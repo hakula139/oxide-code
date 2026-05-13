@@ -151,6 +151,11 @@ impl Client {
         self.config.compaction
     }
 
+    /// `None` means the agent loop runs without a per-turn round cap.
+    pub(crate) fn max_tool_rounds(&self) -> Option<u32> {
+        self.config.max_tool_rounds
+    }
+
     #[cfg(test)]
     pub(crate) fn session_id(&self) -> &str {
         &self.session_id
@@ -187,18 +192,15 @@ impl Client {
         effort
     }
 
-    /// Streams an agentic turn. The returned receiver delivers parsed [`StreamEvent`]s; the
-    /// background task ends when the stream completes, the receiver is dropped, or an unrecoverable
-    /// transport error is forwarded as a final `Err`.
+    /// Streams an agentic turn. The receiver delivers parsed [`StreamEvent`]s and closes when the
+    /// stream ends, the receiver is dropped, or an unrecoverable transport error is forwarded as
+    /// a final `Err`.
     ///
-    /// Wire shape:
-    ///
-    /// - `system_sections` ship as individual `system` text blocks so `cache_control` covers the
-    ///   static prefix only — anything after [`SYSTEM_PROMPT_DYNAMIC_BOUNDARY`] is left uncached.
-    /// - `user_context` rides as a synthetic user message so dynamic content (CLAUDE.md and
-    ///   friends) does not invalidate the cached `system` parameter on every turn.
-    /// - The billing attestation block is injected unconditionally; 3P gateways reject API-key
-    ///   traffic without it.
+    /// `system_sections` ship as individual `system` blocks so `cache_control` covers only the
+    /// prefix up to [`SYSTEM_PROMPT_DYNAMIC_BOUNDARY`]. `user_context` rides as a synthetic user
+    /// message to keep dynamic content (CLAUDE.md and friends) out of the cached `system`
+    /// parameter. The billing attestation block is always injected because 3P gateways reject
+    /// API-key traffic without it.
     pub(crate) fn stream_message(
         &self,
         messages: &[Message],
@@ -401,7 +403,9 @@ mod tests {
     use super::testing::{Captured, api_key, captured, oauth, test_config};
     use super::wire::{ContentBlockInfo, Delta};
     use super::*;
-    use crate::config::{AutoCompactionConfig, CompactionConfig, Effort, ThinkingConfig};
+    use crate::config::{
+        AutoCompactionConfig, CompactionConfig, Effort, ThinkingConfig, test_thresholds,
+    };
 
     // ── Fixtures ──
 
@@ -665,23 +669,28 @@ mod tests {
 
         assert_eq!(effort, Some(Effort::High));
         assert_eq!(client.model(), "claude-sonnet-4-6");
-        assert_eq!(client.compaction().auto.threshold_tokens, Some(167_000));
+        assert_eq!(
+            client.compaction().auto.threshold_tokens,
+            Some(test_thresholds::WINDOW_200K),
+        );
     }
 
     #[test]
-    fn set_model_rejects_threshold_above_new_context_window() {
+    fn set_model_clamps_threshold_above_new_context_window() {
         let mut config = test_config(OFFLINE_URL, api_key(), "claude-opus-4-7[1m]");
+        config.max_tokens = 64_000;
         config.compaction = CompactionConfig::resolved_for_test(AutoCompactionConfig {
             enabled: true,
-            threshold_tokens: Some(967_000),
+            threshold_tokens: Some(test_thresholds::WINDOW_1M),
         });
         let mut client = Client::new(config, Some("sid".to_owned())).unwrap();
 
-        client
-            .set_model("claude-sonnet-4-6".to_owned())
-            .expect_err("threshold above the smaller window must reject the swap");
-        assert_eq!(client.model(), "claude-opus-4-7[1m]");
-        assert_eq!(client.compaction().auto.threshold_tokens, Some(967_000));
+        client.set_model("claude-sonnet-4-6".to_owned()).unwrap();
+        assert_eq!(client.model(), "claude-sonnet-4-6");
+        assert_eq!(
+            client.compaction().auto.threshold_tokens,
+            Some(test_thresholds::WINDOW_200K),
+        );
     }
 
     // ── Client::set_effort ──

@@ -328,6 +328,7 @@ mod tests {
     use super::*;
     use crate::config::{
         AutoCompactionConfig, CompactionConfig, ConfigSnapshot, Effort, PromptCacheTtl,
+        test_thresholds,
     };
     use crate::slash::LiveSessionInfo;
 
@@ -344,10 +345,11 @@ mod tests {
                 model_id: "claude-opus-4-7".to_owned(),
                 effort: Some(Effort::Xhigh),
                 max_tokens: 64_000,
+                max_tool_rounds: None,
                 prompt_cache_ttl: PromptCacheTtl::OneHour,
                 compaction: CompactionConfig::resolved_for_test(AutoCompactionConfig {
                     enabled: true,
-                    threshold_tokens: Some(967_000),
+                    threshold_tokens: Some(test_thresholds::WINDOW_1M),
                 }),
                 show_thinking: false,
                 show_welcome: true,
@@ -475,7 +477,6 @@ mod tests {
 
     #[test]
     fn paint_below_starters_min_height_centers_env_on_its_own_width() {
-        // Regression: when starters / tip are clipped, the env row must still be centered.
         let snap = snap_for(&fixture());
         let backend = render(80, STARTERS_MIN_HEIGHT - 1, &snap);
         let env_row: String = (0..80)

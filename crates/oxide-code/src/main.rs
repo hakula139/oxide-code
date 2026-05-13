@@ -408,14 +408,12 @@ impl AgentLoopTask {
                 self.client.set_session_id(outcome.new_id.clone());
                 self.messages.clear();
                 self.reset_auto_compaction();
-                if let Err(e) = self
-                    .sink
-                    .send(AgentEvent::SessionRolled { id: outcome.new_id })
-                {
-                    // /clear succeeded server-side but the TUI never sees the new id — surfaces as
-                    // a stuck "old session" header. Error-level so the log makes it findable.
-                    tracing::error!("session-rolled event dropped: {e}");
-                }
+                // /clear succeeded server-side, so dropping `SessionRolled` would strand the TUI
+                // on a stuck "old session" header.
+                self.sink.emit(
+                    AgentEvent::SessionRolled { id: outcome.new_id },
+                    "session-rolled",
+                );
                 LoopControl::Continue
             }
             UserAction::Resume { session_id } => {
@@ -450,12 +448,13 @@ impl AgentLoopTask {
                     }
                     Ok(false) => LoopControl::Continue,
                     Err(TurnAbort::Cancelled) => {
-                        _ = self.sink.send(AgentEvent::Cancelled);
+                        self.sink.emit(AgentEvent::Cancelled, "cancelled");
                         LoopControl::Continue
                     }
                     Err(TurnAbort::Quit) => LoopControl::Stop,
                     Err(TurnAbort::Failed(e)) => {
-                        _ = self.sink.send(AgentEvent::Error(format!("{e:#}")));
+                        self.sink
+                            .emit(AgentEvent::Error(format!("{e:#}")), "turn-failed");
                         LoopControl::Continue
                     }
                 }
@@ -492,12 +491,13 @@ impl AgentLoopTask {
             Ok(true) => self.last_usage = None,
             Ok(false) => {}
             Err(TurnAbort::Cancelled) => {
-                _ = self.sink.send(AgentEvent::Cancelled);
+                self.sink.emit(AgentEvent::Cancelled, "cancelled");
                 return LoopControl::Continue;
             }
             Err(TurnAbort::Quit) => return LoopControl::Stop,
             Err(TurnAbort::Failed(e)) => {
-                _ = self.sink.send(AgentEvent::Error(format!("{e:#}")));
+                self.sink
+                    .emit(AgentEvent::Error(format!("{e:#}")), "auto-compact-failed");
                 return LoopControl::Continue;
             }
         }
@@ -532,21 +532,23 @@ impl AgentLoopTask {
             &self.sink,
             &self.session,
             &mut self.user_rx,
+            self.client.max_tool_rounds(),
         )
         .await;
         match outcome {
             Ok(report) => {
                 self.last_usage = report.usage;
-                _ = self.sink.send(AgentEvent::TurnComplete);
+                self.sink.emit(AgentEvent::TurnComplete, "turn-complete");
                 LoopControl::Continue
             }
             Err(TurnAbort::Cancelled) => {
-                _ = self.sink.send(AgentEvent::Cancelled);
+                self.sink.emit(AgentEvent::Cancelled, "cancelled");
                 LoopControl::Continue
             }
             Err(TurnAbort::Quit) => LoopControl::Stop,
             Err(TurnAbort::Failed(e)) => {
-                _ = self.sink.send(AgentEvent::Error(format!("{e:#}")));
+                self.sink
+                    .emit(AgentEvent::Error(format!("{e:#}")), "turn-failed");
                 LoopControl::Continue
             }
         }
@@ -572,38 +574,45 @@ async fn apply_resume(
     let outcome = match session::handle::roll_into(session, store, file_tracker, target_id).await {
         Ok(o) => o,
         Err(e) => {
-            _ = sink.send(AgentEvent::Error(format!(
-                "Resume failed (still on session {}): {e:#}",
-                session.session_id(),
-            )));
+            sink.emit(
+                AgentEvent::Error(format!(
+                    "Resume failed (still on session {}): {e:#}",
+                    session.session_id(),
+                )),
+                "resume-failed",
+            );
             return;
         }
     };
     let new_id = session.session_id().to_owned();
     client.set_session_id(new_id.clone());
     messages.clone_from(&outcome.messages);
-    if let Err(e) = sink.send(AgentEvent::SessionResumed {
-        id: new_id,
-        title: outcome.title,
-        messages: outcome.messages,
-        compact: outcome.compact,
-        tool_metadata: outcome.tool_result_metadata,
-    }) {
-        // Channel closed mid-resume leaves the TUI on the OLD chat. Pinpoint the desync.
-        tracing::error!("session-resumed event dropped: {e}");
-    }
+    sink.emit(
+        AgentEvent::SessionResumed {
+            id: new_id,
+            title: outcome.title,
+            messages: outcome.messages,
+            compact: outcome.compact,
+            tool_metadata: outcome.tool_result_metadata,
+        },
+        "session-resumed",
+    );
     // Emit OLD-session finalize failure AFTER SessionResumed so the chat-clear doesn't wipe it.
     // Distinct phrasing (not session_write_error) so the user doesn't read it as a current-writer
     // fault.
     if let Some(failure) = outcome.finalize_failure.as_deref() {
-        _ = sink.send(AgentEvent::Error(format!(
-            "Previous session failed to finalize cleanly: {failure}",
-        )));
+        sink.emit(
+            AgentEvent::Error(format!(
+                "Previous session failed to finalize cleanly: {failure}",
+            )),
+            "previous-session-finalize-failed",
+        );
     }
     if !outcome.drifted_paths.is_empty() {
-        _ = sink.send(AgentEvent::Error(format_drift_warning(
-            &outcome.drifted_paths,
-        )));
+        sink.emit(
+            AgentEvent::Error(format_drift_warning(&outcome.drifted_paths)),
+            "resume-drift-warning",
+        );
     }
 }
 
@@ -696,12 +705,13 @@ async fn apply_rename(session: &SessionHandle, sink: &dyn AgentSink, title: Stri
     if outcome.failure.is_some() {
         return;
     }
-    if let Err(e) = sink.send(AgentEvent::SessionTitleUpdated {
-        session_id: session.session_id().to_owned(),
-        title,
-    }) {
-        tracing::error!("session-title-updated event dropped: {e}");
-    }
+    sink.emit(
+        AgentEvent::SessionTitleUpdated {
+            session_id: session.session_id().to_owned(),
+            title,
+        },
+        "session-title-updated",
+    );
 }
 
 /// Order matters: model swap re-clamps effort before the explicit pick is applied.
@@ -714,24 +724,27 @@ fn apply_swap_config(
     if let Some(id) = model
         && let Err(e) = client.set_model(id.into_inner())
     {
-        _ = sink.send(AgentEvent::Error(format!("Config change failed: {e:#}")));
+        sink.emit(
+            AgentEvent::Error(format!("Config change failed: {e:#}")),
+            "config-change-failed",
+        );
         return false;
     }
     let resolved = match effort {
         Some(pick) => client.set_effort(pick),
         None => client.effort(),
     };
-    if let Err(e) = sink.send(AgentEvent::ConfigChanged {
-        model_id: client.model().to_owned(),
-        effort: resolved,
-        compaction: client.compaction(),
-        requested_effort: effort,
-    }) {
-        // Dropping this leaves the status bar showing the previous model / effort even though the
-        // client has already swapped — error-level so it stands out in the log when the TUI looks
-        // wrong after a /model or /effort swap.
-        tracing::error!("config-changed event dropped: {e}");
-    }
+    // Dropping this leaves the status bar showing the previous model / effort even though the
+    // client has already swapped.
+    sink.emit(
+        AgentEvent::ConfigChanged {
+            model_id: client.model().to_owned(),
+            effort: resolved,
+            compaction: client.compaction(),
+            requested_effort: effort,
+        },
+        "config-changed",
+    );
     true
 }
 
@@ -817,6 +830,7 @@ async fn bare_repl(
                 &sink,
                 &session,
                 &mut user_rx,
+                client.max_tool_rounds(),
             );
             let turn_result = tokio::select! {
                 r = turn => r,
@@ -831,7 +845,7 @@ async fn bare_repl(
                 Err(TurnAbort::Cancelled | TurnAbort::Quit) => {}
                 Err(TurnAbort::Failed(e)) => return Err(e),
             }
-            _ = sink.send(AgentEvent::TurnComplete);
+            sink.emit(AgentEvent::TurnComplete, "turn-complete");
         }
         Ok(())
     }
@@ -874,6 +888,7 @@ async fn headless(
         &sink,
         &session,
         &mut user_rx,
+        client.max_tool_rounds(),
     );
     let result: Result<()> = tokio::select! {
         r = turn => match r {

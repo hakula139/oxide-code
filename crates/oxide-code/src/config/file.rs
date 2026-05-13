@@ -32,6 +32,7 @@ pub(super) struct ClientConfig {
     pub(super) model: Option<String>,
     pub(super) effort: Option<super::Effort>,
     pub(super) max_tokens: Option<u32>,
+    pub(super) max_tool_rounds: Option<u32>,
     pub(super) prompt_cache_ttl: Option<super::PromptCacheTtl>,
     pub(super) compaction: Option<CompactionConfig>,
 }
@@ -82,6 +83,7 @@ impl ClientConfig {
             model: other.model.or(self.model),
             effort: other.effort.or(self.effort),
             max_tokens: other.max_tokens.or(self.max_tokens),
+            max_tool_rounds: other.max_tool_rounds.or(self.max_tool_rounds),
             prompt_cache_ttl: other.prompt_cache_ttl.or(self.prompt_cache_ttl),
             compaction: merge_section(self.compaction, other.compaction, CompactionConfig::merge),
         }
@@ -252,6 +254,7 @@ mod tests {
                 model: Some("base-model".to_owned()),
                 effort: Some(super::super::Effort::Low),
                 max_tokens: Some(1000),
+                max_tool_rounds: Some(50),
                 prompt_cache_ttl: Some(super::super::PromptCacheTtl::FiveMin),
                 compaction: Some(CompactionConfig {
                     enabled: Some(false),
@@ -272,6 +275,7 @@ mod tests {
                 model: Some("other-model".to_owned()),
                 effort: Some(super::super::Effort::Max),
                 max_tokens: Some(2000),
+                max_tool_rounds: Some(100),
                 prompt_cache_ttl: Some(super::super::PromptCacheTtl::OneHour),
                 compaction: Some(CompactionConfig {
                     enabled: Some(true),
@@ -296,6 +300,7 @@ mod tests {
         assert_eq!(client.model.as_deref(), Some("other-model"));
         assert_eq!(client.effort, Some(super::super::Effort::Max));
         assert_eq!(client.max_tokens, Some(2000));
+        assert_eq!(client.max_tool_rounds, Some(100));
         assert_eq!(
             client.prompt_cache_ttl,
             Some(super::super::PromptCacheTtl::OneHour)
@@ -337,6 +342,7 @@ mod tests {
                 model: Some("model".to_owned()),
                 effort: Some(super::super::Effort::High),
                 max_tokens: Some(4096),
+                max_tool_rounds: Some(75),
                 prompt_cache_ttl: Some(super::super::PromptCacheTtl::FiveMin),
                 compaction: Some(CompactionConfig {
                     enabled: Some(false),
@@ -358,6 +364,7 @@ mod tests {
         assert_eq!(client.model.as_deref(), Some("model"));
         assert_eq!(client.effort, Some(super::super::Effort::High));
         assert_eq!(client.max_tokens, Some(4096));
+        assert_eq!(client.max_tool_rounds, Some(75));
         assert_eq!(
             client.prompt_cache_ttl,
             Some(super::super::PromptCacheTtl::FiveMin)
@@ -474,6 +481,7 @@ mod tests {
                 model = "claude-test"
                 base_url = "https://test.example.com"
                 max_tokens = 4096
+                max_tool_rounds = 100
 
                 [tui]
                 show_thinking = true
@@ -497,6 +505,7 @@ mod tests {
         assert_eq!(client.model.as_deref(), Some("claude-test"));
         assert_eq!(client.base_url.as_deref(), Some("https://test.example.com"));
         assert_eq!(client.max_tokens, Some(4096));
+        assert_eq!(client.max_tool_rounds, Some(100));
 
         let tui = config.tui.expect("tui section should be present");
         assert_eq!(tui.show_thinking, Some(true));

@@ -135,6 +135,7 @@ pub(crate) fn test_session_info() -> LiveSessionInfo {
             model_id: "claude-opus-4-7".to_owned(),
             effort: Some(Effort::High),
             max_tokens: 32_000,
+            max_tool_rounds: None,
             prompt_cache_ttl: PromptCacheTtl::OneHour,
             compaction: CompactionConfig::resolved_for_test(AutoCompactionConfig {
                 enabled: true,

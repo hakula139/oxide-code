@@ -1,5 +1,5 @@
 //! Agent turn loop. Streams the model response, dispatches tool calls, records to the session,
-//! and stops on text-only response or [`MAX_TOOL_ROUNDS`].
+//! and stops on text-only response or the optional per-turn round cap.
 
 pub(crate) mod compact_boundary;
 pub(crate) mod compaction;
@@ -22,16 +22,13 @@ use crate::prompt::PromptParts;
 use crate::session::handle::{RecordOutcome, SessionHandle};
 use crate::tool::{ToolDefinition, ToolMetadata, ToolOutput, ToolRegistry};
 
-const MAX_TOOL_ROUNDS: usize = 25;
 const MAX_AUTO_COMPACT_FAILURES: u8 = 3;
 
 // ── Turn Abort ──
 
-/// Why a turn ended without a clean assistant reply.
-///
-/// `Cancelled` and `Quit` are user-driven and intentionally distinct so the outer driver can
-/// keep running on cancel but tear down on quit. `Failed` wraps any other error (stream / tool
-/// dispatch / session write) so the caller can render it once via `{e:#}`.
+/// Why a turn ended without a clean assistant reply. `Cancelled` and `Quit` are user-driven
+/// and distinct so the outer driver can keep running on cancel but tear down on quit. `Failed`
+/// wraps any other error so the caller can render it via `{e:#}`.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum TurnAbort {
     #[error("turn cancelled")]
@@ -111,19 +108,15 @@ pub(crate) struct AutoCompact<'a> {
     pub(crate) file_tracker: &'a FileTracker,
 }
 
-/// Drives one user prompt to a final assistant text reply.
-///
-/// Each round streams a model response, dispatches any tool calls, and appends both the
-/// assistant message and the synthesized tool-result message to `messages`. The loop returns
-/// as soon as a round produces no tool calls; mid-turn `SubmitPrompt` actions queue and
-/// splice in as user messages at round boundaries. Long-running awaits race `user_rx` so
-/// `Cancel` / `Quit` abort promptly without leaving partial round writes.
-///
-/// Errors:
-///
-/// - [`TurnAbort::Cancelled`] / [`TurnAbort::Quit`] on the matching [`UserAction`].
-/// - [`TurnAbort::Failed`] for stream errors, tool-dispatch failures, or hitting
-///   [`MAX_TOOL_ROUNDS`] without a final response.
+/// Drives one user prompt to a final assistant text reply. The loop returns as soon as a round
+/// produces no tool calls. Mid-turn `SubmitPrompt` actions queue and splice in as user messages
+/// at round boundaries. Long-running awaits race `user_rx` so `Cancel` / `Quit` abort promptly
+/// without leaving partial round writes. `max_tool_rounds = None` runs unbounded. `Some(n)`
+/// bails after `n` rounds without a final response.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "agent_turn owns the full per-turn dependency set; bundling them obscures lifetimes"
+)]
 pub(crate) async fn agent_turn(
     client: &dyn AgentClient,
     tools: &ToolRegistry,
@@ -132,12 +125,13 @@ pub(crate) async fn agent_turn(
     sink: &dyn AgentSink,
     session: &SessionHandle,
     user_rx: &mut mpsc::Receiver<UserAction>,
+    max_tool_rounds: Option<u32>,
 ) -> AbortResult<TurnReport> {
     let tool_defs = tools.definitions();
     let mut pending_prompts: Vec<String> = Vec::new();
     let mut latest_usage = None;
 
-    for _ in 0..MAX_TOOL_ROUNDS {
+    for _ in 0..max_tool_rounds.unwrap_or(u32::MAX) {
         strip_trailing_thinking(messages);
         let StreamOutcome {
             blocks,
@@ -186,15 +180,21 @@ pub(crate) async fn agent_turn(
         record_drained_prompts(pending_prompts.drain(..), messages, session, sink).await;
     }
 
+    // `None` resolves to `u32::MAX`, so this branch is reachable only when the caller set
+    // `Some(n)` and the model ran `n` rounds without a final reply.
+    let cap = max_tool_rounds.unwrap_or(u32::MAX);
     Err(TurnAbort::Failed(anyhow!(
-        "agent stopped after {MAX_TOOL_ROUNDS} tool rounds without a final response \
+        "agent stopped after {cap} tool rounds without a final response \
          — this is a safety cap against runaway loops. Ask again with a narrower request."
     )))
 }
 
+/// Decides whether to compact and drives it when the threshold and breaker allow. Returns
+/// `Ok(true)` when the transcript was replaced. Returns `Ok(false)` when skipped (breaker
+/// tripped, no usage, below threshold) or when summarization / boundary-write failed.
 #[expect(
     clippy::too_many_arguments,
-    reason = "auto-compaction needs the same live turn state as manual compaction plus the latest usage signal"
+    reason = "auto-compaction needs the same live turn state as manual compaction"
 )]
 pub(crate) async fn auto_compact_if_needed(
     client: &dyn AgentClient,
@@ -218,7 +218,7 @@ pub(crate) async fn auto_compact_if_needed(
         return Ok(false);
     }
 
-    _ = sink.send(AgentEvent::AutoCompactionStarted);
+    sink.emit(AgentEvent::AutoCompactionStarted, "auto-compaction-started");
     let summary = match await_unless_aborted(
         compaction::compact_session(client, messages, None),
         user_rx,
@@ -228,8 +228,8 @@ pub(crate) async fn auto_compact_if_needed(
     {
         Ok(summary) => summary,
         Err(e) => {
-            *auto.failures += 1;
             warn!("auto-compaction failed: {e:#}");
+            record_auto_compact_failure(auto, sink, Some(format!("Auto-compaction failed: {e:#}")));
             return Ok(false);
         }
     };
@@ -246,9 +246,31 @@ pub(crate) async fn auto_compact_if_needed(
     if compacted {
         *auto.failures = 0;
     } else {
-        *auto.failures += 1;
+        record_auto_compact_failure(auto, sink, None);
     }
     Ok(compacted)
+}
+
+/// Bumps the failure counter. If the bump trips the breaker, emits a one-time disablement
+/// notice. `detail` becomes a user-visible error event. Pass `None` when an earlier sink call
+/// already surfaced the failure (persist-fail goes through `session_write_error`).
+fn record_auto_compact_failure(
+    auto: &mut AutoCompact<'_>,
+    sink: &dyn AgentSink,
+    detail: Option<String>,
+) {
+    *auto.failures += 1;
+    if let Some(detail) = detail {
+        sink.emit(AgentEvent::Error(detail), "auto-compaction-failed");
+    }
+    if *auto.failures == MAX_AUTO_COMPACT_FAILURES {
+        sink.emit(
+            AgentEvent::Error(format!(
+                "Auto-compaction disabled for this session after {MAX_AUTO_COMPACT_FAILURES} failures."
+            )),
+            "auto-compaction-disabled",
+        );
+    }
 }
 
 fn collect_tool_uses(blocks: &[ContentBlock]) -> Vec<(String, String, serde_json::Value)> {
@@ -274,22 +296,28 @@ async fn run_tool_round(
     let mut results = Vec::with_capacity(tool_uses.len());
     let mut sidecars: Vec<(String, ToolMetadata)> = Vec::with_capacity(tool_uses.len());
     for (id, name, input) in tool_uses {
-        _ = sink.send(AgentEvent::ToolCallStart {
-            id: id.clone(),
-            name: name.clone(),
-            input: input.clone(),
-        });
+        sink.emit(
+            AgentEvent::ToolCallStart {
+                id: id.clone(),
+                name: name.clone(),
+                input: input.clone(),
+            },
+            "tool-call-start",
+        );
 
         let output =
             dispatch_tool_call(tools, &name, input, parse_errors.get(&id), user_rx, pending)
                 .await?;
 
-        _ = sink.send(AgentEvent::ToolCallEnd {
-            id: id.clone(),
-            content: output.content.clone(),
-            is_error: output.is_error,
-            metadata: output.metadata.clone(),
-        });
+        sink.emit(
+            AgentEvent::ToolCallEnd {
+                id: id.clone(),
+                content: output.content.clone(),
+                is_error: output.is_error,
+                metadata: output.metadata.clone(),
+            },
+            "tool-call-end",
+        );
 
         sidecars.push((id.clone(), output.metadata));
         results.push(ContentBlock::ToolResult {
@@ -346,11 +374,12 @@ pub(crate) async fn record_drained_prompts(
         let queued_msg = Message::user(text.clone());
         record_message(session, queued_msg.clone(), sink).await;
         messages.push(queued_msg);
-        _ = sink.send(AgentEvent::PromptDrained(text));
+        sink.emit(AgentEvent::PromptDrained(text), "prompt-drained");
     }
 }
 
-/// Races `fut` against user actions. Cancel / quit → `TurnAbort`; submits buffer into `pending`.
+/// Races `fut` against user actions. Cancel / quit produce a `TurnAbort`. Submits buffer into
+/// `pending`.
 /// `fut` must be cancel-safe.
 pub(crate) async fn await_unless_aborted<F, T>(
     fut: F,
@@ -369,7 +398,7 @@ where
                 Some(UserAction::Cancel) => return Err(TurnAbort::Cancelled),
                 Some(UserAction::Quit) | None => return Err(TurnAbort::Quit),
                 Some(UserAction::SubmitPrompt(text)) => pending.push(text),
-                // Unreachable under current wiring; log so regressions surface.
+                // Unreachable under current wiring. Log so regressions surface.
                 Some(
                     action @ (UserAction::ConfirmExit
                     | UserAction::Clear
@@ -413,7 +442,7 @@ enum BlockAccumulator {
     RedactedThinking {
         data: String,
     },
-    /// Absorbs deltas; produces no [`ContentBlock`].
+    /// Absorbs deltas. Produces no [`ContentBlock`].
     Skipped,
 }
 
@@ -667,7 +696,7 @@ mod tests {
         assert_eq!(format!("{}", TurnAbort::Quit), "turn quit");
     }
 
-    // ── agent_turn ──
+    // ── Fixtures ──
 
     /// In-process fake that scripts a [`StreamEvent`] sequence per turn.
     struct FakeClient {
@@ -896,7 +925,7 @@ mod tests {
         events
     }
 
-    /// Echoes its input; exercises the tool-dispatch path without subprocess machinery.
+    /// Echoes its input. Exercises the tool-dispatch path without subprocess machinery.
     struct EchoTool;
 
     impl Tool for EchoTool {
@@ -960,8 +989,8 @@ mod tests {
         }
     }
 
-    /// Inert receiver whose `recv()` stays pending — sender is leaked deliberately so call sites
-    /// don't need to bind it for the test's lifetime.
+    /// Inert receiver whose `recv()` stays pending. The sender is leaked so call sites don't
+    /// need to bind it for the test's lifetime.
     fn inert_user_rx() -> mpsc::Receiver<UserAction> {
         let (tx, rx) = crate::agent::event::inert_user_action_channel();
         std::mem::forget(tx);
@@ -980,7 +1009,7 @@ mod tests {
         handle::start(&store, "claude-sonnet-4-6")
     }
 
-    /// Handle whose actor channel is closed; every write returns actor-gone.
+    /// Handle whose actor channel is closed. Every write returns actor-gone.
     fn dead_test_session() -> SessionHandle {
         crate::session::handle::testing::dead("dead-test-session")
     }
@@ -1109,6 +1138,60 @@ mod tests {
         assert!(!compacted);
         assert_eq!(failures, 1);
         assert!(matches!(&messages[0].content[0], ContentBlock::Text { text } if text == "hi"));
+        assert!(
+            sink.events().iter().any(|event| {
+                matches!(event, AgentEvent::Error(message) if message.contains("Auto-compaction failed"))
+            }),
+            "summarizer failure must surface a user-visible AgentEvent::Error",
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_compact_if_needed_emits_disabled_notice_on_third_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let sink = CapturingSink::new();
+        let tracker = FileTracker::default();
+        let mut messages = vec![
+            Message::user("hi"),
+            Message::assistant("there"),
+            Message::user("next"),
+            Message::assistant("done"),
+        ];
+        let mut pending = Vec::new();
+        let mut failures = MAX_AUTO_COMPACT_FAILURES - 1;
+
+        let compacted = auto_compact_if_needed(
+            &FailingCompactClient,
+            &session,
+            &mut messages,
+            &sink,
+            &mut inert_user_rx(),
+            &mut pending,
+            Some(&mut AutoCompact {
+                config: AutoCompactionConfig {
+                    enabled: true,
+                    threshold_tokens: Some(10),
+                },
+                failures: &mut failures,
+                file_tracker: &tracker,
+            }),
+            Some(TokenUsage {
+                input_tokens: 20,
+                output_tokens: 1,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert!(!compacted);
+        assert_eq!(failures, MAX_AUTO_COMPACT_FAILURES);
+        assert!(
+            sink.events().iter().any(|event| {
+                matches!(event, AgentEvent::Error(message) if message.contains("Auto-compaction disabled"))
+            }),
+            "the breaker-tripping failure must surface a one-time disablement notice",
+        );
     }
 
     #[tokio::test]
@@ -1301,9 +1384,11 @@ mod tests {
         );
     }
 
+    // ── agent_turn ──
+
     #[tokio::test]
     async fn agent_turn_dead_session_surfaces_write_failure_on_first_call() {
-        // Write errors must not abort the turn; one Error event surfaces and the turn returns Ok.
+        // Write errors must not abort the turn. One Error event surfaces and the turn returns Ok.
         let session = dead_test_session();
         let client = FakeClient::new(vec![text_turn("Hello!")]);
         let tools = ToolRegistry::new(vec![]);
@@ -1318,6 +1403,7 @@ mod tests {
             &sink,
             &session,
             &mut inert_user_rx(),
+            None,
         )
         .await
         .unwrap();
@@ -1336,7 +1422,7 @@ mod tests {
 
     #[tokio::test]
     async fn agent_turn_metadata_batch_failure_after_healthy_messages_surfaces_error() {
-        // First 2 cmds (assistant + tool_result messages) ack healthily; the 3rd (metadata batch)
+        // First 2 cmds (assistant + tool_result messages) ack healthily. The 3rd (metadata batch)
         // is dropped without ack so the batch's failure handler fires the Error event.
         let session = crate::session::handle::testing::acks_then_drops("metadata-batch-fails", 2);
         let client = FakeClient::new(vec![
@@ -1355,6 +1441,7 @@ mod tests {
             &sink,
             &session,
             &mut inert_user_rx(),
+            None,
         )
         .await
         .unwrap();
@@ -1388,6 +1475,7 @@ mod tests {
             &sink,
             &session,
             &mut inert_user_rx(),
+            None,
         )
         .await
         .unwrap();
@@ -1426,6 +1514,7 @@ mod tests {
             &sink,
             &session,
             &mut user_rx,
+            None,
         )
         .await
         .unwrap();
@@ -1462,6 +1551,7 @@ mod tests {
             &sink,
             &session,
             &mut inert_user_rx(),
+            None,
         )
         .await
         .unwrap();
@@ -1489,6 +1579,7 @@ mod tests {
             &sink,
             &session,
             &mut inert_user_rx(),
+            None,
         )
         .await
         .unwrap();
@@ -1551,6 +1642,7 @@ mod tests {
             &sink,
             &session,
             &mut inert_user_rx(),
+            None,
         )
         .await
         .unwrap();
@@ -1568,7 +1660,7 @@ mod tests {
 
     #[tokio::test]
     async fn agent_turn_drains_mid_round_submit_into_messages_at_round_boundary() {
-        // Pre-loaded SubmitPrompt is consumed during the round; at the boundary the agent splices
+        // Pre-loaded SubmitPrompt is consumed during the round. At the boundary the agent splices
         // the queued text as a trailing user message and emits PromptDrained.
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
@@ -1593,6 +1685,7 @@ mod tests {
             &sink,
             &session,
             &mut rx,
+            None,
         )
         .await
         .expect("turn must complete");
@@ -1654,6 +1747,7 @@ mod tests {
             &sink,
             &session,
             &mut rx,
+            None,
         )
         .await
         .expect("turn must complete");
@@ -1703,6 +1797,7 @@ mod tests {
             &sink,
             &session,
             &mut rx,
+            None,
         )
         .await
         .expect_err("cancel must surface as Err(Cancelled)");
@@ -1714,7 +1809,7 @@ mod tests {
 
     #[tokio::test]
     async fn agent_turn_quit_during_stream_is_quit_abort() {
-        // Quit is the teardown signal; it must stay distinct from Cancel for the outer driver.
+        // Quit is the teardown signal. It must stay distinct from Cancel for the outer driver.
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let client = FakeClient::new(vec![text_turn("never reached")]);
@@ -1732,6 +1827,7 @@ mod tests {
             &sink,
             &session,
             &mut rx,
+            None,
         )
         .await
         .expect_err("quit must surface as Err(Quit)");
@@ -1742,7 +1838,7 @@ mod tests {
 
     #[tokio::test]
     async fn agent_turn_sender_drop_during_turn_collapses_to_quit_abort() {
-        // Closed channel resolves `recv()` to None; treated as Quit so the outer loop exits.
+        // Closed channel resolves `recv()` to None. Treated as Quit so the outer loop exits.
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let client = FakeClient::new(vec![text_turn("never reached")]);
@@ -1760,6 +1856,7 @@ mod tests {
             &sink,
             &session,
             &mut rx,
+            None,
         )
         .await
         .expect_err("dead channel must surface as Err(Quit)");
@@ -1769,7 +1866,7 @@ mod tests {
 
     #[tokio::test]
     async fn agent_turn_absorbs_stragglers_without_killing_turn() {
-        // Every catch-all variant in `await_unless_aborted` must let the turn complete; returning
+        // Every catch-all variant in `await_unless_aborted` must let the turn complete. Returning
         // Cancelled for any of these would kill the turn from a buffered no-op.
         for action in [
             UserAction::ConfirmExit,
@@ -1800,6 +1897,7 @@ mod tests {
                 &sink,
                 &session,
                 &mut rx,
+                None,
             )
             .await
             .unwrap_or_else(|_| panic!("turn must complete despite {action:?}"));
@@ -1838,6 +1936,7 @@ mod tests {
                 &sink,
                 &session,
                 &mut rx,
+                None,
             ),
             async {
                 started.notified().await;
@@ -1847,10 +1946,10 @@ mod tests {
 
         let abort = turn_result.expect_err("cancel must surface as Err(Cancelled)");
         assert!(matches!(abort, TurnAbort::Cancelled), "got {abort:?}");
-        // Cancel here happens before the round's messages are appended; iteration-atomic so the
+        // Cancel here happens before the round's messages are appended. Iteration-atomic so the
         // next turn sees the pre-turn tail.
         assert_eq!(messages.len(), 1, "{messages:#?}");
-        // ToolCallStart fires before `dispatch_tool_call` parks; the matching End must not fire
+        // ToolCallStart fires before `dispatch_tool_call` parks. The matching End must not fire
         // because the tool future was dropped.
         let events = sink.events();
         assert!(
@@ -1888,6 +1987,7 @@ mod tests {
             &sink,
             &session,
             &mut inert_user_rx(),
+            None,
         )
         .await
         .unwrap();
@@ -1907,7 +2007,7 @@ mod tests {
 
     #[tokio::test]
     async fn agent_turn_malformed_tool_input_short_circuits_to_parse_error_result() {
-        // Truncated `input_json_delta` must not run the tool with empty input; the agent
+        // Truncated `input_json_delta` must not run the tool with empty input. The agent
         // synthesizes an `is_error: true` result naming the parse failure for self-correction.
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
@@ -1927,6 +2027,7 @@ mod tests {
             &sink,
             &session,
             &mut inert_user_rx(),
+            None,
         )
         .await
         .unwrap();
@@ -1961,10 +2062,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_turn_max_tool_rounds_bails_with_safety_cap_message() {
+    async fn agent_turn_with_some_cap_bails_with_safety_cap_message() {
+        const CAP: u32 = 3;
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
-        let turns: Vec<Vec<StreamEvent>> = (0..MAX_TOOL_ROUNDS)
+        let turns: Vec<Vec<StreamEvent>> = (0..CAP)
             .map(|i| tool_use_turn(&format!("tool_{i}"), "echo", r"{}"))
             .collect();
         let client = FakeClient::new(turns);
@@ -1980,15 +2082,45 @@ mod tests {
             &sink,
             &session,
             &mut inert_user_rx(),
+            Some(CAP),
         )
         .await
         .expect_err("cap must trip");
         let msg = format!("{err:#}");
-        assert!(
-            msg.contains(&MAX_TOOL_ROUNDS.to_string()),
-            "cap in error: {msg}"
-        );
+        assert!(msg.contains(&CAP.to_string()), "cap in error: {msg}");
         assert!(msg.contains("safety cap"), "explains intent: {msg}");
+    }
+
+    #[tokio::test]
+    async fn agent_turn_with_none_cap_runs_unbounded_until_text_only_reply() {
+        // The cap is None, so the loop must not bail on its own; it terminates only when the
+        // model produces a text-only round. Pin that an arbitrary multi-round chain still
+        // completes without tripping the safety cap.
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let mut turns: Vec<Vec<StreamEvent>> = (0..50)
+            .map(|i| tool_use_turn(&format!("tool_{i}"), "echo", r"{}"))
+            .collect();
+        turns.push(text_turn("done"));
+        let client = FakeClient::new(turns);
+        let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
+        let sink = CapturingSink::new();
+        let mut messages = vec![Message::user("loop a while then stop")];
+
+        agent_turn(
+            &client,
+            &tools,
+            &mut messages,
+            &empty_prompt(),
+            &sink,
+            &session,
+            &mut inert_user_rx(),
+            None,
+        )
+        .await
+        .expect("unbounded loop must reach the text-only round");
+        let last = messages.last().expect("assistant reply recorded");
+        assert!(matches!(last.role, Role::Assistant), "{last:?}");
     }
 
     #[tokio::test]
@@ -2013,6 +2145,7 @@ mod tests {
             &sink,
             &session,
             &mut inert_user_rx(),
+            None,
         )
         .await
         .expect_err("api error must propagate");
@@ -2056,6 +2189,7 @@ mod tests {
             &sink,
             &session,
             &mut inert_user_rx(),
+            None,
         )
         .await
         .unwrap();
@@ -2065,7 +2199,7 @@ mod tests {
         assert!(matches!(&stripped.content[0], ContentBlock::Text { .. }));
     }
 
-    /// Covers the real `<Client as AgentClient>` path; `FakeClient` tests above stub the trait.
+    /// Covers the real `<Client as AgentClient>` path. `FakeClient` tests above stub the trait.
     #[tokio::test]
     async fn agent_turn_drives_real_client_over_wiremock() {
         let server = MockServer::start().await;
@@ -2115,6 +2249,7 @@ data: {"type":"message_stop"}
             &sink,
             &session,
             &mut inert_user_rx(),
+            None,
         )
         .await
         .unwrap();

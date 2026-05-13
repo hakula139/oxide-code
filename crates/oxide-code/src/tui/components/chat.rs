@@ -2175,6 +2175,8 @@ mod tests {
         assert_eq!(chat.viewport_height, 20);
     }
 
+    // ── bump_paused_counter ──
+
     #[test]
     fn paused_counter_bumps_only_while_scrolled_up() {
         let mut chat = test_chat();
@@ -2202,7 +2204,7 @@ mod tests {
     }
 
     #[test]
-    fn paused_counter_saturates() {
+    fn paused_counter_does_not_overflow_at_u32_max() {
         let mut chat = test_chat();
         chat.auto_scroll = false;
         chat.new_content_since_pause = u32::MAX;

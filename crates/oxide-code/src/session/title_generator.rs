@@ -100,10 +100,13 @@ async fn generate_and_record(
         sink.session_write_error(Some(failure));
     }
 
-    _ = sink.send(AgentEvent::SessionTitleUpdated {
-        session_id: session.session_id().to_owned(),
-        title,
-    });
+    sink.emit(
+        AgentEvent::SessionTitleUpdated {
+            session_id: session.session_id().to_owned(),
+            title,
+        },
+        "session-title-updated",
+    );
     Ok(())
 }
 

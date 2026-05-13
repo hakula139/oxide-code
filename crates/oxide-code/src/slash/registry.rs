@@ -197,7 +197,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_metadata_offenders_flags_a_synthetic_violator() {
+    fn empty_metadata_offenders_reports_command_with_empty_description() {
         struct EmptyDescCmd;
         impl SlashCommand for EmptyDescCmd {
             fn name(&self) -> &'static str {

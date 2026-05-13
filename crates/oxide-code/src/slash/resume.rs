@@ -722,9 +722,8 @@ mod tests {
 
     #[test]
     fn reload_sets_load_error_and_clears_rows_when_list_paged_fails() {
-        // Pin the Err arm of `reload`: removing the project dir makes `list_paged` fail with
-        // ENOENT on `read_dir`. The picker must surface that as `load_error` (so the footer can
-        // distinguish "0 sessions" from "load failed") and zero out `total`.
+        // `load_error` lets the footer distinguish "load failed" from "0 sessions"; without it
+        // the user has no signal that the listing call errored.
         let (dir, store) = isolated_store();
         let project_dir = crate::session::store::test_project_dir(dir.path());
         std::fs::remove_dir_all(&project_dir).unwrap();
@@ -1089,9 +1088,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_d_pushes_confirm_modal_for_cursor_row() {
-        // Both gestures route to the same confirm push — verifies the dual-binding contract from
-        // the picker footer hint.
+    fn ctrl_d_or_delete_pushes_confirm_modal_for_cursor_row() {
         let (_dir, store) = isolated_store();
         seed_session(
             &store,

@@ -14,6 +14,7 @@ pub(crate) fn test_config(base_url: impl Into<String>, auth: Auth, model: &str) 
         model: model.to_owned(),
         effort: None,
         max_tokens: 128,
+        max_tool_rounds: None,
         prompt_cache_ttl: PromptCacheTtl::OneHour,
         compaction: CompactionConfig::disabled(),
         thinking: None,

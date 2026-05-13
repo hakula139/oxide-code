@@ -11,10 +11,11 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent};
 use futures::{Stream, StreamExt};
-use ratatui::layout::{Alignment, Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block, Paragraph};
 use tokio::sync::mpsc;
+use unicode_width::UnicodeWidthStr;
 
 use super::components::chat::ChatView;
 use super::components::input::InputArea;
@@ -746,16 +747,28 @@ impl App {
         } else {
             self.theme.accent()
         };
-        let band = Rect {
+        // Pill sized to label + 1-cell padding per side, anchored at the right edge with an
+        // opaque surface bg so the chat content underneath stays readable.
+        let pill_width = u16::try_from(label.width().saturating_add(2)).unwrap_or(u16::MAX);
+        if pill_width > area.width {
+            return;
+        }
+        let pill = Rect {
+            x: area.x + area.width.saturating_sub(pill_width),
             y: area.y + area.height.saturating_sub(1),
+            width: pill_width,
             height: 1,
-            ..area
         };
+        let block = Block::default().style(self.theme.surface());
+        let inner = block.inner(pill);
+        frame.render_widget(block, pill);
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(label, style)))
-                .style(self.theme.surface())
-                .alignment(Alignment::Right),
-            band,
+            Paragraph::new(Line::from(vec![
+                Span::raw(" "),
+                Span::styled(label, style),
+                Span::raw(" "),
+            ])),
+            inner,
         );
     }
 }
@@ -857,6 +870,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
+    use crate::config::test_thresholds;
     use crate::tool::ToolRegistry;
     use crate::tui::modal::testing::ScriptedModal;
 
@@ -922,6 +936,7 @@ mod tests {
                 model_id: "test-model".to_owned(),
                 effort: Some(Effort::High),
                 max_tokens: 32_000,
+                max_tool_rounds: None,
                 prompt_cache_ttl: PromptCacheTtl::OneHour,
                 compaction: CompactionConfig::resolved_for_test(AutoCompactionConfig {
                     enabled: true,
@@ -1002,6 +1017,56 @@ mod tests {
             viewport: Viewport::Fixed(Rect::new(0, 0, width, height)),
         };
         (Terminal::with_options(backend, opts).unwrap(), buf)
+    }
+
+    fn render_app(app: &mut App, width: u16, height: u16) -> TestBackend {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let mut chat_area = Rect::default();
+        terminal
+            .draw(|frame| {
+                chat_area = app.draw_frame(frame);
+            })
+            .unwrap();
+        // Mirror `App::render`'s second-pass repaint so the captured
+        // buffer matches what the user actually sees.
+        if app.chat.update_layout(chat_area) {
+            terminal
+                .draw(|frame| {
+                    app.draw_frame(frame);
+                })
+                .unwrap();
+        }
+        terminal.backend().clone()
+    }
+
+    /// Renders the app and returns the buffer as a newline-joined
+    /// string. Use when substring-asserting on the rendered UI is more
+    /// readable than a full `insta::assert_snapshot!`.
+    fn rendered_text(app: &mut App, width: u16, height: u16) -> String {
+        let backend = render_app(app, width, height);
+        let buffer = backend.buffer();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| {
+                        buffer
+                            .cell((x, y))
+                            .map_or(' ', |c| c.symbol().chars().next().unwrap_or(' '))
+                    })
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn long_chat_block() -> String {
+        use std::fmt::Write as _;
+
+        let mut body = String::new();
+        for i in 0..30 {
+            _ = writeln!(body, "line {i:02} of a long chat block");
+        }
+        body
     }
 
     // ── App::new ──
@@ -2045,7 +2110,7 @@ mod tests {
             compaction: crate::config::CompactionConfig::resolved_for_test(
                 crate::config::AutoCompactionConfig {
                     enabled: true,
-                    threshold_tokens: Some(167_000),
+                    threshold_tokens: Some(test_thresholds::WINDOW_200K),
                 },
             ),
             requested_effort: None,
@@ -2059,12 +2124,16 @@ mod tests {
         assert_eq!(app.status_bar.model(), "Claude Sonnet 4.6");
         assert_eq!(
             app.session_info.config.compaction.auto.threshold_tokens,
-            Some(167_000),
+            Some(test_thresholds::WINDOW_200K),
         );
         let body = app.chat.last_system_text().expect("confirmation block");
         assert_eq!(
             body,
-            "Switched to Claude Sonnet 4.6 (claude-sonnet-4-6) · effort high. Auto compaction on at 167000 tokens.",
+            format!(
+                "Switched to Claude Sonnet 4.6 (claude-sonnet-4-6) · effort high. \
+                 Auto compaction at {} tokens.",
+                test_thresholds::WINDOW_200K,
+            ),
         );
         assert!(app.dirty);
     }
@@ -2256,7 +2325,7 @@ mod tests {
         let new_compaction =
             CompactionConfig::resolved_for_test(crate::config::AutoCompactionConfig {
                 enabled: true,
-                threshold_tokens: Some(167_000),
+                threshold_tokens: Some(test_thresholds::WINDOW_200K),
             });
 
         let s = format_config_change(
@@ -2271,7 +2340,11 @@ mod tests {
 
         assert_eq!(
             s,
-            "Switched to Claude Sonnet 4.6 (claude-sonnet-4-6) · effort high. Auto compaction on at 167000 tokens."
+            format!(
+                "Switched to Claude Sonnet 4.6 (claude-sonnet-4-6) · effort high. \
+                 Auto compaction at {} tokens.",
+                test_thresholds::WINDOW_200K,
+            ),
         );
     }
 
@@ -2994,70 +3067,6 @@ mod tests {
 
     // ── draw_frame ──
 
-    fn render_app(app: &mut App, width: u16, height: u16) -> TestBackend {
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        let mut chat_area = Rect::default();
-        terminal
-            .draw(|frame| {
-                chat_area = app.draw_frame(frame);
-            })
-            .unwrap();
-        // Mirror `App::render`'s second-pass repaint so the captured
-        // buffer matches what the user actually sees.
-        if app.chat.update_layout(chat_area) {
-            terminal
-                .draw(|frame| {
-                    app.draw_frame(frame);
-                })
-                .unwrap();
-        }
-        terminal.backend().clone()
-    }
-
-    /// Renders the app and returns the buffer as a newline-joined
-    /// string. Use when substring-asserting on the rendered UI is more
-    /// readable than a full `insta::assert_snapshot!`.
-    fn rendered_text(app: &mut App, width: u16, height: u16) -> String {
-        let backend = render_app(app, width, height);
-        let buffer = backend.buffer();
-        (0..height)
-            .map(|y| {
-                (0..width)
-                    .map(|x| {
-                        buffer
-                            .cell((x, y))
-                            .map_or(' ', |c| c.symbol().chars().next().unwrap_or(' '))
-                    })
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    fn long_chat_block() -> String {
-        use std::fmt::Write as _;
-
-        let mut body = String::new();
-        for i in 0..30 {
-            _ = writeln!(body, "line {i:02} of a long chat block");
-        }
-        body
-    }
-
-    // ── jump_overlay_label ──
-
-    #[test]
-    fn jump_overlay_label_renders_idle_and_new_content_variants() {
-        assert_eq!(jump_overlay_label(0, 60), "Jump to bottom (ctrl+End) ↓");
-        assert_eq!(jump_overlay_label(1, 60), "1 new message (ctrl+End) ↓");
-        assert_eq!(jump_overlay_label(3, 60), "3 new messages (ctrl+End) ↓");
-    }
-
-    #[test]
-    fn jump_overlay_label_uses_short_form_below_full_width() {
-        assert_eq!(jump_overlay_label(3, 30), "↓ (ctrl+End)");
-    }
-
     #[test]
     fn draw_frame_lays_out_status_chat_and_input_in_order() {
         let (mut app, _rx, _agent_tx) = test_app(Some("Session title"));
@@ -3078,9 +3087,6 @@ mod tests {
 
     #[test]
     fn draw_frame_streaming_shows_spinner_in_status_bar() {
-        // The matching input-border style change is validated in
-        // `input::render_disabled_applies_dim_foreground_to_text` — a
-        // text-only snapshot would render identically either way.
         let (mut app, _rx, _agent_tx) = test_app(None);
         app.dispatch_user_action(UserAction::SubmitPrompt("working...".into()));
         app.handle_agent_event(AgentEvent::StreamToken("part".into()));
@@ -3218,6 +3224,24 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── jump_overlay_label ──
+
+    #[test]
+    fn jump_overlay_label_idle_reads_jump_to_bottom() {
+        assert_eq!(jump_overlay_label(0, 60), "Jump to bottom (ctrl+End) ↓");
+    }
+
+    #[test]
+    fn jump_overlay_label_pluralizes_new_message_count() {
+        assert_eq!(jump_overlay_label(1, 60), "1 new message (ctrl+End) ↓");
+        assert_eq!(jump_overlay_label(3, 60), "3 new messages (ctrl+End) ↓");
+    }
+
+    #[test]
+    fn jump_overlay_label_uses_short_form_below_full_width() {
+        assert_eq!(jump_overlay_label(3, 30), "↓ (ctrl+End)");
     }
 
     // ── preview_height ──

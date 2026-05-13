@@ -27,14 +27,15 @@ pub(crate) async fn replace_session_with_summary(
 
     file_tracker.clear();
     *messages = vec![synthetic];
-    if let Err(e) = sink.send(AgentEvent::SessionCompacted {
-        summary,
-        pre_count: outcome.pre_count,
-        instructions,
-        automatic,
-    }) {
-        tracing::error!("session-compacted event dropped: {e}");
-    }
+    sink.emit(
+        AgentEvent::SessionCompacted {
+            summary,
+            pre_count: outcome.pre_count,
+            instructions,
+            automatic,
+        },
+        "session-compacted",
+    );
     true
 }
 

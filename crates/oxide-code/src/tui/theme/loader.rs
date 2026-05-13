@@ -891,8 +891,6 @@ mod tests {
 
     #[test]
     fn parse_theme_inline_supports_every_modifier_flag() {
-        // Hand-craft a body that exercises every modifier flag and
-        // verifies they all reach the resulting Slot.
         let replacement = indoc! {r##"
             thinking = { fg = "#585b70", bold = true, italic = true, underlined = true, dim = true, reversed = true }
         "##}
