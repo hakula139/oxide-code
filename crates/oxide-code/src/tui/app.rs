@@ -3104,9 +3104,6 @@ mod tests {
 
     #[test]
     fn draw_frame_streaming_shows_spinner_in_status_bar() {
-        // The matching input-border style change is validated in
-        // `input::render_disabled_applies_dim_foreground_to_text` — a
-        // text-only snapshot would render identically either way.
         let (mut app, _rx, _agent_tx) = test_app(None);
         app.dispatch_user_action(UserAction::SubmitPrompt("working...".into()));
         app.handle_agent_event(AgentEvent::StreamToken("part".into()));

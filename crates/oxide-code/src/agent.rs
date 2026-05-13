@@ -689,7 +689,7 @@ mod tests {
         assert_eq!(format!("{}", TurnAbort::Quit), "turn quit");
     }
 
-    // ── agent_turn ──
+    // ── Fixtures ──
 
     /// In-process fake that scripts a [`StreamEvent`] sequence per turn.
     struct FakeClient {
@@ -1376,6 +1376,8 @@ mod tests {
             matches!(&messages[0].content[0], ContentBlock::Text { text } if text.contains("auto summary"))
         );
     }
+
+    // ── agent_turn ──
 
     #[tokio::test]
     async fn agent_turn_dead_session_surfaces_write_failure_on_first_call() {
