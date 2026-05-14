@@ -45,7 +45,7 @@ Add `StatusLineSegment` in `config.rs` with TOML values:
 - `thread-title`
 - `current-time`
 
-`[tui] status_line = [...]` controls the order. `OX_STATUS_LINE` accepts the same comma-separated names. Segment colors always come from the active theme.
+`[tui] status_line = [...]` controls the order. `OX_STATUS_LINE` accepts the same comma-separated names. Segment colors and the separator glyph come from the active theme.
 
 `StatusBar` keeps component state and delegates segment formatting to `tui/components/status/line.rs`.
 

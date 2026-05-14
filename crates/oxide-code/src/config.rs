@@ -62,6 +62,8 @@ pub(crate) struct ConfigSnapshot {
     pub(crate) compaction: CompactionConfig,
     pub(crate) show_thinking: bool,
     pub(crate) show_welcome: bool,
+    /// Ordered TUI status-line segments.
+    pub(crate) status_line: Vec<StatusLineSegment>,
     /// Resolved theme base name — built-in catalogue key or filesystem path. `/theme` reads this
     /// to mark the active row in the picker.
     pub(crate) theme_name: String,
@@ -195,6 +197,66 @@ impl FromStr for PromptCacheTtl {
     }
 }
 
+// ── Status Line ──
+
+/// User-configurable status-line segment identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum StatusLineSegment {
+    CurrentDir,
+    GitBranch,
+    Model,
+    ModelWithEffort,
+    ContextUsed,
+    SessionCost,
+    RunState,
+    ThreadTitle,
+    CurrentTime,
+}
+
+impl StatusLineSegment {
+    const ALL: &'static [(Self, &'static str)] = &[
+        (Self::CurrentDir, "current-dir"),
+        (Self::GitBranch, "git-branch"),
+        (Self::Model, "model"),
+        (Self::ModelWithEffort, "model-with-effort"),
+        (Self::ContextUsed, "context-used"),
+        (Self::SessionCost, "session-cost"),
+        (Self::RunState, "run-state"),
+        (Self::ThreadTitle, "thread-title"),
+        (Self::CurrentTime, "current-time"),
+    ];
+
+    /// Default roster: location first, then model, usage, run state, and thread title.
+    pub(crate) const DEFAULT: &'static [Self] = &[
+        Self::CurrentDir,
+        Self::GitBranch,
+        Self::ModelWithEffort,
+        Self::ContextUsed,
+        Self::SessionCost,
+        Self::RunState,
+        Self::ThreadTitle,
+    ];
+}
+
+impl FromStr for StatusLineSegment {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        if let Some((segment, _)) = Self::ALL.iter().find(|(_, name)| *name == s) {
+            return Ok(*segment);
+        }
+        bail!(
+            "invalid status line segment {s:?}; expected one of: {}",
+            Self::ALL
+                .iter()
+                .map(|(_, name)| *name)
+                .collect::<Vec<_>>()
+                .join(", "),
+        )
+    }
+}
+
 // ── CompactionConfig ──
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -286,6 +348,8 @@ pub(crate) struct Config {
     pub(crate) thinking: Option<ThinkingConfig>,
     pub(crate) show_thinking: bool,
     pub(crate) show_welcome: bool,
+    /// Ordered TUI status-line segments.
+    pub(crate) status_line: Vec<StatusLineSegment>,
     pub(crate) theme: Theme,
     /// Built-in catalogue key (e.g. `"mocha"`) or filesystem path; mirrors `[tui.theme] base`,
     /// falling back to [`DEFAULT_THEME`] when unset.
@@ -364,6 +428,13 @@ impl Config {
             .or(tui.show_welcome)
             .unwrap_or(true);
 
+        let status_line = match env::string("OX_STATUS_LINE") {
+            Some(raw) => parse_status_line_segments(&raw).context("OX_STATUS_LINE")?,
+            None => tui
+                .status_line
+                .unwrap_or_else(|| StatusLineSegment::DEFAULT.to_vec()),
+        };
+
         // 4.7 silently defaulted to `omitted`; `display` opts back into summarized. 4.6 and older
         // ignore the field.
         let thinking = Some(ThinkingConfig::Adaptive {
@@ -401,6 +472,7 @@ impl Config {
             thinking,
             show_thinking,
             show_welcome,
+            status_line,
             theme,
             theme_name,
         })
@@ -420,12 +492,21 @@ impl Config {
             compaction: self.compaction,
             show_thinking: self.show_thinking,
             show_welcome: self.show_welcome,
+            status_line: self.status_line.clone(),
             theme_name: self.theme_name.clone(),
         }
     }
 }
 
 // ── Helpers ──
+
+fn parse_status_line_segments(raw: &str) -> Result<Vec<StatusLineSegment>> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(str::parse)
+        .collect()
+}
 
 pub(crate) fn display_effort(effort: Option<Effort>) -> String {
     effort.map_or_else(|| "(no effort tier)".to_owned(), |e| e.to_string())
@@ -716,6 +797,7 @@ mod tests {
         "OX_COMPACTION_AUTO_THRESHOLD_TOKENS",
         "OX_SHOW_THINKING",
         "OX_SHOW_WELCOME",
+        "OX_STATUS_LINE",
         "OX_PROMPT_CACHE_TTL",
         "XDG_CONFIG_HOME",
     ];
@@ -783,6 +865,7 @@ mod tests {
             config.show_welcome,
             "default-on so the empty chat surfaces the welcome"
         );
+        assert_eq!(config.status_line, StatusLineSegment::DEFAULT);
         assert!(matches!(config.auth, Auth::ApiKey(k) if k == "sk-default"));
         assert_eq!(config.theme_name, DEFAULT_THEME);
     }
@@ -814,6 +897,7 @@ mod tests {
             env("OX_MAX_TOOL_ROUNDS", "200"),
             env("OX_SHOW_THINKING", "1"),
             env("OX_SHOW_WELCOME", "0"),
+            env("OX_STATUS_LINE", "run-state,model,current-dir"),
         ]);
         let config = temp_env::async_with_vars(vars, Config::load())
             .await
@@ -827,6 +911,14 @@ mod tests {
         assert!(
             !config.show_welcome,
             "env `0` flips the default-on welcome off"
+        );
+        assert_eq!(
+            config.status_line,
+            vec![
+                StatusLineSegment::RunState,
+                StatusLineSegment::Model,
+                StatusLineSegment::CurrentDir,
+            ],
         );
     }
 
@@ -845,6 +937,7 @@ mod tests {
                 [tui]
                 show_thinking = true
                 show_welcome = false
+                status_line = ["current-dir", "git-branch", "model-with-effort"]
             "#},
         );
         let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
@@ -860,6 +953,27 @@ mod tests {
             !config.show_welcome,
             "file `false` opts out of the default-on welcome"
         );
+        assert_eq!(
+            config.status_line,
+            vec![
+                StatusLineSegment::CurrentDir,
+                StatusLineSegment::GitBranch,
+                StatusLineSegment::ModelWithEffort,
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn load_status_line_invalid_segment_surfaces_parse_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let vars = env_vars(vec![xdg(&dir), env("OX_STATUS_LINE", "model,nope")]);
+        let err = temp_env::async_with_vars(vars, Config::load())
+            .await
+            .expect_err("invalid segment must propagate");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("OX_STATUS_LINE"), "{msg}");
+        assert!(msg.contains("nope"), "{msg}");
+        assert!(msg.contains("current-dir"), "{msg}");
     }
 
     #[tokio::test]
@@ -1475,6 +1589,10 @@ mod tests {
             thinking: None,
             show_thinking: true,
             show_welcome: false,
+            status_line: vec![
+                StatusLineSegment::CurrentDir,
+                StatusLineSegment::ModelWithEffort,
+            ],
             theme: Theme::default(),
             theme_name: "macchiato".to_owned(),
         };
@@ -1493,6 +1611,13 @@ mod tests {
         assert_eq!(snap.compaction.auto.threshold_tokens, Some(42));
         assert!(snap.show_thinking);
         assert!(!snap.show_welcome);
+        assert_eq!(
+            snap.status_line,
+            vec![
+                StatusLineSegment::CurrentDir,
+                StatusLineSegment::ModelWithEffort,
+            ],
+        );
         assert_eq!(snap.theme_name, "macchiato");
     }
 

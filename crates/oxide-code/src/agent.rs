@@ -70,29 +70,61 @@ impl AgentClient for Client {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct TokenUsage {
-    input_tokens: u32,
-    output_tokens: u32,
+    input: u32,
+    cache_creation_input: u32,
+    cache_read_input: u32,
+    output: u32,
 }
 
 impl TokenUsage {
     #[cfg(test)]
     pub(crate) const fn new(input_tokens: u32, output_tokens: u32) -> Self {
         Self {
-            input_tokens,
-            output_tokens,
+            input: input_tokens,
+            cache_creation_input: 0,
+            cache_read_input: 0,
+            output: output_tokens,
         }
     }
 
+    pub(crate) const fn context_tokens(self) -> u32 {
+        self.input
+            .saturating_add(self.cache_creation_input)
+            .saturating_add(self.cache_read_input)
+    }
+
     pub(crate) const fn total_tokens(self) -> u32 {
-        self.input_tokens.saturating_add(self.output_tokens)
+        self.context_tokens().saturating_add(self.output)
+    }
+
+    pub(crate) const fn input_tokens(self) -> u32 {
+        self.input
+    }
+
+    pub(crate) const fn cache_creation_input_tokens(self) -> u32 {
+        self.cache_creation_input
+    }
+
+    pub(crate) const fn cache_read_input_tokens(self) -> u32 {
+        self.cache_read_input
+    }
+
+    pub(crate) const fn output_tokens(self) -> u32 {
+        self.output
     }
 
     fn observe(&mut self, usage: &Usage) {
         if usage.input_tokens > 0 {
-            self.input_tokens = usage.input_tokens;
+            self.input = usage.input_tokens;
+        }
+        if usage.cache_creation_input_tokens > 0 {
+            self.cache_creation_input = usage.cache_creation_input_tokens;
+        }
+        if usage.cache_read_input_tokens > 0 {
+            self.cache_read_input = usage.cache_read_input_tokens;
         }
         if usage.output_tokens > 0 {
-            self.output_tokens = usage.output_tokens;
+            self.output = usage.output_tokens;
         }
     }
 }
@@ -806,6 +838,8 @@ mod tests {
                     model: "claude-sonnet-4-6".into(),
                     usage: Some(Usage {
                         input_tokens: 0,
+                        cache_creation_input_tokens: 0,
+                        cache_read_input_tokens: 0,
                         output_tokens: 0,
                     }),
                 },
@@ -833,6 +867,8 @@ mod tests {
                     model: "claude-sonnet-4-6".into(),
                     usage: Some(Usage {
                         input_tokens: 0,
+                        cache_creation_input_tokens: 0,
+                        cache_read_input_tokens: 0,
                         output_tokens: 0,
                     }),
                 },
@@ -854,6 +890,8 @@ mod tests {
                     model: "claude-sonnet-4-6".into(),
                     usage: Some(Usage {
                         input_tokens,
+                        cache_creation_input_tokens: 0,
+                        cache_read_input_tokens: 0,
                         output_tokens: 0,
                     }),
                 },
@@ -874,6 +912,8 @@ mod tests {
                 },
                 usage: Some(Usage {
                     input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                    cache_read_input_tokens: 0,
                     output_tokens,
                 }),
             },
@@ -917,6 +957,8 @@ mod tests {
                     model: "claude-sonnet-4-6".into(),
                     usage: Some(Usage {
                         input_tokens,
+                        cache_creation_input_tokens: 0,
+                        cache_read_input_tokens: 0,
                         output_tokens,
                     }),
                 },
@@ -1014,6 +1056,21 @@ mod tests {
         crate::session::handle::testing::dead("dead-test-session")
     }
 
+    // ── TokenUsage ──
+
+    #[test]
+    fn token_usage_context_and_total_include_cache_tokens() {
+        let usage = TokenUsage {
+            input: 10,
+            cache_creation_input: 20,
+            cache_read_input: 30,
+            output: 5,
+        };
+
+        assert_eq!(usage.context_tokens(), 60);
+        assert_eq!(usage.total_tokens(), 65);
+    }
+
     // ── auto_compact_if_needed ──
 
     #[tokio::test]
@@ -1041,8 +1098,10 @@ mod tests {
             &mut pending,
             None,
             Some(TokenUsage {
-                input_tokens: 20,
-                output_tokens: 1,
+                input: 20,
+                cache_creation_input: 0,
+                cache_read_input: 0,
+                output: 1,
             }),
         )
         .await
@@ -1086,8 +1145,10 @@ mod tests {
                 file_tracker: &tracker,
             }),
             Some(TokenUsage {
-                input_tokens: 20,
-                output_tokens: 1,
+                input: 20,
+                cache_creation_input: 0,
+                cache_read_input: 0,
+                output: 1,
             }),
         )
         .await
@@ -1128,8 +1189,10 @@ mod tests {
                 file_tracker: &tracker,
             }),
             Some(TokenUsage {
-                input_tokens: 20,
-                output_tokens: 1,
+                input: 20,
+                cache_creation_input: 0,
+                cache_read_input: 0,
+                output: 1,
             }),
         )
         .await
@@ -1177,8 +1240,10 @@ mod tests {
                 file_tracker: &tracker,
             }),
             Some(TokenUsage {
-                input_tokens: 20,
-                output_tokens: 1,
+                input: 20,
+                cache_creation_input: 0,
+                cache_read_input: 0,
+                output: 1,
             }),
         )
         .await
@@ -1225,8 +1290,10 @@ mod tests {
                 file_tracker: &tracker,
             }),
             Some(TokenUsage {
-                input_tokens: 20,
-                output_tokens: 1,
+                input: 20,
+                cache_creation_input: 0,
+                cache_read_input: 0,
+                output: 1,
             }),
         )
         .await
@@ -1258,8 +1325,10 @@ mod tests {
         let mut pending = Vec::new();
         let mut failures = MAX_AUTO_COMPACT_FAILURES - 1;
         let usage = Some(TokenUsage {
-            input_tokens: 50_000,
-            output_tokens: 1,
+            input: 50_000,
+            cache_creation_input: 0,
+            cache_read_input: 0,
+            output: 1,
         });
 
         let first = auto_compact_if_needed(
@@ -1346,8 +1415,10 @@ mod tests {
             &mut pending,
             Some(&mut auto),
             Some(TokenUsage {
-                input_tokens: 20,
-                output_tokens: 1,
+                input: 20,
+                cache_creation_input: 0,
+                cache_read_input: 0,
+                output: 1,
             }),
         );
         let queue_prompt = async {

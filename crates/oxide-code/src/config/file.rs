@@ -56,6 +56,7 @@ pub(super) struct CompactionConfig {
 pub(super) struct TuiConfig {
     pub(super) show_thinking: Option<bool>,
     pub(super) show_welcome: Option<bool>,
+    pub(super) status_line: Option<Vec<super::StatusLineSegment>>,
     pub(super) theme: Option<ThemeFileConfig>,
 }
 
@@ -117,6 +118,7 @@ impl TuiConfig {
         Self {
             show_thinking: other.show_thinking.or(self.show_thinking),
             show_welcome: other.show_welcome.or(self.show_welcome),
+            status_line: other.status_line.or(self.status_line),
             theme: merge_section(self.theme, other.theme, ThemeFileConfig::merge),
         }
     }
@@ -248,6 +250,8 @@ fn find_project_config_from(mut dir: PathBuf) -> Option<PathBuf> {
 mod tests {
     use indoc::indoc;
 
+    use crate::config::StatusLineSegment;
+
     use super::*;
 
     // ── FileConfig::merge ──
@@ -273,6 +277,7 @@ mod tests {
             tui: Some(TuiConfig {
                 show_thinking: Some(false),
                 show_welcome: None,
+                status_line: Some(vec![StatusLineSegment::Model]),
                 theme: None,
             }),
         };
@@ -295,6 +300,7 @@ mod tests {
             tui: Some(TuiConfig {
                 show_thinking: Some(true),
                 show_welcome: None,
+                status_line: Some(vec![StatusLineSegment::CurrentDir]),
                 theme: None,
             }),
         };
@@ -322,6 +328,7 @@ mod tests {
 
         let tui = merged.tui.expect("tui section should be present");
         assert_eq!(tui.show_thinking, Some(true));
+        assert_eq!(tui.status_line, Some(vec![StatusLineSegment::CurrentDir]));
     }
 
     #[test]
@@ -364,6 +371,7 @@ mod tests {
             tui: Some(TuiConfig {
                 show_thinking: Some(true),
                 show_welcome: None,
+                status_line: Some(vec![StatusLineSegment::Model]),
                 theme: None,
             }),
         };
@@ -389,6 +397,7 @@ mod tests {
 
         let tui = merged.tui.expect("tui section should survive");
         assert_eq!(tui.show_thinking, Some(true));
+        assert_eq!(tui.status_line, Some(vec![StatusLineSegment::Model]));
     }
 
     #[test]
@@ -405,6 +414,7 @@ mod tests {
             tui: Some(TuiConfig {
                 show_thinking: Some(true),
                 show_welcome: None,
+                status_line: Some(vec![StatusLineSegment::CurrentDir]),
                 theme: None,
             }),
         };
@@ -566,6 +576,7 @@ mod tests {
 
                 [tui]
                 show_thinking = true
+                status_line = ["run-state", "model", "current-dir"]
 
                 [tui.theme]
                 base = "latte"
@@ -590,6 +601,14 @@ mod tests {
 
         let tui = config.tui.expect("tui section should be present");
         assert_eq!(tui.show_thinking, Some(true));
+        assert_eq!(
+            tui.status_line,
+            Some(vec![
+                StatusLineSegment::RunState,
+                StatusLineSegment::Model,
+                StatusLineSegment::CurrentDir,
+            ]),
+        );
 
         let theme = tui.theme.expect("theme section should be present");
         assert_eq!(theme.base.as_deref(), Some("latte"));

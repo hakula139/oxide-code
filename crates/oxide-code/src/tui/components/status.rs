@@ -1,26 +1,33 @@
-//! Status bar component (model, spinner, working directory).
+//! Configurable status line component.
+
+mod line;
 
 use std::time::Instant;
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::text::{Line, Span};
+use ratatui::text::Span;
 use ratatui::widgets::{Block, Borders, Paragraph};
-use unicode_width::UnicodeWidthStr;
 
+use crate::agent::event::UsageSnapshot;
+use crate::config::{Effort, StatusLineSegment};
 use crate::tui::glyphs::SPINNER_FRAMES;
 use crate::tui::theme::Theme;
-use crate::util::text::truncate_to_width;
+
+use self::line::{StatusLine, StatusLineState};
 
 const TICKS_PER_FRAME: usize = 5;
-const MAX_TITLE_WIDTH: usize = 40;
 
 /// Status bar at the top of the TUI.
 pub(crate) struct StatusBar {
     theme: Theme,
+    line: StatusLine,
     model: String,
+    effort: Option<Effort>,
     title: Option<String>,
+    usage: Option<UsageSnapshot>,
     cwd: String,
+    git_branch: Option<String>,
     status: Status,
     spinner_frame: usize,
     tick_counter: usize,
@@ -37,12 +44,23 @@ pub(crate) enum Status {
 }
 
 impl StatusBar {
-    pub(crate) fn new(theme: &Theme, model: String, cwd: String) -> Self {
+    pub(crate) fn new(
+        theme: &Theme,
+        segments: Vec<StatusLineSegment>,
+        model: String,
+        effort: Option<Effort>,
+        cwd: String,
+        git_branch: Option<String>,
+    ) -> Self {
         Self {
             theme: theme.clone(),
+            line: StatusLine::new(segments),
             model,
+            effort,
             title: None,
+            usage: None,
             cwd,
+            git_branch,
             status: Status::Idle,
             spinner_frame: 0,
             tick_counter: 0,
@@ -59,6 +77,14 @@ impl StatusBar {
             "set_model received empty / whitespace-only label",
         );
         self.model = model;
+    }
+
+    pub(crate) fn set_effort(&mut self, effort: Option<Effort>) {
+        self.effort = effort;
+    }
+
+    pub(crate) fn set_usage(&mut self, usage: Option<UsageSnapshot>) {
+        self.usage = usage;
     }
 
     /// Re-skin subsequent renders; the spinner / status state is unaffected.
@@ -87,6 +113,11 @@ impl StatusBar {
         &self.model
     }
 
+    #[cfg(test)]
+    pub(crate) fn usage(&self) -> Option<UsageSnapshot> {
+        self.usage
+    }
+
     /// Returns `true` if the spinner frame advanced (caller should repaint).
     pub(crate) fn tick(&mut self) -> bool {
         if !is_animated(&self.status) {
@@ -104,51 +135,14 @@ impl StatusBar {
 
 impl StatusBar {
     pub(crate) fn render(&self, frame: &mut Frame, area: Rect) {
-        let sep = self.theme.separator_span();
-        let area_width = usize::from(area.width);
-
-        let core = vec![
-            Span::raw("  "),
-            Span::styled(self.model.as_str(), self.theme.text()),
-            sep.clone(),
-            self.status_span(),
-        ];
-        let core_width: usize = core.iter().map(Span::width).sum();
-
-        let title_slot = self
-            .title
-            .as_deref()
-            .map(|t| title_slot_spans(t, &sep, self.theme.muted()));
-        let title_slot_width = title_slot.as_deref().map_or(0, slot_width);
-
-        let cwd_slot_content_width = self.cwd.width() + 2;
-        let cwd_display_width = if self.cwd.is_empty() {
-            0
-        } else {
-            cwd_slot_content_width + 1
-        };
-
-        let mut spans = core;
-        let (include_title, include_cwd) =
-            fit_layout(area_width, core_width, title_slot_width, cwd_display_width);
-        if include_title && let Some(slot) = title_slot {
-            let status = spans.pop().expect("core always has the status span");
-            spans.extend(slot);
-            spans.push(status);
-        }
-        if include_cwd {
-            let used: usize = spans.iter().map(Span::width).sum();
-            let gap = area_width - used - cwd_slot_content_width;
-            spans.push(Span::raw(" ".repeat(gap)));
-            spans.push(Span::styled(&self.cwd, self.theme.dim()));
-            spans.push(Span::raw("  "));
-        }
-
         let block = Block::default()
             .borders(Borders::BOTTOM)
             .border_style(self.theme.border_unfocused())
             .style(self.theme.surface());
-        frame.render_widget(Paragraph::new(Line::from(spans)).block(block), area);
+        frame.render_widget(
+            Paragraph::new(self.render_line(area.width)).block(block),
+            area,
+        );
     }
 }
 
@@ -174,6 +168,22 @@ impl StatusBar {
         let spinner = SPINNER_FRAMES[self.spinner_frame];
         Span::styled(format!("{spinner} {label}"), self.theme.info())
     }
+
+    fn render_line(&self, width: u16) -> ratatui::text::Line<'static> {
+        self.line.render(
+            &self.theme,
+            &StatusLineState {
+                model: &self.model,
+                effort: self.effort,
+                title: self.title.as_deref(),
+                usage: self.usage,
+                cwd: &self.cwd,
+                git_branch: self.git_branch.as_deref(),
+                status_span: self.status_span(),
+            },
+            width,
+        )
+    }
 }
 
 fn is_animated(status: &Status) -> bool {
@@ -181,37 +191,6 @@ fn is_animated(status: &Status) -> bool {
         status,
         Status::Streaming | Status::ToolRunning { .. } | Status::Compacting | Status::Cancelling,
     )
-}
-
-fn title_slot_spans<'a>(
-    title: &'a str,
-    sep: &Span<'a>,
-    style: ratatui::style::Style,
-) -> Vec<Span<'a>> {
-    vec![
-        Span::styled(truncate_to_width(title, MAX_TITLE_WIDTH), style),
-        sep.clone(),
-    ]
-}
-
-fn slot_width(slot: &[Span<'_>]) -> usize {
-    slot.iter().map(Span::width).sum()
-}
-
-/// Returns `(include_title, include_cwd)`. Cwd wins over title when both
-/// can't fit — it carries location context the title does not.
-fn fit_layout(area_width: usize, core: usize, title: usize, cwd: usize) -> (bool, bool) {
-    let fits = |extra: usize| core + extra < area_width;
-    match (
-        title > 0 && fits(title + cwd),
-        cwd > 0 && fits(cwd),
-        title > 0 && fits(title),
-    ) {
-        (true, _, _) => (true, cwd > 0),
-        (false, true, _) => (false, true),
-        (false, false, true) => (true, false),
-        _ => (false, false),
-    }
 }
 
 #[cfg(test)]
@@ -224,8 +203,11 @@ mod tests {
     fn test_bar() -> StatusBar {
         StatusBar::new(
             &Theme::default(),
+            StatusLineSegment::DEFAULT.to_vec(),
             "test-model".to_owned(),
+            Some(Effort::High),
             "~/test".to_owned(),
+            Some("main".to_owned()),
         )
     }
 
@@ -393,7 +375,14 @@ mod tests {
     }
 
     fn bar_idle(title: Option<&str>, cwd: &str) -> StatusBar {
-        let mut bar = StatusBar::new(&Theme::default(), "Claude Opus 4.7".into(), cwd.into());
+        let mut bar = StatusBar::new(
+            &Theme::default(),
+            StatusLineSegment::DEFAULT.to_vec(),
+            "Claude Opus 4.7".into(),
+            Some(Effort::Xhigh),
+            cwd.into(),
+            Some("main".to_owned()),
+        );
         bar.set_title(title.map(ToOwned::to_owned));
         bar
     }
@@ -415,6 +404,23 @@ mod tests {
         let mut bar = bar_idle(None, "~/projects/demo");
         bar.set_status(Status::Streaming);
         insta::assert_snapshot!(render_status(&mut bar, 80));
+    }
+
+    #[test]
+    fn render_usage_shows_context_and_session_cost() {
+        let mut bar = bar_idle(None, "~/projects/demo");
+        bar.set_usage(Some(UsageSnapshot {
+            context_tokens: 124_000,
+            context_window: Some(1_000_000),
+            estimated_cost_usd: Some(0.4321),
+        }));
+        let output = render_top_row(&mut bar, 120);
+        assert!(
+            output.contains("Ctx: 12% (124k/1M)"),
+            "usage slot should render before status: {output:?}",
+        );
+        assert!(output.contains("Sess: $0.4321"));
+        assert!(output.contains("Ready"));
     }
 
     #[test]
@@ -450,23 +456,70 @@ mod tests {
     }
 
     #[test]
-    fn render_narrow_width_drops_cwd_and_title_slots() {
+    fn render_configured_segments_control_order() {
+        let mut bar = StatusBar::new(
+            &Theme::default(),
+            vec![
+                StatusLineSegment::RunState,
+                StatusLineSegment::Model,
+                StatusLineSegment::CurrentDir,
+            ],
+            "Claude Opus 4.7".into(),
+            Some(Effort::Xhigh),
+            "~/projects/demo".into(),
+            Some("main".to_owned()),
+        );
+        let output = render_top_row(&mut bar, 120);
+        let state_at = output.find("Ready").unwrap();
+        let model_at = output.find("Claude Opus 4.7").unwrap();
+        let cwd_at = output.find("~/projects/demo").unwrap();
+        assert!(state_at < model_at, "run state should lead: {output:?}");
+        assert!(model_at < cwd_at, "cwd should follow model: {output:?}");
+        assert!(
+            !output.contains("main"),
+            "git branch was not requested: {output:?}"
+        );
+    }
+
+    #[test]
+    fn render_uses_theme_separator_and_segment_labels() {
+        let mut bar = StatusBar::new(
+            &Theme::default(),
+            vec![
+                StatusLineSegment::CurrentDir,
+                StatusLineSegment::GitBranch,
+                StatusLineSegment::ModelWithEffort,
+                StatusLineSegment::RunState,
+            ],
+            "Claude Opus 4.7".into(),
+            Some(Effort::Xhigh),
+            "~/projects/demo".into(),
+            Some("feat/status-line".to_owned()),
+        );
+        let output = render_top_row(&mut bar, 120);
+        assert!(
+            output.contains("~/projects/demo │ feat/status-line │ Claude Opus 4.7 (xhigh) │ Ready")
+        );
+    }
+
+    #[test]
+    fn render_narrow_width_preserves_model_and_run_state() {
         let mut bar = bar_idle(Some("A rather long session title"), "~/projects/demo/long");
         insta::assert_snapshot!(render_status(&mut bar, 40));
     }
 
     #[test]
-    fn render_wide_shows_title_between_model_and_status() {
+    fn render_wide_shows_title_after_status() {
         let mut bar = test_bar();
         bar.set_title(Some("Fix auth bug".to_owned()));
         let output = render_top_row(&mut bar, 120);
         let model_at = output.find("test-model").unwrap();
-        let title_at = output.find("Fix auth bug").unwrap();
         let status_at = output.find("Ready").unwrap();
+        let title_at = output.find("Fix auth bug").unwrap();
         assert!(model_at < title_at, "title should follow model: {output:?}");
         assert!(
-            title_at < status_at,
-            "title should precede status: {output:?}"
+            status_at < title_at,
+            "title should follow status: {output:?}"
         );
     }
 
@@ -488,18 +541,6 @@ mod tests {
     }
 
     #[test]
-    fn render_drops_title_first_when_tight() {
-        let mut bar = test_bar();
-        bar.set_title(Some("Some long title".to_owned()));
-        let output = render_top_row(&mut bar, 40);
-        assert!(output.contains("~/test"), "cwd should survive: {output:?}");
-        assert!(
-            !output.contains("Some long title"),
-            "title should drop before cwd: {output:?}",
-        );
-    }
-
-    #[test]
     fn render_no_title_still_shows_cwd_wide() {
         let mut bar = test_bar();
         let output = render_top_row(&mut bar, 120);
@@ -512,7 +553,14 @@ mod tests {
 
     #[test]
     fn render_empty_cwd_drops_cwd_slot_entirely() {
-        let mut bar = StatusBar::new(&Theme::default(), "test-model".to_owned(), String::new());
+        let mut bar = StatusBar::new(
+            &Theme::default(),
+            StatusLineSegment::DEFAULT.to_vec(),
+            "test-model".to_owned(),
+            None,
+            String::new(),
+            None,
+        );
         let output = render_top_row(&mut bar, 120);
         assert!(output.contains("test-model"));
         assert!(output.contains("Ready"));
@@ -520,27 +568,5 @@ mod tests {
             !output.contains('~'),
             "no tildified path should appear: {output:?}",
         );
-    }
-
-    // ── fit_layout ──
-
-    #[test]
-    fn fit_layout_keeps_both_slots_when_everything_fits() {
-        assert_eq!(fit_layout(80, 25, 10, 10), (true, true));
-    }
-
-    #[test]
-    fn fit_layout_drops_title_before_cwd_when_combined_too_wide() {
-        assert_eq!(fit_layout(40, 25, 10, 10), (false, true));
-    }
-
-    #[test]
-    fn fit_layout_keeps_title_when_cwd_is_too_wide_to_fit_alone() {
-        assert_eq!(fit_layout(40, 25, 5, 20), (true, false));
-    }
-
-    #[test]
-    fn fit_layout_drops_both_when_nothing_extra_fits() {
-        assert_eq!(fit_layout(26, 25, 5, 5), (false, false));
     }
 }

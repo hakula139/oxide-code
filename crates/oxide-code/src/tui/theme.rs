@@ -99,7 +99,7 @@ macro_rules! for_each_slot {
             (tool_icon, "Tool icon accent"),
             (border_focused, "Focused component border"),
             (border_unfocused, "Unfocused component border (default-aligned with `dim`)"),
-            (separator, "Status bar separator (dimmed pipe)"),
+            (separator, "Status-line segment separator"),
         }
     };
 }

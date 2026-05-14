@@ -152,6 +152,10 @@ impl Client {
         self.config.compaction
     }
 
+    pub(crate) fn prompt_cache_ttl(&self) -> crate::config::PromptCacheTtl {
+        self.config.prompt_cache_ttl
+    }
+
     /// `None` means the agent loop runs without a per-turn round cap.
     pub(crate) fn max_tool_rounds(&self) -> Option<u32> {
         self.config.max_tool_rounds

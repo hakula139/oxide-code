@@ -14,6 +14,7 @@ use crate::tui::modal::Modal;
 /// persisted JSONL record consumed by `--list`.
 pub(crate) struct LiveSessionInfo {
     pub(crate) cwd: String,
+    pub(crate) git_branch: Option<String>,
     pub(crate) version: &'static str,
     pub(crate) session_id: String,
     pub(crate) config: ConfigSnapshot,

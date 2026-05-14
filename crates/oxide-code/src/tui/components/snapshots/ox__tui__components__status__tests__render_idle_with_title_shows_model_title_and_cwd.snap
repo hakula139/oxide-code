@@ -2,5 +2,5 @@
 source: crates/oxide-code/src/tui/components/status.rs
 expression: "render_status(&mut bar, 80)"
 ---
-"  Claude Opus 4.7 │ Fix login flow │ Ready                     ~/projects/demo  "
+"  ~/projects/demo │ main │ Claude Opus 4.7 (xhigh) │ Ready │ Fix login flow     "
 "────────────────────────────────────────────────────────────────────────────────"

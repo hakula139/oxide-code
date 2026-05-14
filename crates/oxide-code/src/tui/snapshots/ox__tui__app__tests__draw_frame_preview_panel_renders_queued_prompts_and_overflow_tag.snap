@@ -1,9 +1,8 @@
 ---
 source: crates/oxide-code/src/tui/app.rs
-assertion_line: 2652
 expression: "render_app(&mut app, 60, 14)"
 ---
-"  test-model │ ⣷ Streaming · Esc to interrupt       ~/test  "
+"  test-model (high) │ ⣷ Streaming · Esc to interrupt        "
 "────────────────────────────────────────────────────────────"
 "❯ active                                                    "
 "                                                            "

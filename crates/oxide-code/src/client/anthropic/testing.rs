@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex};
 
 use super::Client;
-use crate::config::{Auth, CompactionConfig, Config, PromptCacheTtl};
+use crate::config::{Auth, CompactionConfig, Config, PromptCacheTtl, StatusLineSegment};
 use crate::tui::theme::Theme;
 
 /// Minimal [`Config`] for unit / wiremock tests.
@@ -21,6 +21,7 @@ pub(crate) fn test_config(base_url: impl Into<String>, auth: Auth, model: &str) 
         thinking: None,
         show_thinking: false,
         show_welcome: true,
+        status_line: StatusLineSegment::DEFAULT.to_vec(),
         theme: Theme::default(),
         theme_name: "mocha".to_owned(),
     }

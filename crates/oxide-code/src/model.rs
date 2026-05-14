@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 
-use crate::config::Effort;
+use crate::config::{Effort, PromptCacheTtl};
 
 // ── ModelInfo ──
 
@@ -14,10 +14,67 @@ pub(crate) struct ModelInfo {
     pub(crate) display_name: &'static str,
     pub(crate) cutoff: Option<&'static str>,
     pub(crate) capabilities: Capabilities,
+    /// First-party Claude API token prices in USD per million tokens.
+    pub(crate) cost_rates: Option<TokenCostRates>,
 }
 
 const STANDARD_CONTEXT_WINDOW: u32 = 200_000;
 const CONTEXT_1M_WINDOW: u32 = 1_000_000;
+
+// ── TokenCostRates ──
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct TokenCostRates {
+    input: f64,
+    cache_write_5m: f64,
+    cache_write_1h: f64,
+    cache_read: f64,
+    output: f64,
+}
+
+const OPUS_RATES: TokenCostRates = TokenCostRates {
+    input: 5.0,
+    cache_write_5m: 6.25,
+    cache_write_1h: 10.0,
+    cache_read: 0.50,
+    output: 25.0,
+};
+
+const SONNET_RATES: TokenCostRates = TokenCostRates {
+    input: 3.0,
+    cache_write_5m: 3.75,
+    cache_write_1h: 6.0,
+    cache_read: 0.30,
+    output: 15.0,
+};
+
+const HAIKU_RATES: TokenCostRates = TokenCostRates {
+    input: 1.0,
+    cache_write_5m: 1.25,
+    cache_write_1h: 2.0,
+    cache_read: 0.10,
+    output: 5.0,
+};
+
+impl TokenCostRates {
+    pub(crate) fn estimate_usd(
+        self,
+        input_tokens: u32,
+        cache_creation_input_tokens: u32,
+        cache_read_input_tokens: u32,
+        output_tokens: u32,
+        cache_ttl: PromptCacheTtl,
+    ) -> f64 {
+        let cache_write = match cache_ttl {
+            PromptCacheTtl::FiveMin => self.cache_write_5m,
+            PromptCacheTtl::OneHour => self.cache_write_1h,
+        };
+        million_tokens(input_tokens) * self.input
+            + million_tokens(cache_creation_input_tokens) * cache_write
+            + million_tokens(cache_read_input_tokens) * self.cache_read
+            + million_tokens(output_tokens) * self.output
+    }
+}
 
 // ── Capabilities ──
 
@@ -61,6 +118,7 @@ pub(crate) const MODELS: &[ModelInfo] = &[
             ],
             structured_outputs: true,
         },
+        cost_rates: Some(OPUS_RATES),
     },
     ModelInfo {
         id_substr: "claude-opus-4-6",
@@ -73,6 +131,7 @@ pub(crate) const MODELS: &[ModelInfo] = &[
             supported_efforts: &[Effort::Low, Effort::Medium, Effort::High, Effort::Max],
             structured_outputs: true,
         },
+        cost_rates: Some(OPUS_RATES),
     },
     ModelInfo {
         id_substr: "claude-sonnet-4-6",
@@ -85,6 +144,7 @@ pub(crate) const MODELS: &[ModelInfo] = &[
             supported_efforts: &[Effort::Low, Effort::Medium, Effort::High],
             structured_outputs: true,
         },
+        cost_rates: Some(SONNET_RATES),
     },
     ModelInfo {
         id_substr: "claude-opus-4-5",
@@ -97,6 +157,7 @@ pub(crate) const MODELS: &[ModelInfo] = &[
             supported_efforts: &[],
             structured_outputs: true,
         },
+        cost_rates: Some(OPUS_RATES),
     },
     ModelInfo {
         id_substr: "claude-sonnet-4-5",
@@ -109,6 +170,7 @@ pub(crate) const MODELS: &[ModelInfo] = &[
             supported_efforts: &[],
             structured_outputs: true,
         },
+        cost_rates: Some(SONNET_RATES),
     },
     ModelInfo {
         id_substr: "claude-haiku-4-5",
@@ -122,18 +184,7 @@ pub(crate) const MODELS: &[ModelInfo] = &[
             supported_efforts: &[],
             structured_outputs: true,
         },
-    },
-    ModelInfo {
-        id_substr: "claude-opus-4-1",
-        display_name: "Claude Opus 4.1",
-        cutoff: Some("January 2025"),
-        capabilities: Capabilities {
-            interleaved_thinking: true,
-            context_management: true,
-            context_1m: false,
-            supported_efforts: &[],
-            structured_outputs: true,
-        },
+        cost_rates: Some(HAIKU_RATES),
     },
 ];
 
@@ -222,6 +273,14 @@ pub(crate) fn context_window_for(model: &str) -> Option<u32> {
     }
 }
 
+pub(crate) fn token_cost_rates_for(model: &str) -> Option<TokenCostRates> {
+    lookup(model).and_then(|info| info.cost_rates)
+}
+
+fn million_tokens(tokens: u32) -> f64 {
+    f64::from(tokens) / 1_000_000.0
+}
+
 /// Human-facing label: the row's [`ModelInfo::display_name`] plus a ` (1M context)` suffix on
 /// `[1m]` ids; the raw id when the model is unknown.
 pub(crate) fn display_name(model: &str) -> Cow<'_, str> {
@@ -286,7 +345,6 @@ mod tests {
             "claude-opus-4-5",
             "claude-sonnet-4-5",
             "claude-haiku-4-5",
-            "claude-opus-4-1",
         ] {
             assert!(
                 !lookup(other)
@@ -314,7 +372,6 @@ mod tests {
             "claude-opus-4-5",
             "claude-sonnet-4-5",
             "claude-haiku-4-5",
-            "claude-opus-4-1",
         ] {
             assert!(
                 !lookup(unsupported)
@@ -346,7 +403,6 @@ mod tests {
             "claude-opus-4-7",
             "claude-opus-4-6",
             "claude-opus-4-5",
-            "claude-opus-4-1",
             "claude-sonnet-4-6",
             "claude-sonnet-4-5",
             "claude-haiku-4-5",
@@ -531,6 +587,36 @@ mod tests {
         assert_eq!(context_window_for("claude-future-9"), None);
     }
 
+    // ── token_cost_rates_for ──
+
+    #[test]
+    fn token_cost_rates_for_known_model_estimates_prompt_cache_ttl() {
+        let rates = token_cost_rates_for("claude-opus-4-7[1m]").unwrap();
+        let five_min = rates.estimate_usd(
+            1_000_000,
+            1_000_000,
+            1_000_000,
+            1_000_000,
+            PromptCacheTtl::FiveMin,
+        );
+        let one_hour = rates.estimate_usd(
+            1_000_000,
+            1_000_000,
+            1_000_000,
+            1_000_000,
+            PromptCacheTtl::OneHour,
+        );
+
+        assert!((five_min - 36.75).abs() < 1e-9);
+        assert!((one_hour - 40.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn token_cost_rates_for_unknown_model_is_absent() {
+        assert!(token_cost_rates_for("claude-future-9").is_none());
+        assert!(token_cost_rates_for("claude-opus-4-1").is_none());
+    }
+
     // ── display_name ──
 
     #[test]
@@ -542,7 +628,6 @@ mod tests {
             ("claude-opus-4-5", "Claude Opus 4.5"),
             ("claude-sonnet-4-5", "Claude Sonnet 4.5"),
             ("claude-haiku-4-5", "Claude Haiku 4.5"),
-            ("claude-opus-4-1", "Claude Opus 4.1"),
         ] {
             assert_eq!(display_name(id), expected, "{id}");
         }

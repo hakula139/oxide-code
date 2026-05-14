@@ -334,7 +334,6 @@ mod tests {
     fn execute_short_id_resolves_via_suffix_tier() {
         for (arg, expected) in [
             ("haiku-4-5", "claude-haiku-4-5"),
-            ("opus-4-1", "claude-opus-4-1"),
             ("sonnet-4-5", "claude-sonnet-4-5"),
             ("sonnet-4-6", "claude-sonnet-4-6"),
             ("opus-4-6[1m]", "claude-opus-4-6[1m]"),
@@ -434,12 +433,11 @@ mod tests {
             assert!(msg.contains(id), "{id} should be listed: {msg}");
         }
         // Older non-listed Opus rows must not appear in the curated listing.
-        for id in ["claude-opus-4-5", "claude-opus-4-1"] {
-            assert!(
-                !msg.contains(id),
-                "non-curated `{id}` must not appear: {msg}",
-            );
-        }
+        let id = "claude-opus-4-5";
+        assert!(
+            !msg.contains(id),
+            "non-curated `{id}` must not appear: {msg}",
+        );
     }
 
     // ── resolve_model_arg ──

@@ -232,10 +232,18 @@ pub(crate) struct MessageDeltaBody {
     pub(crate) stop_reason: Option<String>,
 }
 
+#[expect(
+    clippy::struct_field_names,
+    reason = "field names mirror Anthropic's usage payload"
+)]
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct Usage {
     #[serde(default)]
     pub(crate) input_tokens: u32,
+    #[serde(default)]
+    pub(crate) cache_creation_input_tokens: u32,
+    #[serde(default)]
+    pub(crate) cache_read_input_tokens: u32,
     #[serde(default)]
     pub(crate) output_tokens: u32,
 }
@@ -310,7 +318,12 @@ mod tests {
             event,
             StreamEvent::MessageDelta {
                 delta: MessageDeltaBody { stop_reason: Some(ref reason) },
-                usage: Some(Usage { input_tokens: 0, output_tokens: 42 }),
+                usage: Some(Usage {
+                    input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                    cache_read_input_tokens: 0,
+                    output_tokens: 42,
+                }),
             } if reason == "end_turn",
         ));
     }

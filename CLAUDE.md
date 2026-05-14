@@ -131,7 +131,9 @@ ox                                          # Start an interactive session
 │   │   │   ├── popup.rs                    # Slash-command autocomplete overlay: dim non-selected, bold selected, alias parens
 │   │   │   └── snapshots/                  # `cargo insta` baselines for popup render tests
 │   │   ├── snapshots/                      # `cargo insta` baselines for chat, input, status, and welcome render tests
-│   │   ├── status.rs                       # Status bar (model, spinner, status, working directory)
+│   │   ├── status.rs                       # Configurable status-line component state + run-state spinner
+│   │   ├── status/
+│   │   │   └── line.rs                     # Ordered segment rendering for the status line
 │   │   └── welcome.rs                      # Empty-state welcome screen: identity ribbon + body column, themed via `accent`/`text`/`dim`
 │   ├── cursor.rs                           # `place_clamped`: shared right-edge-clamp cursor placement for input surfaces
 │   ├── event.rs                            # ChannelSink (mpsc transport for the TUI)

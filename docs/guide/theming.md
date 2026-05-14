@@ -175,7 +175,7 @@ Each slot maps to one role in the TUI. Override a slot by name to restyle that r
 | `tool_icon`        | Per-tool icon                          |
 | `border_focused`   | Focused component border (e.g., input) |
 | `border_unfocused` | Unfocused component border             |
-| `separator`        | Status bar separator (dimmed pipe)     |
+| `separator`        | Status-line segment separator          |
 
 ## Overrides
 

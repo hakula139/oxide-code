@@ -91,8 +91,11 @@ impl App {
         );
         let mut status_bar = StatusBar::new(
             theme,
+            session_info.config.status_line.clone(),
             session_info.display_name().into_owned(),
+            session_info.config.effort,
             session_info.cwd.clone(),
+            session_info.git_branch.clone(),
         );
         status_bar.set_title(history.title);
         Self {
@@ -459,6 +462,9 @@ impl App {
                 self.pending_prompts.pop_front();
                 self.chat.push_user_message(text);
             }
+            AgentEvent::UsageUpdated(usage) => {
+                self.status_bar.set_usage(Some(usage));
+            }
             AgentEvent::TurnComplete => {
                 self.finish_turn();
             }
@@ -479,6 +485,7 @@ impl App {
             AgentEvent::SessionRolled { id } => {
                 self.session_info.session_id = id;
                 self.status_bar.set_title(None);
+                self.status_bar.set_usage(None);
                 self.chat.clear_history();
                 self.active_prompt = None;
             }
@@ -531,6 +538,7 @@ impl App {
     ) {
         self.session_info.session_id = id;
         self.status_bar.set_title(title);
+        self.status_bar.set_usage(None);
         self.chat.clear_history();
         self.chat
             .load_history(messages, compact, tool_metadata, self.tools.as_ref());
@@ -560,6 +568,7 @@ impl App {
     ) {
         self.chat.clear_history();
         self.pending_calls.clear();
+        self.status_bar.set_usage(None);
         self.chat
             .push_compacted_block(pre_count, instructions, summary.to_owned());
         if automatic && let Some(prompt) = &self.active_prompt {
@@ -595,6 +604,7 @@ impl App {
             self.status_bar
                 .set_model(crate::model::display_name(&model_id).into_owned());
         }
+        self.status_bar.set_effort(effort);
         self.session_info.config.model_id = model_id;
         self.session_info.config.effort = effort;
         self.session_info.config.compaction = compaction;
@@ -870,6 +880,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
+    use crate::agent::event::UsageSnapshot;
     use crate::config::test_thresholds;
     use crate::tool::ToolRegistry;
     use crate::tui::modal::testing::ScriptedModal;
@@ -928,6 +939,7 @@ mod tests {
 
         LiveSessionInfo {
             cwd: "~/test".to_owned(),
+            git_branch: Some("main".to_owned()),
             version: "0.0.0-test",
             session_id: "test-session".to_owned(),
             config: ConfigSnapshot {
@@ -945,6 +957,7 @@ mod tests {
                 }),
                 show_thinking: false,
                 show_welcome: true,
+                status_line: crate::config::StatusLineSegment::DEFAULT.to_vec(),
                 theme_name: "mocha".to_owned(),
             },
         }
@@ -955,6 +968,14 @@ mod tests {
             enabled: true,
             threshold_tokens: Some(155_000),
         })
+    }
+
+    fn usage_snapshot() -> UsageSnapshot {
+        UsageSnapshot {
+            context_tokens: 124_000,
+            context_window: Some(1_000_000),
+            estimated_cost_usd: Some(0.4321),
+        }
     }
 
     /// Minimal modal for layout tests: paints `title` on its only row, ignores keys.
@@ -2350,10 +2371,22 @@ mod tests {
     }
 
     #[test]
+    fn handle_usage_updated_sets_status_bar_usage() {
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        let usage = usage_snapshot();
+
+        app.handle_agent_event(AgentEvent::UsageUpdated(usage));
+
+        assert_eq!(app.status_bar.usage(), Some(usage));
+        assert!(app.dirty);
+    }
+
+    #[test]
     fn handle_session_rolled_clears_chat_rebinds_id_and_drops_stale_title() {
         let (mut app, _rx, _agent_tx) = test_app(Some("Old session title"));
         app.chat.push_user_message("old prompt".to_owned());
         let original_id = app.session_info.session_id.clone();
+        app.status_bar.set_usage(Some(usage_snapshot()));
 
         app.handle_agent_event(AgentEvent::SessionRolled {
             id: "rolled-session".to_owned(),
@@ -2369,6 +2402,10 @@ mod tests {
             "stale AI title must be cleared on roll",
         );
         assert!(
+            app.status_bar.usage().is_none(),
+            "stale usage must be cleared on roll",
+        );
+        assert!(
             app.chat.is_empty(),
             "clear must drain the chat so the welcome can repaint",
         );
@@ -2379,6 +2416,7 @@ mod tests {
     fn handle_session_resumed_replays_transcript_and_clears_pending() {
         let (mut app, _rx, _agent_tx) = test_app(Some("Old"));
         app.chat.push_user_message("live prompt".to_owned());
+        app.status_bar.set_usage(Some(usage_snapshot()));
         app.pending_prompts.push_back("queued".to_owned());
         app.pending_calls.insert(
             "pending-1".to_owned(),
@@ -2405,6 +2443,10 @@ mod tests {
         assert_eq!(app.session_info.session_id, "resumed-session");
         assert_ne!(app.session_info.session_id, original_id);
         assert_eq!(app.status_bar.title(), Some("Resumed title"));
+        assert!(
+            app.status_bar.usage().is_none(),
+            "stale usage must be cleared on resume",
+        );
         assert_eq!(
             app.chat.entry_count(),
             3,
@@ -2488,6 +2530,7 @@ mod tests {
     fn handle_session_compacted_replays_summary_and_clears_pending_calls() {
         let (mut app, _rx, _agent_tx) = test_app(Some("Pre-compact"));
         app.chat.push_user_message("pre-compact prompt".to_owned());
+        app.status_bar.set_usage(Some(usage_snapshot()));
         app.pending_calls.insert(
             "pending-1".to_owned(),
             PendingCall {
@@ -2513,6 +2556,10 @@ mod tests {
             app.pending_calls.len(),
             0,
             "pending tool calls must drop on compact",
+        );
+        assert!(
+            app.status_bar.usage().is_none(),
+            "stale usage must be cleared on compact",
         );
         assert_eq!(app.status_bar.status(), &Status::Idle);
         assert!(app.input.is_enabled(), "compact returns to idle input");

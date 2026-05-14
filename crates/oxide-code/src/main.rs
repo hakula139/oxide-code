@@ -14,6 +14,7 @@ mod tui;
 mod util;
 
 use std::io::{IsTerminal, Write};
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
@@ -22,7 +23,9 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
-use agent::event::{AgentEvent, AgentSink, StdioSink, UserAction, inert_user_action_channel};
+use agent::event::{
+    AgentEvent, AgentSink, StdioSink, UsageSnapshot, UserAction, inert_user_action_channel,
+};
 use agent::{AutoCompact, TokenUsage, TurnAbort, agent_turn};
 use client::anthropic::Client;
 use config::{Config, Effort};
@@ -254,13 +257,16 @@ async fn run_tui(
     let (agent_sink, agent_rx) = tui::event::channel();
     let (user_tx, user_rx) = mpsc::channel::<UserAction>(32);
 
-    let cwd = std::env::current_dir()
+    let cwd_path = std::env::current_dir().ok();
+    let cwd = cwd_path.as_deref().map(tildify).unwrap_or_default();
+    let git_branch = cwd_path
         .as_deref()
-        .map(tildify)
-        .unwrap_or_default();
+        .and_then(current_git_branch)
+        .filter(|branch| !branch.is_empty());
 
     let session_info = LiveSessionInfo {
         cwd,
+        git_branch,
         version: env!("CARGO_PKG_VERSION"),
         session_id: session.session_id().to_owned(),
         config,
@@ -326,6 +332,28 @@ async fn run_tui(
     result
 }
 
+fn current_git_branch(cwd: &Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args([
+            "-C",
+            cwd.to_str()?,
+            "--no-optional-locks",
+            "branch",
+            "--show-current",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let branch = std::str::from_utf8(&output.stdout).ok()?.trim();
+    if branch.is_empty() {
+        None
+    } else {
+        Some(branch.to_owned())
+    }
+}
+
 /// Each `TurnAbort` arm emits exactly one terminal event (`Error` xor `TurnComplete`).
 #[expect(
     clippy::too_many_arguments,
@@ -352,6 +380,8 @@ async fn agent_loop_task(
         file_tracker,
         auto_compaction_failures: 0,
         last_usage: None,
+        displayed_usage: None,
+        total_estimated_cost_usd: 0.0,
     }
     .run()
     .await
@@ -368,6 +398,8 @@ struct AgentLoopTask {
     file_tracker: Arc<FileTracker>,
     auto_compaction_failures: u8,
     last_usage: Option<TokenUsage>,
+    displayed_usage: Option<TokenUsage>,
+    total_estimated_cost_usd: f64,
 }
 
 enum LoopControl {
@@ -408,6 +440,7 @@ impl AgentLoopTask {
                 self.client.set_session_id(outcome.new_id.clone());
                 self.messages.clear();
                 self.reset_auto_compaction();
+                self.reset_usage_display();
                 // /clear succeeded server-side, so dropping `SessionRolled` would strand the TUI
                 // on a stuck "old session" header.
                 self.sink.emit(
@@ -428,6 +461,7 @@ impl AgentLoopTask {
                 )
                 .await;
                 self.reset_auto_compaction();
+                self.reset_usage_display();
                 LoopControl::Continue
             }
             UserAction::Compact { instructions } => {
@@ -444,6 +478,7 @@ impl AgentLoopTask {
                 match outcome {
                     Ok(true) => {
                         self.reset_auto_compaction();
+                        self.reset_usage_display();
                         LoopControl::Continue
                     }
                     Ok(false) => LoopControl::Continue,
@@ -466,6 +501,7 @@ impl AgentLoopTask {
             UserAction::SwapConfig { model, effort } => {
                 if apply_swap_config(&mut self.client, &self.sink, model, effort) {
                     self.auto_compaction_failures = 0;
+                    self.emit_usage_update();
                 }
                 LoopControl::Continue
             }
@@ -488,7 +524,10 @@ impl AgentLoopTask {
         )
         .await;
         match pre_prompt_compact {
-            Ok(true) => self.last_usage = None,
+            Ok(true) => {
+                self.last_usage = None;
+                self.reset_usage_display();
+            }
             Ok(false) => {}
             Err(TurnAbort::Cancelled) => {
                 self.sink.emit(AgentEvent::Cancelled, "cancelled");
@@ -538,6 +577,13 @@ impl AgentLoopTask {
         match outcome {
             Ok(report) => {
                 self.last_usage = report.usage;
+                if let Some(usage) = report.usage {
+                    self.displayed_usage = Some(usage);
+                    if let Some(cost) = estimate_usage_cost_usd(&self.client, usage) {
+                        self.total_estimated_cost_usd += cost;
+                    }
+                    self.emit_usage_update();
+                }
                 self.sink.emit(AgentEvent::TurnComplete, "turn-complete");
                 LoopControl::Continue
             }
@@ -558,6 +604,38 @@ impl AgentLoopTask {
         self.auto_compaction_failures = 0;
         self.last_usage = None;
     }
+
+    fn reset_usage_display(&mut self) {
+        self.displayed_usage = None;
+        self.total_estimated_cost_usd = 0.0;
+    }
+
+    fn emit_usage_update(&self) {
+        let Some(usage) = self.displayed_usage else {
+            return;
+        };
+        self.sink.emit(
+            AgentEvent::UsageUpdated(UsageSnapshot {
+                context_tokens: usage.context_tokens(),
+                context_window: crate::model::context_window_for(self.client.model()),
+                estimated_cost_usd: (self.total_estimated_cost_usd > 0.0)
+                    .then_some(self.total_estimated_cost_usd),
+            }),
+            "usage-updated",
+        );
+    }
+}
+
+fn estimate_usage_cost_usd(client: &Client, usage: TokenUsage) -> Option<f64> {
+    crate::model::token_cost_rates_for(client.model()).map(|rates| {
+        rates.estimate_usd(
+            usage.input_tokens(),
+            usage.cache_creation_input_tokens(),
+            usage.cache_read_input_tokens(),
+            usage.output_tokens(),
+            client.prompt_cache_ttl(),
+        )
+    })
 }
 
 /// Drives the mid-session resume: swap the handle, repaint the chat, surface previous-session
@@ -1031,6 +1109,8 @@ mod tests {
             file_tracker,
             auto_compaction_failures: 3,
             last_usage: Some(TokenUsage::new(100_000, 1)),
+            displayed_usage: None,
+            total_estimated_cost_usd: 0.0,
         };
 
         let control = task
