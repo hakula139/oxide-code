@@ -20,11 +20,13 @@ pub(crate) const INTERRUPTED_MARKER: &str = "(interrupted)";
 /// Token and cost snapshot for status-line rendering.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct UsageSnapshot {
-    /// Current prompt-side context pressure.
+    /// Cache-aware input total: `input + cache_creation + cache_read`. Drives the context-pressure
+    /// percentage and auto-compaction threshold. Resets on `/clear`, `/compact`, and resume.
     pub(crate) context_tokens: u32,
     /// Active model context window. `None` hides the percentage.
     pub(crate) context_window: Option<u32>,
-    /// In-process session cost estimate. `None` hides the cost segment.
+    /// Running session cost in USD, accumulated across every turn. Resets on the same boundaries
+    /// as `context_tokens`. `None` hides the cost segment.
     pub(crate) estimated_cost_usd: Option<f64>,
 }
 

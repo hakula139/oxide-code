@@ -125,6 +125,10 @@ impl TokenUsage {
     }
 
     fn observe(&mut self, usage: &Usage) {
+        // Anthropic's wire usage carries fresh totals only on the events that own them:
+        // `MessageStart` reports input + cache fields with `output_tokens = 0`, and `MessageDelta`
+        // reports `output_tokens` with the input fields zeroed. Treat zero as "not reported here"
+        // so successive observations layer correctly into one snapshot.
         if usage.input_tokens > 0 {
             self.input = usage.input_tokens;
         }
@@ -140,9 +144,15 @@ impl TokenUsage {
     }
 }
 
+/// Per-turn usage report emitted at the end of [`agent_turn`]. The two fields carry different
+/// temporal meanings and resist being collapsed into one.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct TurnReport {
+    /// Latest single round's usage. Drives auto-compaction threshold checks, where the trigger
+    /// depends on the most recent prompt size rather than the historical sum.
     pub(crate) usage: Option<TokenUsage>,
+    /// Sum of every round's usage in this turn. Drives session cost accumulation, since each
+    /// round was billed independently.
     pub(crate) billable_usage: Option<TokenUsage>,
 }
 
