@@ -514,7 +514,15 @@ fn parse_status_line_segments(raw: &str) -> Result<Vec<StatusLineSegment>> {
 
 fn validate_status_line(segments: Vec<StatusLineSegment>) -> Result<Vec<StatusLineSegment>> {
     if segments.is_empty() {
-        bail!("status_line must contain at least one segment");
+        bail!(
+            "status_line must list at least one segment; remove the key (or unset \
+             OX_STATUS_LINE) to use the default. Valid segments: {}",
+            StatusLineSegment::ALL
+                .iter()
+                .map(|(_, name)| *name)
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
     }
     Ok(segments)
 }
@@ -997,6 +1005,8 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("OX_STATUS_LINE"), "{msg}");
         assert!(msg.contains("at least one segment"), "{msg}");
+        assert!(msg.contains("unset OX_STATUS_LINE"), "{msg}");
+        assert!(msg.contains("run-state"), "{msg}");
     }
 
     #[tokio::test]
@@ -1015,6 +1025,8 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("tui.status_line"), "{msg}");
         assert!(msg.contains("at least one segment"), "{msg}");
+        assert!(msg.contains("remove the key"), "{msg}");
+        assert!(msg.contains("run-state"), "{msg}");
     }
 
     #[tokio::test]
