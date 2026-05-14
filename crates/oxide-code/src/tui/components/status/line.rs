@@ -286,20 +286,6 @@ mod tests {
             && bytes[4].is_ascii_digit()
     }
 
-    // ── context_label ──
-
-    #[test]
-    fn context_label_omits_unknown_context_window() {
-        assert_eq!(
-            context_label(UsageSnapshot {
-                context_tokens: 987,
-                context_window: None,
-                estimated_cost_usd: None,
-            }),
-            "Ctx: 987",
-        );
-    }
-
     // ── StatusLine::render ──
 
     #[test]
@@ -329,8 +315,7 @@ mod tests {
             .map(|span| span.content)
             .collect::<String>();
 
-        assert!(UnicodeWidthStr::width(text.as_str()) <= 12, "{text:?}");
-        assert!(!text.contains("very long command"));
+        assert_eq!(text, "  Running...");
     }
 
     #[test]
@@ -346,11 +331,21 @@ mod tests {
             36,
         );
 
-        assert!(text.contains("Ctx: 50% (100k/200k)"), "{text:?}");
-        assert!(text.contains('m'), "{text:?}");
-        assert!(text.contains("Ready"), "{text:?}");
-        assert!(!text.contains("Sess:"), "{text:?}");
-        assert!(UnicodeWidthStr::width(text.as_str()) <= 36, "{text:?}");
+        assert_eq!(text, "  Ctx: 50% (100k/200k) │ m │ Ready");
+    }
+
+    // ── context_label ──
+
+    #[test]
+    fn context_label_omits_unknown_context_window() {
+        assert_eq!(
+            context_label(UsageSnapshot {
+                context_tokens: 987,
+                context_window: None,
+                estimated_cost_usd: None,
+            }),
+            "Ctx: 987",
+        );
     }
 
     // ── format_cost ──
