@@ -1,4 +1,4 @@
-//! Anthropic Messages API client. [`Client::stream_message`] drives the agent loop;
+//! Anthropic Messages API client. [`Client::stream_message`] drives the agent loop.
 //! [`Client::complete`] handles one-shots (title generation, structured-output probes).
 //!
 //! The wire shape mirrors the official `claude-code` CLI: pinned User-Agent and Stainless SDK
@@ -40,27 +40,27 @@ use wire::{
 
 const API_VERSION: &str = "2023-06-01";
 
-/// Pinned to the latest claude-code release; gateways reject pre-allowlist versions.
+/// Pinned to the claude-code version accepted by gateways because pre-allowlist versions fail.
 const CLAUDE_CLI_VERSION: &str = "2.1.121";
 const STAINLESS_PACKAGE_VERSION: &str = "0.81.0";
 const STAINLESS_RUNTIME_VERSION: &str = "v24.3.0";
 const STAINLESS_TIMEOUT_SECS: &str = "600";
 
-/// Required as its own text block; non-Haiku OAuth requests 429 without it.
+/// Required as its own text block because non-Haiku OAuth requests 429 without it.
 const SYSTEM_PROMPT_PREFIX: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
 
 // ── Client ──
 
-/// Shareable HTTP client for the Anthropic Messages API. `Clone` is cheap — `reqwest::Client`
-/// shares its connection pool across clones, so callers may stash one per session and roll
-/// `session_id` / `model` / `effort` in place via the `set_*` methods.
+/// Shareable HTTP client for the Anthropic Messages API. `Clone` is cheap because
+/// `reqwest::Client` shares its connection pool. Callers can keep one per session and update
+/// `session_id` / `model` / `effort` via the `set_*` methods.
 #[derive(Clone)]
 pub(crate) struct Client {
     http: reqwest::Client,
     config: Config,
     session_id: String,
     device_id: String,
-    /// Gates `scope: "global"` in `cache_control` (1P-only — 3P gateways reject it).
+    /// Gates `scope: "global"` in `cache_control`, which 3P gateways reject.
     is_first_party: bool,
 }
 
@@ -122,7 +122,7 @@ impl Client {
         );
         headers.insert("x-stainless-retry-count", HeaderValue::from_static("0"));
 
-        // No whole-request timeout — responses can run for minutes. The 60 s read timeout
+        // No whole-request timeout because responses can run for minutes. The 60 s read timeout
         // catches slowloris dribble. Anthropic sends keepalives every ~15 s on healthy streams.
         let builder = reqwest::Client::builder()
             .default_headers(headers)
@@ -251,7 +251,7 @@ impl Client {
             tools: (!tools.is_empty()).then_some(tools),
             thinking: self.config.thinking.as_ref(),
             output_config: OutputConfig::new(None, self.config.effort),
-            // Body must accompany the beta header; claude-code 2.1.119 ships both on every 4.6+.
+            // Body must accompany the beta header. claude-code 2.1.119 ships both on every 4.6+.
             context_management: caps
                 .context_management
                 .then(ContextManagement::clear_thinking_keep_all),
@@ -281,7 +281,7 @@ impl Client {
 
 // ── Request Building ──
 
-/// Field order is load-bearing — gateways validate the JSON shape of `metadata.user_id`.
+/// Field order is load-bearing because gateways validate the JSON shape of `metadata.user_id`.
 fn build_metadata(device_id: &str, session_id: &str) -> RequestMetadata {
     #[derive(serde::Serialize)]
     struct UserId<'a> {
@@ -358,7 +358,7 @@ fn normalize_arch(arch: &str) -> &'static str {
 
 // ── System Prompt Helpers ──
 
-/// Splits at the boundary marker; marker itself is dropped.
+/// Splits at the boundary marker, dropping the marker itself.
 fn split_at_boundary<'a>(sections: &[&'a str]) -> (Vec<&'a str>, Vec<&'a str>) {
     let boundary_pos = sections
         .iter()
@@ -413,7 +413,6 @@ mod tests {
     const OFFLINE_URL: &str = "https://example.invalid";
     const TEST_MODEL: &str = "claude-sonnet-4-6";
 
-    /// Builds an SSE response body from `(event, data)` pairs.
     fn sse_body(frames: &[(&str, &str)]) -> String {
         use std::fmt::Write;
         let mut body = String::new();
@@ -525,11 +524,9 @@ mod tests {
     }
 
     #[test]
-    fn new_with_extra_ca_certs_trusts_them() {
-        // The assertion only confirms that `Client::new` returns Ok. A client that forgot to
-        // reassign the builder back after `add_root_certificate` would still pass. Keeping the
-        // loose check here since a stronger test would need a TLS-terminating mock server
-        // signed by `TEST_CA_PEM`, which is heavy machinery for one line of wiring.
+    fn new_with_extra_ca_certs_accepts_valid_bundle() {
+        // This pins Client wiring only. End-to-end trust would need a TLS mock server signed by
+        // `TEST_CA_PEM`. PEM parsing and builder application are covered in `util::tls`.
         let pem = tempfile::NamedTempFile::new().unwrap();
         std::io::Write::write_all(&mut pem.as_file(), crate::util::tls::TEST_CA_PEM.as_bytes())
             .unwrap();
@@ -540,12 +537,12 @@ mod tests {
 
     #[test]
     fn new_rejects_auth_values_containing_invalid_header_bytes() {
-        // `HeaderValue::from_str` rejects control chars (\n, \r); both auth arms must propagate.
+        // `HeaderValue::from_str` rejects control chars (\n, \r). Both auth arms must propagate.
         for auth in [
             Auth::ApiKey("bad\nkey".to_owned()),
             Auth::OAuth("bad\rtoken".to_owned()),
         ] {
-            // `Client` has no Debug, so .unwrap_err() doesn't compile — use .err().unwrap().
+            // `Client` has no Debug, so `.unwrap_err()` does not compile.
             let err = Client::new(
                 test_config(OFFLINE_URL, auth, TEST_MODEL),
                 Some("sid".to_owned()),
@@ -562,7 +559,7 @@ mod tests {
     #[test]
     fn new_surfaces_extra_ca_certs_error_with_path() {
         // An unreadable trust anchor must fail the client build and cite the configured path so
-        // the user can debug without having to spelunk into TLS internals.
+        // the user can debug it without inspecting TLS internals.
         let mut cfg = test_config(OFFLINE_URL, api_key(), TEST_MODEL);
         cfg.extra_ca_certs = Some(std::path::PathBuf::from("/no/such/bundle.pem"));
         let err = Client::new(cfg, None).err().expect("missing CA must error");
@@ -575,8 +572,8 @@ mod tests {
 
     #[tokio::test]
     async fn set_session_id_propagates_to_header_and_metadata_user_id() {
-        // Pins both wire surfaces: the mock matches the rolled id in the header (wrong value 404s)
-        // and the assertion below pins the embedded JSON in `metadata.user_id`.
+        // Pin both wire surfaces: the mock matches the rolled id in the header, and the assertion
+        // below pins the embedded JSON in `metadata.user_id`.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/messages"))
@@ -630,8 +627,8 @@ mod tests {
 
     #[test]
     fn set_model_resolves_effort_and_persists_full_state() {
-        // Rows pin each resolution arm: clamp-down, pass-through, no-tier clear, model-default
-        // fallback, unknown-id. Asserting both returned + stored effort catches the
+        // Rows cover each resolution arm: clamp-down, pass-through, no-tier clear, model-default
+        // fallback, and unknown-id. Checking both returned and stored effort catches the
         // "returned but not persisted" mutation.
         for (from_model, from_effort, swap_to, expect) in [
             (
@@ -678,7 +675,7 @@ mod tests {
 
     #[test]
     fn set_model_preserves_1m_tag_round_trip() {
-        // `[1m]` is a client-side opt-in; the swap must store it verbatim so `compute_betas` keeps
+        // `[1m]` is a client-side opt-in. The swap must store it verbatim so `compute_betas` keeps
         // sending the 1M context beta. Regressing this drops 1M context silently.
         let mut client = client_with("claude-opus-4-6", Some(Effort::Max));
         client.set_model("claude-opus-4-7[1m]".to_owned()).unwrap();
@@ -724,7 +721,7 @@ mod tests {
 
     #[test]
     fn set_effort_resolves_pick_against_active_model_caps() {
-        // Rows: pass-through, clamp-down, explicit-on-no-tier → None.
+        // Rows cover pass-through, clamp-down, and explicit effort on a no-tier model.
         for (model, initial, pick, expect) in [
             (
                 "claude-opus-4-7",
@@ -1003,8 +1000,8 @@ mod tests {
 
     #[tokio::test]
     async fn stream_message_third_party_base_url_drops_global_scope_keeps_its_beta() {
-        // On 3P, the `prompt-caching-scope` beta still ships (gateway fingerprints absence) but
-        // the body-side `scope: "global"` is dropped (gateway rejects it downstream of tools).
+        // On 3P, the beta still ships for gateway fingerprint parity, but the body-side
+        // `scope: "global"` is dropped because gateways reject it downstream of tools.
         let server = MockServer::start().await;
         let sink: Captured<(String, String)> = captured();
         let sink_clone = std::sync::Arc::clone(&sink);
@@ -1060,13 +1057,12 @@ mod tests {
             cc.get("scope").is_none(),
             "scope field omitted entirely on 3P (not null): {body}",
         );
-        // TTL rides through on 3P — only `scope` is gated on 1P.
+        // TTL rides through on 3P. Only `scope` is gated on 1P.
         assert_eq!(cc["ttl"], "1h", "default 1h ttl survives on 3P: {body}");
     }
 
     #[tokio::test]
     async fn stream_message_malformed_frame_is_skipped_without_poisoning_stream() {
-        // One bad frame must not poison the rest of the turn.
         let server = MockServer::start().await;
         let body = sse_body(&[
             (
@@ -1114,7 +1110,8 @@ mod tests {
 
     #[tokio::test]
     async fn stream_message_mid_stream_error_event_is_delivered_with_api_payload() {
-        // `StreamEvent::Error` flows as `Ok(Error { .. })`; `agent.rs` converts to bail!.
+        // `StreamEvent::Error` flows as `Ok(Error { .. })`. `agent.rs` still owns conversion to
+        // `bail!`.
         let server = MockServer::start().await;
         let body = sse_body(&[(
             "error",
@@ -1186,8 +1183,8 @@ mod tests {
 
     #[tokio::test]
     async fn stream_message_429_threads_retry_after_header_into_error() {
-        // Retry-after extraction lives in stream_sse (not format_api_error); pin that the
-        // header is read off the response *before* the body is consumed.
+        // Retry-after extraction lives in stream_sse rather than format_api_error. This pins that
+        // the header is read before the body is consumed.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/messages"))
@@ -1238,13 +1235,12 @@ mod tests {
             .unwrap();
         _ = rx.recv().await;
         drop(rx);
-        // Lets the background task observe the closed channel; any panic surfaces in test output.
+        // Give the background task time to observe the closed channel so any panic surfaces here.
         tokio::time::sleep(Duration::from_millis(80)).await;
     }
 
     // ── Client::stream_message / agentic body fields ──
 
-    /// Captures the serialized body of a single streaming request.
     async fn capture_stream_body(config: Config) -> serde_json::Value {
         let server = MockServer::start().await;
         let sink: Captured<String> = captured();
@@ -1284,7 +1280,8 @@ mod tests {
 
     #[tokio::test]
     async fn stream_message_omits_output_config_when_effort_is_none() {
-        // Non-effort-capable model → `Config.effort == None` → `output_config` absent (not `{}`).
+        // Non-effort-capable models resolve to `Config.effort == None`, so `output_config` is
+        // absent rather than `{}`.
         let cfg = test_config(
             "https://placeholder.invalid",
             api_key(),
@@ -1321,8 +1318,8 @@ mod tests {
 
     #[tokio::test]
     async fn stream_message_context_management_absent_on_unknown_model() {
-        // Unknown ids fall back to all-false `Capabilities::default()` — no beta, no body. Keeps
-        // "beta sent ⇒ body populated" an invariant.
+        // Unknown ids fall back to all-false `Capabilities::default()`, preserving the
+        // "beta sent ⇒ body populated" invariant.
         let cfg = test_config("https://placeholder.invalid", api_key(), "claude-opus-5-0");
         let body = capture_stream_body(cfg).await;
         assert!(
@@ -1359,7 +1356,7 @@ mod tests {
 
     #[test]
     fn build_metadata_wraps_ids_in_stringified_json_with_canonical_field_order() {
-        // Field order is `device_id, account_uuid, session_id` — `serde_json::json!` would
+        // Field order is `device_id, account_uuid, session_id`. `serde_json::json!` would
         // alphabetize and trip 3P validation.
         let meta = build_metadata("dev-1", "abc-123");
         assert_eq!(

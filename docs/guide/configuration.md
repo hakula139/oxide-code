@@ -84,7 +84,7 @@ base_url = "https://gw.llm.corp.example/anthropic"
 extra_ca_certs = "~/.config/ox/corp-cachain.pem"
 ```
 
-Use an absolute or `~`-rooted path. The field is user-config only because a checked-in trust-anchor path could widen TLS trust for the process. Equivalent env var: `OX_EXTRA_CA_CERTS`.
+Use an absolute or `~`-rooted path. Relative paths resolve from the launch cwd. The field is user-config only because a checked-in trust-anchor path could widen TLS trust for the process. Equivalent env var: `OX_EXTRA_CA_CERTS`.
 
 #### `prompt_cache_ttl`: cache duration
 
@@ -156,7 +156,7 @@ oxide-code checks three credential sources in order:
 
    Expired tokens are refreshed automatically. No configuration needed.
 
-Prefer the environment variable (or OAuth) over `api_key` in a config file. `ox.toml` resolves by walking up from the current directory, so oxide-code rejects project-level `api_key` and `base_url`. User-level `~/.config/ox/config.toml` is safer, but still plaintext on disk.
+Prefer the environment variable (or OAuth) over `api_key` in a config file. `ox.toml` resolves by walking up from the current directory, so oxide-code rejects project-level `api_key`, `base_url`, and `extra_ca_certs`. User-level `~/.config/ox/config.toml` is safer, but still plaintext on disk.
 
 ## Environment variables
 

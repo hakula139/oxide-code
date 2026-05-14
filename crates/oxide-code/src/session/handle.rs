@@ -1,5 +1,5 @@
 //! Public session API. Every write method sends a [`super::actor::SessionCmd`] and awaits the
-//! actor's ack. Callers never hold a lock across `await`.
+//! actor's ack without holding a lock across `await`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -30,7 +30,7 @@ const CHANNEL_CAPACITY: usize = 1024;
 
 // ── SessionHandle ──
 
-/// Cheap to clone. Clones share one actor task. All methods are async
+/// Cheap to clone because clones share one actor task. All methods are async
 /// and return after the batch flush this cmd lands in.
 #[derive(Clone)]
 pub(crate) struct SessionHandle {
@@ -46,7 +46,7 @@ pub(crate) struct SessionHandle {
 pub(super) struct SharedState {
     flush_failure_surfaced: AtomicBool,
     actor_gone_surfaced: AtomicBool,
-    /// Set when the user has run `/rename`. Suppresses AI titles and the next `FirstPrompt`.
+    /// Set when the user has run `/rename`, suppressing AI titles and the next `FirstPrompt`.
     /// Latched by [`SessionHandle::set_manual_title`] before dispatch so the title generator's
     /// pre-check observes it without an actor round-trip.
     manual_title_set: AtomicBool,
@@ -65,7 +65,7 @@ impl SharedState {
         }
     }
 
-    /// `true` on the first call after [`Self::record_flush_failure`]. Sticky `false` afterwards.
+    /// `true` on the first call after [`Self::record_flush_failure`], then sticky `false`.
     pub(super) fn surface_first_flush_failure(&self) -> bool {
         !self.flush_failure_surfaced.swap(true, Ordering::AcqRel)
     }
@@ -104,7 +104,7 @@ pub(crate) struct RecordOutcome {
     pub(crate) failure: Option<String>,
 }
 
-/// Plain ack from non-record cmds. Carries the same first-failure surface as [`RecordOutcome`].
+/// Plain ack from non-record cmds, carrying the same first-failure surface as [`RecordOutcome`].
 pub(crate) struct Outcome {
     pub(crate) failure: Option<String>,
 }
@@ -210,7 +210,7 @@ impl SessionHandle {
         })
     }
 
-    /// Write the session summary and finalize. Idempotent; no-op on fresh sessions that never
+    /// Write the session summary and finalize. Idempotent no-op on fresh sessions that never
     /// recorded anything. `snapshots` are written as `Entry::FileSnapshot` ahead of the summary.
     pub(crate) async fn finish(&self, snapshots: Vec<FileSnapshot>) -> Outcome {
         let (ack, rx) = oneshot::channel();
@@ -257,7 +257,7 @@ impl SessionHandle {
         }
     }
 
-    /// Sends a cmd and awaits the `Outcome` ack; falls back to actor-gone on failure.
+    /// Sends a cmd and awaits the `Outcome` ack, falling back to actor-gone on failure.
     async fn dispatch_outcome(&self, cmd: SessionCmd, rx: oneshot::Receiver<Outcome>) -> Outcome {
         if self.cmd_tx.send(cmd).await.is_err() {
             return Outcome {
@@ -298,7 +298,7 @@ pub(crate) struct ResumedSession {
     pub(crate) compact: Option<CompactInfo>,
     pub(crate) title: Option<String>,
     pub(crate) tool_result_metadata: HashMap<String, ToolMetadata>,
-    /// Persisted tracker snapshots; passed to `FileTracker::restore_verified` so the
+    /// Persisted tracker snapshots passed to `FileTracker::restore_verified` so the
     /// Read-before-Edit gate clears for files that still match disk.
     pub(crate) file_snapshots: Vec<FileSnapshot>,
 }
@@ -338,7 +338,7 @@ pub(crate) async fn roll(
 }
 
 /// Resumed transcript + finalize failure from the old session. The handle swap happens via
-/// `&mut SessionHandle`; this struct only carries the UI-rebuild payload.
+/// `&mut SessionHandle`. This struct only carries the UI-rebuild payload.
 #[derive(Debug)]
 pub(crate) struct RollIntoOutcome {
     pub(crate) messages: Vec<Message>,

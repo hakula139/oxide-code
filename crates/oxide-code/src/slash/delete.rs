@@ -67,9 +67,8 @@ impl SlashCommand for DeleteCmd {
 
 // ── Resolution ──
 
-/// Wrap the shared resolver with `/delete`'s live-id surface: matches against the live id surface
-/// a dedicated error so the user sees the real reason rather than the generic "no session
-/// matching" they'd get for a typo.
+/// Wraps the shared resolver with `/delete`'s live-id behavior: prefixes that match only the
+/// live id return a dedicated error so typos keep the generic "no session matching" message.
 fn resolve_for_delete(
     store: &SessionStore,
     prefix: &str,

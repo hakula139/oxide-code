@@ -1,5 +1,5 @@
-//! Read-only key-value overview modal — title, multi-section body, fixed footer.
-//! Used by `/status`, `/config`, `/help`. Compose `KvSection` fixtures; the modal owns layout.
+//! Read-only key-value overview modal with a title, multi-section body, and fixed footer.
+//! Used by `/status`, `/config`, and `/help`. The modal owns layout for `KvSection` fixtures.
 
 use crossterm::event::KeyEvent;
 use ratatui::Frame;

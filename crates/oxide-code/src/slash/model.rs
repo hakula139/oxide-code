@@ -427,10 +427,9 @@ mod tests {
 
     #[test]
     fn execute_ambiguous_listing_falls_back_to_full_curated_set_when_filter_empty() {
-        // `claude-opus` matches the listed Opus 4.7 entries; older non-listed rows must not surface.
         let (_, outcome) = run_execute("claude-opus");
         let msg = outcome.expect_err("ambiguous arg must error");
-        // `claude-opus` matches the listed Opus 4.7 entries; the listing surfaces those.
+        // `claude-opus` matches the listed Opus 4.7 entries, so the listing surfaces those.
         for id in ["claude-opus-4-7", "claude-opus-4-7[1m]"] {
             assert!(msg.contains(id), "{id} should be listed: {msg}");
         }

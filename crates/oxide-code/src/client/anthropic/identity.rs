@@ -1,5 +1,6 @@
-//! Per-machine `device_id` (64 lowercase hex chars) at `$XDG_DATA_HOME/ox/user-id`. Lazily minted.
-//! filesystem failure falls back to an ephemeral id rather than blocking client construction.
+//! Per-machine `device_id` (64 lowercase hex chars) stored at `$XDG_DATA_HOME/ox/user-id`.
+//! The id is minted lazily. Filesystem failures fall back to an ephemeral id and do not block
+//! client construction.
 
 use std::fmt::Write as _;
 use std::fs;
@@ -17,7 +18,7 @@ const DATA_DIR: &str = "ox";
 const FILE_NAME: &str = "user-id";
 const ID_LEN: usize = 64;
 
-/// Loads the persisted id, minting one if absent; falls back to ephemeral on filesystem failure.
+/// Loads the persisted id, mints one if absent, and uses an ephemeral id on filesystem failure.
 pub(super) fn load_or_create_device_id() -> String {
     fallback_to_ephemeral(try_load_or_create())
 }

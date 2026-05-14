@@ -1627,7 +1627,7 @@ mod tests {
     async fn dispatch_resume_forwards_to_agent_and_disables_input_until_event() {
         // Pin: between forwarding `Resume` and the SessionResumed event landing, input must be
         // gated so a typed prompt doesn't push into chat just before `apply_session_resumed`'s
-        // `clear_history` wipes it. Re-enable comes from `finalize_idle` inside the resumed handler.
+        // `clear_history` wipes it. `finalize_idle` inside the resumed handler re-enables input.
         let (mut app, mut rx, _agent_tx) = test_app(None);
         let action = UserAction::Resume {
             session_id: "resume-target".to_owned(),

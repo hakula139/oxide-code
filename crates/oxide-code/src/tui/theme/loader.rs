@@ -24,8 +24,8 @@ use super::{Slot, Theme, builtin, color::parse_color};
 
 // ── Resolution ──
 
-/// Resolves a theme from an optional base + per-slot overrides. Unknown / unreadable base errors
-/// hard-fail; per-slot override errors warn via `tracing` and keep the base value.
+/// Resolves a theme from an optional base + per-slot overrides. Unknown / unreadable bases
+/// hard-fail. Per-slot override errors warn via `tracing` and keep the base value.
 pub(crate) fn resolve_theme(
     base: Option<&str>,
     overrides: &HashMap<String, SlotPatch>,

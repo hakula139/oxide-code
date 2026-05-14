@@ -1,4 +1,5 @@
-//! Anthropic Messages API wire types. Pure data. Builders / interpreters live in sibling modules.
+//! Pure data wire types for the Anthropic Messages API. Builders / interpreters live in sibling
+//! modules.
 
 use serde::{Deserialize, Serialize};
 
@@ -9,7 +10,7 @@ use crate::tool::ToolDefinition;
 // ── Request types ──
 
 /// Body for `POST /v1/messages`. Field declaration order is the wire JSON order and is
-/// load-bearing. The billing `cch=00000` placeholder must appear before user-controlled
+/// load-bearing: the billing `cch=00000` placeholder must appear before user-controlled
 /// `messages` content so [`super::billing::inject_cch`]'s single-occurrence replacement targets
 /// the system block, not a user echo.
 #[derive(Serialize)]
@@ -18,7 +19,7 @@ pub(super) struct CreateMessageRequest<'a> {
     pub(super) max_tokens: u32,
     pub(super) stream: bool,
     pub(super) metadata: RequestMetadata,
-    /// Before `messages` so the billing `cch=00000` placeholder appears first; required by
+    /// Before `messages` so the billing `cch=00000` placeholder appears first. Required by
     /// [`super::billing::inject_cch`]'s single-occurrence replacement.
     pub(super) system: Vec<SystemBlock<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -44,7 +45,7 @@ pub(super) struct OutputConfig<'a> {
 }
 
 impl<'a> OutputConfig<'a> {
-    /// Returns `None` when both fields are empty; `Some(_)` otherwise.
+    /// Returns `None` when both fields are empty and `Some(_)` otherwise.
     pub(super) fn new(format: Option<&'a OutputFormat>, effort: Option<Effort>) -> Option<Self> {
         (format.is_some() || effort.is_some()).then_some(Self { format, effort })
     }
@@ -89,7 +90,7 @@ impl OutputFormat {
     }
 }
 
-/// `user_id` is a stringified JSON object `{device_id, account_uuid, session_id}`; field order is
+/// `user_id` is a stringified JSON object `{device_id, account_uuid, session_id}`. Field order is
 /// part of the wire fingerprint.
 #[derive(Serialize)]
 pub(super) struct RequestMetadata {
@@ -105,7 +106,7 @@ pub(super) struct SystemBlock<'a> {
     pub(super) cache_control: Option<CacheControl>,
 }
 
-/// `scope: "global"` shares cache across sessions (1P only). Default ttl is `"1h"`; opt out via
+/// `scope: "global"` shares cache across sessions (1P only). Default ttl is `"1h"`. Opt out via
 /// `prompt_cache_ttl = "5m"` to use the server-side 5-minute default.
 #[derive(Serialize)]
 pub(super) struct CacheControl {

@@ -23,23 +23,23 @@ pub(crate) const INTERRUPTED_MARKER: &str = "(interrupted)";
 pub(crate) enum AgentEvent {
     /// Assistant text chunk to append to the in-flight reply.
     StreamToken(String),
-    /// Extended-thinking chunk. Rendered separately from `StreamToken` and only when the user
+    /// Extended-thinking chunk rendered separately from `StreamToken` and only when the user
     /// has thinking display enabled.
     ThinkingToken(String),
-    /// The model invoked a tool. Render the call row and prepare the result slot.
+    /// Tool call emitted by the model, used to render the call row and prepare the result slot.
     ToolCallStart {
         id: String,
         name: String,
         input: serde_json::Value,
     },
-    /// Tool finished. Fill the slot opened by the matching [`Self::ToolCallStart`].
+    /// Tool result for the slot opened by the matching [`Self::ToolCallStart`].
     ToolCallEnd {
         id: String,
         content: String,
         is_error: bool,
         metadata: crate::tool::ToolMetadata,
     },
-    /// A queued mid-turn submit was just spliced into the live transcript. The UI clears its
+    /// A queued mid-turn submit was just spliced into the live transcript so the UI clears its
     /// queued-prompt indicator.
     PromptDrained(String),
     /// Turn ended cleanly with a final assistant reply (no further tool rounds).
@@ -50,9 +50,9 @@ pub(crate) enum AgentEvent {
     /// Automatic compaction started before the submitted prompt runs. TUI switches to compacting
     /// status while the summarizer request streams.
     AutoCompactionStarted,
-    /// Background title generator finished. UI updates the chrome label.
+    /// Background title generator finished, so the UI updates the chrome label.
     SessionTitleUpdated { session_id: String, title: String },
-    /// `/clear` rolled the session. A new session UUID is now active.
+    /// `/clear` rolled the session, making a new session UUID active.
     SessionRolled { id: String },
     /// `/resume` swapped to an existing session in place. Payload carries the target's
     /// transcript so the UI can rebuild chat without restarting the process.
@@ -89,8 +89,8 @@ pub(crate) enum AgentEvent {
 
 // ── User Actions ──
 
-/// UI to agent-loop commands. Multiplexed onto a single `mpsc` so the loop can race them
-/// against in-flight stream / tool futures with one biased `select!`.
+/// Commands from the UI to the agent loop. Multiplexed onto a single `mpsc` so the loop can race
+/// them against in-flight stream / tool futures with one biased `select!`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum UserAction {
     SubmitPrompt(String),
@@ -115,7 +115,7 @@ pub(crate) enum UserAction {
         effort: Option<Effort>,
     },
     /// TUI-only: live-preview the picker's highlighted theme without committing it. Cursor moves
-    /// in the `/theme` modal emit this. Cancelling the modal restores the snapshot taken on open.
+    /// in the `/theme` modal emit this, and cancelling the modal restores the open-time snapshot.
     PreviewTheme {
         name: String,
     },
