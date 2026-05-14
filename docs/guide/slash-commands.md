@@ -38,11 +38,11 @@ Bare `/model` and `/effort` open pickers. Both apply on Enter and cancel on Esc.
 
 ## Compaction
 
-`/compact` streams a one-shot summarization request through the live model, then replaces the in-memory transcript with a single boundary block: a header (`Compacted N messages → 1 summary`) plus the rendered summary. The next prompt continues from the summary rather than the full prior chat.
+`/compact` summarizes the visible conversation into a single `Compacted N messages → 1 summary` block. The next prompt continues from that summary rather than the full prior chat.
 
 `/compact <instructions>` appends free-text focus instructions to the rubric (e.g., `/compact focus on the build error and how we fixed it`). Useful when only a slice of the work matters going forward.
 
-The summary lands in the JSONL as a `compact` boundary entry plus a synthetic continuation message. Resuming via `ox -c` shows only the post-compact tail. The pre-compact transcript stays on disk for archival but is not replayed in chat. The file-change tracker resets on compact, so any `Edit` after `/compact` requires a fresh `Read`. Queued prompts survive the compaction.
+Resuming via `ox -c` starts from the compacted summary and post-compact tail. The file-change tracker resets on compact, so any `Edit` after `/compact` requires a fresh `Read`. Queued prompts survive the compaction.
 
 `/compact` refuses on sessions with fewer than 4 messages, when the model returns an empty summary, or while a turn is in flight.
 
