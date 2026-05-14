@@ -42,6 +42,7 @@ Anthropic's pricing page lists first-party Claude API prices in USD per million 
 | Family               | Input | 5m cache write | 1h cache write | Cache read | Output |
 | -------------------- | ----- | -------------- | -------------- | ---------- | ------ |
 | Opus 4.7 / 4.6 / 4.5 | $5    | $6.25          | $10            | $0.50      | $25    |
+| Opus 4.1             | $15   | $18.75         | $30            | $1.50      | $75    |
 | Sonnet 4.x           | $3    | $3.75          | $6             | $0.30      | $15    |
 | Haiku 4.5            | $1    | $1.25          | $2             | $0.10      | $5     |
 

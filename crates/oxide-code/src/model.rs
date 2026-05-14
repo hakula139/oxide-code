@@ -32,12 +32,20 @@ pub(crate) struct TokenCostRates {
     output: f64,
 }
 
-const OPUS_RATES: TokenCostRates = TokenCostRates {
+const OPUS_4_5_PLUS_RATES: TokenCostRates = TokenCostRates {
     input: 5.0,
     cache_write_5m: 6.25,
     cache_write_1h: 10.0,
     cache_read: 0.50,
     output: 25.0,
+};
+
+const OPUS_4_1_RATES: TokenCostRates = TokenCostRates {
+    input: 15.0,
+    cache_write_5m: 18.75,
+    cache_write_1h: 30.0,
+    cache_read: 1.50,
+    output: 75.0,
 };
 
 const SONNET_RATES: TokenCostRates = TokenCostRates {
@@ -118,7 +126,7 @@ pub(crate) const MODELS: &[ModelInfo] = &[
             ],
             structured_outputs: true,
         },
-        cost_rates: Some(OPUS_RATES),
+        cost_rates: Some(OPUS_4_5_PLUS_RATES),
     },
     ModelInfo {
         id_substr: "claude-opus-4-6",
@@ -131,7 +139,7 @@ pub(crate) const MODELS: &[ModelInfo] = &[
             supported_efforts: &[Effort::Low, Effort::Medium, Effort::High, Effort::Max],
             structured_outputs: true,
         },
-        cost_rates: Some(OPUS_RATES),
+        cost_rates: Some(OPUS_4_5_PLUS_RATES),
     },
     ModelInfo {
         id_substr: "claude-sonnet-4-6",
@@ -157,7 +165,7 @@ pub(crate) const MODELS: &[ModelInfo] = &[
             supported_efforts: &[],
             structured_outputs: true,
         },
-        cost_rates: Some(OPUS_RATES),
+        cost_rates: Some(OPUS_4_5_PLUS_RATES),
     },
     ModelInfo {
         id_substr: "claude-sonnet-4-5",
@@ -185,6 +193,19 @@ pub(crate) const MODELS: &[ModelInfo] = &[
             structured_outputs: true,
         },
         cost_rates: Some(HAIKU_RATES),
+    },
+    ModelInfo {
+        id_substr: "claude-opus-4-1",
+        display_name: "Claude Opus 4.1",
+        cutoff: Some("January 2025"),
+        capabilities: Capabilities {
+            interleaved_thinking: true,
+            context_management: true,
+            context_1m: false,
+            supported_efforts: &[],
+            structured_outputs: true,
+        },
+        cost_rates: Some(OPUS_4_1_RATES),
     },
 ];
 
@@ -345,6 +366,7 @@ mod tests {
             "claude-opus-4-5",
             "claude-sonnet-4-5",
             "claude-haiku-4-5",
+            "claude-opus-4-1",
         ] {
             assert!(
                 !lookup(other)
@@ -612,9 +634,22 @@ mod tests {
     }
 
     #[test]
+    fn token_cost_rates_for_opus_4_1_uses_older_pricing() {
+        let rates = token_cost_rates_for("claude-opus-4-1").unwrap();
+        let cost = rates.estimate_usd(
+            1_000_000,
+            1_000_000,
+            1_000_000,
+            1_000_000,
+            PromptCacheTtl::FiveMin,
+        );
+
+        assert!((cost - 110.25).abs() < 1e-9);
+    }
+
+    #[test]
     fn token_cost_rates_for_unknown_model_is_absent() {
         assert!(token_cost_rates_for("claude-future-9").is_none());
-        assert!(token_cost_rates_for("claude-opus-4-1").is_none());
     }
 
     // ── display_name ──
@@ -628,6 +663,7 @@ mod tests {
             ("claude-opus-4-5", "Claude Opus 4.5"),
             ("claude-sonnet-4-5", "Claude Sonnet 4.5"),
             ("claude-haiku-4-5", "Claude Haiku 4.5"),
+            ("claude-opus-4-1", "Claude Opus 4.1"),
         ] {
             assert_eq!(display_name(id), expected, "{id}");
         }

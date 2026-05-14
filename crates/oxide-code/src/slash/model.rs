@@ -398,8 +398,8 @@ mod tests {
     }
 
     #[test]
-    fn execute_retired_or_legacy_id_falls_through_to_ambiguity() {
-        // Retired ids substring-match multiple current rows; ambiguity must surface.
+    fn execute_family_prefix_falls_through_to_ambiguity() {
+        // Family prefixes substring-match multiple rows; ambiguity must surface.
         for arg in ["opus-4", "claude-opus-4", "claude-sonnet-4"] {
             let (_, outcome) = run_execute(arg);
             let msg = outcome.expect_err(&format!("`{arg}` must error"));
@@ -471,6 +471,7 @@ mod tests {
         for dated in [
             "claude-opus-4-7-20260101",
             "claude-opus-4-6-20250805",
+            "claude-opus-4-1-20250805",
             "claude-sonnet-4-5-20250929",
         ] {
             assert_eq!(
