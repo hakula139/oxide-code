@@ -252,6 +252,40 @@ fn format_cost(cost: f64) -> String {
 mod tests {
     use super::*;
 
+    fn render_text(segments: Vec<StatusLineSegment>, width: u16) -> String {
+        let line = StatusLine::new(segments).render(
+            &Theme::default(),
+            &StatusLineState {
+                model: "m",
+                effort: Some(Effort::High),
+                title: Some("title"),
+                usage: Some(UsageSnapshot {
+                    context_tokens: 100_000,
+                    context_window: Some(200_000),
+                    estimated_cost_usd: Some(0.1234),
+                }),
+                cwd: "~/repo",
+                git_branch: Some("main"),
+                status_span: Span::raw("Ready"),
+            },
+            width,
+        );
+        line.spans
+            .into_iter()
+            .map(|span| span.content)
+            .collect::<String>()
+    }
+
+    fn is_hh_mm(label: &str) -> bool {
+        let bytes = label.as_bytes();
+        bytes.len() == 5
+            && bytes[0].is_ascii_digit()
+            && bytes[1].is_ascii_digit()
+            && bytes[2] == b':'
+            && bytes[3].is_ascii_digit()
+            && bytes[4].is_ascii_digit()
+    }
+
     // ── context_label ──
 
     #[test]
@@ -264,6 +298,59 @@ mod tests {
             }),
             "Ctx: 987",
         );
+    }
+
+    // ── StatusLine::render ──
+
+    #[test]
+    fn render_current_time_uses_clock_label() {
+        let text = render_text(vec![StatusLineSegment::CurrentTime], 20);
+        assert!(is_hh_mm(text.trim()), "expected HH:MM label: {text:?}");
+    }
+
+    #[test]
+    fn render_truncates_single_oversized_segment_to_width() {
+        let line = StatusLine::new(vec![StatusLineSegment::RunState]).render(
+            &Theme::default(),
+            &StatusLineState {
+                model: "m",
+                effort: None,
+                title: None,
+                usage: None,
+                cwd: "",
+                git_branch: None,
+                status_span: Span::raw("Running a very long command name"),
+            },
+            12,
+        );
+        let text = line
+            .spans
+            .into_iter()
+            .map(|span| span.content)
+            .collect::<String>();
+
+        assert!(UnicodeWidthStr::width(text.as_str()) <= 12, "{text:?}");
+        assert!(!text.contains("very long command"));
+    }
+
+    #[test]
+    fn render_drops_low_utility_segments_before_usage_model_and_state() {
+        let text = render_text(
+            vec![
+                StatusLineSegment::CurrentTime,
+                StatusLineSegment::SessionCost,
+                StatusLineSegment::ContextUsed,
+                StatusLineSegment::Model,
+                StatusLineSegment::RunState,
+            ],
+            36,
+        );
+
+        assert!(text.contains("Ctx: 50% (100k/200k)"), "{text:?}");
+        assert!(text.contains('m'), "{text:?}");
+        assert!(text.contains("Ready"), "{text:?}");
+        assert!(!text.contains("Sess:"), "{text:?}");
+        assert!(UnicodeWidthStr::width(text.as_str()) <= 36, "{text:?}");
     }
 
     // ── format_cost ──
