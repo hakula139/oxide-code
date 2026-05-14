@@ -1020,6 +1020,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn load_status_line_invalid_segment_in_file_surfaces_parse_error() {
+        let dir = tempfile::tempdir().unwrap();
+        write_user_config(
+            dir.path(),
+            indoc::indoc! {r#"
+                [tui]
+                status_line = ["model", "nope"]
+            "#},
+        );
+        let err = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
+            .await
+            .expect_err("invalid TOML segment must propagate");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("status_line"), "{msg}");
+        assert!(msg.contains("unknown variant `nope`"), "{msg}");
+        assert!(msg.contains("current-dir"), "{msg}");
+        assert!(msg.contains("run-state"), "{msg}");
+    }
+
+    #[tokio::test]
     async fn load_status_line_empty_env_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let vars = env_vars(vec![xdg(&dir), env("OX_STATUS_LINE", ",")]);
