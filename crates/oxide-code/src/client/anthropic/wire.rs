@@ -1,4 +1,4 @@
-//! Anthropic Messages API wire types. Pure data; builders / interpreters live in sibling modules.
+//! Anthropic Messages API wire types. Pure data. Builders / interpreters live in sibling modules.
 
 use serde::{Deserialize, Serialize};
 
@@ -9,7 +9,7 @@ use crate::tool::ToolDefinition;
 // ── Request types ──
 
 /// Body for `POST /v1/messages`. Field declaration order is the wire JSON order and is
-/// load-bearing — the billing `cch=00000` placeholder must appear before user-controlled
+/// load-bearing. The billing `cch=00000` placeholder must appear before user-controlled
 /// `messages` content so [`super::billing::inject_cch`]'s single-occurrence replacement targets
 /// the system block, not a user echo.
 #[derive(Serialize)]

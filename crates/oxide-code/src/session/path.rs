@@ -1,5 +1,5 @@
 //! Filesystem-safe project subdir derivation. Sessions live under
-//! `$XDG_DATA_HOME/ox/sessions/{sanitized-cwd}/`; reserved chars become `-` and long names get
+//! `$XDG_DATA_HOME/ox/sessions/{sanitized-cwd}/`. Reserved chars become `-` and long names get
 //! a hash suffix to prevent post-truncation collisions.
 
 use std::path::Path;

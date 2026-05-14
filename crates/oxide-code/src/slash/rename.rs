@@ -1,5 +1,5 @@
-//! `/rename` — set the session title manually. Bare opens a modal pre-filled with the current
-//! title; `/rename <title>` applies immediately. Suppresses AI title generation for the rest of
+//! `/rename` sets the session title manually. Bare opens a modal pre-filled with the current
+//! title. `/rename <title>` applies immediately. Suppresses AI title generation for the rest of
 //! the session so a slow Haiku response can't overwrite the user's pick.
 
 use crossterm::event::{KeyCode, KeyEvent};

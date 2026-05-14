@@ -1,5 +1,5 @@
-//! `/effort` — open the slider, or swap with `/effort <level>`. Bare form opens the
-//! Speed ↔ Intelligence slider (see [`super::effort_slider`]); typed arg shortcuts the picker.
+//! `/effort` opens the slider, or swaps with `/effort <level>`. Bare form opens the
+//! Speed ↔ Intelligence slider (see [`super::effort_slider`]). Typed arg shortcuts the picker.
 
 use std::borrow::Cow;
 

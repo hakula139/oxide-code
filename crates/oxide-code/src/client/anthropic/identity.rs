@@ -1,4 +1,4 @@
-//! Per-machine `device_id` (64 lowercase hex chars) at `$XDG_DATA_HOME/ox/user-id`. Lazily minted;
+//! Per-machine `device_id` (64 lowercase hex chars) at `$XDG_DATA_HOME/ox/user-id`. Lazily minted.
 //! filesystem failure falls back to an ephemeral id rather than blocking client construction.
 
 use std::fmt::Write as _;

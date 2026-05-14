@@ -1,4 +1,4 @@
-//! `/model` — open the picker, or swap with `/model <id>`. Resolution: alias → exact / dated-id →
+//! `/model` opens the picker, or swaps with `/model <id>`. Resolution: alias → exact / dated-id →
 //! unique suffix → unique substring. `[1m]` rejected on models lacking `context_1m`.
 
 use std::borrow::Cow;

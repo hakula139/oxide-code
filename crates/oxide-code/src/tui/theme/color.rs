@@ -1,10 +1,10 @@
 //! Color string parsing for theme TOML values. Case-insensitive.
 //!
-//! - **6-digit hex**: `"#rrggbb"` — true color (24-bit RGB).
+//! - **6-digit hex**: `"#rrggbb"` for true color (24-bit RGB).
 //! - **ANSI 16 named**: `"red"`, `"bright_blue"`, `"dark_gray"`, ... (`light_X` aliases
-//!   `bright_X`; `grey` aliases `gray`).
+//!   `bright_X`, `grey` aliases `gray`).
 //! - **Indexed 256-color**: `"ansi:N"` where `N` is 0–255.
-//! - **Terminal default**: `"reset"` — follows the user's terminal palette.
+//! - **Terminal default**: `"reset"` follows the user's terminal palette.
 //!
 //! Three-digit hex shorthand (`#fff`) is rejected to keep the format unambiguous.
 

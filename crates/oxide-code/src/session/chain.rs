@@ -1,5 +1,5 @@
 //! UUID-DAG message chain reconstruction. Forks form when concurrent resumes append in
-//! parallel; [`ChainBuilder::resolve`] picks the newest non-sidechain linear chain.
+//! parallel. [`ChainBuilder::resolve`] picks the newest non-sidechain linear chain.
 
 use std::collections::{HashMap, HashSet};
 

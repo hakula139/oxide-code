@@ -1,5 +1,5 @@
 //! Public session API. Every write method sends a [`super::actor::SessionCmd`] and awaits the
-//! actor's ack; callers never hold a lock across `await`.
+//! actor's ack. Callers never hold a lock across `await`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -30,14 +30,14 @@ const CHANNEL_CAPACITY: usize = 1024;
 
 // ── SessionHandle ──
 
-/// Cheap to clone — clones share one actor task. All methods are async
+/// Cheap to clone. Clones share one actor task. All methods are async
 /// and return after the batch flush this cmd lands in.
 #[derive(Clone)]
 pub(crate) struct SessionHandle {
     cmd_tx: mpsc::Sender<SessionCmd>,
     session_id: Arc<str>,
     shared: Arc<SharedState>,
-    /// First `shutdown` takes the join; subsequent calls no-op.
+    /// First `shutdown` takes the join. Subsequent calls no-op.
     actor_join: Arc<std::sync::Mutex<Option<JoinHandle<()>>>>,
 }
 
@@ -46,11 +46,11 @@ pub(crate) struct SessionHandle {
 pub(super) struct SharedState {
     flush_failure_surfaced: AtomicBool,
     actor_gone_surfaced: AtomicBool,
-    /// Set when the user has run `/rename` — suppresses AI titles and the next `FirstPrompt`.
+    /// Set when the user has run `/rename`. Suppresses AI titles and the next `FirstPrompt`.
     /// Latched by [`SessionHandle::set_manual_title`] before dispatch so the title generator's
     /// pre-check observes it without an actor round-trip.
     manual_title_set: AtomicBool,
-    /// Most recent flush error — threaded into actor-gone messages so the user sees the I/O cause.
+    /// Most recent flush error, threaded into actor-gone messages so the user sees the I/O cause.
     last_flush_failure: std::sync::Mutex<Option<String>>,
 }
 
@@ -65,7 +65,7 @@ impl SharedState {
         }
     }
 
-    /// `true` on the first call after [`Self::record_flush_failure`]; sticky `false` afterwards.
+    /// `true` on the first call after [`Self::record_flush_failure`]. Sticky `false` afterwards.
     pub(super) fn surface_first_flush_failure(&self) -> bool {
         !self.flush_failure_surfaced.swap(true, Ordering::AcqRel)
     }
@@ -99,18 +99,18 @@ impl SharedState {
 pub(crate) struct RecordOutcome {
     /// `Some` only on the first user-text message of a fresh session.
     pub(crate) ai_title_seed: Option<String>,
-    /// First I/O failure once per session; subsequent failures stay
+    /// First I/O failure once per session. Subsequent failures stay
     /// silent (warn-logged instead). `None` on healthy writes.
     pub(crate) failure: Option<String>,
 }
 
-/// Plain ack from non-record cmds; carries the same first-failure surface as [`RecordOutcome`].
+/// Plain ack from non-record cmds. Carries the same first-failure surface as [`RecordOutcome`].
 pub(crate) struct Outcome {
     pub(crate) failure: Option<String>,
 }
 
 /// Ack from `SessionHandle::compact`. `pre_count` is the message count at the moment the
-/// compact request landed in the actor — the post-compact UI line uses it for the
+/// compact request landed in the actor. The post-compact UI line uses it for the
 /// "compacted N messages → 1 summary" header.
 pub(crate) struct CompactOutcome {
     pub(crate) pre_count: u32,

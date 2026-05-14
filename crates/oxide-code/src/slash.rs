@@ -1,10 +1,10 @@
 //! Slash-command surface.
 //!
-//! [`parse_slash`] detects commands; [`dispatch`] resolves them via the registry. Each command is
-//! a [`registry::SlashCommand`] impl in its own submodule — adding one is one file plus an entry
+//! [`parse_slash`] detects commands. [`dispatch`] resolves them via the registry. Each command is
+//! a [`registry::SlashCommand`] impl in its own submodule. Adding one is one file plus an entry
 //! in [`registry::BUILT_INS`].
 //!
-//! Persistence: commands never write config. Mutations are session-local; restart returns to the
+//! Persistence: commands never write config. Mutations are session-local. Restart returns to the
 //! user-declared config (see `docs/design/slash/commands.md` § Design Decisions 6).
 
 mod clear;

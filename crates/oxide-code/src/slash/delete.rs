@@ -1,6 +1,6 @@
-//! `/delete <id-prefix>` — direct typed-arg form for session deletion. Bare `/delete` is rejected
-//! because "what gets deleted?" is ambiguous; the picker form (`/resume` then Ctrl+D on a row) is
-//! the discoverable path. Both forms share [`super::confirm::ConfirmDeleteSessionModal`].
+//! `/delete <id-prefix>` is the direct typed-arg form for session deletion. Bare `/delete` is
+//! rejected because "what gets deleted?" is ambiguous. The picker form (`/resume` then Ctrl+D on
+//! a row) is the discoverable path. Both forms share [`super::confirm::ConfirmDeleteSessionModal`].
 
 use std::path::Path;
 
