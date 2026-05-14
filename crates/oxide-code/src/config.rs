@@ -503,19 +503,30 @@ impl Config {
 // ── Helpers ──
 
 fn parse_status_line_segments(raw: &str) -> Result<Vec<StatusLineSegment>> {
-    let segments = raw
-        .split(',')
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .map(str::parse)
-        .collect::<Result<Vec<_>>>()?;
-    validate_status_line(segments)
+    let parts: Vec<&str> = raw.split(',').map(str::trim).collect();
+    let all_empty = parts.iter().all(|part| part.is_empty());
+    if all_empty {
+        return validate_status_line(Vec::new());
+    }
+    parts
+        .into_iter()
+        .map(|part| {
+            if part.is_empty() {
+                bail!(
+                    "OX_STATUS_LINE has an empty segment. Remove the stray comma or unset the \
+                     variable to use the default"
+                );
+            }
+            part.parse::<StatusLineSegment>()
+        })
+        .collect::<Result<Vec<_>>>()
+        .and_then(validate_status_line)
 }
 
 fn validate_status_line(segments: Vec<StatusLineSegment>) -> Result<Vec<StatusLineSegment>> {
     if segments.is_empty() {
         bail!(
-            "status_line must list at least one segment; remove the key (or unset \
+            "status_line must list at least one segment. Remove the key (or unset \
              OX_STATUS_LINE) to use the default. Valid segments: {}",
             StatusLineSegment::ALL
                 .iter()
@@ -996,6 +1007,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn load_status_line_stray_comma_in_env_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let vars = env_vars(vec![xdg(&dir), env("OX_STATUS_LINE", "model,,run-state")]);
+        let err = temp_env::async_with_vars(vars, Config::load())
+            .await
+            .expect_err("stray comma must surface as a typo");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("OX_STATUS_LINE"), "{msg}");
+        assert!(msg.contains("empty segment"), "{msg}");
+        assert!(msg.contains("stray comma"), "{msg}");
+    }
+
+    #[tokio::test]
     async fn load_status_line_empty_env_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let vars = env_vars(vec![xdg(&dir), env("OX_STATUS_LINE", ",")]);
@@ -1025,7 +1049,7 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("tui.status_line"), "{msg}");
         assert!(msg.contains("at least one segment"), "{msg}");
-        assert!(msg.contains("remove the key"), "{msg}");
+        assert!(msg.contains("Remove the key"), "{msg}");
         assert!(msg.contains("run-state"), "{msg}");
     }
 
