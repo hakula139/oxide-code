@@ -845,184 +845,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_message_malformed_frame_is_skipped_without_poisoning_stream() {
-        // One bad frame must not poison the rest of the turn.
-        let server = MockServer::start().await;
-        let body = sse_body(&[
-            (
-                "content_block_start",
-                r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
-            ),
-            ("content_block_delta", "{not valid json"),
-            (
-                "content_block_delta",
-                r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}"#,
-            ),
-            ("message_stop", r#"{"type":"message_stop"}"#),
-        ]);
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("content-type", "text/event-stream")
-                    .set_body_string(body),
-            )
-            .mount(&server)
-            .await;
-
-        let client = Client::new(
-            test_config(server.uri(), api_key(), "claude-sonnet-4-6"),
-            Some("sid".to_owned()),
-        )
-        .unwrap();
-        let events = collect_events(
-            client
-                .stream_message(&[Message::user("hi")], &[], None, &[])
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-        let delta = events.iter().find_map(|e| match e {
-            StreamEvent::ContentBlockDelta {
-                delta: Delta::TextDelta { text },
-                ..
-            } => Some(text.as_str()),
-            _ => None,
-        });
-        assert_eq!(delta, Some("Hi"));
-    }
-
-    #[tokio::test]
-    async fn stream_message_mid_stream_error_event_is_delivered_with_api_payload() {
-        // `StreamEvent::Error` flows as `Ok(Error { .. })`; `agent.rs` converts to bail!.
-        let server = MockServer::start().await;
-        let body = sse_body(&[(
-            "error",
-            r#"{"type":"error","error":{"type":"overloaded_error","message":"Servers overloaded"}}"#,
-        )]);
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("content-type", "text/event-stream")
-                    .set_body_string(body),
-            )
-            .mount(&server)
-            .await;
-
-        let client = Client::new(
-            test_config(server.uri(), api_key(), "claude-sonnet-4-6"),
-            Some("sid".to_owned()),
-        )
-        .unwrap();
-        let events = collect_events(
-            client
-                .stream_message(&[Message::user("hi")], &[], None, &[])
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-        let err = events
-            .iter()
-            .find_map(|e| match e {
-                StreamEvent::Error { error } => Some(error),
-                _ => None,
-            })
-            .expect("error event must be delivered");
-        assert_eq!(err.error_type, "overloaded_error");
-        assert_eq!(err.message, "Servers overloaded");
-    }
-
-    #[tokio::test]
-    async fn stream_message_http_error_propagates_status_and_body() {
-        for (status, body) in [
-            (429_u16, r#"{"error":{"type":"rate_limit_error"}}"#),
-            (529, "overloaded"),
-        ] {
-            let server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .and(path("/v1/messages"))
-                .respond_with(ResponseTemplate::new(status).set_body_string(body))
-                .mount(&server)
-                .await;
-
-            let client = Client::new(
-                test_config(server.uri(), api_key(), "claude-sonnet-4-6"),
-                Some("sid".to_owned()),
-            )
-            .unwrap();
-            let rx = client
-                .stream_message(&[Message::user("hi")], &[], None, &[])
-                .unwrap();
-            let err = collect_events(rx).await.expect_err("expected HTTP error");
-            let msg = format!("{err:#}");
-            assert!(
-                msg.contains(&status.to_string()),
-                "status {status} in error: {msg}",
-            );
-            assert!(msg.contains(body), "body surfaced in error: {msg}");
-        }
-    }
-
-    #[tokio::test]
-    async fn stream_message_429_threads_retry_after_header_into_error() {
-        // Retry-after extraction lives in stream_sse (not format_api_error); pin that the
-        // header is read off the response *before* the body is consumed.
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .respond_with(
-                ResponseTemplate::new(429)
-                    .insert_header("retry-after", "60")
-                    .set_body_string(r#"{"error":{"type":"rate_limit_error"}}"#),
-            )
-            .mount(&server)
-            .await;
-
-        let client = Client::new(
-            test_config(server.uri(), api_key(), "claude-sonnet-4-6"),
-            Some("sid".to_owned()),
-        )
-        .unwrap();
-        let rx = client
-            .stream_message(&[Message::user("hi")], &[], None, &[])
-            .unwrap();
-        let err = collect_events(rx).await.expect_err("expected 429");
-        assert!(
-            format!("{err:#}").contains("retry after 60"),
-            "retry-after threaded through stream_sse: {err:#}",
-        );
-    }
-
-    #[tokio::test]
-    async fn stream_message_receiver_dropped_mid_stream_does_not_deadlock() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("content-type", "text/event-stream")
-                    .set_body_string(text_stream_body())
-                    .set_delay(Duration::from_millis(50)),
-            )
-            .mount(&server)
-            .await;
-
-        let client = Client::new(
-            test_config(server.uri(), api_key(), "claude-sonnet-4-6"),
-            Some("sid".to_owned()),
-        )
-        .unwrap();
-        let mut rx = client
-            .stream_message(&[Message::user("hi")], &[], None, &[])
-            .unwrap();
-        _ = rx.recv().await;
-        drop(rx);
-        // Lets the background task observe the closed channel; any panic surfaces in test output.
-        tokio::time::sleep(Duration::from_millis(80)).await;
-    }
-
-    #[tokio::test]
     async fn stream_message_api_key_sends_x_api_key_and_session_id() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -1240,6 +1062,184 @@ mod tests {
         );
         // TTL rides through on 3P — only `scope` is gated on 1P.
         assert_eq!(cc["ttl"], "1h", "default 1h ttl survives on 3P: {body}");
+    }
+
+    #[tokio::test]
+    async fn stream_message_malformed_frame_is_skipped_without_poisoning_stream() {
+        // One bad frame must not poison the rest of the turn.
+        let server = MockServer::start().await;
+        let body = sse_body(&[
+            (
+                "content_block_start",
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+            ),
+            ("content_block_delta", "{not valid json"),
+            (
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}"#,
+            ),
+            ("message_stop", r#"{"type":"message_stop"}"#),
+        ]);
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(body),
+            )
+            .mount(&server)
+            .await;
+
+        let client = Client::new(
+            test_config(server.uri(), api_key(), "claude-sonnet-4-6"),
+            Some("sid".to_owned()),
+        )
+        .unwrap();
+        let events = collect_events(
+            client
+                .stream_message(&[Message::user("hi")], &[], None, &[])
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        let delta = events.iter().find_map(|e| match e {
+            StreamEvent::ContentBlockDelta {
+                delta: Delta::TextDelta { text },
+                ..
+            } => Some(text.as_str()),
+            _ => None,
+        });
+        assert_eq!(delta, Some("Hi"));
+    }
+
+    #[tokio::test]
+    async fn stream_message_mid_stream_error_event_is_delivered_with_api_payload() {
+        // `StreamEvent::Error` flows as `Ok(Error { .. })`; `agent.rs` converts to bail!.
+        let server = MockServer::start().await;
+        let body = sse_body(&[(
+            "error",
+            r#"{"type":"error","error":{"type":"overloaded_error","message":"Servers overloaded"}}"#,
+        )]);
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(body),
+            )
+            .mount(&server)
+            .await;
+
+        let client = Client::new(
+            test_config(server.uri(), api_key(), "claude-sonnet-4-6"),
+            Some("sid".to_owned()),
+        )
+        .unwrap();
+        let events = collect_events(
+            client
+                .stream_message(&[Message::user("hi")], &[], None, &[])
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        let err = events
+            .iter()
+            .find_map(|e| match e {
+                StreamEvent::Error { error } => Some(error),
+                _ => None,
+            })
+            .expect("error event must be delivered");
+        assert_eq!(err.error_type, "overloaded_error");
+        assert_eq!(err.message, "Servers overloaded");
+    }
+
+    #[tokio::test]
+    async fn stream_message_http_error_propagates_status_and_body() {
+        for (status, body) in [
+            (429_u16, r#"{"error":{"type":"rate_limit_error"}}"#),
+            (529, "overloaded"),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/messages"))
+                .respond_with(ResponseTemplate::new(status).set_body_string(body))
+                .mount(&server)
+                .await;
+
+            let client = Client::new(
+                test_config(server.uri(), api_key(), "claude-sonnet-4-6"),
+                Some("sid".to_owned()),
+            )
+            .unwrap();
+            let rx = client
+                .stream_message(&[Message::user("hi")], &[], None, &[])
+                .unwrap();
+            let err = collect_events(rx).await.expect_err("expected HTTP error");
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains(&status.to_string()),
+                "status {status} in error: {msg}",
+            );
+            assert!(msg.contains(body), "body surfaced in error: {msg}");
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_message_429_threads_retry_after_header_into_error() {
+        // Retry-after extraction lives in stream_sse (not format_api_error); pin that the
+        // header is read off the response *before* the body is consumed.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("retry-after", "60")
+                    .set_body_string(r#"{"error":{"type":"rate_limit_error"}}"#),
+            )
+            .mount(&server)
+            .await;
+
+        let client = Client::new(
+            test_config(server.uri(), api_key(), "claude-sonnet-4-6"),
+            Some("sid".to_owned()),
+        )
+        .unwrap();
+        let rx = client
+            .stream_message(&[Message::user("hi")], &[], None, &[])
+            .unwrap();
+        let err = collect_events(rx).await.expect_err("expected 429");
+        assert!(
+            format!("{err:#}").contains("retry after 60"),
+            "retry-after threaded through stream_sse: {err:#}",
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_message_receiver_dropped_mid_stream_does_not_deadlock() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(text_stream_body())
+                    .set_delay(Duration::from_millis(50)),
+            )
+            .mount(&server)
+            .await;
+
+        let client = Client::new(
+            test_config(server.uri(), api_key(), "claude-sonnet-4-6"),
+            Some("sid".to_owned()),
+        )
+        .unwrap();
+        let mut rx = client
+            .stream_message(&[Message::user("hi")], &[], None, &[])
+            .unwrap();
+        _ = rx.recv().await;
+        drop(rx);
+        // Lets the background task observe the closed channel; any panic surfaces in test output.
+        tokio::time::sleep(Duration::from_millis(80)).await;
     }
 
     // ── Client::stream_message / agentic body fields ──

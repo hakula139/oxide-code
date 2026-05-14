@@ -458,12 +458,46 @@ mod tests {
     }
 
     #[test]
+    fn height_accounts_for_visual_wrapping() {
+        let mut input = test_input();
+        input.last_width.set(10);
+        for ch in "abcdefghijklmnopqrstuvwxy".chars() {
+            input.textarea.input(Event::Key(KeyEvent::new(
+                KeyCode::Char(ch),
+                KeyModifiers::NONE,
+            )));
+        }
+        assert_eq!(input.height(), 5);
+    }
+
+    #[test]
     fn height_capped_at_max() {
         let mut input = test_input();
         for _ in 0..10 {
             input.textarea.insert_newline();
         }
         assert_eq!(input.height(), MAX_VISIBLE_LINES + 2);
+    }
+
+    // ── render_popup ──
+
+    #[test]
+    fn render_popup_paints_when_visible() {
+        let mut input = test_input();
+        input.handle_event(&key(KeyCode::Char('/'), KeyModifiers::NONE));
+        assert!(input.popup_visible(), "typing `/` opens the popup");
+
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = Rect::new(0, 0, 40, input.popup_height());
+                input.render_popup(frame, area);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let first = buffer.cell(Position::new(0, 0)).unwrap().symbol();
+        assert!(!first.is_empty(), "popup row paints something at (0,0)");
     }
 
     // ── handle_event ──
@@ -847,21 +881,6 @@ mod tests {
         assert_eq!(input.visual_line_count(), 3);
     }
 
-    #[test]
-    fn height_accounts_for_visual_wrapping() {
-        let mut input = test_input();
-        input.last_width.set(10);
-        // Single logical line, 25 chars -> 3 visual lines.
-        for ch in "abcdefghijklmnopqrstuvwxy".chars() {
-            input.textarea.input(Event::Key(KeyEvent::new(
-                KeyCode::Char(ch),
-                KeyModifiers::NONE,
-            )));
-        }
-        // 3 content + 2 borders
-        assert_eq!(input.height(), 5);
-    }
-
     // ── submit ──
 
     #[test]
@@ -1126,23 +1145,5 @@ mod tests {
     #[test]
     fn normalize_placeholder_trims_whitespace_inside_brackets() {
         assert_eq!(normalize_placeholder("[ <id> ]"), "[id]");
-    }
-
-    // ── render_popup ──
-
-    #[test]
-    fn render_popup_paints_when_visible() {
-        let input = input_with_popup();
-        let backend = TestBackend::new(40, 10);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| {
-                let area = Rect::new(0, 0, 40, input.popup_height());
-                input.render_popup(frame, area);
-            })
-            .unwrap();
-        let buffer = terminal.backend().buffer();
-        let first = buffer.cell(Position::new(0, 0)).unwrap().symbol();
-        assert!(!first.is_empty(), "popup row paints something at (0,0)");
     }
 }

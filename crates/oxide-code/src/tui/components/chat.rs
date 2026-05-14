@@ -2175,6 +2175,22 @@ mod tests {
         assert_eq!(chat.viewport_height, 20);
     }
 
+    #[test]
+    fn update_layout_invalidates_streaming_cache_on_width_change() {
+        let mut chat = test_chat();
+        _ = chat.update_layout(Rect::new(0, 0, 80, 24));
+        chat.append_stream_token("a complete paragraph\n\n");
+        let s = chat.streaming.as_ref().unwrap();
+        assert_ne!(s.rendered_len(), 0);
+        assert_eq!(s.cached_width(), 80);
+
+        _ = chat.update_layout(Rect::new(0, 0, 40, 24));
+        let s = chat.streaming.as_ref().unwrap();
+        assert_eq!(s.rendered_len(), 0);
+        assert_eq!(s.rendered_boundary(), 0);
+        assert_eq!(s.cached_width(), 0);
+    }
+
     // ── bump_paused_counter ──
 
     #[test]
@@ -2211,22 +2227,6 @@ mod tests {
 
         chat.push_error("overflow");
         assert_eq!(chat.new_content_since_pause(), u32::MAX);
-    }
-
-    #[test]
-    fn update_layout_invalidates_streaming_cache_on_width_change() {
-        let mut chat = test_chat();
-        _ = chat.update_layout(Rect::new(0, 0, 80, 24));
-        chat.append_stream_token("a complete paragraph\n\n");
-        let s = chat.streaming.as_ref().unwrap();
-        assert_ne!(s.rendered_len(), 0);
-        assert_eq!(s.cached_width(), 80);
-
-        _ = chat.update_layout(Rect::new(0, 0, 40, 24));
-        let s = chat.streaming.as_ref().unwrap();
-        assert_eq!(s.rendered_len(), 0);
-        assert_eq!(s.rendered_boundary(), 0);
-        assert_eq!(s.cached_width(), 0);
     }
 
     // ── handle_event ──
