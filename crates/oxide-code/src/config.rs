@@ -430,9 +430,11 @@ impl Config {
 
         let status_line = match env::string("OX_STATUS_LINE") {
             Some(raw) => parse_status_line_segments(&raw).context("OX_STATUS_LINE")?,
-            None => tui
-                .status_line
-                .unwrap_or_else(|| StatusLineSegment::DEFAULT.to_vec()),
+            None => validate_status_line(
+                tui.status_line
+                    .unwrap_or_else(|| StatusLineSegment::DEFAULT.to_vec()),
+            )
+            .context("tui.status_line")?,
         };
 
         // 4.7 silently defaulted to `omitted`; `display` opts back into summarized. 4.6 and older
@@ -501,11 +503,20 @@ impl Config {
 // ── Helpers ──
 
 fn parse_status_line_segments(raw: &str) -> Result<Vec<StatusLineSegment>> {
-    raw.split(',')
+    let segments = raw
+        .split(',')
         .map(str::trim)
         .filter(|part| !part.is_empty())
         .map(str::parse)
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    validate_status_line(segments)
+}
+
+fn validate_status_line(segments: Vec<StatusLineSegment>) -> Result<Vec<StatusLineSegment>> {
+    if segments.is_empty() {
+        bail!("status_line must contain at least one segment");
+    }
+    Ok(segments)
 }
 
 pub(crate) fn display_effort(effort: Option<Effort>) -> String {
@@ -974,6 +985,36 @@ mod tests {
         assert!(msg.contains("OX_STATUS_LINE"), "{msg}");
         assert!(msg.contains("nope"), "{msg}");
         assert!(msg.contains("current-dir"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn load_status_line_empty_env_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let vars = env_vars(vec![xdg(&dir), env("OX_STATUS_LINE", ",")]);
+        let err = temp_env::async_with_vars(vars, Config::load())
+            .await
+            .expect_err("empty status line must not launch without run-state");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("OX_STATUS_LINE"), "{msg}");
+        assert!(msg.contains("at least one segment"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn load_status_line_empty_file_roster_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        write_user_config(
+            dir.path(),
+            indoc::indoc! {r"
+                [tui]
+                status_line = []
+            "},
+        );
+        let err = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
+            .await
+            .expect_err("empty status line must not launch without run-state");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("tui.status_line"), "{msg}");
+        assert!(msg.contains("at least one segment"), "{msg}");
     }
 
     #[tokio::test]
