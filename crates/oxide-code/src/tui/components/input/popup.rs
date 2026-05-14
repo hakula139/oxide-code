@@ -1,11 +1,11 @@
 //! Slash-command autocomplete popup. Two modes:
 //!
-//! - **Name** — typing `/cmd`. Rows are matched commands; aliases parenthesize only the typed
+//! - **Name**: typing `/cmd`. Rows are matched commands. Aliases parenthesize only the typed
 //!   alias (`/clear (new)`). Tab inserts `/{name} ` into the buffer.
-//! - **Arg** — typing `/cmd <prefix>`. Rows are arg completions from the command's curated
+//! - **Arg**: typing `/cmd <prefix>`. Rows are arg completions from the command's curated
 //!   roster (`/model`, `/effort`, `/theme`). Tab replaces the prefix with `/{cmd} {value} `.
 //!
-//! Selected row paints in `text` + BOLD; others dim — contrast stands in for a prefix glyph
+//! Selected row paints in `text` + BOLD. Other rows dim so contrast stands in for a prefix glyph
 //! or fill. Lists past [`MAX_VISIBLE_ROWS`] scroll with a centered cursor (Claude Code
 //! typeahead style).
 
@@ -26,7 +26,7 @@ const MAX_VISIBLE_ROWS: usize = 8;
 
 const COLUMN_GAP: usize = 2;
 
-/// Rows of chrome above the row list — one dim horizontal rule that frames the popup as a
+/// Rows of chrome above the row list. One dim horizontal rule frames the popup as a
 /// separate overlay so it doesn't bleed into whatever sits above (welcome, chat, preview).
 const CHROME_ROWS: u16 = 1;
 
@@ -40,7 +40,7 @@ pub(super) enum PopupMode {
     },
 }
 
-/// One popup row. `value` is the bare token (command name or arg value); the renderer adds
+/// One popup row. `value` is the bare token (command name or arg value). The renderer adds
 /// `/` and any matched-alias suffix in name mode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct PopupRow {
@@ -408,7 +408,7 @@ mod tests {
     }
 
     #[test]
-    fn select_prev_decrements_when_not_at_top() {
+    fn select_prev_when_not_at_top_moves_up_one_row() {
         // Pin the non-wrap branch — the decrement path is otherwise dead because select_prev()
         // from row 0 always wraps.
         let mut popup = name_popup("");
@@ -604,7 +604,7 @@ mod tests {
     }
 
     #[test]
-    fn scroll_offset_at_exactly_cap_returns_zero_for_last_row() {
+    fn scroll_offset_at_exactly_cap_does_not_scroll_last_row() {
         // Boundary: total == MAX_VISIBLE_ROWS hits the `<=` early-return. Tightening the boundary
         // pins the invariant for the only case where the edge matters.
         let mut p = long_popup(MAX_VISIBLE_ROWS);

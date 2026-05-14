@@ -32,9 +32,9 @@ show_thinking = true
 
 | Key                | Type    | Default                     | Description                                                |
 | ------------------ | ------- | --------------------------- | ---------------------------------------------------------- |
-| `api_key`          | string  | -                           | Anthropic API key; user config only                        |
-| `base_url`         | string  | `https://api.anthropic.com` | API base URL; user config only                             |
-| `extra_ca_certs`   | string  | -                           | PEM bundle appended to the trust store; user config only   |
+| `api_key`          | string  | -                           | Anthropic API key (user config only)                       |
+| `base_url`         | string  | `https://api.anthropic.com` | API base URL (user config only)                            |
+| `extra_ca_certs`   | string  | -                           | PEM bundle appended to the trust store (user config only)  |
 | `model`            | string  | `claude-opus-4-7[1m]`       | Model to use                                               |
 | `effort`           | string  | per-model (see below)       | Intelligence-vs-latency tier                               |
 | `max_tokens`       | integer | effort-derived (see below)  | Max tokens per response                                    |
@@ -76,7 +76,7 @@ Use `base_url` only in `~/.config/ox/config.toml` or `ANTHROPIC_BASE_URL`. Proje
 
 #### `extra_ca_certs`: corporate trust anchors
 
-oxide-code uses `rustls` with the built-in Mozilla CA bundle, so self-signed or private-CA endpoints like a corporate gateway fail with `invalid peer certificate: UnknownIssuer`. Point `extra_ca_certs` at a PEM bundle (one or more `-----BEGIN CERTIFICATE-----` blocks in one file) to append those roots to the trust store:
+For corporate gateways or other private-CA endpoints, point `extra_ca_certs` at a PEM bundle to append those roots to oxide-code's trust store:
 
 ```toml
 [client]
@@ -84,7 +84,7 @@ base_url = "https://gw.llm.corp.example/anthropic"
 extra_ca_certs = "~/.config/ox/corp-cachain.pem"
 ```
 
-The path accepts `~/` / `~` for `$HOME`. Use an absolute or `~`-rooted path: a relative value resolves against the process working directory at read time, so it will break whenever `ox` is launched from a different folder. The field is user-config only (and rejected in project `ox.toml`) because a checked-in trust-anchor path could widen TLS trust for the process. Equivalent env var: `OX_EXTRA_CA_CERTS`.
+Use an absolute or `~`-rooted path. Relative paths resolve from the launch cwd. The field is user-config only because a checked-in trust-anchor path could widen TLS trust for the process. Equivalent env var: `OX_EXTRA_CA_CERTS`.
 
 #### `prompt_cache_ttl`: cache duration
 
@@ -156,7 +156,7 @@ oxide-code checks three credential sources in order:
 
    Expired tokens are refreshed automatically. No configuration needed.
 
-Prefer the environment variable (or OAuth) over `api_key` in a config file. `ox.toml` resolves by walking up from the current directory, so oxide-code rejects project-level `api_key` and `base_url`; user-level `~/.config/ox/config.toml` is safer but still plaintext on disk.
+Prefer the environment variable (or OAuth) over `api_key` in a config file. `ox.toml` resolves by walking up from the current directory, so oxide-code rejects project-level `api_key`, `base_url`, and `extra_ca_certs`. User-level `~/.config/ox/config.toml` is safer, but still plaintext on disk.
 
 ## Environment variables
 

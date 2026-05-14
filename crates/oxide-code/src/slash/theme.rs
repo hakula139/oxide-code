@@ -1,4 +1,4 @@
-//! `/theme` — open the picker, or swap directly with `/theme <name>`. Picker live-previews on
+//! `/theme` opens the picker, or swaps directly with `/theme <name>`. Picker live-previews on
 //! cursor moves and reverts on cancel.
 
 use std::borrow::Cow;

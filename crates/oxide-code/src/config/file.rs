@@ -684,7 +684,8 @@ mod tests {
         assert!(msg.contains("unknown field `model`"), "{msg}");
     }
 
-    /// Covers section-level `deny_unknown_fields` (top-level: `load_file_rejects_unknown_top_level_key`).
+    /// Covers section-level `deny_unknown_fields`.
+    /// Top-level coverage lives in `load_file_rejects_unknown_top_level_key`.
     #[test]
     fn load_file_rejects_misplaced_field() {
         let dir = tempfile::tempdir().unwrap();

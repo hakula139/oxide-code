@@ -330,7 +330,7 @@ mod tests {
     }
 
     #[test]
-    fn tick_streaming_increments_counter_before_threshold() {
+    fn tick_streaming_before_threshold_does_not_advance_spinner_frame() {
         let mut bar = test_bar();
         bar.set_status(Status::Streaming);
 

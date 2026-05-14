@@ -453,39 +453,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_token_from_without_refresh_token_keeps_nonexpired_as_is() {
-        let dir = tempfile::tempdir().unwrap();
-        let creds = dir.path().join("creds.json");
-        let lock = dir.path().join("lock");
-        write_creds(&creds, "tok", None, now_millis().unwrap() + 60_000);
-
-        let token = load_token_from(
-            &creds,
-            &lock,
-            "http://should-not-be-called",
-            None,
-            read_credentials,
-        )
-        .await
-        .unwrap();
-        assert_eq!(token, "tok");
-    }
-
-    #[tokio::test]
-    async fn load_token_from_without_refresh_token_bails_when_expired() {
-        let dir = tempfile::tempdir().unwrap();
-        let creds = dir.path().join("creds.json");
-        let lock = dir.path().join("lock");
-        write_creds(&creds, "tok", None, 0);
-
-        let err = load_token_from(&creds, &lock, "http://unused", None, read_credentials)
-            .await
-            .expect_err("expired without refresh must bail");
-        assert!(format!("{err:#}").contains("expired"));
-    }
-
-    #[tokio::test]
-    async fn load_token_from_refreshes_near_expiry_and_writes_back() {
+    async fn load_token_from_near_expiry_refreshes_and_persists_new_credentials() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(wm_path("/"))
@@ -525,6 +493,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn load_token_from_without_refresh_token_keeps_nonexpired_as_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let creds = dir.path().join("creds.json");
+        let lock = dir.path().join("lock");
+        write_creds(&creds, "tok", None, now_millis().unwrap() + 60_000);
+
+        let token = load_token_from(
+            &creds,
+            &lock,
+            "http://should-not-be-called",
+            None,
+            read_credentials,
+        )
+        .await
+        .unwrap();
+        assert_eq!(token, "tok");
+    }
+
+    #[tokio::test]
     async fn load_token_from_refresh_endpoint_down_keeps_existing_token_if_unexpired() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -547,6 +534,19 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(token, "stale");
+    }
+
+    #[tokio::test]
+    async fn load_token_from_without_refresh_token_bails_when_expired() {
+        let dir = tempfile::tempdir().unwrap();
+        let creds = dir.path().join("creds.json");
+        let lock = dir.path().join("lock");
+        write_creds(&creds, "tok", None, 0);
+
+        let err = load_token_from(&creds, &lock, "http://unused", None, read_credentials)
+            .await
+            .expect_err("expired without refresh must bail");
+        assert!(format!("{err:#}").contains("expired"));
     }
 
     #[tokio::test]

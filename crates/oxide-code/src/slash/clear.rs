@@ -1,4 +1,4 @@
-//! `/clear` — forwards [`UserAction::Clear`]; the agent loop rolls the session.
+//! `/clear` forwards [`UserAction::Clear`]. The agent loop rolls the session.
 
 use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashKind, SlashOutcome};

@@ -1,5 +1,5 @@
-//! Read-only key-value overview modal — title, multi-section body, fixed footer.
-//! Used by `/status`, `/config`, `/help`. Compose `KvSection` fixtures; the modal owns layout.
+//! Read-only key-value overview modal with a title, multi-section body, and fixed footer.
+//! Used by `/status`, `/config`, and `/help`. The modal owns layout for `KvSection` fixtures.
 
 use crossterm::event::KeyEvent;
 use ratatui::Frame;
@@ -153,25 +153,6 @@ mod tests {
         )
     }
 
-    // ── KvOverview::height ──
-
-    #[test]
-    fn height_for_single_section_without_heading_counts_title_blank_rows_blank_footer() {
-        // 2 rows + (title + blank) + (blank + footer) = 6.
-        assert_eq!(flat_overview().height(80), 6);
-    }
-
-    #[test]
-    fn height_for_two_headed_sections_adds_heading_blanks_and_inter_section_blank() {
-        // title + blank
-        //   + heading + blank + 1 row
-        //   + blank
-        //   + heading + blank + 1 row
-        //   + blank + footer
-        // = 2 + 3 + 1 + 3 + 2 = 11.
-        assert_eq!(sectioned_overview().height(80), 11);
-    }
-
     // ── KvOverview::label_width ──
 
     #[test]
@@ -187,9 +168,21 @@ mod tests {
     }
 
     #[test]
-    fn label_width_empty_sections_returns_zero() {
+    fn label_width_empty_sections_is_zero() {
         let m = KvOverview::new("T", vec![]);
         assert_eq!(m.label_width(), 0);
+    }
+
+    // ── KvOverview::height ──
+
+    #[test]
+    fn height_for_single_section_without_heading_counts_title_blank_rows_blank_footer() {
+        assert_eq!(flat_overview().height(80), 6);
+    }
+
+    #[test]
+    fn height_for_two_headed_sections_adds_heading_blanks_and_inter_section_blank() {
+        assert_eq!(sectioned_overview().height(80), 11);
     }
 
     // ── KvOverview::render ──

@@ -1,5 +1,5 @@
 //! Display-oriented reshaping of a loaded transcript. JSONL batches all `ToolUse` blocks then
-//! all `ToolResult` blocks per turn; live rendering pairs each call with its result inline.
+//! all `ToolResult` blocks per turn. Live rendering pairs each call with its result inline.
 //! [`walk_transcript`] reorders into the live shape and merges adjacent text blocks.
 
 use std::collections::HashMap;

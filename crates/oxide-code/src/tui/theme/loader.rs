@@ -2,15 +2,15 @@
 //!
 //! A theme document is a flat TOML body, one entry per slot. Each value is either:
 //!
-//! - a **bare color string** (`text = "#cdd6f4"`) — sets `fg` only; or
-//! - an **inline table** (`accent = { fg = "#89b4fa", bold = true }`) — explicit `fg` / `bg` plus
+//! - a **bare color string** (`text = "#cdd6f4"`): sets `fg` only.
+//! - an **inline table** (`accent = { fg = "#89b4fa", bold = true }`): explicit `fg` / `bg` plus
 //!   modifiers (`bold`, `italic`, `underlined`, `dim`, `reversed`).
 //!
-//! Every slot must be present; `deny_unknown_fields` catches typos. Per-slot parse errors are
+//! Every slot must be present. `deny_unknown_fields` catches typos. Per-slot parse errors are
 //! wrapped with the slot name.
 //!
 //! [`resolve_theme`] applies a base + per-slot overrides from `[tui.theme]` config. Selection
-//! errors (unknown name, missing file) hard-fail; per-slot value errors warn and fall back to base
+//! errors (unknown name, missing file) hard-fail. Per-slot value errors warn and fall back to base
 //! so the TUI still launches.
 
 use std::collections::HashMap;
@@ -24,8 +24,8 @@ use super::{Slot, Theme, builtin, color::parse_color};
 
 // ── Resolution ──
 
-/// Resolves a theme from an optional base + per-slot overrides. Unknown / unreadable base errors
-/// hard-fail; per-slot override errors warn via `tracing` and keep the base value.
+/// Resolves a theme from an optional base + per-slot overrides. Unknown / unreadable bases
+/// hard-fail. Per-slot override errors warn via `tracing` and keep the base value.
 pub(crate) fn resolve_theme(
     base: Option<&str>,
     overrides: &HashMap<String, SlotPatch>,
@@ -47,7 +47,7 @@ pub(crate) fn resolve_theme(
     Ok(theme)
 }
 
-/// Resolves a `base` to a TOML body — built-in catalogue first, then a filesystem path with
+/// Resolves a `base` to a TOML body. Built-in catalogue first, then a filesystem path with
 /// `~/` expanded to `$HOME`.
 fn load_base_body(name: &str) -> Result<String> {
     if let Some(body) = builtin::lookup(name) {
@@ -62,7 +62,7 @@ fn load_base_body(name: &str) -> Result<String> {
     })
 }
 
-/// Applies one override patch; errors on unknown slot name or bad color value.
+/// Applies one override patch. Errors on unknown slot name or bad color value.
 fn patch_slot(theme: &mut Theme, slot_name: &str, patch: &SlotPatch) -> Result<()> {
     let slot = slot_for_name(theme, slot_name)
         .ok_or_else(|| anyhow::anyhow!("unknown slot {slot_name:?}"))?;
@@ -70,7 +70,7 @@ fn patch_slot(theme: &mut Theme, slot_name: &str, patch: &SlotPatch) -> Result<(
     Ok(())
 }
 
-/// Generated mutable slot lookup; the mapping can't drift from [`Theme`]'s fields.
+/// Generated mutable slot lookup. The mapping can't drift from [`Theme`]'s fields.
 macro_rules! define_slot_for_name {
     ( $( ($name:ident, $doc:literal), )* ) => {
         fn slot_for_name<'a>(theme: &'a mut Theme, name: &str) -> Option<&'a mut Slot> {
@@ -96,9 +96,9 @@ pub(crate) enum SlotPatch {
     Inline(InlinePatch),
 }
 
-/// Inline TOML patch — every field optional. `Option<bool>` distinguishes "no change" / "set" /
+/// Inline TOML patch with every field optional. `Option<bool>` distinguishes "no change" / "set" /
 /// "clear". Empty patches (`error = {}`) are rejected by [`apply`](Self::apply) so the slot warns
-/// and falls back rather than silently re-writing the base with itself; serde's untagged enum
+/// and falls back rather than silently re-writing the base with itself. Serde's untagged enum
 /// dispatcher would swallow a `Deserialize`-time message, so the warn path is clearer.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -552,7 +552,7 @@ mod tests {
     /// pass a happy-path override test, but this assertion fails
     /// because patching `tool_icon` would visibly alter `tool_border`.
     #[test]
-    fn slot_for_name_routes_each_name_to_a_unique_slot() {
+    fn slot_for_name_each_name_resolves_to_a_unique_slot() {
         let sentinel = Slot {
             fg: Some(Color::Rgb(0xde, 0xad, 0xbe)),
             bg: None,

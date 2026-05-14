@@ -1,6 +1,6 @@
-//! `/delete <id-prefix>` — direct typed-arg form for session deletion. Bare `/delete` is rejected
-//! because "what gets deleted?" is ambiguous; the picker form (`/resume` then Ctrl+D on a row) is
-//! the discoverable path. Both forms share [`super::confirm::ConfirmDeleteSessionModal`].
+//! `/delete <id-prefix>` is the direct typed-arg form for session deletion. Bare `/delete` is
+//! rejected because "what gets deleted?" is ambiguous. The picker form (`/resume` then Ctrl+D on
+//! a row) is the discoverable path. Both forms share [`super::confirm::ConfirmDeleteSessionModal`].
 
 use std::path::Path;
 
@@ -67,9 +67,8 @@ impl SlashCommand for DeleteCmd {
 
 // ── Resolution ──
 
-/// Wrap the shared resolver with `/delete`'s live-id surface: matches against the live id surface
-/// a dedicated error so the user sees the real reason rather than the generic "no session
-/// matching" they'd get for a typo.
+/// Wraps the shared resolver with `/delete`'s live-id behavior: prefixes that match only the
+/// live id return a dedicated error so typos keep the generic "no session matching" message.
 fn resolve_for_delete(
     store: &SessionStore,
     prefix: &str,

@@ -34,7 +34,7 @@ The TUI's `App::apply_session_compacted` clears the chat, pushes a single `Compa
 
 8. **`Entry::Compact` JSONL boundary.** Carries `summary`, `pre_message_count`, optional `instructions`, and `timestamp`. Position: written immediately before the synthetic post-compact `Entry::Message`. Loader treats the compact entry as a chain reset, keeps `CompactInfo` for resume display, and only accepts messages that belong to the new tail.
 
-9. **Same session id, do not roll.** All three reference CLIs converged on this. `/clear` rolls (intent reset), while `/compact` preserves (intent retained, context compressed). The JSONL file, session id, project, and title all carry through unchanged. The chain reset is purely an in-memory or replay concern.
+9. **Preserve session identity.** All three reference CLIs converged on this. `/clear` rolls because intent resets, while `/compact` preserves because intent is retained and context is compressed. The JSONL file, session id, project, and title all carry through unchanged. The chain reset is purely an in-memory or replay concern.
 
 10. **Reset the file tracker.** `/compact` discards the read history because Edit and Write contracts depend on a Read having happened _in the visible transcript_. Since the visible transcript is now the summary, the previous `Read`s are no longer "in scope" from a user-visible standpoint. The reset forces a fresh `Read` before any `Edit`, matching the post-`/clear` behavior. The trade-off (extra Reads after compact) is the right side of the safety / convenience line.
 

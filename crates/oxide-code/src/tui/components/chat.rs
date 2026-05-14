@@ -2136,7 +2136,7 @@ mod tests {
     // ── update_layout ──
 
     #[test]
-    fn update_layout_sets_viewport_height() {
+    fn update_layout_adopts_area_height_as_viewport() {
         let mut chat = test_chat();
         _ = chat.update_layout(Rect::new(0, 0, 80, 30));
         assert_eq!(chat.viewport_height, 30);
@@ -2175,6 +2175,22 @@ mod tests {
         assert_eq!(chat.viewport_height, 20);
     }
 
+    #[test]
+    fn update_layout_invalidates_streaming_cache_on_width_change() {
+        let mut chat = test_chat();
+        _ = chat.update_layout(Rect::new(0, 0, 80, 24));
+        chat.append_stream_token("a complete paragraph\n\n");
+        let s = chat.streaming.as_ref().unwrap();
+        assert_ne!(s.rendered_len(), 0);
+        assert_eq!(s.cached_width(), 80);
+
+        _ = chat.update_layout(Rect::new(0, 0, 40, 24));
+        let s = chat.streaming.as_ref().unwrap();
+        assert_eq!(s.rendered_len(), 0);
+        assert_eq!(s.rendered_boundary(), 0);
+        assert_eq!(s.cached_width(), 0);
+    }
+
     // ── bump_paused_counter ──
 
     #[test]
@@ -2211,22 +2227,6 @@ mod tests {
 
         chat.push_error("overflow");
         assert_eq!(chat.new_content_since_pause(), u32::MAX);
-    }
-
-    #[test]
-    fn update_layout_invalidates_streaming_cache_on_width_change() {
-        let mut chat = test_chat();
-        _ = chat.update_layout(Rect::new(0, 0, 80, 24));
-        chat.append_stream_token("a complete paragraph\n\n");
-        let s = chat.streaming.as_ref().unwrap();
-        assert_ne!(s.rendered_len(), 0);
-        assert_eq!(s.cached_width(), 80);
-
-        _ = chat.update_layout(Rect::new(0, 0, 40, 24));
-        let s = chat.streaming.as_ref().unwrap();
-        assert_eq!(s.rendered_len(), 0);
-        assert_eq!(s.rendered_boundary(), 0);
-        assert_eq!(s.cached_width(), 0);
     }
 
     // ── handle_event ──
@@ -2342,7 +2342,7 @@ mod tests {
     // ── render ──
 
     #[test]
-    fn render_updates_content_height() {
+    fn render_measures_content_height_from_layout() {
         let mut chat = test_chat();
         chat.push_user_message("hi".to_owned());
         render_chat(&mut chat, 80, 24);
@@ -2520,7 +2520,7 @@ mod tests {
     // ── scroll_to_bottom / scroll_up / scroll_down ──
 
     #[test]
-    fn scroll_to_bottom_sets_offset_correctly() {
+    fn scroll_to_bottom_aligns_last_row_with_viewport_bottom() {
         let mut chat = test_chat();
         chat.content_height.set(100);
         chat.viewport_height = 20;
@@ -2591,7 +2591,7 @@ mod tests {
     // ── build_text ──
 
     #[test]
-    fn build_text_empty_returns_no_lines() {
+    fn build_text_empty_chat_has_no_lines() {
         let chat = test_chat();
         assert!(chat.build_text(60).lines.is_empty());
     }

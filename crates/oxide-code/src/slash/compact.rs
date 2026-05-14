@@ -1,6 +1,6 @@
-//! `/compact [instructions]` — compress the conversation into a summary. Bare runs the default
-//! rubric; trailing text becomes user-supplied focus instructions appended to the rubric.
-//! Always [`SlashKind::Mutating`] — refused mid-turn so the in-flight reply finishes first.
+//! `/compact [instructions]` compresses the conversation into a summary. Bare runs the default
+//! rubric. Trailing text becomes user-supplied focus instructions appended to the rubric.
+//! Always [`SlashKind::Mutating`], so it is refused mid-turn while the in-flight reply finishes.
 
 use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashKind, SlashOutcome};

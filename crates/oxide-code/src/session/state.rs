@@ -817,7 +817,7 @@ mod tests {
     // ── current_git_branch ──
 
     #[test]
-    fn current_git_branch_in_a_real_repo_returns_the_branch_name() {
+    fn current_git_branch_in_a_real_repo_yields_the_branch_name() {
         // Skipped silently if `git` isn't on PATH so CI without git doesn't fail.
         let dir = tempfile::tempdir().unwrap();
         let cwd = dir.path().to_str().unwrap();
@@ -851,7 +851,7 @@ mod tests {
     }
 
     #[test]
-    fn current_git_branch_outside_a_repo_returns_none() {
+    fn current_git_branch_outside_a_repo_is_absent() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(current_git_branch(dir.path().to_str().unwrap()), None);
     }
