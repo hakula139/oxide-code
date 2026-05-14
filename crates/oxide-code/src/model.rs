@@ -303,7 +303,7 @@ fn million_tokens(tokens: u32) -> f64 {
 }
 
 /// Human-facing label: the row's [`ModelInfo::display_name`] plus a ` (1M context)` suffix on
-/// `[1m]` ids; the raw id when the model is unknown.
+/// `[1m]` ids. Falls back to the raw id when the model is unknown.
 pub(crate) fn display_name(model: &str) -> Cow<'_, str> {
     let base = lookup(model).map_or(Cow::Borrowed(model), |info| {
         Cow::Borrowed(info.display_name)
@@ -312,6 +312,23 @@ pub(crate) fn display_name(model: &str) -> Cow<'_, str> {
         Cow::Owned(format!("{base} (1M context)"))
     } else {
         base
+    }
+}
+
+/// Width-constrained variant for the status bar. Drops the `Claude ` family prefix and
+/// abbreviates the 1M opt-in to ` [1M]`. Falls back to the raw id when the model is unknown.
+pub(crate) fn short_display_name(model: &str) -> Cow<'_, str> {
+    let Some(info) = lookup(model) else {
+        return Cow::Borrowed(model);
+    };
+    let base = info
+        .display_name
+        .strip_prefix("Claude ")
+        .unwrap_or(info.display_name);
+    if model.ends_with("[1m]") {
+        Cow::Owned(format!("{base} [1M]"))
+    } else {
+        Cow::Borrowed(base)
     }
 }
 
@@ -686,5 +703,29 @@ mod tests {
     fn display_name_unknown_id_falls_through_to_raw() {
         assert_eq!(display_name("gpt-4"), "gpt-4");
         assert_eq!(display_name("custom-model"), "custom-model");
+    }
+
+    // ── short_display_name ──
+
+    #[test]
+    fn short_display_name_strips_claude_family_prefix() {
+        for (id, expected) in [
+            ("claude-opus-4-7", "Opus 4.7"),
+            ("claude-sonnet-4-6", "Sonnet 4.6"),
+            ("claude-haiku-4-5", "Haiku 4.5"),
+            ("claude-opus-4-1", "Opus 4.1"),
+        ] {
+            assert_eq!(short_display_name(id), expected, "{id}");
+        }
+    }
+
+    #[test]
+    fn short_display_name_replaces_1m_context_with_compact_tag() {
+        assert_eq!(short_display_name("claude-opus-4-7[1m]"), "Opus 4.7 [1M]");
+    }
+
+    #[test]
+    fn short_display_name_unknown_id_falls_through_to_raw() {
+        assert_eq!(short_display_name("gpt-4"), "gpt-4");
     }
 }

@@ -4,7 +4,7 @@
 use std::borrow::Cow;
 
 use crate::config::ConfigSnapshot;
-use crate::model::display_name;
+use crate::model::{display_name, short_display_name};
 use crate::tui::components::chat::ChatView;
 use crate::tui::modal::Modal;
 
@@ -23,6 +23,10 @@ pub(crate) struct LiveSessionInfo {
 impl LiveSessionInfo {
     pub(crate) fn display_name(&self) -> Cow<'_, str> {
         display_name(&self.config.model_id)
+    }
+
+    pub(crate) fn short_display_name(&self) -> Cow<'_, str> {
+        short_display_name(&self.config.model_id)
     }
 }
 

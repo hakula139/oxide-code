@@ -262,11 +262,11 @@ mod tests {
     #[test]
     fn set_model_replaces_displayed_model_label() {
         let mut bar = test_bar();
-        bar.set_model("Claude Opus 4.7".to_owned());
-        assert_eq!(bar.model(), "Claude Opus 4.7");
+        bar.set_model("Opus 4.7".to_owned());
+        assert_eq!(bar.model(), "Opus 4.7");
         let output = render_top_row(&mut bar, 80);
         assert!(
-            output.contains("Claude Opus 4.7"),
+            output.contains("Opus 4.7"),
             "new label must reach the rendered bar: {output:?}",
         );
         assert!(
@@ -435,7 +435,7 @@ mod tests {
         let mut bar = StatusBar::new(
             &Theme::default(),
             StatusLineSegment::DEFAULT.to_vec(),
-            "Claude Opus 4.7".into(),
+            "Opus 4.7".into(),
             Some(Effort::Xhigh),
             cwd.into(),
             Some("main".to_owned()),
@@ -521,14 +521,14 @@ mod tests {
                 StatusLineSegment::Model,
                 StatusLineSegment::CurrentDir,
             ],
-            "Claude Opus 4.7".into(),
+            "Opus 4.7".into(),
             Some(Effort::Xhigh),
             "~/projects/demo".into(),
             Some("main".to_owned()),
         );
         let output = render_top_row(&mut bar, 120);
         let state_at = output.find("Ready").unwrap();
-        let model_at = output.find("Claude Opus 4.7").unwrap();
+        let model_at = output.find("Opus 4.7").unwrap();
         let cwd_at = output.find("~/projects/demo").unwrap();
         assert!(state_at < model_at, "run state should lead: {output:?}");
         assert!(model_at < cwd_at, "cwd should follow model: {output:?}");
@@ -548,15 +548,13 @@ mod tests {
                 StatusLineSegment::ModelWithEffort,
                 StatusLineSegment::RunState,
             ],
-            "Claude Opus 4.7".into(),
+            "Opus 4.7".into(),
             Some(Effort::Xhigh),
             "~/projects/demo".into(),
             Some("feat/status-line".to_owned()),
         );
         let output = render_top_row(&mut bar, 120);
-        assert!(
-            output.contains("~/projects/demo │ feat/status-line │ Claude Opus 4.7 (xhigh) │ Ready")
-        );
+        assert!(output.contains("~/projects/demo │ feat/status-line │ Opus 4.7 (xhigh) │ Ready"));
     }
 
     #[test]

@@ -92,7 +92,7 @@ impl App {
         let mut status_bar = StatusBar::new(
             theme,
             session_info.config.status_line.clone(),
-            session_info.display_name().into_owned(),
+            session_info.short_display_name().into_owned(),
             session_info.config.effort,
             session_info.cwd.clone(),
             session_info.git_branch.clone(),
@@ -602,7 +602,7 @@ impl App {
         );
         if model_changed {
             self.status_bar
-                .set_model(crate::model::display_name(&model_id).into_owned());
+                .set_model(crate::model::short_display_name(&model_id).into_owned());
         }
         self.status_bar.set_effort(effort);
         self.session_info.config.model_id = model_id;
@@ -2143,7 +2143,7 @@ mod tests {
             app.session_info.config.effort,
             Some(crate::config::Effort::High),
         );
-        assert_eq!(app.status_bar.model(), "Claude Sonnet 4.6");
+        assert_eq!(app.status_bar.model(), "Sonnet 4.6");
         assert_eq!(
             app.session_info.config.compaction.auto.threshold_tokens,
             Some(test_thresholds::WINDOW_200K),
