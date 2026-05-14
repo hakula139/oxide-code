@@ -156,6 +156,59 @@ pub(crate) struct TurnReport {
     pub(crate) billable_usage: Option<TokenUsage>,
 }
 
+/// Result of one [`agent_turn`] invocation. The report carries usage observed before any abort
+/// so the outer loop can still bill rounds the API already charged for, even when the user
+/// cancels mid-stream or a later round fails.
+#[derive(Debug)]
+pub(crate) struct TurnOutcome {
+    pub(crate) report: TurnReport,
+    pub(crate) result: AbortResult<()>,
+}
+
+impl TurnOutcome {
+    fn completed(report: TurnReport) -> Self {
+        Self {
+            report,
+            result: Ok(()),
+        }
+    }
+
+    fn aborted(report: TurnReport, abort: TurnAbort) -> Self {
+        Self {
+            report,
+            result: Err(abort),
+        }
+    }
+
+    /// Test helper: returns the report on success or panics with the abort. Mirrors
+    /// `Result::unwrap`.
+    #[cfg(test)]
+    pub(crate) fn unwrap(self) -> TurnReport {
+        match self.result {
+            Ok(()) => self.report,
+            Err(abort) => panic!("turn aborted: {abort:?}"),
+        }
+    }
+
+    /// Test helper: returns the report on success or panics with the abort and `msg`.
+    #[cfg(test)]
+    pub(crate) fn expect(self, msg: &str) -> TurnReport {
+        match self.result {
+            Ok(()) => self.report,
+            Err(abort) => panic!("{msg}: {abort:?}"),
+        }
+    }
+
+    /// Test helper: returns the abort on failure or panics. Mirrors `Result::expect_err`.
+    #[cfg(test)]
+    pub(crate) fn expect_err(self, msg: &str) -> TurnAbort {
+        match self.result {
+            Ok(()) => panic!("{msg}: turn unexpectedly completed"),
+            Err(abort) => abort,
+        }
+    }
+}
+
 pub(crate) struct AutoCompact<'a> {
     pub(crate) config: AutoCompactionConfig,
     pub(crate) failures: &'a mut u8,
@@ -180,24 +233,38 @@ pub(crate) async fn agent_turn(
     session: &SessionHandle,
     user_rx: &mut mpsc::Receiver<UserAction>,
     max_tool_rounds: Option<u32>,
-) -> AbortResult<TurnReport> {
+) -> TurnOutcome {
     let tool_defs = tools.definitions();
     let mut pending_prompts: Vec<String> = Vec::new();
     let mut latest_usage = None;
     let mut billable_usage = None;
+    let report = |latest, billable| TurnReport {
+        usage: latest,
+        billable_usage: billable,
+    };
 
     for _ in 0..max_tool_rounds.unwrap_or(u32::MAX) {
         strip_trailing_thinking(messages);
-        let StreamOutcome {
-            blocks,
-            parse_errors,
-            usage,
-        } = await_unless_aborted(
+        let stream = await_unless_aborted(
             stream_response(client, messages, &tool_defs, prompt, sink),
             user_rx,
             &mut pending_prompts,
         )
-        .await??;
+        .await;
+        let StreamOutcome {
+            blocks,
+            parse_errors,
+            usage,
+        } = match stream {
+            Ok(Ok(outcome)) => outcome,
+            Ok(Err(error)) => {
+                return TurnOutcome::aborted(
+                    report(latest_usage, billable_usage),
+                    TurnAbort::Failed(error),
+                );
+            }
+            Err(abort) => return TurnOutcome::aborted(report(latest_usage, billable_usage), abort),
+        };
         if let Some(usage) = usage {
             latest_usage = Some(usage);
             billable_usage =
@@ -214,13 +281,10 @@ pub(crate) async fn agent_turn(
             // Queued prompts drain on the TUI side at idle.
             record_message(session, assistant_msg.clone(), sink).await;
             messages.push(assistant_msg);
-            return Ok(TurnReport {
-                usage: latest_usage,
-                billable_usage,
-            });
+            return TurnOutcome::completed(report(latest_usage, billable_usage));
         }
 
-        let (results, sidecars) = run_tool_round(
+        let round = run_tool_round(
             tools,
             tool_uses,
             &parse_errors,
@@ -228,7 +292,11 @@ pub(crate) async fn agent_turn(
             user_rx,
             &mut pending_prompts,
         )
-        .await?;
+        .await;
+        let (results, sidecars) = match round {
+            Ok(pair) => pair,
+            Err(abort) => return TurnOutcome::aborted(report(latest_usage, billable_usage), abort),
+        };
         let tool_result_msg = Message {
             role: Role::User,
             content: results,
@@ -243,10 +311,13 @@ pub(crate) async fn agent_turn(
     // `None` resolves to `u32::MAX`, so this branch is reachable only when the caller set
     // `Some(n)` and the model ran `n` rounds without a final reply.
     let cap = max_tool_rounds.unwrap_or(u32::MAX);
-    Err(TurnAbort::Failed(anyhow!(
-        "agent stopped after {cap} tool rounds without a final response \
-         — this is a safety cap against runaway loops. Ask again with a narrower request."
-    )))
+    TurnOutcome::aborted(
+        report(latest_usage, billable_usage),
+        TurnAbort::Failed(anyhow!(
+            "agent stopped after {cap} tool rounds without a final response \
+             — this is a safety cap against runaway loops. Ask again with a narrower request."
+        )),
+    )
 }
 
 /// Decides whether to compact and drives it when the threshold and breaker allow. Returns
@@ -2073,7 +2144,7 @@ mod tests {
             let (tx, mut rx) = mpsc::channel::<UserAction>(1);
             tx.try_send(action.clone()).unwrap();
 
-            agent_turn(
+            let outcome = agent_turn(
                 &client,
                 &tools,
                 &mut messages,
@@ -2083,8 +2154,11 @@ mod tests {
                 &mut rx,
                 None,
             )
-            .await
-            .unwrap_or_else(|_| panic!("turn must complete despite {action:?}"));
+            .await;
+            assert!(
+                outcome.result.is_ok(),
+                "turn must complete despite {action:?}"
+            );
 
             assert_eq!(
                 messages.len(),
@@ -2147,6 +2221,55 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, AgentEvent::ToolCallEnd { id, .. } if id == "tool_1")),
             "ToolCallEnd must not fire after cancel: {events:?}",
+        );
+        drop(tx);
+    }
+
+    #[tokio::test]
+    async fn agent_turn_cancel_during_tool_round_preserves_completed_round_usage() {
+        // Round 1's stream observes usage before the tool gates. Cancel arrives during the tool
+        // execution, so the abort must still carry billable_usage from the completed round.
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let client = FakeClient::new(vec![tool_use_turn_with_usage(
+            "tool_1", "gate", r"{}", 7, 3,
+        )]);
+        let started = Arc::new(Notify::new());
+        let tools = ToolRegistry::new(vec![Box::new(GateTool {
+            started: started.clone(),
+        })]);
+        let sink = CapturingSink::new();
+        let mut messages = vec![Message::user("kick off")];
+        let (tx, mut rx) = mpsc::channel::<UserAction>(1);
+        let prompt = empty_prompt();
+
+        let (outcome, ()) = tokio::join!(
+            agent_turn(
+                &client,
+                &tools,
+                &mut messages,
+                &prompt,
+                &sink,
+                &session,
+                &mut rx,
+                None,
+            ),
+            async {
+                started.notified().await;
+                tx.send(UserAction::Cancel).await.unwrap();
+            },
+        );
+
+        assert!(
+            matches!(outcome.result, Err(TurnAbort::Cancelled)),
+            "got {:?}",
+            outcome.result,
+        );
+        assert_eq!(
+            outcome.report.billable_usage.map(TokenUsage::total_tokens),
+            Some(10),
+            "round 1 usage must reach the caller despite the abort: {:?}",
+            outcome.report,
         );
         drop(tx);
     }

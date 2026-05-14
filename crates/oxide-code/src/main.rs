@@ -26,7 +26,7 @@ use tracing::{debug, warn};
 use agent::event::{
     AgentEvent, AgentSink, StdioSink, UsageSnapshot, UserAction, inert_user_action_channel,
 };
-use agent::{AutoCompact, TokenUsage, TurnAbort, agent_turn};
+use agent::{AutoCompact, TokenUsage, TurnAbort, TurnOutcome, agent_turn};
 use client::anthropic::Client;
 use config::{Config, Effort};
 use file_tracker::FileTracker;
@@ -576,19 +576,22 @@ impl AgentLoopTask {
             self.client.max_tool_rounds(),
         )
         .await;
-        match outcome {
-            Ok(report) => {
-                self.last_usage = report.usage;
-                if let Some(usage) = report.usage {
-                    self.displayed_usage = Some(usage);
-                    if let Some(cost) = report
-                        .billable_usage
-                        .and_then(|usage| estimate_usage_cost_usd(&self.client, usage))
-                    {
-                        self.total_estimated_cost_usd += cost;
-                    }
-                    self.emit_usage_update();
-                }
+        let TurnOutcome { report, result } = outcome;
+        self.last_usage = report.usage;
+        if let Some(usage) = report.usage {
+            self.displayed_usage = Some(usage);
+        }
+        if let Some(cost) = report
+            .billable_usage
+            .and_then(|usage| estimate_usage_cost_usd(&self.client, usage))
+        {
+            self.total_estimated_cost_usd += cost;
+        }
+        if report.usage.is_some() || report.billable_usage.is_some() {
+            self.emit_usage_update();
+        }
+        match result {
+            Ok(()) => {
                 self.sink.emit(AgentEvent::TurnComplete, "turn-complete");
                 LoopControl::Continue
             }
@@ -916,17 +919,17 @@ async fn bare_repl(
                 &mut user_rx,
                 client.max_tool_rounds(),
             );
-            let turn_result = tokio::select! {
-                r = turn => r,
+            let TurnOutcome { report, result } = tokio::select! {
+                outcome = turn => outcome,
                 () = shutdown_signal() => {
                     eprintln!();
                     shutdown_fired = true;
                     break;
                 }
             };
-            match turn_result {
-                Ok(report) => last_usage = report.usage,
-                Err(TurnAbort::Cancelled | TurnAbort::Quit) => {}
+            last_usage = report.usage;
+            match result {
+                Ok(()) | Err(TurnAbort::Cancelled | TurnAbort::Quit) => {}
                 Err(TurnAbort::Failed(e)) => return Err(e),
             }
             sink.emit(AgentEvent::TurnComplete, "turn-complete");
@@ -975,8 +978,8 @@ async fn headless(
         client.max_tool_rounds(),
     );
     let result: Result<()> = tokio::select! {
-        r = turn => match r {
-            Ok(_) | Err(TurnAbort::Cancelled | TurnAbort::Quit) => Ok(()),
+        outcome = turn => match outcome.result {
+            Ok(()) | Err(TurnAbort::Cancelled | TurnAbort::Quit) => Ok(()),
             Err(TurnAbort::Failed(e)) => Err(e),
         },
         () = shutdown_signal() => {
