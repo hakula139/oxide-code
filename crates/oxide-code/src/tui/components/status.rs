@@ -22,6 +22,7 @@ const TICKS_PER_FRAME: usize = 5;
 pub(crate) struct StatusBar {
     theme: Theme,
     line: StatusLine,
+    current_time_minute: Option<u16>,
     model: String,
     effort: Option<Effort>,
     title: Option<String>,
@@ -52,9 +53,13 @@ impl StatusBar {
         cwd: String,
         git_branch: Option<String>,
     ) -> Self {
+        let current_time_minute = segments
+            .contains(&StatusLineSegment::CurrentTime)
+            .then(current_time_minute);
         Self {
             theme: theme.clone(),
             line: StatusLine::new(segments),
+            current_time_minute,
             model,
             effort,
             title: None,
@@ -118,18 +123,30 @@ impl StatusBar {
         self.usage
     }
 
-    /// Returns `true` if the spinner frame advanced (caller should repaint).
+    /// Returns `true` when time or animation state changed and the caller should repaint.
     pub(crate) fn tick(&mut self) -> bool {
-        if !is_animated(&self.status) {
+        let mut dirty = self.refresh_current_time();
+        if is_animated(&self.status) {
+            self.tick_counter += 1;
+            if self.tick_counter >= TICKS_PER_FRAME {
+                self.tick_counter = 0;
+                self.spinner_frame = (self.spinner_frame + 1) % SPINNER_FRAMES.len();
+                dirty = true;
+            }
+        }
+        dirty
+    }
+
+    fn refresh_current_time(&mut self) -> bool {
+        let Some(previous) = self.current_time_minute else {
+            return false;
+        };
+        let current = current_time_minute();
+        if current == previous {
             return false;
         }
-        self.tick_counter += 1;
-        if self.tick_counter >= TICKS_PER_FRAME {
-            self.tick_counter = 0;
-            self.spinner_frame = (self.spinner_frame + 1) % SPINNER_FRAMES.len();
-            return true;
-        }
-        false
+        self.current_time_minute = Some(current);
+        true
     }
 }
 
@@ -191,6 +208,11 @@ fn is_animated(status: &Status) -> bool {
         status,
         Status::Streaming | Status::ToolRunning { .. } | Status::Compacting | Status::Cancelling,
     )
+}
+
+fn current_time_minute() -> u16 {
+    let now = time::OffsetDateTime::now_utc().to_offset(crate::util::time::local_offset());
+    u16::from(now.hour()) * 60 + u16::from(now.minute())
 }
 
 #[cfg(test)]
@@ -309,6 +331,25 @@ mod tests {
         assert!(!bar.tick());
         assert_eq!(bar.spinner_frame, 0);
         assert_eq!(bar.tick_counter, 0);
+    }
+
+    #[test]
+    fn tick_idle_current_time_marks_dirty_on_minute_change() {
+        let mut bar = StatusBar::new(
+            &Theme::default(),
+            vec![StatusLineSegment::CurrentTime],
+            "test-model".to_owned(),
+            None,
+            "~/test".to_owned(),
+            None,
+        );
+        let current = current_time_minute();
+        bar.current_time_minute = Some((current + 1) % 1440);
+
+        assert!(bar.tick());
+        assert_eq!(bar.current_time_minute, Some(current));
+        assert!(!bar.tick());
+        assert_eq!(bar.spinner_frame, 0);
     }
 
     #[test]
