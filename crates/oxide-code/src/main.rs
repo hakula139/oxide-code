@@ -579,7 +579,10 @@ impl AgentLoopTask {
                 self.last_usage = report.usage;
                 if let Some(usage) = report.usage {
                     self.displayed_usage = Some(usage);
-                    if let Some(cost) = estimate_usage_cost_usd(&self.client, usage) {
+                    if let Some(cost) = report
+                        .billable_usage
+                        .and_then(|usage| estimate_usage_cost_usd(&self.client, usage))
+                    {
                         self.total_estimated_cost_usd += cost;
                     }
                     self.emit_usage_update();

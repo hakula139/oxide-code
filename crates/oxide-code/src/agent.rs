@@ -113,6 +113,17 @@ impl TokenUsage {
         self.output
     }
 
+    fn add(self, other: Self) -> Self {
+        Self {
+            input: self.input.saturating_add(other.input),
+            cache_creation_input: self
+                .cache_creation_input
+                .saturating_add(other.cache_creation_input),
+            cache_read_input: self.cache_read_input.saturating_add(other.cache_read_input),
+            output: self.output.saturating_add(other.output),
+        }
+    }
+
     fn observe(&mut self, usage: &Usage) {
         if usage.input_tokens > 0 {
             self.input = usage.input_tokens;
@@ -132,6 +143,7 @@ impl TokenUsage {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct TurnReport {
     pub(crate) usage: Option<TokenUsage>,
+    pub(crate) billable_usage: Option<TokenUsage>,
 }
 
 pub(crate) struct AutoCompact<'a> {
@@ -162,6 +174,7 @@ pub(crate) async fn agent_turn(
     let tool_defs = tools.definitions();
     let mut pending_prompts: Vec<String> = Vec::new();
     let mut latest_usage = None;
+    let mut billable_usage = None;
 
     for _ in 0..max_tool_rounds.unwrap_or(u32::MAX) {
         strip_trailing_thinking(messages);
@@ -175,7 +188,11 @@ pub(crate) async fn agent_turn(
             &mut pending_prompts,
         )
         .await??;
-        latest_usage = usage.or(latest_usage);
+        if let Some(usage) = usage {
+            latest_usage = Some(usage);
+            billable_usage =
+                Some(billable_usage.map_or(usage, |total: TokenUsage| total.add(usage)));
+        }
 
         let tool_uses = collect_tool_uses(&blocks);
         let assistant_msg = Message {
@@ -189,6 +206,7 @@ pub(crate) async fn agent_turn(
             messages.push(assistant_msg);
             return Ok(TurnReport {
                 usage: latest_usage,
+                billable_usage,
             });
         }
 
@@ -892,6 +910,51 @@ mod tests {
                         input_tokens,
                         cache_creation_input_tokens: 0,
                         cache_read_input_tokens: 0,
+                        output_tokens: 0,
+                    }),
+                },
+            },
+            StreamEvent::ContentBlockStart {
+                index: 0,
+                content_block: ContentBlockInfo::Text {
+                    text: String::new(),
+                },
+            },
+            StreamEvent::ContentBlockDelta {
+                index: 0,
+                delta: Delta::TextDelta { text: text.into() },
+            },
+            StreamEvent::MessageDelta {
+                delta: MessageDeltaBody {
+                    stop_reason: Some("end_turn".into()),
+                },
+                usage: Some(Usage {
+                    input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                    cache_read_input_tokens: 0,
+                    output_tokens,
+                }),
+            },
+            StreamEvent::MessageStop,
+        ]
+    }
+
+    fn text_turn_with_cache_usage(
+        text: &str,
+        input_tokens: u32,
+        cache_creation_input_tokens: u32,
+        cache_read_input_tokens: u32,
+        output_tokens: u32,
+    ) -> Vec<StreamEvent> {
+        vec![
+            StreamEvent::MessageStart {
+                message: MessageResponse {
+                    id: "msg_1".into(),
+                    model: "claude-sonnet-4-6".into(),
+                    usage: Some(Usage {
+                        input_tokens,
+                        cache_creation_input_tokens,
+                        cache_read_input_tokens,
                         output_tokens: 0,
                     }),
                 },
@@ -1628,6 +1691,42 @@ mod tests {
         .unwrap();
 
         assert_eq!(report.usage.map(TokenUsage::total_tokens), Some(107));
+        assert_eq!(
+            report.billable_usage.map(TokenUsage::total_tokens),
+            Some(107)
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_turn_reports_cache_usage_for_context_and_cost() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let client = FakeClient::new(vec![text_turn_with_cache_usage("Hello!", 10, 20, 30, 5)]);
+        let tools = ToolRegistry::new(Vec::new());
+        let sink = CapturingSink::new();
+        let mut messages = vec![Message::user("hi")];
+
+        let report = agent_turn(
+            &client,
+            &tools,
+            &mut messages,
+            &empty_prompt(),
+            &sink,
+            &session,
+            &mut inert_user_rx(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let usage = report.usage.expect("stream reports usage");
+        assert_eq!(usage.input_tokens(), 10);
+        assert_eq!(usage.cache_creation_input_tokens(), 20);
+        assert_eq!(usage.cache_read_input_tokens(), 30);
+        assert_eq!(usage.output_tokens(), 5);
+        assert_eq!(usage.context_tokens(), 60);
+        assert_eq!(usage.total_tokens(), 65);
+        assert_eq!(report.billable_usage, Some(usage));
     }
 
     #[tokio::test]
@@ -1719,6 +1818,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(report.usage.map(TokenUsage::total_tokens), Some(3));
+        assert_eq!(
+            report.billable_usage.map(TokenUsage::total_tokens),
+            Some(14)
+        );
         assert_eq!(
             sink.events()
                 .iter()
