@@ -450,7 +450,7 @@ impl AgentLoopTask {
                 LoopControl::Continue
             }
             UserAction::Resume { session_id } => {
-                apply_resume(
+                let resumed = apply_resume(
                     &mut self.session,
                     &mut self.client,
                     &mut self.messages,
@@ -460,8 +460,10 @@ impl AgentLoopTask {
                     &session_id,
                 )
                 .await;
-                self.reset_auto_compaction();
-                self.reset_usage_display();
+                if resumed {
+                    self.reset_auto_compaction();
+                    self.reset_usage_display();
+                }
                 LoopControl::Continue
             }
             UserAction::Compact { instructions } => {
@@ -651,7 +653,7 @@ async fn apply_resume(
     file_tracker: &FileTracker,
     sink: &dyn AgentSink,
     target_id: &str,
-) {
+) -> bool {
     let outcome = match session::handle::roll_into(session, store, file_tracker, target_id).await {
         Ok(o) => o,
         Err(e) => {
@@ -662,7 +664,7 @@ async fn apply_resume(
                 )),
                 "resume-failed",
             );
-            return;
+            return false;
         }
     };
     let new_id = session.session_id().to_owned();
@@ -695,6 +697,7 @@ async fn apply_resume(
             "resume-drift-warning",
         );
     }
+    true
 }
 
 fn format_drift_warning(drifted: &[std::path::PathBuf]) -> String {
@@ -1129,6 +1132,53 @@ mod tests {
         assert!(matches!(
             event_rx.recv().await,
             Some(AgentEvent::ConfigChanged { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn handle_action_failed_resume_preserves_current_session_usage_state() {
+        let server = MockServer::start().await;
+        let config = test_config(server.uri(), api_key(), "claude-opus-4-7[1m]");
+        let client = Client::new(config, Some("sid".to_owned())).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let session = session::handle::start(&store, "claude-opus-4-7[1m]");
+        let original_id = session.session_id().to_owned();
+        let file_tracker = Arc::new(FileTracker::default());
+        let (sink, mut event_rx) = tui::event::channel();
+        let (_user_tx, user_rx) = agent::event::inert_user_action_channel();
+        let last_usage = TokenUsage::new(100_000, 10);
+        let displayed_usage = TokenUsage::new(90_000, 9);
+        let mut task = AgentLoopTask {
+            client,
+            tools: Arc::new(ToolRegistry::new(Vec::new())),
+            sink,
+            user_rx,
+            session,
+            messages: vec![Message::user("still here")],
+            store,
+            file_tracker,
+            auto_compaction_failures: 2,
+            last_usage: Some(last_usage),
+            displayed_usage: Some(displayed_usage),
+            total_estimated_cost_usd: 1.23,
+        };
+
+        let control = task
+            .handle_action(UserAction::Resume {
+                session_id: "missing-target-id".to_owned(),
+            })
+            .await;
+
+        assert!(matches!(control, LoopControl::Continue));
+        assert_eq!(task.session.session_id(), original_id);
+        assert_eq!(task.auto_compaction_failures, 2);
+        assert_eq!(task.last_usage, Some(last_usage));
+        assert_eq!(task.displayed_usage, Some(displayed_usage));
+        assert!((task.total_estimated_cost_usd - 1.23).abs() < f64::EPSILON);
+        assert!(matches!(
+            event_rx.recv().await,
+            Some(AgentEvent::Error(msg)) if msg.contains("still on session")
         ));
     }
 }
