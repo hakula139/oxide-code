@@ -334,6 +334,22 @@ mod tests {
     }
 
     #[test]
+    fn tick_without_current_time_segment_skips_minute_refresh() {
+        let mut bar = StatusBar::new(
+            &Theme::default(),
+            vec![StatusLineSegment::Model, StatusLineSegment::RunState],
+            "test-model".to_owned(),
+            None,
+            "~/test".to_owned(),
+            None,
+        );
+
+        assert_eq!(bar.current_time_minute, None);
+        assert!(!bar.tick());
+        assert_eq!(bar.current_time_minute, None);
+    }
+
+    #[test]
     fn tick_idle_current_time_marks_dirty_on_minute_change() {
         let mut bar = StatusBar::new(
             &Theme::default(),

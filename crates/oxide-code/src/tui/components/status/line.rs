@@ -320,18 +320,20 @@ mod tests {
 
     #[test]
     fn render_drops_low_utility_segments_before_usage_model_and_state() {
-        let text = render_text(
-            vec![
-                StatusLineSegment::CurrentTime,
-                StatusLineSegment::SessionCost,
-                StatusLineSegment::ContextUsed,
-                StatusLineSegment::Model,
-                StatusLineSegment::RunState,
-            ],
-            36,
-        );
+        let segments = vec![
+            StatusLineSegment::CurrentTime,
+            StatusLineSegment::SessionCost,
+            StatusLineSegment::ContextUsed,
+            StatusLineSegment::Model,
+            StatusLineSegment::RunState,
+        ];
 
-        assert_eq!(text, "  Ctx: 50% (100k/200k) │ m │ Ready");
+        assert_eq!(
+            render_text(segments.clone(), 34),
+            "  Ctx: 50% (100k/200k) │ m │ Ready",
+        );
+        assert_eq!(render_text(segments.clone(), 11), "  m │ Ready");
+        assert_eq!(render_text(segments, 10), "  Ready");
     }
 
     // ── context_label ──
