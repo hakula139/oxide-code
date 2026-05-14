@@ -34,8 +34,9 @@ Organized by topic. Each subdirectory mirrors the corresponding directory in [`d
 
 ## Terminal UI
 
-| Document                                             | Description                                            |
-| ---------------------------------------------------- | ------------------------------------------------------ |
-| [Overview](tui/overview.md)                          | Core stack, rendering strategy, streaming architecture |
-| [Cancellation and Queued Input](tui/cancellation.md) | Cancel, exit, and mid-turn queued prompts              |
-| [Welcome Screen](tui/welcome.md)                     | Empty-state renderer, `WelcomeSnapshot`, width ladder  |
+| Document                                             | Description                                              |
+| ---------------------------------------------------- | -------------------------------------------------------- |
+| [Overview](tui/overview.md)                          | Core stack, rendering strategy, streaming architecture   |
+| [Cancellation and Queued Input](tui/cancellation.md) | Cancel, exit, and mid-turn queued prompts                |
+| [Status Line](tui/status-line.md)                    | Configurable status-line segments and usage display      |
+| [Welcome Screen](tui/welcome.md)                     | Empty-state renderer, `WelcomeSnapshot`, width ladder    |
