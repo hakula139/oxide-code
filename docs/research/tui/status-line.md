@@ -1,10 +1,10 @@
 # Status Line (Reference)
 
-Research on status-line composition in terminal coding assistants. Sources are Claude Code, OpenAI Codex, opencode, and the user's managed Claude / Codex setup.
+Research on status-line composition in terminal coding assistants. Sources are Claude Code, OpenAI Codex, opencode, and local reference Claude / Codex configurations.
 
 ## Claude Code
 
-Claude Code delegates the whole status line to a command. The user's configured script renders:
+Claude Code delegates the whole status line to a command. The reference script renders:
 
 - Row 1: tty, current directory, git branch, and git dirtiness.
 - Row 2: model, context use, session cost, ccusage block / daily totals, and current time.
@@ -17,7 +17,7 @@ The useful data split is provider-local versus external:
 
 ## OpenAI Codex
 
-Codex exposes a roster-style `tui.status_line` array. The user's setup orders:
+Codex exposes a roster-style `tui.status_line` array. The reference config orders:
 
 - current directory
 - git branch

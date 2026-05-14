@@ -106,7 +106,7 @@ The TUI's `App::apply_session_compacted` clears the chat, pushes a single `Compa
 
 - **Pre-flight `count_tokens` API call.** All three reference CLIs use the API's `usage.total_tokens` from the previous response and accept the drift. When auto-compact ships, follow that convention.
 
-- **`/cost` companion.** Token / cost telemetry surface. Status-bar redesign plus `/cost` listed under "Later" in the roadmap.
+- **`/cost` companion.** The status line exposes local context and session-cost estimates. A command can later show detailed per-turn or account-level billing.
 
 ## Sources
 

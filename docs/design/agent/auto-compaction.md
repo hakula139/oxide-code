@@ -102,5 +102,5 @@ During TUI auto-compaction, the status bar uses the existing `Compacting` state.
 - Microcompact / prune for old tool-result bodies.
 - Anchored re-compaction that updates a previous summary in place.
 - Separate compaction model.
-- Token / cost status-bar redesign.
+- Persisted cost restore after resume.
 - Hook integration.

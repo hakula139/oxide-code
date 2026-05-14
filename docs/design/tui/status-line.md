@@ -12,15 +12,17 @@ The TUI status line should be an ordered roster of built-in segments. This ships
 
 Implemented segments:
 
-- current directory
-- git branch
-- model
-- model with effort
-- context used
-- estimated session cost
-- run state
-- thread title
-- current time
+| Segment                | Config value        |
+| ---------------------- | ------------------- |
+| current directory      | `current-dir`       |
+| git branch             | `git-branch`        |
+| model                  | `model`             |
+| model with effort      | `model-with-effort` |
+| context used           | `context-used`      |
+| estimated session cost | `session-cost`      |
+| run state              | `run-state`         |
+| thread title           | `thread-title`      |
+| current time           | `current-time`      |
 
 Out of scope:
 
@@ -33,19 +35,7 @@ Out of scope:
 
 ## Implementation
 
-Add `StatusLineSegment` in `config.rs` with TOML values:
-
-- `current-dir`
-- `git-branch`
-- `model`
-- `model-with-effort`
-- `context-used`
-- `session-cost`
-- `run-state`
-- `thread-title`
-- `current-time`
-
-`[tui] status_line = [...]` controls the order. `OX_STATUS_LINE` accepts the same comma-separated names. Segment colors and the separator glyph come from the active theme.
+Add `StatusLineSegment` in `config.rs` for the roster above. `[tui] status_line = [...]` controls the order. `OX_STATUS_LINE` accepts the same comma-separated names. Segment colors and the separator glyph come from the active theme.
 
 `StatusBar` keeps component state and delegates segment formatting to `tui/components/status/line.rs`.
 
@@ -83,7 +73,7 @@ status_line = [
 ]
 ```
 
-This differs from the user's Claude Code script in two ways:
+This differs from the reference Claude Code script in two ways:
 
 - oxide-code stays one row because Ratatui already owns the app chrome.
 - External billing data is omitted until there is a first-class provider boundary.

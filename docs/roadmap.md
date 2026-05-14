@@ -115,7 +115,7 @@ Persistence stance: session commands should feel reversible. Cross-session write
 - Auth slash commands.
 - Configurable instruction directories.
 
-### Status Line Redesign
+### Status Line Extensions
 
 - Additional segments for queue state, session identity, theme, account-limit usage, pull requests, and task progress.
 
