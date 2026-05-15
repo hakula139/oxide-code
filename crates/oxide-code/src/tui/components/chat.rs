@@ -416,6 +416,18 @@ impl ChatView {
             .scroll((self.scroll_offset, 0));
         frame.render_widget(paragraph, area);
     }
+
+    /// Current scroll offset in content rows. Used by [`crate::tui::selection`] to translate a
+    /// selection's screen-row coordinates into chat-content row indices.
+    pub(crate) fn scroll_offset(&self) -> u16 {
+        self.scroll_offset
+    }
+
+    /// Wrapped `Text` for the given viewport width. Materializes the same lines `render` paints,
+    /// so [`crate::tui::selection`] can extract substrings consistent with what's on screen.
+    pub(crate) fn rendered_text(&self, width: u16) -> Text<'static> {
+        self.build_text(width)
+    }
 }
 
 // ── Private Helpers ──

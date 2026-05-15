@@ -68,6 +68,10 @@ pub(crate) struct App {
     /// and read by `handle_crossterm_event` for left-click hit-testing. `None` while the pill
     /// is hidden (auto-scroll on, viewport too narrow, or content fits).
     jump_overlay_rect: Cell<Option<Rect>>,
+    /// Rect of the chat area on the most recent frame, set by `draw_frame`. Used as the bound
+    /// for mouse-drag text selection.
+    chat_rect: Cell<Option<Rect>>,
+    selection: super::selection::Selection,
     should_quit: bool,
     dirty: bool,
 }
@@ -121,6 +125,8 @@ impl App {
             modals: ModalStack::new(),
             preview_theme_snapshot: None,
             jump_overlay_rect: Cell::new(None),
+            chat_rect: Cell::new(None),
+            selection: super::selection::Selection::default(),
             should_quit: false,
             dirty: true,
         }
@@ -223,17 +229,65 @@ impl App {
         self.dirty = true;
     }
 
-    /// Routes a mouse event in priority order: hit-test app-owned overlays first, then fall
-    /// through to chat for wheel scroll. Returns silently when the click misses every target.
+    /// Routes a mouse event in priority order: jump-overlay click → drag-selection state machine
+    /// → wheel scroll on chat. Each branch returns silently when the click misses every target.
     fn handle_mouse_event(&mut self, event: &Event, mouse: MouseEvent) {
-        if let MouseEventKind::Down(MouseButton::Left) = mouse.kind
-            && let Some(rect) = self.jump_overlay_rect.get()
-            && rect_contains(rect, mouse.column, mouse.row)
-        {
-            self.chat.jump_to_bottom();
-            return;
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(rect) = self.jump_overlay_rect.get()
+                    && rect_contains(rect, mouse.column, mouse.row)
+                {
+                    self.chat.jump_to_bottom();
+                    return;
+                }
+                if let Some(chat_rect) = self.chat_rect.get()
+                    && rect_contains(chat_rect, mouse.column, mouse.row)
+                {
+                    self.selection.begin(mouse.column, mouse.row);
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if self.selection.is_dragging() {
+                    let clamped_col = self.chat_rect.get().map_or(mouse.column, |r| {
+                        mouse.column.clamp(r.x, r.x + r.width.saturating_sub(1))
+                    });
+                    let clamped_row = self.chat_rect.get().map_or(mouse.row, |r| {
+                        mouse.row.clamp(r.y, r.y + r.height.saturating_sub(1))
+                    });
+                    self.selection.update(clamped_col, clamped_row);
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                if self.selection.is_dragging() {
+                    self.copy_selection_to_clipboard();
+                    _ = self.selection.clear();
+                }
+            }
+            _ => {
+                self.chat.handle_event(event);
+            }
         }
-        self.chat.handle_event(event);
+    }
+
+    /// Materializes the current selection from the chat's rendered text and emits an OSC 52
+    /// set-clipboard sequence. No-op when there's no selection or when materialization clips out.
+    fn copy_selection_to_clipboard(&mut self) {
+        let Some(area) = self.chat_rect.get() else {
+            return;
+        };
+        let text = self.chat.rendered_text(area.width);
+        let scroll = self.chat.scroll_offset();
+        let Some(payload) = self.selection.materialize(&text, area, scroll) else {
+            return;
+        };
+        let (sequence, truncated) = super::selection::osc52_set_clipboard(&payload);
+        if let Err(error) = std::io::Write::write_all(&mut std::io::stdout(), &sequence) {
+            tracing::debug!(?error, "OSC 52 write failed");
+        }
+        if truncated {
+            self.chat
+                .push_system_message("Selection truncated to ~8 KB for the clipboard.".to_owned());
+        }
     }
 
     fn apply_modal_action(&mut self, action: ModalAction) {
@@ -715,11 +769,15 @@ impl App {
 
         self.status_bar.render(frame, chunks[0]);
         if self.chat.is_empty() && self.session_info.config.show_welcome {
+            self.chat_rect.set(None);
             let snap = WelcomeSnapshot::from_live(&self.session_info);
             welcome::paint(frame, chunks[1], &self.theme, &snap);
         } else {
             self.chat.render(frame, chunks[1]);
             self.render_jump_overlay(frame, chunks[1]);
+            self.chat_rect.set(Some(chunks[1]));
+            self.selection
+                .paint(frame.buffer_mut(), chunks[1], &self.theme);
         }
         if preview_height > 0 {
             self.render_preview(frame, chunks[2]);
@@ -1365,6 +1423,55 @@ mod tests {
         assert!(!rect_contains(rect, 2, 5), "past bottom edge");
         assert!(!rect_contains(Rect::new(0, 0, 0, 1), 0, 0), "zero-width");
         assert!(!rect_contains(Rect::new(0, 0, 1, 0), 0, 0), "zero-height");
+    }
+
+    #[test]
+    fn drag_in_chat_area_arms_selection_state_machine() {
+        // Down → Drag → Up over the cached chat rect must traverse the selection states.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.chat_rect.set(Some(Rect::new(0, 2, 80, 20)));
+
+        app.handle_crossterm_event(&Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 5,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert!(app.selection.is_dragging(), "down arms drag");
+
+        app.handle_crossterm_event(&Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: 12,
+            row: 7,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert!(app.selection.is_dragging(), "drag updates endpoint");
+
+        app.handle_crossterm_event(&Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: 12,
+            row: 7,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert!(
+            !app.selection.is_dragging(),
+            "up clears the in-flight selection"
+        );
+    }
+
+    #[test]
+    fn left_click_outside_chat_area_does_not_arm_selection() {
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.chat_rect.set(Some(Rect::new(0, 2, 80, 20)));
+
+        // Click in the status-bar row 0 (above chat_rect.y == 2).
+        app.handle_crossterm_event(&Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 5,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert!(!app.selection.is_dragging());
     }
 
     #[test]
