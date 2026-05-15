@@ -1,3 +1,5 @@
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use time::OffsetDateTime;
 use unicode_width::UnicodeWidthStr;
@@ -11,11 +13,29 @@ use crate::util::time::local_offset;
 const MAX_CURRENT_DIR_WIDTH: usize = 40;
 const MAX_GIT_BRANCH_WIDTH: usize = 32;
 const MAX_TITLE_WIDTH: usize = 40;
+/// Leading margin (cells) inside the status bar that lines up content with the chat block.
+const STATUS_LINE_MARGIN: u16 = 2;
 
 /// Ordered segment roster for one status-line render.
 #[derive(Debug, Clone)]
 pub(super) struct StatusLine {
     segments: Vec<StatusLineSegment>,
+}
+
+/// A rendered status line plus the buffer ranges that should be wrapped in OSC 8 hyperlinks.
+#[derive(Debug)]
+pub(super) struct RenderedStatusLine {
+    pub(super) line: Line<'static>,
+    pub(super) hyperlinks: Vec<RenderedHyperlink>,
+}
+
+/// Where a hyperlinked segment landed inside the rendered line. `col` is the cell column from
+/// the start of the line, before any block / area offset is applied.
+#[derive(Debug, Clone)]
+pub(super) struct RenderedHyperlink {
+    pub(super) col: u16,
+    pub(super) width: u16,
+    pub(super) url: String,
 }
 
 impl StatusLine {
@@ -28,7 +48,7 @@ impl StatusLine {
         theme: &Theme,
         state: &StatusLineState<'_>,
         width: u16,
-    ) -> Line<'static> {
+    ) -> RenderedStatusLine {
         let sep = theme.separator_span();
         let sep_width = UnicodeWidthStr::width(sep.content.as_ref());
         let mut rendered = self
@@ -38,22 +58,33 @@ impl StatusLine {
             .collect::<Vec<_>>();
         fit_segments(&mut rendered, usize::from(width), sep_width);
 
+        // Leading margin lines up content with the chat block underneath.
         let mut spans = vec![Span::raw("  ")];
-        let mut first = true;
-        for segment in rendered {
-            if !first {
+        let mut hyperlinks = Vec::new();
+        let mut col: u16 = STATUS_LINE_MARGIN;
+        let sep_w = u16::try_from(sep_width).unwrap_or(0);
+        for (index, segment) in rendered.iter().enumerate() {
+            if index > 0 {
                 spans.push(sep.clone());
+                col = col.saturating_add(sep_w);
             }
-            if let Some(url) = segment.hyperlink {
-                spans.push(osc8_open(&url));
-                spans.push(segment.span);
-                spans.push(osc8_close());
-            } else {
-                spans.push(segment.span);
+            let span_width = u16::try_from(segment.width()).unwrap_or(0);
+            if let Some(url) = &segment.hyperlink
+                && span_width > 0
+            {
+                hyperlinks.push(RenderedHyperlink {
+                    col,
+                    width: span_width,
+                    url: url.clone(),
+                });
             }
-            first = false;
+            spans.push(segment.span.clone());
+            col = col.saturating_add(span_width);
         }
-        Line::from(spans)
+        RenderedStatusLine {
+            line: Line::from(spans),
+            hyperlinks,
+        }
     }
 
     fn render_segment(
@@ -220,17 +251,28 @@ fn non_empty_span(label: String, style: ratatui::style::Style) -> Option<Span<'s
     (!label.is_empty()).then(|| Span::styled(label, style))
 }
 
-/// OSC 8 hyperlink opener (`ESC ] 8 ; ; URL ST`). Emitted as a `Span::raw` because the bytes
-/// carry no visible glyph. `unicode_width` reports 0 for control codes, so ratatui's column
-/// accounting passes the escape through without disturbing layout. Control chars in `url` are
-/// stripped so a malformed value cannot break out of the hyperlink envelope.
-fn osc8_open(url: &str) -> Span<'static> {
-    let sanitized: String = url.chars().filter(|c| !c.is_control()).collect();
-    Span::raw(format!("\x1b]8;;{sanitized}\x1b\\"))
-}
-
-fn osc8_close() -> Span<'static> {
-    Span::raw("\x1b]8;;\x1b\\")
+/// Wraps each non-empty cell symbol in `area` with an OSC 8 hyperlink envelope. Control chars in
+/// `url` are stripped so a malformed value cannot break out of the envelope. Cells whose symbol
+/// is whitespace are skipped so the link doesn't extend over the surrounding margin.
+///
+/// This works because crossterm's `Print` renders the cell symbol verbatim, while ratatui's
+/// `Buffer::set_string` filters control chars before they reach the cell. Setting the symbol
+/// directly via `Cell::set_symbol` bypasses that filter.
+pub(super) fn mark_url_hyperlink(buf: &mut Buffer, area: Rect, url: &str) {
+    let safe_url: String = url.chars().filter(|c| !c.is_control()).collect();
+    if safe_url.is_empty() {
+        return;
+    }
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            let cell = &mut buf[(x, y)];
+            let sym = cell.symbol().to_string();
+            if sym.trim().is_empty() {
+                continue;
+            }
+            cell.set_symbol(&format!("\x1b]8;;{safe_url}\x1b\\{sym}\x1b]8;;\x1b\\"));
+        }
+    }
 }
 
 fn model_with_effort(model: &str, effort: Option<Effort>) -> String {
@@ -294,7 +336,7 @@ mod tests {
             number: 86,
             url: "https://github.com/o/r/pull/86".to_owned(),
         };
-        let line = StatusLine::new(segments).render(
+        let rendered = StatusLine::new(segments).render(
             &Theme::default(),
             &StatusLineState {
                 model: "m",
@@ -312,7 +354,9 @@ mod tests {
             },
             width,
         );
-        line.spans
+        rendered
+            .line
+            .spans
             .into_iter()
             .map(|span| span.content)
             .collect::<String>()
@@ -338,7 +382,7 @@ mod tests {
 
     #[test]
     fn render_truncates_single_oversized_segment_to_width() {
-        let line = StatusLine::new(vec![StatusLineSegment::RunState]).render(
+        let rendered = StatusLine::new(vec![StatusLineSegment::RunState]).render(
             &Theme::default(),
             &StatusLineState {
                 model: "m",
@@ -352,7 +396,8 @@ mod tests {
             },
             12,
         );
-        let text = line
+        let text = rendered
+            .line
             .spans
             .into_iter()
             .map(|span| span.content)
@@ -408,26 +453,44 @@ mod tests {
             "wide width keeps every segment: {full}",
         );
         // Width 22 drops time (utility 1) before PR (2) and branch (3). Width 14 narrows further
-        // until only branch and run state remain. The OSC 8 wrapper measures as zero columns, so
-        // budget math doesn't change even with the escape bytes embedded.
-        let pr_open = "\x1b]8;;https://github.com/o/r/pull/86\x1b\\";
-        let pr_close = "\x1b]8;;\x1b\\";
-        assert_eq!(
-            render_text(segments.clone(), 22),
-            format!("  main │ {pr_open}#86{pr_close} │ Ready"),
-        );
+        // until only branch and run state remain.
+        assert_eq!(render_text(segments.clone(), 22), "  main │ #86 │ Ready");
         assert_eq!(render_text(segments, 14), "  main │ Ready");
     }
 
-    #[test]
-    fn pull_request_segment_emits_osc8_open_and_close_around_visible_text() {
-        let rendered = render_text(vec![StatusLineSegment::PullRequest], 80);
-        let url = "https://github.com/o/r/pull/86";
-        assert!(rendered.contains(&format!("\x1b]8;;{url}\x1b\\#86\x1b]8;;\x1b\\")));
+    fn pr_state() -> crate::util::git::PullRequest {
+        crate::util::git::PullRequest {
+            number: 86,
+            url: "https://github.com/o/r/pull/86".to_owned(),
+        }
     }
 
     #[test]
-    fn pull_request_segment_skips_osc8_when_absent() {
+    fn pull_request_segment_reports_hyperlink_range_for_post_render_marking() {
+        let pr = pr_state();
+        let rendered = StatusLine::new(vec![StatusLineSegment::PullRequest]).render(
+            &Theme::default(),
+            &StatusLineState {
+                model: "m",
+                effort: None,
+                title: None,
+                usage: None,
+                cwd: "~/repo",
+                git_branch: None,
+                pull_request: Some(&pr),
+                status_span: Span::raw("Ready"),
+            },
+            80,
+        );
+        // After the leading "  " margin the `#86` segment lives at col 2, width 3.
+        assert_eq!(rendered.hyperlinks.len(), 1);
+        assert_eq!(rendered.hyperlinks[0].col, 2);
+        assert_eq!(rendered.hyperlinks[0].width, 3);
+        assert_eq!(rendered.hyperlinks[0].url, pr.url);
+    }
+
+    #[test]
+    fn pull_request_segment_reports_no_hyperlink_when_absent() {
         let rendered = StatusLine::new(vec![StatusLineSegment::PullRequest]).render(
             &Theme::default(),
             &StatusLineState {
@@ -442,19 +505,68 @@ mod tests {
             },
             80,
         );
-        let text: String = rendered.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(!text.contains("\x1b]8;;"), "no OSC 8 bytes when PR absent");
+        let text: String = rendered
+            .line
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(rendered.hyperlinks.is_empty(), "no PR → no hyperlink range");
         assert!(!text.contains('#'), "no PR number rendered when absent");
     }
 
-    // ── osc8_open ──
+    // ── mark_url_hyperlink ──
 
     #[test]
-    fn osc8_open_strips_control_chars_from_url() {
-        let span = osc8_open("https://example.com/\x1b\x07\x00ok");
+    fn mark_url_hyperlink_wraps_each_non_blank_cell_with_osc8() {
+        let area = Rect::new(0, 0, 5, 1);
+        let mut buf = Buffer::empty(area);
+        // Pre-paint "ab cd" in the buffer (col 2 is whitespace).
+        buf[(0, 0)].set_symbol("a");
+        buf[(1, 0)].set_symbol("b");
+        buf[(2, 0)].set_symbol(" ");
+        buf[(3, 0)].set_symbol("c");
+        buf[(4, 0)].set_symbol("d");
+
+        mark_url_hyperlink(&mut buf, area, "https://example.com");
+
         assert_eq!(
-            span.content.as_ref(),
-            "\x1b]8;;https://example.com/ok\x1b\\"
+            buf[(0, 0)].symbol(),
+            "\x1b]8;;https://example.com\x1b\\a\x1b]8;;\x1b\\",
+        );
+        assert_eq!(buf[(2, 0)].symbol(), " ", "whitespace cells stay untouched");
+        assert_eq!(
+            buf[(4, 0)].symbol(),
+            "\x1b]8;;https://example.com\x1b\\d\x1b]8;;\x1b\\",
+        );
+    }
+
+    #[test]
+    fn mark_url_hyperlink_strips_control_chars_from_url() {
+        let area = Rect::new(0, 0, 1, 1);
+        let mut buf = Buffer::empty(area);
+        buf[(0, 0)].set_symbol("x");
+
+        mark_url_hyperlink(&mut buf, area, "https://example.com/\x1b\x07\x00ok");
+
+        assert_eq!(
+            buf[(0, 0)].symbol(),
+            "\x1b]8;;https://example.com/ok\x1b\\x\x1b]8;;\x1b\\",
+        );
+    }
+
+    #[test]
+    fn mark_url_hyperlink_with_empty_url_is_noop() {
+        let area = Rect::new(0, 0, 1, 1);
+        let mut buf = Buffer::empty(area);
+        buf[(0, 0)].set_symbol("x");
+
+        mark_url_hyperlink(&mut buf, area, "\x1b\x07");
+
+        assert_eq!(
+            buf[(0, 0)].symbol(),
+            "x",
+            "no wrap when sanitized URL is empty"
         );
     }
 

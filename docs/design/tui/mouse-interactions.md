@@ -46,9 +46,9 @@ Truncation walks back to a UTF-8 char boundary so the encoded string is always v
 
 ## OSC 8 hyperlinks
 
-The `pull-request` status segment renders `#NN` wrapped in OSC 8 hyperlink bytes (`\x1b]8;;<URL>\x1b\\#NN\x1b]8;;\x1b\\`). Modern terminals (iTerm2, WezTerm, kitty, Alacritty, foot, Konsole, Ghostty, recent Windows Terminal, GNOME Terminal) make the number Ctrl-clickable and open it via the user's browser. Older terminals print the bytes verbatim and just show `#NN` as plain text.
+The `pull-request` status segment renders `#NN` as plain spans, then the parent `StatusBar` post-paints OSC 8 escape bytes onto each cell of the segment so modern terminals (iTerm2, WezTerm, kitty, Alacritty, foot, Konsole, Ghostty, recent Windows Terminal, GNOME Terminal) make the number Ctrl-clickable and open it via the user's browser. Older terminals print the bytes verbatim and just show `#NN` as plain text.
 
-The escape bytes ride zero-width `Span::raw`s emitted around the visible span at line-assembly time. `unicode_width::UnicodeWidthStr` reports 0 for control codes, so column accounting and `fit_segments`'s drop ordering see only the `#NN` width.
+Direct embedding of escape bytes inside `Span::raw` does not survive ratatui's renderer: `Buffer::set_string` filters out any grapheme that contains a control char, so the leading and trailing `\x1b` are stripped while the printable bytes (`]8;;<URL>\\#NN]8;;\\`) leak into the output as visible text. The fix is to bypass that filter via `Cell::set_symbol`, which stores the symbol verbatim and the crossterm Backend prints it unchanged. `StatusLine::render` returns the cell-column ranges of every hyperlinked segment alongside the line, and `StatusBar::render` runs `mark_url_hyperlink` over each range after the line is painted. Control chars in the URL are stripped to keep a malformed value from breaking out of the OSC 8 envelope.
 
 ## Selection escape hatches
 

@@ -16,7 +16,7 @@ use crate::tui::glyphs::SPINNER_FRAMES;
 use crate::tui::theme::Theme;
 use crate::util::git;
 
-use self::line::{StatusLine, StatusLineState};
+use self::line::{RenderedStatusLine, StatusLine, StatusLineState, mark_url_hyperlink};
 
 const TICKS_PER_FRAME: usize = 5;
 
@@ -233,10 +233,21 @@ impl StatusBar {
             .borders(Borders::BOTTOM)
             .border_style(self.theme.border_unfocused())
             .style(self.theme.surface());
-        frame.render_widget(
-            Paragraph::new(self.render_line(area.width)).block(block),
-            area,
-        );
+        let rendered = self.render_line(area.width);
+        // Inside the block the content row is `area.y` (no top border) starting at `area.x`.
+        let content_y = area.y;
+        let content_x = area.x;
+        frame.render_widget(Paragraph::new(rendered.line).block(block), area);
+        for link in &rendered.hyperlinks {
+            let link_x = content_x.saturating_add(link.col);
+            let max_width = area.x.saturating_add(area.width).saturating_sub(link_x);
+            let width = link.width.min(max_width);
+            if width == 0 {
+                continue;
+            }
+            let link_rect = Rect::new(link_x, content_y, width, 1);
+            mark_url_hyperlink(frame.buffer_mut(), link_rect, &link.url);
+        }
     }
 }
 
@@ -263,7 +274,7 @@ impl StatusBar {
         Span::styled(format!("{spinner} {label}"), self.theme.info())
     }
 
-    fn render_line(&self, width: u16) -> ratatui::text::Line<'static> {
+    fn render_line(&self, width: u16) -> RenderedStatusLine {
         self.line.render(
             &self.theme,
             &StatusLineState {
