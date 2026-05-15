@@ -2399,6 +2399,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_turn_safety_cap_bail_preserves_completed_round_usage() {
+        // Each capped round reports usage. The cap-trip abort must still fold every round into
+        // billable_usage so the caller bills what the API charged for.
+        const CAP: u32 = 2;
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let turns: Vec<Vec<StreamEvent>> = (0..CAP)
+            .map(|i| tool_use_turn_with_usage(&format!("tool_{i}"), "echo", r"{}", 5, 2))
+            .collect();
+        let client = FakeClient::new(turns);
+        let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
+        let sink = CapturingSink::new();
+        let mut messages = vec![Message::user("loop forever")];
+
+        let outcome = agent_turn(
+            &client,
+            &tools,
+            &mut messages,
+            &empty_prompt(),
+            &sink,
+            &session,
+            &mut inert_user_rx(),
+            Some(CAP),
+        )
+        .await;
+
+        assert!(
+            matches!(outcome.result, Err(TurnAbort::Failed(_))),
+            "got {:?}",
+            outcome.result,
+        );
+        assert_eq!(
+            outcome.report.billable_usage.map(TokenUsage::total_tokens),
+            Some(CAP * 7),
+            "every capped round must reach billable_usage: {:?}",
+            outcome.report,
+        );
+    }
+
+    #[tokio::test]
     async fn agent_turn_with_none_cap_runs_unbounded_until_text_only_reply() {
         // The cap is None, so the loop must not bail on its own; it terminates only when the
         // model produces a text-only round. Pin that an arbitrary multi-round chain still
@@ -2461,6 +2501,51 @@ mod tests {
         assert!(
             msg.contains("Servers overloaded"),
             "message in error: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_turn_failed_after_completed_round_preserves_billable_usage() {
+        // Round 1 completes with reported usage. Round 2 emits a stream Error so the turn
+        // bails with TurnAbort::Failed. The completed round's usage must still ride out on
+        // billable_usage so the caller bills what the API charged for.
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let client = FakeClient::new(vec![
+            tool_use_turn_with_usage("tool_1", "echo", r"{}", 9, 4),
+            vec![StreamEvent::Error {
+                error: ApiError {
+                    error_type: "overloaded_error".into(),
+                    message: "Servers overloaded".into(),
+                },
+            }],
+        ]);
+        let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
+        let sink = CapturingSink::new();
+        let mut messages = vec![Message::user("hi")];
+
+        let outcome = agent_turn(
+            &client,
+            &tools,
+            &mut messages,
+            &empty_prompt(),
+            &sink,
+            &session,
+            &mut inert_user_rx(),
+            None,
+        )
+        .await;
+
+        assert!(
+            matches!(outcome.result, Err(TurnAbort::Failed(_))),
+            "got {:?}",
+            outcome.result,
+        );
+        assert_eq!(
+            outcome.report.billable_usage.map(TokenUsage::total_tokens),
+            Some(13),
+            "round 1 usage must reach the caller despite the bail: {:?}",
+            outcome.report,
         );
     }
 
