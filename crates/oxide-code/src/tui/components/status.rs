@@ -38,17 +38,14 @@ pub(crate) struct StatusBar {
     title: Option<String>,
     usage: Option<UsageSnapshot>,
     cwd: String,
-    /// Working directory for git probes. `None` collapses every probe to a no-op.
+    /// `None` collapses every git probe to a no-op.
     git_cwd: Option<PathBuf>,
     git_branch: Option<String>,
-    /// Open pull request number for `git_branch`. `None` until the first probe completes.
     pull_request: Option<u64>,
     /// `true` while the `pull-request` segment is configured. Skips the `gh` probe entirely when
     /// the user hasn't opted in.
     track_pull_request: bool,
-    /// Last time the git branch was probed. `None` until the first tick.
     last_branch_probe: Option<Instant>,
-    /// Last time the pull request was probed. `None` until the first tick.
     last_pr_probe: Option<Instant>,
     status: Status,
     spinner_frame: usize,

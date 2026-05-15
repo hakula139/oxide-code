@@ -118,10 +118,9 @@ pub(super) struct StatusLineState<'a> {
     pub(super) effort: Option<Effort>,
     pub(super) title: Option<&'a str>,
     pub(super) usage: Option<UsageSnapshot>,
-    /// Tildified working directory; rendered as-is, no further `~` substitution.
+    /// Already tilde-expanded, so the renderer must not substitute `~` again.
     pub(super) cwd: &'a str,
     pub(super) git_branch: Option<&'a str>,
-    /// Open pull request number for the current branch, when one is detected.
     pub(super) pull_request: Option<u64>,
     /// Pre-rendered run-state segment from the parent component.
     pub(super) status_span: Span<'static>,
@@ -162,6 +161,8 @@ fn fit_segments(segments: &mut Vec<RenderedSegment>, max_width: usize, sep_width
     if total_width(segments, sep_width) <= max_width {
         return;
     }
+    // The drop loop only stops with `segments.len() <= 1`, so truncating the widest is the
+    // single-survivor truncation path even though the iterator wording suggests otherwise.
     let content_width = max_width
         .saturating_sub(2)
         .saturating_sub(sep_width.saturating_mul(segments.len().saturating_sub(1)));

@@ -144,14 +144,13 @@ impl TokenUsage {
     }
 }
 
-/// Per-turn usage report emitted at the end of [`agent_turn`]. The two fields carry different
-/// temporal meanings and resist being collapsed into one.
+/// Per-turn usage report emitted at the end of [`agent_turn`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct TurnReport {
-    /// Latest single round's usage. Drives auto-compaction threshold checks, where the trigger
-    /// depends on the most recent prompt size rather than the historical sum.
+    /// Latest single round's usage, used by the auto-compaction threshold check (which compares
+    /// against the most recent prompt size, not the historical sum).
     pub(crate) usage: Option<TokenUsage>,
-    /// Sum of every round's usage in this turn. Drives session cost accumulation, since each
+    /// Sum of every round's usage in this turn, used by session cost accumulation since each
     /// round was billed independently.
     pub(crate) billable_usage: Option<TokenUsage>,
 }
@@ -180,8 +179,7 @@ impl TurnOutcome {
         }
     }
 
-    /// Test helper: returns the report on success or panics with the abort. Mirrors
-    /// `Result::unwrap`.
+    /// Mirrors `Result::unwrap`: returns the report on success or panics with the abort.
     #[cfg(test)]
     pub(crate) fn unwrap(self) -> TurnReport {
         match self.result {
@@ -190,7 +188,7 @@ impl TurnOutcome {
         }
     }
 
-    /// Test helper: returns the report on success or panics with the abort and `msg`.
+    /// Mirrors `Result::expect`: returns the report on success or panics with the abort and `msg`.
     #[cfg(test)]
     pub(crate) fn expect(self, msg: &str) -> TurnReport {
         match self.result {
@@ -199,7 +197,7 @@ impl TurnOutcome {
         }
     }
 
-    /// Test helper: returns the abort on failure or panics. Mirrors `Result::expect_err`.
+    /// Mirrors `Result::expect_err`: returns the abort on failure or panics.
     #[cfg(test)]
     pub(crate) fn expect_err(self, msg: &str) -> TurnAbort {
         match self.result {
