@@ -58,7 +58,7 @@ impl StatusLine {
         let span = match segment {
             StatusLineSegment::CurrentDir => non_empty_span(
                 truncate_to_width(state.cwd, MAX_CURRENT_DIR_WIDTH),
-                Self::segment_style(theme, SegmentStyle::Dim),
+                Self::segment_style(theme, SegmentStyle::Muted),
             ),
             StatusLineSegment::GitBranch => state.git_branch.map(|branch| {
                 Span::styled(
