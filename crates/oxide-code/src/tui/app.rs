@@ -1360,6 +1360,75 @@ mod tests {
     }
 
     #[test]
+    fn handle_crossterm_resize_schedules_dirty_for_relayout() {
+        // Resize falls through to `dirty = true` so the next tick re-splits with the new area.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.dirty = false;
+        app.handle_crossterm_event(&Event::Resize(80, 24));
+        assert!(app.dirty, "Resize must trigger a re-layout render");
+    }
+
+    #[test]
+    fn handle_crossterm_unknown_event_is_a_noop() {
+        // The `_ => return` arm prevents FocusGained / FocusLost / Paste from forcing re-renders.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.dirty = false;
+        app.handle_crossterm_event(&Event::FocusGained);
+        assert!(!app.dirty);
+    }
+
+    #[test]
+    fn handle_crossterm_scroll_key_routes_to_chat_while_input_disabled() {
+        // While input is disabled, arrow / page keys must still reach chat for scrolling.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.input.set_enabled(false);
+        app.handle_crossterm_event(&key_event(KeyCode::PageUp, KeyModifiers::NONE));
+        assert!(app.dirty);
+    }
+
+    #[tokio::test]
+    async fn handle_crossterm_popup_enter_dispatches_canonical_command() {
+        // `/h` filters to /help; Enter dispatches it. /help is read-only so chat
+        // lands a system message instead of forwarding to the agent.
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.handle_crossterm_event(&key_event(KeyCode::Char('/'), KeyModifiers::NONE));
+        app.handle_crossterm_event(&key_event(KeyCode::Char('h'), KeyModifiers::NONE));
+        assert!(app.input.popup_visible());
+
+        app.handle_crossterm_event(&key_event(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(!app.input.popup_visible(), "submit clears popup");
+        assert!(
+            !app.chat.last_is_error(),
+            "/help must produce a system message, not an error",
+        );
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "slash command stays client-side",
+        );
+    }
+
+    #[test]
+    fn handle_crossterm_popup_tab_completes_canonical_name_into_buffer() {
+        // Tab inserts `/{name} ` and hides the popup. Filter to /help so the test pins
+        // the completion shape independent of BUILT_INS ordering.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.handle_crossterm_event(&key_event(KeyCode::Char('/'), KeyModifiers::NONE));
+        app.handle_crossterm_event(&key_event(KeyCode::Char('h'), KeyModifiers::NONE));
+
+        app.handle_crossterm_event(&key_event(KeyCode::Tab, KeyModifiers::NONE));
+
+        assert!(!app.input.popup_visible(), "Tab hides the popup");
+        assert_eq!(
+            app.input.lines(),
+            vec!["/help ".to_owned()],
+            "buffer reflects the completed canonical name + space",
+        );
+    }
+
+    // ── handle_mouse_event ──
+
+    #[test]
     fn left_click_on_jump_overlay_jumps_chat_to_bottom() {
         // Cache a known jump-overlay rect, scroll the chat up, and confirm a left-click inside
         // the rect snaps back to bottom and re-arms auto-scroll.
@@ -1450,73 +1519,6 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         }));
         assert!(!app.selection.is_dragging());
-    }
-
-    #[test]
-    fn handle_crossterm_resize_schedules_dirty_for_relayout() {
-        // Resize falls through to `dirty = true` so the next tick re-splits with the new area.
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        app.dirty = false;
-        app.handle_crossterm_event(&Event::Resize(80, 24));
-        assert!(app.dirty, "Resize must trigger a re-layout render");
-    }
-
-    #[test]
-    fn handle_crossterm_unknown_event_is_a_noop() {
-        // The `_ => return` arm prevents FocusGained / FocusLost / Paste from forcing re-renders.
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        app.dirty = false;
-        app.handle_crossterm_event(&Event::FocusGained);
-        assert!(!app.dirty);
-    }
-
-    #[test]
-    fn handle_crossterm_scroll_key_routes_to_chat_while_input_disabled() {
-        // While input is disabled, arrow / page keys must still reach chat for scrolling.
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        app.input.set_enabled(false);
-        app.handle_crossterm_event(&key_event(KeyCode::PageUp, KeyModifiers::NONE));
-        assert!(app.dirty);
-    }
-
-    #[tokio::test]
-    async fn handle_crossterm_popup_enter_dispatches_canonical_command() {
-        // `/h` filters to /help; Enter dispatches it. /help is read-only so chat
-        // lands a system message instead of forwarding to the agent.
-        let (mut app, mut rx, _agent_tx) = test_app(None);
-        app.handle_crossterm_event(&key_event(KeyCode::Char('/'), KeyModifiers::NONE));
-        app.handle_crossterm_event(&key_event(KeyCode::Char('h'), KeyModifiers::NONE));
-        assert!(app.input.popup_visible());
-
-        app.handle_crossterm_event(&key_event(KeyCode::Enter, KeyModifiers::NONE));
-
-        assert!(!app.input.popup_visible(), "submit clears popup");
-        assert!(
-            !app.chat.last_is_error(),
-            "/help must produce a system message, not an error",
-        );
-        assert!(
-            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
-            "slash command stays client-side",
-        );
-    }
-
-    #[test]
-    fn handle_crossterm_popup_tab_completes_canonical_name_into_buffer() {
-        // Tab inserts `/{name} ` and hides the popup. Filter to /help so the test pins
-        // the completion shape independent of BUILT_INS ordering.
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        app.handle_crossterm_event(&key_event(KeyCode::Char('/'), KeyModifiers::NONE));
-        app.handle_crossterm_event(&key_event(KeyCode::Char('h'), KeyModifiers::NONE));
-
-        app.handle_crossterm_event(&key_event(KeyCode::Tab, KeyModifiers::NONE));
-
-        assert!(!app.input.popup_visible(), "Tab hides the popup");
-        assert_eq!(
-            app.input.lines(),
-            vec!["/help ".to_owned()],
-            "buffer reflects the completed canonical name + space",
-        );
     }
 
     // ── modal gate ──

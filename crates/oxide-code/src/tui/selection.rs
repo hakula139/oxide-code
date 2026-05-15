@@ -223,7 +223,15 @@ mod tests {
         Cell { col, row }
     }
 
-    // ── Selection state ──
+    fn fixture_text() -> Text<'static> {
+        Text::from(vec![
+            Line::from("hello world"),
+            Line::from("second line"),
+            Line::from("third"),
+        ])
+    }
+
+    // ── Selection ──
 
     #[test]
     fn begin_then_update_tracks_drag_endpoint() {
@@ -267,15 +275,7 @@ mod tests {
         assert!(s.normalized().is_none(), "click without drag");
     }
 
-    // ── Materialization (line-rect) ──
-
-    fn fixture_text() -> Text<'static> {
-        Text::from(vec![
-            Line::from("hello world"),
-            Line::from("second line"),
-            Line::from("third"),
-        ])
-    }
+    // ── materialize ──
 
     #[test]
     fn materialize_single_row_returns_substring() {
@@ -309,16 +309,15 @@ mod tests {
     }
 
     #[test]
-    fn materialize_clips_to_area_bounds() {
+    fn materialize_returns_none_when_drag_starts_below_area() {
         let mut s = Selection::default();
         s.begin(0, 5);
         s.update(99, 99);
         let area = Rect::new(0, 0, 80, 3);
-        // Drag starts below the chat area entirely.
         assert!(s.materialize(&fixture_text(), area, 0).is_none());
     }
 
-    // ── CJK round-trip ──
+    // ── slice_line ──
 
     #[test]
     fn slice_line_keeps_cjk_chars_whole_at_each_boundary() {
@@ -351,6 +350,8 @@ mod tests {
         assert_eq!(slice_line(&line, 1, 4), "cho");
     }
 
+    // ── osc52_set_clipboard ──
+
     #[test]
     fn osc52_round_trips_cjk_bytes() {
         let payload = "Hello 你好 🌏 World";
@@ -376,6 +377,8 @@ mod tests {
         assert_eq!(decoded.len(), OSC52_PAYLOAD_BYTES);
     }
 
+    // ── floor_to_char_boundary ──
+
     #[test]
     fn floor_to_char_boundary_walks_back_through_multibyte() {
         // `好` is 3 bytes (e5 a5 bd). Cap inside the 2nd or 3rd byte must rewind to the start.
@@ -385,7 +388,7 @@ mod tests {
         assert_eq!(floor_to_char_boundary(s, 4), 4, "between 好 and B");
     }
 
-    // ── Painting ──
+    // ── paint ──
 
     #[test]
     fn paint_applies_selection_style_to_in_area_cells() {
