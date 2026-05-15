@@ -66,9 +66,9 @@ impl StatusLine {
                     Self::segment_style(theme, SegmentStyle::Accent),
                 )
             }),
-            StatusLineSegment::PullRequest => state.pull_request.map(|number| {
+            StatusLineSegment::PullRequest => state.pull_request.map(|pr| {
                 Span::styled(
-                    format!("#{number}"),
+                    format!("#{}", pr.number),
                     Self::segment_style(theme, SegmentStyle::Accent),
                 )
             }),
@@ -121,7 +121,7 @@ pub(super) struct StatusLineState<'a> {
     /// Already tilde-expanded, so the renderer must not substitute `~` again.
     pub(super) cwd: &'a str,
     pub(super) git_branch: Option<&'a str>,
-    pub(super) pull_request: Option<u64>,
+    pub(super) pull_request: Option<&'a crate::util::git::PullRequest>,
     /// Pre-rendered run-state segment from the parent component.
     pub(super) status_span: Span<'static>,
 }
@@ -263,6 +263,10 @@ mod tests {
     use super::*;
 
     fn render_text(segments: Vec<StatusLineSegment>, width: u16) -> String {
+        let pr = crate::util::git::PullRequest {
+            number: 86,
+            url: "https://github.com/o/r/pull/86".to_owned(),
+        };
         let line = StatusLine::new(segments).render(
             &Theme::default(),
             &StatusLineState {
@@ -276,7 +280,7 @@ mod tests {
                 }),
                 cwd: "~/repo",
                 git_branch: Some("main"),
-                pull_request: Some(86),
+                pull_request: Some(&pr),
                 status_span: Span::raw("Ready"),
             },
             width,

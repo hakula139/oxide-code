@@ -56,15 +56,22 @@ fn parse_branch(stdout: &[u8]) -> Option<String> {
     }
 }
 
-/// Probe the open pull request for `cwd`'s current branch via `gh pr view --json number --jq
-/// .number`. Returns `None` when `gh` is missing, the user is unauthenticated, or no PR is open.
-pub(crate) fn current_pull_request(cwd: &Path) -> Option<u64> {
+/// Open pull request for the current branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PullRequest {
+    pub(crate) number: u64,
+    pub(crate) url: String,
+}
+
+/// Probe the open pull request for `cwd`'s current branch via `gh pr view --json number,url`.
+/// Returns `None` when `gh` is missing, the user is unauthenticated, or no PR is open.
+pub(crate) fn current_pull_request(cwd: &Path) -> Option<PullRequest> {
     let Some(cwd_str) = cwd.to_str() else {
         debug!(cwd = ?cwd, "gh pr probe: cwd is not valid UTF-8");
         return None;
     };
     let output = match Command::new("gh")
-        .args(["pr", "view", "--json", "number", "--jq", ".number"])
+        .args(["pr", "view", "--json", "number,url"])
         .current_dir(cwd_str)
         .output()
     {
@@ -83,11 +90,17 @@ pub(crate) fn current_pull_request(cwd: &Path) -> Option<u64> {
         );
         return None;
     }
-    parse_pr_number(&output.stdout)
+    parse_pull_request(&output.stdout)
 }
 
-fn parse_pr_number(stdout: &[u8]) -> Option<u64> {
-    std::str::from_utf8(stdout).ok()?.trim().parse().ok()
+fn parse_pull_request(stdout: &[u8]) -> Option<PullRequest> {
+    let value: serde_json::Value = serde_json::from_slice(stdout).ok()?;
+    let number = value.get("number")?.as_u64()?;
+    let url = value.get("url")?.as_str()?.to_owned();
+    if url.is_empty() {
+        return None;
+    }
+    Some(PullRequest { number, url })
 }
 
 /// First non-blank stderr line, capped to keep log records terse. Surfaces the actionable signal
@@ -165,16 +178,23 @@ mod tests {
         assert_eq!(current_pull_request(dir.path()), None);
     }
 
-    // ── parse_pr_number ──
+    // ── parse_pull_request ──
 
     #[test]
-    fn parse_pr_number_keeps_positive_integers_and_drops_everything_else() {
-        assert_eq!(parse_pr_number(b"86\n"), Some(86));
-        assert_eq!(parse_pr_number(b"  12\n"), Some(12));
-        assert_eq!(parse_pr_number(b""), None);
-        assert_eq!(parse_pr_number(b"not-a-number\n"), None);
-        assert_eq!(parse_pr_number(b"-1\n"), None);
-        assert_eq!(parse_pr_number(&[0xff, b'\n']), None);
+    fn parse_pull_request_extracts_number_and_url() {
+        assert_eq!(
+            parse_pull_request(br#"{"number":86,"url":"https://github.com/o/r/pull/86"}"#),
+            Some(PullRequest {
+                number: 86,
+                url: "https://github.com/o/r/pull/86".to_owned(),
+            }),
+        );
+        assert_eq!(parse_pull_request(b""), None);
+        assert_eq!(parse_pull_request(b"not json"), None);
+        assert_eq!(parse_pull_request(br#"{"number":86}"#), None);
+        assert_eq!(parse_pull_request(br#"{"url":"https://x"}"#), None);
+        assert_eq!(parse_pull_request(br#"{"number":86,"url":""}"#), None);
+        assert_eq!(parse_pull_request(br#"{"number":-1,"url":"x"}"#), None);
     }
 
     // ── stderr_summary ──

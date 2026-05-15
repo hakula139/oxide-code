@@ -41,7 +41,7 @@ pub(crate) struct StatusBar {
     /// `None` collapses every git probe to a no-op.
     git_cwd: Option<PathBuf>,
     git_branch: Option<String>,
-    pull_request: Option<u64>,
+    pull_request: Option<git::PullRequest>,
     /// `true` while the `pull-request` segment is configured. Skips the `gh` probe entirely when
     /// the user hasn't opted in.
     track_pull_request: bool,
@@ -273,7 +273,7 @@ impl StatusBar {
                 usage: self.usage,
                 cwd: &self.cwd,
                 git_branch: self.git_branch.as_deref(),
-                pull_request: self.pull_request,
+                pull_request: self.pull_request.as_ref(),
                 status_span: self.status_span(),
             },
             width,
