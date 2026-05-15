@@ -3,7 +3,7 @@
 //! `debug` so they don't pollute normal use but are recoverable when the status bar misbehaves.
 
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use tracing::debug;
 
@@ -22,7 +22,6 @@ pub(crate) fn current_branch(cwd: &Path) -> Option<String> {
             "branch",
             "--show-current",
         ])
-        .stderr(Stdio::null())
         .output()
     {
         Ok(output) => output,
@@ -35,6 +34,7 @@ pub(crate) fn current_branch(cwd: &Path) -> Option<String> {
         debug!(
             cwd = cwd_str,
             code = output.status.code().unwrap_or(-1),
+            stderr = stderr_summary(&output.stderr),
             "git branch probe: non-zero exit",
         );
         return None;
@@ -66,7 +66,6 @@ pub(crate) fn current_pull_request(cwd: &Path) -> Option<u64> {
     let output = match Command::new("gh")
         .args(["pr", "view", "--json", "number", "--jq", ".number"])
         .current_dir(cwd_str)
-        .stderr(Stdio::null())
         .output()
     {
         Ok(output) => output,
@@ -79,6 +78,7 @@ pub(crate) fn current_pull_request(cwd: &Path) -> Option<u64> {
         debug!(
             cwd = cwd_str,
             code = output.status.code().unwrap_or(-1),
+            stderr = stderr_summary(&output.stderr),
             "gh pr probe: non-zero exit",
         );
         return None;
@@ -88,6 +88,21 @@ pub(crate) fn current_pull_request(cwd: &Path) -> Option<u64> {
 
 fn parse_pr_number(stdout: &[u8]) -> Option<u64> {
     std::str::from_utf8(stdout).ok()?.trim().parse().ok()
+}
+
+/// First non-blank stderr line, capped to keep log records terse. Surfaces the actionable signal
+/// (`auth required`, `no pull requests found`, `not a git repository`) without dumping a wall of
+/// hint text.
+fn stderr_summary(stderr: &[u8]) -> String {
+    const MAX_LEN: usize = 200;
+    let text = String::from_utf8_lossy(stderr);
+    let line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    let trimmed = line.trim();
+    if trimmed.len() <= MAX_LEN {
+        trimmed.to_owned()
+    } else {
+        format!("{}...", &trimmed[..MAX_LEN])
+    }
 }
 
 #[cfg(test)]
@@ -160,5 +175,20 @@ mod tests {
         assert_eq!(parse_pr_number(b"not-a-number\n"), None);
         assert_eq!(parse_pr_number(b"-1\n"), None);
         assert_eq!(parse_pr_number(&[0xff, b'\n']), None);
+    }
+
+    // ── stderr_summary ──
+
+    #[test]
+    fn stderr_summary_picks_first_meaningful_line_and_caps_length() {
+        assert_eq!(stderr_summary(b""), "");
+        assert_eq!(
+            stderr_summary(b"\n  \nfatal: not a git repository\nmore detail\n"),
+            "fatal: not a git repository",
+        );
+        let huge = vec![b'x'; 500];
+        let summary = stderr_summary(&huge);
+        assert_eq!(summary.len(), 203, "200 chars + '...': {summary}");
+        assert!(summary.ends_with("..."));
     }
 }
