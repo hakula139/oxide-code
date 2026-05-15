@@ -4,7 +4,6 @@
 //! loop multiplexing crossterm events, agent events, user actions, and a 60 FPS render tick.
 //! A dirty flag coalesces redraws so renders fire per state change rather than per event.
 
-use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -14,7 +13,7 @@ use crossterm::event::{
     Event, EventStream, KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind,
 };
 use futures::{Stream, StreamExt};
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 use tokio::sync::mpsc;
@@ -50,6 +49,12 @@ pub(crate) struct App {
     theme: Theme,
     status_bar: StatusBar,
     chat: ChatView,
+    /// Rect of the chat area on the most recent frame. Bounds drag-selection events.
+    chat_rect: Option<Rect>,
+    /// Rect of the jump-to-bottom pill on the most recent frame, or `None` while it's hidden.
+    jump_overlay_rect: Option<Rect>,
+    /// In-flight mouse-drag selection over the chat region.
+    selection: super::selection::Selection,
     input: InputArea,
     session_info: LiveSessionInfo,
     agent_rx: mpsc::Receiver<AgentEvent>,
@@ -64,14 +69,6 @@ pub(crate) struct App {
     modals: ModalStack,
     /// Theme saved when a `/theme` picker opens. Restored if the modal cancels.
     preview_theme_snapshot: Option<Theme>,
-    /// Rect of the jump-to-bottom pill on the most recent frame, set by `render_jump_overlay`
-    /// and read by `handle_crossterm_event` for left-click hit-testing. `None` while the pill
-    /// is hidden (auto-scroll on, viewport too narrow, or content fits).
-    jump_overlay_rect: Cell<Option<Rect>>,
-    /// Rect of the chat area on the most recent frame, set by `draw_frame`. Used as the bound
-    /// for mouse-drag text selection.
-    chat_rect: Cell<Option<Rect>>,
-    selection: super::selection::Selection,
     should_quit: bool,
     dirty: bool,
 }
@@ -114,6 +111,9 @@ impl App {
             theme: theme.clone(),
             status_bar,
             chat,
+            chat_rect: None,
+            jump_overlay_rect: None,
+            selection: super::selection::Selection::default(),
             input: InputArea::new(theme),
             session_info,
             agent_rx,
@@ -124,9 +124,6 @@ impl App {
             pending_prompts: VecDeque::new(),
             modals: ModalStack::new(),
             preview_theme_snapshot: None,
-            jump_overlay_rect: Cell::new(None),
-            chat_rect: Cell::new(None),
-            selection: super::selection::Selection::default(),
             should_quit: false,
             dirty: true,
         }
@@ -232,28 +229,31 @@ impl App {
     /// Routes a mouse event in priority order: jump-overlay click → drag-selection state machine
     /// → wheel scroll on chat. Each branch returns silently when the click misses every target.
     fn handle_mouse_event(&mut self, event: &Event, mouse: MouseEvent) {
+        let position = Position::new(mouse.column, mouse.row);
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                if let Some(rect) = self.jump_overlay_rect.get()
-                    && rect_contains(rect, mouse.column, mouse.row)
+                if let Some(rect) = self.jump_overlay_rect
+                    && rect.contains(position)
                 {
                     self.chat.jump_to_bottom();
                     return;
                 }
-                if let Some(chat_rect) = self.chat_rect.get()
-                    && rect_contains(chat_rect, mouse.column, mouse.row)
+                if let Some(chat_rect) = self.chat_rect
+                    && chat_rect.contains(position)
                 {
                     self.selection.begin(mouse.column, mouse.row);
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) => {
-                if self.selection.is_dragging() {
-                    let clamped_col = self.chat_rect.get().map_or(mouse.column, |r| {
-                        mouse.column.clamp(r.x, r.x + r.width.saturating_sub(1))
-                    });
-                    let clamped_row = self.chat_rect.get().map_or(mouse.row, |r| {
-                        mouse.row.clamp(r.y, r.y + r.height.saturating_sub(1))
-                    });
+                if self.selection.is_dragging()
+                    && let Some(rect) = self.chat_rect
+                {
+                    let clamped_col = mouse
+                        .column
+                        .clamp(rect.x, rect.x + rect.width.saturating_sub(1));
+                    let clamped_row = mouse
+                        .row
+                        .clamp(rect.y, rect.y + rect.height.saturating_sub(1));
                     self.selection.update(clamped_col, clamped_row);
                 }
             }
@@ -272,7 +272,7 @@ impl App {
     /// Materializes the current selection from the chat's rendered text and emits an OSC 52
     /// set-clipboard sequence. No-op when there's no selection or when materialization clips out.
     fn copy_selection_to_clipboard(&mut self) {
-        let Some(area) = self.chat_rect.get() else {
+        let Some(area) = self.chat_rect else {
             return;
         };
         let text = self.chat.rendered_text(area.width);
@@ -769,13 +769,13 @@ impl App {
 
         self.status_bar.render(frame, chunks[0]);
         if self.chat.is_empty() && self.session_info.config.show_welcome {
-            self.chat_rect.set(None);
+            self.chat_rect = None;
             let snap = WelcomeSnapshot::from_live(&self.session_info);
             welcome::paint(frame, chunks[1], &self.theme, &snap);
         } else {
             self.chat.render(frame, chunks[1]);
             self.render_jump_overlay(frame, chunks[1]);
-            self.chat_rect.set(Some(chunks[1]));
+            self.chat_rect = Some(chunks[1]);
             self.selection
                 .paint(frame.buffer_mut(), chunks[1], &self.theme);
         }
@@ -825,9 +825,9 @@ impl App {
         );
     }
 
-    fn render_jump_overlay(&self, frame: &mut ratatui::Frame<'_>, area: Rect) {
+    fn render_jump_overlay(&mut self, frame: &mut ratatui::Frame<'_>, area: Rect) {
         if !self.chat.is_scrolled_up() || area.width < 25 || area.height == 0 {
-            self.jump_overlay_rect.set(None);
+            self.jump_overlay_rect = None;
             return;
         }
 
@@ -842,7 +842,7 @@ impl App {
         // opaque surface bg so the chat content underneath stays readable.
         let pill_width = u16::try_from(label.width().saturating_add(2)).unwrap_or(u16::MAX);
         if pill_width > area.width {
-            self.jump_overlay_rect.set(None);
+            self.jump_overlay_rect = None;
             return;
         }
         let pill = Rect {
@@ -851,7 +851,7 @@ impl App {
             width: pill_width,
             height: 1,
         };
-        self.jump_overlay_rect.set(Some(pill));
+        self.jump_overlay_rect = Some(pill);
         let block = Block::default().style(self.theme.surface());
         let inner = block.inner(pill);
         frame.render_widget(block, pill);
@@ -876,16 +876,6 @@ fn jump_overlay_label(new_count: u32, width: usize) -> String {
         n => format!("{n} new messages (ctrl+End) ↓"),
     };
     center_truncate_to_width(&label, width.saturating_sub(2))
-}
-
-/// Cell-coordinate hit test: `Rect::contains` exists on ratatui but takes a `Position` whose
-/// constructor we don't already use elsewhere; this avoids the wrapper boilerplate at every
-/// call site.
-fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
-    col >= rect.x
-        && col < rect.x.saturating_add(rect.width)
-        && row >= rect.y
-        && row < rect.y.saturating_add(rect.height)
 }
 
 /// Renders a queued prompt as a dim ghost, capped at `body_width` columns.
@@ -1378,7 +1368,7 @@ mod tests {
         app.chat.set_viewport_for_test(20);
         app.chat.set_scroll_offset_for_test(10);
         app.chat.set_auto_scroll_for_test(false);
-        app.jump_overlay_rect.set(Some(Rect::new(60, 23, 18, 1)));
+        app.jump_overlay_rect = Some(Rect::new(60, 23, 18, 1));
 
         app.handle_crossterm_event(&Event::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
@@ -1400,7 +1390,7 @@ mod tests {
         app.chat.set_viewport_for_test(20);
         app.chat.set_scroll_offset_for_test(10);
         app.chat.set_auto_scroll_for_test(false);
-        app.jump_overlay_rect.set(Some(Rect::new(60, 23, 18, 1)));
+        app.jump_overlay_rect = Some(Rect::new(60, 23, 18, 1));
 
         app.handle_crossterm_event(&Event::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
@@ -1414,22 +1404,10 @@ mod tests {
     }
 
     #[test]
-    fn rect_contains_left_top_inclusive_right_bottom_exclusive() {
-        let rect = Rect::new(2, 3, 4, 2);
-        assert!(rect_contains(rect, 2, 3), "left-top corner is inside");
-        assert!(rect_contains(rect, 5, 4), "last cell inside");
-        assert!(!rect_contains(rect, 1, 3), "left of x");
-        assert!(!rect_contains(rect, 6, 3), "past right edge");
-        assert!(!rect_contains(rect, 2, 5), "past bottom edge");
-        assert!(!rect_contains(Rect::new(0, 0, 0, 1), 0, 0), "zero-width");
-        assert!(!rect_contains(Rect::new(0, 0, 1, 0), 0, 0), "zero-height");
-    }
-
-    #[test]
     fn drag_in_chat_area_arms_selection_state_machine() {
         // Down → Drag → Up over the cached chat rect must traverse the selection states.
         let (mut app, _rx, _agent_tx) = test_app(None);
-        app.chat_rect.set(Some(Rect::new(0, 2, 80, 20)));
+        app.chat_rect = Some(Rect::new(0, 2, 80, 20));
 
         app.handle_crossterm_event(&Event::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
@@ -1462,7 +1440,7 @@ mod tests {
     #[test]
     fn left_click_outside_chat_area_does_not_arm_selection() {
         let (mut app, _rx, _agent_tx) = test_app(None);
-        app.chat_rect.set(Some(Rect::new(0, 2, 80, 20)));
+        app.chat_rect = Some(Rect::new(0, 2, 80, 20));
 
         // Click in the status-bar row 0 (above chat_rect.y == 2).
         app.handle_crossterm_event(&Event::Mouse(MouseEvent {
