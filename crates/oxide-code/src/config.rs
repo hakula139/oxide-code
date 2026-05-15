@@ -355,14 +355,14 @@ pub(crate) struct Config {
     pub(crate) show_welcome: bool,
     pub(crate) status_line: Vec<StatusLineSegment>,
     pub(crate) theme: Theme,
-    /// Built-in catalogue key (e.g. `"mocha"`) or filesystem path; mirrors `[tui.theme] base`,
+    /// Built-in catalogue key (e.g. `"mocha"`) or filesystem path. Mirrors `[tui.theme] base`,
     /// falling back to [`DEFAULT_THEME`] when unset.
     pub(crate) theme_name: String,
 }
 
 impl Config {
     /// Resolves config from layered sources. Per-field precedence is env > project `ox.toml` >
-    /// user `~/.config/ox/config.toml` > built-in default; see the module docs for the auth
+    /// user `~/.config/ox/config.toml` > built-in default. See the module docs for the auth
     /// chain. Parse errors (TOML, env, theme) propagate so a typo doesn't degrade silently into
     /// "no credentials".
     pub(crate) async fn load() -> Result<Self> {
@@ -1538,7 +1538,7 @@ mod tests {
 
     #[tokio::test]
     async fn load_effort_clamps_xhigh_down_to_high_on_sonnet_4_6() {
-        // Sonnet 4.6 has effort but caps below `xhigh`; clamping keeps the request from 400ing.
+        // Sonnet 4.6 has effort but caps below `xhigh`. Clamping keeps the request from 400ing.
         let dir = tempfile::tempdir().unwrap();
         let vars = env_vars(vec![
             xdg(&dir),

@@ -147,8 +147,8 @@ impl TokenUsage {
 /// Per-turn usage report emitted at the end of [`agent_turn`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct TurnReport {
-    /// Latest single round's usage, used by the auto-compaction threshold check (which compares
-    /// against the most recent prompt size, not the historical sum).
+    /// Latest single round's usage, used by the auto-compaction threshold check, which compares
+    /// against the most recent prompt size rather than the historical sum.
     pub(crate) usage: Option<TokenUsage>,
     /// Sum of every round's usage in this turn, used by session cost accumulation since each
     /// round was billed independently.
