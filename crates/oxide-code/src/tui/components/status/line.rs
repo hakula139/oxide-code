@@ -184,6 +184,8 @@ fn lowest_priority_index(segments: &[RenderedSegment]) -> Option<usize> {
         .map(|(index, _)| index)
 }
 
+/// Per-segment "drop me first when narrow" rank. Lower numbers drop earlier, so run state and
+/// model sit at the top because the bar is useless without them.
 fn segment_utility(segment: StatusLineSegment) -> u8 {
     match segment {
         StatusLineSegment::ThreadTitle => 0,
@@ -245,6 +247,8 @@ fn compact_tokens(tokens: u32) -> String {
 }
 
 fn format_cost(cost: f64) -> String {
+    // Switch to two-decimal display once `{cost:.2}` would round up to `$1.00` so the bar reads
+    // `$1.00` instead of `$0.9999` at the boundary.
     if cost >= 0.995 {
         format!("${cost:.2}")
     } else {
