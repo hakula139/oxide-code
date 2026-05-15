@@ -1,0 +1,105 @@
+# Status Line
+
+Design for a configurable TUI status line.
+
+## Scope
+
+The TUI status line should be an ordered roster of built-in segments. This ships:
+
+- User-controlled segment order.
+- Segments backed by local state today.
+- Cache-aware context and session-cost display.
+
+Implemented segments:
+
+| Segment                | Config value        |
+| ---------------------- | ------------------- |
+| current directory      | `current-dir`       |
+| git branch             | `git-branch`        |
+| pull request           | `pull-request`      |
+| model                  | `model`             |
+| model with effort      | `model-with-effort` |
+| context used           | `context-used`      |
+| estimated session cost | `session-cost`      |
+| run state              | `run-state`         |
+| thread title           | `thread-title`      |
+| current time           | `current-time`      |
+
+Out of scope:
+
+- Command-based custom renderers.
+- ccusage block / daily totals.
+- Five-hour or weekly account-limit display.
+- Task-progress segments.
+- Persisting cost totals across resume.
+- Non-Anthropic provider pricing.
+
+## Implementation
+
+Add `StatusLineSegment` in `config.rs` for the roster above. `[tui] status_line = [...]` controls the order. `OX_STATUS_LINE` accepts the same comma-separated names. Segment colors and the separator glyph come from the active theme.
+
+`StatusBar` keeps component state and delegates segment formatting to `tui/components/status/line.rs`.
+
+Segment render rules:
+
+- Return `None` when data is unavailable.
+- Do not render placeholders for absent branch, title, usage, or pricing.
+- Use active theme styles; color customization belongs in theme overrides.
+- Join only rendered segments, so omitted segments do not leave extra separators.
+- When the row is too narrow, omit lower-utility segments before truncating the last remaining segment. Run state and model have the highest utility.
+- The `model` and `model-with-effort` segments use a width-tightened label: the `Claude` family prefix is dropped and `(1M context)` becomes `[1M]` (e.g., `Opus 4.7 [1M] (xhigh)`). Other surfaces (welcome screen, prompt environment, error blocks) keep the full `Claude Opus 4.7 (1M context)` label.
+
+## Usage Data
+
+Extend Anthropic `Usage` with `cache_creation_input_tokens` and `cache_read_input_tokens`. `TokenUsage::context_tokens()` returns input + cache creation + cache read. `TokenUsage::total_tokens()` returns context + output and remains the auto-compaction trigger input.
+
+A successful `agent_turn` returns the latest provider usage. `AgentLoopTask` keeps that usage for the next auto-compaction check, updates the displayed usage snapshot, adds the turn's estimated cost when rates are known, then emits `AgentEvent::UsageUpdated(UsageSnapshot)` before `TurnComplete`.
+
+Known first-party Claude API rates live in `model.rs` beside the model catalogue. Unknown models render context without session cost. The estimate excludes account discounts, marketplace billing, data-residency multipliers, fast mode, and server-side tool surcharges.
+
+On model swap, recompute the snapshot with the new model's context window if display usage exists. The session cost remains the accumulated estimate from turns that actually reported usage. On `/clear`, `/resume`, manual compaction, and automatic compaction, clear displayed usage because the visible transcript basis changed.
+
+## Default Order
+
+The default order is:
+
+```toml
+status_line = [
+  "current-dir",
+  "git-branch",
+  "pull-request",
+  "model-with-effort",
+  "context-used",
+  "session-cost",
+  "run-state",
+  "thread-title",
+]
+```
+
+This differs from the reference Claude Code script in two ways: oxide-code stays one row because Ratatui already owns the app chrome, and external billing data is omitted until there is a first-class provider boundary.
+
+The default order tracks reading flow: location and branch orient the user, model and usage describe cost and context pressure, run state sits near the end because it changes most often.
+
+## Design Decisions
+
+1. **Roster, not DSL.** A typed segment list is enough for first-party data and keeps rendering inside Ratatui.
+2. **Implemented segments only.** Unsupported names fail config parsing instead of silently reserving future vocabulary.
+3. **Local usage first.** Context and session cost use provider usage already observed by the current process.
+4. **Segment omission over placeholders.** Missing usage, unknown pricing, absent branch, and blank titles disappear cleanly.
+5. **Probe-throttled segments.** `git-branch` and `pull-request` re-probe on tick at fixed cadences (5 s and 60 s respectively) so the bar stays current after `git checkout` or `gh pr create` without paying per-frame cost.
+
+## Deferred
+
+- ccusage or another account-usage provider boundary.
+- Five-hour and weekly account-limit telemetry.
+- Task-progress segments.
+- Persisted cost restore after resume.
+- Command-based custom status-line renderer.
+
+## Sources
+
+- [Status line research](../../research/tui/status-line.md)
+- [Auto-compaction design](../agent/auto-compaction.md)
+- `crates/oxide-code/src/tui/components/status.rs`
+- `crates/oxide-code/src/tui/components/status/line.rs`
+- `crates/oxide-code/src/main.rs`

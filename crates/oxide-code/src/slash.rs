@@ -127,6 +127,8 @@ pub(crate) fn test_session_info() -> LiveSessionInfo {
     // Real MODELS row so `display_name()` resolves to a known label.
     LiveSessionInfo {
         cwd: "~/test".to_owned(),
+        git_cwd: None,
+        git_branch: Some("main".to_owned()),
         version: "0.0.0-test",
         session_id: "test-session".to_owned(),
         config: ConfigSnapshot {
@@ -144,6 +146,7 @@ pub(crate) fn test_session_info() -> LiveSessionInfo {
             }),
             show_thinking: false,
             show_welcome: true,
+            status_line: crate::config::StatusLineSegment::DEFAULT.to_vec(),
             theme_name: "mocha".to_owned(),
         },
     }

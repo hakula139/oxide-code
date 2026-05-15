@@ -14,10 +14,10 @@ It does not interrupt an in-flight stream or tool call. If another prompt arrive
 
 The agent loop records the maximum observed token usage from each stream:
 
-- `message_start.message.usage.input_tokens + output_tokens`;
-- `message_delta.usage.input_tokens + output_tokens`.
+- `message_start.message.usage.input_tokens + cache_creation_input_tokens + cache_read_input_tokens + output_tokens`;
+- `message_delta.usage.input_tokens + cache_creation_input_tokens + cache_read_input_tokens + output_tokens`.
 
-Anthropic's delta usage often carries only output tokens, so stream processing keeps the latest non-zero input and output values separately and computes `total = input + output`. Treat this value only as the auto-compaction trigger signal; it is unsuitable for billing telemetry. Missing usage means "do not auto-compact".
+Anthropic's delta usage often carries only output tokens, so stream processing keeps the latest non-zero input, cache-creation input, cache-read input, and output values separately. The status-line context segment reuses the same cache-aware signal. Missing usage means "do not auto-compact".
 
 ## Threshold
 
@@ -102,5 +102,5 @@ During TUI auto-compaction, the status bar uses the existing `Compacting` state.
 - Microcompact / prune for old tool-result bodies.
 - Anchored re-compaction that updates a previous summary in place.
 - Separate compaction model.
-- Token / cost status-bar redesign.
+- Persisted cost restore after resume.
 - Hook integration.

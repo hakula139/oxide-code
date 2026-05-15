@@ -22,8 +22,10 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
-use agent::event::{AgentEvent, AgentSink, StdioSink, UserAction, inert_user_action_channel};
-use agent::{AutoCompact, TokenUsage, TurnAbort, agent_turn};
+use agent::event::{
+    AgentEvent, AgentSink, StdioSink, UsageSnapshot, UserAction, inert_user_action_channel,
+};
+use agent::{AutoCompact, TokenUsage, TurnAbort, TurnOutcome, agent_turn};
 use client::anthropic::Client;
 use config::{Config, Effort};
 use file_tracker::FileTracker;
@@ -254,13 +256,14 @@ async fn run_tui(
     let (agent_sink, agent_rx) = tui::event::channel();
     let (user_tx, user_rx) = mpsc::channel::<UserAction>(32);
 
-    let cwd = std::env::current_dir()
-        .as_deref()
-        .map(tildify)
-        .unwrap_or_default();
+    let cwd_path = std::env::current_dir().ok();
+    let cwd = cwd_path.as_deref().map(tildify).unwrap_or_default();
+    let git_branch = cwd_path.as_deref().and_then(util::git::current_branch);
 
     let session_info = LiveSessionInfo {
         cwd,
+        git_cwd: cwd_path,
+        git_branch,
         version: env!("CARGO_PKG_VERSION"),
         session_id: session.session_id().to_owned(),
         config,
@@ -352,6 +355,8 @@ async fn agent_loop_task(
         file_tracker,
         auto_compaction_failures: 0,
         last_usage: None,
+        displayed_usage: None,
+        total_estimated_cost_usd: 0.0,
     }
     .run()
     .await
@@ -368,6 +373,8 @@ struct AgentLoopTask {
     file_tracker: Arc<FileTracker>,
     auto_compaction_failures: u8,
     last_usage: Option<TokenUsage>,
+    displayed_usage: Option<TokenUsage>,
+    total_estimated_cost_usd: f64,
 }
 
 enum LoopControl {
@@ -408,6 +415,7 @@ impl AgentLoopTask {
                 self.client.set_session_id(outcome.new_id.clone());
                 self.messages.clear();
                 self.reset_auto_compaction();
+                self.reset_usage_display();
                 // /clear succeeded server-side, so dropping `SessionRolled` would strand the TUI
                 // on a stuck "old session" header.
                 self.sink.emit(
@@ -417,7 +425,7 @@ impl AgentLoopTask {
                 LoopControl::Continue
             }
             UserAction::Resume { session_id } => {
-                apply_resume(
+                let resumed = apply_resume(
                     &mut self.session,
                     &mut self.client,
                     &mut self.messages,
@@ -427,7 +435,10 @@ impl AgentLoopTask {
                     &session_id,
                 )
                 .await;
-                self.reset_auto_compaction();
+                if resumed {
+                    self.reset_auto_compaction();
+                    self.reset_usage_display();
+                }
                 LoopControl::Continue
             }
             UserAction::Compact { instructions } => {
@@ -444,6 +455,7 @@ impl AgentLoopTask {
                 match outcome {
                     Ok(true) => {
                         self.reset_auto_compaction();
+                        self.reset_usage_display();
                         LoopControl::Continue
                     }
                     Ok(false) => LoopControl::Continue,
@@ -466,6 +478,7 @@ impl AgentLoopTask {
             UserAction::SwapConfig { model, effort } => {
                 if apply_swap_config(&mut self.client, &self.sink, model, effort) {
                     self.auto_compaction_failures = 0;
+                    self.emit_usage_update();
                 }
                 LoopControl::Continue
             }
@@ -488,7 +501,10 @@ impl AgentLoopTask {
         )
         .await;
         match pre_prompt_compact {
-            Ok(true) => self.last_usage = None,
+            Ok(true) => {
+                self.last_usage = None;
+                self.reset_usage_display();
+            }
             Ok(false) => {}
             Err(TurnAbort::Cancelled) => {
                 self.sink.emit(AgentEvent::Cancelled, "cancelled");
@@ -535,9 +551,22 @@ impl AgentLoopTask {
             self.client.max_tool_rounds(),
         )
         .await;
-        match outcome {
-            Ok(report) => {
-                self.last_usage = report.usage;
+        let TurnOutcome { report, result } = outcome;
+        self.last_usage = report.usage;
+        if let Some(usage) = report.usage {
+            self.displayed_usage = Some(usage);
+        }
+        if let Some(cost) = report
+            .billable_usage
+            .and_then(|usage| estimate_usage_cost_usd(&self.client, usage))
+        {
+            self.total_estimated_cost_usd += cost;
+        }
+        if report.usage.is_some() || report.billable_usage.is_some() {
+            self.emit_usage_update();
+        }
+        match result {
+            Ok(()) => {
                 self.sink.emit(AgentEvent::TurnComplete, "turn-complete");
                 LoopControl::Continue
             }
@@ -558,6 +587,38 @@ impl AgentLoopTask {
         self.auto_compaction_failures = 0;
         self.last_usage = None;
     }
+
+    fn reset_usage_display(&mut self) {
+        self.displayed_usage = None;
+        self.total_estimated_cost_usd = 0.0;
+    }
+
+    fn emit_usage_update(&self) {
+        let Some(usage) = self.displayed_usage else {
+            return;
+        };
+        self.sink.emit(
+            AgentEvent::UsageUpdated(UsageSnapshot {
+                context_tokens: usage.context_tokens(),
+                context_window: crate::model::context_window_for(self.client.model()),
+                estimated_cost_usd: (self.total_estimated_cost_usd > 0.0)
+                    .then_some(self.total_estimated_cost_usd),
+            }),
+            "usage-updated",
+        );
+    }
+}
+
+fn estimate_usage_cost_usd(client: &Client, usage: TokenUsage) -> Option<f64> {
+    crate::model::token_cost_rates_for(client.model()).map(|rates| {
+        rates.estimate_usd(
+            usage.input_tokens(),
+            usage.cache_creation_input_tokens(),
+            usage.cache_read_input_tokens(),
+            usage.output_tokens(),
+            client.prompt_cache_ttl(),
+        )
+    })
 }
 
 /// Drives the mid-session resume: swap the handle, repaint the chat, surface previous-session
@@ -570,7 +631,7 @@ async fn apply_resume(
     file_tracker: &FileTracker,
     sink: &dyn AgentSink,
     target_id: &str,
-) {
+) -> bool {
     let outcome = match session::handle::roll_into(session, store, file_tracker, target_id).await {
         Ok(o) => o,
         Err(e) => {
@@ -581,7 +642,7 @@ async fn apply_resume(
                 )),
                 "resume-failed",
             );
-            return;
+            return false;
         }
     };
     let new_id = session.session_id().to_owned();
@@ -614,6 +675,7 @@ async fn apply_resume(
             "resume-drift-warning",
         );
     }
+    true
 }
 
 fn format_drift_warning(drifted: &[std::path::PathBuf]) -> String {
@@ -832,17 +894,17 @@ async fn bare_repl(
                 &mut user_rx,
                 client.max_tool_rounds(),
             );
-            let turn_result = tokio::select! {
-                r = turn => r,
+            let TurnOutcome { report, result } = tokio::select! {
+                outcome = turn => outcome,
                 () = shutdown_signal() => {
                     eprintln!();
                     shutdown_fired = true;
                     break;
                 }
             };
-            match turn_result {
-                Ok(report) => last_usage = report.usage,
-                Err(TurnAbort::Cancelled | TurnAbort::Quit) => {}
+            last_usage = report.usage;
+            match result {
+                Ok(()) | Err(TurnAbort::Cancelled | TurnAbort::Quit) => {}
                 Err(TurnAbort::Failed(e)) => return Err(e),
             }
             sink.emit(AgentEvent::TurnComplete, "turn-complete");
@@ -891,8 +953,8 @@ async fn headless(
         client.max_tool_rounds(),
     );
     let result: Result<()> = tokio::select! {
-        r = turn => match r {
-            Ok(_) | Err(TurnAbort::Cancelled | TurnAbort::Quit) => Ok(()),
+        outcome = turn => match outcome.result {
+            Ok(()) | Err(TurnAbort::Cancelled | TurnAbort::Quit) => Ok(()),
             Err(TurnAbort::Failed(e)) => Err(e),
         },
         () = shutdown_signal() => {
@@ -1031,6 +1093,8 @@ mod tests {
             file_tracker,
             auto_compaction_failures: 3,
             last_usage: Some(TokenUsage::new(100_000, 1)),
+            displayed_usage: None,
+            total_estimated_cost_usd: 1.23,
         };
 
         let control = task
@@ -1043,9 +1107,61 @@ mod tests {
         assert!(matches!(control, LoopControl::Continue));
         assert_eq!(task.auto_compaction_failures, 0);
         assert_eq!(task.last_usage, Some(TokenUsage::new(100_000, 1)));
+        assert!(
+            (task.total_estimated_cost_usd - 1.23).abs() < f64::EPSILON,
+            "session cost must accumulate across swaps: {}",
+            task.total_estimated_cost_usd,
+        );
         assert!(matches!(
             event_rx.recv().await,
             Some(AgentEvent::ConfigChanged { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn handle_action_failed_resume_preserves_current_session_usage_state() {
+        let server = MockServer::start().await;
+        let config = test_config(server.uri(), api_key(), "claude-opus-4-7[1m]");
+        let client = Client::new(config, Some("sid".to_owned())).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let session = session::handle::start(&store, "claude-opus-4-7[1m]");
+        let original_id = session.session_id().to_owned();
+        let file_tracker = Arc::new(FileTracker::default());
+        let (sink, mut event_rx) = tui::event::channel();
+        let (_user_tx, user_rx) = agent::event::inert_user_action_channel();
+        let last_usage = TokenUsage::new(100_000, 10);
+        let displayed_usage = TokenUsage::new(90_000, 9);
+        let mut task = AgentLoopTask {
+            client,
+            tools: Arc::new(ToolRegistry::new(Vec::new())),
+            sink,
+            user_rx,
+            session,
+            messages: vec![Message::user("still here")],
+            store,
+            file_tracker,
+            auto_compaction_failures: 2,
+            last_usage: Some(last_usage),
+            displayed_usage: Some(displayed_usage),
+            total_estimated_cost_usd: 1.23,
+        };
+
+        let control = task
+            .handle_action(UserAction::Resume {
+                session_id: "missing-target-id".to_owned(),
+            })
+            .await;
+
+        assert!(matches!(control, LoopControl::Continue));
+        assert_eq!(task.session.session_id(), original_id);
+        assert_eq!(task.auto_compaction_failures, 2);
+        assert_eq!(task.last_usage, Some(last_usage));
+        assert_eq!(task.displayed_usage, Some(displayed_usage));
+        assert!((task.total_estimated_cost_usd - 1.23).abs() < f64::EPSILON);
+        assert!(matches!(
+            event_rx.recv().await,
+            Some(AgentEvent::Error(msg)) if msg.contains("still on session")
         ));
     }
 }

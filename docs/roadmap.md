@@ -13,7 +13,7 @@ The direction is simple:
 ### Terminal UI
 
 - Streaming chat with markdown, syntax-highlighted code, and clear tool output.
-- Multi-line input, a live status bar, and a focused welcome screen for new sessions.
+- Multi-line input, a configurable status line with context / estimated-cost usage, and a focused welcome screen for new sessions.
 - Theme support with built-in palettes and user-defined TOML themes.
 - Full TUI, bare REPL (`--no-tui`), and headless (`-p`) modes.
 
@@ -84,7 +84,7 @@ The direction is simple:
 
 Remaining surface beyond Working Today:
 
-- Cost visibility, login/logout, custom commands, and a guided `/init` flow.
+- Login/logout, custom commands, and a guided `/init` flow.
 
 Persistence stance: session commands should feel reversible. Cross-session writes will require an explicit user action.
 
@@ -115,9 +115,9 @@ Persistence stance: session commands should feel reversible. Cross-session write
 - Auth slash commands.
 - Configurable instruction directories.
 
-### Status Bar Redesign
+### Status Line Extensions
 
-- A clearer status surface for model, cost, queue state, session identity, and theme.
+- Additional segments for queue state, session identity, theme, account-limit usage, pull requests, and task progress.
 
 ## Not the Goal Right Now
 

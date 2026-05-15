@@ -70,36 +70,141 @@ impl AgentClient for Client {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct TokenUsage {
-    input_tokens: u32,
-    output_tokens: u32,
+    input: u32,
+    cache_creation_input: u32,
+    cache_read_input: u32,
+    output: u32,
 }
 
 impl TokenUsage {
     #[cfg(test)]
     pub(crate) const fn new(input_tokens: u32, output_tokens: u32) -> Self {
         Self {
-            input_tokens,
-            output_tokens,
+            input: input_tokens,
+            cache_creation_input: 0,
+            cache_read_input: 0,
+            output: output_tokens,
         }
+    }
+
+    pub(crate) const fn context_tokens(self) -> u32 {
+        self.input
+            .saturating_add(self.cache_creation_input)
+            .saturating_add(self.cache_read_input)
     }
 
     pub(crate) const fn total_tokens(self) -> u32 {
-        self.input_tokens.saturating_add(self.output_tokens)
+        self.context_tokens().saturating_add(self.output)
+    }
+
+    pub(crate) const fn input_tokens(self) -> u32 {
+        self.input
+    }
+
+    pub(crate) const fn cache_creation_input_tokens(self) -> u32 {
+        self.cache_creation_input
+    }
+
+    pub(crate) const fn cache_read_input_tokens(self) -> u32 {
+        self.cache_read_input
+    }
+
+    pub(crate) const fn output_tokens(self) -> u32 {
+        self.output
+    }
+
+    fn add(self, other: Self) -> Self {
+        Self {
+            input: self.input.saturating_add(other.input),
+            cache_creation_input: self
+                .cache_creation_input
+                .saturating_add(other.cache_creation_input),
+            cache_read_input: self.cache_read_input.saturating_add(other.cache_read_input),
+            output: self.output.saturating_add(other.output),
+        }
     }
 
     fn observe(&mut self, usage: &Usage) {
+        // Anthropic's wire usage carries fresh totals only on the events that own them:
+        // `MessageStart` reports input + cache fields with `output_tokens = 0`, and `MessageDelta`
+        // reports `output_tokens` with the input fields zeroed. Treat zero as "not reported here"
+        // so successive observations layer correctly into one snapshot.
         if usage.input_tokens > 0 {
-            self.input_tokens = usage.input_tokens;
+            self.input = usage.input_tokens;
+        }
+        if usage.cache_creation_input_tokens > 0 {
+            self.cache_creation_input = usage.cache_creation_input_tokens;
+        }
+        if usage.cache_read_input_tokens > 0 {
+            self.cache_read_input = usage.cache_read_input_tokens;
         }
         if usage.output_tokens > 0 {
-            self.output_tokens = usage.output_tokens;
+            self.output = usage.output_tokens;
         }
     }
 }
 
+/// Per-turn usage report emitted at the end of [`agent_turn`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct TurnReport {
+    /// Latest single round's usage, used by the auto-compaction threshold check, which compares
+    /// against the most recent prompt size rather than the historical sum.
     pub(crate) usage: Option<TokenUsage>,
+    /// Sum of every round's usage in this turn, used by session cost accumulation since each
+    /// round was billed independently.
+    pub(crate) billable_usage: Option<TokenUsage>,
+}
+
+/// Result of one [`agent_turn`] invocation. The report carries usage observed before any abort
+/// so the outer loop can still bill rounds the API already charged for, even when the user
+/// cancels mid-stream or a later round fails.
+#[derive(Debug)]
+pub(crate) struct TurnOutcome {
+    pub(crate) report: TurnReport,
+    pub(crate) result: AbortResult<()>,
+}
+
+impl TurnOutcome {
+    fn completed(report: TurnReport) -> Self {
+        Self {
+            report,
+            result: Ok(()),
+        }
+    }
+
+    fn aborted(report: TurnReport, abort: TurnAbort) -> Self {
+        Self {
+            report,
+            result: Err(abort),
+        }
+    }
+
+    /// Mirrors `Result::unwrap`: returns the report on success or panics with the abort.
+    #[cfg(test)]
+    pub(crate) fn unwrap(self) -> TurnReport {
+        match self.result {
+            Ok(()) => self.report,
+            Err(abort) => panic!("turn aborted: {abort:?}"),
+        }
+    }
+
+    /// Mirrors `Result::expect`: returns the report on success or panics with the abort and `msg`.
+    #[cfg(test)]
+    pub(crate) fn expect(self, msg: &str) -> TurnReport {
+        match self.result {
+            Ok(()) => self.report,
+            Err(abort) => panic!("{msg}: {abort:?}"),
+        }
+    }
+
+    /// Mirrors `Result::expect_err`: returns the abort on failure or panics.
+    #[cfg(test)]
+    pub(crate) fn expect_err(self, msg: &str) -> TurnAbort {
+        match self.result {
+            Ok(()) => panic!("{msg}: turn unexpectedly completed"),
+            Err(abort) => abort,
+        }
+    }
 }
 
 pub(crate) struct AutoCompact<'a> {
@@ -126,24 +231,43 @@ pub(crate) async fn agent_turn(
     session: &SessionHandle,
     user_rx: &mut mpsc::Receiver<UserAction>,
     max_tool_rounds: Option<u32>,
-) -> AbortResult<TurnReport> {
+) -> TurnOutcome {
     let tool_defs = tools.definitions();
     let mut pending_prompts: Vec<String> = Vec::new();
     let mut latest_usage = None;
+    let mut billable_usage = None;
+    let report = |latest, billable| TurnReport {
+        usage: latest,
+        billable_usage: billable,
+    };
 
     for _ in 0..max_tool_rounds.unwrap_or(u32::MAX) {
         strip_trailing_thinking(messages);
-        let StreamOutcome {
-            blocks,
-            parse_errors,
-            usage,
-        } = await_unless_aborted(
+        let stream = await_unless_aborted(
             stream_response(client, messages, &tool_defs, prompt, sink),
             user_rx,
             &mut pending_prompts,
         )
-        .await??;
-        latest_usage = usage.or(latest_usage);
+        .await;
+        let StreamOutcome {
+            blocks,
+            parse_errors,
+            usage,
+        } = match stream {
+            Ok(Ok(outcome)) => outcome,
+            Ok(Err(error)) => {
+                return TurnOutcome::aborted(
+                    report(latest_usage, billable_usage),
+                    TurnAbort::Failed(error),
+                );
+            }
+            Err(abort) => return TurnOutcome::aborted(report(latest_usage, billable_usage), abort),
+        };
+        if let Some(usage) = usage {
+            latest_usage = Some(usage);
+            billable_usage =
+                Some(billable_usage.map_or(usage, |total: TokenUsage| total.add(usage)));
+        }
 
         let tool_uses = collect_tool_uses(&blocks);
         let assistant_msg = Message {
@@ -155,12 +279,10 @@ pub(crate) async fn agent_turn(
             // Queued prompts drain on the TUI side at idle.
             record_message(session, assistant_msg.clone(), sink).await;
             messages.push(assistant_msg);
-            return Ok(TurnReport {
-                usage: latest_usage,
-            });
+            return TurnOutcome::completed(report(latest_usage, billable_usage));
         }
 
-        let (results, sidecars) = run_tool_round(
+        let round = run_tool_round(
             tools,
             tool_uses,
             &parse_errors,
@@ -168,7 +290,11 @@ pub(crate) async fn agent_turn(
             user_rx,
             &mut pending_prompts,
         )
-        .await?;
+        .await;
+        let (results, sidecars) = match round {
+            Ok(pair) => pair,
+            Err(abort) => return TurnOutcome::aborted(report(latest_usage, billable_usage), abort),
+        };
         let tool_result_msg = Message {
             role: Role::User,
             content: results,
@@ -183,10 +309,13 @@ pub(crate) async fn agent_turn(
     // `None` resolves to `u32::MAX`, so this branch is reachable only when the caller set
     // `Some(n)` and the model ran `n` rounds without a final reply.
     let cap = max_tool_rounds.unwrap_or(u32::MAX);
-    Err(TurnAbort::Failed(anyhow!(
-        "agent stopped after {cap} tool rounds without a final response \
-         — this is a safety cap against runaway loops. Ask again with a narrower request."
-    )))
+    TurnOutcome::aborted(
+        report(latest_usage, billable_usage),
+        TurnAbort::Failed(anyhow!(
+            "agent stopped after {cap} tool rounds without a final response \
+             — this is a safety cap against runaway loops. Ask again with a narrower request."
+        )),
+    )
 }
 
 /// Decides whether to compact and drives it when the threshold and breaker allow. Returns
@@ -806,6 +935,8 @@ mod tests {
                     model: "claude-sonnet-4-6".into(),
                     usage: Some(Usage {
                         input_tokens: 0,
+                        cache_creation_input_tokens: 0,
+                        cache_read_input_tokens: 0,
                         output_tokens: 0,
                     }),
                 },
@@ -833,6 +964,8 @@ mod tests {
                     model: "claude-sonnet-4-6".into(),
                     usage: Some(Usage {
                         input_tokens: 0,
+                        cache_creation_input_tokens: 0,
+                        cache_read_input_tokens: 0,
                         output_tokens: 0,
                     }),
                 },
@@ -854,6 +987,8 @@ mod tests {
                     model: "claude-sonnet-4-6".into(),
                     usage: Some(Usage {
                         input_tokens,
+                        cache_creation_input_tokens: 0,
+                        cache_read_input_tokens: 0,
                         output_tokens: 0,
                     }),
                 },
@@ -874,6 +1009,53 @@ mod tests {
                 },
                 usage: Some(Usage {
                     input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                    cache_read_input_tokens: 0,
+                    output_tokens,
+                }),
+            },
+            StreamEvent::MessageStop,
+        ]
+    }
+
+    fn text_turn_with_cache_usage(
+        text: &str,
+        input_tokens: u32,
+        cache_creation_input_tokens: u32,
+        cache_read_input_tokens: u32,
+        output_tokens: u32,
+    ) -> Vec<StreamEvent> {
+        vec![
+            StreamEvent::MessageStart {
+                message: MessageResponse {
+                    id: "msg_1".into(),
+                    model: "claude-sonnet-4-6".into(),
+                    usage: Some(Usage {
+                        input_tokens,
+                        cache_creation_input_tokens,
+                        cache_read_input_tokens,
+                        output_tokens: 0,
+                    }),
+                },
+            },
+            StreamEvent::ContentBlockStart {
+                index: 0,
+                content_block: ContentBlockInfo::Text {
+                    text: String::new(),
+                },
+            },
+            StreamEvent::ContentBlockDelta {
+                index: 0,
+                delta: Delta::TextDelta { text: text.into() },
+            },
+            StreamEvent::MessageDelta {
+                delta: MessageDeltaBody {
+                    stop_reason: Some("end_turn".into()),
+                },
+                usage: Some(Usage {
+                    input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                    cache_read_input_tokens: 0,
                     output_tokens,
                 }),
             },
@@ -917,6 +1099,8 @@ mod tests {
                     model: "claude-sonnet-4-6".into(),
                     usage: Some(Usage {
                         input_tokens,
+                        cache_creation_input_tokens: 0,
+                        cache_read_input_tokens: 0,
                         output_tokens,
                     }),
                 },
@@ -1014,6 +1198,21 @@ mod tests {
         crate::session::handle::testing::dead("dead-test-session")
     }
 
+    // ── TokenUsage ──
+
+    #[test]
+    fn token_usage_context_and_total_include_cache_tokens() {
+        let usage = TokenUsage {
+            input: 10,
+            cache_creation_input: 20,
+            cache_read_input: 30,
+            output: 5,
+        };
+
+        assert_eq!(usage.context_tokens(), 60);
+        assert_eq!(usage.total_tokens(), 65);
+    }
+
     // ── auto_compact_if_needed ──
 
     #[tokio::test]
@@ -1041,8 +1240,10 @@ mod tests {
             &mut pending,
             None,
             Some(TokenUsage {
-                input_tokens: 20,
-                output_tokens: 1,
+                input: 20,
+                cache_creation_input: 0,
+                cache_read_input: 0,
+                output: 1,
             }),
         )
         .await
@@ -1086,8 +1287,10 @@ mod tests {
                 file_tracker: &tracker,
             }),
             Some(TokenUsage {
-                input_tokens: 20,
-                output_tokens: 1,
+                input: 20,
+                cache_creation_input: 0,
+                cache_read_input: 0,
+                output: 1,
             }),
         )
         .await
@@ -1128,8 +1331,10 @@ mod tests {
                 file_tracker: &tracker,
             }),
             Some(TokenUsage {
-                input_tokens: 20,
-                output_tokens: 1,
+                input: 20,
+                cache_creation_input: 0,
+                cache_read_input: 0,
+                output: 1,
             }),
         )
         .await
@@ -1177,8 +1382,10 @@ mod tests {
                 file_tracker: &tracker,
             }),
             Some(TokenUsage {
-                input_tokens: 20,
-                output_tokens: 1,
+                input: 20,
+                cache_creation_input: 0,
+                cache_read_input: 0,
+                output: 1,
             }),
         )
         .await
@@ -1225,8 +1432,10 @@ mod tests {
                 file_tracker: &tracker,
             }),
             Some(TokenUsage {
-                input_tokens: 20,
-                output_tokens: 1,
+                input: 20,
+                cache_creation_input: 0,
+                cache_read_input: 0,
+                output: 1,
             }),
         )
         .await
@@ -1258,8 +1467,10 @@ mod tests {
         let mut pending = Vec::new();
         let mut failures = MAX_AUTO_COMPACT_FAILURES - 1;
         let usage = Some(TokenUsage {
-            input_tokens: 50_000,
-            output_tokens: 1,
+            input: 50_000,
+            cache_creation_input: 0,
+            cache_read_input: 0,
+            output: 1,
         });
 
         let first = auto_compact_if_needed(
@@ -1346,8 +1557,10 @@ mod tests {
             &mut pending,
             Some(&mut auto),
             Some(TokenUsage {
-                input_tokens: 20,
-                output_tokens: 1,
+                input: 20,
+                cache_creation_input: 0,
+                cache_read_input: 0,
+                output: 1,
             }),
         );
         let queue_prompt = async {
@@ -1557,6 +1770,42 @@ mod tests {
         .unwrap();
 
         assert_eq!(report.usage.map(TokenUsage::total_tokens), Some(107));
+        assert_eq!(
+            report.billable_usage.map(TokenUsage::total_tokens),
+            Some(107)
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_turn_reports_cache_usage_for_context_and_cost() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let client = FakeClient::new(vec![text_turn_with_cache_usage("Hello!", 10, 20, 30, 5)]);
+        let tools = ToolRegistry::new(Vec::new());
+        let sink = CapturingSink::new();
+        let mut messages = vec![Message::user("hi")];
+
+        let report = agent_turn(
+            &client,
+            &tools,
+            &mut messages,
+            &empty_prompt(),
+            &sink,
+            &session,
+            &mut inert_user_rx(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let usage = report.usage.expect("stream reports usage");
+        assert_eq!(usage.input_tokens(), 10);
+        assert_eq!(usage.cache_creation_input_tokens(), 20);
+        assert_eq!(usage.cache_read_input_tokens(), 30);
+        assert_eq!(usage.output_tokens(), 5);
+        assert_eq!(usage.context_tokens(), 60);
+        assert_eq!(usage.total_tokens(), 65);
+        assert_eq!(report.billable_usage, Some(usage));
     }
 
     #[tokio::test]
@@ -1648,6 +1897,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(report.usage.map(TokenUsage::total_tokens), Some(3));
+        assert_eq!(
+            report.billable_usage.map(TokenUsage::total_tokens),
+            Some(14)
+        );
         assert_eq!(
             sink.events()
                 .iter()
@@ -1889,7 +2142,7 @@ mod tests {
             let (tx, mut rx) = mpsc::channel::<UserAction>(1);
             tx.try_send(action.clone()).unwrap();
 
-            agent_turn(
+            let outcome = agent_turn(
                 &client,
                 &tools,
                 &mut messages,
@@ -1899,8 +2152,11 @@ mod tests {
                 &mut rx,
                 None,
             )
-            .await
-            .unwrap_or_else(|_| panic!("turn must complete despite {action:?}"));
+            .await;
+            assert!(
+                outcome.result.is_ok(),
+                "turn must complete despite {action:?}"
+            );
 
             assert_eq!(
                 messages.len(),
@@ -1963,6 +2219,55 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, AgentEvent::ToolCallEnd { id, .. } if id == "tool_1")),
             "ToolCallEnd must not fire after cancel: {events:?}",
+        );
+        drop(tx);
+    }
+
+    #[tokio::test]
+    async fn agent_turn_cancel_during_tool_round_preserves_completed_round_usage() {
+        // Round 1's stream observes usage before the tool gates. Cancel arrives during the tool
+        // execution, so the abort must still carry billable_usage from the completed round.
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let client = FakeClient::new(vec![tool_use_turn_with_usage(
+            "tool_1", "gate", r"{}", 7, 3,
+        )]);
+        let started = Arc::new(Notify::new());
+        let tools = ToolRegistry::new(vec![Box::new(GateTool {
+            started: started.clone(),
+        })]);
+        let sink = CapturingSink::new();
+        let mut messages = vec![Message::user("kick off")];
+        let (tx, mut rx) = mpsc::channel::<UserAction>(1);
+        let prompt = empty_prompt();
+
+        let (outcome, ()) = tokio::join!(
+            agent_turn(
+                &client,
+                &tools,
+                &mut messages,
+                &prompt,
+                &sink,
+                &session,
+                &mut rx,
+                None,
+            ),
+            async {
+                started.notified().await;
+                tx.send(UserAction::Cancel).await.unwrap();
+            },
+        );
+
+        assert!(
+            matches!(outcome.result, Err(TurnAbort::Cancelled)),
+            "got {:?}",
+            outcome.result,
+        );
+        assert_eq!(
+            outcome.report.billable_usage.map(TokenUsage::total_tokens),
+            Some(10),
+            "round 1 usage must reach the caller despite the abort: {:?}",
+            outcome.report,
         );
         drop(tx);
     }
@@ -2092,10 +2397,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_turn_safety_cap_bail_preserves_completed_round_usage() {
+        // Each capped round reports usage. The cap-trip abort must still fold every round into
+        // billable_usage so the caller bills what the API charged for.
+        const CAP: u32 = 2;
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let turns: Vec<Vec<StreamEvent>> = (0..CAP)
+            .map(|i| tool_use_turn_with_usage(&format!("tool_{i}"), "echo", r"{}", 5, 2))
+            .collect();
+        let client = FakeClient::new(turns);
+        let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
+        let sink = CapturingSink::new();
+        let mut messages = vec![Message::user("loop forever")];
+
+        let outcome = agent_turn(
+            &client,
+            &tools,
+            &mut messages,
+            &empty_prompt(),
+            &sink,
+            &session,
+            &mut inert_user_rx(),
+            Some(CAP),
+        )
+        .await;
+
+        assert!(
+            matches!(outcome.result, Err(TurnAbort::Failed(_))),
+            "got {:?}",
+            outcome.result,
+        );
+        assert_eq!(
+            outcome.report.billable_usage.map(TokenUsage::total_tokens),
+            Some(CAP * 7),
+            "every capped round must reach billable_usage: {:?}",
+            outcome.report,
+        );
+    }
+
+    #[tokio::test]
     async fn agent_turn_with_none_cap_runs_unbounded_until_text_only_reply() {
-        // The cap is None, so the loop must not bail on its own; it terminates only when the
-        // model produces a text-only round. Pin that an arbitrary multi-round chain still
-        // completes without tripping the safety cap.
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let mut turns: Vec<Vec<StreamEvent>> = (0..50)
@@ -2154,6 +2496,51 @@ mod tests {
         assert!(
             msg.contains("Servers overloaded"),
             "message in error: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_turn_failed_after_completed_round_preserves_billable_usage() {
+        // Round 1 completes with reported usage. Round 2 emits a stream Error so the turn
+        // bails with TurnAbort::Failed. The completed round's usage must still ride out on
+        // billable_usage so the caller bills what the API charged for.
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let client = FakeClient::new(vec![
+            tool_use_turn_with_usage("tool_1", "echo", r"{}", 9, 4),
+            vec![StreamEvent::Error {
+                error: ApiError {
+                    error_type: "overloaded_error".into(),
+                    message: "Servers overloaded".into(),
+                },
+            }],
+        ]);
+        let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
+        let sink = CapturingSink::new();
+        let mut messages = vec![Message::user("hi")];
+
+        let outcome = agent_turn(
+            &client,
+            &tools,
+            &mut messages,
+            &empty_prompt(),
+            &sink,
+            &session,
+            &mut inert_user_rx(),
+            None,
+        )
+        .await;
+
+        assert!(
+            matches!(outcome.result, Err(TurnAbort::Failed(_))),
+            "got {:?}",
+            outcome.result,
+        );
+        assert_eq!(
+            outcome.report.billable_usage.map(TokenUsage::total_tokens),
+            Some(13),
+            "round 1 usage must reach the caller despite the bail: {:?}",
+            outcome.report,
         );
     }
 

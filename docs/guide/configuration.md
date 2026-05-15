@@ -26,20 +26,30 @@ auto_threshold_tokens = 400000
 
 [tui]
 show_thinking = true
+status_line = [
+  "current-dir",
+  "git-branch",
+  "pull-request",
+  "model-with-effort",
+  "context-used",
+  "session-cost",
+  "run-state",
+  "thread-title",
+]
 ```
 
 ### `[client]`: API connection
 
-| Key                | Type    | Default                     | Description                                                |
-| ------------------ | ------- | --------------------------- | ---------------------------------------------------------- |
-| `api_key`          | string  | -                           | Anthropic API key (user config only)                       |
-| `base_url`         | string  | `https://api.anthropic.com` | API base URL (user config only)                            |
-| `extra_ca_certs`   | string  | -                           | PEM bundle appended to the trust store (user config only)  |
-| `model`            | string  | `claude-opus-4-7[1m]`       | Model to use                                               |
-| `effort`           | string  | per-model (see below)       | Intelligence-vs-latency tier                               |
-| `max_tokens`       | integer | effort-derived (see below)  | Max tokens per response                                    |
-| `max_tool_rounds`  | integer | unset (unbounded)           | Per-turn safety cap on tool rounds                         |
-| `prompt_cache_ttl` | string  | `"1h"`                      | Prompt-cache TTL (`"5m"` or `"1h"`)                        |
+| Key                | Type    | Default                     | Description                                               |
+| ------------------ | ------- | --------------------------- | --------------------------------------------------------- |
+| `api_key`          | string  | -                           | Anthropic API key (user config only)                      |
+| `base_url`         | string  | `https://api.anthropic.com` | API base URL (user config only)                           |
+| `extra_ca_certs`   | string  | -                           | PEM bundle appended to the trust store (user config only) |
+| `model`            | string  | `claude-opus-4-7[1m]`       | Model to use                                              |
+| `effort`           | string  | per-model (see below)       | Intelligence-vs-latency tier                              |
+| `max_tokens`       | integer | effort-derived (see below)  | Max tokens per response                                   |
+| `max_tool_rounds`  | integer | unset (unbounded)           | Per-turn safety cap on tool rounds                        |
+| `prompt_cache_ttl` | string  | `"1h"`                      | Prompt-cache TTL (`"5m"` or `"1h"`)                       |
 
 #### `effort`: intelligence tier
 
@@ -117,14 +127,34 @@ model = "claude-opus-4-7[1m]"
 
 ### `[tui]`: Terminal UI
 
-| Key             | Type    | Default | Description                               |
-| --------------- | ------- | ------- | ----------------------------------------- |
-| `show_thinking` | boolean | `false` | Show extended thinking                    |
-| `show_welcome`  | boolean | `true`  | Paint the welcome splash on an empty chat |
+| Key             | Type    | Default   | Description                               |
+| --------------- | ------- | --------- | ----------------------------------------- |
+| `show_thinking` | boolean | `false`   | Show extended thinking                    |
+| `show_welcome`  | boolean | `true`    | Paint the welcome splash on an empty chat |
+| `status_line`   | array   | see below | Ordered status-line segments              |
 
 On Opus 4.7, `show_thinking = true` opts the request into `thinking.display = "summarized"` so the API streams reasoning text. Otherwise the 4.7 default of `"omitted"` applies and the UI sees nothing until the final answer arrives.
 
 `show_welcome = false` blanks the chat region until you submit a prompt, which is useful when piping or screen-recording.
+
+`status_line` accepts these segment names: `current-dir`, `git-branch`, `pull-request`, `model`, `model-with-effort`, `context-used`, `session-cost`, `run-state`, `thread-title`, `current-time`. The list must contain at least one segment. Segments with no data, such as a missing git branch, an unopened pull request, or usage before the first completed turn, are omitted. The `pull-request` segment shells out to `gh pr view` so it requires the GitHub CLI on PATH. The separator is part of the active theme's `separator` slot; there is no separate status-line separator setting.
+
+| Segment             | Renders                                        | Refresh         |
+| ------------------- | ---------------------------------------------- | --------------- |
+| `current-dir`       | Tildified working directory                    | At startup      |
+| `git-branch`        | Current branch (omitted on detached HEAD)      | Every 5 s       |
+| `pull-request`      | Open PR for the branch as `#86`                | Every 60 s      |
+| `model`             | Compact model label (e.g., `Opus 4.7`)         | On `/model`     |
+| `model-with-effort` | Model label plus the effort tier in parens     | On `/model`     |
+| `context-used`      | `Ctx: 50% (100k/200k)` after the first turn    | Per turn        |
+| `session-cost`      | `Sess: $0.4321` running USD estimate           | Per turn        |
+| `run-state`         | `Ready` / spinner + label / Ctrl+C exit hint   | On state change |
+| `thread-title`      | AI-generated session title                     | After turn 1    |
+| `current-time`      | `HH:MM` in the local timezone                  | Per minute      |
+
+When the row is too narrow to fit every configured segment, low-utility ones drop in this order before the remaining content gets truncated: `thread-title` → `current-time` → `pull-request` → `git-branch` → `current-dir` → `session-cost` → `context-used` → `model` → `model-with-effort` → `run-state`. Run state, the model labels, and the bar's last surviving segment are always preserved.
+
+`OX_STATUS_LINE` accepts the same segment names, comma-separated, with optional whitespace (`OX_STATUS_LINE="model, run-state"`). An empty value, an empty entry between commas (`"model,,run-state"`), or any unknown segment name fails startup with a parse error rather than silently dropping the offending part.
 
 ### `[tui.theme]`: Terminal theme
 
@@ -177,6 +207,7 @@ Environment variables override all config file values.
 | `OX_COMPACTION_AUTO_THRESHOLD_PERCENT` | `client.compaction.auto_threshold_percent` | model-derived               | Percent compaction trigger   |
 | `OX_SHOW_THINKING`                     | `tui.show_thinking`                        | `false`                     | Show extended thinking       |
 | `OX_SHOW_WELCOME`                      | `tui.show_welcome`                         | `true`                      | Paint the welcome splash     |
+| `OX_STATUS_LINE`                       | `tui.status_line`                          | see `[tui]`                 | Comma-separated segments     |
 
 Set `OX_SHOW_THINKING=1` to display the model's thinking process (dimmed text) when extended thinking is enabled for the model.
 

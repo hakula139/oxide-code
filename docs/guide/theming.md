@@ -175,7 +175,28 @@ Each slot maps to one role in the TUI. Override a slot by name to restyle that r
 | `tool_icon`        | Per-tool icon                          |
 | `border_focused`   | Focused component border (e.g., input) |
 | `border_unfocused` | Unfocused component border             |
-| `separator`        | Status bar separator (dimmed pipe)     |
+| `separator`        | Status-line segment separator (`│`)    |
+
+### Status-line segments
+
+Each status-line segment routes to one of the slots above so re-skinning the slot re-skins everywhere it appears. To restyle one segment, override the slot it uses.
+
+| Segment              | Slot     |
+| -------------------- | -------- |
+| `current-dir`        | `muted`  |
+| `git-branch`         | `accent` |
+| `pull-request`       | `accent` |
+| `model`              | `text`   |
+| `model-with-effort`  | `text`   |
+| `context-used`       | `dim`    |
+| `session-cost`       | `dim`    |
+| `run-state` (idle)   | `success`|
+| `run-state` (busy)   | `info`   |
+| `run-state` (warn)   | `warning`|
+| `thread-title`       | `muted`  |
+| `current-time`       | `dim`    |
+
+The separator glyph itself (`│`) is fixed; the `separator` slot only controls its color and modifiers.
 
 ## Overrides
 

@@ -334,7 +334,6 @@ mod tests {
     fn execute_short_id_resolves_via_suffix_tier() {
         for (arg, expected) in [
             ("haiku-4-5", "claude-haiku-4-5"),
-            ("opus-4-1", "claude-opus-4-1"),
             ("sonnet-4-5", "claude-sonnet-4-5"),
             ("sonnet-4-6", "claude-sonnet-4-6"),
             ("opus-4-6[1m]", "claude-opus-4-6[1m]"),
@@ -399,8 +398,7 @@ mod tests {
     }
 
     #[test]
-    fn execute_retired_or_legacy_id_falls_through_to_ambiguity() {
-        // Retired ids substring-match multiple current rows; ambiguity must surface.
+    fn execute_family_prefix_falls_through_to_ambiguity() {
         for arg in ["opus-4", "claude-opus-4", "claude-sonnet-4"] {
             let (_, outcome) = run_execute(arg);
             let msg = outcome.expect_err(&format!("`{arg}` must error"));
@@ -434,12 +432,11 @@ mod tests {
             assert!(msg.contains(id), "{id} should be listed: {msg}");
         }
         // Older non-listed Opus rows must not appear in the curated listing.
-        for id in ["claude-opus-4-5", "claude-opus-4-1"] {
-            assert!(
-                !msg.contains(id),
-                "non-curated `{id}` must not appear: {msg}",
-            );
-        }
+        let id = "claude-opus-4-5";
+        assert!(
+            !msg.contains(id),
+            "non-curated `{id}` must not appear: {msg}",
+        );
     }
 
     // ── resolve_model_arg ──
@@ -473,6 +470,7 @@ mod tests {
         for dated in [
             "claude-opus-4-7-20260101",
             "claude-opus-4-6-20250805",
+            "claude-opus-4-1-20250805",
             "claude-sonnet-4-5-20250929",
         ] {
             assert_eq!(

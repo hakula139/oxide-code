@@ -1,8 +1,13 @@
 //! Ground-truth table of known Claude models. Substring-matched, most-specific entry first.
 
+mod pricing;
+
 use std::borrow::Cow;
 
 use crate::config::Effort;
+
+pub(crate) use pricing::TokenCostRates;
+use pricing::{HAIKU_RATES, OPUS_4_1_RATES, OPUS_4_5_PLUS_RATES, SONNET_RATES};
 
 // ── ModelInfo ──
 
@@ -14,6 +19,8 @@ pub(crate) struct ModelInfo {
     pub(crate) display_name: &'static str,
     pub(crate) cutoff: Option<&'static str>,
     pub(crate) capabilities: Capabilities,
+    /// First-party Claude API token prices in USD per million tokens.
+    pub(crate) cost_rates: Option<TokenCostRates>,
 }
 
 const STANDARD_CONTEXT_WINDOW: u32 = 200_000;
@@ -61,6 +68,7 @@ pub(crate) const MODELS: &[ModelInfo] = &[
             ],
             structured_outputs: true,
         },
+        cost_rates: Some(OPUS_4_5_PLUS_RATES),
     },
     ModelInfo {
         id_substr: "claude-opus-4-6",
@@ -73,6 +81,7 @@ pub(crate) const MODELS: &[ModelInfo] = &[
             supported_efforts: &[Effort::Low, Effort::Medium, Effort::High, Effort::Max],
             structured_outputs: true,
         },
+        cost_rates: Some(OPUS_4_5_PLUS_RATES),
     },
     ModelInfo {
         id_substr: "claude-sonnet-4-6",
@@ -85,6 +94,7 @@ pub(crate) const MODELS: &[ModelInfo] = &[
             supported_efforts: &[Effort::Low, Effort::Medium, Effort::High],
             structured_outputs: true,
         },
+        cost_rates: Some(SONNET_RATES),
     },
     ModelInfo {
         id_substr: "claude-opus-4-5",
@@ -97,6 +107,7 @@ pub(crate) const MODELS: &[ModelInfo] = &[
             supported_efforts: &[],
             structured_outputs: true,
         },
+        cost_rates: Some(OPUS_4_5_PLUS_RATES),
     },
     ModelInfo {
         id_substr: "claude-sonnet-4-5",
@@ -109,6 +120,7 @@ pub(crate) const MODELS: &[ModelInfo] = &[
             supported_efforts: &[],
             structured_outputs: true,
         },
+        cost_rates: Some(SONNET_RATES),
     },
     ModelInfo {
         id_substr: "claude-haiku-4-5",
@@ -122,6 +134,7 @@ pub(crate) const MODELS: &[ModelInfo] = &[
             supported_efforts: &[],
             structured_outputs: true,
         },
+        cost_rates: Some(HAIKU_RATES),
     },
     ModelInfo {
         id_substr: "claude-opus-4-1",
@@ -134,6 +147,7 @@ pub(crate) const MODELS: &[ModelInfo] = &[
             supported_efforts: &[],
             structured_outputs: true,
         },
+        cost_rates: Some(OPUS_4_1_RATES),
     },
 ];
 
@@ -222,8 +236,12 @@ pub(crate) fn context_window_for(model: &str) -> Option<u32> {
     }
 }
 
+pub(crate) fn token_cost_rates_for(model: &str) -> Option<TokenCostRates> {
+    lookup(model).and_then(|info| info.cost_rates)
+}
+
 /// Human-facing label: the row's [`ModelInfo::display_name`] plus a ` (1M context)` suffix on
-/// `[1m]` ids; the raw id when the model is unknown.
+/// `[1m]` ids. Falls back to the raw id when the model is unknown.
 pub(crate) fn display_name(model: &str) -> Cow<'_, str> {
     let base = lookup(model).map_or(Cow::Borrowed(model), |info| {
         Cow::Borrowed(info.display_name)
@@ -235,9 +253,27 @@ pub(crate) fn display_name(model: &str) -> Cow<'_, str> {
     }
 }
 
+/// Width-constrained variant for the status bar. Drops the `Claude ` family prefix and
+/// abbreviates the 1M opt-in to ` [1M]`. Falls back to the raw id when the model is unknown.
+pub(crate) fn short_display_name(model: &str) -> Cow<'_, str> {
+    let Some(info) = lookup(model) else {
+        return Cow::Borrowed(model);
+    };
+    let base = info
+        .display_name
+        .strip_prefix("Claude ")
+        .unwrap_or(info.display_name);
+    if model.ends_with("[1m]") {
+        Cow::Owned(format!("{base} [1M]"))
+    } else {
+        Cow::Borrowed(base)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::PromptCacheTtl;
 
     // ── capability rows ──
 
@@ -314,7 +350,6 @@ mod tests {
             "claude-opus-4-5",
             "claude-sonnet-4-5",
             "claude-haiku-4-5",
-            "claude-opus-4-1",
         ] {
             assert!(
                 !lookup(unsupported)
@@ -346,7 +381,6 @@ mod tests {
             "claude-opus-4-7",
             "claude-opus-4-6",
             "claude-opus-4-5",
-            "claude-opus-4-1",
             "claude-sonnet-4-6",
             "claude-sonnet-4-5",
             "claude-haiku-4-5",
@@ -531,6 +565,49 @@ mod tests {
         assert_eq!(context_window_for("claude-future-9"), None);
     }
 
+    // ── token_cost_rates_for ──
+
+    #[test]
+    fn token_cost_rates_for_known_model_estimates_prompt_cache_ttl() {
+        let rates = token_cost_rates_for("claude-opus-4-7[1m]").unwrap();
+        let five_min = rates.estimate_usd(
+            1_000_000,
+            1_000_000,
+            1_000_000,
+            1_000_000,
+            PromptCacheTtl::FiveMin,
+        );
+        let one_hour = rates.estimate_usd(
+            1_000_000,
+            1_000_000,
+            1_000_000,
+            1_000_000,
+            PromptCacheTtl::OneHour,
+        );
+
+        assert!((five_min - 36.75).abs() < 1e-9);
+        assert!((one_hour - 40.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn token_cost_rates_for_opus_4_1_uses_older_pricing() {
+        let rates = token_cost_rates_for("claude-opus-4-1").unwrap();
+        let cost = rates.estimate_usd(
+            1_000_000,
+            1_000_000,
+            1_000_000,
+            1_000_000,
+            PromptCacheTtl::FiveMin,
+        );
+
+        assert!((cost - 110.25).abs() < 1e-9);
+    }
+
+    #[test]
+    fn token_cost_rates_for_unknown_model_is_absent() {
+        assert!(token_cost_rates_for("claude-future-9").is_none());
+    }
+
     // ── display_name ──
 
     #[test]
@@ -565,5 +642,29 @@ mod tests {
     fn display_name_unknown_id_falls_through_to_raw() {
         assert_eq!(display_name("gpt-4"), "gpt-4");
         assert_eq!(display_name("custom-model"), "custom-model");
+    }
+
+    // ── short_display_name ──
+
+    #[test]
+    fn short_display_name_strips_claude_family_prefix() {
+        for (id, expected) in [
+            ("claude-opus-4-7", "Opus 4.7"),
+            ("claude-sonnet-4-6", "Sonnet 4.6"),
+            ("claude-haiku-4-5", "Haiku 4.5"),
+            ("claude-opus-4-1", "Opus 4.1"),
+        ] {
+            assert_eq!(short_display_name(id), expected, "{id}");
+        }
+    }
+
+    #[test]
+    fn short_display_name_replaces_1m_context_with_compact_tag() {
+        assert_eq!(short_display_name("claude-opus-4-7[1m]"), "Opus 4.7 [1M]");
+    }
+
+    #[test]
+    fn short_display_name_unknown_id_falls_through_to_raw() {
+        assert_eq!(short_display_name("gpt-4"), "gpt-4");
     }
 }

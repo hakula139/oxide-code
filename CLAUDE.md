@@ -47,6 +47,8 @@ ox                                          # Start an interactive session
 ├── main.rs                                 # CLI entry point, mode dispatch (TUI / REPL / headless), signal handling
 ├── message.rs                              # Conversation message types
 ├── model.rs                                # Ground-truth table: display name, cutoff, capabilities, and unknown raw-id fallback
+├── model/
+│   └── pricing.rs                          # Per-million-token cost rates + USD estimator (excludes account / marketplace adjustments)
 ├── prompt.rs                               # System prompt builder (section assembly)
 ├── prompt/
 │   ├── environment.rs                      # Runtime environment detection (platform, git, date, knowledge cutoff)
@@ -131,7 +133,9 @@ ox                                          # Start an interactive session
 │   │   │   ├── popup.rs                    # Slash-command autocomplete overlay: dim non-selected, bold selected, alias parens
 │   │   │   └── snapshots/                  # `cargo insta` baselines for popup render tests
 │   │   ├── snapshots/                      # `cargo insta` baselines for chat, input, status, and welcome render tests
-│   │   ├── status.rs                       # Status bar (model, spinner, status, working directory)
+│   │   ├── status.rs                       # Configurable status-line component state + run-state spinner
+│   │   ├── status/
+│   │   │   └── line.rs                     # Ordered segment rendering for the status line
 │   │   └── welcome.rs                      # Empty-state welcome screen: identity ribbon + body column, themed via `accent`/`text`/`dim`
 │   ├── cursor.rs                           # `place_clamped`: shared right-edge-clamp cursor placement for input surfaces
 │   ├── event.rs                            # ChannelSink (mpsc transport for the TUI)
@@ -158,6 +162,7 @@ ox                                          # Start an interactive session
 └── util/
     ├── env.rs                              # Environment-variable helpers (`string`, `bool`: empty-is-absent semantics)
     ├── fs.rs                               # Filesystem helpers: `create_private_dir_all` (0o700) + `atomic_write_private` (0o600 temp+rename)
+    ├── git.rs                              # Git / `gh` probes for branch + open PR (best-effort, debug-logged failures)
     ├── lock.rs                             # Async retry helper for advisory locks (used by oauth)
     ├── log.rs                              # `tracing` subscriber init: file under $XDG_STATE_HOME in TUI mode, stderr otherwise
     ├── path.rs                             # Path display + expansion helpers (`tildify`: $HOME → ~/, `expand_user`: ~/ → $HOME)

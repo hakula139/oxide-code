@@ -2,5 +2,5 @@
 source: crates/oxide-code/src/tui/components/status.rs
 expression: "render_status(&mut bar, 80)"
 ---
-"  Claude Opus 4.7 │ ⣷ Streaming · Esc to interrupt             ~/projects/demo  "
+"  ~/projects/demo │ main │ Opus 4.7 (xhigh) │ ⣷ Streaming · Esc to interrupt    "
 "────────────────────────────────────────────────────────────────────────────────"

@@ -152,6 +152,10 @@ impl Client {
         self.config.compaction
     }
 
+    pub(crate) fn prompt_cache_ttl(&self) -> crate::config::PromptCacheTtl {
+        self.config.prompt_cache_ttl
+    }
+
     /// `None` means the agent loop runs without a per-turn round cap.
     pub(crate) fn max_tool_rounds(&self) -> Option<u32> {
         self.config.max_tool_rounds
@@ -405,7 +409,8 @@ mod tests {
     use super::wire::{ContentBlockInfo, Delta};
     use super::*;
     use crate::config::{
-        AutoCompactionConfig, CompactionConfig, Effort, ThinkingConfig, test_thresholds,
+        AutoCompactionConfig, CompactionConfig, Effort, PromptCacheTtl, ThinkingConfig,
+        test_thresholds,
     };
 
     // ── Fixtures ──
@@ -490,12 +495,14 @@ mod tests {
     #[test]
     fn new_exposes_compaction_config() {
         let mut config = test_config(OFFLINE_URL, Auth::ApiKey("sk-test".to_owned()), TEST_MODEL);
+        config.prompt_cache_ttl = PromptCacheTtl::FiveMin;
         config.compaction = CompactionConfig::resolved_for_test(AutoCompactionConfig {
             enabled: true,
             threshold_tokens: Some(123_456),
         });
         let client = Client::new(config, None).unwrap();
 
+        assert_eq!(client.prompt_cache_ttl(), PromptCacheTtl::FiveMin);
         assert_eq!(client.compaction().auto.threshold_tokens, Some(123_456));
     }
 

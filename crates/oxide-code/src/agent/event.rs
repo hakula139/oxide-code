@@ -17,6 +17,20 @@ pub(crate) const INTERRUPTED_MARKER: &str = "(interrupted)";
 
 // ── Agent Events ──
 
+/// Token and cost snapshot for status-line rendering.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct UsageSnapshot {
+    /// Cache-aware input total: `input + cache_creation + cache_read`. Drives the context-pressure
+    /// percentage and auto-compaction threshold. Cleared on session roll (`/clear`), `/resume`,
+    /// and any compaction (manual `/compact` or automatic).
+    pub(crate) context_tokens: u32,
+    /// Active model context window. `None` hides the percentage.
+    pub(crate) context_window: Option<u32>,
+    /// Running session cost in USD, accumulated across every turn. Cleared on the same boundaries
+    /// as `context_tokens`. `None` hides the cost segment.
+    pub(crate) estimated_cost_usd: Option<f64>,
+}
+
 /// One-way notifications from the agent loop to whichever UI is rendering it
 /// (TUI [`ChannelSink`](crate::tui::event::ChannelSink) or stdio [`StdioSink`]).
 #[derive(Debug, Clone)]
@@ -44,6 +58,8 @@ pub(crate) enum AgentEvent {
     PromptDrained(String),
     /// Turn ended cleanly with a final assistant reply (no further tool rounds).
     TurnComplete,
+    /// Live usage and estimated cost snapshot for the current process.
+    UsageUpdated(UsageSnapshot),
     /// User cancelled mid-turn ([`UserAction::Cancel`]). The in-flight reply is truncated and the
     /// inline [`INTERRUPTED_MARKER`] is rendered.
     Cancelled,
@@ -234,6 +250,7 @@ impl StdioSink {
             }
             // TUI-only — no stdio surface to update.
             AgentEvent::PromptDrained(_)
+            | AgentEvent::UsageUpdated(_)
             | AgentEvent::AutoCompactionStarted
             | AgentEvent::SessionTitleUpdated { .. }
             | AgentEvent::SessionRolled { .. }

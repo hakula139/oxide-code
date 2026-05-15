@@ -258,7 +258,6 @@ mod tests {
             ("claude-opus-4-6", "May 2025"),
             ("claude-opus-4-5", "May 2025"),
             ("claude-haiku-4-5", "February 2025"),
-            ("claude-opus-4-1", "January 2025"),
             ("claude-sonnet-4-5", "January 2025"),
         ] {
             assert_eq!(knowledge_cutoff(id), Some(expected), "{id}");

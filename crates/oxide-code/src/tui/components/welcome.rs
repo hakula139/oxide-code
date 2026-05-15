@@ -337,6 +337,8 @@ mod tests {
     fn fixture() -> LiveSessionInfo {
         LiveSessionInfo {
             cwd: "~/github/oxide-code".to_owned(),
+            git_cwd: None,
+            git_branch: Some("main".to_owned()),
             version: "0.1.0",
             session_id: "test-session".to_owned(),
             config: ConfigSnapshot {
@@ -354,6 +356,7 @@ mod tests {
                 }),
                 show_thinking: false,
                 show_welcome: true,
+                status_line: crate::config::StatusLineSegment::DEFAULT.to_vec(),
                 theme_name: "mocha".to_owned(),
             },
         }
