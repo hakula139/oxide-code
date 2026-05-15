@@ -1,8 +1,13 @@
 //! Ground-truth table of known Claude models. Substring-matched, most-specific entry first.
 
+mod pricing;
+
 use std::borrow::Cow;
 
-use crate::config::{Effort, PromptCacheTtl};
+use crate::config::Effort;
+
+pub(crate) use pricing::TokenCostRates;
+use pricing::{HAIKU_RATES, OPUS_4_1_RATES, OPUS_4_5_PLUS_RATES, SONNET_RATES};
 
 // ── ModelInfo ──
 
@@ -20,69 +25,6 @@ pub(crate) struct ModelInfo {
 
 const STANDARD_CONTEXT_WINDOW: u32 = 200_000;
 const CONTEXT_1M_WINDOW: u32 = 1_000_000;
-
-// ── TokenCostRates ──
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct TokenCostRates {
-    input: f64,
-    cache_write_5m: f64,
-    cache_write_1h: f64,
-    cache_read: f64,
-    output: f64,
-}
-
-const OPUS_4_5_PLUS_RATES: TokenCostRates = TokenCostRates {
-    input: 5.0,
-    cache_write_5m: 6.25,
-    cache_write_1h: 10.0,
-    cache_read: 0.50,
-    output: 25.0,
-};
-
-const OPUS_4_1_RATES: TokenCostRates = TokenCostRates {
-    input: 15.0,
-    cache_write_5m: 18.75,
-    cache_write_1h: 30.0,
-    cache_read: 1.50,
-    output: 75.0,
-};
-
-const SONNET_RATES: TokenCostRates = TokenCostRates {
-    input: 3.0,
-    cache_write_5m: 3.75,
-    cache_write_1h: 6.0,
-    cache_read: 0.30,
-    output: 15.0,
-};
-
-const HAIKU_RATES: TokenCostRates = TokenCostRates {
-    input: 1.0,
-    cache_write_5m: 1.25,
-    cache_write_1h: 2.0,
-    cache_read: 0.10,
-    output: 5.0,
-};
-
-impl TokenCostRates {
-    pub(crate) fn estimate_usd(
-        self,
-        input_tokens: u32,
-        cache_creation_input_tokens: u32,
-        cache_read_input_tokens: u32,
-        output_tokens: u32,
-        cache_ttl: PromptCacheTtl,
-    ) -> f64 {
-        let cache_write = match cache_ttl {
-            PromptCacheTtl::FiveMin => self.cache_write_5m,
-            PromptCacheTtl::OneHour => self.cache_write_1h,
-        };
-        million_tokens(input_tokens) * self.input
-            + million_tokens(cache_creation_input_tokens) * cache_write
-            + million_tokens(cache_read_input_tokens) * self.cache_read
-            + million_tokens(output_tokens) * self.output
-    }
-}
 
 // ── Capabilities ──
 
@@ -298,10 +240,6 @@ pub(crate) fn token_cost_rates_for(model: &str) -> Option<TokenCostRates> {
     lookup(model).and_then(|info| info.cost_rates)
 }
 
-fn million_tokens(tokens: u32) -> f64 {
-    f64::from(tokens) / 1_000_000.0
-}
-
 /// Human-facing label: the row's [`ModelInfo::display_name`] plus a ` (1M context)` suffix on
 /// `[1m]` ids. Falls back to the raw id when the model is unknown.
 pub(crate) fn display_name(model: &str) -> Cow<'_, str> {
@@ -335,6 +273,7 @@ pub(crate) fn short_display_name(model: &str) -> Cow<'_, str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::PromptCacheTtl;
 
     // ── capability rows ──
 
