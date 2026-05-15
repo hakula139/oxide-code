@@ -37,8 +37,10 @@ On left-button up, the app:
 1. Reads `ChatView::rendered_text(width)` to materialize the same wrapped lines that were on screen.
 2. Calls `Selection::materialize(text, area, scroll_offset)` to extract the substring (line-rect, unicode-width-aware).
 3. Builds `\x1b]52;c;<base64>\x07` over the raw UTF-8 bytes via `osc52_set_clipboard`.
-4. Writes the bytes to stdout (the terminal forwards them to the OS clipboard when configured).
+4. Writes the bytes to stdout, then flushes so the sequence reaches the terminal before the next frame.
 5. Pushes a system-message warning when the payload was clamped.
+
+When `TMUX` is set in the environment, the app also emits a tmux DCS pass-through copy (`\x1bPtmux;\x1b\x1b]52;c;...\x07\x1b\\`) right after the bare sequence. tmux configurations without `set -g set-clipboard on` swallow the bare OSC 52, but the DCS-wrapped variant always reaches the outer terminal because tmux strips its DCS envelope and forwards the inner bytes verbatim. Configurations that already pass OSC 52 through receive both variants. The terminal's clipboard handler is idempotent, so a duplicate write is harmless.
 
 Payload cap is 8 KB pre-base64 (xterm's conservative limit). kitty / iTerm2 / WezTerm tolerate more but the floor keeps the same selection working everywhere.
 

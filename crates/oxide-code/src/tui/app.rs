@@ -280,7 +280,8 @@ impl App {
 
     /// Writes the OSC 52 sequence for the current selection into `sink`. Pushes a system message
     /// when the payload was truncated. No-op when there's no selection or when materialization
-    /// clips out, in which case `sink` is not touched.
+    /// clips out, in which case `sink` is not touched. Inside tmux, the sequence is also emitted
+    /// wrapped in DCS pass-through so it survives configurations without `set-clipboard on`.
     fn write_selection_to(&mut self, sink: &mut dyn std::io::Write) -> std::io::Result<()> {
         let Some(area) = self.chat_rect else {
             return Ok(());
@@ -292,6 +293,10 @@ impl App {
         };
         let (sequence, truncated) = super::selection::osc52_set_clipboard(&payload);
         sink.write_all(&sequence)?;
+        if std::env::var_os("TMUX").is_some() {
+            sink.write_all(&super::selection::tmux_passthrough(&sequence))?;
+        }
+        sink.flush()?;
         if truncated {
             self.chat
                 .push_system_message("Selection truncated to ~8 KB for the clipboard.".to_owned());
@@ -1644,7 +1649,9 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         }));
         let mut sink = Vec::<u8>::new();
-        app.write_selection_to(&mut sink).unwrap();
+        temp_env::with_var_unset("TMUX", || {
+            app.write_selection_to(&mut sink).unwrap();
+        });
 
         assert!(
             sink.starts_with(b"\x1b]52;c;"),
@@ -1652,7 +1659,44 @@ mod tests {
         );
         assert!(
             sink.ends_with(b"\x07"),
-            "BEL terminates the OSC 52 sequence"
+            "BEL terminates the OSC 52 sequence outside tmux",
+        );
+    }
+
+    #[test]
+    fn write_selection_to_inside_tmux_also_emits_dcs_wrapped_payload() {
+        let mut app = drag_app_with_chat_text("hello world");
+        app.handle_crossterm_event(&Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        }));
+        app.handle_crossterm_event(&Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: 50,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        }));
+        let mut sink = Vec::<u8>::new();
+        temp_env::with_var("TMUX", Some("/tmp/tmux-1000/default,1234,0"), || {
+            app.write_selection_to(&mut sink).unwrap();
+        });
+
+        // Bare OSC 52 first so a tmux config that already passes through gets the clipboard.
+        assert!(
+            sink.starts_with(b"\x1b]52;c;"),
+            "bare OSC 52 still opens the sink",
+        );
+        // DCS pass-through wrapper follows so a tmux config without `set-clipboard on` still
+        // forwards the inner OSC 52 to the outer terminal.
+        assert!(
+            sink.windows(7).any(|w| w == b"\x1bPtmux;"),
+            "tmux DCS opener present in the emitted bytes",
+        );
+        assert!(
+            sink.ends_with(b"\x1b\\"),
+            "DCS pass-through terminates the sink with ST",
         );
     }
 
@@ -1678,7 +1722,9 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         }));
         let mut sink = Vec::<u8>::new();
-        app.write_selection_to(&mut sink).unwrap();
+        temp_env::with_var_unset("TMUX", || {
+            app.write_selection_to(&mut sink).unwrap();
+        });
 
         let last = app.chat.last_system_text().unwrap_or_default();
         assert!(
@@ -1711,7 +1757,9 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         }));
         let mut sink = Vec::<u8>::new();
-        app.write_selection_to(&mut sink).unwrap();
+        temp_env::with_var_unset("TMUX", || {
+            app.write_selection_to(&mut sink).unwrap();
+        });
         assert!(
             sink.starts_with(b"\x1b]52;c;"),
             "scrolled-into-content drag still emits an OSC 52 payload",

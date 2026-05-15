@@ -214,6 +214,22 @@ pub(super) fn osc52_set_clipboard(text: &str) -> (Vec<u8>, bool) {
     (out, truncated)
 }
 
+/// Wraps an escape sequence in tmux's DCS pass-through (`\x1bPtmux;...\x1b\\`) so a tmux session
+/// that doesn't have `set-clipboard on` still forwards the bytes to the outer terminal. Every
+/// `\x1b` inside the payload must be doubled per the tmux spec.
+pub(super) fn tmux_passthrough(escape: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(escape.len() + 8);
+    out.extend_from_slice(b"\x1bPtmux;");
+    for &b in escape {
+        if b == 0x1b {
+            out.push(0x1b);
+        }
+        out.push(b);
+    }
+    out.extend_from_slice(b"\x1b\\");
+    out
+}
+
 /// Largest byte index `<= cap` that lies on a UTF-8 char boundary. Walks back at most 3 bytes.
 fn floor_to_char_boundary(s: &str, cap: usize) -> usize {
     let mut i = cap.min(s.len());
@@ -428,6 +444,26 @@ mod tests {
         // Length is the largest multiple of 3 that fits inside the cap.
         let expected = OSC52_PAYLOAD_BYTES - (OSC52_PAYLOAD_BYTES % 3);
         assert_eq!(decoded.len(), expected);
+    }
+
+    // ── tmux_passthrough ──
+
+    #[test]
+    fn tmux_passthrough_doubles_inner_escape_and_wraps_in_dcs() {
+        let inner = b"\x1b]52;c;abc\x07";
+        let wrapped = tmux_passthrough(inner);
+        // DCS opener `\x1bPtmux;`, doubled inner ESC, BEL, DCS closer `\x1b\\`.
+        let expected = b"\x1bPtmux;\x1b\x1b]52;c;abc\x07\x1b\\";
+        assert_eq!(&wrapped, expected);
+    }
+
+    #[test]
+    fn tmux_passthrough_doubles_every_inner_escape() {
+        // Multiple ESCs (e.g. an OSC followed by another OSC) all need doubling so tmux strips its
+        // own DCS wrapper without consuming the inner sequences.
+        let inner = b"\x1b]A\x1b]B";
+        let wrapped = tmux_passthrough(inner);
+        assert_eq!(&wrapped, b"\x1bPtmux;\x1b\x1b]A\x1b\x1b]B\x1b\\");
     }
 
     // ── floor_to_char_boundary ──
