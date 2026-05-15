@@ -76,16 +76,9 @@ status_line = [
 ]
 ```
 
-This differs from the reference Claude Code script in two ways:
+This differs from the reference Claude Code script in two ways: oxide-code stays one row because Ratatui already owns the app chrome, and external billing data is omitted until there is a first-class provider boundary.
 
-- oxide-code stays one row because Ratatui already owns the app chrome.
-- External billing data is omitted until there is a first-class provider boundary.
-
-Order rationale:
-
-- Location and branch lead because they orient the user.
-- Model and usage follow because they describe request cost and context pressure.
-- Run state stays near the end because it changes most often.
+The default order tracks reading flow: location and branch orient the user, model and usage describe cost and context pressure, run state sits near the end because it changes most often.
 
 ## Design Decisions
 
