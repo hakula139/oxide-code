@@ -1094,7 +1094,7 @@ mod tests {
             auto_compaction_failures: 3,
             last_usage: Some(TokenUsage::new(100_000, 1)),
             displayed_usage: None,
-            total_estimated_cost_usd: 0.0,
+            total_estimated_cost_usd: 1.23,
         };
 
         let control = task
@@ -1107,6 +1107,11 @@ mod tests {
         assert!(matches!(control, LoopControl::Continue));
         assert_eq!(task.auto_compaction_failures, 0);
         assert_eq!(task.last_usage, Some(TokenUsage::new(100_000, 1)));
+        assert!(
+            (task.total_estimated_cost_usd - 1.23).abs() < f64::EPSILON,
+            "session cost must accumulate across swaps: {}",
+            task.total_estimated_cost_usd,
+        );
         assert!(matches!(
             event_rx.recv().await,
             Some(AgentEvent::ConfigChanged { .. })
