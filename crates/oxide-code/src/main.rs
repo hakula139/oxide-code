@@ -14,7 +14,6 @@ mod tui;
 mod util;
 
 use std::io::{IsTerminal, Write};
-use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
@@ -259,10 +258,7 @@ async fn run_tui(
 
     let cwd_path = std::env::current_dir().ok();
     let cwd = cwd_path.as_deref().map(tildify).unwrap_or_default();
-    let git_branch = cwd_path
-        .as_deref()
-        .and_then(current_git_branch)
-        .filter(|branch| !branch.is_empty());
+    let git_branch = cwd_path.as_deref().and_then(util::git::current_branch);
 
     let session_info = LiveSessionInfo {
         cwd,
@@ -330,28 +326,6 @@ async fn run_tui(
     }
 
     result
-}
-
-fn current_git_branch(cwd: &Path) -> Option<String> {
-    let output = std::process::Command::new("git")
-        .args([
-            "-C",
-            cwd.to_str()?,
-            "--no-optional-locks",
-            "branch",
-            "--show-current",
-        ])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let branch = std::str::from_utf8(&output.stdout).ok()?.trim();
-    if branch.is_empty() {
-        None
-    } else {
-        Some(branch.to_owned())
-    }
 }
 
 /// Each `TurnAbort` arm emits exactly one terminal event (`Error` xor `TurnComplete`).
