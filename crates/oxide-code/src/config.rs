@@ -215,6 +215,9 @@ pub(crate) enum StatusLineSegment {
 }
 
 impl StatusLineSegment {
+    /// Adding a variant: also add an entry here. The string must match the kebab-case form
+    /// `serde(rename_all = "kebab-case")` would produce, since `OX_STATUS_LINE` parsing reads
+    /// from this table while TOML config goes through serde.
     const ALL: &'static [(Self, &'static str)] = &[
         (Self::CurrentDir, "current-dir"),
         (Self::GitBranch, "git-branch"),
