@@ -399,7 +399,6 @@ mod tests {
 
     #[test]
     fn execute_family_prefix_falls_through_to_ambiguity() {
-        // Family prefixes substring-match multiple rows; ambiguity must surface.
         for arg in ["opus-4", "claude-opus-4", "claude-sonnet-4"] {
             let (_, outcome) = run_execute(arg);
             let msg = outcome.expect_err(&format!("`{arg}` must error"));
