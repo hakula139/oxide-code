@@ -500,6 +500,28 @@ mod tests {
         assert_eq!(bar.last_branch_probe, probed_at);
     }
 
+    #[test]
+    fn refresh_git_branch_arms_throttle_when_probe_returns_none() {
+        // A non-repo cwd makes `git branch --show-current` return None. The throttle key must
+        // still advance, since a regression that only stamps on `Some(branch)` would re-shell
+        // out every tick on a non-repo cwd.
+        let dir = tempfile::tempdir().unwrap();
+        let mut bar = test_bar();
+        bar.git_cwd = Some(dir.path().to_path_buf());
+        let now = Instant::now();
+        bar.refresh_git_branch(now);
+        assert_eq!(bar.last_branch_probe, Some(now));
+        assert!(
+            !bar.refresh_git_branch(now + Duration::from_millis(100)),
+            "second call within the interval must short-circuit",
+        );
+        assert_eq!(
+            bar.last_branch_probe,
+            Some(now),
+            "stamp must not move while the throttle window is open",
+        );
+    }
+
     // ── refresh_pull_request ──
 
     #[test]
@@ -517,6 +539,25 @@ mod tests {
         bar.track_pull_request = true;
         assert!(!bar.refresh_pull_request(Instant::now()));
         assert!(bar.last_pr_probe.is_none(), "must skip without cwd");
+    }
+
+    #[test]
+    fn refresh_pull_request_arms_throttle_when_probe_returns_none() {
+        // Same throttle invariant as the git branch probe. A non-repo cwd (or a cwd where `gh`
+        // can't find a PR) returns None; the stamp must advance regardless so we don't re-shell
+        // every tick.
+        let dir = tempfile::tempdir().unwrap();
+        let mut bar = test_bar();
+        bar.track_pull_request = true;
+        bar.git_cwd = Some(dir.path().to_path_buf());
+        let now = Instant::now();
+        assert!(!bar.refresh_pull_request(now));
+        assert_eq!(bar.last_pr_probe, Some(now));
+        assert!(
+            !bar.refresh_pull_request(now + Duration::from_millis(100)),
+            "second call within the interval must short-circuit",
+        );
+        assert_eq!(bar.last_pr_probe, Some(now));
     }
 
     // ── should_probe ──
