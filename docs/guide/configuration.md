@@ -139,6 +139,23 @@ On Opus 4.7, `show_thinking = true` opts the request into `thinking.display = "s
 
 `status_line` accepts these segment names: `current-dir`, `git-branch`, `pull-request`, `model`, `model-with-effort`, `context-used`, `session-cost`, `run-state`, `thread-title`, `current-time`. The list must contain at least one segment. Segments with no data, such as a missing git branch, an unopened pull request, or usage before the first completed turn, are omitted. The `pull-request` segment shells out to `gh pr view` so it requires the GitHub CLI on PATH. The separator is part of the active theme's `separator` slot; there is no separate status-line separator setting.
 
+| Segment             | Renders                                        | Refresh         |
+| ------------------- | ---------------------------------------------- | --------------- |
+| `current-dir`       | Tildified working directory                    | At startup      |
+| `git-branch`        | Current branch (omitted on detached HEAD)      | Every 5 s       |
+| `pull-request`      | Open PR for the branch as `#86`                | Every 60 s      |
+| `model`             | Compact model label (e.g., `Opus 4.7`)         | On `/model`     |
+| `model-with-effort` | Model label plus the effort tier in parens     | On `/model`     |
+| `context-used`      | `Ctx: 50% (100k/200k)` after the first turn    | Per turn        |
+| `session-cost`      | `Sess: $0.4321` running USD estimate           | Per turn        |
+| `run-state`         | `Ready` / spinner + label / Ctrl+C exit hint   | On state change |
+| `thread-title`      | AI-generated session title                     | After turn 1    |
+| `current-time`      | `HH:MM` in the local timezone                  | Per minute      |
+
+When the row is too narrow to fit every configured segment, low-utility ones drop in this order before the remaining content gets truncated: `thread-title` → `current-time` → `pull-request` → `git-branch` → `current-dir` → `session-cost` → `context-used` → `model` → `run-state`. Run state and model are always preserved.
+
+`OX_STATUS_LINE` accepts the same segment names, comma-separated, with optional whitespace (`OX_STATUS_LINE="model, run-state"`). An empty value, an empty entry between commas (`"model,,run-state"`), or any unknown segment name fails startup with a parse error rather than silently dropping the offending part.
+
 ### `[tui.theme]`: Terminal theme
 
 | Key         | Type   | Default   | Description                                      |
