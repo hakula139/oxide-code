@@ -29,6 +29,7 @@ show_thinking = true
 status_line = [
   "current-dir",
   "git-branch",
+  "pull-request",
   "model-with-effort",
   "context-used",
   "session-cost",
@@ -136,7 +137,7 @@ On Opus 4.7, `show_thinking = true` opts the request into `thinking.display = "s
 
 `show_welcome = false` blanks the chat region until you submit a prompt, which is useful when piping or screen-recording.
 
-`status_line` accepts these segment names: `current-dir`, `git-branch`, `model`, `model-with-effort`, `context-used`, `session-cost`, `run-state`, `thread-title`, `current-time`. The list must contain at least one segment. Segments with no data, such as a missing git branch or usage before the first completed turn, are omitted. The separator is part of the active theme's `separator` slot; there is no separate status-line separator setting.
+`status_line` accepts these segment names: `current-dir`, `git-branch`, `pull-request`, `model`, `model-with-effort`, `context-used`, `session-cost`, `run-state`, `thread-title`, `current-time`. The list must contain at least one segment. Segments with no data, such as a missing git branch, an unopened pull request, or usage before the first completed turn, are omitted. The `pull-request` segment shells out to `gh pr view` so it requires the GitHub CLI on PATH. The separator is part of the active theme's `separator` slot; there is no separate status-line separator setting.
 
 ### `[tui.theme]`: Terminal theme
 

@@ -66,6 +66,12 @@ impl StatusLine {
                     Self::segment_style(theme, SegmentStyle::Accent),
                 )
             }),
+            StatusLineSegment::PullRequest => state.pull_request.map(|number| {
+                Span::styled(
+                    format!("#{number}"),
+                    Self::segment_style(theme, SegmentStyle::Accent),
+                )
+            }),
             StatusLineSegment::Model => Some(Span::styled(
                 state.model.to_owned(),
                 Self::segment_style(theme, SegmentStyle::Text),
@@ -120,6 +126,8 @@ pub(super) struct StatusLineState<'a> {
     pub(super) cwd: &'a str,
     /// Branch captured at TUI startup.
     pub(super) git_branch: Option<&'a str>,
+    /// Open pull request number for the current branch, when one is detected.
+    pub(super) pull_request: Option<u64>,
     /// Pre-rendered run-state segment from the parent component.
     pub(super) status_span: Span<'static>,
 }
@@ -185,12 +193,13 @@ fn segment_utility(segment: StatusLineSegment) -> u8 {
     match segment {
         StatusLineSegment::ThreadTitle => 0,
         StatusLineSegment::CurrentTime => 1,
-        StatusLineSegment::GitBranch => 2,
-        StatusLineSegment::CurrentDir => 3,
-        StatusLineSegment::SessionCost => 4,
-        StatusLineSegment::ContextUsed => 5,
-        StatusLineSegment::Model | StatusLineSegment::ModelWithEffort => 6,
-        StatusLineSegment::RunState => 7,
+        StatusLineSegment::PullRequest => 2,
+        StatusLineSegment::GitBranch => 3,
+        StatusLineSegment::CurrentDir => 4,
+        StatusLineSegment::SessionCost => 5,
+        StatusLineSegment::ContextUsed => 6,
+        StatusLineSegment::Model | StatusLineSegment::ModelWithEffort => 7,
+        StatusLineSegment::RunState => 8,
     }
 }
 
@@ -266,6 +275,7 @@ mod tests {
                 }),
                 cwd: "~/repo",
                 git_branch: Some("main"),
+                pull_request: Some(86),
                 status_span: Span::raw("Ready"),
             },
             width,
@@ -305,6 +315,7 @@ mod tests {
                 usage: None,
                 cwd: "",
                 git_branch: None,
+                pull_request: None,
                 status_span: Span::raw("Running a very long command name"),
             },
             12,
@@ -334,6 +345,18 @@ mod tests {
         );
         assert_eq!(render_text(segments.clone(), 11), "  m │ Ready");
         assert_eq!(render_text(segments, 10), "  Ready");
+    }
+
+    #[test]
+    fn render_pull_request_renders_hash_prefix_and_drops_before_git_branch() {
+        let segments = vec![
+            StatusLineSegment::GitBranch,
+            StatusLineSegment::PullRequest,
+            StatusLineSegment::RunState,
+        ];
+
+        assert_eq!(render_text(segments.clone(), 80), "  main │ #86 │ Ready");
+        assert_eq!(render_text(segments, 14), "  main │ Ready");
     }
 
     // ── context_label ──

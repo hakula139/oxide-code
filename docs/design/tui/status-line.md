@@ -16,6 +16,7 @@ Implemented segments:
 | ---------------------- | ------------------- |
 | current directory      | `current-dir`       |
 | git branch             | `git-branch`        |
+| pull request           | `pull-request`      |
 | model                  | `model`             |
 | model with effort      | `model-with-effort` |
 | context used           | `context-used`      |
@@ -29,7 +30,7 @@ Out of scope:
 - Command-based custom renderers.
 - ccusage block / daily totals.
 - Five-hour or weekly account-limit display.
-- Pull request and task-progress segments.
+- Task-progress segments.
 - Persisting cost totals across resume.
 - Non-Anthropic provider pricing.
 
@@ -66,6 +67,7 @@ The default order is:
 status_line = [
   "current-dir",
   "git-branch",
+  "pull-request",
   "model-with-effort",
   "context-used",
   "session-cost",
@@ -91,12 +93,13 @@ Order rationale:
 2. **Implemented segments only.** Unsupported names fail config parsing instead of silently reserving future vocabulary.
 3. **Local usage first.** Context and session cost use provider usage already observed by the current process.
 4. **Segment omission over placeholders.** Missing usage, unknown pricing, absent branch, and blank titles disappear cleanly.
+5. **Probe-throttled segments.** `git-branch` and `pull-request` re-probe on tick at fixed cadences (5 s and 60 s respectively) so the bar stays current after `git checkout` or `gh pr create` without paying per-frame cost.
 
 ## Deferred
 
 - ccusage or another account-usage provider boundary.
 - Five-hour and weekly account-limit telemetry.
-- Pull request and task-progress segments.
+- Task-progress segments.
 - Persisted cost restore after resume.
 - Command-based custom status-line renderer.
 

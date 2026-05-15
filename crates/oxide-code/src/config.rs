@@ -205,6 +205,7 @@ impl FromStr for PromptCacheTtl {
 pub(crate) enum StatusLineSegment {
     CurrentDir,
     GitBranch,
+    PullRequest,
     Model,
     ModelWithEffort,
     ContextUsed,
@@ -218,6 +219,7 @@ impl StatusLineSegment {
     const ALL: &'static [(Self, &'static str)] = &[
         (Self::CurrentDir, "current-dir"),
         (Self::GitBranch, "git-branch"),
+        (Self::PullRequest, "pull-request"),
         (Self::Model, "model"),
         (Self::ModelWithEffort, "model-with-effort"),
         (Self::ContextUsed, "context-used"),
@@ -231,6 +233,7 @@ impl StatusLineSegment {
     pub(crate) const DEFAULT: &'static [Self] = &[
         Self::CurrentDir,
         Self::GitBranch,
+        Self::PullRequest,
         Self::ModelWithEffort,
         Self::ContextUsed,
         Self::SessionCost,

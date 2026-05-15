@@ -56,6 +56,40 @@ fn parse_branch(stdout: &[u8]) -> Option<String> {
     }
 }
 
+/// Probe the open pull request for `cwd`'s current branch via `gh pr view --json number --jq
+/// .number`. Returns `None` when `gh` is missing, the user is unauthenticated, or no PR is open.
+pub(crate) fn current_pull_request(cwd: &Path) -> Option<u64> {
+    let Some(cwd_str) = cwd.to_str() else {
+        debug!(cwd = ?cwd, "gh pr probe: cwd is not valid UTF-8");
+        return None;
+    };
+    let output = match Command::new("gh")
+        .args(["pr", "view", "--json", "number", "--jq", ".number"])
+        .current_dir(cwd_str)
+        .stderr(Stdio::null())
+        .output()
+    {
+        Ok(output) => output,
+        Err(e) => {
+            debug!(cwd = cwd_str, error = %e, "gh pr probe: spawn failed");
+            return None;
+        }
+    };
+    if !output.status.success() {
+        debug!(
+            cwd = cwd_str,
+            code = output.status.code().unwrap_or(-1),
+            "gh pr probe: non-zero exit",
+        );
+        return None;
+    }
+    parse_pr_number(&output.stdout)
+}
+
+fn parse_pr_number(stdout: &[u8]) -> Option<u64> {
+    std::str::from_utf8(stdout).ok()?.trim().parse().ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -106,5 +140,25 @@ mod tests {
         assert_eq!(parse_branch(b""), None);
         assert_eq!(parse_branch(b"   \n"), None);
         assert_eq!(parse_branch(&[0xff, 0xfe, b'\n']), None);
+    }
+
+    // ── current_pull_request ──
+
+    #[test]
+    fn current_pull_request_outside_a_repo_is_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(current_pull_request(dir.path()), None);
+    }
+
+    // ── parse_pr_number ──
+
+    #[test]
+    fn parse_pr_number_keeps_positive_integers_and_drops_everything_else() {
+        assert_eq!(parse_pr_number(b"86\n"), Some(86));
+        assert_eq!(parse_pr_number(b"  12\n"), Some(12));
+        assert_eq!(parse_pr_number(b""), None);
+        assert_eq!(parse_pr_number(b"not-a-number\n"), None);
+        assert_eq!(parse_pr_number(b"-1\n"), None);
+        assert_eq!(parse_pr_number(&[0xff, b'\n']), None);
     }
 }
