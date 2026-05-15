@@ -387,20 +387,17 @@ impl ChatView {
         frame.render_widget(paragraph, area);
     }
 
-    /// Current scroll offset in content rows. Used by [`crate::tui::selection`] to translate a
-    /// selection's screen-row coordinates into chat-content row indices.
+    /// Current scroll offset in content rows.
     pub(crate) fn scroll_offset(&self) -> u16 {
         self.scroll_offset
     }
 
-    /// Wrapped `Text` for the given viewport width. Materializes the same lines `render` paints,
-    /// so [`crate::tui::selection`] can extract substrings consistent with what's on screen.
+    /// Wrapped `Text` for the given viewport width.
     pub(crate) fn rendered_text(&self, width: u16) -> Text<'static> {
         self.build_text(width)
     }
 
-    /// Scrolls to the latest content and re-arms auto-scroll. Fires from `Ctrl+End` and from
-    /// a left-click on the jump-to-bottom overlay.
+    /// Scrolls to the latest content and re-arms auto-scroll.
     pub(crate) fn jump_to_bottom(&mut self) {
         self.scroll_to_bottom();
         self.auto_scroll = true;

@@ -17,8 +17,8 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::tui::theme::Theme;
 
-/// Conservative pre-base64 cap. xterm's OSC budget is ~8 KB; kitty / iTerm2 are larger. Pick the
-/// floor so the same selection works everywhere.
+/// Conservative pre-base64 cap. xterm's OSC budget is ~8 KB. kitty and iTerm2 are larger, so
+/// picking the floor lets the same selection work on every supported terminal.
 pub(super) const OSC52_PAYLOAD_BYTES: usize = 8 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,7 +42,7 @@ impl Cell {
 pub(super) enum Selection {
     #[default]
     Idle,
-    /// Left button pressed; `end` updates on every drag event.
+    /// Left button is pressed. `end` updates on every drag event.
     Dragging { start: Cell, end: Cell },
 }
 
@@ -51,8 +51,8 @@ impl Selection {
         matches!(self, Selection::Dragging { .. })
     }
 
-    /// Begins a drag. A subsequent `update` with the same coordinates leaves the selection empty,
-    /// so the click-vs-drag distinction is "did `end` move from `start` before mouse-up?".
+    /// Begins a drag at `(col, row)`. The first matching `update` distinguishes the gesture from
+    /// a bare click by moving `end` away from `start`.
     pub(super) fn begin(&mut self, col: u16, row: u16) {
         let cell = Cell { col, row };
         *self = Selection::Dragging {
@@ -74,7 +74,7 @@ impl Selection {
     }
 
     /// Returns the normalized `(start, end)` cells with `start` always above-or-left of `end`.
-    /// Returns `None` when not dragging or when start == end (a click, not a drag).
+    /// `None` when idle or when `start == end`.
     fn normalized(&self) -> Option<(Cell, Cell)> {
         match self {
             Selection::Dragging { start, end } if start != end => {

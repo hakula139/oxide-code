@@ -1357,7 +1357,7 @@ mod tests {
 
     #[test]
     fn handle_crossterm_mouse_is_forwarded_to_chat() {
-        // Wheel events still reach `ChatView::handle_event` for scroll; the dirty flag must flip.
+        // Wheel events reach `ChatView::handle_event` for scroll, so the dirty flag flips.
         let (mut app, _rx, _agent_tx) = test_app(None);
         app.handle_crossterm_event(&Event::Mouse(MouseEvent {
             kind: MouseEventKind::ScrollDown,
@@ -1439,8 +1439,6 @@ mod tests {
 
     #[test]
     fn left_click_on_jump_overlay_jumps_chat_to_bottom() {
-        // Cache a known jump-overlay rect, scroll the chat up, and confirm a left-click inside
-        // the rect snaps back to bottom and re-arms auto-scroll.
         let (mut app, _rx, _agent_tx) = test_app(None);
         app.chat.content_height_for_test().set(100);
         app.chat.set_viewport_for_test(20);
@@ -1462,8 +1460,7 @@ mod tests {
 
     #[test]
     fn left_click_outside_jump_overlay_does_not_jump_chat() {
-        // A click on the chat area but outside the cached pill rect must not snap to bottom and
-        // must not arm a selection (chat_rect is intentionally None here).
+        // `chat_rect` is intentionally None so the click hits neither the pill nor the chat area.
         let (mut app, _rx, _agent_tx) = test_app(None);
         app.chat.content_height_for_test().set(100);
         app.chat.set_viewport_for_test(20);
@@ -1488,7 +1485,6 @@ mod tests {
 
     #[test]
     fn drag_in_chat_area_arms_selection_state_machine() {
-        // Down → Drag → Up over the cached chat rect must traverse the selection states.
         let (mut app, _rx, _agent_tx) = test_app(None);
         app.chat_rect = Some(Rect::new(0, 2, 80, 20));
 
@@ -1537,8 +1533,6 @@ mod tests {
 
     #[test]
     fn drag_outside_chat_clamps_endpoint_into_rect() {
-        // A drag that exits the chat rect must clamp the endpoint inside, so a subsequent
-        // mouse-up materializes against in-bounds coordinates instead of garbage.
         use crate::tui::selection::Selection;
         let (mut app, _rx, _agent_tx) = test_app(None);
         let rect = Rect::new(0, 2, 80, 20);
@@ -1575,8 +1569,7 @@ mod tests {
 
     #[test]
     fn mouse_up_outside_chat_still_finalizes_drag() {
-        // Up's position doesn't gate copy: as long as a drag is in flight, mouse-up always
-        // clears the selection. Otherwise a release outside the chat rect would leak the highlight.
+        // A release outside the chat rect would leak the highlight if Up gated on position.
         let (mut app, _rx, _agent_tx) = test_app(None);
         app.chat_rect = Some(Rect::new(0, 2, 80, 20));
 
@@ -1611,7 +1604,7 @@ mod tests {
     fn drag_app_with_chat_text(text: &str) -> App {
         let (mut app, _rx, _agent_tx) = test_app(None);
         app.chat.push_user_message(text.to_owned());
-        // The user-message block paints "❯ <text>" on a single row; we drag from col 0 across.
+        // The user-message block paints "❯ <text>" on a single row, so drags start from col 0.
         app.chat_rect = Some(Rect::new(0, 0, 80, 5));
         app
     }
@@ -1636,8 +1629,8 @@ mod tests {
     #[test]
     fn write_selection_to_emits_osc52_payload_for_dragged_text() {
         let mut app = drag_app_with_chat_text("hello world");
-        // Drag across columns spanning the rendered text. The chat block prefixes content,
-        // so we don't pin exact bytes — we assert the OSC 52 envelope is emitted.
+        // The chat block prefixes content with a glyph, so the assertion targets the OSC 52
+        // envelope rather than exact bytes.
         app.handle_crossterm_event(&Event::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: 0,

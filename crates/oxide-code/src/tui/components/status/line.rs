@@ -221,7 +221,7 @@ fn non_empty_span(label: String, style: ratatui::style::Style) -> Option<Span<'s
 }
 
 /// OSC 8 hyperlink opener (`ESC ] 8 ; ; URL ST`). Emitted as a `Span::raw` because the bytes
-/// carry no visible glyph; `unicode_width` reports 0 for control codes, so ratatui's column
+/// carry no visible glyph. `unicode_width` reports 0 for control codes, so ratatui's column
 /// accounting passes the escape through without disturbing layout. Control chars in `url` are
 /// stripped so a malformed value cannot break out of the hyperlink envelope.
 fn osc8_open(url: &str) -> Span<'static> {
@@ -407,10 +407,9 @@ mod tests {
             full.contains("#86") && full.contains("main") && full.ends_with("Ready"),
             "wide width keeps every segment: {full}",
         );
-        // Width 22 forces time (utility 1) to drop before PR (2) and branch (3). Width 14
-        // narrows further until only branch and run state remain. The PR span is wrapped in
-        // OSC 8 hyperlink bytes that `unicode_width` measures as zero, so column math is
-        // unaffected even though the printed string carries the escape sequence.
+        // Width 22 drops time (utility 1) before PR (2) and branch (3). Width 14 narrows further
+        // until only branch and run state remain. The OSC 8 wrapper measures as zero columns, so
+        // budget math doesn't change even with the escape bytes embedded.
         let pr_open = "\x1b]8;;https://github.com/o/r/pull/86\x1b\\";
         let pr_close = "\x1b]8;;\x1b\\";
         assert_eq!(
