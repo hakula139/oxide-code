@@ -152,7 +152,7 @@ On Opus 4.7, `show_thinking = true` opts the request into `thinking.display = "s
 | `thread-title`      | AI-generated session title                     | After turn 1    |
 | `current-time`      | `HH:MM` in the local timezone                  | Per minute      |
 
-When the row is too narrow to fit every configured segment, low-utility ones drop in this order before the remaining content gets truncated: `thread-title` → `current-time` → `pull-request` → `git-branch` → `current-dir` → `session-cost` → `context-used` → `model` → `run-state`. Run state and model are always preserved.
+When the row is too narrow to fit every configured segment, low-utility ones drop in this order before the remaining content gets truncated: `thread-title` → `current-time` → `pull-request` → `git-branch` → `current-dir` → `session-cost` → `context-used` → `model` → `model-with-effort` → `run-state`. Run state, the model labels, and the bar's last surviving segment are always preserved.
 
 `OX_STATUS_LINE` accepts the same segment names, comma-separated, with optional whitespace (`OX_STATUS_LINE="model, run-state"`). An empty value, an empty entry between commas (`"model,,run-state"`), or any unknown segment name fails startup with a parse error rather than silently dropping the offending part.
 

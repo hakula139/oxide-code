@@ -195,8 +195,9 @@ fn segment_utility(segment: StatusLineSegment) -> u8 {
         StatusLineSegment::CurrentDir => 4,
         StatusLineSegment::SessionCost => 5,
         StatusLineSegment::ContextUsed => 6,
-        StatusLineSegment::Model | StatusLineSegment::ModelWithEffort => 7,
-        StatusLineSegment::RunState => 8,
+        StatusLineSegment::Model => 7,
+        StatusLineSegment::ModelWithEffort => 8,
+        StatusLineSegment::RunState => 9,
     }
 }
 
@@ -344,6 +345,20 @@ mod tests {
         );
         assert_eq!(render_text(segments.clone(), 11), "  m │ Ready");
         assert_eq!(render_text(segments, 10), "  Ready");
+    }
+
+    #[test]
+    fn render_drops_plain_model_before_model_with_effort() {
+        // The compact `model-with-effort` label carries strictly more information than `model`,
+        // so a user who configures both keeps the more useful variant under width pressure.
+        let segments = vec![
+            StatusLineSegment::Model,
+            StatusLineSegment::ModelWithEffort,
+            StatusLineSegment::RunState,
+        ];
+
+        assert_eq!(render_text(segments.clone(), 80), "  m │ m (high) │ Ready");
+        assert_eq!(render_text(segments, 18), "  m (high) │ Ready");
     }
 
     #[test]
