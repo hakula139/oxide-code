@@ -349,12 +349,20 @@ mod tests {
     #[test]
     fn render_pull_request_renders_hash_prefix_and_drops_before_git_branch() {
         let segments = vec![
+            StatusLineSegment::CurrentTime,
             StatusLineSegment::GitBranch,
             StatusLineSegment::PullRequest,
             StatusLineSegment::RunState,
         ];
 
-        assert_eq!(render_text(segments.clone(), 80), "  main │ #86 │ Ready");
+        let full = render_text(segments.clone(), 80);
+        assert!(
+            full.contains("#86") && full.contains("main") && full.ends_with("Ready"),
+            "wide width keeps every segment: {full}",
+        );
+        // Width 22 forces time (utility 1) to drop before PR (2) and branch (3). Width 14
+        // narrows further until only branch and run state remain.
+        assert_eq!(render_text(segments.clone(), 22), "  main │ #86 │ Ready");
         assert_eq!(render_text(segments, 14), "  main │ Ready");
     }
 
