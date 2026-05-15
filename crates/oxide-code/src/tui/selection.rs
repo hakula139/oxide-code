@@ -153,20 +153,30 @@ fn row_columns(row: u16, start: Cell, end: Cell, area_left: u16, area_right: u16
 
 /// Walks the line's spans to extract the slice between cell columns `[col_start, col_end)`.
 /// Wide chars (`UnicodeWidthChar::width == 2`) are taken whole when their leading half lands
-/// inside `[col_start, col_end)` so multi-byte sequences never split.
+/// inside `[col_start, col_end)` so multi-byte sequences never split. Zero-width combining
+/// marks attach to the preceding base char and are kept whenever that base char was kept.
 fn slice_line(line: &ratatui::text::Line<'_>, col_start: u16, col_end: u16) -> String {
     let mut out = String::new();
     let mut col: u16 = 0;
+    let mut last_base_kept = false;
     'spans: for span in &line.spans {
         for ch in span.content.chars() {
             let w = u16::try_from(UnicodeWidthChar::width(ch).unwrap_or(0)).unwrap_or(0);
-            let next = col.saturating_add(w);
+            if w == 0 {
+                if last_base_kept {
+                    out.push(ch);
+                }
+                continue;
+            }
             if col >= col_end {
                 break 'spans;
             }
-            if next > col_start && w > 0 {
+            let next = col.saturating_add(w);
+            let kept = next > col_start;
+            if kept {
                 out.push(ch);
             }
+            last_base_kept = kept;
             col = next;
         }
     }
@@ -328,6 +338,17 @@ mod tests {
         let line = Line::from(vec![Span::raw("ab"), Span::raw("好"), Span::raw("c")]);
         // a=0 b=1 好=2,3 c=4. Selecting cols 1..=4 should pick "b好c".
         assert_eq!(slice_line(&line, 1, 5), "b好c");
+    }
+
+    #[test]
+    fn slice_line_preserves_zero_width_combining_marks() {
+        // NFD-decomposed `é` is `e` + COMBINING ACUTE ACCENT (U+0301, width 0).
+        let line = Line::from("e\u{0301}cho");
+        // Selecting just the first column keeps the base char and its combining mark.
+        assert_eq!(slice_line(&line, 0, 1), "e\u{0301}");
+        // Selecting from col 1 starts past the combining mark's base, so it's dropped along with
+        // the base it modified.
+        assert_eq!(slice_line(&line, 1, 4), "cho");
     }
 
     #[test]

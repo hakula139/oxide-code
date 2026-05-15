@@ -222,9 +222,11 @@ fn non_empty_span(label: String, style: ratatui::style::Style) -> Option<Span<'s
 
 /// OSC 8 hyperlink opener (`ESC ] 8 ; ; URL ST`). Emitted as a `Span::raw` because the bytes
 /// carry no visible glyph; `unicode_width` reports 0 for control codes, so ratatui's column
-/// accounting passes the escape through without disturbing layout.
+/// accounting passes the escape through without disturbing layout. Control chars in `url` are
+/// stripped so a malformed value cannot break out of the hyperlink envelope.
 fn osc8_open(url: &str) -> Span<'static> {
-    Span::raw(format!("\x1b]8;;{url}\x1b\\"))
+    let sanitized: String = url.chars().filter(|c| !c.is_control()).collect();
+    Span::raw(format!("\x1b]8;;{sanitized}\x1b\\"))
 }
 
 fn osc8_close() -> Span<'static> {
@@ -443,6 +445,18 @@ mod tests {
         );
         let text: String = rendered.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(!text.contains("\x1b]8;;"), "no OSC 8 bytes when PR absent");
+        assert!(!text.contains('#'), "no PR number rendered when absent");
+    }
+
+    // ── osc8_open ──
+
+    #[test]
+    fn osc8_open_strips_control_chars_from_url() {
+        let span = osc8_open("https://example.com/\x1b\x07\x00ok");
+        assert_eq!(
+            span.content.as_ref(),
+            "\x1b]8;;https://example.com/ok\x1b\\"
+        );
     }
 
     // ── context_label ──
