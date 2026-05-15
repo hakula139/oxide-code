@@ -262,6 +262,7 @@ async fn run_tui(
 
     let session_info = LiveSessionInfo {
         cwd,
+        git_cwd: cwd_path,
         git_branch,
         version: env!("CARGO_PKG_VERSION"),
         session_id: session.session_id().to_owned(),

@@ -337,6 +337,7 @@ mod tests {
     fn fixture() -> LiveSessionInfo {
         LiveSessionInfo {
             cwd: "~/github/oxide-code".to_owned(),
+            git_cwd: None,
             git_branch: Some("main".to_owned()),
             version: "0.1.0",
             session_id: "test-session".to_owned(),

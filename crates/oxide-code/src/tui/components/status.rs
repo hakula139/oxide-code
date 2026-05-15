@@ -2,7 +2,8 @@
 
 mod line;
 
-use std::time::Instant;
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -13,10 +14,15 @@ use crate::agent::event::UsageSnapshot;
 use crate::config::{Effort, StatusLineSegment};
 use crate::tui::glyphs::SPINNER_FRAMES;
 use crate::tui::theme::Theme;
+use crate::util::git;
 
 use self::line::{StatusLine, StatusLineState};
 
 const TICKS_PER_FRAME: usize = 5;
+
+/// How often the status bar re-probes git for the current branch. Branch changes outside the
+/// session (manual `git checkout`) only become visible after one interval.
+const GIT_BRANCH_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Status bar at the top of the TUI.
 pub(crate) struct StatusBar {
@@ -28,7 +34,11 @@ pub(crate) struct StatusBar {
     title: Option<String>,
     usage: Option<UsageSnapshot>,
     cwd: String,
+    /// Working directory for git probes. `None` collapses every probe to a no-op.
+    git_cwd: Option<PathBuf>,
     git_branch: Option<String>,
+    /// Last time the git branch was probed. `None` until the first tick.
+    last_branch_probe: Option<Instant>,
     status: Status,
     spinner_frame: usize,
     tick_counter: usize,
@@ -51,6 +61,7 @@ impl StatusBar {
         model: String,
         effort: Option<Effort>,
         cwd: String,
+        git_cwd: Option<PathBuf>,
         git_branch: Option<String>,
     ) -> Self {
         let current_time_minute = segments
@@ -65,7 +76,9 @@ impl StatusBar {
             title: None,
             usage: None,
             cwd,
+            git_cwd,
             git_branch,
+            last_branch_probe: None,
             status: Status::Idle,
             spinner_frame: 0,
             tick_counter: 0,
@@ -123,9 +136,13 @@ impl StatusBar {
         self.usage
     }
 
-    /// Returns `true` when time or animation state changed and the caller should repaint.
+    /// Returns `true` when time, animation, or git-branch state changed and the caller should
+    /// repaint.
     pub(crate) fn tick(&mut self) -> bool {
         let mut dirty = self.refresh_current_time();
+        if self.refresh_git_branch(Instant::now()) {
+            dirty = true;
+        }
         if is_animated(&self.status) {
             self.tick_counter += 1;
             if self.tick_counter >= TICKS_PER_FRAME {
@@ -148,6 +165,29 @@ impl StatusBar {
         self.current_time_minute = Some(current);
         true
     }
+
+    /// Re-probes the git branch when [`GIT_BRANCH_REFRESH_INTERVAL`] has elapsed. Returns `true`
+    /// when the resolved branch changed.
+    fn refresh_git_branch(&mut self, now: Instant) -> bool {
+        let Some(cwd) = self.git_cwd.as_deref() else {
+            return false;
+        };
+        if !should_probe_branch(self.last_branch_probe, now) {
+            return false;
+        }
+        self.last_branch_probe = Some(now);
+        let probed = git::current_branch(cwd);
+        if probed == self.git_branch {
+            return false;
+        }
+        self.git_branch = probed;
+        true
+    }
+}
+
+/// Time-only predicate split out so the throttle can be exercised without shelling out to git.
+fn should_probe_branch(last: Option<Instant>, now: Instant) -> bool {
+    last.is_none_or(|prev| now.duration_since(prev) >= GIT_BRANCH_REFRESH_INTERVAL)
 }
 
 impl StatusBar {
@@ -229,6 +269,7 @@ mod tests {
             "test-model".to_owned(),
             Some(Effort::High),
             "~/test".to_owned(),
+            None,
             Some("main".to_owned()),
         )
     }
@@ -342,6 +383,7 @@ mod tests {
             None,
             "~/test".to_owned(),
             None,
+            None,
         );
 
         assert_eq!(bar.current_time_minute, None);
@@ -357,6 +399,7 @@ mod tests {
             "test-model".to_owned(),
             None,
             "~/test".to_owned(),
+            None,
             None,
         );
         let current = current_time_minute();
@@ -406,6 +449,36 @@ mod tests {
         assert_eq!(bar.spinner_frame, 0);
     }
 
+    // ── refresh_git_branch ──
+
+    #[test]
+    fn refresh_git_branch_without_cwd_is_a_noop() {
+        let mut bar = test_bar();
+        let probed_at = bar.last_branch_probe;
+        assert!(!bar.refresh_git_branch(Instant::now()));
+        assert_eq!(bar.last_branch_probe, probed_at);
+    }
+
+    // ── should_probe_branch ──
+
+    #[test]
+    fn should_probe_branch_runs_immediately_when_never_probed() {
+        assert!(should_probe_branch(None, Instant::now()));
+    }
+
+    #[test]
+    fn should_probe_branch_skips_within_interval_and_runs_after() {
+        let earlier = Instant::now();
+        assert!(!should_probe_branch(
+            Some(earlier),
+            earlier + Duration::from_millis(100),
+        ));
+        assert!(should_probe_branch(
+            Some(earlier),
+            earlier + GIT_BRANCH_REFRESH_INTERVAL,
+        ));
+    }
+
     // ── render ──
 
     fn render_status(bar: &mut StatusBar, width: u16) -> TestBackend {
@@ -438,6 +511,7 @@ mod tests {
             "Opus 4.7".into(),
             Some(Effort::Xhigh),
             cwd.into(),
+            None,
             Some("main".to_owned()),
         );
         bar.set_title(title.map(ToOwned::to_owned));
@@ -524,6 +598,7 @@ mod tests {
             "Opus 4.7".into(),
             Some(Effort::Xhigh),
             "~/projects/demo".into(),
+            None,
             Some("main".to_owned()),
         );
         let output = render_top_row(&mut bar, 120);
@@ -551,6 +626,7 @@ mod tests {
             "Opus 4.7".into(),
             Some(Effort::Xhigh),
             "~/projects/demo".into(),
+            None,
             Some("feat/status-line".to_owned()),
         );
         let output = render_top_row(&mut bar, 120);
@@ -614,6 +690,7 @@ mod tests {
             "test-model".to_owned(),
             None,
             String::new(),
+            None,
             None,
         );
         let output = render_top_row(&mut bar, 120);

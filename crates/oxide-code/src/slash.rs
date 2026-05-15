@@ -127,6 +127,7 @@ pub(crate) fn test_session_info() -> LiveSessionInfo {
     // Real MODELS row so `display_name()` resolves to a known label.
     LiveSessionInfo {
         cwd: "~/test".to_owned(),
+        git_cwd: None,
         git_branch: Some("main".to_owned()),
         version: "0.0.0-test",
         session_id: "test-session".to_owned(),

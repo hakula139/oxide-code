@@ -95,6 +95,7 @@ impl App {
             session_info.short_display_name().into_owned(),
             session_info.config.effort,
             session_info.cwd.clone(),
+            session_info.git_cwd.clone(),
             session_info.git_branch.clone(),
         );
         status_bar.set_title(history.title);
@@ -939,6 +940,7 @@ mod tests {
 
         LiveSessionInfo {
             cwd: "~/test".to_owned(),
+            git_cwd: None,
             git_branch: Some("main".to_owned()),
             version: "0.0.0-test",
             session_id: "test-session".to_owned(),

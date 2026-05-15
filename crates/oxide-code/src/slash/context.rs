@@ -2,6 +2,7 @@
 //! [`LiveSessionInfo`] is the session-level snapshot.
 
 use std::borrow::Cow;
+use std::path::PathBuf;
 
 use crate::config::ConfigSnapshot;
 use crate::model::{display_name, short_display_name};
@@ -14,6 +15,9 @@ use crate::tui::modal::Modal;
 /// persisted JSONL record consumed by `--list`.
 pub(crate) struct LiveSessionInfo {
     pub(crate) cwd: String,
+    /// Original cwd as a path. Held alongside `cwd` so the status bar can re-probe git without
+    /// re-resolving the tilde expansion.
+    pub(crate) git_cwd: Option<PathBuf>,
     pub(crate) git_branch: Option<String>,
     pub(crate) version: &'static str,
     pub(crate) session_id: String,
