@@ -272,22 +272,31 @@ impl App {
     /// Materializes the current selection from the chat's rendered text and emits an OSC 52
     /// set-clipboard sequence. No-op when there's no selection or when materialization clips out.
     fn copy_selection_to_clipboard(&mut self) {
+        let mut stdout = std::io::stdout().lock();
+        if let Err(error) = self.write_selection_to(&mut stdout) {
+            tracing::debug!(?error, "OSC 52 write failed");
+        }
+    }
+
+    /// Writes the OSC 52 sequence for the current selection into `sink`. Pushes a system message
+    /// when the payload was truncated. No-op when there's no selection or when materialization
+    /// clips out, in which case `sink` is not touched.
+    fn write_selection_to(&mut self, sink: &mut dyn std::io::Write) -> std::io::Result<()> {
         let Some(area) = self.chat_rect else {
-            return;
+            return Ok(());
         };
         let text = self.chat.rendered_text(area.width);
         let scroll = self.chat.scroll_offset();
         let Some(payload) = self.selection.materialize(&text, area, scroll) else {
-            return;
+            return Ok(());
         };
         let (sequence, truncated) = super::selection::osc52_set_clipboard(&payload);
-        if let Err(error) = std::io::Write::write_all(&mut std::io::stdout(), &sequence) {
-            tracing::debug!(?error, "OSC 52 write failed");
-        }
+        sink.write_all(&sequence)?;
         if truncated {
             self.chat
                 .push_system_message("Selection truncated to ~8 KB for the clipboard.".to_owned());
         }
+        Ok(())
     }
 
     fn apply_modal_action(&mut self, action: ModalAction) {
@@ -1453,7 +1462,8 @@ mod tests {
 
     #[test]
     fn left_click_outside_jump_overlay_does_not_jump_chat() {
-        // A click on the chat area but outside the cached pill rect must not snap to bottom.
+        // A click on the chat area but outside the cached pill rect must not snap to bottom and
+        // must not arm a selection (chat_rect is intentionally None here).
         let (mut app, _rx, _agent_tx) = test_app(None);
         app.chat.content_height_for_test().set(100);
         app.chat.set_viewport_for_test(20);
@@ -1470,6 +1480,10 @@ mod tests {
 
         assert_eq!(app.chat.scroll_offset_for_test(), 10);
         assert!(!app.chat.auto_scroll_for_test());
+        assert!(
+            !app.selection.is_dragging(),
+            "click outside both rects must not arm selection"
+        );
     }
 
     #[test]
@@ -1519,6 +1533,196 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         }));
         assert!(!app.selection.is_dragging());
+    }
+
+    #[test]
+    fn drag_outside_chat_clamps_endpoint_into_rect() {
+        // A drag that exits the chat rect must clamp the endpoint inside, so a subsequent
+        // mouse-up materializes against in-bounds coordinates instead of garbage.
+        use crate::tui::selection::Selection;
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        let rect = Rect::new(0, 2, 80, 20);
+        app.chat_rect = Some(rect);
+
+        app.handle_crossterm_event(&Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 5,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        }));
+        app.handle_crossterm_event(&Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: 500,
+            row: 500,
+            modifiers: KeyModifiers::NONE,
+        }));
+
+        match &app.selection {
+            Selection::Dragging { end, .. } => {
+                let (col, row) = ((*end).col(), (*end).row());
+                assert!(
+                    col < rect.x + rect.width,
+                    "endpoint clamped within rect width"
+                );
+                assert!(
+                    row < rect.y + rect.height,
+                    "endpoint clamped within rect height"
+                );
+            }
+            Selection::Idle => panic!("drag arm must keep the selection in Dragging"),
+        }
+    }
+
+    #[test]
+    fn mouse_up_outside_chat_still_finalizes_drag() {
+        // Up's position doesn't gate copy: as long as a drag is in flight, mouse-up always
+        // clears the selection. Otherwise a release outside the chat rect would leak the highlight.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.chat_rect = Some(Rect::new(0, 2, 80, 20));
+
+        app.handle_crossterm_event(&Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 5,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        }));
+        app.handle_crossterm_event(&Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: 12,
+            row: 7,
+            modifiers: KeyModifiers::NONE,
+        }));
+        // Up fires from far outside the chat rect.
+        app.handle_crossterm_event(&Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: 999,
+            row: 999,
+            modifiers: KeyModifiers::NONE,
+        }));
+
+        assert!(
+            !app.selection.is_dragging(),
+            "up always clears regardless of position"
+        );
+    }
+
+    // ── write_selection_to ──
+
+    fn drag_app_with_chat_text(text: &str) -> App {
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.chat.push_user_message(text.to_owned());
+        // The user-message block paints "❯ <text>" on a single row; we drag from col 0 across.
+        app.chat_rect = Some(Rect::new(0, 0, 80, 5));
+        app
+    }
+
+    #[test]
+    fn write_selection_to_is_noop_without_chat_rect() {
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.chat_rect = None;
+        let mut sink = Vec::<u8>::new();
+        app.write_selection_to(&mut sink).unwrap();
+        assert!(sink.is_empty(), "no rect → no OSC 52 bytes");
+    }
+
+    #[test]
+    fn write_selection_to_is_noop_without_drag() {
+        let mut app = drag_app_with_chat_text("hello world");
+        let mut sink = Vec::<u8>::new();
+        app.write_selection_to(&mut sink).unwrap();
+        assert!(sink.is_empty(), "Selection::Idle → no OSC 52 bytes");
+    }
+
+    #[test]
+    fn write_selection_to_emits_osc52_payload_for_dragged_text() {
+        let mut app = drag_app_with_chat_text("hello world");
+        // Drag across columns spanning the rendered text. The chat block prefixes content,
+        // so we don't pin exact bytes — we assert the OSC 52 envelope is emitted.
+        app.handle_crossterm_event(&Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        }));
+        app.handle_crossterm_event(&Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: 50,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        }));
+        let mut sink = Vec::<u8>::new();
+        app.write_selection_to(&mut sink).unwrap();
+
+        assert!(
+            sink.starts_with(b"\x1b]52;c;"),
+            "OSC 52 envelope opens the sink"
+        );
+        assert!(
+            sink.ends_with(b"\x07"),
+            "BEL terminates the OSC 52 sequence"
+        );
+    }
+
+    #[test]
+    fn write_selection_to_pushes_truncation_message_when_payload_clamped() {
+        let big = "A".repeat(crate::tui::selection::OSC52_PAYLOAD_BYTES + 100);
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.chat.push_user_message(big);
+        // 8 KB of "A" wraps to ~104 rows at 80 cols, so the chat rect must be tall enough for
+        // materialize to span the full content during the drag.
+        app.chat_rect = Some(Rect::new(0, 0, 80, 200));
+
+        app.handle_crossterm_event(&Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        }));
+        app.handle_crossterm_event(&Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: 79,
+            row: 199,
+            modifiers: KeyModifiers::NONE,
+        }));
+        let mut sink = Vec::<u8>::new();
+        app.write_selection_to(&mut sink).unwrap();
+
+        let last = app.chat.last_system_text().unwrap_or_default();
+        assert!(
+            last.contains("Selection truncated"),
+            "truncation pushes a system message: {last:?}",
+        );
+    }
+
+    #[test]
+    fn write_selection_to_uses_current_scroll_offset_for_materialization() {
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.chat.push_user_message("first row content".to_owned());
+        app.chat.push_user_message("second row content".to_owned());
+        app.chat.push_user_message("third row content".to_owned());
+        app.chat_rect = Some(Rect::new(0, 0, 80, 2));
+        // Force the viewport to look 4 rows past the top so the second message is at row 0.
+        app.chat.set_viewport_for_test(2);
+        app.chat.set_scroll_offset_for_test(4);
+
+        app.handle_crossterm_event(&Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        }));
+        app.handle_crossterm_event(&Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: 79,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        }));
+        let mut sink = Vec::<u8>::new();
+        app.write_selection_to(&mut sink).unwrap();
+        assert!(
+            sink.starts_with(b"\x1b]52;c;"),
+            "scrolled-into-content drag still emits an OSC 52 payload",
+        );
     }
 
     // ── modal gate ──

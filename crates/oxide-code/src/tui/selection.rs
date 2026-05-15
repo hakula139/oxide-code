@@ -19,12 +19,23 @@ use crate::tui::theme::Theme;
 
 /// Conservative pre-base64 cap. xterm's OSC budget is ~8 KB; kitty / iTerm2 are larger. Pick the
 /// floor so the same selection works everywhere.
-const OSC52_PAYLOAD_BYTES: usize = 8 * 1024;
+pub(super) const OSC52_PAYLOAD_BYTES: usize = 8 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Cell {
     col: u16,
     row: u16,
+}
+
+#[cfg(test)]
+impl Cell {
+    pub(super) fn col(self) -> u16 {
+        self.col
+    }
+
+    pub(super) fn row(self) -> u16 {
+        self.row
+    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -377,6 +388,48 @@ mod tests {
         assert_eq!(decoded.len(), OSC52_PAYLOAD_BYTES);
     }
 
+    #[test]
+    fn osc52_at_exact_cap_is_not_truncated() {
+        let payload = "A".repeat(OSC52_PAYLOAD_BYTES);
+        let (sequence, truncated) = osc52_set_clipboard(&payload);
+        assert!(!truncated, "exact-cap payload must pass through untouched");
+        let prefix = b"\x1b]52;c;";
+        let b64 = &sequence[prefix.len()..sequence.len() - 1];
+        let decoded = BASE64.decode(b64).unwrap();
+        assert_eq!(decoded.len(), OSC52_PAYLOAD_BYTES);
+    }
+
+    #[test]
+    fn osc52_one_byte_over_cap_truncates_to_cap() {
+        let payload = "A".repeat(OSC52_PAYLOAD_BYTES + 1);
+        let (sequence, truncated) = osc52_set_clipboard(&payload);
+        assert!(
+            truncated,
+            "payload one byte over the cap must report truncation"
+        );
+        let prefix = b"\x1b]52;c;";
+        let b64 = &sequence[prefix.len()..sequence.len() - 1];
+        let decoded = BASE64.decode(b64).unwrap();
+        assert_eq!(decoded.len(), OSC52_PAYLOAD_BYTES);
+    }
+
+    #[test]
+    fn osc52_truncates_at_cjk_char_boundary_not_mid_byte() {
+        // `好` is 3 bytes. Repeat enough to land the cap mid-char and force a boundary walk-back.
+        let payload = "好".repeat((OSC52_PAYLOAD_BYTES / 3) + 10);
+        let (sequence, truncated) = osc52_set_clipboard(&payload);
+        assert!(truncated);
+        let prefix = b"\x1b]52;c;";
+        let b64 = &sequence[prefix.len()..sequence.len() - 1];
+        let decoded = BASE64.decode(b64).unwrap();
+        // Decoded bytes must be valid UTF-8: a mid-3-byte truncation would fail std::str.
+        let kept = std::str::from_utf8(&decoded).expect("truncation lands on a UTF-8 boundary");
+        assert!(kept.chars().all(|c| c == '好'));
+        // Length is the largest multiple of 3 that fits inside the cap.
+        let expected = OSC52_PAYLOAD_BYTES - (OSC52_PAYLOAD_BYTES % 3);
+        assert_eq!(decoded.len(), expected);
+    }
+
     // ── floor_to_char_boundary ──
 
     #[test]
@@ -394,6 +447,13 @@ mod tests {
     fn paint_applies_selection_style_to_in_area_cells() {
         let area = Rect::new(0, 0, 10, 3);
         let mut buf = Buffer::empty(area);
+        // Pre-fill with a sentinel so "untouched" assertions distinguish a skipped paint from a
+        // cell that happened to default to `Color::Reset`.
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                buf[(x, y)].bg = Color::Cyan;
+            }
+        }
         let mut theme = Theme::default();
         theme.selection.bg = Some(Color::Red);
 
@@ -405,7 +465,25 @@ mod tests {
         for col in 2..=5 {
             assert_eq!(buf[(col, 1)].bg, Color::Red, "col {col} highlighted");
         }
-        assert_eq!(buf[(1, 1)].bg, Color::Reset, "before selection");
-        assert_eq!(buf[(6, 1)].bg, Color::Reset, "after selection");
+        assert_eq!(
+            buf[(1, 1)].bg,
+            Color::Cyan,
+            "sentinel survives before selection"
+        );
+        assert_eq!(
+            buf[(6, 1)].bg,
+            Color::Cyan,
+            "sentinel survives after selection"
+        );
+        assert_eq!(
+            buf[(2, 0)].bg,
+            Color::Cyan,
+            "rows above selection untouched"
+        );
+        assert_eq!(
+            buf[(2, 2)].bg,
+            Color::Cyan,
+            "rows below selection untouched"
+        );
     }
 }

@@ -69,6 +69,7 @@ println
 pulldown
 RAII
 ratatui
+rects
 replacen
 reqwest
 reserialized
