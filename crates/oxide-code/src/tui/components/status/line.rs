@@ -44,7 +44,13 @@ impl StatusLine {
             if !first {
                 spans.push(sep.clone());
             }
-            spans.push(segment.span);
+            if let Some(url) = segment.hyperlink {
+                spans.push(osc8_open(&url));
+                spans.push(segment.span);
+                spans.push(osc8_close());
+            } else {
+                spans.push(segment.span);
+            }
             first = false;
         }
         Line::from(spans)
@@ -55,6 +61,7 @@ impl StatusLine {
         theme: &Theme,
         state: &StatusLineState<'_>,
     ) -> Option<RenderedSegment> {
+        let mut hyperlink: Option<String> = None;
         let span = match segment {
             StatusLineSegment::CurrentDir => non_empty_span(
                 truncate_to_width(state.cwd, MAX_CURRENT_DIR_WIDTH),
@@ -67,6 +74,7 @@ impl StatusLine {
                 )
             }),
             StatusLineSegment::PullRequest => state.pull_request.map(|pr| {
+                hyperlink = Some(pr.url.clone());
                 Span::styled(
                     format!("#{}", pr.number),
                     Self::segment_style(theme, SegmentStyle::Accent),
@@ -100,7 +108,7 @@ impl StatusLine {
                 Self::segment_style(theme, SegmentStyle::Dim),
             )),
         }?;
-        Some(RenderedSegment::new(segment, span))
+        Some(RenderedSegment::new(segment, span, hyperlink))
     }
 
     fn segment_style(theme: &Theme, style: SegmentStyle) -> ratatui::style::Style {
@@ -138,11 +146,17 @@ enum SegmentStyle {
 struct RenderedSegment {
     segment: StatusLineSegment,
     span: Span<'static>,
+    /// URL to wrap the visible span in an OSC 8 hyperlink. Empty when the segment is plain text.
+    hyperlink: Option<String>,
 }
 
 impl RenderedSegment {
-    fn new(segment: StatusLineSegment, span: Span<'static>) -> Self {
-        Self { segment, span }
+    fn new(segment: StatusLineSegment, span: Span<'static>, hyperlink: Option<String>) -> Self {
+        Self {
+            segment,
+            span,
+            hyperlink,
+        }
     }
 
     fn width(&self) -> usize {
@@ -204,6 +218,17 @@ fn segment_utility(segment: StatusLineSegment) -> u8 {
 
 fn non_empty_span(label: String, style: ratatui::style::Style) -> Option<Span<'static>> {
     (!label.is_empty()).then(|| Span::styled(label, style))
+}
+
+/// OSC 8 hyperlink opener (`ESC ] 8 ; ; URL ST`). Emitted as a `Span::raw` because the bytes
+/// carry no visible glyph; `unicode_width` reports 0 for control codes, so ratatui's column
+/// accounting passes the escape through without disturbing layout.
+fn osc8_open(url: &str) -> Span<'static> {
+    Span::raw(format!("\x1b]8;;{url}\x1b\\"))
+}
+
+fn osc8_close() -> Span<'static> {
+    Span::raw("\x1b]8;;\x1b\\")
 }
 
 fn model_with_effort(model: &str, effort: Option<Effort>) -> String {
@@ -381,9 +406,43 @@ mod tests {
             "wide width keeps every segment: {full}",
         );
         // Width 22 forces time (utility 1) to drop before PR (2) and branch (3). Width 14
-        // narrows further until only branch and run state remain.
-        assert_eq!(render_text(segments.clone(), 22), "  main │ #86 │ Ready");
+        // narrows further until only branch and run state remain. The PR span is wrapped in
+        // OSC 8 hyperlink bytes that `unicode_width` measures as zero, so column math is
+        // unaffected even though the printed string carries the escape sequence.
+        let pr_open = "\x1b]8;;https://github.com/o/r/pull/86\x1b\\";
+        let pr_close = "\x1b]8;;\x1b\\";
+        assert_eq!(
+            render_text(segments.clone(), 22),
+            format!("  main │ {pr_open}#86{pr_close} │ Ready"),
+        );
         assert_eq!(render_text(segments, 14), "  main │ Ready");
+    }
+
+    #[test]
+    fn pull_request_segment_emits_osc8_open_and_close_around_visible_text() {
+        let rendered = render_text(vec![StatusLineSegment::PullRequest], 80);
+        let url = "https://github.com/o/r/pull/86";
+        assert!(rendered.contains(&format!("\x1b]8;;{url}\x1b\\#86\x1b]8;;\x1b\\")));
+    }
+
+    #[test]
+    fn pull_request_segment_skips_osc8_when_absent() {
+        let rendered = StatusLine::new(vec![StatusLineSegment::PullRequest]).render(
+            &Theme::default(),
+            &StatusLineState {
+                model: "m",
+                effort: None,
+                title: None,
+                usage: None,
+                cwd: "~/repo",
+                git_branch: None,
+                pull_request: None,
+                status_span: Span::raw("Ready"),
+            },
+            80,
+        );
+        let text: String = rendered.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(!text.contains("\x1b]8;;"), "no OSC 8 bytes when PR absent");
     }
 
     // ── context_label ──
