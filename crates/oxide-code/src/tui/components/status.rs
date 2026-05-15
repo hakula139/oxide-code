@@ -117,7 +117,7 @@ impl StatusBar {
         self.usage = usage;
     }
 
-    /// Re-skin subsequent renders; the spinner / status state is unaffected.
+    /// Re-skin subsequent renders. The spinner / status state is unaffected.
     pub(crate) fn set_theme(&mut self, theme: &Theme) {
         self.theme = theme.clone();
     }
@@ -487,6 +487,20 @@ mod tests {
         assert_eq!(bar.spinner_frame, 0);
     }
 
+    #[test]
+    fn tick_marks_dirty_when_git_branch_changes() {
+        // With no animated status and no minute change, the only path flipping dirty is the git
+        // probe surfacing a new branch. A future `refresh_git_branch` reordering could quietly
+        // drop the dirty bit and leave the rendered branch label stale until the next user input.
+        let dir = tempfile::tempdir().unwrap();
+        let mut bar = test_bar();
+        bar.git_cwd = Some(dir.path().to_path_buf());
+        bar.git_branch = Some("stale".to_owned());
+        bar.last_branch_probe = None;
+        assert!(bar.tick());
+        assert_eq!(bar.git_branch, None);
+    }
+
     // ── refresh_git_branch ──
 
     #[test]
@@ -541,7 +555,7 @@ mod tests {
     #[test]
     fn refresh_pull_request_arms_throttle_when_probe_returns_none() {
         // Same throttle invariant as the git branch probe. A non-repo cwd (or a cwd where `gh`
-        // can't find a PR) returns None; the stamp must advance regardless so we don't re-shell
+        // can't find a PR) returns None, but the stamp must still advance so we don't re-shell
         // every tick.
         let dir = tempfile::tempdir().unwrap();
         let mut bar = test_bar();
