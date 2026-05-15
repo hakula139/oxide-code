@@ -2440,9 +2440,6 @@ mod tests {
 
     #[tokio::test]
     async fn agent_turn_with_none_cap_runs_unbounded_until_text_only_reply() {
-        // The cap is None, so the loop must not bail on its own; it terminates only when the
-        // model produces a text-only round. Pin that an arbitrary multi-round chain still
-        // completes without tripping the safety cap.
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let mut turns: Vec<Vec<StreamEvent>> = (0..50)
