@@ -114,17 +114,12 @@ impl StatusLine {
 }
 
 pub(super) struct StatusLineState<'a> {
-    /// Display label for the active model.
     pub(super) model: &'a str,
-    /// Resolved effort tier for model-with-effort.
     pub(super) effort: Option<Effort>,
-    /// Optional session title.
     pub(super) title: Option<&'a str>,
-    /// Latest usage snapshot from the agent loop.
     pub(super) usage: Option<UsageSnapshot>,
-    /// Tildified working directory.
+    /// Tildified working directory; rendered as-is, no further `~` substitution.
     pub(super) cwd: &'a str,
-    /// Branch captured at TUI startup.
     pub(super) git_branch: Option<&'a str>,
     /// Open pull request number for the current branch, when one is detected.
     pub(super) pull_request: Option<u64>,

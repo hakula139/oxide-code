@@ -62,7 +62,6 @@ pub(crate) struct ConfigSnapshot {
     pub(crate) compaction: CompactionConfig,
     pub(crate) show_thinking: bool,
     pub(crate) show_welcome: bool,
-    /// Ordered TUI status-line segments.
     pub(crate) status_line: Vec<StatusLineSegment>,
     /// Resolved theme base name — built-in catalogue key or filesystem path. `/theme` reads this
     /// to mark the active row in the picker.
@@ -229,7 +228,7 @@ impl StatusLineSegment {
         (Self::CurrentTime, "current-time"),
     ];
 
-    /// Default roster: location first, then model, usage, run state, and thread title.
+    /// Order rationale documented in `docs/design/tui/status-line.md`.
     pub(crate) const DEFAULT: &'static [Self] = &[
         Self::CurrentDir,
         Self::GitBranch,
@@ -351,7 +350,6 @@ pub(crate) struct Config {
     pub(crate) thinking: Option<ThinkingConfig>,
     pub(crate) show_thinking: bool,
     pub(crate) show_welcome: bool,
-    /// Ordered TUI status-line segments.
     pub(crate) status_line: Vec<StatusLineSegment>,
     pub(crate) theme: Theme,
     /// Built-in catalogue key (e.g. `"mocha"`) or filesystem path; mirrors `[tui.theme] base`,
