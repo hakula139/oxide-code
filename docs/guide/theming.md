@@ -196,6 +196,8 @@ Each status-line segment routes to one of the slots above so re-skinning the slo
 | `thread-title`       | `muted`  |
 | `current-time`       | `dim`    |
 
+The separator glyph itself (`│`) is fixed; the `separator` slot only controls its color and modifiers.
+
 ## Overrides
 
 `[tui.theme.overrides]` is a table of `slot_name = patch` pairs. A patch is _additive_, so only the fields it lists are applied to the base slot.
