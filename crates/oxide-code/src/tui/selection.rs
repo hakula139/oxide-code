@@ -22,13 +22,13 @@ use crate::tui::theme::Theme;
 const OSC52_PAYLOAD_BYTES: usize = 8 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Cell {
+pub(super) struct Cell {
     col: u16,
     row: u16,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub(crate) enum Selection {
+pub(super) enum Selection {
     #[default]
     Idle,
     /// Left button pressed; `end` updates on every drag event.
@@ -36,13 +36,13 @@ pub(crate) enum Selection {
 }
 
 impl Selection {
-    pub(crate) fn is_dragging(&self) -> bool {
+    pub(super) fn is_dragging(&self) -> bool {
         matches!(self, Selection::Dragging { .. })
     }
 
     /// Begins a drag. A subsequent `update` with the same coordinates leaves the selection empty,
     /// so the click-vs-drag distinction is "did `end` move from `start` before mouse-up?".
-    pub(crate) fn begin(&mut self, col: u16, row: u16) {
+    pub(super) fn begin(&mut self, col: u16, row: u16) {
         let cell = Cell { col, row };
         *self = Selection::Dragging {
             start: cell,
@@ -51,14 +51,14 @@ impl Selection {
     }
 
     /// Updates the drag endpoint. No-op when not currently dragging.
-    pub(crate) fn update(&mut self, col: u16, row: u16) {
+    pub(super) fn update(&mut self, col: u16, row: u16) {
         if let Selection::Dragging { end, .. } = self {
             *end = Cell { col, row };
         }
     }
 
     /// Clears any in-flight drag. Returns the prior state so callers can finalize before clearing.
-    pub(crate) fn clear(&mut self) -> Selection {
+    pub(super) fn clear(&mut self) -> Selection {
         std::mem::replace(self, Selection::Idle)
     }
 
@@ -80,7 +80,7 @@ impl Selection {
 
     /// Materializes the selected text from `text` clipped to `area` with `scroll_offset`. Returns
     /// `None` when there's no selection or when the drag misses the chat area entirely.
-    pub(crate) fn materialize(
+    pub(super) fn materialize(
         &self,
         text: &Text<'_>,
         area: Rect,
@@ -107,7 +107,7 @@ impl Selection {
 
     /// Highlights selected cells in `buf` using `theme.selection`. Cells outside the chat `area`
     /// are clipped. No-op when not dragging.
-    pub(crate) fn paint(&self, buf: &mut Buffer, area: Rect, theme: &Theme) {
+    pub(super) fn paint(&self, buf: &mut Buffer, area: Rect, theme: &Theme) {
         let Some((start, end)) = self.normalized() else {
             return;
         };
@@ -185,7 +185,7 @@ fn slice_line(line: &ratatui::text::Line<'_>, col_start: u16, col_end: u16) -> S
 
 /// OSC 52 set-clipboard sequence. `c` selects the system clipboard (xterm `selection`).
 /// Returns the bytes plus a flag indicating whether the payload was clamped.
-pub(crate) fn osc52_set_clipboard(text: &str) -> (Vec<u8>, bool) {
+pub(super) fn osc52_set_clipboard(text: &str) -> (Vec<u8>, bool) {
     let bytes = text.as_bytes();
     let (clipped, truncated) = if bytes.len() > OSC52_PAYLOAD_BYTES {
         (

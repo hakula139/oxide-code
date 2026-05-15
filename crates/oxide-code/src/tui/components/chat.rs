@@ -317,36 +317,6 @@ impl ChatView {
         self.blocks.last().and_then(|b| b.system_text())
     }
 
-    #[cfg(test)]
-    pub(crate) fn scroll_offset_for_test(&self) -> u16 {
-        self.scroll_offset
-    }
-
-    #[cfg(test)]
-    pub(crate) fn auto_scroll_for_test(&self) -> bool {
-        self.auto_scroll
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_scroll_offset_for_test(&mut self, offset: u16) {
-        self.scroll_offset = offset;
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_viewport_for_test(&mut self, height: u16) {
-        self.viewport_height = height;
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_auto_scroll_for_test(&mut self, on: bool) {
-        self.auto_scroll = on;
-    }
-
-    #[cfg(test)]
-    pub(crate) fn content_height_for_test(&self) -> &Cell<u16> {
-        &self.content_height
-    }
-
     /// Updates cached viewport size and syncs scroll. `true` if auto-scroll moved the offset.
     #[must_use]
     pub(crate) fn update_layout(&mut self, area: Rect) -> bool {
@@ -428,18 +398,18 @@ impl ChatView {
     pub(crate) fn rendered_text(&self, width: u16) -> Text<'static> {
         self.build_text(width)
     }
-}
 
-// ── Private Helpers ──
-
-impl ChatView {
     /// Scrolls to the latest content and re-arms auto-scroll. Fires from `Ctrl+End` and from
     /// a left-click on the jump-to-bottom overlay.
     pub(crate) fn jump_to_bottom(&mut self) {
         self.scroll_to_bottom();
         self.auto_scroll = true;
     }
+}
 
+// ── Private Helpers ──
+
+impl ChatView {
     fn scroll_to_bottom(&mut self) {
         self.scroll_offset = self
             .content_height
@@ -550,6 +520,35 @@ impl ChatView {
     /// True when the chat has no content for the user to see (committed, streaming, or thinking).
     pub(crate) fn is_empty(&self) -> bool {
         self.blocks.is_empty() && self.streaming.is_none() && self.thinking_buffer.is_empty()
+    }
+}
+
+// ── Test accessors ──
+
+#[cfg(test)]
+impl ChatView {
+    pub(crate) fn scroll_offset_for_test(&self) -> u16 {
+        self.scroll_offset
+    }
+
+    pub(crate) fn auto_scroll_for_test(&self) -> bool {
+        self.auto_scroll
+    }
+
+    pub(crate) fn set_scroll_offset_for_test(&mut self, offset: u16) {
+        self.scroll_offset = offset;
+    }
+
+    pub(crate) fn set_viewport_for_test(&mut self, height: u16) {
+        self.viewport_height = height;
+    }
+
+    pub(crate) fn set_auto_scroll_for_test(&mut self, on: bool) {
+        self.auto_scroll = on;
+    }
+
+    pub(crate) fn content_height_for_test(&self) -> &Cell<u16> {
+        &self.content_height
     }
 }
 
