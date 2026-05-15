@@ -16,7 +16,7 @@ oxide-code is a Rust reimplementation of Claude Code, an interactive CLI agent t
 
 Early development. What works today:
 
-- Terminal UI: streaming output, markdown rendering, syntax-highlighted code blocks, configurable status line, and 5 built-in themes with custom-TOML overrides
+- Terminal UI: streaming output, markdown rendering, syntax-highlighted code blocks, [configurable status line](docs/guide/configuration.md#tui-terminal-ui), and 5 built-in themes with custom-TOML overrides
 - Agent loop with extended thinking and tool-use round-trip
 - File and search tools: `read`, `write`, `edit`, `glob`, `grep`, `bash`
 - Turn interruption (Esc / Ctrl+C) plus mid-turn queued follow-up prompts that splice into the same turn between tool calls, with double-press Ctrl+C exit confirmation
