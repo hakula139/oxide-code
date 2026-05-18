@@ -829,11 +829,35 @@ impl App {
 }
 
 /// Writes each link's OSC 8 envelope (with replayed visible chars) to `out`. Pure I/O — accepts
-/// any `Write` so tests can capture and inspect the bytes.
+/// any `Write` so tests can capture and inspect the bytes. Inside tmux the envelope is wrapped
+/// in DCS pass-through, since tmux only passes a small whitelist of OSCs through to the outer
+/// terminal and OSC 8 isn't on it.
 fn write_status_hyperlinks<W: std::io::Write>(
     out: &mut W,
     links: &[super::components::status::StatusHyperlink],
 ) -> std::io::Result<()> {
+    let envelope = build_status_hyperlink_envelope(links)?;
+    if envelope.is_empty() {
+        return Ok(());
+    }
+    if std::env::var_os("TMUX").is_some() {
+        out.write_all(&tmux_passthrough(&envelope))?;
+    } else {
+        out.write_all(&envelope)?;
+    }
+    out.flush()?;
+    Ok(())
+}
+
+/// Materializes the DECSC + per-link CUP / OSC 8 / replayed cells / SGR reset + DECRC byte
+/// stream. Returns an empty buffer when no link has a non-empty sanitized URL, so callers can
+/// short-circuit before touching the terminal.
+fn build_status_hyperlink_envelope(
+    links: &[super::components::status::StatusHyperlink],
+) -> std::io::Result<Vec<u8>> {
+    use std::io::Write as _;
+
+    let mut buf: Vec<u8> = Vec::new();
     let mut wrote_any = false;
     for link in links {
         let safe_url: String = link.url.chars().filter(|c| !c.is_control()).collect();
@@ -843,26 +867,41 @@ fn write_status_hyperlinks<W: std::io::Write>(
         if !wrote_any {
             // DECSC / DECRC parks the cursor terminal-side, so the OSC 8 writes don't drag it onto
             // the status bar. Avoids a DSR roundtrip that would race the TUI event reader.
-            queue!(out, SavePosition)?;
+            queue!(&mut buf, SavePosition)?;
             wrote_any = true;
         }
         // CUP uses 1-based coordinates.
         let row = link.rect.y.saturating_add(1);
         let col = link.rect.x.saturating_add(1);
-        write!(out, "\x1b[{row};{col}H")?;
-        write!(out, "\x1b]8;;{safe_url}\x07")?;
+        write!(buf, "\x1b[{row};{col}H")?;
+        write!(buf, "\x1b]8;;{safe_url}\x07")?;
         for cell in &link.cells {
-            write_styled_symbol(out, cell)?;
+            write_styled_symbol(&mut buf, cell)?;
         }
-        write!(out, "\x1b]8;;\x07")?;
+        write!(buf, "\x1b]8;;\x07")?;
         // Reset SGR so subsequent terminal output isn't tinted by the last cell's style.
-        write!(out, "\x1b[0m")?;
+        write!(buf, "\x1b[0m")?;
     }
     if wrote_any {
-        queue!(out, RestorePosition)?;
+        queue!(&mut buf, RestorePosition)?;
     }
-    out.flush()?;
-    Ok(())
+    Ok(buf)
+}
+
+/// Wraps an escape sequence in tmux's DCS pass-through (`\x1bPtmux;...\x1b\\`) so a tmux session
+/// forwards bytes for OSC numbers it doesn't otherwise pass through (OSC 8 is the relevant case).
+/// Every `\x1b` inside the payload must be doubled per the tmux spec.
+fn tmux_passthrough(escape: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(escape.len() + 8);
+    out.extend_from_slice(b"\x1bPtmux;");
+    for &b in escape {
+        if b == 0x1b {
+            out.push(0x1b);
+        }
+        out.push(b);
+    }
+    out.extend_from_slice(b"\x1b\\");
+    out
 }
 
 /// Writes one buffer cell (symbol + fg / bg / SGR) directly to `out`.
@@ -3481,10 +3520,10 @@ mod tests {
         }
     }
 
-    // ── write_status_hyperlinks ──
+    // ── build_status_hyperlink_envelope ──
 
     #[test]
-    fn write_status_hyperlinks_emits_cup_then_envelope_per_link() {
+    fn build_status_hyperlink_envelope_emits_cup_then_osc8_per_link() {
         // Pins the on-the-wire byte sequence: DECSC → CUP (1-based) → OSC 8 opener → replayed
         // cells → OSC 8 closer (BEL terminator) → SGR reset → DECRC. Drift here breaks the
         // PR-click affordance in xterm.js-based terminals (Cursor / VS Code) where the parser is
@@ -3509,9 +3548,8 @@ mod tests {
                 },
             ],
         };
-        let mut buf: Vec<u8> = Vec::new();
-        write_status_hyperlinks(&mut buf, &[link]).unwrap();
-        let output = String::from_utf8(buf).unwrap();
+        let bytes = build_status_hyperlink_envelope(&[link]).unwrap();
+        let output = String::from_utf8(bytes).unwrap();
         assert!(
             output.starts_with("\x1b7"),
             "DECSC parks the cursor before our writes: {output:?}",
@@ -3542,7 +3580,7 @@ mod tests {
     }
 
     #[test]
-    fn write_status_hyperlinks_strips_control_chars_from_url() {
+    fn build_status_hyperlink_envelope_strips_control_chars_from_url() {
         use crate::tui::components::status::{HyperlinkCell, StatusHyperlink};
 
         let link = StatusHyperlink {
@@ -3553,9 +3591,8 @@ mod tests {
                 style: ratatui::style::Style::default(),
             }],
         };
-        let mut buf: Vec<u8> = Vec::new();
-        write_status_hyperlinks(&mut buf, &[link]).unwrap();
-        let output = String::from_utf8(buf).unwrap();
+        let bytes = build_status_hyperlink_envelope(&[link]).unwrap();
+        let output = String::from_utf8(bytes).unwrap();
         assert!(
             output.contains("\x1b]8;;https://x.com/ok\x07"),
             "ESC, BEL, NUL stripped from URL: {output:?}",
@@ -3563,7 +3600,7 @@ mod tests {
     }
 
     #[test]
-    fn write_status_hyperlinks_skips_link_with_empty_safe_url() {
+    fn build_status_hyperlink_envelope_is_empty_when_safe_url_is_empty() {
         use crate::tui::components::status::{HyperlinkCell, StatusHyperlink};
 
         let link = StatusHyperlink {
@@ -3574,16 +3611,15 @@ mod tests {
                 style: ratatui::style::Style::default(),
             }],
         };
-        let mut buf: Vec<u8> = Vec::new();
-        write_status_hyperlinks(&mut buf, &[link]).unwrap();
+        let bytes = build_status_hyperlink_envelope(&[link]).unwrap();
         assert!(
-            buf.is_empty(),
+            bytes.is_empty(),
             "no bytes (no DECSC either) when sanitized URL is empty",
         );
     }
 
     #[test]
-    fn write_status_hyperlinks_replays_styled_cell_attributes() {
+    fn build_status_hyperlink_envelope_replays_styled_cell_attributes() {
         // Pins every modifier branch in write_styled_symbol plus a few palette branches in
         // ratatui_color_to_crossterm, since uncovered branches there silently lose styling on
         // the post-flush replay.
@@ -3606,9 +3642,8 @@ mod tests {
                     .add_modifier(modifiers),
             }],
         };
-        let mut buf: Vec<u8> = Vec::new();
-        write_status_hyperlinks(&mut buf, &[link]).unwrap();
-        let output = String::from_utf8(buf).unwrap();
+        let bytes = build_status_hyperlink_envelope(&[link]).unwrap();
+        let output = String::from_utf8(bytes).unwrap();
         // SGR 38;2;r;g;b is the truecolor fg; 48;5;n is the indexed bg.
         assert!(
             output.contains("\x1b[38;2;10;20;30m") && output.contains("\x1b[48;5;7m"),
@@ -3626,6 +3661,82 @@ mod tests {
                 "missing {label} SGR escape: {output:?}",
             );
         }
+    }
+
+    // ── write_status_hyperlinks ──
+
+    #[test]
+    fn write_status_hyperlinks_passes_envelope_through_unchanged_outside_tmux() {
+        use crate::tui::components::status::{HyperlinkCell, StatusHyperlink};
+
+        let link = StatusHyperlink {
+            rect: ratatui::layout::Rect::new(0, 0, 1, 1),
+            url: "https://x".to_owned(),
+            cells: vec![HyperlinkCell {
+                symbol: "x".to_owned(),
+                style: ratatui::style::Style::default(),
+            }],
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        temp_env::with_var_unset("TMUX", || {
+            write_status_hyperlinks(&mut buf, std::slice::from_ref(&link)).unwrap();
+        });
+        let envelope = build_status_hyperlink_envelope(std::slice::from_ref(&link)).unwrap();
+        assert_eq!(
+            buf, envelope,
+            "outside tmux the wire bytes match the raw envelope",
+        );
+    }
+
+    #[test]
+    fn write_status_hyperlinks_wraps_envelope_in_dcs_passthrough_inside_tmux() {
+        // tmux only forwards a small whitelist of OSC numbers (52, 4, 7, 9, 12) to the outer
+        // terminal; OSC 8 needs the DCS pass-through wrapper or it gets silently dropped.
+        use crate::tui::components::status::{HyperlinkCell, StatusHyperlink};
+
+        let link = StatusHyperlink {
+            rect: ratatui::layout::Rect::new(0, 0, 1, 1),
+            url: "https://x".to_owned(),
+            cells: vec![HyperlinkCell {
+                symbol: "x".to_owned(),
+                style: ratatui::style::Style::default(),
+            }],
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        temp_env::with_var("TMUX", Some("/tmp/tmux-1000/default,1234,0"), || {
+            write_status_hyperlinks(&mut buf, &[link]).unwrap();
+        });
+        assert!(
+            buf.starts_with(b"\x1bPtmux;"),
+            "DCS opener brackets the envelope: {buf:?}",
+        );
+        assert!(
+            buf.ends_with(b"\x1b\\"),
+            "ST closer terminates the DCS: {buf:?}",
+        );
+        // Inner OSC 8 ESCs must be doubled so tmux strips its own DCS wrapper without consuming
+        // the inner sequence.
+        assert!(
+            buf.windows(8).any(|w| w == b"\x1b\x1b]8;;ht"),
+            "inner ESC before OSC 8 opener is doubled: {buf:?}",
+        );
+    }
+
+    #[test]
+    fn write_status_hyperlinks_is_a_noop_when_no_links_pending() {
+        let mut buf: Vec<u8> = Vec::new();
+        write_status_hyperlinks(&mut buf, &[]).unwrap();
+        assert!(buf.is_empty(), "no bytes for an empty link list");
+    }
+
+    // ── tmux_passthrough ──
+
+    #[test]
+    fn tmux_passthrough_doubles_inner_escape_and_wraps_in_dcs() {
+        let inner = b"\x1b]8;;https://x\x07X\x1b]8;;\x07";
+        let wrapped = tmux_passthrough(inner);
+        let expected = b"\x1bPtmux;\x1b\x1b]8;;https://x\x07X\x1b\x1b]8;;\x07\x1b\\";
+        assert_eq!(&wrapped, expected);
     }
 
     #[test]

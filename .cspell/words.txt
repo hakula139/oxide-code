@@ -69,6 +69,7 @@ pgid
 pkgs
 pname
 println
+Ptmux
 pulldown
 RAII
 ratatui
