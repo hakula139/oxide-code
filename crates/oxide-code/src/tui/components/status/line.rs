@@ -258,6 +258,11 @@ fn non_empty_span(label: String, style: ratatui::style::Style) -> Option<Span<'s
 /// This works because crossterm's `Print` renders the cell symbol verbatim, while ratatui's
 /// `Buffer::set_string` filters control chars before they reach the cell. Setting the symbol
 /// directly via `Cell::set_symbol` bypasses that filter.
+///
+/// The envelope uses BEL (`\x07`) as the terminator because some terminal emulators (notably
+/// xterm.js, which powers VS Code and Cursor's integrated terminals) misparse the ST terminator
+/// (`\x1b\\`) when each cell carries its own self-contained OSC 8 sequence, leaking visible
+/// bytes into adjacent cells. Single-byte BEL is universally accepted by every modern emulator.
 pub(super) fn mark_url_hyperlink(buf: &mut Buffer, area: Rect, url: &str) {
     let safe_url: String = url.chars().filter(|c| !c.is_control()).collect();
     if safe_url.is_empty() {
@@ -270,7 +275,7 @@ pub(super) fn mark_url_hyperlink(buf: &mut Buffer, area: Rect, url: &str) {
             if sym.trim().is_empty() {
                 continue;
             }
-            cell.set_symbol(&format!("\x1b]8;;{safe_url}\x1b\\{sym}\x1b]8;;\x1b\\"));
+            cell.set_symbol(&format!("\x1b]8;;{safe_url}\x07{sym}\x1b]8;;\x07"));
         }
     }
 }
@@ -532,12 +537,12 @@ mod tests {
 
         assert_eq!(
             buf[(0, 0)].symbol(),
-            "\x1b]8;;https://example.com\x1b\\a\x1b]8;;\x1b\\",
+            "\x1b]8;;https://example.com\x07a\x1b]8;;\x07",
         );
         assert_eq!(buf[(2, 0)].symbol(), " ", "whitespace cells stay untouched");
         assert_eq!(
             buf[(4, 0)].symbol(),
-            "\x1b]8;;https://example.com\x1b\\d\x1b]8;;\x1b\\",
+            "\x1b]8;;https://example.com\x07d\x1b]8;;\x07",
         );
     }
 
@@ -551,7 +556,7 @@ mod tests {
 
         assert_eq!(
             buf[(0, 0)].symbol(),
-            "\x1b]8;;https://example.com/ok\x1b\\x\x1b]8;;\x1b\\",
+            "\x1b]8;;https://example.com/ok\x07x\x1b]8;;\x07",
         );
     }
 
