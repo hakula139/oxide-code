@@ -28,10 +28,8 @@ const GIT_BRANCH_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 /// probe because `gh pr view` hits the network.
 const PR_REFRESH_INTERVAL: Duration = Duration::from_mins(1);
 
-/// A hyperlink the status bar wants the App to wrap in OSC 8 after `terminal.draw()` flushes.
-/// `rect` is in absolute screen coordinates (relative to the area passed to `render`). `cells`
-/// holds a snapshot of the visible chars and their styles taken at render time so the post-draw
-/// emission can replay them without having to re-read the buffer.
+/// Hyperlink rect + replayable cell snapshot the App wraps in OSC 8 after `terminal.draw()`
+/// flushes.
 #[derive(Debug, Clone)]
 pub(crate) struct StatusHyperlink {
     pub(crate) rect: Rect,
@@ -255,14 +253,10 @@ impl StatusBar {
             .border_style(self.theme.border_unfocused())
             .style(self.theme.surface());
         let rendered = self.render_line(area.width);
-        // Inside the block the content row is `area.y` (no top border) starting at `area.x`.
         let content_y = area.y;
         let content_x = area.x;
-        // Capture link rects for the App to wrap in OSC 8 *after* `terminal.draw()` flushes.
-        // Storing the envelope inside cell symbols would inflate `unicode-width` (the URL is
-        // plain ASCII), and ratatui's diff uses that width to compute `to_skip` for trailing
-        // cells. With a 30-byte URL the diff would skip ~30 cells worth of trailing text and
-        // shift unrelated chars into the gap (e.g., `#86` rendering as `#pus`).
+        // Capture link rects for App::emit_status_hyperlinks to wrap post-flush. See
+        // docs/design/tui/mouse-interactions.md for why the envelope can't live in cell symbols.
         self.pending_hyperlinks.clear();
         let mut hyperlink_rects = Vec::with_capacity(rendered.hyperlinks.len());
         for link in &rendered.hyperlinks {
@@ -275,8 +269,7 @@ impl StatusBar {
             hyperlink_rects.push((Rect::new(link_x, content_y, width, 1), link.url.clone()));
         }
         frame.render_widget(Paragraph::new(rendered.line).block(block), area);
-        // After the Paragraph paints into the buffer, snapshot the cells under each link rect so
-        // the App can replay them with an OSC 8 envelope wrapped around them post-flush.
+        // Snapshot link cells after the paint so emit_status_hyperlinks can replay them.
         let buf = frame.buffer_mut();
         for (rect, url) in hyperlink_rects {
             let mut cells = Vec::with_capacity(usize::from(rect.width));
@@ -293,8 +286,8 @@ impl StatusBar {
         }
     }
 
-    /// Drain hyperlink rects captured during the most recent `render` so the App can re-emit them
-    /// out-of-band as OSC 8 sequences after `terminal.draw()` has flushed.
+    /// Drains the link rects captured by the most recent `render` so the App can re-emit them
+    /// inside OSC 8 envelopes after `terminal.draw()` flushes.
     pub(crate) fn take_pending_hyperlinks(&mut self) -> Vec<StatusHyperlink> {
         std::mem::take(&mut self.pending_hyperlinks)
     }
@@ -561,6 +554,23 @@ mod tests {
         assert_eq!(bar.git_branch, None);
     }
 
+    #[test]
+    fn tick_marks_dirty_when_pull_request_changes() {
+        // Pins the pull-request → dirty arm of `tick`. A regression that drops the PR-refresh
+        // result on the floor would leave the status bar stale for one whole probe interval.
+        let dir = tempfile::tempdir().unwrap();
+        let mut bar = test_bar();
+        bar.git_cwd = Some(dir.path().to_path_buf());
+        bar.track_pull_request = true;
+        bar.pull_request = Some(git::PullRequest {
+            number: 999,
+            url: "https://example.com/pull/999".to_owned(),
+        });
+        bar.last_pr_probe = None;
+        assert!(bar.tick());
+        assert_eq!(bar.pull_request, None);
+    }
+
     // ── refresh_git_branch ──
 
     #[test]
@@ -591,6 +601,24 @@ mod tests {
             Some(now),
             "stamp must not move while the throttle window is open",
         );
+    }
+
+    #[test]
+    fn refresh_git_branch_returns_false_when_branch_unchanged() {
+        // Pre-seed last_branch_probe past the throttle window and pin git_branch to whatever
+        // probe will return (None for a non-repo cwd). A re-probe yields the same value, so the
+        // function must report no change.
+        let dir = tempfile::tempdir().unwrap();
+        let mut bar = test_bar();
+        bar.git_cwd = Some(dir.path().to_path_buf());
+        bar.git_branch = None;
+        bar.last_branch_probe = Some(
+            Instant::now()
+                .checked_sub(GIT_BRANCH_REFRESH_INTERVAL * 2)
+                .unwrap(),
+        );
+        assert!(!bar.refresh_git_branch(Instant::now()));
+        assert_eq!(bar.git_branch, None);
     }
 
     // ── refresh_pull_request ──
@@ -672,76 +700,6 @@ mod tests {
             earlier + GIT_BRANCH_REFRESH_INTERVAL,
             GIT_BRANCH_REFRESH_INTERVAL,
         ));
-    }
-
-    // ── take_pending_hyperlinks ──
-
-    #[test]
-    fn render_records_pull_request_hyperlink_rect_for_post_flush_emission() {
-        // The OSC 8 envelope is emitted by the App after `terminal.draw()` flushes. The bar's
-        // job is to record the link rect + visible cells so the App can replay them. Storing the
-        // envelope inside cell symbols would inflate `unicode-width` to ~30 (URL is plain ASCII)
-        // and ratatui's diff would skip ~30 trailing cells, producing the `#86 → #pus` bug.
-        let mut bar = StatusBar::new(
-            &Theme::default(),
-            vec![StatusLineSegment::PullRequest, StatusLineSegment::RunState],
-            "Opus 4.7".into(),
-            None,
-            String::new(),
-            None,
-            None,
-        );
-        bar.pull_request = Some(git::PullRequest {
-            number: 86,
-            url: "https://github.com/o/r/pull/86".to_owned(),
-        });
-        let _backend = render_status(&mut bar, 40);
-        let links = bar.take_pending_hyperlinks();
-        assert_eq!(
-            links.len(),
-            1,
-            "PR segment reports exactly one link: {links:?}"
-        );
-        let link = &links[0];
-        assert_eq!(link.url, "https://github.com/o/r/pull/86");
-        // Leading "  " margin → `#86` lives at col 2, width 3.
-        assert_eq!(link.rect.x, 2);
-        assert_eq!(link.rect.width, 3);
-        let visible: String = link.cells.iter().map(|c| c.symbol.as_str()).collect();
-        assert_eq!(visible, "#86");
-        // Drained on take.
-        assert!(
-            bar.take_pending_hyperlinks().is_empty(),
-            "drain leaves nothing behind"
-        );
-    }
-
-    #[test]
-    fn render_records_no_hyperlinks_when_pull_request_absent() {
-        let mut bar = test_bar();
-        let _backend = render_status(&mut bar, 40);
-        assert!(bar.take_pending_hyperlinks().is_empty());
-    }
-
-    #[test]
-    fn render_drops_hyperlink_when_segment_clipped_to_zero_width() {
-        // Narrow renders drop the PR segment via the fit pass, so the recorded hyperlinks list
-        // must mirror the rendered line and not surface a link rect that points at empty cells.
-        let mut bar = StatusBar::new(
-            &Theme::default(),
-            vec![StatusLineSegment::PullRequest, StatusLineSegment::RunState],
-            "Opus 4.7".into(),
-            None,
-            String::new(),
-            None,
-            None,
-        );
-        bar.pull_request = Some(git::PullRequest {
-            number: 86,
-            url: "https://github.com/o/r/pull/86".to_owned(),
-        });
-        let _backend = render_status(&mut bar, 10);
-        assert!(bar.take_pending_hyperlinks().is_empty());
     }
 
     // ── render ──
@@ -964,6 +922,92 @@ mod tests {
         assert!(
             !output.contains('~'),
             "no tildified path should appear: {output:?}",
+        );
+    }
+
+    #[test]
+    fn render_records_pull_request_hyperlink_rect_for_post_flush_emission() {
+        // The OSC 8 envelope is emitted by the App after `terminal.draw()` flushes. The bar's
+        // job is to record the link rect + visible cells so the App can replay them.
+        let mut bar = StatusBar::new(
+            &Theme::default(),
+            vec![StatusLineSegment::PullRequest, StatusLineSegment::RunState],
+            "Opus 4.7".into(),
+            None,
+            String::new(),
+            None,
+            None,
+        );
+        bar.pull_request = Some(git::PullRequest {
+            number: 86,
+            url: "https://github.com/o/r/pull/86".to_owned(),
+        });
+        let _backend = render_status(&mut bar, 40);
+        let links = bar.take_pending_hyperlinks();
+        assert_eq!(
+            links.len(),
+            1,
+            "PR segment reports exactly one link: {links:?}",
+        );
+        let link = &links[0];
+        assert_eq!(link.url, "https://github.com/o/r/pull/86");
+        // Leading "  " margin → `#86` lives at col 2, width 3.
+        assert_eq!(link.rect.x, 2);
+        assert_eq!(link.rect.width, 3);
+        let visible: String = link.cells.iter().map(|c| c.symbol.as_str()).collect();
+        assert_eq!(visible, "#86");
+    }
+
+    #[test]
+    fn render_records_no_hyperlinks_when_pull_request_absent() {
+        let mut bar = test_bar();
+        let _backend = render_status(&mut bar, 40);
+        assert!(bar.take_pending_hyperlinks().is_empty());
+    }
+
+    #[test]
+    fn render_drops_hyperlink_when_segment_clipped_to_zero_width() {
+        // Narrow renders drop the PR segment via the fit pass, so the recorded hyperlinks list
+        // must mirror the rendered line and not surface a link rect that points at empty cells.
+        let mut bar = StatusBar::new(
+            &Theme::default(),
+            vec![StatusLineSegment::PullRequest, StatusLineSegment::RunState],
+            "Opus 4.7".into(),
+            None,
+            String::new(),
+            None,
+            None,
+        );
+        bar.pull_request = Some(git::PullRequest {
+            number: 86,
+            url: "https://github.com/o/r/pull/86".to_owned(),
+        });
+        let _backend = render_status(&mut bar, 10);
+        assert!(bar.take_pending_hyperlinks().is_empty());
+    }
+
+    // ── take_pending_hyperlinks ──
+
+    #[test]
+    fn take_pending_hyperlinks_drains_after_first_call() {
+        let mut bar = StatusBar::new(
+            &Theme::default(),
+            vec![StatusLineSegment::PullRequest, StatusLineSegment::RunState],
+            "Opus 4.7".into(),
+            None,
+            String::new(),
+            None,
+            None,
+        );
+        bar.pull_request = Some(git::PullRequest {
+            number: 86,
+            url: "https://github.com/o/r/pull/86".to_owned(),
+        });
+        let _backend = render_status(&mut bar, 40);
+        assert_eq!(bar.take_pending_hyperlinks().len(), 1);
+        assert!(
+            bar.take_pending_hyperlinks().is_empty(),
+            "second take leaves nothing behind",
         );
     }
 }

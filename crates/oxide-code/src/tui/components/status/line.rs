@@ -13,6 +13,8 @@ const MAX_GIT_BRANCH_WIDTH: usize = 32;
 const MAX_TITLE_WIDTH: usize = 40;
 /// Leading margin (cells) inside the status bar that lines up content with the chat block.
 const STATUS_LINE_MARGIN: u16 = 2;
+const STATUS_LINE_MARGIN_STR: &str = "  ";
+const _: () = assert!(STATUS_LINE_MARGIN_STR.len() == STATUS_LINE_MARGIN as usize);
 
 /// Ordered segment roster for one status-line render.
 #[derive(Debug, Clone)]
@@ -57,7 +59,7 @@ impl StatusLine {
         fit_segments(&mut rendered, usize::from(width), sep_width);
 
         // Leading margin lines up content with the chat block underneath.
-        let mut spans = vec![Span::raw("  ")];
+        let mut spans = vec![Span::raw(STATUS_LINE_MARGIN_STR)];
         let mut hyperlinks = Vec::new();
         let mut col: u16 = STATUS_LINE_MARGIN;
         let sep_w = u16::try_from(sep_width).unwrap_or(0);
@@ -346,6 +348,13 @@ mod tests {
             && bytes[4].is_ascii_digit()
     }
 
+    fn pr_state() -> crate::util::git::PullRequest {
+        crate::util::git::PullRequest {
+            number: 86,
+            url: "https://github.com/o/r/pull/86".to_owned(),
+        }
+    }
+
     // ── StatusLine::render ──
 
     #[test]
@@ -432,15 +441,8 @@ mod tests {
         assert_eq!(render_text(segments, 14), "  main │ Ready");
     }
 
-    fn pr_state() -> crate::util::git::PullRequest {
-        crate::util::git::PullRequest {
-            number: 86,
-            url: "https://github.com/o/r/pull/86".to_owned(),
-        }
-    }
-
     #[test]
-    fn pull_request_segment_reports_hyperlink_range_for_post_render_marking() {
+    fn render_pull_request_reports_hyperlink_range() {
         let pr = pr_state();
         let rendered = StatusLine::new(vec![StatusLineSegment::PullRequest]).render(
             &Theme::default(),
@@ -464,7 +466,7 @@ mod tests {
     }
 
     #[test]
-    fn pull_request_segment_reports_no_hyperlink_when_absent() {
+    fn render_pull_request_reports_no_hyperlink_when_absent() {
         let rendered = StatusLine::new(vec![StatusLineSegment::PullRequest]).render(
             &Theme::default(),
             &StatusLineState {
