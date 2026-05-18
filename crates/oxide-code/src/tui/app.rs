@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use crossterm::cursor::{RestorePosition, SavePosition};
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, MouseButton, MouseEventKind};
 use crossterm::queue;
 use crossterm::style::{
@@ -681,22 +682,20 @@ impl App {
         draw_sync(terminal, |frame| {
             chat_area = self.draw_frame(frame);
         })?;
-        self.emit_status_hyperlinks(terminal)?;
         if self.chat.update_layout(chat_area) {
             draw_sync(terminal, |frame| {
                 self.draw_frame(frame);
             })?;
-            self.emit_status_hyperlinks(terminal)?;
         }
+        self.emit_status_hyperlinks(terminal)?;
         Ok(())
     }
 
-    /// Re-emits any hyperlink ranges captured by the status bar wrapped in OSC 8 envelopes.
-    /// Runs out-of-band after `terminal.draw()` has flushed because storing the envelope inside
-    /// cell symbols would inflate `unicode-width` (URLs are plain ASCII), and ratatui's diff
-    /// reads that width to compute `to_skip` for trailing cells. With a 30-byte URL the diff
-    /// would skip ~30 trailing cells, dropping the rest of `#86` and shifting later text into
-    /// the gap. Replaying the visible bytes after the flush bypasses the diff entirely.
+    /// Replays each captured link rect inside an OSC 8 envelope after `terminal.draw()` flushes.
+    /// Out-of-band emission avoids ratatui's `Buffer::diff` over-counting URL bytes as cell width
+    /// and skipping trailing cells (the `#86 → #pus` bug). Brackets the writes with DECSC / DECRC
+    /// so the cursor `terminal.draw()` parked stays put without a DSR roundtrip racing the event
+    /// reader.
     fn emit_status_hyperlinks<W: std::io::Write>(
         &mut self,
         terminal: &mut ratatui::Terminal<ratatui::prelude::CrosstermBackend<W>>,
@@ -705,15 +704,7 @@ impl App {
         if links.is_empty() {
             return Ok(());
         }
-        // Save the cursor `terminal.draw()` parked (typically at the input field). Our writes
-        // move it to each link rect, so without restoring it the user sees a stray cursor next
-        // to `#NN` in the status bar.
-        let saved_cursor = terminal.get_cursor_position().ok();
         write_status_hyperlinks(terminal.backend_mut(), &links)?;
-        if let Some(pos) = saved_cursor {
-            terminal.set_cursor_position(pos)?;
-            std::io::Write::flush(terminal.backend_mut())?;
-        }
         Ok(())
     }
 
@@ -840,17 +831,22 @@ impl App {
 }
 
 /// Writes each link's OSC 8 envelope (with replayed visible chars) to `out`. Pure I/O — accepts
-/// any `Write` so tests can capture the bytes via a `Vec<u8>` and inspect them. Strips control
-/// chars from each URL so a malformed value can't break out of the envelope, and uses BEL (`\x07`)
-/// as the OSC terminator because xterm.js misparses self-contained per-cell ST closers.
-pub(super) fn write_status_hyperlinks<W: std::io::Write>(
+/// any `Write` so tests can capture and inspect the bytes.
+pub(crate) fn write_status_hyperlinks<W: std::io::Write>(
     out: &mut W,
     links: &[super::components::status::StatusHyperlink],
 ) -> std::io::Result<()> {
+    let mut wrote_any = false;
     for link in links {
         let safe_url: String = link.url.chars().filter(|c| !c.is_control()).collect();
         if safe_url.is_empty() {
             continue;
+        }
+        if !wrote_any {
+            // DECSC / DECRC parks the cursor terminal-side, so the OSC 8 writes don't drag it onto
+            // the status bar. Avoids a DSR roundtrip that would race the TUI event reader.
+            queue!(out, SavePosition)?;
+            wrote_any = true;
         }
         // CUP uses 1-based coordinates.
         let row = link.rect.y.saturating_add(1);
@@ -863,6 +859,9 @@ pub(super) fn write_status_hyperlinks<W: std::io::Write>(
         write!(out, "\x1b]8;;\x07")?;
         // Reset SGR so subsequent terminal output isn't tinted by the last cell's style.
         write!(out, "\x1b[0m")?;
+    }
+    if wrote_any {
+        queue!(out, RestorePosition)?;
     }
     out.flush()?;
     Ok(())
@@ -3491,9 +3490,10 @@ mod tests {
 
     #[test]
     fn write_status_hyperlinks_emits_cup_then_envelope_per_link() {
-        // Pins the on-the-wire byte sequence: CUP (1-based) → OSC 8 opener → replayed cells →
-        // OSC 8 closer (BEL terminator) → SGR reset. Drift here breaks the PR-click affordance
-        // in xterm.js-based terminals (Cursor / VS Code) where the parser is least forgiving.
+        // Pins the on-the-wire byte sequence: DECSC → CUP (1-based) → OSC 8 opener → replayed
+        // cells → OSC 8 closer (BEL terminator) → SGR reset → DECRC. Drift here breaks the
+        // PR-click affordance in xterm.js-based terminals (Cursor / VS Code) where the parser is
+        // least forgiving, or leaves the cursor parked next to `#NN` on the status bar.
         use crate::tui::components::status::{HyperlinkCell, StatusHyperlink};
 
         let link = StatusHyperlink {
@@ -3518,8 +3518,16 @@ mod tests {
         write_status_hyperlinks(&mut buf, &[link]).unwrap();
         let output = String::from_utf8(buf).unwrap();
         assert!(
+            output.starts_with("\x1b7"),
+            "DECSC parks the cursor before our writes: {output:?}",
+        );
+        assert!(
+            output.ends_with("\x1b8"),
+            "DECRC restores the cursor after our writes: {output:?}",
+        );
+        assert!(
             output.contains("\x1b[1;3H"),
-            "CUP to row 1 col 3 (1-based): {output:?}"
+            "CUP to row 1 col 3 (1-based): {output:?}",
         );
         assert!(
             output.contains("\x1b]8;;https://example.com/pull/86\x07"),
@@ -3533,8 +3541,8 @@ mod tests {
             "visible bytes #, 8, 6 sit between opener and closer: {between:?}",
         );
         assert!(
-            output.ends_with("\x1b]8;;\x07\x1b[0m"),
-            "closer + SGR reset: {output:?}"
+            output.contains("\x1b]8;;\x07\x1b[0m"),
+            "closer + SGR reset: {output:?}",
         );
     }
 
@@ -3573,7 +3581,10 @@ mod tests {
         };
         let mut buf: Vec<u8> = Vec::new();
         write_status_hyperlinks(&mut buf, &[link]).unwrap();
-        assert!(buf.is_empty(), "no bytes when sanitized URL is empty");
+        assert!(
+            buf.is_empty(),
+            "no bytes (no DECSC either) when sanitized URL is empty",
+        );
     }
 
     // ── jump_overlay_label ──
