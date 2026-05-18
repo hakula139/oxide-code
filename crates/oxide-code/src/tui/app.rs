@@ -225,8 +225,8 @@ impl App {
 
     /// Routes a mouse event. The TUI does not capture mouse input, so the only events it sees are
     /// app-side affordances delivered through DECSET 1007 (alternate-scroll, which delivers wheel
-    /// as arrow-key sequences). Left-click on the cached jump-pill rect snaps to bottom; every
-    /// other event flows to chat for wheel scroll. Native drag-select-and-copy is preserved.
+    /// as arrow-key sequences). Left-click on the cached jump-pill rect snaps to bottom, and
+    /// every other event flows to chat for wheel scroll. Native drag-select-and-copy is preserved.
     fn handle_mouse_event(&mut self, event: &Event) {
         if let Event::Mouse(mouse) = event
             && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
@@ -705,7 +705,15 @@ impl App {
         if links.is_empty() {
             return Ok(());
         }
+        // Save the cursor `terminal.draw()` parked (typically at the input field). Our writes
+        // move it to each link rect, so without restoring it the user sees a stray cursor next
+        // to `#NN` in the status bar.
+        let saved_cursor = terminal.get_cursor_position().ok();
         write_status_hyperlinks(terminal.backend_mut(), &links)?;
+        if let Some(pos) = saved_cursor {
+            terminal.set_cursor_position(pos)?;
+            std::io::Write::flush(terminal.backend_mut())?;
+        }
         Ok(())
     }
 

@@ -678,7 +678,7 @@ mod tests {
 
     #[test]
     fn render_records_pull_request_hyperlink_rect_for_post_flush_emission() {
-        // The OSC 8 envelope is emitted by the App after `terminal.draw()` flushes; the bar's
+        // The OSC 8 envelope is emitted by the App after `terminal.draw()` flushes. The bar's
         // job is to record the link rect + visible cells so the App can replay them. Storing the
         // envelope inside cell symbols would inflate `unicode-width` to ~30 (URL is plain ASCII)
         // and ratatui's diff would skip ~30 trailing cells, producing the `#86 → #pus` bug.
@@ -725,7 +725,7 @@ mod tests {
 
     #[test]
     fn render_drops_hyperlink_when_segment_clipped_to_zero_width() {
-        // Narrow renders drop the PR segment via the fit pass; the recorded hyperlinks list
+        // Narrow renders drop the PR segment via the fit pass, so the recorded hyperlinks list
         // must mirror the rendered line and not surface a link rect that points at empty cells.
         let mut bar = StatusBar::new(
             &Theme::default(),
