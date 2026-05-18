@@ -1,11 +1,12 @@
 //! Terminal initialization, restore, and panic hook.
 
+use std::fmt;
 use std::io::{self, Stdout, Write};
 
 use anyhow::Result;
+use crossterm::Command;
 use crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
-    PushKeyboardEnhancementFlags,
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::{
     self, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -16,8 +17,8 @@ use ratatui::prelude::CrosstermBackend;
 
 pub(crate) type Tui = Terminal<CrosstermBackend<Stdout>>;
 
-/// Enters raw mode + alt screen + mouse + Kitty keyboard. Caller must invoke [`restore`] on exit
-/// (including panics).
+/// Enters raw mode + alt screen + alternate-scroll + Kitty keyboard. Caller must invoke [`restore`]
+/// on exit (including panics).
 pub(crate) fn init() -> Result<Tui> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -32,7 +33,7 @@ fn enter_tui_mode(stdout: &mut impl Write) -> Result<()> {
     execute!(
         stdout,
         EnterAlternateScreen,
-        EnableMouseCapture,
+        EnableAlternateScroll,
         PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
         terminal::Clear(terminal::ClearType::All),
     )?;
@@ -53,12 +54,58 @@ pub(crate) fn restore() {
 fn leave_tui_mode(stdout: &mut impl Write) -> Result<()> {
     execute!(
         stdout,
-        DisableMouseCapture,
+        DisableAlternateScroll,
         PopKeyboardEnhancementFlags,
         LeaveAlternateScreen,
         crossterm::cursor::Show,
     )?;
     Ok(())
+}
+
+/// DECSET `?1007h`. Tells the terminal emulator to translate physical wheel-mouse events into
+/// arrow-key sequences while the alternate screen is active. Wheel scroll keeps working without
+/// claiming `EnableMouseCapture`, so native drag-select-and-copy stays available to the user.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EnableAlternateScroll;
+
+impl Command for EnableAlternateScroll {
+    fn write_ansi(&self, f: &mut impl fmt::Write) -> fmt::Result {
+        write!(f, "\x1b[?1007h")
+    }
+
+    #[cfg(windows)]
+    fn execute_winapi(&self) -> std::io::Result<()> {
+        Err(std::io::Error::other(
+            "EnableAlternateScroll requires ANSI sequences",
+        ))
+    }
+
+    #[cfg(windows)]
+    fn is_ansi_code_supported(&self) -> bool {
+        true
+    }
+}
+
+/// DECSET `?1007l`. Pairs with [`EnableAlternateScroll`] on shutdown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DisableAlternateScroll;
+
+impl Command for DisableAlternateScroll {
+    fn write_ansi(&self, f: &mut impl fmt::Write) -> fmt::Result {
+        write!(f, "\x1b[?1007l")
+    }
+
+    #[cfg(windows)]
+    fn execute_winapi(&self) -> std::io::Result<()> {
+        Err(std::io::Error::other(
+            "DisableAlternateScroll requires ANSI sequences",
+        ))
+    }
+
+    #[cfg(windows)]
+    fn is_ansi_code_supported(&self) -> bool {
+        true
+    }
 }
 
 /// Brackets a render closure with DEC synchronized-update (mode 2026) sequences so the terminal
@@ -100,6 +147,8 @@ mod tests {
 
     const ENTER_ALT_SCREEN: &[u8] = b"\x1b[?1049h";
     const CLEAR_SCREEN: &[u8] = b"\x1b[2J";
+    const ENABLE_ALT_SCROLL: &[u8] = b"\x1b[?1007h";
+    const ENABLE_MOUSE_BASIC: &[u8] = b"\x1b[?1000h";
 
     #[test]
     fn enter_tui_mode_writes_setup_sequences() {
@@ -113,12 +162,31 @@ mod tests {
             enter < clear,
             "setup should enter alternate screen before clearing"
         );
+        assert!(
+            index_of(&buf, ENABLE_ALT_SCROLL).is_some(),
+            "alternate-scroll must be enabled so wheel still scrolls without mouse capture"
+        );
+    }
+
+    #[test]
+    fn enter_tui_mode_does_not_enable_mouse_capture() {
+        // Native drag-select-and-copy depends on the terminal seeing the mouse, so the TUI must
+        // never claim it. Pin the negative case so a future refactor can't silently re-enable it.
+        let mut buf = Vec::new();
+
+        enter_tui_mode(&mut buf).unwrap();
+
+        assert!(
+            index_of(&buf, ENABLE_MOUSE_BASIC).is_none(),
+            "EnableMouseCapture would suppress native terminal drag-select"
+        );
     }
 
     // ── leave_tui_mode ──
 
     const LEAVE_ALT_SCREEN: &[u8] = b"\x1b[?1049l";
     const SHOW_CURSOR: &[u8] = b"\x1b[?25h";
+    const DISABLE_ALT_SCROLL: &[u8] = b"\x1b[?1007l";
 
     #[test]
     fn leave_tui_mode_writes_restore_sequences() {
@@ -131,6 +199,10 @@ mod tests {
         assert!(
             leave < show,
             "restore should leave alternate screen before showing cursor"
+        );
+        assert!(
+            index_of(&buf, DISABLE_ALT_SCROLL).is_some(),
+            "alternate-scroll must be disabled when leaving the TUI"
         );
     }
 
