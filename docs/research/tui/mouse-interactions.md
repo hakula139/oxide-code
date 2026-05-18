@@ -59,7 +59,14 @@ Failure modes: rejected payloads are silently dropped. The app cannot detect sup
 
 Modern support: iTerm2, WezTerm, kitty, Alacritty, foot, Konsole, Ghostty, recent Windows Terminal, GNOME Terminal, VTE-based terminals, VS Code's terminal, Cursor's terminal. Legacy terminals print the escape bytes literally. The `<text>` part is what users see, so the fallback is graceful as long as the visible text alone is meaningful (e.g., `#NN` works, while an empty link doesn't).
 
-`unicode-width` reports 0 for ESC and the printable bytes inside a `]8;;...\x07` sequence are also non-printable, so layout math sees the whole sequence as zero-width when wrapped in `Span::raw`. Truncation logic that measures `Span::content` width via `unicode_width::UnicodeWidthStr::width` is unaffected. ratatui's `Buffer::set_string` filters out any grapheme that contains a control char, so embedding ESC in a `Span` strips the leading and trailing escape and leaks the printable middle. The fix is to bypass that filter via `Cell::set_symbol`, which stores the symbol verbatim. crossterm's `Print(cell.symbol())` writes the bytes unchanged.
+`unicode-width` reports 0 for ESC and the printable bytes inside a `]8;;...\x07` sequence are also non-printable, so layout math sees the whole sequence as zero-width when wrapped in `Span::raw`. Truncation logic that measures `Span::content` width via `unicode_width::UnicodeWidthStr::width` is unaffected.
+
+Two ratatui-specific traps appear when embedding the envelope inside a frame buffer cell:
+
+1. **`Buffer::set_string` strips control chars.** Embedding ESC in a `Span::raw` strips the leading and trailing escape and leaks the printable middle. `Cell::set_symbol` bypasses that filter and stores the symbol verbatim; crossterm's `Print(cell.symbol())` writes the bytes unchanged.
+2. **`Buffer::diff` over-counts the cell's width.** The diff reads `cell.symbol().width()` to compute `to_skip` for trailing cells (multi-width handling). A symbol like `\x1b]8;;https://github.com/o/r/pull/86\x07#\x1b]8;;\x07` is mostly plain ASCII (the URL), so `unicode-width` reports ~30. The diff then skips ~30 trailing cells, dropping the rest of `#86` and shifting later text into the gap. Codex's `mark_url_hyperlink` writes the envelope into cell symbols too, but no Codex test exercises `Terminal::flush`, so the same bug lurks there as well.
+
+The clean workaround: emit the OSC 8 envelope **out-of-band**, after `terminal.draw()` has flushed. Capture the link rect + visible cells at render time, then write CUP + `\x1b]8;;<URL>\x07` + replayed styled cells + `\x1b]8;;\x07` + SGR reset directly to the crossterm backend. Buffer cells stay plain (width 1) and the diff math behaves.
 
 ## Mouse capture mode bundle
 
@@ -85,7 +92,7 @@ The shipped design defers selection entirely to the terminal:
 
 - **No mouse capture.** `enter_tui_mode` skips `EnableMouseCapture` so the terminal sees every drag itself. The terminal's native selection layer renders the highlight, decides what gets copied, and writes to the OS clipboard the way the user already expects.
 - **DECSET 1007 (alternate-scroll).** Wheel events arrive as arrow-key sequences in the alt-screen, so chat still scrolls without claiming the mouse. iTerm2, WezTerm, kitty, Alacritty, foot, Ghostty, Windows Terminal, recent GNOME Terminal, Konsole, and xterm.js-based terminals (VS Code, Cursor) implement 1007. Older terminals fall back to keyboard scroll.
-- **OSC 8 on the PR segment, painted post-render via `Cell::set_symbol`.** ratatui's `Buffer::set_string` filters control chars out of `Span::raw`, so the envelope has to be written at the cell level after the line is painted. BEL (`\x07`) terminator, not ST (`\x1b\\`), because xterm.js misparses the self-contained per-cell ST closers and leaks visible bytes into adjacent cells.
+- **OSC 8 on the PR segment, emitted out-of-band after `terminal.draw()` flushes.** Capturing the link rect + visible cells at render time and writing the envelope directly to the crossterm backend avoids both ratatui traps: `Buffer::set_string` no longer filters our control chars (we never go through it), and `Buffer::diff`'s `to_skip` math no longer reads a 30-byte URL out of a single cell symbol and drops the trailing characters. BEL (`\x07`) terminator, not ST (`\x1b\\`), because xterm.js misparses the self-contained per-cell ST closers and leaks visible bytes into adjacent cells.
 - **No app-side selection.** The `Selection` state machine, OSC 52 encoder, tmux DCS pass-through, `selection` theme slot, and `arboard` fallback all become unnecessary.
 
 The remaining trade-off is the same one Codex makes: app-side click affordances beyond the jump-pill are out of reach, because there are no mouse events to route. That's the right trade until concrete demand for click-to-expand or similar arrives.

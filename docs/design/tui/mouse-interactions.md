@@ -25,17 +25,17 @@ Modern emulators (iTerm2, WezTerm, kitty, Alacritty, foot, Ghostty, Windows Term
 
 ## OSC 8 hyperlink on the PR status segment
 
-The `pull-request` status segment renders `#NN` as plain spans. After `Paragraph::render` paints the line into the frame buffer, `StatusBar::render` walks each `RenderedHyperlink` range and runs `mark_url_hyperlink` over it.
-
-`mark_url_hyperlink` rewrites every non-whitespace cell in the range so that `Cell::symbol()` carries the OSC 8 envelope inline:
+The `pull-request` status segment renders `#NN` as plain spans. After `Paragraph::render` paints the line into the frame buffer, `StatusBar::render` records each `RenderedHyperlink` range — its absolute screen rect, URL, and a snapshot of the visible chars + styles in the link cells — into a `pending_hyperlinks` queue. `App::render` drains that queue after `terminal.draw()` flushes and replays each link as an OSC 8 envelope written directly to the crossterm backend.
 
 ```text
-\x1b]8;;<URL>\x07<sym>\x1b]8;;\x07
+\x1b[<row>;<col>H\x1b]8;;<URL>\x07<styled cells>\x1b]8;;\x07\x1b[0m
 ```
+
+The envelope must live **outside** the cell symbols. ratatui's `Buffer::diff` reads each cell symbol's `unicode-width` to decide how many trailing cells the cell occupies (multi-width handling), and stores that in `to_skip`. A URL like `https://github.com/o/r/pull/86` is plain ASCII, so `unicode-width` reports ~30 for the envelope. The diff would then skip ~30 trailing cells, dropping the rest of `#86` and shifting later text into the gap (the original `#86 → #pus` bug). Replaying the envelope after the flush bypasses the diff entirely; the just-painted cells stay plain, and the next frame's diff sees them as plain symbols of width 1.
 
 Two non-obvious mechanics:
 
-- **`Cell::set_symbol` instead of `Span::raw`.** ratatui's `Buffer::set_string` filters out any grapheme that contains a control char, so embedding ESC bytes in a `Span` is silently stripped while the printable middle leaks through as visible text. Setting the symbol directly bypasses that filter, and crossterm's `Print(cell.symbol())` writes the bytes verbatim.
+- **Out-of-band emission, not `Cell::set_symbol`.** Storing the envelope in the cell symbol breaks ratatui's diff math (`unicode-width` over-counts the URL bytes). After `terminal.draw()` returns, `App::emit_status_hyperlinks` walks the captured link list, positions the cursor with CUP (`\x1b[<row>;<col>H`, 1-based), writes the OSC 8 opener, replays each cell's style + symbol via crossterm's `SetForegroundColor` / `SetBackgroundColor` / `SetAttribute` / `Print`, then writes the OSC 8 closer and an SGR reset.
 - **BEL (`\x07`) terminator instead of ST (`\x1b\\`).** Some xterm.js-based terminals (VS Code's and Cursor's integrated terminals) misparse self-contained per-cell ST closers, leaking visible bytes into the next cells of the line. BEL is one byte and every modern emulator parses it identically.
 
 Modern terminals (iTerm2, WezTerm, kitty, Alacritty, foot, Konsole, Ghostty, recent Windows Terminal, GNOME Terminal, VS Code's terminal, Cursor's terminal) make the segment Ctrl-clickable (Cmd-click on macOS in some terminals) and open the URL via the user's browser. Older terminals print the raw bytes literally; the visible `#NN` still reads correctly because BEL is non-printable.
@@ -58,9 +58,9 @@ This means we don't need:
 ## Implementation files
 
 - `crates/oxide-code/src/tui/terminal.rs` — `enter_tui_mode` / `leave_tui_mode` write the alt-screen + alternate-scroll + Kitty keyboard sequences.
-- `crates/oxide-code/src/tui/app.rs` — `handle_mouse_event` routes the jump-pill click and forwards everything else to chat.
-- `crates/oxide-code/src/tui/components/status.rs` — `StatusBar::render` paints the line, then walks `RenderedStatusLine::hyperlinks` and applies `mark_url_hyperlink` over each range.
-- `crates/oxide-code/src/tui/components/status/line.rs` — `StatusLine::render` returns the cell-column ranges of every hyperlinked segment alongside the line; `mark_url_hyperlink` rewrites each cell's symbol with the OSC 8 envelope.
+- `crates/oxide-code/src/tui/app.rs` — `handle_mouse_event` routes the jump-pill click and forwards everything else to chat. `emit_status_hyperlinks` drains the bar's pending link list after `terminal.draw()` flushes; `write_status_hyperlinks` emits the CUP + OSC 8 envelope + replayed cells + SGR reset to any `Write`.
+- `crates/oxide-code/src/tui/components/status.rs` — `StatusBar::render` paints the line with plain cell symbols, then snapshots each link rect's visible chars + styles into `pending_hyperlinks` for `App::emit_status_hyperlinks` to drain post-flush.
+- `crates/oxide-code/src/tui/components/status/line.rs` — `StatusLine::render` returns the cell-column ranges of every hyperlinked segment alongside the line.
 - `crates/oxide-code/src/util/git.rs` — `current_pull_request` returns `Option<PullRequest { number, url }>` parsed from `gh pr view --json number,url`, so the status bar has the URL ready when the PR refresh fires.
 
 ## Out of scope
@@ -85,4 +85,5 @@ Automated tests:
 
 - `tui::terminal::tests::enter_tui_mode_writes_setup_sequences`, `enter_tui_mode_does_not_enable_mouse_capture`, `leave_tui_mode_writes_restore_sequences` — pin the DECSET 1007 enable / disable and the absence of `EnableMouseCapture`.
 - `tui::app::tests::left_click_on_jump_overlay_jumps_chat_to_bottom`, `left_click_outside_jump_overlay_does_not_jump_chat`, `wheel_scroll_event_routes_to_chat_view` — pin the mouse-routing surface.
-- `tui::components::status::line::tests::mark_url_hyperlink_wraps_each_non_blank_cell_with_osc8`, `mark_url_hyperlink_strips_control_chars_from_url`, `mark_url_hyperlink_with_empty_url_is_noop`, `pull_request_segment_reports_hyperlink_range_for_post_render_marking`, `pull_request_segment_reports_no_hyperlink_when_absent` — pin the OSC 8 envelope shape.
+- `tui::app::tests::write_status_hyperlinks_emits_cup_then_envelope_per_link`, `write_status_hyperlinks_strips_control_chars_from_url`, `write_status_hyperlinks_skips_link_with_empty_safe_url` — pin the on-the-wire byte sequence (CUP + OSC 8 opener + replayed cells + closer + SGR reset).
+- `tui::components::status::tests::render_records_pull_request_hyperlink_rect_for_post_flush_emission`, `render_records_no_hyperlinks_when_pull_request_absent`, `render_drops_hyperlink_when_segment_clipped_to_zero_width`, `pull_request_segment_reports_hyperlink_range_for_post_render_marking`, `pull_request_segment_reports_no_hyperlink_when_absent` — pin what the bar surfaces to the App.

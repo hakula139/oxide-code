@@ -10,6 +10,11 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, MouseButton, MouseEventKind};
+use crossterm::queue;
+use crossterm::style::{
+    Attribute as CtAttribute, Color as CtColor, Print, SetAttribute, SetBackgroundColor,
+    SetForegroundColor,
+};
 use futures::{Stream, StreamExt};
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::text::{Line, Span};
@@ -676,11 +681,31 @@ impl App {
         draw_sync(terminal, |frame| {
             chat_area = self.draw_frame(frame);
         })?;
+        self.emit_status_hyperlinks(terminal)?;
         if self.chat.update_layout(chat_area) {
             draw_sync(terminal, |frame| {
                 self.draw_frame(frame);
             })?;
+            self.emit_status_hyperlinks(terminal)?;
         }
+        Ok(())
+    }
+
+    /// Re-emits any hyperlink ranges captured by the status bar wrapped in OSC 8 envelopes.
+    /// Runs out-of-band after `terminal.draw()` has flushed because storing the envelope inside
+    /// cell symbols would inflate `unicode-width` (URLs are plain ASCII), and ratatui's diff
+    /// reads that width to compute `to_skip` for trailing cells. With a 30-byte URL the diff
+    /// would skip ~30 trailing cells, dropping the rest of `#86` and shifting later text into
+    /// the gap. Replaying the visible bytes after the flush bypasses the diff entirely.
+    fn emit_status_hyperlinks<W: std::io::Write>(
+        &mut self,
+        terminal: &mut ratatui::Terminal<ratatui::prelude::CrosstermBackend<W>>,
+    ) -> Result<()> {
+        let links = self.status_bar.take_pending_hyperlinks();
+        if links.is_empty() {
+            return Ok(());
+        }
+        write_status_hyperlinks(terminal.backend_mut(), &links)?;
         Ok(())
     }
 
@@ -803,6 +828,97 @@ impl App {
             ])),
             inner,
         );
+    }
+}
+
+/// Writes each link's OSC 8 envelope (with replayed visible chars) to `out`. Pure I/O — accepts
+/// any `Write` so tests can capture the bytes via a `Vec<u8>` and inspect them. Strips control
+/// chars from each URL so a malformed value can't break out of the envelope, and uses BEL (`\x07`)
+/// as the OSC terminator because xterm.js misparses self-contained per-cell ST closers.
+pub(super) fn write_status_hyperlinks<W: std::io::Write>(
+    out: &mut W,
+    links: &[super::components::status::StatusHyperlink],
+) -> std::io::Result<()> {
+    for link in links {
+        let safe_url: String = link.url.chars().filter(|c| !c.is_control()).collect();
+        if safe_url.is_empty() {
+            continue;
+        }
+        // CUP uses 1-based coordinates.
+        let row = link.rect.y.saturating_add(1);
+        let col = link.rect.x.saturating_add(1);
+        write!(out, "\x1b[{row};{col}H")?;
+        write!(out, "\x1b]8;;{safe_url}\x07")?;
+        for cell in &link.cells {
+            write_styled_symbol(out, cell)?;
+        }
+        write!(out, "\x1b]8;;\x07")?;
+        // Reset SGR so subsequent terminal output isn't tinted by the last cell's style.
+        write!(out, "\x1b[0m")?;
+    }
+    out.flush()?;
+    Ok(())
+}
+
+/// Writes a single buffer cell — symbol + foreground / background / SGR attributes — directly to
+/// `out`. Used by `App::emit_status_hyperlinks` to replay link cells inside an OSC 8 envelope
+/// after `terminal.draw()` has flushed.
+fn write_styled_symbol<W: std::io::Write>(
+    out: &mut W,
+    cell: &super::components::status::HyperlinkCell,
+) -> std::io::Result<()> {
+    if let Some(fg) = cell.style.fg {
+        queue!(out, SetForegroundColor(ratatui_color_to_crossterm(fg)))?;
+    } else {
+        queue!(out, SetForegroundColor(CtColor::Reset))?;
+    }
+    if let Some(bg) = cell.style.bg {
+        queue!(out, SetBackgroundColor(ratatui_color_to_crossterm(bg)))?;
+    } else {
+        queue!(out, SetBackgroundColor(CtColor::Reset))?;
+    }
+    let modifier = cell.style.add_modifier;
+    if modifier.contains(ratatui::style::Modifier::BOLD) {
+        queue!(out, SetAttribute(CtAttribute::Bold))?;
+    }
+    if modifier.contains(ratatui::style::Modifier::DIM) {
+        queue!(out, SetAttribute(CtAttribute::Dim))?;
+    }
+    if modifier.contains(ratatui::style::Modifier::ITALIC) {
+        queue!(out, SetAttribute(CtAttribute::Italic))?;
+    }
+    if modifier.contains(ratatui::style::Modifier::UNDERLINED) {
+        queue!(out, SetAttribute(CtAttribute::Underlined))?;
+    }
+    if modifier.contains(ratatui::style::Modifier::REVERSED) {
+        queue!(out, SetAttribute(CtAttribute::Reverse))?;
+    }
+    queue!(out, Print(&cell.symbol))?;
+    Ok(())
+}
+
+fn ratatui_color_to_crossterm(c: ratatui::style::Color) -> CtColor {
+    use ratatui::style::Color as RC;
+    match c {
+        RC::Reset => CtColor::Reset,
+        RC::Black => CtColor::Black,
+        RC::Red => CtColor::DarkRed,
+        RC::Green => CtColor::DarkGreen,
+        RC::Yellow => CtColor::DarkYellow,
+        RC::Blue => CtColor::DarkBlue,
+        RC::Magenta => CtColor::DarkMagenta,
+        RC::Cyan => CtColor::DarkCyan,
+        RC::Gray => CtColor::Grey,
+        RC::DarkGray => CtColor::DarkGrey,
+        RC::LightRed => CtColor::Red,
+        RC::LightGreen => CtColor::Green,
+        RC::LightYellow => CtColor::Yellow,
+        RC::LightBlue => CtColor::Blue,
+        RC::LightMagenta => CtColor::Magenta,
+        RC::LightCyan => CtColor::Cyan,
+        RC::White => CtColor::White,
+        RC::Indexed(i) => CtColor::AnsiValue(i),
+        RC::Rgb(r, g, b) => CtColor::Rgb { r, g, b },
     }
 }
 
@@ -3361,6 +3477,95 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── write_status_hyperlinks ──
+
+    #[test]
+    fn write_status_hyperlinks_emits_cup_then_envelope_per_link() {
+        // Pins the on-the-wire byte sequence: CUP (1-based) → OSC 8 opener → replayed cells →
+        // OSC 8 closer (BEL terminator) → SGR reset. Drift here breaks the PR-click affordance
+        // in xterm.js-based terminals (Cursor / VS Code) where the parser is least forgiving.
+        use crate::tui::components::status::{HyperlinkCell, StatusHyperlink};
+
+        let link = StatusHyperlink {
+            rect: ratatui::layout::Rect::new(2, 0, 3, 1),
+            url: "https://example.com/pull/86".to_owned(),
+            cells: vec![
+                HyperlinkCell {
+                    symbol: "#".to_owned(),
+                    style: ratatui::style::Style::default(),
+                },
+                HyperlinkCell {
+                    symbol: "8".to_owned(),
+                    style: ratatui::style::Style::default(),
+                },
+                HyperlinkCell {
+                    symbol: "6".to_owned(),
+                    style: ratatui::style::Style::default(),
+                },
+            ],
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        write_status_hyperlinks(&mut buf, &[link]).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+        assert!(
+            output.contains("\x1b[1;3H"),
+            "CUP to row 1 col 3 (1-based): {output:?}"
+        );
+        assert!(
+            output.contains("\x1b]8;;https://example.com/pull/86\x07"),
+            "OSC 8 opener with URL: {output:?}",
+        );
+        let osc8_open_at = output.find("\x1b]8;;https").unwrap();
+        let osc8_close_at = output.rfind("\x1b]8;;\x07").unwrap();
+        let between = &output[osc8_open_at..osc8_close_at];
+        assert!(
+            between.contains('#') && between.contains('8') && between.contains('6'),
+            "visible bytes #, 8, 6 sit between opener and closer: {between:?}",
+        );
+        assert!(
+            output.ends_with("\x1b]8;;\x07\x1b[0m"),
+            "closer + SGR reset: {output:?}"
+        );
+    }
+
+    #[test]
+    fn write_status_hyperlinks_strips_control_chars_from_url() {
+        use crate::tui::components::status::{HyperlinkCell, StatusHyperlink};
+
+        let link = StatusHyperlink {
+            rect: ratatui::layout::Rect::new(0, 0, 1, 1),
+            url: "https://x.com/\x1b\x07\x00ok".to_owned(),
+            cells: vec![HyperlinkCell {
+                symbol: "x".to_owned(),
+                style: ratatui::style::Style::default(),
+            }],
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        write_status_hyperlinks(&mut buf, &[link]).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+        assert!(
+            output.contains("\x1b]8;;https://x.com/ok\x07"),
+            "ESC, BEL, NUL stripped from URL: {output:?}",
+        );
+    }
+
+    #[test]
+    fn write_status_hyperlinks_skips_link_with_empty_safe_url() {
+        use crate::tui::components::status::{HyperlinkCell, StatusHyperlink};
+
+        let link = StatusHyperlink {
+            rect: ratatui::layout::Rect::new(0, 0, 1, 1),
+            url: "\x1b\x07".to_owned(),
+            cells: vec![HyperlinkCell {
+                symbol: "x".to_owned(),
+                style: ratatui::style::Style::default(),
+            }],
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        write_status_hyperlinks(&mut buf, &[link]).unwrap();
+        assert!(buf.is_empty(), "no bytes when sanitized URL is empty");
     }
 
     // ── jump_overlay_label ──
