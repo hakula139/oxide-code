@@ -84,6 +84,15 @@ Some terminals skip `?1003` for performance. SGR (`?1006`) is the only encoding 
 
 The author's tmux config enables tmux mouse mode, vi copy-mode bindings, and `y` for yank. With `set -g set-clipboard on`, OSC 52 from an inner app passes through to the outer terminal. Wheel-up enters copy-mode when the pane isn't already receiving mouse events. An app that captures mouse intercepts those gestures. The author also runs `ox` inside VS Code's and Cursor's integrated terminals, which are xterm.js-based; those have looser OSC parsing than xterm proper, so any per-cell escape sequence has to use the safest forms (BEL terminator, no relying on OSC 52 reaching the OS clipboard).
 
+### tmux mouse mode and the off-by-one click
+
+When the user is inside `tmux` with `set -g mouse on`, tmux is the **first** layer to interpret mouse events. Click + drag automatically enters tmux's copy-mode, and tmux's own highlight layer (independent of the host terminal's selection) is what the user sees. tmux's hit-test against the pane is row-aware and is sometimes off-by-one in xterm.js-based hosts (Cursor, VS Code's integrated terminals): a click on the row the user perceives as "row N of chat" registers as "row N+1" inside copy-mode, so the highlight starts on the line below.
+
+This is independent of our app — `ox` never sees the click. The user-side workarounds:
+
+- **Hold Shift** while clicking / dragging. Bypasses tmux's mouse handler and falls through to the host terminal's native selection (which has accurate row mapping).
+- **Toggle tmux mouse mode off** with `set -g mouse off` (or via the mouse-mode toggle binding) and rely entirely on the host terminal's selection.
+
 ## Takeaway for oxide-code
 
 Two features are worth supporting: clicking the PR number to open it in the browser, and drag-selecting chat content to copy. The `EnableMouseCapture` + OSC 52 approach trades native drag-select for an app-side reimplementation that fights the terminal in every layer above (tmux behavior, OSC 52 acceptance, in-app highlight, payload caps). The author's terminals (Cursor's and VS Code's xterm.js, plus tmux without `set-clipboard on`) make that trade unfavorable.
