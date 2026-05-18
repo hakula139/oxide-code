@@ -7,7 +7,7 @@ Design policy for mouse behavior in the TUI.
 Two user-visible features:
 
 1. **Click `#NN` in the status bar to open the pull request in the browser**, even though no app code routes the click.
-2. **Drag-select chat content with the mouse and paste it elsewhere**, in any terminal the user runs `ox` in (iTerm2, WezTerm, kitty, Alacritty, Terminal.app, GNOME Terminal, Konsole, Ghostty, Windows Terminal, VS Code's integrated terminal, Cursor's integrated terminal, ...).
+2. **Drag-select chat content with the mouse and paste it elsewhere**, in any terminal the user runs `ox` in (iTerm2, WezTerm, kitty, Alacritty, Terminal.app, GNOME Terminal, Konsole, Ghostty, Windows Terminal, VS Code's integrated terminal, Cursor's integrated terminal).
 
 The cleanest way to deliver both is to let the terminal do the work. The TUI does not enable mouse capture, so the terminal's own selection layer is intact. The status-bar PR segment is wrapped in an OSC 8 hyperlink envelope that every modern terminal already knows how to make Ctrl-clickable.
 
@@ -15,7 +15,7 @@ The cleanest way to deliver both is to let the terminal do the work. The TUI doe
 
 `enter_tui_mode` enables raw mode, the alternate screen, Kitty keyboard disambiguation, and DECSET 1007 (alternate-scroll). It does **not** enable `EnableMouseCapture`. Pairs unwind on `leave_tui_mode`.
 
-`App::handle_mouse_event` only routes a left-click on the cached jump-to-bottom pill rect. Every other mouse event flows to `ChatView::handle_event` for wheel scroll. Wheel events arrive as keyboard arrow-key sequences via DECSET 1007 in real sessions, so the path that exercises `MouseEventKind::ScrollUp` / `ScrollDown` is mostly test-side. Both routes are kept for portability.
+`App::handle_mouse_event` only routes a left-click on the cached jump-to-bottom pill rect. Every other mouse event flows to `ChatView::handle_event` for wheel scroll. Wheel events arrive as keyboard arrow-key sequences via DECSET 1007 in real sessions, so the wheel-event path mostly exercises in tests. Both routes are kept for portability.
 
 ## DECSET 1007 (alternate-scroll)
 
@@ -35,12 +35,12 @@ The envelope must live **outside** the cell symbols. ratatui's `Buffer::diff` re
 
 Two non-obvious mechanics:
 
-- **Out-of-band emission via the crossterm backend.** Storing the envelope in the cell symbol breaks ratatui's diff math, since `unicode-width` over-counts the URL bytes. After `terminal.draw()` returns, `App::emit_status_hyperlinks` walks the captured link list, positions the cursor with CUP (`\x1b[<row>;<col>H`, 1-based), writes the OSC 8 opener, replays each cell's style + symbol via crossterm's `SetForegroundColor` / `SetBackgroundColor` / `SetAttribute` / `Print`, then writes the OSC 8 closer and an SGR reset. Finally, the saved pre-emission cursor position (typically the input field) is restored so the user doesn't see a stray cursor parked next to `#NN`.
+- **Out-of-band emission via the crossterm backend.** Storing the envelope in the cell symbol breaks ratatui's diff math, since `unicode-width` over-counts the URL bytes. After `terminal.draw()` returns, `App::emit_status_hyperlinks` writes DECSC (`\x1b7`) to park the cursor terminal-side, then for each captured link rect it positions the cursor with CUP (`\x1b[<row>;<col>H`, 1-based), writes the OSC 8 opener, replays each cell's style + symbol via crossterm's `SetForegroundColor` / `SetBackgroundColor` / `SetAttribute` / `Print`, then writes the OSC 8 closer and an SGR reset. After the loop a single DECRC (`\x1b8`) restores the cursor `terminal.draw()` parked, so the user doesn't see a stray cursor next to `#NN`. DECSC / DECRC was chosen over `terminal.get_cursor_position()` because the latter issues a DSR query and reads from stdin, which races the TUI event loop and silently fails when the response gets consumed by the event reader.
 - **BEL (`\x07`) terminator over ST (`\x1b\\`).** Some xterm.js-based terminals (VS Code's and Cursor's integrated terminals) misparse self-contained per-cell ST closers, leaking visible bytes into the next cells of the line. BEL is one byte and every modern emulator parses it identically.
 
 Modern terminals (iTerm2, WezTerm, kitty, Alacritty, foot, Konsole, Ghostty, recent Windows Terminal, GNOME Terminal, VS Code's terminal, Cursor's terminal) make the segment Ctrl-clickable (Cmd-click on macOS in some terminals) and open the URL via the user's browser. Older terminals print the raw bytes literally. The visible `#NN` still reads correctly because BEL is non-printable.
 
-URLs are sanitized — every control char is filtered out before the envelope is built — so a malformed value can't break out of the OSC 8 sequence.
+URLs are sanitized: every control char is filtered out before the envelope is built, so a malformed value can't break out of the OSC 8 sequence.
 
 ## Native drag-select-and-copy
 
@@ -52,7 +52,7 @@ This means we don't need:
 - An app-side highlight overlay.
 - An OSC 52 encoder.
 - A `selection` theme slot.
-- Per-terminal escape hatches (Option+drag, Shift+drag, ...) — the terminal's normal drag is the primary path, not an escape hatch.
+- Per-terminal escape hatches (Option+drag, Shift+drag, etc.). The terminal's normal drag is the primary path.
 - `set -g set-clipboard on` in tmux (the user's tmux selection model is whatever the user already configured).
 
 ## Implementation files

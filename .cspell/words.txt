@@ -18,6 +18,8 @@ codex
 CREAT
 creds
 crossterm
+DECRC
+DECSC
 dedupe
 deque
 deserialize
