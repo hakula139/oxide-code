@@ -224,10 +224,8 @@ impl App {
         self.dirty = true;
     }
 
-    /// Routes a mouse event. The TUI does not capture mouse input, so the only events it sees are
-    /// app-side affordances delivered through DECSET 1007 (alternate-scroll, which delivers wheel
-    /// as arrow-key sequences). Left-click on the cached jump-pill rect snaps to bottom, and
-    /// every other event flows to chat for wheel scroll. Native drag-select-and-copy is preserved.
+    /// Routes a left-click on the cached jump-pill rect to chat-jump. Forwards everything else
+    /// to chat for wheel scroll.
     fn handle_mouse_event(&mut self, event: &Event) {
         if let Event::Mouse(mouse) = event
             && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
@@ -832,7 +830,7 @@ impl App {
 
 /// Writes each link's OSC 8 envelope (with replayed visible chars) to `out`. Pure I/O — accepts
 /// any `Write` so tests can capture and inspect the bytes.
-pub(crate) fn write_status_hyperlinks<W: std::io::Write>(
+fn write_status_hyperlinks<W: std::io::Write>(
     out: &mut W,
     links: &[super::components::status::StatusHyperlink],
 ) -> std::io::Result<()> {
@@ -867,9 +865,7 @@ pub(crate) fn write_status_hyperlinks<W: std::io::Write>(
     Ok(())
 }
 
-/// Writes a single buffer cell — symbol + foreground / background / SGR attributes — directly to
-/// `out`. Used by `App::emit_status_hyperlinks` to replay link cells inside an OSC 8 envelope
-/// after `terminal.draw()` has flushed.
+/// Writes one buffer cell (symbol + fg / bg / SGR) directly to `out`.
 fn write_styled_symbol<W: std::io::Write>(
     out: &mut W,
     cell: &super::components::status::HyperlinkCell,
@@ -1514,9 +1510,8 @@ mod tests {
 
     #[test]
     fn left_click_outside_jump_overlay_does_not_jump_chat() {
-        // Without mouse capture the TUI never sees Down(Left) events from the terminal in real
-        // sessions, but DECSET 1007 lets simulated tests flow through `handle_mouse_event` so the
-        // pill hit-test stays exercised end-to-end.
+        // In real sessions the TUI never sees Down(Left) without mouse capture, but tests inject
+        // events directly to keep the pill hit-test exercised.
         let (mut app, _rx, _agent_tx) = test_app(None);
         app.chat.content_height_for_test().set(100);
         app.chat.set_viewport_for_test(20);
@@ -3584,6 +3579,93 @@ mod tests {
         assert!(
             buf.is_empty(),
             "no bytes (no DECSC either) when sanitized URL is empty",
+        );
+    }
+
+    #[test]
+    fn write_status_hyperlinks_replays_styled_cell_attributes() {
+        // Pins every modifier branch in write_styled_symbol plus a few palette branches in
+        // ratatui_color_to_crossterm, since uncovered branches there silently lose styling on
+        // the post-flush replay.
+        use crate::tui::components::status::{HyperlinkCell, StatusHyperlink};
+        use ratatui::style::{Color, Modifier, Style};
+
+        let modifiers = Modifier::BOLD
+            | Modifier::DIM
+            | Modifier::ITALIC
+            | Modifier::UNDERLINED
+            | Modifier::REVERSED;
+        let link = StatusHyperlink {
+            rect: ratatui::layout::Rect::new(0, 0, 1, 1),
+            url: "https://x".to_owned(),
+            cells: vec![HyperlinkCell {
+                symbol: "X".to_owned(),
+                style: Style::default()
+                    .fg(Color::Rgb(10, 20, 30))
+                    .bg(Color::Indexed(7))
+                    .add_modifier(modifiers),
+            }],
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        write_status_hyperlinks(&mut buf, &[link]).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+        // SGR 38;2;r;g;b is the truecolor fg; 48;5;n is the indexed bg.
+        assert!(
+            output.contains("\x1b[38;2;10;20;30m") && output.contains("\x1b[48;5;7m"),
+            "fg + bg SGR escapes: {output:?}",
+        );
+        for (sgr, label) in [
+            ("\x1b[1m", "bold"),
+            ("\x1b[2m", "dim"),
+            ("\x1b[3m", "italic"),
+            ("\x1b[4m", "underlined"),
+            ("\x1b[7m", "reverse"),
+        ] {
+            assert!(
+                output.contains(sgr),
+                "missing {label} SGR escape: {output:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn emit_status_hyperlinks_is_a_noop_when_no_links_pending() {
+        // Drives the early-return path in App::emit_status_hyperlinks. A regression that always
+        // touches the backend would wedge a stray cursor move into every frame.
+        use std::sync::{Arc, Mutex};
+
+        use ratatui::Terminal;
+        use ratatui::backend::CrosstermBackend;
+
+        #[derive(Clone)]
+        struct SharedSink(Arc<Mutex<Vec<u8>>>);
+
+        impl std::io::Write for SharedSink {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        let bytes = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let backend = CrosstermBackend::new(SharedSink(bytes.clone()));
+        let mut terminal = Terminal::with_options(
+            backend,
+            ratatui::TerminalOptions {
+                viewport: ratatui::Viewport::Fixed(Rect::new(0, 0, 80, 24)),
+            },
+        )
+        .unwrap();
+        // No render() means take_pending_hyperlinks returns empty; emit must short-circuit.
+        app.emit_status_hyperlinks(&mut terminal).unwrap();
+        assert!(
+            bytes.lock().unwrap().is_empty(),
+            "no bytes written for a no-link frame",
         );
     }
 
