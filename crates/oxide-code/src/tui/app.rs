@@ -1051,12 +1051,13 @@ fn append_sentence(mut message: String, sentence: &str) -> String {
 #[cfg(test)]
 mod tests {
     use std::io::{self, Write};
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
     use ratatui::prelude::CrosstermBackend;
+    use ratatui::style::{Color, Modifier, Style};
     use ratatui::{Terminal, TerminalOptions, Viewport};
     use tokio::sync::mpsc;
 
@@ -1064,6 +1065,7 @@ mod tests {
     use crate::agent::event::UsageSnapshot;
     use crate::config::test_thresholds;
     use crate::tool::ToolRegistry;
+    use crate::tui::components::status::{HyperlinkCell, StatusHyperlink};
     use crate::tui::modal::testing::ScriptedModal;
 
     /// Idle `App` plus the `user_tx` consumer and an `agent_tx` kept alive so `agent_rx` stays
@@ -3492,8 +3494,6 @@ mod tests {
         // Buffer-wide invariant: pre-stain every cell, render, and assert no sentinel survives.
         // The frame-area surface fill is the only widget that guarantees this for cells no
         // other widget covers.
-        use ratatui::style::Color;
-
         let (mut app, _rx, _agent_tx) = test_app(None);
         let sentinel = Color::Rgb(254, 0, 254);
         let surface_bg = app.theme.surface().bg.expect("surface slot defines bg");
@@ -3522,32 +3522,35 @@ mod tests {
 
     // ── build_status_hyperlink_envelope ──
 
+    fn plain_hyperlink(
+        rect: ratatui::layout::Rect,
+        url: &str,
+        symbols: &[&str],
+    ) -> StatusHyperlink {
+        StatusHyperlink {
+            rect,
+            url: url.to_owned(),
+            cells: symbols
+                .iter()
+                .map(|s| HyperlinkCell {
+                    symbol: (*s).to_owned(),
+                    style: Style::default(),
+                })
+                .collect(),
+        }
+    }
+
     #[test]
     fn build_status_hyperlink_envelope_emits_cup_then_osc8_per_link() {
         // Pins the on-the-wire byte sequence: DECSC → CUP (1-based) → OSC 8 opener → replayed
         // cells → OSC 8 closer (BEL terminator) → SGR reset → DECRC. Drift here breaks the
         // PR-click affordance in xterm.js-based terminals (Cursor / VS Code) where the parser is
         // least forgiving, or leaves the cursor parked next to `#NN` on the status bar.
-        use crate::tui::components::status::{HyperlinkCell, StatusHyperlink};
-
-        let link = StatusHyperlink {
-            rect: ratatui::layout::Rect::new(2, 0, 3, 1),
-            url: "https://example.com/pull/86".to_owned(),
-            cells: vec![
-                HyperlinkCell {
-                    symbol: "#".to_owned(),
-                    style: ratatui::style::Style::default(),
-                },
-                HyperlinkCell {
-                    symbol: "8".to_owned(),
-                    style: ratatui::style::Style::default(),
-                },
-                HyperlinkCell {
-                    symbol: "6".to_owned(),
-                    style: ratatui::style::Style::default(),
-                },
-            ],
-        };
+        let link = plain_hyperlink(
+            Rect::new(2, 0, 3, 1),
+            "https://example.com/pull/86",
+            &["#", "8", "6"],
+        );
         let bytes = build_status_hyperlink_envelope(&[link]).unwrap();
         let output = String::from_utf8(bytes).unwrap();
         assert!(
@@ -3581,16 +3584,11 @@ mod tests {
 
     #[test]
     fn build_status_hyperlink_envelope_strips_control_chars_from_url() {
-        use crate::tui::components::status::{HyperlinkCell, StatusHyperlink};
-
-        let link = StatusHyperlink {
-            rect: ratatui::layout::Rect::new(0, 0, 1, 1),
-            url: "https://x.com/\x1b\x07\x00ok".to_owned(),
-            cells: vec![HyperlinkCell {
-                symbol: "x".to_owned(),
-                style: ratatui::style::Style::default(),
-            }],
-        };
+        let link = plain_hyperlink(
+            Rect::new(0, 0, 1, 1),
+            "https://x.com/\x1b\x07\x00ok",
+            &["x"],
+        );
         let bytes = build_status_hyperlink_envelope(&[link]).unwrap();
         let output = String::from_utf8(bytes).unwrap();
         assert!(
@@ -3601,16 +3599,7 @@ mod tests {
 
     #[test]
     fn build_status_hyperlink_envelope_is_empty_when_safe_url_is_empty() {
-        use crate::tui::components::status::{HyperlinkCell, StatusHyperlink};
-
-        let link = StatusHyperlink {
-            rect: ratatui::layout::Rect::new(0, 0, 1, 1),
-            url: "\x1b\x07".to_owned(),
-            cells: vec![HyperlinkCell {
-                symbol: "x".to_owned(),
-                style: ratatui::style::Style::default(),
-            }],
-        };
+        let link = plain_hyperlink(Rect::new(0, 0, 1, 1), "\x1b\x07", &["x"]);
         let bytes = build_status_hyperlink_envelope(&[link]).unwrap();
         assert!(
             bytes.is_empty(),
@@ -3623,16 +3612,13 @@ mod tests {
         // Pins every modifier branch in write_styled_symbol plus a few palette branches in
         // ratatui_color_to_crossterm, since uncovered branches there silently lose styling on
         // the post-flush replay.
-        use crate::tui::components::status::{HyperlinkCell, StatusHyperlink};
-        use ratatui::style::{Color, Modifier, Style};
-
         let modifiers = Modifier::BOLD
             | Modifier::DIM
             | Modifier::ITALIC
             | Modifier::UNDERLINED
             | Modifier::REVERSED;
         let link = StatusHyperlink {
-            rect: ratatui::layout::Rect::new(0, 0, 1, 1),
+            rect: Rect::new(0, 0, 1, 1),
             url: "https://x".to_owned(),
             cells: vec![HyperlinkCell {
                 symbol: "X".to_owned(),
@@ -3667,16 +3653,7 @@ mod tests {
 
     #[test]
     fn write_status_hyperlinks_passes_envelope_through_unchanged_outside_tmux() {
-        use crate::tui::components::status::{HyperlinkCell, StatusHyperlink};
-
-        let link = StatusHyperlink {
-            rect: ratatui::layout::Rect::new(0, 0, 1, 1),
-            url: "https://x".to_owned(),
-            cells: vec![HyperlinkCell {
-                symbol: "x".to_owned(),
-                style: ratatui::style::Style::default(),
-            }],
-        };
+        let link = plain_hyperlink(Rect::new(0, 0, 1, 1), "https://x", &["x"]);
         let mut buf: Vec<u8> = Vec::new();
         temp_env::with_var_unset("TMUX", || {
             write_status_hyperlinks(&mut buf, std::slice::from_ref(&link)).unwrap();
@@ -3692,16 +3669,7 @@ mod tests {
     fn write_status_hyperlinks_wraps_envelope_in_dcs_passthrough_inside_tmux() {
         // tmux only forwards a small whitelist of OSC numbers (52, 4, 7, 9, 12) to the outer
         // terminal; OSC 8 needs the DCS pass-through wrapper or it gets silently dropped.
-        use crate::tui::components::status::{HyperlinkCell, StatusHyperlink};
-
-        let link = StatusHyperlink {
-            rect: ratatui::layout::Rect::new(0, 0, 1, 1),
-            url: "https://x".to_owned(),
-            cells: vec![HyperlinkCell {
-                symbol: "x".to_owned(),
-                style: ratatui::style::Style::default(),
-            }],
-        };
+        let link = plain_hyperlink(Rect::new(0, 0, 1, 1), "https://x", &["x"]);
         let mut buf: Vec<u8> = Vec::new();
         temp_env::with_var("TMUX", Some("/tmp/tmux-1000/default,1234,0"), || {
             write_status_hyperlinks(&mut buf, &[link]).unwrap();
@@ -3743,10 +3711,6 @@ mod tests {
     fn emit_status_hyperlinks_is_a_noop_when_no_links_pending() {
         // Drives the early-return path in App::emit_status_hyperlinks. A regression that always
         // touches the backend would wedge a stray cursor move into every frame.
-        use std::sync::{Arc, Mutex};
-
-        use ratatui::Terminal;
-        use ratatui::backend::CrosstermBackend;
 
         #[derive(Clone)]
         struct SharedSink(Arc<Mutex<Vec<u8>>>);

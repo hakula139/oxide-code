@@ -365,6 +365,13 @@ mod tests {
         )
     }
 
+    fn pr_state(number: u64) -> git::PullRequest {
+        git::PullRequest {
+            number,
+            url: format!("https://github.com/o/r/pull/{number}"),
+        }
+    }
+
     // ── set_title ──
 
     #[test]
@@ -562,10 +569,7 @@ mod tests {
         let mut bar = test_bar();
         bar.git_cwd = Some(dir.path().to_path_buf());
         bar.track_pull_request = true;
-        bar.pull_request = Some(git::PullRequest {
-            number: 999,
-            url: "https://example.com/pull/999".to_owned(),
-        });
+        bar.pull_request = Some(pr_state(999));
         bar.last_pr_probe = None;
         assert!(bar.tick());
         assert_eq!(bar.pull_request, None);
@@ -649,10 +653,7 @@ mod tests {
         let mut bar = test_bar();
         bar.track_pull_request = true;
         bar.git_cwd = Some(dir.path().to_path_buf());
-        bar.pull_request = Some(git::PullRequest {
-            number: 1,
-            url: "https://example.com/pull/1".to_owned(),
-        });
+        bar.pull_request = Some(pr_state(1));
         assert!(bar.refresh_pull_request(Instant::now()));
         assert_eq!(bar.pull_request, None);
     }
@@ -938,10 +939,7 @@ mod tests {
             None,
             None,
         );
-        bar.pull_request = Some(git::PullRequest {
-            number: 86,
-            url: "https://github.com/o/r/pull/86".to_owned(),
-        });
+        bar.pull_request = Some(pr_state(86));
         let _backend = render_status(&mut bar, 40);
         let links = bar.take_pending_hyperlinks();
         assert_eq!(
@@ -978,10 +976,7 @@ mod tests {
             None,
             None,
         );
-        bar.pull_request = Some(git::PullRequest {
-            number: 86,
-            url: "https://github.com/o/r/pull/86".to_owned(),
-        });
+        bar.pull_request = Some(pr_state(86));
         let _backend = render_status(&mut bar, 10);
         assert!(bar.take_pending_hyperlinks().is_empty());
     }
@@ -999,10 +994,7 @@ mod tests {
             None,
             None,
         );
-        bar.pull_request = Some(git::PullRequest {
-            number: 86,
-            url: "https://github.com/o/r/pull/86".to_owned(),
-        });
+        bar.pull_request = Some(pr_state(86));
         let _backend = render_status(&mut bar, 40);
         assert_eq!(bar.take_pending_hyperlinks().len(), 1);
         assert!(

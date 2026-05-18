@@ -348,10 +348,10 @@ mod tests {
             && bytes[4].is_ascii_digit()
     }
 
-    fn pr_state() -> crate::util::git::PullRequest {
+    fn pr_state(number: u64) -> crate::util::git::PullRequest {
         crate::util::git::PullRequest {
-            number: 86,
-            url: "https://github.com/o/r/pull/86".to_owned(),
+            number,
+            url: format!("https://github.com/o/r/pull/{number}"),
         }
     }
 
@@ -443,7 +443,7 @@ mod tests {
 
     #[test]
     fn render_pull_request_reports_hyperlink_range() {
-        let pr = pr_state();
+        let pr = pr_state(86);
         let rendered = StatusLine::new(vec![StatusLineSegment::PullRequest]).render(
             &Theme::default(),
             &StatusLineState {
