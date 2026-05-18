@@ -150,9 +150,8 @@ ox                                          # Start an interactive session
 │   │   ├── list_picker.rs                  # Generic ListPicker<T: PickerItem>: cursor + render primitive used by concrete pickers
 │   │   └── searchable_list.rs              # Generic SearchableList<T: SearchableItem>: substring filter + scrollable viewport for searchable pickers
 │   ├── pending_calls.rs                    # Tool-call correlation state for streaming and transcript resume
-│   ├── selection.rs                        # Mouse-drag text selection, line-rect materialization, OSC 52 clipboard write
 │   ├── snapshots/                          # `cargo insta` baselines for full App frame render tests
-│   ├── terminal.rs                         # Terminal init / restore, synchronized output, panic hook
+│   ├── terminal.rs                         # Terminal init / restore, alternate-scroll (DECSET 1007), synchronized output, panic hook
 │   ├── theme.rs                            # Theme palette (Slot{fg,bg,modifiers} per role) + style helpers + LazyLock-cached Mocha default
 │   ├── theme/
 │   │   ├── builtin.rs                      # Built-in TOML catalogue (Mocha / Macchiato / Frappe / Latte / Material via include_str!) + lookup

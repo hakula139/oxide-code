@@ -46,6 +46,7 @@ Konsole
 latte
 macchiato
 misparse
+misparses
 MMIX
 mplan
 mpsc
@@ -66,11 +67,9 @@ pgid
 pkgs
 pname
 println
-Ptmux
 pulldown
 RAII
 ratatui
-rects
 replacen
 reqwest
 reserialized

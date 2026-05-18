@@ -55,11 +55,11 @@ Failure modes: rejected payloads are silently dropped. The app cannot detect sup
 
 ## OSC 8 protocol
 
-`\x1b]8;params;URI\x1b\\<text>\x1b]8;;\x1b\\` where `params` is `key=value:key=value` (often empty) and `URI` is the link target. ST is `\x1b\\` (or `\x07` on legacy terminals).
+`\x1b]8;params;URI<terminator><text>\x1b]8;;<terminator>` where `params` is `key=value:key=value` (often empty), `URI` is the link target, and `<terminator>` is either `\x1b\\` (ST, two bytes) or `\x07` (BEL, one byte). xterm.js-based terminals (VS Code's and Cursor's integrated terminals) misparse self-contained per-cell ST closers and leak visible bytes into adjacent cells, so the BEL form is the universally-safe choice.
 
-Modern support: iTerm2, WezTerm, kitty, Alacritty, foot, Konsole, Ghostty, recent Windows Terminal, GNOME Terminal, VTE-based terminals. Legacy terminals print the escape bytes literally. The `<text>` part is what users see, so the fallback is graceful as long as the visible text alone is meaningful (e.g., `#NN` works, while an empty link doesn't).
+Modern support: iTerm2, WezTerm, kitty, Alacritty, foot, Konsole, Ghostty, recent Windows Terminal, GNOME Terminal, VTE-based terminals, VS Code's terminal, Cursor's terminal. Legacy terminals print the escape bytes literally. The `<text>` part is what users see, so the fallback is graceful as long as the visible text alone is meaningful (e.g., `#NN` works, while an empty link doesn't).
 
-`unicode-width` reports 0 for ESC and the printable bytes inside a `]8;;...\\` sequence are also non-printable, so layout math sees the whole sequence as zero-width when wrapped in `Span::raw`. Truncation logic that measures `Span::content` width via `unicode_width::UnicodeWidthStr::width` is unaffected.
+`unicode-width` reports 0 for ESC and the printable bytes inside a `]8;;...\x07` sequence are also non-printable, so layout math sees the whole sequence as zero-width when wrapped in `Span::raw`. Truncation logic that measures `Span::content` width via `unicode_width::UnicodeWidthStr::width` is unaffected. ratatui's `Buffer::set_string` filters out any grapheme that contains a control char, so embedding ESC in a `Span` strips the leading and trailing escape and leaks the printable middle. The fix is to bypass that filter via `Cell::set_symbol`, which stores the symbol verbatim. crossterm's `Print(cell.symbol())` writes the bytes unchanged.
 
 ## Mouse capture mode bundle
 
@@ -75,10 +75,17 @@ Some terminals skip `?1003` for performance. SGR (`?1006`) is the only encoding 
 
 ## User-environment signal
 
-The author's tmux config enables tmux mouse mode, vi copy-mode bindings, and `y` for yank. With `set -g set-clipboard on`, OSC 52 from the inner app passes through to the outer terminal. Wheel-up enters copy-mode when the pane isn't already receiving mouse events. When oxide-code captures mouse, that gesture goes to oxide-code and tmux doesn't see it. Users who want tmux's wheel-to-copy-mode can `Ctrl-b z` to zoom out, or escape via `Ctrl-b [`.
+The author's tmux config enables tmux mouse mode, vi copy-mode bindings, and `y` for yank. With `set -g set-clipboard on`, OSC 52 from an inner app passes through to the outer terminal. Wheel-up enters copy-mode when the pane isn't already receiving mouse events. An app that captures mouse intercepts those gestures. The author also runs `ox` inside VS Code's and Cursor's integrated terminals, which are xterm.js-based; those have looser OSC parsing than xterm proper, so any per-cell escape sequence has to use the safest forms (BEL terminator, no relying on OSC 52 reaching the OS clipboard).
 
 ## Takeaway for oxide-code
 
-Capture mouse and build a small set of well-scoped affordances: jump-to-bottom click, OSC 8 PR hyperlink, drag-select-and-copy via OSC 52. Document the per-terminal selection-modifier escape hatches for content outside the chat (status bar, input box). Defer block selection, drag auto-scroll, double / triple-click word / line, click-to-expand, and an opt-out env var until usage validates the demand.
+Two features are worth supporting: clicking the PR number to open it in the browser, and drag-selecting chat content to copy. The `EnableMouseCapture` + OSC 52 approach trades native drag-select for an app-side reimplementation that fights the terminal in every layer above (tmux behavior, OSC 52 acceptance, in-app highlight, payload caps). The author's terminals (Cursor's and VS Code's xterm.js, plus tmux without `set-clipboard on`) make that trade unfavorable.
 
-Claude Code's hit-test framework is the right model long-term but overengineered for a first pass. opencode's per-element click handlers via opentui aren't reachable from ratatui without a similar framework. Codex's "no capture, alternate-scroll" approach trades affordances for native selection. Workable, but limits future click features.
+The shipped design defers selection entirely to the terminal:
+
+- **No mouse capture.** `enter_tui_mode` skips `EnableMouseCapture` so the terminal sees every drag itself. The terminal's native selection layer renders the highlight, decides what gets copied, and writes to the OS clipboard the way the user already expects.
+- **DECSET 1007 (alternate-scroll).** Wheel events arrive as arrow-key sequences in the alt-screen, so chat still scrolls without claiming the mouse. iTerm2, WezTerm, kitty, Alacritty, foot, Ghostty, Windows Terminal, recent GNOME Terminal, Konsole, and xterm.js-based terminals (VS Code, Cursor) implement 1007. Older terminals fall back to keyboard scroll.
+- **OSC 8 on the PR segment, painted post-render via `Cell::set_symbol`.** ratatui's `Buffer::set_string` filters control chars out of `Span::raw`, so the envelope has to be written at the cell level after the line is painted. BEL (`\x07`) terminator, not ST (`\x1b\\`), because xterm.js misparses the self-contained per-cell ST closers and leaks visible bytes into adjacent cells.
+- **No app-side selection.** The `Selection` state machine, OSC 52 encoder, tmux DCS pass-through, `selection` theme slot, and `arboard` fallback all become unnecessary.
+
+The remaining trade-off is the same one Codex makes: app-side click affordances beyond the jump-pill are out of reach, because there are no mouse events to route. That's the right trade until concrete demand for click-to-expand or similar arrives.
