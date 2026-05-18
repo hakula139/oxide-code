@@ -100,7 +100,6 @@ macro_rules! for_each_slot {
             (border_focused, "Focused component border"),
             (border_unfocused, "Unfocused component border (default-aligned with `dim`)"),
             (separator, "Status-line segment separator"),
-            (selection, "Mouse-drag selection highlight (bg-only)"),
         }
     };
 }
@@ -329,7 +328,6 @@ mod tests {
         assert_ne!(t.user.fg, t.assistant.fg);
         assert_ne!(t.success.fg, t.error.fg);
         assert_ne!(t.diff_add.bg, t.diff_del.bg);
-        assert!(t.selection.bg.is_some(), "selection slot must define a bg");
     }
 
     // ── Style helpers ──

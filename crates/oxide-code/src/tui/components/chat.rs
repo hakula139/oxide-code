@@ -387,16 +387,6 @@ impl ChatView {
         frame.render_widget(paragraph, area);
     }
 
-    /// Current scroll offset in content rows.
-    pub(crate) fn scroll_offset(&self) -> u16 {
-        self.scroll_offset
-    }
-
-    /// Wrapped `Text` for the given viewport width.
-    pub(crate) fn rendered_text(&self, width: u16) -> Text<'static> {
-        self.build_text(width)
-    }
-
     /// Scrolls to the latest content and re-arms auto-scroll.
     pub(crate) fn jump_to_bottom(&mut self) {
         self.scroll_to_bottom();

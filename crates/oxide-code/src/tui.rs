@@ -12,7 +12,6 @@ pub(crate) mod glyphs;
 pub(crate) mod markdown;
 pub(crate) mod modal;
 pub(crate) mod pending_calls;
-pub(crate) mod selection;
 pub(crate) mod terminal;
 pub(crate) mod theme;
 pub(crate) mod wrap;
