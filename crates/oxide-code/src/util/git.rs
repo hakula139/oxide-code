@@ -11,7 +11,7 @@ use tracing::debug;
 /// stdout, which we collapse to `None`.
 pub(crate) fn current_branch(cwd: &Path) -> Option<String> {
     let cwd_str = cwd_to_str(cwd, "git branch")?;
-    let output = run_probe("git branch", || {
+    let output = run_probe("git branch", cwd_str, || {
         Command::new("git")
             .args([
                 "-C",
@@ -50,7 +50,7 @@ pub(crate) struct PullRequest {
 /// Returns `None` when `gh` is missing, the user is unauthenticated, or no PR is open.
 pub(crate) fn current_pull_request(cwd: &Path) -> Option<PullRequest> {
     let cwd_str = cwd_to_str(cwd, "gh pr")?;
-    let output = run_probe("gh pr", || {
+    let output = run_probe("gh pr", cwd_str, || {
         Command::new("gh")
             .args(["pr", "view", "--json", "number,url"])
             .current_dir(cwd_str)
@@ -81,15 +81,16 @@ fn cwd_to_str<'a>(cwd: &'a Path, probe: &str) -> Option<&'a str> {
 }
 
 /// Runs a `Command::output()` closure, logging on spawn failure or non-zero exit. Returns the
-/// successful output or `None`.
-fn run_probe<F>(probe: &str, spawn: F) -> Option<Output>
+/// successful output or `None`. `cwd` rides along on the log records so a user can pinpoint which
+/// worktree the probe failed in.
+fn run_probe<F>(probe: &str, cwd: &str, spawn: F) -> Option<Output>
 where
     F: FnOnce() -> std::io::Result<Output>,
 {
     let output = match spawn() {
         Ok(output) => output,
         Err(e) => {
-            debug!(error = %e, "{probe} probe: spawn failed");
+            debug!(error = %e, cwd = %cwd, "{probe} probe: spawn failed");
             return None;
         }
     };
@@ -97,6 +98,7 @@ where
         debug!(
             code = output.status.code().unwrap_or(-1),
             stderr = stderr_summary(&output.stderr),
+            cwd = %cwd,
             "{probe} probe: non-zero exit",
         );
         return None;
@@ -243,7 +245,7 @@ mod tests {
 
     #[test]
     fn run_probe_returns_output_on_success() {
-        let output = run_probe("test", || {
+        let output = run_probe("test", "/tmp/cwd", || {
             Ok(Output {
                 status: status_with_code(0),
                 stdout: b"ok".to_vec(),
@@ -256,7 +258,7 @@ mod tests {
 
     #[test]
     fn run_probe_drops_output_on_non_zero_exit() {
-        let result = run_probe("test", || {
+        let result = run_probe("test", "/tmp/cwd", || {
             Ok(Output {
                 status: status_with_code(1),
                 stdout: b"unused".to_vec(),
@@ -268,7 +270,7 @@ mod tests {
 
     #[test]
     fn run_probe_drops_output_on_spawn_failure() {
-        let result = run_probe("test", || {
+        let result = run_probe("test", "/tmp/cwd", || {
             Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 "binary missing",

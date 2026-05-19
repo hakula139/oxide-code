@@ -840,7 +840,7 @@ fn write_status_hyperlinks<W: std::io::Write>(
     if envelope.is_empty() {
         return Ok(());
     }
-    if std::env::var_os("TMUX").is_some() {
+    if running_inside_tmux() {
         out.write_all(&tmux_passthrough(&envelope))?;
     } else {
         out.write_all(&envelope)?;
@@ -888,6 +888,12 @@ fn build_status_hyperlink_envelope(
     Ok(buf)
 }
 
+/// True when the process is running inside tmux. Empty `$TMUX` is treated as absent so a stale
+/// rc-file export doesn't route DCS pass-through bytes to a raw terminal.
+fn running_inside_tmux() -> bool {
+    std::env::var("TMUX").is_ok_and(|v| !v.is_empty())
+}
+
 /// Wraps an escape sequence in tmux's DCS pass-through (`\x1bPtmux;...\x1b\\`) so a tmux session
 /// forwards bytes for OSC numbers it doesn't otherwise pass through (OSC 8 is the relevant case).
 /// Every `\x1b` inside the payload must be doubled per the tmux spec.
@@ -904,20 +910,19 @@ fn tmux_passthrough(escape: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Writes one buffer cell (symbol + fg / bg / SGR) directly to `out`.
+/// Writes one buffer cell (symbol + fg / bg / SGR) directly to `out`. Each cell starts with an
+/// SGR reset so a prior cell's modifier bits don't carry over into a sibling with a different
+/// style.
 fn write_styled_symbol<W: std::io::Write>(
     out: &mut W,
     cell: &super::components::status::HyperlinkCell,
 ) -> std::io::Result<()> {
+    queue!(out, SetAttribute(CtAttribute::Reset))?;
     if let Some(fg) = cell.style.fg {
         queue!(out, SetForegroundColor(ratatui_color_to_crossterm(fg)))?;
-    } else {
-        queue!(out, SetForegroundColor(CtColor::Reset))?;
     }
     if let Some(bg) = cell.style.bg {
         queue!(out, SetBackgroundColor(ratatui_color_to_crossterm(bg)))?;
-    } else {
-        queue!(out, SetBackgroundColor(CtColor::Reset))?;
     }
     let modifier = cell.style.add_modifier;
     if modifier.contains(ratatui::style::Modifier::BOLD) {
@@ -2449,6 +2454,27 @@ mod tests {
     }
 
     #[test]
+    fn format_config_change_swap_to_no_tier_model_surfaces_requested_effort() {
+        // Model swap onto a no-tier model with an explicit effort ask. The user needs to know
+        // the requested tier didn't apply, otherwise a silent drop reads as a config change
+        // landing.
+        let s = format_config_change(
+            "claude-haiku-4-5",
+            true,
+            None,
+            None,
+            Some(crate::config::Effort::High),
+            base_compaction(),
+            base_compaction(),
+        );
+        assert_eq!(
+            s,
+            "Switched to Claude Haiku 4.5 (claude-haiku-4-5). \
+             Effort unchanged — model has no effort tier (asked for high).",
+        );
+    }
+
+    #[test]
     fn format_config_change_swap_clears_effort_when_new_model_drops_it() {
         // User had a tier; new model has none. Surface the change so
         // the user knows their effort just disappeared.
@@ -3649,6 +3675,34 @@ mod tests {
         }
     }
 
+    #[test]
+    fn build_status_hyperlink_envelope_resets_sgr_between_cells_with_different_modifiers() {
+        // Without an SGR reset per cell, modifier bits from a prior cell leak into the next
+        // (crossterm's `SetAttribute(Bold)` only sets, it doesn't clear). Pin the reset so a
+        // mixed-style link can't render the second cell with bold-from-the-first.
+        let link = StatusHyperlink {
+            rect: Rect::new(0, 0, 2, 1),
+            url: "https://x".to_owned(),
+            cells: vec![
+                HyperlinkCell {
+                    symbol: "A".to_owned(),
+                    style: Style::default().add_modifier(Modifier::BOLD),
+                },
+                HyperlinkCell {
+                    symbol: "B".to_owned(),
+                    style: Style::default().add_modifier(Modifier::ITALIC),
+                },
+            ],
+        };
+        let bytes = build_status_hyperlink_envelope(&[link]).unwrap();
+        let output = String::from_utf8(bytes).unwrap();
+        let after_first_cell = output.split('A').nth(1).unwrap_or_default();
+        assert!(
+            after_first_cell.starts_with("\x1b[0m"),
+            "second cell starts with SGR reset to drop the prior cell's modifiers: {output:?}",
+        );
+    }
+
     // ── write_status_hyperlinks ──
 
     #[test]
@@ -3688,6 +3742,19 @@ mod tests {
             buf.windows(8).any(|w| w == b"\x1b\x1b]8;;ht"),
             "inner ESC before OSC 8 opener is doubled: {buf:?}",
         );
+    }
+
+    #[test]
+    fn write_status_hyperlinks_treats_empty_tmux_env_as_outside_tmux() {
+        // Stale rc-file `export TMUX=` would otherwise route DCS pass-through bytes to a raw
+        // terminal that prints `Ptmux;...\\` literally on the status bar.
+        let link = plain_hyperlink(Rect::new(0, 0, 1, 1), "https://x", &["x"]);
+        let mut buf: Vec<u8> = Vec::new();
+        temp_env::with_var("TMUX", Some(""), || {
+            write_status_hyperlinks(&mut buf, std::slice::from_ref(&link)).unwrap();
+        });
+        let envelope = build_status_hyperlink_envelope(std::slice::from_ref(&link)).unwrap();
+        assert_eq!(buf, envelope, "empty $TMUX is treated as absent");
     }
 
     #[test]
@@ -3742,6 +3809,44 @@ mod tests {
             bytes.lock().unwrap().is_empty(),
             "no bytes written for a no-link frame",
         );
+    }
+
+    // ── ratatui_color_to_crossterm ──
+
+    #[test]
+    fn ratatui_color_to_crossterm_round_trips_every_palette_variant() {
+        // Every color a theme can emit must replay correctly over OSC 8. A wrong branch silently
+        // loses styling on the post-flush hyperlink replay because `write_styled_symbol` queues
+        // whichever crossterm value this function returns.
+        use ratatui::style::Color as RC;
+        let cases = [
+            (RC::Reset, CtColor::Reset),
+            (RC::Black, CtColor::Black),
+            (RC::Red, CtColor::DarkRed),
+            (RC::Green, CtColor::DarkGreen),
+            (RC::Yellow, CtColor::DarkYellow),
+            (RC::Blue, CtColor::DarkBlue),
+            (RC::Magenta, CtColor::DarkMagenta),
+            (RC::Cyan, CtColor::DarkCyan),
+            (RC::Gray, CtColor::Grey),
+            (RC::DarkGray, CtColor::DarkGrey),
+            (RC::LightRed, CtColor::Red),
+            (RC::LightGreen, CtColor::Green),
+            (RC::LightYellow, CtColor::Yellow),
+            (RC::LightBlue, CtColor::Blue),
+            (RC::LightMagenta, CtColor::Magenta),
+            (RC::LightCyan, CtColor::Cyan),
+            (RC::White, CtColor::White),
+            (RC::Indexed(33), CtColor::AnsiValue(33)),
+            (RC::Rgb(1, 2, 3), CtColor::Rgb { r: 1, g: 2, b: 3 }),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                ratatui_color_to_crossterm(input),
+                expected,
+                "color {input:?}",
+            );
+        }
     }
 
     // ── jump_overlay_label ──
