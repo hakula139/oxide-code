@@ -13,7 +13,7 @@ All fields are optional. Only specify the values you want to override.
 
 ```toml
 # ~/.config/ox/config.toml (user-wide)
-# or ox.toml in your project root (per-project, except api_key/base_url)
+# or ox.toml in your project root (per-project, except api_key / base_url)
 
 [client]
 model = "claude-sonnet-4-6"
@@ -137,13 +137,13 @@ On Opus 4.7, `show_thinking = true` opts the request into `thinking.display = "s
 
 `show_welcome = false` blanks the chat region until you submit a prompt, which is useful when piping or screen-recording.
 
-`status_line` accepts these segment names: `current-dir`, `git-branch`, `pull-request`, `model`, `model-with-effort`, `context-used`, `session-cost`, `run-state`, `thread-title`, `current-time`. The list must contain at least one segment. Segments with no data, such as a missing git branch, an unopened pull request, or usage before the first completed turn, are omitted. The `pull-request` segment shells out to `gh pr view` so it requires the GitHub CLI on PATH. The separator is part of the active theme's `separator` slot; there is no separate status-line separator setting.
+`status_line` accepts these segment names: `current-dir`, `git-branch`, `pull-request`, `model`, `model-with-effort`, `context-used`, `session-cost`, `run-state`, `thread-title`, `current-time`. The list must contain at least one segment. Segments with no data, such as a missing git branch, an unopened pull request, or usage before the first completed turn, are omitted. The `pull-request` segment shells out to `gh pr view` so it requires the GitHub CLI on PATH. In supporting terminals, Ctrl-click or Cmd-click the segment to open the PR URL. The separator is part of the active theme's `separator` slot; there is no separate status-line separator setting.
 
 | Segment             | Renders                                        | Refresh         |
 | ------------------- | ---------------------------------------------- | --------------- |
 | `current-dir`       | Tildified working directory                    | At startup      |
 | `git-branch`        | Current branch (omitted on detached HEAD)      | Every 5 s       |
-| `pull-request`      | Open PR for the branch as `#86`                | Every 60 s      |
+| `pull-request`      | Open PR as clickable `#86` when OSC 8 works    | Every 60 s      |
 | `model`             | Compact model label (e.g., `Opus 4.7`)         | On `/model`     |
 | `model-with-effort` | Model label plus the effort tier in parens     | On `/model`     |
 | `context-used`      | `Ctx: 50% (100k/200k)` after the first turn    | Per turn        |

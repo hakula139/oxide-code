@@ -6,7 +6,7 @@ Research on mouse handling in terminal AI CLIs: capture defaults, click affordan
 
 The most polished mouse layer of the three peers. Claude Code's `src/utils/fullscreen.ts` reads `CLAUDE_CODE_DISABLE_MOUSE` to gate the entire mouse pipeline, with a separate `CLAUDE_CODE_DISABLE_MOUSE_CLICKS` env var that lets wheel work while blocking click events.
 
-The mode bundle enabled by `src/ink/termio/dec.ts` is `?1000h`, `?1002h`, `?1003h`, `?1006h` — same as crossterm's `EnableMouseCapture`. Disabled via the matching `...l` set on suspend / exit.
+The mode bundle enabled by `src/ink/termio/dec.ts` is `?1000h`, `?1002h`, `?1003h`, `?1006h`, the same shape as crossterm's `EnableMouseCapture`. Disabled via the matching `...l` set on suspend or exit.
 
 Hit-testing lives in `src/ink/hit-test.ts`. Each render builds a Yoga DOM with rect-per-node, then `dispatchClick` bubbles from the deepest hit up the parent chain until `stopImmediatePropagation()`. Clickable elements include the jump-to-bottom pill (`FullscreenLayout.tsx:491`), expand / collapse on message rows (`VirtualMessageList.tsx:225`), background-task agent pills (`BackgroundTaskStatus.tsx:155`), and OSC 8 hyperlinks via `<Link url={...}>`.
 
@@ -72,11 +72,11 @@ The clean workaround: emit the OSC 8 envelope **out-of-band**, after `terminal.d
 
 `crossterm::EnableMouseCapture` writes five DECSETs:
 
-- `?1000h` — X10/normal tracking (button press / release).
-- `?1002h` — button-event tracking (adds drag while button held).
-- `?1003h` — any-event tracking (adds motion without button).
-- `?1006h` — SGR encoding (`\x1b[<button;col;rowM`, supports cols > 223).
-- `?1015h` — URXVT encoding (legacy fallback).
+- `?1000h`: X10 / normal tracking (button press / release).
+- `?1002h`: button-event tracking (adds drag while button held).
+- `?1003h`: any-event tracking (adds motion without button).
+- `?1006h`: SGR encoding (`\x1b[<button;col;rowM`, supports cols > 223).
+- `?1015h`: URXVT encoding (legacy fallback).
 
 Some terminals skip `?1003` for performance. SGR (`?1006`) is the only encoding modern crossterm reads, but the others are needed for older terminals that don't speak SGR. There's no portable terminal primitive that delivers wheel only without click / drag, so claiming wheel implies claiming the rest.
 
@@ -88,11 +88,11 @@ The author's tmux config enables tmux mouse mode, vi copy-mode bindings, and `y`
 
 Two features are worth supporting: clicking the PR number to open it in the browser, and drag-selecting chat content to copy. The `EnableMouseCapture` + OSC 52 approach trades native drag-select for an app-side reimplementation that fights the terminal in every layer above (tmux behavior, OSC 52 acceptance, in-app highlight, payload caps). The author's terminals (Cursor's and VS Code's xterm.js, plus tmux without `set-clipboard on`) make that trade unfavorable.
 
-The shipped design defers selection entirely to the terminal:
+For oxide-code, selection should stay terminal-owned:
 
 - **No mouse capture.** `enter_tui_mode` skips `EnableMouseCapture` so the terminal sees every drag itself. The terminal's native selection layer renders the highlight, decides what gets copied, and writes to the OS clipboard the way the user already expects.
 - **DECSET 1007 (alternate-scroll).** Wheel events arrive as arrow-key sequences in the alt-screen, so chat still scrolls without claiming the mouse. iTerm2, WezTerm, kitty, Alacritty, foot, Ghostty, Windows Terminal, recent GNOME Terminal, Konsole, and xterm.js-based terminals (VS Code, Cursor) implement 1007. Older terminals fall back to keyboard scroll.
-- **OSC 8 on the PR segment, emitted out-of-band after `terminal.draw()` flushes.** Capturing the link rect + visible cells at render time and writing the envelope directly to the crossterm backend avoids both ratatui traps: `Buffer::set_string` no longer filters our control chars (we never go through it), and `Buffer::diff`'s `to_skip` math no longer reads a 30-byte URL out of a single cell symbol and drops the trailing characters. BEL (`\x07`) terminator, not ST (`\x1b\\`), because xterm.js misparses the self-contained per-cell ST closers and leaks visible bytes into adjacent cells.
-- **No app-side selection.** The `Selection` state machine, OSC 52 encoder, tmux DCS pass-through, `selection` theme slot, and `arboard` fallback all become unnecessary.
+- **OSC 8 on the PR segment, emitted out-of-band after `terminal.draw()` flushes.** Capturing the link rect + visible cells at render time and writing the envelope directly to the crossterm backend avoids both ratatui traps: `Buffer::set_string` no longer filters our control chars, and `Buffer::diff` no longer sees a 30-byte URL as one cell symbol. BEL (`\x07`) avoids xterm.js ST parsing leaks in self-contained per-cell closers.
+- **No app-side selection.** The `Selection` state machine, OSC 52 encoder, `selection` theme slot, and `arboard` fallback all become unnecessary.
 
-The remaining trade-off is the same one Codex makes: app-side click affordances beyond the jump-pill are out of reach, because there are no mouse events to route. That's the right trade until concrete demand for click-to-expand or similar arrives.
+The remaining trade-off is the same one Codex makes: app-side click affordances are out of reach because there are no mouse events to route. That's the right trade until concrete demand for click-to-expand or similar arrives.

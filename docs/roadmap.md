@@ -58,7 +58,7 @@ The direction is simple:
 
 ### Slash Commands
 
-- Built-in commands cover session control, config/status, model and theme changes, diffs, compaction, and help. See the [user guide](guide/slash-commands.md).
+- Built-in commands cover session control, config / status, model and theme changes, diffs, compaction, and help. See the [user guide](guide/slash-commands.md).
 - Autocomplete, typed shortcuts, and modal pickers keep common actions quick.
 - Destructive session actions require confirmation.
 
@@ -84,7 +84,7 @@ The direction is simple:
 
 Remaining surface beyond Working Today:
 
-- Login/logout, custom commands, and a guided `/init` flow.
+- Login / logout, custom commands, and a guided `/init` flow.
 
 Persistence stance: session commands should feel reversible. Cross-session writes will require an explicit user action.
 
@@ -117,7 +117,7 @@ Persistence stance: session commands should feel reversible. Cross-session write
 
 ### Status Line Extensions
 
-- Additional segments for queue state, session identity, theme, account-limit usage, pull requests, and task progress.
+- Additional segments for queue state, session identity, theme, account-limit usage, richer PR metadata / actions, and task progress.
 
 ## Not the Goal Right Now
 
