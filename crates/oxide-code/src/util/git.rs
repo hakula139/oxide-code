@@ -1,6 +1,6 @@
 //! Git probes used by the session header and the status bar. Best-effort: every probe collapses
 //! to `None` on missing git, non-repo cwd, detached HEAD, or non-UTF-8 output. Failures log at
-//! `debug` so they don't pollute normal use but are recoverable when the status bar misbehaves.
+//! `debug` so they're recoverable when the status bar misbehaves.
 
 use std::path::Path;
 use std::process::{Command, Output};
@@ -106,9 +106,7 @@ where
     Some(output)
 }
 
-/// First non-blank stderr line, capped to keep log records terse. Surfaces the actionable signal
-/// (`auth required`, `no pull requests found`, `not a git repository`) without dumping a wall of
-/// hint text.
+/// First non-blank stderr line, capped at `MAX_LEN` for terse log records.
 fn stderr_summary(stderr: &[u8]) -> String {
     const MAX_LEN: usize = 200;
     let text = String::from_utf8_lossy(stderr);

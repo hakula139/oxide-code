@@ -25,7 +25,7 @@ use unicode_width::UnicodeWidthStr;
 
 use super::components::chat::ChatView;
 use super::components::input::InputArea;
-use super::components::status::{Status, StatusBar};
+use super::components::status::{HyperlinkCell, Status, StatusBar, StatusHyperlink};
 use super::components::welcome::{self, WelcomeSnapshot};
 use super::glyphs::{NEWLINE_GLYPH, USER_PROMPT_PREFIX, USER_PROMPT_PREFIX_WIDTH};
 use super::modal::{ModalAction, ModalStack};
@@ -689,11 +689,7 @@ impl App {
         Ok(())
     }
 
-    /// Replays each captured link rect inside an OSC 8 envelope after `terminal.draw()` flushes.
-    /// Out-of-band emission avoids ratatui's `Buffer::diff` over-counting URL bytes as cell width
-    /// and skipping trailing cells (the `#86 → #pus` bug). Brackets the writes with DECSC / DECRC
-    /// so the cursor `terminal.draw()` parked stays put without a DSR roundtrip racing the event
-    /// reader.
+    /// Drains the bar's pending hyperlinks and writes their OSC 8 envelopes to the backend.
     fn emit_status_hyperlinks<W: std::io::Write>(
         &mut self,
         terminal: &mut ratatui::Terminal<ratatui::prelude::CrosstermBackend<W>>,
@@ -828,13 +824,11 @@ impl App {
     }
 }
 
-/// Writes each link's OSC 8 envelope (with replayed visible chars) to `out`. Pure I/O — accepts
-/// any `Write` so tests can capture and inspect the bytes. Inside tmux the envelope is wrapped
-/// in DCS pass-through, since tmux only passes a small whitelist of OSCs through to the outer
-/// terminal and OSC 8 isn't on it.
+/// Writes each link's OSC 8 envelope to `out`. Inside tmux the envelope rides through DCS
+/// pass-through, since tmux drops OSC 8 from its forward whitelist.
 fn write_status_hyperlinks<W: std::io::Write>(
     out: &mut W,
-    links: &[super::components::status::StatusHyperlink],
+    links: &[StatusHyperlink],
 ) -> std::io::Result<()> {
     let envelope = build_status_hyperlink_envelope(links)?;
     if envelope.is_empty() {
@@ -849,12 +843,8 @@ fn write_status_hyperlinks<W: std::io::Write>(
     Ok(())
 }
 
-/// Materializes the DECSC + per-link CUP / OSC 8 / replayed cells / SGR reset + DECRC byte
-/// stream. Returns an empty buffer when no link has a non-empty sanitized URL, so callers can
-/// short-circuit before touching the terminal.
-fn build_status_hyperlink_envelope(
-    links: &[super::components::status::StatusHyperlink],
-) -> std::io::Result<Vec<u8>> {
+/// Builds the OSC 8 byte stream for the link batch. Empty when no link has a usable URL.
+fn build_status_hyperlink_envelope(links: &[StatusHyperlink]) -> std::io::Result<Vec<u8>> {
     use std::io::Write as _;
 
     let mut buf: Vec<u8> = Vec::new();
@@ -865,8 +855,6 @@ fn build_status_hyperlink_envelope(
             continue;
         }
         if !wrote_any {
-            // DECSC / DECRC parks the cursor terminal-side, so the OSC 8 writes don't drag it onto
-            // the status bar. Avoids a DSR roundtrip that would race the TUI event reader.
             queue!(&mut buf, SavePosition)?;
             wrote_any = true;
         }
@@ -894,9 +882,7 @@ fn running_inside_tmux() -> bool {
     std::env::var("TMUX").is_ok_and(|v| !v.is_empty())
 }
 
-/// Wraps an escape sequence in tmux's DCS pass-through (`\x1bPtmux;...\x1b\\`) so a tmux session
-/// forwards bytes for OSC numbers it doesn't otherwise pass through (OSC 8 is the relevant case).
-/// Every `\x1b` inside the payload must be doubled per the tmux spec.
+/// Wraps an escape sequence in tmux's DCS pass-through so OSC 8 reaches the outer terminal.
 fn tmux_passthrough(escape: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(escape.len() + 8);
     out.extend_from_slice(b"\x1bPtmux;");
@@ -915,7 +901,7 @@ fn tmux_passthrough(escape: &[u8]) -> Vec<u8> {
 /// style.
 fn write_styled_symbol<W: std::io::Write>(
     out: &mut W,
-    cell: &super::components::status::HyperlinkCell,
+    cell: &HyperlinkCell,
 ) -> std::io::Result<()> {
     queue!(out, SetAttribute(CtAttribute::Reset))?;
     if let Some(fg) = cell.style.fg {
@@ -1278,6 +1264,20 @@ mod tests {
             _ = writeln!(body, "line {i:02} of a long chat block");
         }
         body
+    }
+
+    fn plain_hyperlink(rect: Rect, url: &str, symbols: &[&str]) -> StatusHyperlink {
+        StatusHyperlink {
+            rect,
+            url: url.to_owned(),
+            cells: symbols
+                .iter()
+                .map(|s| HyperlinkCell {
+                    symbol: (*s).to_owned(),
+                    style: Style::default(),
+                })
+                .collect(),
+        }
     }
 
     // ── App::new ──
@@ -3546,25 +3546,107 @@ mod tests {
         }
     }
 
-    // ── build_status_hyperlink_envelope ──
+    // ── emit_status_hyperlinks ──
 
-    fn plain_hyperlink(
-        rect: ratatui::layout::Rect,
-        url: &str,
-        symbols: &[&str],
-    ) -> StatusHyperlink {
-        StatusHyperlink {
-            rect,
-            url: url.to_owned(),
-            cells: symbols
-                .iter()
-                .map(|s| HyperlinkCell {
-                    symbol: (*s).to_owned(),
-                    style: Style::default(),
-                })
-                .collect(),
+    #[test]
+    fn emit_status_hyperlinks_is_a_noop_when_no_links_pending() {
+        // Drives the early-return path in App::emit_status_hyperlinks. A regression that always
+        // touches the backend would wedge a stray cursor move into every frame.
+
+        #[derive(Clone)]
+        struct SharedSink(Arc<Mutex<Vec<u8>>>);
+
+        impl std::io::Write for SharedSink {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
         }
+
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        let bytes = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let backend = CrosstermBackend::new(SharedSink(bytes.clone()));
+        let mut terminal = Terminal::with_options(
+            backend,
+            TerminalOptions {
+                viewport: Viewport::Fixed(Rect::new(0, 0, 80, 24)),
+            },
+        )
+        .unwrap();
+        // No render() means take_pending_hyperlinks returns empty; emit must short-circuit.
+        app.emit_status_hyperlinks(&mut terminal).unwrap();
+        assert!(
+            bytes.lock().unwrap().is_empty(),
+            "no bytes written for a no-link frame",
+        );
     }
+
+    // ── write_status_hyperlinks ──
+
+    #[test]
+    fn write_status_hyperlinks_passes_envelope_through_unchanged_outside_tmux() {
+        let link = plain_hyperlink(Rect::new(0, 0, 1, 1), "https://x", &["x"]);
+        let mut buf: Vec<u8> = Vec::new();
+        temp_env::with_var_unset("TMUX", || {
+            write_status_hyperlinks(&mut buf, std::slice::from_ref(&link)).unwrap();
+        });
+        let envelope = build_status_hyperlink_envelope(std::slice::from_ref(&link)).unwrap();
+        assert_eq!(
+            buf, envelope,
+            "outside tmux the wire bytes match the raw envelope",
+        );
+    }
+
+    #[test]
+    fn write_status_hyperlinks_wraps_envelope_in_dcs_passthrough_inside_tmux() {
+        // tmux only forwards a small whitelist of OSC numbers (52, 4, 7, 9, 12) to the outer
+        // terminal; OSC 8 needs the DCS pass-through wrapper or it gets silently dropped.
+        let link = plain_hyperlink(Rect::new(0, 0, 1, 1), "https://x", &["x"]);
+        let mut buf: Vec<u8> = Vec::new();
+        temp_env::with_var("TMUX", Some("/tmp/tmux-1000/default,1234,0"), || {
+            write_status_hyperlinks(&mut buf, &[link]).unwrap();
+        });
+        assert!(
+            buf.starts_with(b"\x1bPtmux;"),
+            "DCS opener brackets the envelope: {buf:?}",
+        );
+        assert!(
+            buf.ends_with(b"\x1b\\"),
+            "ST closer terminates the DCS: {buf:?}",
+        );
+        // Inner OSC 8 ESCs must be doubled so tmux strips its own DCS wrapper without consuming
+        // the inner sequence.
+        assert!(
+            buf.windows(8).any(|w| w == b"\x1b\x1b]8;;ht"),
+            "inner ESC before OSC 8 opener is doubled: {buf:?}",
+        );
+    }
+
+    #[test]
+    fn write_status_hyperlinks_treats_empty_tmux_env_as_outside_tmux() {
+        // Stale rc-file `export TMUX=` would otherwise route DCS pass-through bytes to a raw
+        // terminal that prints `Ptmux;...\\` literally on the status bar.
+        let link = plain_hyperlink(Rect::new(0, 0, 1, 1), "https://x", &["x"]);
+        let mut buf: Vec<u8> = Vec::new();
+        temp_env::with_var("TMUX", Some(""), || {
+            write_status_hyperlinks(&mut buf, std::slice::from_ref(&link)).unwrap();
+        });
+        let envelope = build_status_hyperlink_envelope(std::slice::from_ref(&link)).unwrap();
+        assert_eq!(buf, envelope, "empty $TMUX is treated as absent");
+    }
+
+    #[test]
+    fn write_status_hyperlinks_is_a_noop_when_no_links_pending() {
+        let mut buf: Vec<u8> = Vec::new();
+        write_status_hyperlinks(&mut buf, &[]).unwrap();
+        assert!(buf.is_empty(), "no bytes for an empty link list");
+    }
+
+    // ── build_status_hyperlink_envelope ──
 
     #[test]
     fn build_status_hyperlink_envelope_emits_cup_then_osc8_per_link() {
@@ -3703,67 +3785,6 @@ mod tests {
         );
     }
 
-    // ── write_status_hyperlinks ──
-
-    #[test]
-    fn write_status_hyperlinks_passes_envelope_through_unchanged_outside_tmux() {
-        let link = plain_hyperlink(Rect::new(0, 0, 1, 1), "https://x", &["x"]);
-        let mut buf: Vec<u8> = Vec::new();
-        temp_env::with_var_unset("TMUX", || {
-            write_status_hyperlinks(&mut buf, std::slice::from_ref(&link)).unwrap();
-        });
-        let envelope = build_status_hyperlink_envelope(std::slice::from_ref(&link)).unwrap();
-        assert_eq!(
-            buf, envelope,
-            "outside tmux the wire bytes match the raw envelope",
-        );
-    }
-
-    #[test]
-    fn write_status_hyperlinks_wraps_envelope_in_dcs_passthrough_inside_tmux() {
-        // tmux only forwards a small whitelist of OSC numbers (52, 4, 7, 9, 12) to the outer
-        // terminal; OSC 8 needs the DCS pass-through wrapper or it gets silently dropped.
-        let link = plain_hyperlink(Rect::new(0, 0, 1, 1), "https://x", &["x"]);
-        let mut buf: Vec<u8> = Vec::new();
-        temp_env::with_var("TMUX", Some("/tmp/tmux-1000/default,1234,0"), || {
-            write_status_hyperlinks(&mut buf, &[link]).unwrap();
-        });
-        assert!(
-            buf.starts_with(b"\x1bPtmux;"),
-            "DCS opener brackets the envelope: {buf:?}",
-        );
-        assert!(
-            buf.ends_with(b"\x1b\\"),
-            "ST closer terminates the DCS: {buf:?}",
-        );
-        // Inner OSC 8 ESCs must be doubled so tmux strips its own DCS wrapper without consuming
-        // the inner sequence.
-        assert!(
-            buf.windows(8).any(|w| w == b"\x1b\x1b]8;;ht"),
-            "inner ESC before OSC 8 opener is doubled: {buf:?}",
-        );
-    }
-
-    #[test]
-    fn write_status_hyperlinks_treats_empty_tmux_env_as_outside_tmux() {
-        // Stale rc-file `export TMUX=` would otherwise route DCS pass-through bytes to a raw
-        // terminal that prints `Ptmux;...\\` literally on the status bar.
-        let link = plain_hyperlink(Rect::new(0, 0, 1, 1), "https://x", &["x"]);
-        let mut buf: Vec<u8> = Vec::new();
-        temp_env::with_var("TMUX", Some(""), || {
-            write_status_hyperlinks(&mut buf, std::slice::from_ref(&link)).unwrap();
-        });
-        let envelope = build_status_hyperlink_envelope(std::slice::from_ref(&link)).unwrap();
-        assert_eq!(buf, envelope, "empty $TMUX is treated as absent");
-    }
-
-    #[test]
-    fn write_status_hyperlinks_is_a_noop_when_no_links_pending() {
-        let mut buf: Vec<u8> = Vec::new();
-        write_status_hyperlinks(&mut buf, &[]).unwrap();
-        assert!(buf.is_empty(), "no bytes for an empty link list");
-    }
-
     // ── tmux_passthrough ──
 
     #[test]
@@ -3772,43 +3793,6 @@ mod tests {
         let wrapped = tmux_passthrough(inner);
         let expected = b"\x1bPtmux;\x1b\x1b]8;;https://x\x07X\x1b\x1b]8;;\x07\x1b\\";
         assert_eq!(&wrapped, expected);
-    }
-
-    #[test]
-    fn emit_status_hyperlinks_is_a_noop_when_no_links_pending() {
-        // Drives the early-return path in App::emit_status_hyperlinks. A regression that always
-        // touches the backend would wedge a stray cursor move into every frame.
-
-        #[derive(Clone)]
-        struct SharedSink(Arc<Mutex<Vec<u8>>>);
-
-        impl std::io::Write for SharedSink {
-            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(buf);
-                Ok(buf.len())
-            }
-
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        let bytes = Arc::new(Mutex::new(Vec::<u8>::new()));
-        let backend = CrosstermBackend::new(SharedSink(bytes.clone()));
-        let mut terminal = Terminal::with_options(
-            backend,
-            ratatui::TerminalOptions {
-                viewport: ratatui::Viewport::Fixed(Rect::new(0, 0, 80, 24)),
-            },
-        )
-        .unwrap();
-        // No render() means take_pending_hyperlinks returns empty; emit must short-circuit.
-        app.emit_status_hyperlinks(&mut terminal).unwrap();
-        assert!(
-            bytes.lock().unwrap().is_empty(),
-            "no bytes written for a no-link frame",
-        );
     }
 
     // ── ratatui_color_to_crossterm ──
@@ -3844,7 +3828,7 @@ mod tests {
             assert_eq!(
                 ratatui_color_to_crossterm(input),
                 expected,
-                "color {input:?}",
+                "color {input:?}"
             );
         }
     }

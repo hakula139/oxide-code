@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
+use ratatui::style::Style;
 use ratatui::text::Span;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
@@ -28,8 +29,7 @@ const GIT_BRANCH_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 /// probe because `gh pr view` hits the network.
 const PR_REFRESH_INTERVAL: Duration = Duration::from_mins(1);
 
-/// Hyperlink rect + replayable cell snapshot the App wraps in OSC 8 after `terminal.draw()`
-/// flushes.
+/// A status-bar segment that should be re-emitted as an OSC 8 hyperlink.
 #[derive(Debug, Clone)]
 pub(crate) struct StatusHyperlink {
     pub(crate) rect: Rect,
@@ -40,7 +40,7 @@ pub(crate) struct StatusHyperlink {
 #[derive(Debug, Clone)]
 pub(crate) struct HyperlinkCell {
     pub(crate) symbol: String,
-    pub(crate) style: ratatui::style::Style,
+    pub(crate) style: Style,
 }
 
 /// Status bar at the top of the TUI.
@@ -57,16 +57,14 @@ pub(crate) struct StatusBar {
     git_cwd: Option<PathBuf>,
     git_branch: Option<String>,
     pull_request: Option<git::PullRequest>,
-    /// `true` while the `pull-request` segment is configured. Skips the `gh` probe entirely when
-    /// the user hasn't opted in.
+    /// Skips the gh probe when the pull-request segment isn't configured.
     track_pull_request: bool,
     last_branch_probe: Option<Instant>,
     last_pr_probe: Option<Instant>,
     status: Status,
     spinner_frame: usize,
     tick_counter: usize,
-    /// Absolute screen rects of hyperlink segments from the most recent `render` call. Drained by
-    /// the App after `terminal.draw()` flushes, then re-emitted as out-of-band OSC 8 envelopes.
+    /// Hyperlink segments captured during the most recent render, awaiting drain by the App.
     pending_hyperlinks: Vec<StatusHyperlink>,
 }
 
@@ -255,8 +253,6 @@ impl StatusBar {
         let rendered = self.render_line(area.width);
         let content_y = area.y;
         let content_x = area.x;
-        // Capture link rects for App::emit_status_hyperlinks to wrap post-flush. See
-        // docs/design/tui/mouse-interactions.md for why the envelope can't live in cell symbols.
         self.pending_hyperlinks.clear();
         let mut hyperlink_rects = Vec::with_capacity(rendered.hyperlinks.len());
         for link in &rendered.hyperlinks {
@@ -286,8 +282,7 @@ impl StatusBar {
         }
     }
 
-    /// Drains the link rects captured by the most recent `render` so the App can re-emit them
-    /// inside OSC 8 envelopes after `terminal.draw()` flushes.
+    /// Drains and returns the hyperlinks captured during the most recent render.
     pub(crate) fn take_pending_hyperlinks(&mut self) -> Vec<StatusHyperlink> {
         std::mem::take(&mut self.pending_hyperlinks)
     }
@@ -362,6 +357,19 @@ mod tests {
             "~/test".to_owned(),
             None,
             Some("main".to_owned()),
+        )
+    }
+
+    /// Bar configured with a `pull-request` segment so render captures a hyperlink rect.
+    fn pr_bar() -> StatusBar {
+        StatusBar::new(
+            &Theme::default(),
+            vec![StatusLineSegment::PullRequest, StatusLineSegment::RunState],
+            "Opus 4.7".into(),
+            None,
+            String::new(),
+            None,
+            None,
         )
     }
 
@@ -930,17 +938,9 @@ mod tests {
     fn render_records_pull_request_hyperlink_rect_for_post_flush_emission() {
         // The OSC 8 envelope is emitted by the App after `terminal.draw()` flushes. The bar's
         // job is to record the link rect + visible cells so the App can replay them.
-        let mut bar = StatusBar::new(
-            &Theme::default(),
-            vec![StatusLineSegment::PullRequest, StatusLineSegment::RunState],
-            "Opus 4.7".into(),
-            None,
-            String::new(),
-            None,
-            None,
-        );
+        let mut bar = pr_bar();
         bar.pull_request = Some(pr_state(86));
-        let _backend = render_status(&mut bar, 40);
+        render_status(&mut bar, 40);
         let links = bar.take_pending_hyperlinks();
         assert_eq!(
             links.len(),
@@ -959,7 +959,7 @@ mod tests {
     #[test]
     fn render_records_no_hyperlinks_when_pull_request_absent() {
         let mut bar = test_bar();
-        let _backend = render_status(&mut bar, 40);
+        render_status(&mut bar, 40);
         assert!(bar.take_pending_hyperlinks().is_empty());
     }
 
@@ -967,17 +967,9 @@ mod tests {
     fn render_drops_hyperlink_when_segment_clipped_to_zero_width() {
         // Narrow renders drop the PR segment via the fit pass, so the recorded hyperlinks list
         // must mirror the rendered line and not surface a link rect that points at empty cells.
-        let mut bar = StatusBar::new(
-            &Theme::default(),
-            vec![StatusLineSegment::PullRequest, StatusLineSegment::RunState],
-            "Opus 4.7".into(),
-            None,
-            String::new(),
-            None,
-            None,
-        );
+        let mut bar = pr_bar();
         bar.pull_request = Some(pr_state(86));
-        let _backend = render_status(&mut bar, 10);
+        render_status(&mut bar, 10);
         assert!(bar.take_pending_hyperlinks().is_empty());
     }
 
@@ -985,17 +977,9 @@ mod tests {
 
     #[test]
     fn take_pending_hyperlinks_drains_after_first_call() {
-        let mut bar = StatusBar::new(
-            &Theme::default(),
-            vec![StatusLineSegment::PullRequest, StatusLineSegment::RunState],
-            "Opus 4.7".into(),
-            None,
-            String::new(),
-            None,
-            None,
-        );
+        let mut bar = pr_bar();
         bar.pull_request = Some(pr_state(86));
-        let _backend = render_status(&mut bar, 40);
+        render_status(&mut bar, 40);
         assert_eq!(bar.take_pending_hyperlinks().len(), 1);
         assert!(
             bar.take_pending_hyperlinks().is_empty(),

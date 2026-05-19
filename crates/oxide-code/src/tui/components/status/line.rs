@@ -5,6 +5,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::agent::event::UsageSnapshot;
 use crate::config::{Effort, StatusLineSegment};
 use crate::tui::theme::Theme;
+use crate::util::git::PullRequest;
 use crate::util::text::truncate_to_width;
 use crate::util::time::local_offset;
 
@@ -22,15 +23,14 @@ pub(super) struct StatusLine {
     segments: Vec<StatusLineSegment>,
 }
 
-/// A rendered status line plus the buffer ranges that should be wrapped in OSC 8 hyperlinks.
+/// A rendered status line plus the column ranges of hyperlinkable segments.
 #[derive(Debug)]
 pub(super) struct RenderedStatusLine {
     pub(super) line: Line<'static>,
     pub(super) hyperlinks: Vec<RenderedHyperlink>,
 }
 
-/// Where a hyperlinked segment landed inside the rendered line. `col` is the cell column from
-/// the start of the line, before any block / area offset is applied.
+/// Cell range of a hyperlinked segment, measured from the start of the line.
 #[derive(Debug, Clone)]
 pub(super) struct RenderedHyperlink {
     pub(super) col: u16,
@@ -160,7 +160,7 @@ pub(super) struct StatusLineState<'a> {
     /// Already tilde-expanded, so the renderer must not substitute `~` again.
     pub(super) cwd: &'a str,
     pub(super) git_branch: Option<&'a str>,
-    pub(super) pull_request: Option<&'a crate::util::git::PullRequest>,
+    pub(super) pull_request: Option<&'a PullRequest>,
     /// Pre-rendered run-state segment from the parent component.
     pub(super) status_span: Span<'static>,
 }
@@ -308,7 +308,7 @@ mod tests {
     use super::*;
 
     fn render_text(segments: Vec<StatusLineSegment>, width: u16) -> String {
-        let pr = crate::util::git::PullRequest {
+        let pr = PullRequest {
             number: 86,
             url: "https://github.com/o/r/pull/86".to_owned(),
         };
@@ -348,8 +348,8 @@ mod tests {
             && bytes[4].is_ascii_digit()
     }
 
-    fn pr_state(number: u64) -> crate::util::git::PullRequest {
-        crate::util::git::PullRequest {
+    fn pr_state(number: u64) -> PullRequest {
+        PullRequest {
             number,
             url: format!("https://github.com/o/r/pull/{number}"),
         }
