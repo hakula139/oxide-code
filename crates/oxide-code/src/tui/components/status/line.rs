@@ -177,7 +177,7 @@ enum SegmentStyle {
 struct RenderedSegment {
     segment: StatusLineSegment,
     span: Span<'static>,
-    /// URL to wrap the visible span in an OSC 8 hyperlink. Empty when the segment is plain text.
+    /// OSC 8 target for the visible span.
     hyperlink: Option<String>,
 }
 
@@ -230,8 +230,7 @@ fn lowest_priority_index(segments: &[RenderedSegment]) -> Option<usize> {
         .map(|(index, _)| index)
 }
 
-/// Per-segment "drop me first when narrow" rank. Lower numbers drop earlier, so run state and
-/// model sit at the top because the bar is useless without them.
+/// Per-segment narrow-width rank. Lower numbers drop earlier.
 fn segment_utility(segment: StatusLineSegment) -> u8 {
     match segment {
         StatusLineSegment::ThreadTitle => 0,
@@ -435,8 +434,6 @@ mod tests {
             full.contains("#86") && full.contains("main") && full.ends_with("Ready"),
             "wide width keeps every segment: {full}",
         );
-        // Width 22 drops time (utility 1) before PR (2) and branch (3). Width 14 narrows further
-        // until only branch and run state remain.
         assert_eq!(render_text(segments.clone(), 22), "  main │ #86 │ Ready");
         assert_eq!(render_text(segments, 14), "  main │ Ready");
     }
@@ -458,7 +455,6 @@ mod tests {
             },
             80,
         );
-        // After the leading "  " margin the `#86` segment lives at col 2, width 3.
         assert_eq!(rendered.hyperlinks.len(), 1);
         assert_eq!(rendered.hyperlinks[0].col, 2);
         assert_eq!(rendered.hyperlinks[0].width, 3);

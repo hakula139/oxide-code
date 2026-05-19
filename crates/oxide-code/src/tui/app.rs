@@ -9,15 +9,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use crossterm::cursor::{RestorePosition, SavePosition};
-use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, MouseButton, MouseEventKind};
-use crossterm::queue;
-use crossterm::style::{
-    Attribute as CtAttribute, Color as CtColor, Print, SetAttribute, SetBackgroundColor,
-    SetForegroundColor,
-};
+use crossterm::event::{Event, EventStream, KeyCode, KeyEvent};
 use futures::{Stream, StreamExt};
-use ratatui::layout::{Constraint, Layout, Position, Rect};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 use tokio::sync::mpsc;
@@ -25,12 +19,12 @@ use unicode_width::UnicodeWidthStr;
 
 use super::components::chat::ChatView;
 use super::components::input::InputArea;
-use super::components::status::{HyperlinkCell, Status, StatusBar, StatusHyperlink};
+use super::components::status::{Status, StatusBar};
 use super::components::welcome::{self, WelcomeSnapshot};
 use super::glyphs::{NEWLINE_GLYPH, USER_PROMPT_PREFIX, USER_PROMPT_PREFIX_WIDTH};
 use super::modal::{ModalAction, ModalStack};
 use super::pending_calls::{PendingCall, PendingCalls, result_header};
-use super::terminal::{Tui, draw_sync};
+use super::terminal::{Tui, draw_sync, write_status_hyperlinks};
 use super::theme::Theme;
 use crate::agent::event::{AgentEvent, UserAction};
 use crate::config::{CompactionConfig, Effort, display_auto_compaction};
@@ -53,8 +47,6 @@ pub(crate) struct App {
     theme: Theme,
     status_bar: StatusBar,
     chat: ChatView,
-    /// Rect of the jump-to-bottom pill on the most recent frame, or `None` while it's hidden.
-    jump_overlay_rect: Option<Rect>,
     input: InputArea,
     session_info: LiveSessionInfo,
     agent_rx: mpsc::Receiver<AgentEvent>,
@@ -111,7 +103,6 @@ impl App {
             theme: theme.clone(),
             status_bar,
             chat,
-            jump_overlay_rect: None,
             input: InputArea::new(theme),
             session_info,
             agent_rx,
@@ -216,26 +207,12 @@ impl App {
                 }
             }
             Event::Mouse(_) => {
-                self.handle_mouse_event(event);
+                self.chat.handle_event(event);
             }
             Event::Resize(..) => {}
             _ => return,
         }
         self.dirty = true;
-    }
-
-    /// Routes a left-click on the cached jump-pill rect to chat-jump. Forwards everything else
-    /// to chat for wheel scroll.
-    fn handle_mouse_event(&mut self, event: &Event) {
-        if let Event::Mouse(mouse) = event
-            && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
-            && let Some(rect) = self.jump_overlay_rect
-            && rect.contains(Position::new(mouse.column, mouse.row))
-        {
-            self.chat.jump_to_bottom();
-            return;
-        }
-        self.chat.handle_event(event);
     }
 
     fn apply_modal_action(&mut self, action: ModalAction) {
@@ -689,7 +666,7 @@ impl App {
         Ok(())
     }
 
-    /// Drains the bar's pending hyperlinks and writes their OSC 8 envelopes to the backend.
+    /// Replays captured status links as OSC 8 envelopes after the frame flush.
     fn emit_status_hyperlinks<W: std::io::Write>(
         &mut self,
         terminal: &mut ratatui::Terminal<ratatui::prelude::CrosstermBackend<W>>,
@@ -783,9 +760,8 @@ impl App {
         );
     }
 
-    fn render_jump_overlay(&mut self, frame: &mut ratatui::Frame<'_>, area: Rect) {
+    fn render_jump_overlay(&self, frame: &mut ratatui::Frame<'_>, area: Rect) {
         if !self.chat.is_scrolled_up() || area.width < 25 || area.height == 0 {
-            self.jump_overlay_rect = None;
             return;
         }
 
@@ -800,7 +776,6 @@ impl App {
         // opaque surface bg so the chat content underneath stays readable.
         let pill_width = u16::try_from(label.width().saturating_add(2)).unwrap_or(u16::MAX);
         if pill_width > area.width {
-            self.jump_overlay_rect = None;
             return;
         }
         let pill = Rect {
@@ -809,7 +784,6 @@ impl App {
             width: pill_width,
             height: 1,
         };
-        self.jump_overlay_rect = Some(pill);
         let block = Block::default().style(self.theme.surface());
         let inner = block.inner(pill);
         frame.render_widget(block, pill);
@@ -821,137 +795,6 @@ impl App {
             ])),
             inner,
         );
-    }
-}
-
-/// Writes each link's OSC 8 envelope to `out`. Inside tmux the envelope rides through DCS
-/// pass-through, since tmux drops OSC 8 from its forward whitelist.
-fn write_status_hyperlinks<W: std::io::Write>(
-    out: &mut W,
-    links: &[StatusHyperlink],
-) -> std::io::Result<()> {
-    let envelope = build_status_hyperlink_envelope(links)?;
-    if envelope.is_empty() {
-        return Ok(());
-    }
-    if running_inside_tmux() {
-        out.write_all(&tmux_passthrough(&envelope))?;
-    } else {
-        out.write_all(&envelope)?;
-    }
-    out.flush()?;
-    Ok(())
-}
-
-/// Builds the OSC 8 byte stream for the link batch. Empty when no link has a usable URL.
-fn build_status_hyperlink_envelope(links: &[StatusHyperlink]) -> std::io::Result<Vec<u8>> {
-    use std::io::Write as _;
-
-    let mut buf: Vec<u8> = Vec::new();
-    let mut wrote_any = false;
-    for link in links {
-        let safe_url: String = link.url.chars().filter(|c| !c.is_control()).collect();
-        if safe_url.is_empty() {
-            continue;
-        }
-        if !wrote_any {
-            queue!(&mut buf, SavePosition)?;
-            wrote_any = true;
-        }
-        // CUP uses 1-based coordinates.
-        let row = link.rect.y.saturating_add(1);
-        let col = link.rect.x.saturating_add(1);
-        write!(buf, "\x1b[{row};{col}H")?;
-        write!(buf, "\x1b]8;;{safe_url}\x07")?;
-        for cell in &link.cells {
-            write_styled_symbol(&mut buf, cell)?;
-        }
-        write!(buf, "\x1b]8;;\x07")?;
-        // Reset SGR so subsequent terminal output isn't tinted by the last cell's style.
-        write!(buf, "\x1b[0m")?;
-    }
-    if wrote_any {
-        queue!(&mut buf, RestorePosition)?;
-    }
-    Ok(buf)
-}
-
-/// True when the process is running inside tmux. Empty `$TMUX` is treated as absent so a stale
-/// rc-file export doesn't route DCS pass-through bytes to a raw terminal.
-fn running_inside_tmux() -> bool {
-    std::env::var("TMUX").is_ok_and(|v| !v.is_empty())
-}
-
-/// Wraps an escape sequence in tmux's DCS pass-through so OSC 8 reaches the outer terminal.
-fn tmux_passthrough(escape: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(escape.len() + 8);
-    out.extend_from_slice(b"\x1bPtmux;");
-    for &b in escape {
-        if b == 0x1b {
-            out.push(0x1b);
-        }
-        out.push(b);
-    }
-    out.extend_from_slice(b"\x1b\\");
-    out
-}
-
-/// Writes one buffer cell (symbol + fg / bg / SGR) directly to `out`. Each cell starts with an
-/// SGR reset so a prior cell's modifier bits don't carry over into a sibling with a different
-/// style.
-fn write_styled_symbol<W: std::io::Write>(
-    out: &mut W,
-    cell: &HyperlinkCell,
-) -> std::io::Result<()> {
-    queue!(out, SetAttribute(CtAttribute::Reset))?;
-    if let Some(fg) = cell.style.fg {
-        queue!(out, SetForegroundColor(ratatui_color_to_crossterm(fg)))?;
-    }
-    if let Some(bg) = cell.style.bg {
-        queue!(out, SetBackgroundColor(ratatui_color_to_crossterm(bg)))?;
-    }
-    let modifier = cell.style.add_modifier;
-    if modifier.contains(ratatui::style::Modifier::BOLD) {
-        queue!(out, SetAttribute(CtAttribute::Bold))?;
-    }
-    if modifier.contains(ratatui::style::Modifier::DIM) {
-        queue!(out, SetAttribute(CtAttribute::Dim))?;
-    }
-    if modifier.contains(ratatui::style::Modifier::ITALIC) {
-        queue!(out, SetAttribute(CtAttribute::Italic))?;
-    }
-    if modifier.contains(ratatui::style::Modifier::UNDERLINED) {
-        queue!(out, SetAttribute(CtAttribute::Underlined))?;
-    }
-    if modifier.contains(ratatui::style::Modifier::REVERSED) {
-        queue!(out, SetAttribute(CtAttribute::Reverse))?;
-    }
-    queue!(out, Print(&cell.symbol))?;
-    Ok(())
-}
-
-fn ratatui_color_to_crossterm(c: ratatui::style::Color) -> CtColor {
-    use ratatui::style::Color as RC;
-    match c {
-        RC::Reset => CtColor::Reset,
-        RC::Black => CtColor::Black,
-        RC::Red => CtColor::DarkRed,
-        RC::Green => CtColor::DarkGreen,
-        RC::Yellow => CtColor::DarkYellow,
-        RC::Blue => CtColor::DarkBlue,
-        RC::Magenta => CtColor::DarkMagenta,
-        RC::Cyan => CtColor::DarkCyan,
-        RC::Gray => CtColor::Grey,
-        RC::DarkGray => CtColor::DarkGrey,
-        RC::LightRed => CtColor::Red,
-        RC::LightGreen => CtColor::Green,
-        RC::LightYellow => CtColor::Yellow,
-        RC::LightBlue => CtColor::Blue,
-        RC::LightMagenta => CtColor::Magenta,
-        RC::LightCyan => CtColor::Cyan,
-        RC::White => CtColor::White,
-        RC::Indexed(i) => CtColor::AnsiValue(i),
-        RC::Rgb(r, g, b) => CtColor::Rgb { r, g, b },
     }
 }
 
@@ -999,7 +842,7 @@ fn format_config_change(
             (Some(req), _, Some(eff)) if req == eff => format!("{head} · effort {eff}."),
             (Some(req), _, Some(eff)) => format!("{head} · effort {eff} (clamped from {req})."),
             (Some(req), _, None) => {
-                format!("{head}. Effort unchanged — model has no effort tier (asked for {req}).")
+                format!("{head}. Effort unchanged: model has no effort tier (asked for {req}).")
             }
             (None, None, None) => format!("{head}."),
             (None, Some(_), None) => format!("{head}. Effort cleared (model has no effort tier)."),
@@ -1014,7 +857,7 @@ fn format_config_change(
             (Some(req), Some(eff)) if req == eff => format!("Effort set to {eff}."),
             (Some(req), Some(eff)) => format!("Effort set to {eff} (clamped from {req})."),
             (Some(req), None) => {
-                format!("Effort unchanged — model has no effort tier (asked for {req}).")
+                format!("Effort unchanged: model has no effort tier (asked for {req}).")
             }
             // Slash dispatch keeps this unreachable, but a clear fallback beats a panic.
             (None, _) => "Config unchanged.".to_owned(),
@@ -1048,7 +891,7 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
     use ratatui::prelude::CrosstermBackend;
-    use ratatui::style::{Color, Modifier, Style};
+    use ratatui::style::Color;
     use ratatui::{Terminal, TerminalOptions, Viewport};
     use tokio::sync::mpsc;
 
@@ -1056,7 +899,6 @@ mod tests {
     use crate::agent::event::UsageSnapshot;
     use crate::config::test_thresholds;
     use crate::tool::ToolRegistry;
-    use crate::tui::components::status::{HyperlinkCell, StatusHyperlink};
     use crate::tui::modal::testing::ScriptedModal;
 
     /// Idle `App` plus the `user_tx` consumer and an `agent_tx` kept alive so `agent_rx` stays
@@ -1266,20 +1108,6 @@ mod tests {
         body
     }
 
-    fn plain_hyperlink(rect: Rect, url: &str, symbols: &[&str]) -> StatusHyperlink {
-        StatusHyperlink {
-            rect,
-            url: url.to_owned(),
-            cells: symbols
-                .iter()
-                .map(|s| HyperlinkCell {
-                    symbol: (*s).to_owned(),
-                    style: Style::default(),
-                })
-                .collect(),
-        }
-    }
-
     // ── App::new ──
 
     #[test]
@@ -1452,15 +1280,20 @@ mod tests {
     }
 
     #[test]
-    fn handle_crossterm_mouse_is_forwarded_to_chat() {
-        // Wheel events reach `ChatView::handle_event` for scroll, so the dirty flag flips.
+    fn handle_crossterm_event_mouse_is_forwarded_to_chat() {
         let (mut app, _rx, _agent_tx) = test_app(None);
+        app.chat.push_system_message(long_chat_block());
+        _ = render_app(&mut app, 60, 10);
+
         app.handle_crossterm_event(&Event::Mouse(MouseEvent {
-            kind: MouseEventKind::ScrollDown,
+            kind: MouseEventKind::ScrollUp,
             column: 0,
             row: 0,
             modifiers: KeyModifiers::NONE,
         }));
+        let text = rendered_text(&mut app, 60, 10);
+
+        assert!(text.contains("Jump to bottom"), "{text}");
         assert!(app.dirty);
     }
 
@@ -1529,70 +1362,6 @@ mod tests {
             vec!["/help ".to_owned()],
             "buffer reflects the completed canonical name + space",
         );
-    }
-
-    // ── handle_mouse_event ──
-
-    #[test]
-    fn left_click_on_jump_overlay_jumps_chat_to_bottom() {
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        app.chat.content_height_for_test().set(100);
-        app.chat.set_viewport_for_test(20);
-        app.chat.set_scroll_offset_for_test(10);
-        app.chat.set_auto_scroll_for_test(false);
-        app.jump_overlay_rect = Some(Rect::new(60, 23, 18, 1));
-
-        app.handle_crossterm_event(&Event::Mouse(MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: 70,
-            row: 23,
-            modifiers: KeyModifiers::NONE,
-        }));
-
-        assert_eq!(app.chat.scroll_offset_for_test(), 80);
-        assert!(app.chat.auto_scroll_for_test());
-        assert!(app.dirty);
-    }
-
-    #[test]
-    fn left_click_outside_jump_overlay_does_not_jump_chat() {
-        // In real sessions the TUI never sees Down(Left) without mouse capture, but tests inject
-        // events directly to keep the pill hit-test exercised.
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        app.chat.content_height_for_test().set(100);
-        app.chat.set_viewport_for_test(20);
-        app.chat.set_scroll_offset_for_test(10);
-        app.chat.set_auto_scroll_for_test(false);
-        app.jump_overlay_rect = Some(Rect::new(60, 23, 18, 1));
-
-        app.handle_crossterm_event(&Event::Mouse(MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: 5,
-            row: 5,
-            modifiers: KeyModifiers::NONE,
-        }));
-
-        assert_eq!(app.chat.scroll_offset_for_test(), 10);
-        assert!(!app.chat.auto_scroll_for_test());
-    }
-
-    #[test]
-    fn wheel_scroll_event_routes_to_chat_view() {
-        // DECSET 1007 lets the terminal translate physical wheel into arrow-key sequences in real
-        // sessions, but tests inject ScrollUp / ScrollDown directly to exercise the routing.
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        app.chat.content_height_for_test().set(100);
-        app.chat.set_viewport_for_test(20);
-        app.chat.set_scroll_offset_for_test(10);
-
-        app.handle_crossterm_event(&Event::Mouse(MouseEvent {
-            kind: MouseEventKind::ScrollUp,
-            column: 5,
-            row: 5,
-            modifiers: KeyModifiers::NONE,
-        }));
-
-        assert_eq!(app.chat.scroll_offset_for_test(), 9);
     }
 
     // ── modal gate ──
@@ -2470,7 +2239,7 @@ mod tests {
         assert_eq!(
             s,
             "Switched to Claude Haiku 4.5 (claude-haiku-4-5). \
-             Effort unchanged — model has no effort tier (asked for high).",
+             Effort unchanged: model has no effort tier (asked for high).",
         );
     }
 
@@ -2612,7 +2381,7 @@ mod tests {
         );
         assert_eq!(
             s,
-            "Effort unchanged — model has no effort tier (asked for high)."
+            "Effort unchanged: model has no effort tier (asked for high)."
         );
     }
 
@@ -3372,8 +3141,7 @@ mod tests {
     fn render_repaints_when_chat_content_grows_past_viewport() {
         use std::fmt::Write as _;
 
-        // Content pushed in the same handler tick must land in the viewport on the first frame —
-        // a post-paint re-clamp would arrive too late.
+        // Content pushed in the same handler tick must land before a post-paint re-clamp.
         let (mut app, _rx, _agent_tx) = test_app(None);
         let mut body = String::new();
         for i in 0..40 {
@@ -3384,6 +3152,41 @@ mod tests {
         assert!(
             text.contains("line 39"),
             "tail of overflowing block must be in the viewport after the first render, got:\n{text}",
+        );
+    }
+
+    // ── emit_status_hyperlinks ──
+
+    #[test]
+    fn emit_status_hyperlinks_is_a_noop_when_no_links_pending() {
+        #[derive(Clone)]
+        struct SharedSink(Arc<Mutex<Vec<u8>>>);
+
+        impl std::io::Write for SharedSink {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        let bytes = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let backend = CrosstermBackend::new(SharedSink(bytes.clone()));
+        let mut terminal = Terminal::with_options(
+            backend,
+            TerminalOptions {
+                viewport: Viewport::Fixed(Rect::new(0, 0, 80, 24)),
+            },
+        )
+        .unwrap();
+        app.emit_status_hyperlinks(&mut terminal).unwrap();
+        assert!(
+            bytes.lock().unwrap().is_empty(),
+            "no bytes written for a no-link frame",
         );
     }
 
@@ -3517,9 +3320,6 @@ mod tests {
 
     #[test]
     fn draw_frame_surface_fill_overwrites_unpainted_cells_with_surface_bg() {
-        // Buffer-wide invariant: pre-stain every cell, render, and assert no sentinel survives.
-        // The frame-area surface fill is the only widget that guarantees this for cells no
-        // other widget covers.
         let (mut app, _rx, _agent_tx) = test_app(None);
         let sentinel = Color::Rgb(254, 0, 254);
         let surface_bg = app.theme.surface().bg.expect("surface slot defines bg");
@@ -3540,315 +3340,10 @@ mod tests {
                 let cell = buffer.cell((x, y)).expect("cell in bounds");
                 assert_eq!(
                     cell.bg, surface_bg,
-                    "cell ({x},{y}) kept the sentinel — surface fill regressed",
+                    "cell ({x},{y}) kept the sentinel, surface fill regressed",
                 );
             }
         }
-    }
-
-    // ── emit_status_hyperlinks ──
-
-    #[test]
-    fn emit_status_hyperlinks_is_a_noop_when_no_links_pending() {
-        // Drives the early-return path in App::emit_status_hyperlinks. A regression that always
-        // touches the backend would wedge a stray cursor move into every frame.
-
-        #[derive(Clone)]
-        struct SharedSink(Arc<Mutex<Vec<u8>>>);
-
-        impl std::io::Write for SharedSink {
-            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(buf);
-                Ok(buf.len())
-            }
-
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        let bytes = Arc::new(Mutex::new(Vec::<u8>::new()));
-        let backend = CrosstermBackend::new(SharedSink(bytes.clone()));
-        let mut terminal = Terminal::with_options(
-            backend,
-            TerminalOptions {
-                viewport: Viewport::Fixed(Rect::new(0, 0, 80, 24)),
-            },
-        )
-        .unwrap();
-        // No render() means take_pending_hyperlinks returns empty; emit must short-circuit.
-        app.emit_status_hyperlinks(&mut terminal).unwrap();
-        assert!(
-            bytes.lock().unwrap().is_empty(),
-            "no bytes written for a no-link frame",
-        );
-    }
-
-    // ── write_status_hyperlinks ──
-
-    #[test]
-    fn write_status_hyperlinks_passes_envelope_through_unchanged_outside_tmux() {
-        let link = plain_hyperlink(Rect::new(0, 0, 1, 1), "https://x", &["x"]);
-        let mut buf: Vec<u8> = Vec::new();
-        temp_env::with_var_unset("TMUX", || {
-            write_status_hyperlinks(&mut buf, std::slice::from_ref(&link)).unwrap();
-        });
-        let envelope = build_status_hyperlink_envelope(std::slice::from_ref(&link)).unwrap();
-        assert_eq!(
-            buf, envelope,
-            "outside tmux the wire bytes match the raw envelope",
-        );
-    }
-
-    #[test]
-    fn write_status_hyperlinks_wraps_envelope_in_dcs_passthrough_inside_tmux() {
-        // tmux only forwards a small whitelist of OSC numbers (52, 4, 7, 9, 12) to the outer
-        // terminal; OSC 8 needs the DCS pass-through wrapper or it gets silently dropped.
-        let link = plain_hyperlink(Rect::new(0, 0, 1, 1), "https://x", &["x"]);
-        let mut buf: Vec<u8> = Vec::new();
-        temp_env::with_var("TMUX", Some("/tmp/tmux-1000/default,1234,0"), || {
-            write_status_hyperlinks(&mut buf, &[link]).unwrap();
-        });
-        assert!(
-            buf.starts_with(b"\x1bPtmux;"),
-            "DCS opener brackets the envelope: {buf:?}",
-        );
-        assert!(
-            buf.ends_with(b"\x1b\\"),
-            "ST closer terminates the DCS: {buf:?}",
-        );
-        // Inner OSC 8 ESCs must be doubled so tmux strips its own DCS wrapper without consuming
-        // the inner sequence.
-        assert!(
-            buf.windows(8).any(|w| w == b"\x1b\x1b]8;;ht"),
-            "inner ESC before OSC 8 opener is doubled: {buf:?}",
-        );
-    }
-
-    #[test]
-    fn write_status_hyperlinks_treats_empty_tmux_env_as_outside_tmux() {
-        // Stale rc-file `export TMUX=` would otherwise route DCS pass-through bytes to a raw
-        // terminal that prints `Ptmux;...\\` literally on the status bar.
-        let link = plain_hyperlink(Rect::new(0, 0, 1, 1), "https://x", &["x"]);
-        let mut buf: Vec<u8> = Vec::new();
-        temp_env::with_var("TMUX", Some(""), || {
-            write_status_hyperlinks(&mut buf, std::slice::from_ref(&link)).unwrap();
-        });
-        let envelope = build_status_hyperlink_envelope(std::slice::from_ref(&link)).unwrap();
-        assert_eq!(buf, envelope, "empty $TMUX is treated as absent");
-    }
-
-    #[test]
-    fn write_status_hyperlinks_is_a_noop_when_no_links_pending() {
-        let mut buf: Vec<u8> = Vec::new();
-        write_status_hyperlinks(&mut buf, &[]).unwrap();
-        assert!(buf.is_empty(), "no bytes for an empty link list");
-    }
-
-    // ── build_status_hyperlink_envelope ──
-
-    #[test]
-    fn build_status_hyperlink_envelope_emits_cup_then_osc8_per_link() {
-        // Pins the on-the-wire byte sequence: DECSC → CUP (1-based) → OSC 8 opener → replayed
-        // cells → OSC 8 closer (BEL terminator) → SGR reset → DECRC. Drift here breaks the
-        // PR-click affordance in xterm.js-based terminals (Cursor / VS Code) where the parser is
-        // least forgiving, or leaves the cursor parked next to `#NN` on the status bar.
-        let link = plain_hyperlink(
-            Rect::new(2, 0, 3, 1),
-            "https://example.com/pull/86",
-            &["#", "8", "6"],
-        );
-        let bytes = build_status_hyperlink_envelope(&[link]).unwrap();
-        let output = String::from_utf8(bytes).unwrap();
-        assert!(
-            output.starts_with("\x1b7"),
-            "DECSC parks the cursor before our writes: {output:?}",
-        );
-        assert!(
-            output.ends_with("\x1b8"),
-            "DECRC restores the cursor after our writes: {output:?}",
-        );
-        assert!(
-            output.contains("\x1b[1;3H"),
-            "CUP to row 1 col 3 (1-based): {output:?}",
-        );
-        assert!(
-            output.contains("\x1b]8;;https://example.com/pull/86\x07"),
-            "OSC 8 opener with URL: {output:?}",
-        );
-        let osc8_open_at = output.find("\x1b]8;;https").unwrap();
-        let osc8_close_at = output.rfind("\x1b]8;;\x07").unwrap();
-        let between = &output[osc8_open_at..osc8_close_at];
-        assert!(
-            between.contains('#') && between.contains('8') && between.contains('6'),
-            "visible bytes #, 8, 6 sit between opener and closer: {between:?}",
-        );
-        assert!(
-            output.contains("\x1b]8;;\x07\x1b[0m"),
-            "closer + SGR reset: {output:?}",
-        );
-    }
-
-    #[test]
-    fn build_status_hyperlink_envelope_strips_control_chars_from_url() {
-        let link = plain_hyperlink(
-            Rect::new(0, 0, 1, 1),
-            "https://x.com/\x1b\x07\x00ok",
-            &["x"],
-        );
-        let bytes = build_status_hyperlink_envelope(&[link]).unwrap();
-        let output = String::from_utf8(bytes).unwrap();
-        assert!(
-            output.contains("\x1b]8;;https://x.com/ok\x07"),
-            "ESC, BEL, NUL stripped from URL: {output:?}",
-        );
-    }
-
-    #[test]
-    fn build_status_hyperlink_envelope_is_empty_when_safe_url_is_empty() {
-        let link = plain_hyperlink(Rect::new(0, 0, 1, 1), "\x1b\x07", &["x"]);
-        let bytes = build_status_hyperlink_envelope(&[link]).unwrap();
-        assert!(
-            bytes.is_empty(),
-            "no bytes (no DECSC either) when sanitized URL is empty",
-        );
-    }
-
-    #[test]
-    fn build_status_hyperlink_envelope_replays_styled_cell_attributes() {
-        // Pins every modifier branch in write_styled_symbol plus a few palette branches in
-        // ratatui_color_to_crossterm, since uncovered branches there silently lose styling on
-        // the post-flush replay.
-        let modifiers = Modifier::BOLD
-            | Modifier::DIM
-            | Modifier::ITALIC
-            | Modifier::UNDERLINED
-            | Modifier::REVERSED;
-        let link = StatusHyperlink {
-            rect: Rect::new(0, 0, 1, 1),
-            url: "https://x".to_owned(),
-            cells: vec![HyperlinkCell {
-                symbol: "X".to_owned(),
-                style: Style::default()
-                    .fg(Color::Rgb(10, 20, 30))
-                    .bg(Color::Indexed(7))
-                    .add_modifier(modifiers),
-            }],
-        };
-        let bytes = build_status_hyperlink_envelope(&[link]).unwrap();
-        let output = String::from_utf8(bytes).unwrap();
-        // SGR 38;2;r;g;b is the truecolor fg; 48;5;n is the indexed bg.
-        assert!(
-            output.contains("\x1b[38;2;10;20;30m") && output.contains("\x1b[48;5;7m"),
-            "fg + bg SGR escapes: {output:?}",
-        );
-        for (sgr, label) in [
-            ("\x1b[1m", "bold"),
-            ("\x1b[2m", "dim"),
-            ("\x1b[3m", "italic"),
-            ("\x1b[4m", "underlined"),
-            ("\x1b[7m", "reverse"),
-        ] {
-            assert!(
-                output.contains(sgr),
-                "missing {label} SGR escape: {output:?}",
-            );
-        }
-    }
-
-    #[test]
-    fn build_status_hyperlink_envelope_resets_sgr_between_cells_with_different_modifiers() {
-        // Without an SGR reset per cell, modifier bits from a prior cell leak into the next
-        // (crossterm's `SetAttribute(Bold)` only sets, it doesn't clear). Pin the reset so a
-        // mixed-style link can't render the second cell with bold-from-the-first.
-        let link = StatusHyperlink {
-            rect: Rect::new(0, 0, 2, 1),
-            url: "https://x".to_owned(),
-            cells: vec![
-                HyperlinkCell {
-                    symbol: "A".to_owned(),
-                    style: Style::default().add_modifier(Modifier::BOLD),
-                },
-                HyperlinkCell {
-                    symbol: "B".to_owned(),
-                    style: Style::default().add_modifier(Modifier::ITALIC),
-                },
-            ],
-        };
-        let bytes = build_status_hyperlink_envelope(&[link]).unwrap();
-        let output = String::from_utf8(bytes).unwrap();
-        let after_first_cell = output.split('A').nth(1).unwrap_or_default();
-        assert!(
-            after_first_cell.starts_with("\x1b[0m"),
-            "second cell starts with SGR reset to drop the prior cell's modifiers: {output:?}",
-        );
-    }
-
-    // ── tmux_passthrough ──
-
-    #[test]
-    fn tmux_passthrough_doubles_inner_escape_and_wraps_in_dcs() {
-        let inner = b"\x1b]8;;https://x\x07X\x1b]8;;\x07";
-        let wrapped = tmux_passthrough(inner);
-        let expected = b"\x1bPtmux;\x1b\x1b]8;;https://x\x07X\x1b\x1b]8;;\x07\x1b\\";
-        assert_eq!(&wrapped, expected);
-    }
-
-    // ── ratatui_color_to_crossterm ──
-
-    #[test]
-    fn ratatui_color_to_crossterm_round_trips_every_palette_variant() {
-        // Every color a theme can emit must replay correctly over OSC 8. A wrong branch silently
-        // loses styling on the post-flush hyperlink replay because `write_styled_symbol` queues
-        // whichever crossterm value this function returns.
-        use ratatui::style::Color as RC;
-        let cases = [
-            (RC::Reset, CtColor::Reset),
-            (RC::Black, CtColor::Black),
-            (RC::Red, CtColor::DarkRed),
-            (RC::Green, CtColor::DarkGreen),
-            (RC::Yellow, CtColor::DarkYellow),
-            (RC::Blue, CtColor::DarkBlue),
-            (RC::Magenta, CtColor::DarkMagenta),
-            (RC::Cyan, CtColor::DarkCyan),
-            (RC::Gray, CtColor::Grey),
-            (RC::DarkGray, CtColor::DarkGrey),
-            (RC::LightRed, CtColor::Red),
-            (RC::LightGreen, CtColor::Green),
-            (RC::LightYellow, CtColor::Yellow),
-            (RC::LightBlue, CtColor::Blue),
-            (RC::LightMagenta, CtColor::Magenta),
-            (RC::LightCyan, CtColor::Cyan),
-            (RC::White, CtColor::White),
-            (RC::Indexed(33), CtColor::AnsiValue(33)),
-            (RC::Rgb(1, 2, 3), CtColor::Rgb { r: 1, g: 2, b: 3 }),
-        ];
-        for (input, expected) in cases {
-            assert_eq!(
-                ratatui_color_to_crossterm(input),
-                expected,
-                "color {input:?}"
-            );
-        }
-    }
-
-    // ── jump_overlay_label ──
-
-    #[test]
-    fn jump_overlay_label_idle_reads_jump_to_bottom() {
-        assert_eq!(jump_overlay_label(0, 60), "Jump to bottom (ctrl+End) ↓");
-    }
-
-    #[test]
-    fn jump_overlay_label_pluralizes_new_message_count() {
-        assert_eq!(jump_overlay_label(1, 60), "1 new message (ctrl+End) ↓");
-        assert_eq!(jump_overlay_label(3, 60), "3 new messages (ctrl+End) ↓");
-    }
-
-    #[test]
-    fn jump_overlay_label_uses_short_form_below_full_width() {
-        assert_eq!(jump_overlay_label(3, 30), "↓ (ctrl+End)");
     }
 
     // ── preview_height ──
@@ -3875,9 +3370,6 @@ mod tests {
 
     #[test]
     fn render_preview_overflow_appends_more_count_row() {
-        // A queue larger than `PREVIEW_VISIBLE` collapses the tail
-        // into a single "+N more" hint so the panel never grows past
-        // the cap; the user keeps the most recent items in view.
         let (mut app, _rx, _agent_tx) = test_app(None);
         app.input.set_enabled(false);
         let extra = 3;
@@ -3890,5 +3382,23 @@ mod tests {
             text.contains(&format!("+{extra} more")),
             "overflow hint must show exact extra count: {text}",
         );
+    }
+
+    // ── jump_overlay_label ──
+
+    #[test]
+    fn jump_overlay_label_idle_reads_jump_to_bottom() {
+        assert_eq!(jump_overlay_label(0, 60), "Jump to bottom (ctrl+End) ↓");
+    }
+
+    #[test]
+    fn jump_overlay_label_pluralizes_new_message_count() {
+        assert_eq!(jump_overlay_label(1, 60), "1 new message (ctrl+End) ↓");
+        assert_eq!(jump_overlay_label(3, 60), "3 new messages (ctrl+End) ↓");
+    }
+
+    #[test]
+    fn jump_overlay_label_uses_short_form_below_full_width() {
+        assert_eq!(jump_overlay_label(3, 30), "↓ (ctrl+End)");
     }
 }

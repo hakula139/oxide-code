@@ -510,35 +510,6 @@ impl ChatView {
     }
 }
 
-// ── Test accessors ──
-
-#[cfg(test)]
-impl ChatView {
-    pub(crate) fn scroll_offset_for_test(&self) -> u16 {
-        self.scroll_offset
-    }
-
-    pub(crate) fn auto_scroll_for_test(&self) -> bool {
-        self.auto_scroll
-    }
-
-    pub(crate) fn set_scroll_offset_for_test(&mut self, offset: u16) {
-        self.scroll_offset = offset;
-    }
-
-    pub(crate) fn set_viewport_for_test(&mut self, height: u16) {
-        self.viewport_height = height;
-    }
-
-    pub(crate) fn set_auto_scroll_for_test(&mut self, on: bool) {
-        self.auto_scroll = on;
-    }
-
-    pub(crate) fn content_height_for_test(&self) -> &Cell<u16> {
-        &self.content_height
-    }
-}
-
 fn post_compact_display_messages(messages: &[Message]) -> Vec<Message> {
     let mut messages = messages.to_vec();
     if let Some(first) = messages.first_mut()

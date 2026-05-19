@@ -121,9 +121,12 @@ fn stderr_summary(stderr: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::OsStr;
-    use std::os::unix::ffi::OsStrExt;
     use std::path::PathBuf;
+
+    #[cfg(unix)]
+    use std::ffi::OsStr;
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStrExt;
 
     use super::*;
 
@@ -165,6 +168,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn current_branch_with_non_utf8_cwd_is_absent() {
         // Linux paths are bytes; embedding a non-UTF-8 byte hits the cwd_to_str failure branch
         // without ever spawning git.
@@ -175,7 +179,7 @@ mod tests {
     // ── current_branch_str ──
 
     #[test]
-    fn current_branch_str_delegates_to_current_branch() {
+    fn current_branch_str_outside_a_repo_is_absent() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(current_branch_str(dir.path().to_str().unwrap()), None);
     }
@@ -200,6 +204,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn current_pull_request_with_non_utf8_cwd_is_absent() {
         let cwd = PathBuf::from(OsStr::from_bytes(b"/tmp/\xff"));
         assert_eq!(current_pull_request(&cwd), None);
@@ -216,13 +221,16 @@ mod tests {
                 url: "https://github.com/o/r/pull/86".to_owned(),
             }),
         );
+    }
+
+    #[test]
+    fn parse_pull_request_drops_invalid_payloads() {
         assert_eq!(parse_pull_request(b""), None);
         assert_eq!(parse_pull_request(b"not json"), None);
         assert_eq!(parse_pull_request(br#"{"number":86}"#), None);
         assert_eq!(parse_pull_request(br#"{"url":"https://x"}"#), None);
         assert_eq!(parse_pull_request(br#"{"number":86,"url":""}"#), None);
         assert_eq!(parse_pull_request(br#"{"number":-1,"url":"x"}"#), None);
-        // Non-string url field exercises the second `?` in `as_str()?.to_owned()`.
         assert_eq!(parse_pull_request(br#"{"number":86,"url":42}"#), None);
     }
 
@@ -234,6 +242,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn cwd_to_str_is_absent_when_not_utf8() {
         let cwd = PathBuf::from(OsStr::from_bytes(b"/tmp/\xff"));
         assert_eq!(cwd_to_str(&cwd, "p"), None);

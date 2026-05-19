@@ -11,13 +11,12 @@ use ratatui::style::Style;
 use ratatui::text::Span;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
+use self::line::{RenderedStatusLine, StatusLine, StatusLineState};
 use crate::agent::event::UsageSnapshot;
 use crate::config::{Effort, StatusLineSegment};
 use crate::tui::glyphs::SPINNER_FRAMES;
 use crate::tui::theme::Theme;
 use crate::util::git;
-
-use self::line::{RenderedStatusLine, StatusLine, StatusLineState};
 
 const TICKS_PER_FRAME: usize = 5;
 
@@ -57,14 +56,14 @@ pub(crate) struct StatusBar {
     git_cwd: Option<PathBuf>,
     git_branch: Option<String>,
     pull_request: Option<git::PullRequest>,
-    /// Skips the gh probe when the pull-request segment isn't configured.
+    /// Whether the configured line needs the `gh pr` probe.
     track_pull_request: bool,
     last_branch_probe: Option<Instant>,
     last_pr_probe: Option<Instant>,
     status: Status,
     spinner_frame: usize,
     tick_counter: usize,
-    /// Hyperlink segments captured during the most recent render, awaiting drain by the App.
+    /// Hyperlink cells captured during the most recent render.
     pending_hyperlinks: Vec<StatusHyperlink>,
 }
 
@@ -360,7 +359,6 @@ mod tests {
         )
     }
 
-    /// Bar configured with a `pull-request` segment so render captures a hyperlink rect.
     fn pr_bar() -> StatusBar {
         StatusBar::new(
             &Theme::default(),
@@ -557,9 +555,6 @@ mod tests {
 
     #[test]
     fn tick_marks_dirty_when_git_branch_changes() {
-        // With no animated status and no minute change, the only path flipping dirty is the git
-        // probe surfacing a new branch. A future `refresh_git_branch` reordering could quietly
-        // drop the dirty bit and leave the rendered branch label stale until the next user input.
         let dir = tempfile::tempdir().unwrap();
         let mut bar = test_bar();
         bar.git_cwd = Some(dir.path().to_path_buf());
@@ -571,8 +566,6 @@ mod tests {
 
     #[test]
     fn tick_marks_dirty_when_pull_request_changes() {
-        // Pins the pull-request → dirty arm of `tick`. A regression that drops the PR-refresh
-        // result on the floor would leave the status bar stale for one whole probe interval.
         let dir = tempfile::tempdir().unwrap();
         let mut bar = test_bar();
         bar.git_cwd = Some(dir.path().to_path_buf());
@@ -654,9 +647,6 @@ mod tests {
 
     #[test]
     fn refresh_pull_request_marks_dirty_when_value_changes() {
-        // Mirrors `tick_marks_dirty_when_git_branch_changes` for the PR slot. The fail mode is
-        // the same: a refactor that only flips dirty when the probe yields `Some(_)` would leave
-        // the rendered `#NN` segment stale after the user closes the PR.
         let dir = tempfile::tempdir().unwrap();
         let mut bar = test_bar();
         bar.track_pull_request = true;
@@ -668,9 +658,6 @@ mod tests {
 
     #[test]
     fn refresh_pull_request_arms_throttle_when_probe_returns_none() {
-        // Same throttle invariant as the git branch probe. A non-repo cwd (or a cwd where `gh`
-        // can't find a PR) returns None, but the stamp must still advance so we don't re-shell
-        // every tick.
         let dir = tempfile::tempdir().unwrap();
         let mut bar = test_bar();
         bar.track_pull_request = true;
@@ -936,8 +923,6 @@ mod tests {
 
     #[test]
     fn render_records_pull_request_hyperlink_rect_for_post_flush_emission() {
-        // The OSC 8 envelope is emitted by the App after `terminal.draw()` flushes. The bar's
-        // job is to record the link rect + visible cells so the App can replay them.
         let mut bar = pr_bar();
         bar.pull_request = Some(pr_state(86));
         render_status(&mut bar, 40);
@@ -949,7 +934,6 @@ mod tests {
         );
         let link = &links[0];
         assert_eq!(link.url, "https://github.com/o/r/pull/86");
-        // Leading "  " margin → `#86` lives at col 2, width 3.
         assert_eq!(link.rect.x, 2);
         assert_eq!(link.rect.width, 3);
         let visible: String = link.cells.iter().map(|c| c.symbol.as_str()).collect();
@@ -965,8 +949,6 @@ mod tests {
 
     #[test]
     fn render_drops_hyperlink_when_segment_clipped_to_zero_width() {
-        // Narrow renders drop the PR segment via the fit pass, so the recorded hyperlinks list
-        // must mirror the rendered line and not surface a link rect that points at empty cells.
         let mut bar = pr_bar();
         bar.pull_request = Some(pr_state(86));
         render_status(&mut bar, 10);
