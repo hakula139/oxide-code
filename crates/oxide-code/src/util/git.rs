@@ -1,44 +1,27 @@
 //! Git probes used by the session header and the status bar. Best-effort: every probe collapses
 //! to `None` on missing git, non-repo cwd, detached HEAD, or non-UTF-8 output. Failures log at
-//! `debug` so they don't pollute normal use but are recoverable when the status bar misbehaves.
+//! `debug` so they're recoverable when the status bar misbehaves.
 
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Output};
 
 use tracing::debug;
 
 /// Probe the current branch via `git branch --show-current`. Detached HEAD comes back as empty
 /// stdout, which we collapse to `None`.
 pub(crate) fn current_branch(cwd: &Path) -> Option<String> {
-    let Some(cwd_str) = cwd.to_str() else {
-        debug!(cwd = ?cwd, "git branch probe: cwd is not valid UTF-8");
-        return None;
-    };
-    let output = match Command::new("git")
-        .args([
-            "-C",
-            cwd_str,
-            "--no-optional-locks",
-            "branch",
-            "--show-current",
-        ])
-        .output()
-    {
-        Ok(output) => output,
-        Err(e) => {
-            debug!(cwd = cwd_str, error = %e, "git branch probe: spawn failed");
-            return None;
-        }
-    };
-    if !output.status.success() {
-        debug!(
-            cwd = cwd_str,
-            code = output.status.code().unwrap_or(-1),
-            stderr = stderr_summary(&output.stderr),
-            "git branch probe: non-zero exit",
-        );
-        return None;
-    }
+    let cwd_str = cwd_to_str(cwd, "git branch")?;
+    let output = run_probe("git branch", cwd_str, || {
+        Command::new("git")
+            .args([
+                "-C",
+                cwd_str,
+                "--no-optional-locks",
+                "branch",
+                "--show-current",
+            ])
+            .output()
+    })?;
     parse_branch(&output.stdout)
 }
 
@@ -56,43 +39,74 @@ fn parse_branch(stdout: &[u8]) -> Option<String> {
     }
 }
 
-/// Probe the open pull request for `cwd`'s current branch via `gh pr view --json number --jq
-/// .number`. Returns `None` when `gh` is missing, the user is unauthenticated, or no PR is open.
-pub(crate) fn current_pull_request(cwd: &Path) -> Option<u64> {
-    let Some(cwd_str) = cwd.to_str() else {
-        debug!(cwd = ?cwd, "gh pr probe: cwd is not valid UTF-8");
+/// Open pull request for the current branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PullRequest {
+    pub(crate) number: u64,
+    pub(crate) url: String,
+}
+
+/// Probe the open pull request for `cwd`'s current branch via `gh pr view --json number,url`.
+/// Returns `None` when `gh` is missing, the user is unauthenticated, or no PR is open.
+pub(crate) fn current_pull_request(cwd: &Path) -> Option<PullRequest> {
+    let cwd_str = cwd_to_str(cwd, "gh pr")?;
+    let output = run_probe("gh pr", cwd_str, || {
+        Command::new("gh")
+            .args(["pr", "view", "--json", "number,url"])
+            .current_dir(cwd_str)
+            .output()
+    })?;
+    parse_pull_request(&output.stdout)
+}
+
+fn parse_pull_request(stdout: &[u8]) -> Option<PullRequest> {
+    let value: serde_json::Value = serde_json::from_slice(stdout).ok()?;
+    let number = value.get("number")?.as_u64()?;
+    let url = value.get("url")?.as_str()?.to_owned();
+    if url.is_empty() {
         return None;
-    };
-    let output = match Command::new("gh")
-        .args(["pr", "view", "--json", "number", "--jq", ".number"])
-        .current_dir(cwd_str)
-        .output()
-    {
+    }
+    Some(PullRequest { number, url })
+}
+
+/// Coerces `cwd` to a `&str` so it can flow into `Command::args` / `current_dir`. Logs and
+/// surfaces `None` when the path isn't valid UTF-8.
+fn cwd_to_str<'a>(cwd: &'a Path, probe: &str) -> Option<&'a str> {
+    if let Some(s) = cwd.to_str() {
+        Some(s)
+    } else {
+        debug!(cwd = ?cwd, "{probe} probe: cwd is not valid UTF-8");
+        None
+    }
+}
+
+/// Runs a `Command::output()` closure, logging on spawn failure or non-zero exit. Returns the
+/// successful output or `None`. `cwd` rides along on the log records so a user can pinpoint which
+/// worktree the probe failed in.
+fn run_probe<F>(probe: &str, cwd: &str, spawn: F) -> Option<Output>
+where
+    F: FnOnce() -> std::io::Result<Output>,
+{
+    let output = match spawn() {
         Ok(output) => output,
         Err(e) => {
-            debug!(cwd = cwd_str, error = %e, "gh pr probe: spawn failed");
+            debug!(error = %e, cwd = %cwd, "{probe} probe: spawn failed");
             return None;
         }
     };
     if !output.status.success() {
         debug!(
-            cwd = cwd_str,
             code = output.status.code().unwrap_or(-1),
             stderr = stderr_summary(&output.stderr),
-            "gh pr probe: non-zero exit",
+            cwd = %cwd,
+            "{probe} probe: non-zero exit",
         );
         return None;
     }
-    parse_pr_number(&output.stdout)
+    Some(output)
 }
 
-fn parse_pr_number(stdout: &[u8]) -> Option<u64> {
-    std::str::from_utf8(stdout).ok()?.trim().parse().ok()
-}
-
-/// First non-blank stderr line, capped to keep log records terse. Surfaces the actionable signal
-/// (`auth required`, `no pull requests found`, `not a git repository`) without dumping a wall of
-/// hint text.
+/// First non-blank stderr line, capped at `MAX_LEN` for terse log records.
 fn stderr_summary(stderr: &[u8]) -> String {
     const MAX_LEN: usize = 200;
     let text = String::from_utf8_lossy(stderr);
@@ -107,6 +121,13 @@ fn stderr_summary(stderr: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
+    #[cfg(unix)]
+    use std::ffi::OsStr;
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStrExt;
+
     use super::*;
 
     // ── current_branch ──
@@ -146,6 +167,23 @@ mod tests {
         assert_eq!(current_branch(dir.path()), None);
     }
 
+    #[test]
+    #[cfg(unix)]
+    fn current_branch_with_non_utf8_cwd_is_absent() {
+        // Linux paths are bytes; embedding a non-UTF-8 byte hits the cwd_to_str failure branch
+        // without ever spawning git.
+        let cwd = PathBuf::from(OsStr::from_bytes(b"/tmp/\xff"));
+        assert_eq!(current_branch(&cwd), None);
+    }
+
+    // ── current_branch_str ──
+
+    #[test]
+    fn current_branch_str_outside_a_repo_is_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(current_branch_str(dir.path().to_str().unwrap()), None);
+    }
+
     // ── parse_branch ──
 
     #[test]
@@ -165,16 +203,97 @@ mod tests {
         assert_eq!(current_pull_request(dir.path()), None);
     }
 
-    // ── parse_pr_number ──
+    #[test]
+    #[cfg(unix)]
+    fn current_pull_request_with_non_utf8_cwd_is_absent() {
+        let cwd = PathBuf::from(OsStr::from_bytes(b"/tmp/\xff"));
+        assert_eq!(current_pull_request(&cwd), None);
+    }
+
+    // ── parse_pull_request ──
 
     #[test]
-    fn parse_pr_number_keeps_positive_integers_and_drops_everything_else() {
-        assert_eq!(parse_pr_number(b"86\n"), Some(86));
-        assert_eq!(parse_pr_number(b"  12\n"), Some(12));
-        assert_eq!(parse_pr_number(b""), None);
-        assert_eq!(parse_pr_number(b"not-a-number\n"), None);
-        assert_eq!(parse_pr_number(b"-1\n"), None);
-        assert_eq!(parse_pr_number(&[0xff, b'\n']), None);
+    fn parse_pull_request_extracts_number_and_url() {
+        assert_eq!(
+            parse_pull_request(br#"{"number":86,"url":"https://github.com/o/r/pull/86"}"#),
+            Some(PullRequest {
+                number: 86,
+                url: "https://github.com/o/r/pull/86".to_owned(),
+            }),
+        );
+    }
+
+    #[test]
+    fn parse_pull_request_drops_invalid_payloads() {
+        assert_eq!(parse_pull_request(b""), None);
+        assert_eq!(parse_pull_request(b"not json"), None);
+        assert_eq!(parse_pull_request(br#"{"number":86}"#), None);
+        assert_eq!(parse_pull_request(br#"{"url":"https://x"}"#), None);
+        assert_eq!(parse_pull_request(br#"{"number":86,"url":""}"#), None);
+        assert_eq!(parse_pull_request(br#"{"number":-1,"url":"x"}"#), None);
+        assert_eq!(parse_pull_request(br#"{"number":86,"url":42}"#), None);
+    }
+
+    // ── cwd_to_str ──
+
+    #[test]
+    fn cwd_to_str_returns_path_when_utf8() {
+        assert_eq!(cwd_to_str(Path::new("/tmp/a"), "p"), Some("/tmp/a"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn cwd_to_str_is_absent_when_not_utf8() {
+        let cwd = PathBuf::from(OsStr::from_bytes(b"/tmp/\xff"));
+        assert_eq!(cwd_to_str(&cwd, "p"), None);
+    }
+
+    // ── run_probe ──
+
+    #[test]
+    fn run_probe_returns_output_on_success() {
+        let output = run_probe("test", "/tmp/cwd", || {
+            Ok(Output {
+                status: status_with_code(0),
+                stdout: b"ok".to_vec(),
+                stderr: Vec::new(),
+            })
+        })
+        .expect("success path keeps the output");
+        assert_eq!(output.stdout, b"ok");
+    }
+
+    #[test]
+    fn run_probe_drops_output_on_non_zero_exit() {
+        let result = run_probe("test", "/tmp/cwd", || {
+            Ok(Output {
+                status: status_with_code(1),
+                stdout: b"unused".to_vec(),
+                stderr: b"fatal: not a git repository\n".to_vec(),
+            })
+        });
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn run_probe_drops_output_on_spawn_failure() {
+        let result = run_probe("test", "/tmp/cwd", || {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "binary missing",
+            ))
+        });
+        assert!(result.is_none());
+    }
+
+    fn status_with_code(code: i32) -> std::process::ExitStatus {
+        // `Command::new("sh").arg("-c").arg(format!("exit {code}"))` is the portable way to mint
+        // an `ExitStatus` with a specific code from tests.
+        Command::new("sh")
+            .arg("-c")
+            .arg(format!("exit {code}"))
+            .status()
+            .unwrap()
     }
 
     // ── stderr_summary ──
@@ -190,5 +309,10 @@ mod tests {
         let summary = stderr_summary(&huge);
         assert_eq!(summary.len(), 203, "200 chars + '...': {summary}");
         assert!(summary.ends_with("..."));
+    }
+
+    #[test]
+    fn stderr_summary_returns_empty_when_every_line_is_blank() {
+        assert_eq!(stderr_summary(b"\n   \n\t\n"), "");
     }
 }

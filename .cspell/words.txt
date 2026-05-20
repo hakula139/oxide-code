@@ -6,6 +6,7 @@ anthropic
 anthropics
 anyhow
 APFS
+arboard
 atuin
 cachain
 catppuccin
@@ -17,6 +18,8 @@ codex
 CREAT
 creds
 crossterm
+DECRC
+DECSC
 dedupe
 deque
 deserialize
@@ -32,6 +35,7 @@ ESRCH
 feff
 frappe
 getpwuid
+Ghostty
 gitui
 hakula
 impls
@@ -40,9 +44,11 @@ insta
 isatty
 killpg
 Kobalte
+Konsole
 latte
 macchiato
 misparse
+misparses
 MMIX
 mplan
 mpsc
@@ -63,9 +69,11 @@ pgid
 pkgs
 pname
 println
+Ptmux
 pulldown
 RAII
 ratatui
+rects
 replacen
 reqwest
 reserialized
@@ -84,6 +92,7 @@ sysname
 SYSPROMPT
 tengu
 Tera
+termio
 thiserror
 throbber
 tildified
@@ -99,10 +108,12 @@ unresumable
 unrotated
 untap
 urandom
+URXVT
 usize
 venv
 vtable
 writeln
 xhigh
+Xresources
 xxhash
 yazi

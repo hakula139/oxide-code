@@ -372,10 +372,7 @@ impl ChatView {
                 code: KeyCode::End,
                 modifiers: KeyModifiers::CONTROL,
                 ..
-            }) => {
-                self.scroll_to_bottom();
-                self.auto_scroll = true;
-            }
+            }) => self.jump_to_bottom(),
             _ => {}
         }
     }
@@ -388,6 +385,12 @@ impl ChatView {
             .style(self.theme.surface())
             .scroll((self.scroll_offset, 0));
         frame.render_widget(paragraph, area);
+    }
+
+    /// Scrolls to the latest content and re-arms auto-scroll.
+    pub(crate) fn jump_to_bottom(&mut self) {
+        self.scroll_to_bottom();
+        self.auto_scroll = true;
     }
 }
 

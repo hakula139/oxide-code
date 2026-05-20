@@ -1,19 +1,18 @@
 ---
 source: crates/oxide-code/src/tui/components/welcome.rs
-assertion_line: 444
 expression: "render(50, 14, &snap)"
 ---
 "                                                  "
 "                 oxide-code v0.1.0                "
 "                                                  "
-"   Claude Opus 4.7 · xhigh effort                 "
-"   ~/github/oxide-code                            "
+"      Claude Opus 4.7 · xhigh effort              "
+"      ~/github/oxide-code                         "
 "                                                  "
-"   Try one of:                                    "
+"      Try one of:                                 "
 "                                                  "
-"     /help     list commands                      "
-"     /diff     show git changes                   "
-"     /model    switch model                       "
+"        /clear    reset conversation              "
+"        /help     list commands                   "
+"        /theme    switch theme                    "
 "                                                  "
-"   Tip — ox --continue resumes your last session  "
+"      Tip — drag chat text to select and copy     "
 "                                                  "

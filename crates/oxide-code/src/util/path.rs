@@ -115,25 +115,29 @@ mod tests {
 
     #[test]
     fn tildify_rewrites_home_prefix_to_tilde() {
-        let Some(home) = dirs::home_dir() else {
-            return; // unusual CI envs without HOME
-        };
-        let path = home.join("work/project");
-        assert_eq!(tildify(&path), "~/work/project");
+        temp_env::with_var("HOME", Some("/tmp/oxide-home"), || {
+            assert_eq!(
+                tildify(&PathBuf::from("/tmp/oxide-home/work/project")),
+                "~/work/project",
+            );
+        });
     }
 
     #[test]
     fn tildify_preserves_paths_outside_home() {
-        let path = PathBuf::from("/tmp/not-home/session");
-        assert_eq!(tildify(&path), "/tmp/not-home/session");
+        temp_env::with_var("HOME", Some("/tmp/oxide-home"), || {
+            assert_eq!(
+                tildify(&PathBuf::from("/tmp/not-home/session")),
+                "/tmp/not-home/session",
+            );
+        });
     }
 
     #[test]
     fn tildify_leaves_home_itself_as_tilde() {
-        let Some(home) = dirs::home_dir() else {
-            return;
-        };
-        assert_eq!(tildify(&home), "~/");
+        temp_env::with_var("HOME", Some("/tmp/oxide-home"), || {
+            assert_eq!(tildify(&PathBuf::from("/tmp/oxide-home")), "~/");
+        });
     }
 
     // ── expand_user ──

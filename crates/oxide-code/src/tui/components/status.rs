@@ -7,16 +7,16 @@ use std::time::{Duration, Instant};
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
+use ratatui::style::Style;
 use ratatui::text::Span;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
+use self::line::{RenderedStatusLine, StatusLine, StatusLineState};
 use crate::agent::event::UsageSnapshot;
 use crate::config::{Effort, StatusLineSegment};
 use crate::tui::glyphs::SPINNER_FRAMES;
 use crate::tui::theme::Theme;
 use crate::util::git;
-
-use self::line::{StatusLine, StatusLineState};
 
 const TICKS_PER_FRAME: usize = 5;
 
@@ -27,6 +27,20 @@ const GIT_BRANCH_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 /// How often the status bar re-probes `gh` for the open pull request. Slower than the branch
 /// probe because `gh pr view` hits the network.
 const PR_REFRESH_INTERVAL: Duration = Duration::from_mins(1);
+
+/// A status-bar segment that should be re-emitted as an OSC 8 hyperlink.
+#[derive(Debug, Clone)]
+pub(crate) struct StatusHyperlink {
+    pub(crate) rect: Rect,
+    pub(crate) url: String,
+    pub(crate) cells: Vec<HyperlinkCell>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct HyperlinkCell {
+    pub(crate) symbol: String,
+    pub(crate) style: Style,
+}
 
 /// Status bar at the top of the TUI.
 pub(crate) struct StatusBar {
@@ -41,15 +55,16 @@ pub(crate) struct StatusBar {
     /// `None` collapses every git probe to a no-op.
     git_cwd: Option<PathBuf>,
     git_branch: Option<String>,
-    pull_request: Option<u64>,
-    /// `true` while the `pull-request` segment is configured. Skips the `gh` probe entirely when
-    /// the user hasn't opted in.
+    pull_request: Option<git::PullRequest>,
+    /// Whether the configured line needs the `gh pr` probe.
     track_pull_request: bool,
     last_branch_probe: Option<Instant>,
     last_pr_probe: Option<Instant>,
     status: Status,
     spinner_frame: usize,
     tick_counter: usize,
+    /// Hyperlink cells captured during the most recent render.
+    pending_hyperlinks: Vec<StatusHyperlink>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,6 +109,7 @@ impl StatusBar {
             status: Status::Idle,
             spinner_frame: 0,
             tick_counter: 0,
+            pending_hyperlinks: Vec::new(),
         }
     }
 
@@ -228,15 +244,46 @@ fn should_probe(last: Option<Instant>, now: Instant, interval: Duration) -> bool
 }
 
 impl StatusBar {
-    pub(crate) fn render(&self, frame: &mut Frame, area: Rect) {
+    pub(crate) fn render(&mut self, frame: &mut Frame, area: Rect) {
         let block = Block::default()
             .borders(Borders::BOTTOM)
             .border_style(self.theme.border_unfocused())
             .style(self.theme.surface());
-        frame.render_widget(
-            Paragraph::new(self.render_line(area.width)).block(block),
-            area,
-        );
+        let rendered = self.render_line(area.width);
+        let content_y = area.y;
+        let content_x = area.x;
+        self.pending_hyperlinks.clear();
+        let mut hyperlink_rects = Vec::with_capacity(rendered.hyperlinks.len());
+        for link in &rendered.hyperlinks {
+            let link_x = content_x.saturating_add(link.col);
+            let max_width = area.x.saturating_add(area.width).saturating_sub(link_x);
+            let width = link.width.min(max_width);
+            if width == 0 {
+                continue;
+            }
+            hyperlink_rects.push((Rect::new(link_x, content_y, width, 1), link.url.clone()));
+        }
+        frame.render_widget(Paragraph::new(rendered.line).block(block), area);
+        // Snapshot link cells after the paint so emit_status_hyperlinks can replay them.
+        let buf = frame.buffer_mut();
+        for (rect, url) in hyperlink_rects {
+            let mut cells = Vec::with_capacity(usize::from(rect.width));
+            for x in rect.x..rect.x.saturating_add(rect.width) {
+                if let Some(cell) = buf.cell((x, rect.y)) {
+                    cells.push(HyperlinkCell {
+                        symbol: cell.symbol().to_owned(),
+                        style: cell.style(),
+                    });
+                }
+            }
+            self.pending_hyperlinks
+                .push(StatusHyperlink { rect, url, cells });
+        }
+    }
+
+    /// Drains and returns the hyperlinks captured during the most recent render.
+    pub(crate) fn take_pending_hyperlinks(&mut self) -> Vec<StatusHyperlink> {
+        std::mem::take(&mut self.pending_hyperlinks)
     }
 }
 
@@ -263,7 +310,7 @@ impl StatusBar {
         Span::styled(format!("{spinner} {label}"), self.theme.info())
     }
 
-    fn render_line(&self, width: u16) -> ratatui::text::Line<'static> {
+    fn render_line(&self, width: u16) -> RenderedStatusLine {
         self.line.render(
             &self.theme,
             &StatusLineState {
@@ -273,7 +320,7 @@ impl StatusBar {
                 usage: self.usage,
                 cwd: &self.cwd,
                 git_branch: self.git_branch.as_deref(),
-                pull_request: self.pull_request,
+                pull_request: self.pull_request.as_ref(),
                 status_span: self.status_span(),
             },
             width,
@@ -310,6 +357,25 @@ mod tests {
             None,
             Some("main".to_owned()),
         )
+    }
+
+    fn pr_bar() -> StatusBar {
+        StatusBar::new(
+            &Theme::default(),
+            vec![StatusLineSegment::PullRequest, StatusLineSegment::RunState],
+            "Opus 4.7".into(),
+            None,
+            String::new(),
+            None,
+            None,
+        )
+    }
+
+    fn pr_state(number: u64) -> git::PullRequest {
+        git::PullRequest {
+            number,
+            url: format!("https://github.com/o/r/pull/{number}"),
+        }
     }
 
     // ── set_title ──
@@ -489,9 +555,6 @@ mod tests {
 
     #[test]
     fn tick_marks_dirty_when_git_branch_changes() {
-        // With no animated status and no minute change, the only path flipping dirty is the git
-        // probe surfacing a new branch. A future `refresh_git_branch` reordering could quietly
-        // drop the dirty bit and leave the rendered branch label stale until the next user input.
         let dir = tempfile::tempdir().unwrap();
         let mut bar = test_bar();
         bar.git_cwd = Some(dir.path().to_path_buf());
@@ -499,6 +562,18 @@ mod tests {
         bar.last_branch_probe = None;
         assert!(bar.tick());
         assert_eq!(bar.git_branch, None);
+    }
+
+    #[test]
+    fn tick_marks_dirty_when_pull_request_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bar = test_bar();
+        bar.git_cwd = Some(dir.path().to_path_buf());
+        bar.track_pull_request = true;
+        bar.pull_request = Some(pr_state(999));
+        bar.last_pr_probe = None;
+        assert!(bar.tick());
+        assert_eq!(bar.pull_request, None);
     }
 
     // ── refresh_git_branch ──
@@ -533,6 +608,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn refresh_git_branch_returns_false_when_branch_unchanged() {
+        // Pre-seed last_branch_probe past the throttle window and pin git_branch to whatever
+        // probe will return (None for a non-repo cwd). A re-probe yields the same value, so the
+        // function must report no change.
+        let dir = tempfile::tempdir().unwrap();
+        let mut bar = test_bar();
+        bar.git_cwd = Some(dir.path().to_path_buf());
+        bar.git_branch = None;
+        bar.last_branch_probe = Some(
+            Instant::now()
+                .checked_sub(GIT_BRANCH_REFRESH_INTERVAL * 2)
+                .unwrap(),
+        );
+        assert!(!bar.refresh_git_branch(Instant::now()));
+        assert_eq!(bar.git_branch, None);
+    }
+
     // ── refresh_pull_request ──
 
     #[test]
@@ -553,10 +646,18 @@ mod tests {
     }
 
     #[test]
+    fn refresh_pull_request_marks_dirty_when_value_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bar = test_bar();
+        bar.track_pull_request = true;
+        bar.git_cwd = Some(dir.path().to_path_buf());
+        bar.pull_request = Some(pr_state(1));
+        assert!(bar.refresh_pull_request(Instant::now()));
+        assert_eq!(bar.pull_request, None);
+    }
+
+    #[test]
     fn refresh_pull_request_arms_throttle_when_probe_returns_none() {
-        // Same throttle invariant as the git branch probe. A non-repo cwd (or a cwd where `gh`
-        // can't find a PR) returns None, but the stamp must still advance so we don't re-shell
-        // every tick.
         let dir = tempfile::tempdir().unwrap();
         let mut bar = test_bar();
         bar.track_pull_request = true;
@@ -817,6 +918,54 @@ mod tests {
         assert!(
             !output.contains('~'),
             "no tildified path should appear: {output:?}",
+        );
+    }
+
+    #[test]
+    fn render_records_pull_request_hyperlink_rect_for_post_flush_emission() {
+        let mut bar = pr_bar();
+        bar.pull_request = Some(pr_state(86));
+        render_status(&mut bar, 40);
+        let links = bar.take_pending_hyperlinks();
+        assert_eq!(
+            links.len(),
+            1,
+            "PR segment reports exactly one link: {links:?}",
+        );
+        let link = &links[0];
+        assert_eq!(link.url, "https://github.com/o/r/pull/86");
+        assert_eq!(link.rect.x, 2);
+        assert_eq!(link.rect.width, 3);
+        let visible: String = link.cells.iter().map(|c| c.symbol.as_str()).collect();
+        assert_eq!(visible, "#86");
+    }
+
+    #[test]
+    fn render_records_no_hyperlinks_when_pull_request_absent() {
+        let mut bar = test_bar();
+        render_status(&mut bar, 40);
+        assert!(bar.take_pending_hyperlinks().is_empty());
+    }
+
+    #[test]
+    fn render_drops_hyperlink_when_segment_clipped_to_zero_width() {
+        let mut bar = pr_bar();
+        bar.pull_request = Some(pr_state(86));
+        render_status(&mut bar, 10);
+        assert!(bar.take_pending_hyperlinks().is_empty());
+    }
+
+    // ── take_pending_hyperlinks ──
+
+    #[test]
+    fn take_pending_hyperlinks_drains_after_first_call() {
+        let mut bar = pr_bar();
+        bar.pull_request = Some(pr_state(86));
+        render_status(&mut bar, 40);
+        assert_eq!(bar.take_pending_hyperlinks().len(), 1);
+        assert!(
+            bar.take_pending_hyperlinks().is_empty(),
+            "second take leaves nothing behind",
         );
     }
 }

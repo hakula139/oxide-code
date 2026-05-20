@@ -24,7 +24,7 @@ use super::components::welcome::{self, WelcomeSnapshot};
 use super::glyphs::{NEWLINE_GLYPH, USER_PROMPT_PREFIX, USER_PROMPT_PREFIX_WIDTH};
 use super::modal::{ModalAction, ModalStack};
 use super::pending_calls::{PendingCall, PendingCalls, result_header};
-use super::terminal::{Tui, draw_sync};
+use super::terminal::{Tui, draw_sync, write_status_hyperlinks};
 use super::theme::Theme;
 use crate::agent::event::{AgentEvent, UserAction};
 use crate::config::{CompactionConfig, Effort, display_auto_compaction};
@@ -206,7 +206,7 @@ impl App {
                     self.chat.handle_event(event);
                 }
             }
-            Event::Mouse(..) => {
+            Event::Mouse(_) => {
                 self.chat.handle_event(event);
             }
             Event::Resize(..) => {}
@@ -662,6 +662,20 @@ impl App {
                 self.draw_frame(frame);
             })?;
         }
+        self.emit_status_hyperlinks(terminal)?;
+        Ok(())
+    }
+
+    /// Replays captured status links as OSC 8 envelopes after the frame flush.
+    fn emit_status_hyperlinks<W: std::io::Write>(
+        &mut self,
+        terminal: &mut ratatui::Terminal<ratatui::prelude::CrosstermBackend<W>>,
+    ) -> Result<()> {
+        let links = self.status_bar.take_pending_hyperlinks();
+        if links.is_empty() {
+            return Ok(());
+        }
+        write_status_hyperlinks(terminal.backend_mut(), &links)?;
         Ok(())
     }
 
@@ -828,7 +842,7 @@ fn format_config_change(
             (Some(req), _, Some(eff)) if req == eff => format!("{head} · effort {eff}."),
             (Some(req), _, Some(eff)) => format!("{head} · effort {eff} (clamped from {req})."),
             (Some(req), _, None) => {
-                format!("{head}. Effort unchanged — model has no effort tier (asked for {req}).")
+                format!("{head}. Effort unchanged: model has no effort tier (asked for {req}).")
             }
             (None, None, None) => format!("{head}."),
             (None, Some(_), None) => format!("{head}. Effort cleared (model has no effort tier)."),
@@ -843,7 +857,7 @@ fn format_config_change(
             (Some(req), Some(eff)) if req == eff => format!("Effort set to {eff}."),
             (Some(req), Some(eff)) => format!("Effort set to {eff} (clamped from {req})."),
             (Some(req), None) => {
-                format!("Effort unchanged — model has no effort tier (asked for {req}).")
+                format!("Effort unchanged: model has no effort tier (asked for {req}).")
             }
             // Slash dispatch keeps this unreachable, but a clear fallback beats a panic.
             (None, _) => "Config unchanged.".to_owned(),
@@ -871,12 +885,13 @@ fn append_sentence(mut message: String, sentence: &str) -> String {
 #[cfg(test)]
 mod tests {
     use std::io::{self, Write};
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
     use ratatui::prelude::CrosstermBackend;
+    use ratatui::style::Color;
     use ratatui::{Terminal, TerminalOptions, Viewport};
     use tokio::sync::mpsc;
 
@@ -1265,15 +1280,20 @@ mod tests {
     }
 
     #[test]
-    fn handle_crossterm_mouse_is_forwarded_to_chat() {
-        // Mouse events reach `ChatView::handle_event` for scroll; the dirty flag must flip.
+    fn handle_crossterm_event_mouse_is_forwarded_to_chat() {
         let (mut app, _rx, _agent_tx) = test_app(None);
+        app.chat.push_system_message(long_chat_block());
+        _ = render_app(&mut app, 60, 10);
+
         app.handle_crossterm_event(&Event::Mouse(MouseEvent {
-            kind: MouseEventKind::ScrollDown,
+            kind: MouseEventKind::ScrollUp,
             column: 0,
             row: 0,
             modifiers: KeyModifiers::NONE,
         }));
+        let text = rendered_text(&mut app, 60, 10);
+
+        assert!(text.contains("Jump to bottom"), "{text}");
         assert!(app.dirty);
     }
 
@@ -2203,6 +2223,27 @@ mod tests {
     }
 
     #[test]
+    fn format_config_change_swap_to_no_tier_model_surfaces_requested_effort() {
+        // Model swap onto a no-tier model with an explicit effort ask. The user needs to know
+        // the requested tier didn't apply, otherwise a silent drop reads as a config change
+        // landing.
+        let s = format_config_change(
+            "claude-haiku-4-5",
+            true,
+            None,
+            None,
+            Some(crate::config::Effort::High),
+            base_compaction(),
+            base_compaction(),
+        );
+        assert_eq!(
+            s,
+            "Switched to Claude Haiku 4.5 (claude-haiku-4-5). \
+             Effort unchanged: model has no effort tier (asked for high).",
+        );
+    }
+
+    #[test]
     fn format_config_change_swap_clears_effort_when_new_model_drops_it() {
         // User had a tier; new model has none. Surface the change so
         // the user knows their effort just disappeared.
@@ -2340,7 +2381,7 @@ mod tests {
         );
         assert_eq!(
             s,
-            "Effort unchanged — model has no effort tier (asked for high)."
+            "Effort unchanged: model has no effort tier (asked for high)."
         );
     }
 
@@ -3100,8 +3141,7 @@ mod tests {
     fn render_repaints_when_chat_content_grows_past_viewport() {
         use std::fmt::Write as _;
 
-        // Content pushed in the same handler tick must land in the viewport on the first frame —
-        // a post-paint re-clamp would arrive too late.
+        // Content pushed in the same handler tick must land before a post-paint re-clamp.
         let (mut app, _rx, _agent_tx) = test_app(None);
         let mut body = String::new();
         for i in 0..40 {
@@ -3112,6 +3152,41 @@ mod tests {
         assert!(
             text.contains("line 39"),
             "tail of overflowing block must be in the viewport after the first render, got:\n{text}",
+        );
+    }
+
+    // ── emit_status_hyperlinks ──
+
+    #[test]
+    fn emit_status_hyperlinks_is_a_noop_when_no_links_pending() {
+        #[derive(Clone)]
+        struct SharedSink(Arc<Mutex<Vec<u8>>>);
+
+        impl std::io::Write for SharedSink {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        let bytes = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let backend = CrosstermBackend::new(SharedSink(bytes.clone()));
+        let mut terminal = Terminal::with_options(
+            backend,
+            TerminalOptions {
+                viewport: Viewport::Fixed(Rect::new(0, 0, 80, 24)),
+            },
+        )
+        .unwrap();
+        app.emit_status_hyperlinks(&mut terminal).unwrap();
+        assert!(
+            bytes.lock().unwrap().is_empty(),
+            "no bytes written for a no-link frame",
         );
     }
 
@@ -3245,11 +3320,6 @@ mod tests {
 
     #[test]
     fn draw_frame_surface_fill_overwrites_unpainted_cells_with_surface_bg() {
-        // Buffer-wide invariant: pre-stain every cell, render, and assert no sentinel survives.
-        // The frame-area surface fill is the only widget that guarantees this for cells no
-        // other widget covers.
-        use ratatui::style::Color;
-
         let (mut app, _rx, _agent_tx) = test_app(None);
         let sentinel = Color::Rgb(254, 0, 254);
         let surface_bg = app.theme.surface().bg.expect("surface slot defines bg");
@@ -3270,28 +3340,10 @@ mod tests {
                 let cell = buffer.cell((x, y)).expect("cell in bounds");
                 assert_eq!(
                     cell.bg, surface_bg,
-                    "cell ({x},{y}) kept the sentinel — surface fill regressed",
+                    "cell ({x},{y}) kept the sentinel, surface fill regressed",
                 );
             }
         }
-    }
-
-    // ── jump_overlay_label ──
-
-    #[test]
-    fn jump_overlay_label_idle_reads_jump_to_bottom() {
-        assert_eq!(jump_overlay_label(0, 60), "Jump to bottom (ctrl+End) ↓");
-    }
-
-    #[test]
-    fn jump_overlay_label_pluralizes_new_message_count() {
-        assert_eq!(jump_overlay_label(1, 60), "1 new message (ctrl+End) ↓");
-        assert_eq!(jump_overlay_label(3, 60), "3 new messages (ctrl+End) ↓");
-    }
-
-    #[test]
-    fn jump_overlay_label_uses_short_form_below_full_width() {
-        assert_eq!(jump_overlay_label(3, 30), "↓ (ctrl+End)");
     }
 
     // ── preview_height ──
@@ -3318,9 +3370,6 @@ mod tests {
 
     #[test]
     fn render_preview_overflow_appends_more_count_row() {
-        // A queue larger than `PREVIEW_VISIBLE` collapses the tail
-        // into a single "+N more" hint so the panel never grows past
-        // the cap; the user keeps the most recent items in view.
         let (mut app, _rx, _agent_tx) = test_app(None);
         app.input.set_enabled(false);
         let extra = 3;
@@ -3333,5 +3382,23 @@ mod tests {
             text.contains(&format!("+{extra} more")),
             "overflow hint must show exact extra count: {text}",
         );
+    }
+
+    // ── jump_overlay_label ──
+
+    #[test]
+    fn jump_overlay_label_idle_reads_jump_to_bottom() {
+        assert_eq!(jump_overlay_label(0, 60), "Jump to bottom (ctrl+End) ↓");
+    }
+
+    #[test]
+    fn jump_overlay_label_pluralizes_new_message_count() {
+        assert_eq!(jump_overlay_label(1, 60), "1 new message (ctrl+End) ↓");
+        assert_eq!(jump_overlay_label(3, 60), "3 new messages (ctrl+End) ↓");
+    }
+
+    #[test]
+    fn jump_overlay_label_uses_short_form_below_full_width() {
+        assert_eq!(jump_overlay_label(3, 30), "↓ (ctrl+End)");
     }
 }

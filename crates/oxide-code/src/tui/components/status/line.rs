@@ -5,17 +5,37 @@ use unicode_width::UnicodeWidthStr;
 use crate::agent::event::UsageSnapshot;
 use crate::config::{Effort, StatusLineSegment};
 use crate::tui::theme::Theme;
+use crate::util::git::PullRequest;
 use crate::util::text::truncate_to_width;
 use crate::util::time::local_offset;
 
 const MAX_CURRENT_DIR_WIDTH: usize = 40;
 const MAX_GIT_BRANCH_WIDTH: usize = 32;
 const MAX_TITLE_WIDTH: usize = 40;
+/// Leading margin (cells) inside the status bar that lines up content with the chat block.
+const STATUS_LINE_MARGIN: u16 = 2;
+const STATUS_LINE_MARGIN_STR: &str = "  ";
+const _: () = assert!(STATUS_LINE_MARGIN_STR.len() == STATUS_LINE_MARGIN as usize);
 
 /// Ordered segment roster for one status-line render.
 #[derive(Debug, Clone)]
 pub(super) struct StatusLine {
     segments: Vec<StatusLineSegment>,
+}
+
+/// A rendered status line plus the column ranges of hyperlinkable segments.
+#[derive(Debug)]
+pub(super) struct RenderedStatusLine {
+    pub(super) line: Line<'static>,
+    pub(super) hyperlinks: Vec<RenderedHyperlink>,
+}
+
+/// Cell range of a hyperlinked segment, measured from the start of the line.
+#[derive(Debug, Clone)]
+pub(super) struct RenderedHyperlink {
+    pub(super) col: u16,
+    pub(super) width: u16,
+    pub(super) url: String,
 }
 
 impl StatusLine {
@@ -28,7 +48,7 @@ impl StatusLine {
         theme: &Theme,
         state: &StatusLineState<'_>,
         width: u16,
-    ) -> Line<'static> {
+    ) -> RenderedStatusLine {
         let sep = theme.separator_span();
         let sep_width = UnicodeWidthStr::width(sep.content.as_ref());
         let mut rendered = self
@@ -38,16 +58,33 @@ impl StatusLine {
             .collect::<Vec<_>>();
         fit_segments(&mut rendered, usize::from(width), sep_width);
 
-        let mut spans = vec![Span::raw("  ")];
-        let mut first = true;
-        for segment in rendered {
-            if !first {
+        // Leading margin lines up content with the chat block underneath.
+        let mut spans = vec![Span::raw(STATUS_LINE_MARGIN_STR)];
+        let mut hyperlinks = Vec::new();
+        let mut col: u16 = STATUS_LINE_MARGIN;
+        let sep_w = u16::try_from(sep_width).unwrap_or(0);
+        for (index, segment) in rendered.iter().enumerate() {
+            if index > 0 {
                 spans.push(sep.clone());
+                col = col.saturating_add(sep_w);
             }
-            spans.push(segment.span);
-            first = false;
+            let span_width = u16::try_from(segment.width()).unwrap_or(0);
+            if let Some(url) = &segment.hyperlink
+                && span_width > 0
+            {
+                hyperlinks.push(RenderedHyperlink {
+                    col,
+                    width: span_width,
+                    url: url.clone(),
+                });
+            }
+            spans.push(segment.span.clone());
+            col = col.saturating_add(span_width);
         }
-        Line::from(spans)
+        RenderedStatusLine {
+            line: Line::from(spans),
+            hyperlinks,
+        }
     }
 
     fn render_segment(
@@ -55,6 +92,7 @@ impl StatusLine {
         theme: &Theme,
         state: &StatusLineState<'_>,
     ) -> Option<RenderedSegment> {
+        let mut hyperlink: Option<String> = None;
         let span = match segment {
             StatusLineSegment::CurrentDir => non_empty_span(
                 truncate_to_width(state.cwd, MAX_CURRENT_DIR_WIDTH),
@@ -66,9 +104,10 @@ impl StatusLine {
                     Self::segment_style(theme, SegmentStyle::Accent),
                 )
             }),
-            StatusLineSegment::PullRequest => state.pull_request.map(|number| {
+            StatusLineSegment::PullRequest => state.pull_request.map(|pr| {
+                hyperlink = Some(pr.url.clone());
                 Span::styled(
-                    format!("#{number}"),
+                    format!("#{}", pr.number),
                     Self::segment_style(theme, SegmentStyle::Accent),
                 )
             }),
@@ -100,7 +139,7 @@ impl StatusLine {
                 Self::segment_style(theme, SegmentStyle::Dim),
             )),
         }?;
-        Some(RenderedSegment::new(segment, span))
+        Some(RenderedSegment::new(segment, span, hyperlink))
     }
 
     fn segment_style(theme: &Theme, style: SegmentStyle) -> ratatui::style::Style {
@@ -121,7 +160,7 @@ pub(super) struct StatusLineState<'a> {
     /// Already tilde-expanded, so the renderer must not substitute `~` again.
     pub(super) cwd: &'a str,
     pub(super) git_branch: Option<&'a str>,
-    pub(super) pull_request: Option<u64>,
+    pub(super) pull_request: Option<&'a PullRequest>,
     /// Pre-rendered run-state segment from the parent component.
     pub(super) status_span: Span<'static>,
 }
@@ -138,11 +177,17 @@ enum SegmentStyle {
 struct RenderedSegment {
     segment: StatusLineSegment,
     span: Span<'static>,
+    /// OSC 8 target for the visible span.
+    hyperlink: Option<String>,
 }
 
 impl RenderedSegment {
-    fn new(segment: StatusLineSegment, span: Span<'static>) -> Self {
-        Self { segment, span }
+    fn new(segment: StatusLineSegment, span: Span<'static>, hyperlink: Option<String>) -> Self {
+        Self {
+            segment,
+            span,
+            hyperlink,
+        }
     }
 
     fn width(&self) -> usize {
@@ -185,8 +230,7 @@ fn lowest_priority_index(segments: &[RenderedSegment]) -> Option<usize> {
         .map(|(index, _)| index)
 }
 
-/// Per-segment "drop me first when narrow" rank. Lower numbers drop earlier, so run state and
-/// model sit at the top because the bar is useless without them.
+/// Per-segment narrow-width rank. Lower numbers drop earlier.
 fn segment_utility(segment: StatusLineSegment) -> u8 {
     match segment {
         StatusLineSegment::ThreadTitle => 0,
@@ -263,7 +307,11 @@ mod tests {
     use super::*;
 
     fn render_text(segments: Vec<StatusLineSegment>, width: u16) -> String {
-        let line = StatusLine::new(segments).render(
+        let pr = PullRequest {
+            number: 86,
+            url: "https://github.com/o/r/pull/86".to_owned(),
+        };
+        let rendered = StatusLine::new(segments).render(
             &Theme::default(),
             &StatusLineState {
                 model: "m",
@@ -276,12 +324,14 @@ mod tests {
                 }),
                 cwd: "~/repo",
                 git_branch: Some("main"),
-                pull_request: Some(86),
+                pull_request: Some(&pr),
                 status_span: Span::raw("Ready"),
             },
             width,
         );
-        line.spans
+        rendered
+            .line
+            .spans
             .into_iter()
             .map(|span| span.content)
             .collect::<String>()
@@ -297,6 +347,13 @@ mod tests {
             && bytes[4].is_ascii_digit()
     }
 
+    fn pr_state(number: u64) -> PullRequest {
+        PullRequest {
+            number,
+            url: format!("https://github.com/o/r/pull/{number}"),
+        }
+    }
+
     // ── StatusLine::render ──
 
     #[test]
@@ -307,7 +364,7 @@ mod tests {
 
     #[test]
     fn render_truncates_single_oversized_segment_to_width() {
-        let line = StatusLine::new(vec![StatusLineSegment::RunState]).render(
+        let rendered = StatusLine::new(vec![StatusLineSegment::RunState]).render(
             &Theme::default(),
             &StatusLineState {
                 model: "m",
@@ -321,7 +378,8 @@ mod tests {
             },
             12,
         );
-        let text = line
+        let text = rendered
+            .line
             .spans
             .into_iter()
             .map(|span| span.content)
@@ -376,10 +434,57 @@ mod tests {
             full.contains("#86") && full.contains("main") && full.ends_with("Ready"),
             "wide width keeps every segment: {full}",
         );
-        // Width 22 forces time (utility 1) to drop before PR (2) and branch (3). Width 14
-        // narrows further until only branch and run state remain.
         assert_eq!(render_text(segments.clone(), 22), "  main │ #86 │ Ready");
         assert_eq!(render_text(segments, 14), "  main │ Ready");
+    }
+
+    #[test]
+    fn render_pull_request_reports_hyperlink_range() {
+        let pr = pr_state(86);
+        let rendered = StatusLine::new(vec![StatusLineSegment::PullRequest]).render(
+            &Theme::default(),
+            &StatusLineState {
+                model: "m",
+                effort: None,
+                title: None,
+                usage: None,
+                cwd: "~/repo",
+                git_branch: None,
+                pull_request: Some(&pr),
+                status_span: Span::raw("Ready"),
+            },
+            80,
+        );
+        assert_eq!(rendered.hyperlinks.len(), 1);
+        assert_eq!(rendered.hyperlinks[0].col, 2);
+        assert_eq!(rendered.hyperlinks[0].width, 3);
+        assert_eq!(rendered.hyperlinks[0].url, pr.url);
+    }
+
+    #[test]
+    fn render_pull_request_reports_no_hyperlink_when_absent() {
+        let rendered = StatusLine::new(vec![StatusLineSegment::PullRequest]).render(
+            &Theme::default(),
+            &StatusLineState {
+                model: "m",
+                effort: None,
+                title: None,
+                usage: None,
+                cwd: "~/repo",
+                git_branch: None,
+                pull_request: None,
+                status_span: Span::raw("Ready"),
+            },
+            80,
+        );
+        let text: String = rendered
+            .line
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(rendered.hyperlinks.is_empty(), "no PR → no hyperlink range");
+        assert!(!text.contains('#'), "no PR number rendered when absent");
     }
 
     // ── context_label ──

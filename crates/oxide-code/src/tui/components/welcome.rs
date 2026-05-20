@@ -18,23 +18,31 @@ type Starter = (&'static str, &'static str);
 
 const STARTER_POOL: &[Starter] = &[
     ("/clear", "reset conversation"),
+    ("/compact", "summarize and trim context"),
+    ("/config", "inspect resolved config"),
     ("/diff", "show git changes"),
     ("/effort", "tune Speed ↔ Intelligence"),
     ("/help", "list commands"),
     ("/init", "author or update AGENTS.md"),
     ("/model", "switch model"),
+    ("/rename", "set session title"),
     ("/resume", "switch to another session"),
     ("/status", "session at a glance"),
     ("/theme", "switch theme"),
 ];
 
 const TIP_POOL: &[&str] = &[
+    "Ctrl/Cmd-click #NN in the status bar to open the PR",
+    "drag chat text to select and copy",
     "ox --continue resumes your last session",
     "ox --list shows recent sessions",
+    "ox -p \"<prompt>\" runs a one-shot prompt headless",
     "press / to browse all commands",
     "press Ctrl+C twice to exit",
     "press Ctrl+D in /resume to delete a session",
+    "press Ctrl+End to jump chat back to bottom",
     "press Enter to send, Shift+Enter for newline",
+    "press Esc to cancel an in-flight response",
 ];
 
 const STARTER_PICK: usize = 3;

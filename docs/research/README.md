@@ -42,9 +42,10 @@ Organized by topic. Each subdirectory mirrors the corresponding directory in [`d
 
 ## Terminal UI
 
-| Document                                             | Description                                                      |
-| ---------------------------------------------------- | ---------------------------------------------------------------- |
-| [Overview](tui/overview.md)                          | Reference TUI patterns, flickering prevention, ecosystem         |
-| [Cancellation and Queued Input](tui/cancellation.md) | Cancel, exit, and input queueing patterns                        |
-| [Status Line](tui/status-line.md)                    | Segment ordering, usage, and billing patterns across coding CLIs |
-| [Welcome Screen](tui/welcome.md)                     | Empty-state surfaces and layout primitives across the three CLIs |
+| Document                                             | Description                                                                              |
+| ---------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| [Overview](tui/overview.md)                          | Reference TUI patterns, flickering prevention, ecosystem                                 |
+| [Cancellation and Queued Input](tui/cancellation.md) | Cancel, exit, and input queueing patterns                                                |
+| [Mouse Interactions](tui/mouse-interactions.md)      | Mouse capture, click handling, OSC 8 / OSC 52 across coding CLIs, xterm.js parser quirks |
+| [Status Line](tui/status-line.md)                    | Segment ordering, usage, and billing patterns across coding CLIs                         |
+| [Welcome Screen](tui/welcome.md)                     | Empty-state surfaces and layout primitives across the three CLIs                         |
