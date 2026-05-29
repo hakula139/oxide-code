@@ -43,6 +43,10 @@ pub(crate) struct Capabilities {
     pub(crate) context_1m: bool,
     /// `output_config.effort` levels accepted upstream. Empty when the model rejects `effort`.
     pub(crate) supported_efforts: &'static [Effort],
+    /// Effort sent when the user picks none. Mirrors Claude Code's per-model stock default, which
+    /// differs from a model's ceiling (Opus 4.7 ships `xhigh`, Opus 4.8 rides the `high` default).
+    /// `None` when the model rejects `effort`.
+    pub(crate) default_effort: Option<Effort>,
     /// `structured-outputs-2025-12-15` beta.
     pub(crate) structured_outputs: bool,
 }
@@ -66,6 +70,7 @@ pub(crate) const MODELS: &[ModelInfo] = &[
                 Effort::Xhigh,
                 Effort::Max,
             ],
+            default_effort: Some(Effort::High),
             structured_outputs: true,
         },
         cost_rates: Some(OPUS_4_5_PLUS_RATES),
@@ -85,6 +90,7 @@ pub(crate) const MODELS: &[ModelInfo] = &[
                 Effort::Xhigh,
                 Effort::Max,
             ],
+            default_effort: Some(Effort::Xhigh),
             structured_outputs: true,
         },
         cost_rates: Some(OPUS_4_5_PLUS_RATES),
@@ -98,6 +104,7 @@ pub(crate) const MODELS: &[ModelInfo] = &[
             context_management: true,
             context_1m: true,
             supported_efforts: &[Effort::Low, Effort::Medium, Effort::High, Effort::Max],
+            default_effort: Some(Effort::High),
             structured_outputs: true,
         },
         cost_rates: Some(OPUS_4_5_PLUS_RATES),
@@ -111,6 +118,7 @@ pub(crate) const MODELS: &[ModelInfo] = &[
             context_management: true,
             context_1m: true,
             supported_efforts: &[Effort::Low, Effort::Medium, Effort::High],
+            default_effort: Some(Effort::High),
             structured_outputs: true,
         },
         cost_rates: Some(SONNET_RATES),
@@ -124,6 +132,7 @@ pub(crate) const MODELS: &[ModelInfo] = &[
             context_management: true,
             context_1m: false,
             supported_efforts: &[],
+            default_effort: None,
             structured_outputs: true,
         },
         cost_rates: Some(OPUS_4_5_PLUS_RATES),
@@ -137,6 +146,7 @@ pub(crate) const MODELS: &[ModelInfo] = &[
             context_management: true,
             context_1m: true,
             supported_efforts: &[],
+            default_effort: None,
             structured_outputs: true,
         },
         cost_rates: Some(SONNET_RATES),
@@ -151,6 +161,7 @@ pub(crate) const MODELS: &[ModelInfo] = &[
             context_management: true,
             context_1m: false,
             supported_efforts: &[],
+            default_effort: None,
             structured_outputs: true,
         },
         cost_rates: Some(HAIKU_RATES),
@@ -177,21 +188,11 @@ impl Capabilities {
             .find(|&level| level <= pick)
     }
 
-    /// Default tier when the user hasn't picked one. `Max` is opt-in, so the implicit ceiling is
-    /// the highest non-`Max` supported level.
-    pub(crate) fn default_effort(self) -> Option<Effort> {
-        self.supported_efforts
-            .iter()
-            .copied()
-            .rev()
-            .find(|&level| level != Effort::Max)
-    }
-
-    /// Clamps `pick` when present, otherwise falls back to [`Self::default_effort`].
+    /// Clamps `pick` when present, otherwise falls back to the model's stock `default_effort`.
     pub(crate) fn resolve_effort(self, pick: Option<Effort>) -> Option<Effort> {
         match pick {
             Some(p) => self.clamp_effort(p),
-            None => self.default_effort(),
+            None => self.default_effort,
         }
     }
 }
@@ -463,22 +464,16 @@ mod tests {
     // ── Capabilities::default_effort ──
 
     #[test]
-    fn default_effort_picks_highest_supported_tier_when_user_has_no_pick() {
-        // Opus 4.7 / 4.8: full ladder → xhigh.
-        for id in ["claude-opus-4-7", "claude-opus-4-8"] {
-            let caps = lookup(id).unwrap().capabilities;
-            assert_eq!(caps.default_effort(), Some(Effort::Xhigh), "{id}");
+    fn default_effort_stays_within_supported_efforts() {
+        // Each row's stock default must be a tier the model accepts (or `None` when it rejects
+        // effort), so resolve_effort never emits a level the API would 400 on.
+        for info in MODELS {
+            let caps = info.capabilities;
+            match caps.default_effort {
+                Some(level) => assert!(caps.accepts_effort(level), "{}", info.id_substr),
+                None => assert!(!caps.has_effort(), "{}", info.id_substr),
+            }
         }
-
-        // Opus 4.6 / Sonnet 4.6: effort but no xhigh → high.
-        for id in ["claude-opus-4-6", "claude-sonnet-4-6"] {
-            let caps = lookup(id).unwrap().capabilities;
-            assert_eq!(caps.default_effort(), Some(Effort::High), "{id}");
-        }
-
-        // No effort tier at all → None.
-        let haiku_4_5 = lookup("claude-haiku-4-5").unwrap().capabilities;
-        assert_eq!(haiku_4_5.default_effort(), None);
     }
 
     // ── Capabilities::resolve_effort ──
@@ -503,11 +498,13 @@ mod tests {
     }
 
     #[test]
-    fn resolve_effort_falls_back_to_model_default_when_pick_is_none() {
+    fn resolve_effort_falls_back_to_per_model_default_when_pick_is_none() {
+        // 4.7 and 4.8 share the full ladder but default differently: 4.7 ships xhigh, 4.8 rides
+        // the high default (mirrors Claude Code).
         let opus_4_7 = lookup("claude-opus-4-7").unwrap().capabilities;
         assert_eq!(opus_4_7.resolve_effort(None), Some(Effort::Xhigh));
-        let sonnet_4_6 = lookup("claude-sonnet-4-6").unwrap().capabilities;
-        assert_eq!(sonnet_4_6.resolve_effort(None), Some(Effort::High));
+        let opus_4_8 = lookup("claude-opus-4-8").unwrap().capabilities;
+        assert_eq!(opus_4_8.resolve_effort(None), Some(Effort::High));
     }
 
     #[test]

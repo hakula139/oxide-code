@@ -879,15 +879,15 @@ mod tests {
 
     #[tokio::test]
     async fn load_defaults_apply_when_no_config_and_no_env() {
-        // Opus 4.8 supports `xhigh`; `effort` / `max_tokens` derive from that ceiling.
+        // Opus 4.8 defaults to `high` (mirroring Claude Code); `max_tokens` derives from that.
         let dir = tempfile::tempdir().unwrap();
         let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
             .await
             .unwrap();
         assert_eq!(config.model, DEFAULT_MODEL);
         assert_eq!(config.base_url, DEFAULT_BASE_URL);
-        assert_eq!(config.max_tokens, 64_000);
-        assert_eq!(config.effort, Some(Effort::Xhigh));
+        assert_eq!(config.max_tokens, 32_000);
+        assert_eq!(config.effort, Some(Effort::High));
         assert_eq!(config.prompt_cache_ttl, PromptCacheTtl::OneHour);
         assert!(config.compaction.auto.enabled);
         assert_eq!(
@@ -1505,13 +1505,11 @@ mod tests {
     // ── Config::load / effort resolution ──
 
     #[tokio::test]
-    async fn load_effort_default_follows_model_ceiling() {
+    async fn load_effort_defaults_to_per_model_value() {
+        // 4.7 ships xhigh, 4.8 rides the high default; no-effort models stay unset.
         for (model, expected) in [
-            ("claude-opus-4-8", Some(Effort::Xhigh)),
             ("claude-opus-4-7", Some(Effort::Xhigh)),
-            ("claude-opus-4-6", Some(Effort::High)),
-            ("claude-sonnet-4-6", Some(Effort::High)),
-            ("claude-sonnet-4-5", None),
+            ("claude-opus-4-8", Some(Effort::High)),
             ("claude-haiku-4-5", None),
         ] {
             let dir = tempfile::tempdir().unwrap();
