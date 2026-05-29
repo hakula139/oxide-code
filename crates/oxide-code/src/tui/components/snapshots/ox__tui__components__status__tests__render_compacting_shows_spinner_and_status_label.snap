@@ -2,5 +2,5 @@
 source: crates/oxide-code/src/tui/components/status.rs
 expression: "render_status(&mut bar, 80)"
 ---
-"  ~/projects/demo │ main │ Opus 4.7 (xhigh) │ ⣷ Compacting · Esc to interrupt   "
+"  ~/projects/demo │ main │ Opus 4.8 (xhigh) │ ⣷ Compacting · Esc to interrupt   "
 "────────────────────────────────────────────────────────────────────────────────"

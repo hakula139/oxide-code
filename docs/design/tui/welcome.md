@@ -21,12 +21,12 @@ The minimal `Welcome to ox / Ask anything to begin.` banner gets users to the pr
 
 ## Layout
 
-At 80 cols with the test fixture (`claude-opus-4-7` plain, `xhigh` effort, OAuth), the render is:
+At 80 cols with the test fixture (`claude-opus-4-8` plain, `xhigh` effort, OAuth), the render is:
 
 ```text
                            ━━━━ oxide-code v0.1.0 ━━━━
 
-                  Claude Opus 4.7 · xhigh effort · OAuth
+                  Claude Opus 4.8 · xhigh effort · OAuth
                   ~/github/oxide-code
 
                   Try one of:

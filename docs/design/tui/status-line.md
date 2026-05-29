@@ -47,7 +47,7 @@ Segment render rules:
 - Use active theme styles; color customization belongs in theme overrides.
 - Join only rendered segments, so omitted segments do not leave extra separators.
 - When the row is too narrow, omit lower-utility segments before truncating the last remaining segment. Run state and model have the highest utility.
-- The `model` and `model-with-effort` segments use a width-tightened label: the `Claude` family prefix is dropped and `(1M context)` becomes `[1M]` (e.g., `Opus 4.7 [1M] (xhigh)`). Other surfaces (welcome screen, prompt environment, error blocks) keep the full `Claude Opus 4.7 (1M context)` label.
+- The `model` and `model-with-effort` segments use a width-tightened label: the `Claude` family prefix is dropped and `(1M context)` becomes `[1M]` (e.g., `Opus 4.8 [1M] (xhigh)`). Other surfaces (welcome screen, prompt environment, error blocks) keep the full `Claude Opus 4.8 (1M context)` label.
 
 ## Usage Data
 

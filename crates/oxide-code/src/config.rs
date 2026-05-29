@@ -17,7 +17,7 @@ use crate::tui::theme::{self, Theme};
 use crate::util::env;
 use crate::util::path::expand_user;
 
-const DEFAULT_MODEL: &str = "claude-opus-4-7[1m]";
+const DEFAULT_MODEL: &str = "claude-opus-4-8[1m]";
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const AUTO_COMPACTION_OUTPUT_RESERVE_CAP: u32 = 20_000;
 const AUTO_COMPACTION_BUFFER_TOKENS: u32 = 13_000;
@@ -879,7 +879,7 @@ mod tests {
 
     #[tokio::test]
     async fn load_defaults_apply_when_no_config_and_no_env() {
-        // Opus 4.7 supports `xhigh`; `effort` / `max_tokens` derive from that ceiling.
+        // Opus 4.8 supports `xhigh`; `effort` / `max_tokens` derive from that ceiling.
         let dir = tempfile::tempdir().unwrap();
         let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
             .await
@@ -1507,6 +1507,7 @@ mod tests {
     #[tokio::test]
     async fn load_effort_default_follows_model_ceiling() {
         for (model, expected) in [
+            ("claude-opus-4-8", Some(Effort::Xhigh)),
             ("claude-opus-4-7", Some(Effort::Xhigh)),
             ("claude-opus-4-6", Some(Effort::High)),
             ("claude-sonnet-4-6", Some(Effort::High)),

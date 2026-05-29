@@ -52,6 +52,25 @@ pub(crate) struct Capabilities {
 /// Most-specific substring first.
 pub(crate) const MODELS: &[ModelInfo] = &[
     ModelInfo {
+        id_substr: "claude-opus-4-8",
+        display_name: "Claude Opus 4.8",
+        cutoff: Some("January 2026"),
+        capabilities: Capabilities {
+            interleaved_thinking: true,
+            context_management: true,
+            context_1m: true,
+            supported_efforts: &[
+                Effort::Low,
+                Effort::Medium,
+                Effort::High,
+                Effort::Xhigh,
+                Effort::Max,
+            ],
+            structured_outputs: true,
+        },
+        cost_rates: Some(OPUS_4_5_PLUS_RATES),
+    },
+    ModelInfo {
         id_substr: "claude-opus-4-7",
         display_name: "Claude Opus 4.7",
         cutoff: Some("January 2026"),
@@ -279,10 +298,10 @@ mod tests {
 
     #[test]
     fn capability_flags_match_upstream_substring_predicates() {
-        // Locks substring-derived flags to upstream's `modelSupports*` predicates. Opus 4.7
-        // postdates the predicate set and is skipped.
+        // Locks substring-derived flags to upstream's `modelSupports*` predicates. Opus 4.7 and
+        // 4.8 postdate the predicate set and are skipped.
         for info in MODELS {
-            if info.id_substr == "claude-opus-4-7" {
+            if matches!(info.id_substr, "claude-opus-4-7" | "claude-opus-4-8") {
                 continue;
             }
             let m = info.id_substr;
@@ -306,15 +325,17 @@ mod tests {
     }
 
     #[test]
-    fn opus_4_7_uniquely_supports_xhigh() {
-        // Upstream predates 4.7; pin so a future "alignment" edit doesn't strip our caps.
-        let caps = lookup("claude-opus-4-7").unwrap().capabilities;
-        assert!(caps.interleaved_thinking);
-        assert!(caps.context_management);
-        assert!(caps.context_1m);
-        assert!(caps.accepts_effort(Effort::Xhigh));
-        assert!(caps.accepts_effort(Effort::Max));
-        assert!(caps.structured_outputs);
+    fn opus_4_7_and_4_8_support_the_full_effort_ladder() {
+        // Upstream predates 4.7 / 4.8; pin so a future "alignment" edit doesn't strip our caps.
+        for id in ["claude-opus-4-7", "claude-opus-4-8"] {
+            let caps = lookup(id).unwrap().capabilities;
+            assert!(caps.interleaved_thinking, "{id}");
+            assert!(caps.context_management, "{id}");
+            assert!(caps.context_1m, "{id}");
+            assert!(caps.accepts_effort(Effort::Xhigh), "{id}");
+            assert!(caps.accepts_effort(Effort::Max), "{id}");
+            assert!(caps.structured_outputs, "{id}");
+        }
 
         for other in [
             "claude-opus-4-6",
@@ -329,14 +350,14 @@ mod tests {
                     .unwrap()
                     .capabilities
                     .accepts_effort(Effort::Xhigh),
-                "{other} must not accept Xhigh — it 400s on non-4.7",
+                "{other} must not accept Xhigh — it 400s on pre-4.7 models",
             );
         }
     }
 
     #[test]
     fn effort_max_is_opus_only() {
-        for supported in ["claude-opus-4-7", "claude-opus-4-6"] {
+        for supported in ["claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6"] {
             assert!(
                 lookup(supported)
                     .unwrap()
@@ -378,6 +399,7 @@ mod tests {
     #[test]
     fn structured_outputs_flag_tracks_upstream_allowlist() {
         for supported in [
+            "claude-opus-4-8",
             "claude-opus-4-7",
             "claude-opus-4-6",
             "claude-opus-4-5",
@@ -456,9 +478,11 @@ mod tests {
 
     #[test]
     fn default_effort_picks_highest_supported_tier_when_user_has_no_pick() {
-        // Opus 4.7: full ladder → xhigh.
-        let opus_4_7 = lookup("claude-opus-4-7").unwrap().capabilities;
-        assert_eq!(opus_4_7.default_effort(), Some(Effort::Xhigh));
+        // Opus 4.7 / 4.8: full ladder → xhigh.
+        for id in ["claude-opus-4-7", "claude-opus-4-8"] {
+            let caps = lookup(id).unwrap().capabilities;
+            assert_eq!(caps.default_effort(), Some(Effort::Xhigh), "{id}");
+        }
 
         // Opus 4.6 / Sonnet 4.6: effort but no xhigh → high.
         for id in ["claude-opus-4-6", "claude-sonnet-4-6"] {
@@ -613,6 +637,7 @@ mod tests {
     #[test]
     fn display_name_known_plain_id_renders_row_label() {
         for (id, expected) in [
+            ("claude-opus-4-8", "Claude Opus 4.8"),
             ("claude-opus-4-7", "Claude Opus 4.7"),
             ("claude-opus-4-6", "Claude Opus 4.6"),
             ("claude-sonnet-4-6", "Claude Sonnet 4.6"),
@@ -649,6 +674,7 @@ mod tests {
     #[test]
     fn short_display_name_strips_claude_family_prefix() {
         for (id, expected) in [
+            ("claude-opus-4-8", "Opus 4.8"),
             ("claude-opus-4-7", "Opus 4.7"),
             ("claude-sonnet-4-6", "Sonnet 4.6"),
             ("claude-haiku-4-5", "Haiku 4.5"),

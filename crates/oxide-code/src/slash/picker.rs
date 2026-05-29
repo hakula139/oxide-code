@@ -22,8 +22,8 @@ use crate::tui::theme::Theme;
 /// Curated roster shown in the picker AND in `/model`'s typed-arg autocomplete; `/model <id>`
 /// still resolves against the full `MODELS` table.
 pub(super) const LISTED_MODELS: &[&str] = &[
-    "claude-opus-4-7",
-    "claude-opus-4-7[1m]",
+    "claude-opus-4-8",
+    "claude-opus-4-8[1m]",
     "claude-sonnet-4-6",
     "claude-sonnet-4-6[1m]",
     "claude-haiku-4-5",
@@ -329,10 +329,10 @@ mod tests {
 
     #[test]
     fn new_positions_cursor_on_active_model() {
-        // `test_session_info` ships claude-opus-4-7 active.
+        // `test_session_info` ships claude-opus-4-8 active.
         let p = picker();
         let row = p.list.selected().expect("active row");
-        assert_eq!(row.id, "claude-opus-4-7");
+        assert_eq!(row.id, "claude-opus-4-8");
         assert!(row.is_active);
     }
 
@@ -366,7 +366,7 @@ mod tests {
 
     #[test]
     fn right_arrow_cycles_effort_within_supported_levels() {
-        // Opus 4.7 supports the full ladder. Pressing Right walks
+        // Opus 4.8 supports the full ladder. Pressing Right walks
         // through it; Left walks back.
         let mut p = picker();
         let initial = p.effort;
@@ -396,7 +396,7 @@ mod tests {
         // — pin it independently. Cycle Left until the effort returns to the initial pick.
         let mut p = picker();
         p.handle_key(&key(KeyCode::Right)); // arm the axis with a known starting tier
-        let initial = p.effort.expect("Opus 4.7 has an effort axis");
+        let initial = p.effort.expect("Opus 4.8 has an effort axis");
         for _ in 0..16 {
             p.handle_key(&key(KeyCode::Left));
             if p.effort == Some(initial) {
@@ -439,7 +439,7 @@ mod tests {
             ModalKey::Submitted(ModalAction::User(UserAction::SwapConfig { model, effort })) => {
                 assert_eq!(
                     model.map(ResolvedModelId::into_inner).as_deref(),
-                    Some("claude-opus-4-7[1m]"),
+                    Some("claude-opus-4-8[1m]"),
                 );
                 assert!(
                     effort.is_none(),
@@ -452,7 +452,7 @@ mod tests {
 
     #[test]
     fn enter_after_effort_change_emits_swap_with_effort_only() {
-        // Opus 4.7 active + High; cycle effort Forward once → Xhigh.
+        // Opus 4.8 active + High; cycle effort Forward once → Xhigh.
         let mut p = picker();
         p.handle_key(&key(KeyCode::Right));
         let outcome = p.handle_key(&key(KeyCode::Enter));
@@ -491,10 +491,10 @@ mod tests {
     #[test]
     fn render_runs_at_typical_widths_without_panicking() {
         let theme = Theme::default();
-        // Two cursor positions: an effort-tier model (Opus 4.7) so the effort row renders, and
+        // Two cursor positions: an effort-tier model (Opus 4.8) so the effort row renders, and
         // a no-tier model (Haiku 4.5) so the hide branch executes.
         for setup in [
-            None,                     // Opus 4.7 — has effort tier
+            None,                     // Opus 4.8 — has effort tier
             Some(KeyCode::Char('5')), // Haiku 4.5 — no effort tier
         ] {
             let mut p = picker();

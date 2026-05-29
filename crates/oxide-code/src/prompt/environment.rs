@@ -253,6 +253,7 @@ mod tests {
     #[test]
     fn knowledge_cutoff_known_models() {
         for (id, expected) in [
+            ("claude-opus-4-8", "January 2026"),
             ("claude-opus-4-7", "January 2026"),
             ("claude-sonnet-4-6", "August 2025"),
             ("claude-opus-4-6", "May 2025"),

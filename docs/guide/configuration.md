@@ -45,7 +45,7 @@ status_line = [
 | `api_key`          | string  | -                           | Anthropic API key (user config only)                      |
 | `base_url`         | string  | `https://api.anthropic.com` | API base URL (user config only)                           |
 | `extra_ca_certs`   | string  | -                           | PEM bundle appended to the trust store (user config only) |
-| `model`            | string  | `claude-opus-4-7[1m]`       | Model to use                                              |
+| `model`            | string  | `claude-opus-4-8[1m]`       | Model to use                                              |
 | `effort`           | string  | per-model (see below)       | Intelligence-vs-latency tier                              |
 | `max_tokens`       | integer | effort-derived (see below)  | Max tokens per response                                   |
 | `max_tool_rounds`  | integer | unset (unbounded)           | Per-turn safety cap on tool rounds                        |
@@ -59,15 +59,15 @@ Per-model defaults when `effort` is unset:
 
 | Model           | Default |
 | --------------- | ------- |
-| Opus 4.7        | `xhigh` |
+| Opus 4.8 / 4.7  | `xhigh` |
 | Opus 4.6        | `high`  |
 | Sonnet 4.6      | `high`  |
 | Everything else | (unset) |
 
-Tier guide (from the [Opus 4.7 migration guide](https://platform.claude.com/docs/en/about-claude/models/migration-guide)):
+Tier guide (from the [Opus 4.8 migration guide](https://platform.claude.com/docs/en/about-claude/models/migration-guide)):
 
 - `max`: Deepest reasoning, Opus-only, with diminishing returns on some tasks.
-- `xhigh`: Recommended default for coding and agentic work on Opus 4.7.
+- `xhigh`: Recommended default for coding and agentic work on Opus 4.7 / 4.8.
 - `high`: Balanced, minimum recommended for intelligence-sensitive tasks.
 - `medium`: Cost-sensitive workloads.
 - `low`: Scoped, latency-sensitive tasks.
@@ -120,7 +120,7 @@ Append `[1m]` to `model` to opt into the 1M-token context window on models that 
 
 ```toml
 [client]
-model = "claude-opus-4-7[1m]"
+model = "claude-opus-4-8[1m]"
 ```
 
 1M access depends on your subscription or gateway, so you have to opt in explicitly. The tag is silently ignored on models without 1M support (e.g. Haiku).
@@ -133,7 +133,7 @@ model = "claude-opus-4-7[1m]"
 | `show_welcome`  | boolean | `true`    | Paint the welcome splash on an empty chat |
 | `status_line`   | array   | see below | Ordered status-line segments              |
 
-On Opus 4.7, `show_thinking = true` opts the request into `thinking.display = "summarized"` so the API streams reasoning text. Otherwise the 4.7 default of `"omitted"` applies and the UI sees nothing until the final answer arrives.
+On Opus 4.7 / 4.8, `show_thinking = true` opts the request into `thinking.display = "summarized"` so the API streams reasoning text. Otherwise the `"omitted"` default applies and the UI sees nothing until the final answer arrives.
 
 `show_welcome = false` blanks the chat region until you submit a prompt, which is useful when piping or screen-recording.
 
@@ -144,7 +144,7 @@ On Opus 4.7, `show_thinking = true` opts the request into `thinking.display = "s
 | `current-dir`       | Tildified working directory                    | At startup      |
 | `git-branch`        | Current branch (omitted on detached HEAD)      | Every 5 s       |
 | `pull-request`      | Open PR as clickable `#86` when OSC 8 works    | Every 60 s      |
-| `model`             | Compact model label (e.g., `Opus 4.7`)         | On `/model`     |
+| `model`             | Compact model label (e.g., `Opus 4.8`)         | On `/model`     |
 | `model-with-effort` | Model label plus the effort tier in parens     | On `/model`     |
 | `context-used`      | `Ctx: 50% (100k/200k)` after the first turn    | Per turn        |
 | `session-cost`      | `Sess: $0.4321` running USD estimate           | Per turn        |
@@ -196,7 +196,7 @@ Environment variables override all config file values.
 | -------------------------------------- | ------------------------------------------ | --------------------------- | ---------------------------- |
 | `ANTHROPIC_API_KEY`                    | `client.api_key`                           | -                           | Anthropic API key            |
 | `ANTHROPIC_BASE_URL`                   | `client.base_url`                          | `https://api.anthropic.com` | API base URL                 |
-| `ANTHROPIC_MODEL`                      | `client.model`                             | `claude-opus-4-7[1m]`       | Model to use                 |
+| `ANTHROPIC_MODEL`                      | `client.model`                             | `claude-opus-4-8[1m]`       | Model to use                 |
 | `ANTHROPIC_EFFORT`                     | `client.effort`                            | per-model                   | Intelligence-vs-latency tier |
 | `ANTHROPIC_MAX_TOKENS`                 | `client.max_tokens`                        | effort-derived              | Max tokens per response      |
 | `OX_EXTRA_CA_CERTS`                    | `client.extra_ca_certs`                    | -                           | Path to a PEM trust bundle   |
