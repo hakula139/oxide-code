@@ -68,16 +68,16 @@ Rows are grouped by role: identity / auth → universal agentic → model-tier-g
 
 Cell legend: `✓` always on, `-` not supported (or stripped), `[1m]` opt-in via the model suffix, `*` caller opt-in (body field + beta ship together, see rules below).
 
-| Beta                              | Opus 4.5 | Opus 4.6+ | Sonnet 4.5 | Sonnet 4.6+ | Haiku 4.5 (agentic) | Haiku 4.5 (one-shot) |
-| --------------------------------- | -------- | --------- | ---------- | ----------- | ------------------- | -------------------- |
-| `claude-code-20250219`            | ✓        | ✓         | ✓          | ✓           | ✓                   | -                    |
-| `oauth-2025-04-20` (OAuth only)   | ✓        | ✓         | ✓          | ✓           | ✓                   | ✓                    |
-| `context-management-2025-06-27`   | ✓        | ✓         | ✓          | ✓           | ✓                   | -                    |
-| `prompt-caching-scope-2026-01-05` | ✓        | ✓         | ✓          | ✓           | ✓                   | -                    |
-| `interleaved-thinking-2025-05-14` | ✓        | ✓         | ✓          | ✓           | -                   | -                    |
-| `context-1m-2025-08-07`           | -        | `[1m]`    | `[1m]`     | `[1m]`      | -                   | -                    |
-| `effort-2025-11-24`               | -        | ✓         | -          | ✓           | -                   | -                    |
-| `structured-outputs-2025-12-15`   | `*`      | `*`       | `*`        | `*`         | `*`                 | `*`                  |
+| Beta                              | Opus 4 (base) | Opus 4.1 / 4.5 | Opus 4.6+ | Sonnet 4 (base) | Sonnet 4.5 | Sonnet 4.6+ | Haiku 4 (base) | Haiku 4.5 (agentic) | Haiku 4.5 (one-shot) |
+| --------------------------------- | ------------- | -------------- | --------- | --------------- | ---------- | ----------- | -------------- | ------------------- | -------------------- |
+| `claude-code-20250219`            | ✓             | ✓              | ✓         | ✓               | ✓          | ✓           | ✓              | ✓                   | -                    |
+| `oauth-2025-04-20` (OAuth only)   | ✓             | ✓              | ✓         | ✓               | ✓          | ✓           | ✓              | ✓                   | ✓                    |
+| `context-management-2025-06-27`   | ✓             | ✓              | ✓         | ✓               | ✓          | ✓           | ✓              | ✓                   | -                    |
+| `prompt-caching-scope-2026-01-05` | ✓             | ✓              | ✓         | ✓               | ✓          | ✓           | ✓              | ✓                   | -                    |
+| `interleaved-thinking-2025-05-14` | ✓             | ✓              | ✓         | ✓               | ✓          | ✓           | -              | -                   | -                    |
+| `context-1m-2025-08-07`           | -             | -              | `[1m]`    | `[1m]`          | `[1m]`     | `[1m]`      | -              | -                   | -                    |
+| `effort-2025-11-24`               | -             | -              | ✓         | -               | -          | ✓           | -              | -                   | -                    |
+| `structured-outputs-2025-12-15`   | -             | `*`            | `*`       | -               | `*`        | `*`         | -              | `*`                 | `*`                  |
 
 Key rules:
 
@@ -88,7 +88,7 @@ Key rules:
 - **`context-1m` is user opt-in via `[1m]`.** Appending `[1m]` to the model string (e.g., `claude-opus-4-8[1m]`) adds the 1M beta and strips the tag before the request hits the wire. Family-based auto-enable would 400 on subscriptions or gateways that do not carry 1M access. Convention matches Claude Code.
 - **`effort` is Opus 4.6+ and Sonnet 4.6+ only.** Opus 4.5 and older, Sonnet 4.5 and older, and all Haiku variants reject it per upstream's `modelSupportsEffort`. Per-model support is encoded in `Capabilities::supported_efforts`; `accepts_effort`, `clamp_effort`, and `default_effort` keep user picks and defaults inside that set.
 - **`effort` and `context-management` betas need a body field.** Sending the header alone is a silent no-op: the request runs at the server default. See [Agentic Request Body Fields](#agentic-request-body-fields) for the matching `output_config.effort` and `context_management.edits` shapes. oxide-code pairs each capability with both its beta and its body field so the two stay in sync.
-- **`structured-outputs` is per-version and caller-opt-in.** The upstream allowlist is Opus 4.5 / 4.6+, Sonnet 4.5 / 4.6+, Haiku 4.5. The beta ships only when a caller supplies an `output_config.format` (today: the AI-title generator). The body field and header are paired on the same capability flag. A schema passed to an unsupported model silently falls back to free-form text, mirroring the `[1m]` × `context_1m` silent-strip pattern.
+- **`structured-outputs` is per-version and caller-opt-in.** The upstream allowlist is Opus 4.1+, Sonnet 4.5+, Haiku 4.5. The beta ships only when a caller supplies an `output_config.format` (today: the AI-title generator). The body field and header are paired on the same capability flag. A schema passed to an unsupported model silently falls back to free-form text, mirroring the `[1m]` × `context_1m` silent-strip pattern.
 - **Unknown model aliases** fall through substring matching on the family stem. `claude-opus-5-x` would miss every row and ship with only the identity / caching betas. Bump the `MODELS` table when a new family lands.
 
 oxide-code gates each beta header on the target model in `client::anthropic::compute_betas`, which consults the ground-truth `Capabilities` flags in `crate::model::MODELS`. New models ship by adding a row to that table, with no beta-logic changes needed.
@@ -238,7 +238,7 @@ GA as of Opus 4.6. Controls the intelligence-vs-latency tier of agentic turns vi
 
 - **The `effort-2025-11-24` beta header is necessary but not sufficient.** oxide-code used to send the header without the body field. The header became a no-op and the model ran at an undefined default.
 - **Per-model ceiling.** `max` is Opus-only, and Sonnet 4.6 400s on it. `xhigh` is Opus 4.7 / 4.8-only. `Capabilities::supported_efforts` encodes the allowed set, and `Capabilities::clamp_effort` clamps a user pick down to the highest supported level at or below it.
-- **Per-model default.** `Capabilities::default_effort` picks the highest non-`max` tier: `xhigh` on Opus 4.7 / 4.8, `high` on Opus 4.6 and Sonnet 4.6, omitted on models without effort. This tracks Claude Code for 4.6 / 4.7; oxide-code keeps `xhigh` as the 4.8 default even though upstream lowered the stock 4.8 default to `high`.
+- **Per-model default.** The raw API default is `high` for every effort-capable model (`high` is equivalent to omitting the field), and `xhigh` is Anthropic's coding recommendation rather than a stock default. Claude Code bumps Opus 4.7 to `xhigh` but rides the `high` default on Opus 4.8; oxide-code mirrors this in `Capabilities::default_effort` (`xhigh` on 4.7, `high` on 4.8 / 4.6 / Sonnet 4.6, omitted on models without effort).
 - **`max_tokens` should scale with effort.** Claude Code uses 64 K on Opus 4.7 at `xhigh`, 32 K on Sonnet 4.6 at `high`. oxide-code's `default_max_tokens(effort)` matches the upper tiers and uses 16 K otherwise when the user hasn't set `ANTHROPIC_MAX_TOKENS` explicitly.
 
 ### `context_management.edits`

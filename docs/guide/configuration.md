@@ -59,12 +59,14 @@ Per-model defaults when `effort` is unset:
 
 | Model           | Default |
 | --------------- | ------- |
-| Opus 4.8 / 4.7  | `xhigh` |
-| Opus 4.6        | `high`  |
+| Opus 4.7        | `xhigh` |
+| Opus 4.8 / 4.6  | `high`  |
 | Sonnet 4.6      | `high`  |
 | Everything else | (unset) |
 
-Tier guide (from the [Opus 4.8 migration guide](https://platform.claude.com/docs/en/about-claude/models/migration-guide)):
+oxide-code mirrors Claude Code here: `high` is the upstream API default, and Opus 4.7 ships `xhigh`. `xhigh` stays the recommended pick for coding on both 4.7 and 4.8, so set it explicitly (or via `/effort`) when you want it on 4.8.
+
+Tier guide (from Anthropic's [effort documentation](https://platform.claude.com/docs/en/build-with-claude/effort)):
 
 - `max`: Deepest reasoning, Opus-only, with diminishing returns on some tasks.
 - `xhigh`: Recommended default for coding and agentic work on Opus 4.7 / 4.8.
