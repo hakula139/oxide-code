@@ -470,7 +470,6 @@ mod tests {
         for dated in [
             "claude-opus-4-7-20260101",
             "claude-opus-4-6-20250805",
-            "claude-opus-4-1-20250805",
             "claude-sonnet-4-5-20250929",
         ] {
             assert_eq!(

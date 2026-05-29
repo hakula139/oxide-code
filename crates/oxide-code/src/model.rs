@@ -7,7 +7,7 @@ use std::borrow::Cow;
 use crate::config::Effort;
 
 pub(crate) use pricing::TokenCostRates;
-use pricing::{HAIKU_RATES, OPUS_4_1_RATES, OPUS_4_5_PLUS_RATES, SONNET_RATES};
+use pricing::{HAIKU_RATES, OPUS_4_5_PLUS_RATES, SONNET_RATES};
 
 // ── ModelInfo ──
 
@@ -154,19 +154,6 @@ pub(crate) const MODELS: &[ModelInfo] = &[
             structured_outputs: true,
         },
         cost_rates: Some(HAIKU_RATES),
-    },
-    ModelInfo {
-        id_substr: "claude-opus-4-1",
-        display_name: "Claude Opus 4.1",
-        cutoff: Some("January 2025"),
-        capabilities: Capabilities {
-            interleaved_thinking: true,
-            context_management: true,
-            context_1m: false,
-            supported_efforts: &[],
-            structured_outputs: true,
-        },
-        cost_rates: Some(OPUS_4_1_RATES),
     },
 ];
 
@@ -343,7 +330,6 @@ mod tests {
             "claude-opus-4-5",
             "claude-sonnet-4-5",
             "claude-haiku-4-5",
-            "claude-opus-4-1",
         ] {
             assert!(
                 !lookup(other)
@@ -564,6 +550,7 @@ mod tests {
             "claude-sonnet-4",
             "claude-haiku-4",
             "claude-opus-4-20250514",
+            "claude-opus-4-1",
             "gpt-4",
         ] {
             assert!(lookup(unknown).is_none(), "{unknown} must not resolve");
@@ -614,20 +601,6 @@ mod tests {
     }
 
     #[test]
-    fn token_cost_rates_for_opus_4_1_uses_older_pricing() {
-        let rates = token_cost_rates_for("claude-opus-4-1").unwrap();
-        let cost = rates.estimate_usd(
-            1_000_000,
-            1_000_000,
-            1_000_000,
-            1_000_000,
-            PromptCacheTtl::FiveMin,
-        );
-
-        assert!((cost - 110.25).abs() < 1e-9);
-    }
-
-    #[test]
     fn token_cost_rates_for_unknown_model_is_absent() {
         assert!(token_cost_rates_for("claude-future-9").is_none());
     }
@@ -644,7 +617,6 @@ mod tests {
             ("claude-opus-4-5", "Claude Opus 4.5"),
             ("claude-sonnet-4-5", "Claude Sonnet 4.5"),
             ("claude-haiku-4-5", "Claude Haiku 4.5"),
-            ("claude-opus-4-1", "Claude Opus 4.1"),
         ] {
             assert_eq!(display_name(id), expected, "{id}");
         }
@@ -678,7 +650,6 @@ mod tests {
             ("claude-opus-4-7", "Opus 4.7"),
             ("claude-sonnet-4-6", "Sonnet 4.6"),
             ("claude-haiku-4-5", "Haiku 4.5"),
-            ("claude-opus-4-1", "Opus 4.1"),
         ] {
             assert_eq!(short_display_name(id), expected, "{id}");
         }
