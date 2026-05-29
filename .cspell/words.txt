@@ -60,6 +60,7 @@ MULT
 nixfmt
 nixos
 nixpkgs
+nohup
 nonewline
 nucleo
 numtide
