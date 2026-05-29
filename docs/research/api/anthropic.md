@@ -68,16 +68,16 @@ Rows are grouped by role: identity / auth → universal agentic → model-tier-g
 
 Cell legend: `✓` always on, `-` not supported (or stripped), `[1m]` opt-in via the model suffix, `*` caller opt-in (body field + beta ship together, see rules below).
 
-| Beta                              | Opus 4 (base) | Opus 4.5 | Opus 4.6+ | Sonnet 4 (base) | Sonnet 4.5 | Sonnet 4.6+ | Haiku 4 (base) | Haiku 4.5 (agentic) | Haiku 4.5 (one-shot) |
-| --------------------------------- | ------------- | -------- | --------- | --------------- | ---------- | ----------- | -------------- | ------------------- | -------------------- |
-| `claude-code-20250219`            | ✓             | ✓        | ✓         | ✓               | ✓          | ✓           | ✓              | ✓                   | -                    |
-| `oauth-2025-04-20` (OAuth only)   | ✓             | ✓        | ✓         | ✓               | ✓          | ✓           | ✓              | ✓                   | ✓                    |
-| `context-management-2025-06-27`   | ✓             | ✓        | ✓         | ✓               | ✓          | ✓           | ✓              | ✓                   | -                    |
-| `prompt-caching-scope-2026-01-05` | ✓             | ✓        | ✓         | ✓               | ✓          | ✓           | ✓              | ✓                   | -                    |
-| `interleaved-thinking-2025-05-14` | ✓             | ✓        | ✓         | ✓               | ✓          | ✓           | -              | -                   | -                    |
-| `context-1m-2025-08-07`           | -             | -        | `[1m]`    | `[1m]`          | `[1m]`     | `[1m]`      | -              | -                   | -                    |
-| `effort-2025-11-24`               | -             | -        | ✓         | -               | -          | ✓           | -              | -                   | -                    |
-| `structured-outputs-2025-12-15`   | -             | `*`      | `*`       | -               | `*`        | `*`         | -              | `*`                 | `*`                  |
+| Beta                              | Opus 4.5 | Opus 4.6+ | Sonnet 4.5 | Sonnet 4.6+ | Haiku 4.5 (agentic) | Haiku 4.5 (one-shot) |
+| --------------------------------- | -------- | --------- | ---------- | ----------- | ------------------- | -------------------- |
+| `claude-code-20250219`            | ✓        | ✓         | ✓          | ✓           | ✓                   | -                    |
+| `oauth-2025-04-20` (OAuth only)   | ✓        | ✓         | ✓          | ✓           | ✓                   | ✓                    |
+| `context-management-2025-06-27`   | ✓        | ✓         | ✓          | ✓           | ✓                   | -                    |
+| `prompt-caching-scope-2026-01-05` | ✓        | ✓         | ✓          | ✓           | ✓                   | -                    |
+| `interleaved-thinking-2025-05-14` | ✓        | ✓         | ✓          | ✓           | -                   | -                    |
+| `context-1m-2025-08-07`           | -        | `[1m]`    | `[1m]`     | `[1m]`      | -                   | -                    |
+| `effort-2025-11-24`               | -        | ✓         | -          | ✓           | -                   | -                    |
+| `structured-outputs-2025-12-15`   | `*`      | `*`       | `*`        | `*`         | `*`                 | `*`                  |
 
 Key rules:
 
