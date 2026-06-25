@@ -36,9 +36,10 @@ Organized by topic. Each subdirectory mirrors the corresponding directory in [`d
 
 ## Tools
 
-| Document                                 | Description                                    |
-| ---------------------------------------- | ---------------------------------------------- |
-| [Output Truncation](tools/truncation.md) | Per-tool vs central caps, spillover strategies |
+| Document                                 | Description                                            |
+| ---------------------------------------- | ------------------------------------------------------ |
+| [Output Truncation](tools/truncation.md) | Per-tool vs central caps, spillover strategies         |
+| [Permissions](tools/permissions.md)      | Tool approval modes, rule grammar, decision precedence |
 
 ## Terminal UI
 
