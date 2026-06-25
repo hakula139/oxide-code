@@ -92,9 +92,12 @@ const DANGEROUS_DEFAULTS: &[&str] = &[
 
 /// What a tool call acts on, matched against rule specifiers. `bash` carries its command string;
 /// path tools carry the canonicalized absolute path plus the cwd-relative path when the target sits
-/// inside the working directory (the same value drives the inside-cwd allow at step 3).
+/// inside the working directory (the same value drives the inside-cwd allow at step 3). `None` is a
+/// tool with no extractable specifier (a read-only tool, or a call missing its path argument): only
+/// a tool-wide rule can match it.
 #[derive(Debug, Clone)]
 pub(crate) enum Target<'a> {
+    None,
     Command(&'a str),
     Path {
         canonical: &'a str,
@@ -113,6 +116,56 @@ impl Target<'_> {
                 ..
             }
         )
+    }
+}
+
+/// Owned form of [`Target`] produced by [`crate::tool::Tool::gate_target`]. A tool extracts the
+/// command or canonicalized path from its input once; the borrowing [`Self::as_target`] then feeds
+/// the allocation-free matcher. Owned because a canonicalized path is not a substring of the input.
+#[derive(Debug, Clone, Default)]
+pub(crate) enum GateTarget {
+    /// No extractable specifier; only a tool-wide rule matches.
+    #[default]
+    None,
+    Command(String),
+    Path {
+        canonical: String,
+        relative: Option<String>,
+    },
+}
+
+impl GateTarget {
+    /// Builds a path target by resolving `path` against `cwd`. An existing path is canonicalized
+    /// (resolving symlinks and `..`); a path that cannot canonicalize yet (e.g. a brand-new file)
+    /// falls back to a lexical normalization that still resolves `..`, so a `../escape` traversal
+    /// can never masquerade as inside-cwd. The relative component is set only when the resolved
+    /// path stays inside `cwd`, which drives the inside-cwd auto-allow.
+    pub(crate) fn for_path(path: &str, cwd: &std::path::Path) -> Self {
+        let joined = cwd.join(path);
+        let canonical =
+            std::fs::canonicalize(&joined).unwrap_or_else(|_| lexical_normalize(&joined));
+        let relative = canonical
+            .strip_prefix(cwd)
+            .ok()
+            .map(|r| r.to_string_lossy().into_owned());
+        Self::Path {
+            canonical: canonical.to_string_lossy().into_owned(),
+            relative,
+        }
+    }
+
+    pub(crate) fn as_target(&self) -> Target<'_> {
+        match self {
+            Self::None => Target::None,
+            Self::Command(cmd) => Target::Command(cmd),
+            Self::Path {
+                canonical,
+                relative,
+            } => Target::Path {
+                canonical,
+                relative: relative.as_deref(),
+            },
+        }
     }
 }
 
@@ -206,6 +259,25 @@ pub(crate) fn parse_rules(raw: &[impl AsRef<str>]) -> Result<Vec<Rule>> {
     raw.iter().map(|s| Rule::parse(s.as_ref())).collect()
 }
 
+/// Resolves `.` and `..` components in `path` without touching the filesystem, used when a target
+/// path does not yet exist so [`std::fs::canonicalize`] cannot. A leading `..` that would escape
+/// the root is dropped, matching how the OS clamps traversal at `/`.
+fn lexical_normalize(path: &std::path::Path) -> std::path::PathBuf {
+    use std::path::Component;
+
+    let mut out = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                _ = out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,6 +321,53 @@ mod tests {
     fn mode_rejects_unknown_value() {
         let err = "bypass".parse::<Mode>().unwrap_err().to_string();
         assert!(err.contains("invalid permission mode"), "got: {err}");
+    }
+
+    // ── GateTarget::for_path ──
+
+    #[test]
+    fn for_path_inside_cwd_sets_relative_component() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = std::fs::canonicalize(dir.path()).unwrap();
+        std::fs::write(cwd.join("a.rs"), "x").unwrap();
+
+        let GateTarget::Path {
+            canonical,
+            relative,
+        } = GateTarget::for_path("a.rs", &cwd)
+        else {
+            panic!("expected a path target");
+        };
+        assert!(canonical.ends_with("a.rs"), "canonical: {canonical}");
+        assert_eq!(relative.as_deref(), Some("a.rs"));
+    }
+
+    #[test]
+    fn for_path_brand_new_file_still_resolves_relative() {
+        // A not-yet-created file under cwd can't canonicalize, but the lexical join keeps it
+        // inside-cwd so the step-3 allow still applies to new-file writes.
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = std::fs::canonicalize(dir.path()).unwrap();
+        let target = GateTarget::for_path("new/file.rs", &cwd);
+        assert!(target.as_target().is_inside_cwd());
+    }
+
+    #[test]
+    fn for_path_outside_cwd_has_no_relative_component() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = std::fs::canonicalize(dir.path()).unwrap();
+        let target = GateTarget::for_path("/etc/hosts", &cwd);
+        assert!(!target.as_target().is_inside_cwd());
+    }
+
+    #[test]
+    fn for_path_escaping_parent_traversal_is_not_inside_cwd() {
+        // `..` must resolve before the inside-cwd test so a traversal can't smuggle an outside
+        // path past the step-3 allow.
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = std::fs::canonicalize(dir.path()).unwrap();
+        let target = GateTarget::for_path("../escape.rs", &cwd);
+        assert!(!target.as_target().is_inside_cwd());
     }
 
     // ── Policy::decide (precedence) ──

@@ -34,6 +34,16 @@ impl Tool for BashTool {
         super::RiskClass::Execute
     }
 
+    fn gate_target(
+        &self,
+        input: &serde_json::Value,
+        _cwd: &std::path::Path,
+    ) -> crate::permission::GateTarget {
+        extract_input_field(input, "command")
+            .map(|c| crate::permission::GateTarget::Command(c.to_owned()))
+            .unwrap_or_default()
+    }
+
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",

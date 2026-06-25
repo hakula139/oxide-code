@@ -186,6 +186,14 @@ pub(crate) trait Tool: Send + Sync {
     /// new tool cannot silently inherit a permissive class.
     fn risk_class(&self) -> RiskClass;
 
+    /// Extracts what the permission gate matches rules against from this call's `input`, resolving
+    /// any path against `cwd`. Defaults to [`GateTarget::None`] (only a tool-wide rule matches);
+    /// `bash` returns its command and the path tools their canonicalized target.
+    fn gate_target(&self, input: &serde_json::Value, cwd: &Path) -> crate::permission::GateTarget {
+        _ = (input, cwd);
+        crate::permission::GateTarget::None
+    }
+
     fn icon(&self) -> &'static str {
         "⟡"
     }
