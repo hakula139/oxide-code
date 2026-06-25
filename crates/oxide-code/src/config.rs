@@ -60,6 +60,7 @@ pub(crate) struct ConfigSnapshot {
     pub(crate) max_tool_rounds: Option<u32>,
     pub(crate) prompt_cache_ttl: PromptCacheTtl,
     pub(crate) compaction: CompactionConfig,
+    pub(crate) permission_mode: crate::permission::Mode,
     pub(crate) show_thinking: bool,
     pub(crate) show_welcome: bool,
     pub(crate) status_line: Vec<StatusLineSegment>,
@@ -350,6 +351,7 @@ pub(crate) struct Config {
     pub(crate) max_tool_rounds: Option<u32>,
     pub(crate) prompt_cache_ttl: PromptCacheTtl,
     pub(crate) compaction: CompactionConfig,
+    pub(crate) permission: crate::permission::Policy,
     pub(crate) thinking: Option<ThinkingConfig>,
     pub(crate) show_thinking: bool,
     pub(crate) show_welcome: bool,
@@ -456,6 +458,8 @@ impl Config {
 
         let compaction = resolve_compaction(client.compaction, &model, max_tokens)?;
 
+        let permission = resolve_permission(fc.permission)?;
+
         let theme_name = theme_config
             .base
             .clone()
@@ -475,6 +479,7 @@ impl Config {
             max_tool_rounds,
             prompt_cache_ttl,
             compaction,
+            permission,
             thinking,
             show_thinking,
             show_welcome,
@@ -496,6 +501,7 @@ impl Config {
             max_tool_rounds: self.max_tool_rounds,
             prompt_cache_ttl: self.prompt_cache_ttl,
             compaction: self.compaction,
+            permission_mode: self.permission.mode(),
             show_thinking: self.show_thinking,
             show_welcome: self.show_welcome,
             status_line: self.status_line.clone(),
@@ -585,6 +591,25 @@ fn resolve_compaction(
         AutoCompactionPolicy::Disabled
     };
     resolve_compaction_policy(policy, model, max_tokens)
+}
+
+/// Resolves the permission policy from the merged file config plus the `OX_PERMISSION_MODE`
+/// override. The env mode wins over the file mode with the empty-is-absent and parse-error-
+/// propagates behavior `effort` uses, so a typo fails loudly rather than defaulting permissive.
+/// Allow / deny rule strings are parsed here so a malformed rule surfaces at load.
+fn resolve_permission(
+    file: Option<file::PermissionFileConfig>,
+) -> Result<crate::permission::Policy> {
+    let file = file.unwrap_or_default();
+
+    let mode = match env::string("OX_PERMISSION_MODE") {
+        Some(raw) => raw.parse().context("OX_PERMISSION_MODE")?,
+        None => file.mode.unwrap_or_default(),
+    };
+
+    let allow = file.allow.unwrap_or_default();
+    let deny = file.deny.unwrap_or_default();
+    crate::permission::Policy::resolve(mode, &allow, &deny)
 }
 
 fn resolve_compaction_policy(
@@ -833,6 +858,7 @@ mod tests {
         "OX_SHOW_WELCOME",
         "OX_STATUS_LINE",
         "OX_PROMPT_CACHE_TTL",
+        "OX_PERMISSION_MODE",
         "XDG_CONFIG_HOME",
     ];
 
@@ -902,6 +928,7 @@ mod tests {
         assert_eq!(config.status_line, StatusLineSegment::DEFAULT);
         assert!(matches!(config.auth, Auth::ApiKey(k) if k == "sk-default"));
         assert_eq!(config.theme_name, DEFAULT_THEME);
+        assert_eq!(config.permission.mode(), crate::permission::Mode::Auto);
     }
 
     #[tokio::test]
@@ -1326,6 +1353,54 @@ mod tests {
         assert_eq!(config.compaction.auto.threshold_tokens, None);
     }
 
+    // ── resolve_permission ──
+
+    #[tokio::test]
+    async fn load_permission_mode_env_beats_file() {
+        let dir = tempfile::tempdir().unwrap();
+        write_user_config(
+            dir.path(),
+            indoc::indoc! {r#"
+                [permission]
+                mode = "plan"
+            "#},
+        );
+        let vars = env_vars(vec![xdg(&dir), env("OX_PERMISSION_MODE", "yolo")]);
+        let config = temp_env::async_with_vars(vars, Config::load())
+            .await
+            .unwrap();
+        assert_eq!(config.permission.mode(), crate::permission::Mode::Yolo);
+    }
+
+    #[tokio::test]
+    async fn load_permission_invalid_mode_env_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let vars = env_vars(vec![xdg(&dir), env("OX_PERMISSION_MODE", "bypass")]);
+        let err = temp_env::async_with_vars(vars, Config::load())
+            .await
+            .expect_err("invalid mode must propagate");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("OX_PERMISSION_MODE"), "{msg}");
+        assert!(msg.contains("invalid permission mode"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn load_permission_invalid_rule_in_file_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        write_user_config(
+            dir.path(),
+            indoc::indoc! {r#"
+                [permission]
+                allow = ["edit(src/**/[)"]
+            "#},
+        );
+        let vars = env_vars(vec![xdg(&dir)]);
+        let err = temp_env::async_with_vars(vars, Config::load())
+            .await
+            .expect_err("malformed rule must propagate");
+        assert!(format!("{err:#}").contains("invalid path glob"));
+    }
+
     #[tokio::test]
     async fn load_invalid_max_tokens_env_errors() {
         let dir = tempfile::tempdir().unwrap();
@@ -1686,6 +1761,8 @@ mod tests {
                 enabled: true,
                 threshold_tokens: Some(42),
             }),
+            permission: crate::permission::Policy::resolve(crate::permission::Mode::Plan, &[], &[])
+                .unwrap(),
             thinking: None,
             show_thinking: true,
             show_welcome: false,
@@ -1709,6 +1786,7 @@ mod tests {
         assert_eq!(snap.max_tool_rounds, Some(100));
         assert_eq!(snap.prompt_cache_ttl, PromptCacheTtl::FiveMin);
         assert_eq!(snap.compaction.auto.threshold_tokens, Some(42));
+        assert_eq!(snap.permission_mode, crate::permission::Mode::Plan);
         assert!(snap.show_thinking);
         assert!(!snap.show_welcome);
         assert_eq!(

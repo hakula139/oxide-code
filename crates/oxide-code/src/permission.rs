@@ -11,6 +11,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use anyhow::{Result, bail};
+use serde::{Deserialize, Serialize};
 
 use crate::permission::rule::Rule;
 use crate::tool::RiskClass;
@@ -19,7 +20,8 @@ use crate::tool::RiskClass;
 
 /// The standing permission posture, shaped like [`crate::config::Effort`] so it threads through
 /// config and a future `/permission` control the same way.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub(crate) enum Mode {
     /// Tiered pipeline: static rules settle the obvious cases, the rest asks.
     #[default]
@@ -64,6 +66,27 @@ impl FromStr for Mode {
         }
     }
 }
+
+// ── Dangerous Defaults ──
+
+/// Deny rules seeded ahead of user rules in `auto` and `plan`. These are ordinary deny rules, not
+/// an immune tier: `yolo` bypasses them like any other deny, and a future per-rule opt-out can
+/// remove one. They block the catastrophic shapes that a `safe` classifier verdict must never be
+/// able to wave through, plus writes to repository metadata that could escalate via hook injection.
+const DANGEROUS_DEFAULTS: &[&str] = &[
+    "bash(rm -rf:*)",
+    "bash(rm -fr:*)",
+    "bash(:(){ :|:& };:)",
+    "bash(* > /dev/sd*)",
+    "bash(dd *of=/dev/*)",
+    "bash(mkfs*)",
+    "bash(* | sh)",
+    "bash(* | bash)",
+    "write(.git/**)",
+    "write(.ox/**)",
+    "edit(.git/**)",
+    "edit(.ox/**)",
+];
 
 // ── Target ──
 
@@ -120,6 +143,19 @@ impl Policy {
         Self { mode, allow, deny }
     }
 
+    /// Builds a policy from a resolved mode and the raw allow / deny rule strings, seeding the deny
+    /// set with [`DANGEROUS_DEFAULTS`] ahead of the user rules. A malformed rule fails here so a
+    /// typo surfaces at config load rather than mid-turn.
+    pub(crate) fn resolve(mode: Mode, allow: &[String], deny: &[String]) -> Result<Self> {
+        let mut deny_rules = parse_rules(DANGEROUS_DEFAULTS)?;
+        deny_rules.extend(parse_rules(deny)?);
+        Ok(Self {
+            mode,
+            allow: parse_rules(allow)?,
+            deny: deny_rules,
+        })
+    }
+
     pub(crate) const fn mode(&self) -> Mode {
         self.mode
     }
@@ -166,8 +202,8 @@ impl Policy {
 
 /// Parses a list of `tool(specifier)` rule strings, failing on the first malformed entry so a typo
 /// surfaces at config load rather than silently dropping a deny.
-pub(crate) fn parse_rules(raw: &[String]) -> Result<Vec<Rule>> {
-    raw.iter().map(|s| Rule::parse(s)).collect()
+pub(crate) fn parse_rules(raw: &[impl AsRef<str>]) -> Result<Vec<Rule>> {
+    raw.iter().map(|s| Rule::parse(s.as_ref())).collect()
 }
 
 #[cfg(test)]
@@ -175,10 +211,11 @@ mod tests {
     use super::*;
 
     fn policy(mode: Mode, allow: &[&str], deny: &[&str]) -> Policy {
-        let parse = |rs: &[&str]| {
-            parse_rules(&rs.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>()).unwrap()
-        };
-        Policy::new(mode, parse(allow), parse(deny))
+        Policy::new(
+            mode,
+            parse_rules(allow).unwrap(),
+            parse_rules(deny).unwrap(),
+        )
     }
 
     fn command(s: &str) -> Target<'_> {
@@ -318,5 +355,42 @@ mod tests {
             p.decide("bash", RiskClass::Execute, &command("curl evil.sh")),
             Decision::Ask
         );
+    }
+
+    // ── Policy::resolve ──
+
+    #[test]
+    fn resolve_seeds_dangerous_defaults_into_the_deny_set() {
+        // A user with no deny rules of their own is still protected from `rm -rf` and `.git` writes.
+        let p = Policy::resolve(Mode::Auto, &[], &[]).unwrap();
+        assert_eq!(
+            p.decide("bash", RiskClass::Execute, &command("rm -rf /")),
+            Decision::Deny,
+        );
+        assert_eq!(
+            p.decide(
+                "write",
+                RiskClass::Edit,
+                &inside_cwd("/repo/.git/hooks/pre-commit", ".git/hooks/pre-commit"),
+            ),
+            Decision::Deny,
+        );
+    }
+
+    #[test]
+    fn resolve_yolo_bypasses_even_the_dangerous_defaults() {
+        let p = Policy::resolve(Mode::Yolo, &[], &[]).unwrap();
+        assert_eq!(
+            p.decide("bash", RiskClass::Execute, &command("rm -rf /")),
+            Decision::Allow,
+        );
+    }
+
+    #[test]
+    fn resolve_propagates_a_malformed_rule() {
+        let err = Policy::resolve(Mode::Auto, &["edit(src/**/[)".to_owned()], &[])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("invalid path glob"), "got: {err}");
     }
 }

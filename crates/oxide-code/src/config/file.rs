@@ -21,6 +21,7 @@ const PROJECT_CONFIG_FILENAME: &str = "ox.toml";
 #[serde(deny_unknown_fields)]
 pub(super) struct FileConfig {
     pub(super) client: Option<ClientConfig>,
+    pub(super) permission: Option<PermissionFileConfig>,
     pub(super) tui: Option<TuiConfig>,
 }
 
@@ -51,6 +52,17 @@ pub(super) struct CompactionConfig {
     pub(super) threshold_percent: Option<u8>,
 }
 
+/// `[permission]` block. `mode` and `allow` are user / env-only, so a checked-in project `ox.toml`
+/// setting either is rejected by [`reject_project_permissions`]; `deny` append-merges across layers
+/// so a project can only tighten. `allow` and `deny` are raw rule strings, parsed in `Config::load`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct PermissionFileConfig {
+    pub(super) mode: Option<crate::permission::Mode>,
+    pub(super) allow: Option<Vec<String>>,
+    pub(super) deny: Option<Vec<String>>,
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct TuiConfig {
@@ -74,6 +86,11 @@ impl FileConfig {
     fn merge(self, other: Self) -> Self {
         Self {
             client: merge_section(self.client, other.client, ClientConfig::merge),
+            permission: merge_section(
+                self.permission,
+                other.permission,
+                PermissionFileConfig::merge,
+            ),
             tui: merge_section(self.tui, other.tui, TuiConfig::merge),
         }
     }
@@ -91,6 +108,19 @@ impl ClientConfig {
             max_tool_rounds: other.max_tool_rounds.or(self.max_tool_rounds),
             prompt_cache_ttl: other.prompt_cache_ttl.or(self.prompt_cache_ttl),
             compaction: merge_section(self.compaction, other.compaction, CompactionConfig::merge),
+        }
+    }
+}
+
+impl PermissionFileConfig {
+    /// `mode`: other wins. `allow` / `deny`: append `other` onto `self` so a higher-precedence
+    /// layer widens rather than replaces. Project trust is enforced before merge in
+    /// [`reject_project_permissions`], so by here every layer is allowed to contribute.
+    fn merge(self, other: Self) -> Self {
+        Self {
+            mode: other.mode.or(self.mode),
+            allow: append_rules(self.allow, other.allow),
+            deny: append_rules(self.deny, other.deny),
         }
     }
 }
@@ -148,6 +178,19 @@ fn merge_section<T>(base: Option<T>, other: Option<T>, merge: fn(T, T) -> T) -> 
     }
 }
 
+/// Concatenates two optional rule lists, `base` first. `None` is the empty list, so the result is
+/// `Some` whenever either layer set rules. Append (not replace) keeps a higher-precedence layer
+/// widening rather than discarding the lower layer's rules.
+fn append_rules(base: Option<Vec<String>>, other: Option<Vec<String>>) -> Option<Vec<String>> {
+    match (base, other) {
+        (Some(mut b), Some(o)) => {
+            b.extend(o);
+            Some(b)
+        }
+        (base, other) => other.or(base),
+    }
+}
+
 // ── Loading ──
 
 /// Loads + merges user and project TOML. Project config wins for non-secret fields; credential
@@ -173,6 +216,7 @@ fn load_project_file(path: &Path) -> Result<Option<FileConfig>> {
     let config = load_file(path)?;
     if let Some(config) = &config {
         reject_project_secrets(config, path)?;
+        reject_project_permissions(config, path)?;
     }
     Ok(config)
 }
@@ -198,6 +242,33 @@ fn reject_project_secrets(config: &FileConfig, path: &Path) -> Result<()> {
 
     bail!(
         "{} cannot set {}; move credential and endpoint settings to ~/.config/ox/config.toml or environment variables",
+        path.display(),
+        blocked.join(", "),
+    )
+}
+
+/// A project `ox.toml` is untrusted, so it may tighten permissions but never widen them. `mode` and
+/// `allow` are user / env-only; only `deny` (which can only restrict) is honored from a project
+/// file. Setting either blocked field is a hard error rather than a silent drop so the user learns
+/// the rule did not take effect.
+fn reject_project_permissions(config: &FileConfig, path: &Path) -> Result<()> {
+    let Some(permission) = &config.permission else {
+        return Ok(());
+    };
+
+    let mut blocked = Vec::new();
+    if permission.mode.is_some() {
+        blocked.push("permission.mode");
+    }
+    if permission.allow.is_some() {
+        blocked.push("permission.allow");
+    }
+    if blocked.is_empty() {
+        return Ok(());
+    }
+
+    bail!(
+        "{} cannot set {}; a project file may only add permission.deny. Move mode and allow rules to ~/.config/ox/config.toml or environment variables",
         path.display(),
         blocked.join(", "),
     )
@@ -274,6 +345,7 @@ mod tests {
                     threshold_percent: None,
                 }),
             }),
+            permission: None,
             tui: Some(TuiConfig {
                 show_thinking: Some(false),
                 show_welcome: None,
@@ -297,6 +369,7 @@ mod tests {
                     threshold_percent: Some(40),
                 }),
             }),
+            permission: None,
             tui: Some(TuiConfig {
                 show_thinking: Some(true),
                 show_welcome: None,
@@ -368,6 +441,7 @@ mod tests {
                     threshold_percent: None,
                 }),
             }),
+            permission: None,
             tui: Some(TuiConfig {
                 show_thinking: Some(true),
                 show_welcome: None,
@@ -407,10 +481,12 @@ mod tests {
                 model: Some("base-model".to_owned()),
                 ..Default::default()
             }),
+            permission: None,
             tui: None,
         };
         let other = FileConfig {
             client: None,
+            permission: None,
             tui: Some(TuiConfig {
                 show_thinking: Some(true),
                 show_welcome: None,
@@ -489,6 +565,42 @@ mod tests {
         assert!(map.contains_key("error"));
     }
 
+    // ── PermissionFileConfig::merge ──
+
+    fn permission_with(mode: Option<&str>, allow: &[&str], deny: &[&str]) -> PermissionFileConfig {
+        let to_vec =
+            |rs: &[&str]| (!rs.is_empty()).then(|| rs.iter().map(|s| (*s).to_owned()).collect());
+        PermissionFileConfig {
+            mode: mode.map(|m| m.parse().unwrap()),
+            allow: to_vec(allow),
+            deny: to_vec(deny),
+        }
+    }
+
+    #[test]
+    fn permission_merge_appends_rules_rather_than_replacing() {
+        // The append, not replace, contract: a higher-precedence layer widens the lower one's
+        // deny list rather than discarding it.
+        let base = permission_with(None, &["bash(ls)"], &["bash(rm:*)"]);
+        let other = permission_with(None, &["bash(cat:*)"], &["bash(curl:*)"]);
+        let merged = base.merge(other);
+        assert_eq!(
+            merged.allow.as_deref(),
+            Some(&["bash(ls)".to_owned(), "bash(cat:*)".to_owned()][..]),
+        );
+        assert_eq!(
+            merged.deny.as_deref(),
+            Some(&["bash(rm:*)".to_owned(), "bash(curl:*)".to_owned()][..]),
+        );
+    }
+
+    #[test]
+    fn permission_merge_other_mode_wins() {
+        let base = permission_with(Some("auto"), &[], &[]);
+        let other = permission_with(Some("plan"), &[], &[]);
+        assert_eq!(base.merge(other).mode, Some(crate::permission::Mode::Plan));
+    }
+
     // ── load_project_file ──
 
     #[test]
@@ -556,6 +668,51 @@ mod tests {
             .expect("file exists");
         assert!(config.client.is_none());
         assert_eq!(config.tui.unwrap().show_welcome, Some(false));
+    }
+
+    #[test]
+    fn load_project_file_rejects_permission_mode_and_allow() {
+        // A project file may tighten (deny) but never widen (mode / allow), so both are blocked.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(PROJECT_CONFIG_FILENAME);
+        std::fs::write(
+            &path,
+            indoc! {r#"
+                [permission]
+                mode = "yolo"
+                allow = ["bash(rm -rf:*)"]
+            "#},
+        )
+        .unwrap();
+
+        let err = load_project_file(&path).expect_err("project widening must be blocked");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("permission.mode"), "{msg}");
+        assert!(msg.contains("permission.allow"), "{msg}");
+        assert!(msg.contains("only add permission.deny"), "{msg}");
+    }
+
+    #[test]
+    fn load_project_file_allows_permission_deny() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(PROJECT_CONFIG_FILENAME);
+        std::fs::write(
+            &path,
+            indoc! {r#"
+                [permission]
+                deny = ["bash(git push:*)"]
+            "#},
+        )
+        .unwrap();
+
+        let config = load_project_file(&path)
+            .expect("project deny should parse")
+            .expect("file exists");
+        let permission = config.permission.expect("permission section present");
+        assert_eq!(
+            permission.deny.as_deref(),
+            Some(&["bash(git push:*)".to_owned()][..])
+        );
     }
 
     // ── load_file ──
