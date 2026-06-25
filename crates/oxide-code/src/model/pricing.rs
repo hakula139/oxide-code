@@ -24,14 +24,6 @@ pub(super) const OPUS_4_5_PLUS_RATES: TokenCostRates = TokenCostRates {
     output: 25.0,
 };
 
-pub(super) const OPUS_4_1_RATES: TokenCostRates = TokenCostRates {
-    input: 15.0,
-    cache_write_5m: 18.75,
-    cache_write_1h: 30.0,
-    cache_read: 1.50,
-    output: 75.0,
-};
-
 pub(super) const SONNET_RATES: TokenCostRates = TokenCostRates {
     input: 3.0,
     cache_write_5m: 3.75,

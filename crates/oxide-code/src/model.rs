@@ -7,7 +7,7 @@ use std::borrow::Cow;
 use crate::config::Effort;
 
 pub(crate) use pricing::TokenCostRates;
-use pricing::{HAIKU_RATES, OPUS_4_1_RATES, OPUS_4_5_PLUS_RATES, SONNET_RATES};
+use pricing::{HAIKU_RATES, OPUS_4_5_PLUS_RATES, SONNET_RATES};
 
 // ── ModelInfo ──
 
@@ -43,6 +43,10 @@ pub(crate) struct Capabilities {
     pub(crate) context_1m: bool,
     /// `output_config.effort` levels accepted upstream. Empty when the model rejects `effort`.
     pub(crate) supported_efforts: &'static [Effort],
+    /// Effort sent when the user picks none. Mirrors Claude Code's per-model stock default, which
+    /// differs from a model's ceiling (Opus 4.7 ships `xhigh`, Opus 4.8 rides the `high` default).
+    /// `None` when the model rejects `effort`.
+    pub(crate) default_effort: Option<Effort>,
     /// `structured-outputs-2025-12-15` beta.
     pub(crate) structured_outputs: bool,
 }
@@ -51,6 +55,26 @@ pub(crate) struct Capabilities {
 
 /// Most-specific substring first.
 pub(crate) const MODELS: &[ModelInfo] = &[
+    ModelInfo {
+        id_substr: "claude-opus-4-8",
+        display_name: "Claude Opus 4.8",
+        cutoff: Some("January 2026"),
+        capabilities: Capabilities {
+            interleaved_thinking: true,
+            context_management: true,
+            context_1m: true,
+            supported_efforts: &[
+                Effort::Low,
+                Effort::Medium,
+                Effort::High,
+                Effort::Xhigh,
+                Effort::Max,
+            ],
+            default_effort: Some(Effort::High),
+            structured_outputs: true,
+        },
+        cost_rates: Some(OPUS_4_5_PLUS_RATES),
+    },
     ModelInfo {
         id_substr: "claude-opus-4-7",
         display_name: "Claude Opus 4.7",
@@ -66,6 +90,7 @@ pub(crate) const MODELS: &[ModelInfo] = &[
                 Effort::Xhigh,
                 Effort::Max,
             ],
+            default_effort: Some(Effort::Xhigh),
             structured_outputs: true,
         },
         cost_rates: Some(OPUS_4_5_PLUS_RATES),
@@ -79,6 +104,7 @@ pub(crate) const MODELS: &[ModelInfo] = &[
             context_management: true,
             context_1m: true,
             supported_efforts: &[Effort::Low, Effort::Medium, Effort::High, Effort::Max],
+            default_effort: Some(Effort::High),
             structured_outputs: true,
         },
         cost_rates: Some(OPUS_4_5_PLUS_RATES),
@@ -92,6 +118,7 @@ pub(crate) const MODELS: &[ModelInfo] = &[
             context_management: true,
             context_1m: true,
             supported_efforts: &[Effort::Low, Effort::Medium, Effort::High],
+            default_effort: Some(Effort::High),
             structured_outputs: true,
         },
         cost_rates: Some(SONNET_RATES),
@@ -105,6 +132,7 @@ pub(crate) const MODELS: &[ModelInfo] = &[
             context_management: true,
             context_1m: false,
             supported_efforts: &[],
+            default_effort: None,
             structured_outputs: true,
         },
         cost_rates: Some(OPUS_4_5_PLUS_RATES),
@@ -118,6 +146,7 @@ pub(crate) const MODELS: &[ModelInfo] = &[
             context_management: true,
             context_1m: true,
             supported_efforts: &[],
+            default_effort: None,
             structured_outputs: true,
         },
         cost_rates: Some(SONNET_RATES),
@@ -132,22 +161,10 @@ pub(crate) const MODELS: &[ModelInfo] = &[
             context_management: true,
             context_1m: false,
             supported_efforts: &[],
+            default_effort: None,
             structured_outputs: true,
         },
         cost_rates: Some(HAIKU_RATES),
-    },
-    ModelInfo {
-        id_substr: "claude-opus-4-1",
-        display_name: "Claude Opus 4.1",
-        cutoff: Some("January 2025"),
-        capabilities: Capabilities {
-            interleaved_thinking: true,
-            context_management: true,
-            context_1m: false,
-            supported_efforts: &[],
-            structured_outputs: true,
-        },
-        cost_rates: Some(OPUS_4_1_RATES),
     },
 ];
 
@@ -171,21 +188,11 @@ impl Capabilities {
             .find(|&level| level <= pick)
     }
 
-    /// Default tier when the user hasn't picked one. `Max` is opt-in, so the implicit ceiling is
-    /// the highest non-`Max` supported level.
-    pub(crate) fn default_effort(self) -> Option<Effort> {
-        self.supported_efforts
-            .iter()
-            .copied()
-            .rev()
-            .find(|&level| level != Effort::Max)
-    }
-
-    /// Clamps `pick` when present, otherwise falls back to [`Self::default_effort`].
+    /// Clamps `pick` when present, otherwise falls back to the model's stock `default_effort`.
     pub(crate) fn resolve_effort(self, pick: Option<Effort>) -> Option<Effort> {
         match pick {
             Some(p) => self.clamp_effort(p),
-            None => self.default_effort(),
+            None => self.default_effort,
         }
     }
 }
@@ -279,10 +286,10 @@ mod tests {
 
     #[test]
     fn capability_flags_match_upstream_substring_predicates() {
-        // Locks substring-derived flags to upstream's `modelSupports*` predicates. Opus 4.7
-        // postdates the predicate set and is skipped.
+        // Locks substring-derived flags to upstream's `modelSupports*` predicates. Opus 4.7 and
+        // 4.8 postdate the predicate set and are skipped.
         for info in MODELS {
-            if info.id_substr == "claude-opus-4-7" {
+            if matches!(info.id_substr, "claude-opus-4-7" | "claude-opus-4-8") {
                 continue;
             }
             let m = info.id_substr;
@@ -306,15 +313,17 @@ mod tests {
     }
 
     #[test]
-    fn opus_4_7_uniquely_supports_xhigh() {
-        // Upstream predates 4.7; pin so a future "alignment" edit doesn't strip our caps.
-        let caps = lookup("claude-opus-4-7").unwrap().capabilities;
-        assert!(caps.interleaved_thinking);
-        assert!(caps.context_management);
-        assert!(caps.context_1m);
-        assert!(caps.accepts_effort(Effort::Xhigh));
-        assert!(caps.accepts_effort(Effort::Max));
-        assert!(caps.structured_outputs);
+    fn opus_4_7_and_4_8_support_the_full_effort_ladder() {
+        // Upstream predates 4.7 / 4.8; pin so a future "alignment" edit doesn't strip our caps.
+        for id in ["claude-opus-4-7", "claude-opus-4-8"] {
+            let caps = lookup(id).unwrap().capabilities;
+            assert!(caps.interleaved_thinking, "{id}");
+            assert!(caps.context_management, "{id}");
+            assert!(caps.context_1m, "{id}");
+            assert!(caps.accepts_effort(Effort::Xhigh), "{id}");
+            assert!(caps.accepts_effort(Effort::Max), "{id}");
+            assert!(caps.structured_outputs, "{id}");
+        }
 
         for other in [
             "claude-opus-4-6",
@@ -322,21 +331,20 @@ mod tests {
             "claude-opus-4-5",
             "claude-sonnet-4-5",
             "claude-haiku-4-5",
-            "claude-opus-4-1",
         ] {
             assert!(
                 !lookup(other)
                     .unwrap()
                     .capabilities
                     .accepts_effort(Effort::Xhigh),
-                "{other} must not accept Xhigh — it 400s on non-4.7",
+                "{other} must not accept Xhigh — it 400s on pre-4.7 models",
             );
         }
     }
 
     #[test]
     fn effort_max_is_opus_only() {
-        for supported in ["claude-opus-4-7", "claude-opus-4-6"] {
+        for supported in ["claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6"] {
             assert!(
                 lookup(supported)
                     .unwrap()
@@ -378,6 +386,7 @@ mod tests {
     #[test]
     fn structured_outputs_flag_tracks_upstream_allowlist() {
         for supported in [
+            "claude-opus-4-8",
             "claude-opus-4-7",
             "claude-opus-4-6",
             "claude-opus-4-5",
@@ -455,20 +464,16 @@ mod tests {
     // ── Capabilities::default_effort ──
 
     #[test]
-    fn default_effort_picks_highest_supported_tier_when_user_has_no_pick() {
-        // Opus 4.7: full ladder → xhigh.
-        let opus_4_7 = lookup("claude-opus-4-7").unwrap().capabilities;
-        assert_eq!(opus_4_7.default_effort(), Some(Effort::Xhigh));
-
-        // Opus 4.6 / Sonnet 4.6: effort but no xhigh → high.
-        for id in ["claude-opus-4-6", "claude-sonnet-4-6"] {
-            let caps = lookup(id).unwrap().capabilities;
-            assert_eq!(caps.default_effort(), Some(Effort::High), "{id}");
+    fn default_effort_stays_within_supported_efforts() {
+        // Each row's stock default must be a tier the model accepts (or `None` when it rejects
+        // effort), so resolve_effort never emits a level the API would 400 on.
+        for info in MODELS {
+            let caps = info.capabilities;
+            match caps.default_effort {
+                Some(level) => assert!(caps.accepts_effort(level), "{}", info.id_substr),
+                None => assert!(!caps.has_effort(), "{}", info.id_substr),
+            }
         }
-
-        // No effort tier at all → None.
-        let haiku_4_5 = lookup("claude-haiku-4-5").unwrap().capabilities;
-        assert_eq!(haiku_4_5.default_effort(), None);
     }
 
     // ── Capabilities::resolve_effort ──
@@ -493,11 +498,13 @@ mod tests {
     }
 
     #[test]
-    fn resolve_effort_falls_back_to_model_default_when_pick_is_none() {
+    fn resolve_effort_falls_back_to_per_model_default_when_pick_is_none() {
+        // 4.7 and 4.8 share the full ladder but default differently: 4.7 ships xhigh, 4.8 rides
+        // the high default (mirrors Claude Code).
         let opus_4_7 = lookup("claude-opus-4-7").unwrap().capabilities;
         assert_eq!(opus_4_7.resolve_effort(None), Some(Effort::Xhigh));
-        let sonnet_4_6 = lookup("claude-sonnet-4-6").unwrap().capabilities;
-        assert_eq!(sonnet_4_6.resolve_effort(None), Some(Effort::High));
+        let opus_4_8 = lookup("claude-opus-4-8").unwrap().capabilities;
+        assert_eq!(opus_4_8.resolve_effort(None), Some(Effort::High));
     }
 
     #[test]
@@ -540,6 +547,7 @@ mod tests {
             "claude-sonnet-4",
             "claude-haiku-4",
             "claude-opus-4-20250514",
+            "claude-opus-4-1",
             "gpt-4",
         ] {
             assert!(lookup(unknown).is_none(), "{unknown} must not resolve");
@@ -590,20 +598,6 @@ mod tests {
     }
 
     #[test]
-    fn token_cost_rates_for_opus_4_1_uses_older_pricing() {
-        let rates = token_cost_rates_for("claude-opus-4-1").unwrap();
-        let cost = rates.estimate_usd(
-            1_000_000,
-            1_000_000,
-            1_000_000,
-            1_000_000,
-            PromptCacheTtl::FiveMin,
-        );
-
-        assert!((cost - 110.25).abs() < 1e-9);
-    }
-
-    #[test]
     fn token_cost_rates_for_unknown_model_is_absent() {
         assert!(token_cost_rates_for("claude-future-9").is_none());
     }
@@ -613,13 +607,13 @@ mod tests {
     #[test]
     fn display_name_known_plain_id_renders_row_label() {
         for (id, expected) in [
+            ("claude-opus-4-8", "Claude Opus 4.8"),
             ("claude-opus-4-7", "Claude Opus 4.7"),
             ("claude-opus-4-6", "Claude Opus 4.6"),
             ("claude-sonnet-4-6", "Claude Sonnet 4.6"),
             ("claude-opus-4-5", "Claude Opus 4.5"),
             ("claude-sonnet-4-5", "Claude Sonnet 4.5"),
             ("claude-haiku-4-5", "Claude Haiku 4.5"),
-            ("claude-opus-4-1", "Claude Opus 4.1"),
         ] {
             assert_eq!(display_name(id), expected, "{id}");
         }
@@ -649,10 +643,10 @@ mod tests {
     #[test]
     fn short_display_name_strips_claude_family_prefix() {
         for (id, expected) in [
+            ("claude-opus-4-8", "Opus 4.8"),
             ("claude-opus-4-7", "Opus 4.7"),
             ("claude-sonnet-4-6", "Sonnet 4.6"),
             ("claude-haiku-4-5", "Haiku 4.5"),
-            ("claude-opus-4-1", "Opus 4.1"),
         ] {
             assert_eq!(short_display_name(id), expected, "{id}");
         }

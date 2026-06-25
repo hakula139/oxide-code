@@ -15,7 +15,7 @@ use crate::model::{MODELS, ResolvedModelId, display_name, lookup};
 const TAG_1M: &str = "[1m]";
 
 const ALIASES: &[(&str, &str)] = &[
-    ("opus", "claude-opus-4-7"),
+    ("opus", "claude-opus-4-8"),
     ("sonnet", "claude-sonnet-4-6"),
     ("haiku", "claude-haiku-4-5"),
 ];
@@ -79,7 +79,7 @@ fn resolve_model_arg(arg: &str) -> Result<ResolvedModelId, String> {
     };
     if base_arg.is_empty() {
         return Err(format!(
-            "`{TAG_1M}` is a tag, not a model. Try `/model opus{TAG_1M}` or `/model claude-opus-4-7{TAG_1M}`.",
+            "`{TAG_1M}` is a tag, not a model. Try `/model opus{TAG_1M}` or `/model claude-opus-4-8{TAG_1M}`.",
         ));
     }
     let base_id = resolve_base(base_arg)?;
@@ -238,19 +238,19 @@ mod tests {
             .into_iter()
             .map(|(v, _)| v)
             .collect();
-        assert_eq!(got, vec!["claude-opus-4-7", "claude-opus-4-7[1m]"]);
+        assert_eq!(got, vec!["claude-opus-4-8", "claude-opus-4-8[1m]"]);
     }
 
     #[test]
     fn complete_arg_appends_1m_context_suffix_only_for_1m_variants() {
-        let rows = arg_rows("claude-opus-4-7");
+        let rows = arg_rows("claude-opus-4-8");
         let one_m = rows
             .iter()
-            .find(|(v, _)| v == "claude-opus-4-7[1m]")
+            .find(|(v, _)| v == "claude-opus-4-8[1m]")
             .expect("1M variant present");
         let plain = rows
             .iter()
-            .find(|(v, _)| v == "claude-opus-4-7")
+            .find(|(v, _)| v == "claude-opus-4-8")
             .expect("plain variant present");
         assert!(
             one_m.1.contains("1M context"),
@@ -296,8 +296,8 @@ mod tests {
     #[test]
     fn execute_with_alias_resolves_to_canonical_id() {
         for (alias, expected) in [
-            ("opus", "claude-opus-4-7"),
-            ("opus[1m]", "claude-opus-4-7[1m]"),
+            ("opus", "claude-opus-4-8"),
+            ("opus[1m]", "claude-opus-4-8[1m]"),
             ("sonnet", "claude-sonnet-4-6"),
             ("sonnet[1m]", "claude-sonnet-4-6[1m]"),
             ("haiku", "claude-haiku-4-5"),
@@ -391,7 +391,7 @@ mod tests {
             );
         }
         assert!(
-            msg.contains("Claude Opus 4.7 (1M context)"),
+            msg.contains("Claude Opus 4.8 (1M context)"),
             "1M variant renders the (1M context) suffix: {msg}",
         );
         assert_eq!(chat.entry_count(), 0);
@@ -427,8 +427,8 @@ mod tests {
     fn execute_ambiguous_listing_falls_back_to_full_curated_set_when_filter_empty() {
         let (_, outcome) = run_execute("claude-opus");
         let msg = outcome.expect_err("ambiguous arg must error");
-        // `claude-opus` matches the listed Opus 4.7 entries, so the listing surfaces those.
-        for id in ["claude-opus-4-7", "claude-opus-4-7[1m]"] {
+        // `claude-opus` matches the listed Opus 4.8 entries, so the listing surfaces those.
+        for id in ["claude-opus-4-8", "claude-opus-4-8[1m]"] {
             assert!(msg.contains(id), "{id} should be listed: {msg}");
         }
         // Older non-listed Opus rows must not appear in the curated listing.
@@ -447,7 +447,7 @@ mod tests {
             resolve_model_arg("opus")
                 .as_ref()
                 .map(ResolvedModelId::as_str),
-            Ok("claude-opus-4-7")
+            Ok("claude-opus-4-8")
         );
     }
 
@@ -470,7 +470,6 @@ mod tests {
         for dated in [
             "claude-opus-4-7-20260101",
             "claude-opus-4-6-20250805",
-            "claude-opus-4-1-20250805",
             "claude-sonnet-4-5-20250929",
         ] {
             assert_eq!(
@@ -489,7 +488,7 @@ mod tests {
             resolve_model_arg("OPUS")
                 .as_ref()
                 .map(ResolvedModelId::as_str),
-            Ok("claude-opus-4-7")
+            Ok("claude-opus-4-8")
         );
         assert_eq!(
             resolve_model_arg("Claude-Opus-4-7")
@@ -501,7 +500,7 @@ mod tests {
             resolve_model_arg("OPUS[1M]")
                 .as_ref()
                 .map(ResolvedModelId::as_str),
-            Ok("claude-opus-4-7[1m]"),
+            Ok("claude-opus-4-8[1m]"),
         );
     }
 
@@ -543,11 +542,11 @@ mod tests {
     fn listed_models_matching_surfaces_1m_variants_alongside_base() {
         let out = listed_models_matching("claude-opus");
         assert!(
-            out.contains("- `claude-opus-4-7` — Claude Opus 4.7"),
+            out.contains("- `claude-opus-4-8` — Claude Opus 4.8"),
             "{out}"
         );
         assert!(
-            out.contains("- `claude-opus-4-7[1m]` — Claude Opus 4.7 (1M context)"),
+            out.contains("- `claude-opus-4-8[1m]` — Claude Opus 4.8 (1M context)"),
             "{out}",
         );
     }

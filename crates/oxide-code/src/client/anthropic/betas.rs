@@ -210,6 +210,19 @@ mod tests {
     }
 
     #[test]
+    fn compute_betas_opus_4_8_matches_opus_4_7_header_order() {
+        // 4.8 shares 4.7's capability flags, so the fingerprinted header sequence must be
+        // byte-identical (3P gateways reject mismatches).
+        assert_eq!(
+            compute_betas("claude-opus-4-8", &api_key(), true, false),
+            compute_betas("claude-opus-4-7", &api_key(), true, false),
+        );
+        let with_1m = compute_betas("claude-opus-4-8[1m]", &api_key(), true, false);
+        assert!(with_1m.contains(&CONTEXT_1M_BETA_HEADER));
+        assert!(with_1m.contains(&EFFORT_BETA_HEADER));
+    }
+
+    #[test]
     fn compute_betas_structured_outputs_gated_by_model_capability() {
         assert_eq!(
             compute_betas("claude-haiku-4-5", &api_key(), false, true),

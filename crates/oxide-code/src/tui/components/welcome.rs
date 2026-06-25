@@ -353,7 +353,7 @@ mod tests {
                 auth_label: "OAuth",
                 base_url: "https://api.test.invalid".to_owned(),
                 extra_ca_certs: None,
-                model_id: "claude-opus-4-7".to_owned(),
+                model_id: "claude-opus-4-8".to_owned(),
                 effort: Some(Effort::Xhigh),
                 max_tokens: 64_000,
                 max_tool_rounds: None,
@@ -392,7 +392,7 @@ mod tests {
         let info = fixture();
         let snap = snap_for(&info);
         assert_eq!(snap.version, "0.1.0");
-        assert_eq!(snap.model_label, "Claude Opus 4.7");
+        assert_eq!(snap.model_label, "Claude Opus 4.8");
         assert_eq!(snap.effort_label, "xhigh");
         assert_eq!(snap.auth_label, "OAuth");
         assert_eq!(snap.cwd, "~/github/oxide-code");
