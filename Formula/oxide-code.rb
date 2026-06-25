@@ -4,24 +4,24 @@
 class OxideCode < Formula
   desc "Terminal-based AI coding assistant written in Rust"
   homepage "https://github.com/hakula139/oxide-code"
-  version "0.1.0-alpha.1"
+  version "0.1.0-alpha.2"
   license "MIT"
 
   on_macos do
     on_arm do
-      url "https://github.com/hakula139/oxide-code/releases/download/v0.1.0-alpha.1/oxide-code-aarch64-apple-darwin.tar.gz"
-      sha256 "adb399884afee3539103f7a5a2c8d5f78f1951f6c3762b7b79d92a519d891919"
+      url "https://github.com/hakula139/oxide-code/releases/download/v0.1.0-alpha.2/oxide-code-aarch64-apple-darwin.tar.gz"
+      sha256 "799bd844c3151735e23c8cdecda1a4d1665dd2b75aecebe969728ede39a5df70"
     end
     on_intel do
-      url "https://github.com/hakula139/oxide-code/releases/download/v0.1.0-alpha.1/oxide-code-x86_64-apple-darwin.tar.gz"
-      sha256 "f0762669729fec25b7d3f2f1911f250befd56a06d577f11b0367c4d16bdfabfb"
+      url "https://github.com/hakula139/oxide-code/releases/download/v0.1.0-alpha.2/oxide-code-x86_64-apple-darwin.tar.gz"
+      sha256 "2f806cbb231e56aebb57c43bdfec9a8b5ec6276c01d407752d2edb736a752a56"
     end
   end
 
   on_linux do
     on_intel do
-      url "https://github.com/hakula139/oxide-code/releases/download/v0.1.0-alpha.1/oxide-code-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "063598d0f801d4d53628cda63e573e6af57288c116af35d04d81c3f959ad6e9b"
+      url "https://github.com/hakula139/oxide-code/releases/download/v0.1.0-alpha.2/oxide-code-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "b8a900dc97fc9d0930836cae8acff209061f1c95612e2972d8d88ef424f1f481"
     end
   end
 
