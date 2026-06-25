@@ -7,50 +7,77 @@ on:
     branches: [main]
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
+  CACHIX_NAME: hakula
   CARGO_TERM_COLOR: always
 
 jobs:
-  rust-check:
+  flake-check:
+    name: Nix Flake Check
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Setup Nix
+        uses: ./.github/actions/setup-nix
         with:
-          components: rustfmt, clippy
+          cachix_name: ${{ env.CACHIX_NAME }}
+          cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          cachix_skip_push: ${{ !(github.ref == 'refs/heads/main' || github.actor == 'hakula139') }}
 
-      - name: Cache dependencies
+      - name: Run flake check
+        run: nix flake check
+
+  rust-check:
+    name: Rust Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Nix
+        uses: ./.github/actions/setup-nix
+        with:
+          cachix_name: ${{ env.CACHIX_NAME }}
+          cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          cachix_skip_push: ${{ !(github.ref == 'refs/heads/main' || github.actor == 'hakula139') }}
+
+      - name: Cache cargo target
         uses: Swatinem/rust-cache@v2
 
       - name: Format
-        run: cargo fmt --all --check
+        run: nix develop -c cargo fmt --all --check
 
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: nix develop -c cargo clippy --all-targets -- -D warnings
 
       - name: Test
-        run: cargo test
+        run: nix develop -c cargo test
 
   coverage:
+    name: Coverage
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Setup Nix
+        uses: ./.github/actions/setup-nix
+        with:
+          cachix_name: ${{ env.CACHIX_NAME }}
+          cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          cachix_skip_push: ${{ !(github.ref == 'refs/heads/main' || github.actor == 'hakula139') }}
 
-      - name: Cache dependencies
+      - name: Cache cargo target
         uses: Swatinem/rust-cache@v2
 
-      - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
-
       - name: Generate coverage
-        run: cargo llvm-cov --ignore-filename-regex 'main\.rs' --lcov --output-path lcov.info
+        run: nix develop -c cargo llvm-cov --ignore-filename-regex 'main\.rs' --lcov --output-path lcov.info
 
       - name: Upload to Codecov
         uses: codecov/codecov-action@v6
@@ -59,25 +86,45 @@ jobs:
           files: lcov.info
 
   node-check:
+    name: Node Check
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Set up pnpm
-        uses: pnpm/action-setup@v5
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v6
+      - name: Setup Nix
+        uses: ./.github/actions/setup-nix
         with:
-          node-version: lts/*
-          cache: pnpm
+          cachix_name: ${{ env.CACHIX_NAME }}
+          cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          cachix_skip_push: ${{ !(github.ref == 'refs/heads/main' || github.actor == 'hakula139') }}
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: nix develop -c pnpm install --frozen-lockfile
 
       - name: Lint Markdown
-        run: pnpm lint
+        run: nix develop -c pnpm lint
 
       - name: Spell check
-        run: pnpm spellcheck
+        run: nix develop -c pnpm spellcheck
+
+  nix-build:
+    name: Nix Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Nix
+        uses: ./.github/actions/setup-nix
+        with:
+          cachix_name: ${{ env.CACHIX_NAME }}
+          cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          cachix_skip_push: ${{ !(github.ref == 'refs/heads/main' || github.actor == 'hakula139') }}
+
+      - name: Build oxide-code
+        run: nix build .#oxide-code --print-build-logs

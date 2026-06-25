@@ -9,6 +9,7 @@ APFS
 arboard
 atuin
 cachain
+cachix
 catppuccin
 claudemd
 Clawd
@@ -24,6 +25,7 @@ dedupe
 deque
 deserialize
 desync
+direnv
 disambiguable
 dtolnay
 EACCES

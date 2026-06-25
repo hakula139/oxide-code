@@ -1,0 +1,27 @@
+name: Setup Nix
+description: Install Nix and configure the Cachix substituter
+
+inputs:
+  cachix_name:
+    description: Cachix cache name (skips Cachix if not provided)
+  cachix_auth_token:
+    description: Cachix authentication token
+  cachix_skip_push:
+    description: Skip pushing to Cachix
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - name: Install Nix
+      uses: cachix/install-nix-action@v31
+      with:
+        install_options: ${{ runner.os == 'Linux' && '--no-daemon' || '' }}
+
+    - name: Setup Cachix
+      if: ${{ inputs.cachix_name }}
+      uses: cachix/cachix-action@v17
+      with:
+        name: ${{ inputs.cachix_name }}
+        authToken: ${{ inputs.cachix_auth_token }}
+        skipPush: ${{ inputs.cachix_skip_push }}
