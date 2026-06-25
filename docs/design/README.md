@@ -31,6 +31,7 @@ Organized by topic. Each subdirectory mirrors the corresponding directory in [`d
 | Document                                 | Description                                        |
 | ---------------------------------------- | -------------------------------------------------- |
 | [Output Truncation](tools/truncation.md) | Per-tool view-shape caps + centralized byte-budget |
+| [Permissions](tools/permissions.md)      | Tiered allow / ask / deny gate, modes, classifier  |
 
 ## Terminal UI
 
