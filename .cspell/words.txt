@@ -38,6 +38,7 @@ getpwuid
 Ghostty
 gitui
 hakula
+idna
 impls
 indoc
 insta

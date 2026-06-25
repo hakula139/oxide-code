@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-alpha.2] - 2026-06-25
+
+### Added
+
+- _(slash)_ /delete and Ctrl+D in /resume picker for session deletion (#75)
+- _(install)_ Nix flake, Homebrew formula, and install matrix docs (#76)
+- _(slash)_ /compact context compression with summary boundary (#77)
+- _(agent)_ Add automatic compaction (#82)
+- Configurable tool-round cap and auto-compaction follow-ups (#83)
+- Trust extra CA bundles for corp gateways (#84)
+- _(tui)_ Add configurable status line (#86)
+- _(tui)_ OSC 8 PR hyperlink and native terminal drag-select (#87)
+- _(model)_ Add Claude Opus 4.8 and retire Opus 4.1 (#89)
+
+### Fixed
+
+- _(slash)_ Preserve compact boundary invariants
+- _(slash)_ Preserve /compact ordering and resume state
+
+### Dependencies
+
+- _(deps)_ Bump idna from 3.11 to 3.15 (#88)
+
 ## [0.1.0-alpha.1] - 2026-05-09
 
 ### Added
@@ -65,3 +88,4 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - _(deps)_ Bump rustls-webpki from 0.103.12 to 0.103.13 (#34)
 
 [0.1.0-alpha.1]: https://github.com/hakula139/oxide-code/releases/tag/v0.1.0-alpha.1
+[0.1.0-alpha.2]: https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.1..v0.1.0-alpha.2
