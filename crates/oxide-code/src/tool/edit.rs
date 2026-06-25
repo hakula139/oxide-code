@@ -37,6 +37,10 @@ impl Tool for EditTool {
          and to files that changed externally since the last Read."
     }
 
+    fn risk_class(&self) -> super::RiskClass {
+        super::RiskClass::Edit
+    }
+
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",

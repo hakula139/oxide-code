@@ -160,6 +160,19 @@ pub(crate) struct GrepMatchLine {
 
 // ── Tool Trait ──
 
+/// How dangerous a tool's effects are, consulted by the permission gate. Read-only tools never
+/// mutate and auto-allow; edit-class and execute gate by mode and rules. See
+/// `docs/design/tools/permissions.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RiskClass {
+    /// Never mutates: `read`, `glob`, `grep`.
+    ReadOnly,
+    /// Mutates a file the call names: `edit`, `write`.
+    Edit,
+    /// Runs an opaque command with unbounded authority: `bash`.
+    Execute,
+}
+
 /// A tool that the agent can invoke.
 ///
 /// Per-instance metadata (name, icon, schema, input summary) lives on the trait so that adding a
@@ -168,6 +181,10 @@ pub(crate) trait Tool: Send + Sync {
     fn name(&self) -> &'static str;
     fn description(&self) -> &'static str;
     fn input_schema(&self) -> serde_json::Value;
+
+    /// The tool's risk class for the permission gate. No default: each tool states its own so a
+    /// new tool cannot silently inherit a permissive class.
+    fn risk_class(&self) -> RiskClass;
 
     fn icon(&self) -> &'static str {
         "⟡"

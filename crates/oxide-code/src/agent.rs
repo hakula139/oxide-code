@@ -1121,6 +1121,10 @@ mod tests {
             "echo the input"
         }
 
+        fn risk_class(&self) -> crate::tool::RiskClass {
+            crate::tool::RiskClass::Execute
+        }
+
         fn input_schema(&self) -> serde_json::Value {
             json!({"type": "object"})
         }
@@ -1155,6 +1159,10 @@ mod tests {
 
         fn description(&self) -> &'static str {
             "blocks until the turn is cancelled"
+        }
+
+        fn risk_class(&self) -> crate::tool::RiskClass {
+            crate::tool::RiskClass::Execute
         }
 
         fn input_schema(&self) -> serde_json::Value {

@@ -39,6 +39,10 @@ impl Tool for ReadTool {
         "Read the contents of a file with line numbers."
     }
 
+    fn risk_class(&self) -> super::RiskClass {
+        super::RiskClass::ReadOnly
+    }
+
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",

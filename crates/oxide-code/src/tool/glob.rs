@@ -21,6 +21,10 @@ impl Tool for GlobTool {
         "Find files matching a glob pattern. Returns paths sorted by modification time (newest first)."
     }
 
+    fn risk_class(&self) -> super::RiskClass {
+        super::RiskClass::ReadOnly
+    }
+
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",

@@ -30,6 +30,10 @@ impl Tool for BashTool {
         "Execute a shell command and return its output."
     }
 
+    fn risk_class(&self) -> super::RiskClass {
+        super::RiskClass::Execute
+    }
+
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",

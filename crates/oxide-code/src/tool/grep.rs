@@ -26,6 +26,10 @@ impl Tool for GrepTool {
         "Search file contents using a regular expression."
     }
 
+    fn risk_class(&self) -> super::RiskClass {
+        super::RiskClass::ReadOnly
+    }
+
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",

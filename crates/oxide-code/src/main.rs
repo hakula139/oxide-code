@@ -6,6 +6,7 @@ mod config;
 mod file_tracker;
 mod message;
 mod model;
+mod permission;
 mod prompt;
 mod session;
 mod slash;

@@ -33,6 +33,10 @@ impl Tool for WriteTool {
          Creating a brand-new file bypasses the gate."
     }
 
+    fn risk_class(&self) -> super::RiskClass {
+        super::RiskClass::Edit
+    }
+
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
