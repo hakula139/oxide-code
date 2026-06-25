@@ -47,6 +47,16 @@ impl Tool for WriteTool {
             .unwrap_or_default()
     }
 
+    fn approval_preview(&self, input: &serde_json::Value) -> crate::agent::event::ApprovalPreview {
+        let content = extract_input_field(input, "content").unwrap_or_default();
+        crate::agent::event::ApprovalPreview {
+            title: self.summarize_call(input),
+            body: crate::agent::event::ApprovalBody::Diff(vec![super::edit::synthesize_chunk(
+                "", content,
+            )]),
+        }
+    }
+
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",

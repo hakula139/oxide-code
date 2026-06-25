@@ -53,7 +53,7 @@ pub(super) struct CompactionConfig {
 }
 
 /// `[permission]` block. `mode` and `allow` are user / env-only, so a checked-in project `ox.toml`
-/// setting either is rejected by [`reject_project_permissions`]; `deny` append-merges across layers
+/// setting either is rejected by [`reject_project_permissions`]. `deny` append-merges across layers
 /// so a project can only tighten. `allow` and `deny` are raw rule strings, parsed in `Config::load`.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -248,7 +248,7 @@ fn reject_project_secrets(config: &FileConfig, path: &Path) -> Result<()> {
 }
 
 /// A project `ox.toml` is untrusted, so it may tighten permissions but never widen them. `mode` and
-/// `allow` are user / env-only; only `deny` (which can only restrict) is honored from a project
+/// `allow` are user / env-only, and only `deny` (which can only restrict) is honored from a project
 /// file. Setting either blocked field is a hard error rather than a silent drop so the user learns
 /// the rule did not take effect.
 fn reject_project_permissions(config: &FileConfig, path: &Path) -> Result<()> {

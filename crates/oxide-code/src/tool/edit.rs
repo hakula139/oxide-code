@@ -51,6 +51,15 @@ impl Tool for EditTool {
             .unwrap_or_default()
     }
 
+    fn approval_preview(&self, input: &serde_json::Value) -> crate::agent::event::ApprovalPreview {
+        let old = extract_input_field(input, "old_string").unwrap_or_default();
+        let new = extract_input_field(input, "new_string").unwrap_or_default();
+        crate::agent::event::ApprovalPreview {
+            title: self.summarize_call(input),
+            body: crate::agent::event::ApprovalBody::Diff(vec![synthesize_chunk(old, new)]),
+        }
+    }
+
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",

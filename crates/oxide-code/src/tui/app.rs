@@ -232,7 +232,9 @@ impl App {
 
     fn clear_modals(&mut self) {
         self.cancel_theme_preview();
-        self.modals.clear();
+        for action in self.modals.clear() {
+            self.apply_modal_action(action);
+        }
     }
 
     /// Repaints every theme-styled component for a mid-session theme swap.
@@ -314,7 +316,10 @@ impl App {
                 self.should_quit = true;
                 true
             }
-            UserAction::Clear | UserAction::Rename { .. } | UserAction::SwapConfig { .. } => true,
+            UserAction::Clear
+            | UserAction::Rename { .. }
+            | UserAction::SwapConfig { .. }
+            | UserAction::ApprovalDecision { .. } => true,
             UserAction::Resume { .. } => {
                 self.input.set_enabled(false);
                 true
@@ -518,8 +523,18 @@ impl App {
                 self.chat.push_error(&msg);
                 self.finish_turn();
             }
+            AgentEvent::ApprovalRequested { id, preview } => self.push_approval_modal(id, preview),
         }
         self.dirty = true;
+    }
+
+    /// Opens the approve-or-deny overlay for a gated tool call. Pushing onto the stack lets it nest
+    /// over any open picker, and the modal's cancel hook resolves the blocked agent on dismissal.
+    fn push_approval_modal(&mut self, id: String, preview: crate::agent::event::ApprovalPreview) {
+        self.modals
+            .push(Box::new(super::modal::approval::ApprovalModal::new(
+                id, preview,
+            )));
     }
 
     fn finish_turn(&mut self) {

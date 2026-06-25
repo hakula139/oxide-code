@@ -33,6 +33,8 @@ pub(crate) enum Mode {
 }
 
 impl Mode {
+    /// Every mode in display order, for the future `/permission` picker. Test-only until then.
+    #[cfg(test)]
     pub(crate) const ALL: [Self; 3] = [Self::Auto, Self::Plan, Self::Yolo];
     pub(crate) const VALID_VALUES: &str = "auto, plan, yolo";
 
@@ -90,11 +92,11 @@ const DANGEROUS_DEFAULTS: &[&str] = &[
 
 // ── Target ──
 
-/// What a tool call acts on, matched against rule specifiers. `bash` carries its command string;
-/// path tools carry the canonicalized absolute path plus the cwd-relative path when the target sits
-/// inside the working directory (the same value drives the inside-cwd allow at step 3). `None` is a
-/// tool with no extractable specifier (a read-only tool, or a call missing its path argument): only
-/// a tool-wide rule can match it.
+/// What a tool call acts on, matched against rule specifiers. `bash` carries its command string,
+/// while path tools carry the canonicalized absolute path plus the cwd-relative path when the target
+/// sits inside the working directory (the same value drives the inside-cwd allow at step 3). `None`
+/// is a tool with no extractable specifier (a read-only tool, or a call missing its path argument):
+/// only a tool-wide rule can match it.
 #[derive(Debug, Clone)]
 pub(crate) enum Target<'a> {
     None,
@@ -120,11 +122,12 @@ impl Target<'_> {
 }
 
 /// Owned form of [`Target`] produced by [`crate::tool::Tool::gate_target`]. A tool extracts the
-/// command or canonicalized path from its input once; the borrowing [`Self::as_target`] then feeds
-/// the allocation-free matcher. Owned because a canonicalized path is not a substring of the input.
+/// command or canonicalized path from its input once, and the borrowing [`Self::as_target`] then
+/// feeds the allocation-free matcher. Owned because a canonicalized path is not a substring of the
+/// input.
 #[derive(Debug, Clone, Default)]
 pub(crate) enum GateTarget {
-    /// No extractable specifier; only a tool-wide rule matches.
+    /// No extractable specifier, so only a tool-wide rule matches.
     #[default]
     None,
     Command(String),
@@ -136,10 +139,10 @@ pub(crate) enum GateTarget {
 
 impl GateTarget {
     /// Builds a path target by resolving `path` against `cwd`. An existing path is canonicalized
-    /// (resolving symlinks and `..`); a path that cannot canonicalize yet (e.g. a brand-new file)
-    /// falls back to a lexical normalization that still resolves `..`, so a `../escape` traversal
-    /// can never masquerade as inside-cwd. The relative component is set only when the resolved
-    /// path stays inside `cwd`, which drives the inside-cwd auto-allow.
+    /// (resolving symlinks and `..`), while a path that cannot canonicalize yet (e.g. a brand-new
+    /// file) falls back to a lexical normalization that still resolves `..`, so a `../escape`
+    /// traversal can never masquerade as inside-cwd. The relative component is set only when the
+    /// resolved path stays inside `cwd`, which drives the inside-cwd auto-allow.
     pub(crate) fn for_path(path: &str, cwd: &std::path::Path) -> Self {
         let joined = cwd.join(path);
         let canonical =
@@ -192,6 +195,9 @@ pub(crate) struct Policy {
 }
 
 impl Policy {
+    /// Builds a policy directly from parsed rule sets, skipping the [`DANGEROUS_DEFAULTS`] seeding
+    /// that [`Self::resolve`] applies. Test-only: production always goes through `resolve`.
+    #[cfg(test)]
     pub(crate) fn new(mode: Mode, allow: Vec<Rule>, deny: Vec<Rule>) -> Self {
         Self { mode, allow, deny }
     }

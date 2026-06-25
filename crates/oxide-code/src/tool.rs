@@ -224,6 +224,16 @@ pub(crate) trait Tool: Send + Sync {
         None
     }
 
+    /// Builds the preview the approval modal shows when this call needs the user's decision.
+    /// Defaults to the `summarize_call` label with a command-style body. `edit` / `write` override
+    /// to show a diff. Only reached when the gate returns `ask`, so it can afford to format.
+    fn approval_preview(&self, input: &serde_json::Value) -> crate::agent::event::ApprovalPreview {
+        crate::agent::event::ApprovalPreview {
+            title: self.summarize_call(input),
+            body: crate::agent::event::ApprovalBody::Command(self.summarize_call(input)),
+        }
+    }
+
     fn run(
         &self,
         input: serde_json::Value,

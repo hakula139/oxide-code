@@ -2,8 +2,8 @@
 //!
 //! The form mirrors Claude Code's for transferable muscle memory. A rule names a tool
 //! (case-insensitive) and an optional specifier. `bash` specifiers match the command string in
-//! exact, prefix (`cargo test:*`), or wildcard (`git *`) shapes; every other tool's specifier is a
-//! gitignore-style path glob. A bare tool name, `tool()`, or `tool(*)` is tool-wide.
+//! exact, prefix (`cargo test:*`), or wildcard (`git *`) shapes, while every other tool's specifier
+//! is a gitignore-style path glob. A bare tool name, `tool()`, or `tool(*)` is tool-wide.
 //!
 //! Because a `bash` command is an unparsed string, matching is best-effort UX rather than a
 //! security boundary (see `docs/design/tools/permissions.md`). The asymmetry is deliberate: an
@@ -48,8 +48,8 @@ enum BashSpec {
 
 impl Rule {
     /// Parses a `tool(specifier)` string. The first unescaped `(` opens the specifier and the
-    /// trailing `)` closes it; everything else is a bare tool name. Path globs and wildcard regexes
-    /// compile here so a malformed rule fails at config load rather than mid-turn.
+    /// trailing `)` closes it, and everything else is a bare tool name. Path globs and wildcard
+    /// regexes compile here so a malformed rule fails at config load rather than mid-turn.
     pub(crate) fn parse(raw: &str) -> Result<Self> {
         let raw = raw.trim();
         let (tool, spec_str) = match (raw.find('('), raw.strip_suffix(')')) {
@@ -148,7 +148,7 @@ fn split_segments(command: &str) -> impl Iterator<Item = &str> {
 }
 
 /// Converts a bash wildcard specifier to an anchored regex: literal text is escaped and `*` becomes
-/// `.*`, so `git *` matches `git status` but not `cargo gitx`.
+/// `.*`, so `git *` matches `git status` but not `cargo git`.
 fn glob_to_regex(glob: &str) -> Regex {
     let mut pattern = String::with_capacity(glob.len() + 4);
     pattern.push('^');
@@ -156,7 +156,7 @@ fn glob_to_regex(glob: &str) -> Regex {
         pattern.push_str(&regex::escape(part));
         pattern.push_str(".*");
     }
-    // Each segment appended a trailing `.*`; drop the final one so the regex ends at the last
+    // Each segment appended a trailing `.*`, so drop the final one so the regex ends at the last
     // literal unless the glob itself ended in `*`.
     pattern.truncate(pattern.len() - 2);
     pattern.push('$');
@@ -234,7 +234,7 @@ mod tests {
     fn bash_wildcard_anchors_both_ends() {
         let rule = Rule::parse("bash(git *)").unwrap();
         assert!(rule.matches("bash", &cmd("git status"), false));
-        assert!(!rule.matches("bash", &cmd("cargo gitx"), false));
+        assert!(!rule.matches("bash", &cmd("cargo git"), false));
     }
 
     #[test]
@@ -278,7 +278,7 @@ mod tests {
     #[test]
     fn relative_path_glob_does_not_match_an_out_of_cwd_absolute_path() {
         // A cwd-relative glob must not match an absolute path that resolved outside the working
-        // directory; such targets fall through to ask rather than to a relative rule.
+        // directory, so such targets fall through to ask rather than to a relative rule.
         let rule = Rule::parse("write(.git/**)").unwrap();
         assert!(!rule.matches("write", &path("/elsewhere/.git/config", None), true));
     }
@@ -317,7 +317,7 @@ mod tests {
 
     #[test]
     fn glob_to_regex_escapes_literals_and_expands_star() {
-        // `.` is a regex metachar; it must stay literal so `a.b *` doesn't match `axb c`.
+        // `.` is a regex metachar, so it must stay literal so `a.b *` doesn't match `axb c`.
         let re = glob_to_regex("a.b *");
         assert!(re.is_match("a.b c"));
         assert!(!re.is_match("axb c"));
@@ -333,8 +333,8 @@ mod tests {
 
     #[test]
     fn split_segments_drops_empty_halves_of_double_operators() {
-        let segs: Vec<_> = split_segments("a && b || c").collect();
-        assert_eq!(segs, ["a", "b", "c"]);
+        let segments: Vec<_> = split_segments("a && b || c").collect();
+        assert_eq!(segments, ["a", "b", "c"]);
     }
 
     #[test]

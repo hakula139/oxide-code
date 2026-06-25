@@ -398,11 +398,13 @@ impl AgentLoopTask {
         match action {
             UserAction::SubmitPrompt(text) => self.handle_submit_prompt(text).await,
             // Cancel / ConfirmExit are no-ops here; PreviewTheme / SwapTheme are TUI-only and
-            // applied client-side in `App::apply_action_locally`.
+            // applied client-side in `App::apply_action_locally`. ApprovalDecision is unreachable
+            // in the REPL driver, which never asks (no modal surface, gate denies instead).
             UserAction::Cancel
             | UserAction::ConfirmExit
             | UserAction::PreviewTheme { .. }
-            | UserAction::SwapTheme { .. } => LoopControl::Continue,
+            | UserAction::SwapTheme { .. }
+            | UserAction::ApprovalDecision { .. } => LoopControl::Continue,
             UserAction::Clear => {
                 let outcome = roll_session(
                     &mut self.session,
@@ -541,6 +543,12 @@ impl AgentLoopTask {
         }
 
         let prompt = prompt::build_prompt(self.client.model()).await;
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let gate = agent::GateContext {
+            policy: self.client.permission(),
+            cwd: &cwd,
+            interactive: true,
+        };
         let outcome = agent_turn(
             &self.client,
             &self.tools,
@@ -550,6 +558,7 @@ impl AgentLoopTask {
             &self.session,
             &mut self.user_rx,
             self.client.max_tool_rounds(),
+            &gate,
         )
         .await;
         let TurnOutcome { report, result } = outcome;
@@ -813,6 +822,19 @@ fn apply_swap_config(
 
 // ── Bare REPL Mode ──
 
+/// Gate for the modal-less surfaces (`--no-tui` REPL and headless `-p`). Both lack an approval UI,
+/// so an `ask` verdict resolves to deny rather than emitting a prompt no one can answer.
+fn non_interactive_gate<'a>(
+    client: &'a Client,
+    cwd: &'a std::path::Path,
+) -> agent::GateContext<'a> {
+    agent::GateContext {
+        policy: client.permission(),
+        cwd,
+        interactive: false,
+    }
+}
+
 async fn bare_repl(
     client: &Client,
     tools: Arc<ToolRegistry>,
@@ -885,6 +907,8 @@ async fn bare_repl(
             )
             .await;
             let prompt = prompt::build_prompt(model).await;
+            let cwd = std::env::current_dir().unwrap_or_default();
+            let gate = non_interactive_gate(client, &cwd);
             let turn = agent_turn(
                 client,
                 &tools,
@@ -894,6 +918,7 @@ async fn bare_repl(
                 &session,
                 &mut user_rx,
                 client.max_tool_rounds(),
+                &gate,
             );
             let TurnOutcome { report, result } = tokio::select! {
                 outcome = turn => outcome,
@@ -943,6 +968,8 @@ async fn headless(
     let prompt = prompt::build_prompt(model).await;
     let mut shutdown_fired = false;
     let (_user_tx, mut user_rx) = inert_user_action_channel();
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let gate = non_interactive_gate(client, &cwd);
     let turn = agent_turn(
         client,
         &tools,
@@ -952,6 +979,7 @@ async fn headless(
         &session,
         &mut user_rx,
         client.max_tool_rounds(),
+        &gate,
     );
     let result: Result<()> = tokio::select! {
         outcome = turn => match outcome.result {
