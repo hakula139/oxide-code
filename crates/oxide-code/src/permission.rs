@@ -13,7 +13,7 @@ use std::str::FromStr;
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::permission::rule::Rule;
+use crate::permission::rule::{MatchDiscipline, Rule};
 use crate::tool::RiskClass;
 
 // ── Mode ──
@@ -238,7 +238,11 @@ impl Policy {
             return Decision::Allow;
         }
 
-        if self.deny.iter().any(|r| r.matches(tool, target, true)) {
+        if self
+            .deny
+            .iter()
+            .any(|r| r.matches(tool, target, MatchDiscipline::Deny))
+        {
             return Decision::Deny;
         }
 
@@ -254,7 +258,11 @@ impl Policy {
             return Decision::Allow;
         }
 
-        if self.allow.iter().any(|r| r.matches(tool, target, false)) {
+        if self
+            .allow
+            .iter()
+            .any(|r| r.matches(tool, target, MatchDiscipline::Allow))
+        {
             return Decision::Allow;
         }
 

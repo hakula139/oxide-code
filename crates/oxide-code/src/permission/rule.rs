@@ -46,6 +46,18 @@ enum BashSpec {
     Wildcard(Regex),
 }
 
+/// Which rule set a match is being evaluated for, selecting the compound-`bash`-command discipline.
+/// Allow widens, so it matches conservatively; deny revokes, so it matches aggressively. Carrying
+/// this as a type rather than a bare bool keeps the security-critical asymmetry legible at the two
+/// call sites in [`crate::permission::Policy::decide`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MatchDiscipline {
+    /// A single non-compound command must match the whole rule, so a chained command never widens.
+    Allow,
+    /// The whole command or any chained segment may match, so a danger behind a safe head is caught.
+    Deny,
+}
+
 impl Rule {
     /// Parses a `tool(specifier)` string. The first unescaped `(` opens the specifier and the
     /// trailing `)` closes it, and a bare name with no parentheses is tool-wide. An unbalanced
@@ -77,16 +89,21 @@ impl Rule {
         Ok(Self { tool, spec })
     }
 
-    /// Whether this rule matches a call to `tool` with `target`. `deny` selects the matching
-    /// discipline for compound `bash` commands: a deny rule matches the whole command or any chained
+    /// Whether this rule matches a call to `tool` with `target`. `discipline` selects the matching
+    /// rule for compound `bash` commands: a deny rule matches the whole command or any chained
     /// segment, an allow rule matches only a single non-compound command.
-    pub(crate) fn matches(&self, tool: &str, target: &Target<'_>, deny: bool) -> bool {
+    pub(crate) fn matches(
+        &self,
+        tool: &str,
+        target: &Target<'_>,
+        discipline: MatchDiscipline,
+    ) -> bool {
         if self.tool != tool {
             return false;
         }
         match (&self.spec, target) {
             (Spec::Any, _) => true,
-            (Spec::Bash(spec), Target::Command(cmd)) => spec.matches(cmd, deny),
+            (Spec::Bash(spec), Target::Command(cmd)) => spec.matches(cmd, discipline),
             (
                 Spec::Path(glob),
                 Target::Path {
@@ -111,8 +128,8 @@ impl BashSpec {
         }
     }
 
-    fn matches(&self, command: &str, deny: bool) -> bool {
-        if deny {
+    fn matches(&self, command: &str, discipline: MatchDiscipline) -> bool {
+        if discipline == MatchDiscipline::Deny {
             // Test the whole command before splitting so a deny pattern that itself contains a chain
             // operator (the shipped `* | sh` and fork-bomb defaults) still fires, then each segment
             // so a danger chained behind a safe head (`ls && rm -rf`) is caught too.
@@ -197,21 +214,24 @@ mod tests {
     #[test]
     fn parse_bare_tool_name_is_tool_wide() {
         let rule = Rule::parse("bash").unwrap();
-        assert!(rule.matches("bash", &cmd("anything; rm -rf /"), false));
+        assert!(rule.matches("bash", &cmd("anything; rm -rf /"), MatchDiscipline::Allow));
     }
 
     #[test]
     fn parse_empty_and_star_specifiers_are_tool_wide() {
         for raw in ["bash()", "bash(*)"] {
             let rule = Rule::parse(raw).unwrap();
-            assert!(rule.matches("bash", &cmd("ls"), false), "{raw}");
+            assert!(
+                rule.matches("bash", &cmd("ls"), MatchDiscipline::Allow),
+                "{raw}"
+            );
         }
     }
 
     #[test]
     fn parse_lowercases_tool_name_for_case_insensitive_match() {
         let rule = Rule::parse("Bash(ls)").unwrap();
-        assert!(rule.matches("bash", &cmd("ls"), false));
+        assert!(rule.matches("bash", &cmd("ls"), MatchDiscipline::Allow));
     }
 
     #[test]
@@ -241,24 +261,28 @@ mod tests {
     #[test]
     fn bash_exact_matches_only_identical_command() {
         let rule = Rule::parse("bash(cargo build)").unwrap();
-        assert!(rule.matches("bash", &cmd("cargo build"), false));
-        assert!(!rule.matches("bash", &cmd("cargo build --release"), false));
+        assert!(rule.matches("bash", &cmd("cargo build"), MatchDiscipline::Allow));
+        assert!(!rule.matches(
+            "bash",
+            &cmd("cargo build --release"),
+            MatchDiscipline::Allow
+        ));
     }
 
     #[test]
     fn bash_prefix_matches_command_and_its_arguments() {
         let rule = Rule::parse("bash(cargo test:*)").unwrap();
-        assert!(rule.matches("bash", &cmd("cargo test"), false));
-        assert!(rule.matches("bash", &cmd("cargo test --all"), false));
+        assert!(rule.matches("bash", &cmd("cargo test"), MatchDiscipline::Allow));
+        assert!(rule.matches("bash", &cmd("cargo test --all"), MatchDiscipline::Allow));
         // A different command that merely starts with the same letters must not match.
-        assert!(!rule.matches("bash", &cmd("cargo testbench"), false));
+        assert!(!rule.matches("bash", &cmd("cargo testbench"), MatchDiscipline::Allow));
     }
 
     #[test]
     fn bash_wildcard_anchors_both_ends() {
         let rule = Rule::parse("bash(git *)").unwrap();
-        assert!(rule.matches("bash", &cmd("git status"), false));
-        assert!(!rule.matches("bash", &cmd("cargo git"), false));
+        assert!(rule.matches("bash", &cmd("git status"), MatchDiscipline::Allow));
+        assert!(!rule.matches("bash", &cmd("cargo git"), MatchDiscipline::Allow));
     }
 
     #[test]
@@ -266,20 +290,32 @@ mod tests {
         // The load-bearing safety property: `cargo test:*` must not allow a chained `rm` or a
         // redirect that clobbers a file.
         let rule = Rule::parse("bash(cargo test:*)").unwrap();
-        assert!(!rule.matches("bash", &cmd("cargo test && rm -rf /"), false));
-        assert!(!rule.matches("bash", &cmd("cargo test; rm -rf /"), false));
-        assert!(!rule.matches("bash", &cmd("cargo test | tee out"), false));
-        assert!(!rule.matches("bash", &cmd("cargo test $(rm -rf /)"), false));
-        assert!(!rule.matches("bash", &cmd("cargo test > /etc/passwd"), false));
+        assert!(!rule.matches(
+            "bash",
+            &cmd("cargo test && rm -rf /"),
+            MatchDiscipline::Allow
+        ));
+        assert!(!rule.matches("bash", &cmd("cargo test; rm -rf /"), MatchDiscipline::Allow));
+        assert!(!rule.matches("bash", &cmd("cargo test | tee out"), MatchDiscipline::Allow));
+        assert!(!rule.matches(
+            "bash",
+            &cmd("cargo test $(rm -rf /)"),
+            MatchDiscipline::Allow
+        ));
+        assert!(!rule.matches(
+            "bash",
+            &cmd("cargo test > /etc/passwd"),
+            MatchDiscipline::Allow
+        ));
     }
 
     #[test]
     fn deny_prefix_matches_any_segment_of_compound_command() {
         // The mirror property: a deny must fire even when the danger is chained behind a safe head.
         let rule = Rule::parse("bash(rm -rf:*)").unwrap();
-        assert!(rule.matches("bash", &cmd("rm -rf /"), true));
-        assert!(rule.matches("bash", &cmd("ls && rm -rf /tmp/x"), true));
-        assert!(rule.matches("bash", &cmd("echo hi; rm -rf ."), true));
+        assert!(rule.matches("bash", &cmd("rm -rf /"), MatchDiscipline::Deny));
+        assert!(rule.matches("bash", &cmd("ls && rm -rf /tmp/x"), MatchDiscipline::Deny));
+        assert!(rule.matches("bash", &cmd("echo hi; rm -rf ."), MatchDiscipline::Deny));
     }
 
     #[test]
@@ -294,7 +330,7 @@ mod tests {
         for (spec, command) in cases {
             let rule = Rule::parse(spec).unwrap();
             assert!(
-                rule.matches("bash", &cmd(command), true),
+                rule.matches("bash", &cmd(command), MatchDiscipline::Deny),
                 "{spec} vs {command:?}"
             );
         }
@@ -305,7 +341,7 @@ mod tests {
         // The fork-bomb default is an exact rule whose own text spans chain operators, so it only
         // matches when the unsplit command is tested.
         let rule = Rule::parse("bash(:(){ :|:& };:)").unwrap();
-        assert!(rule.matches("bash", &cmd(":(){ :|:& };:"), true));
+        assert!(rule.matches("bash", &cmd(":(){ :|:& };:"), MatchDiscipline::Deny));
     }
 
     // ── Rule::matches (path) ──
@@ -318,12 +354,12 @@ mod tests {
         assert!(rule.matches(
             "write",
             &path("/repo/.git/hooks/pre-commit", Some(".git/hooks/pre-commit")),
-            true
+            MatchDiscipline::Deny
         ));
         assert!(!rule.matches(
             "write",
             &path("/repo/src/main.rs", Some("src/main.rs")),
-            true
+            MatchDiscipline::Deny
         ));
     }
 
@@ -332,7 +368,11 @@ mod tests {
         // A cwd-relative glob must not match an absolute path that resolved outside the working
         // directory, so such targets fall through to ask rather than to a relative rule.
         let rule = Rule::parse("write(.git/**)").unwrap();
-        assert!(!rule.matches("write", &path("/elsewhere/.git/config", None), true));
+        assert!(!rule.matches(
+            "write",
+            &path("/elsewhere/.git/config", None),
+            MatchDiscipline::Deny
+        ));
     }
 
     #[test]
@@ -340,29 +380,37 @@ mod tests {
         // An absolute glob (e.g. a `~`-expanded rule) matches the canonical path even with no
         // relative component.
         let rule = Rule::parse("read(/etc/**)").unwrap();
-        assert!(rule.matches("read", &path("/etc/passwd", None), false));
-        assert!(!rule.matches("read", &path("/home/u/.config", None), false));
+        assert!(rule.matches("read", &path("/etc/passwd", None), MatchDiscipline::Allow));
+        assert!(!rule.matches(
+            "read",
+            &path("/home/u/.config", None),
+            MatchDiscipline::Allow
+        ));
     }
 
     #[test]
     fn path_recursive_glob_spans_directories() {
         let rule = Rule::parse("edit(src/**)").unwrap();
-        assert!(rule.matches("edit", &path("/repo/src/a/b.rs", Some("src/a/b.rs")), false));
+        assert!(rule.matches(
+            "edit",
+            &path("/repo/src/a/b.rs", Some("src/a/b.rs")),
+            MatchDiscipline::Allow
+        ));
     }
 
     #[test]
     fn rule_does_not_match_other_tools() {
         let rule = Rule::parse("bash(ls)").unwrap();
-        assert!(!rule.matches("edit", &cmd("ls"), false));
+        assert!(!rule.matches("edit", &cmd("ls"), MatchDiscipline::Allow));
     }
 
     #[test]
     fn bash_rule_ignores_path_target_and_vice_versa() {
         let bash_rule = Rule::parse("bash(ls)").unwrap();
-        assert!(!bash_rule.matches("bash", &path("/x", None), false));
+        assert!(!bash_rule.matches("bash", &path("/x", None), MatchDiscipline::Allow));
 
         let path_rule = Rule::parse("edit(src/**)").unwrap();
-        assert!(!path_rule.matches("edit", &cmd("src/a"), false));
+        assert!(!path_rule.matches("edit", &cmd("src/a"), MatchDiscipline::Allow));
     }
 
     // ── glob_to_regex ──
