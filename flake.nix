@@ -9,7 +9,7 @@
   description = "oxide-code — terminal-based AI coding assistant";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
     flake-utils.url = "github:numtide/flake-utils";
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
@@ -128,7 +128,7 @@
         preCommitCheck = git-hooks-nix.lib.${system}.run {
           src = ./.;
           hooks = {
-            nixfmt-rfc-style.enable = true;
+            nixfmt.enable = true;
 
             # Clippy stays in CI; the bare hook would recompile on every commit.
             rustfmt = {
