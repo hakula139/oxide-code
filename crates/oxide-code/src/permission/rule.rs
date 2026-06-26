@@ -48,13 +48,16 @@ enum BashSpec {
 
 impl Rule {
     /// Parses a `tool(specifier)` string. The first unescaped `(` opens the specifier and the
-    /// trailing `)` closes it, and everything else is a bare tool name. Path globs and wildcard
-    /// regexes compile here so a malformed rule fails at config load rather than mid-turn.
+    /// trailing `)` closes it, and a bare name with no parentheses is tool-wide. An unbalanced
+    /// parenthesis is a hard error so a typo like `bash(rm -rf:*` fails at config load rather than
+    /// parsing as a tool name that silently matches nothing. Path globs and wildcard regexes compile
+    /// here so a malformed rule fails at config load rather than mid-turn.
     pub(crate) fn parse(raw: &str) -> Result<Self> {
         let raw = raw.trim();
         let (tool, spec_str) = match (raw.find('('), raw.strip_suffix(')')) {
             (Some(open), Some(_)) => (&raw[..open], &raw[open + 1..raw.len() - 1]),
-            _ => (raw, ""),
+            (None, None) => (raw, ""),
+            _ => anyhow::bail!("permission rule {raw:?} has an unbalanced parenthesis"),
         };
 
         let tool = tool.trim().to_lowercase();
@@ -208,6 +211,16 @@ mod tests {
     fn parse_rejects_empty_tool_name() {
         let err = Rule::parse("(ls)").unwrap_err().to_string();
         assert!(err.contains("no tool name"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_rejects_unbalanced_parenthesis() {
+        // A typo'd deny like `bash(rm -rf:*` must fail loudly, not parse as a tool named
+        // `bash(rm -rf:*` that silently matches no real call.
+        for raw in ["bash(rm -rf:*", "bash rm -rf:*)"] {
+            let err = Rule::parse(raw).unwrap_err().to_string();
+            assert!(err.contains("unbalanced parenthesis"), "{raw}: {err}");
+        }
     }
 
     #[test]
