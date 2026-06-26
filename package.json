@@ -6,7 +6,13 @@
     "spellcheck": "cspell --no-progress \"**/*\""
   },
   "devDependencies": {
-    "cspell": "^10.0.0",
-    "markdownlint-cli2": "^0.22.0"
+    "cspell": "^10.0.1",
+    "markdownlint-cli2": "^0.22.1"
+  },
+  "pnpm": {
+    "overrides": {
+      "js-yaml@<=4.1.1": "^4.2.0",
+      "markdown-it@<=14.1.1": "^14.2.0"
+    }
   }
 }
