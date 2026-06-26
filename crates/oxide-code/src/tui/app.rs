@@ -285,6 +285,14 @@ impl App {
                     self.input.set_enabled(false);
                     self.should_quit = true;
                 }
+                // An approval decision is a control-plane reply the agent is actively waiting for, so
+                // a dropped one leaves the turn blocked rather than merely losing a prompt. Point the
+                // user at the recovery path instead of the generic prompt-dropped message.
+                mpsc::error::TrySendError::Full(UserAction::ApprovalDecision { .. }) => {
+                    self.chat.push_error(
+                        "approval could not be delivered; press Esc to cancel the blocked turn",
+                    );
+                }
                 mpsc::error::TrySendError::Full(_) => {
                     self.chat
                         .push_error("user-action channel full; prompt dropped (this is a bug)");
@@ -1635,6 +1643,31 @@ mod tests {
             "exactly one error block on overflow",
         );
         assert!(app.chat.last_is_error());
+    }
+
+    #[test]
+    fn dispatch_full_channel_on_approval_points_to_the_cancel_recovery() {
+        // A dropped approval decision blocks the turn, unlike a dropped prompt, so the error must
+        // name the recovery path rather than the generic prompt-dropped message.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
+        for _ in 0..8 {
+            app.dispatch_user_action(UserAction::Cancel);
+        }
+
+        app.dispatch_user_action(UserAction::ApprovalDecision {
+            id: "call-1".to_owned(),
+            decision: crate::agent::event::ApprovalDecision::Approve,
+        });
+
+        assert!(!app.should_quit, "Full is not fatal");
+        assert!(app.chat.last_is_error());
+        assert!(
+            app.chat
+                .last_error_text()
+                .is_some_and(|t| t.contains("Esc to cancel")),
+            "approval-drop error should name the cancel recovery",
+        );
     }
 
     #[tokio::test]
