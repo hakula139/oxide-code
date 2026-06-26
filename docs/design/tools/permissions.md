@@ -66,7 +66,7 @@ In `-p` / `--no-tui` runs there is no human to prompt, so a would-ask call denie
 
 ## Tool Risk Classes
 
-Risk is a new method on the `Tool` trait, so each tool declares its own class. The three classes are read-only (`read`, `glob`, `grep`), edit-class (`edit`, `write`), and execute (`bash`).
+Risk is a new method on the `Tool` trait, so each tool declares its own class. The three classes are read-only (`read`, `glob`, `grep`), edit-class (`edit`, `write`), and execute (`bash`). A read-only tool auto-allows at step 2, but it still extracts a gate target (the file for `read`, the search root for `grep` / `glob`) so a path-scoped deny at step 1 fires first.
 
 `edit` and `write` share a class but differ in blast radius. `edit` requires the file to exist and to have been read, so it cannot create files. `write` can create brand-new files and parent directories without a prior Read, while overwriting an existing file still goes through the tracker gate. The step-4 cwd check operates on each call's target path, canonicalized (or resolved through its nearest existing parent when the file is new), so the two share one risk class.
 
@@ -101,7 +101,7 @@ Each phase ships independently.
 - Per-rule opt-out of a shipped dangerous-pattern deny default within `auto`; today only `yolo` bypasses them.
 - Persisted project allowlists via an explicit confirmed writer (`util/fs.rs::atomic_write_private`).
 - Editable bash-prefix widening in the approval modal ("don't ask again for `cargo *`").
-- Read confidentiality scoping: `read` can open any absolute path, gated nowhere today.
+- Read confidentiality scoping beyond path-glob denies: `read` / `grep` / `glob` honor a path-scoped deny (e.g. `read(**/.env)`), but a read-only call with no matching deny still allows, and `grep` / `glob` gate on the search root rather than each matched file.
 - Rule env vars beyond `OX_PERMISSION_MODE`.
 - Resume survival of session allow-always through the session actor.
 

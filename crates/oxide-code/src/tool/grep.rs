@@ -30,6 +30,17 @@ impl Tool for GrepTool {
         super::RiskClass::ReadOnly
     }
 
+    fn gate_target(
+        &self,
+        input: &serde_json::Value,
+        cwd: &std::path::Path,
+    ) -> crate::permission::GateTarget {
+        // The gated target is the search root (the `path` arg, defaulting to cwd), so a path-scoped
+        // deny can block searching under a protected directory.
+        let path = extract_input_field(input, "path").unwrap_or(".");
+        crate::permission::GateTarget::for_path(path, cwd)
+    }
+
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
@@ -638,6 +649,21 @@ mod tests {
     #[test]
     fn risk_class_is_read_only() {
         assert_eq!(GrepTool.risk_class(), RiskClass::ReadOnly);
+    }
+
+    // ── gate_target ──
+
+    #[test]
+    fn gate_target_defaults_the_search_root_to_cwd() {
+        // With no `path`, the search root is cwd, so a deny scoped to the project root still applies.
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = std::fs::canonicalize(dir.path()).unwrap();
+
+        let target = GrepTool.gate_target(&serde_json::json!({"pattern": "x"}), &cwd);
+        let crate::permission::GateTarget::Path { relative, .. } = target else {
+            panic!("expected a path target");
+        };
+        assert_eq!(relative.as_deref(), Some(""));
     }
 
     // ── run ──
