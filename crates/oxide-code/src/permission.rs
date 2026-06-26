@@ -139,14 +139,14 @@ pub(crate) enum GateTarget {
 
 impl GateTarget {
     /// Builds a path target by resolving `path` against `cwd`. An existing path is canonicalized
-    /// (resolving symlinks and `..`), while a path that cannot canonicalize yet (e.g. a brand-new
-    /// file) falls back to a lexical normalization that still resolves `..`, so a `../escape`
+    /// (resolving symlinks and `..`). A path that cannot canonicalize yet (e.g. a brand-new file)
+    /// has its nearest existing ancestor canonicalized, then the remaining components appended
+    /// lexically, so a symlinked parent resolves before the inside-cwd test and a `../escape`
     /// traversal can never masquerade as inside-cwd. The relative component is set only when the
     /// resolved path stays inside `cwd`, which drives the inside-cwd auto-allow.
     pub(crate) fn for_path(path: &str, cwd: &std::path::Path) -> Self {
         let joined = cwd.join(path);
-        let canonical =
-            std::fs::canonicalize(&joined).unwrap_or_else(|_| lexical_normalize(&joined));
+        let canonical = std::fs::canonicalize(&joined).unwrap_or_else(|_| resolve_partial(&joined));
         let relative = canonical
             .strip_prefix(cwd)
             .ok()
@@ -265,9 +265,41 @@ pub(crate) fn parse_rules(raw: &[impl AsRef<str>]) -> Result<Vec<Rule>> {
     raw.iter().map(|s| Rule::parse(s.as_ref())).collect()
 }
 
-/// Resolves `.` and `..` components in `path` without touching the filesystem, used when a target
-/// path does not yet exist so [`std::fs::canonicalize`] cannot. A leading `..` that would escape
-/// the root is dropped, matching how the OS clamps traversal at `/`.
+/// Resolves a path whose tail does not exist yet, so [`std::fs::canonicalize`] cannot. The nearest
+/// existing ancestor is canonicalized (resolving symlinks and `..` in the real part), then the
+/// remaining components are appended lexically. This keeps a symlinked parent from smuggling an
+/// outside path past the inside-cwd test: `cwd/link/new.rs` with `link` pointing outside `cwd`
+/// resolves to the real outside location rather than staying textually under `cwd`.
+fn resolve_partial(path: &std::path::Path) -> std::path::PathBuf {
+    // Walk up to the first ancestor that exists and canonicalizes, recording the trailing
+    // components we skipped so they can be re-applied to the resolved base.
+    let mut tail = Vec::new();
+    let mut base = path;
+    loop {
+        if let Ok(real) = std::fs::canonicalize(base) {
+            let mut out = real;
+            for component in tail.iter().rev() {
+                out.push(component);
+            }
+            return out;
+        }
+        match base.parent() {
+            Some(parent) => {
+                if let Some(name) = base.file_name() {
+                    tail.push(name.to_owned());
+                }
+                base = parent;
+            }
+            // No ancestor exists (e.g. a path rooted outside any real directory): fall back to a
+            // pure lexical normalization, which still resolves `..` so a traversal can't masquerade.
+            None => return lexical_normalize(path),
+        }
+    }
+}
+
+/// Resolves `.` and `..` components in `path` without touching the filesystem, the last-resort
+/// fallback when not even an ancestor of the path exists. A leading `..` that would escape the root
+/// is dropped, matching how the OS clamps traversal at `/`.
 fn lexical_normalize(path: &std::path::Path) -> std::path::PathBuf {
     use std::path::Component;
 
@@ -373,6 +405,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cwd = std::fs::canonicalize(dir.path()).unwrap();
         let target = GateTarget::for_path("../escape.rs", &cwd);
+        assert!(!target.as_target().is_inside_cwd());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn for_path_new_file_under_a_symlinked_parent_is_not_inside_cwd() {
+        // A brand-new file can't canonicalize, but its parent symlink must still resolve so a write
+        // to `cwd/link/new.rs` where `link` points outside cwd is not waved through as inside-cwd.
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = std::fs::canonicalize(dir.path()).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let outside = std::fs::canonicalize(outside.path()).unwrap();
+        std::os::unix::fs::symlink(&outside, cwd.join("link")).unwrap();
+
+        let target = GateTarget::for_path("link/new.rs", &cwd);
         assert!(!target.as_target().is_inside_cwd());
     }
 
@@ -574,5 +621,34 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("invalid path glob"), "got: {err}");
+    }
+
+    // ── resolve_partial ──
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_partial_resolves_a_symlinked_ancestor() {
+        // The nearest existing ancestor canonicalizes (resolving the symlink), then the missing tail
+        // is appended, so the result reflects the real location rather than the textual one.
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let outside = root.join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
+
+        let resolved = resolve_partial(&root.join("link/sub/new.rs"));
+        assert_eq!(resolved, outside.join("sub/new.rs"));
+    }
+
+    // ── lexical_normalize ──
+
+    #[test]
+    fn lexical_normalize_drops_a_dot_dot_that_would_escape_root() {
+        // The last-resort fallback when no ancestor exists: a leading `..` past root is clamped, not
+        // carried, matching the OS so a traversal can't escape.
+        assert_eq!(
+            lexical_normalize(std::path::Path::new("/a/../../b")),
+            std::path::PathBuf::from("/b")
+        );
     }
 }
