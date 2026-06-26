@@ -142,14 +142,17 @@ impl GateTarget {
     /// (resolving symlinks and `..`). A path that cannot canonicalize yet (e.g. a brand-new file)
     /// has its nearest existing ancestor canonicalized, then the remaining components appended
     /// lexically, so a symlinked parent resolves before the inside-cwd test and a `../escape`
-    /// traversal can never masquerade as inside-cwd. The relative component is set only when the
-    /// resolved path stays inside `cwd`, which drives the inside-cwd auto-allow.
+    /// traversal can never masquerade as inside-cwd. The relative component is set only when `cwd`
+    /// is absolute and the resolved path stays inside it, which drives the inside-cwd auto-allow.
+    /// A non-absolute `cwd` (e.g. an empty fallback after `current_dir` fails) yields no relative
+    /// component, so the call falls through to ask rather than auto-allowing every path.
     pub(crate) fn for_path(path: &str, cwd: &std::path::Path) -> Self {
         let joined = cwd.join(path);
         let canonical = std::fs::canonicalize(&joined).unwrap_or_else(|_| resolve_partial(&joined));
-        let relative = canonical
-            .strip_prefix(cwd)
-            .ok()
+        let relative = cwd
+            .is_absolute()
+            .then(|| canonical.strip_prefix(cwd).ok())
+            .flatten()
             .map(|r| r.to_string_lossy().into_owned());
         Self::Path {
             canonical: canonical.to_string_lossy().into_owned(),
@@ -420,6 +423,14 @@ mod tests {
         std::os::unix::fs::symlink(&outside, cwd.join("link")).unwrap();
 
         let target = GateTarget::for_path("link/new.rs", &cwd);
+        assert!(!target.as_target().is_inside_cwd());
+    }
+
+    #[test]
+    fn for_path_with_a_non_absolute_cwd_is_not_inside_cwd() {
+        // An empty cwd (the `current_dir` failure fallback) must not auto-allow every path. Without
+        // the absolute-cwd guard, `strip_prefix("")` would succeed for any target.
+        let target = GateTarget::for_path("a.rs", std::path::Path::new(""));
         assert!(!target.as_target().is_inside_cwd());
     }
 
