@@ -38,7 +38,6 @@
         };
 
         # Track the workspace's MSRV via rust-overlay; nixpkgs' stable rustc may lag.
-        # llvm-tools-preview backs `cargo llvm-cov`; rust-analyzer / rust-src aid editors.
         rustToolchain = pkgs.rust-bin.stable.latest.default.override {
           extensions = [
             "llvm-tools-preview"
@@ -123,8 +122,6 @@
         # ----------------------------------------------------------------------
         # Pre-commit Hooks
         # ----------------------------------------------------------------------
-        # Mirrors the compile-free CI checks. Clippy, tests, and coverage stay
-        # in CI, where their build cost does not gate every commit.
         preCommitCheck = git-hooks-nix.lib.${system}.run {
           src = ./.;
           hooks = {
@@ -158,8 +155,7 @@
       in
       {
         # ----------------------------------------------------------------------
-        # Dev Shell (`nix develop`) — provisions the hook toolchain and installs
-        # the git hook via the generated `shellHook`.
+        # Dev Shell
         # ----------------------------------------------------------------------
         devShells.default = pkgs.mkShell {
           name = "oxide-code-dev";
@@ -185,7 +181,7 @@
         };
 
         # ----------------------------------------------------------------------
-        # Checks (`nix flake check`) — runs the same hooks CI gates on.
+        # Checks (`nix flake check`)
         # ----------------------------------------------------------------------
         checks = {
           pre-commit = preCommitCheck;
