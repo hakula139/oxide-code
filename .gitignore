@@ -2,6 +2,12 @@
 /target/
 /node_modules/
 
+# Nix
+.direnv/
+.pre-commit-config.yaml
+result
+result-*
+
 # cargo insta pending-review files
 *.snap.new
 

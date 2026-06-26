@@ -1080,10 +1080,12 @@ mod tests {
         ];
 
         let tracker = FileTracker::default();
-        let dropped = tracker.restore_verified(snaps);
+        let mut dropped = tracker.restore_verified(snaps);
+        dropped.sort();
+        let mut expected = vec![drifted_path, missing_path];
+        expected.sort();
         assert_eq!(
-            dropped,
-            vec![missing_path, drifted_path],
+            dropped, expected,
             "both the size-drifted and the missing snapshots must be reported",
         );
         assert!(tracker.lock().contains_key(&kept_path));
