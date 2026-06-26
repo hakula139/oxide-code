@@ -347,6 +347,18 @@ impl AgentSink for CapturingSink {
     }
 }
 
+/// An [`AgentSink`] whose `send` always fails, for exercising the fail-closed paths that depend on
+/// a control-plane event reaching the UI.
+#[cfg(test)]
+pub(crate) struct FailingSink;
+
+#[cfg(test)]
+impl AgentSink for FailingSink {
+    fn send(&self, _event: AgentEvent) -> Result<()> {
+        anyhow::bail!("sink closed")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -531,7 +531,8 @@ async fn dispatch_tool_call(
 /// Runs the permission gate for one call. Returns `Ok(None)` to proceed, `Ok(Some(output))` with a
 /// synthetic denial the model sees as a tool result, or an abort if the user cancelled / quit while
 /// the approval was outstanding. An `ask` verdict emits [`AgentEvent::ApprovalRequested`] and blocks
-/// on the matching [`UserAction::ApprovalDecision`]. In a non-interactive session it denies instead.
+/// on the matching [`UserAction::ApprovalDecision`], denying if the event cannot be delivered (no
+/// modal could answer it). In a non-interactive session it denies instead.
 #[expect(
     clippy::too_many_arguments,
     reason = "the gate threads the same per-call inputs dispatch already carries"
@@ -561,13 +562,18 @@ async fn check_permission(
         crate::permission::Decision::Deny => Ok(Some(denied_output(name))),
         crate::permission::Decision::Ask if !gate.interactive => Ok(Some(denied_output(name))),
         crate::permission::Decision::Ask => {
-            sink.emit(
-                AgentEvent::ApprovalRequested {
+            // The approval request is a control-plane event: if it can't be delivered, no modal will
+            // exist to answer it and `await_approval` would block forever. Fail closed on a send
+            // error rather than stranding the turn.
+            if sink
+                .send(AgentEvent::ApprovalRequested {
                     id: id.to_owned(),
                     preview: tool.approval_preview(input),
-                },
-                "approval-requested",
-            );
+                })
+                .is_err()
+            {
+                return Ok(Some(denied_output(name)));
+            }
             match await_approval(id, user_rx, pending).await? {
                 ApprovalDecision::Approve => Ok(None),
                 ApprovalDecision::Deny => Ok(Some(denied_output(name))),
@@ -2972,6 +2978,33 @@ data: {"type":"message_stop"}
             Some("tool_1"),
             "ask must surface an approval event carrying the call id",
         );
+    }
+
+    #[tokio::test]
+    async fn check_permission_ask_undeliverable_event_fails_closed() {
+        // If the approval event can't be delivered, no modal can answer it, so the gate must deny
+        // rather than block in await_approval forever. An inert receiver would hang on a regression.
+        let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
+        let sink = crate::agent::event::FailingSink;
+        let gate = gate_with(crate::permission::Mode::Auto, &[], &[], true);
+        let (_tx, mut rx) = mpsc::channel::<UserAction>(1);
+
+        let denial = check_permission(
+            &tools,
+            "tool_1",
+            "echo",
+            &json!({}),
+            &sink,
+            &mut rx,
+            &mut Vec::new(),
+            &gate,
+        )
+        .await
+        .expect("an undeliverable approval resolves without abort")
+        .expect("an undeliverable approval yields a synthetic denial");
+
+        assert!(denial.is_error);
+        assert!(denial.content.contains("denied by the permission policy"));
     }
 
     #[tokio::test]
