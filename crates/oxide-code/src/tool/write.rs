@@ -197,10 +197,55 @@ async fn check_gate(file_path: &Path, path: &str, tracker: &FileTracker) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::event::ApprovalBody;
     use crate::file_tracker::{
         LastView, MAX_TRACKED_FILE_SIZE,
         testing::{seed_full_read, tracker},
     };
+    use crate::permission::GateTarget;
+
+    // ── gate_target ──
+
+    #[test]
+    fn gate_target_resolves_a_brand_new_file_inside_cwd() {
+        // A write target need not exist yet, but it still resolves relative to cwd so the inside-cwd
+        // allow applies to new-file writes.
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = std::fs::canonicalize(dir.path()).unwrap();
+        let tool = WriteTool::new(Arc::new(FileTracker::default()));
+
+        let target = tool.gate_target(&serde_json::json!({"file_path": "new/file.rs"}), &cwd);
+        let GateTarget::Path { relative, .. } = target else {
+            panic!("expected a path target");
+        };
+        assert_eq!(relative.as_deref(), Some("new/file.rs"));
+    }
+
+    #[test]
+    fn gate_target_missing_file_path_is_none() {
+        let tool = WriteTool::new(Arc::new(FileTracker::default()));
+        let target = tool.gate_target(&serde_json::json!({}), std::path::Path::new("/"));
+        assert!(matches!(target, GateTarget::None));
+    }
+
+    // ── approval_preview ──
+
+    #[test]
+    fn approval_preview_renders_content_as_an_all_added_diff() {
+        let tool = WriteTool::new(Arc::new(FileTracker::default()));
+        let preview = tool.approval_preview(&serde_json::json!({
+            "file_path": "src/new.rs",
+            "content": "fn main() {}",
+        }));
+
+        assert!(preview.title.contains("src/new.rs"));
+        let ApprovalBody::Diff(chunks) = preview.body else {
+            panic!("write preview should be a diff");
+        };
+        let chunk = &chunks[0];
+        assert!(chunk.old.is_empty(), "a new file has no removed lines");
+        assert!(chunk.new.iter().any(|l| l.text.contains("fn main() {}")));
+    }
 
     // ── run ──
 

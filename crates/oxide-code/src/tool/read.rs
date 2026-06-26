@@ -292,6 +292,15 @@ mod tests {
 
     use super::*;
     use crate::file_tracker::{GatePurpose, MAX_TRACKED_FILE_SIZE, testing::tracker};
+    use crate::tool::RiskClass;
+
+    // ── risk_class ──
+
+    #[test]
+    fn risk_class_is_read_only() {
+        let tool = ReadTool::new(tracker());
+        assert_eq!(tool.risk_class(), RiskClass::ReadOnly);
+    }
 
     // ── run ──
 

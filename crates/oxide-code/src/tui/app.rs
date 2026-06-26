@@ -1430,6 +1430,35 @@ mod tests {
         assert_eq!(app.input.lines(), vec!["y".to_owned()]);
     }
 
+    #[test]
+    fn clear_modals_resolves_a_pending_approval_to_deny() {
+        // A session swap clears the stack while an approval is outstanding. The cancel hook's Deny
+        // must reach the agent so the blocked turn is not stranded waiting for a decision.
+        use crate::agent::event::{ApprovalBody, ApprovalDecision, ApprovalPreview};
+
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.push_approval_modal(
+            "call-1".to_owned(),
+            ApprovalPreview {
+                title: "Bash(rm -rf /)".to_owned(),
+                body: ApprovalBody::Command("rm -rf /".to_owned()),
+            },
+        );
+
+        app.clear_modals();
+
+        let forwarded = rx
+            .try_recv()
+            .expect("clear must forward the cancel-hook deny");
+        assert!(matches!(
+            forwarded,
+            UserAction::ApprovalDecision {
+                id,
+                decision: ApprovalDecision::Deny,
+            } if id == "call-1"
+        ));
+    }
+
     // ── handle_esc ──
 
     #[tokio::test]

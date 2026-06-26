@@ -254,6 +254,14 @@ mod tests {
     use indoc::{formatdoc, indoc};
 
     use super::*;
+    use crate::tool::RiskClass;
+
+    // ── risk_class ──
+
+    #[test]
+    fn risk_class_is_read_only() {
+        assert_eq!(GlobTool.risk_class(), RiskClass::ReadOnly);
+    }
 
     // ── run ──
 

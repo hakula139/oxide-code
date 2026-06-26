@@ -424,10 +424,55 @@ mod tests {
     use indoc::indoc;
 
     use super::*;
+    use crate::agent::event::ApprovalBody;
     use crate::file_tracker::{
         LastView, MAX_TRACKED_FILE_SIZE,
         testing::{tracker, tracker_seeded},
     };
+    use crate::permission::GateTarget;
+
+    // ── gate_target ──
+
+    #[test]
+    fn gate_target_resolves_the_file_path_against_cwd() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = std::fs::canonicalize(dir.path()).unwrap();
+        std::fs::write(cwd.join("a.rs"), "x").unwrap();
+        let tool = EditTool::new(Arc::new(FileTracker::default()));
+
+        let target = tool.gate_target(&serde_json::json!({"file_path": "a.rs"}), &cwd);
+        let GateTarget::Path { relative, .. } = target else {
+            panic!("expected a path target");
+        };
+        assert_eq!(relative.as_deref(), Some("a.rs"));
+    }
+
+    #[test]
+    fn gate_target_missing_file_path_is_none() {
+        let tool = EditTool::new(Arc::new(FileTracker::default()));
+        let target = tool.gate_target(&serde_json::json!({}), Path::new("/"));
+        assert!(matches!(target, GateTarget::None));
+    }
+
+    // ── approval_preview ──
+
+    #[test]
+    fn approval_preview_renders_old_and_new_as_a_diff() {
+        let tool = EditTool::new(Arc::new(FileTracker::default()));
+        let preview = tool.approval_preview(&serde_json::json!({
+            "file_path": "src/main.rs",
+            "old_string": "let a = 1;",
+            "new_string": "let a = 2;",
+        }));
+
+        assert!(preview.title.contains("src/main.rs"));
+        let ApprovalBody::Diff(chunks) = preview.body else {
+            panic!("edit preview should be a diff");
+        };
+        let chunk = &chunks[0];
+        assert!(chunk.old.iter().any(|l| l.text.contains("let a = 1;")));
+        assert!(chunk.new.iter().any(|l| l.text.contains("let a = 2;")));
+    }
 
     // ── result_view ──
 

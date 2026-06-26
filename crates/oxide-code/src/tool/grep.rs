@@ -619,6 +619,7 @@ mod tests {
     use indoc::indoc;
 
     use super::*;
+    use crate::tool::RiskClass;
 
     fn params(pattern: &str) -> GrepParams<'_> {
         GrepParams {
@@ -630,6 +631,13 @@ mod tests {
             case_insensitive: false,
             head_limit: None,
         }
+    }
+
+    // ── risk_class ──
+
+    #[test]
+    fn risk_class_is_read_only() {
+        assert_eq!(GrepTool.risk_class(), RiskClass::ReadOnly);
     }
 
     // ── run ──
