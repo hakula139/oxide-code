@@ -6,7 +6,7 @@ Companion docs: [research/tools/permissions.md](../../research/tools/permissions
 
 ## Modes
 
-A mode sets the standing posture, shaped like the `Effort` enum (`ALL` / `as_str` / `Display` / `FromStr`) and cycled the same way `/effort` is.
+A mode sets the standing posture, shaped like the `Effort` enum (`ALL` / `as_str` / `Display` / `FromStr`) so it threads through config and a future `/permission` control the same way `effort` does.
 
 - **`auto`** (default): the tiered pipeline below. The gate is on out of the box, flipping today's unchecked behavior.
 - **`plan`**: read-only analysis. Read-only tools allow; every mutating tool denies, including `bash`, which cannot be statically proven side-effect-free.
@@ -14,13 +14,14 @@ A mode sets the standing posture, shaped like the `Effort` enum (`ALL` / `as_str
 
 ## Decision Pipeline
 
-In `auto` mode the gate evaluates a call in fixed order and stops at the first match.
+In `auto` mode the gate evaluates a call in fixed order and stops at the first match. This is the shipped Phase 1 pipeline; the classifier (step 6's fallback) and session allow-always are later phases noted inline.
 
 1. **Deny match** (user ∪ project deny rules, including the shipped dangerous-pattern defaults) → deny.
 2. **Read-only tool** (`read`, `glob`, `grep`) → allow.
-3. **Edit-class call inside the working directory** (`edit` / `write`, target path canonicalized first) → allow.
-4. **Allow match** (user allow rules) or **session allow-always** → allow.
-5. **Classifier verdict** → `safe` allows and caches; `risky` or unreachable falls through to ask (interactive) or deny (headless).
+3. **`plan` mode** → deny every mutating tool.
+4. **Edit-class call inside the working directory** (`edit` / `write`, target path canonicalized first) → allow.
+5. **Allow match** (user allow rules) → allow. Session allow-always (Phase 3) will also allow here.
+6. **Otherwise** → ask (interactive) or deny (headless). The classifier (Phase 2) will slot in here, allowing a `safe` verdict before the fallback.
 
 Deny precedes every allow, so an explicit deny is never downgraded by an allow rule or by the classifier. The shipped dangerous-pattern defaults seed the deny set, so a classifier outage cannot let a command matching them through. They hold in `auto`, and `yolo` bypasses every deny rule, including these. A per-rule opt-out within `auto` is deferred.
 
@@ -32,13 +33,13 @@ The `bash` command string is unparsed (`bash -c "..."`), so prefix and wildcard 
 
 ## Classifier
 
-The classifier mirrors the background title generator: a cheap Haiku model, a JSON-schema `OutputFormat` forcing a `{ "safe": bool, "reason": string }` envelope, prompt clamping, and warn-log-and-fall-back on any HTTP, parse, or timeout failure. It is consulted only at step 5, never for the static cases.
+The classifier mirrors the background title generator: a cheap Haiku model, a JSON-schema `OutputFormat` forcing a `{ "safe": bool, "reason": string }` envelope, prompt clamping, and warn-log-and-fall-back on any HTTP, parse, or timeout failure. It is consulted only at step 6, never for the static cases.
 
 A verdict caches per session, keyed by tool name plus the verbatim `bash` command string or the canonical `edit` / `write` path, and scoped to the session's resolved policy so a later mode or rule change starts fresh. The cache is process-local and never persisted. On failure the call has already cleared the deny list at step 1, so it falls through to ask interactively or deny in headless mode.
 
 ## Approval Round-Trip
 
-When step 5 resolves to ask, the decision rides the existing `user_rx` channel rather than a second channel the turn loop does not poll. Tool dispatch is sequential, so at most one approval is ever outstanding and no id fan-out is needed.
+When step 6 resolves to ask, the decision rides the existing `user_rx` channel rather than a second channel the turn loop does not poll. Tool dispatch is sequential, so at most one approval is ever outstanding and no id fan-out is needed.
 
 `run_tool_round` threads the tool-use `id` and `sink` into `dispatch_tool_call`, which emits a new `AgentEvent::ApprovalRequested { id, preview }` carrying the id and a small `Clone` preview: an edit diff via `edit::synthesize_chunk`, an all-add diff for `write`, the command string for `bash`. The gate intercepts before `tools.run`, the same place the parse-error short-circuit already returns a synthetic `ToolOutput`. It awaits a decision in a sibling of `await_unless_aborted`: the select-loop still maps `Cancel` → `Cancelled` and `Quit` → `Quit`, still buffers a queued `SubmitPrompt` into `pending`, and matches a new `UserAction::ApprovalDecision { id, decision }`. A decision whose id does not match the outstanding call is ignored, and the wait future is cancel-safe by drop.
 
@@ -55,27 +56,27 @@ deny  = ["bash(rm -rf:*)", "write(.git/**)"]
 
 `OX_PERMISSION_MODE` overrides the mode with the same empty-env-falls-through and parse-error-propagates behavior `effort` uses, so a typo fails loudly rather than defaulting permissive. The block adds a `PermissionFileConfig` to `FileConfig` with `deny_unknown_fields`, merged through `merge_section`, and resolved in `Config::load` after the compaction block.
 
-The shipped deny defaults cover catastrophic commands (`rm -rf` of broad roots, disk writes, fork bombs, `curl | sh`) and metadata paths (`write(.git/**)`, `write(.ox/**)`), so step 3's in-cwd allow cannot create a new file under those paths without first clearing step 1.
+The shipped deny defaults cover catastrophic commands (`rm -rf` of broad roots, disk writes, fork bombs, `curl | sh`) and metadata paths (`write(.git/**)`, `write(.ox/**)`), so step 4's in-cwd allow cannot create a new file under those paths without first clearing step 1.
 
 A checked-in `ox.toml` is untrusted, exactly like the credentials `reject_project_secrets` already blocks, so a project file may set only `deny`. Setting `mode` or `allow` there is rejected with a message pointing to user config. The merge appends project `deny` onto the user deny set, so a repo can restrict itself but never widen what the user allowed.
 
 ## Headless Behavior
 
-In `-p` / `--no-tui` runs there is no human to prompt, so a would-ask call resolves against the classifier alone: `safe` allows, `risky` or unreachable denies. The deny list and the classifier are the whole boundary here, with no human fallback, so a headless run assumes an already-trusted invocation. The model sees a synthetic denial and can retry.
+In `-p` / `--no-tui` runs there is no human to prompt, so a would-ask call denies directly: the gate carries an `interactive` flag the modal-less surfaces set to false, and `check_permission` turns an `Ask` verdict into a synthetic denial. The deny list is the whole boundary here, with no human fallback, so a headless run assumes an already-trusted invocation. The model sees the denial and can retry. Phase 2 will insert the classifier ahead of this fallback, so a `safe` verdict allows before the deny.
 
 ## Tool Risk Classes
 
 Risk is a new method on the `Tool` trait, so each tool declares its own class. The three classes are read-only (`read`, `glob`, `grep`), edit-class (`edit`, `write`), and execute (`bash`).
 
-`edit` and `write` share a class but differ in blast radius. `edit` requires the file to exist and to have been read, so it cannot create files. `write` can create brand-new files and parent directories without a prior Read, while overwriting an existing file still goes through the tracker gate. The step-3 cwd check operates on each call's target path, the canonicalized parent for `write`, so the two share one risk class.
+`edit` and `write` share a class but differ in blast radius. `edit` requires the file to exist and to have been read, so it cannot create files. `write` can create brand-new files and parent directories without a prior Read, while overwriting an existing file still goes through the tracker gate. The step-4 cwd check operates on each call's target path, canonicalized (or resolved through its nearest existing parent when the file is new), so the two share one risk class.
 
 ## Phasing
 
 Each phase ships independently.
 
-1. **Static tiers, modal, and modes.** The deny / read-only / cwd / allow pipeline, the `ApprovalModal` plus the `ModalStack` cancel hook, the mode enum, and config wiring. Fully deterministic and offline, with step 5 resolving straight to ask.
-2. **Classifier.** Insert the Haiku verdict and the per-session cache at step 5.
-3. **Session allow-always.** The in-memory "don't ask again this session" map at step 4, mirroring `FileTracker`.
+1. **Static tiers, modal, and modes.** The deny / read-only / cwd / allow pipeline, the `ApprovalModal` plus the `ModalStack` cancel hook, the mode enum, and config wiring. Fully deterministic and offline, with step 6 resolving straight to ask.
+2. **Classifier.** Insert the Haiku verdict and the per-session cache at step 6.
+3. **Session allow-always.** The in-memory "don't ask again this session" map at step 5, mirroring `FileTracker`.
 
 ## Design Decisions
 

@@ -118,7 +118,8 @@ pub(crate) enum AgentEvent {
 pub(crate) struct ApprovalPreview {
     /// Tool display label, e.g. `Bash(cargo test)` or `Write(src/main.rs)`.
     pub(crate) title: String,
-    /// Body lines: an edit / write diff or the command string, already truncated for display.
+    /// Body lines: an edit / write diff or the command string, capped to a display height when the
+    /// modal flattens it for render.
     pub(crate) body: ApprovalBody,
 }
 

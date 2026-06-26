@@ -33,7 +33,7 @@ pub(crate) enum Mode {
 }
 
 impl Mode {
-    /// Every mode in display order, for the future `/permission` picker. Test-only until then.
+    /// Every mode in display order, for the `/permission` picker.
     #[cfg(test)]
     pub(crate) const ALL: [Self; 3] = [Self::Auto, Self::Plan, Self::Yolo];
     pub(crate) const VALID_VALUES: &str = "auto, plan, yolo";

@@ -114,8 +114,8 @@ impl ClientConfig {
 
 impl PermissionFileConfig {
     /// `mode`: other wins. `allow` / `deny`: append `other` onto `self` so a higher-precedence
-    /// layer widens rather than replaces. Project trust is enforced before merge in
-    /// [`reject_project_permissions`], so by here every layer is allowed to contribute.
+    /// layer adds to rather than replaces the lower layer's rules. Project trust is enforced before
+    /// merge in [`reject_project_permissions`], so by here every layer is allowed to contribute.
     fn merge(self, other: Self) -> Self {
         Self {
             mode: other.mode.or(self.mode),
@@ -179,8 +179,8 @@ fn merge_section<T>(base: Option<T>, other: Option<T>, merge: fn(T, T) -> T) -> 
 }
 
 /// Concatenates two optional rule lists, `base` first. `None` is the empty list, so the result is
-/// `Some` whenever either layer set rules. Append (not replace) keeps a higher-precedence layer
-/// widening rather than discarding the lower layer's rules.
+/// `Some` whenever either layer set rules. Append (not replace) keeps each layer's rules in effect
+/// rather than discarding the lower layer's.
 fn append_rules(base: Option<Vec<String>>, other: Option<Vec<String>>) -> Option<Vec<String>> {
     match (base, other) {
         (Some(mut b), Some(o)) => {
