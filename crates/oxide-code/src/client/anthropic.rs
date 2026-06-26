@@ -161,6 +161,11 @@ impl Client {
         self.config.max_tool_rounds
     }
 
+    /// The resolved permission policy the agent loop's gate consults on each tool call.
+    pub(crate) fn permission(&self) -> &crate::permission::Policy {
+        &self.config.permission
+    }
+
     #[cfg(test)]
     pub(crate) fn session_id(&self) -> &str {
         &self.session_id

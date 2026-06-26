@@ -232,7 +232,9 @@ impl App {
 
     fn clear_modals(&mut self) {
         self.cancel_theme_preview();
-        self.modals.clear();
+        for action in self.modals.clear() {
+            self.apply_modal_action(action);
+        }
     }
 
     /// Repaints every theme-styled component for a mid-session theme swap.
@@ -283,6 +285,14 @@ impl App {
                     self.input.set_enabled(false);
                     self.should_quit = true;
                 }
+                // An approval decision is a control-plane reply the agent is actively waiting for, so
+                // a dropped one leaves the turn blocked rather than merely losing a prompt. Point the
+                // user at the recovery path instead of the generic prompt-dropped message.
+                mpsc::error::TrySendError::Full(UserAction::ApprovalDecision { .. }) => {
+                    self.chat.push_error(
+                        "approval could not be delivered; press Esc to cancel the blocked turn",
+                    );
+                }
                 mpsc::error::TrySendError::Full(_) => {
                     self.chat
                         .push_error("user-action channel full; prompt dropped (this is a bug)");
@@ -314,7 +324,10 @@ impl App {
                 self.should_quit = true;
                 true
             }
-            UserAction::Clear | UserAction::Rename { .. } | UserAction::SwapConfig { .. } => true,
+            UserAction::Clear
+            | UserAction::Rename { .. }
+            | UserAction::SwapConfig { .. }
+            | UserAction::ApprovalDecision { .. } => true,
             UserAction::Resume { .. } => {
                 self.input.set_enabled(false);
                 true
@@ -518,8 +531,18 @@ impl App {
                 self.chat.push_error(&msg);
                 self.finish_turn();
             }
+            AgentEvent::ApprovalRequested { id, preview } => self.push_approval_modal(id, preview),
         }
         self.dirty = true;
+    }
+
+    /// Opens the approve-or-deny overlay for a gated tool call. Pushing onto the stack lets it nest
+    /// over any open picker, and the modal's cancel hook resolves the blocked agent on dismissal.
+    fn push_approval_modal(&mut self, id: String, preview: crate::agent::event::ApprovalPreview) {
+        self.modals
+            .push(Box::new(super::modal::approval::ApprovalModal::new(
+                id, preview,
+            )));
     }
 
     fn finish_turn(&mut self) {
@@ -972,6 +995,7 @@ mod tests {
                     enabled: true,
                     threshold_tokens: Some(155_000),
                 }),
+                permission_mode: crate::permission::Mode::Auto,
                 show_thinking: false,
                 show_welcome: true,
                 status_line: crate::config::StatusLineSegment::DEFAULT.to_vec(),
@@ -1406,6 +1430,35 @@ mod tests {
         assert_eq!(app.input.lines(), vec!["y".to_owned()]);
     }
 
+    #[test]
+    fn clear_modals_resolves_a_pending_approval_to_deny() {
+        // A session swap clears the stack while an approval is outstanding. The cancel hook's Deny
+        // must reach the agent so the blocked turn is not stranded waiting for a decision.
+        use crate::agent::event::{ApprovalBody, ApprovalDecision, ApprovalPreview};
+
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.push_approval_modal(
+            "call-1".to_owned(),
+            ApprovalPreview {
+                title: "Bash(rm -rf /)".to_owned(),
+                body: ApprovalBody::Command("rm -rf /".to_owned()),
+            },
+        );
+
+        app.clear_modals();
+
+        let forwarded = rx
+            .try_recv()
+            .expect("clear must forward the cancel-hook deny");
+        assert!(matches!(
+            forwarded,
+            UserAction::ApprovalDecision {
+                id,
+                decision: ApprovalDecision::Deny,
+            } if id == "call-1"
+        ));
+    }
+
     // ── handle_esc ──
 
     #[tokio::test]
@@ -1619,6 +1672,31 @@ mod tests {
             "exactly one error block on overflow",
         );
         assert!(app.chat.last_is_error());
+    }
+
+    #[test]
+    fn dispatch_full_channel_on_approval_points_to_the_cancel_recovery() {
+        // A dropped approval decision blocks the turn, unlike a dropped prompt, so the error must
+        // name the recovery path rather than the generic prompt-dropped message.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
+        for _ in 0..8 {
+            app.dispatch_user_action(UserAction::Cancel);
+        }
+
+        app.dispatch_user_action(UserAction::ApprovalDecision {
+            id: "call-1".to_owned(),
+            decision: crate::agent::event::ApprovalDecision::Approve,
+        });
+
+        assert!(!app.should_quit, "Full is not fatal");
+        assert!(app.chat.last_is_error());
+        assert!(
+            app.chat
+                .last_error_text()
+                .is_some_and(|t| t.contains("Esc to cancel")),
+            "approval-drop error should name the cancel recovery",
+        );
     }
 
     #[tokio::test]

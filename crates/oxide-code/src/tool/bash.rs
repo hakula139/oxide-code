@@ -30,6 +30,20 @@ impl Tool for BashTool {
         "Execute a shell command and return its output."
     }
 
+    fn risk_class(&self) -> super::RiskClass {
+        super::RiskClass::Execute
+    }
+
+    fn gate_target(
+        &self,
+        input: &serde_json::Value,
+        _cwd: &std::path::Path,
+    ) -> crate::permission::GateTarget {
+        extract_input_field(input, "command")
+            .map(|c| crate::permission::GateTarget::Command(c.to_owned()))
+            .unwrap_or_default()
+    }
+
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
@@ -304,8 +318,28 @@ fn kill_process_group(_pgid: Option<u32>) {}
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
+    use crate::permission::GateTarget;
     use tokio::io::AsyncWriteExt as _;
+
+    // ── gate_target ──
+
+    #[test]
+    fn gate_target_extracts_the_command() {
+        let target =
+            BashTool.gate_target(&serde_json::json!({"command": "ls -la"}), Path::new("/"));
+        assert!(matches!(target, GateTarget::Command(c) if c == "ls -la"));
+    }
+
+    #[test]
+    fn gate_target_missing_command_is_none() {
+        // A call with no `command` field falls to `None`, which only a tool-wide rule matches, so a
+        // malformed bash call cannot slip past a command-specific allow.
+        let target = BashTool.gate_target(&serde_json::json!({}), Path::new("/"));
+        assert!(matches!(target, GateTarget::None));
+    }
 
     // ── run ──
 
