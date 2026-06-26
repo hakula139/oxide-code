@@ -138,11 +138,18 @@ impl BashSpec {
 /// and to reject compound commands for allow matching.
 const CHAIN_CHARS: [char; 4] = [';', '|', '&', '\n'];
 
-/// Whether a command chains, pipes, redirects, or substitutes into another command. Best-effort:
-/// it is the gate against an allow rule silently widening `cargo test` to `cargo test; rm -rf /`,
-/// not a parser.
+/// Redirection operators. They do not chain a second command, so they are not split points for deny
+/// matching, but an allow rule must still refuse them: `echo hi > /etc/passwd` is not `echo hi`.
+const REDIRECT_CHARS: [char; 2] = ['>', '<'];
+
+/// Whether a command chains, pipes, redirects, or substitutes into another command or file.
+/// Best-effort: it is the gate against an allow rule silently widening `cargo test` to
+/// `cargo test; rm -rf /` or `echo ok > /etc/passwd`, not a parser.
 fn is_compound(command: &str) -> bool {
-    command.contains(CHAIN_CHARS) || command.contains("$(") || command.contains('`')
+    command.contains(CHAIN_CHARS)
+        || command.contains(REDIRECT_CHARS)
+        || command.contains("$(")
+        || command.contains('`')
 }
 
 /// Splits a command on chain operators into trimmed, non-empty segments. `&&` and `||` split on
@@ -256,12 +263,14 @@ mod tests {
 
     #[test]
     fn allow_prefix_refuses_compound_command() {
-        // The load-bearing safety property: `cargo test:*` must not allow a chained `rm`.
+        // The load-bearing safety property: `cargo test:*` must not allow a chained `rm` or a
+        // redirect that clobbers a file.
         let rule = Rule::parse("bash(cargo test:*)").unwrap();
         assert!(!rule.matches("bash", &cmd("cargo test && rm -rf /"), false));
         assert!(!rule.matches("bash", &cmd("cargo test; rm -rf /"), false));
         assert!(!rule.matches("bash", &cmd("cargo test | tee out"), false));
         assert!(!rule.matches("bash", &cmd("cargo test $(rm -rf /)"), false));
+        assert!(!rule.matches("bash", &cmd("cargo test > /etc/passwd"), false));
     }
 
     #[test]
@@ -381,8 +390,10 @@ mod tests {
     }
 
     #[test]
-    fn is_compound_flags_chains_pipes_and_substitution() {
-        for c in ["a; b", "a && b", "a | b", "a\nb", "a $(b)", "a `b`"] {
+    fn is_compound_flags_chains_pipes_redirects_and_substitution() {
+        for c in [
+            "a; b", "a && b", "a | b", "a\nb", "a $(b)", "a `b`", "a > f", "a >> f", "a < f",
+        ] {
             assert!(is_compound(c), "{c:?} should be compound");
         }
         assert!(!is_compound("cargo test --all"));

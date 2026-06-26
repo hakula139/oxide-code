@@ -28,7 +28,7 @@ Deny precedes every allow, so an explicit deny is never downgraded by an allow r
 
 Rules reuse Claude Code's `tool(specifier)` string form for transferable muscle memory, with tool-name matching case-insensitive so `Bash(...)` and `bash(...)` are equivalent. `bash` / `bash()` / `bash(*)` collapse to a tool-wide rule. Bash specifiers come in exact, prefix (`cargo test:*`), and wildcard (`git *`) shapes; `edit` / `write` specifiers are gitignore-style path globs resolved against the working directory.
 
-The `bash` command string is unparsed (`bash -c "..."`), so prefix and wildcard matching is best-effort UX, not a boundary: `ls; rm -rf` and `$()` indirection defeat naive matching. Allow rules therefore match conservatively, and a compound command never matches a prefix allow. Deny rules match the raw string. Path keys are canonicalized before any inside-cwd test, since `edit` / `write` resolve neither `..` nor symlinks today, so a raw-string check is bypassable.
+The `bash` command string is unparsed (`bash -c "..."`), so prefix and wildcard matching is best-effort UX, not a boundary: `ls; rm -rf` and `$()` indirection defeat naive matching. Allow rules therefore match conservatively, and a compound command (chained, substituted, or redirected with `>` / `<`) never matches a prefix allow. Deny rules match the whole command or any chained segment of it. Path keys are canonicalized before any inside-cwd test, since `edit` / `write` resolve neither `..` nor symlinks today, so a raw-string check is bypassable.
 
 ## Classifier
 
