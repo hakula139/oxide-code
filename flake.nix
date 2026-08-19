@@ -187,7 +187,7 @@
           pre-commit = preCommitCheck;
         };
 
-        formatter = pkgs.nixfmt;
+        formatter = pkgs.nixfmt-tree;
       }
     );
 }
