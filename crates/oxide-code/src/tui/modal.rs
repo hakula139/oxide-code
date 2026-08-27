@@ -4,6 +4,7 @@
 //!
 //! Companion design: `docs/design/slash/modals.md`.
 
+pub(crate) mod approval;
 pub(crate) mod kv_overview;
 pub(crate) mod list_picker;
 pub(crate) mod searchable_list;
@@ -37,6 +38,14 @@ pub(crate) trait Modal: Send {
     /// Fires when this modal returns to the top of the stack after a nested modal pops. Default
     /// no-op; pickers override to refresh state mutated by the sub-modal.
     fn on_focus_regained(&mut self) {}
+
+    /// Fires when the modal leaves the stack without submitting: universal-cancel (Esc / Ctrl+C),
+    /// a [`ModalKey::Cancelled`], or [`ModalStack::clear`]. Returns an action to dispatch in place
+    /// of the silent [`ModalAction::None`]. The approval modal overrides this to resolve a blocked
+    /// agent to `Deny` rather than strand it. Default no-op.
+    fn on_cancel(&mut self) -> Option<ModalAction> {
+        None
+    }
 }
 
 // ── Outcomes ──
@@ -100,10 +109,18 @@ impl ModalStack {
         self.stack.push(modal);
     }
 
-    /// Drop every modal on the stack. Called on session swap so picker and nested overlays don't
-    /// leak across sessions.
-    pub(crate) fn clear(&mut self) {
+    /// Drop every modal on the stack, firing each modal's [`Modal::on_cancel`] hook first. Called
+    /// on session swap so picker and nested overlays don't leak across sessions, and so a pending
+    /// approval resolves to a decision instead of stranding the agent. Returns the hooks' actions
+    /// for the caller to dispatch.
+    pub(crate) fn clear(&mut self) -> Vec<ModalAction> {
+        let actions = self
+            .stack
+            .iter_mut()
+            .filter_map(|m| m.on_cancel())
+            .collect();
         self.stack.clear();
+        actions
     }
 
     /// Height above the input — top modal's body plus a one-row separator.
@@ -154,16 +171,12 @@ impl ModalStack {
             return None;
         }
         if is_universal_cancel(event) {
-            self.pop_and_notify();
-            return Some(ModalAction::None);
+            return Some(self.pop_cancelled());
         }
         let outcome = self.stack.last_mut()?.handle_key(event);
         match outcome {
             ModalKey::Consumed => None,
-            ModalKey::Cancelled => {
-                self.pop_and_notify();
-                Some(ModalAction::None)
-            }
+            ModalKey::Cancelled => Some(self.pop_cancelled()),
             ModalKey::Submitted(action) => {
                 self.pop_and_notify();
                 Some(action)
@@ -183,6 +196,16 @@ impl ModalStack {
         if let Some(top) = self.stack.last_mut() {
             top.on_focus_regained();
         }
+    }
+
+    /// Pop the top entry for a cancellation, firing its [`Modal::on_cancel`] hook and notifying the
+    /// new top. Returns the hook's action, or [`ModalAction::None`] for a silent close.
+    fn pop_cancelled(&mut self) -> ModalAction {
+        let action = self.stack.pop().and_then(|mut m| m.on_cancel());
+        if let Some(top) = self.stack.last_mut() {
+            top.on_focus_regained();
+        }
+        action.unwrap_or(ModalAction::None)
     }
 }
 
@@ -211,6 +234,9 @@ pub(crate) mod testing {
         pub(crate) on_push_key: char,
         pub(crate) submit_action: ModalAction,
         pub(crate) preview_action: ModalAction,
+        /// Take-once action returned from [`Modal::on_cancel`]. `None` leaves the default (silent
+        /// close), matching pickers that don't override the hook.
+        pub(crate) cancel_action: Option<ModalAction>,
         /// `Some` to make `on_push_key` emit `ModalKey::Push(<child>)`. Take-once: subsequent
         /// presses fall through to `Consumed` so a single test step can't redouble-push.
         pub(crate) push_child: Option<Box<dyn Modal>>,
@@ -229,6 +255,7 @@ pub(crate) mod testing {
                 on_push_key: 'h',
                 submit_action,
                 preview_action: ModalAction::None,
+                cancel_action: None,
                 push_child: None,
                 declared_height: 3,
                 focus_regained_count: Arc::new(AtomicU32::new(0)),
@@ -267,6 +294,10 @@ pub(crate) mod testing {
 
         fn on_focus_regained(&mut self) {
             self.focus_regained_count.fetch_add(1, Ordering::Relaxed);
+        }
+
+        fn on_cancel(&mut self) -> Option<ModalAction> {
+            self.cancel_action.take()
         }
     }
 }
@@ -318,9 +349,39 @@ mod tests {
         stack.push(Box::new(ScriptedModal::new(ModalAction::None)));
         stack.push(Box::new(ScriptedModal::new(ModalAction::None)));
         assert!(stack.is_active());
-        stack.clear();
+        let actions = stack.clear();
         assert!(!stack.is_active(), "clear must empty the stack");
         assert_eq!(stack.height(80), 0);
+        assert!(
+            actions.is_empty(),
+            "modals without an on_cancel override surface no action",
+        );
+    }
+
+    #[test]
+    fn clear_returns_each_modals_on_cancel_action() {
+        // Session swap over a pending approval must drain the modal's deny decision so the agent
+        // isn't stranded. The hook runs per modal, top-down, before the stack empties.
+        let mut stack = ModalStack::new();
+        let mut bottom = ScriptedModal::new(ModalAction::None);
+        bottom.cancel_action = Some(ModalAction::User(UserAction::Clear));
+        let mut top = ScriptedModal::new(ModalAction::None);
+        top.cancel_action = Some(ModalAction::User(UserAction::Cancel));
+        stack.push(Box::new(bottom));
+        stack.push(Box::new(top));
+
+        let actions = stack.clear();
+        assert!(!stack.is_active());
+        assert!(
+            matches!(
+                actions.as_slice(),
+                [
+                    ModalAction::User(UserAction::Clear),
+                    ModalAction::User(UserAction::Cancel),
+                ],
+            ),
+            "clear must surface each modal's cancel action in stack order: {actions:?}",
+        );
     }
 
     // ── render ──
@@ -393,6 +454,43 @@ mod tests {
         let outcome = stack.handle_key(&key('c'));
         assert!(matches!(outcome, Some(ModalAction::None)));
         assert!(!stack.is_active());
+    }
+
+    #[test]
+    fn handle_key_cancel_surfaces_the_modals_on_cancel_action() {
+        // A modal that overrides on_cancel (the approval modal) must have its deny decision
+        // surfaced on a ModalKey::Cancelled, not swallowed as a silent close.
+        let mut stack = ModalStack::new();
+        let mut modal = ScriptedModal::new(ModalAction::None);
+        modal.cancel_action = Some(ModalAction::User(UserAction::Cancel));
+        stack.push(Box::new(modal));
+        let outcome = stack.handle_key(&key('c'));
+        assert!(matches!(
+            outcome,
+            Some(ModalAction::User(UserAction::Cancel))
+        ));
+        assert!(!stack.is_active());
+    }
+
+    #[test]
+    fn handle_key_universal_cancel_surfaces_the_modals_on_cancel_action() {
+        // Esc / Ctrl+C bypass handle_key, so the deny decision must come from the on_cancel hook
+        // the stack invokes on the outgoing modal.
+        for cancel in [
+            key_with_mods(KeyCode::Esc, KeyModifiers::NONE),
+            key_with_mods(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        ] {
+            let mut stack = ModalStack::new();
+            let mut modal = ScriptedModal::new(ModalAction::None);
+            modal.cancel_action = Some(ModalAction::User(UserAction::Cancel));
+            stack.push(Box::new(modal));
+            let outcome = stack.handle_key(&cancel);
+            assert!(
+                matches!(outcome, Some(ModalAction::User(UserAction::Cancel))),
+                "{cancel:?} must surface the on_cancel action",
+            );
+            assert!(!stack.is_active());
+        }
     }
 
     #[test]

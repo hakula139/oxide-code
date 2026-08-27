@@ -71,6 +71,10 @@ fn build_modal(
             display_auto_compaction(cfg.compaction.auto),
         ),
         (
+            "Permission Mode".to_owned(),
+            cfg.permission_mode.to_string(),
+        ),
+        (
             "Show Thinking".to_owned(),
             display_bool(cfg.show_thinking).to_owned(),
         ),
@@ -161,11 +165,11 @@ mod tests {
 
     #[test]
     fn build_modal_height_accounts_for_both_sections() {
-        // title + blank + (heading + blank + 11 rows) + blank + (heading + blank + 2 rows)
-        //   + blank + footer = 2 + 13 + 1 + 4 + 2 = 22.
+        // title + blank + (heading + blank + 12 rows) + blank + (heading + blank + 2 rows)
+        //   + blank + footer = 2 + 14 + 1 + 4 + 2 = 23.
         let info = test_session_info();
         let m = build_modal(&info, None, None);
-        assert_eq!(m.height(80), 22);
+        assert_eq!(m.height(80), 23);
     }
 
     #[test]

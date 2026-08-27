@@ -362,6 +362,7 @@ mod tests {
                     enabled: true,
                     threshold_tokens: Some(test_thresholds::WINDOW_1M),
                 }),
+                permission_mode: crate::permission::Mode::Auto,
                 show_thinking: false,
                 show_welcome: true,
                 status_line: crate::config::StatusLineSegment::DEFAULT.to_vec(),

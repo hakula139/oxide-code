@@ -101,6 +101,42 @@ pub(crate) enum AgentEvent {
     /// User-visible error from the agent loop, session writer, or tool dispatch. Renders as a
     /// dedicated chat block.
     Error(String),
+    /// A gated tool call needs the user's approval before it runs. Carries the tool-use id so a
+    /// stale decision for a dropped call is ignored, plus a small preview for the modal to render.
+    /// The agent loop blocks on the matching [`UserAction::ApprovalDecision`].
+    ApprovalRequested {
+        id: String,
+        preview: ApprovalPreview,
+    },
+}
+
+// ── Approval ──
+
+/// What a pending approval shows the user. `Clone` and small, since it rides the bounded event
+/// channel. The body is pre-rendered by the tool's gate seam so the modal stays display-only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ApprovalPreview {
+    /// Tool display label, e.g. `Bash(cargo test)` or `Write(src/main.rs)`.
+    pub(crate) title: String,
+    /// Body lines: an edit / write diff or the command string, capped to a display height when the
+    /// modal flattens it for render.
+    pub(crate) body: ApprovalBody,
+}
+
+/// The renderable body of an [`ApprovalPreview`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ApprovalBody {
+    /// A shell command string (`bash`).
+    Command(String),
+    /// A unified diff (`edit` / `write`), reusing the chat's `+` / `-` chunk shape.
+    Diff(Vec<crate::tool::DiffChunk>),
+}
+
+/// The user's verdict on a pending approval, carried back on [`UserAction::ApprovalDecision`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ApprovalDecision {
+    Approve,
+    Deny,
 }
 
 // ── User Actions ──
@@ -138,6 +174,12 @@ pub(crate) enum UserAction {
     /// TUI-only: commit a theme swap for the rest of the session. Restart returns to user config.
     SwapTheme {
         name: String,
+    },
+    /// The user's verdict on the outstanding [`AgentEvent::ApprovalRequested`]. The `id` is matched
+    /// against the blocked call so a decision for an already-dropped call is ignored.
+    ApprovalDecision {
+        id: String,
+        decision: ApprovalDecision,
     },
     Cancel,
     /// TUI-only. Agent loop ignores this.
@@ -255,7 +297,8 @@ impl StdioSink {
             | AgentEvent::SessionTitleUpdated { .. }
             | AgentEvent::SessionRolled { .. }
             | AgentEvent::SessionResumed { .. }
-            | AgentEvent::ConfigChanged { .. } => {}
+            | AgentEvent::ConfigChanged { .. }
+            | AgentEvent::ApprovalRequested { .. } => {}
             AgentEvent::TurnComplete => {
                 writeln!(stdout)?;
             }
@@ -301,6 +344,18 @@ impl AgentSink for CapturingSink {
     fn send(&self, event: AgentEvent) -> Result<()> {
         self.0.lock().unwrap().push(event);
         Ok(())
+    }
+}
+
+/// An [`AgentSink`] whose `send` always fails, for exercising the fail-closed paths that depend on
+/// a control-plane event reaching the UI.
+#[cfg(test)]
+pub(crate) struct FailingSink;
+
+#[cfg(test)]
+impl AgentSink for FailingSink {
+    fn send(&self, _event: AgentEvent) -> Result<()> {
+        anyhow::bail!("sink closed")
     }
 }
 

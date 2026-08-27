@@ -18,6 +18,7 @@ pub(crate) fn test_config(base_url: impl Into<String>, auth: Auth, model: &str) 
         max_tool_rounds: None,
         prompt_cache_ttl: PromptCacheTtl::OneHour,
         compaction: CompactionConfig::disabled(),
+        permission: crate::permission::Policy::default(),
         thinking: None,
         show_thinking: false,
         show_welcome: true,

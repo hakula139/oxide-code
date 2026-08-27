@@ -12,7 +12,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
-use crate::agent::event::{AgentEvent, AgentSink, UserAction};
+use crate::agent::event::{AgentEvent, AgentSink, ApprovalDecision, UserAction};
 use crate::client::anthropic::Client;
 use crate::client::anthropic::wire::{ContentBlockInfo, Delta, StreamEvent, Usage};
 use crate::config::AutoCompactionConfig;
@@ -213,6 +213,15 @@ pub(crate) struct AutoCompact<'a> {
     pub(crate) file_tracker: &'a FileTracker,
 }
 
+/// Inputs the permission gate needs at each tool call: the resolved policy, the working directory
+/// to resolve path targets against, and whether the session can prompt a human. In a non-interactive
+/// session an `ask` resolves to deny, since no modal can surface.
+pub(crate) struct GateContext<'a> {
+    pub(crate) policy: &'a crate::permission::Policy,
+    pub(crate) cwd: &'a std::path::Path,
+    pub(crate) interactive: bool,
+}
+
 /// Drives one user prompt to a final assistant text reply. The loop returns as soon as a round
 /// produces no tool calls. Mid-turn `SubmitPrompt` actions queue and splice in as user messages
 /// at round boundaries. Long-running awaits race `user_rx` so `Cancel` / `Quit` abort promptly
@@ -231,6 +240,7 @@ pub(crate) async fn agent_turn(
     session: &SessionHandle,
     user_rx: &mut mpsc::Receiver<UserAction>,
     max_tool_rounds: Option<u32>,
+    gate: &GateContext<'_>,
 ) -> TurnOutcome {
     let tool_defs = tools.definitions();
     let mut pending_prompts: Vec<String> = Vec::new();
@@ -289,6 +299,7 @@ pub(crate) async fn agent_turn(
             sink,
             user_rx,
             &mut pending_prompts,
+            gate,
         )
         .await;
         let (results, sidecars) = match round {
@@ -421,6 +432,7 @@ async fn run_tool_round(
     sink: &dyn AgentSink,
     user_rx: &mut mpsc::Receiver<UserAction>,
     pending: &mut Vec<String>,
+    gate: &GateContext<'_>,
 ) -> AbortResult<(Vec<ContentBlock>, Vec<(String, ToolMetadata)>)> {
     let mut results = Vec::with_capacity(tool_uses.len());
     let mut sidecars: Vec<(String, ToolMetadata)> = Vec::with_capacity(tool_uses.len());
@@ -434,9 +446,18 @@ async fn run_tool_round(
             "tool-call-start",
         );
 
-        let output =
-            dispatch_tool_call(tools, &name, input, parse_errors.get(&id), user_rx, pending)
-                .await?;
+        let output = dispatch_tool_call(
+            tools,
+            &id,
+            &name,
+            input,
+            parse_errors.get(&id),
+            sink,
+            user_rx,
+            pending,
+            gate,
+        )
+        .await?;
 
         sink.emit(
             AgentEvent::ToolCallEnd {
@@ -475,13 +496,20 @@ async fn commit_round_writes(
     sink.session_write_error(metadata_outcome.failure.as_deref());
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "dispatch threads the per-call gate inputs (id, sink, gate) alongside the run state"
+)]
 async fn dispatch_tool_call(
     tools: &ToolRegistry,
+    id: &str,
     name: &str,
     input: serde_json::Value,
     parse_error: Option<&String>,
+    sink: &dyn AgentSink,
     user_rx: &mut mpsc::Receiver<UserAction>,
     pending: &mut Vec<String>,
+    gate: &GateContext<'_>,
 ) -> AbortResult<ToolOutput> {
     if let Some(err) = parse_error {
         return Ok(ToolOutput {
@@ -490,7 +518,108 @@ async fn dispatch_tool_call(
             metadata: ToolMetadata::default(),
         });
     }
+
+    if let Some(denial) =
+        check_permission(tools, id, name, &input, sink, user_rx, pending, gate).await?
+    {
+        return Ok(denial);
+    }
+
     await_unless_aborted(tools.run(name, input), user_rx, pending).await
+}
+
+/// Runs the permission gate for one call. Returns `Ok(None)` to proceed, `Ok(Some(output))` with a
+/// synthetic denial the model sees as a tool result, or an abort if the user cancelled / quit while
+/// the approval was outstanding. An `ask` verdict emits [`AgentEvent::ApprovalRequested`] and blocks
+/// on the matching [`UserAction::ApprovalDecision`], denying if the event cannot be delivered (no
+/// modal could answer it). In a non-interactive session it denies instead.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the gate threads the same per-call inputs dispatch already carries"
+)]
+async fn check_permission(
+    tools: &ToolRegistry,
+    id: &str,
+    name: &str,
+    input: &serde_json::Value,
+    sink: &dyn AgentSink,
+    user_rx: &mut mpsc::Receiver<UserAction>,
+    pending: &mut Vec<String>,
+    gate: &GateContext<'_>,
+) -> AbortResult<Option<ToolOutput>> {
+    let Some(tool) = tools.get(name) else {
+        // Unknown tool: let `tools.run` produce its own "unknown tool" error rather than denying.
+        return Ok(None);
+    };
+
+    let gate_target = tool.gate_target(input, gate.cwd);
+    let decision = gate
+        .policy
+        .decide(name, tool.risk_class(), &gate_target.as_target());
+
+    match decision {
+        crate::permission::Decision::Allow => Ok(None),
+        crate::permission::Decision::Deny => Ok(Some(denied_output(name))),
+        crate::permission::Decision::Ask if !gate.interactive => Ok(Some(denied_output(name))),
+        crate::permission::Decision::Ask => {
+            // The approval request is a control-plane event: if it can't be delivered, no modal will
+            // exist to answer it and `await_approval` would block forever. Fail closed on a send
+            // error rather than stranding the turn.
+            if sink
+                .send(AgentEvent::ApprovalRequested {
+                    id: id.to_owned(),
+                    preview: tool.approval_preview(input),
+                })
+                .is_err()
+            {
+                return Ok(Some(denied_output(name)));
+            }
+            match await_approval(id, user_rx, pending).await? {
+                ApprovalDecision::Approve => Ok(None),
+                ApprovalDecision::Deny => Ok(Some(denied_output(name))),
+            }
+        }
+    }
+}
+
+/// The synthetic tool result returned for a denied call. Marked `is_error` so the model treats it
+/// as a failed call and can try another approach.
+fn denied_output(name: &str) -> ToolOutput {
+    ToolOutput {
+        content: format!(
+            "The {name} call was denied by the permission policy. Do not retry it; \
+             choose a different approach or ask the user to adjust permissions."
+        ),
+        is_error: true,
+        metadata: ToolMetadata::default(),
+    }
+}
+
+/// Blocks on the `user_rx` channel for the [`UserAction::ApprovalDecision`] matching `id`, the same
+/// channel the turn loop races elsewhere so no second channel is introduced. Cancel / quit abort
+/// the turn, a queued `SubmitPrompt` buffers into `pending`, and a decision for a different id is
+/// ignored (a stale reply for an already-resolved call). Cancel-safe by drop: it holds no state.
+async fn await_approval(
+    id: &str,
+    user_rx: &mut mpsc::Receiver<UserAction>,
+    pending: &mut Vec<String>,
+) -> AbortResult<ApprovalDecision> {
+    loop {
+        match user_rx.recv().await {
+            Some(UserAction::Cancel) => return Err(TurnAbort::Cancelled),
+            Some(UserAction::Quit) | None => return Err(TurnAbort::Quit),
+            Some(UserAction::SubmitPrompt(text)) => pending.push(text),
+            Some(UserAction::ApprovalDecision {
+                id: target,
+                decision,
+            }) if target == id => {
+                return Ok(decision);
+            }
+            // A decision for a different id is a stale reply, and any other action is unreachable
+            // while an approval is outstanding. Log and keep waiting so the gate can't be skipped.
+            Some(other) => warn!("ignored action while awaiting approval {id}: {other:?}"),
+        }
+    }
 }
 
 pub(crate) async fn record_drained_prompts(
@@ -527,7 +656,8 @@ where
                 Some(UserAction::Cancel) => return Err(TurnAbort::Cancelled),
                 Some(UserAction::Quit) | None => return Err(TurnAbort::Quit),
                 Some(UserAction::SubmitPrompt(text)) => pending.push(text),
-                // Unreachable under current wiring. Log so regressions surface.
+                // Unreachable under current wiring. Log so regressions surface. An
+                // `ApprovalDecision` here is a stale reply for an already-resolved call.
                 Some(
                     action @ (UserAction::ConfirmExit
                     | UserAction::Clear
@@ -536,7 +666,8 @@ where
                     | UserAction::Rename { .. }
                     | UserAction::SwapConfig { .. }
                     | UserAction::PreviewTheme { .. }
-                    | UserAction::SwapTheme { .. }),
+                    | UserAction::SwapTheme { .. }
+                    | UserAction::ApprovalDecision { .. }),
                 ) => warn!("dropped mid-turn action: {action:?}"),
             },
             output = &mut fut => return Ok(output),
@@ -1121,6 +1252,10 @@ mod tests {
             "echo the input"
         }
 
+        fn risk_class(&self) -> crate::tool::RiskClass {
+            crate::tool::RiskClass::Execute
+        }
+
         fn input_schema(&self) -> serde_json::Value {
             json!({"type": "object"})
         }
@@ -1157,6 +1292,10 @@ mod tests {
             "blocks until the turn is cancelled"
         }
 
+        fn risk_class(&self) -> crate::tool::RiskClass {
+            crate::tool::RiskClass::Execute
+        }
+
         fn input_schema(&self) -> serde_json::Value {
             json!({"type": "object"})
         }
@@ -1185,6 +1324,20 @@ mod tests {
         PromptParts {
             system_sections: vec![],
             user_context: None,
+        }
+    }
+
+    /// Gate that bypasses every rule (`yolo`), so the dispatch tests exercise the turn loop without
+    /// the permission layer interceding. Permission-specific behavior is covered in `permission`.
+    fn yolo_gate() -> GateContext<'static> {
+        static POLICY: std::sync::LazyLock<crate::permission::Policy> =
+            std::sync::LazyLock::new(|| {
+                crate::permission::Policy::new(crate::permission::Mode::Yolo, vec![], vec![])
+            });
+        GateContext {
+            policy: &POLICY,
+            cwd: std::path::Path::new("."),
+            interactive: false,
         }
     }
 
@@ -1617,6 +1770,7 @@ mod tests {
             &session,
             &mut inert_user_rx(),
             None,
+            &yolo_gate(),
         )
         .await
         .unwrap();
@@ -1655,6 +1809,7 @@ mod tests {
             &session,
             &mut inert_user_rx(),
             None,
+            &yolo_gate(),
         )
         .await
         .unwrap();
@@ -1689,6 +1844,7 @@ mod tests {
             &session,
             &mut inert_user_rx(),
             None,
+            &yolo_gate(),
         )
         .await
         .unwrap();
@@ -1728,6 +1884,7 @@ mod tests {
             &session,
             &mut user_rx,
             None,
+            &yolo_gate(),
         )
         .await
         .unwrap();
@@ -1765,6 +1922,7 @@ mod tests {
             &session,
             &mut inert_user_rx(),
             None,
+            &yolo_gate(),
         )
         .await
         .unwrap();
@@ -1794,6 +1952,7 @@ mod tests {
             &session,
             &mut inert_user_rx(),
             None,
+            &yolo_gate(),
         )
         .await
         .unwrap();
@@ -1829,6 +1988,7 @@ mod tests {
             &session,
             &mut inert_user_rx(),
             None,
+            &yolo_gate(),
         )
         .await
         .unwrap();
@@ -1892,6 +2052,7 @@ mod tests {
             &session,
             &mut inert_user_rx(),
             None,
+            &yolo_gate(),
         )
         .await
         .unwrap();
@@ -1939,6 +2100,7 @@ mod tests {
             &session,
             &mut rx,
             None,
+            &yolo_gate(),
         )
         .await
         .expect("turn must complete");
@@ -2001,6 +2163,7 @@ mod tests {
             &session,
             &mut rx,
             None,
+            &yolo_gate(),
         )
         .await
         .expect("turn must complete");
@@ -2051,6 +2214,7 @@ mod tests {
             &session,
             &mut rx,
             None,
+            &yolo_gate(),
         )
         .await
         .expect_err("cancel must surface as Err(Cancelled)");
@@ -2081,6 +2245,7 @@ mod tests {
             &session,
             &mut rx,
             None,
+            &yolo_gate(),
         )
         .await
         .expect_err("quit must surface as Err(Quit)");
@@ -2110,6 +2275,7 @@ mod tests {
             &session,
             &mut rx,
             None,
+            &yolo_gate(),
         )
         .await
         .expect_err("dead channel must surface as Err(Quit)");
@@ -2151,6 +2317,7 @@ mod tests {
                 &session,
                 &mut rx,
                 None,
+                &yolo_gate(),
             )
             .await;
             assert!(
@@ -2182,6 +2349,7 @@ mod tests {
         let mut messages = vec![Message::user("kick off")];
         let (tx, mut rx) = mpsc::channel::<UserAction>(1);
         let prompt = empty_prompt();
+        let gate = yolo_gate();
 
         let (turn_result, ()) = tokio::join!(
             agent_turn(
@@ -2193,6 +2361,7 @@ mod tests {
                 &session,
                 &mut rx,
                 None,
+                &gate,
             ),
             async {
                 started.notified().await;
@@ -2240,6 +2409,7 @@ mod tests {
         let mut messages = vec![Message::user("kick off")];
         let (tx, mut rx) = mpsc::channel::<UserAction>(1);
         let prompt = empty_prompt();
+        let gate = yolo_gate();
 
         let (outcome, ()) = tokio::join!(
             agent_turn(
@@ -2251,6 +2421,7 @@ mod tests {
                 &session,
                 &mut rx,
                 None,
+                &gate,
             ),
             async {
                 started.notified().await;
@@ -2293,6 +2464,7 @@ mod tests {
             &session,
             &mut inert_user_rx(),
             None,
+            &yolo_gate(),
         )
         .await
         .unwrap();
@@ -2333,6 +2505,7 @@ mod tests {
             &session,
             &mut inert_user_rx(),
             None,
+            &yolo_gate(),
         )
         .await
         .unwrap();
@@ -2388,6 +2561,7 @@ mod tests {
             &session,
             &mut inert_user_rx(),
             Some(CAP),
+            &yolo_gate(),
         )
         .await
         .expect_err("cap must trip");
@@ -2420,6 +2594,7 @@ mod tests {
             &session,
             &mut inert_user_rx(),
             Some(CAP),
+            &yolo_gate(),
         )
         .await;
 
@@ -2458,6 +2633,7 @@ mod tests {
             &session,
             &mut inert_user_rx(),
             None,
+            &yolo_gate(),
         )
         .await
         .expect("unbounded loop must reach the text-only round");
@@ -2488,6 +2664,7 @@ mod tests {
             &session,
             &mut inert_user_rx(),
             None,
+            &yolo_gate(),
         )
         .await
         .expect_err("api error must propagate");
@@ -2528,6 +2705,7 @@ mod tests {
             &session,
             &mut inert_user_rx(),
             None,
+            &yolo_gate(),
         )
         .await;
 
@@ -2577,6 +2755,7 @@ mod tests {
             &session,
             &mut inert_user_rx(),
             None,
+            &yolo_gate(),
         )
         .await
         .unwrap();
@@ -2637,12 +2816,316 @@ data: {"type":"message_stop"}
             &session,
             &mut inert_user_rx(),
             None,
+            &yolo_gate(),
         )
         .await
         .unwrap();
 
         assert_eq!(messages.len(), 2);
         assert!(matches!(&messages[1].content[0], ContentBlock::Text { text } if text == "hello"),);
+    }
+
+    // ── check_permission ──
+
+    /// Interactive gate over allow / deny rule sets. `echo` (execute) has no gate target, so only a
+    /// tool-wide rule matches. The policy is leaked to keep the returned context `'static`, matching
+    /// [`yolo_gate`], which is acceptable in a short-lived test process.
+    fn gate_with(
+        mode: crate::permission::Mode,
+        allow: &[&str],
+        deny: &[&str],
+        interactive: bool,
+    ) -> GateContext<'static> {
+        let owned = |rules: &[&str]| rules.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        let policy = Box::leak(Box::new(
+            crate::permission::Policy::resolve(mode, &owned(allow), &owned(deny))
+                .expect("rules parse"),
+        ));
+        GateContext {
+            policy,
+            cwd: std::path::Path::new("."),
+            interactive,
+        }
+    }
+
+    #[tokio::test]
+    async fn check_permission_allow_proceeds_without_an_approval_event() {
+        // `echo` is an execute tool, so `auto` asks by default, and an explicit allow rule clears it.
+        let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
+        let sink = CapturingSink::new();
+        let gate = gate_with(crate::permission::Mode::Auto, &["echo"], &[], true);
+
+        let denial = check_permission(
+            &tools,
+            "tool_1",
+            "echo",
+            &json!({}),
+            &sink,
+            &mut inert_user_rx(),
+            &mut Vec::new(),
+            &gate,
+        )
+        .await
+        .expect("allow must not abort");
+
+        assert!(denial.is_none(), "an allowed call proceeds");
+        assert!(
+            !sink
+                .events()
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ApprovalRequested { .. })),
+            "allow must not surface an approval prompt",
+        );
+    }
+
+    #[tokio::test]
+    async fn check_permission_deny_rule_short_circuits_to_a_synthetic_denial() {
+        let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
+        let sink = CapturingSink::new();
+        let gate = gate_with(crate::permission::Mode::Auto, &[], &["echo"], true);
+
+        let denial = check_permission(
+            &tools,
+            "tool_1",
+            "echo",
+            &json!({}),
+            &sink,
+            &mut inert_user_rx(),
+            &mut Vec::new(),
+            &gate,
+        )
+        .await
+        .expect("deny resolves without abort")
+        .expect("a deny rule must yield a synthetic denial");
+
+        assert!(
+            denial.is_error,
+            "denial is surfaced as a failed tool result"
+        );
+        assert!(denial.content.contains("denied by the permission policy"));
+        assert!(
+            !sink
+                .events()
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ApprovalRequested { .. })),
+            "a deny rule never prompts",
+        );
+    }
+
+    #[tokio::test]
+    async fn check_permission_ask_in_non_interactive_session_denies_without_prompting() {
+        // The bare REPL and headless modes have no modal surface, so an `ask` resolves to deny.
+        let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
+        let sink = CapturingSink::new();
+        let gate = gate_with(crate::permission::Mode::Auto, &[], &[], false);
+
+        let denial = check_permission(
+            &tools,
+            "tool_1",
+            "echo",
+            &json!({}),
+            &sink,
+            &mut inert_user_rx(),
+            &mut Vec::new(),
+            &gate,
+        )
+        .await
+        .expect("non-interactive ask resolves without abort")
+        .expect("non-interactive ask denies");
+
+        assert!(denial.is_error);
+        assert!(
+            !sink
+                .events()
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ApprovalRequested { .. })),
+            "non-interactive ask must not emit an approval event no UI can answer",
+        );
+    }
+
+    #[tokio::test]
+    async fn check_permission_ask_emits_event_and_approve_proceeds() {
+        let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
+        let sink = CapturingSink::new();
+        let gate = gate_with(crate::permission::Mode::Auto, &[], &[], true);
+        let (tx, mut rx) = mpsc::channel::<UserAction>(1);
+        tx.try_send(UserAction::ApprovalDecision {
+            id: "tool_1".to_owned(),
+            decision: ApprovalDecision::Approve,
+        })
+        .unwrap();
+
+        let denial = check_permission(
+            &tools,
+            "tool_1",
+            "echo",
+            &json!({}),
+            &sink,
+            &mut rx,
+            &mut Vec::new(),
+            &gate,
+        )
+        .await
+        .expect("approve resolves without abort");
+
+        assert!(denial.is_none(), "an approved call proceeds");
+        let prompted = sink.events().into_iter().find_map(|e| match e {
+            AgentEvent::ApprovalRequested { id, .. } => Some(id),
+            _ => None,
+        });
+        assert_eq!(
+            prompted.as_deref(),
+            Some("tool_1"),
+            "ask must surface an approval event carrying the call id",
+        );
+    }
+
+    #[tokio::test]
+    async fn check_permission_ask_undeliverable_event_fails_closed() {
+        // If the approval event can't be delivered, no modal can answer it, so the gate must deny
+        // rather than block in await_approval forever. An inert receiver would hang on a regression.
+        let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
+        let sink = crate::agent::event::FailingSink;
+        let gate = gate_with(crate::permission::Mode::Auto, &[], &[], true);
+        let (_tx, mut rx) = mpsc::channel::<UserAction>(1);
+
+        let denial = check_permission(
+            &tools,
+            "tool_1",
+            "echo",
+            &json!({}),
+            &sink,
+            &mut rx,
+            &mut Vec::new(),
+            &gate,
+        )
+        .await
+        .expect("an undeliverable approval resolves without abort")
+        .expect("an undeliverable approval yields a synthetic denial");
+
+        assert!(denial.is_error);
+        assert!(denial.content.contains("denied by the permission policy"));
+    }
+
+    #[tokio::test]
+    async fn check_permission_ask_deny_decision_yields_a_synthetic_denial() {
+        let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
+        let sink = CapturingSink::new();
+        let gate = gate_with(crate::permission::Mode::Auto, &[], &[], true);
+        let (tx, mut rx) = mpsc::channel::<UserAction>(1);
+        tx.try_send(UserAction::ApprovalDecision {
+            id: "tool_1".to_owned(),
+            decision: ApprovalDecision::Deny,
+        })
+        .unwrap();
+
+        let denial = check_permission(
+            &tools,
+            "tool_1",
+            "echo",
+            &json!({}),
+            &sink,
+            &mut rx,
+            &mut Vec::new(),
+            &gate,
+        )
+        .await
+        .expect("deny decision resolves without abort")
+        .expect("a deny decision yields a synthetic denial");
+
+        assert!(denial.is_error);
+        assert!(denial.content.contains("denied by the permission policy"));
+    }
+
+    #[tokio::test]
+    async fn check_permission_unknown_tool_proceeds_so_run_can_report_it() {
+        // An unknown tool can't have a risk class, so the gate steps aside and lets `tools.run`
+        // emit its own "unknown tool" error rather than a permission denial.
+        let tools = ToolRegistry::new(vec![]);
+        let sink = CapturingSink::new();
+        let gate = gate_with(crate::permission::Mode::Auto, &[], &["mystery"], true);
+        let denial = check_permission(
+            &tools,
+            "tool_1",
+            "mystery",
+            &json!({}),
+            &sink,
+            &mut inert_user_rx(),
+            &mut Vec::new(),
+            &gate,
+        )
+        .await
+        .expect("unknown tool resolves without abort");
+
+        assert!(denial.is_none(), "unknown tool bypasses the gate");
+    }
+
+    // ── await_approval ──
+
+    #[tokio::test]
+    async fn await_approval_ignores_a_stale_decision_for_another_call() {
+        // A decision for an already-resolved call must not satisfy the wait, but the matching id does.
+        let (tx, mut rx) = mpsc::channel::<UserAction>(2);
+        tx.try_send(UserAction::ApprovalDecision {
+            id: "other".to_owned(),
+            decision: ApprovalDecision::Approve,
+        })
+        .unwrap();
+        tx.try_send(UserAction::ApprovalDecision {
+            id: "tool_1".to_owned(),
+            decision: ApprovalDecision::Deny,
+        })
+        .unwrap();
+
+        let decision = await_approval("tool_1", &mut rx, &mut Vec::new())
+            .await
+            .expect("matching decision resolves");
+        assert_eq!(decision, ApprovalDecision::Deny);
+    }
+
+    #[tokio::test]
+    async fn await_approval_buffers_a_mid_approval_submit_into_pending() {
+        let (tx, mut rx) = mpsc::channel::<UserAction>(2);
+        tx.try_send(UserAction::SubmitPrompt("queued".to_owned()))
+            .unwrap();
+        tx.try_send(UserAction::ApprovalDecision {
+            id: "tool_1".to_owned(),
+            decision: ApprovalDecision::Approve,
+        })
+        .unwrap();
+        let mut pending = Vec::new();
+
+        let decision = await_approval("tool_1", &mut rx, &mut pending)
+            .await
+            .expect("approval resolves");
+        assert_eq!(decision, ApprovalDecision::Approve);
+        assert_eq!(pending, vec!["queued".to_owned()], "the submit buffers");
+    }
+
+    #[tokio::test]
+    async fn await_approval_cancel_and_quit_abort_the_turn() {
+        for (action, want_quit) in [(UserAction::Cancel, false), (UserAction::Quit, true)] {
+            let (tx, mut rx) = mpsc::channel::<UserAction>(1);
+            tx.try_send(action.clone()).unwrap();
+            let abort = await_approval("tool_1", &mut rx, &mut Vec::new())
+                .await
+                .expect_err("cancel / quit abort the wait");
+            if want_quit {
+                assert!(matches!(abort, TurnAbort::Quit), "{action:?}");
+            } else {
+                assert!(matches!(abort, TurnAbort::Cancelled), "{action:?}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn await_approval_dropped_channel_collapses_to_quit() {
+        let (tx, mut rx) = mpsc::channel::<UserAction>(1);
+        drop(tx);
+        let abort = await_approval("tool_1", &mut rx, &mut Vec::new())
+            .await
+            .expect_err("a closed channel aborts");
+        assert!(matches!(abort, TurnAbort::Quit));
     }
 
     // ── BlockAccumulator::into_content_block ──
