@@ -25,7 +25,7 @@ impl SlashCommand for CompactCmd {
         Some("[<instructions>]")
     }
 
-    fn execute(&self, args: &str, _ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
+    fn execute(&self, args: &str, _ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
         let trimmed = args.trim();
         let instructions = (!trimmed.is_empty()).then(|| trimmed.to_owned());
         Ok(SlashOutcome::Forward(UserAction::Compact { instructions }))
@@ -36,11 +36,13 @@ impl SlashCommand for CompactCmd {
 mod tests {
     use super::*;
     use crate::slash::test_session_info;
-    use crate::tui::components::chat::ChatView;
-    use crate::tui::theme::Theme;
 
-    fn fresh_chat() -> ChatView {
-        ChatView::new(&Theme::default(), false)
+    fn run_execute(args: &str) -> UserAction {
+        let info = test_session_info();
+        CompactCmd
+            .execute(args, &SlashContext::new(&info, None))
+            .unwrap()
+            .into_forward()
     }
 
     // ── CompactCmd metadata ──
@@ -63,47 +65,24 @@ mod tests {
 
     #[test]
     fn execute_bare_forwards_compact_action_with_no_instructions() {
-        let mut chat = fresh_chat();
-        let info = test_session_info();
-        let outcome = CompactCmd
-            .execute("", &mut SlashContext::new(&mut chat, &info))
-            .unwrap();
-
-        assert_eq!(
-            outcome,
-            SlashOutcome::Forward(UserAction::Compact { instructions: None }),
-        );
+        assert_eq!(run_execute(""), UserAction::Compact { instructions: None },);
     }
 
     #[test]
     fn execute_with_args_forwards_trimmed_instructions() {
-        let mut chat = fresh_chat();
-        let info = test_session_info();
-        let outcome = CompactCmd
-            .execute(
-                "  focus on the build error  ",
-                &mut SlashContext::new(&mut chat, &info),
-            )
-            .unwrap();
-
         assert_eq!(
-            outcome,
-            SlashOutcome::Forward(UserAction::Compact {
+            run_execute("  focus on the build error  "),
+            UserAction::Compact {
                 instructions: Some("focus on the build error".to_owned()),
-            }),
+            },
         );
     }
 
     #[test]
     fn execute_whitespace_only_args_treated_as_bare() {
-        let mut chat = fresh_chat();
-        let info = test_session_info();
-        let outcome = CompactCmd
-            .execute("   \n\t  ", &mut SlashContext::new(&mut chat, &info))
-            .unwrap();
         assert_eq!(
-            outcome,
-            SlashOutcome::Forward(UserAction::Compact { instructions: None }),
+            run_execute("   \n\t  "),
+            UserAction::Compact { instructions: None },
         );
     }
 }

@@ -7,26 +7,16 @@ use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
 
 use super::context::SlashContext;
 use super::matcher::rank_by_prefix;
 use super::registry::{ArgCompletion, SlashCommand, SlashKind, SlashOutcome};
 use crate::agent::event::UserAction;
-use crate::tui::modal::list_picker::{ListPicker, PickerItem};
+use crate::tui::modal::chrome::{CONFIRM_HINT, FOOTER_HEIGHT, render_footer};
+use crate::tui::modal::list_picker::{ListPicker, PickerItem, numeric_hint};
 use crate::tui::modal::{Modal, ModalAction, ModalKey};
 use crate::tui::theme::Theme;
-
-// ── Constants ──
-
-/// Curated picker roster (name, one-line description). Order matches `tui/theme/builtin.rs`.
-const LISTED_THEMES: &[(&str, &str)] = &[
-    ("mocha", "Catppuccin dark (default)"),
-    ("macchiato", "Catppuccin dark (medium)"),
-    ("frappe", "Catppuccin dark (soft)"),
-    ("latte", "Catppuccin light"),
-    ("material", "Material dark"),
-];
+use crate::tui::theme::builtin::BUILT_IN;
 
 // ── PickerItem ──
 
@@ -39,21 +29,17 @@ struct ThemeRow {
 
 impl ThemeRow {
     fn build(active_name: &str) -> Vec<Self> {
-        LISTED_THEMES
+        BUILT_IN
             .iter()
             .enumerate()
-            .map(|(idx, (name, description))| Self {
-                name,
-                description,
-                is_active: *name == active_name,
+            .map(|(idx, theme)| Self {
+                name: theme.name,
+                description: theme.description,
+                is_active: theme.name == active_name,
                 hint: numeric_hint(idx),
             })
             .collect()
     }
-}
-
-fn numeric_hint(idx: usize) -> Option<char> {
-    char::from_digit(u32::try_from(idx).ok()? + 1, 10)
 }
 
 impl PickerItem for ThemeRow {
@@ -83,7 +69,7 @@ impl ThemePicker {
     pub(super) fn new(active_name: &str) -> Self {
         let rows = ThemeRow::build(active_name);
         let mut list = ListPicker::new("Select theme", rows).with_description(
-            "Switch the active theme. Applies to this session only — restart returns to your config.",
+            "Switch the active theme for this session. Restarting returns to your config.",
         );
         list.select_initial(|row| row.is_active);
         Self {
@@ -92,7 +78,7 @@ impl ThemePicker {
         }
     }
 
-    /// `Preview` for cursor-driven moves on the picker; `Cancelled` when there's no current row.
+    /// `Preview` of the row under the cursor, or `Consumed` when the list is empty.
     fn preview_current(&self) -> ModalKey {
         match self.list.selected() {
             Some(row) => ModalKey::Preview(ModalAction::User(UserAction::PreviewTheme {
@@ -117,33 +103,23 @@ impl ThemePicker {
 }
 
 impl Modal for ThemePicker {
-    fn height(&self, width: u16) -> u16 {
-        // Reserve one blank spacer + one footer line below the list.
-        self.list.height(width).saturating_add(2)
+    fn height(&self, width: u16, max_height: u16) -> u16 {
+        let list_max = max_height.saturating_sub(FOOTER_HEIGHT);
+        self.list.height(width, list_max) + FOOTER_HEIGHT
     }
 
     fn render(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
-        let list_h = self.list.height(area.width);
         let list_area = Rect {
-            height: list_h.min(area.height),
+            height: area.height.saturating_sub(FOOTER_HEIGHT),
             ..area
         };
         self.list.render(frame, list_area, theme);
-
-        let remaining = area.height.saturating_sub(list_h);
-        if remaining >= 2 {
-            let footer_area = Rect {
-                x: area.x,
-                y: area.y.saturating_add(list_h).saturating_add(1),
-                width: area.width,
-                height: 1,
-            };
-            let footer = Line::from(Span::styled(
-                "Enter to confirm  ·  Esc to cancel",
-                theme.dim(),
-            ));
-            frame.render_widget(Paragraph::new(footer).style(theme.surface()), footer_area);
-        }
+        render_footer(
+            frame,
+            area,
+            Line::from(Span::styled(CONFIRM_HINT, theme.dim())),
+            theme,
+        );
     }
 
     fn handle_key(&mut self, event: &KeyEvent) -> ModalKey {
@@ -199,20 +175,21 @@ impl SlashCommand for ThemeCmd {
     }
 
     fn complete_arg(&self, prefix: &str) -> Vec<ArgCompletion> {
-        rank_by_prefix(LISTED_THEMES, prefix, |(name, _)| *name)
+        rank_by_prefix(BUILT_IN, prefix, |theme| theme.name)
             .into_iter()
-            .map(|(name, description)| ArgCompletion {
-                value: Cow::Borrowed(*name),
-                description: Cow::Borrowed(*description),
+            .map(|theme| ArgCompletion {
+                value: Cow::Borrowed(theme.name),
+                description: Cow::Borrowed(theme.description),
             })
             .collect()
     }
 
-    fn execute(&self, args: &str, ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
+    fn execute(&self, args: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
         let arg = args.trim();
         if arg.is_empty() {
-            ctx.open_modal(Box::new(ThemePicker::new(&ctx.info.config.theme_name)));
-            return Ok(SlashOutcome::Done);
+            return Ok(SlashOutcome::Modal(Box::new(ThemePicker::new(
+                &ctx.info.config.theme_name,
+            ))));
         }
         let name = resolve_theme_arg(arg)?;
         Ok(SlashOutcome::Forward(UserAction::SwapTheme {
@@ -225,17 +202,17 @@ impl SlashCommand for ThemeCmd {
 /// are rejected — users with a custom TOML edit `~/.config/ox/config.toml` directly.
 fn resolve_theme_arg(arg: &str) -> Result<&'static str, String> {
     let lower = arg.to_ascii_lowercase();
-    LISTED_THEMES
+    BUILT_IN
         .iter()
-        .find(|(name, _)| *name == lower)
-        .map(|(name, _)| *name)
+        .find(|theme| theme.name == lower)
+        .map(|theme| theme.name)
         .ok_or_else(|| format!("Unknown theme: `{arg}`. Valid: {}.", valid_names()))
 }
 
 fn valid_names() -> String {
-    LISTED_THEMES
+    BUILT_IN
         .iter()
-        .map(|(name, _)| *name)
+        .map(|theme| theme.name)
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -247,27 +224,13 @@ mod tests {
 
     use super::*;
     use crate::slash::test_session_info;
-    use crate::tui::components::chat::ChatView;
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::from(code)
     }
 
-    fn run_execute(
-        args: &str,
-    ) -> (
-        ChatView,
-        Option<Box<dyn Modal>>,
-        Result<SlashOutcome, String>,
-    ) {
-        let mut chat = ChatView::new(&Theme::default(), false);
-        let info = test_session_info();
-        let (outcome, modal) = {
-            let mut ctx = SlashContext::new(&mut chat, &info);
-            let outcome = ThemeCmd.execute(args, &mut ctx);
-            (outcome, ctx.take_modal())
-        };
-        (chat, modal, outcome)
+    fn run_execute(args: &str) -> Result<SlashOutcome, String> {
+        ThemeCmd.execute(args, &SlashContext::new(&test_session_info(), None))
     }
 
     fn picker_with_active(name: &str) -> ThemePicker {
@@ -280,10 +243,7 @@ mod tests {
     fn theme_row_picker_item_methods_return_curated_values() {
         let rows = ThemeRow::build("latte");
         let names: Vec<&str> = rows.iter().map(PickerItem::label).collect();
-        assert_eq!(
-            names,
-            LISTED_THEMES.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
-        );
+        assert_eq!(names, BUILT_IN.iter().map(|t| t.name).collect::<Vec<_>>(),);
 
         let active_count = rows.iter().filter(|r| r.is_active()).count();
         assert_eq!(active_count, 1, "exactly one row marks the active theme");
@@ -294,19 +254,8 @@ mod tests {
 
         for (idx, row) in rows.iter().enumerate() {
             assert_eq!(row.key_hint(), numeric_hint(idx), "idx={idx}");
-            assert_eq!(row.description(), Some(LISTED_THEMES[idx].1));
+            assert_eq!(row.description(), Some(BUILT_IN[idx].description));
         }
-    }
-
-    // ── numeric_hint ──
-
-    #[test]
-    fn numeric_hint_covers_first_nine_rows_then_returns_none() {
-        for idx in 0..9 {
-            let expected = char::from_digit(u32::try_from(idx + 1).unwrap(), 10);
-            assert_eq!(numeric_hint(idx), expected, "idx={idx}");
-        }
-        assert_eq!(numeric_hint(9), None, "10th row has no hint");
     }
 
     // ── ThemePicker::new ──
@@ -353,7 +302,7 @@ mod tests {
                 ModalKey::Preview(ModalAction::User(UserAction::PreviewTheme { name })) => {
                     assert_eq!(
                         name,
-                        LISTED_THEMES.last().unwrap().0,
+                        BUILT_IN.last().unwrap().name,
                         "{code:?} from first row wraps to last",
                     );
                 }
@@ -377,7 +326,7 @@ mod tests {
     #[test]
     fn numeric_jump_past_roster_is_a_consumed_noop() {
         // Out-of-range digits stay Consumed — first digit past the count survives roster growth.
-        let past_end = char::from_digit(u32::try_from(LISTED_THEMES.len()).unwrap() + 1, 10)
+        let past_end = char::from_digit(u32::try_from(BUILT_IN.len()).unwrap() + 1, 10)
             .expect("roster fits in a single digit");
         let mut p = picker_with_active("mocha");
         let outcome = p.handle_key(&key(KeyCode::Char(past_end)));
@@ -424,7 +373,7 @@ mod tests {
         let p = picker_with_active("mocha");
         let theme = Theme::default();
         for width in [40_u16, 80, 120] {
-            let h = p.height(width).min(20);
+            let h = p.height(width, 20);
             let mut terminal = Terminal::new(TestBackend::new(width, h)).unwrap();
             terminal
                 .draw(|frame| p.render(frame, Rect::new(0, 0, width, h), &theme))
@@ -461,10 +410,7 @@ mod tests {
 
     #[test]
     fn complete_arg_empty_prefix_lists_full_roster_in_curated_order() {
-        let expected: Vec<String> = LISTED_THEMES
-            .iter()
-            .map(|(name, _)| (*name).to_owned())
-            .collect();
+        let expected: Vec<String> = BUILT_IN.iter().map(|t| t.name.to_owned()).collect();
         assert_eq!(arg_values(""), expected);
     }
 
@@ -486,46 +432,40 @@ mod tests {
     // ── ThemeCmd::execute ──
 
     #[test]
-    fn execute_no_args_opens_picker_and_pushes_no_chat_block() {
-        let (chat, modal, outcome) = run_execute("");
-        assert_eq!(outcome, Ok(SlashOutcome::Done));
-        assert!(modal.is_some(), "bare /theme must populate the modal slot");
-        assert_eq!(chat.entry_count(), 0, "chat must stay clean on open");
+    fn execute_no_args_opens_the_picker() {
+        run_execute("").unwrap().into_modal();
     }
 
     #[test]
     fn execute_with_known_name_forwards_swap_theme() {
-        for (name, _) in LISTED_THEMES {
-            let (_, _, outcome) = run_execute(name);
+        for theme in BUILT_IN {
             assert_eq!(
-                outcome,
-                Ok(SlashOutcome::Forward(UserAction::SwapTheme {
-                    name: (*name).to_owned(),
-                })),
-                "`{name}` must forward SwapTheme",
+                run_execute(theme.name).unwrap().into_forward(),
+                UserAction::SwapTheme {
+                    name: theme.name.to_owned(),
+                },
+                "`{}` must forward SwapTheme",
+                theme.name,
             );
         }
     }
 
     #[test]
     fn execute_is_case_insensitive() {
-        let (_, _, outcome) = run_execute("LATTE");
         assert_eq!(
-            outcome,
-            Ok(SlashOutcome::Forward(UserAction::SwapTheme {
+            run_execute("LATTE").unwrap().into_forward(),
+            UserAction::SwapTheme {
                 name: "latte".to_owned(),
-            })),
+            },
         );
     }
 
     #[test]
     fn execute_unknown_name_errors_listing_valid_options() {
-        let (chat, _, outcome) = run_execute("solarized");
-        let msg = outcome.expect_err("unknown name must error");
+        let msg = run_execute("solarized").expect_err("unknown name must error");
         assert!(msg.starts_with("Unknown theme: `solarized`."), "{msg}");
-        for (name, _) in LISTED_THEMES {
-            assert!(msg.contains(name), "lists `{name}`: {msg}");
+        for theme in BUILT_IN {
+            assert!(msg.contains(theme.name), "lists `{}`: {msg}", theme.name);
         }
-        assert_eq!(chat.entry_count(), 0, "execute must not push on Err");
     }
 }

@@ -6,9 +6,9 @@ Companions: [commands.md](commands.md), [modals.md](modals.md). Underlying resea
 
 ## Implementation
 
-`slash/resume` hosts both `ResumeCmd` and `ResumePicker`. Bare opens the picker via `ctx.open_modal`, while typed-arg resolves through `match_in_scope` (current project first, widening to all projects on miss) and forwards `UserAction::Resume { session_id }` carrying the full id.
+`slash/resume` hosts both `ResumeCmd` and `ResumePicker`. Bare returns the picker as `SlashOutcome::Modal`, while typed-arg resolves through `match_in_scope` (current project first, widening to all projects on miss) and forwards `UserAction::Resume { session_id }` carrying the full id.
 
-The picker wraps [`SearchableList`](modals.md) and adds a footer line. Each row paints a two-line title plus dim metadata block (id prefix · relative time · message count · branch · project) followed by a trailing blank. Tab toggles current-project ↔ all-projects, reloading rows from `SessionStore::list_paged` while preserving the typed query. Enter on a focused row submits, while Enter with no selection keeps the picker open so the user can Tab the scope or Esc out. Esc / Ctrl+C cancel via the universal stack gate. Ctrl+D / Delete on the cursor row pushes [`ConfirmDeleteSessionModal`](modals.md). On focus regain the picker reloads and re-seeks the cursor to the previously selected row, so cancel-delete keeps the user in place.
+The picker wraps [`SearchableList`](modals.md) and adds a footer line. Each row paints a two-line title plus dim metadata block (id prefix · relative time · message count · branch · project) followed by a trailing blank. Tab toggles current-project ↔ all-projects, reloading rows from `SessionStore::list_paged` while preserving the typed query. Enter on a focused row submits, while Enter with no selection keeps the picker open so the user can Tab the scope or Esc out. Esc / Ctrl+C cancel via the universal stack gate. The footer counts the loaded rows and, when the 30-row cap clipped the listing, names the full total (`29 most recent of 112 sessions`), since a query only searches loaded rows. Ctrl+D on the cursor row pushes [`ConfirmDeleteSessionModal`](modals.md). On focus regain the picker reloads and re-seeks the cursor to the previously selected row, so cancel-delete keeps the user in place.
 
 `session/handle` provides `roll_into(...)`, which mirrors `roll(...)`. It loads and sanitizes the target first, so a load failure leaves the live session untouched. It then snapshots and clears the file tracker, restores the target's tracker state through `restore_verified`, swaps the handle in place, and finalizes the old session. The flat `RollIntoOutcome` carries the resumed transcript (messages, compact boundary, title, tool-result metadata, and recorded prompt context) plus a diagnostic pair (finalize failure of the prior session, drift list from the file tracker).
 
@@ -54,9 +54,9 @@ The picker wraps [`SearchableList`](modals.md) and adds a footer line. Each row 
 
 - **`ResumeCmd`**: Canonical `resume`, alias `continue`. `classify` is always `Mutating`. `echoes_input` returns false for bare (modal IS the response) and true for typed-arg (echo anchors the swap-confirmation message). Typed-arg path validates non-empty / non-whitespace, then calls `match_in_scope` against the current project first and widens on miss.
 
-- **`ResumePicker`**: Wraps `SearchableList<SessionRow>` plus a footer row. Loads rows from `SessionStore::list_paged`. Tab toggles `all` and rebuilds while preserving the query. Enter on a focused row dispatches `UserAction::Resume`. Enter with no selection keeps the picker open so the user can Tab the scope or Esc out.
+- **`ResumePicker`**: Wraps `SearchableList<SessionRow>` plus a footer row. Loads rows from `SessionStore::list_paged`. Tab toggles `all` and rebuilds while preserving the query. Ctrl+U clears the query, and other unbound keys edit it through the shared `LineEditor`. Enter on a focused row dispatches `UserAction::Resume`. Enter with no selection keeps the picker open so the user can Tab the scope or Esc out.
 
-- **`SearchableList<T>`**: Owns query, items, filtered visible index, cursor, and viewport offset. Substring filter recomputes on every `set_query`, and the cursor clamps to filtered bounds. `SearchableItem::haystack` returns the composite filter source. `render(width, is_cursor, theme)` paints one or more `Line`s per row.
+- **`SearchableList<T>`**: Owns the query editor, items, filtered visible index, cursor, and viewport. The substring filter recomputes whenever the query changes, through `set_query` or an `edit_query` keystroke, and resets the cursor to the top. The viewport sizes itself from the height each render grants, and paging steps by the rows last shown. `SearchableItem::haystack` returns the composite filter source. `render(width, is_cursor, theme)` paints one or more `Line`s per row.
 
 - **`SessionRow`**: Carries the 8-char id prefix, full id, title-or-`(untitled)`, `last_active_at`, message count, optional git branch, and (in all-projects mode) the tildified project path. `haystack` joins id + title plus project when visible. `render` paints a two-line title plus dim metadata block under a fixed width budget. The metadata line is built via the shared `session::display::format_metadata_line` helper so the confirm-delete modal can reuse the same shape.
 
@@ -99,7 +99,7 @@ Opening the picker from the shell with `ox --resume` is tracked in [#187](https:
 - `crates/oxide-code/src/session/list_view.rs`: `render_list` over `list_paged`.
 - `crates/oxide-code/src/session/resolver.rs`: `resolve_prefix_to_info` and its `match_in_scope` helper, shared with `/delete`.
 - `crates/oxide-code/src/session/store.rs`: `list_paged`, `ListPage`, plus `list` / `list_all` wrappers.
-- `crates/oxide-code/src/slash/confirm.rs`: `ConfirmDeleteSessionModal` pushed by Ctrl+D / Delete.
+- `crates/oxide-code/src/slash/confirm.rs`: `ConfirmDeleteSessionModal` pushed by Ctrl+D.
 - `crates/oxide-code/src/slash/registry.rs`: `BUILT_INS` entry `&ResumeCmd`.
 - `crates/oxide-code/src/slash/resume.rs`: `ResumeCmd`, `ResumePicker`, `SessionRow`, `resolve_prefix`.
 - `crates/oxide-code/src/tui/app.rs`: `apply_session_resumed`.

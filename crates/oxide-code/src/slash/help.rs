@@ -22,9 +22,8 @@ impl SlashCommand for HelpCmd {
         false
     }
 
-    fn execute(&self, _args: &str, ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
-        ctx.open_modal(Box::new(build_modal()));
-        Ok(SlashOutcome::Done)
+    fn execute(&self, _args: &str, _ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
+        Ok(SlashOutcome::Modal(Box::new(build_modal())))
     }
 }
 
@@ -52,10 +51,11 @@ fn display_label(cmd: &dyn SlashCommand) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::slash::clear::ClearCmd;
     use crate::slash::context::SlashContext;
-    use crate::tui::components::chat::ChatView;
+    use crate::slash::model::ModelCmd;
+    use crate::slash::resume::ResumeCmd;
     use crate::tui::modal::Modal;
-    use crate::tui::theme::Theme;
 
     // ── HelpCmd metadata ──
 
@@ -69,16 +69,10 @@ mod tests {
     // ── HelpCmd::execute ──
 
     #[test]
-    fn execute_opens_a_modal_via_ctx_and_pushes_no_chat_block() {
-        let mut chat = ChatView::new(&Theme::default(), false);
+    fn execute_opens_the_overview_modal() {
         let info = crate::slash::test_session_info();
-        let mut ctx = SlashContext::new(&mut chat, &info);
-        HelpCmd.execute("", &mut ctx).unwrap();
-        assert!(
-            ctx.take_modal().is_some(),
-            "/help must populate the modal slot",
-        );
-        assert_eq!(chat.entry_count(), 0, "chat must stay clean on open");
+        let outcome = HelpCmd.execute("", &SlashContext::new(&info, None));
+        outcome.unwrap().into_modal();
     }
 
     // ── build_modal ──
@@ -88,62 +82,19 @@ mod tests {
         let m = build_modal();
         // title + blank + N rows + blank + footer.
         let expected = u16::try_from(BUILT_INS.len() + 4).unwrap();
-        assert_eq!(m.height(80), expected);
+        assert_eq!(m.height(80, u16::MAX), expected);
     }
 
     // ── display_label ──
 
     #[test]
     fn display_label_combines_name_aliases_and_usage() {
-        // Four-row matrix: no-alias / alias-only / usage-only / both-present.
         assert_eq!(display_label(&HelpCmd), "/help");
-        assert_eq!(display_label(&Fake::CLEAR), "/clear (new, reset)");
-        assert_eq!(display_label(&Fake::MODEL), "/model <model-id>");
+        assert_eq!(display_label(&ClearCmd), "/clear (new, reset)");
+        assert_eq!(display_label(&ModelCmd), "/model [<id>]");
         assert_eq!(
-            display_label(&Fake::CLEAR_WITH_USAGE),
-            "/clear (new, reset) <args>",
+            display_label(&ResumeCmd),
+            "/resume (continue) [<id-prefix>]"
         );
-    }
-
-    struct Fake {
-        name: &'static str,
-        aliases: &'static [&'static str],
-        usage: Option<&'static str>,
-    }
-
-    impl Fake {
-        const CLEAR: Self = Self {
-            name: "clear",
-            aliases: &["new", "reset"],
-            usage: None,
-        };
-        const MODEL: Self = Self {
-            name: "model",
-            aliases: &[],
-            usage: Some("<model-id>"),
-        };
-        const CLEAR_WITH_USAGE: Self = Self {
-            name: "clear",
-            aliases: &["new", "reset"],
-            usage: Some("<args>"),
-        };
-    }
-
-    impl SlashCommand for Fake {
-        fn name(&self) -> &'static str {
-            self.name
-        }
-        fn aliases(&self) -> &'static [&'static str] {
-            self.aliases
-        }
-        fn description(&self) -> &'static str {
-            ""
-        }
-        fn usage(&self) -> Option<&'static str> {
-            self.usage
-        }
-        fn execute(&self, _: &str, _: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
-            Ok(SlashOutcome::Done)
-        }
     }
 }

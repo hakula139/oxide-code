@@ -15,14 +15,14 @@ impl SlashCommand for InitCmd {
     }
 
     fn description(&self) -> &'static str {
-        "Set up `AGENTS.md` / `CLAUDE.md`"
+        "Create or update AGENTS.md / CLAUDE.md"
     }
 
     fn classify(&self, _args: &str) -> SlashKind {
         SlashKind::Mutating
     }
 
-    fn execute(&self, _args: &str, _ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
+    fn execute(&self, _args: &str, _ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
         Ok(SlashOutcome::Forward(UserAction::SubmitPrompt(
             PROMPT.to_owned(),
         )))
@@ -82,15 +82,6 @@ const PROMPT: &str = indoc! {r"
 mod tests {
     use super::*;
     use crate::slash::test_session_info;
-    use crate::tui::components::chat::ChatView;
-    use crate::tui::theme::Theme;
-
-    fn run_execute() -> (ChatView, Result<SlashOutcome, String>) {
-        let mut chat = ChatView::new(&Theme::default(), false);
-        let info = test_session_info();
-        let outcome = InitCmd.execute("", &mut SlashContext::new(&mut chat, &info));
-        (chat, outcome)
-    }
 
     // ── InitCmd metadata ──
 
@@ -109,12 +100,16 @@ mod tests {
     // ── InitCmd::execute ──
 
     #[test]
-    fn execute_forwards_authoring_prompt_without_chat_writes() {
-        let (chat, outcome) = run_execute();
-        assert_eq!(chat.entry_count(), 0);
-        let Ok(SlashOutcome::Forward(UserAction::SubmitPrompt(p))) = outcome else {
-            panic!("expected Forward(SubmitPrompt), got {outcome:?}");
-        };
+    fn execute_forwards_authoring_prompt() {
+        let info = test_session_info();
+        let outcome = InitCmd
+            .execute("", &SlashContext::new(&info, None))
+            .unwrap();
+        assert_eq!(
+            outcome.into_forward(),
+            UserAction::SubmitPrompt(PROMPT.to_owned())
+        );
+        let p = PROMPT;
         assert!(p.contains("AGENTS.md") && p.contains("CLAUDE.md"), "{p}");
         assert!(
             p.contains("already exists") && p.contains("do not") && p.contains("overwrite it"),

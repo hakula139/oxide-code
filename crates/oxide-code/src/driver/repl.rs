@@ -73,7 +73,7 @@ where
             }
 
             tokio::select! {
-                end = conversation.submit_prompt(input, sink, &mut user_rx) => {
+                end = conversation.submit_prompt(slash::unescape_literal(input), sink, &mut user_rx) => {
                     if end == TurnEnd::Failed {
                         println!();
                         failed = true;
@@ -135,7 +135,7 @@ mod tests {
         let requests = request_bodies(&server).await;
         assert_eq!(requests.len(), 2, "/clear must not reach the model");
         let last = requests[1]["messages"].as_array().unwrap().last().unwrap();
-        assert_eq!(last["content"][0]["text"], "//literal");
+        assert_eq!(last["content"][0]["text"], "/literal");
         let errors: Vec<String> = sink
             .events()
             .into_iter()

@@ -694,7 +694,7 @@ mod tests {
     /// All four vendored Catppuccin TOMLs must parse without error.
     #[test]
     fn parse_theme_all_builtins() {
-        for (name, body) in builtin::BUILT_IN {
+        for builtin::BuiltinTheme { name, body, .. } in builtin::BUILT_IN {
             parse_theme(body).unwrap_or_else(|e| panic!("built-in {name:?} failed: {e:#}"));
         }
     }
@@ -705,7 +705,7 @@ mod tests {
     /// every panel's text in the surface color. Pin the contract.
     #[test]
     fn parse_theme_surface_is_bg_only_in_every_builtin() {
-        for (name, body) in builtin::BUILT_IN {
+        for builtin::BuiltinTheme { name, body, .. } in builtin::BUILT_IN {
             let t = parse_theme(body).unwrap_or_else(|e| panic!("{name} parse: {e:#}"));
             assert_eq!(
                 t.surface.fg, None,

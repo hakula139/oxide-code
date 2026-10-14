@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use super::{Conversation, Exit, TurnEnd, shutdown_signal};
 use crate::agent::event::{AgentSink, StdioSink, inert_user_action_channel};
+use crate::slash;
 
 /// Runs `prompt` as a single turn. A failed or cancelled turn exits with failure, and a signal
 /// exits with its own status.
@@ -18,7 +19,7 @@ where
 {
     let (_user_tx, mut user_rx) = inert_user_action_channel();
     let exit = tokio::select! {
-        end = conversation.submit_prompt(prompt, sink, &mut user_rx) => {
+        end = conversation.submit_prompt(slash::unescape_literal(prompt), sink, &mut user_rx) => {
             if end == TurnEnd::Completed {
                 Exit::Success
             } else {

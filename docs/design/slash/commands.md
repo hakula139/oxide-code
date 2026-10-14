@@ -14,7 +14,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 - `/init` synthesizes an AGENTS.md / CLAUDE.md author-or-update prompt and forwards to the agent loop.
 - `/rename` sets the session title manually and locks out the AI title generator. Bare opens a single-line editor pre-filled with the current title.
 - `/resume` swaps to a different session in place. Bare opens a searchable picker, while typed-arg jumps directly. Full design: [resume.md](resume.md).
-- `/delete <id-prefix>` unlinks a saved session's JSONL after a Y/N confirm. The `/resume` picker offers the same gesture via Ctrl+D / Delete on the cursor row.
+- `/delete <id-prefix>` unlinks a saved session's JSONL after a Y/N confirm. The `/resume` picker offers the same gesture via Ctrl+D on the cursor row.
 - `/config`, `/help`, and `/status` open a read-only [`KvOverview`](modals.md) modal. `/diff` is the lone printer because its output can run to hundreds of lines, where scrollback value beats modal cropping.
 
 ## Design Decisions
@@ -41,9 +41,9 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 11. **Read-only commands fast-path the busy turn.** `classify` defaults to `SlashKind::ReadOnly`, and the dispatcher runs them client-side even when input is disabled. State-mutating commands override to `SlashKind::Mutating` and refuse mid-turn.
 
-12. **Two command kinds, one trait return: `SlashOutcome { Done, Forward(UserAction) }`.** `Done` covers read-only commands. `Forward(_)` is state-mutating, handed back to the App which forwards to the agent loop.
+12. **One trait return carries every effect: `SlashOutcome`.** `Forward(UserAction)` hands a state-mutating action back to the App, which routes it locally or to the agent loop. `Modal(_)` opens a modal, and `SystemMessage` / `GitDiff` print into chat. A failure returns `Err(String)`, which the dispatcher prefixes with the typed command name.
 
-13. **Modals open via a `SlashContext` side-channel.** Commands set `ctx.open_modal(Box::new(...))` and return `Done`. The dispatcher then harvests the slot after `execute` and pushes onto the App's modal stack. This keeps `SlashOutcome` derive-clean with its two variants. See [modals.md](modals.md) for the full modal design.
+13. **Commands read a borrowed `SlashContext` and write nothing.** The context carries `LiveSessionInfo` and the live session title. The App applies the returned outcome in one place on both the idle and busy paths, so no command reaches into `ChatView` or the modal stack. See [modals.md](modals.md) for the full modal design.
 
 14. **Modal-only commands suppress their own echo.** `SlashCommand::echoes_input(args) -> bool` defaults to true. Modal-only forms (`/status`, `/config`, `/help`, plus bare `/effort`, `/model`, `/rename`, `/resume`, and `/theme`) override to false, since the modal IS the response and the typed `> /foo` line would orphan in history once the modal closes. Typed forms keep echoing because the swap-confirmation system message anchors the pair.
 
@@ -73,7 +73,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 - **`/resume`** (alias `/continue`): Bare opens a searchable session picker ([modals.md](modals.md)), while `/resume <id-prefix>` resolves directly via a current-project-first lookup that widens to all projects on miss. Both forms refuse mid-turn and forward `UserAction::Resume`. Bare suppresses echo while typed-arg echoes. Full design: [resume.md](resume.md).
 
-- **`/delete`**: Typed-arg only, while bare returns a friendly redirect. Picker entry is Ctrl+D / Delete inside `/resume`. Both push `ConfirmDeleteSessionModal` ([modals.md](modals.md)), which runs `SessionStore::delete` on Y / Enter and emits a `Deleted session {id}: {title}` line in chat. Live-session refusal is layered across the picker filter, the resolver, and the store-layer bail.
+- **`/delete`**: Typed-arg only, while bare returns a friendly redirect. Picker entry is Ctrl+D inside `/resume`. Both push `ConfirmDeleteSessionModal` ([modals.md](modals.md)), which runs `SessionStore::delete` on Y / Enter and emits a `Deleted session {id}: {title}` line in chat. Live-session refusal is layered across the picker filter, the resolver, and the store-layer bail.
 
 ## Sources
 
@@ -85,7 +85,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 - `crates/oxide-code/src/slash/clear.rs`: `ClearCmd`, send-first ordering.
 - `crates/oxide-code/src/slash/config.rs`: `/config` row builder plus sectioned `KvOverview` constructor.
 - `crates/oxide-code/src/slash/confirm.rs`: `ConfirmDeleteSessionModal` (destructive-action gate, sticky inline error cleared only on deliberate Y / N).
-- `crates/oxide-code/src/slash/context.rs`: `SlashContext`, `open_modal` / `take_modal`.
+- `crates/oxide-code/src/slash/context.rs`: `SlashContext` (`LiveSessionInfo` plus the live title).
 - `crates/oxide-code/src/slash/delete.rs`: `DeleteCmd` plus live-id-aware resolver wrapper.
 - `crates/oxide-code/src/slash/diff.rs`: `/diff` printer with 64 KB UTF-8-boundary cap.
 - `crates/oxide-code/src/slash/effort.rs`: `EffortCmd`, level parser.
@@ -99,7 +99,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 - `crates/oxide-code/src/slash/resume.rs`: `ResumeCmd` plus `ResumePicker` (see `resume.md`).
 - `crates/oxide-code/src/slash/status.rs`: `/status` row builder plus `KvOverview` constructor.
 - `crates/oxide-code/src/slash/theme.rs`: `ThemeCmd`, picker open plus typed-arg validator.
-- `crates/oxide-code/src/tui/app.rs`: `dispatch_user_action`, `apply_action_locally`, modal gate, echo gate.
+- `crates/oxide-code/src/tui/app.rs`: `dispatch_user_action`, `apply_action_locally`, `run_slash`, `apply_slash_outcome`, modal gate, echo gate.
 - `crates/oxide-code/src/tui/modal.rs`: `Modal` trait, `ModalStack`, key routing.
 - `crates/oxide-code/src/tui/modal/kv_overview.rs`: generic `KvOverview` / `KvSection` primitive.
 - `crates/oxide-code/src/tui/modal/list_picker.rs`: generic `ListPicker` primitive.

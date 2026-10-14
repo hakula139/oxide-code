@@ -31,7 +31,7 @@ use crate::agent::event::{AgentEvent, UserAction};
 use crate::config::{CompactionConfig, Effort, StatusLineSegment, display_auto_compaction};
 use crate::message::Message;
 use crate::session::entry::CompactInfo;
-use crate::slash::{self, LiveSessionInfo, SlashContext, SlashKind};
+use crate::slash::{self, LiveSessionInfo, Parsed, SlashContext, SlashKind, SlashOutcome};
 use crate::tool::{ToolMetadata, ToolRegistry, ToolResultView};
 use crate::util::text::{center_truncate_to_width, truncate_to_width};
 
@@ -209,7 +209,11 @@ impl App {
                     self.dirty = true;
                     return;
                 }
-                Event::Paste(_) => return,
+                Event::Paste(text) => {
+                    self.modals.handle_paste(text);
+                    self.dirty = true;
+                    return;
+                }
                 _ => {}
             }
         }
@@ -239,8 +243,7 @@ impl App {
 
     fn apply_modal_action(&mut self, action: ModalAction) {
         match action {
-            // Cancel: revert any in-flight theme preview to the snapshot taken on open.
-            ModalAction::None => self.cancel_theme_preview(),
+            ModalAction::Cancelled => self.cancel_theme_preview(),
             ModalAction::User(user_action) => self.dispatch_user_action(user_action),
             ModalAction::SystemMessage(msg) => self.chat.push_system_message(msg),
         }
@@ -289,10 +292,14 @@ impl App {
     ///
     /// `apply_action_locally` returns `false` when the action was fully handled in the UI (slash
     /// command synthesized its own forward, prompt was queued mid-turn, exit-arm was set, etc.),
-    /// gating the forward so the agent loop never sees actions that were never meant for it.
-    fn dispatch_user_action(&mut self, action: UserAction) {
+    /// gating the forward so the agent loop never sees actions that were never meant for it. A
+    /// `//` escape reaches the agent as its literal text.
+    fn dispatch_user_action(&mut self, mut action: UserAction) {
         if !self.apply_action_locally(&action) {
             return;
+        }
+        if let UserAction::SubmitPrompt(text) = &mut action {
+            *text = slash::unescape_literal(text).to_owned();
         }
         self.forward_to_agent(action);
     }
@@ -393,19 +400,7 @@ impl App {
                 if slash::echoes_input(&parsed) {
                     self.chat.push_user_message(text.to_owned());
                 }
-                let (synthesized, modal) = {
-                    let mut ctx = SlashContext::with_title(
-                        &mut self.chat,
-                        &self.session_info,
-                        self.status_bar.title(),
-                    );
-                    let action = slash::dispatch(&parsed, &mut ctx);
-                    (action, ctx.take_modal())
-                };
-                if let Some(modal) = modal {
-                    self.modals.push(modal);
-                }
-                if let Some(action) = synthesized {
+                if let Some(action) = self.run_slash(&parsed) {
                     if matches!(action, UserAction::SubmitPrompt(_)) {
                         if slash::echoes_input(&parsed) {
                             self.active_prompt = Some(text.to_owned());
@@ -419,8 +414,9 @@ impl App {
                 }
                 return false;
             }
-            self.chat.push_user_message(text.to_owned());
-            self.active_prompt = Some(text.to_owned());
+            let prompt = slash::unescape_literal(text).to_owned();
+            self.chat.push_user_message(prompt.clone());
+            self.active_prompt = Some(prompt);
             self.input.set_enabled(false);
             self.status_bar.set_status(Status::Streaming);
             return true;
@@ -430,16 +426,7 @@ impl App {
                 self.chat.push_user_message(text.to_owned());
             }
             match slash::classify(&parsed) {
-                SlashKind::ReadOnly | SlashKind::Unknown => {
-                    let modal = {
-                        let mut ctx = SlashContext::new(&mut self.chat, &self.session_info);
-                        _ = slash::dispatch(&parsed, &mut ctx);
-                        ctx.take_modal()
-                    };
-                    if let Some(modal) = modal {
-                        self.modals.push(modal);
-                    }
-                }
+                SlashKind::ReadOnly | SlashKind::Unknown => _ = self.run_slash(&parsed),
                 SlashKind::Mutating => {
                     self.chat.push_system_message(format!(
                         "/{} runs only when idle. Try again after the turn finishes.",
@@ -454,6 +441,25 @@ impl App {
             self.status_bar.status(),
             Status::Compacting | Status::Cancelling,
         )
+    }
+
+    /// Runs `parsed` and applies its outcome, returning the action it asks the caller to route.
+    fn run_slash(&mut self, parsed: &Parsed) -> Option<UserAction> {
+        let ctx = SlashContext::new(&self.session_info, self.status_bar.title());
+        let outcome = slash::dispatch(parsed, &ctx);
+        self.apply_slash_outcome(outcome)
+    }
+
+    /// Shows a slash command's chat output or modal, returning a forwarded action unapplied.
+    fn apply_slash_outcome(&mut self, outcome: Result<SlashOutcome, String>) -> Option<UserAction> {
+        match outcome {
+            Ok(SlashOutcome::Forward(action)) => return Some(action),
+            Ok(SlashOutcome::Modal(modal)) => self.modals.push(modal),
+            Ok(SlashOutcome::SystemMessage(text)) => self.chat.push_system_message(text),
+            Ok(SlashOutcome::GitDiff(diff)) => self.chat.push_git_diff(diff),
+            Err(msg) => self.chat.push_error(&msg),
+        }
+        None
     }
 
     fn handle_agent_event(&mut self, event: AgentEvent) {
@@ -728,10 +734,13 @@ impl App {
     }
 
     fn draw_frame(&mut self, frame: &mut ratatui::Frame<'_>) {
-        let preview_height = self.preview_height();
-        let modal_height = self.modals.height(frame.area().width);
+        // The status bar and one chat row stay visible above a modal, which then outranks the
+        // queued-prompt preview.
+        let modal_max = frame.area().height.saturating_sub(2 + 1);
+        let modal_height = self.modals.height(frame.area().width, modal_max);
+        let preview_height = self.preview_height().min(modal_max - modal_height);
         // Modal owns focus, so input and popup bands collapse.
-        let modal_active = modal_height > 0;
+        let modal_active = self.modals.is_active();
         let popup_height = if modal_active {
             0
         } else {
@@ -1056,7 +1065,7 @@ mod tests {
     }
 
     impl crate::tui::modal::Modal for FakeModal {
-        fn height(&self, _width: u16) -> u16 {
+        fn height(&self, _width: u16, _max_height: u16) -> u16 {
             1
         }
 
@@ -1139,6 +1148,21 @@ mod tests {
             _ = writeln!(body, "line {i:02} of a long chat block");
         }
         body
+    }
+
+    /// Pushes a Bash approval past its type-ahead guard, so it answers keys at once.
+    fn push_answerable_approval(app: &mut App, command: &str) {
+        use crate::agent::event::{ApprovalBody, ApprovalPreview};
+
+        let mut modal = crate::tui::modal::approval::ApprovalModal::new(
+            "call-1".to_owned(),
+            ApprovalPreview {
+                title: "Bash".to_owned(),
+                body: ApprovalBody::Command(command.to_owned()),
+            },
+        );
+        modal.expire_guard();
+        app.push_modal(Box::new(modal));
     }
 
     // ── App::new ──
@@ -1550,21 +1574,42 @@ mod tests {
         assert!(matches!(forwarded, UserAction::Cancel));
     }
 
-    #[test]
-    fn modal_gate_drops_pastes_while_a_modal_is_open() {
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        app.push_modal(Box::new(FakeModal::new("picker")));
+    #[tokio::test]
+    async fn modal_gate_routes_pastes_to_the_top_modal() {
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("/rename".to_owned()));
 
-        app.handle_crossterm_event(&Event::Paste("pasted".to_owned()));
+        app.handle_crossterm_event(&Event::Paste("Fix auth\r\nflow".to_owned()));
+        app.handle_crossterm_event(&key_event(KeyCode::Enter, KeyModifiers::NONE));
 
+        let forwarded = rx.recv().await.expect("rename forwarded");
+        assert_eq!(
+            forwarded,
+            UserAction::Rename {
+                title: "Fix auth flow".to_owned(),
+            },
+        );
         assert!(app.input.is_empty(), "the hidden input must stay empty");
+    }
+
+    #[test]
+    fn modal_gate_paste_never_answers_an_approval() {
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        push_answerable_approval(&mut app, "rm -rf build");
+        _ = render_app(&mut app, 60, 20);
+
+        app.handle_crossterm_event(&Event::Paste("y\n".to_owned()));
+
+        assert!(rx.try_recv().is_err(), "a paste must not decide the call");
+        assert!(app.modals.is_active());
+        assert!(app.input.is_empty());
     }
 
     #[test]
     fn modal_gate_cancel_closes_modal_without_dispatching() {
         // `ModalKey::Cancelled` pops the modal without dispatching; next key reaches input.
         let (mut app, mut rx, _agent_tx) = test_app(None);
-        app.push_modal(Box::new(ScriptedModal::new(ModalAction::None)));
+        app.push_modal(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
         app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::NONE));
 
         assert!(
@@ -1734,7 +1779,6 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_double_slash_escapes_command_and_forwards_literal() {
-        // `//foo` parses as "not a command", so the agent receives the bytes verbatim.
         let (mut app, mut rx, _agent_tx) = test_app(None);
         app.dispatch_user_action(UserAction::SubmitPrompt("//etc/hosts".to_owned()));
 
@@ -1745,8 +1789,18 @@ mod tests {
         let forwarded = rx.recv().await.expect("forwarded action");
         assert!(matches!(
             forwarded,
-            UserAction::SubmitPrompt(s) if s == "//etc/hosts",
+            UserAction::SubmitPrompt(s) if s == "/etc/hosts",
         ));
+        assert_eq!(
+            app.active_prompt.as_deref(),
+            Some("/etc/hosts"),
+            "a post-compaction re-echo shows the literal text",
+        );
+        let text = rendered_text(&mut app, 60, 10);
+        assert!(
+            text.contains("/etc/hosts") && !text.contains("//etc"),
+            "{text}"
+        );
     }
 
     #[tokio::test]
@@ -2150,13 +2204,13 @@ mod tests {
 
     #[test]
     fn preview_theme_then_modal_cancel_restores_original() {
-        // Esc / Ctrl+C surface as ModalAction::None; the snapshot must roll back.
+        // Esc / Ctrl+C surface as ModalAction::Cancelled, so the snapshot must roll back.
         let (mut app, _rx, _agent_tx) = test_app(None);
         let original = app.theme.clone();
         app.dispatch_user_action(UserAction::PreviewTheme {
             name: "latte".to_owned(),
         });
-        app.apply_modal_action(ModalAction::None);
+        app.apply_modal_action(ModalAction::Cancelled);
         assert!(
             app.preview_theme_snapshot.is_none(),
             "snapshot consumed on cancel",
@@ -2168,7 +2222,7 @@ mod tests {
     fn clearing_modal_stack_rolls_back_theme_preview() {
         let (mut app, _rx, _agent_tx) = test_app(None);
         let original = app.theme.clone();
-        app.push_modal(Box::new(ScriptedModal::new(ModalAction::None)));
+        app.push_modal(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
         app.dispatch_user_action(UserAction::PreviewTheme {
             name: "latte".to_owned(),
         });
@@ -2183,10 +2237,10 @@ mod tests {
     #[test]
     fn modal_cancel_without_snapshot_is_a_noop() {
         // Modals that never previewed (e.g. /model picker) cancel through the same
-        // ModalAction::None path; the rollback arm must skip cleanly with no snapshot.
+        // ModalAction::Cancelled path, so the rollback arm must skip cleanly with no snapshot.
         let (mut app, _rx, _agent_tx) = test_app(None);
         let original_text = app.theme.text;
-        app.apply_modal_action(ModalAction::None);
+        app.apply_modal_action(ModalAction::Cancelled);
         assert!(app.preview_theme_snapshot.is_none());
         assert_eq!(app.theme.text, original_text);
     }
@@ -2245,7 +2299,7 @@ mod tests {
         assert_eq!(app.session_info.config.theme_name, "latte");
         assert_eq!(app.theme.text, previewed.text);
 
-        app.apply_modal_action(ModalAction::None);
+        app.apply_modal_action(ModalAction::Cancelled);
         assert_eq!(
             app.session_info.config.theme_name, "latte",
             "post-commit cancel must not restore the pre-preview theme",
@@ -2254,8 +2308,8 @@ mod tests {
 
     #[tokio::test]
     async fn swap_theme_with_unknown_name_is_a_silent_noop() {
-        // Roster drift between slash::theme::LISTED_THEMES and tui::theme::builtin::TABLE is a
-        // dev bug, not user error — log via tracing and leave UI state untouched.
+        // Only a dev bug can name an unknown built-in, so log via tracing and leave UI state
+        // untouched.
         let (mut app, _rx, _agent_tx) = test_app(None);
         let original = app.session_info.config.theme_name.clone();
         let entries_before = app.chat.entry_count();
@@ -2292,8 +2346,8 @@ mod tests {
 
     #[test]
     fn submit_slash_theme_pushes_picker_onto_modal_stack() {
-        // Bare `/theme` is the ReadOnly modal-opening branch — `slash::dispatch` populates the
-        // SlashContext modal slot, then handle_submit_prompt drains it onto `App::modals`.
+        // Bare `/theme` is the ReadOnly modal-opening branch, so its `SlashOutcome::Modal` must
+        // land on `App::modals`.
         let (mut app, _rx, _agent_tx) = test_app(None);
         assert!(!app.modals.is_active(), "stack starts empty");
         app.dispatch_user_action(UserAction::SubmitPrompt("/theme".to_owned()));
@@ -2334,6 +2388,54 @@ mod tests {
                 assert_eq!(effort, None);
             }
             other => panic!("expected SwapConfig, got {other:?}"),
+        }
+    }
+
+    // ── apply_slash_outcome ──
+
+    #[test]
+    fn apply_slash_outcome_shows_output_and_hands_back_forwards_whether_idle_or_busy() {
+        let diff = indoc::indoc! {"
+            diff --git a/src/lib.rs b/src/lib.rs
+            --- a/src/lib.rs
+            +++ b/src/lib.rs
+            @@ -1 +1 @@
+            -old line
+            +new line
+        "};
+        for busy in [false, true] {
+            let (mut app, mut rx, _agent_tx) = test_app(None);
+            if busy {
+                app.handle_agent_event(AgentEvent::StreamToken("partial".into()));
+            }
+
+            let clean = SlashOutcome::SystemMessage("Working tree clean.".to_owned());
+            assert_eq!(app.apply_slash_outcome(Ok(clean)), None);
+            assert_eq!(app.chat.last_system_text(), Some("Working tree clean."));
+
+            assert_eq!(
+                app.apply_slash_outcome(Ok(SlashOutcome::GitDiff(diff.to_owned()))),
+                None
+            );
+            let text = rendered_text(&mut app, 60, 24);
+            assert!(text.contains("new line"), "busy = {busy}: {text}");
+
+            assert_eq!(app.apply_slash_outcome(Err("/diff: boom".to_owned())), None);
+            assert_eq!(app.chat.last_error_text(), Some("/diff: boom"));
+
+            let modal = SlashOutcome::Modal(Box::new(FakeModal::new("picker")));
+            assert_eq!(app.apply_slash_outcome(Ok(modal)), None);
+            assert!(app.modals.is_active());
+
+            let forward = SlashOutcome::Forward(UserAction::Clear);
+            assert_eq!(
+                app.apply_slash_outcome(Ok(forward)),
+                Some(UserAction::Clear)
+            );
+            assert!(
+                rx.try_recv().is_err(),
+                "the caller routes a forwarded action"
+            );
         }
     }
 
@@ -3578,6 +3680,30 @@ mod tests {
             .handle_key(&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
         assert!(action.is_none(), "FakeModal consumes without emitting");
         assert!(app.modals.is_active(), "Consumed must not pop the stack");
+    }
+
+    #[test]
+    fn draw_frame_sizes_a_modal_before_the_queued_prompt_preview() {
+        use crate::agent::event::ApprovalDecision;
+
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        for i in 0..5 {
+            app.pending_prompts.push_back(format!("queued {i}"));
+        }
+        push_answerable_approval(&mut app, "cargo test --all");
+
+        let text = rendered_text(&mut app, 60, 11);
+        assert!(text.contains("cargo test --all"), "{text}");
+
+        app.handle_crossterm_event(&key_event(KeyCode::Char('y'), KeyModifiers::NONE));
+        let forwarded = rx.try_recv().expect("approval forwarded");
+        assert!(matches!(
+            forwarded,
+            UserAction::ApprovalDecision {
+                decision: ApprovalDecision::Approve,
+                ..
+            }
+        ));
     }
 
     #[test]

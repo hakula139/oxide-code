@@ -6,7 +6,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
 use syntect::highlighting::Theme as SyntaxTheme;
 
-mod builtin;
+pub(crate) mod builtin;
 mod color;
 mod loader;
 

@@ -5,26 +5,19 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use unicode_width::UnicodeWidthStr;
 
 use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashKind, SlashOutcome};
 use crate::agent::event::UserAction;
+use crate::tui::modal::chrome::{FOOTER_HEIGHT, Header, render_footer};
+use crate::tui::modal::line_editor::LineEditor;
 use crate::tui::modal::{Modal, ModalAction, ModalKey};
 use crate::tui::theme::Theme;
-use crate::util::text::truncate_to_width;
 
 const MODAL_TITLE: &str = "Rename session";
-const PROMPT: &str = "/ ";
-const PROMPT_WIDTH: u16 = 2;
 const FOOTER_HINT: &str = "Enter to save · Esc to cancel";
-const TITLE_ROW_HEIGHT: u16 = 1;
-const SECTION_GAP: u16 = 1;
-const INPUT_ROW_HEIGHT: u16 = 1;
-const FOOTER_ROW_HEIGHT: u16 = 1;
 /// Mirrors the actor's first-prompt title cap so manual titles fit one `--list` row.
 const MAX_TITLE_CHARS: usize = 80;
 
@@ -53,11 +46,10 @@ impl SlashCommand for RenameCmd {
         !args.trim().is_empty()
     }
 
-    fn execute(&self, args: &str, ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
+    fn execute(&self, args: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
         let trimmed = args.trim();
         if trimmed.is_empty() {
-            ctx.open_modal(Box::new(RenameModal::new(ctx.title)));
-            return Ok(SlashOutcome::Done);
+            return Ok(SlashOutcome::Modal(Box::new(RenameModal::new(ctx.title))));
         }
         Ok(SlashOutcome::Forward(UserAction::Rename {
             title: trimmed.to_owned(),
@@ -68,20 +60,20 @@ impl SlashCommand for RenameCmd {
 // ── RenameModal ──
 
 pub(super) struct RenameModal {
-    buffer: String,
+    header: Header,
+    editor: LineEditor,
 }
 
 impl RenameModal {
     fn new(initial: Option<&str>) -> Self {
         Self {
-            buffer: initial
-                .map(|t| t.chars().take(MAX_TITLE_CHARS).collect())
-                .unwrap_or_default(),
+            header: Header::new(MODAL_TITLE),
+            editor: LineEditor::new(initial.unwrap_or_default()).with_max_chars(MAX_TITLE_CHARS),
         }
     }
 
     fn submit(&self) -> ModalKey {
-        let trimmed = self.buffer.trim();
+        let trimmed = self.editor.text().trim();
         if trimmed.is_empty() {
             return ModalKey::Consumed;
         }
@@ -92,87 +84,55 @@ impl RenameModal {
 }
 
 impl Modal for RenameModal {
-    fn height(&self, _width: u16) -> u16 {
-        TITLE_ROW_HEIGHT + SECTION_GAP + INPUT_ROW_HEIGHT + SECTION_GAP + FOOTER_ROW_HEIGHT
+    fn height(&self, _width: u16, _max_height: u16) -> u16 {
+        self.header.height() + 1 + FOOTER_HEIGHT
     }
 
     fn render(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
-        let lines: Vec<Line<'static>> = vec![
-            Line::from(Span::styled(
-                MODAL_TITLE.to_owned(),
-                theme.accent().add_modifier(Modifier::BOLD),
-            )),
-            Line::default(),
-            self.input_row(area.width, theme),
-            Line::default(),
-            Line::from(Span::styled(FOOTER_HINT.to_owned(), theme.dim())),
-        ];
+        let mut lines = Vec::new();
+        self.header.push_lines(&mut lines, area.width, theme);
+        lines.push(self.editor.line(area.width, theme));
         frame.render_widget(Paragraph::new(lines).style(theme.surface()), area);
-        self.place_cursor(frame, area);
+        render_footer(
+            frame,
+            area,
+            Line::from(Span::styled(FOOTER_HINT, theme.dim())),
+            theme,
+        );
+
+        let input_y = self.header.height();
+        if input_y < area.height {
+            self.editor.place_cursor(frame, area, area.y + input_y);
+        }
     }
 
     fn handle_key(&mut self, event: &KeyEvent) -> ModalKey {
-        match event.code {
-            KeyCode::Enter => self.submit(),
-            KeyCode::Backspace => {
-                self.buffer.pop();
-                ModalKey::Consumed
-            }
-            KeyCode::Char(c) => {
-                if self.buffer.chars().count() < MAX_TITLE_CHARS {
-                    self.buffer.push(c);
-                }
-                ModalKey::Consumed
-            }
-            _ => ModalKey::Consumed,
+        if event.code == KeyCode::Enter {
+            return self.submit();
         }
-    }
-}
-
-impl RenameModal {
-    fn input_row(&self, area_width: u16, theme: &Theme) -> Line<'static> {
-        let prompt = Span::styled(PROMPT.to_owned(), theme.accent());
-        let budget = usize::from(area_width.saturating_sub(PROMPT_WIDTH + 1));
-        let shown = truncate_to_width(&self.buffer, budget);
-        let body = Span::styled(shown, theme.text());
-        Line::from(vec![prompt, body])
+        self.editor.handle_key(event);
+        ModalKey::Consumed
     }
 
-    fn place_cursor(&self, frame: &mut Frame<'_>, area: Rect) {
-        let input_y_offset = TITLE_ROW_HEIGHT + SECTION_GAP;
-        if input_y_offset >= area.height {
-            return;
-        }
-        let cursor_y = area.y.saturating_add(input_y_offset);
-        let visible_width =
-            u16::try_from(UnicodeWidthStr::width(self.buffer.as_str())).unwrap_or(u16::MAX);
-        let raw_x = area
-            .x
-            .saturating_add(PROMPT_WIDTH)
-            .saturating_add(visible_width);
-        crate::tui::cursor::place_clamped(frame, raw_x, cursor_y, area);
+    fn handle_paste(&mut self, text: &str) {
+        self.editor.paste(text);
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crossterm::event::KeyModifiers;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
     use super::*;
-    use crate::slash::context::{LiveSessionInfo, SlashContext};
-    use crate::tui::components::chat::ChatView;
+    use crate::slash::context::SlashContext;
 
-    fn ctx_with_title<'a>(
-        chat: &'a mut ChatView,
-        info: &'a LiveSessionInfo,
-        title: Option<&'a str>,
-    ) -> SlashContext<'a> {
-        SlashContext::with_title(chat, info, title)
-    }
-
-    fn fresh_chat() -> ChatView {
-        ChatView::new(&Theme::default(), false)
+    fn run_execute(args: &str, title: Option<&str>) -> SlashOutcome {
+        let info = crate::slash::test_session_info();
+        RenameCmd
+            .execute(args, &SlashContext::new(&info, title))
+            .unwrap()
     }
 
     // ── RenameCmd metadata ──
@@ -202,34 +162,17 @@ mod tests {
 
     #[test]
     fn execute_typed_arg_forwards_rename_action_with_trimmed_title() {
-        let mut chat = fresh_chat();
-        let info = crate::slash::test_session_info();
-        let mut ctx = ctx_with_title(&mut chat, &info, None);
-
-        let outcome = RenameCmd.execute("  Fix auth bug  ", &mut ctx).unwrap();
-
         assert_eq!(
-            outcome,
-            SlashOutcome::Forward(UserAction::Rename {
+            run_execute("  Fix auth bug  ", None).into_forward(),
+            UserAction::Rename {
                 title: "Fix auth bug".to_owned(),
-            }),
-        );
-        assert!(
-            ctx.take_modal().is_none(),
-            "typed-arg form does not open a modal"
+            },
         );
     }
 
     #[test]
     fn execute_bare_form_opens_modal_pre_filled_with_current_title() {
-        let mut chat = fresh_chat();
-        let info = crate::slash::test_session_info();
-        let mut ctx = ctx_with_title(&mut chat, &info, Some("Existing title"));
-
-        let outcome = RenameCmd.execute("", &mut ctx).unwrap();
-
-        assert_eq!(outcome, SlashOutcome::Done);
-        let mut modal = ctx.take_modal().expect("bare form opens a modal");
+        let mut modal = run_execute("", Some("Existing title")).into_modal();
         let result = modal.handle_key(&KeyEvent::from(KeyCode::Enter));
         let ModalKey::Submitted(ModalAction::User(UserAction::Rename { title })) = result else {
             panic!("Enter on pre-filled buffer must submit; got {result:?}");
@@ -239,12 +182,7 @@ mod tests {
 
     #[test]
     fn execute_bare_form_with_no_current_title_opens_empty_modal() {
-        let mut chat = fresh_chat();
-        let info = crate::slash::test_session_info();
-        let mut ctx = ctx_with_title(&mut chat, &info, None);
-
-        _ = RenameCmd.execute("", &mut ctx).unwrap();
-        let mut modal = ctx.take_modal().expect("modal opens");
+        let mut modal = run_execute("", None).into_modal();
         let result = modal.handle_key(&KeyEvent::from(KeyCode::Enter));
         assert!(
             matches!(result, ModalKey::Consumed),
@@ -295,7 +233,6 @@ mod tests {
 
     #[test]
     fn handle_key_char_at_max_length_drops_extra_input() {
-        // Cap mirrors `session::state::MAX_TITLE_LEN` — over-long titles overflow `--list` rows.
         let prefilled: String = "a".repeat(MAX_TITLE_CHARS);
         let mut modal = RenameModal::new(Some(&prefilled));
         modal.handle_key(&KeyEvent::from(KeyCode::Char('z')));
@@ -308,19 +245,25 @@ mod tests {
     }
 
     #[test]
-    fn handle_key_unhandled_codes_are_silently_consumed_without_buffer_change() {
-        let mut modal = RenameModal::new(Some("ab"));
-        let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Tab));
-
-        assert!(
-            matches!(outcome, ModalKey::Consumed),
-            "non-text keys must consume without action; got {outcome:?}",
-        );
+    fn handle_key_edits_at_the_cursor_and_never_inserts_control_chords() {
+        let mut modal = RenameModal::new(Some("ac"));
+        for event in [
+            KeyEvent::from(KeyCode::Left),
+            KeyEvent::from(KeyCode::Char('b')),
+            KeyEvent::from(KeyCode::Tab),
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL),
+        ] {
+            let outcome = modal.handle_key(&event);
+            assert!(
+                matches!(outcome, ModalKey::Consumed),
+                "{event:?}: {outcome:?}"
+            );
+        }
         let submit = modal.handle_key(&KeyEvent::from(KeyCode::Enter));
         let ModalKey::Submitted(ModalAction::User(UserAction::Rename { title })) = submit else {
             panic!("buffer should still submit cleanly; got {submit:?}");
         };
-        assert_eq!(title, "ab", "Tab must not have mutated the buffer");
+        assert_eq!(title, "abc", "Tab and Ctrl+G must not edit the title");
     }
 
     #[test]
@@ -336,11 +279,21 @@ mod tests {
         );
     }
 
+    // ── RenameModal::handle_paste ──
+
+    #[test]
+    fn handle_paste_inserts_one_line_at_the_cursor() {
+        let mut modal = RenameModal::new(Some("Fix"));
+        modal.handle_paste(" auth\r\nflow");
+        let buf = rendered_buffer(&modal, 40);
+        assert_eq!(row_text(&buf, 2, 40).trim_end(), "/ Fix auth flow");
+    }
+
     // ── Modal::render ──
 
     fn rendered_buffer(modal: &RenameModal, width: u16) -> ratatui::buffer::Buffer {
         let theme = Theme::default();
-        let h = modal.height(width);
+        let h = modal.height(width, u16::MAX);
         let mut terminal = Terminal::new(TestBackend::new(width, h)).unwrap();
         terminal
             .draw(|frame| modal.render(frame, Rect::new(0, 0, width, h), &theme))
@@ -376,17 +329,14 @@ mod tests {
     }
 
     #[test]
-    fn render_truncates_buffer_wider_than_input_row_budget() {
-        let long: String = "x".repeat(100);
+    fn render_scrolls_a_title_wider_than_the_row_to_its_tail() {
+        let long = format!("{}tail", "x".repeat(60));
         let modal = RenameModal::new(Some(&long));
         let width: u16 = 20;
         let buf = rendered_buffer(&modal, width);
 
         let input = row_text(&buf, 2, width);
-        assert!(
-            input.contains(crate::util::text::ELLIPSIS),
-            "narrow width must produce an ellipsis; got {input:?}",
-        );
+        assert_eq!(input.trim_end(), format!("/ {}tail", "x".repeat(13)));
     }
 
     #[test]
@@ -394,7 +344,7 @@ mod tests {
         let theme = Theme::default();
         let modal = RenameModal::new(Some("ab"));
         let width: u16 = 40;
-        let h = modal.height(width);
+        let h = modal.height(width, u16::MAX);
         let mut terminal = Terminal::new(TestBackend::new(width, h)).unwrap();
         terminal
             .draw(|frame| modal.render(frame, Rect::new(0, 0, width, h), &theme))
@@ -415,7 +365,7 @@ mod tests {
         let long: String = "x".repeat(100);
         let modal = RenameModal::new(Some(&long));
         let width: u16 = 20;
-        let h = modal.height(width);
+        let h = modal.height(width, u16::MAX);
         let mut terminal = Terminal::new(TestBackend::new(width, h)).unwrap();
         terminal
             .draw(|frame| modal.render(frame, Rect::new(0, 0, width, h), &theme))
@@ -440,8 +390,8 @@ mod tests {
 
     #[test]
     fn height_sums_to_five_rows() {
-        // Title (1) + gap (1) + input (1) + gap (1) + footer (1) = 5; pinning lets render tests
-        // assume the input row sits at y=2.
-        assert_eq!(RenameModal::new(None).height(40), 5);
+        // Title (1) + gap (1) + input (1) + gap (1) + footer (1) = 5. Render tests assume the
+        // input row sits at y=2.
+        assert_eq!(RenameModal::new(None).height(40, u16::MAX), 5);
     }
 }

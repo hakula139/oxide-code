@@ -1,20 +1,23 @@
 //! Read-only key-value overview modal with a title, multi-section body, and fixed footer.
 //! Used by `/status`, `/config`, and `/help`. The modal owns layout for `KvSection` fixtures.
 
-use crossterm::event::KeyEvent;
+use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
+use super::chrome::{FOOTER_HEIGHT, Header, render_footer};
 use super::{Modal, ModalKey};
 use crate::tui::theme::Theme;
+use crate::tui::viewport::Viewport;
 
 // ── Constants ──
 
 const COLUMN_GAP: usize = 2;
 const FOOTER: &str = "Esc to close";
+const SCROLL_FOOTER: &str = "↑ ↓ to scroll · Esc to close";
 
 // ── KvSection ──
 
@@ -39,16 +42,19 @@ impl KvSection {
 
 // ── KvOverview ──
 
+/// The body scrolls between the pinned header and footer when the granted height is short.
 pub(crate) struct KvOverview {
-    title: String,
+    header: Header,
     sections: Vec<KvSection>,
+    viewport: Viewport,
 }
 
 impl KvOverview {
     pub(crate) fn new(title: impl Into<String>, sections: Vec<KvSection>) -> Self {
         Self {
-            title: title.into(),
+            header: Header::new(title),
             sections,
+            viewport: Viewport::default(),
         }
     }
 
@@ -62,8 +68,8 @@ impl KvOverview {
             .unwrap_or(0)
     }
 
-    fn line_count(&self) -> usize {
-        let mut total = 2;
+    fn body_len(&self) -> usize {
+        let mut total = 0;
         for (i, section) in self.sections.iter().enumerate() {
             if i > 0 {
                 total += 1;
@@ -73,25 +79,12 @@ impl KvOverview {
             }
             total += section.rows.len();
         }
-        total + 2
-    }
-}
-
-impl Modal for KvOverview {
-    fn height(&self, _width: u16) -> u16 {
-        u16::try_from(self.line_count()).unwrap_or(u16::MAX)
+        total
     }
 
-    fn render(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+    fn body_lines(&self, theme: &Theme) -> Vec<Line<'static>> {
         let label_width = self.label_width();
-        let mut lines: Vec<Line<'static>> = Vec::with_capacity(self.line_count());
-
-        lines.push(Line::from(Span::styled(
-            self.title.clone(),
-            theme.accent().add_modifier(Modifier::BOLD),
-        )));
-        lines.push(Line::default());
-
+        let mut lines: Vec<Line<'static>> = Vec::with_capacity(self.body_len());
         for (i, section) in self.sections.iter().enumerate() {
             if i > 0 {
                 lines.push(Line::default());
@@ -111,15 +104,59 @@ impl Modal for KvOverview {
                 ]));
             }
         }
-
-        lines.push(Line::default());
-        lines.push(Line::from(Span::styled(FOOTER.to_owned(), theme.dim())));
-
-        frame.render_widget(Paragraph::new(lines).style(theme.surface()), area);
+        lines
     }
 
-    fn handle_key(&mut self, _event: &KeyEvent) -> ModalKey {
-        // Read-only: nothing to commit. Esc / Ctrl+C cancel universally via the modal stack.
+    fn scroll(&self, delta: isize) {
+        self.viewport.scroll_by(delta, self.body_len());
+    }
+
+    fn page(&self) -> isize {
+        isize::try_from(self.viewport.page()).unwrap_or(isize::MAX)
+    }
+}
+
+impl Modal for KvOverview {
+    fn height(&self, _width: u16, max_height: u16) -> u16 {
+        let body = u16::try_from(self.body_len()).unwrap_or(u16::MAX);
+        (self.header.height() + FOOTER_HEIGHT)
+            .saturating_add(body)
+            .min(max_height)
+    }
+
+    fn render(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+        let rows = area
+            .height
+            .saturating_sub(self.header.height() + FOOTER_HEIGHT);
+        let body = self.body_lines(theme);
+        let window = self.viewport.window(body.len(), usize::from(rows), None);
+        let scrollable = window.len() < body.len();
+
+        let mut lines: Vec<Line<'static>> = Vec::with_capacity(usize::from(area.height));
+        self.header.push_lines(&mut lines, area.width, theme);
+        lines.extend(body.into_iter().skip(window.start).take(window.len()));
+        frame.render_widget(Paragraph::new(lines).style(theme.surface()), area);
+
+        let hint = if scrollable { SCROLL_FOOTER } else { FOOTER };
+        render_footer(
+            frame,
+            area,
+            Line::from(Span::styled(hint, theme.dim())),
+            theme,
+        );
+    }
+
+    fn handle_key(&mut self, event: &KeyEvent) -> ModalKey {
+        // Esc / Ctrl+C cancel universally via the modal stack, so only scrolling lands here.
+        match event.code {
+            KeyCode::Up | KeyCode::Char('k') => self.scroll(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.scroll(1),
+            KeyCode::PageUp => self.scroll(-self.page()),
+            KeyCode::PageDown => self.scroll(self.page()),
+            KeyCode::Home => self.scroll(isize::MIN),
+            KeyCode::End => self.scroll(isize::MAX),
+            _ => {}
+        }
         ModalKey::Consumed
     }
 }
@@ -177,38 +214,114 @@ mod tests {
 
     #[test]
     fn height_for_single_section_without_heading_counts_title_blank_rows_blank_footer() {
-        assert_eq!(flat_overview().height(80), 6);
+        assert_eq!(flat_overview().height(80, 40), 6);
     }
 
     #[test]
     fn height_for_two_headed_sections_adds_heading_blanks_and_inter_section_blank() {
-        assert_eq!(sectioned_overview().height(80), 11);
+        assert_eq!(sectioned_overview().height(80, 40), 11);
+    }
+
+    #[test]
+    fn height_caps_at_the_max() {
+        assert_eq!(sectioned_overview().height(80, 7), 7);
     }
 
     // ── KvOverview::render ──
 
-    #[test]
-    fn render_runs_at_typical_widths_without_panicking() {
+    fn long_overview() -> KvOverview {
+        let rows = (0..10)
+            .map(|i| row(&format!("k{i}"), &format!("v{i}")))
+            .collect();
+        KvOverview::new("Long", vec![KvSection::new(rows)])
+    }
+
+    fn render_rows(m: &KvOverview, width: u16, height: u16) -> Vec<String> {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| m.render(frame, Rect::new(0, 0, width, height), &Theme::default()))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        (0..height)
+            .map(|y| {
+                let row: String = (0..width).map(|x| buf[(x, y)].symbol()).collect();
+                row.trim_end().to_owned()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn render_lays_out_every_row_with_a_close_hint_when_it_fits() {
+        let m = flat_overview();
+        let rows = render_rows(&m, 40, m.height(40, 40));
+        assert_eq!(
+            rows,
+            [
+                "Status",
+                "",
+                "Model   Claude Opus",
+                "Effort  high",
+                "",
+                "Esc to close"
+            ],
+        );
+    }
+
+    #[test]
+    fn render_clips_the_body_between_pinned_header_and_scroll_hint() {
+        let m = long_overview();
+        let rows = render_rows(&m, 40, 7);
+        assert_eq!(
+            rows,
+            ["Long", "", "k0  v0", "k1  v1", "k2  v2", "", SCROLL_FOOTER]
+        );
+    }
+
+    #[test]
+    fn render_runs_at_typical_widths_without_panicking() {
         let m = sectioned_overview();
-        let theme = Theme::default();
         for width in [40_u16, 80, 120] {
-            let h = m.height(width).max(1);
-            let mut terminal = Terminal::new(TestBackend::new(width, h)).unwrap();
-            terminal
-                .draw(|frame| m.render(frame, Rect::new(0, 0, width, h), &theme))
-                .expect("render must not panic");
+            render_rows(&m, width, m.height(width, 40));
         }
     }
 
     // ── KvOverview::handle_key ──
 
     #[test]
+    fn handle_key_scrolls_the_clipped_body_within_its_bounds() {
+        let mut m = long_overview();
+        render_rows(&m, 40, 7);
+
+        m.handle_key(&KeyEvent::from(KeyCode::Down));
+        assert_eq!(render_rows(&m, 40, 7)[2], "k1  v1");
+        m.handle_key(&KeyEvent::from(KeyCode::PageDown));
+        assert_eq!(
+            render_rows(&m, 40, 7)[2],
+            "k4  v4",
+            "a page is the three body rows"
+        );
+        m.handle_key(&KeyEvent::from(KeyCode::End));
+        assert_eq!(render_rows(&m, 40, 7)[4], "k9  v9", "End pins the last row");
+        m.handle_key(&KeyEvent::from(KeyCode::Down));
+        assert_eq!(
+            render_rows(&m, 40, 7)[4],
+            "k9  v9",
+            "no scrolling past the end"
+        );
+        m.handle_key(&KeyEvent::from(KeyCode::Char('k')));
+        assert_eq!(render_rows(&m, 40, 7)[4], "k8  v8");
+        m.handle_key(&KeyEvent::from(KeyCode::PageUp));
+        assert_eq!(render_rows(&m, 40, 7)[2], "k3  v3");
+        m.handle_key(&KeyEvent::from(KeyCode::Home));
+        assert_eq!(render_rows(&m, 40, 7)[2], "k0  v0");
+    }
+
+    #[test]
     fn every_key_is_consumed_so_only_universal_cancel_dismisses() {
-        // Read-only modal — Esc / Ctrl+C close at the stack layer; the modal itself never pops.
-        use crossterm::event::KeyCode;
+        // Esc / Ctrl+C close at the stack layer, so the modal itself never pops.
         let mut m = flat_overview();
         for code in [
             KeyCode::Enter,

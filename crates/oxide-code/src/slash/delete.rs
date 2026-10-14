@@ -42,7 +42,7 @@ impl SlashCommand for DeleteCmd {
         Some("<id-prefix>")
     }
 
-    fn execute(&self, args: &str, ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
+    fn execute(&self, args: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
         let arg = args.trim();
         if arg.is_empty() {
             return Err(
@@ -54,14 +54,15 @@ impl SlashCommand for DeleteCmd {
             SessionStore::open().map_err(|e| format!("session store unavailable: {e:#}"))?;
         let live_id = ctx.info.session_id.as_str();
         let info = resolve_for_delete(&store, arg, live_id)?;
-        ctx.open_modal(Box::new(ConfirmDeleteSessionModal::new(
-            store,
-            info.session_id.clone(),
-            display_title(&info),
-            metadata_line(&info),
-            live_id.to_owned(),
-        )));
-        Ok(SlashOutcome::Done)
+        Ok(SlashOutcome::Modal(Box::new(
+            ConfirmDeleteSessionModal::new(
+                store,
+                info.session_id.clone(),
+                display_title(&info),
+                metadata_line(&info),
+                live_id.to_owned(),
+            ),
+        )))
     }
 }
 
@@ -109,8 +110,6 @@ mod tests {
     use crate::session::store::seed_test_session;
     use crate::slash::registry::SlashCommand;
     use crate::slash::{stamped_id, test_session_info, with_isolated_xdg};
-    use crate::tui::components::chat::ChatView;
-    use crate::tui::theme::Theme;
 
     // ── DeleteCmd metadata ──
 
@@ -144,24 +143,20 @@ mod tests {
     #[test]
     fn execute_bare_returns_friendly_error_about_missing_id() {
         with_isolated_xdg(|_| {
-            let mut chat = ChatView::new(&Theme::default(), false);
             let info = test_session_info();
-            let mut ctx = SlashContext::new(&mut chat, &info);
-            let err = DeleteCmd.execute("", &mut ctx).unwrap_err();
+            let ctx = SlashContext::new(&info, None);
+            let err = DeleteCmd.execute("", &ctx).unwrap_err();
             assert!(err.contains("missing id"), "{err}");
-            assert!(ctx.take_modal().is_none(), "no modal pushed on bare form");
         });
     }
 
     #[test]
     fn execute_with_unknown_prefix_returns_friendly_error() {
         with_isolated_xdg(|_| {
-            let mut chat = ChatView::new(&Theme::default(), false);
             let info = test_session_info();
-            let mut ctx = SlashContext::new(&mut chat, &info);
-            let err = DeleteCmd.execute("zzz1234", &mut ctx).unwrap_err();
+            let ctx = SlashContext::new(&info, None);
+            let err = DeleteCmd.execute("zzz1234", &ctx).unwrap_err();
             assert!(err.contains("no session matching"), "{err}");
-            assert!(ctx.take_modal().is_none());
         });
     }
 
@@ -177,16 +172,13 @@ mod tests {
                 Some(3),
                 datetime!(2026-04-18 09:00:00 UTC),
             );
-            let mut chat = ChatView::new(&Theme::default(), false);
             let info = test_session_info();
-            let mut ctx = SlashContext::new(&mut chat, &info);
+            let ctx = SlashContext::new(&info, None);
 
-            let outcome = DeleteCmd.execute(&target_id[..4], &mut ctx).unwrap();
-            assert_eq!(outcome, SlashOutcome::Done);
-            assert!(
-                ctx.take_modal().is_some(),
-                "typed-arg must push a confirm modal",
-            );
+            DeleteCmd
+                .execute(&target_id[..4], &ctx)
+                .unwrap()
+                .into_modal();
         });
     }
 
@@ -206,16 +198,13 @@ mod tests {
                 Some(1),
                 datetime!(2026-04-18 09:00:00 UTC),
             );
-            let mut chat = ChatView::new(&Theme::default(), false);
             let info = test_session_info();
-            let mut ctx = SlashContext::new(&mut chat, &info);
+            let ctx = SlashContext::new(&info, None);
 
-            let outcome = DeleteCmd.execute(&target_id[..4], &mut ctx).unwrap();
-            assert_eq!(outcome, SlashOutcome::Done);
-            assert!(
-                ctx.take_modal().is_some(),
-                "widened resolution must still push the confirm modal",
-            );
+            DeleteCmd
+                .execute(&target_id[..4], &ctx)
+                .unwrap()
+                .into_modal();
         });
     }
 
@@ -234,16 +223,14 @@ mod tests {
                 Some(1),
                 datetime!(2026-04-18 09:00:00 UTC),
             );
-            let mut chat = ChatView::new(&Theme::default(), false);
             let info = test_session_info();
-            let mut ctx = SlashContext::new(&mut chat, &info);
+            let ctx = SlashContext::new(&info, None);
 
-            let err = DeleteCmd.execute(live_id, &mut ctx).unwrap_err();
+            let err = DeleteCmd.execute(live_id, &ctx).unwrap_err();
             assert!(
                 err.contains("cannot delete the live session"),
                 "live-only match must surface the dedicated message: {err}",
             );
-            assert!(ctx.take_modal().is_none(), "no modal pushed for refusal");
         });
     }
 
@@ -268,13 +255,10 @@ mod tests {
                 Some(1),
                 datetime!(2026-04-18 09:01:00 UTC),
             );
-            let mut chat = ChatView::new(&Theme::default(), false);
             let info = test_session_info();
-            let mut ctx = SlashContext::new(&mut chat, &info);
+            let ctx = SlashContext::new(&info, None);
 
-            let outcome = DeleteCmd.execute("test-", &mut ctx).unwrap();
-            assert_eq!(outcome, SlashOutcome::Done);
-            assert!(ctx.take_modal().is_some(), "non-live match opens the modal");
+            DeleteCmd.execute("test-", &ctx).unwrap().into_modal();
         });
     }
 
@@ -293,11 +277,10 @@ mod tests {
                     datetime!(2026-04-18 09:00:00 UTC),
                 );
             }
-            let mut chat = ChatView::new(&Theme::default(), false);
             let info = test_session_info();
-            let mut ctx = SlashContext::new(&mut chat, &info);
+            let ctx = SlashContext::new(&info, None);
 
-            let err = DeleteCmd.execute("aaaa", &mut ctx).unwrap_err();
+            let err = DeleteCmd.execute("aaaa", &ctx).unwrap_err();
             assert!(err.contains("ambiguous prefix"), "{err}");
             assert!(err.contains(&id_a[..8]), "first id in {err}");
             assert!(err.contains(&id_b[..8]), "second id in {err}");

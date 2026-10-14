@@ -26,26 +26,24 @@ impl SlashCommand for DiffCmd {
         "Show uncommitted working-tree changes"
     }
 
-    fn execute(&self, _args: &str, ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
-        let cwd = std::env::current_dir()
-            .context("failed to read current directory")
-            .map_err(|e| format!("{e:#}"))?;
-        execute_in(&cwd, ctx)
+    fn execute(&self, _args: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
+        let cwd = ctx
+            .info
+            .git_cwd
+            .as_deref()
+            .ok_or("no working directory for this session")?;
+        let text = collect_diff_in(cwd).map_err(|e| format!("{e:#}"))?;
+        if text.trim().is_empty() {
+            Ok(SlashOutcome::SystemMessage(
+                "Working tree clean.".to_owned(),
+            ))
+        } else {
+            Ok(SlashOutcome::GitDiff(text))
+        }
     }
 }
 
 // ── Execution ──
-
-/// Testable core; avoids mutating process cwd.
-fn execute_in(cwd: &Path, ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
-    let text = collect_diff_in(cwd).map_err(|e| format!("{e:#}"))?;
-    if text.trim().is_empty() {
-        ctx.chat.push_system_message("Working tree clean.");
-    } else {
-        ctx.chat.push_git_diff(text);
-    }
-    Ok(SlashOutcome::Done)
-}
 
 /// Tracked + untracked diff at `cwd`. Falls back to `--cached` when HEAD is absent (fresh repo).
 fn collect_diff_in(cwd: &Path) -> Result<String> {
@@ -117,7 +115,7 @@ fn inside_git_repo(cwd: &Path) -> Result<bool> {
         .current_dir(cwd)
         .stdin(Stdio::null())
         .output()
-        .context("failed to spawn git — is it installed and on PATH?")?;
+        .context("failed to spawn git (is it installed and on PATH?)")?;
     Ok(out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "true")
 }
 
@@ -178,7 +176,7 @@ fn truncate(s: String, full_hint: &str) -> String {
     let mut t = s[..cut].to_owned();
     _ = write!(
         t,
-        "\n\n(truncated: {} more — run {full_hint} for the full output)",
+        "\n\n(truncated: {} more. Run {full_hint} for the full output.)",
         format_size(dropped),
     );
     t
@@ -210,8 +208,6 @@ mod tests {
 
     use super::*;
     use crate::slash::test_session_info;
-    use crate::tui::components::chat::ChatView;
-    use crate::tui::theme::Theme;
     use crate::util::git::testing::{isolated_git, with_isolated_git_env};
 
     fn git_setup(cwd: &Path, args: &[&str]) {
@@ -241,41 +237,46 @@ mod tests {
         assert_ne!(DiffCmd.description(), "");
     }
 
-    // ── execute_in ──
+    // ── DiffCmd::execute ──
 
-    #[test]
-    fn execute_in_clean_repo_pushes_no_changes_marker() {
-        let (_dir, repo) = fresh_repo();
-        let mut chat = ChatView::new(&Theme::default(), false);
-        let info = test_session_info();
-        with_isolated_git_env(|| execute_in(&repo, &mut SlashContext::new(&mut chat, &info)))
-            .expect("clean repo execute_in is Ok");
-        assert_eq!(chat.entry_count(), 1);
-        assert!(!chat.last_is_error());
+    fn execute_at(cwd: Option<&Path>) -> Result<SlashOutcome, String> {
+        let mut info = test_session_info();
+        info.git_cwd = cwd.map(Path::to_owned);
+        with_isolated_git_env(|| DiffCmd.execute("", &SlashContext::new(&info, None)))
     }
 
     #[test]
-    fn execute_in_dirty_repo_pushes_diff_text() {
+    fn execute_clean_repo_reports_a_clean_tree() {
+        let (_dir, repo) = fresh_repo();
+        let outcome = execute_at(Some(&repo)).expect("clean repo execute is Ok");
+        assert!(
+            matches!(&outcome, SlashOutcome::SystemMessage(text) if text == "Working tree clean."),
+            "{outcome:?}",
+        );
+    }
+
+    #[test]
+    fn execute_dirty_repo_returns_the_diff() {
         let (_dir, repo) = fresh_repo();
         std::fs::write(repo.join("note.txt"), "hello\n").unwrap();
-        let mut chat = ChatView::new(&Theme::default(), false);
-        let info = test_session_info();
-        with_isolated_git_env(|| execute_in(&repo, &mut SlashContext::new(&mut chat, &info)))
-            .expect("dirty repo execute_in is Ok");
-        assert_eq!(chat.entry_count(), 1);
-        assert!(!chat.last_is_error());
+        let outcome = execute_at(Some(&repo)).expect("dirty repo execute is Ok");
+        assert!(
+            matches!(&outcome, SlashOutcome::GitDiff(text) if text.contains("note.txt")),
+            "{outcome:?}",
+        );
     }
 
     #[test]
-    fn execute_in_outside_a_repo_errors() {
+    fn execute_outside_a_repo_errors() {
         let dir = tempfile::tempdir().unwrap();
-        let mut chat = ChatView::new(&Theme::default(), false);
-        let info = test_session_info();
-        let err = with_isolated_git_env(|| {
-            execute_in(dir.path(), &mut SlashContext::new(&mut chat, &info))
-        })
-        .expect_err("execute_in must error outside a repo");
+        let err = execute_at(Some(dir.path())).expect_err("execute must error outside a repo");
         assert!(err.contains("not inside a git repository"), "{err}");
+    }
+
+    #[test]
+    fn execute_without_a_session_cwd_errors() {
+        let err = execute_at(None).expect_err("execute needs the session cwd");
+        assert_eq!(err, "no working directory for this session");
     }
 
     // ── collect_diff_in ──
@@ -499,7 +500,7 @@ mod tests {
     fn truncate_oversized_input_appends_footer_with_human_size() {
         let s = "a".repeat(MAX_BYTES + 100);
         let got = truncate(s, "`git diff HEAD`");
-        let footer = "\n\n(truncated: 100 B more — run `git diff HEAD` for the full output)";
+        let footer = "\n\n(truncated: 100 B more. Run `git diff HEAD` for the full output.)";
         assert_eq!(got.len(), MAX_BYTES + footer.len());
         assert_eq!(&got[..MAX_BYTES], &"a".repeat(MAX_BYTES));
         let tail = &got[got.len() - 80..];

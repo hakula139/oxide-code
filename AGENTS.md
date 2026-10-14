@@ -99,7 +99,7 @@ ox                                          # Start an interactive session
 │   ├── compact.rs                          # /compact [<instructions>]: forwards UserAction::Compact. Agent loop drives the summarization
 │   ├── config.rs                           # /config: opens a KvOverview modal of resolved config + layered file paths
 │   ├── confirm.rs                          # ConfirmDeleteSessionModal: destructive-action gate. Runs the unlink synchronously on Y, sticky inline error on failure
-│   ├── context.rs                          # SlashContext (borrowed ChatView + LiveSessionInfo + modal slot) handed to each command's execute
+│   ├── context.rs                          # SlashContext (borrowed LiveSessionInfo + live title) handed to each command's execute
 │   ├── delete.rs                           # /delete <id-prefix>: typed-arg form, resolves prefix, pushes ConfirmDeleteSessionModal. Bare /delete rejected
 │   ├── diff.rs                             # /diff: uncommitted git changes + untracked, 64 KB cap on UTF-8 boundary
 │   ├── effort.rs                           # /effort: bare opens the slider. `/effort <level>` resolves the typed-arg shortcut
@@ -108,11 +108,11 @@ ox                                          # Start an interactive session
 │   ├── init.rs                             # /init: synthesize an AGENTS.md / CLAUDE.md author-or-update prompt
 │   ├── matcher.rs                          # filter_and_rank: tier-ranked popup matches
 │   ├── model.rs                            # /model: bare opens picker. `/model <id>` resolves alias → lookup → unique suffix → unique substring. `[1m]` first-class
-│   ├── parser.rs                           # parse_slash + popup_query: detect `/cmd args`. Allows `:` and `.`
+│   ├── parser.rs                           # parse_slash + popup_state: detect `/cmd args`. Allows `:` and `.`. unescape_literal maps `//x` to `/x`
 │   ├── picker.rs                           # ModelEffortPicker: combined model + effort modal. Emits a single SwapConfig
-│   ├── registry.rs                         # SlashCommand trait + SlashOutcome + echoes_input + BUILT_INS slice + alias-aware lookup
+│   ├── registry.rs                         # SlashCommand trait + SlashOutcome (Forward / Modal / chat output) + echoes_input + BUILT_INS slice + alias-aware lookup
 │   ├── rename.rs                           # /rename: bare opens a single-line title editor. `/rename <title>` applies directly and locks out AI title generation
-│   ├── resume.rs                           # /resume (alias /continue): bare opens a searchable session picker (Tab toggles current-project ↔ all-projects, Ctrl+D / Delete pushes the confirm-delete modal). `/resume <id-prefix>` jumps directly
+│   ├── resume.rs                           # /resume (alias /continue): bare opens a searchable session picker (Tab toggles current-project ↔ all-projects, Ctrl+D pushes the confirm-delete modal). `/resume <id-prefix>` jumps directly
 │   ├── status.rs                           # /status: opens a KvOverview modal of session descriptors
 │   └── theme.rs                            # /theme: bare opens the picker (live preview). `/theme <name>` validates against the curated roster and swaps
 ├── tool.rs                                 # Tool trait, registry, definitions
@@ -170,7 +170,9 @@ ox                                          # Start an interactive session
 │   ├── modal.rs                            # Modal trait, ModalKey, ModalAction, ModalStack: focus-grabbing UI overlays
 │   ├── modal/
 │   │   ├── approval.rs                     # ApprovalModal: approve-or-deny overlay for a gated tool call (wrapped, scrollable, invisible characters revealed, type-ahead guarded), on_cancel resolves dismissals to Deny
-│   │   ├── kv_overview.rs                  # Generic KvOverview / KvSection: read-only sectioned kv-table modal used by /status, /config, /help
+│   │   ├── chrome.rs                       # Shared modal chrome: title / description Header, bottom hint footer, CONFIRM_HINT
+│   │   ├── kv_overview.rs                  # Generic KvOverview / KvSection: read-only sectioned kv-table modal used by /status, /config, /help, scrolls when clipped
+│   │   ├── line_editor.rs                  # LineEditor: single-line ratatui-textarea field for /rename and picker search queries
 │   │   ├── list_picker.rs                  # Generic ListPicker<T: PickerItem>: cursor + render primitive used by concrete pickers
 │   │   └── searchable_list.rs              # Generic SearchableList<T: SearchableItem>: substring filter + scrollable viewport for searchable pickers
 │   ├── pending_calls.rs                    # Tool-call correlation state for streaming and transcript resume
@@ -178,9 +180,10 @@ ox                                          # Start an interactive session
 │   ├── terminal.rs                         # Terminal init / restore, alternate-scroll (DECSET 1007), synchronized output, panic hook
 │   ├── theme.rs                            # Theme palette (Slot{fg,bg,modifiers} per role) + style helpers + LazyLock-cached Mocha default
 │   ├── theme/
-│   │   ├── builtin.rs                      # Built-in TOML catalogue (Mocha / Macchiato / Frappe / Latte / Material via include_str!) + lookup
+│   │   ├── builtin.rs                      # Built-in TOML catalogue (Mocha / Macchiato / Frappe / Latte / Material via include_str!) + picker descriptions + lookup
 │   │   ├── color.rs                        # Color string parsing (hex, ANSI named, indexed, reset)
 │   │   └── loader.rs                       # Theme TOML deserialization + `syntax_theme` lookup + base+overrides resolution (resolve_theme + SlotPatch)
+│   ├── viewport.rs                         # Viewport: render-settled scroll window for modal lists + wrap_next / wrap_prev cursor steps
 │   └── wrap.rs                             # Grapheme-aware word-wrap with continuation indent for styled lines + tab expansion
 ├── util.rs                                 # Shared utilities module root
 └── util/

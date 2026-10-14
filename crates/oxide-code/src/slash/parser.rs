@@ -28,6 +28,15 @@ fn is_name_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | ':' | '.')
 }
 
+/// The prompt text a `//` escape stands for: `//etc` becomes `/etc`. Other input is unchanged.
+pub(crate) fn unescape_literal(input: &str) -> &str {
+    input
+        .trim_start()
+        .strip_prefix('/')
+        .filter(|rest| rest.starts_with('/'))
+        .unwrap_or(input)
+}
+
 /// In-progress popup context. `Name` while typing the command name (no whitespace yet);
 /// `Arg` once the user has typed a space after the name. `None` for plain prompts and `//`
 /// escape.
@@ -128,6 +137,26 @@ mod tests {
         assert!(parse_slash("/foo🦀").is_none());
         assert!(parse_slash("/foo!").is_none());
         assert!(parse_slash("/foo,bar").is_none());
+    }
+
+    // ── unescape_literal ──
+
+    #[test]
+    fn unescape_literal_strips_one_slash_from_the_escape() {
+        assert_eq!(unescape_literal("//etc/hosts"), "/etc/hosts");
+        assert_eq!(unescape_literal("  //help me"), "/help me");
+        assert_eq!(
+            unescape_literal("///x"),
+            "//x",
+            "only one slash is consumed"
+        );
+    }
+
+    #[test]
+    fn unescape_literal_leaves_other_input_unchanged() {
+        for input in ["hello", "/help", " explain //etc", ""] {
+            assert_eq!(unescape_literal(input), input);
+        }
     }
 
     // ── popup_state ──
