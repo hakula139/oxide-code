@@ -12,7 +12,7 @@ use unicode_width::UnicodeWidthStr;
 
 use super::highlight::highlight_code;
 use crate::tui::theme::Theme;
-use crate::tui::wrap::{expand_tabs_in_spans, wrap_line};
+use crate::tui::wrap::{expand_tabs_in_spans, wrap_line, wrap_line_keeping_lead};
 
 // ── Renderer ──
 
@@ -325,10 +325,17 @@ where
     }
 
     /// Pushes one highlighted line through the block indent and wrapping, keeping its line style.
+    /// Wrapped rows hang at the code's own indent.
     fn push_code_line(&mut self, line: Line<'static>) {
         let style = line.style;
+        let code = Line::from(expand_tabs_in_spans(line.spans));
+        let code_width = code.width();
+        let lead = leading_whitespace_width(&code);
+        let line = self.prefixed(code);
+        let keep = line.width() - code_width + lead;
+
         let start = self.lines.len();
-        self.push_line(Line::from(expand_tabs_in_spans(line.spans)));
+        self.wrap_and_push_hanging(line, lead, keep);
         for row in &mut self.lines[start..] {
             row.style = style;
         }
@@ -548,6 +555,12 @@ where
 
     /// Starts a new output line with indent prefixes and any pending list marker.
     fn push_line(&mut self, line: Line<'static>) {
+        let line = self.prefixed(line);
+        self.wrap_and_push(line);
+    }
+
+    /// Prepends the indent prefixes and any pending list marker.
+    fn prefixed(&mut self, line: Line<'static>) -> Line<'static> {
         let mut spans: Vec<Span<'static>> = Vec::new();
 
         // The pending list marker (if any) replaces the continuation indent at the deepest
@@ -570,26 +583,35 @@ where
         }
 
         spans.extend(line.spans);
-
-        self.wrap_and_push(Line::from(spans));
+        Line::from(spans)
     }
 
     fn wrap_and_push(&mut self, line: Line<'static>) {
+        self.wrap_and_push_hanging(line, 0, 0);
+    }
+
+    /// Wraps without breaking inside the first `keep` columns, indenting continuation rows by
+    /// `hang` extra columns, capped at half the width left after the block indent.
+    fn wrap_and_push_hanging(&mut self, line: Line<'static>, hang: usize, keep: usize) {
         if self.width == 0 {
             self.lines.push(line);
             return;
         }
-        let cont_prefix = self.continuation_indent_spans();
-        let indent = cont_prefix
+        let mut cont_prefix = self.continuation_indent_spans();
+        let indent: usize = cont_prefix
             .iter()
             .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
             .sum();
+        let hang = hang.min(self.width.saturating_sub(indent) / 2);
+        if hang > 0 {
+            cont_prefix.push(Span::raw(" ".repeat(hang)));
+        }
         let prefix = if cont_prefix.is_empty() {
             None
         } else {
             Some(cont_prefix.as_slice())
         };
-        for wrapped in wrap_line(line, self.width, indent, prefix) {
+        for wrapped in wrap_line_keeping_lead(line, self.width, indent + hang, prefix, keep) {
             self.lines.push(wrapped);
         }
     }
@@ -623,6 +645,21 @@ where
     fn push_blank_line(&mut self) {
         self.lines.push(Line::default());
     }
+}
+
+// ── Code Helpers ──
+
+fn leading_whitespace_width(line: &Line<'_>) -> usize {
+    let mut width = 0;
+    for span in &line.spans {
+        let content = span.content.as_ref();
+        let rest = content.trim_start();
+        width += content[..content.len() - rest.len()].width();
+        if !rest.is_empty() {
+            break;
+        }
+    }
+    width
 }
 
 // ── Table Helpers ──
@@ -1193,6 +1230,19 @@ mod tests {
     }
 
     #[test]
+    fn fenced_code_block_wrapped_rows_hang_at_the_code_indent_up_to_half_width() {
+        let lines = rendered_text_at_width(
+            indoc! {"
+                ```
+                        format value;
+                ```
+            "},
+            12,
+        );
+        assert_eq!(lines, ["        form", "      at ", "      value;"]);
+    }
+
+    #[test]
     fn fenced_code_block_in_list_item_keeps_item_indent() {
         let lines = rendered_text(indoc! {"
             - item
@@ -1202,6 +1252,24 @@ mod tests {
               ```
         "});
         assert_eq!(lines, ["- item", "", "  let x = 1;"]);
+    }
+
+    #[test]
+    fn fenced_code_block_in_list_item_hangs_wrapped_rows_past_the_item_indent() {
+        let lines = rendered_text_at_width(
+            indoc! {"
+                - item
+
+                  ```
+                      foo bar baz
+                  ```
+            "},
+            12,
+        );
+        assert_eq!(
+            lines,
+            ["- item", "", "      foo ", "      bar ", "      baz"]
+        );
     }
 
     #[test]

@@ -67,6 +67,7 @@ nixos
 nixpkgs
 nohup
 nonewline
+noprefix
 nucleo
 numtide
 oxalica

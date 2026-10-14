@@ -21,6 +21,18 @@ pub(crate) fn wrap_line(
     continuation_indent: usize,
     continuation_prefix: Option<&[Span<'static>]>,
 ) -> Vec<Line<'static>> {
+    wrap_line_keeping_lead(line, max_width, continuation_indent, continuation_prefix, 0)
+}
+
+/// Wraps like [`wrap_line`] without breaking inside the first `lead_width` columns, so a line's
+/// prefix and indentation never end up alone on a row.
+pub(crate) fn wrap_line_keeping_lead(
+    line: Line<'static>,
+    max_width: usize,
+    continuation_indent: usize,
+    continuation_prefix: Option<&[Span<'static>]>,
+    lead_width: usize,
+) -> Vec<Line<'static>> {
     if max_width == 0 {
         return vec![line];
     }
@@ -38,7 +50,7 @@ pub(crate) fn wrap_line(
 
     // Keep at least one column on continuations so deep indents still make progress.
     let cont_content_width = max_width.saturating_sub(continuation_indent).max(1);
-    let wrapped = greedy_word_wrap(&styled, max_width, cont_content_width);
+    let wrapped = greedy_word_wrap(&styled, max_width, cont_content_width, lead_width);
 
     wrapped
         .into_iter()
@@ -65,38 +77,34 @@ fn line_width(line: &Line<'_>) -> usize {
 
 // ── Word Wrap Algorithm ──
 
-/// Greedy word-wrap over styled graphemes. The first line wraps at `first_width` and the rest at
-/// `subsequent_width`, which already excludes the continuation indent.
+/// Greedy word-wrap over styled graphemes. The first line wraps at `first_width` without breaking
+/// inside its first `lead_width` columns, and the rest wrap at `subsequent_width`, which already
+/// excludes the continuation indent.
 fn greedy_word_wrap<'a>(
     graphemes: &'a [(&'a str, Style)],
     first_width: usize,
     subsequent_width: usize,
+    lead_width: usize,
 ) -> Vec<&'a [(&'a str, Style)]> {
     let mut lines = Vec::new();
-    let mut pos = 0;
-    let mut is_first = true;
-
+    let (end, mut pos) = take_one_line(graphemes, 0, first_width, lead_width);
+    lines.push(&graphemes[..end]);
     while pos < graphemes.len() {
-        let budget = if is_first {
-            first_width
-        } else {
-            subsequent_width
-        };
-        let (end, next) = take_one_line(graphemes, pos, budget);
+        let (end, next) = take_one_line(graphemes, pos, subsequent_width, 0);
         lines.push(&graphemes[pos..end]);
         pos = next;
-        is_first = false;
     }
-
-    if lines.is_empty() {
-        lines.push(&graphemes[..0]);
-    }
-
     lines
 }
 
 /// Measures one visual line starting at `start`, returning its end and the next line's start.
-fn take_one_line(graphemes: &[(&str, Style)], start: usize, max_width: usize) -> (usize, usize) {
+/// Whitespace inside the first `lead_width` columns is not a break point.
+fn take_one_line(
+    graphemes: &[(&str, Style)],
+    start: usize,
+    max_width: usize,
+    lead_width: usize,
+) -> (usize, usize) {
     let mut width = 0;
     let mut last_break: Option<usize> = None;
 
@@ -116,11 +124,10 @@ fn take_one_line(graphemes: &[(&str, Style)], start: usize, max_width: usize) ->
             return (end, end);
         }
 
-        width += g_width;
-
-        if is_whitespace(g) {
+        if is_whitespace(g) && width >= lead_width {
             last_break = Some(i);
         }
+        width += g_width;
     }
 
     (graphemes.len(), graphemes.len())
@@ -206,7 +213,7 @@ mod tests {
     use ratatui::style::{Color, Modifier, Style};
     use ratatui::text::{Line, Span};
 
-    use super::{expand_tabs, expand_tabs_in_spans, wrap_line};
+    use super::{expand_tabs, expand_tabs_in_spans, wrap_line, wrap_line_keeping_lead};
 
     fn texts(lines: &[Line<'_>]) -> Vec<String> {
         lines.iter().map(ToString::to_string).collect()
@@ -343,6 +350,23 @@ mod tests {
         let family = "👨‍👩‍👧";
         let result = wrap_line(Line::from(format!("ab{family}{family}")), 3, 0, None);
         assert_eq!(texts(&result), ["ab", family, family]);
+    }
+
+    // ── wrap_line_keeping_lead ──
+
+    #[test]
+    fn wrap_line_keeping_lead_breaks_only_from_the_lead_column_on() {
+        let wrap = |lead| {
+            texts(&wrap_line_keeping_lead(
+                Line::from("  ab cd ef"),
+                6,
+                2,
+                None,
+                lead,
+            ))
+        };
+        assert_eq!(wrap(4), ["  ab ", "  cd ", "  ef"]);
+        assert_eq!(wrap(5), ["  ab c", "  d ef"]);
     }
 
     // ── expand_tabs ──

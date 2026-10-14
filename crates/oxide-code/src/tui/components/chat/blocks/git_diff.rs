@@ -44,32 +44,40 @@ impl ChatBlock for GitDiffBlock {
         let mut out = Vec::new();
         let mut old_ln: usize = 0;
         let mut new_ln: usize = 0;
-        let mut in_hunk = false;
+        let mut old_left: usize = 0;
+        let mut new_left: usize = 0;
 
         for line in self.text.lines() {
-            if let Some(path) = parse_diff_git_path(line) {
+            if line.starts_with("diff ") {
+                let header = parse_diff_git_path(line).unwrap_or(line);
                 bordered_row::render(
                     &mut out,
                     ctx,
                     border,
-                    path.to_owned(),
+                    header.to_owned(),
                     ctx.theme.text().add_modifier(Modifier::BOLD),
                 );
-                in_hunk = false;
-            } else if let Some((o, n)) = parse_hunk_starts(line) {
-                old_ln = o;
-                new_ln = n;
-                in_hunk = true;
+                old_left = 0;
+                new_left = 0;
+            } else if let Some((old, new)) = parse_hunk_header(line) {
+                old_ln = old.start;
+                new_ln = new.start;
+                old_left = old.count;
+                new_left = new.count;
                 bordered_row::render(&mut out, ctx, border, line.to_owned(), ctx.theme.dim());
             } else if line.is_empty() {
-                in_hunk = false;
+                old_left = 0;
+                new_left = 0;
                 bordered_row::render(&mut out, ctx, border, String::new(), ctx.theme.dim());
-            } else if !in_hunk {
+            } else if old_left == 0 && new_left == 0 {
                 if is_file_header(line) {
                     continue;
                 }
-                // Untracked heading / paths / truncation footer.
-                let style = if line.starts_with("Untracked") || line.starts_with("(truncated") {
+                // Untracked heading and paths, the truncation footer, or a no-newline marker.
+                let style = if line.starts_with("Untracked")
+                    || line.starts_with("(truncated")
+                    || line.starts_with('\\')
+                {
                     ctx.theme.dim()
                 } else {
                     ctx.theme.text()
@@ -78,13 +86,17 @@ impl ChatBlock for GitDiffBlock {
             } else if let Some(text) = line.strip_prefix('+') {
                 add.render(&mut out, new_ln, text, ctx.theme.text());
                 new_ln += 1;
+                new_left = new_left.saturating_sub(1);
             } else if let Some(text) = line.strip_prefix('-') {
                 del.render(&mut out, old_ln, text, ctx.theme.text());
                 old_ln += 1;
+                old_left = old_left.saturating_sub(1);
             } else if let Some(text) = line.strip_prefix(' ') {
                 context.render(&mut out, new_ln, text, ctx.theme.dim());
                 old_ln += 1;
                 new_ln += 1;
+                old_left = old_left.saturating_sub(1);
+                new_left = new_left.saturating_sub(1);
             } else {
                 bordered_row::render(&mut out, ctx, border, line.to_owned(), ctx.theme.dim());
             }
@@ -99,7 +111,7 @@ impl ChatBlock for GitDiffBlock {
 
 // ── Diff Parsing ──
 
-/// Extended header lines between `diff --git` and the first `@@`, which the path row already covers.
+/// Extended header lines between `diff --git` and the first `@@`, covered by the path row.
 fn is_file_header(line: &str) -> bool {
     [
         "index ",
@@ -121,48 +133,47 @@ fn parse_diff_git_path(line: &str) -> Option<&str> {
     Some(&after_a[..space])
 }
 
-fn parse_hunk_starts(line: &str) -> Option<(usize, usize)> {
-    let after_minus = line.strip_prefix("@@ -")?;
-    let old_start = parse_first_number(after_minus)?;
-    let plus_at = line.find(" +")?;
-    let after_plus = &line[plus_at + 2..];
-    let new_start = parse_first_number(after_plus)?;
-    Some((old_start, new_start))
+/// One side of a hunk header: the first line number and the number of lines the hunk spans.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HunkRange {
+    start: usize,
+    count: usize,
 }
 
-fn parse_first_number(s: &str) -> Option<usize> {
-    let stop = s.find([',', ' ']).unwrap_or(s.len());
-    s[..stop].parse().ok()
+impl HunkRange {
+    /// Last line number in the range, or `start` when the range is empty.
+    fn last(self) -> usize {
+        self.start + self.count.saturating_sub(1)
+    }
+}
+
+/// Parses the old and new ranges of an `@@ -a,b +c,d @@` header.
+fn parse_hunk_header(line: &str) -> Option<(HunkRange, HunkRange)> {
+    let rest = line.strip_prefix("@@ -")?;
+    let (old, rest) = rest.split_once(" +")?;
+    let new = rest.split(' ').next()?;
+    Some((parse_hunk_range(old)?, parse_hunk_range(new)?))
+}
+
+/// Parses `start[,count]`, where an omitted count means one line.
+fn parse_hunk_range(s: &str) -> Option<HunkRange> {
+    let (start, count) = match s.split_once(',') {
+        Some((start, count)) => (start.parse().ok()?, count.parse().ok()?),
+        None => (s.parse().ok()?, 1),
+    };
+    Some(HunkRange { start, count })
 }
 
 // ── Gutter Sizing ──
 
 fn max_line_number_width(text: &str) -> usize {
-    let mut max_ln: usize = 0;
-    for line in text.lines() {
-        if let Some(extents) = parse_hunk_extents(line) {
-            max_ln = max_ln.max(extents);
-        }
-    }
+    let max_ln = text
+        .lines()
+        .filter_map(parse_hunk_header)
+        .map(|(old, new)| old.last().max(new.last()))
+        .max()
+        .unwrap_or(0);
     max_ln.to_string().len().max(1)
-}
-
-fn parse_hunk_extents(line: &str) -> Option<usize> {
-    let after_minus = line.strip_prefix("@@ -")?;
-    let old_extent = parse_range_extent(after_minus)?;
-    let plus_at = line.find(" +")?;
-    let after_plus = &line[plus_at + 2..];
-    let new_extent = parse_range_extent(after_plus)?;
-    Some(old_extent.max(new_extent))
-}
-
-fn parse_range_extent(s: &str) -> Option<usize> {
-    let start = parse_first_number(s)?;
-    let Some(comma) = s.find(',') else {
-        return Some(start);
-    };
-    let count = parse_first_number(&s[comma + 1..])?;
-    Some(start + count.saturating_sub(1))
 }
 
 #[cfg(test)]
@@ -178,6 +189,20 @@ mod tests {
             theme,
             show_thinking: false,
         }
+    }
+
+    fn range(start: usize, count: usize) -> HunkRange {
+        HunkRange { start, count }
+    }
+
+    fn body_rows(lines: &[Line<'_>]) -> Vec<String> {
+        lines
+            .iter()
+            .map(|line| {
+                let row: String = line.spans[1..].iter().map(|s| s.content.as_ref()).collect();
+                row.trim_end().to_owned()
+            })
+            .collect()
     }
 
     // ── parse_diff_git_path ──
@@ -196,75 +221,58 @@ mod tests {
         assert_eq!(parse_diff_git_path("plain text"), None);
     }
 
-    // ── parse_hunk_starts ──
+    // ── parse_hunk_header ──
 
     #[test]
-    fn parse_hunk_starts_with_counts() {
-        assert_eq!(parse_hunk_starts("@@ -27,20 +27,20 @@"), Some((27, 27)));
-        assert_eq!(parse_hunk_starts("@@ -10,5 +12,7 @@ ctx"), Some((10, 12)));
+    fn parse_hunk_header_with_counts() {
+        assert_eq!(
+            parse_hunk_header("@@ -27,20 +27,20 @@"),
+            Some((range(27, 20), range(27, 20))),
+        );
+        assert_eq!(
+            parse_hunk_header("@@ -10,5 +12,0 @@ fn ctx()"),
+            Some((range(10, 5), range(12, 0))),
+        );
     }
 
     #[test]
-    fn parse_hunk_starts_without_counts() {
-        // Single-line hunks omit the ",B" suffix.
-        assert_eq!(parse_hunk_starts("@@ -42 +43 @@"), Some((42, 43)));
+    fn parse_hunk_header_omitted_count_spans_one_line() {
+        assert_eq!(
+            parse_hunk_header("@@ -42 +43 @@"),
+            Some((range(42, 1), range(43, 1))),
+        );
     }
 
     #[test]
-    fn parse_hunk_starts_is_none_for_non_hunk() {
-        assert_eq!(parse_hunk_starts("+ added line"), None);
-        assert_eq!(parse_hunk_starts(""), None);
+    fn parse_hunk_header_is_none_for_non_hunk() {
+        assert_eq!(parse_hunk_header("+ added line"), None);
+        assert_eq!(parse_hunk_header("@@ -x +1 @@"), None);
+        assert_eq!(parse_hunk_header(""), None);
+    }
+
+    // ── HunkRange::last ──
+
+    #[test]
+    fn hunk_range_last_is_start_plus_count_minus_one() {
+        assert_eq!(range(27, 20).last(), 46);
+        assert_eq!(range(27, 1).last(), 27);
+        assert_eq!(range(5, 0).last(), 5);
     }
 
     // ── max_line_number_width ──
 
     #[test]
     fn max_line_number_width_uses_largest_hunk_extent() {
-        // Asymmetric extents: dropping `.max()` would collapse to 1.
-        let text = "@@ -1,1 +1,10 @@";
-        assert_eq!(max_line_number_width(text), 2);
+        // Asymmetric extents: dropping `.max()` would collapse to the narrower side.
+        assert_eq!(max_line_number_width("@@ -1,1 +1,10 @@"), 2);
+        assert_eq!(max_line_number_width("@@ -100,5 +1,1 @@"), 3);
     }
 
     #[test]
     fn max_line_number_width_floors_at_one_when_no_hunks() {
-        // Floor at 1 — width 0 would butt the separator against the bar.
+        // Width 0 would butt the separator against the bar.
         assert_eq!(max_line_number_width(""), 1);
         assert_eq!(max_line_number_width("Untracked files:\n  foo"), 1);
-    }
-
-    // ── parse_hunk_extents ──
-
-    #[test]
-    fn parse_hunk_extents_produces_max_of_old_and_new_sides() {
-        // Pin `.max()` directly; the integration test above only
-        // catches losses that change the rendered gutter width.
-        assert_eq!(parse_hunk_extents("@@ -1,1 +1,10 @@"), Some(10));
-        assert_eq!(parse_hunk_extents("@@ -100,5 +1,1 @@"), Some(104));
-    }
-
-    #[test]
-    fn parse_hunk_extents_handles_omitted_counts() {
-        assert_eq!(parse_hunk_extents("@@ -42 +43 @@"), Some(43));
-    }
-
-    #[test]
-    fn parse_hunk_extents_is_none_for_non_hunk() {
-        assert_eq!(parse_hunk_extents("plain"), None);
-    }
-
-    // ── parse_range_extent ──
-
-    #[test]
-    fn parse_range_extent_with_count_is_start_plus_count_minus_one() {
-        // count=1 must give extent=start, not start+1.
-        assert_eq!(parse_range_extent("27,20"), Some(46));
-        assert_eq!(parse_range_extent("27,1"), Some(27));
-    }
-
-    #[test]
-    fn parse_range_extent_without_count_is_just_start() {
-        assert_eq!(parse_range_extent("42"), Some(42));
-        assert_eq!(parse_range_extent("42 @@"), Some(42));
     }
 
     // ── render ──
@@ -319,15 +327,8 @@ mod tests {
              outro
         "});
         let lines = block.render(&ctx_at(80, &theme));
-        let body: Vec<String> = lines[2..]
-            .iter()
-            .map(|line| {
-                let row: String = line.spans[1..].iter().map(|s| s.content.as_ref()).collect();
-                row.trim_end().to_owned()
-            })
-            .collect();
         assert_eq!(
-            body,
+            body_rows(&lines[2..]),
             [
                 "10 │ intro",
                 "11 - - item",
@@ -336,6 +337,44 @@ mod tests {
                 "12 │ outro",
             ],
         );
+    }
+
+    #[test]
+    fn render_ends_hunks_by_count_so_unparsed_file_headers_stay_headers() {
+        let theme = Theme::default();
+        let block = GitDiffBlock::new(indoc! {r#"
+            diff --git a/one.rs b/one.rs
+            index 1111111..2222222 100644
+            --- a/one.rs
+            +++ b/one.rs
+            @@ -1 +1 @@
+            -old
+            +new
+            \ No newline at end of file
+            diff --git "a/\346\226\207.txt" "b/\346\226\207.txt"
+            index 3333333..4444444 100644
+            --- "a/\346\226\207.txt"
+            +++ "b/\346\226\207.txt"
+            @@ -1 +1 @@
+            -x
+            +y
+        "#});
+        let lines = block.render(&ctx_at(80, &theme));
+        assert_eq!(
+            body_rows(&lines),
+            [
+                "one.rs",
+                "@@ -1 +1 @@",
+                "1 - old",
+                "1 + new",
+                r"\ No newline at end of file",
+                r#"diff --git "a/\346\226\207.txt" "b/\346\226\207.txt""#,
+                "@@ -1 +1 @@",
+                "1 - x",
+                "1 + y",
+            ],
+        );
+        assert_eq!(lines[4].spans[1].style, theme.dim());
     }
 
     #[test]
