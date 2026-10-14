@@ -1497,7 +1497,7 @@ mod tests {
     fn wrap_cell_empty_produces_single_empty_sub_line() {
         let out = wrap_cell(&[], 10);
         assert_eq!(out.len(), 1);
-        assert!(out[0].is_empty());
+        assert_eq!(out[0], []);
     }
 
     #[test]

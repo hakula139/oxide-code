@@ -840,7 +840,7 @@ mod tests {
     #[test]
     fn snapshot_all_empty_tracker_is_empty() {
         let snaps = FileTracker::default().snapshot_all();
-        assert!(snaps.is_empty());
+        assert_eq!(snaps, []);
     }
 
     // ── clear ──
@@ -855,7 +855,7 @@ mod tests {
 
         tracker.clear();
 
-        assert!(tracker.snapshot_all().is_empty());
+        assert_eq!(tracker.snapshot_all(), []);
     }
 
     // ── restore_verified ──
@@ -1122,13 +1122,13 @@ mod tests {
 
         let tracker = FileTracker::default();
         let dropped = tracker.restore_verified(vec![older.clone(), newer.clone()]);
-        assert!(dropped.is_empty());
+        assert_eq!(dropped, [] as [PathBuf; 0]);
         let stored = tracker.lock().get(&path).cloned().unwrap();
         assert_eq!(stored.last_view, LastView::Full, "newer recorded_at wins");
 
         let tracker = FileTracker::default();
         let dropped = tracker.restore_verified(vec![newer, older]);
-        assert!(dropped.is_empty());
+        assert_eq!(dropped, [] as [PathBuf; 0]);
         let stored = tracker.lock().get(&path).cloned().unwrap();
         assert_eq!(
             stored.last_view,

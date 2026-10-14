@@ -224,8 +224,8 @@ mod tests {
     #[test]
     fn metadata_matches_built_ins_contract() {
         assert_eq!(DiffCmd.name(), "diff");
-        assert!(DiffCmd.aliases().is_empty());
-        assert!(!DiffCmd.description().is_empty());
+        assert_eq!(DiffCmd.aliases(), [] as [&str; 0]);
+        assert_ne!(DiffCmd.description(), "");
     }
 
     // ── execute_in ──

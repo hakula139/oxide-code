@@ -202,8 +202,8 @@ mod tests {
     #[test]
     fn metadata_matches_built_ins_contract() {
         assert_eq!(ModelCmd.name(), "model");
-        assert!(ModelCmd.aliases().is_empty());
-        assert!(!ModelCmd.description().is_empty());
+        assert_eq!(ModelCmd.aliases(), [] as [&str; 0]);
+        assert_ne!(ModelCmd.description(), "");
         assert_eq!(ModelCmd.usage(), Some("[<id>]"));
     }
 

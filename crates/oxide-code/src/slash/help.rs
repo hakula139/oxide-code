@@ -62,8 +62,8 @@ mod tests {
     #[test]
     fn metadata_matches_built_ins_contract() {
         assert_eq!(HelpCmd.name(), "help");
-        assert!(HelpCmd.aliases().is_empty());
-        assert!(!HelpCmd.description().is_empty());
+        assert_eq!(HelpCmd.aliases(), [] as [&str; 0]);
+        assert_ne!(HelpCmd.description(), "");
     }
 
     // ── HelpCmd::execute ──

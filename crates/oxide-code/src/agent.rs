@@ -3289,7 +3289,7 @@ data: {"type":"message_stop"}
         };
         assert_eq!(id, "tool_1");
         assert_eq!(name, "bash");
-        assert!(json_buf.is_empty());
+        assert_eq!(json_buf, "");
     }
 
     #[test]
@@ -3306,7 +3306,7 @@ data: {"type":"message_stop"}
         };
         assert_eq!(id, "srv_1");
         assert_eq!(name, "web_search");
-        assert!(json_buf.is_empty());
+        assert_eq!(json_buf, "");
     }
 
     #[test]

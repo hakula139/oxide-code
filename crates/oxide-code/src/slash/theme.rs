@@ -437,8 +437,8 @@ mod tests {
     #[test]
     fn metadata_matches_built_ins_contract() {
         assert_eq!(ThemeCmd.name(), "theme");
-        assert!(ThemeCmd.aliases().is_empty());
-        assert!(!ThemeCmd.description().is_empty());
+        assert_eq!(ThemeCmd.aliases(), [] as [&str; 0]);
+        assert_ne!(ThemeCmd.description(), "");
         assert_eq!(ThemeCmd.usage(), Some("[<name>]"));
     }
 

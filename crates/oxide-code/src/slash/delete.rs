@@ -117,8 +117,8 @@ mod tests {
     #[test]
     fn metadata_matches_built_ins_contract() {
         assert_eq!(DeleteCmd.name(), "delete");
-        assert!(DeleteCmd.aliases().is_empty());
-        assert!(!DeleteCmd.description().is_empty());
+        assert_eq!(DeleteCmd.aliases(), [] as [&str; 0]);
+        assert_ne!(DeleteCmd.description(), "");
         assert_eq!(DeleteCmd.usage(), Some("<id-prefix>"));
     }
 

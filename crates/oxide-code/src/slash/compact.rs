@@ -48,8 +48,8 @@ mod tests {
     #[test]
     fn metadata_matches_built_ins_contract() {
         assert_eq!(CompactCmd.name(), "compact");
-        assert!(CompactCmd.aliases().is_empty());
-        assert!(!CompactCmd.description().is_empty());
+        assert_eq!(CompactCmd.aliases(), [] as [&str; 0]);
+        assert_ne!(CompactCmd.description(), "");
         assert_eq!(CompactCmd.usage(), Some("[<instructions>]"));
     }
 

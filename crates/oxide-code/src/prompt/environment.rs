@@ -289,7 +289,7 @@ mod tests {
     #[test]
     fn detect_shell_produces_basename() {
         let shell = detect_shell();
-        assert!(!shell.is_empty());
+        assert_ne!(shell, "");
         assert!(!shell.contains('/'), "should be a basename, got: {shell:?}");
     }
 

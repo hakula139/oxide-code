@@ -1439,7 +1439,7 @@ mod tests {
             1,
         );
         assert_eq!(chunks.len(), 1);
-        assert!(chunks[0].old.is_empty());
+        assert_eq!(chunks[0].old, []);
         assert_eq!(
             chunks[0].new,
             vec![DiffLine {
@@ -1468,12 +1468,15 @@ mod tests {
 
     #[test]
     fn match_positions_no_match_is_empty() {
-        assert!(match_positions("hello", "xyz", usize::MAX).is_empty());
+        assert_eq!(
+            match_positions("hello", "xyz", usize::MAX),
+            [] as [usize; 0]
+        );
     }
 
     #[test]
     fn match_positions_take_zero_is_empty() {
-        assert!(match_positions("aXbXcX", "X", 0).is_empty());
+        assert_eq!(match_positions("aXbXcX", "X", 0), [] as [usize; 0]);
     }
 
     // ── line_at_byte ──
@@ -1538,7 +1541,7 @@ mod tests {
 
     #[test]
     fn split_into_diff_lines_empty_yields_empty() {
-        assert!(split_into_diff_lines("", 1).is_empty());
+        assert_eq!(split_into_diff_lines("", 1), []);
     }
 
     // ── trim_chunk ──
@@ -1611,7 +1614,7 @@ mod tests {
             ],
         };
         trim_chunk(&mut chunk);
-        assert!(chunk.old.is_empty());
+        assert_eq!(chunk.old, []);
         assert_eq!(
             chunk.new,
             vec![DiffLine {
@@ -1634,8 +1637,8 @@ mod tests {
             }],
         };
         trim_chunk(&mut chunk);
-        assert!(chunk.old.is_empty());
-        assert!(chunk.new.is_empty());
+        assert_eq!(chunk.old, []);
+        assert_eq!(chunk.new, []);
     }
 
     // ── common_boundaries ──
@@ -1758,7 +1761,7 @@ mod tests {
     #[test]
     fn synthesize_chunk_applies_trim() {
         let chunk = synthesize_chunk("fn foo()", "fn foo()\n    body");
-        assert!(chunk.old.is_empty());
+        assert_eq!(chunk.old, []);
         assert_eq!(chunk.new.len(), 1);
         assert_eq!(chunk.new[0].text, "    body");
     }

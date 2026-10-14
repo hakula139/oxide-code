@@ -301,7 +301,7 @@ mod tests {
             .map(|r| r.value.clone().into_owned())
             .collect();
         // BUILT_INS is alphabetical, so empty-query first row is `clear`.
-        assert!(!values.is_empty());
+        assert_ne!(values, [] as [String; 0]);
         assert_eq!(values[0], "clear");
     }
 
@@ -352,8 +352,7 @@ mod tests {
         let popup = arg_popup("model", "");
         assert!(popup.is_visible());
         assert!(matches!(popup.mode(), Some(PopupMode::Arg { name }) if name == "model"));
-        // Roster is non-empty for /model.
-        assert!(!popup.rows.is_empty());
+        assert_ne!(popup.rows, []);
     }
 
     #[test]

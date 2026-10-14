@@ -110,7 +110,7 @@ mod tests {
         let mut out = Vec::new();
         // truncated=true is intentional: empty groups short-circuit before the footer.
         render(&mut out, &ctx, &[], true, false);
-        assert!(out.is_empty());
+        assert_eq!(out, []);
     }
 
     #[test]
