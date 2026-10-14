@@ -18,7 +18,7 @@ The `FileTracker` is a per-session `Arc<Mutex<HashMap>>` shared across tool call
 
 5. **Partial-view Reads keep the gate closed.** A ranged Read populates `LastView::Partial { offset, limit }`. Edit / Write against that path fires the "must read fully first" error.
 
-6. **`Arc<Mutex<HashMap>>` instead of an actor channel.** The tracker mutates on every Read / Write / Edit, and an actor-message-per-update path would force ten-plus round-trips per turn, while lock contention on a small struct with no I/O is microseconds.
+6. **`Arc<Mutex<HashMap>>` for tracker state.** The tracker mutates on every Read / Write / Edit. Routing each update through an actor message would force ten-plus round-trips per turn, while lock contention on a small struct with no I/O costs microseconds.
 
 7. **xxh64 for change detection.** Cryptographic integrity isn't required, since the tracker only needs to spot drift, and xxh64 is already used elsewhere in the crate.
 

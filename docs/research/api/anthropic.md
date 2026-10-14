@@ -220,7 +220,7 @@ oxide-code ships `prompt-caching-scope-2026-01-05` on every agentic request (3P 
 
 Shape is otherwise identical in both modes. Only the body-side `scope` field toggles.
 
-Same pattern as fine-grained tool streaming and client-request-ID injection: gate on base URL rather than provider enum, since the provider flag only says "not Bedrock / not Vertex" and a user pointing `ANTHROPIC_BASE_URL` at a gateway still parses as first-party under that check.
+Same pattern as fine-grained tool streaming and client-request-ID injection: gate on the base URL, since the provider flag only says "not Bedrock / not Vertex" and a user pointing `ANTHROPIC_BASE_URL` at a gateway still parses as first-party under that check.
 
 ## Agentic Request Body Fields
 
@@ -282,7 +282,7 @@ As of April 4, 2026, Anthropic enforces that OAuth subscription credits (Pro / M
 - **API key** (`ANTHROPIC_API_KEY`) with standard per-token billing.
 - **Extra Usage** billing enabled on the account, which allows OAuth but bills per-token beyond the subscription.
 
-The `cch` hash is the primary technical enforcement mechanism, and both the algorithm (xxHash64, non-cryptographic) and the constants are publicly known. No additional protections exist: no TLS fingerprinting, binary attestation, pre-registration handshake, replay detection, or connection association. Anthropic could escalate enforcement at any time, but today's scheme reads as billing plumbing rather than a security boundary.
+The `cch` hash is the primary technical enforcement mechanism, and both the algorithm (xxHash64, non-cryptographic) and the constants are publicly known. No additional protections exist: no TLS fingerprinting, binary attestation, pre-registration handshake, replay detection, or connection association. Anthropic could escalate enforcement at any time, but today's scheme reads as billing plumbing with no security boundary behind it.
 
 oxide-code computes valid `cch` hashes on every outbound request, both OAuth and API-key. Claude Code 2.1.121 emits the attestation block under both auth modes. 3P re-distribution gateways treat absence as a missing client signature and reject. The fingerprint salt and xxHash64 seed are version-specific constants, so they may change with Claude Code releases.
 
@@ -294,7 +294,7 @@ Re-distribution gateways front the upstream API and reject anything that does no
 2. **Stainless SDK headers.** Claude Code's TS SDK auto-emits the `lang` / `os` / `arch` triple plus `x-stainless-package-version`, `x-stainless-runtime`, `x-stainless-runtime-version`, `x-stainless-timeout`, and `x-stainless-retry-count`. Absence of any one fingerprints as "not from Stainless". Gateways often return HTTP 403 with `"user agent not allowed"`.
 3. **Billing attestation under both auth modes.** Claude Code emits the `x-anthropic-billing-header` block (with the `cch` xxHash64) on API-key requests too. An OAuth-only guard leaves API-key traffic without the integrity primitive the gateway verifies. See [Attribution header](#3-attribution-header).
 4. **Beta header set and order.** Match Claude Code's emit order on agentic 4.6+ requests: `claude-code-20250219, [oauth-2025-04-20,] interleaved-thinking-2025-05-14, context-management-2025-06-27, prompt-caching-scope-2026-01-05, effort-2025-11-24`. `prompt-caching-scope-2026-01-05` ships unconditionally. The matching `cache_control.scope: "global"` body field stays gated on `is_first_party_base_url` because 3P gateways reject the scope downstream of tool definitions, but the header alone keeps the wire fingerprint intact.
-5. **`metadata.user_id` shape.** Field order: `device_id`, `account_uuid`, `session_id`. Empty `account_uuid` must be present because missing the key changes the fingerprint. Use a typed struct rather than `serde_json::json!` so the wire order matches the source declaration. `json!` ships fields alphabetically without the `preserve_order` feature, which trips the verifier. `device_id` is minted as 64 lowercase hex chars (32 random bytes) and persisted at `$XDG_DATA_HOME/ox/user-id`. Verifiers check shape without caring whether the value round-trips to Claude Code's `~/.claude.json#userID`.
+5. **`metadata.user_id` shape.** Field order: `device_id`, `account_uuid`, `session_id`. Empty `account_uuid` must be present because missing the key changes the fingerprint. Use a typed struct so the wire order matches the source declaration. `serde_json::json!` ships fields alphabetically without the `preserve_order` feature, which trips the verifier. `device_id` is minted as 64 lowercase hex chars (32 random bytes) and persisted at `$XDG_DATA_HOME/ox/user-id`. Verifiers check shape without caring whether the value round-trips to Claude Code's `~/.claude.json#userID`.
 
 System-prompt block content is a separate gateway-validation axis. See [System Prompt § Third-Party Gateway Validation](system-prompt.md#third-party-gateway-validation) for the prompt-content side of the same check.
 

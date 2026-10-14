@@ -20,7 +20,7 @@ Two CLI entry points (direct and exploratory) plus a Ctrl-modifier-driven inline
 
 - **Mid-session form**: `/resume` (alias `/continue`) is a `local-jsx` slash command mounting the same `LogSelector` inline. Selection re-initializes the same TUI process via `context.resume?.(sessionId, fullLog, 'slash_command_picker')`, with no fork-exec.
 
-- **Cross-project gate**: Picking from a different cwd shows a copy-to-clipboard `cd <path> && claude --resume ...` rather than resuming directly.
+- **Cross-project gate**: Picking from a different cwd only offers a copy-to-clipboard `cd <path> && claude --resume ...` command.
 
 - **Empty / single states**: Both show the picker, no auto-resume on a single match. Zero sessions surfaces "No conversations found to resume" and exits.
 

@@ -12,7 +12,7 @@ Sessions are stored under `$XDG_DATA_HOME/ox/sessions/` (default: `~/.local/shar
 ox --list                # 30 most recent sessions in the current project
 ox -la                   # same, across every project
 ox --list --limit 100    # raise the cap for one run
-ox --list --limit 0      # unbounded (the original behavior)
+ox --list --limit 0      # unbounded
 ```
 
 Prints a table of recent sessions (most recently active first, local time):
@@ -64,19 +64,21 @@ ox -c ./conversation.jsonl
 ox -c /home/me/archive/2026-04/session.jsonl
 ```
 
-On resume, oxide-code loads the full history and appends new messages to the same file, so the session keeps its original ID.
+On resume, oxide-code loads the saved history and appends new messages to the same file, so the session keeps its original ID.
 
 ### Mid-Session Resume
 
-Inside the TUI, `/resume` (alias `/continue`) opens a session picker without restarting the process. Type to filter by id, title, or project, press Tab to widen the scope from current-project to all projects, and press Enter to resume the highlighted session in place. To skip the picker, pass `/resume <id-prefix>` to jump directly. Mid-session resume behaves identically to `ox -c` from launch.
+Inside the TUI, `/resume` (alias `/continue`) opens a session picker without restarting the process. Type to filter by id, title, or project, press Tab to widen the scope from current-project to all projects, and press Enter to resume the highlighted session in place. To skip the picker, pass `/resume <id-prefix>` to jump directly, and an ambiguous prefix lists the candidates. Chat repopulates from the resumed transcript, and the next prompt continues that thread just as it would after `ox -c`.
 
 ### Deleting a Session
 
-Inside the `/resume` picker, **Ctrl+D** (or **Delete**) on the cursor row opens a Y/N confirm modal. **Y / Enter** unlinks the session JSONL and prints a `Deleted session {id}: {title}` line in chat. **N / Esc / Ctrl+C** dismisses. `/delete <id-prefix>` opens the same confirm directly. The live session is excluded; any saved non-live session matched by id prefix can be deleted.
+Inside the `/resume` picker, **Ctrl+D** (or **Delete**) on the cursor row opens a Y/N confirm modal. **Y / Enter** unlinks the session JSONL and prints a `Deleted session {id}: {title}` line in chat. **N / Esc / Ctrl+C** dismisses. `/delete <id-prefix>` opens the same confirm directly for any saved session except the live one.
 
 ## Titles
 
-When the TUI is running, oxide-code generates a concise AI title (3-7 words) shortly after your first prompt. Outside the TUI (bare REPL, headless mode), sessions keep the first prompt as the title, and setting `/rename` cancels and replaces the AI title for the rest of the session.
+When the TUI is running, oxide-code generates a concise AI title (3-7 words) shortly after your first prompt. Outside the TUI (bare REPL, headless mode), sessions keep the first prompt as the title.
+
+In the TUI, `/rename` opens a title editor pre-filled with the current title, and `/rename <title>` sets it directly. Your title replaces the AI title, and AI title generation stops for that session.
 
 ## Security
 

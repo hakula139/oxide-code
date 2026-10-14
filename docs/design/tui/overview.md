@@ -24,9 +24,8 @@ Components are concrete structs (`ChatView`, `InputArea`, `StatusBar`, modals) t
 ```text
 tokio::select! {
     event = crossterm_events.next() => { /* keyboard, mouse, resize */ }
-    token = stream_rx.recv()        => { /* LLM streaming token */ }
-    result = tool_rx.recv()         => { /* tool execution result */ }
-    _ = tick_interval.tick()        => { /* animation frame */ }
+    event = self.agent_rx.recv()    => { /* AgentEvent: stream tokens, tool calls, session updates */ }
+    _ = tick.tick()                 => { /* spinner frame, exit-arm expiry, render when dirty */ }
 }
 ```
 
@@ -48,7 +47,7 @@ Code blocks: buffer entire block, apply syntax highlighting on completion.
 ## Design Decisions
 
 1. **ratatui + crossterm + tokio.** No custom rendering engine.
-2. **Concrete component structs.** `App` composes chat, input, status, and modal surfaces directly; there is no shared component trait.
+2. **Concrete component structs.** `App` composes chat, input, status, and modal surfaces directly, with no shared component trait.
 3. **Synchronized output** enabled by default.
 4. **Render throttling at ~60 FPS**.
 5. **Line-based markdown commit with stable-prefix cache** during streaming, full re-render on completion.

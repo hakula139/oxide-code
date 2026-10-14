@@ -93,7 +93,7 @@ Most distinct from chat: a route-based full-screen Home with no chat-region inhe
 
 2. **Codex's small starter command list (3-5 rows)**: concrete, hardcoded, name plus one-line description. Discoverable without becoming a dashboard.
 
-3. **opencode's example prompts framing**: "Try one of:" reads more inviting than "Available commands:". Worth borrowing the framing even if the content is slash commands rather than free-form prompts.
+3. **opencode's example prompts framing**: "Try one of:" reads more inviting than "Available commands:". Worth borrowing the framing even when the content is slash commands.
 
 4. **Claude Code's two-mode width ladder**: full layout at typical widths, single-line collapse at narrow. The 3-tier ladder is overkill, but a 2-tier (full / collapsed) is the right discipline for a static welcome.
 
@@ -107,6 +107,6 @@ Most distinct from chat: a route-based full-screen Home with no chat-region inhe
 
 3. **Codex's welcome-as-history-cell shape**. Conflates ephemeral onboarding UI with conversation transcript. Forces explicit re-emission on `/clear` and bloats the JSONL persisted record. Empty-state branching in the chat view is the right model.
 
-4. **opencode's 60-tip rotating array**. Maintenance cost on the array, and rotating content makes the welcome feel "noisy" rather than "deliberate." A static curated 3-row list wins.
+4. **opencode's 60-tip rotating array**. Maintenance cost on the array, and rotating content makes the welcome feel "noisy". A static curated 3-row list wins.
 
 5. **Claude Code's full-screen takeover**. Visually heavy and consumes vertical space the user wants for chat. The welcome should occupy the empty chat region.

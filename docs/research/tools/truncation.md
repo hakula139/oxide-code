@@ -16,7 +16,7 @@ When the per-message budget trips, the largest blocks are spilled to disk, repla
 
 ## OpenAI Codex (Rust)
 
-No system-wide cap. Tools bound their own output (e.g., `MATCH_LIMIT = 50` for ripgrep). A `bash cat large.log` returns whatever the command printed.
+Tool output passes through a per-model `TruncationPolicy` (`core/src/tools/context.rs`, defined in `protocol/src/protocol.rs`): a `Bytes(n)` or `Tokens(n)` budget from the model's metadata, falling back to `Bytes(10_000)`. The `tool_output_token_limit` config key overrides the budget. Exec, unified-exec, and MCP outputs are middle-truncated to it, keeping the head and tail, and a unified-exec call can request a tighter `max_output_tokens`. Nothing spills to disk.
 
 ## opencode (TypeScript)
 
@@ -35,6 +35,6 @@ When either limit trips: take head or tail slice, write full output to temp file
 | Repo        | Cap location | Per-tool cap | System cap | Strategy          | Spillover          | Per-tool override |
 | ----------- | ------------ | ------------ | ---------- | ----------------- | ------------------ | ----------------- |
 | Claude Code | dispatcher   | 50 KB chars  | 100 K toks | tail-cut + spill  | yes (file path)    | yes               |
-| Codex       | per-tool     | varies       | none       | varies (or none)  | no                 | n/a               |
+| Codex       | tool output  | none         | per model  | head-tail         | no                 | exec, lower only  |
 | opencode    | dispatcher   | 50 KB        | none       | head/tail + spill | yes (file + hint)  | no                |
 | oxide-code  | dispatcher   | per-tool     | 128 KB     | head-tail         | no                 | yes               |

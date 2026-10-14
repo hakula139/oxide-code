@@ -1,6 +1,6 @@
 # Instruction Files
 
-Instruction files let you give the assistant persistent, project-specific context. They are Markdown files discovered on every turn and injected into the system prompt.
+Instruction files let you give the assistant persistent, project-specific context. oxide-code rereads these Markdown files on every turn and sends their contents verbatim in a context block ahead of the conversation.
 
 ## Supported filenames
 
@@ -25,7 +25,7 @@ Files closer to your working directory appear later in the prompt and convention
 
 ## Writing effective instructions
 
-Instruction files are injected verbatim into the system prompt:
+For example:
 
 ```markdown
 # CLAUDE.md

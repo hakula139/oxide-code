@@ -12,7 +12,7 @@ Invariants (`FileEditTool.ts:275-311`):
 
 1. Edit refuses if no entry exists or entry is `isPartialView: true`.
 2. Edit refuses if `mtime > readTimestamp.timestamp`. For full reads, disk content is re-compared. Matching bytes allow the Edit through (Windows cloud-sync workaround). Partial reads always reject on mtime drift.
-3. Read on cached unchanged file returns a stub instead of repeating bytes.
+3. Read on a cached unchanged file returns a short stub and skips the repeated bytes.
 
 Resume: rehydrate cache by scanning message history (`queryHelpers.ts:346-501`).
 

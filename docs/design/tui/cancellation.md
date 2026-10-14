@@ -4,15 +4,15 @@ Esc / Ctrl+C cancellation, dual-press Ctrl+C exit from idle, and mid-turn queued
 
 ## Implementation
 
-The TUI exposes Esc / Ctrl+C cancellation, dual-press Ctrl+C exit from idle, POSIX Ctrl+D, and mid-turn queued user prompts. Enter while busy appends to `App::pending_prompts: VecDeque<String>`, rendered as a dim preview above the input. `agent_turn` accumulates the same submits in a per-turn `Vec<String>` and splices each into `messages` as a trailing User message at every round boundary, so the model sees new instructions in the next API request without aborting in-flight work. Tool-less turns have no round boundary, so queued prompts fall through to `App::finalize_idle()`'s drain. Cancellation drops the `agent_turn` future: reqwest closes the SSE stream, `kill_on_drop(true)` reaps subprocesses, and a dim italic `(interrupted)` marker lands in chat. The status bar colocates the active-key hint with the spinner: `Streaming · Esc to interrupt` / `Running {tool} · Esc to interrupt` / `Cancelling` / `Press Ctrl+C again to exit`.
+The TUI exposes Esc / Ctrl+C cancellation, dual-press Ctrl+C exit from idle, POSIX Ctrl+D, and mid-turn queued user prompts. Enter while busy appends to `App::pending_prompts: VecDeque<String>`, rendered as a dim preview above the input. `agent_turn` accumulates the same submits in a per-turn `Vec<String>` and splices each into `messages` as a trailing User message at every round boundary, so the model sees new instructions in the next API request without aborting in-flight work. Tool-less turns have no round boundary, so queued prompts fall through to `App::finalize_idle()`'s drain. Cancellation drops the `agent_turn` future: reqwest closes the SSE stream, `kill_on_drop(true)` kills a running `bash` tool's direct child process, and a dim italic `(interrupted)` marker lands in chat. Processes that child spawned can keep running, since the `bash` tool kills its whole process group only on timeout. The status bar colocates the active-key hint with the spinner: `Streaming · Esc to interrupt` / `Running {tool} · Esc to interrupt` / `Cancelling` / `Press Ctrl+C again to exit`.
 
 ## Design Decisions
 
 The picks lean toward the Codex precedent on most surfaces, since it is the one Rust reference and its patterns map onto our async / actor architecture without reshaping. The wire-shape choice (3) is the deliberate exception.
 
-1. **Drop-the-future cancellation.** Esc / Ctrl+C drops the `agent_turn` future from the agent loop. reqwest's SSE-close-on-drop and `kill_on_drop(true)` clean up automatically, which is simpler than Codex's protocol message.
+1. **Drop-the-future cancellation.** Esc / Ctrl+C drops the `agent_turn` future from the agent loop. reqwest's SSE-close-on-drop and `kill_on_drop(true)` on the spawned `bash` child clean up automatically, which is simpler than Codex's protocol message. The drop reaches only that direct child, and the process-group kill runs only when a command times out.
 
-2. **Discard partial assistant state on cancel.** The TUI shows the streamed prefix with an `(interrupted)` suffix, while the model sees clean history without the cancelled assistant message or orphan `tool_use`. Follows Codex (discard) over Claude Code (preserved tombstone).
+2. **Discard partial assistant state on cancel.** The TUI shows the streamed prefix with an `(interrupted)` suffix, while the model sees clean history without the cancelled assistant message or orphan `tool_use`. Follows Codex, which discards it. Claude Code preserves a tombstone.
 
 3. **Mid-turn drain at round boundary, raw consecutive User messages on the wire.** Each queued prompt becomes its own `User` message with one `Text` block. Anthropic accepts consecutive same-role messages. oxide-code deliberately drops the `<system-reminder>` envelope that Claude Code and opencode wrap with, which keeps persistence trivial. May flip if the model ignores mid-turn instructions.
 
@@ -31,7 +31,7 @@ The picks lean toward the Codex precedent on most surfaces, since it is the one 
 - `crates/oxide-code/src/agent.rs`: `agent_turn` round loop, `await_unless_aborted`, `record_drained_prompts`, `TurnAbort` enum.
 - `crates/oxide-code/src/agent/event.rs`: `AgentEvent::{Cancelled, PromptDrained}`, `UserAction::{Cancel, ConfirmExit, Quit}`, `INTERRUPTED_MARKER`, `StdioSink::render`.
 - `crates/oxide-code/src/main.rs`: `agent_loop_task`, `bare_repl` / `headless`.
-- `crates/oxide-code/src/tool/bash.rs`: `kill_on_drop(true)`.
+- `crates/oxide-code/src/tool/bash.rs`: `kill_on_drop(true)` on the spawned child, plus the timeout-only `kill_process_group`.
 - `crates/oxide-code/src/tui/app.rs`: `App::pending_prompts`, `dispatch_user_action` / `apply_action_locally`, `finalize_idle` / `drain_pending_prompt`, `set_active_status`, `expire_armed_exit`.
 - `crates/oxide-code/src/tui/components/chat/blocks/interrupted.rs`: `InterruptedMarker` block.
 - `crates/oxide-code/src/tui/components/input.rs`: Ctrl+D POSIX gate, Esc-pop, `set_text`.

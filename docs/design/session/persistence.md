@@ -20,9 +20,9 @@ Every session is a single `.jsonl` file: one JSON object per line, append-only a
 
 ### Schema Invariants
 
-1. **Explicit entry schema.** Unknown discriminators are treated as malformed lines by the loader instead of becoming silent compatibility shims.
+1. **Explicit entry schema.** The loader treats unknown discriminators as malformed lines, so schema compatibility stays explicit.
 2. **`parent_uuid` chain.** Each message links to its predecessor. Concurrent resumes can fork, and the newest-leaf rule resolves the active branch without rewriting history.
-3. **`version` field.** Bump on incompatible changes so older binaries fail fast instead of silently misreading session state.
+3. **`version` field.** Bump on incompatible changes so older binaries fail fast on session state they cannot read.
 
 ## Storage Layout
 
@@ -58,7 +58,7 @@ There is no file-level lock: two processes resuming the same session both append
 
 ### AI-generated titles
 
-First user prompt of a fresh session seeds a detached tokio task calling Haiku via `Client::complete` with a 3-7 word sentence-case prompt, structured-outputs JSON schema. Failures warn-log only.
+In the TUI, the first user prompt of a fresh session seeds a detached tokio task calling Haiku via `Client::complete` with a 3-7 word sentence-case prompt, structured-outputs JSON schema. Failures warn-log only.
 
 ### Write-error surfacing
 

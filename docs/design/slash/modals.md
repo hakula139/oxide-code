@@ -1,6 +1,6 @@
 # Modal UI
 
-Focus-grabbing UI overlays that any slash command can open. Lives in the band between the chat scroll and the input area, the same row range the slash autocomplete popup uses, but wider.
+Focus-grabbing UI overlays that slash commands and the agent loop can open. Lives in the band between the chat scroll and the input area, the same row range the slash autocomplete popup uses, but wider.
 
 Companion: [commands.md](commands.md) covers the slash-command surface that opens modals.
 
@@ -12,21 +12,23 @@ Three things drove the abstraction:
 
 1. **Live preview.** `/theme` swaps palettes as the user arrows through choices and snaps back on Esc. This was the original motivating case for the trait shape.
 2. **Multi-step interaction.** The combined `/model + /effort` picker. Plan approval. MCP server pick-then-configure.
-3. **Agent-driven prompts.** When a tool wants permission, the agent must surface a prompt and route the user's decision back. Today there is no UI seam for this, and the modal trait is shaped to support it later.
+3. **Agent-driven prompts.** When a tool call needs approval, the agent emits `AgentEvent::ApprovalRequested` and blocks until the user's decision comes back. The App pushes an `ApprovalModal`, which routes the decision back as `UserAction::ApprovalDecision`.
 
 ## Trait Shape
 
 A modal is `Send` (App lives on tokio) but not `Sync`, since modals own mutable state and are never shared across threads. It declares its `height` for layout, paints itself into a `Rect`, and routes one `KeyEvent` to one of five outcomes:
 
 - **Consumed**: Stay open, key handled internally.
-- **Cancelled**: Close, no dispatch.
+- **Cancelled**: Close and dispatch the modal's `on_cancel` action, if any.
 - **Submitted**: Close and forward an action (a `UserAction` through the agent channel, or a no-op when the modal already applied its effect locally).
-- **Previewed**: Forward an action without closing. Used for live-preview cursor moves like `/theme`, where each Up / Down repaints the chat in the candidate without committing.
-- **Pushed**: Nest a child modal above the current one. The parent regains focus on pop via `Modal::on_focus_regained` (default no-op).
+- **Preview**: Forward an action without closing. Used for live-preview cursor moves like `/theme`, where each Up / Down repaints the chat in the candidate without committing.
+- **Push**: Nest a child modal above the current one. The parent regains focus on pop via `Modal::on_focus_regained` (default no-op).
 
-`Submitted` and `Previewed` carry a `ModalAction`: `None` (no dispatch), `User(UserAction)` (forward to the agent loop), or `SystemMessage(String)` (push a confirmation line into chat after pop).
+`Submitted` and `Preview` carry a `ModalAction`: `None` (no dispatch), `User(UserAction)` (forward to the agent loop), or `SystemMessage(String)` (push a confirmation line into chat after pop).
 
 Dispatched actions flow through the same channel as keyboard input, so the modal never needs to know what handler will run on the other side.
+
+`Modal::on_cancel` fires whenever a modal leaves the stack without submitting: the stack-level Esc / Ctrl+C cancel, a `Cancelled` outcome, or `ModalStack::clear` on session swap. It returns an optional `ModalAction` that the App dispatches in place of the silent close. The default returns `None`, and `ApprovalModal` overrides it to emit a deny decision so a blocked agent always receives an answer.
 
 ## Implementation
 
@@ -40,6 +42,7 @@ Modals shipping today:
 - **`/rename` editor**: Single-line title editor pre-filled with the current title.
 - **`/resume` picker**: Searchable session picker (over `SearchableList`).
 - **Confirm-delete modal**: Y/N gate pushed by `/delete <id-prefix>` and `/resume`'s Ctrl+D / Delete.
+- **Approval modal**: Approve-or-deny gate the App pushes when the agent asks to run a gated tool call.
 - **`/status`, `/config`, `/help`**: Read-only overviews assembled from `KvOverview` + `KvSection` fixtures inside the per-command files.
 
 App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event`, so an active modal sees every key before any other component. `apply_modal_action` then dispatches the result through the same path as a keyboard `UserAction`.
@@ -48,7 +51,7 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 
 1. **Trait per modal.** Each concrete modal is its own type implementing `Modal`, so adding one is a new file plus a constructor with no central match arm.
 
-2. **Stack-based ownership (`Vec<Box<dyn Modal>>`).** Single-element today, but the `Vec` lets a future "confirm leave?" overlay inside a picker `push` itself on without a redesign.
+2. **Stack-based ownership (`Vec<Box<dyn Modal>>`).** The `Vec` lets an overlay stack on an open modal without a redesign, such as the confirm-delete modal over the `/resume` picker or an approval prompt over a read-only overview.
 
 3. **Typed result delivery via `ModalAction`, no callbacks.** Modal emits `ModalKey::Submitted(ModalAction)` and the manager dispatches. Boxed `FnOnce` callbacks were rejected for the lifetime / `Send` complexity and because they hide the dispatch graph.
 
@@ -56,11 +59,11 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 
 5. **Layout band sized by `ModalStack::height(width)`.** Zero rows when empty (so the existing layout stays unchanged), and displaces the chat upward when active, just like the slash popup.
 
-6. **Modals open via `SlashContext::open_modal` instead of a new `SlashOutcome` variant.** Keeps `SlashOutcome` derive-clean (`Debug + PartialEq + Eq`). The dispatcher harvests the slot after `execute` and pushes onto the App's stack, mirroring how `chat: &mut ChatView` carries write-effects.
+6. **Slash commands open modals via `SlashContext::open_modal`.** Keeps `SlashOutcome` derive-clean (`Debug + PartialEq + Eq`) without a modal-carrying variant. The dispatcher harvests the slot after `execute` and pushes onto the App's stack, mirroring how `chat: &mut ChatView` carries write-effects.
 
 7. **Bare `/model` and bare `/effort` open separate modals.** Threading both bare forms through one modal would force a single-axis decision through a two-axis interface. `/model` keeps the multi-axis combined picker (model and effort cycle together), while `/effort` gets its own single-axis slider. Typed-arg `/model <id>` and `/effort <level>` keep direct-switch behaviour for scripting and power users.
 
-8. **`ListPicker` is a state + render primitive.** Concrete pickers embed it and forward keys to it. This separates "list selection state" from "what does Enter dispatch", avoiding the boxed-callback pattern while staying broadly reusable. `/model + /effort` and `/theme` both build on it today, and future approval prompts will too.
+8. **`ListPicker` is a state + render primitive.** Concrete pickers embed it and forward keys to it. This separates "list selection state" from "what does Enter dispatch", avoiding the boxed-callback pattern while staying broadly reusable. `/model + /effort` and `/theme` both build on it.
 
 9. **Read-only kv overviews share `KvOverview`.** `/status`, `/config`, and `/help` all build the same title + sectioned-rows + footer shape, so the layout, key handling, and dismiss live in one place. Per-command files own only the fixture (rows, headings) and a thin constructor, and new overviews are a `Vec<KvSection>` away.
 
@@ -84,6 +87,8 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 
 - **Confirm-delete modal**: `ConfirmDeleteSessionModal` runs `SessionStore::delete` synchronously on Y / Enter and submits `ModalAction::SystemMessage("Deleted session {id}: {title}")` on success so the user has chat-stream evidence the action ran. Failures latch into a sticky inline error that clears only on a deliberate Y / N choice, so a stray key can't wipe the diagnostic. Pushed by `/delete <id-prefix>` and by `/resume`'s Ctrl+D / Delete.
 
+- **Approval modal**: `ApprovalModal` holds the tool-use id and renders the call summary as its title above a body capped at 16 rows: the command text for `bash`, or `-` / `+` diff rows for `edit` and `write`. Y / Enter submits `UserAction::ApprovalDecision` with `Approve`. N returns `Cancelled`, so N, Esc, Ctrl+C, and a session-swap `clear` all resolve through `on_cancel` to `Deny`. Built from the `ConfirmDeleteSessionModal` template.
+
 - **`/status` overview**: Single-section `KvOverview` of session descriptors (model, effort, cwd, session id, auth, version, cache TTL, show-thinking, show-welcome). Constructed in `slash/status`.
 
 - **`/config` overview**: Two-section `KvOverview`. "Resolved" carries effective config values, while "Source Files" carries the layered TOML paths it was assembled from. Path discovery runs per-invocation. Constructed in `slash/config`.
@@ -100,8 +105,6 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 
 - **Custom user-defined modal commands.** The trait is open, but `~/.config/ox/commands/*.md` discovery / loader is tracked separately under "Workflow Skills" in the roadmap.
 
-- **Agent-triggered modal path** (`AgentEvent::PromptRequest` round-trip). The trait shape supports it. Lands with the Permission & Approval roadmap item.
-
 ## Sources
 
 - `crates/oxide-code/src/session/display.rs`: shared metadata-line formatter used by the picker row and the confirm-delete modal.
@@ -116,8 +119,9 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 - `crates/oxide-code/src/slash/resume.rs`: `ResumeCmd` plus `ResumePicker`.
 - `crates/oxide-code/src/slash/status.rs`: `/status` row builder plus `KvOverview`.
 - `crates/oxide-code/src/slash/theme.rs`: `/theme` live-preview picker (`ThemeCmd` plus `ThemePicker`).
-- `crates/oxide-code/src/tui/app.rs`: `App::handle_crossterm_event` modal gate, `apply_modal_action`, layout band.
-- `crates/oxide-code/src/tui/modal.rs`: `Modal`, `ModalKey`, `ModalAction`, `ModalStack`.
+- `crates/oxide-code/src/tui/app.rs`: `App::handle_crossterm_event` modal gate, `apply_modal_action`, `clear_modals`, `push_approval_modal`, layout band.
+- `crates/oxide-code/src/tui/modal.rs`: `Modal` (including the `on_cancel` hook), `ModalKey`, `ModalAction`, `ModalStack`.
+- `crates/oxide-code/src/tui/modal/approval.rs`: `ApprovalModal` approve-or-deny gate for agent tool calls.
 - `crates/oxide-code/src/tui/modal/kv_overview.rs`: generic `KvOverview` plus `KvSection`.
 - `crates/oxide-code/src/tui/modal/list_picker.rs`: generic `ListPicker<T: PickerItem>`.
 - `crates/oxide-code/src/tui/modal/searchable_list.rs`: generic `SearchableList<T: SearchableItem>`.

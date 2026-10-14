@@ -130,7 +130,7 @@ Each API request includes a `metadata` field with a `user_id` containing a strin
 - `device_id`: Persistent UUID stored in `~/.claude/.user-id` (created once, reused across sessions).
 - `account_uuid`: OAuth account UUID when using OAuth auth. Empty string for API key auth.
 
-The `user_id` value is `JSON.stringify()`'d. The API receives a string rather than a nested object.
+The `user_id` value is `JSON.stringify()`'d, so the API receives it as a string.
 
 ## Tool Definitions
 
@@ -146,11 +146,11 @@ The API supports prompt caching via `cache_control` on `TextBlockParam` blocks. 
 
 The `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` marker separates cacheable from non-cacheable content. Effective caching requires the static prefix to be identical across requests.
 
-oxide-code ships `scope: "global"` only when the configured base URL points at the first-party API. On any other host the static prefix still gets ephemeral caching, just at org level instead of global. The dynamic sections and block order are identical in both modes.
+oxide-code ships `scope: "global"` only when the configured base URL points at the first-party API. On any other host the static prefix still gets ephemeral caching at org scope. The dynamic sections and block order are identical in both modes.
 
 ## System Block Layout
 
-The flat sections array gets transformed into the block layout actually sent to the API. The boundary marker is consumed and never appears in the request. Agentic streaming emits the same 4-block shape (billing / attribution + identity + static + dynamic). The billing block is unconditional for gateway compatibility; only the `cache_control` on the static block varies by base URL.
+The flat sections array gets transformed into the block layout actually sent to the API. The boundary marker is consumed and never appears in the request. Agentic streaming emits the same 4-block shape (billing / attribution + identity + static + dynamic). The billing block is unconditional for gateway compatibility, and only the `cache_control` on the static block varies by base URL.
 
 **First-party base URL** (`api.anthropic.com`), global cache active:
 
@@ -170,7 +170,7 @@ The flat sections array gets transformed into the block layout actually sent to 
 | 2   | Static sections joined (`\n\n`)  | `{ type: "ephemeral" }` |
 | 3   | Dynamic sections joined (`\n\n`) | -                       |
 
-Dropping the `scope` field (rather than serializing `scope: "org"` explicitly) is deliberate: org is the absent-field default, the resulting wire shape is what the Anthropic SDK ships for non-global ephemeral caches, and every gateway accepts it.
+Omitting the `scope` field is deliberate: org is the absent-field default, the resulting wire shape is what the Anthropic SDK ships for non-global ephemeral caches, and every gateway accepts it.
 
 Static sections (before boundary): intro, system, doing tasks, actions, tools, tone / style, output efficiency. Dynamic sections (after boundary): session guidance, environment, language, MCP instructions, etc.
 

@@ -46,7 +46,7 @@ brew tap hakula139/oxide-code https://github.com/hakula139/oxide-code
 brew install oxide-code
 ```
 
-The formula pulls the prebuilt tarball published by `.github/workflows/release.yml`, so the install is binary-only and needs no Rust toolchain.
+The formula installs the prebuilt release binary, so it needs no Rust toolchain.
 
 ### From source via cargo
 
@@ -103,7 +103,7 @@ If `ox` is on `PATH`, this prints the version string. A `command not found` mean
 To also remove session data and config:
 
 ```bash
-rm -rf ${XDG_DATA_HOME:-$HOME/.local/share}/ox        # session JSONLs
+rm -rf ${XDG_DATA_HOME:-$HOME/.local/share}/ox        # sessions and device ID
 rm -rf ${XDG_STATE_HOME:-$HOME/.local/state}/ox       # log files
 rm -rf ${XDG_CONFIG_HOME:-$HOME/.config}/ox           # user config (if you wrote one)
 ```

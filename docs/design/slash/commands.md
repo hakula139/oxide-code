@@ -43,7 +43,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 12. **Two command kinds, one trait return: `SlashOutcome { Done, Forward(UserAction) }`.** `Done` covers read-only commands. `Forward(_)` is state-mutating, handed back to the App which forwards to the agent loop.
 
-13. **Modals open via a `SlashContext` side-channel.** Commands set `ctx.open_modal(Box::new(...))` and return `Done`. The dispatcher then harvests the slot after `execute` and pushes onto the App's modal stack. This keeps `SlashOutcome` derive-clean rather than adding a third variant. See [modals.md](modals.md) for the full modal design.
+13. **Modals open via a `SlashContext` side-channel.** Commands set `ctx.open_modal(Box::new(...))` and return `Done`. The dispatcher then harvests the slot after `execute` and pushes onto the App's modal stack. This keeps `SlashOutcome` derive-clean with its two variants. See [modals.md](modals.md) for the full modal design.
 
 14. **Modal-only commands suppress their own echo.** `SlashCommand::echoes_input(args) -> bool` defaults to true. Modal-only forms (`/status`, `/config`, `/help`, plus bare `/effort`, `/model`, `/rename`, `/resume`, and `/theme`) override to false, since the modal IS the response and the typed `> /foo` line would orphan in history once the modal closes. Typed forms keep echoing because the swap-confirmation system message anchors the pair.
 
@@ -61,7 +61,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 - **`/theme`**: Bare opens a live-preview list picker ([modals.md](modals.md)) over the built-in palettes. Up / Down repaints the TUI in the candidate, and Esc snaps back. `/theme <name>` validates against the curated roster and swaps directly. Custom file-path themes aren't accepted via the slash form.
 
-- **`/status`**: Opens a [`KvOverview`](modals.md) of session descriptors. No args, no chat output. Esc / Enter both dismiss.
+- **`/status`**: Opens a [`KvOverview`](modals.md) of session descriptors. No args, no chat output. Esc / Ctrl+C dismiss.
 
 - **`/config`**: Opens a [`KvOverview`](modals.md) with two headed sections: resolved effective config, and the layered TOML source paths it was assembled from. Path discovery runs per-invocation so mid-session edits surface immediately.
 
