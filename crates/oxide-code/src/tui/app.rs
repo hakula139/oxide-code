@@ -8,8 +8,8 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
-use crossterm::event::{Event, EventStream, KeyCode, KeyEvent};
+use anyhow::{Context, Result};
+use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind};
 use futures::{Stream, StreamExt};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
@@ -18,7 +18,7 @@ use tokio::sync::mpsc;
 use unicode_width::UnicodeWidthStr;
 
 use super::components::chat::ChatView;
-use super::components::input::InputArea;
+use super::components::input::{InputArea, InputOutcome};
 use super::components::status::{Status, StatusBar};
 use super::components::welcome::{self, WelcomeSnapshot};
 use super::git_probes::{GitProbes, GitUpdate};
@@ -151,9 +151,11 @@ impl App {
             // Four sources can wake the loop. The tick arm is the only renderer, so handlers only
             // mark `dirty` and render work stays paced by the 60 FPS clock.
             tokio::select! {
-                    event = crossterm_events.next() => {
-                    if let Some(Ok(event)) = event {
-                        self.handle_crossterm_event(&event);
+                event = crossterm_events.next() => {
+                    match event {
+                        Some(Ok(event)) => self.handle_crossterm_event(&event),
+                        Some(Err(e)) => return Err(e).context("cannot read terminal input"),
+                        None => self.should_quit = true,
                     }
                 }
                 event = self.agent_rx.recv() => {
@@ -190,15 +192,26 @@ impl App {
     // ── Event Handling ──
 
     fn handle_crossterm_event(&mut self, event: &Event) {
-        // Modal keys belong to the top overlay. Mouse and resize events still reach chat.
+        // Windows also reports key releases, which would otherwise act as a second press.
         if let Event::Key(key) = event
-            && self.modals.is_active()
+            && key.kind == KeyEventKind::Release
         {
-            if let Some(action) = self.modals.handle_key(key) {
-                self.apply_modal_action(action);
-            }
-            self.dirty = true;
             return;
+        }
+        // The top overlay owns keyboard input, including pastes. Mouse and resize events still
+        // reach chat.
+        if self.modals.is_active() {
+            match event {
+                Event::Key(key) => {
+                    if let Some(action) = self.modals.handle_key(key) {
+                        self.apply_modal_action(action);
+                    }
+                    self.dirty = true;
+                    return;
+                }
+                Event::Paste(_) => return,
+                _ => {}
+            }
         }
         match event {
             Event::Key(KeyEvent {
@@ -210,14 +223,11 @@ impl App {
                     self.handle_esc();
                 }
             }
-            Event::Key(..) => {
-                if let Some(action) = self.input.handle_event(event) {
-                    self.dispatch_user_action(action);
-                }
-                if !self.input.is_enabled() {
-                    self.chat.handle_event(event);
-                }
-            }
+            Event::Key(..) | Event::Paste(..) => match self.input.handle_event(event) {
+                InputOutcome::Action(action) => self.dispatch_user_action(action),
+                InputOutcome::Consumed => {}
+                InputOutcome::Ignored => self.chat.handle_event(event),
+            },
             Event::Mouse(_) => {
                 self.chat.handle_event(event);
             }
@@ -1266,6 +1276,36 @@ mod tests {
         assert_eq!(app.status_bar.git_branch(), Some("feat/x"));
     }
 
+    #[tokio::test]
+    async fn run_with_events_returns_terminal_read_errors() {
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        let (mut terminal, _buf) = crossterm_test_terminal(60, 8);
+        let stream = futures::stream::iter(vec![Err(io::Error::other("tty gone"))]);
+
+        let err = app
+            .run_with_events(&mut terminal, stream)
+            .await
+            .unwrap_err();
+
+        assert!(format!("{err:#}").contains("tty gone"), "{err:#}");
+    }
+
+    #[tokio::test]
+    async fn run_with_events_quits_when_the_terminal_stream_ends() {
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        let (mut terminal, _buf) = crossterm_test_terminal(60, 8);
+
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            app.run_with_events(&mut terminal, futures::stream::empty()),
+        )
+        .await
+        .expect("an ended stream must stop the loop")
+        .unwrap();
+
+        assert!(app.should_quit);
+    }
+
     // ── handle_crossterm_event ──
 
     fn key_event(code: KeyCode, modifiers: KeyModifiers) -> Event {
@@ -1353,7 +1393,7 @@ mod tests {
 
     #[test]
     fn handle_crossterm_unknown_event_is_a_noop() {
-        // The `_ => return` arm prevents FocusGained / FocusLost / Paste from forcing re-renders.
+        // The `_ => return` arm prevents FocusGained / FocusLost from forcing re-renders.
         let (mut app, _rx, _agent_tx) = test_app(None);
         app.dirty = false;
         app.handle_crossterm_event(&Event::FocusGained);
@@ -1361,11 +1401,85 @@ mod tests {
     }
 
     #[test]
-    fn handle_crossterm_scroll_key_routes_to_chat_while_input_disabled() {
-        // While input is disabled, arrow / page keys must still reach chat for scrolling.
+    fn handle_crossterm_key_release_is_ignored() {
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.input.set_text("hi");
+        app.dirty = false;
+
+        app.handle_crossterm_event(&Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+            KeyEventKind::Release,
+        )));
+
+        assert!(rx.try_recv().is_err(), "a release must not submit");
+        assert_eq!(app.input.lines(), vec!["hi".to_owned()]);
+        assert!(!app.dirty);
+    }
+
+    #[test]
+    fn handle_crossterm_page_up_scrolls_chat_while_idle_and_ctrl_end_jumps_back() {
         let (mut app, _rx, _agent_tx) = test_app(None);
-        app.input.set_enabled(false);
+        app.chat.push_system_message(long_chat_block());
+        _ = render_app(&mut app, 80, 20);
+        app.input.set_text("draft");
+
         app.handle_crossterm_event(&key_event(KeyCode::PageUp, KeyModifiers::NONE));
+        assert!(app.chat.is_scrolled_up(), "idle PageUp reaches chat");
+
+        app.handle_crossterm_event(&key_event(KeyCode::End, KeyModifiers::CONTROL));
+        assert!(
+            !app.chat.is_scrolled_up(),
+            "Ctrl+End jumps chat to the bottom"
+        );
+        assert_eq!(app.input.lines(), vec!["draft".to_owned()]);
+    }
+
+    #[test]
+    fn handle_crossterm_up_scrolls_chat_once_the_input_cursor_reaches_the_top() {
+        // Alternate-scroll turns wheel ticks into Up, so an idle prompt must still scroll chat.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.chat.push_system_message(long_chat_block());
+        _ = render_app(&mut app, 80, 20);
+        app.input.set_text("one\ntwo");
+
+        app.handle_crossterm_event(&key_event(KeyCode::Up, KeyModifiers::NONE));
+        assert!(
+            !app.chat.is_scrolled_up(),
+            "first Up moves the input cursor"
+        );
+
+        app.handle_crossterm_event(&key_event(KeyCode::Up, KeyModifiers::NONE));
+        assert!(app.chat.is_scrolled_up(), "Up on the top row scrolls chat");
+    }
+
+    #[test]
+    fn handle_crossterm_popup_arrows_while_busy_leave_chat_scroll_alone() {
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.chat.push_system_message(long_chat_block());
+        _ = render_app(&mut app, 80, 20);
+        app.handle_agent_event(AgentEvent::StreamToken("partial".into()));
+        app.handle_crossterm_event(&key_event(KeyCode::Char('/'), KeyModifiers::NONE));
+        assert!(app.input.popup_visible());
+
+        app.handle_crossterm_event(&key_event(KeyCode::Up, KeyModifiers::NONE));
+
+        assert!(!app.chat.is_scrolled_up(), "the popup consumed Up");
+    }
+
+    #[test]
+    fn handle_crossterm_paste_fills_the_input_without_submitting() {
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.dirty = false;
+
+        app.handle_crossterm_event(&Event::Paste("first line\r\nsecond line".to_owned()));
+
+        assert_eq!(
+            app.input.lines(),
+            vec!["first line".to_owned(), "second line".to_owned()],
+        );
+        assert!(rx.try_recv().is_err(), "a paste never submits");
+        assert_eq!(app.chat.entry_count(), 0);
         assert!(app.dirty);
     }
 
@@ -1433,6 +1547,16 @@ mod tests {
         app.handle_crossterm_event(&key_event(KeyCode::Char('s'), KeyModifiers::NONE));
         let forwarded = rx.recv().await.expect("modal-submitted action forwarded");
         assert!(matches!(forwarded, UserAction::Cancel));
+    }
+
+    #[test]
+    fn modal_gate_drops_pastes_while_a_modal_is_open() {
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.push_modal(Box::new(FakeModal::new("picker")));
+
+        app.handle_crossterm_event(&Event::Paste("pasted".to_owned()));
+
+        assert!(app.input.is_empty(), "the hidden input must stay empty");
     }
 
     #[test]

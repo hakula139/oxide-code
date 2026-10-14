@@ -10,8 +10,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
-use ratatui_textarea::{TextArea, WrapMode};
-use unicode_width::UnicodeWidthStr;
+use ratatui_textarea::{CursorMove, TextArea, WrapMode};
 
 use self::popup::{PopupMode, SlashPopup};
 use crate::agent::event::UserAction;
@@ -24,10 +23,15 @@ use crate::tui::theme::Theme;
 /// Maximum number of visible content lines before the input stops growing.
 const MAX_VISIBLE_LINES: u16 = 6;
 
-enum PopupKey {
+/// Result of routing one terminal event through [`InputArea::handle_event`].
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum InputOutcome {
+    /// The app should dispatch this action.
     Action(UserAction),
+    /// The input handled the event, so no other component may see it.
     Consumed,
-    Pass,
+    /// The input had no use for the event, so the caller may route it to the chat.
+    Ignored,
 }
 
 // ── InputArea ──
@@ -39,8 +43,11 @@ pub(crate) struct InputArea {
     popup: SlashPopup,
     enabled: bool,
     /// `Cell` because `render(&self)` is immutable.
-    last_width: Cell<u16>,
     scroll_top: Cell<u16>,
+    /// Textarea width at the last render, which sets the wrap layout.
+    rendered_width: Cell<u16>,
+    /// Cached [`Self::visual_line_count`], cleared when the text or the rendered width changes.
+    visual_lines: Cell<Option<u16>>,
 }
 
 // ── Public API ──
@@ -50,7 +57,7 @@ impl InputArea {
         let mut textarea = TextArea::default();
         textarea.set_cursor_line_style(Style::default());
         textarea.set_style(theme.text());
-        textarea.set_wrap_mode(WrapMode::Word);
+        textarea.set_wrap_mode(WrapMode::WordOrGlyph);
         textarea.set_block(Block::default());
 
         Self {
@@ -58,8 +65,9 @@ impl InputArea {
             textarea,
             enabled: true,
             popup: SlashPopup::new(theme),
-            last_width: Cell::new(0),
             scroll_top: Cell::new(0),
+            rendered_width: Cell::new(0),
+            visual_lines: Cell::new(None),
         }
     }
 
@@ -84,11 +92,12 @@ impl InputArea {
         self.textarea.lines().to_vec()
     }
 
-    /// Replaces the buffer with `text` and parks the cursor at its end.
+    /// Replaces the buffer with `text`, parks the cursor at its end, and keeps the yank buffer.
     pub(crate) fn set_text(&mut self, text: &str) {
+        // `cut` and `clear` would overwrite the yank buffer that Ctrl+Y pastes from.
         self.textarea.select_all();
-        self.textarea.cut();
         self.textarea.insert_str(text);
+        self.visual_lines.set(None);
         self.scroll_top.set(0);
     }
 
@@ -113,66 +122,15 @@ impl InputArea {
 // ── Event Handling & Rendering ──
 
 impl InputArea {
-    pub(crate) fn handle_event(&mut self, event: &Event) -> Option<UserAction> {
-        if let Event::Key(KeyEvent {
-            code: KeyCode::Char('d'),
-            modifiers: KeyModifiers::CONTROL,
-            ..
-        }) = event
-        {
-            return if self.enabled && self.is_empty() {
-                Some(UserAction::Quit)
-            } else {
-                None
-            };
-        }
-
-        if let Event::Key(KeyEvent {
-            code: KeyCode::Char('c'),
-            modifiers: KeyModifiers::CONTROL,
-            ..
-        }) = event
-        {
-            return Some(if self.enabled {
-                UserAction::ConfirmExit
-            } else {
-                UserAction::Cancel
-            });
-        }
-
-        if self.popup.is_visible() {
-            match self.handle_popup_key(event) {
-                PopupKey::Action(action) => return Some(action),
-                PopupKey::Consumed => return None,
-                PopupKey::Pass => {}
+    pub(crate) fn handle_event(&mut self, event: &Event) -> InputOutcome {
+        match event {
+            Event::Key(key) => self.handle_key(key),
+            Event::Paste(text) => {
+                self.paste(text);
+                InputOutcome::Consumed
             }
+            _ => InputOutcome::Ignored,
         }
-
-        if let Event::Key(KeyEvent {
-            code: KeyCode::Enter,
-            modifiers,
-            ..
-        }) = event
-        {
-            // Native Kitty protocol: terminal reports SHIFT directly.
-            // VS Code / Cursor keybinding: Shift+Enter sends \x1b\r (ESC CR),
-            // which crossterm parses as Alt+Enter.
-            if modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) {
-                self.textarea.insert_newline();
-                self.refresh_popup();
-                return None;
-            }
-            return self.submit();
-        }
-
-        // Scroll keys while busy belong to the chat view.
-        if !self.enabled && Self::is_scroll_key(event) {
-            return None;
-        }
-
-        self.textarea.input(event.clone());
-        self.refresh_popup();
-        None
     }
 
     pub(crate) fn render(&self, frame: &mut Frame, area: Rect) {
@@ -198,8 +156,9 @@ impl InputArea {
         );
 
         frame.render_widget(&self.textarea, textarea_area);
-
-        self.last_width.set(textarea_area.width);
+        if self.rendered_width.replace(textarea_area.width) != textarea_area.width {
+            self.visual_lines.set(None);
+        }
 
         let sc = self.textarea.screen_cursor();
         let cursor_row = saturating_u16(sc.row);
@@ -238,36 +197,114 @@ impl InputArea {
 // ── Private Helpers ──
 
 impl InputArea {
+    // ── Key Routing ──
+
+    fn handle_key(&mut self, key: &KeyEvent) -> InputOutcome {
+        match (key.code, key.modifiers) {
+            (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
+                return if self.enabled && self.is_empty() {
+                    InputOutcome::Action(UserAction::Quit)
+                } else {
+                    InputOutcome::Consumed
+                };
+            }
+            (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                return InputOutcome::Action(if self.enabled {
+                    UserAction::ConfirmExit
+                } else {
+                    UserAction::Cancel
+                });
+            }
+            (KeyCode::PageUp | KeyCode::PageDown, _)
+            | (KeyCode::Home | KeyCode::End, KeyModifiers::CONTROL) => {
+                return InputOutcome::Ignored;
+            }
+            _ => {}
+        }
+
+        if self.popup.is_visible() {
+            let outcome = self.handle_popup_key(key);
+            if outcome != InputOutcome::Ignored {
+                return outcome;
+            }
+        }
+
+        match key.code {
+            KeyCode::Enter => {
+                // Native Kitty protocol: terminal reports SHIFT directly.
+                // VS Code / Cursor keybinding: Shift+Enter sends \x1b\r (ESC CR),
+                // which crossterm parses as Alt+Enter.
+                if key
+                    .modifiers
+                    .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
+                {
+                    self.textarea.insert_newline();
+                    self.visual_lines.set(None);
+                    self.refresh_popup();
+                    return InputOutcome::Consumed;
+                }
+                self.submit()
+                    .map_or(InputOutcome::Consumed, InputOutcome::Action)
+            }
+            // Alternate-scroll delivers wheel ticks as Up / Down, so an unmovable cursor yields
+            // the key to chat scroll.
+            KeyCode::Up | KeyCode::Down => {
+                let before = self.textarea.cursor();
+                self.input_key(*key);
+                if self.textarea.cursor() == before {
+                    InputOutcome::Ignored
+                } else {
+                    InputOutcome::Consumed
+                }
+            }
+            _ => {
+                self.input_key(*key);
+                self.refresh_popup();
+                InputOutcome::Consumed
+            }
+        }
+    }
+
+    /// Feeds one key to the textarea, dropping the cached line count when the text changed.
+    fn input_key(&mut self, key: KeyEvent) {
+        if self.textarea.input(key) {
+            self.visual_lines.set(None);
+        }
+    }
+
+    /// Inserts bracketed-paste text without submitting on its newlines.
+    fn paste(&mut self, text: &str) {
+        // Terminals send CRLF or bare CR line breaks, and the textarea splits only on LF.
+        let text = text.replace("\r\n", "\n").replace('\r', "\n");
+        self.textarea.insert_str(text);
+        self.visual_lines.set(None);
+        self.refresh_popup();
+    }
+
     // ── Popup & State ──
 
-    fn handle_popup_key(&mut self, event: &Event) -> PopupKey {
-        let Event::Key(KeyEvent {
-            code, modifiers, ..
-        }) = event
-        else {
-            return PopupKey::Pass;
-        };
-        match code {
+    fn handle_popup_key(&mut self, key: &KeyEvent) -> InputOutcome {
+        match key.code {
             KeyCode::Up => {
                 self.popup.select_prev();
-                PopupKey::Consumed
+                InputOutcome::Consumed
             }
             KeyCode::Down => {
                 self.popup.select_next();
-                PopupKey::Consumed
+                InputOutcome::Consumed
             }
             KeyCode::Esc => {
                 self.popup.set_state(None);
-                PopupKey::Consumed
+                InputOutcome::Consumed
             }
-            KeyCode::Tab if modifiers.is_empty() => {
+            KeyCode::Tab if key.modifiers.is_empty() => {
                 self.popup_complete_to_buffer();
-                PopupKey::Consumed
+                InputOutcome::Consumed
             }
-            KeyCode::Enter if modifiers.is_empty() => self
+            KeyCode::Enter if key.modifiers.is_empty() => self
                 .popup_submit_selected()
-                .map_or(PopupKey::Pass, PopupKey::Action),
-            _ => PopupKey::Pass,
+                .map_or(InputOutcome::Ignored, InputOutcome::Action),
+            _ => InputOutcome::Ignored,
         }
     }
 
@@ -293,9 +330,7 @@ impl InputArea {
             PopupMode::Name => format!("/{}", row.value),
             PopupMode::Arg { name } => format!("/{name} {}", row.value),
         };
-        self.textarea.select_all();
-        self.textarea.cut();
-        self.scroll_top.set(0);
+        self.set_text("");
         self.popup.set_state(None);
         Some(UserAction::SubmitPrompt(submission))
     }
@@ -322,36 +357,17 @@ impl InputArea {
         ghost_text_from_state(&state, usage)
     }
 
-    fn is_scroll_key(event: &Event) -> bool {
-        matches!(
-            event,
-            Event::Key(KeyEvent {
-                code: KeyCode::Up
-                    | KeyCode::Down
-                    | KeyCode::PageUp
-                    | KeyCode::PageDown
-                    | KeyCode::Home
-                    | KeyCode::End,
-                ..
-            }),
-        )
-    }
-
+    /// Screen rows in the textarea's own wrap layout at its last-rendered width.
     fn visual_line_count(&self) -> u16 {
-        let width = self.last_width.get() as usize;
-        if width == 0 {
-            return saturating_u16(self.textarea.lines().len()).max(1);
+        if let Some(count) = self.visual_lines.get() {
+            return count;
         }
-        let count = self
-            .textarea
-            .lines()
-            .iter()
-            .map(|line| {
-                let w = UnicodeWidthStr::width(line.as_str());
-                if w <= width { 1 } else { w.div_ceil(width) }
-            })
-            .sum();
-        saturating_u16(count).max(1)
+        let mut probe = self.textarea.clone();
+        probe.move_cursor(CursorMove::Bottom);
+        probe.move_cursor(CursorMove::End);
+        let count = saturating_u16(probe.screen_cursor().row.saturating_add(1));
+        self.visual_lines.set(Some(count));
+        count
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -367,9 +383,7 @@ impl InputArea {
         }
         let trimmed = self.textarea.lines().join("\n").trim().to_owned();
 
-        self.textarea.select_all();
-        self.textarea.cut();
-        self.scroll_top.set(0);
+        self.set_text("");
         self.popup.set_state(None);
 
         Some(UserAction::SubmitPrompt(trimmed))
@@ -460,14 +474,9 @@ mod tests {
     #[test]
     fn height_accounts_for_visual_wrapping() {
         let mut input = test_input();
-        input.last_width.set(10);
-        for ch in "abcdefghijklmnopqrstuvwxy".chars() {
-            input.textarea.input(Event::Key(KeyEvent::new(
-                KeyCode::Char(ch),
-                KeyModifiers::NONE,
-            )));
-        }
-        assert_eq!(input.height(), 5);
+        type_text(&mut input, "aaaaaa bbbbbb cccccc dddddd");
+        render_to_backend(&input, 12, 3);
+        assert_eq!(input.height(), 6, "4 word-wrapped rows + 2 borders");
     }
 
     #[test]
@@ -505,22 +514,22 @@ mod tests {
     #[test]
     fn handle_event_ctrl_c_idle_arms_exit() {
         let mut input = test_input();
-        let action = input.handle_event(&key(KeyCode::Char('c'), KeyModifiers::CONTROL));
-        assert!(matches!(action, Some(UserAction::ConfirmExit)));
+        let outcome = input.handle_event(&key(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert_eq!(outcome, InputOutcome::Action(UserAction::ConfirmExit));
     }
 
     #[test]
     fn handle_event_ctrl_d_empty_buffer_quits_only_when_idle() {
         // POSIX EOF idiom: idle Ctrl+D on an empty buffer exits.
         let mut input = test_input();
-        let idle_action = input.handle_event(&key(KeyCode::Char('d'), KeyModifiers::CONTROL));
-        assert!(matches!(idle_action, Some(UserAction::Quit)));
+        let idle = input.handle_event(&key(KeyCode::Char('d'), KeyModifiers::CONTROL));
+        assert_eq!(idle, InputOutcome::Action(UserAction::Quit));
 
         // Busy Ctrl+D is a no-op even with an empty buffer — a habitual
         // EOF press shouldn't tear down an in-flight turn.
         input.set_enabled(false);
-        let busy_action = input.handle_event(&key(KeyCode::Char('d'), KeyModifiers::CONTROL));
-        assert!(busy_action.is_none());
+        let busy = input.handle_event(&key(KeyCode::Char('d'), KeyModifiers::CONTROL));
+        assert_eq!(busy, InputOutcome::Consumed);
     }
 
     #[test]
@@ -534,13 +543,13 @@ mod tests {
             KeyCode::Char('h'),
             KeyModifiers::NONE,
         )));
-        let idle_action = input.handle_event(&key(KeyCode::Char('d'), KeyModifiers::CONTROL));
-        assert!(idle_action.is_none());
+        let idle = input.handle_event(&key(KeyCode::Char('d'), KeyModifiers::CONTROL));
+        assert_eq!(idle, InputOutcome::Consumed);
         assert_eq!(input.textarea.lines(), vec!["h"]);
 
         input.set_enabled(false);
-        let busy_action = input.handle_event(&key(KeyCode::Char('d'), KeyModifiers::CONTROL));
-        assert!(busy_action.is_none());
+        let busy = input.handle_event(&key(KeyCode::Char('d'), KeyModifiers::CONTROL));
+        assert_eq!(busy, InputOutcome::Consumed);
         assert_eq!(input.textarea.lines(), vec!["h"]);
     }
 
@@ -548,8 +557,8 @@ mod tests {
     fn handle_event_ctrl_c_busy_triggers_cancel() {
         let mut input = test_input();
         input.set_enabled(false);
-        let action = input.handle_event(&key(KeyCode::Char('c'), KeyModifiers::CONTROL));
-        assert!(matches!(action, Some(UserAction::Cancel)));
+        let outcome = input.handle_event(&key(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert_eq!(outcome, InputOutcome::Action(UserAction::Cancel));
     }
 
     #[test]
@@ -558,8 +567,8 @@ mod tests {
         // mid-turn produces no action even though the textarea now accepts typing during busy.
         let mut input = test_input();
         input.set_enabled(false);
-        let action = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(action.is_none());
+        let outcome = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(outcome, InputOutcome::Consumed);
     }
 
     #[test]
@@ -577,26 +586,90 @@ mod tests {
         let mut input = test_input();
         input.set_enabled(false);
         input.handle_event(&key(KeyCode::Char('q'), KeyModifiers::NONE));
-        let action = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(matches!(action, Some(UserAction::SubmitPrompt(s)) if s == "q"));
+        let outcome = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            outcome,
+            InputOutcome::Action(UserAction::SubmitPrompt("q".to_owned())),
+        );
     }
 
     #[test]
-    fn handle_event_disabled_scroll_keys_pass_through() {
-        // Arrow / Page keys while busy must reach `ChatView` for scroll;
-        // returning `None` lets the parent route them.
+    fn handle_event_page_and_jump_keys_are_ignored_in_both_run_states() {
+        // Chat owns these keys, so a draft must neither change nor swallow them.
+        let mut input = test_input();
+        type_text(&mut input, "draft");
+        for enabled in [true, false] {
+            input.set_enabled(enabled);
+            for event in [
+                key(KeyCode::PageUp, KeyModifiers::NONE),
+                key(KeyCode::PageDown, KeyModifiers::NONE),
+                key(KeyCode::Home, KeyModifiers::CONTROL),
+                key(KeyCode::End, KeyModifiers::CONTROL),
+            ] {
+                assert_eq!(
+                    input.handle_event(&event),
+                    InputOutcome::Ignored,
+                    "{event:?}"
+                );
+            }
+            assert_eq!(input.textarea.lines(), vec!["draft"]);
+            assert_eq!(input.textarea.cursor(), (0, 5));
+        }
+    }
+
+    #[test]
+    fn handle_event_up_down_on_empty_buffer_is_ignored() {
+        let mut input = test_input();
+        for code in [KeyCode::Up, KeyCode::Down] {
+            assert_eq!(
+                input.handle_event(&key(code, KeyModifiers::NONE)),
+                InputOutcome::Ignored,
+            );
+        }
+    }
+
+    #[test]
+    fn handle_event_up_down_move_the_cursor_until_the_buffer_edge() {
+        let mut input = test_input();
+        input.set_text("one\ntwo");
+
+        let up = key(KeyCode::Up, KeyModifiers::NONE);
+        let down = key(KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(input.handle_event(&up), InputOutcome::Consumed);
+        assert_eq!(input.textarea.cursor().0, 0);
+        assert_eq!(input.handle_event(&up), InputOutcome::Ignored, "top row");
+        assert_eq!(input.handle_event(&down), InputOutcome::Consumed);
+        assert_eq!(input.textarea.cursor().0, 1);
+        assert_eq!(
+            input.handle_event(&down),
+            InputOutcome::Ignored,
+            "bottom row"
+        );
+    }
+
+    #[test]
+    fn handle_event_plain_home_moves_the_cursor_while_busy() {
         let mut input = test_input();
         input.set_enabled(false);
-        for code in [
-            KeyCode::Up,
-            KeyCode::Down,
-            KeyCode::PageUp,
-            KeyCode::PageDown,
-            KeyCode::Home,
-            KeyCode::End,
-        ] {
-            assert!(input.handle_event(&key(code, KeyModifiers::NONE)).is_none());
-        }
+        type_text(&mut input, "draft");
+        let outcome = input.handle_event(&key(KeyCode::Home, KeyModifiers::NONE));
+        assert_eq!(outcome, InputOutcome::Consumed);
+        assert_eq!(input.textarea.cursor(), (0, 0));
+    }
+
+    #[test]
+    fn handle_event_paste_normalizes_line_breaks_without_submitting() {
+        let mut input = test_input();
+        let outcome = input.handle_event(&Event::Paste("one\r\ntwo\rthree\nfour".to_owned()));
+        assert_eq!(outcome, InputOutcome::Consumed);
+        assert_eq!(input.textarea.lines(), vec!["one", "two", "three", "four"]);
+    }
+
+    #[test]
+    fn handle_event_paste_of_a_slash_command_opens_the_popup() {
+        let mut input = test_input();
+        input.handle_event(&Event::Paste("/he".to_owned()));
+        assert!(input.popup_visible());
     }
 
     #[test]
@@ -607,8 +680,8 @@ mod tests {
             KeyModifiers::NONE,
         )));
 
-        let action = input.handle_event(&key(KeyCode::Enter, KeyModifiers::SHIFT));
-        assert!(action.is_none());
+        let outcome = input.handle_event(&key(KeyCode::Enter, KeyModifiers::SHIFT));
+        assert_eq!(outcome, InputOutcome::Consumed);
         assert_eq!(input.textarea.lines().len(), 2);
     }
 
@@ -622,8 +695,8 @@ mod tests {
             KeyModifiers::NONE,
         )));
 
-        let action = input.handle_event(&key(KeyCode::Enter, KeyModifiers::ALT));
-        assert!(action.is_none());
+        let outcome = input.handle_event(&key(KeyCode::Enter, KeyModifiers::ALT));
+        assert_eq!(outcome, InputOutcome::Consumed);
         assert_eq!(input.textarea.lines().len(), 2);
     }
 
@@ -639,8 +712,11 @@ mod tests {
             KeyModifiers::NONE,
         )));
 
-        let action = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(matches!(action, Some(UserAction::SubmitPrompt(s)) if s == "hi"));
+        let outcome = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            outcome,
+            InputOutcome::Action(UserAction::SubmitPrompt("hi".to_owned())),
+        );
     }
 
     // ── render ──
@@ -837,48 +913,59 @@ mod tests {
 
     #[test]
     fn visual_line_count_no_width_falls_back_to_logical() {
+        // Before the first render the textarea has no wrap width.
         let mut input = test_input();
-        // last_width is 0 (no render yet), so falls back to logical count.
         assert_eq!(input.visual_line_count(), 1);
 
-        input.textarea.insert_newline();
+        input.handle_event(&key(KeyCode::Enter, KeyModifiers::SHIFT));
         assert_eq!(input.visual_line_count(), 2);
     }
 
     #[test]
-    fn visual_line_count_wraps_long_line() {
+    fn visual_line_count_tracks_edits_and_width_changes() {
         let mut input = test_input();
-        input.last_width.set(10);
-        // Insert a 25-char line: wraps to ceil(25/10) = 3 visual lines.
-        for ch in "abcdefghijklmnopqrstuvwxy".chars() {
-            input.textarea.input(Event::Key(KeyEvent::new(
-                KeyCode::Char(ch),
-                KeyModifiers::NONE,
-            )));
+        render_to_backend(&input, 12, 6);
+        assert_eq!(input.visual_line_count(), 1);
+
+        for ch in "a".repeat(25).chars() {
+            input.handle_event(&key(KeyCode::Char(ch), KeyModifiers::NONE));
         }
+        assert_eq!(input.visual_line_count(), 3, "typing re-measures");
+
+        input.handle_event(&Event::Paste("dddddddddd".to_owned()));
+        assert_eq!(input.visual_line_count(), 4, "a paste re-measures");
+
+        render_to_backend(&input, 40, 6);
+        assert_eq!(input.visual_line_count(), 1, "a wider render re-measures");
+
+        input.set_text("a\nb\nc");
+        assert_eq!(input.visual_line_count(), 3, "set_text re-measures");
+    }
+
+    #[test]
+    fn visual_line_count_breaks_at_word_boundaries() {
+        // 27 chars fit 3 rows of 10 by width alone, but words cannot straddle a row break.
+        let mut input = test_input();
+        type_text(&mut input, "aaaaaa bbbbbb cccccc dddddd");
+        render_to_backend(&input, 12, 6);
+        assert_eq!(input.visual_line_count(), 4);
+    }
+
+    #[test]
+    fn visual_line_count_splits_an_unbroken_token_at_the_width() {
+        // A pasted URL or path wider than the band wraps onto the following rows.
+        let mut input = test_input();
+        type_text(&mut input, "abcdefghijklmnopqrstuvwxy");
+        render_to_backend(&input, 12, 3);
         assert_eq!(input.visual_line_count(), 3);
     }
 
     #[test]
     fn visual_line_count_mixed_logical_and_wrapped() {
         let mut input = test_input();
-        input.last_width.set(10);
-        // Line 1: 5 chars (fits in 10) -> 1 visual line.
-        for ch in "hello".chars() {
-            input.textarea.input(Event::Key(KeyEvent::new(
-                KeyCode::Char(ch),
-                KeyModifiers::NONE,
-            )));
-        }
-        input.textarea.insert_newline();
-        // Line 2: 15 chars -> ceil(15/10) = 2 visual lines.
-        for ch in "abcdefghijklmno".chars() {
-            input.textarea.input(Event::Key(KeyEvent::new(
-                KeyCode::Char(ch),
-                KeyModifiers::NONE,
-            )));
-        }
-        assert_eq!(input.visual_line_count(), 3);
+        input.set_text("hello\nabcdefghijklmno");
+        render_to_backend(&input, 12, 3);
+        assert_eq!(input.visual_line_count(), 3, "1 row + 2 rows");
     }
 
     // ── submit ──
@@ -898,8 +985,19 @@ mod tests {
     #[test]
     fn submit_empty_produces_no_action() {
         let mut input = test_input();
-        let action = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(action.is_none());
+        let outcome = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(outcome, InputOutcome::Consumed);
+    }
+
+    #[test]
+    fn submit_keeps_the_yank_buffer() {
+        // Ctrl+W yanks `bar`, and Ctrl+Y after the submit must still paste it.
+        let mut input = test_input();
+        type_text(&mut input, "foo bar");
+        input.handle_event(&key(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
+        input.handle_event(&key(KeyCode::Char('y'), KeyModifiers::CONTROL));
+        assert_eq!(input.textarea.lines(), vec!["bar"]);
     }
 
     #[test]
@@ -918,8 +1016,11 @@ mod tests {
             KeyModifiers::NONE,
         )));
 
-        let action = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(matches!(action, Some(UserAction::SubmitPrompt(s)) if s == "a"));
+        let outcome = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            outcome,
+            InputOutcome::Action(UserAction::SubmitPrompt("a".to_owned())),
+        );
     }
 
     // ── popup routing ──
@@ -941,8 +1042,8 @@ mod tests {
     fn handle_event_popup_down_advances_selection() {
         let mut input = input_with_popup();
         let initial = selected_value(&input);
-        let action = input.handle_event(&key(KeyCode::Down, KeyModifiers::NONE));
-        assert!(action.is_none(), "Down is consumed silently");
+        let outcome = input.handle_event(&key(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(outcome, InputOutcome::Consumed, "chat must not scroll too");
         let after = selected_value(&input);
         assert_ne!(initial, after, "Down moves to a different command");
     }
@@ -962,8 +1063,8 @@ mod tests {
         // Char keys are not popup nav — they fall through to the
         // textarea so refining the query keeps working.
         let mut input = input_with_popup();
-        let action = input.handle_event(&key(KeyCode::Char('h'), KeyModifiers::NONE));
-        assert!(action.is_none());
+        let outcome = input.handle_event(&key(KeyCode::Char('h'), KeyModifiers::NONE));
+        assert_eq!(outcome, InputOutcome::Consumed);
         assert_eq!(input.textarea.lines(), vec!["/h"]);
         assert!(input.popup_visible(), "popup stays visible while typing");
     }
@@ -973,8 +1074,8 @@ mod tests {
         // Resize and other non-key events reach handle_event when
         // routed directly; popup must let them pass without panicking.
         let mut input = input_with_popup();
-        let action = input.handle_event(&Event::Resize(80, 24));
-        assert!(action.is_none());
+        let outcome = input.handle_event(&Event::Resize(80, 24));
+        assert_eq!(outcome, InputOutcome::Ignored);
         assert!(input.popup_visible());
     }
 
@@ -984,8 +1085,8 @@ mod tests {
         // hides on reclassification — arg mode with an empty roster yields no rows.
         let mut input = input_with_popup();
         let selected = selected_value(&input);
-        let action = input.handle_event(&key(KeyCode::Tab, KeyModifiers::NONE));
-        assert!(action.is_none(), "Tab is consumed, no UserAction");
+        let outcome = input.handle_event(&key(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(outcome, InputOutcome::Consumed);
         assert_eq!(input.textarea.lines(), vec![format!("/{selected} ")]);
         assert!(!input.popup_visible(), "no arg roster → popup hides");
     }
@@ -997,8 +1098,8 @@ mod tests {
         let mut input = test_input();
         type_text(&mut input, "/mo");
         input.refresh_popup();
-        let action = input.handle_event(&key(KeyCode::Tab, KeyModifiers::NONE));
-        assert!(action.is_none());
+        let outcome = input.handle_event(&key(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(outcome, InputOutcome::Consumed);
         assert_eq!(input.textarea.lines(), vec!["/model "]);
         assert!(
             input.popup_visible(),
@@ -1013,8 +1114,8 @@ mod tests {
         input.refresh_popup();
         assert!(input.popup_visible(), "popup opens for /effort arg mode");
         let picked = selected_value(&input);
-        let action = input.handle_event(&key(KeyCode::Tab, KeyModifiers::NONE));
-        assert!(action.is_none(), "Tab is consumed, no UserAction");
+        let outcome = input.handle_event(&key(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(outcome, InputOutcome::Consumed);
         assert_eq!(input.textarea.lines(), vec![format!("/effort {picked} ")]);
         assert!(!input.popup_visible(), "popup dismisses after Tab");
     }
@@ -1023,10 +1124,10 @@ mod tests {
     fn handle_event_popup_enter_in_name_mode_commits_picked_row() {
         let mut input = input_with_popup();
         let selected = selected_value(&input);
-        let action = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
+        let outcome = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(
-            action,
-            Some(UserAction::SubmitPrompt(format!("/{selected}")))
+            outcome,
+            InputOutcome::Action(UserAction::SubmitPrompt(format!("/{selected}"))),
         );
         assert!(input.textarea.is_empty());
     }
@@ -1037,10 +1138,10 @@ mod tests {
         type_text(&mut input, "/effort ");
         input.refresh_popup();
         let picked = selected_value(&input);
-        let action = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
+        let outcome = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(
-            action,
-            Some(UserAction::SubmitPrompt(format!("/effort {picked}")))
+            outcome,
+            InputOutcome::Action(UserAction::SubmitPrompt(format!("/effort {picked}"))),
         );
         assert!(input.textarea.is_empty());
     }
@@ -1052,10 +1153,10 @@ mod tests {
         input.refresh_popup();
         assert!(input.popup_visible());
         let picked = selected_value(&input);
-        let action = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
+        let outcome = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(
-            action,
-            Some(UserAction::SubmitPrompt(format!("/model {picked}"))),
+            outcome,
+            InputOutcome::Action(UserAction::SubmitPrompt(format!("/model {picked}"))),
         );
         assert!(input.textarea.is_empty());
         assert!(!input.popup_visible());
@@ -1073,10 +1174,10 @@ mod tests {
         input.handle_event(&key(KeyCode::Esc, KeyModifiers::NONE));
         assert!(!input.popup_visible());
 
-        let action = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
+        let outcome = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(
-            action,
-            Some(UserAction::SubmitPrompt("/model claude-opus-4".to_owned())),
+            outcome,
+            InputOutcome::Action(UserAction::SubmitPrompt("/model claude-opus-4".to_owned())),
         );
     }
 

@@ -7,7 +7,8 @@ use anyhow::Result;
 use crossterm::Command;
 use crossterm::cursor::{RestorePosition, SavePosition};
 use crossterm::event::{
-    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    DisableBracketedPaste, EnableBracketedPaste, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::style::{
     Attribute as CtAttribute, Color as CtColor, Print, SetAttribute, SetBackgroundColor,
@@ -24,8 +25,8 @@ use super::components::status::{HyperlinkCell, StatusHyperlink};
 
 pub(crate) type Tui = Terminal<CrosstermBackend<Stdout>>;
 
-/// Enters raw mode + alt screen + alternate-scroll + Kitty keyboard. Caller must invoke [`restore`]
-/// on exit (including panics).
+/// Enters raw mode + alt screen + alternate-scroll + bracketed paste + Kitty keyboard. Caller must
+/// invoke [`restore`] on exit (including panics).
 pub(crate) fn init() -> Result<Tui> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -41,6 +42,7 @@ fn enter_tui_mode(stdout: &mut impl Write) -> Result<()> {
         stdout,
         EnterAlternateScreen,
         EnableAlternateScroll,
+        EnableBracketedPaste,
         PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
         terminal::Clear(terminal::ClearType::All),
     )?;
@@ -62,6 +64,7 @@ fn leave_tui_mode(stdout: &mut impl Write) -> Result<()> {
     execute!(
         stdout,
         DisableAlternateScroll,
+        DisableBracketedPaste,
         PopKeyboardEnhancementFlags,
         LeaveAlternateScreen,
         crossterm::cursor::Show,
@@ -279,6 +282,7 @@ mod tests {
     const ENTER_ALT_SCREEN: &[u8] = b"\x1b[?1049h";
     const CLEAR_SCREEN: &[u8] = b"\x1b[2J";
     const ENABLE_ALT_SCROLL: &[u8] = b"\x1b[?1007h";
+    const ENABLE_BRACKETED_PASTE: &[u8] = b"\x1b[?2004h";
     const ENABLE_MOUSE_BASIC: &[u8] = b"\x1b[?1000h";
 
     #[test]
@@ -296,6 +300,10 @@ mod tests {
         assert!(
             index_of(&buf, ENABLE_ALT_SCROLL).is_some(),
             "alternate-scroll must be enabled so wheel still scrolls without mouse capture"
+        );
+        assert!(
+            index_of(&buf, ENABLE_BRACKETED_PASTE).is_some(),
+            "bracketed paste must be enabled so pasted newlines do not submit"
         );
     }
 
@@ -318,6 +326,7 @@ mod tests {
     const LEAVE_ALT_SCREEN: &[u8] = b"\x1b[?1049l";
     const SHOW_CURSOR: &[u8] = b"\x1b[?25h";
     const DISABLE_ALT_SCROLL: &[u8] = b"\x1b[?1007l";
+    const DISABLE_BRACKETED_PASTE: &[u8] = b"\x1b[?2004l";
 
     #[test]
     fn leave_tui_mode_writes_restore_sequences() {
@@ -334,6 +343,10 @@ mod tests {
         assert!(
             index_of(&buf, DISABLE_ALT_SCROLL).is_some(),
             "alternate-scroll must be disabled when leaving the TUI"
+        );
+        assert!(
+            index_of(&buf, DISABLE_BRACKETED_PASTE).is_some(),
+            "bracketed paste must be disabled when leaving the TUI"
         );
     }
 
