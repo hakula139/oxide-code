@@ -34,8 +34,9 @@ See [`docs/roadmap.md`](docs/roadmap.md) for current focus and plans.
 Four install paths are supported: prebuilt tarball, Homebrew tap, `cargo install`, and Nix flake. See [Installation](docs/guide/install.md) for the full matrix. The most common one-liners:
 
 ```bash
-# macOS aarch64 (Apple Silicon)
-curl -fsSL https://github.com/hakula139/oxide-code/releases/latest/download/oxide-code-aarch64-apple-darwin.tar.gz | tar -xz
+# macOS aarch64 (Apple Silicon). Set VERSION to the newest tag on the Releases page.
+VERSION=v0.1.0-alpha.2
+curl -fsSL "https://github.com/hakula139/oxide-code/releases/download/$VERSION/oxide-code-aarch64-apple-darwin.tar.gz" | tar -xz
 sudo mv ox /usr/local/bin/
 
 # Homebrew (macOS, Linux)

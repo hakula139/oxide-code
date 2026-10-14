@@ -61,12 +61,13 @@ The release lands through a PR, never a direct push to `main`. The order is: ope
 
     Each archive contains the `ox` binary.
 
-11. Refresh the Homebrew formula against the published artifacts. Run this after the workflow finishes uploading assets, otherwise the sidecar URLs return 404. The script regenerates `Formula/oxide-code.rb` by fetching each `.sha256` sidecar from the release, so it goes through its own PR:
+11. Refresh the Homebrew formula and the pinned install snippets against the published artifacts. Run this after the workflow finishes uploading assets, otherwise the sidecar URLs return 404. The script regenerates `Formula/oxide-code.rb` by fetching each `.sha256` sidecar from the release. Also set `VERSION=vX.Y.Z` in the install blocks of `README.md` and `docs/guide/install.md`. Both changes go through one PR of their own:
 
     ```bash
     git switch -c chore/homebrew-vX.Y.Z
     ./scripts/update-homebrew-formula.sh vX.Y.Z
-    git commit -am "chore(release): refresh Homebrew formula for vX.Y.Z"
+    perl -pi -e 's/^VERSION=v.*/VERSION=vX.Y.Z/' README.md docs/guide/install.md
+    git commit -am "chore(release): refresh Homebrew formula and install snippets for vX.Y.Z"
     ```
 
     Push and open a PR as in steps 7 and 8.

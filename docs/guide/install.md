@@ -15,27 +15,29 @@ Pick whichever path matches how you usually install developer tools.
 
 ### Prebuilt binary
 
-Download the latest release archive from [Releases](https://github.com/hakula139/oxide-code/releases/latest), extract, and move the `ox` binary onto your `PATH`:
+Download the archive for your platform from [Releases](https://github.com/hakula139/oxide-code/releases), extract it, and move the `ox` binary onto your `PATH`. The commands below fetch the release named by `VERSION`, so set it to the newest tag on that page:
 
 ```bash
+VERSION=v0.1.0-alpha.2
+
 # macOS aarch64 (Apple Silicon)
-curl -fsSL https://github.com/hakula139/oxide-code/releases/latest/download/oxide-code-aarch64-apple-darwin.tar.gz | tar -xz
+curl -fsSL "https://github.com/hakula139/oxide-code/releases/download/$VERSION/oxide-code-aarch64-apple-darwin.tar.gz" | tar -xz
 sudo mv ox /usr/local/bin/
 
 # macOS x86_64 (Intel)
-curl -fsSL https://github.com/hakula139/oxide-code/releases/latest/download/oxide-code-x86_64-apple-darwin.tar.gz | tar -xz
+curl -fsSL "https://github.com/hakula139/oxide-code/releases/download/$VERSION/oxide-code-x86_64-apple-darwin.tar.gz" | tar -xz
 sudo mv ox /usr/local/bin/
 
 # Linux x86_64
-curl -fsSL https://github.com/hakula139/oxide-code/releases/latest/download/oxide-code-x86_64-unknown-linux-gnu.tar.gz | tar -xz
+curl -fsSL "https://github.com/hakula139/oxide-code/releases/download/$VERSION/oxide-code-x86_64-unknown-linux-gnu.tar.gz" | tar -xz
 sudo mv ox /usr/local/bin/
 
 # Windows x86_64 (Git Bash / MSYS / WSL)
-curl -fsSLO https://github.com/hakula139/oxide-code/releases/latest/download/oxide-code-x86_64-pc-windows-msvc.zip
+curl -fsSLO "https://github.com/hakula139/oxide-code/releases/download/$VERSION/oxide-code-x86_64-pc-windows-msvc.zip"
 unzip oxide-code-x86_64-pc-windows-msvc.zip
 ```
 
-Each archive ships a single `ox` executable. Each release also publishes a `<archive>.sha256` sidecar you can verify against.
+Each archive ships a single `ox` executable, and each release publishes an `oxide-code-<target>.sha256` checksum beside it.
 
 ### Homebrew (macOS, Linux)
 
@@ -84,12 +86,12 @@ If `ox` is on `PATH`, this prints the version string. A `command not found` mean
 
 ## Update `ox`
 
-| Install method  | Update command                                                                             |
-| --------------- | ------------------------------------------------------------------------------------------ |
-| Prebuilt binary | Re-run the `curl ... \| tar -xz` + `sudo mv` block from above against `/releases/latest/`. |
-| Homebrew        | `brew update && brew upgrade oxide-code`                                                   |
-| Cargo           | `cargo install --git https://github.com/hakula139/oxide-code --locked --force`             |
-| Nix profile     | `nix profile upgrade oxide-code` (or refresh the flake input in your project)              |
+| Install method  | Update command                                                                 |
+| --------------- | ------------------------------------------------------------------------------ |
+| Prebuilt binary | Re-run the download block from above with `VERSION` set to the new tag         |
+| Homebrew        | `brew update && brew upgrade oxide-code`                                       |
+| Cargo           | `cargo install --git https://github.com/hakula139/oxide-code --locked --force` |
+| Nix profile     | `nix profile upgrade oxide-code` (or refresh the flake input in your project)  |
 
 ## Uninstall `ox`
 
