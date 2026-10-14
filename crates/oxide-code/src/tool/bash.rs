@@ -30,8 +30,8 @@ impl Tool for BashTool {
         "Execute a shell command and return its output."
     }
 
-    fn risk_class(&self) -> super::RiskClass {
-        super::RiskClass::Execute
+    fn permission_class(&self) -> crate::permission::PermissionClass {
+        crate::permission::PermissionClass::Bash
     }
 
     fn gate_target(
