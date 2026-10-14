@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -95,8 +95,9 @@ impl SessionStore {
         })
     }
 
-    /// Creates a new session file (0o600, `O_EXCL`) and writes the header.
-    pub(crate) fn create(&self, header: &Entry) -> Result<SessionWriter> {
+    /// Creates the file (0o600, `O_EXCL`) and writes the header, then the JSONL `lines`, in one
+    /// write that unlinks the file on failure.
+    pub(crate) fn create(&self, header: &Entry, lines: &[u8]) -> Result<SessionWriter> {
         let Entry::Header {
             session_id,
             created_at,
@@ -107,15 +108,16 @@ impl SessionStore {
         };
         validate_session_id(session_id)?;
 
+        let mut buf = encode_lines([header])?;
+        buf.extend_from_slice(lines);
         let path = self
             .project_dir
             .join(session_filename(session_id, *created_at));
-        let file = open_create_exclusive(&path)
-            .with_context(|| format!("failed to create {}", path.display()))?;
-
-        let mut writer = SessionWriter::new(file);
-        writer.append(header)?;
-        Ok(writer)
+        let file = create_written(&path, |mut file| file.write_all(&buf))?;
+        Ok(SessionWriter {
+            path,
+            file: Some(file),
+        })
     }
 
     /// Opens an existing session file in append mode, searching all projects.
@@ -247,43 +249,20 @@ impl SessionStore {
 
 /// Opens an existing session file in append mode by explicit path.
 pub(crate) fn open_append_at(path: &Path) -> Result<SessionWriter> {
-    let file = OpenOptions::new()
-        .append(true)
-        .open(path)
-        .with_context(|| format!("session not found: {}", path.display()))?;
-    Ok(SessionWriter::new(file))
+    Ok(SessionWriter {
+        path: path.to_owned(),
+        file: Some(open_append_file(path)?),
+    })
 }
 
 /// Loads session data from an explicit path with DAG-based chain resolution.
 pub(crate) fn load_session_data_from_path(path: &Path) -> Result<SessionData> {
     let file =
         File::open(path).with_context(|| format!("session not found: {}", path.display()))?;
-    let mut reader = BufReader::new(file);
+    let mut lines = JsonlLines::new(BufReader::new(file));
     let mut builder = SessionDataBuilder::new();
-    let mut buf = Vec::new();
-    let mut line_no: u32 = 0;
 
-    // Byte-by-line so truncated UTF-8 at EOF is warn-skipped (not `InvalidData` from `lines()`).
-    loop {
-        buf.clear();
-        let read = reader
-            .read_until(b'\n', &mut buf)
-            .with_context(|| format!("read error at line {}", line_no + 1))?;
-        if read == 0 {
-            break;
-        }
-        line_no += 1;
-        let without_newline = buf.strip_suffix(b"\n").unwrap_or(&buf);
-        if without_newline.is_empty() {
-            continue;
-        }
-        let line = match std::str::from_utf8(without_newline) {
-            Ok(s) => s,
-            Err(e) => {
-                warn!("skipping non-utf8 entry at line {line_no}: {e}");
-                continue;
-            }
-        };
+    while let Some((line_no, line)) = lines.next_line()? {
         let entry: Entry = match serde_json::from_str(line) {
             Ok(e) => e,
             Err(e) => {
@@ -301,6 +280,8 @@ struct SessionDataBuilder {
     chain: ChainBuilder,
     context: Option<SessionContext>,
     compact: Option<CompactInfo>,
+    /// A compact boundary that takes effect only once its post-compact root follows it.
+    pending_compact: Option<CompactInfo>,
     latest_title: Option<TitleInfo>,
     compact_tail_uuids: Option<HashSet<Uuid>>,
     compact_tail_accepts_sidecars: bool,
@@ -314,6 +295,7 @@ impl SessionDataBuilder {
             chain: ChainBuilder::new(),
             context: None,
             compact: None,
+            pending_compact: None,
             latest_title: None,
             compact_tail_uuids: None,
             compact_tail_accepts_sidecars: true,
@@ -360,7 +342,13 @@ impl SessionDataBuilder {
                 pre_message_count,
                 instructions,
                 ..
-            } => self.reset_at_compact(summary, pre_message_count, instructions),
+            } => {
+                self.pending_compact = Some(CompactInfo {
+                    summary,
+                    pre_message_count,
+                    instructions,
+                });
+            }
             _ => {}
         }
         Ok(())
@@ -374,6 +362,13 @@ impl SessionDataBuilder {
         timestamp: OffsetDateTime,
         line_no: u32,
     ) {
+        if let Some(compact) = self.pending_compact.take() {
+            if parent_uuid.is_none() {
+                self.reset_at_compact(compact);
+            } else {
+                warn!("skipping compact boundary without its post-compact root at line {line_no}");
+            }
+        }
         let accepted = self.accepts_compact_tail_message(uuid, parent_uuid);
         if self.compact_tail_uuids.is_some() {
             self.compact_tail_accepts_sidecars = accepted;
@@ -406,19 +401,10 @@ impl SessionDataBuilder {
         self.compact_tail_uuids.is_none() || self.compact_tail_accepts_sidecars
     }
 
-    fn reset_at_compact(
-        &mut self,
-        summary: String,
-        pre_message_count: u32,
-        instructions: Option<String>,
-    ) {
+    fn reset_at_compact(&mut self, compact: CompactInfo) {
         self.chain = ChainBuilder::new();
         self.context = None;
-        self.compact = Some(CompactInfo {
-            summary,
-            pre_message_count,
-            instructions,
-        });
+        self.compact = Some(compact);
         self.compact_tail_uuids = Some(HashSet::new());
         self.compact_tail_accepts_sidecars = false;
         self.clear_sidecars();
@@ -447,14 +433,8 @@ impl SessionDataBuilder {
 pub(crate) fn read_session_id_from_path(path: &Path) -> Result<String> {
     let file =
         File::open(path).with_context(|| format!("session not found: {}", path.display()))?;
-    let mut first_line = String::new();
-    BufReader::new(file).read_line(&mut first_line)?;
-    let Entry::Header { session_id, .. } = serde_json::from_str(first_line.trim())
-        .with_context(|| format!("first line of {} is not a valid header", path.display()))?
-    else {
-        bail!("{} does not begin with a header", path.display());
-    };
-    Ok(session_id)
+    let header = read_header(&mut JsonlLines::new(BufReader::new(file)), path)?;
+    Ok(header.session_id)
 }
 
 fn validate_session_id(session_id: &str) -> Result<()> {
@@ -532,34 +512,35 @@ fn sort_paths_recent_first(paths: &mut [(PathBuf, OffsetDateTime)]) {
 
 // ── SessionWriter ──
 
-/// Append-only buffered handle for an open session file.
+/// Append handle for one session file that reopens its path after a failed write.
 #[derive(Debug)]
 pub(crate) struct SessionWriter {
-    file: BufWriter<File>,
+    path: PathBuf,
+    file: Option<File>,
 }
 
 impl SessionWriter {
-    fn new(file: File) -> Self {
-        Self {
-            file: BufWriter::new(file),
-        }
-    }
-
-    pub(super) fn append_no_flush(&mut self, entry: &Entry) -> Result<()> {
-        let json = serde_json::to_string(entry).context("failed to serialize entry")?;
-        writeln!(self.file, "{json}").context("failed to write entry")?;
+    /// Appends JSONL `lines` in one write, so concurrent appenders interleave only between batches.
+    pub(super) fn append_lines(&mut self, lines: &[u8]) -> Result<()> {
+        let file = match self.file.take() {
+            Some(file) => file,
+            None => open_append_file(&self.path)?,
+        };
+        append_whole(&file, &mut &file, lines)
+            .with_context(|| format!("failed to write {}", self.path.display()))?;
+        self.file = Some(file);
         Ok(())
     }
+}
 
-    pub(super) fn flush(&mut self) -> Result<()> {
-        self.file.flush().context("failed to flush entry")?;
-        Ok(())
+/// Encodes `entries` as JSONL, one line each.
+pub(super) fn encode_lines<'a>(entries: impl IntoIterator<Item = &'a Entry>) -> Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    for entry in entries {
+        serde_json::to_writer(&mut buf, entry).context("failed to serialize entry")?;
+        buf.push(b'\n');
     }
-
-    fn append(&mut self, entry: &Entry) -> Result<()> {
-        self.append_no_flush(entry)?;
-        self.flush()
-    }
+    Ok(buf)
 }
 
 // ── SessionData ──
@@ -580,15 +561,160 @@ pub(crate) struct SessionData {
 
 // ── File Opening ──
 
-fn open_create_exclusive(path: &Path) -> std::io::Result<File> {
+fn open_create_exclusive(path: &Path) -> io::Result<File> {
     let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
+    options.read(true).append(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
     options.open(path)
+}
+
+/// Creates `path` and runs `write` on it, unlinking the file when `write` fails.
+fn create_written(path: &Path, write: impl FnOnce(&File) -> io::Result<()>) -> Result<File> {
+    let file = open_create_exclusive(path)
+        .with_context(|| format!("failed to create {}", path.display()))?;
+    if let Err(e) = write(&file) {
+        _ = fs::remove_file(path);
+        return Err(e).with_context(|| format!("failed to write {}", path.display()));
+    }
+    Ok(file)
+}
+
+fn open_append_file(path: &Path) -> Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("session not found: {}", path.display()))
+}
+
+/// Writes `lines` through `out`, a handle on `file`, after terminating a torn last line. A failed
+/// write is truncated back off unless another appender has written since.
+fn append_whole(file: &File, out: &mut impl Write, lines: &[u8]) -> io::Result<()> {
+    let mut start = file.metadata()?.len();
+    if start > 0 && !ends_with_newline(file, start)? {
+        out.write_all(b"\n")?;
+        start += 1;
+    }
+    let mut written = 0;
+    while written < lines.len() {
+        let err = match out.write(&lines[written..]) {
+            Ok(0) => io::ErrorKind::WriteZero.into(),
+            Ok(n) => {
+                written += n;
+                continue;
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => e,
+        };
+        let end = start + written as u64;
+        if file.metadata().is_ok_and(|meta| meta.len() == end)
+            && let Err(e) = file.set_len(start)
+        {
+            warn!("failed to truncate a partial session write: {e}");
+        }
+        return Err(err);
+    }
+    Ok(())
+}
+
+fn ends_with_newline(file: &File, len: u64) -> io::Result<bool> {
+    let mut last = [0];
+    #[cfg(unix)]
+    std::os::unix::fs::FileExt::read_exact_at(file, &mut last, len - 1)?;
+    #[cfg(not(unix))]
+    {
+        let mut file = file;
+        io::Seek::seek(&mut file, io::SeekFrom::Start(len - 1))?;
+        io::Read::read_exact(&mut file, &mut last)?;
+    }
+    Ok(last[0] == b'\n')
+}
+
+// ── Line Reading ──
+
+/// JSONL line reader that warn-skips invalid UTF-8 lines, such as one torn mid-codepoint.
+struct JsonlLines<R> {
+    reader: R,
+    line: String,
+    line_no: u32,
+}
+
+impl<R: BufRead> JsonlLines<R> {
+    fn new(reader: R) -> Self {
+        Self {
+            reader,
+            line: String::new(),
+            line_no: 0,
+        }
+    }
+
+    /// Next non-empty line with its 1-based line number, or `None` at EOF.
+    fn next_line(&mut self) -> Result<Option<(u32, &str)>> {
+        let mut buf = std::mem::take(&mut self.line).into_bytes();
+        loop {
+            buf.clear();
+            let read = self
+                .reader
+                .read_until(b'\n', &mut buf)
+                .with_context(|| format!("read error at line {}", self.line_no + 1))?;
+            if read == 0 {
+                return Ok(None);
+            }
+            self.line_no += 1;
+            if buf.last() == Some(&b'\n') {
+                buf.pop();
+            }
+            if buf.is_empty() {
+                continue;
+            }
+            match String::from_utf8(buf) {
+                Ok(line) => {
+                    self.line = line;
+                    return Ok(Some((self.line_no, &self.line)));
+                }
+                Err(e) => {
+                    warn!("skipping non-utf8 entry at line {}: {e}", self.line_no);
+                    buf = e.into_bytes();
+                }
+            }
+        }
+    }
+}
+
+struct HeaderInfo {
+    session_id: String,
+    cwd: String,
+    created_at: OffsetDateTime,
+    git_branch: Option<String>,
+}
+
+/// Parses the first non-empty line as the session header and validates its id.
+fn read_header<R: BufRead>(lines: &mut JsonlLines<R>, path: &Path) -> Result<HeaderInfo> {
+    let Some((_, line)) = lines.next_line()? else {
+        bail!("{} is empty (no header)", path.display());
+    };
+    let Entry::Header {
+        session_id,
+        cwd,
+        created_at,
+        git_branch,
+        ..
+    } = serde_json::from_str(line)
+        .with_context(|| format!("first line of {} is not a valid header", path.display()))?
+    else {
+        bail!("{} does not begin with a header", path.display());
+    };
+    validate_session_id(&session_id)?;
+    Ok(HeaderInfo {
+        session_id,
+        cwd,
+        created_at,
+        git_branch,
+    })
 }
 
 // ── Session Info Extraction ──
@@ -602,43 +728,17 @@ fn read_session_info(path: &Path) -> Result<SessionInfo> {
     let metadata = file
         .metadata()
         .with_context(|| format!("cannot stat {}", path.display()))?;
-    let mut reader = BufReader::new(&file);
-
-    let mut first_line = String::new();
-    reader.read_line(&mut first_line)?;
-    if first_line.trim().is_empty() {
-        bail!("session file is empty (no header)");
-    }
-    let header: Entry = serde_json::from_str(first_line.trim()).context("invalid header line")?;
-    let Entry::Header {
+    let mut lines = JsonlLines::new(BufReader::new(&file));
+    let HeaderInfo {
         session_id,
         cwd,
         created_at,
         git_branch,
-        ..
-    } = header
-    else {
-        bail!("first line is not a header");
-    };
+    } = read_header(&mut lines, path)?;
 
     let mut title: Option<TitleInfo> = None;
     let mut exit: Option<ExitInfo> = None;
-    let mut buf = Vec::new();
-    loop {
-        buf.clear();
-        let read = reader
-            .read_until(b'\n', &mut buf)
-            .with_context(|| format!("read error scanning {}", path.display()))?;
-        if read == 0 {
-            break;
-        }
-        let without_newline = buf.strip_suffix(b"\n").unwrap_or(&buf);
-        if without_newline.is_empty() {
-            continue;
-        }
-        let Ok(line) = std::str::from_utf8(without_newline) else {
-            continue;
-        };
+    while let Some((_, line)) = lines.next_line()? {
         if line.starts_with(TITLE_LINE_PREFIX) {
             if let Some(t) = parse_title(line)
                 && title
@@ -711,30 +811,33 @@ pub(crate) fn seed_test_session(
     created_at: time::OffsetDateTime,
 ) {
     let mut writer = store
-        .create(&Entry::Header {
-            session_id: session_id.to_owned(),
-            cwd: "/work/proj".to_owned(),
-            model: "claude-opus-4-7".to_owned(),
-            created_at,
-            version: CURRENT_VERSION,
-            git_branch: None,
-        })
+        .create(
+            &Entry::Header {
+                session_id: session_id.to_owned(),
+                cwd: "/work/proj".to_owned(),
+                model: "claude-opus-4-7".to_owned(),
+                created_at,
+                version: CURRENT_VERSION,
+                git_branch: None,
+            },
+            &[],
+        )
         .unwrap();
     if let Some(t) = title {
         writer
-            .append(&Entry::Title {
+            .append(&[Entry::Title {
                 title: t.to_owned(),
                 source: super::entry::TitleSource::UserProvided,
                 updated_at: created_at,
-            })
+            }])
             .unwrap();
     }
     if let Some(count) = message_count {
         writer
-            .append(&Entry::Summary {
+            .append(&[Entry::Summary {
                 message_count: count,
                 updated_at: created_at,
-            })
+            }])
             .unwrap();
     }
 }
@@ -750,6 +853,21 @@ pub(super) fn test_session_file(dir: &Path, session_id: &str) -> PathBuf {
 #[cfg(test)]
 pub(crate) fn test_project_dir(dir: &Path) -> PathBuf {
     dir.join(TEST_PROJECT)
+}
+
+#[cfg(test)]
+impl SessionWriter {
+    /// Writer whose first append fails on a read-only handle and whose next one reopens `path`.
+    pub(super) fn failing_once(path: &Path) -> Self {
+        Self {
+            path: path.to_owned(),
+            file: Some(File::open(path).unwrap()),
+        }
+    }
+
+    pub(super) fn append(&mut self, entries: &[Entry]) -> Result<()> {
+        self.append_lines(&encode_lines(entries)?)
+    }
 }
 
 #[cfg(test)]
@@ -901,17 +1019,28 @@ mod tests {
     // ── create ──
 
     #[tokio::test]
-    async fn create_writes_header_to_new_file() {
+    async fn create_writes_the_header_then_the_given_lines() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let header = sample_header("test-id");
+        let uuid = Uuid::new_v4();
+        let lines = encode_lines(&[sample_message_entry(uuid, "hi")]).unwrap();
 
-        let _writer = store.create(&header).unwrap();
+        let _writer = store.create(&sample_header("test-id"), &lines).unwrap();
 
         let content = fs::read_to_string(test_session_file(dir.path(), "test-id")).unwrap();
-        let parsed: Entry = serde_json::from_str(content.trim()).unwrap();
+        let entries: Vec<Entry> = content
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
         assert!(
-            matches!(parsed, Entry::Header { session_id, version, .. } if session_id == "test-id" && version == CURRENT_VERSION)
+            matches!(
+                entries.as_slice(),
+                [
+                    Entry::Header { session_id, version, .. },
+                    Entry::Message { uuid: written, .. },
+                ] if session_id == "test-id" && *version == CURRENT_VERSION && *written == uuid
+            ),
+            "got: {entries:?}"
         );
     }
 
@@ -921,7 +1050,7 @@ mod tests {
         let store = test_store(dir.path());
         let entry = sample_message_entry(Uuid::new_v4(), "hi");
 
-        assert!(store.create(&entry).is_err());
+        assert!(store.create(&entry, &[]).is_err());
     }
 
     #[tokio::test]
@@ -934,7 +1063,7 @@ mod tests {
         };
         let taken = test_project_path(dir.path(), &session_filename("existing", created_at));
         fs::write(taken, "{}").unwrap();
-        assert!(store.create(&header).is_err());
+        assert!(store.create(&header, &[]).is_err());
     }
 
     #[cfg(unix)]
@@ -944,7 +1073,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let _writer = store.create(&sample_header("perm-test")).unwrap();
+        let _writer = store.create(&sample_header("perm-test"), &[]).unwrap();
 
         let meta = fs::metadata(test_session_file(dir.path(), "perm-test")).unwrap();
         assert_eq!(meta.permissions().mode() & 0o777, 0o600);
@@ -956,26 +1085,26 @@ mod tests {
     async fn open_append_writes_to_existing_file() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut writer = store.create(&sample_header("append-test")).unwrap();
+        let mut writer = store.create(&sample_header("append-test"), &[]).unwrap();
         let u1 = Uuid::new_v4();
         writer
-            .append(&sample_message_at(
+            .append(&[sample_message_at(
                 u1,
                 None,
                 datetime!(2026-04-16 12:00:01 UTC),
                 "first",
-            ))
+            )])
             .unwrap();
         drop(writer);
 
         let mut writer = store.open_append("append-test").unwrap();
         writer
-            .append(&sample_message_at(
+            .append(&[sample_message_at(
                 Uuid::new_v4(),
                 Some(u1),
                 datetime!(2026-04-16 12:00:02 UTC),
                 "second",
-            ))
+            )])
             .unwrap();
         drop(writer);
 
@@ -986,6 +1115,29 @@ mod tests {
         );
         assert!(
             matches!(&data.messages[1].content[0], ContentBlock::Text { text } if text == "second")
+        );
+    }
+
+    #[test]
+    fn open_append_starts_an_empty_file_without_a_blank_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let path = test_project_path(
+            dir.path(),
+            &session_filename("empty", datetime!(2026-04-16 12:00:00 UTC)),
+        );
+        fs::write(&path, "").unwrap();
+
+        store
+            .open_append("empty")
+            .unwrap()
+            .append(&[sample_summary_entry(0)])
+            .unwrap();
+
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(
+            content.starts_with(r#"{"type":"summary""#),
+            "got: {content}"
         );
     }
 
@@ -1000,7 +1152,7 @@ mod tests {
     async fn open_append_allows_concurrent_resumes_without_blocking() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let _writer_a = store.create(&sample_header("concurrent")).unwrap();
+        let _writer_a = store.create(&sample_header("concurrent"), &[]).unwrap();
 
         let start = std::time::Instant::now();
         let writer_b = store.open_append("concurrent");
@@ -1022,28 +1174,28 @@ mod tests {
     async fn load_session_data_includes_only_messages_with_last_uuid() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut writer = store.create(&sample_header("load-test")).unwrap();
+        let mut writer = store.create(&sample_header("load-test"), &[]).unwrap();
 
         let u1 = Uuid::new_v4();
         let u2 = Uuid::new_v4();
         writer
-            .append(&Entry::Message {
+            .append(&[Entry::Message {
                 uuid: u1,
                 parent_uuid: None,
                 message: Message::user("hello"),
                 timestamp: datetime!(2026-04-16 12:00:01 UTC),
-            })
+            }])
             .unwrap();
         writer
-            .append(&Entry::Message {
+            .append(&[Entry::Message {
                 uuid: u2,
                 parent_uuid: Some(u1),
                 message: Message::assistant("hi there"),
                 timestamp: datetime!(2026-04-16 12:00:02 UTC),
-            })
+            }])
             .unwrap();
-        writer.append(&sample_title_entry("greeting")).unwrap();
-        writer.append(&sample_summary_entry(2)).unwrap();
+        writer.append(&[sample_title_entry("greeting")]).unwrap();
+        writer.append(&[sample_summary_entry(2)]).unwrap();
         drop(writer);
 
         let data = store.load_session_data("load-test").unwrap();
@@ -1063,57 +1215,59 @@ mod tests {
     fn load_session_data_resets_sidecars_at_compact_boundary() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut writer = store.create(&sample_header("compact-sidecars")).unwrap();
+        let mut writer = store
+            .create(&sample_header("compact-sidecars"), &[])
+            .unwrap();
 
         let pre = Uuid::new_v4();
         writer
-            .append(&sample_message_at(
+            .append(&[sample_message_at(
                 pre,
                 None,
                 datetime!(2026-04-16 12:00:01 UTC),
                 "pre-compact",
-            ))
+            )])
             .unwrap();
         writer
-            .append(&Entry::ToolResultMetadata {
+            .append(&[Entry::ToolResultMetadata {
                 tool_use_id: "pre-tool".to_owned(),
                 metadata: ToolMetadata {
                     title: Some("pre metadata".to_owned()),
                     ..ToolMetadata::default()
                 },
                 timestamp: datetime!(2026-04-16 12:00:02 UTC),
-            })
+            }])
             .unwrap();
-        writer.append(&sample_snapshot("pre.txt")).unwrap();
+        writer.append(&[sample_snapshot("pre.txt")]).unwrap();
         writer
-            .append(&Entry::Compact {
+            .append(&[Entry::Compact {
                 summary: "summary".to_owned(),
                 pre_message_count: 1,
                 instructions: None,
                 timestamp: datetime!(2026-04-16 12:00:03 UTC),
-            })
+            }])
             .unwrap();
 
         let post = Uuid::new_v4();
         writer
-            .append(&sample_message_at(
+            .append(&[sample_message_at(
                 post,
                 None,
                 datetime!(2026-04-16 12:00:04 UTC),
                 "post-compact summary",
-            ))
+            )])
             .unwrap();
         writer
-            .append(&Entry::ToolResultMetadata {
+            .append(&[Entry::ToolResultMetadata {
                 tool_use_id: "post-tool".to_owned(),
                 metadata: ToolMetadata {
                     title: Some("post metadata".to_owned()),
                     ..ToolMetadata::default()
                 },
                 timestamp: datetime!(2026-04-16 12:00:05 UTC),
-            })
+            }])
             .unwrap();
-        writer.append(&sample_snapshot("post.txt")).unwrap();
+        writer.append(&[sample_snapshot("post.txt")]).unwrap();
         drop(writer);
 
         let data = store.load_session_data("compact-sidecars").unwrap();
@@ -1135,27 +1289,43 @@ mod tests {
     fn load_session_data_takes_the_latest_context_since_the_last_compact_boundary() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut writer = store.create(&sample_header("compact-context")).unwrap();
+        let mut writer = store
+            .create(&sample_header("compact-context"), &[])
+            .unwrap();
         let load = || store.load_session_data("compact-context").unwrap().context;
 
-        writer.append(&sample_context("2026-04-16")).unwrap();
+        writer.append(&[sample_context("2026-04-16")]).unwrap();
         writer
-            .append(&sample_message_entry(Uuid::new_v4(), "first"))
+            .append(&[sample_message_entry(Uuid::new_v4(), "first")])
             .unwrap();
-        writer.append(&sample_context("2026-04-17")).unwrap();
+        writer.append(&[sample_context("2026-04-17")]).unwrap();
         assert_eq!(load(), Some(session_context("2026-04-17")));
 
         writer
-            .append(&Entry::Compact {
+            .append(&[Entry::Compact {
                 summary: "summary".to_owned(),
                 pre_message_count: 1,
                 instructions: None,
                 timestamp: datetime!(2026-04-17 12:00:00 UTC),
-            })
+            }])
+            .unwrap();
+        assert_eq!(
+            load(),
+            Some(session_context("2026-04-17")),
+            "a compact without its post-compact root keeps the old context",
+        );
+
+        writer
+            .append(&[sample_message_at(
+                Uuid::new_v4(),
+                None,
+                datetime!(2026-04-17 12:00:01 UTC),
+                "summary",
+            )])
             .unwrap();
         assert_eq!(load(), None, "a compacted transcript no longer carries it");
 
-        writer.append(&sample_context("2026-04-18")).unwrap();
+        writer.append(&[sample_context("2026-04-18")]).unwrap();
         assert_eq!(load(), Some(session_context("2026-04-18")));
     }
 
@@ -1163,42 +1333,44 @@ mod tests {
     fn load_session_data_ignores_newer_old_chain_messages_after_compact() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut writer = store.create(&sample_header("compact-generation")).unwrap();
+        let mut writer = store
+            .create(&sample_header("compact-generation"), &[])
+            .unwrap();
 
         let pre = Uuid::new_v4();
         writer
-            .append(&sample_message_at(
+            .append(&[sample_message_at(
                 pre,
                 None,
                 datetime!(2026-04-16 12:00:01 UTC),
                 "pre-compact",
-            ))
+            )])
             .unwrap();
         writer
-            .append(&Entry::Compact {
+            .append(&[Entry::Compact {
                 summary: "summary".to_owned(),
                 pre_message_count: 1,
                 instructions: Some("focus".to_owned()),
                 timestamp: datetime!(2026-04-16 12:00:02 UTC),
-            })
+            }])
             .unwrap();
 
         let synthetic = Uuid::new_v4();
         writer
-            .append(&sample_message_at(
+            .append(&[sample_message_at(
                 synthetic,
                 None,
                 datetime!(2026-04-16 12:00:03 UTC),
                 "synthetic summary",
-            ))
+            )])
             .unwrap();
         writer
-            .append(&sample_message_at(
+            .append(&[sample_message_at(
                 Uuid::new_v4(),
                 Some(pre),
                 datetime!(2026-04-16 12:00:05 UTC),
                 "stale old-chain append",
-            ))
+            )])
             .unwrap();
         drop(writer);
 
@@ -1220,80 +1392,120 @@ mod tests {
     }
 
     #[test]
-    fn load_session_data_skips_sidecars_after_rejected_compact_tail_message() {
+    fn load_session_data_ignores_a_compact_whose_root_never_landed() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut writer = store
-            .create(&sample_header("compact-stale-sidecars"))
-            .unwrap();
-
+        let mut writer = store.create(&sample_header("torn-compact"), &[]).unwrap();
         let pre = Uuid::new_v4();
         writer
-            .append(&sample_message_at(
+            .append(&[sample_message_at(
                 pre,
                 None,
                 datetime!(2026-04-16 12:00:01 UTC),
                 "pre-compact",
-            ))
+            )])
+            .unwrap();
+        let mut torn = encode_lines(&[Entry::Compact {
+            summary: "summary".to_owned(),
+            pre_message_count: 1,
+            instructions: None,
+            timestamp: datetime!(2026-04-16 12:00:02 UTC),
+        }])
+        .unwrap();
+        torn.extend_from_slice(br#"{"type":"message","uuid":"#);
+        writer.append_lines(&torn).unwrap();
+
+        let kept = Uuid::new_v4();
+        writer
+            .append(&[sample_message_at(
+                kept,
+                Some(pre),
+                datetime!(2026-04-16 12:00:03 UTC),
+                "kept",
+            )])
+            .unwrap();
+
+        let data = store.load_session_data("torn-compact").unwrap();
+        assert!(data.compact.is_none(), "got: {:?}", data.compact);
+        assert_eq!(data.last_uuid, Some(kept));
+        assert_eq!(data.messages.len(), 2);
+    }
+
+    #[test]
+    fn load_session_data_skips_sidecars_after_rejected_compact_tail_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut writer = store
+            .create(&sample_header("compact-stale-sidecars"), &[])
+            .unwrap();
+
+        let pre = Uuid::new_v4();
+        writer
+            .append(&[sample_message_at(
+                pre,
+                None,
+                datetime!(2026-04-16 12:00:01 UTC),
+                "pre-compact",
+            )])
             .unwrap();
         writer
-            .append(&Entry::Compact {
+            .append(&[Entry::Compact {
                 summary: "summary".to_owned(),
                 pre_message_count: 1,
                 instructions: None,
                 timestamp: datetime!(2026-04-16 12:00:02 UTC),
-            })
+            }])
             .unwrap();
 
         let synthetic = Uuid::new_v4();
         writer
-            .append(&sample_message_at(
+            .append(&[sample_message_at(
                 synthetic,
                 None,
                 datetime!(2026-04-16 12:00:03 UTC),
                 "synthetic summary",
-            ))
+            )])
             .unwrap();
         writer
-            .append(&sample_message_at(
+            .append(&[sample_message_at(
                 Uuid::new_v4(),
                 Some(pre),
                 datetime!(2026-04-16 12:00:04 UTC),
                 "stale old-chain append",
-            ))
+            )])
             .unwrap();
         writer
-            .append(&Entry::ToolResultMetadata {
+            .append(&[Entry::ToolResultMetadata {
                 tool_use_id: "stale-tool".to_owned(),
                 metadata: ToolMetadata {
                     title: Some("stale metadata".to_owned()),
                     ..ToolMetadata::default()
                 },
                 timestamp: datetime!(2026-04-16 12:00:05 UTC),
-            })
+            }])
             .unwrap();
-        writer.append(&sample_snapshot("stale.txt")).unwrap();
+        writer.append(&[sample_snapshot("stale.txt")]).unwrap();
 
         let valid = Uuid::new_v4();
         writer
-            .append(&sample_message_at(
+            .append(&[sample_message_at(
                 valid,
                 Some(synthetic),
                 datetime!(2026-04-16 12:00:07 UTC),
                 "valid post-compact append",
-            ))
+            )])
             .unwrap();
         writer
-            .append(&Entry::ToolResultMetadata {
+            .append(&[Entry::ToolResultMetadata {
                 tool_use_id: "valid-tool".to_owned(),
                 metadata: ToolMetadata {
                     title: Some("valid metadata".to_owned()),
                     ..ToolMetadata::default()
                 },
                 timestamp: datetime!(2026-04-16 12:00:08 UTC),
-            })
+            }])
             .unwrap();
-        writer.append(&sample_snapshot("valid.txt")).unwrap();
+        writer.append(&[sample_snapshot("valid.txt")]).unwrap();
         drop(writer);
 
         let data = store.load_session_data("compact-stale-sidecars").unwrap();
@@ -1344,50 +1556,56 @@ mod tests {
     fn load_session_data_rejects_malicious_session_ids() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        assert!(store.load_session_data("").is_err());
-        assert!(store.load_session_data("../etc/passwd").is_err());
-        assert!(store.load_session_data(r"..\..\etc\passwd").is_err());
-        assert!(store.load_session_data("session\0evil").is_err());
-        assert!(store.load_session_data("foo:bar").is_err());
-        assert!(store.load_session_data("foo|bar").is_err());
-        assert!(store.load_session_data("foo*").is_err());
-        assert!(store.load_session_data(&"a".repeat(65)).is_err());
+        let too_long = "a".repeat(65);
+        for bogus in [
+            "",
+            "../etc/passwd",
+            r"..\..\etc\passwd",
+            "session\0evil",
+            "foo:bar",
+            "foo|bar",
+            "foo*",
+            &too_long,
+        ] {
+            let err = store.load_session_data(bogus).unwrap_err().to_string();
+            assert!(err.contains("invalid session ID"), "{bogus:?}: {err}");
+        }
     }
 
     #[tokio::test]
     async fn load_session_data_picks_newest_leaf_on_fork() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut writer = store.create(&sample_header("fork")).unwrap();
+        let mut writer = store.create(&sample_header("fork"), &[]).unwrap();
 
         let root = Uuid::new_v4();
         writer
-            .append(&sample_message_at(
+            .append(&[sample_message_at(
                 root,
                 None,
                 datetime!(2026-04-16 12:00:01 UTC),
                 "shared root",
-            ))
+            )])
             .unwrap();
 
         let branch_a = Uuid::new_v4();
         writer
-            .append(&sample_message_at(
+            .append(&[sample_message_at(
                 branch_a,
                 Some(root),
                 datetime!(2026-04-16 12:00:02 UTC),
                 "branch A (older leaf)",
-            ))
+            )])
             .unwrap();
 
         let branch_b = Uuid::new_v4();
         writer
-            .append(&sample_message_at(
+            .append(&[sample_message_at(
                 branch_b,
                 Some(root),
                 datetime!(2026-04-16 12:00:03 UTC),
                 "branch B (newer leaf)",
-            ))
+            )])
             .unwrap();
         drop(writer);
 
@@ -1412,16 +1630,16 @@ mod tests {
     async fn load_session_data_terminates_at_orphan_parent_reference() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut writer = store.create(&sample_header("orphan")).unwrap();
+        let mut writer = store.create(&sample_header("orphan"), &[]).unwrap();
 
         let only = Uuid::new_v4();
         writer
-            .append(&sample_message_at(
+            .append(&[sample_message_at(
                 only,
                 Some(Uuid::new_v4()), // points at a missing ancestor
                 datetime!(2026-04-16 12:00:01 UTC),
                 "orphan tip",
-            ))
+            )])
             .unwrap();
         drop(writer);
 
@@ -1437,25 +1655,25 @@ mod tests {
     async fn load_session_data_breaks_chain_walk_on_cycle() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut writer = store.create(&sample_header("cycle")).unwrap();
+        let mut writer = store.create(&sample_header("cycle"), &[]).unwrap();
 
         let a = Uuid::new_v4();
         let b = Uuid::new_v4();
         writer
-            .append(&sample_message_at(
+            .append(&[sample_message_at(
                 a,
                 Some(b), // a points at b — part of the cycle
                 datetime!(2026-04-16 12:00:01 UTC),
                 "A",
-            ))
+            )])
             .unwrap();
         writer
-            .append(&sample_message_at(
+            .append(&[sample_message_at(
                 b,
                 Some(a), // b points back at a — completes the cycle
                 datetime!(2026-04-16 12:00:02 UTC),
                 "B",
-            ))
+            )])
             .unwrap();
         drop(writer);
 
@@ -1471,24 +1689,24 @@ mod tests {
     async fn load_session_data_prefers_later_duplicate_uuid() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut writer = store.create(&sample_header("dup")).unwrap();
+        let mut writer = store.create(&sample_header("dup"), &[]).unwrap();
 
         let u = Uuid::new_v4();
         writer
-            .append(&sample_message_at(
+            .append(&[sample_message_at(
                 u,
                 None,
                 datetime!(2026-04-16 12:00:01 UTC),
                 "first copy",
-            ))
+            )])
             .unwrap();
         writer
-            .append(&sample_message_at(
+            .append(&[sample_message_at(
                 u,
                 None,
                 datetime!(2026-04-16 12:00:05 UTC),
                 "second copy",
-            ))
+            )])
             .unwrap();
         drop(writer);
 
@@ -1611,6 +1829,29 @@ mod tests {
     }
 
     #[test]
+    fn read_session_id_from_path_rejects_invalid_session_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("traversal.jsonl");
+        fs::write(
+            &path,
+            r#"{"type":"header","session_id":"../escape","cwd":"/","model":"m","created_at":"2026-01-01T00:00:00Z","version":1}
+"#,
+        )
+        .unwrap();
+        let err = read_session_id_from_path(&path).unwrap_err().to_string();
+        assert!(err.contains("invalid session ID"), "got: {err}");
+    }
+
+    #[test]
+    fn read_session_id_from_path_rejects_an_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.jsonl");
+        fs::write(&path, "").unwrap();
+        let err = read_session_id_from_path(&path).unwrap_err().to_string();
+        assert!(err.contains("is empty"), "got: {err}");
+    }
+
+    #[test]
     fn read_session_id_from_path_errors_when_file_missing() {
         let dir = tempfile::tempdir().unwrap();
         let err = read_session_id_from_path(&dir.path().join("ghost.jsonl"))
@@ -1627,30 +1868,36 @@ mod tests {
         let store = test_store(dir.path());
 
         let mut wa = store
-            .create(&Entry::Header {
-                session_id: "aaa".to_owned(),
-                cwd: "/a".to_owned(),
-                model: "m".to_owned(),
-                created_at: datetime!(2026-04-15 10:00:00 UTC),
-                version: CURRENT_VERSION,
-                git_branch: None,
-            })
+            .create(
+                &Entry::Header {
+                    session_id: "aaa".to_owned(),
+                    cwd: "/a".to_owned(),
+                    model: "m".to_owned(),
+                    created_at: datetime!(2026-04-15 10:00:00 UTC),
+                    version: CURRENT_VERSION,
+                    git_branch: None,
+                },
+                &[],
+            )
             .unwrap();
-        wa.append(&sample_title_entry("Older")).unwrap();
-        wa.append(&sample_summary_entry(3)).unwrap();
+        wa.append(&[sample_title_entry("Older")]).unwrap();
+        wa.append(&[sample_summary_entry(3)]).unwrap();
 
         let mut wb = store
-            .create(&Entry::Header {
-                session_id: "bbb".to_owned(),
-                cwd: "/b".to_owned(),
-                model: "m".to_owned(),
-                created_at: datetime!(2026-04-16 12:00:00 UTC),
-                version: CURRENT_VERSION,
-                git_branch: None,
-            })
+            .create(
+                &Entry::Header {
+                    session_id: "bbb".to_owned(),
+                    cwd: "/b".to_owned(),
+                    model: "m".to_owned(),
+                    created_at: datetime!(2026-04-16 12:00:00 UTC),
+                    version: CURRENT_VERSION,
+                    git_branch: None,
+                },
+                &[],
+            )
             .unwrap();
-        wb.append(&sample_title_entry("Newer")).unwrap();
-        wb.append(&sample_summary_entry(5)).unwrap();
+        wb.append(&[sample_title_entry("Newer")]).unwrap();
+        wb.append(&[sample_summary_entry(5)]).unwrap();
 
         let sessions = store.list().unwrap();
         assert_eq!(sessions.len(), 2);
@@ -1666,29 +1913,35 @@ mod tests {
         let store = test_store(dir.path());
 
         let mut w_old = store
-            .create(&Entry::Header {
-                session_id: "aaa-old-header".to_owned(),
-                cwd: "/a".to_owned(),
-                model: "m".to_owned(),
-                created_at: datetime!(2026-01-01 10:00:00 UTC),
-                version: CURRENT_VERSION,
-                git_branch: None,
-            })
+            .create(
+                &Entry::Header {
+                    session_id: "aaa-old-header".to_owned(),
+                    cwd: "/a".to_owned(),
+                    model: "m".to_owned(),
+                    created_at: datetime!(2026-01-01 10:00:00 UTC),
+                    version: CURRENT_VERSION,
+                    git_branch: None,
+                },
+                &[],
+            )
             .unwrap();
-        w_old.append(&sample_title_entry("Old")).unwrap();
+        w_old.append(&[sample_title_entry("Old")]).unwrap();
         drop(w_old);
 
         let mut w_new = store
-            .create(&Entry::Header {
-                session_id: "zzz-new-header".to_owned(),
-                cwd: "/z".to_owned(),
-                model: "m".to_owned(),
-                created_at: datetime!(2026-04-17 10:00:00 UTC),
-                version: CURRENT_VERSION,
-                git_branch: None,
-            })
+            .create(
+                &Entry::Header {
+                    session_id: "zzz-new-header".to_owned(),
+                    cwd: "/z".to_owned(),
+                    model: "m".to_owned(),
+                    created_at: datetime!(2026-04-17 10:00:00 UTC),
+                    version: CURRENT_VERSION,
+                    git_branch: None,
+                },
+                &[],
+            )
             .unwrap();
-        w_new.append(&sample_title_entry("New")).unwrap();
+        w_new.append(&[sample_title_entry("New")]).unwrap();
         drop(w_new);
 
         let new_path = test_session_file(dir.path(), "zzz-new-header");
@@ -1718,20 +1971,20 @@ mod tests {
     async fn list_picks_latest_title_when_re_appended() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut writer = store.create(&sample_header("retitled")).unwrap();
+        let mut writer = store.create(&sample_header("retitled"), &[]).unwrap();
         writer
-            .append(&Entry::Title {
+            .append(&[Entry::Title {
                 title: "original prompt".to_owned(),
                 source: TitleSource::FirstPrompt,
                 updated_at: datetime!(2026-04-16 12:00:00 UTC),
-            })
+            }])
             .unwrap();
         writer
-            .append(&Entry::Title {
+            .append(&[Entry::Title {
                 title: "AI generated".to_owned(),
                 source: TitleSource::AiGenerated,
                 updated_at: datetime!(2026-04-16 12:01:00 UTC),
-            })
+            }])
             .unwrap();
 
         let sessions = store.list().unwrap();
@@ -1743,29 +1996,29 @@ mod tests {
     async fn list_finds_ai_title_buried_between_head_and_tail() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut writer = store.create(&sample_header("buried")).unwrap();
+        let mut writer = store.create(&sample_header("buried"), &[]).unwrap();
         writer
-            .append(&Entry::Title {
+            .append(&[Entry::Title {
                 title: "first prompt".to_owned(),
                 source: TitleSource::FirstPrompt,
                 updated_at: datetime!(2026-04-16 12:00:00 UTC),
-            })
+            }])
             .unwrap();
         writer
-            .append(&sample_message_entry(Uuid::new_v4(), "short user text"))
+            .append(&[sample_message_entry(Uuid::new_v4(), "short user text")])
             .unwrap();
         writer
-            .append(&Entry::Title {
+            .append(&[Entry::Title {
                 title: "AI picked".to_owned(),
                 source: TitleSource::AiGenerated,
                 updated_at: datetime!(2026-04-16 12:00:05 UTC),
-            })
+            }])
             .unwrap();
         let bulky_body = "x".repeat(16_000);
         writer
-            .append(&sample_message_entry(Uuid::new_v4(), &bulky_body))
+            .append(&[sample_message_entry(Uuid::new_v4(), &bulky_body)])
             .unwrap();
-        writer.append(&sample_summary_entry(2)).unwrap();
+        writer.append(&[sample_summary_entry(2)]).unwrap();
 
         let sessions = store.list().unwrap();
         let title = sessions[0].title.as_ref().unwrap();
@@ -1778,7 +2031,7 @@ mod tests {
     async fn list_absent_title_and_exit_fields_are_none() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let _writer = store.create(&sample_header("bare")).unwrap();
+        let _writer = store.create(&sample_header("bare"), &[]).unwrap();
 
         let sessions = store.list().unwrap();
         assert_eq!(sessions.len(), 1);
@@ -1804,11 +2057,13 @@ mod tests {
     async fn list_is_scoped_to_current_project() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let _own = store.create(&sample_header("own")).unwrap();
+        let _own = store.create(&sample_header("own"), &[]).unwrap();
 
         let sibling_store =
             SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
-        let _foreign = sibling_store.create(&sample_header("foreign")).unwrap();
+        let _foreign = sibling_store
+            .create(&sample_header("foreign"), &[])
+            .unwrap();
         drop(sibling_store);
 
         let sessions = store.list().unwrap();
@@ -1822,11 +2077,13 @@ mod tests {
     async fn list_all_spans_every_project_subdirectory() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let _own = store.create(&sample_header("own")).unwrap();
+        let _own = store.create(&sample_header("own"), &[]).unwrap();
 
         let foreign_store =
             SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
-        let _foreign = foreign_store.create(&sample_header("foreign")).unwrap();
+        let _foreign = foreign_store
+            .create(&sample_header("foreign"), &[])
+            .unwrap();
         drop(foreign_store);
 
         let all = store.list_all().unwrap();
@@ -1843,18 +2100,21 @@ mod tests {
             let id = format!("session-{i:04}");
             let offset = i64::try_from(i).expect("test count fits i64");
             let mut writer = store
-                .create(&Entry::Header {
-                    session_id: id.clone(),
-                    cwd: "/work/project".to_owned(),
-                    model: "m".to_owned(),
-                    created_at: datetime!(2026-04-15 10:00:00 UTC)
-                        + time::Duration::seconds(offset),
-                    version: CURRENT_VERSION,
-                    git_branch: None,
-                })
+                .create(
+                    &Entry::Header {
+                        session_id: id.clone(),
+                        cwd: "/work/project".to_owned(),
+                        model: "m".to_owned(),
+                        created_at: datetime!(2026-04-15 10:00:00 UTC)
+                            + time::Duration::seconds(offset),
+                        version: CURRENT_VERSION,
+                        git_branch: None,
+                    },
+                    &[],
+                )
                 .unwrap();
             writer
-                .append(&sample_title_entry(&format!("Title {i}")))
+                .append(&[sample_title_entry(&format!("Title {i}"))])
                 .unwrap();
         }
     }
@@ -1903,7 +2163,7 @@ mod tests {
     async fn delete_removes_the_session_file_from_disk() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let _writer = store.create(&sample_header("doomed")).unwrap();
+        let _writer = store.create(&sample_header("doomed"), &[]).unwrap();
         let path = test_session_file(dir.path(), "doomed");
         assert!(path.exists(), "fixture path materialized: {path:?}");
 
@@ -1922,7 +2182,7 @@ mod tests {
         let foreign_store =
             SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
         let _w = foreign_store
-            .create(&sample_header("foreign-doomed"))
+            .create(&sample_header("foreign-doomed"), &[])
             .unwrap();
         drop(foreign_store);
 
@@ -1944,7 +2204,7 @@ mod tests {
         // `/delete <live-id>` would otherwise reach this method and unlink the open writer's file.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let _writer = store.create(&sample_header("live-id")).unwrap();
+        let _writer = store.create(&sample_header("live-id"), &[]).unwrap();
         let err = store
             .delete("live-id", "live-id")
             .expect_err("self-delete must be rejected");
@@ -1997,7 +2257,9 @@ mod tests {
 
         let foreign_store =
             SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
-        let _w = foreign_store.create(&sample_header("foreign")).unwrap();
+        let _w = foreign_store
+            .create(&sample_header("foreign"), &[])
+            .unwrap();
         drop(foreign_store);
 
         let found = store.find_session_path("foreign").unwrap();
@@ -2026,17 +2288,187 @@ mod tests {
     async fn append_writes_multiple_entries() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut writer = store.create(&sample_header("multi")).unwrap();
+        let mut writer = store.create(&sample_header("multi"), &[]).unwrap();
 
         writer
-            .append(&sample_message_entry(Uuid::new_v4(), "hello"))
+            .append(&[sample_message_entry(Uuid::new_v4(), "hello")])
             .unwrap();
         writer
-            .append(&sample_message_entry(Uuid::new_v4(), "world"))
+            .append(&[sample_message_entry(Uuid::new_v4(), "world")])
             .unwrap();
 
         let content = fs::read_to_string(test_session_file(dir.path(), "multi")).unwrap();
         let lines: Vec<&str> = content.lines().collect();
         assert_eq!(lines.len(), 3); // header + 2 messages
+    }
+
+    #[test]
+    fn append_terminates_a_line_torn_by_another_appender() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut writer = store.create(&sample_header("torn"), &[]).unwrap();
+        let first = Uuid::new_v4();
+        writer
+            .append(&[sample_message_at(
+                first,
+                None,
+                datetime!(2026-04-16 12:00:01 UTC),
+                "first",
+            )])
+            .unwrap();
+        OpenOptions::new()
+            .append(true)
+            .open(test_session_file(dir.path(), "torn"))
+            .unwrap()
+            .write_all(br#"{"type":"message","uuid":"#)
+            .unwrap();
+
+        let second = Uuid::new_v4();
+        writer
+            .append(&[sample_message_at(
+                second,
+                Some(first),
+                datetime!(2026-04-16 12:00:02 UTC),
+                "second",
+            )])
+            .unwrap();
+
+        let data = store.load_session_data("torn").unwrap();
+        assert_eq!(data.last_uuid, Some(second), "appended entry must parse");
+        assert_eq!(data.messages.len(), 2);
+    }
+
+    // ── create_written ──
+
+    #[test]
+    fn create_written_unlinks_the_file_when_the_write_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doomed.jsonl");
+
+        let err = create_written(&path, |_| Err(io::ErrorKind::StorageFull.into())).unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("failed to write"),
+            "got: {err:#}"
+        );
+        assert!(!path.exists(), "a failed create must leave no file behind");
+        create_written(&path, |_| Ok(())).unwrap();
+    }
+
+    // ── append_whole ──
+
+    /// Writes through to `file` until `budget` bytes are spent, then returns what `exhausted` does.
+    struct ShortWriter<'a> {
+        file: &'a File,
+        budget: usize,
+        exhausted: fn(&File) -> io::Result<usize>,
+    }
+
+    impl Write for ShortWriter<'_> {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if self.budget == 0 {
+                return (self.exhausted)(self.file);
+            }
+            let n = buf.len().min(self.budget);
+            self.budget -= n;
+            let mut file = self.file;
+            file.write(&buf[..n])
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Creates a session holding one root message, returning its path, writer, and a two-line
+    /// batch continuing the chain.
+    fn session_with_pending_batch(
+        store: &SessionStore,
+        dir: &Path,
+    ) -> (PathBuf, SessionWriter, Vec<u8>) {
+        let root = Uuid::new_v4();
+        let second = Uuid::new_v4();
+        let mut writer = store.create(&sample_header("partial"), &[]).unwrap();
+        writer
+            .append(&[sample_message_at(
+                root,
+                None,
+                datetime!(2026-04-16 12:00:01 UTC),
+                "root",
+            )])
+            .unwrap();
+        let batch = encode_lines(&[
+            sample_message_at(
+                second,
+                Some(root),
+                datetime!(2026-04-16 12:00:02 UTC),
+                "second",
+            ),
+            sample_message_at(
+                Uuid::new_v4(),
+                Some(second),
+                datetime!(2026-04-16 12:00:03 UTC),
+                "third",
+            ),
+        ])
+        .unwrap();
+        (test_session_file(dir, "partial"), writer, batch)
+    }
+
+    #[test]
+    fn append_whole_truncates_a_partial_write_so_the_retry_adds_no_duplicates() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let (path, mut writer, batch) = session_with_pending_batch(&store, dir.path());
+        let first_line = batch.iter().position(|&byte| byte == b'\n').unwrap() + 1;
+        let file = open_append_file(&path).unwrap();
+        let mut out = ShortWriter {
+            file: &file,
+            budget: first_line + 5,
+            exhausted: |_| Err(io::ErrorKind::StorageFull.into()),
+        };
+
+        let err = append_whole(&file, &mut out, &batch).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::StorageFull);
+        writer.append_lines(&batch).unwrap();
+
+        let content = fs::read_to_string(&path).unwrap();
+        let unique: HashSet<&str> = content.lines().collect();
+        assert_eq!(
+            unique.len(),
+            content.lines().count(),
+            "duplicated line in: {content}"
+        );
+        let data = store.load_session_data("partial").unwrap();
+        assert_eq!(
+            data.messages,
+            [
+                Message::user("root"),
+                Message::user("second"),
+                Message::user("third"),
+            ]
+        );
+    }
+
+    #[test]
+    fn append_whole_keeps_a_line_another_appender_wrote_after_the_partial_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let (path, _writer, batch) = session_with_pending_batch(&store, dir.path());
+        let file = open_append_file(&path).unwrap();
+        let mut out = ShortWriter {
+            file: &file,
+            budget: 5,
+            exhausted: |mut file| {
+                file.write_all(b"\nother appender\n").unwrap();
+                Ok(0)
+            },
+        };
+
+        let err = append_whole(&file, &mut out, &batch).unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::WriteZero);
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.ends_with("\nother appender\n"), "got: {content}");
     }
 }

@@ -46,6 +46,7 @@ pub(crate) struct SessionHandle {
 #[derive(Default)]
 pub(super) struct SharedState {
     flush_failure_surfaced: AtomicBool,
+    persistence_stop_surfaced: AtomicBool,
     actor_gone_surfaced: AtomicBool,
     /// Set when the user has run `/rename`, suppressing AI titles and the next `FirstPrompt`.
     /// Latched by [`SessionHandle::set_manual_title`] before dispatch so the title generator's
@@ -69,6 +70,11 @@ impl SharedState {
     /// `true` on the first call after [`Self::record_flush_failure`], then sticky `false`.
     pub(super) fn surface_first_flush_failure(&self) -> bool {
         !self.flush_failure_surfaced.swap(true, Ordering::AcqRel)
+    }
+
+    /// Sticky-once: `true` on first call, `false` after.
+    pub(super) fn surface_first_persistence_stop(&self) -> bool {
+        !self.persistence_stop_surfaced.swap(true, Ordering::AcqRel)
     }
 
     /// Sticky-once: `true` on first call, `false` after.

@@ -83,8 +83,8 @@ enum BatchFlow {
     FlushNow,
 }
 
-/// Actor task body. Owns [`SessionState`] (which owns the writer); absorbs each `recv`-and-drain
-/// batch into one buffered flush, then fires acks. Exits when the channel closes or a
+/// Actor task body. Owns [`SessionState`], which owns the writer, appends each `recv`-and-drain
+/// batch in one write, then fires its acks. Exits when the channel closes or a
 /// [`SessionCmd::Shutdown`] is absorbed.
 pub(super) async fn run(
     mut state: SessionState,
@@ -116,7 +116,7 @@ pub(super) async fn run(
                 &mut should_exit,
             );
         }
-        let failure = match state.flush_entries(&entries) {
+        let failure = match state.flush_entries(entries) {
             Err(e) => {
                 let msg = format!("{e:#}");
                 warn!("session write batch failed: {msg}");
@@ -125,10 +125,13 @@ pub(super) async fn run(
             }
             Ok(()) => None,
         };
-        if failure.is_none() {
-            commit_acks(&acks, &mut state);
-        }
-        deliver_acks(acks, failure.as_deref(), &shared);
+        settle_compact(&acks, &mut state, failure.is_none());
+        deliver_acks(
+            acks,
+            failure.as_deref(),
+            state.persistence_stopped(),
+            &shared,
+        );
         if should_exit {
             break;
         }
@@ -241,26 +244,31 @@ fn absorb(
     }
 }
 
-fn commit_acks(acks: &[PendingAck], state: &mut SessionState) {
+/// Commits a flushed compact or abandons a failed one, matching what its ack tells the agent.
+fn settle_compact(acks: &[PendingAck], state: &mut SessionState, flushed: bool) {
     for pending in acks {
         if let PendingAck::Compact { synthetic_uuid, .. } = pending {
-            state.commit_compact(*synthetic_uuid);
+            if flushed {
+                state.commit_compact(*synthetic_uuid);
+            } else {
+                state.abandon_compact();
+            }
         }
     }
 }
 
-fn deliver_acks(acks: Vec<PendingAck>, failure: Option<&str>, shared: &SharedState) {
+fn deliver_acks(acks: Vec<PendingAck>, failure: Option<&str>, stopped: bool, shared: &SharedState) {
     for pending in acks {
         match pending {
             PendingAck::Record { ack, ai_title_seed } => {
                 _ = ack.send(RecordOutcome {
                     ai_title_seed,
-                    failure: surface_failure(failure, shared),
+                    failure: surface_failure(failure, stopped, shared),
                 });
             }
             PendingAck::Outcome(ack) => {
                 _ = ack.send(Outcome {
-                    failure: surface_failure(failure, shared),
+                    failure: surface_failure(failure, stopped, shared),
                 });
             }
             PendingAck::Compact {
@@ -268,9 +276,11 @@ fn deliver_acks(acks: Vec<PendingAck>, failure: Option<&str>, shared: &SharedSta
                 pre_count,
                 synthetic_uuid: _,
             } => {
+                // Every compact failure reaches the agent, which keeps its old transcript only when
+                // told the write failed.
                 _ = ack.send(super::handle::CompactOutcome {
                     pre_count,
-                    failure: surface_failure(failure, shared),
+                    failure: failure.map(str::to_owned),
                 });
             }
             PendingAck::Shutdown(ack) => {
@@ -281,14 +291,16 @@ fn deliver_acks(acks: Vec<PendingAck>, failure: Option<&str>, shared: &SharedSta
     }
 }
 
-/// At-most-once: the first failure carries through; subsequent ones stay in the warn-log.
-fn surface_failure(failure: Option<&str>, shared: &SharedState) -> Option<String> {
+/// Carries the first flush failure and the first failure after persistence stopped. Later ones
+/// stay in the warn-log.
+fn surface_failure(failure: Option<&str>, stopped: bool, shared: &SharedState) -> Option<String> {
     let msg = failure?;
-    if shared.surface_first_flush_failure() {
-        Some(msg.to_owned())
+    let first = if stopped {
+        shared.surface_first_persistence_stop()
     } else {
-        None
-    }
+        shared.surface_first_flush_failure()
+    };
+    first.then(|| msg.to_owned())
 }
 
 #[cfg(test)]
@@ -348,21 +360,36 @@ mod tests {
     // ── run ──
 
     #[tokio::test]
-    async fn run_record_then_finish_writes_header_message_summary_in_order() {
+    async fn run_record_then_finish_writes_header_title_message_summary_in_order() {
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
-        let state = SessionState::fresh(store.clone(), "m");
+        let state = SessionState::fresh(store, "m");
         let session_id = state.session_id.to_string();
         let (rec, _rec_rx) = record_cmd("hello");
         let (fin, _fin_rx) = finish_cmd();
 
         drive(state, vec![rec, fin]).await;
 
-        let data = store.load_session_data(&session_id).unwrap();
-        assert_eq!(data.messages.len(), 1, "user message recorded");
+        let path = super::super::store::test_session_file(dir.path(), &session_id);
+        let content = std::fs::read_to_string(path).unwrap();
+        let entries: Vec<Entry> = content
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
         assert!(
-            data.title.is_some(),
-            "first-prompt title written before message",
+            matches!(
+                entries.as_slice(),
+                [
+                    Entry::Header { .. },
+                    Entry::Title { .. },
+                    Entry::Message { .. },
+                    Entry::Summary {
+                        message_count: 1,
+                        ..
+                    },
+                ]
+            ),
+            "{content}",
         );
     }
 
@@ -779,29 +806,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_compact_flush_error_surfaces_in_ack() {
-        // Mirror the Record flush-error path: removing the project dir forces flush to fail
-        // when the writer tries to promote Pending → Active.
+    async fn run_failed_compact_is_dropped_while_earlier_records_retry() {
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
-        let state = SessionState::fresh(store, "m");
+        let state = SessionState::fresh(store.clone(), "m");
+        let session_id = state.session_id.to_string();
+        let (tx, rx) = mpsc::channel(4);
+        let actor = tokio::spawn(run(state, rx, Arc::new(SharedState::default())));
         let project_dir = super::super::store::test_project_dir(dir.path());
         std::fs::remove_dir_all(&project_dir).unwrap();
 
+        let (rec, rec_rx) = record_cmd("before compact");
+        tx.send(rec).await.unwrap();
+        assert!(rec_rx.await.unwrap().failure.is_some());
         let (compact_ack, compact_rx) = oneshot::channel();
-        let compact_cmd = SessionCmd::Compact {
+        tx.send(SessionCmd::Compact {
             summary: "s".to_owned(),
             instructions: None,
-            synthetic_message: Message::user("synth"),
+            synthetic_message: Message::user("synthetic summary"),
             ack: compact_ack,
-        };
-
-        drive(state, vec![compact_cmd]).await;
-
-        let outcome = compact_rx.await.unwrap();
+        })
+        .await
+        .unwrap();
         assert!(
-            outcome.failure.is_some(),
-            "flush error must surface in the Compact ack",
+            compact_rx.await.unwrap().failure.is_some(),
+            "the agent must see every compact failure, even after one was already surfaced",
+        );
+
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let (rec, rec_rx) = record_cmd("after compact");
+        tx.send(rec).await.unwrap();
+        assert!(rec_rx.await.unwrap().failure.is_none());
+        drop(tx);
+        actor.await.unwrap();
+
+        let data = store.load_session_data(&session_id).unwrap();
+        assert!(data.compact.is_none(), "failed compact must not reach disk");
+        assert_eq!(
+            data.messages,
+            [
+                Message::user("before compact"),
+                Message::user("after compact")
+            ]
         );
     }
 
@@ -854,22 +900,60 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn run_surfaces_the_persistence_stop_after_an_earlier_flush_failure() {
+        let dir = tempdir().unwrap();
+        let state = SessionState::fresh(test_store(dir.path()), "m");
+        let (tx, rx) = mpsc::channel(1);
+        let actor = tokio::spawn(run(state, rx, Arc::new(SharedState::default())));
+        std::fs::remove_dir_all(super::super::store::test_project_dir(dir.path())).unwrap();
+
+        let mut failures = Vec::new();
+        let huge = "x".repeat(super::super::state::MAX_UNWRITTEN_BYTES);
+        for text in ["small", huge.as_str(), "later"] {
+            let (rec, rec_rx) = record_cmd(text);
+            tx.send(rec).await.unwrap();
+            failures.push(rec_rx.await.unwrap().failure);
+        }
+        drop(tx);
+        actor.await.unwrap();
+
+        assert!(
+            failures[0].is_some(),
+            "the first flush failure must surface"
+        );
+        let stop = &failures[1];
+        assert!(
+            stop.as_deref()
+                .is_some_and(|msg| msg.contains("persistence stopped")),
+            "the stop must surface after an earlier failure, got: {stop:?}",
+        );
+        assert!(failures[2].is_none(), "failures after the stop stay silent");
+    }
+
     // ── surface_failure ──
 
     #[test]
-    fn surface_failure_first_call_after_record_produces_message_then_silences() {
+    fn surface_failure_surfaces_the_first_flush_failure_and_the_first_stop_then_silences() {
         let shared = SharedState::default();
-        shared.record_flush_failure("boom");
-        let first = surface_failure(Some("boom"), &shared);
-        let second = surface_failure(Some("boom"), &shared);
-        assert_eq!(first.as_deref(), Some("boom"));
-        assert!(second.is_none(), "subsequent failures stay silent");
+        let surface = |msg, stopped| surface_failure(Some(msg), stopped, &shared);
+
+        assert_eq!(surface("boom", false).as_deref(), Some("boom"));
+        assert!(
+            surface("boom", false).is_none(),
+            "later flush failures stay silent"
+        );
+        assert_eq!(surface("stopped", true).as_deref(), Some("stopped"));
+        assert!(
+            surface("stopped", true).is_none(),
+            "later stop failures stay silent"
+        );
     }
 
     #[test]
     fn surface_failure_no_failure_is_none() {
         let shared = SharedState::default();
-        assert!(surface_failure(None, &shared).is_none());
+        assert!(surface_failure(None, false, &shared).is_none());
     }
 
     // ── Helpers ──

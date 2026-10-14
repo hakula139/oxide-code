@@ -4,7 +4,7 @@ JSONL append-only storage, actor-owned writes, resume semantics.
 
 ## Storage Format
 
-Every session is a single `.jsonl` file: one JSON object per line, append-only and crash-safe with write-then-flush.
+Every session is a single append-only `.jsonl` file with one JSON object per line.
 
 ### Entry Types
 
@@ -37,13 +37,15 @@ On Unix, session files are created with mode `0o600`.
 
 ### Actor + batched writes
 
-The on-disk file is owned by a single `tokio::spawn`-ed actor task. The rest of the program holds a `SessionHandle` that forwards operations as `SessionCmd` over a bounded mpsc channel, with each cmd carrying a oneshot ack. The actor's loop awaits the first cmd, drains any queued commands with `try_recv()`, then issues one buffered flush over the batch.
+The on-disk file is owned by a single `tokio::spawn`-ed actor task. The rest of the program holds a `SessionHandle` that forwards operations as `SessionCmd` over a bounded mpsc channel, with each cmd carrying a oneshot ack. The actor's loop awaits the first cmd, drains any queued commands with `try_recv()`, then appends the batch in one write.
 
-`agent_turn` queues a tool round's three writes through one `tokio::join!` so the actor's drain coalesces them into a single buffered flush, while the text-only branch records its single assistant message via the sequential path. The side effect of joining is that the on-disk file is iteration-atomic, so a crash mid-tool leaves the file at the previous turn's tail.
+`agent_turn` queues a tool round's three writes through one `tokio::join!`, while the text-only branch records its single assistant message via the sequential path. The joined writes usually land in one append, and resume sanitization drops a tool call whose result was torn off.
 
-### Writer recovery on flush error
+### Writer recovery on write error
 
-`WriterStatus` has three variants: `Pending` (file not yet on disk, staged header plus an optional deferred rename), `Active(SessionWriter)` (steady state), and `Broken` (last batch errored, next batch reopens via `SessionStore::open_append`).
+`WriterStatus` is either `Pending` (file not yet on disk, staged header plus an optional deferred rename) or `Active(SessionWriter)`. Entries stay queued in `SessionState` until a write succeeds, and each batch retries the queue ahead of its own entries, so a message never reaches disk before its parent. The flush that creates the file writes the header and its batch in one write and unlinks the file if that write fails, so the session stays `Pending` with nothing on disk. A failed append drops the writer's file handle, and the next append reopens the same path, including for sessions resumed from an explicit path. A failed flush with more than 8 MiB to write drops the queue and stops persistence for the rest of the session.
+
+Every append first terminates a torn last line, so a crash mid-write loses only the batch it interrupted, none of which was acknowledged. A failed append truncates the bytes it wrote unless another process has appended since, so a retry never duplicates a line. A compact whose write fails is unqueued and never committed, matching the agent, which keeps its pre-compact transcript. The loader applies a compact boundary only once its post-compact root follows, so a boundary whose root never landed leaves the old chain in place.
 
 ### Lazy materialization
 
@@ -59,7 +61,7 @@ A session records its prompt context (the environment section, rendered instruct
 
 ### Fork-on-conflict concurrency
 
-There is no file-level lock: two processes resuming the same session both append, and the newest-leaf rule resolves forks deterministically. Writes smaller than `PIPE_BUF` are atomic under POSIX `O_APPEND`.
+There is no file-level lock: two processes resuming the same session both append, and the newest-leaf rule resolves forks deterministically. Each batch lands in one `O_APPEND` write, so concurrent appends interleave only between batches.
 
 ### AI-generated titles
 
@@ -67,7 +69,7 @@ In the TUI, the first user prompt of a fresh session spawns a detached tokio tas
 
 ### Write-error surfacing
 
-First failure populates the handle's `RecordOutcome::failure` slot so the agent loop emits a one-shot `AgentEvent::Error`. Two independent sticky-once flags (`flush_failure_surfaced`, `actor_gone_surfaced`) prevent different failure kinds from masking each other.
+First failure populates the handle's `RecordOutcome::failure` slot so the agent loop emits a one-shot `AgentEvent::Error`. Compact acks carry every failure, since the agent swaps in the summary only when the boundary reached disk. Three independent sticky-once flags (`flush_failure_surfaced`, `persistence_stop_surfaced`, `actor_gone_surfaced`) keep different failure kinds from masking each other, so stopping persistence surfaces even after an earlier flush failure.
 
 ## Listing
 
@@ -87,8 +89,8 @@ First failure populates the handle's `RecordOutcome::failure` slot so the agent 
 4. **Explicit entry schema.** Tagged union + `parent_uuid` DAG + `version` field.
 5. **Lazy file creation.** Empty sessions leave no artifact.
 6. **Resume + symmetric sanitization.** Reopen, walk DAG, sanitize, keep every transcript API-valid.
-7. **Fork-on-conflict concurrency, no file lock.** Newest-leaf rule resolves forks, and large interleaved writes are warn-skipped.
+7. **Fork-on-conflict concurrency, no file lock.** Newest-leaf rule resolves forks, and one write per batch keeps concurrent appends from splitting a line.
 8. **Fire-and-forget AI titles.** One-shot Haiku call, warn-log on failure, tail-scan's `updated_at` auto-supersedes.
-9. **First-failure-only write-error surfacing.** One `AgentEvent::Error` plus warn-logs gives visibility without spam.
+9. **First-failure-only write-error surfacing.** One `AgentEvent::Error` per failure kind plus warn-logs gives visibility without spam.
 10. **Head + tail listing scan, mtime sort.** Head catches first-prompt title, and tail picks up later titles and summary.
-11. **Actor-owned writes, receive-and-drain batching.** One task owns the writer, and `tokio::join!` coalesces a tool round's writes into one flush.
+11. **Actor-owned writes, receive-and-drain batching.** One task owns the writer, and `tokio::join!` coalesces a tool round's records into one append.

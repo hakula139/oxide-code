@@ -16,7 +16,7 @@ pub(crate) enum Role {
 /// One entry in a [`Message::content`] vector. Variants mirror the Anthropic Messages API
 /// content-block taxonomy verbatim so the same struct serves the wire format, the JSONL
 /// session transcript, and the TUI renderer without lossy conversions.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum ContentBlock {
     Text {
@@ -54,7 +54,7 @@ fn is_default<T: Default + PartialEq>(v: &T) -> bool {
 
 // ── Message ──
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Message {
     pub(crate) role: Role,
     pub(crate) content: Vec<ContentBlock>,

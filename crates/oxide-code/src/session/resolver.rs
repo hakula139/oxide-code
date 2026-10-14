@@ -204,7 +204,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let resumed = resolve_session(&store, "m", None, false).await.unwrap();
-        assert!(resumed.messages.is_empty());
+        assert_eq!(resumed.messages, []);
         assert!(resumed.title.is_none());
         assert!(resumed.tool_result_metadata.is_empty());
         assert!(

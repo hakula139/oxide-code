@@ -3,13 +3,13 @@
 
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use time::OffsetDateTime;
 use tracing::warn;
 use uuid::Uuid;
 
 use super::entry::{CURRENT_VERSION, Entry, TitleSource};
-use super::store::{SessionStore, SessionWriter};
+use super::store::{SessionStore, SessionWriter, encode_lines};
 use crate::file_tracker::FileSnapshot;
 use crate::message::{ContentBlock, Message, Role};
 use crate::util::text::{ELLIPSIS, ELLIPSIS_WIDTH};
@@ -17,6 +17,11 @@ use crate::util::text::{ELLIPSIS, ELLIPSIS_WIDTH};
 /// Char cap for first-prompt-derived titles. Sized so a 120-col `--list` row still has room
 /// after the fixed `ID / Last Active / Msgs` prefix.
 const MAX_TITLE_LEN: usize = 80;
+
+/// Retry-queue size past which a failed flush stops persistence for the rest of the session.
+pub(super) const MAX_UNWRITTEN_BYTES: usize = 8 << 20;
+const PERSISTENCE_STOPPED: &str =
+    "session persistence stopped after more than 8 MiB of entries failed to write";
 
 // ── SessionState ──
 
@@ -26,6 +31,8 @@ pub(super) struct SessionState {
     pub(super) session_id: Arc<str>,
     store: SessionStore,
     writer_status: WriterStatus,
+    /// Unwritten entries, retried ahead of the next batch so no message precedes its parent.
+    unwritten: Vec<Entry>,
     last_message_uuid: Option<Uuid>,
     /// Loaded count on resume (`0` for fresh). `finish_entries` skips the summary when unchanged.
     initial_message_count: u32,
@@ -33,6 +40,7 @@ pub(super) struct SessionState {
     /// Latched on first user-text so we don't emit a duplicate title entry.
     first_user_prompt_seen: bool,
     finished: bool,
+    persistence_stopped: bool,
 }
 
 /// Writer lifecycle. `Pending` defers file creation until the first non-empty flush.
@@ -42,7 +50,6 @@ enum WriterStatus {
         deferred_title: Option<String>,
     },
     Active(SessionWriter),
-    Broken,
 }
 
 impl SessionState {
@@ -55,11 +62,13 @@ impl SessionState {
                 header,
                 deferred_title: None,
             },
+            unwritten: Vec::new(),
             last_message_uuid: None,
             initial_message_count: 0,
             message_count: 0,
             first_user_prompt_seen: false,
             finished: false,
+            persistence_stopped: false,
         }
     }
 
@@ -77,17 +86,17 @@ impl SessionState {
             session_id: Arc::from(session_id),
             store,
             writer_status: WriterStatus::Active(writer),
+            unwritten: Vec::new(),
             last_message_uuid,
             initial_message_count,
             message_count: initial_message_count,
             first_user_prompt_seen,
             finished: false,
+            persistence_stopped: false,
         }
     }
 
-    /// Parks `title` for the first `Pending` → `Active` flush as `UserProvided`. Returns
-    /// `Some(title)` when already `Active` / `Broken` so the caller queues it normally.
-    /// Last-wins on repeat.
+    /// Parks `title` for the flush that creates the file, or hands it back once the file exists.
     pub(super) fn try_defer_title(&mut self, title: String) -> Option<String> {
         let WriterStatus::Pending { deferred_title, .. } = &mut self.writer_status else {
             return Some(title);
@@ -163,7 +172,7 @@ impl SessionState {
         (entries, synthetic_uuid)
     }
 
-    /// Anchors future messages to the post-compact root.
+    /// Anchors future messages to the post-compact root once its entries are on disk.
     pub(super) fn commit_compact(&mut self, synthetic_uuid: Uuid) {
         self.last_message_uuid = Some(synthetic_uuid);
         self.message_count = 1;
@@ -173,8 +182,24 @@ impl SessionState {
         self.first_user_prompt_seen = true;
     }
 
+    /// Unqueues a failed compact so a retry cannot persist a compaction the agent abandoned. Relies
+    /// on a compact ending its batch, which leaves its entries at the tail of the queue.
+    pub(super) fn abandon_compact(&mut self) {
+        if let Some(start) = self
+            .unwritten
+            .iter()
+            .rposition(|entry| matches!(entry, Entry::Compact { .. }))
+        {
+            self.unwritten.truncate(start);
+        }
+    }
+
     pub(super) fn message_count(&self) -> u32 {
         self.message_count
+    }
+
+    pub(super) fn persistence_stopped(&self) -> bool {
+        self.persistence_stopped
     }
 
     /// Builds snapshot + summary closing entries, or empty vec for no-op finish.
@@ -205,54 +230,48 @@ impl SessionState {
         entries
     }
 
-    /// Writes entries in one flush. Transitions to Broken on failure so next batch reopens.
-    /// On first `Pending` → `Active` promotion, any deferred title flushes ahead of `entries`
-    /// as a `UserProvided` entry stamped at flush time.
-    pub(super) fn flush_entries(&mut self, entries: &[Entry]) -> Result<()> {
-        if entries.is_empty() {
+    /// Writes the retry queue, then `entries`, in one append and keeps them all queued on failure.
+    /// The flush that creates the file writes the header and any deferred title first. A failure
+    /// with more than [`MAX_UNWRITTEN_BYTES`] to write drops the queue and stops persistence.
+    pub(super) fn flush_entries(&mut self, entries: Vec<Entry>) -> Result<()> {
+        if self.persistence_stopped {
+            bail!(PERSISTENCE_STOPPED);
+        }
+        self.unwritten.extend(entries);
+        if self.unwritten.is_empty() {
             return Ok(());
         }
-        let (mut writer, deferred_title) = self.take_or_open_writer()?;
-        let result = (|| -> Result<()> {
-            if let Some(title) = &deferred_title {
-                writer.append_no_flush(&Entry::Title {
-                    title: title.clone(),
-                    source: TitleSource::UserProvided,
-                    updated_at: OffsetDateTime::now_utc(),
-                })?;
-            }
-            for entry in entries {
-                writer.append_no_flush(entry)?;
-            }
-            writer.flush()
-        })();
-        self.writer_status = match result {
-            Ok(()) => WriterStatus::Active(writer),
-            Err(_) => WriterStatus::Broken,
-        };
-        result
-    }
 
-    /// Returns the writer plus any title deferred while `Pending`. On `Pending` failure the
-    /// header AND deferred title are restored so the next batch retries `create`.
-    fn take_or_open_writer(&mut self) -> Result<(SessionWriter, Option<String>)> {
-        match std::mem::replace(&mut self.writer_status, WriterStatus::Broken) {
-            WriterStatus::Active(w) => Ok((w, None)),
+        let deferred_title = match &self.writer_status {
             WriterStatus::Pending {
-                header,
-                deferred_title,
-            } => match self.store.create(&header) {
-                Ok(w) => Ok((w, deferred_title)),
-                Err(e) => {
-                    self.writer_status = WriterStatus::Pending {
-                        header,
-                        deferred_title,
-                    };
-                    Err(e)
-                }
-            },
-            WriterStatus::Broken => Ok((self.store.open_append(&self.session_id)?, None)),
+                deferred_title: Some(title),
+                ..
+            } => Some(Entry::Title {
+                title: title.clone(),
+                source: TitleSource::UserProvided,
+                updated_at: OffsetDateTime::now_utc(),
+            }),
+            _ => None,
+        };
+        let lines = encode_lines(deferred_title.iter().chain(&self.unwritten))?;
+        let result = match &mut self.writer_status {
+            WriterStatus::Active(writer) => writer.append_lines(&lines),
+            WriterStatus::Pending { header, .. } => self
+                .store
+                .create(header, &lines)
+                .map(|writer| self.writer_status = WriterStatus::Active(writer)),
+        };
+
+        if let Err(e) = result {
+            if lines.len() > MAX_UNWRITTEN_BYTES {
+                self.persistence_stopped = true;
+                self.unwritten = Vec::new();
+                return Err(e.context(PERSISTENCE_STOPPED));
+            }
+            return Err(e);
         }
+        self.unwritten.clear();
+        Ok(())
     }
 }
 
@@ -324,7 +343,9 @@ fn truncate_title(s: &str, max_len: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::super::store::test_store;
+    use super::super::store::{
+        load_session_data_from_path, test_project_dir, test_session_file, test_store,
+    };
     use super::*;
     use crate::file_tracker::FileTracker;
 
@@ -356,19 +377,8 @@ mod tests {
         let mut state = SessionState::fresh(store, "m");
         let now = OffsetDateTime::now_utc();
         let (entries, _) = state.queue_message_entries(&Message::user("first"), now, false);
-        state.flush_entries(&entries).unwrap();
+        state.flush_entries(entries).unwrap();
         assert!(matches!(state.writer_status, WriterStatus::Active(_)));
-
-        let rejected = state.try_defer_title("Manual title".to_owned());
-        assert_eq!(rejected.as_deref(), Some("Manual title"));
-    }
-
-    #[test]
-    fn try_defer_title_broken_rejects_with_title() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let mut state = SessionState::fresh(store, "m");
-        state.writer_status = WriterStatus::Broken;
 
         let rejected = state.try_defer_title("Manual title".to_owned());
         assert_eq!(rejected.as_deref(), Some("Manual title"));
@@ -471,9 +481,9 @@ mod tests {
         let mut state = SessionState::fresh(store, "m");
         let now = OffsetDateTime::now_utc();
         let (rec, _) = state.queue_message_entries(&Message::user("first"), now, false);
-        state.flush_entries(&rec).unwrap();
+        state.flush_entries(rec).unwrap();
         let (rec, _) = state.queue_message_entries(&Message::assistant("reply"), now, false);
-        state.flush_entries(&rec).unwrap();
+        state.flush_entries(rec).unwrap();
         assert_eq!(state.message_count(), 2);
 
         let (entries, synthetic_uuid) = state.compact_entries(
@@ -544,9 +554,9 @@ mod tests {
         let mut state = SessionState::fresh(store, "m");
         let now = OffsetDateTime::now_utc();
         let (rec, _) = state.queue_message_entries(&Message::user("first"), now, false);
-        state.flush_entries(&rec).unwrap();
+        state.flush_entries(rec).unwrap();
         let (rec, _) = state.queue_message_entries(&Message::assistant("reply"), now, false);
-        state.flush_entries(&rec).unwrap();
+        state.flush_entries(rec).unwrap();
 
         let (_, synthetic_uuid) = state.compact_entries("s", None, Message::user("synth"), now);
         state.commit_compact(synthetic_uuid);
@@ -595,7 +605,7 @@ mod tests {
         let mut state = SessionState::fresh(store, "m");
         let now = OffsetDateTime::now_utc();
         let (entries, _) = state.queue_message_entries(&Message::user("hello"), now, false);
-        state.flush_entries(&entries).unwrap();
+        state.flush_entries(entries).unwrap();
 
         let entries = state.finish_entries(Vec::new(), now);
         let Some(Entry::Summary { message_count, .. }) = entries.last() else {
@@ -626,7 +636,7 @@ mod tests {
         let mut state = SessionState::fresh(store, "m");
         let now = OffsetDateTime::now_utc();
         let (msgs, _) = state.queue_message_entries(&Message::user("hi"), now, false);
-        state.flush_entries(&msgs).unwrap();
+        state.flush_entries(msgs).unwrap();
 
         for name in ["/tmp/a", "/tmp/b", "/tmp/c"] {
             tracker.record_modify(
@@ -656,7 +666,7 @@ mod tests {
         let mut state = SessionState::fresh(store, "m");
         let now = OffsetDateTime::now_utc();
         let (entries, _) = state.queue_message_entries(&Message::user("hi"), now, false);
-        state.flush_entries(&entries).unwrap();
+        state.flush_entries(entries).unwrap();
         let _first = state.finish_entries(Vec::new(), now);
 
         let second = state.finish_entries(Vec::new(), now);
@@ -673,7 +683,7 @@ mod tests {
         let mut original = SessionState::fresh(store.clone(), "m");
         let now = OffsetDateTime::now_utc();
         let (entries, _) = original.queue_message_entries(&Message::user("hi"), now, false);
-        original.flush_entries(&entries).unwrap();
+        original.flush_entries(entries).unwrap();
         let parent = original.last_message_uuid;
         let session_id = original.session_id.to_string();
         drop(original);
@@ -688,67 +698,46 @@ mod tests {
 
     // ── flush_entries ──
 
-    // `/dev/full` drives a real ENOSPC on every write. Linux-only, so the test gates instead of
-    // smuggling in a failing-writer trait.
-    #[cfg(target_os = "linux")]
     #[test]
-    fn flush_entries_active_writer_flush_failure_transitions_to_broken() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let mut state = SessionState::fresh(store, "m");
+    fn flush_entries_failed_write_retries_queued_entries_at_the_writer_path() {
+        let source = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
         let now = OffsetDateTime::now_utc();
-        let writer = super::super::store::open_append_at(std::path::Path::new("/dev/full"))
-            .expect("/dev/full must be openable on Linux");
-        state.writer_status = WriterStatus::Active(writer);
+        let mut original = SessionState::fresh(test_store(source.path()), "m");
+        let (entries, _) = original.queue_message_entries(&Message::user("first"), now, false);
+        original.flush_entries(entries).unwrap();
+        let session_id = original.session_id.to_string();
+        let copied = elsewhere.path().join("copied.jsonl");
+        std::fs::copy(test_session_file(source.path(), &session_id), &copied).unwrap();
 
-        let (entries, _) = state.queue_message_entries(&Message::user("hi"), now, false);
-        let result = state.flush_entries(&entries);
-
-        assert!(result.is_err(), "flush to /dev/full must surface ENOSPC");
-        assert!(
-            matches!(state.writer_status, WriterStatus::Broken),
-            "flush failure on Active writer must transition to Broken",
+        let empty_store = tempfile::tempdir().unwrap();
+        let mut state = SessionState::resumed(
+            test_store(empty_store.path()),
+            session_id,
+            SessionWriter::failing_once(&copied),
+            original.last_message_uuid,
+            1,
+            true,
         );
-    }
-
-    #[test]
-    fn flush_entries_broken_writer_reopens_file_and_appends() {
-        // Reopen must hit the existing file, not create a fresh one.
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let mut state = SessionState::fresh(store.clone(), "m");
-        let now = OffsetDateTime::now_utc();
-        let session_id = state.session_id.to_string();
-
-        let (entries, _) = state.queue_message_entries(&Message::user("first"), now, false);
-        state.flush_entries(&entries).unwrap();
-        assert!(matches!(state.writer_status, WriterStatus::Active(_)));
-        state.writer_status = WriterStatus::Broken;
-
         let (entries, _) = state.queue_message_entries(&Message::user("second"), now, false);
-        state.flush_entries(&entries).unwrap();
+        assert!(state.flush_entries(entries).is_err());
+        let (entries, _) = state.queue_message_entries(&Message::assistant("third"), now, false);
+        state.flush_entries(entries).unwrap();
 
-        assert!(
-            matches!(state.writer_status, WriterStatus::Active(_)),
-            "Broken must transition back to Active after a successful reopen",
-        );
-        let path = super::super::store::test_session_file(dir.path(), &session_id);
-        let content = std::fs::read_to_string(path).unwrap();
-        let messages: Vec<&str> = content
-            .lines()
-            .filter(|l| l.contains(r#""type":"message""#))
-            .collect();
+        let data = load_session_data_from_path(&copied).unwrap();
         assert_eq!(
-            messages.len(),
-            2,
-            "both messages on disk after reopen: {content}",
+            data.messages,
+            [
+                Message::user("first"),
+                Message::user("second"),
+                Message::assistant("third"),
+            ]
         );
+        assert_eq!(data.last_uuid, state.last_message_uuid);
     }
 
     #[test]
-    fn flush_entries_pending_create_failure_preserves_deferred_title() {
-        // The next batch must retry create rather than append a file that was never created. The
-        // deferred title must survive into the retry.
+    fn flush_entries_pending_create_failure_keeps_entries_and_deferred_title() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let mut state = SessionState::fresh(store, "m");
@@ -761,12 +750,13 @@ mod tests {
             "fresh state must accept defer",
         );
 
-        let project_dir = super::super::store::test_project_dir(dir.path());
+        let project_dir = test_project_dir(dir.path());
         std::fs::remove_dir_all(&project_dir).unwrap();
         let (entries, _) = state.queue_message_entries(&Message::user("first"), now, false);
-        let result = state.flush_entries(&entries);
-
-        assert!(result.is_err(), "create must fail with project dir gone");
+        assert!(
+            state.flush_entries(entries).is_err(),
+            "create must fail with project dir gone",
+        );
         let WriterStatus::Pending {
             deferred_title: Some(restored),
             ..
@@ -774,18 +764,59 @@ mod tests {
         else {
             panic!("create failure must leave Pending with deferred title intact");
         };
-        assert_eq!(
-            restored, "Survives rollback",
-            "deferred title must survive rollback verbatim",
-        );
+        assert_eq!(restored, "Survives rollback");
 
         std::fs::create_dir_all(&project_dir).unwrap();
-        state.flush_entries(&entries).expect("retry succeeds");
-        let path = super::super::store::test_session_file(dir.path(), &session_id);
-        let content = std::fs::read_to_string(path).unwrap();
+        let (entries, _) = state.queue_message_entries(&Message::assistant("second"), now, false);
+        state.flush_entries(entries).unwrap();
+
+        let data =
+            load_session_data_from_path(&test_session_file(dir.path(), &session_id)).unwrap();
+        assert_eq!(
+            data.messages,
+            [Message::user("first"), Message::assistant("second")]
+        );
+        assert_eq!(
+            data.title.map(|t| t.title).as_deref(),
+            Some("Survives rollback"),
+        );
+    }
+
+    #[test]
+    fn flush_entries_failure_over_the_cap_stops_persistence_for_good() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = OffsetDateTime::now_utc();
+        let mut original = SessionState::fresh(test_store(dir.path()), "m");
+        let (entries, _) = original.queue_message_entries(&Message::user("first"), now, false);
+        original.flush_entries(entries).unwrap();
+        let session_id = original.session_id.to_string();
+        let path = test_session_file(dir.path(), &session_id);
+        let before = std::fs::read(&path).unwrap();
+
+        let mut state = SessionState::resumed(
+            test_store(dir.path()),
+            session_id,
+            SessionWriter::failing_once(&path),
+            original.last_message_uuid,
+            1,
+            true,
+        );
+        let huge = Message::user("x".repeat(MAX_UNWRITTEN_BYTES));
+        let (entries, _) = state.queue_message_entries(&huge, now, false);
+        let err = state.flush_entries(entries).unwrap_err();
         assert!(
-            content.contains("Survives rollback"),
-            "deferred title reaches disk on retry: {content}",
+            format!("{err:#}").contains(PERSISTENCE_STOPPED),
+            "got: {err:#}"
+        );
+        let (entries, _) = state.queue_message_entries(&Message::assistant("after"), now, false);
+        let err = state.flush_entries(entries).unwrap_err();
+
+        assert_eq!(err.to_string(), PERSISTENCE_STOPPED);
+        assert!(state.persistence_stopped());
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "a stopped session writes nothing"
         );
     }
 

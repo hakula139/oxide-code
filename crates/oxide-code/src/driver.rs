@@ -824,7 +824,7 @@ mod tests {
         conversation.messages = vec![Message::user("before clear")];
 
         conversation.clear(&sink, &store).await;
-        assert!(conversation.messages.is_empty());
+        assert_eq!(conversation.messages, []);
         assert_ne!(conversation.prompt.user_context, SESSION_CONTEXT);
         assert!(conversation.prompt.user_context.contains("# Current date"));
         assert_eq!(
