@@ -440,7 +440,7 @@ mod tests {
         };
         let mut out = Vec::new();
         render_locations_footer(&mut out, &ctx, &[], theme.tool_border());
-        assert!(out.is_empty());
+        assert_eq!(out, []);
     }
 
     // ── any_chunk_has_content ──

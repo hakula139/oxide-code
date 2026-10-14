@@ -180,8 +180,8 @@ mod tests {
     #[test]
     fn metadata_matches_built_ins_contract() {
         assert_eq!(RenameCmd.name(), "rename");
-        assert!(RenameCmd.aliases().is_empty());
-        assert!(!RenameCmd.description().is_empty());
+        assert_eq!(RenameCmd.aliases(), [] as [&str; 0]);
+        assert_ne!(RenameCmd.description(), "");
         assert_eq!(RenameCmd.usage(), Some("[<title>]"));
     }
 

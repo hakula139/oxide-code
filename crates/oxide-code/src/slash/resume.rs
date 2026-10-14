@@ -1259,7 +1259,7 @@ mod tests {
     fn metadata_matches_built_ins_contract() {
         assert_eq!(ResumeCmd.name(), "resume");
         assert_eq!(ResumeCmd.aliases(), &["continue"]);
-        assert!(!ResumeCmd.description().is_empty());
+        assert_ne!(ResumeCmd.description(), "");
         assert_eq!(ResumeCmd.usage(), Some("[<id-prefix>]"));
     }
 

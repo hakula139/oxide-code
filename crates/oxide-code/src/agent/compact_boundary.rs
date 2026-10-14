@@ -97,7 +97,7 @@ mod tests {
         .await;
 
         assert!(compacted);
-        assert!(tracker.snapshot_all().is_empty());
+        assert_eq!(tracker.snapshot_all(), []);
         assert_eq!(messages.len(), 1);
         assert!(
             matches!(&messages[0].content[0], ContentBlock::Text { text } if text.contains("fixed login bug"))
@@ -168,7 +168,7 @@ mod tests {
         .await;
 
         assert!(compacted);
-        assert!(tracker.snapshot_all().is_empty());
+        assert_eq!(tracker.snapshot_all(), []);
         assert_eq!(messages.len(), 1);
         assert!(
             matches!(&messages[0].content[0], ContentBlock::Text { text } if text.contains("fixed login bug"))

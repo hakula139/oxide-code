@@ -1,26 +1,21 @@
-//! Extra-trust-anchor helpers. `reqwest` with `rustls-tls` only trusts the baked-in
-//! `webpki-roots` Mozilla bundle, so corporate or self-signed endpoints need explicit PEM
-//! bundles appended to the client builder.
+//! Extra-trust-anchor helpers. `reqwest` with `rustls` verifies against the platform trust store,
+//! so corporate or self-signed endpoints whose CA is not installed system-wide need explicit PEM
+//! bundles merged into the client builder.
 
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use reqwest::{Certificate, ClientBuilder};
 
-/// Appends the PEM bundle at `path` (if any) to `builder`'s trust store. A `None` path is the
-/// happy-path no-op so callers can funnel both the "extra CA configured" and the default branch
-/// through one line.
+/// Merges the PEM bundle at `path` into `builder`'s trust store. `None` returns `builder` unchanged.
 pub(crate) fn apply_extra_ca_certs(
-    mut builder: ClientBuilder,
+    builder: ClientBuilder,
     path: Option<&Path>,
 ) -> Result<ClientBuilder> {
     let Some(path) = path else {
         return Ok(builder);
     };
-    for cert in load_extra_ca_certs(path)? {
-        builder = builder.add_root_certificate(cert);
-    }
-    Ok(builder)
+    Ok(builder.tls_certs_merge(load_extra_ca_certs(path)?))
 }
 
 /// Reads a PEM-encoded bundle from disk and returns one [`Certificate`] per `BEGIN CERTIFICATE`

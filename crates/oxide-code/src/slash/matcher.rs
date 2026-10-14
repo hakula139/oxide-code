@@ -239,7 +239,7 @@ mod tests {
     #[test]
     fn filter_and_rank_unmatched_query_is_empty() {
         let rows = filter_and_rank("zzz", &registry());
-        assert!(rows.is_empty());
+        assert_eq!(rows, []);
     }
 
     // ── best_match ──
@@ -293,7 +293,7 @@ mod tests {
 
     #[test]
     fn rank_by_prefix_unmatched_query_is_empty() {
-        assert!(ranked("zzz").is_empty());
+        assert_eq!(ranked("zzz"), [] as [&str; 0]);
     }
 
     // ── Fake fixture ──

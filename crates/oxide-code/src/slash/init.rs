@@ -97,7 +97,7 @@ mod tests {
     #[test]
     fn metadata_matches_built_ins_contract() {
         assert_eq!(InitCmd.name(), "init");
-        assert!(InitCmd.aliases().is_empty());
+        assert_eq!(InitCmd.aliases(), [] as [&str; 0]);
         assert!(InitCmd.usage().is_none());
     }
 

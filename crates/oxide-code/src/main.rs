@@ -1083,7 +1083,7 @@ mod tests {
         .unwrap();
 
         assert!(compacted);
-        assert!(pending.is_empty());
+        assert_eq!(pending, [] as [String; 0]);
         assert_eq!(failures, 0);
         assert_eq!(messages.len(), 1);
         assert!(

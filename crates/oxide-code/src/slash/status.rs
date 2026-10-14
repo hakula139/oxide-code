@@ -91,8 +91,8 @@ mod tests {
     #[test]
     fn metadata_matches_built_ins_contract() {
         assert_eq!(StatusCmd.name(), "status");
-        assert!(StatusCmd.aliases().is_empty());
-        assert!(!StatusCmd.description().is_empty());
+        assert_eq!(StatusCmd.aliases(), [] as [&str; 0]);
+        assert_ne!(StatusCmd.description(), "");
     }
 
     // ── StatusCmd::execute ──

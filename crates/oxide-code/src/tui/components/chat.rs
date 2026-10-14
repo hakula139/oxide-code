@@ -1157,11 +1157,11 @@ mod tests {
     fn append_stream_token_persists_thinking_into_blocks() {
         let mut chat = test_chat();
         chat.append_thinking_token("reasoning here");
-        assert!(!chat.thinking_buffer.is_empty());
+        assert_ne!(chat.thinking_buffer, "");
         assert_eq!(chat.blocks.len(), 0);
 
         chat.append_stream_token("reply text");
-        assert!(chat.thinking_buffer.is_empty());
+        assert_eq!(chat.thinking_buffer, "");
         assert_eq!(chat.blocks.len(), 1);
 
         let text = all_text(&chat);
@@ -1450,7 +1450,7 @@ mod tests {
 
         chat.commit_streaming();
         assert!(chat.streaming.is_none());
-        assert!(chat.thinking_buffer.is_empty());
+        assert_eq!(chat.thinking_buffer, "");
     }
 
     #[test]
@@ -1461,7 +1461,7 @@ mod tests {
 
         chat.commit_streaming();
         assert_eq!(chat.blocks.len(), 1);
-        assert!(chat.thinking_buffer.is_empty());
+        assert_eq!(chat.thinking_buffer, "");
         let text = all_text(&chat);
         assert!(text.contains("plan before tool"));
     }
@@ -2069,7 +2069,7 @@ mod tests {
 
         assert_eq!(chat.entry_count(), 0);
         assert!(chat.streaming.is_none());
-        assert!(chat.thinking_buffer.is_empty());
+        assert_eq!(chat.thinking_buffer, "");
         assert_eq!(chat.scroll_offset, 0);
         assert_eq!(chat.content_height.get(), 0);
         assert!(chat.auto_scroll);
@@ -2596,7 +2596,7 @@ mod tests {
     #[test]
     fn build_text_empty_chat_has_no_lines() {
         let chat = test_chat();
-        assert!(chat.build_text(60).lines.is_empty());
+        assert_eq!(chat.build_text(60).lines, []);
     }
 
     #[test]

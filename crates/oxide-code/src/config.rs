@@ -344,7 +344,7 @@ pub(crate) struct Config {
     pub(crate) auth: Auth,
     pub(crate) base_url: String,
     /// Resolved path to a PEM bundle appended to reqwest's trust anchors. `None` means the
-    /// client keeps only the built-in Mozilla roots.
+    /// client trusts only the platform roots.
     pub(crate) extra_ca_certs: Option<PathBuf>,
     pub(crate) max_tokens: u32,
     /// `None` means the agent loop runs without a per-turn round cap.

@@ -142,8 +142,8 @@ mod tests {
     #[test]
     fn metadata_matches_built_ins_contract() {
         assert_eq!(ConfigCmd.name(), "config");
-        assert!(ConfigCmd.aliases().is_empty());
-        assert!(!ConfigCmd.description().is_empty());
+        assert_eq!(ConfigCmd.aliases(), [] as [&str; 0]);
+        assert_ne!(ConfigCmd.description(), "");
     }
 
     // ── ConfigCmd::execute ──

@@ -436,7 +436,7 @@ mod tests {
             ..
         } = &entries[1]
         else {
-            panic!("expected Entry::Message, got {:?}", &entries[1]);
+            panic!("expected Entry::Message, got {:?}", entries[1]);
         };
         assert_eq!(uuid.to_string(), "a1b2c3d4-e5f6-7890-abcd-1234567890ef");
         assert_eq!(*parent_uuid, None);

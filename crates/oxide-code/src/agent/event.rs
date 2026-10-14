@@ -388,7 +388,7 @@ mod tests {
             AgentEvent::StreamToken("hello".to_owned()),
         );
         assert_eq!(stdout, "hello");
-        assert!(stderr.is_empty());
+        assert_eq!(stderr, "");
     }
 
     #[test]
@@ -406,8 +406,8 @@ mod tests {
             &test_sink(false),
             AgentEvent::ThinkingToken("plan".to_owned()),
         );
-        assert!(stdout.is_empty());
-        assert!(stderr.is_empty());
+        assert_eq!(stdout, "");
+        assert_eq!(stderr, "");
     }
 
     #[test]
@@ -514,7 +514,7 @@ mod tests {
     fn render_turn_complete_writes_trailing_newline_to_stdout() {
         let (stdout, stderr) = render_one(&test_sink(false), AgentEvent::TurnComplete);
         assert_eq!(stdout, "\n");
-        assert!(stderr.is_empty());
+        assert_eq!(stderr, "");
     }
 
     #[test]

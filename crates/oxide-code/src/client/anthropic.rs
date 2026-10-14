@@ -1461,7 +1461,7 @@ mod tests {
     fn split_at_boundary_without_marker_treats_all_as_static() {
         let (statics, dynamic) = split_at_boundary(&["intro", "tasks", "env"]);
         assert_eq!(statics, vec!["intro", "tasks", "env"]);
-        assert!(dynamic.is_empty());
+        assert_eq!(dynamic, [] as [&str; 0]);
     }
 
     #[test]
@@ -1476,13 +1476,13 @@ mod tests {
     fn split_at_boundary_at_extremes_yields_empty_side() {
         let (statics, dynamic) =
             split_at_boundary(&[SYSTEM_PROMPT_DYNAMIC_BOUNDARY, "env", "lang"]);
-        assert!(statics.is_empty());
+        assert_eq!(statics, [] as [&str; 0]);
         assert_eq!(dynamic, vec!["env", "lang"]);
 
         let (statics, dynamic) =
             split_at_boundary(&["intro", "tasks", SYSTEM_PROMPT_DYNAMIC_BOUNDARY]);
         assert_eq!(statics, vec!["intro", "tasks"]);
-        assert!(dynamic.is_empty());
+        assert_eq!(dynamic, [] as [&str; 0]);
     }
 
     // ── first_user_text ──

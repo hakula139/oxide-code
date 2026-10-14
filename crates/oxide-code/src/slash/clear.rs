@@ -41,7 +41,7 @@ mod tests {
     fn metadata_matches_built_ins_contract() {
         assert_eq!(ClearCmd.name(), "clear");
         assert_eq!(ClearCmd.aliases(), &["new", "reset"]);
-        assert!(!ClearCmd.description().is_empty());
+        assert_ne!(ClearCmd.description(), "");
     }
 
     #[test]
