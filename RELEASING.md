@@ -44,7 +44,7 @@ The release lands through a PR, never a direct push to `main`. The order is: ope
 
 8. Wait for CI to pass, fix anything it flags, then have the PR reviewed and merged. Do not tag until the PR is merged and green.
 
-9. Tag the merge commit and push the tag:
+9. Tag the merge commit and push the tag. Pushing the tag starts the release workflow and is hard to undo, so get approval for the tag push separately from the release PR:
 
    ```bash
    git switch main && git pull
