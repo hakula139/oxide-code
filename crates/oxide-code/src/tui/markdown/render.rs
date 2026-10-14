@@ -148,8 +148,8 @@ where
             Tag::TableHead => self.table.in_head = true,
             Tag::TableRow => {}
             Tag::TableCell => self.table.cell_buf.clear(),
-            Tag::HtmlBlock
-            | Tag::Image { .. }
+            Tag::HtmlBlock => self.start_html_block(),
+            Tag::Image { .. }
             | Tag::FootnoteDefinition(_)
             | Tag::MetadataBlock(_)
             | Tag::DefinitionList
@@ -167,6 +167,7 @@ where
             TagEnd::Paragraph => self.end_paragraph(),
             TagEnd::Heading(_) => self.end_heading(),
             TagEnd::BlockQuote(_) => self.end_blockquote(),
+            TagEnd::HtmlBlock => self.needs_newline = true,
             TagEnd::CodeBlock => self.end_code_block(),
             TagEnd::List(_) => self.end_list(),
             TagEnd::Item => {
@@ -261,6 +262,19 @@ where
             self.theme.horizontal_rule(),
         )]));
         self.needs_newline = true;
+    }
+
+    fn start_html_block(&mut self) {
+        if self.needs_newline {
+            self.push_blank_line();
+            self.needs_newline = false;
+        }
+    }
+
+    fn html(&mut self, html: &str) {
+        for line in html.lines() {
+            self.push_line(Line::from(line.to_owned()));
+        }
     }
 
     // ── Lists ──
@@ -473,17 +487,6 @@ where
             self.push_line(Line::default());
         }
         self.push_span(Span::styled(code.into_string(), style));
-    }
-
-    fn html(&mut self, html: &str) {
-        let style = self.current_inline_style();
-        for (i, line) in html.lines().enumerate() {
-            if i > 0 || self.needs_newline {
-                self.push_line(Line::default());
-                self.needs_newline = false;
-            }
-            self.push_span(Span::styled(line.to_owned(), style));
-        }
     }
 
     fn inline_html(&mut self, html: &str) {
@@ -1779,9 +1782,27 @@ mod tests {
     // ── HTML ──
 
     #[test]
-    fn html_block_rendered_as_text() {
-        let lines = rendered_text("<div>hello</div>");
-        assert!(lines.iter().any(|l| l.contains("<div>hello</div>")));
+    fn html_block_renders_one_row_per_line_between_blank_separators() {
+        let lines = rendered_text(indoc! {"
+            para
+
+            <div>
+            hello
+            </div>
+
+            after
+        "});
+        assert_eq!(lines, ["para", "", "<div>", "hello", "</div>", "", "after"]);
+    }
+
+    #[test]
+    fn html_block_in_blockquote_keeps_the_marker_on_every_row() {
+        let lines = rendered_text(indoc! {"
+            > <div>
+            > x
+            > </div>
+        "});
+        assert_eq!(lines, ["> <div>", "> x", "> </div>"]);
     }
 
     #[test]
