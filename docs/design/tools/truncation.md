@@ -13,7 +13,7 @@ Two-layer truncation: per-tool view-shape caps + centralized byte-budget safety 
 
 ### Per-tool view-shape caps
 
-- **bash**: Drains stdout / stderr while retaining `MAX_OUTPUT_BYTES` per pipe so large streams cannot block on a full OS pipe. The dispatcher cap still applies to the combined output.
+- **bash**: Drains stdout / stderr while keeping the head and tail of each pipe, so large streams cannot block on a full OS pipe and a trailing error summary survives. Rendering splits one budget just under `MAX_OUTPUT_BYTES` across both pipes, so each `[N bytes omitted]` marker counts everything its pipe dropped and the dispatcher cap never fires on bash output. A timeout kills the process group and returns the output captured so far.
 - **edit / write**: No output truncation because success messages are tiny.
 - **glob**: `MAX_RESULTS = 100` matches. Footer: `(Showing N of TOTAL matches.)`.
 - **grep**: Per-line `truncate_line`, per-mode row cap at `DEFAULT_HEAD_LIMIT = 250`, user-overridable. File-size pre-gate at `MAX_GREP_FILE_SIZE = 1 MB`.
@@ -29,6 +29,7 @@ Two-layer truncation: per-tool view-shape caps + centralized byte-budget safety 
 ## Sources
 
 - `crates/oxide-code/src/tool.rs`: `ToolRegistry::run`, `cap_output()`, `MAX_OUTPUT_BYTES`, `truncate_line()`.
+- `crates/oxide-code/src/tool/bash.rs`: `OUTPUT_BUDGET`, `PipeCapture`, `render_pipe()`.
 - `crates/oxide-code/src/tool/glob.rs`: `MAX_RESULTS`, `truncated_total` setter.
 - `crates/oxide-code/src/tool/grep.rs`: `DEFAULT_HEAD_LIMIT`, `MAX_GREP_FILE_SIZE`.
 - `crates/oxide-code/src/file_tracker.rs`: `MAX_TRACKED_FILE_SIZE`.
