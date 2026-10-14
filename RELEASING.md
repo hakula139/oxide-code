@@ -26,7 +26,7 @@ The release lands through a PR, never a direct push to `main`. The order is: ope
 
    Inspect the diff to confirm the new section reads well. If it does not, fix the underlying commits (rebase, amend, reword the squash commit subject) and regenerate. Never edit the body sections of `CHANGELOG.md` directly.
 
-5. Add the compare-link footer line manually. `--prepend` does not touch the footer block, so insert this line above the previous-version line: `[X.Y.Z]: https://github.com/hakula139/oxide-code/compare/<prev-tag>..vX.Y.Z`. For the very first tag, use `https://github.com/hakula139/oxide-code/releases/tag/vX.Y.Z` instead (no compare base).
+5. Add the compare-link footer line manually. `--prepend` does not touch the footer links, which run newest first, so insert this line above the previous version's link: `[X.Y.Z]: https://github.com/hakula139/oxide-code/compare/<prev-tag>..vX.Y.Z`. For the very first tag, use `https://github.com/hakula139/oxide-code/releases/tag/vX.Y.Z` instead (no compare base).
 
 6. Run the local check suite before pushing, so CI does not surface anything avoidable. It is the locally runnable subset of the CI checks:
 
