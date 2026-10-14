@@ -3,14 +3,13 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 #[cfg(target_os = "macos")]
 use crate::util::env;
 use crate::util::fs::atomic_write_private;
-use crate::util::lock;
 use crate::util::tls::apply_extra_ca_certs;
 
 const OAUTH_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
@@ -26,6 +25,11 @@ const TOKEN_EXPIRY_BUFFER_MS: u64 = 5 * 60 * 1000;
 const REFRESH_TIMEOUT: Duration = Duration::from_secs(15);
 
 const LOCK_STALE_THRESHOLD: Duration = Duration::from_secs(30);
+const LOCK_MAX_RETRIES: u32 = 5;
+#[cfg(not(test))]
+const LOCK_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+#[cfg(test)]
+const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(10);
 
 #[cfg(target_os = "macos")]
 const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
@@ -53,31 +57,56 @@ impl OAuthCredential {
     }
 }
 
+/// Credentials parsed from one store, keeping the raw JSON so write-back preserves unknown fields.
+struct StoredCredentials<'a> {
+    source: Source<'a>,
+    json: String,
+    oauth: OAuthCredential,
+}
+
+impl<'a> StoredCredentials<'a> {
+    fn parse(source: Source<'a>, json: String) -> Result<Self> {
+        let file: CredentialsFile =
+            serde_json::from_str(&json).context("failed to parse Claude Code credentials")?;
+        Ok(Self {
+            source,
+            json,
+            oauth: file.claude_ai_oauth,
+        })
+    }
+}
+
+/// The store credentials were read from, and therefore the only one their refresh updates.
+enum Source<'a> {
+    Keychain(&'a dyn Keychain),
+    File(&'a Path),
+}
+
 // ── Token Loading ──
 
 /// Loads (and refreshes if near expiry) the Claude Code OAuth access token. On macOS the Keychain
-/// is consulted first; non-macOS and Keychain-miss fall back to `~/.claude/.credentials.json`.
+/// is consulted first. Other platforms and Keychain misses read `~/.claude/.credentials.json`.
 pub(super) async fn load_token(extra_ca_certs: Option<&Path>) -> Result<String> {
     let file_path = credentials_path().context("could not determine home directory")?;
     let lock_path = lock_path().context("could not determine home directory")?;
     load_token_from(
+        SYSTEM_KEYCHAIN,
         &file_path,
         &lock_path,
         OAUTH_TOKEN_URL,
         extra_ca_certs,
-        load_credentials,
     )
     .await
 }
 
 async fn load_token_from(
+    keychain: Option<&dyn Keychain>,
     file_path: &Path,
     lock_path: &Path,
     refresh_url: &str,
     extra_ca_certs: Option<&Path>,
-    loader: fn(&Path) -> Result<CredentialsFile>,
 ) -> Result<String> {
-    let oauth = loader(file_path)?.claude_ai_oauth;
+    let oauth = load_credentials(keychain, file_path)?.oauth;
     let expires_at_ms = oauth.expires_at_ms();
 
     if !is_near_expiry(expires_at_ms) {
@@ -86,29 +115,43 @@ async fn load_token_from(
 
     if oauth.refresh_token.is_none() {
         if is_expired(expires_at_ms) {
-            bail!("Claude Code OAuth token has expired — run `claude` to refresh");
+            bail!("Claude Code OAuth token has expired (run `claude` to refresh it)");
         }
         warn!("OAuth token expires soon but no refresh token available");
         return Ok(oauth.access_token);
     }
 
-    let _lock = acquire_lock(lock_path).await?;
+    let _lock = match acquire_lock(lock_path).await {
+        Ok(lock) => lock,
+        Err(e) => {
+            // The lock holder may have written a fresh token before releasing.
+            let oauth = load_credentials(keychain, file_path)?.oauth;
+            if is_expired(oauth.expires_at_ms()) {
+                return Err(e);
+            }
+            warn!("skipping OAuth token refresh, using existing: {e:#}");
+            return Ok(oauth.access_token);
+        }
+    };
 
     // Double-checked: a sibling process may have refreshed while we were waiting on the lock.
-    let oauth = loader(file_path)?.claude_ai_oauth;
-    let expires_at_ms = oauth.expires_at_ms();
+    let creds = load_credentials(keychain, file_path)?;
+    let expires_at_ms = creds.oauth.expires_at_ms();
     if !is_near_expiry(expires_at_ms) {
-        return Ok(oauth.access_token);
+        return Ok(creds.oauth.access_token);
     }
 
-    let refresh_token = oauth
+    let refresh_token = creds
+        .oauth
         .refresh_token
         .as_deref()
         .context("refresh token missing after re-read")?;
 
     match refresh_oauth_token(refresh_url, refresh_token, extra_ca_certs).await {
         Ok(response) => {
-            write_refreshed_credentials(file_path, &response)?;
+            if let Err(e) = write_refreshed_credentials(&creds, &response) {
+                warn!("failed to save refreshed OAuth credentials: {e:#}");
+            }
             Ok(response.access_token)
         }
         Err(e) if is_expired(expires_at_ms) => {
@@ -116,66 +159,32 @@ async fn load_token_from(
         }
         Err(e) => {
             warn!("failed to refresh OAuth token, using existing: {e:#}");
-            Ok(oauth.access_token)
+            Ok(creds.oauth.access_token)
         }
     }
 }
 
-#[cfg(target_os = "macos")]
-fn load_credentials(file_path: &Path) -> Result<CredentialsFile> {
-    if let Some(kc) = read_keychain() {
-        return Ok(kc);
+fn load_credentials<'a>(
+    keychain: Option<&'a dyn Keychain>,
+    file_path: &'a Path,
+) -> Result<StoredCredentials<'a>> {
+    if let Some(keychain) = keychain {
+        match keychain
+            .read()
+            .and_then(|json| StoredCredentials::parse(Source::Keychain(keychain), json))
+        {
+            Ok(creds) => return Ok(creds),
+            Err(e) => debug!("Keychain credentials unavailable: {e:#}"),
+        }
     }
     read_credentials(file_path)
 }
 
-#[cfg(not(target_os = "macos"))]
-fn load_credentials(file_path: &Path) -> Result<CredentialsFile> {
-    read_credentials(file_path)
-}
-
-#[cfg(target_os = "macos")]
-fn read_keychain() -> Option<CredentialsFile> {
-    use security_framework::passwords::{PasswordOptions, generic_password};
-    use tracing::debug;
-
-    let account = keychain_account()?;
-    let bytes = match generic_password(PasswordOptions::new_generic_password(
-        KEYCHAIN_SERVICE,
-        &account,
-    )) {
-        Ok(b) => b,
-        Err(e) => {
-            debug!("Keychain read failed: {e}");
-            return None;
-        }
-    };
-    let json = match String::from_utf8(bytes) {
-        Ok(s) => s,
-        Err(e) => {
-            debug!("Keychain data is not valid UTF-8: {e}");
-            return None;
-        }
-    };
-    match serde_json::from_str(&json) {
-        Ok(creds) => Some(creds),
-        Err(e) => {
-            debug!("Keychain JSON parse failed: {e}");
-            None
-        }
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn keychain_account() -> Option<String> {
-    env::string("USER")
-}
-
-fn read_credentials(path: &Path) -> Result<CredentialsFile> {
-    let content = std::fs::read_to_string(path)
+fn read_credentials(path: &Path) -> Result<StoredCredentials<'_>> {
+    let json = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read {}", path.display()))?;
     enforce_private_mode(path);
-    serde_json::from_str(&content).context("failed to parse Claude Code credentials")
+    StoredCredentials::parse(Source::File(path), json)
 }
 
 #[cfg(unix)]
@@ -196,6 +205,50 @@ fn is_near_expiry(expires_at_ms: u64) -> bool {
 
 fn is_expired(expires_at_ms: u64) -> bool {
     now_millis().is_none_or(|now| now >= expires_at_ms)
+}
+
+// ── Keychain ──
+
+/// Claude Code's macOS Keychain entry, holding the same JSON document as the credentials file.
+trait Keychain: Sync {
+    fn read(&self) -> Result<String>;
+    fn write(&self, json: &str) -> Result<()>;
+}
+
+#[cfg(target_os = "macos")]
+const SYSTEM_KEYCHAIN: Option<&dyn Keychain> = Some(&SystemKeychain);
+#[cfg(not(target_os = "macos"))]
+const SYSTEM_KEYCHAIN: Option<&dyn Keychain> = None;
+
+#[cfg(target_os = "macos")]
+struct SystemKeychain;
+
+#[cfg(target_os = "macos")]
+impl Keychain for SystemKeychain {
+    fn read(&self) -> Result<String> {
+        use security_framework::passwords::{PasswordOptions, generic_password};
+
+        let account = keychain_account()?;
+        let bytes = generic_password(PasswordOptions::new_generic_password(
+            KEYCHAIN_SERVICE,
+            &account,
+        ))
+        .context("failed to read from Keychain")?;
+        String::from_utf8(bytes).context("Keychain data is not valid UTF-8")
+    }
+
+    fn write(&self, json: &str) -> Result<()> {
+        use security_framework::passwords::set_generic_password;
+
+        let account = keychain_account()?;
+        set_generic_password(KEYCHAIN_SERVICE, &account, json.as_bytes())
+            .context("failed to write to Keychain")
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn keychain_account() -> Result<String> {
+    env::string("USER").context("could not determine OS username")
 }
 
 // ── Token Refresh ──
@@ -254,10 +307,12 @@ struct RefreshResponse {
     scope: Option<String>,
 }
 
-fn write_refreshed_credentials(path: &Path, response: &RefreshResponse) -> Result<()> {
-    let content = std::fs::read_to_string(path)?;
+fn write_refreshed_credentials(
+    creds: &StoredCredentials<'_>,
+    response: &RefreshResponse,
+) -> Result<()> {
     let mut json: serde_json::Value =
-        serde_json::from_str(&content).context("failed to parse credentials for update")?;
+        serde_json::from_str(&creds.json).context("failed to parse credentials for update")?;
 
     let oauth = json
         .get_mut("claudeAiOauth")
@@ -275,23 +330,10 @@ fn write_refreshed_credentials(path: &Path, response: &RefreshResponse) -> Resul
     }
 
     let serialized = serde_json::to_string_pretty(&json)?;
-    atomic_write_private(path, serialized.as_bytes())?;
-
-    #[cfg(all(target_os = "macos", not(test)))]
-    if let Err(e) = write_keychain(&serialized) {
-        warn!("failed to update Keychain: {e:#}");
+    match creds.source {
+        Source::Keychain(keychain) => keychain.write(&serialized),
+        Source::File(path) => atomic_write_private(path, serialized.as_bytes()),
     }
-
-    Ok(())
-}
-
-#[cfg(all(target_os = "macos", not(test)))]
-fn write_keychain(json: &str) -> Result<()> {
-    use security_framework::passwords::set_generic_password;
-
-    let account = keychain_account().context("could not determine OS username")?;
-    set_generic_password(KEYCHAIN_SERVICE, &account, json.as_bytes())
-        .context("failed to write to Keychain")
 }
 
 fn now_millis() -> Option<u64> {
@@ -326,33 +368,33 @@ impl Drop for LockGuard {
 /// primitive; the guard `rmdir`s on drop. A lock older than [`LOCK_STALE_THRESHOLD`] is treated
 /// as abandoned by a crashed sibling and cleared on the next retry.
 async fn acquire_lock(path: &Path) -> Result<LockGuard> {
-    lock::retry_acquire(
-        || match std::fs::create_dir(path) {
-            Ok(()) => Ok(Some(LockGuard {
-                path: path.to_owned(),
-            })),
+    for attempt in 0..=LOCK_MAX_RETRIES {
+        if attempt > 0 {
+            tokio::time::sleep(LOCK_RETRY_INTERVAL).await;
+        }
+        match std::fs::create_dir(path) {
+            Ok(()) => {
+                return Ok(LockGuard {
+                    path: path.to_owned(),
+                });
+            }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 if is_stale_lock(path)
                     && let Err(e) = std::fs::remove_dir_all(path)
                 {
                     debug!("failed to clear stale lock {}: {e}", path.display());
                 }
-                Ok(None)
             }
-            Err(e) => Err(anyhow::Error::new(e)
-                .context(format!("failed to create lock at {}", path.display()))),
-        },
-        lock::MAX_RETRIES,
-        lock::RETRY_INTERVAL,
-        || {
-            anyhow!(
-                "failed to acquire credentials lock after {} retries \
-                 — another process may be refreshing",
-                lock::MAX_RETRIES,
-            )
-        },
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("failed to create lock at {}", path.display()));
+            }
+        }
+    }
+    bail!(
+        "failed to acquire credentials lock after {LOCK_MAX_RETRIES} retries (another process may \
+         be refreshing)"
     )
-    .await
 }
 
 fn is_stale_lock(path: &Path) -> bool {
@@ -421,7 +463,7 @@ mod tests {
 
     // ── load_token_from ──
 
-    fn write_creds(path: &Path, access: &str, refresh: Option<&str>, expires_at: u64) {
+    fn creds_json(access: &str, refresh: Option<&str>, expires_at: u64) -> serde_json::Value {
         let mut oauth = serde_json::json!({
             "accessToken": access,
             "expiresAt": expires_at,
@@ -429,31 +471,18 @@ mod tests {
         if let Some(r) = refresh {
             oauth["refreshToken"] = r.into();
         }
-        let body = serde_json::json!({ "claudeAiOauth": oauth }).to_string();
-        std::fs::write(path, body).unwrap();
+        serde_json::json!({ "claudeAiOauth": oauth })
     }
 
-    #[tokio::test]
-    async fn load_token_from_keeps_existing_when_far_from_expiry() {
-        let dir = tempfile::tempdir().unwrap();
-        let creds = dir.path().join("creds.json");
-        let lock = dir.path().join("lock");
-        write_creds(&creds, "tok", Some("ref"), 9_999_999_999_999);
-
-        let token = load_token_from(
-            &creds,
-            &lock,
-            "http://should-not-be-called",
-            None,
-            read_credentials,
-        )
-        .await
-        .unwrap();
-        assert_eq!(token, "tok");
+    fn write_creds(path: &Path, access: &str, refresh: Option<&str>, expires_at: u64) {
+        std::fs::write(path, creds_json(access, refresh, expires_at).to_string()).unwrap();
     }
 
-    #[tokio::test]
-    async fn load_token_from_near_expiry_refreshes_and_persists_new_credentials() {
+    fn read_json(path: &Path) -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    async fn mock_refresh_server() -> MockServer {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(wm_path("/"))
@@ -464,6 +493,57 @@ mod tests {
             )))
             .mount(&server)
             .await;
+        server
+    }
+
+    struct FakeKeychain {
+        entry: Mutex<String>,
+        writable: bool,
+    }
+
+    impl FakeKeychain {
+        fn holding(entry: impl Into<String>) -> Self {
+            Self {
+                entry: Mutex::new(entry.into()),
+                writable: true,
+            }
+        }
+
+        fn json(&self) -> serde_json::Value {
+            serde_json::from_str(&self.entry.lock().unwrap()).unwrap()
+        }
+    }
+
+    impl Keychain for FakeKeychain {
+        fn read(&self) -> Result<String> {
+            Ok(self.entry.lock().unwrap().clone())
+        }
+
+        fn write(&self, json: &str) -> Result<()> {
+            if !self.writable {
+                bail!("Keychain write denied");
+            }
+            json.clone_into(&mut self.entry.lock().unwrap());
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn load_token_from_keeps_existing_when_far_from_expiry() {
+        let dir = tempfile::tempdir().unwrap();
+        let creds = dir.path().join("creds.json");
+        let lock = dir.path().join("lock");
+        write_creds(&creds, "tok", Some("ref"), 9_999_999_999_999);
+
+        let token = load_token_from(None, &creds, &lock, "http://should-not-be-called", None)
+            .await
+            .unwrap();
+        assert_eq!(token, "tok");
+    }
+
+    #[tokio::test]
+    async fn load_token_from_near_expiry_refreshes_and_persists_new_credentials() {
+        let server = mock_refresh_server().await;
 
         let dir = tempfile::tempdir().unwrap();
         let creds = dir.path().join("creds.json");
@@ -475,13 +555,12 @@ mod tests {
             now_millis().unwrap() + 1_000,
         );
 
-        let token = load_token_from(&creds, &lock, &server.uri(), None, read_credentials)
+        let token = load_token_from(None, &creds, &lock, &server.uri(), None)
             .await
             .unwrap();
         assert_eq!(token, "fresh-access");
 
-        let content = std::fs::read_to_string(&creds).unwrap();
-        let json: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let json = read_json(&creds);
         assert_eq!(json["claudeAiOauth"]["accessToken"], "fresh-access");
         assert_eq!(json["claudeAiOauth"]["refreshToken"], "fresh-refresh");
         let expires_at = json["claudeAiOauth"]["expiresAt"].as_u64().unwrap();
@@ -493,21 +572,110 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn load_token_from_keychain_refresh_writes_back_to_keychain_without_creating_file() {
+        let server = mock_refresh_server().await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let creds = dir.path().join("creds.json");
+        let lock = dir.path().join("lock");
+        let keychain = FakeKeychain::holding(
+            creds_json("old", Some("old-refresh"), now_millis().unwrap() + 1_000).to_string(),
+        );
+
+        let token = load_token_from(Some(&keychain), &creds, &lock, &server.uri(), None)
+            .await
+            .unwrap();
+        assert_eq!(token, "fresh-access");
+
+        let json = keychain.json();
+        assert_eq!(json["claudeAiOauth"]["accessToken"], "fresh-access");
+        assert_eq!(json["claudeAiOauth"]["refreshToken"], "fresh-refresh");
+        assert!(!creds.exists(), "file must not be created");
+    }
+
+    #[tokio::test]
+    async fn load_token_from_keychain_refresh_leaves_existing_file_untouched() {
+        let server = mock_refresh_server().await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let creds = dir.path().join("creds.json");
+        let lock = dir.path().join("lock");
+        let mut file_json = creds_json("file-access", Some("file-refresh"), 0);
+        file_json["claudeAiOauth"]["subscriptionType"] = "pro".into();
+        std::fs::write(&creds, file_json.to_string()).unwrap();
+        let mut keychain_json =
+            creds_json("old", Some("old-refresh"), now_millis().unwrap() + 1_000);
+        keychain_json["claudeAiOauth"]["subscriptionType"] = "max".into();
+        let keychain = FakeKeychain::holding(keychain_json.to_string());
+
+        let token = load_token_from(Some(&keychain), &creds, &lock, &server.uri(), None)
+            .await
+            .unwrap();
+        assert_eq!(token, "fresh-access");
+
+        let json = keychain.json();
+        assert_eq!(json["claudeAiOauth"]["accessToken"], "fresh-access");
+        assert_eq!(json["claudeAiOauth"]["subscriptionType"], "max");
+        assert_eq!(read_json(&creds), file_json);
+    }
+
+    #[tokio::test]
+    async fn load_token_from_unparsable_keychain_falls_back_to_file_and_refreshes_only_the_file() {
+        let server = mock_refresh_server().await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let creds = dir.path().join("creds.json");
+        let lock = dir.path().join("lock");
+        write_creds(
+            &creds,
+            "old",
+            Some("old-refresh"),
+            now_millis().unwrap() + 1_000,
+        );
+        let keychain = FakeKeychain::holding("not json");
+
+        let token = load_token_from(Some(&keychain), &creds, &lock, &server.uri(), None)
+            .await
+            .unwrap();
+        assert_eq!(token, "fresh-access");
+
+        assert_eq!(
+            read_json(&creds)["claudeAiOauth"]["accessToken"],
+            "fresh-access"
+        );
+        assert_eq!(*keychain.entry.lock().unwrap(), "not json");
+    }
+
+    #[tokio::test]
+    async fn load_token_from_write_back_failure_still_uses_refreshed_token() {
+        let server = mock_refresh_server().await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let creds = dir.path().join("creds.json");
+        let lock = dir.path().join("lock");
+        let keychain = FakeKeychain {
+            writable: false,
+            ..FakeKeychain::holding(
+                creds_json("old", Some("old-refresh"), now_millis().unwrap() + 1_000).to_string(),
+            )
+        };
+
+        let token = load_token_from(Some(&keychain), &creds, &lock, &server.uri(), None)
+            .await
+            .unwrap();
+        assert_eq!(token, "fresh-access");
+    }
+
+    #[tokio::test]
     async fn load_token_from_without_refresh_token_keeps_nonexpired_as_is() {
         let dir = tempfile::tempdir().unwrap();
         let creds = dir.path().join("creds.json");
         let lock = dir.path().join("lock");
         write_creds(&creds, "tok", None, now_millis().unwrap() + 60_000);
 
-        let token = load_token_from(
-            &creds,
-            &lock,
-            "http://should-not-be-called",
-            None,
-            read_credentials,
-        )
-        .await
-        .unwrap();
+        let token = load_token_from(None, &creds, &lock, "http://should-not-be-called", None)
+            .await
+            .unwrap();
         assert_eq!(token, "tok");
     }
 
@@ -530,10 +698,24 @@ mod tests {
             now_millis().unwrap() + 60_000,
         );
 
-        let token = load_token_from(&creds, &lock, &server.uri(), None, read_credentials)
+        let token = load_token_from(None, &creds, &lock, &server.uri(), None)
             .await
             .unwrap();
         assert_eq!(token, "stale");
+    }
+
+    #[tokio::test]
+    async fn load_token_from_lock_held_keeps_existing_token_if_unexpired() {
+        let dir = tempfile::tempdir().unwrap();
+        let creds = dir.path().join("creds.json");
+        let lock = dir.path().join("lock");
+        write_creds(&creds, "tok", Some("ref"), now_millis().unwrap() + 60_000);
+        std::fs::create_dir(&lock).unwrap();
+
+        let token = load_token_from(None, &creds, &lock, "http://should-not-be-called", None)
+            .await
+            .unwrap();
+        assert_eq!(token, "tok");
     }
 
     #[tokio::test]
@@ -543,7 +725,7 @@ mod tests {
         let lock = dir.path().join("lock");
         write_creds(&creds, "tok", None, 0);
 
-        let err = load_token_from(&creds, &lock, "http://unused", None, read_credentials)
+        let err = load_token_from(None, &creds, &lock, "http://unused", None)
             .await
             .expect_err("expired without refresh must bail");
         assert!(format!("{err:#}").contains("expired"));
@@ -563,11 +745,52 @@ mod tests {
         let lock = dir.path().join("lock");
         write_creds(&creds, "dead", Some("old"), 0);
 
-        let err = load_token_from(&creds, &lock, &server.uri(), None, read_credentials)
+        let err = load_token_from(None, &creds, &lock, &server.uri(), None)
             .await
             .expect_err("expired + refresh down must bail");
         let msg = format!("{err:#}");
         assert!(msg.contains("expired OAuth"), "wrapped context: {msg}");
+    }
+
+    #[tokio::test]
+    async fn load_token_from_lock_held_bails_if_expired() {
+        let dir = tempfile::tempdir().unwrap();
+        let creds = dir.path().join("creds.json");
+        let lock = dir.path().join("lock");
+        write_creds(&creds, "dead", Some("ref"), 0);
+        std::fs::create_dir(&lock).unwrap();
+
+        let err = load_token_from(None, &creds, &lock, "http://should-not-be-called", None)
+            .await
+            .expect_err("expired + lock held must bail");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("credentials lock"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn load_token_from_lock_held_picks_up_sibling_refresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let creds = dir.path().join("creds.json");
+        let lock = dir.path().join("lock");
+        write_creds(&creds, "dead", Some("ref"), 0);
+        std::fs::create_dir(&lock).unwrap();
+
+        let sibling_creds = creds.clone();
+        let sibling = tokio::spawn(async move {
+            tokio::time::sleep(LOCK_RETRY_INTERVAL * 2).await;
+            write_creds(
+                &sibling_creds,
+                "sibling",
+                Some("ref"),
+                now_millis().unwrap() + 60 * 60 * 1000,
+            );
+        });
+
+        let token = load_token_from(None, &creds, &lock, "http://should-not-be-called", None)
+            .await
+            .unwrap();
+        sibling.await.unwrap();
+        assert_eq!(token, "sibling");
     }
 
     // ── read_credentials ──
@@ -592,9 +815,9 @@ mod tests {
         .unwrap();
 
         let creds = read_credentials(&path).unwrap();
-        assert_eq!(creds.claude_ai_oauth.access_token, "tok");
-        assert_eq!(creds.claude_ai_oauth.refresh_token.as_deref(), Some("ref"));
-        assert_eq!(creds.claude_ai_oauth.expires_at, 9_999_999_999_999);
+        assert_eq!(creds.oauth.access_token, "tok");
+        assert_eq!(creds.oauth.refresh_token.as_deref(), Some("ref"));
+        assert_eq!(creds.oauth.expires_at, 9_999_999_999_999);
     }
 
     #[test]
@@ -616,7 +839,7 @@ mod tests {
         .unwrap();
 
         let creds = read_credentials(&path).unwrap();
-        assert!(creds.claude_ai_oauth.refresh_token.is_none());
+        assert!(creds.oauth.refresh_token.is_none());
     }
 
     #[test]
@@ -814,7 +1037,7 @@ mod tests {
             scope: Some("user:profile user:inference".to_owned()),
         };
 
-        write_refreshed_credentials(&path, &response).unwrap();
+        write_refreshed_credentials(&read_credentials(&path).unwrap(), &response).unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
         let json: serde_json::Value = serde_json::from_str(&content).unwrap();
@@ -867,7 +1090,7 @@ mod tests {
             scope: Some("  user:profile   user:inference  ".to_owned()),
         };
 
-        write_refreshed_credentials(&path, &response).unwrap();
+        write_refreshed_credentials(&read_credentials(&path).unwrap(), &response).unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
         let json: serde_json::Value = serde_json::from_str(&content).unwrap();
@@ -904,7 +1127,7 @@ mod tests {
             scope: None,
         };
 
-        write_refreshed_credentials(&path, &response).unwrap();
+        write_refreshed_credentials(&read_credentials(&path).unwrap(), &response).unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
         let json: serde_json::Value = serde_json::from_str(&content).unwrap();
@@ -925,5 +1148,34 @@ mod tests {
 
         drop(guard);
         assert!(!lock_path.exists());
+    }
+
+    #[tokio::test]
+    async fn acquire_lock_clears_stale_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock_path = dir.path().join("test.lock");
+        std::fs::create_dir(&lock_path).unwrap();
+        let abandoned_at =
+            std::time::SystemTime::now() - LOCK_STALE_THRESHOLD - Duration::from_secs(1);
+        std::fs::File::open(&lock_path)
+            .unwrap()
+            .set_modified(abandoned_at)
+            .unwrap();
+
+        let _guard = acquire_lock(&lock_path).await.unwrap();
+        assert!(!is_stale_lock(&lock_path));
+    }
+
+    #[tokio::test]
+    async fn acquire_lock_surfaces_io_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock_path = dir.path().join("missing").join("test.lock");
+
+        let err = acquire_lock(&lock_path)
+            .await
+            .err()
+            .expect("missing parent must fail");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("failed to create lock"), "{msg}");
     }
 }
