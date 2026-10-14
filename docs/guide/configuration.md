@@ -211,6 +211,8 @@ Environment variables override all config file values.
 | `OX_SHOW_WELCOME`                      | `tui.show_welcome`                         | `true`                      | Paint the welcome splash     |
 | `OX_STATUS_LINE`                       | `tui.status_line`                          | see `[tui]`                 | Comma-separated segments     |
 
+Boolean variables accept `1`, `true`, `yes`, or `on` to enable and `0`, `false`, `no`, or `off` to disable, in any letter case. Any other value makes `ox` exit at startup with an error naming the variable.
+
 Set `OX_SHOW_THINKING=1` to display the model's thinking process (dimmed text) when extended thinking is enabled for the model.
 
 Set `OX_SHOW_WELCOME=0` to suppress the welcome splash on an empty chat.

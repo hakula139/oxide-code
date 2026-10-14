@@ -1,8 +1,8 @@
 //! Root TUI application.
 //!
 //! [`App`] owns every component, holds the cross-task channels, and runs the `tokio::select!`
-//! loop multiplexing crossterm events, agent events, user actions, and a 60 FPS render tick.
-//! A dirty flag coalesces redraws so renders fire per state change rather than per event.
+//! loop multiplexing crossterm events, agent events, git probe results, and a 60 FPS render tick.
+//! A dirty flag coalesces redraws so each state change renders once.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -21,13 +21,14 @@ use super::components::chat::ChatView;
 use super::components::input::InputArea;
 use super::components::status::{Status, StatusBar};
 use super::components::welcome::{self, WelcomeSnapshot};
+use super::git_probes::{GitProbes, GitUpdate};
 use super::glyphs::{NEWLINE_GLYPH, USER_PROMPT_PREFIX, USER_PROMPT_PREFIX_WIDTH};
 use super::modal::{ModalAction, ModalStack};
 use super::pending_calls::{PendingCall, PendingCalls, result_header};
 use super::terminal::{Tui, draw_sync, write_status_hyperlinks};
 use super::theme::Theme;
 use crate::agent::event::{AgentEvent, UserAction};
-use crate::config::{CompactionConfig, Effort, display_auto_compaction};
+use crate::config::{CompactionConfig, Effort, StatusLineSegment, display_auto_compaction};
 use crate::message::Message;
 use crate::session::entry::CompactInfo;
 use crate::slash::{self, LiveSessionInfo, SlashContext, SlashKind};
@@ -46,6 +47,7 @@ const PREVIEW_VISIBLE: usize = 3;
 pub(crate) struct App {
     theme: Theme,
     status_bar: StatusBar,
+    git_probes: GitProbes,
     chat: ChatView,
     input: InputArea,
     session_info: LiveSessionInfo,
@@ -95,13 +97,21 @@ impl App {
             session_info.short_display_name().into_owned(),
             session_info.config.effort,
             session_info.cwd.clone(),
-            session_info.git_cwd.clone(),
             session_info.git_branch.clone(),
         );
         status_bar.set_title(history.title);
+        let git_probes = GitProbes::new(
+            session_info.git_cwd.clone(),
+            session_info
+                .config
+                .status_line
+                .contains(&StatusLineSegment::PullRequest),
+            Instant::now(),
+        );
         Self {
             theme: theme.clone(),
             status_bar,
+            git_probes,
             chat,
             input: InputArea::new(theme),
             session_info,
@@ -138,7 +148,7 @@ impl App {
         self.render(terminal)?;
 
         loop {
-            // Three sources can wake the loop. The tick arm is the only renderer, so handlers only
+            // Four sources can wake the loop. The tick arm is the only renderer, so handlers only
             // mark `dirty` and render work stays paced by the 60 FPS clock.
             tokio::select! {
                     event = crossterm_events.next() => {
@@ -153,7 +163,9 @@ impl App {
                         None => self.should_quit = true,
                     }
                 }
+                Some(update) = self.git_probes.recv() => self.apply_git_update(update),
                 _ = tick.tick() => {
+                    self.git_probes.poll(Instant::now());
                     if self.status_bar.tick() {
                         self.dirty = true;
                     }
@@ -668,6 +680,16 @@ impl App {
             return true;
         }
         false
+    }
+
+    fn apply_git_update(&mut self, update: GitUpdate) {
+        let changed = match update {
+            GitUpdate::Branch(branch) => self.status_bar.set_git_branch(branch),
+            GitUpdate::PullRequest(pull_request) => self.status_bar.set_pull_request(pull_request),
+        };
+        if changed {
+            self.dirty = true;
+        }
     }
 
     // ── Rendering ──
@@ -1243,6 +1265,29 @@ mod tests {
             !app.input.is_enabled(),
             "agent StreamToken disabled the input",
         );
+    }
+
+    #[tokio::test]
+    async fn run_with_events_applies_git_probe_results() {
+        let (mut app, _rx, agent_tx) = test_app(None);
+        app.git_probes
+            .inject(GitUpdate::Branch(Some("feat/x".to_owned())));
+
+        let (mut terminal, _buf) = crossterm_test_terminal(60, 8);
+        let closer = tokio::spawn(async move {
+            tokio::time::sleep(TICK_INTERVAL * 2).await;
+            drop(agent_tx);
+        });
+
+        app.run_with_events(
+            &mut terminal,
+            futures::stream::pending::<std::io::Result<Event>>(),
+        )
+        .await
+        .unwrap();
+        closer.await.unwrap();
+
+        assert_eq!(app.status_bar.git_branch(), Some("feat/x"));
     }
 
     // ── handle_crossterm_event ──
@@ -3191,6 +3236,25 @@ mod tests {
             "no-op when status isn't ExitArmed",
         );
         assert_eq!(app.status_bar.status(), &Status::Idle);
+    }
+
+    // ── apply_git_update ──
+
+    #[test]
+    fn apply_git_update_marks_dirty_only_when_the_status_bar_changes() {
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.dirty = false;
+
+        app.apply_git_update(GitUpdate::Branch(Some("main".to_owned())));
+        assert!(!app.dirty, "unchanged branch skips the repaint");
+
+        app.apply_git_update(GitUpdate::PullRequest(Some(
+            crate::util::git::PullRequest {
+                number: 7,
+                url: "https://github.com/o/r/pull/7".to_owned(),
+            },
+        )));
+        assert!(app.dirty, "new pull request repaints");
     }
 
     // ── render ──

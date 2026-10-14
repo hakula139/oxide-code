@@ -2,32 +2,42 @@
 //! to `None` on missing git, non-repo cwd, detached HEAD, or non-UTF-8 output. Failures log at
 //! `debug` so they're recoverable when the status bar misbehaves.
 
+use std::io;
 use std::path::Path;
 use std::process::{Command, Output};
 
 use tracing::debug;
 
+use crate::util::text::truncate_to_width;
+
 /// Probe the current branch via `git branch --show-current`. Detached HEAD comes back as empty
 /// stdout, which we collapse to `None`.
 pub(crate) fn current_branch(cwd: &Path) -> Option<String> {
     let cwd_str = cwd_to_str(cwd, "git branch")?;
-    let output = run_probe("git branch", cwd_str, || {
-        Command::new("git")
-            .args([
-                "-C",
-                cwd_str,
-                "--no-optional-locks",
-                "branch",
-                "--show-current",
-            ])
-            .output()
-    })?;
+    let output = check_output("git branch", cwd_str, branch_command(cwd_str).output())?;
+    parse_branch(&output.stdout)
+}
+
+/// [`current_branch`] for async callers. Dropping the future kills the child process.
+pub(crate) async fn current_branch_async(cwd: &Path) -> Option<String> {
+    let cwd_str = cwd_to_str(cwd, "git branch")?;
+    let output = check_output(
+        "git branch",
+        cwd_str,
+        output_async(branch_command(cwd_str)).await,
+    )?;
     parse_branch(&output.stdout)
 }
 
 /// `&str` overload for callers that already hold a string-shaped cwd.
 pub(crate) fn current_branch_str(cwd: &str) -> Option<String> {
     current_branch(Path::new(cwd))
+}
+
+fn branch_command(cwd: &str) -> Command {
+    let mut command = Command::new("git");
+    command.args(["-C", cwd, "--no-optional-locks", "branch", "--show-current"]);
+    command
 }
 
 fn parse_branch(stdout: &[u8]) -> Option<String> {
@@ -47,15 +57,15 @@ pub(crate) struct PullRequest {
 }
 
 /// Probe the open pull request for `cwd`'s current branch via `gh pr view --json number,url`.
-/// Returns `None` when `gh` is missing, the user is unauthenticated, or no PR is open.
-pub(crate) fn current_pull_request(cwd: &Path) -> Option<PullRequest> {
+/// Returns `None` when `gh` is missing, the user is unauthenticated, or no PR is open. Dropping
+/// the future kills the child process.
+pub(crate) async fn current_pull_request(cwd: &Path) -> Option<PullRequest> {
     let cwd_str = cwd_to_str(cwd, "gh pr")?;
-    let output = run_probe("gh pr", cwd_str, || {
-        Command::new("gh")
-            .args(["pr", "view", "--json", "number,url"])
-            .current_dir(cwd_str)
-            .output()
-    })?;
+    let mut command = Command::new("gh");
+    command
+        .args(["pr", "view", "--json", "number,url"])
+        .current_dir(cwd_str);
+    let output = check_output("gh pr", cwd_str, output_async(command).await)?;
     parse_pull_request(&output.stdout)
 }
 
@@ -80,14 +90,18 @@ fn cwd_to_str<'a>(cwd: &'a Path, probe: &str) -> Option<&'a str> {
     }
 }
 
-/// Runs a `Command::output()` closure, logging on spawn failure or non-zero exit. Returns the
-/// successful output or `None`. `cwd` rides along on the log records so a user can pinpoint which
-/// worktree the probe failed in.
-fn run_probe<F>(probe: &str, cwd: &str, spawn: F) -> Option<Output>
-where
-    F: FnOnce() -> std::io::Result<Output>,
-{
-    let output = match spawn() {
+/// Runs `command` on the tokio runtime, killing the child if the caller drops the future.
+async fn output_async(command: Command) -> io::Result<Output> {
+    tokio::process::Command::from(command)
+        .kill_on_drop(true)
+        .output()
+        .await
+}
+
+/// Logs a spawn failure or non-zero exit and returns the successful output or `None`. `cwd` rides
+/// along on the log records so a user can pinpoint which worktree the probe failed in.
+fn check_output(probe: &str, cwd: &str, result: io::Result<Output>) -> Option<Output> {
+    let output = match result {
         Ok(output) => output,
         Err(e) => {
             debug!(error = %e, cwd = %cwd, "{probe} probe: spawn failed");
@@ -106,17 +120,12 @@ where
     Some(output)
 }
 
-/// First non-blank stderr line, capped at `MAX_LEN` for terse log records.
+/// First non-blank stderr line, capped at `MAX_WIDTH` columns for terse log records.
 fn stderr_summary(stderr: &[u8]) -> String {
-    const MAX_LEN: usize = 200;
+    const MAX_WIDTH: usize = 200;
     let text = String::from_utf8_lossy(stderr);
     let line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
-    let trimmed = line.trim();
-    if trimmed.len() <= MAX_LEN {
-        trimmed.to_owned()
-    } else {
-        format!("{}...", &trimmed[..MAX_LEN])
-    }
+    truncate_to_width(line.trim(), MAX_WIDTH)
 }
 
 #[cfg(test)]
@@ -135,30 +144,13 @@ mod tests {
     #[test]
     fn current_branch_in_a_real_repo_yields_the_branch_name() {
         let dir = tempfile::tempdir().unwrap();
-        let cwd = dir.path();
-        let Ok(status) = Command::new("git")
-            .args(["init", "-q", "-b", "fixture-branch"])
-            .current_dir(cwd)
-            .status()
-        else {
-            return;
-        };
-        if !status.success() {
+        if !init_fixture_repo(dir.path()) {
             return;
         }
-        for args in [
-            ["config", "user.email", "test@example.com"].as_slice(),
-            ["config", "user.name", "Test"].as_slice(),
-            ["config", "commit.gpgsign", "false"].as_slice(),
-            ["commit", "-q", "--allow-empty", "-m", "init"].as_slice(),
-        ] {
-            Command::new("git")
-                .args(args)
-                .current_dir(cwd)
-                .status()
-                .unwrap();
-        }
-        assert_eq!(current_branch(cwd), Some("fixture-branch".to_owned()));
+        assert_eq!(
+            current_branch(dir.path()),
+            Some("fixture-branch".to_owned())
+        );
     }
 
     #[test]
@@ -174,6 +166,53 @@ mod tests {
         // without ever spawning git.
         let cwd = PathBuf::from(OsStr::from_bytes(b"/tmp/\xff"));
         assert_eq!(current_branch(&cwd), None);
+    }
+
+    /// Commits once on `fixture-branch` in `cwd`. Returns `false` when git is unavailable.
+    fn init_fixture_repo(cwd: &Path) -> bool {
+        let Ok(status) = Command::new("git")
+            .args(["init", "-q", "-b", "fixture-branch"])
+            .current_dir(cwd)
+            .status()
+        else {
+            return false;
+        };
+        if !status.success() {
+            return false;
+        }
+        for args in [
+            ["config", "user.email", "test@example.com"].as_slice(),
+            ["config", "user.name", "Test"].as_slice(),
+            ["config", "commit.gpgsign", "false"].as_slice(),
+            ["commit", "-q", "--allow-empty", "-m", "init"].as_slice(),
+        ] {
+            Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .status()
+                .unwrap();
+        }
+        true
+    }
+
+    // ── current_branch_async ──
+
+    #[tokio::test]
+    async fn current_branch_async_in_a_real_repo_yields_the_branch_name() {
+        let dir = tempfile::tempdir().unwrap();
+        if !init_fixture_repo(dir.path()) {
+            return;
+        }
+        assert_eq!(
+            current_branch_async(dir.path()).await,
+            Some("fixture-branch".to_owned()),
+        );
+    }
+
+    #[tokio::test]
+    async fn current_branch_async_outside_a_repo_is_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(current_branch_async(dir.path()).await, None);
     }
 
     // ── current_branch_str ──
@@ -197,17 +236,17 @@ mod tests {
 
     // ── current_pull_request ──
 
-    #[test]
-    fn current_pull_request_outside_a_repo_is_absent() {
+    #[tokio::test]
+    async fn current_pull_request_outside_a_repo_is_absent() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(current_pull_request(dir.path()), None);
+        assert_eq!(current_pull_request(dir.path()).await, None);
     }
 
-    #[test]
+    #[tokio::test]
     #[cfg(unix)]
-    fn current_pull_request_with_non_utf8_cwd_is_absent() {
+    async fn current_pull_request_with_non_utf8_cwd_is_absent() {
         let cwd = PathBuf::from(OsStr::from_bytes(b"/tmp/\xff"));
-        assert_eq!(current_pull_request(&cwd), None);
+        assert_eq!(current_pull_request(&cwd).await, None);
     }
 
     // ── parse_pull_request ──
@@ -248,41 +287,44 @@ mod tests {
         assert_eq!(cwd_to_str(&cwd, "p"), None);
     }
 
-    // ── run_probe ──
+    // ── check_output ──
 
     #[test]
-    fn run_probe_returns_output_on_success() {
-        let output = run_probe("test", "/tmp/cwd", || {
+    fn check_output_returns_output_on_success() {
+        let output = check_output(
+            "test",
+            "/tmp/cwd",
             Ok(Output {
                 status: status_with_code(0),
                 stdout: b"ok".to_vec(),
                 stderr: Vec::new(),
-            })
-        })
+            }),
+        )
         .expect("success path keeps the output");
         assert_eq!(output.stdout, b"ok");
     }
 
     #[test]
-    fn run_probe_drops_output_on_non_zero_exit() {
-        let result = run_probe("test", "/tmp/cwd", || {
+    fn check_output_drops_output_on_non_zero_exit() {
+        let result = check_output(
+            "test",
+            "/tmp/cwd",
             Ok(Output {
                 status: status_with_code(1),
                 stdout: b"unused".to_vec(),
                 stderr: b"fatal: not a git repository\n".to_vec(),
-            })
-        });
+            }),
+        );
         assert!(result.is_none());
     }
 
     #[test]
-    fn run_probe_drops_output_on_spawn_failure() {
-        let result = run_probe("test", "/tmp/cwd", || {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "binary missing",
-            ))
-        });
+    fn check_output_drops_output_on_spawn_failure() {
+        let result = check_output(
+            "test",
+            "/tmp/cwd",
+            Err(io::Error::new(io::ErrorKind::NotFound, "binary missing")),
+        );
         assert!(result.is_none());
     }
 
@@ -306,9 +348,17 @@ mod tests {
             "fatal: not a git repository",
         );
         let huge = vec![b'x'; 500];
-        let summary = stderr_summary(&huge);
-        assert_eq!(summary.len(), 203, "200 chars + '...': {summary}");
-        assert!(summary.ends_with("..."));
+        assert_eq!(stderr_summary(&huge), format!("{}...", "x".repeat(197)));
+    }
+
+    #[test]
+    fn stderr_summary_caps_multibyte_lines_on_char_boundaries() {
+        // 303 bytes of three-byte chars, so a byte-indexed cut at 200 would land mid-char.
+        let line = "中".repeat(101);
+        assert_eq!(
+            stderr_summary(line.as_bytes()),
+            format!("{}...", "中".repeat(98)),
+        );
     }
 
     #[test]

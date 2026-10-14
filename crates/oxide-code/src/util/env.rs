@@ -1,5 +1,7 @@
-//! Env-var readers with empty-is-absent semantics — a stray empty shell value must never
-//! shadow a config-file default.
+//! Env-var readers with empty-is-absent semantics, so a stray empty shell value never shadows a
+//! config-file default.
+
+use anyhow::{Result, bail};
 
 // ── Readers ──
 
@@ -8,10 +10,17 @@ pub(crate) fn string(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
 }
 
-/// `Some(true)` for `"1"` / `"true"`, `Some(false)` for any other set value, `None` when
-/// unset or empty. The `Some(false)` arm lets any non-truthy value act as an explicit "off".
-pub(crate) fn bool(key: &str) -> Option<bool> {
-    string(key).map(|v| v == "1" || v == "true")
+/// Reads a boolean env var: `1` / `true` / `yes` / `on` or `0` / `false` / `no` / `off`, matched
+/// case-insensitively. Unset or empty is `None`, and any other value is an error.
+pub(crate) fn bool(key: &str) -> Result<Option<bool>> {
+    let Some(raw) = string(key) else {
+        return Ok(None);
+    };
+    match raw.to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(Some(true)),
+        "0" | "false" | "no" | "off" => Ok(Some(false)),
+        _ => bail!("invalid {key} {raw:?}: expected one of 1, true, yes, on, 0, false, no, off"),
+    }
 }
 
 #[cfg(test)]
@@ -42,19 +51,19 @@ mod tests {
     // ── bool ──
 
     #[test]
-    fn bool_recognizes_true_values() {
-        for truthy in ["1", "true"] {
+    fn bool_recognizes_true_values_case_insensitively() {
+        for truthy in ["1", "true", "yes", "on", "TRUE", "Yes", "ON"] {
             temp_env::with_var(KEY, Some(truthy), || {
-                assert_eq!(bool(KEY), Some(true), "input={truthy}");
+                assert_eq!(bool(KEY).unwrap(), Some(true), "input={truthy}");
             });
         }
     }
 
     #[test]
-    fn bool_any_other_set_value_is_explicit_false() {
-        for falsy in ["0", "false", "no", "yes", "TRUE"] {
+    fn bool_recognizes_false_values_case_insensitively() {
+        for falsy in ["0", "false", "no", "off", "FALSE", "No", "OFF"] {
             temp_env::with_var(KEY, Some(falsy), || {
-                assert_eq!(bool(KEY), Some(false), "input={falsy}");
+                assert_eq!(bool(KEY).unwrap(), Some(false), "input={falsy}");
             });
         }
     }
@@ -62,10 +71,22 @@ mod tests {
     #[test]
     fn bool_unset_or_empty_is_absent() {
         temp_env::with_var_unset(KEY, || {
-            assert_eq!(bool(KEY), None);
+            assert_eq!(bool(KEY).unwrap(), None);
         });
         temp_env::with_var(KEY, Some(""), || {
-            assert_eq!(bool(KEY), None);
+            assert_eq!(bool(KEY).unwrap(), None);
         });
+    }
+
+    #[test]
+    fn bool_unrecognized_value_is_an_error_naming_key_and_value() {
+        for bad in ["2", "enabled", " true"] {
+            temp_env::with_var(KEY, Some(bad), || {
+                let msg = bool(KEY).unwrap_err().to_string();
+                assert!(msg.contains(KEY), "msg={msg}");
+                assert!(msg.contains(&format!("{bad:?}")), "msg={msg}");
+                assert!(msg.contains("expected one of"), "msg={msg}");
+            });
+        }
     }
 }

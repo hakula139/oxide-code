@@ -104,6 +104,6 @@ To also remove session data and config:
 
 ```bash
 rm -rf ${XDG_DATA_HOME:-$HOME/.local/share}/ox        # session JSONLs
-rm -rf ${XDG_STATE_HOME:-$HOME/.local/state}/ox       # log file
+rm -rf ${XDG_STATE_HOME:-$HOME/.local/state}/ox       # log files
 rm -rf ${XDG_CONFIG_HOME:-$HOME/.config}/ox           # user config (if you wrote one)
 ```

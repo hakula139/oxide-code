@@ -2,8 +2,7 @@
 
 mod line;
 
-use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -19,14 +18,6 @@ use crate::tui::theme::Theme;
 use crate::util::git;
 
 const TICKS_PER_FRAME: usize = 5;
-
-/// How often the status bar re-probes git for the current branch. Branch changes outside the
-/// session (manual `git checkout`) only become visible after one interval.
-const GIT_BRANCH_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
-
-/// How often the status bar re-probes `gh` for the open pull request. Slower than the branch
-/// probe because `gh pr view` hits the network.
-const PR_REFRESH_INTERVAL: Duration = Duration::from_mins(1);
 
 /// A status-bar segment that should be re-emitted as an OSC 8 hyperlink.
 #[derive(Debug, Clone)]
@@ -52,14 +43,8 @@ pub(crate) struct StatusBar {
     title: Option<String>,
     usage: Option<UsageSnapshot>,
     cwd: String,
-    /// `None` collapses every git probe to a no-op.
-    git_cwd: Option<PathBuf>,
     git_branch: Option<String>,
     pull_request: Option<git::PullRequest>,
-    /// Whether the configured line needs the `gh pr` probe.
-    track_pull_request: bool,
-    last_branch_probe: Option<Instant>,
-    last_pr_probe: Option<Instant>,
     status: Status,
     spinner_frame: usize,
     tick_counter: usize,
@@ -84,13 +69,11 @@ impl StatusBar {
         model: String,
         effort: Option<Effort>,
         cwd: String,
-        git_cwd: Option<PathBuf>,
         git_branch: Option<String>,
     ) -> Self {
         let current_time_minute = segments
             .contains(&StatusLineSegment::CurrentTime)
             .then(current_time_minute);
-        let track_pull_request = segments.contains(&StatusLineSegment::PullRequest);
         Self {
             theme: theme.clone(),
             line: StatusLine::new(segments),
@@ -100,12 +83,8 @@ impl StatusBar {
             title: None,
             usage: None,
             cwd,
-            git_cwd,
             git_branch,
             pull_request: None,
-            track_pull_request,
-            last_branch_probe: None,
-            last_pr_probe: None,
             status: Status::Idle,
             spinner_frame: 0,
             tick_counter: 0,
@@ -131,6 +110,24 @@ impl StatusBar {
 
     pub(crate) fn set_usage(&mut self, usage: Option<UsageSnapshot>) {
         self.usage = usage;
+    }
+
+    /// Returns `true` when the branch changed and the caller should repaint.
+    pub(crate) fn set_git_branch(&mut self, branch: Option<String>) -> bool {
+        if branch == self.git_branch {
+            return false;
+        }
+        self.git_branch = branch;
+        true
+    }
+
+    /// Returns `true` when the pull request changed and the caller should repaint.
+    pub(crate) fn set_pull_request(&mut self, pull_request: Option<git::PullRequest>) -> bool {
+        if pull_request == self.pull_request {
+            return false;
+        }
+        self.pull_request = pull_request;
+        true
     }
 
     /// Re-skin subsequent renders. The spinner / status state is unaffected.
@@ -164,17 +161,14 @@ impl StatusBar {
         self.usage
     }
 
-    /// Returns `true` when time, animation, git-branch, or pull-request state changed and the
-    /// caller should repaint.
+    #[cfg(test)]
+    pub(crate) fn git_branch(&self) -> Option<&str> {
+        self.git_branch.as_deref()
+    }
+
+    /// Returns `true` when time or animation state changed and the caller should repaint.
     pub(crate) fn tick(&mut self) -> bool {
         let mut dirty = self.refresh_current_time();
-        let now = Instant::now();
-        if self.refresh_git_branch(now) {
-            dirty = true;
-        }
-        if self.refresh_pull_request(now) {
-            dirty = true;
-        }
         if is_animated(&self.status) {
             self.tick_counter += 1;
             if self.tick_counter >= TICKS_PER_FRAME {
@@ -197,50 +191,6 @@ impl StatusBar {
         self.current_time_minute = Some(current);
         true
     }
-
-    /// Re-probes the git branch when [`GIT_BRANCH_REFRESH_INTERVAL`] has elapsed. Returns `true`
-    /// when the resolved branch changed.
-    fn refresh_git_branch(&mut self, now: Instant) -> bool {
-        let Some(cwd) = self.git_cwd.as_deref() else {
-            return false;
-        };
-        if !should_probe(self.last_branch_probe, now, GIT_BRANCH_REFRESH_INTERVAL) {
-            return false;
-        }
-        self.last_branch_probe = Some(now);
-        let probed = git::current_branch(cwd);
-        if probed == self.git_branch {
-            return false;
-        }
-        self.git_branch = probed;
-        true
-    }
-
-    /// Re-probes the open pull request via `gh` when [`PR_REFRESH_INTERVAL`] has elapsed. The
-    /// probe is skipped entirely when the user hasn't configured the `pull-request` segment.
-    fn refresh_pull_request(&mut self, now: Instant) -> bool {
-        if !self.track_pull_request {
-            return false;
-        }
-        let Some(cwd) = self.git_cwd.as_deref() else {
-            return false;
-        };
-        if !should_probe(self.last_pr_probe, now, PR_REFRESH_INTERVAL) {
-            return false;
-        }
-        self.last_pr_probe = Some(now);
-        let probed = git::current_pull_request(cwd);
-        if probed == self.pull_request {
-            return false;
-        }
-        self.pull_request = probed;
-        true
-    }
-}
-
-/// Time-only predicate split out so the throttle can be exercised without shelling out.
-fn should_probe(last: Option<Instant>, now: Instant, interval: Duration) -> bool {
-    last.is_none_or(|prev| now.duration_since(prev) >= interval)
 }
 
 impl StatusBar {
@@ -354,7 +304,6 @@ mod tests {
             "test-model".to_owned(),
             Some(Effort::High),
             "~/test".to_owned(),
-            None,
             Some("main".to_owned()),
         )
     }
@@ -366,7 +315,6 @@ mod tests {
             "Opus 4.8".into(),
             None,
             String::new(),
-            None,
             None,
         )
     }
@@ -418,6 +366,30 @@ mod tests {
             !output.contains("test-model"),
             "old label must not survive: {output:?}",
         );
+    }
+
+    // ── set_git_branch ──
+
+    #[test]
+    fn set_git_branch_reports_only_real_changes() {
+        let mut bar = test_bar();
+        assert!(!bar.set_git_branch(Some("main".to_owned())));
+        assert!(bar.set_git_branch(Some("feat/x".to_owned())));
+        assert_eq!(bar.git_branch(), Some("feat/x"));
+        assert!(bar.set_git_branch(None));
+        assert_eq!(bar.git_branch(), None);
+    }
+
+    // ── set_pull_request ──
+
+    #[test]
+    fn set_pull_request_reports_only_real_changes() {
+        let mut bar = pr_bar();
+        assert!(!bar.set_pull_request(None));
+        assert!(bar.set_pull_request(Some(pr_state(1))));
+        assert!(!bar.set_pull_request(Some(pr_state(1))));
+        assert!(bar.set_pull_request(Some(pr_state(2))));
+        assert_eq!(bar.pull_request, Some(pr_state(2)));
     }
 
     // ── set_status ──
@@ -487,7 +459,6 @@ mod tests {
             None,
             "~/test".to_owned(),
             None,
-            None,
         );
 
         assert_eq!(bar.current_time_minute, None);
@@ -503,7 +474,6 @@ mod tests {
             "test-model".to_owned(),
             None,
             "~/test".to_owned(),
-            None,
             None,
         );
         let current = current_time_minute();
@@ -553,151 +523,6 @@ mod tests {
         assert_eq!(bar.spinner_frame, 0);
     }
 
-    #[test]
-    fn tick_marks_dirty_when_git_branch_changes() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut bar = test_bar();
-        bar.git_cwd = Some(dir.path().to_path_buf());
-        bar.git_branch = Some("stale".to_owned());
-        bar.last_branch_probe = None;
-        assert!(bar.tick());
-        assert_eq!(bar.git_branch, None);
-    }
-
-    #[test]
-    fn tick_marks_dirty_when_pull_request_changes() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut bar = test_bar();
-        bar.git_cwd = Some(dir.path().to_path_buf());
-        bar.track_pull_request = true;
-        bar.pull_request = Some(pr_state(999));
-        bar.last_pr_probe = None;
-        assert!(bar.tick());
-        assert_eq!(bar.pull_request, None);
-    }
-
-    // ── refresh_git_branch ──
-
-    #[test]
-    fn refresh_git_branch_without_cwd_is_a_noop() {
-        let mut bar = test_bar();
-        let probed_at = bar.last_branch_probe;
-        assert!(!bar.refresh_git_branch(Instant::now()));
-        assert_eq!(bar.last_branch_probe, probed_at);
-    }
-
-    #[test]
-    fn refresh_git_branch_arms_throttle_when_probe_returns_none() {
-        // A non-repo cwd makes `git branch --show-current` return None. The throttle key must
-        // still advance, since a regression that only stamps on `Some(branch)` would re-shell
-        // out every tick on a non-repo cwd.
-        let dir = tempfile::tempdir().unwrap();
-        let mut bar = test_bar();
-        bar.git_cwd = Some(dir.path().to_path_buf());
-        let now = Instant::now();
-        bar.refresh_git_branch(now);
-        assert_eq!(bar.last_branch_probe, Some(now));
-        assert!(
-            !bar.refresh_git_branch(now + Duration::from_millis(100)),
-            "second call within the interval must short-circuit",
-        );
-        assert_eq!(
-            bar.last_branch_probe,
-            Some(now),
-            "stamp must not move while the throttle window is open",
-        );
-    }
-
-    #[test]
-    fn refresh_git_branch_returns_false_when_branch_unchanged() {
-        // Pre-seed last_branch_probe past the throttle window and pin git_branch to whatever
-        // probe will return (None for a non-repo cwd). A re-probe yields the same value, so the
-        // function must report no change.
-        let dir = tempfile::tempdir().unwrap();
-        let mut bar = test_bar();
-        bar.git_cwd = Some(dir.path().to_path_buf());
-        bar.git_branch = None;
-        bar.last_branch_probe = Some(
-            Instant::now()
-                .checked_sub(GIT_BRANCH_REFRESH_INTERVAL * 2)
-                .unwrap(),
-        );
-        assert!(!bar.refresh_git_branch(Instant::now()));
-        assert_eq!(bar.git_branch, None);
-    }
-
-    // ── refresh_pull_request ──
-
-    #[test]
-    fn refresh_pull_request_when_segment_disabled_is_a_noop() {
-        let mut bar = test_bar();
-        bar.track_pull_request = false;
-        bar.git_cwd = Some(std::path::PathBuf::from("/tmp"));
-        assert!(!bar.refresh_pull_request(Instant::now()));
-        assert!(bar.last_pr_probe.is_none(), "must skip when not tracked");
-    }
-
-    #[test]
-    fn refresh_pull_request_without_cwd_is_a_noop() {
-        let mut bar = test_bar();
-        bar.track_pull_request = true;
-        assert!(!bar.refresh_pull_request(Instant::now()));
-        assert!(bar.last_pr_probe.is_none(), "must skip without cwd");
-    }
-
-    #[test]
-    fn refresh_pull_request_marks_dirty_when_value_changes() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut bar = test_bar();
-        bar.track_pull_request = true;
-        bar.git_cwd = Some(dir.path().to_path_buf());
-        bar.pull_request = Some(pr_state(1));
-        assert!(bar.refresh_pull_request(Instant::now()));
-        assert_eq!(bar.pull_request, None);
-    }
-
-    #[test]
-    fn refresh_pull_request_arms_throttle_when_probe_returns_none() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut bar = test_bar();
-        bar.track_pull_request = true;
-        bar.git_cwd = Some(dir.path().to_path_buf());
-        let now = Instant::now();
-        assert!(!bar.refresh_pull_request(now));
-        assert_eq!(bar.last_pr_probe, Some(now));
-        assert!(
-            !bar.refresh_pull_request(now + Duration::from_millis(100)),
-            "second call within the interval must short-circuit",
-        );
-        assert_eq!(bar.last_pr_probe, Some(now));
-    }
-
-    // ── should_probe ──
-
-    #[test]
-    fn should_probe_runs_immediately_when_never_probed() {
-        assert!(should_probe(
-            None,
-            Instant::now(),
-            GIT_BRANCH_REFRESH_INTERVAL,
-        ));
-    }
-
-    #[test]
-    fn should_probe_skips_within_interval_and_runs_after() {
-        let earlier = Instant::now();
-        assert!(!should_probe(
-            Some(earlier),
-            earlier + Duration::from_millis(100),
-            GIT_BRANCH_REFRESH_INTERVAL,
-        ));
-        assert!(should_probe(
-            Some(earlier),
-            earlier + GIT_BRANCH_REFRESH_INTERVAL,
-            GIT_BRANCH_REFRESH_INTERVAL,
-        ));
-    }
-
     // ── render ──
 
     fn render_status(bar: &mut StatusBar, width: u16) -> TestBackend {
@@ -730,7 +555,6 @@ mod tests {
             "Opus 4.8".into(),
             Some(Effort::Xhigh),
             cwd.into(),
-            None,
             Some("main".to_owned()),
         );
         bar.set_title(title.map(ToOwned::to_owned));
@@ -817,7 +641,6 @@ mod tests {
             "Opus 4.8".into(),
             Some(Effort::Xhigh),
             "~/projects/demo".into(),
-            None,
             Some("main".to_owned()),
         );
         let output = render_top_row(&mut bar, 120);
@@ -845,7 +668,6 @@ mod tests {
             "Opus 4.8".into(),
             Some(Effort::Xhigh),
             "~/projects/demo".into(),
-            None,
             Some("feat/status-line".to_owned()),
         );
         let output = render_top_row(&mut bar, 120);
@@ -909,7 +731,6 @@ mod tests {
             "test-model".to_owned(),
             None,
             String::new(),
-            None,
             None,
         );
         let output = render_top_row(&mut bar, 120);
