@@ -158,7 +158,7 @@ ox                                          # Start an interactive session
 │   ├── glyphs.rs                           # Shared visual constants (chevrons, bar, tool indicators, spinner frames)
 │   ├── markdown.rs                         # Markdown module root (pulldown-cmark + syntect renderer)
 │   ├── markdown/
-│   │   ├── highlight.rs                    # Syntax highlighting (syntect lazy-loaded SyntaxSet, colors from the theme's `syntax_theme`)
+│   │   ├── highlight.rs                    # Syntax highlighting (syntect lazy-loaded SyntaxSet, theme's `syntax_theme` colors, resumes a growing block after its last complete line)
 │   │   └── render.rs                       # pulldown-cmark event walker, inline / block / list / table rendering
 │   ├── modal.rs                            # Modal trait, ModalKey, ModalAction, ModalStack: focus-grabbing UI overlays
 │   ├── modal/
