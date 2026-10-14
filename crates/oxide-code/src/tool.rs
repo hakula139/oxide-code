@@ -410,10 +410,19 @@ pub(crate) fn parse_input<T: DeserializeOwned>(raw: serde_json::Value) -> Result
 
 // ── Path Utilities ──
 
-pub(crate) fn resolve_base_dir(search_path: Option<&str>) -> Result<PathBuf, String> {
-    let cwd =
-        std::env::current_dir().map_err(|e| format!("Failed to get working directory: {e}"))?;
-    Ok(search_path.map_or(cwd, PathBuf::from))
+/// The canonical working directory, so hits under a canonical search base render relative to it.
+pub(crate) fn working_dir() -> Result<PathBuf, String> {
+    std::env::current_dir()
+        .and_then(std::fs::canonicalize)
+        .map_err(|e| format!("Failed to get working directory: {e}"))
+}
+
+/// Resolves a search tool's `path` argument against `cwd`, defaulting to `cwd` itself. The base
+/// must exist, and it is canonical so the walk covers the directory the permission gate resolved.
+pub(crate) fn resolve_base_dir(search_path: Option<&str>, cwd: &Path) -> Result<PathBuf, String> {
+    let base = search_path.map_or_else(|| cwd.to_path_buf(), |p| cwd.join(p));
+    std::fs::canonicalize(&base)
+        .map_err(|e| format!("Cannot access {}: {e}", display_path(&base, cwd)))
 }
 
 pub(crate) fn display_cwd_path(path: &str) -> String {
@@ -537,12 +546,17 @@ pub(crate) async fn write_no_follow(
 
 const MAX_WALK_DEPTH: usize = 64;
 
+const VCS_DIRS: &[&str] = &[".bzr", ".git", ".hg", ".jj", ".sl", ".svn"];
+
 /// Recursively walks `base`, yielding regular files only.
 ///
-/// Honors `.gitignore`, global ignore files, and hidden-entry rules via the `ignore` crate's
-/// defaults, and pins the walk to the starting filesystem so symlinked mounts don't escape.
+/// Honors `.gitignore` and global ignore files, includes hidden entries such as `.github/` so
+/// dotfile config stays searchable, skips VCS metadata directories below `base`, and pins the walk
+/// to the starting filesystem so symlinked mounts don't escape.
 pub(crate) fn walk_files(base: &Path) -> impl Iterator<Item = ignore::DirEntry> {
     ignore::WalkBuilder::new(base)
+        .hidden(false)
+        .filter_entry(|e| e.depth() == 0 || !VCS_DIRS.iter().any(|d| e.file_name() == *d))
         .same_file_system(true)
         .max_depth(Some(MAX_WALK_DEPTH))
         .build()
@@ -599,10 +613,36 @@ pub(crate) fn truncate_line(line: &str) -> Cow<'_, str> {
     ))
 }
 
+// ── Testing ──
+
+#[cfg(test)]
+pub(crate) mod testing {
+    use std::path::{Path, PathBuf};
+
+    use tempfile::TempDir;
+
+    /// A temp dir with a canonical path, matching the cwd [`super::working_dir`] returns.
+    pub(crate) struct CanonicalTempDir {
+        _dir: TempDir,
+        path: PathBuf,
+    }
+
+    impl CanonicalTempDir {
+        pub(crate) fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    pub(crate) fn canonical_tempdir() -> CanonicalTempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().canonicalize().unwrap();
+        CanonicalTempDir { _dir: dir, path }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
-    use std::path::PathBuf;
     use std::sync::Arc;
 
     use super::bash::BashTool;
@@ -610,6 +650,7 @@ mod tests {
     use super::glob::GlobTool;
     use super::grep::GrepTool;
     use super::read::ReadTool;
+    use super::testing::canonical_tempdir;
     use super::write::WriteTool;
     use super::*;
     use crate::file_tracker::testing::tracker;
@@ -1279,15 +1320,51 @@ mod tests {
     // ── resolve_base_dir ──
 
     #[test]
-    fn resolve_base_dir_some_uses_given_path() {
-        let result = resolve_base_dir(Some("/tmp/foo")).unwrap();
-        assert_eq!(result, PathBuf::from("/tmp/foo"));
+    fn resolve_base_dir_canonicalizes_relative_and_absolute_paths() {
+        let dir = canonical_tempdir();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::create_dir(dir.path().join("lib")).unwrap();
+        let lib = dir.path().join("lib");
+
+        assert_eq!(
+            resolve_base_dir(Some("./src/../lib"), dir.path()),
+            Ok(lib.clone())
+        );
+        assert_eq!(
+            resolve_base_dir(Some(lib.to_str().unwrap()), Path::new("/")),
+            Ok(lib)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_base_dir_resolves_dot_dot_after_a_symlink_physically() {
+        let dir = canonical_tempdir();
+        std::fs::create_dir_all(dir.path().join("real/target")).unwrap();
+        let cwd = dir.path().join("cwd");
+        std::fs::create_dir(&cwd).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("real/target"), cwd.join("link")).unwrap();
+
+        assert_eq!(
+            resolve_base_dir(Some("link/.."), &cwd),
+            Ok(dir.path().join("real"))
+        );
     }
 
     #[test]
     fn resolve_base_dir_none_uses_cwd() {
-        let result = resolve_base_dir(None).unwrap();
-        assert_eq!(result, std::env::current_dir().unwrap());
+        let dir = canonical_tempdir();
+        assert_eq!(
+            resolve_base_dir(None, dir.path()),
+            Ok(dir.path().to_path_buf())
+        );
+    }
+
+    #[test]
+    fn resolve_base_dir_missing_path_is_named_relative_to_cwd() {
+        let dir = canonical_tempdir();
+        let err = resolve_base_dir(Some("missing"), dir.path()).unwrap_err();
+        assert!(err.starts_with("Cannot access missing: "), "{err}");
     }
 
     // ── display_cwd_path_from ──

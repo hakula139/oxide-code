@@ -2,6 +2,7 @@
 
 use std::fmt::Write as _;
 use std::future::Future;
+use std::path::Path;
 use std::pin::Pin;
 
 use serde::Deserialize;
@@ -42,7 +43,7 @@ impl Tool for GlobTool {
             "properties": {
                 "pattern": {
                     "type": "string",
-                    "description": r#"The glob pattern to match (e.g. "**/*.rs", "src/**/*.ts")"#
+                    "description": r#"The glob pattern to match (e.g. "**/*.rs", "src/**/*.ts"). "*" and "?" stay within one directory, and a pattern without "/" matches file names at any depth."#
                 },
                 "path": {
                     "type": "string",
@@ -97,7 +98,11 @@ async fn run(raw: serde_json::Value) -> ToolOutput {
 
     let Input { pattern, path } = input;
 
-    match tokio::task::spawn_blocking(move || glob_files(&pattern, path.as_deref())).await {
+    match tokio::task::spawn_blocking(move || {
+        super::working_dir().and_then(|cwd| glob_files(&pattern, path.as_deref(), &cwd))
+    })
+    .await
+    {
         Ok(result) => {
             let title = glob_title(result.as_ref().ok().map(|r| r.content.as_str()));
             let truncated_total = result.as_ref().ok().and_then(|r| r.truncated_total);
@@ -133,22 +138,20 @@ struct GlobOutput {
     truncated_total: Option<usize>,
 }
 
-/// Walks `search_path` (defaulting to the current working directory), filters entries against
-/// `pattern`, and returns up to `MAX_RESULTS` matches sorted newest-first by mtime.
+/// Walks `search_path` (resolved against `cwd`, defaulting to it), filters entries against
+/// `pattern`, and returns up to `MAX_RESULTS` matches sorted newest-first by mtime, rendered
+/// relative to the canonical `cwd`.
 ///
-/// `walk_files` already enforces the ignore-list precedence (`.gitignore` and global ignore
-/// files first, then hidden-entry rules), so the glob only ever sees tracked files. Truncation
-/// past `MAX_RESULTS` is announced inline and surfaced separately on `truncated_total` for the
-/// structured view.
-fn glob_files(pattern: &str, search_path: Option<&str>) -> Result<GlobOutput, String> {
-    let base = super::resolve_base_dir(search_path)?;
+/// `walk_files` skips files matched by `.gitignore` or a global ignore file, so only non-ignored
+/// files reach the matcher. Truncation past `MAX_RESULTS` is announced inline and surfaced
+/// separately on `truncated_total` for the structured view.
+fn glob_files(pattern: &str, search_path: Option<&str>, cwd: &Path) -> Result<GlobOutput, String> {
+    let base = super::resolve_base_dir(search_path, cwd)?;
     if !base.is_dir() {
         return Err(format!("Directory does not exist: {}", base.display()));
     }
 
-    let glob = globset::Glob::new(pattern)
-        .map_err(|e| format!("Invalid glob pattern: {e}"))?
-        .compile_matcher();
+    let glob = compile_glob(pattern)?;
 
     let mut matches: Vec<(String, std::time::SystemTime)> = super::walk_files(&base)
         .filter(|entry| {
@@ -157,7 +160,7 @@ fn glob_files(pattern: &str, search_path: Option<&str>) -> Result<GlobOutput, St
         })
         .map(|entry| {
             let mtime = super::entry_mtime(&entry);
-            (super::display_path(entry.path(), &base), mtime)
+            (super::display_path(entry.path(), cwd), mtime)
         })
         .collect();
 
@@ -193,6 +196,21 @@ fn glob_files(pattern: &str, search_path: Option<&str>) -> Result<GlobOutput, St
         content,
         truncated_total: truncated.then_some(total),
     })
+}
+
+/// Compiles `pattern` so `*` and `?` never cross `/`. A pattern without `/` gains a `**/` prefix
+/// and matches file names at any depth, the way gitignore-style globs behave.
+fn compile_glob(pattern: &str) -> Result<globset::GlobMatcher, String> {
+    let pattern = if pattern.contains('/') {
+        pattern.to_owned()
+    } else {
+        format!("**/{pattern}")
+    };
+    globset::GlobBuilder::new(&pattern)
+        .literal_separator(true)
+        .build()
+        .map(|glob| glob.compile_matcher())
+        .map_err(|e| format!("Invalid glob pattern: {e}"))
 }
 
 // ── Result View ──
@@ -265,6 +283,7 @@ mod tests {
     use indoc::{formatdoc, indoc};
 
     use super::*;
+    use crate::tool::testing::canonical_tempdir;
 
     // ── gate_target ──
 
@@ -285,7 +304,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_finds_files() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = canonical_tempdir();
         std::fs::write(dir.path().join("a.txt"), "").unwrap();
         std::fs::write(dir.path().join("b.rs"), "").unwrap();
 
@@ -310,7 +329,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_truncated_attaches_total_to_metadata() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = canonical_tempdir();
         let total = MAX_RESULTS + 10;
         for i in 0..total {
             std::fs::write(dir.path().join(format!("{i:04}.txt")), "").unwrap();
@@ -344,77 +363,112 @@ mod tests {
 
     #[test]
     fn glob_files_basic() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = canonical_tempdir();
         std::fs::write(dir.path().join("foo.txt"), "").unwrap();
         std::fs::write(dir.path().join("bar.txt"), "").unwrap();
         std::fs::write(dir.path().join("baz.rs"), "").unwrap();
 
-        let result = glob_files("*.txt", Some(dir.path().to_str().unwrap())).unwrap();
-        assert!(result.content.contains("foo.txt"));
-        assert!(result.content.contains("bar.txt"));
-        assert!(!result.content.contains("baz.rs"));
+        let result = glob_files("*.txt", None, dir.path()).unwrap();
+        let mut files: Vec<&str> = result.content.lines().collect();
+        files.sort_unstable();
+        assert_eq!(files, ["bar.txt", "foo.txt"]);
         assert!(result.truncated_total.is_none());
     }
 
     #[test]
     fn glob_files_recursive() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = canonical_tempdir();
         let sub = dir.path().join("sub");
         std::fs::create_dir(&sub).unwrap();
         std::fs::write(dir.path().join("top.rs"), "").unwrap();
         std::fs::write(sub.join("nested.rs"), "").unwrap();
 
-        let result = glob_files("**/*.rs", Some(dir.path().to_str().unwrap())).unwrap();
-        assert!(result.content.contains("top.rs"));
-        assert!(result.content.contains("nested.rs"));
+        let result = glob_files("**/*.rs", None, dir.path()).unwrap();
+        assert!(result.content.lines().any(|l| l == "top.rs"));
+        assert!(result.content.lines().any(|l| l == "sub/nested.rs"));
+    }
+
+    #[test]
+    fn glob_files_star_stays_within_one_directory() {
+        let dir = canonical_tempdir();
+        let nested = dir.path().join("src/nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(dir.path().join("src/a.rs"), "").unwrap();
+        std::fs::write(nested.join("b.rs"), "").unwrap();
+
+        let scoped = glob_files("src/*.rs", None, dir.path()).unwrap();
+        assert_eq!(scoped.content, "src/a.rs");
+
+        // A pattern without `/` matches the file name at any depth.
+        let bare = glob_files("b.rs", None, dir.path()).unwrap();
+        assert_eq!(bare.content, "src/nested/b.rs");
+    }
+
+    #[test]
+    fn glob_files_renders_paths_relative_to_cwd() {
+        let dir = canonical_tempdir();
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(cwd.join("src")).unwrap();
+        std::fs::write(cwd.join("src/lib.rs"), "").unwrap();
+        let outside = dir.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("x.rs"), "").unwrap();
+
+        let inside = glob_files("*.rs", Some("src"), &cwd).unwrap();
+        assert_eq!(inside.content, "src/lib.rs");
+
+        let outside_hit = glob_files("*.rs", Some("../outside"), &cwd).unwrap();
+        assert_eq!(
+            outside_hit.content,
+            outside.join("x.rs").to_str().unwrap(),
+            "hits outside cwd fall back to an absolute path",
+        );
     }
 
     #[test]
     fn glob_files_sorted_by_mtime() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = canonical_tempdir();
 
         std::fs::write(dir.path().join("old.txt"), "old").unwrap();
         std::thread::sleep(std::time::Duration::from_millis(50));
         std::fs::write(dir.path().join("new.txt"), "new").unwrap();
 
-        let result = glob_files("*.txt", Some(dir.path().to_str().unwrap())).unwrap();
-        let lines: Vec<&str> = result.content.lines().collect();
-        assert_eq!(lines.len(), 2);
-        assert!(lines[0].contains("new.txt"));
-        assert!(lines[1].contains("old.txt"));
+        let result = glob_files("*.txt", None, dir.path()).unwrap();
+        assert_eq!(result.content, "new.txt\nold.txt");
     }
 
     #[test]
     fn glob_files_no_matches() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = canonical_tempdir();
         std::fs::write(dir.path().join("a.txt"), "").unwrap();
 
-        let result = glob_files("*.rs", Some(dir.path().to_str().unwrap())).unwrap();
+        let result = glob_files("*.rs", None, dir.path()).unwrap();
         assert_eq!(result.content, "No files found");
         assert!(result.truncated_total.is_none());
     }
 
     #[test]
     fn glob_files_invalid_pattern() {
-        let dir = tempfile::tempdir().unwrap();
-        let err = glob_files("[invalid", Some(dir.path().to_str().unwrap())).unwrap_err();
+        let dir = canonical_tempdir();
+        let err = glob_files("[invalid", None, dir.path()).unwrap_err();
         assert!(err.contains("Invalid glob pattern"));
     }
 
     #[test]
     fn glob_files_invalid_directory() {
-        let err = glob_files("*.txt", Some("/nonexistent/dir")).unwrap_err();
-        assert!(err.contains("does not exist"));
+        let dir = canonical_tempdir();
+        let err = glob_files("*.txt", Some("missing"), dir.path()).unwrap_err();
+        assert!(err.starts_with("Cannot access missing: "), "{err}");
     }
 
     #[test]
     fn glob_files_truncated_at_max_results() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = canonical_tempdir();
         for i in 0..MAX_RESULTS + 10 {
             std::fs::write(dir.path().join(format!("{i:04}.txt")), "").unwrap();
         }
 
-        let result = glob_files("*.txt", Some(dir.path().to_str().unwrap())).unwrap();
+        let result = glob_files("*.txt", None, dir.path()).unwrap();
         let file_count = result
             .content
             .lines()
@@ -430,29 +484,32 @@ mod tests {
     }
 
     #[test]
-    fn glob_files_skips_hidden_dirs() {
-        let dir = tempfile::tempdir().unwrap();
-        let hidden = dir.path().join(".hidden");
-        std::fs::create_dir(&hidden).unwrap();
-        std::fs::write(hidden.join("secret.txt"), "").unwrap();
-        std::fs::write(dir.path().join("visible.txt"), "").unwrap();
+    fn glob_files_includes_hidden_paths_but_skips_vcs_dirs() {
+        let dir = canonical_tempdir();
+        let workflows = dir.path().join(".github/workflows");
+        std::fs::create_dir_all(&workflows).unwrap();
+        std::fs::write(workflows.join("ci.yml"), "").unwrap();
+        let git = dir.path().join(".git");
+        std::fs::create_dir(&git).unwrap();
+        std::fs::write(git.join("hook.yml"), "").unwrap();
 
-        let result = glob_files("*.txt", Some(dir.path().to_str().unwrap())).unwrap();
-        assert!(result.content.contains("visible.txt"));
-        assert!(!result.content.contains(".hidden"));
+        let result = glob_files(".github/workflows/*.yml", None, dir.path()).unwrap();
+        assert_eq!(result.content, ".github/workflows/ci.yml");
+
+        let all = glob_files("*.yml", None, dir.path()).unwrap();
+        assert_eq!(all.content, ".github/workflows/ci.yml");
     }
 
     #[test]
     fn glob_files_respects_gitignore() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = canonical_tempdir();
         std::fs::create_dir(dir.path().join(".git")).unwrap();
         std::fs::write(dir.path().join(".gitignore"), "ignored.txt\n").unwrap();
         std::fs::write(dir.path().join("ignored.txt"), "").unwrap();
         std::fs::write(dir.path().join("tracked.txt"), "").unwrap();
 
-        let result = glob_files("*.txt", Some(dir.path().to_str().unwrap())).unwrap();
-        assert!(result.content.contains("tracked.txt"));
-        assert!(!result.content.contains("ignored.txt"));
+        let result = glob_files("*.txt", None, dir.path()).unwrap();
+        assert_eq!(result.content, "tracked.txt");
     }
 
     // ── result_view ──
