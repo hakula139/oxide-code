@@ -4,11 +4,7 @@ Design for a configurable TUI status line.
 
 ## Scope
 
-The TUI status line is an ordered roster of built-in segments with:
-
-- User-controlled segment order.
-- Segments backed by local state today.
-- Cache-aware context and session-cost display.
+The TUI status line renders a user-ordered roster of built-in segments. Most segments read in-process state, `git-branch` and `pull-request` probe `git` and the GitHub CLI, and the context and session-cost segments count prompt-cache tokens.
 
 Implemented segments:
 
@@ -41,11 +37,11 @@ Segment render rules:
 
 ## Usage Data
 
-Anthropic `Usage` carries `cache_creation_input_tokens` and `cache_read_input_tokens`. `TokenUsage::context_tokens()` returns input + cache creation + cache read. `TokenUsage::total_tokens()` returns context + output and remains the auto-compaction trigger input.
+Anthropic `Usage` carries `cache_creation_input_tokens` and `cache_read_input_tokens`. `TokenUsage::context_tokens()` returns input + cache creation + cache read. `TokenUsage::total_tokens()` returns context + output and is the auto-compaction trigger input.
 
 A successful `agent_turn` returns the latest provider usage. `AgentLoopTask` keeps that usage for the next auto-compaction check, updates the displayed usage snapshot, adds the turn's estimated cost when rates are known, then emits `AgentEvent::UsageUpdated(UsageSnapshot)` before `TurnComplete`.
 
-Known first-party Claude API rates live in `model.rs` beside the model catalogue. Unknown models render context without session cost. The estimate excludes account discounts, marketplace billing, data-residency multipliers, fast mode, and server-side tool surcharges.
+Known first-party Claude API rates live in `model/pricing.rs`, and the `model.rs` catalogue attaches them to each model. Unknown models render context without session cost. The estimate excludes account discounts, marketplace billing, data-residency multipliers, fast mode, and server-side tool surcharges.
 
 On model swap, recompute the snapshot with the new model's context window if display usage exists. The session cost remains the accumulated estimate from turns that actually reported usage. On `/clear`, `/resume`, manual compaction, and automatic compaction, clear displayed usage because the visible transcript basis changed.
 

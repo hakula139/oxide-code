@@ -68,7 +68,7 @@ On resume, oxide-code loads the saved history and appends new messages to the sa
 
 ### Mid-Session Resume
 
-Inside the TUI, `/resume` (alias `/continue`) opens a session picker without restarting the process. Type to filter by id, title, or project, press Tab to widen the scope from current-project to all projects, and press Enter to resume the highlighted session in place. To skip the picker, pass `/resume <id-prefix>` to jump directly, and an ambiguous prefix lists the candidates. Chat repopulates from the resumed transcript, and the next prompt continues that thread just as it would after `ox -c`.
+Inside the TUI, `/resume` (alias `/continue`) opens a session picker without restarting the process. Type to filter by id, title, or project, press Tab to widen the scope from current-project to all projects, and press Enter to resume the highlighted session in place. To skip the picker, pass `/resume <id-prefix>` to jump directly. An ambiguous prefix lists the candidates. Chat repopulates from the resumed transcript, and any queued prompts are discarded because they were typed for the previous session. The next prompt continues the resumed thread just as it would after `ox -c`.
 
 ### Deleting a Session
 

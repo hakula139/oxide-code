@@ -29,7 +29,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 5. **Mid-session model + effort swap via `&mut Client`.** Both `/model <id>` and `/effort <level>` return `Forward(UserAction::SwapConfig { model, effort })`, the same payload both modals emit, so the typed-arg path and the modals share one resolver. Per-request paths re-read config every call so betas and `output_config` pick up the swap. Bare `/model` (combined picker) and bare `/effort` (slider) are also mutating because their submit path emits `SwapConfig`, so both forms refuse mid-turn. See [modals.md](modals.md).
 
-6. **Slash commands never write user config files.** State is session-only, so restarting reverts to the values in `config.toml`.
+6. **Slash commands never write user config files.** State is session-only, so a restart reverts to the configured values.
 
 7. **Aliases resolve to canonical but display by surface.** `/clear` is canonical, while `/new` and `/reset` are aliases. The popup shows only the alias the user typed.
 

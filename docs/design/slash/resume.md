@@ -10,7 +10,7 @@ Companions: [commands.md](commands.md), [modals.md](modals.md). Underlying resea
 
 The picker wraps [`SearchableList`](modals.md) and adds a footer line. Each row paints a two-line title plus dim metadata block (id prefix · relative time · message count · branch · project) followed by a trailing blank. Tab toggles current-project ↔ all-projects, reloading rows from `SessionStore::list_paged` while preserving the typed query. Enter on a focused row submits, while Enter with no selection keeps the picker open so the user can Tab the scope or Esc out. Esc / Ctrl+C cancel via the universal stack gate. Ctrl+D / Delete on the cursor row pushes [`ConfirmDeleteSessionModal`](modals.md). On focus regain the picker reloads and re-seeks the cursor to the previously selected row, so cancel-delete keeps the user in place.
 
-`session/handle` provides `roll_into(...)` mirroring `roll(...)`: snapshot the file tracker, clear it, load + sanitize the target, swap the handle in place, finalize the old session. Returns a flat `RollIntoOutcome` carrying the resumed transcript (messages, title, tool-result metadata) plus a diagnostic pair (finalize failure of the prior session, drift list from the file tracker).
+`session/handle` provides `roll_into(...)`, which mirrors `roll(...)`. It loads and sanitizes the target first, so a load failure leaves the live session untouched. It then snapshots and clears the file tracker, restores the target's tracker state through `restore_verified`, swaps the handle in place, and finalizes the old session. The flat `RollIntoOutcome` carries the resumed transcript (messages, compact boundary, title, tool-result metadata) plus a diagnostic pair (finalize failure of the prior session, drift list from the file tracker).
 
 In `main.rs`, `apply_resume` drives `roll_into`, rebinds `Client::set_session_id`, emits `AgentEvent::SessionResumed { id, title, messages, compact, tool_metadata }`, and surfaces the old session's finalize failure and any tracker-drift warning as distinct `AgentEvent::Error`s. The TUI's `App::apply_session_resumed` clears the chat, replays `load_history`, drops queued prompts (surfaces the count as a system message), and clears the modal stack.
 
@@ -68,7 +68,7 @@ In `main.rs`, `apply_resume` drives `roll_into`, rebinds `Client::set_session_id
 
 - **`AgentEvent::SessionResumed`**: Carries id + title + messages + compact boundary + tool_metadata. App-only reaction. `StdioSink` ignores it (TUI-only event, like `SessionRolled`).
 
-- **`apply_resume` (agent loop)**: Drives `roll_into`, rebinds `Client::set_session_id`, emits `SessionResumed`, then surfaces `finalize_failure` and `drifted_paths` as distinct `AgentEvent::Error`s. Channel-closed on the resume event logs a desync warning, since the TUI is then stuck on the old chat.
+- **`apply_resume` (`main.rs`)**: Drives `roll_into`, rebinds `Client::set_session_id`, emits `SessionResumed`, then surfaces `finalize_failure` and `drifted_paths` as distinct `AgentEvent::Error`s. Channel-closed on the resume event logs a desync warning, since the TUI is then stuck on the old chat.
 
 - **`apply_session_resumed` (TUI)**: Swaps the session id, repaints the title, clears and replays chat history, drops queued prompts (with a system-message surface), clears the modal stack, and resumes idle.
 
@@ -93,10 +93,10 @@ In `main.rs`, `apply_resume` drives `roll_into`, rebinds `Client::set_session_id
 - `crates/oxide-code/src/session/display.rs`: shared `format_metadata_line` used by the picker row.
 - `crates/oxide-code/src/session/handle.rs`: `roll_into`, `RollIntoOutcome`.
 - `crates/oxide-code/src/session/list_view.rs`: `render_list` over `list_paged`.
-- `crates/oxide-code/src/session/resolver.rs`: `normalize_resume_arg`.
+- `crates/oxide-code/src/session/resolver.rs`: `resolve_prefix_to_info` and its `match_in_scope` helper, shared with `/delete`.
 - `crates/oxide-code/src/session/store.rs`: `list_paged`, `ListPage`, plus `list` / `list_all` wrappers.
 - `crates/oxide-code/src/slash/confirm.rs`: `ConfirmDeleteSessionModal` pushed by Ctrl+D / Delete.
 - `crates/oxide-code/src/slash/registry.rs`: `BUILT_INS` entry `&ResumeCmd`.
-- `crates/oxide-code/src/slash/resume.rs`: `ResumeCmd`, `ResumePicker`, `SessionRow`, `match_in_scope`.
+- `crates/oxide-code/src/slash/resume.rs`: `ResumeCmd`, `ResumePicker`, `SessionRow`, `resolve_prefix`.
 - `crates/oxide-code/src/tui/app.rs`: `apply_session_resumed`.
 - `crates/oxide-code/src/tui/modal/searchable_list.rs`: `SearchableList<T>` plus `SearchableItem` plus `cursor_to` for cursor preservation across reload.

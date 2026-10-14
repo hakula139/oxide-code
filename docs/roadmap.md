@@ -35,7 +35,7 @@ The direction is simple:
 
 ### Permission & Approval
 
-- Three modes. `auto` (default) runs read-only tools and edits inside the working directory without asking, then asks about any other call no rule settles. `plan` denies every mutating tool for read-only analysis, and `yolo` allows everything.
+- `auto` (default) runs read-only tools anywhere and file edits inside the working directory without asking, and prompts for any other call that no rule settles. `plan` denies every mutating tool for read-only analysis, and `yolo` allows every call, including ones a deny rule matches.
 - Allow / deny rules for `bash` commands and file paths, with dangerous-command and repository-metadata denies on by default. Project config files can only add deny rules.
 - An approval prompt in the TUI shows the command or diff for each call the rules leave open. The bare REPL and headless runs deny those calls.
 

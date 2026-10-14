@@ -58,7 +58,7 @@ There is no file-level lock: two processes resuming the same session both append
 
 ### AI-generated titles
 
-In the TUI, the first user prompt of a fresh session seeds a detached tokio task calling Haiku via `Client::complete` with a 3-7 word sentence-case prompt, structured-outputs JSON schema. Failures warn-log only.
+In the TUI, the first user prompt of a fresh session spawns a detached tokio task that asks Haiku through `Client::complete` for a 3-7 word sentence-case title, constrained by a structured-outputs JSON schema. Failures only log a warning.
 
 ### Write-error surfacing
 

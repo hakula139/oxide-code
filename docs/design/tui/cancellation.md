@@ -10,9 +10,9 @@ The TUI exposes Esc / Ctrl+C cancellation, dual-press Ctrl+C exit from idle, POS
 
 The picks lean toward the Codex precedent on most surfaces, since it is the one Rust reference and its patterns map onto our async / actor architecture without reshaping. The wire-shape choice (3) is the deliberate exception.
 
-1. **Drop-the-future cancellation.** Esc / Ctrl+C drops the `agent_turn` future from the agent loop. reqwest's SSE-close-on-drop and `kill_on_drop(true)` on the spawned `bash` child clean up automatically, which is simpler than Codex's protocol message. The drop reaches only that direct child, and the process-group kill runs only when a command times out.
+1. **Drop-the-future cancellation.** Esc / Ctrl+C drops the `agent_turn` future from the agent loop. Dropping it closes the reqwest SSE stream and kills the spawned `bash` child through `kill_on_drop(true)`, so cancellation needs no protocol message of the kind Codex sends.
 
-2. **Discard partial assistant state on cancel.** The TUI shows the streamed prefix with an `(interrupted)` suffix, while the model sees clean history without the cancelled assistant message or orphan `tool_use`. Follows Codex, which discards it. Claude Code preserves a tombstone.
+2. **Discard partial assistant state on cancel.** The TUI shows the streamed prefix with an `(interrupted)` suffix, and the model's history omits the cancelled assistant message and any orphan `tool_use`. Codex discards the partial message the same way, while Claude Code keeps a tombstone.
 
 3. **Mid-turn drain at round boundary, raw consecutive User messages on the wire.** Each queued prompt becomes its own `User` message with one `Text` block. Anthropic accepts consecutive same-role messages. oxide-code deliberately drops the `<system-reminder>` envelope that Claude Code and opencode wrap with, which keeps persistence trivial. May flip if the model ignores mid-turn instructions.
 
@@ -24,7 +24,7 @@ The picks lean toward the Codex precedent on most surfaces, since it is the one 
 
 7. **Cancellation rides the existing `AgentEvent` channel.** `AgentEvent::Cancelled` covers both TUI and `StdioSink`. No new event channel.
 
-8. **`agent_loop_task` fires one terminal event.** `Error` and `TurnComplete` both run the same TUI teardown, so emitting both double-drained the queue head on every API failure.
+8. **`agent_loop_task` fires one terminal event.** `Error` and `TurnComplete` both run the same TUI teardown, so emitting both would drain the queue head twice on an API failure.
 
 ## Sources
 

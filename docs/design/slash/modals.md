@@ -1,6 +1,6 @@
 # Modal UI
 
-Focus-grabbing UI overlays that slash commands and the agent loop can open. Lives in the band between the chat scroll and the input area, the same row range the slash autocomplete popup uses, but wider.
+Focus-grabbing UI overlays opened by slash commands, and by the App when an agent event requests tool approval. Lives in the band between the chat scroll and the input area, the same row range the slash autocomplete popup uses, but wider.
 
 Companion: [commands.md](commands.md) covers the slash-command surface that opens modals.
 
@@ -28,7 +28,7 @@ A modal is `Send` (App lives on tokio) but not `Sync`, since modals own mutable 
 
 Dispatched actions flow through the same channel as keyboard input, so the modal never needs to know what handler will run on the other side.
 
-`Modal::on_cancel` fires whenever a modal leaves the stack without submitting: the stack-level Esc / Ctrl+C cancel, a `Cancelled` outcome, or `ModalStack::clear` on session swap. It returns an optional `ModalAction` that the App dispatches in place of the silent close. The default returns `None`, and `ApprovalModal` overrides it to emit a deny decision so a blocked agent always receives an answer.
+`Modal::on_cancel` fires whenever a modal leaves the stack without submitting: the stack-level Esc / Ctrl+C cancel, a `Cancelled` outcome, or `ModalStack::clear` on resume or compaction. It returns an optional `ModalAction` that the App dispatches in place of the silent close. The default returns `None`, and `ApprovalModal` overrides it to emit a deny decision so a blocked agent always receives an answer.
 
 ## Implementation
 
@@ -87,9 +87,9 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 
 - **Confirm-delete modal**: `ConfirmDeleteSessionModal` runs `SessionStore::delete` synchronously on Y / Enter and submits `ModalAction::SystemMessage("Deleted session {id}: {title}")` on success so the user has chat-stream evidence the action ran. Failures latch into a sticky inline error that clears only on a deliberate Y / N choice, so a stray key can't wipe the diagnostic. Pushed by `/delete <id-prefix>` and by `/resume`'s Ctrl+D / Delete.
 
-- **Approval modal**: `ApprovalModal` holds the tool-use id and renders the call summary as its title above a body capped at 16 rows: the command text for `bash`, or `-` / `+` diff rows for `edit` and `write`. Y / Enter submits `UserAction::ApprovalDecision` with `Approve`. N returns `Cancelled`, so N, Esc, Ctrl+C, and a session-swap `clear` all resolve through `on_cancel` to `Deny`. Built from the `ConfirmDeleteSessionModal` template.
+- **Approval modal**: `ApprovalModal` holds the tool-use id and renders the call summary as its title above a body capped at 16 rows: the command text for `bash`, or `-` / `+` diff rows for `edit` and `write`. Y / Enter submits `UserAction::ApprovalDecision` with `Approve`. N returns `Cancelled`, so N, Esc, Ctrl+C, and a `clear` on resume or compaction all resolve through `on_cancel` to `Deny`.
 
-- **`/status` overview**: Single-section `KvOverview` of session descriptors (model, effort, cwd, session id, auth, version, cache TTL, show-thinking, show-welcome). Constructed in `slash/status`.
+- **`/status` overview**: Single-section `KvOverview` of session descriptors (model, effort, cwd, session id, auth, version, cache TTL, auto compaction, show-thinking, show-welcome). Constructed in `slash/status`.
 
 - **`/config` overview**: Two-section `KvOverview`. "Resolved" carries effective config values, while "Source Files" carries the layered TOML paths it was assembled from. Path discovery runs per-invocation. Constructed in `slash/config`.
 

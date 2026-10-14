@@ -25,7 +25,7 @@ Files closer to your working directory appear later in the prompt and convention
 
 ## Writing effective instructions
 
-For example:
+A typical file lists coding conventions and project-specific rules:
 
 ```markdown
 # CLAUDE.md

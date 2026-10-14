@@ -54,11 +54,11 @@ The TUI's `App::apply_session_compacted` clears the chat, pushes a single `Compa
 
 18. **`CompactedBlock` is one chat block.** The accent-bar surface gives compaction a visual identity while keeping the header and summary one conceptual unit. The block can later grow a "view full pre-compact transcript" footer or a token-saved indicator without coordinating two block types.
 
-19. **`echoes_input` returns true.** The user's `> /compact <instructions>` line stays in scrollback above the `CompactedBlock` so the operation is visible in history. Bare `/compact` echoes too, so the prompt line plus boundary block reads as a single coherent operation.
+19. **`echoes_input` keeps the trait default of `true`.** The `> /compact` line shows while the summarization runs. The compact event then clears chat down to the `CompactedBlock`, whose `(focus: ...)` suffix keeps any instructions visible.
 
 ## Per-Component Notes
 
-- **`CompactCmd`**: `name = "compact"`, no aliases. `description = "Compress conversation context into a summary"`. `usage() = Some("[<instructions>]")`. `classify` is always `Mutating`. `echoes_input` returns true while the request is in flight, and the final compact event repaints chat to the boundary block. `execute` parses args via `args.trim()` and returns `SlashOutcome::Forward(UserAction::Compact { instructions })` with `instructions = (!s.is_empty()).then_some(s.to_owned())`.
+- **`CompactCmd`**: `name = "compact"`, no aliases. `description = "Compress conversation context into a summary"`. `usage() = Some("[<instructions>]")`. `classify` is always `Mutating`. `echoes_input` uses the trait default of `true`. `execute` parses args via `args.trim()` and returns `SlashOutcome::Forward(UserAction::Compact { instructions })` with `instructions = (!s.is_empty()).then_some(s.to_owned())`.
 
 - **`UserAction::Compact { instructions }`**: `Option<String>`. Empty or whitespace input becomes `None` at the slash boundary so the agent loop's `apply_compact` doesn't repeat the trim.
 
@@ -68,7 +68,7 @@ The TUI's `App::apply_session_compacted` clears the chat, pushes a single `Compa
 
 - **`SUMMARIZATION_SYSTEM`**, **`SUMMARIZATION_USER_RUBRIC`**, **`SUMMARY_PREFIX`**: Three `&'static str` constants. System prompt is one paragraph. Rubric is the terse list (intent, decisions, code paths touched, current state, next step). Prefix is the next-turn framing prepended to the synthetic message.
 
-- **`apply_compact` (`main.rs`)**: Drive `compact_session` and surface failure as `AgentEvent::Error`. On success, `replace_session_with_summary` synthesizes the continuation, calls `session.compact(summary, instructions, synthetic_message)`, surfaces session-write failure via the existing sink helper, clears the file tracker, swaps the in-memory `Vec<Message>` for the synthetic continuation, and emits `SessionCompacted`.
+- **`apply_compact` (`main.rs`)**: Drive `compact_session` and surface failure as `AgentEvent::Error`. On success, `replace_session_with_summary` synthesizes the continuation and calls `session.compact(summary, instructions, synthetic_message)`. A session-write failure surfaces through the sink and returns before the file tracker or the in-memory transcript changes. Otherwise it clears the file tracker, swaps the in-memory `Vec<Message>` for the synthetic continuation, and emits `SessionCompacted`.
 
 - **`Entry::Compact`**: Variant on the externally-tagged `Entry` enum. Fields: `summary: String`, `pre_message_count: u32`, `instructions: Option<String>`, `timestamp: OffsetDateTime`. Tagged `"type": "compact"` (lowercase, snake_case).
 
@@ -80,7 +80,7 @@ The TUI's `App::apply_session_compacted` clears the chat, pushes a single `Compa
 
 - **`apply_session_compacted` (TUI)**: Clears the chat, pushes a single `CompactedBlock`, keeps queued prompts for the normal idle drain, clears the modal stack, and resumes idle unless the compaction was automatic.
 
-- **`chain::pick_chain`**: Needs no compaction-specific logic because the store loader resets its `ChainBuilder` at the compact boundary, meaning a backward traversal from the latest tail leaf via `parent_uuid` stops at the post-compact head (`parent_uuid: None`).
+- **`ChainBuilder::resolve`**: Needs no compaction-specific logic. The store loader starts a fresh `ChainBuilder` at the compact boundary, and the walk back from the latest tail leaf stops at the post-compact head because its `parent_uuid` is `None`.
 
 - **`session::sanitize`**: Treats the synthetic continuation as a normal `role: user` text message without dropping anything.
 
@@ -111,8 +111,8 @@ The TUI's `App::apply_session_compacted` clears the chat, pushes a single `Compa
 - `crates/oxide-code/src/session/actor.rs`: `SessionCmd::Compact` handler.
 - `crates/oxide-code/src/session/entry.rs`: `Entry::Compact` variant.
 - `crates/oxide-code/src/session/handle.rs`: `SessionHandle::compact`, `CompactOutcome`.
-- `crates/oxide-code/src/session/store.rs`: resume loader compact boundary reset, tail filtering, and `CompactInfo`.
 - `crates/oxide-code/src/session/state.rs`: `compact_entries` and `commit_compact` (chain reset).
+- `crates/oxide-code/src/session/store.rs`: resume loader compact boundary reset, tail filtering, and `CompactInfo`.
 - `crates/oxide-code/src/slash/compact.rs`: `CompactCmd`.
 - `crates/oxide-code/src/slash/registry.rs`: `BUILT_INS` entry `&CompactCmd`.
 - `crates/oxide-code/src/tui/app.rs`: `apply_session_compacted`.
