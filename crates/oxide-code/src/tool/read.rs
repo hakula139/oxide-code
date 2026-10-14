@@ -39,6 +39,20 @@ impl Tool for ReadTool {
         "Read the contents of a file with line numbers."
     }
 
+    fn risk_class(&self) -> super::RiskClass {
+        super::RiskClass::ReadOnly
+    }
+
+    fn gate_target(
+        &self,
+        input: &serde_json::Value,
+        cwd: &std::path::Path,
+    ) -> crate::permission::GateTarget {
+        extract_input_field(input, "file_path")
+            .map(|p| crate::permission::GateTarget::for_path(p, cwd))
+            .unwrap_or_default()
+    }
+
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
@@ -288,6 +302,54 @@ mod tests {
 
     use super::*;
     use crate::file_tracker::{GatePurpose, MAX_TRACKED_FILE_SIZE, testing::tracker};
+    use crate::permission::{Decision, GateTarget, Mode, Policy};
+    use crate::tool::RiskClass;
+
+    // ── risk_class ──
+
+    #[test]
+    fn risk_class_is_read_only() {
+        let tool = ReadTool::new(tracker());
+        assert_eq!(tool.risk_class(), RiskClass::ReadOnly);
+    }
+
+    // ── gate_target ──
+
+    #[test]
+    fn gate_target_extracts_the_file_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = std::fs::canonicalize(dir.path()).unwrap();
+        std::fs::write(cwd.join(".env"), "SECRET=1").unwrap();
+        let tool = ReadTool::new(tracker());
+
+        let target = tool.gate_target(&serde_json::json!({"file_path": ".env"}), &cwd);
+        let GateTarget::Path { relative, .. } = target else {
+            panic!("expected a path target");
+        };
+        assert_eq!(relative.as_deref(), Some(".env"));
+    }
+
+    #[test]
+    fn gate_target_missing_file_path_is_none() {
+        let tool = ReadTool::new(tracker());
+        let target = tool.gate_target(&serde_json::json!({}), std::path::Path::new("/"));
+        assert!(matches!(target, GateTarget::None));
+    }
+
+    #[test]
+    fn path_scoped_deny_beats_the_read_only_auto_allow_end_to_end() {
+        // The regression the hand-built-target unit test missed: a real `read` call must resolve its
+        // own gate target so `deny = ["read(**/.env)"]` actually fires before the read-only allow.
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = std::fs::canonicalize(dir.path()).unwrap();
+        std::fs::write(cwd.join(".env"), "SECRET=1").unwrap();
+        let tool = ReadTool::new(tracker());
+        let policy = Policy::resolve(Mode::Auto, &[], &["read(**/.env)".to_owned()]).unwrap();
+
+        let target = tool.gate_target(&serde_json::json!({"file_path": ".env"}), &cwd);
+        let decision = policy.decide(tool.name(), tool.risk_class(), &target.as_target());
+        assert_eq!(decision, Decision::Deny);
+    }
 
     // ── run ──
 

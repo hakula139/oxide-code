@@ -160,6 +160,19 @@ pub(crate) struct GrepMatchLine {
 
 // ── Tool Trait ──
 
+/// How dangerous a tool's effects are, consulted by the permission gate. Read-only tools never
+/// mutate and auto-allow; edit-class and execute gate by mode and rules. See
+/// `docs/design/tools/permissions.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RiskClass {
+    /// Never mutates: `read`, `glob`, `grep`.
+    ReadOnly,
+    /// Mutates a file the call names: `edit`, `write`.
+    Edit,
+    /// Runs an opaque command with unbounded authority: `bash`.
+    Execute,
+}
+
 /// A tool that the agent can invoke.
 ///
 /// Per-instance metadata (name, icon, schema, input summary) lives on the trait so that adding a
@@ -168,6 +181,18 @@ pub(crate) trait Tool: Send + Sync {
     fn name(&self) -> &'static str;
     fn description(&self) -> &'static str;
     fn input_schema(&self) -> serde_json::Value;
+
+    /// The tool's risk class for the permission gate. No default: each tool states its own so a
+    /// new tool cannot silently inherit a permissive class.
+    fn risk_class(&self) -> RiskClass;
+
+    /// Extracts what the permission gate matches rules against from this call's `input`, resolving
+    /// any path against `cwd`. Defaults to [`GateTarget::None`] (only a tool-wide rule matches);
+    /// `bash` returns its command and the path tools their canonicalized target.
+    fn gate_target(&self, input: &serde_json::Value, cwd: &Path) -> crate::permission::GateTarget {
+        _ = (input, cwd);
+        crate::permission::GateTarget::None
+    }
 
     fn icon(&self) -> &'static str {
         "⟡"
@@ -197,6 +222,16 @@ pub(crate) trait Tool: Send + Sync {
         _metadata: &ToolMetadata,
     ) -> Option<ToolResultView> {
         None
+    }
+
+    /// Builds the preview the approval modal shows when this call needs the user's decision.
+    /// Defaults to the `summarize_call` label with a command-style body. `edit` / `write` override
+    /// to show a diff. Only reached when the gate returns `ask`, so it can afford to format.
+    fn approval_preview(&self, input: &serde_json::Value) -> crate::agent::event::ApprovalPreview {
+        crate::agent::event::ApprovalPreview {
+            title: self.summarize_call(input),
+            body: crate::agent::event::ApprovalBody::Command(self.summarize_call(input)),
+        }
     }
 
     fn run(
