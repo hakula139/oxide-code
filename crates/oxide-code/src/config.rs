@@ -426,11 +426,11 @@ impl Config {
             None => client.max_tool_rounds,
         };
 
-        let show_thinking = env::bool("OX_SHOW_THINKING")
+        let show_thinking = env::bool("OX_SHOW_THINKING")?
             .or(tui.show_thinking)
             .unwrap_or(false);
 
-        let show_welcome = env::bool("OX_SHOW_WELCOME")
+        let show_welcome = env::bool("OX_SHOW_WELCOME")?
             .or(tui.show_welcome)
             .unwrap_or(true);
 
@@ -581,7 +581,7 @@ fn resolve_compaction(
     model: &str,
     max_tokens: u32,
 ) -> Result<CompactionConfig> {
-    let auto_requested = env::bool("OX_COMPACTION_AUTO_ENABLED")
+    let auto_requested = env::bool("OX_COMPACTION_AUTO_ENABLED")?
         .or_else(|| file.as_ref().and_then(|c| c.enabled))
         .unwrap_or(true);
 
@@ -1204,7 +1204,7 @@ mod tests {
                 auto_enabled = false
             "},
         );
-        let vars = env_vars(vec![xdg(&dir), env("OX_COMPACTION_AUTO_ENABLED", "1")]);
+        let vars = env_vars(vec![xdg(&dir), env("OX_COMPACTION_AUTO_ENABLED", "TRUE")]);
         let config = temp_env::async_with_vars(vars, Config::load())
             .await
             .unwrap();

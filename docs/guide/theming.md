@@ -231,7 +231,7 @@ Bisected severity:
 
 The default tracing level is `warn`, so per-slot fallback messages surface without requiring `RUST_LOG`. Routing depends on mode:
 
-- **TUI**: Diagnostics go to `$XDG_STATE_HOME/ox/log/oxide-code.log` (default `~/.local/state/ox/log/oxide-code.log`). Routing to a file keeps `warn!` output off the alternate screen, where it would otherwise paint over the rendered frame.
+- **TUI**: Diagnostics go to `$XDG_STATE_HOME/ox/log/oxide-code.log` (default `~/.local/state/ox/log/oxide-code.log`). Routing to a file keeps `warn!` output off the alternate screen, where it would otherwise paint over the rendered frame. The file is readable only by your user. Once it passes 10 MiB it moves to `oxide-code.log.1`, replacing the previous backup, so the log directory holds at most two files.
 - **Bare REPL / headless / `--list`**: Diagnostics go to stderr, the natural CLI surface.
 
 Set `RUST_LOG=info` (or `debug`) for more detail.

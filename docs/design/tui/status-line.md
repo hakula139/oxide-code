@@ -86,7 +86,7 @@ The default order tracks reading flow: location and branch orient the user, mode
 2. **Implemented segments only.** Unsupported names fail config parsing instead of silently reserving future vocabulary.
 3. **Local usage first.** Context and session cost use provider usage already observed by the current process.
 4. **Segment omission over placeholders.** Missing usage, unknown pricing, absent branch, and blank titles disappear cleanly.
-5. **Probe-throttled segments.** `git-branch` and `pull-request` re-probe on tick at fixed cadences (5 s and 60 s respectively) so the bar stays current after `git checkout` or `gh pr create` without paying per-frame cost.
+5. **Background probes.** `git-branch` and `pull-request` re-probe as background child processes, 5 s and 60 s respectively after the previous probe finishes, with at most one run of each in flight. The bar stays current after `git checkout` or `gh pr create`, and a slow `gh` network round-trip never stalls input or rendering.
 
 ## Deferred
 
@@ -100,6 +100,8 @@ The default order tracks reading flow: location and branch orient the user, mode
 
 - [Status line research](../../research/tui/status-line.md)
 - [Auto-compaction design](../agent/auto-compaction.md)
+- `crates/oxide-code/src/main.rs`
 - `crates/oxide-code/src/tui/components/status.rs`
 - `crates/oxide-code/src/tui/components/status/line.rs`
-- `crates/oxide-code/src/main.rs`
+- `crates/oxide-code/src/tui/git_probes.rs`
+- `crates/oxide-code/src/util/git.rs`
