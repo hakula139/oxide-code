@@ -3,39 +3,29 @@ name: Release
 on:
   push:
     tags: ['v[0-9]+.*']
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - Cargo.lock
+      - Cargo.toml
+      - crates/oxide-code/Cargo.toml
+      - rust-toolchain.toml
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  create-release:
-    name: Create GitHub Release
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Create GitHub release
-        uses: taiki-e/create-gh-release-action@v1
-        with:
-          changelog: CHANGELOG.md
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-  upload-assets:
-    name: Upload Assets (${{ matrix.target }})
-    needs: create-release
+  build:
+    name: Build (${{ matrix.target }})
     runs-on: ${{ matrix.runner }}
-    permissions:
-      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -58,7 +48,8 @@ jobs:
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
 
-      - name: Upload binary
+      - name: Build archive
+        id: binary
         uses: taiki-e/upload-rust-binary-action@v1
         with:
           bin: ox
@@ -68,4 +59,55 @@ jobs:
           zip: windows
           checksum: sha256
           locked: true
-          token: ${{ secrets.GITHUB_TOKEN }}
+          dry-run: true
+          dry-run-intended: true
+
+      - name: Upload archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: oxide-code-${{ matrix.target }}
+          path: |
+            ${{ steps.binary.outputs.tar }}
+            ${{ steps.binary.outputs.zip }}
+            ${{ steps.binary.outputs.sha256 }}
+          if-no-files-found: error
+          overwrite: true
+
+  publish:
+    name: Publish GitHub Release
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Download archives
+        uses: actions/download-artifact@v8
+        with:
+          pattern: oxide-code-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Check version
+        run: |
+          tar -xzf release-assets/oxide-code-x86_64-unknown-linux-gnu.tar.gz ox
+          test "$(./ox --version)" = "ox ${GITHUB_REF_NAME#v}"
+
+      - name: Install changelog parser
+        uses: taiki-e/install-action@parse-changelog
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          parse-changelog CHANGELOG.md "${GITHUB_REF_NAME#v}" > release-notes.md
+
+          options=(--verify-tag --title "$GITHUB_REF_NAME" --notes-file release-notes.md)
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            options+=(--prerelease)
+          fi
+
+          gh release create "$GITHUB_REF_NAME" release-assets/* "${options[@]}"

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Regenerate Formula/oxide-code.rb from a release tag's published artifacts.
 #
-# Run after a release tag's `upload-assets` job has finished, since the script
-# fetches each `.sha256` sidecar from the GitHub Release. Manual flow:
+# Run after the release workflow publishes the tag's GitHub Release, since the
+# script fetches each `.sha256` sidecar from it. Manual flow:
 #
 #   ./scripts/update-homebrew-formula.sh vX.Y.Z
 #   git commit -am "chore(release): refresh Homebrew formula for vX.Y.Z"
