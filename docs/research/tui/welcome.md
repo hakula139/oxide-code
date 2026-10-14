@@ -103,10 +103,10 @@ Most distinct from chat: a route-based full-screen Home with no chat-region inhe
 
 1. **Claude Code's feed panels**. Recent-sessions / release-notes / upsells turn onboarding into a dashboard. Maintenance cost is high (each feed is a separate live data source) and the value to a returning user is near-zero.
 
-2. **Claude Code's mascot + Codex's animated frames**. ASCII art at this scale is outsized for the value. Static text reads as professional, and animations add complexity without payoff. The plan's earlier open-question on ASCII art lands "no" in light of this.
+2. **Claude Code's mascot + Codex's animated frames**. ASCII art at this scale is outsized for the value. Static text reads as professional, while animations add complexity without payoff.
 
 3. **Codex's welcome-as-history-cell shape**. Conflates ephemeral onboarding UI with conversation transcript. Forces explicit re-emission on `/clear` and bloats the JSONL persisted record. Empty-state branching in the chat view is the right model.
 
-4. **opencode's 60-tip rotating array**. Maintenance cost on the array, and rotating content makes the welcome feel "noisy". A static curated 3-row list wins.
+4. **opencode's 60-tip rotating array**. Because maintaining a 60-entry array is costly, oxide-code samples three starters and one tip per session from small curated pools.
 
 5. **Claude Code's full-screen takeover**. Visually heavy and consumes vertical space the user wants for chat. The welcome should occupy the empty chat region.

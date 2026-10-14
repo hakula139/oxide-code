@@ -12,7 +12,7 @@ Companions: [commands.md](commands.md), [session/persistence.md](../session/pers
 
 `session/handle` exposes `compact(summary, instructions, synthetic_message) -> CompactOutcome`. The actor writes one `Entry::Compact` followed by the synthetic post-compact `Entry::Message` (a `role: user` carrying `SUMMARY_PREFIX + summary`), with the synthetic message's `parent_uuid` deliberately set to `None`. `SessionState`'s `last_message_uuid` is reset to the synthetic message's id and `message_count` resets to `1`. `SessionCmd::Compact` is a batch barrier, so queued writes cannot share the same flush after the boundary. The file tracker is reset to match `/clear`. On resume, `load_session_data` treats `Entry::Compact` as a generation boundary, clears pre-compact sidecars, filters out later stale writes from the old chain, and carries `CompactInfo` so the TUI can render the boundary block while the model transcript keeps the synthetic root.
 
-The agent loop in `main.rs` adds `apply_compact`: drive the streaming summarization, then on success hand the summary to `agent/compact_boundary`'s `replace_session_with_summary`, which calls `session.compact(...)`, clears the file tracker, replaces the in-memory `Vec<Message>` with the synthetic continuation, and emits `AgentEvent::SessionCompacted { summary, pre_count, instructions, automatic }` with `automatic: false`. Failure paths (stream error, empty summary, too-few-messages guard, channel close) emit `AgentEvent::Error` and leave the session untouched. Cancellation routes through the existing cancel infrastructure and emits `AgentEvent::Cancelled` like a regular turn.
+In `main.rs`, `apply_compact` drives streaming summarization and, on success, hands the summary to `agent/compact_boundary`'s `replace_session_with_summary`, which calls `session.compact(...)`, clears the file tracker, replaces the in-memory `Vec<Message>` with the synthetic continuation, and emits `AgentEvent::SessionCompacted { summary, pre_count, instructions, automatic }` with `automatic: false`. Failure paths (stream error, empty summary, too-few-messages guard, channel close) emit `AgentEvent::Error` and leave the session untouched. Cancellation routes through the existing cancel infrastructure and emits `AgentEvent::Cancelled` like a regular turn.
 
 The TUI's `App::apply_session_compacted` clears the chat, pushes a single `CompactedBlock` with a count header and markdown summary body, keeps queued prompts for the normal idle drain, clears the modal stack, and resumes idle after a manual compact. Resume renders the same boundary block and skips the synthetic root in visible chat.
 
@@ -22,7 +22,7 @@ The TUI's `App::apply_session_compacted` clears the chat, pushes a single `Compa
 
 2. **Optional free-text custom instructions.** `/compact <instructions>` lets the user steer the summary toward what they care about (`focus on the build error and how we fixed it`). The argument shape matches the existing `/rename <title>` / `/model <id>` typed-arg form, and adding it costs little. Claude Code shipped it because the rubric is generic enough that user-supplied focus noticeably improves recall.
 
-3. **Same model plus streaming via the existing `Client`.** The summarization request reuses the live model selection, thinking / effort settings, and OAuth / API-key auth, since it's just another `Client::stream_message` call with a custom system prompt and no tool definitions. No separate code path is needed. opencode's `agent.compaction.model` config knob is genuinely useful but unnecessary for v1.
+3. **Same model plus streaming via the existing `Client`.** The summarization request reuses the live model selection, thinking / effort settings, and OAuth / API-key auth, since it's just another `Client::stream_message` call with a custom system prompt and no tool definitions. No separate code path is needed.
 
 4. **No tool definitions on the compaction request.** Passing an empty tool slice omits the `tools` field, so the API layer bans tool calls outright. Claude Code's `NO_TOOLS_PREAMBLE` is forceful prose but still relies on the model honoring it. The no-tools path is simpler and unconditional.
 
@@ -40,7 +40,7 @@ The TUI's `App::apply_session_compacted` clears the chat, pushes a single `Compa
 
 11. **Keep queued prompts.** Unlike `/resume` (queued prompts belong to the source thread and get dropped), `/compact` _preserves_ the user's intent. Queued prompts continue to make sense after compaction, and dropping them would surprise the user. This mirrors `/clear`'s "same identity, fresh slate" behavior, even though the underlying mechanic is different.
 
-12. **No live token streaming in v1.** Show the spinner during compaction, then emit `AgentEvent::SessionCompacted` once with the full summary at the end. Live-streaming the summary into a `StreamingCompactionBlock` is a v2 nicety because it requires an extra block variant, finalize-on-completion plumbing, and "what if the user cancels mid-stream" handling. Not worth it for the typical 5-15 second wait.
+12. **No live token streaming.** Show the spinner during compaction, then emit `AgentEvent::SessionCompacted` once with the full summary at the end. Live-streaming the summary into a `StreamingCompactionBlock` is not worth it for the typical 5-15 second wait, as it would require an extra block variant, finalize-on-completion plumbing, and mid-stream cancel handling.
 
 13. **Refuse mid-turn (`classify = Mutating`).** All three reference CLIs treat manual compaction as a between-turns operation. `Mutating` is the existing oxide-code lever for that. The slash registry refuses if a turn is in flight, and the user retries after the in-flight reply finishes.
 
@@ -80,15 +80,15 @@ The TUI's `App::apply_session_compacted` clears the chat, pushes a single `Compa
 
 - **`apply_session_compacted` (TUI)**: Clears the chat, pushes a single `CompactedBlock`, keeps queued prompts for the normal idle drain, clears the modal stack, and resumes idle unless the compaction was automatic.
 
-- **`chain::pick_chain`**: No change needed. The store loader resets its `ChainBuilder` at the compact boundary, and walking from the latest tail leaf back via `parent_uuid` naturally stops at the post-compact head because `parent_uuid: None`.
+- **`chain::pick_chain`**: Needs no compaction-specific logic because the store loader resets its `ChainBuilder` at the compact boundary, meaning a backward traversal from the latest tail leaf via `parent_uuid` stops at the post-compact head (`parent_uuid: None`).
 
-- **`session::sanitize`**: No change needed. The synthetic continuation is a normal `role: user` message with text content, and sanitize drops nothing.
-
-- **`SessionInfo` / `--list`**: No change in v1. Future work surfaces "compacted N times" alongside `Msgs`. Free at write time once `Entry::Compact` lines exist, and a follow-up PR can add the column.
+- **`session::sanitize`**: Treats the synthetic continuation as a normal `role: user` text message without dropping anything.
 
 ## Out of Scope / Deferred
 
-- **Live-streamed summary.** `StreamingCompactionBlock` finalizing into `CompactedBlock`, tokenwise rendering, mid-stream cancel handling. v2 polish.
+- **Live-streamed summary.** Tokenwise rendering via a `StreamingCompactionBlock` that handles mid-stream cancellation and finalizes into a `CompactedBlock`.
+
+- **Compaction count in `--list`.** A "compacted N times" column beside `Msgs`, derivable from existing `Entry::Compact` lines.
 
 - **Anchored re-compaction (`<previous-summary>` block).** opencode's signature pattern. Genuinely useful for ultra-long sessions, but defer until a user has compacted the same session twice.
 
@@ -96,7 +96,7 @@ The TUI's `App::apply_session_compacted` clears the chat, pushes a single `Compa
 
 - **Partial / range compaction.** Claude Code's "summarize from here" / "summarize up to here" via the message selector. Adds a UI surface, a dual-direction summarizer, and a transcript splice. Its own feature.
 
-- **PreCompact / PostCompact hooks.** All three CLIs ship hooks, but oxide-code doesn't have a hook surface yet. Lands with the broader hooks abstraction.
+- **PreCompact / PostCompact hooks.** All three CLIs ship hooks, whereas oxide-code has no hook surface.
 
 - **`agent.compaction.model` config knob.** Letting users pin compaction to a cheap model (Haiku) while the main session runs Opus. Useful, but defer until users ask.
 

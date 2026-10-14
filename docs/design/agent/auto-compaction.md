@@ -50,11 +50,11 @@ auto_threshold_percent = 40
 
 Environment:
 
-| Variable                                 | Effect                                      |
-| ---------------------------------------- | ------------------------------------------- |
-| `OX_COMPACTION_AUTO_ENABLED`             | Overrides `client.compaction.auto_enabled`  |
-| `OX_COMPACTION_AUTO_THRESHOLD_TOKENS`    | Absolute automatic trigger threshold        |
-| `OX_COMPACTION_AUTO_THRESHOLD_PERCENT`   | Percent of context, capped by safe trigger  |
+| Variable                               | Effect                                     |
+| -------------------------------------- | ------------------------------------------ |
+| `OX_COMPACTION_AUTO_ENABLED`           | Overrides `client.compaction.auto_enabled` |
+| `OX_COMPACTION_AUTO_THRESHOLD_TOKENS`  | Absolute automatic trigger threshold       |
+| `OX_COMPACTION_AUTO_THRESHOLD_PERCENT` | Percent of context, capped by safe trigger |
 
 Manual `/compact` remains available. The config controls only whether automatic compaction triggers and where that trigger fires. Token and percent thresholds are mutually exclusive so the resolved trigger stays obvious.
 
@@ -86,9 +86,9 @@ During TUI auto-compaction, the status bar uses the existing `Compacting` state.
 
 2. **Response usage as the token signal.** The stream already carries usage. A count-tokens request would add latency and still be approximate once dynamic system context and tool definitions are included.
 
-3. **Boundary-only compaction.** The first version compacts after a coherent transcript unit is persisted and before the next prompt starts. This avoids partial tool loops and makes session replay identical to manual `/compact`.
+3. **Boundary-only compaction.** Compaction runs between persisting a coherent transcript unit and starting the next prompt. This avoids partial tool loops and makes session replay identical to manual `/compact`.
 
-4. **Same summarizer as `/compact`.** No separate compaction model knob yet. The current `Client::stream_message` path already handles auth, model, effort, betas, prompt caching, and first-party gateway constraints.
+4. **Same summarizer as `/compact`.** Auto-compaction has no model setting of its own, as the `Client::stream_message` path already handles auth, model, effort, betas, prompt caching, and first-party gateway constraints.
 
 5. **Same persistence boundary as `/compact`.** Auto-compaction should not create a second session format. `Entry::Compact` can later gain a trigger field if the UI needs to distinguish manual from automatic in history.
 

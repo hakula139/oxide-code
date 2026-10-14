@@ -29,7 +29,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 5. **Mid-session model + effort swap via `&mut Client`.** Both `/model <id>` and `/effort <level>` return `Forward(UserAction::SwapConfig { model, effort })`, the same payload both modals emit, so the typed-arg path and the modals share one resolver. Per-request paths re-read config every call so betas and `output_config` pick up the swap. Bare `/model` (combined picker) and bare `/effort` (slider) are also mutating because their submit path emits `SwapConfig`, so both forms refuse mid-turn. See [modals.md](modals.md).
 
-6. **Slash commands never write user config files.** State stays session-only and a restart returns to config.toml values. Cross-session persistence will land as an explicit subcommand writing to a user-opted-in path, never a silent merge into a `~/.claude.json`-style file.
+6. **Slash commands never write user config files.** State is session-only, so restarting reverts to the values in `config.toml`.
 
 7. **Aliases resolve to canonical but display by surface.** `/clear` is canonical, while `/new` and `/reset` are aliases. The popup shows only the alias the user typed.
 
@@ -37,7 +37,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 9. **Read-only kv views go through one shared modal primitive.** `/status`, `/config`, and `/help` all open a [`KvOverview`](modals.md) with title + sectioned label-value rows + footer. The modal is the response, so the typed `> /foo` line stays out of chat history (see decision 14).
 
-10. **Built-in only in v1.** The trait registry leaves room for `~/.config/ox/commands/*.md` discovery later.
+10. **Built-in commands only.** `BUILT_INS` is the entire registry, with no discovery of user-defined commands.
 
 11. **Read-only commands fast-path the busy turn.** `classify` defaults to `SlashKind::ReadOnly`, and the dispatcher runs them client-side even when input is disabled. State-mutating commands override to `SlashKind::Mutating` and refuse mid-turn.
 

@@ -12,7 +12,7 @@ The picker wraps [`SearchableList`](modals.md) and adds a footer line. Each row 
 
 `session/handle` provides `roll_into(...)` mirroring `roll(...)`: snapshot the file tracker, clear it, load + sanitize the target, swap the handle in place, finalize the old session. Returns a flat `RollIntoOutcome` carrying the resumed transcript (messages, title, tool-result metadata) plus a diagnostic pair (finalize failure of the prior session, drift list from the file tracker).
 
-The agent loop in `main` adds an `apply_resume` helper: drive `roll_into`, rebind `Client::set_session_id`, emit `AgentEvent::SessionResumed { id, title, messages, compact, tool_metadata }`, then surface the old session's finalize failure and any tracker-drift warning as distinct `AgentEvent::Error`s. The TUI's `App::apply_session_resumed` clears the chat, replays `load_history`, drops queued prompts (surfaces the count as a system message), and clears the modal stack.
+In `main.rs`, `apply_resume` drives `roll_into`, rebinds `Client::set_session_id`, emits `AgentEvent::SessionResumed { id, title, messages, compact, tool_metadata }`, and surfaces the old session's finalize failure and any tracker-drift warning as distinct `AgentEvent::Error`s. The TUI's `App::apply_session_resumed` clears the chat, replays `load_history`, drops queued prompts (surfaces the count as a system message), and clears the modal stack.
 
 `SessionStore::list_paged` is the listing entry point: stat every candidate file, sort by mtime desc, truncate to the cap, then `read_session_info` only the survivors. `ListPage` carries the surviving sessions and the pre-truncation total. `list()` / `list_all()` are thin wrappers. `ox --list --limit N` (default `30`, `0` = unbounded) prints `... and N more (use --limit N or --limit 0 to disable the cap)` when the cap clipped output.
 
@@ -36,11 +36,11 @@ The agent loop in `main` adds an `apply_resume` helper: drive `roll_into`, rebin
 
 9. **Two-method `SearchableItem`: `haystack` plus `render`.** A substring filter and a layout callback are the only things the primitive needs from items. Date grouping, numeric mnemonics, and other UX shapes were prototyped and dropped because they bloat the trait for one consumer.
 
-10. **Substring search only in v1.** Codex and opencode both ship plain substring and it works. `nucleo-matcher` is a small dep with a clean upgrade path if users complain.
+10. **Substring search only.** Codex and opencode both ship plain substring and it works. `nucleo-matcher` is a small dep with a clean upgrade path if users complain.
 
 11. **Project scoping defaults to current cwd, with Tab widening.** Matches the existing `ox -c` resolver semantics: CLI `--all` widens up front, in-picker `Tab` toggles, and the typed query persists across the rebuild.
 
-12. **30-row default page, no background load-more in v1.** Codex's near-bottom prefetch is genuinely nice but adds a non-trivial state machine for marginal gain at typical session counts. More than 30 sessions in a project is search territory anyway.
+12. **Default to a 30-row page with no background load-more.** Codex's near-bottom prefetch is genuinely nice but adds a non-trivial state machine for marginal gain at typical session counts. More than 30 sessions in a project is search territory anyway.
 
 13. **Listing API centralizes pagination in `list_paged(limit, all)`.** The win is cap-before-tail-scan ordering: for 1000 sessions, only the first N files get parsed.
 
@@ -82,7 +82,7 @@ The agent loop in `main` adds an `apply_resume` helper: drive `roll_into`, rebin
 - **Worktree / branch tree expansion** (Claude Code's `▼` / `▶`) and **side preview pane.** Both double layout complexity for marginal gain.
 - **In-picker rename of other sessions.** `/rename` covers the live session's title.
 - **Background load-more on scroll near bottom.** 30-row page plus search covers the typical case. Add when a user complaint shows a >30-session-in-one-project workflow.
-- **Fuzzy search.** Substring is enough for v1, and `nucleo-matcher` is the upgrade path if users complain.
+- **Fuzzy search.** Substring search covers typical session counts, with `nucleo-matcher` as the upgrade path if users complain.
 - **Auto-resume on single match.** Users who type `/resume` to peek the list deserve to see it.
 - **`/sessions` listing variant.** One slash command per intent. `ox --list` already covers script-friendly listing.
 

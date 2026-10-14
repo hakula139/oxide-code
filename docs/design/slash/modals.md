@@ -57,7 +57,7 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 
 4. **Modals receive a `&LiveSessionInfo` snapshot at open.** Reactive subscriptions are deferred, so when a value changes mid-modal (rare) the modal closes and reopens with fresh state.
 
-5. **Layout band sized by `ModalStack::height(width)`.** Zero rows when empty (so the existing layout stays unchanged), and displaces the chat upward when active, just like the slash popup.
+5. **Layout band sized by `ModalStack::height(width)`.** When the stack is empty, the band takes no rows. When active, it shifts the chat upward, just like the slash popup.
 
 6. **Slash commands open modals via `SlashContext::open_modal`.** Keeps `SlashOutcome` derive-clean (`Debug + PartialEq + Eq`) without a modal-carrying variant. The dispatcher harvests the slot after `execute` and pushes onto the App's stack, mirroring how `chat: &mut ChatView` carries write-effects.
 
@@ -71,7 +71,7 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 
 11. **Nested modals use `ModalKey::Push`.** A push outcome keeps `handle_key` returning one value and avoids threading a stack borrow through every modal. `Debug for ModalKey` is hand-rolled because `Box<dyn Modal>` cannot derive it.
 
-12. **`Modal::on_focus_regained` is a generally-useful hook.** Any picker that opens a sub-modal mutating shared state benefits from refresh-on-pop. Default no-op so existing modals don't change.
+12. **`Modal::on_focus_regained` is a generally-useful hook.** It defaults to a no-op, but any picker that opens a sub-modal mutating shared state can override it to refresh on pop.
 
 ## Per-Modal Notes
 
