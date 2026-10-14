@@ -1,4 +1,5 @@
 # Build output
+/mutants.out*/
 /target/
 
 # Dependencies

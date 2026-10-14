@@ -161,6 +161,7 @@
             ++ [ rustToolchain ]
             ++ (with pkgs; [
               cargo-llvm-cov
+              cargo-mutants
               git-cliff
               nodejs_24
               pnpm

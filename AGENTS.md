@@ -333,7 +333,7 @@ Coverage reports whether a line ran. Mutation testing reports whether a mutation
 cargo mutants --package oxide-code
 ```
 
-Surviving mutants usually mean a test asserts something too loose. Tighten the assertion. If the mutant is genuinely equivalent, exclude it with an explanatory comment.
+Surviving mutants usually mean a test asserts something too loose. Tighten the assertion. If the mutant is genuinely equivalent, add an `exclude_re` pattern for it to `.cargo/mutants.toml`, with a comment explaining the equivalence.
 
 ## Code Review
 
