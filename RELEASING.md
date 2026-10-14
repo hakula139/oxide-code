@@ -28,12 +28,13 @@ The release lands through a PR, never a direct push to `main`. The order is: ope
 
 5. Add the compare-link footer line manually. `--prepend` does not touch the footer block, so insert this line above the previous-version line: `[X.Y.Z]: https://github.com/hakula139/oxide-code/compare/<prev-tag>..vX.Y.Z`. For the very first tag, use `https://github.com/hakula139/oxide-code/releases/tag/vX.Y.Z` instead (no compare base).
 
-6. Run the full local check suite before pushing, so CI does not surface anything avoidable. This is the same set CI gates:
+6. Run the local check suite before pushing, so CI does not surface anything avoidable. It is the locally runnable subset of the CI checks:
 
    ```bash
    cargo fmt --all --check
    cargo clippy --all-targets -- -D warnings
    cargo test
+   pnpm format
    pnpm lint
    pnpm spellcheck
    ```

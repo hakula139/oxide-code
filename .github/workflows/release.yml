@@ -8,17 +8,21 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   create-release:
+    name: Create GitHub Release
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Create GitHub release
         uses: taiki-e/create-gh-release-action@v1
@@ -27,8 +31,9 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
   upload-assets:
+    name: Upload Assets (${{ matrix.target }})
     needs: create-release
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: write
     strategy:
@@ -36,16 +41,16 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            runner: ubuntu-latest
           - target: aarch64-apple-darwin
-            os: macos-latest
+            runner: macos-latest
           - target: x86_64-apple-darwin
-            os: macos-latest
+            runner: macos-latest
           - target: x86_64-pc-windows-msvc
-            os: windows-latest
+            runner: windows-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable

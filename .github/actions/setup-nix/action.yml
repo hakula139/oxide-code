@@ -1,14 +1,9 @@
-name: Setup Nix
-description: Install Nix and configure the Cachix substituter
+name: Set up Nix
+description: Install Nix and configure the Cachix substituter named by the caller's CACHIX_NAME environment variable
 
 inputs:
-  cachix_name:
-    description: Cachix cache name (skips Cachix if not provided)
   cachix_auth_token:
-    description: Cachix authentication token
-  cachix_skip_push:
-    description: Skip pushing to Cachix
-    default: 'false'
+    description: Upload token for main and maintainer runs (omit for read-only cache access)
 
 runs:
   using: composite
@@ -16,12 +11,16 @@ runs:
     - name: Install Nix
       uses: cachix/install-nix-action@v31
       with:
-        install_options: ${{ runner.os == 'Linux' && '--no-daemon' || '' }}
+        # A single-user install cannot create the kernel namespaces the sandbox
+        # needs, and `sandbox-fallback` would otherwise hide that by retrying a
+        # failed sandbox setup without one.
+        extra_nix_config: |
+          sandbox = true
+          sandbox-fallback = false
 
-    - name: Setup Cachix
-      if: ${{ inputs.cachix_name }}
+    - name: Set up Cachix
       uses: cachix/cachix-action@v17
       with:
-        name: ${{ inputs.cachix_name }}
+        name: ${{ env.CACHIX_NAME }}
         authToken: ${{ inputs.cachix_auth_token }}
-        skipPush: ${{ inputs.cachix_skip_push }}
+        skipPush: ${{ !inputs.cachix_auth_token || !(github.ref == 'refs/heads/main' || github.actor == 'hakula139') }}
