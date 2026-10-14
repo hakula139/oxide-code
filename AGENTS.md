@@ -121,27 +121,28 @@ ox                                          # Start an interactive session
 │   ├── app.rs                              # Root App struct, tokio::select! event loop, render dispatch
 │   ├── components.rs                       # Components module root
 │   ├── components/
-│   │   ├── chat.rs                         # ChatView: scrollable chat with block stacking and history load
+│   │   ├── chat.rs                         # ChatView: scrollable chat, history load, block stacking with visible-slice paint
 │   │   ├── chat/
 │   │   │   ├── blocks.rs                   # ChatBlock trait + RenderCtx + icon-prefix helpers
-│   │   │   └── blocks/
-│   │   │       ├── assistant.rs            # AssistantText + AssistantThinking
-│   │   │       ├── compacted.rs            # CompactedBlock: bordered surface with bold accent header (count + optional focus) + markdown summary body
-│   │   │       ├── error.rs                # ErrorBlock
-│   │   │       ├── git_diff.rs             # GitDiffBlock: unified-diff render reusing the Edit-tool `+` / `-` row-bg + line-number gutter
-│   │   │       ├── interrupted.rs          # InterruptedMarker: dim italic `(interrupted)` line on cancel
-│   │   │       ├── streaming.rs            # StreamingAssistant (in-flight buffer + render cache)
-│   │   │       ├── system.rs               # SystemMessageBlock: left-bar accent + body text for slash-command output
-│   │   │       ├── tool.rs                 # ToolCallBlock + ToolResultBlock (left-bar border machinery + per-variant dispatch)
-│   │   │       ├── tool/
-│   │   │       │   ├── bordered_row.rs     # Shared `[bar] [text]` row renderer for unnumbered body / header / footer rows
-│   │   │       │   ├── diff.rs             # Edit-tool unified diff body: boundary trim + per-side budget + line-number gutter
-│   │   │       │   ├── glob.rs             # Glob-tool body: header + flat path list + truncation footer
-│   │   │       │   ├── grep.rs             # Grep-tool per-file groups of line-numbered matches (content mode)
-│   │   │       │   ├── numbered_row.rs     # Shared `[bar] [number] [sep] [text]` row renderer: pipe sep for read / grep, sign sep for diff
-│   │   │       │   ├── read_excerpt.rs     # Read-tool line-numbered excerpt body + path / range header
-│   │   │       │   └── text.rs             # Default truncated-text body (fallback for tools without a richer view)
-│   │   │       └── user.rs                 # UserMessage
+│   │   │   ├── blocks/
+│   │   │   │   ├── assistant.rs            # AssistantText + AssistantThinking
+│   │   │   │   ├── compacted.rs            # CompactedBlock: bordered surface with bold accent header (count + optional focus) + markdown summary body
+│   │   │   │   ├── error.rs                # ErrorBlock
+│   │   │   │   ├── git_diff.rs             # GitDiffBlock: unified-diff render reusing the Edit-tool `+` / `-` row-bg + line-number gutter
+│   │   │   │   ├── interrupted.rs          # InterruptedMarker: dim italic `(interrupted)` line on cancel
+│   │   │   │   ├── streaming.rs            # StreamingAssistant (in-flight buffer + complete-block render cache)
+│   │   │   │   ├── system.rs               # SystemMessageBlock: left-bar accent + body text for slash-command output
+│   │   │   │   ├── tool.rs                 # ToolCallBlock + ToolResultBlock (left-bar border machinery + per-variant dispatch)
+│   │   │   │   ├── tool/
+│   │   │   │   │   ├── bordered_row.rs     # Shared `[bar] [text]` row renderer for unnumbered body / header / footer rows
+│   │   │   │   │   ├── diff.rs             # Edit-tool unified diff body: boundary trim + per-side budget + line-number gutter
+│   │   │   │   │   ├── glob.rs             # Glob-tool body: header + flat path list + truncation footer
+│   │   │   │   │   ├── grep.rs             # Grep-tool per-file groups of line-numbered matches (content mode)
+│   │   │   │   │   ├── numbered_row.rs     # Shared `[bar] [number] [sep] [text]` row renderer: pipe sep for read / grep, sign sep for diff
+│   │   │   │   │   ├── read_excerpt.rs     # Read-tool line-numbered excerpt body + path / range header
+│   │   │   │   │   └── text.rs             # Default truncated-text body (fallback for tools without a richer view)
+│   │   │   │   └── user.rs                 # UserMessage
+│   │   │   └── stack.rs                    # CachedBlock (render memo keyed by width / theme epoch / show_thinking) + Stack (borrowed row runs, visible-slice copy)
 │   │   ├── input.rs                        # Multi-line input area (ratatui-textarea) + slash-popup wiring + arg-mode `[id]` ghost text
 │   │   ├── input/
 │   │   │   ├── popup.rs                    # Slash-command autocomplete overlay: dim non-selected, bold selected, alias parens

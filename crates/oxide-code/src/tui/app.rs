@@ -698,15 +698,7 @@ impl App {
         &mut self,
         terminal: &mut ratatui::Terminal<ratatui::prelude::CrosstermBackend<W>>,
     ) -> Result<()> {
-        let mut chat_area = ratatui::layout::Rect::default();
-        draw_sync(terminal, |frame| {
-            chat_area = self.draw_frame(frame);
-        })?;
-        if self.chat.update_layout(chat_area) {
-            draw_sync(terminal, |frame| {
-                self.draw_frame(frame);
-            })?;
-        }
+        draw_sync(terminal, |frame| self.draw_frame(frame))?;
         self.emit_status_hyperlinks(terminal)?;
         Ok(())
     }
@@ -724,8 +716,7 @@ impl App {
         Ok(())
     }
 
-    /// Returns the chat area so the scroll cache can refresh its layout.
-    fn draw_frame(&mut self, frame: &mut ratatui::Frame<'_>) -> ratatui::layout::Rect {
+    fn draw_frame(&mut self, frame: &mut ratatui::Frame<'_>) {
         let preview_height = self.preview_height();
         let modal_height = self.modals.height(frame.area().width);
         // Modal owns focus, so input and popup bands collapse.
@@ -770,7 +761,6 @@ impl App {
             }
             self.input.render(frame, chunks[5]);
         }
-        chunks[1]
     }
 
     fn preview_height(&self) -> u16 {
@@ -1106,21 +1096,7 @@ mod tests {
 
     fn render_app(app: &mut App, width: u16, height: u16) -> TestBackend {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        let mut chat_area = Rect::default();
-        terminal
-            .draw(|frame| {
-                chat_area = app.draw_frame(frame);
-            })
-            .unwrap();
-        // Mirror `App::render`'s second-pass repaint so the captured
-        // buffer matches what the user actually sees.
-        if app.chat.update_layout(chat_area) {
-            terminal
-                .draw(|frame| {
-                    app.draw_frame(frame);
-                })
-                .unwrap();
-        }
+        terminal.draw(|frame| app.draw_frame(frame)).unwrap();
         terminal.backend().clone()
     }
 
@@ -3470,11 +3446,7 @@ mod tests {
         for cell in &mut terminal.current_buffer_mut().content {
             cell.set_bg(sentinel);
         }
-        terminal
-            .draw(|frame| {
-                _ = app.draw_frame(frame);
-            })
-            .unwrap();
+        terminal.draw(|frame| app.draw_frame(frame)).unwrap();
 
         let buffer = terminal.backend().buffer();
         for y in 0..10 {

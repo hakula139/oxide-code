@@ -95,7 +95,7 @@ Persistence stance: session commands should feel reversible. Cross-session write
 
 ### Viewport Virtualization
 
-- Keep very long sessions responsive by rendering only the visible chat region.
+- Keep resizes and theme swaps responsive in very long sessions by rendering only the blocks near the viewport.
 
 ## Later
 
