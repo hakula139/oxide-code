@@ -54,8 +54,14 @@ ox                                          # Start an interactive session
 ├── config/
 │   ├── file.rs                             # TOML config file discovery, parsing, and merge (user + project)
 │   └── oauth.rs                            # Claude Code OAuth credentials (macOS Keychain + file), token refresh, directory-based advisory lock
+├── driver.rs                               # Conversation: per-session core every driver feeds prompts through (auto-compact, turn, session ops, usage), exit status, shutdown signals
+├── driver/
+│   ├── headless.rs                         # `-p` driver: one turn, exit status from how it ended
+│   ├── repl.rs                             # `--no-tui` driver: stdin prompt loop, rejects slash commands, keeps reading after a failed turn and exits with failure at EOF
+│   ├── testing.rs                          # Cfg-test Conversation fixtures shared by the driver tests (conversation, mount_reply, request_bodies)
+│   └── tui.rs                              # TUI driver: App event loop beside the agent task, which serves UserActions and finalizes the live session
 ├── file_tracker.rs                         # Per-session FileTracker: Read-before-Edit gate, mtime+xxh64 staleness check, persist-on-finish + verify-on-resume
-├── main.rs                                 # CLI entry point, mode dispatch (TUI / REPL / headless), signal handling
+├── main.rs                                 # CLI entry point: config + session resolution, mode dispatch to a driver, process exit code
 ├── message.rs                              # Conversation message types
 ├── model.rs                                # Ground-truth table: display name, cutoff, capabilities, and unknown raw-id fallback
 ├── model/

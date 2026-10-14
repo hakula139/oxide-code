@@ -24,13 +24,13 @@ The picks lean toward the Codex precedent on most surfaces, since it is the one 
 
 7. **Cancellation rides the existing `AgentEvent` channel.** `AgentEvent::Cancelled` covers both TUI and `StdioSink`. No new event channel.
 
-8. **`agent_loop_task` fires one terminal event.** `Error` and `TurnComplete` both run the same TUI teardown, so emitting both would drain the queue head twice on an API failure.
+8. **A turn reports its outcome with one event.** `Conversation::submit_prompt` ends a turn with `TurnComplete`, `Error`, or `Cancelled`, and never pairs `Error` with `TurnComplete`, because both run the same TUI teardown and the pair would drain the queue head twice on an API failure. Auto-compaction and session-write failures emit their own `Error` earlier in the turn, and the TUI runs the same teardown for those.
 
 ## Sources
 
 - `crates/oxide-code/src/agent.rs`: `agent_turn` round loop, `await_unless_aborted`, `record_drained_prompts`, `TurnAbort` enum.
 - `crates/oxide-code/src/agent/event.rs`: `AgentEvent::{Cancelled, PromptDrained}`, `UserAction::{Cancel, ConfirmExit, Quit}`, `INTERRUPTED_MARKER`, `StdioSink::render`.
-- `crates/oxide-code/src/main.rs`: `agent_loop_task`, `bare_repl` / `headless`.
+- `crates/oxide-code/src/driver.rs`: `Conversation::submit_prompt` and `report_abort`, shared by the TUI, REPL, and headless drivers.
 - `crates/oxide-code/src/tool/bash.rs`: `kill_on_drop(true)` on the spawned child, plus the timeout-only `kill_process_group`.
 - `crates/oxide-code/src/tui/app.rs`: `App::pending_prompts`, `dispatch_user_action` / `apply_action_locally`, `finalize_idle` / `drain_pending_prompt`, `set_active_status`, `expire_armed_exit`.
 - `crates/oxide-code/src/tui/components/chat/blocks/interrupted.rs`: `InterruptedMarker` block.

@@ -166,32 +166,12 @@ mod tests {
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
     use super::*;
-    use crate::client::anthropic::testing::{Captured, api_key, captured, test_client};
+    use crate::client::anthropic::testing::{
+        Captured, api_key, captured, test_client, text_stream_body,
+    };
     use crate::message::Role;
 
     // ── compact_session ──
-
-    fn streamed_summary_body(text: &str) -> String {
-        streamed_summary_body_parts("", text)
-    }
-
-    fn streamed_summary_body_parts(start_text: &str, delta_text: &str) -> String {
-        use std::fmt::Write as _;
-
-        let frames = [
-            json!({"type": "message_start", "message": {"id": "m", "model": "claude-haiku-4-5"}}).to_string(),
-            json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": start_text}}).to_string(),
-            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": delta_text}}).to_string(),
-            json!({"type": "content_block_stop", "index": 0}).to_string(),
-            json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}}).to_string(),
-            json!({"type": "message_stop"}).to_string(),
-        ];
-        let mut body = String::new();
-        for frame in &frames {
-            _ = writeln!(body, "event: ping\ndata: {frame}\n");
-        }
-        body
-    }
 
     fn fake_transcript() -> Vec<Message> {
         vec![
@@ -250,7 +230,7 @@ mod tests {
             .and(path("/v1/messages"))
             .respond_with(
                 ResponseTemplate::new(200)
-                    .set_body_string(streamed_summary_body("  fixed login bug  \n"))
+                    .set_body_string(text_stream_body("", "  fixed login bug  \n"))
                     .insert_header("content-type", "text/event-stream"),
             )
             .mount(&server)
@@ -270,7 +250,7 @@ mod tests {
             .and(path("/v1/messages"))
             .respond_with(
                 ResponseTemplate::new(200)
-                    .set_body_string(streamed_summary_body_parts("  fixed", " login bug  \n"))
+                    .set_body_string(text_stream_body("  fixed", " login bug  \n"))
                     .insert_header("content-type", "text/event-stream"),
             )
             .mount(&server)
@@ -290,7 +270,7 @@ mod tests {
             .and(path("/v1/messages"))
             .respond_with(
                 ResponseTemplate::new(200)
-                    .set_body_string(streamed_summary_body("   \n  "))
+                    .set_body_string(text_stream_body("", "   \n  "))
                     .insert_header("content-type", "text/event-stream"),
             )
             .mount(&server)
@@ -314,7 +294,7 @@ mod tests {
             .respond_with(move |req: &Request| {
                 *sink_clone.lock().unwrap() = Some(String::from_utf8_lossy(&req.body).into_owned());
                 ResponseTemplate::new(200)
-                    .set_body_string(streamed_summary_body("done"))
+                    .set_body_string(text_stream_body("", "done"))
                     .insert_header("content-type", "text/event-stream")
             })
             .mount(&server)

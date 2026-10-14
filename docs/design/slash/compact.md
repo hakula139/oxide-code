@@ -12,7 +12,7 @@ Companions: [commands.md](commands.md), [session/persistence.md](../session/pers
 
 `session/handle` exposes `compact(summary, instructions, synthetic_message) -> CompactOutcome`. The actor writes one `Entry::Compact` followed by the synthetic post-compact `Entry::Message` (a `role: user` carrying `SUMMARY_PREFIX + summary`), with the synthetic message's `parent_uuid` deliberately set to `None`. `SessionState`'s `last_message_uuid` is reset to the synthetic message's id and `message_count` resets to `1`. `SessionCmd::Compact` is a batch barrier, so queued writes cannot share the same flush after the boundary. The file tracker is reset to match `/clear`. On resume, `load_session_data` treats `Entry::Compact` as a generation boundary, clears pre-compact sidecars, filters out later stale writes from the old chain, and carries `CompactInfo` so the TUI can render the boundary block while the model transcript keeps the synthetic root.
 
-In `main.rs`, `apply_compact` drives streaming summarization and, on success, hands the summary to `agent/compact_boundary`'s `replace_session_with_summary`, which calls `session.compact(...)`, clears the file tracker, replaces the in-memory `Vec<Message>` with the synthetic continuation, and emits `AgentEvent::SessionCompacted { summary, pre_count, instructions, automatic }` with `automatic: false`. Failure paths (stream error, empty summary, too-few-messages guard, channel close) emit `AgentEvent::Error` and leave the session untouched. Cancellation routes through the existing cancel infrastructure and emits `AgentEvent::Cancelled` like a regular turn.
+`Conversation::compact` in `driver.rs` drives streaming summarization and, on success, hands the summary to `agent/compact_boundary`'s `replace_session_with_summary`, which calls `session.compact(...)`, clears the file tracker, replaces the in-memory `Vec<Message>` with the synthetic continuation, and emits `AgentEvent::SessionCompacted { summary, pre_count, instructions, automatic }` with `automatic: false`. Failure paths (stream error, empty summary, too-few-messages guard, channel close) emit `AgentEvent::Error` and leave the session untouched. Cancellation routes through the existing cancel infrastructure and emits `AgentEvent::Cancelled` like a regular turn.
 
 The TUI's `App::apply_session_compacted` clears the chat, pushes a single `CompactedBlock` with a count header and markdown summary body, keeps queued prompts for the normal idle drain, clears the modal stack, and resumes idle after a manual compact. Resume renders the same boundary block and skips the synthetic root in visible chat.
 
@@ -60,7 +60,7 @@ The TUI's `App::apply_session_compacted` clears the chat, pushes a single `Compa
 
 - **`CompactCmd`**: `name = "compact"`, no aliases. `description = "Compress conversation context into a summary"`. `usage() = Some("[<instructions>]")`. `classify` is always `Mutating`. `echoes_input` uses the trait default of `true`. `execute` parses args via `args.trim()` and returns `SlashOutcome::Forward(UserAction::Compact { instructions })` with `instructions = (!s.is_empty()).then_some(s.to_owned())`.
 
-- **`UserAction::Compact { instructions }`**: `Option<String>`. Empty or whitespace input becomes `None` at the slash boundary so the agent loop's `apply_compact` doesn't repeat the trim.
+- **`UserAction::Compact { instructions }`**: `Option<String>`. Empty or whitespace input becomes `None` at the slash boundary so `Conversation::compact` doesn't repeat the trim.
 
 - **`AgentEvent::SessionCompacted { summary, pre_count, instructions, automatic }`**: Emitted post-success. `summary` is the rendered body, `pre_count` is for the count header, `instructions` becomes the header's `(focus: ...)` suffix, and `automatic` is false for `/compact` and true for auto-compaction. The TUI repaints from it, and `StdioSink` prints a `Compacted N messages into summary` line to stderr (`Auto-compacted` when automatic).
 
@@ -68,7 +68,7 @@ The TUI's `App::apply_session_compacted` clears the chat, pushes a single `Compa
 
 - **`SUMMARIZATION_SYSTEM`**, **`SUMMARIZATION_USER_RUBRIC`**, **`SUMMARY_PREFIX`**: Three `&'static str` constants. System prompt is one paragraph. Rubric is the terse list (intent, decisions, code paths touched, current state, next step). Prefix is the next-turn framing prepended to the synthetic message.
 
-- **`apply_compact` (`main.rs`)**: Drive `compact_session` and surface failure as `AgentEvent::Error`. On success, `replace_session_with_summary` synthesizes the continuation and calls `session.compact(summary, instructions, synthetic_message)`. A session-write failure surfaces through the sink and returns before the file tracker or the in-memory transcript changes. Otherwise it clears the file tracker, swaps the in-memory `Vec<Message>` for the synthetic continuation, and emits `SessionCompacted`.
+- **`Conversation::compact` (`driver.rs`)**: Drive `compact_session` and surface failure as `AgentEvent::Error`. On success, `replace_session_with_summary` synthesizes the continuation and calls `session.compact(summary, instructions, synthetic_message)`. A session-write failure surfaces through the sink and returns before the file tracker or the in-memory transcript changes. Otherwise it clears the file tracker, swaps the in-memory `Vec<Message>` for the synthetic continuation, and emits `SessionCompacted`.
 
 - **`Entry::Compact`**: Variant on the externally-tagged `Entry` enum. Fields: `summary: String`, `pre_message_count: u32`, `instructions: Option<String>`, `timestamp: OffsetDateTime`. Tagged `"type": "compact"` (lowercase, snake_case).
 
@@ -104,10 +104,11 @@ The TUI's `App::apply_session_compacted` clears the chat, pushes a single `Compa
 
 ## Sources
 
+- `crates/oxide-code/src/agent.rs`: `await_unless_aborted` races the summarization against cancel and quit.
 - `crates/oxide-code/src/agent/compact_boundary.rs`: `replace_session_with_summary`, shared by manual and automatic compaction.
 - `crates/oxide-code/src/agent/compaction.rs`: `compact_session` driver plus `SUMMARIZATION_SYSTEM` / `SUMMARIZATION_USER_RUBRIC` / `SUMMARY_PREFIX` constants.
 - `crates/oxide-code/src/agent/event.rs`: `UserAction::Compact`, `AgentEvent::SessionCompacted`.
-- `crates/oxide-code/src/main.rs`: `apply_compact` helper alongside `apply_resume`, plus the `UserAction::Compact` dispatch arm.
+- `crates/oxide-code/src/driver.rs`: `Conversation::compact` beside `Conversation::resume`.
 - `crates/oxide-code/src/session/actor.rs`: `SessionCmd::Compact` handler.
 - `crates/oxide-code/src/session/entry.rs`: `Entry::Compact` variant.
 - `crates/oxide-code/src/session/handle.rs`: `SessionHandle::compact`, `CompactOutcome`.

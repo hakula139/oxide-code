@@ -24,9 +24,8 @@ struct MemoryFile {
 }
 
 /// Walks `~/.claude/`, then root → cwd. Subdirectory files appear later (higher priority).
-pub(super) async fn load(cwd: Option<&Path>, git_root: Option<&Path>) -> String {
-    let project_root = git_root.or(cwd);
-    let slots = candidate_slots(cwd, project_root);
+pub(super) async fn load(cwd: &Path, git_root: Option<&Path>) -> String {
+    let slots = candidate_slots(cwd, git_root.unwrap_or(cwd));
     let files = load_files(slots).await;
 
     if files.is_empty() {
@@ -37,7 +36,7 @@ pub(super) async fn load(cwd: Option<&Path>, git_root: Option<&Path>) -> String 
 }
 
 /// Emits a global slot (when home exists) plus one root-level + one `.claude/` slot per directory.
-fn candidate_slots(cwd: Option<&Path>, project_root: Option<&Path>) -> Vec<Slot> {
+fn candidate_slots(cwd: &Path, project_root: &Path) -> Vec<Slot> {
     let mut slots = Vec::new();
 
     if let Some(home) = dirs::home_dir() {
@@ -52,33 +51,27 @@ fn candidate_slots(cwd: Option<&Path>, project_root: Option<&Path>) -> Vec<Slot>
         }
     }
 
-    if let Some(root) = project_root {
-        for dir in walk_root_to_cwd(root, cwd) {
+    for dir in walk_root_to_cwd(project_root, cwd) {
+        slots.push(Slot {
+            candidates: INSTRUCTION_FILENAMES.iter().map(|f| dir.join(f)).collect(),
+            label: "project instructions",
+        });
+        for subdir in INSTRUCTION_DIRS {
             slots.push(Slot {
-                candidates: INSTRUCTION_FILENAMES.iter().map(|f| dir.join(f)).collect(),
-                label: "project instructions",
+                candidates: INSTRUCTION_FILENAMES
+                    .iter()
+                    .map(|f| dir.join(subdir).join(f))
+                    .collect(),
+                label: "project instructions (.claude/)",
             });
-            for subdir in INSTRUCTION_DIRS {
-                slots.push(Slot {
-                    candidates: INSTRUCTION_FILENAMES
-                        .iter()
-                        .map(|f| dir.join(subdir).join(f))
-                        .collect(),
-                    label: "project instructions (.claude/)",
-                });
-            }
         }
     }
 
     slots
 }
 
-/// Every directory from `root` down to `cwd` inclusive. Falls back to `[root]`.
-fn walk_root_to_cwd(root: &Path, cwd: Option<&Path>) -> Vec<PathBuf> {
-    let Some(cwd) = cwd else {
-        return vec![root.to_path_buf()];
-    };
-
+/// Every directory from `root` down to `cwd` inclusive. `[root]` when `cwd` is outside `root`.
+fn walk_root_to_cwd(root: &Path, cwd: &Path) -> Vec<PathBuf> {
     let Ok(relative) = cwd.strip_prefix(root) else {
         return vec![root.to_path_buf()];
     };
@@ -153,7 +146,7 @@ mod tests {
             .await
             .unwrap();
 
-        let result = load(Some(dir.path()), None).await;
+        let result = load(dir.path(), None).await;
         assert!(
             result.contains("Fallback rules."),
             "should discover CLAUDE.md using cwd as project root"
@@ -169,7 +162,7 @@ mod tests {
             .await
             .unwrap();
 
-        let result = load(Some(dir.path()), Some(dir.path())).await;
+        let result = load(dir.path(), Some(dir.path())).await;
         assert!(
             result.contains("Hidden rules."),
             "should discover .claude/CLAUDE.md"
@@ -181,7 +174,7 @@ mod tests {
     #[test]
     fn candidate_slots_cwd_equals_root() {
         let root = PathBuf::from("/home/user/project");
-        let slots = candidate_slots(Some(&root), Some(&root));
+        let slots = candidate_slots(&root, &root);
 
         let project: Vec<_> = slots
             .iter()
@@ -212,7 +205,7 @@ mod tests {
     fn candidate_slots_walks_root_to_cwd() {
         let root = PathBuf::from("/repo");
         let cwd = PathBuf::from("/repo/crates/core");
-        let slots = candidate_slots(Some(&cwd), Some(&root));
+        let slots = candidate_slots(&cwd, &root);
 
         let project: Vec<_> = slots
             .iter()
@@ -229,11 +222,12 @@ mod tests {
     }
 
     #[test]
-    fn candidate_slots_without_project_root_still_includes_global() {
-        let slots = candidate_slots(None, None);
+    fn candidate_slots_lists_global_before_project() {
+        let root = PathBuf::from("/repo");
+        let slots = candidate_slots(&root, &root);
 
         if let Some(home) = dirs::home_dir() {
-            assert_eq!(slots.len(), 1);
+            assert_eq!(slots.len(), 3);
             assert_eq!(slots[0].label, "user's global instructions");
             assert_eq!(
                 slots[0].candidates,
@@ -243,8 +237,9 @@ mod tests {
                 ]
             );
         } else {
-            assert!(slots.is_empty());
+            assert_eq!(slots.len(), 2);
         }
+        assert_eq!(slots[slots.len() - 2].label, "project instructions");
     }
 
     // ── walk_root_to_cwd ──
@@ -252,7 +247,7 @@ mod tests {
     #[test]
     fn walk_root_to_cwd_same_directory() {
         let root = PathBuf::from("/repo");
-        let dirs = walk_root_to_cwd(&root, Some(&root));
+        let dirs = walk_root_to_cwd(&root, &root);
         assert_eq!(dirs, vec![PathBuf::from("/repo")]);
     }
 
@@ -260,7 +255,7 @@ mod tests {
     fn walk_root_to_cwd_nested() {
         let root = PathBuf::from("/repo");
         let cwd = PathBuf::from("/repo/a/b");
-        let dirs = walk_root_to_cwd(&root, Some(&cwd));
+        let dirs = walk_root_to_cwd(&root, &cwd);
         assert_eq!(
             dirs,
             vec![
@@ -275,14 +270,7 @@ mod tests {
     fn walk_root_to_cwd_outside_root_yields_root_only() {
         let root = PathBuf::from("/repo");
         let cwd = PathBuf::from("/other/dir");
-        let dirs = walk_root_to_cwd(&root, Some(&cwd));
-        assert_eq!(dirs, vec![PathBuf::from("/repo")]);
-    }
-
-    #[test]
-    fn walk_root_to_cwd_none_yields_root_only() {
-        let root = PathBuf::from("/repo");
-        let dirs = walk_root_to_cwd(&root, None);
+        let dirs = walk_root_to_cwd(&root, &cwd);
         assert_eq!(dirs, vec![PathBuf::from("/repo")]);
     }
 

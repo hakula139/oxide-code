@@ -48,17 +48,12 @@ impl PromptParts {
 
 /// Detects the environment and loads instruction files. Callers build once per session and reuse
 /// the result, since any change to it rewrites the start of every later request.
-pub(crate) async fn build_prompt(model: &str) -> PromptParts {
-    let cwd = std::env::current_dir().ok();
-    let git_root = match &cwd {
-        Some(cwd) => find_git_root(cwd).await,
-        None => None,
-    };
-
-    assemble(model, cwd.as_deref(), git_root.as_deref()).await
+pub(crate) async fn build_prompt(model: &str, cwd: &Path) -> PromptParts {
+    let git_root = find_git_root(cwd).await;
+    assemble(model, cwd, git_root.as_deref()).await
 }
 
-async fn assemble(model: &str, cwd: Option<&Path>, git_root: Option<&Path>) -> PromptParts {
+async fn assemble(model: &str, cwd: &Path, git_root: Option<&Path>) -> PromptParts {
     let environment = Environment::detect(model, cwd, git_root);
     let claude_md = instructions::load(cwd, git_root).await;
 
@@ -146,7 +141,7 @@ mod tests {
     #[tokio::test]
     async fn set_model_rerenders_system_and_keeps_user_context() {
         let tmp = tempfile::tempdir().expect("failed to create tempdir");
-        let mut parts = assemble("claude-opus-4-6", Some(tmp.path()), None).await;
+        let mut parts = assemble("claude-opus-4-6", tmp.path(), None).await;
         let user_context = parts.user_context.clone();
 
         parts.set_model("claude-sonnet-4-6");
@@ -161,7 +156,7 @@ mod tests {
 
     #[tokio::test]
     async fn build_prompt_system_starts_with_intro() {
-        let parts = build_prompt("test-model").await;
+        let parts = build_prompt("test-model", &cwd()).await;
         assert!(
             parts
                 .system_joined()
@@ -172,7 +167,7 @@ mod tests {
 
     #[tokio::test]
     async fn build_prompt_system_contains_all_static_sections() {
-        let parts = build_prompt("test-model").await;
+        let parts = build_prompt("test-model", &cwd()).await;
         let joined = parts.system_joined();
         assert!(joined.contains("# System"));
         assert!(joined.contains("# Doing tasks"));
@@ -185,13 +180,13 @@ mod tests {
 
     #[tokio::test]
     async fn build_prompt_system_includes_model_name() {
-        let parts = build_prompt("test-model").await;
+        let parts = build_prompt("test-model", &cwd()).await;
         assert!(parts.system_joined().contains("test-model"));
     }
 
     #[tokio::test]
     async fn build_prompt_system_does_not_contain_user_instructions() {
-        let parts = build_prompt("test-model").await;
+        let parts = build_prompt("test-model", &cwd()).await;
         assert!(
             !parts.system_joined().contains("# User instructions"),
             "CLAUDE.md should be in user_context, not system"
@@ -200,7 +195,7 @@ mod tests {
 
     #[tokio::test]
     async fn build_prompt_sections_joined_with_double_newline() {
-        let parts = build_prompt("test-model").await;
+        let parts = build_prompt("test-model", &cwd()).await;
         let joined = parts.system_joined();
         let system_start = joined.find("# System").expect("system section missing");
         let before = &joined[..system_start];
@@ -218,7 +213,7 @@ mod tests {
         init_git_repo(tmp.path());
         std::fs::write(tmp.path().join("CLAUDE.md"), "Test project rules.").unwrap();
 
-        let parts = assemble("test-model", Some(tmp.path()), Some(tmp.path())).await;
+        let parts = assemble("test-model", tmp.path(), Some(tmp.path())).await;
 
         let expected_system_sections = [
             "You are an interactive agent",
@@ -269,7 +264,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("failed to create tempdir");
         init_git_repo(tmp.path());
 
-        let parts = assemble("test-model", Some(tmp.path()), Some(tmp.path())).await;
+        let parts = assemble("test-model", tmp.path(), Some(tmp.path())).await;
         assert!(
             !parts.system_joined().contains("# User instructions"),
             "system should never contain user instructions"
@@ -287,7 +282,7 @@ mod tests {
         std::fs::create_dir_all(&sub).unwrap();
         std::fs::write(sub.join("CLAUDE.md"), "Subdir rules.").unwrap();
 
-        let parts = assemble("test-model", Some(&sub), Some(root)).await;
+        let parts = assemble("test-model", &sub, Some(root)).await;
         let ctx = &parts.user_context;
 
         assert!(ctx.contains("Root rules."));
@@ -371,6 +366,10 @@ mod tests {
     }
 
     // ── helpers ──
+
+    fn cwd() -> PathBuf {
+        std::env::current_dir().expect("cwd should be available")
+    }
 
     fn init_git_repo(path: &Path) {
         let status = std::process::Command::new("git")
