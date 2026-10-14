@@ -8,114 +8,156 @@ Companion docs: [research/tools/permissions.md](../../research/tools/permissions
 
 A mode sets the standing posture, shaped like the `Effort` enum (`ALL` / `as_str` / `Display` / `FromStr`) so it threads through config and a future `/permission` control the same way `effort` does.
 
-- **`auto`** (default): the tiered pipeline below. The gate is on out of the box, flipping today's unchecked behavior.
-- **`plan`**: read-only analysis. Read-only tools allow; every mutating tool denies, including `bash`, which cannot be statically proven side-effect-free.
-- **`yolo`**: allow everything, skipping the pipeline. The opt-in "dangerously skip" posture for trusted or externally sandboxed environments. `yolo` bypasses deny rules too, so it is the one mode with no floor.
+- **`auto`** (default): uses the tiered pipeline below.
+- **`plan`**: performs read-only analysis. Read-class tools are allowed, while edit-class tools and `bash` calls are denied because shell commands cannot be statically proven side-effect-free.
+- **`yolo`**: allows everything not blocked by a user or project deny rule. It skips all approval prompts and the shipped dangerous-pattern defaults, for use in trusted or externally sandboxed environments.
 
 ## Decision Pipeline
 
-In `auto` mode the gate evaluates a call in fixed order and stops at the first match. This is the shipped Phase 1 pipeline; the classifier (step 6's fallback) and session allow-always are later phases noted inline.
+The gate evaluates each call in a fixed order and stops at the first match. This is the shipped Phase 1 pipeline. The classifier, which comes before step 9's fallback, and session allow-always are later phases noted inline.
 
-1. **Deny match** (user ∪ project deny rules, including the shipped dangerous-pattern defaults) → deny.
-2. **Read-only tool** (`read`, `glob`, `grep`) → allow.
-3. **`plan` mode** → deny every mutating tool.
-4. **Edit-class call inside the working directory** (`edit` / `write`, target path canonicalized first) → allow.
-5. **Allow match** (user allow rules) → allow. Session allow-always (Phase 3) will also allow here.
-6. **Otherwise** → ask (interactive) or deny (headless). The classifier (Phase 2) will slot in here, allowing a `safe` verdict before the fallback.
+1. **User or project deny match** → deny in every mode.
+2. **`yolo` mode** → allow.
+3. **Shipped dangerous-pattern default match** → deny.
+4. **Read-class call** (`read`, `glob`, `grep`) → allow.
+5. **`plan` mode** → deny.
+6. **Edit-class call on a protected path** → ask, regardless of what the allow rules say.
+7. **Edit-class call inside the workspace** → allow.
+8. **Allow match** → allow, with Phase 3 adding session allow-always here.
+9. **Otherwise** → ask in interactive mode or deny in headless mode. The classifier (Phase 2) will be added here, allowing a `safe` verdict before the fallback.
 
-Deny precedes every allow, so an explicit deny is never downgraded by an allow rule or by the classifier. The shipped dangerous-pattern defaults seed the deny set, so a classifier outage cannot let a command matching them through. They hold in `auto`, and `yolo` bypasses every deny rule, including these. A per-rule opt-out within `auto` is deferred.
+Every deny comes before every allow, so neither an allow rule nor a classifier verdict can override an explicit deny. The shipped defaults populate a separate deny set, so a classifier outage cannot allow a matching command through in `auto` or `plan`.
+
+## Path Targets
+
+A path tool's target is resolved before any rules run. `GateTarget::for_path` joins the input to cwd and walks it one component at a time the way the kernel does. It follows every symlink it meets, a dangling one included, and steps `..` back from wherever the walk stands, so a `missing/..` detour cannot hide a link reached after it. Past the first missing component nothing exists yet, so the rest of the path applies as `create_dir_all` builds it. More than 40 symlink hops, or a component the walk cannot read, leave the target outside the workspace under its joined spelling, so the tool fails on it the same way the kernel would.
+
+`check_permission` then pins the tool's `file_path` field to the resolved path before building the preview or running the tool, so the approval title shows the real destination and the tool opens what the gate checked. `read` and `edit` check the size and file type by path and again on the opened file, so a file swapped in between cannot skip the check. On Unix, `read`, `edit`, and `write` also open with `O_NOFOLLOW`, so a symlink swapped into the final component afterwards fails the open, `read` and `edit` open with `O_NONBLOCK` so a swapped-in fifo cannot hang them, and `write` creates a new file with `create_new`, which also refuses a dangling link. Windows has no `O_NOFOLLOW`, so a final-component swap there is not covered. On every platform, a symlink swapped into an intermediate directory between the gate and the open is not covered.
+
+Each resolved target belongs to one zone:
+
+- **Protected**: edit-class calls ask at step 6. A target is protected when the resolved path or the path as the call names it contains a protected name, or when it sits where a protected name directly inside cwd resolves, so `.vscode -> tools/vscode` protects `tools/vscode` as well. Names compare after dropping default-ignorable code points, Unicode compatibility case folding, and trimming trailing dots and spaces. A case-insensitive file system such as APFS opens `.VSCODE` and `.vſcode` as `.vscode`, HFS+ ignores the zero-width `\u{200c}` in `.g\u{200c}it`, and Windows opens `.git.` as `.git`. Windows 8.3 short names such as `GIT~1` are not recognized. Each protected path runs or configures code outside the task at hand:
+  - `.git`, `.githooks`, `.husky`, `.vscode`, `.idea`, `.devcontainer`, and `.codex` as any path segment.
+  - The file names `.gitconfig`, `.gitmodules`, `.envrc`, `ox.toml`, `rust-toolchain`, `rust-toolchain.toml`, and the bash / zsh / POSIX shell startup files anywhere.
+  - `.cargo/config`, `.cargo/config.toml`, `.claude/settings.json`, `.claude/settings.local.json`, and everything under `.claude/hooks`. The rest of `.claude`, including `worktrees` and `plans`, stays editable.
+  - Everything under oxide-code's own config, data, and state directories.
+- **Workspace**: the target sits inside cwd, so edit-class calls allow at step 7. A cwd of `/`, `$HOME`, or any ancestor of `$HOME` is never a workspace, so launching there leaves every edit to the allow rules. On Unix, an existing regular file with more than one hard link is never a workspace target either, since another link can sit outside cwd. Rust's standard library exposes no hard-link count on Windows, so a hard-linked file there still counts as a workspace target.
+- **Outside**: everything else, which needs an allow rule or an approval.
 
 ## Rule Grammar
 
-Rules reuse Claude Code's `tool(specifier)` string form for transferable muscle memory, with tool-name matching case-insensitive so `Bash(...)` and `bash(...)` are equivalent. `bash` / `bash()` / `bash(*)` collapse to a tool-wide rule. Bash specifiers come in exact, prefix (`cargo test:*`), and wildcard (`git *`) shapes; `edit` / `write` specifiers are gitignore-style path globs resolved against the working directory.
+Rules use Claude Code's `name(specifier)` string form, where the name identifies a permission class: `read` (the `read`, `grep`, and `glob` tools), `edit` (`edit` and `write`), or `bash`. Class names are case-insensitive. An unknown name causes a load error, so `write(...)` fails loudly. `bash`, `bash()`, and `bash(*)` all become a class-wide rule.
 
-The `bash` command string is unparsed (`bash -c "..."`), so prefix and wildcard matching is best-effort UX, not a boundary: `ls; rm -rf` and `$()` indirection defeat naive matching. Allow rules therefore match conservatively, and a compound command (chained, substituted, or redirected with `>` / `<`) never matches a prefix allow. Deny rules match the whole command or any chained segment of it. Path keys are canonicalized before any inside-cwd test, since `edit` / `write` resolve neither `..` nor symlinks today, so a raw-string check is bypassable.
+Bash specifiers can be exact, prefix (`cargo test:*`), or wildcard (`git *`). Read and edit specifiers are path globs:
+
+- `*` and `?` match within one path segment, while `**` spans multiple segments. `[...]` and `{a,b}` work as in `globset`.
+- A glob without a leading `/` or `~/` matches a cwd-relative path and applies only inside the working directory. `*.json` matches `package.json` but not `src/a.json`, while `**/.env` matches at any depth.
+- A glob starting with `/` matches the resolved absolute path. A glob starting with `~/` expands to the home directory first.
+- Deny rules also match the path as the call spells it, lexically normalized, so `.env -> ../shared/.env` cannot route a read around `read(**/.env)`. Allow rules match only the resolved path.
+- When the policy loads, a deny rule whose literal prefix, the components before the first glob character, runs through a symlink also matches where that prefix resolves, with relative rules resolved against the launch directory. With `secrets -> ../vault`, `read(secrets/**)` also covers `../vault/key`.
+- Allow rules match names exactly as written. Deny rules also compare names the way protected paths do, so `read(**/.env)` covers `.ENV`, `.env.`, and a path whose cwd prefix differs only in case.
+- A leading `./` is dropped.
+
+The `bash` command string is unparsed (`bash -c "..."`), so prefix and wildcard matching provides best-effort UX. Since `ls; rm -rf` and `$()` indirection defeat naive matching, allow rules match conservatively: a compound command (chained, substituted, or redirected with `>` / `<`) never matches an allow rule. Deny rules match the whole command or any chained segment.
 
 ## Classifier
 
-The classifier mirrors the background title generator: a cheap Haiku model, a JSON-schema `OutputFormat` forcing a `{ "safe": bool, "reason": string }` envelope, prompt clamping, and warn-log-and-fall-back on any HTTP, parse, or timeout failure. It is consulted only at step 6, never for the static cases.
+The Phase 2 classifier is planned to follow the background title generator's design: a cheap Haiku model, a JSON-schema `OutputFormat` that enforces a `{ "safe": bool, "reason": string }` envelope, prompt clamping, and a warning log followed by fallback on any HTTP, parse, or timeout failure. It would be consulted only at step 9, never for static cases.
 
-A verdict caches per session, keyed by tool name plus the verbatim `bash` command string or the canonical `edit` / `write` path, and scoped to the session's resolved policy so a later mode or rule change starts fresh. The cache is process-local and never persisted. On failure the call has already cleared the deny list at step 1, so it falls through to ask interactively or deny in headless mode.
+Verdicts would be cached per session, keyed by tool name and either the verbatim `bash` command string or the resolved `edit` / `write` path. The cache would be scoped to the session's resolved policy, so changing the mode or rules starts a fresh cache, and it would stay process-local and never persisted. A call reaching the classifier has already cleared both deny sets, so on a classifier failure it falls through to ask in interactive mode or deny in headless mode.
 
 ## Approval Round-Trip
 
-When step 6 resolves to ask, the decision rides the existing `user_rx` channel rather than a second channel the turn loop does not poll. Tool dispatch is sequential, so at most one approval is ever outstanding and no id fan-out is needed.
+When the gate resolves to ask, the decision travels through the existing `user_rx` channel polled by the turn loop. Tool dispatch is sequential, so at most one approval can be outstanding and no id fan-out is needed.
 
-`run_tool_round` threads the tool-use `id` and `sink` into `dispatch_tool_call`, which emits a new `AgentEvent::ApprovalRequested { id, preview }` carrying the id and a small `Clone` preview: an edit diff via `edit::synthesize_chunk`, an all-add diff for `write`, the command string for `bash`. The gate intercepts before `tools.run`, the same place the parse-error short-circuit already returns a synthetic `ToolOutput`. It awaits a decision in a sibling of `await_unless_aborted`: the select-loop still maps `Cancel` → `Cancelled` and `Quit` → `Quit`, still buffers a queued `SubmitPrompt` into `pending`, and matches a new `UserAction::ApprovalDecision { id, decision }`. A decision whose id does not match the outstanding call is ignored, and the wait future is cancel-safe by drop.
+`run_tool_round` passes the tool-use `id` and `sink` to `dispatch_tool_call`. The latter emits `AgentEvent::ApprovalRequested { id, preview }`, carrying the id and a small `Clone` preview: an edit diff from `edit::synthesize_chunk`, a diff against the file's current content for `write`, or the command string under the tool name for `bash`. The gate intercepts the call before `tools.run`, the same way the parse-error short-circuit returns a synthetic `ToolOutput`. It waits for a decision in a sibling of `await_unless_aborted`, whose select loop maps `Cancel` to `Cancelled` and `Quit` to `Quit`, buffers a queued `SubmitPrompt` in `pending`, and matches `UserAction::ApprovalDecision { id, decision }`. Decisions with an id that does not match the outstanding call are ignored, and dropping the wait future is cancel-safe.
 
-On the TUI side an `ApprovalModal` joins the `ModalStack`, built from the `ConfirmDeleteSessionModal` template. The blocked agent must receive a decision on every dismissal path, but `ModalStack::handle_key` intercepts Esc and Ctrl+C before delegation and `clear` drops modals outright, both yielding `ModalAction::None`. The stack therefore gains a cancel hook (a `Modal::on_cancel` returning an optional `ModalAction`) so universal-cancel and session-swap `clear` resolve a pending approval to `ApprovalDecision::Deny` instead of stranding the agent. A denied call returns a synthetic error `ToolOutput`, so the model sees the refusal as a tool result and can choose another approach.
+On the TUI side, an `ApprovalModal` joins the `ModalStack` and follows the `ConfirmDeleteSessionModal` template. The blocked agent must receive a decision on every dismissal path, but `ModalStack::handle_key` intercepts Esc and Ctrl+C before delegation, while `clear` drops modals outright. Both paths yield `ModalAction::None`. The stack therefore has a cancel hook (`Modal::on_cancel` returning an optional `ModalAction`) that resolves a pending approval to `ApprovalDecision::Deny` on universal cancel or session-swap `clear`. A denied call returns a synthetic error `ToolOutput`, so the model receives the refusal as a tool result and can choose another approach.
+
+`Y` approves, and `N` or Esc denies. Enter does nothing. The modal answers key presses only, so a key release or repeat cannot approve. Apart from the stack-level Esc / Ctrl+C cancel, it ignores every key until 300 ms pass without one, and each key inside that window restarts it, so neither a keystroke typed for the prompt underneath nor a pasted burst can approve the call.
+
+The preview must show everything it approves. Every row wraps. If the body exceeds 16 rows, it scrolls with Up / Down, PageUp / PageDown, and Home / End, with a `rows a-b of n` position line. Control and zero-width characters render as `\u{..}` escapes. In a command, each whitespace character beyond the indentation renders as `·` unless it is a single space, so padding that pushes a chained command off-screen appears as a dotted run.
 
 ## Configuration
 
 ```toml
 [permission]
-mode = "auto"                              # auto | plan | yolo
+mode = "auto" # auto | plan | yolo
 allow = ["bash(cargo test:*)", "edit(src/**)"]
-deny  = ["bash(rm -rf:*)", "write(.git/**)"]
+deny = ["bash(rm -rf:*)", "read(**/.env)"]
 ```
 
-`OX_PERMISSION_MODE` overrides the mode with the same empty-env-falls-through and parse-error-propagates behavior `effort` uses, so a typo fails loudly rather than defaulting permissive. The block adds a `PermissionFileConfig` to `FileConfig` with `deny_unknown_fields`, merged through `merge_section`, and resolved in `Config::load` after the compaction block.
+`OX_PERMISSION_MODE` overrides the mode, following `effort`'s behavior: an empty environment value falls through, while a parse error propagates so a typo fails loudly. The `[permission]` table parses into a `PermissionFileConfig` on `FileConfig` with `deny_unknown_fields`, merges through `merge_section`, and resolves in `Config::load` after the compaction block, which is also where each deny rule's literal prefix resolves against the launch directory.
 
-The shipped deny defaults cover catastrophic commands (`rm -rf` of broad roots, disk writes, fork bombs, `curl | sh`) and metadata paths (`write(.git/**)`, `write(.ox/**)`), so step 4's in-cwd allow cannot create a new file under those paths without first clearing step 1.
+The shipped defaults cover catastrophic commands (`rm -rf`, disk writes, `mkfs`, fork bombs, `curl | sh`) and `edit(.git/**)`, preventing step 7's workspace allow from touching the project's own git metadata.
 
-A checked-in `ox.toml` is untrusted, exactly like the credentials `reject_project_secrets` already blocks, so a project file may set only `deny`. Setting `mode` or `allow` there is rejected with a message pointing to user config. The merge appends project `deny` onto the user deny set, so a repo can restrict itself but never widen what the user allowed.
+A checked-in `ox.toml` is untrusted, like the project credentials `reject_project_secrets` blocks, so a project file may set only `deny`. Setting `mode` or `allow` there is rejected with a message pointing to user config. The merge appends project `deny` onto the user deny set, so a repo can restrict itself but never widen what the user allowed.
 
 ## Headless Behavior
 
-In `-p` / `--no-tui` runs there is no human to prompt, so a would-ask call denies directly: the gate carries an `interactive` flag the modal-less surfaces set to false, and `check_permission` turns an `Ask` verdict into a synthetic denial. The deny list is the whole boundary here, with no human fallback, so a headless run assumes an already-trusted invocation. The model sees the denial and can retry. Phase 2 will insert the classifier ahead of this fallback, so a `safe` verdict allows before the deny.
+In `-p` / `--no-tui` runs there is no human to prompt, so a would-ask call denies directly: the gate carries an `interactive` flag the modal-less surfaces set to false, and `check_permission` turns an `Ask` verdict into a synthetic denial. With no human fallback, the deny rules, zones, and allow rules settle every call, so a headless run assumes an already-trusted invocation. The model sees the denial and can retry. Phase 2 will insert the classifier ahead of this fallback, so a `safe` verdict allows before the deny.
 
-## Tool Risk Classes
+## Permission Classes
 
-Risk is a new method on the `Tool` trait, so each tool declares its own class. The three classes are read-only (`read`, `glob`, `grep`), edit-class (`edit`, `write`), and execute (`bash`). A read-only tool auto-allows at step 2, but it still extracts a gate target (the file for `read`, the search root for `grep` / `glob`) so a path-scoped deny at step 1 fires first.
+`Tool::permission_class` has no default, so every tool declares its class and a new tool cannot inherit a permissive class. Read-class tools are allowed at step 4, but they still extract a gate target (the file for `read`, the search root for `grep` / `glob`), allowing a path-scoped deny at step 1 or 3 to fire first. Rules target the class, so `read(**/.env)` also stops a `grep` rooted at a `.env` file.
 
-`edit` and `write` share a class but differ in blast radius. `edit` requires the file to exist and to have been read, so it cannot create files. `write` can create brand-new files and parent directories without a prior Read, while overwriting an existing file still goes through the tracker gate. The step-4 cwd check operates on each call's target path, canonicalized (or resolved through its nearest existing parent when the file is new), so the two share one risk class.
+`edit` and `write` share a class but have different blast radii. `edit` requires the file to exist and to have been read, so it cannot create files. `write` can create new files and parent directories without a prior Read, while overwriting an existing file still goes through the tracker gate. Both declare `file_path` as their path field, so the resolution, zoning, and pinning described above treat them identically.
 
 ## Phasing
 
 Each phase ships independently.
 
-1. **Static tiers, modal, and modes.** The deny / read-only / cwd / allow pipeline, the `ApprovalModal` plus the `ModalStack` cancel hook, the mode enum, and config wiring. Fully deterministic and offline, with step 6 resolving straight to ask.
-2. **Classifier.** Insert the Haiku verdict and the per-session cache at step 6.
-3. **Session allow-always.** The in-memory "don't ask again this session" map at step 5, mirroring `FileTracker`.
+1. **Static tiers, modal, and modes.** The deny / read-class / protected / workspace / allow pipeline, the `ApprovalModal` and `ModalStack` cancel hook, the mode enum, and config wiring. This phase is fully deterministic and offline, with step 9 going straight to ask.
+2. **Classifier.** Add the Haiku verdict and per-session cache at step 9.
+3. **Session allow-always.** Add the in-memory "don't ask again this session" map at step 8, mirroring `FileTracker`.
 
 ## Design Decisions
 
 1. **Classifier runs last.** Static checks are instant and free, so the model round-trip runs only when neither an allow nor a deny rule settles the call. A pure rule engine would prompt on everything unmatched, breaking the non-stop goal, and a pure classifier would add a round-trip to every `bash` call. The tiered order spends neither.
 
-2. **Default `auto`, flipping today's behavior.** Running tools unchecked is the larger hazard. `yolo` preserves the old behavior for anyone who wants it, as an explicit opt-in.
+2. **Default `auto`.** Running tools unchecked is the greater hazard. `yolo` keeps unprompted execution available as an explicit opt-in.
 
-3. **No immutable danger floor.** The dangerous-pattern defaults are ordinary deny rules rather than a separate immune tier. Evaluating deny before the classifier keeps them effective in `auto`, and `yolo` bypasses every deny rule rather than carving out an exception. A granular per-rule opt-out is deferred.
+3. **`yolo` keeps the user's denies.** A deny written by the user or project expresses intent that no mode should override, so it runs before the `yolo` short-circuit. The shipped defaults are generic guesses that can block legitimate work, so the opt-in skips them. A granular per-rule opt-out is deferred.
 
-4. **Project files tighten only.** Honoring a project `allow` or `mode` would let a teammate's repo widen what the local user permitted, the same privilege-escalation vector as project-set credentials. Append-only `deny` lets a repo restrict itself without that risk.
+4. **Protected paths ask.** Editing `.git/hooks`, `.vscode/tasks.json`, or `.envrc` inside the workspace can escalate to code execution outside the task. These paths therefore require approval even under a broad `edit(**)` allow. Asking keeps legitimate edits possible, while a deny would force the user to edit config.
 
-5. **The classifier is a UX layer.** Because `bash` is unparsed, the classifier cannot be trusted against an adversarial model. The deny list is the dependable boundary, and an unreachable classifier degrades to asking rather than to running.
+5. **Resolve once, act on the result.** Resolving in the gate and pinning the input makes the tool open the path the gate checked, and on Unix `O_NOFOLLOW` turns a symlink swapped into its final component into a failed open. A swap in an intermediate directory needs `openat`-style traversal, which stays deferred, or an external OS sandbox.
 
-6. **Decision on the existing channel.** Routing the approval through `user_rx` and the `ModalStack` reuses the cancel / quit / queue semantics the turn loop already races, so no second channel or control-flow path is introduced.
+6. **Project files tighten only.** Honoring a project's `allow` or `mode` would let a teammate's repo broaden what the local user permitted, creating the same privilege-escalation vector as project-set credentials. Append-only `deny` lets a repo restrict itself without that risk.
 
-7. **Session memory in process only.** A persisted "allow bash X" has no disk ground-truth to re-validate on resume, unlike a `FileSnapshot` rehash, so re-admitting it would be a trust regression. Per the roadmap, session commands stay reversible and cross-session writes wait for an explicit confirmed action.
+7. **The classifier is a UX layer.** Because `bash` is unparsed, the classifier cannot be trusted against an adversarial model, and an unreachable classifier degrades to asking. The deny list is what the gate enforces for path tools: it matches both spellings of the path as the file system stands when the gate checks, each rule's literal prefix as it resolved when the policy loaded, and folded names. It does not cover a symlink swapped into an intermediate directory after the check, a Windows 8.3 short name, or whatever a `bash` command touches, so an untrusted model still needs an external OS sandbox.
 
-8. **Classifier reuses the title-gen path.** The cheap-Haiku, JSON-schema, warn-and-fall-back shape already exists and already handles auth, betas, and gateway constraints. A bespoke classifier client would duplicate it.
+8. **Decision on the existing channel.** Routing approvals through `user_rx` and the `ModalStack` reuses the cancel / quit / queue semantics that the turn loop already races, so no second channel or control-flow path is needed.
+
+9. **Session memory in process only.** A persisted "allow bash X" has no disk ground truth to revalidate on resume, unlike a `FileSnapshot` rehash, so restoring it would regress trust. Per the roadmap, session commands remain reversible, and cross-session writes wait for an explicit confirmed action.
+
+10. **The classifier reuses the title-gen path.** The existing cheap-Haiku, JSON-schema, warn-and-fall-back design already handles auth, betas, and gateway constraints. A bespoke classifier client would duplicate it.
 
 ## Deferred
 
-- Per-rule opt-out of a shipped dangerous-pattern deny default within `auto`; today only `yolo` bypasses them.
+- Per-rule opt-out of a shipped dangerous-pattern default within `auto`, which only `yolo` skips.
 - Persisted project allowlists via an explicit confirmed writer (`util/fs.rs::atomic_write_private`).
 - Editable bash-prefix widening in the approval modal ("don't ask again for `cargo *`").
-- Read confidentiality scoping beyond path-glob denies: `read` / `grep` / `glob` honor a path-scoped deny (e.g. `read(**/.env)`), but a read-only call with no matching deny still allows, and `grep` / `glob` gate on the search root rather than each matched file.
+- Read confidentiality beyond path-glob denies. A read-class call with no matching deny allows, and because `grep` / `glob` gate on the search root, a deny on a file inside it does not filter the walk.
+- Symlink swaps in an intermediate directory between the gate and the open, which need `openat`-style traversal.
+- Windows coverage of final-component symlink swaps, hard links, and 8.3 short names.
 - Rule env vars beyond `OX_PERMISSION_MODE`.
 - Resume survival of session allow-always through the session actor.
 
 ## Sources
 
-- `crates/oxide-code/src/agent.rs`: `dispatch_tool_call`, `await_unless_aborted`, `run_tool_round`.
-- `crates/oxide-code/src/agent/event.rs`: `AgentEvent`, `UserAction`.
+- `crates/oxide-code/src/agent.rs`: `check_permission` (resolve, pin, decide), `dispatch_tool_call`, `await_unless_aborted`, `run_tool_round`.
+- `crates/oxide-code/src/agent/event.rs`: `AgentEvent`, `UserAction`, `ApprovalPreview`.
 - `crates/oxide-code/src/client/anthropic/wire.rs`: `OutputFormat` JSON-schema envelope.
-- `crates/oxide-code/src/config.rs`: `Config::load`, `Effort` enum template.
-- `crates/oxide-code/src/config/file.rs`: `FileConfig::merge`, `merge_section`, `reject_project_secrets`.
+- `crates/oxide-code/src/config.rs`: `Config::load`, `OX_PERMISSION_MODE`, `Effort` enum template.
+- `crates/oxide-code/src/config/file.rs`: `FileConfig::merge`, `merge_section`, `reject_project_secrets`, `reject_project_permissions`.
+- `crates/oxide-code/src/permission.rs`: `Mode`, `PermissionClass`, `GateTarget::for_path`, protected paths, `Policy::decide`.
+- `crates/oxide-code/src/permission/rule.rs`: `class(specifier)` parsing and path-glob matching.
 - `crates/oxide-code/src/session/title_generator.rs`: classifier template (Haiku, structured output).
 - `crates/oxide-code/src/slash/confirm.rs`: `ConfirmDeleteSessionModal`, the approval-modal template.
-- `crates/oxide-code/src/tool.rs`: `Tool` trait, the new risk-class method.
-- `crates/oxide-code/src/tool/bash.rs`: unbounded execute surface.
+- `crates/oxide-code/src/tool.rs`: `Tool` trait (`permission_class`, `path_field`, `gate_target`, `pin_target`, `approval_preview`), `read_validated`, `write_no_follow`.
+- `crates/oxide-code/src/tool/bash.rs`: unbounded execution surface.
 - `crates/oxide-code/src/tool/edit.rs`: read-before-edit gate, `synthesize_chunk` preview.
-- `crates/oxide-code/src/tool/write.rs`: new-file creation and the cwd-scope seam.
-- `crates/oxide-code/src/tui/modal.rs`: `ModalStack`, the cancel-hook seam for approval.
+- `crates/oxide-code/src/tool/write.rs`: new-file creation, symlink refusal, current-content preview.
+- `crates/oxide-code/src/tui/modal.rs`: `ModalStack`, the cancel hook.
+- `crates/oxide-code/src/tui/modal/approval.rs`: `ApprovalModal` wrapping, scrolling, and character reveal.

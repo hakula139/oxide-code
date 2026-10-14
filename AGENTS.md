@@ -66,9 +66,9 @@ ox                                          # Start an interactive session
 ├── model.rs                                # Ground-truth table: display name, cutoff, capabilities, and unknown raw-id fallback
 ├── model/
 │   └── pricing.rs                          # Per-million-token cost rates + USD estimator (excludes account / marketplace adjustments)
-├── permission.rs                           # Permission module root: Mode, Policy::decide tiered gate, Target / GateTarget, dangerous-pattern deny defaults
+├── permission.rs                           # Permission module root: Mode, PermissionClass, Policy::decide tiered gate, GateTarget path resolution (symlinks, protected paths, workspace zone), dangerous-pattern deny defaults
 ├── permission/
-│   └── rule.rs                             # Rule grammar: `tool(specifier)` parse + match (bash exact / prefix / wildcard, gitignore-style path globs)
+│   └── rule.rs                             # Rule grammar: `class(specifier)` parse + match (bash exact / prefix / wildcard, cwd-relative or absolute path globs)
 ├── prompt.rs                               # System prompt builder (section assembly), session prompt context replay, change reminders
 ├── prompt/
 │   ├── environment.rs                      # Runtime environment detection (platform, git, date, knowledge cutoff)
@@ -168,7 +168,7 @@ ox                                          # Start an interactive session
 │   │   └── render.rs                       # pulldown-cmark event walker, inline / block / list / table rendering
 │   ├── modal.rs                            # Modal trait, ModalKey, ModalAction, ModalStack: focus-grabbing UI overlays
 │   ├── modal/
-│   │   ├── approval.rs                     # ApprovalModal: approve-or-deny overlay for a gated tool call, on_cancel resolves dismissals to Deny
+│   │   ├── approval.rs                     # ApprovalModal: approve-or-deny overlay for a gated tool call (wrapped, scrollable, invisible characters revealed, type-ahead guarded), on_cancel resolves dismissals to Deny
 │   │   ├── kv_overview.rs                  # Generic KvOverview / KvSection: read-only sectioned kv-table modal used by /status, /config, /help
 │   │   ├── list_picker.rs                  # Generic ListPicker<T: PickerItem>: cursor + render primitive used by concrete pickers
 │   │   └── searchable_list.rs              # Generic SearchableList<T: SearchableItem>: substring filter + scrollable viewport for searchable pickers

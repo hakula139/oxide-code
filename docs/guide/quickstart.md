@@ -33,7 +33,7 @@ This opens an interactive terminal session. Type a task and press Enter:
 
 The assistant reads files, runs commands, and edits code using its built-in tools until it produces a final answer.
 
-In the default `auto` permission mode, reads and searches run without asking, as do file edits inside the working directory. A `bash` command or a file change outside the working directory opens an approval prompt unless a rule settles it first: press **Y** or **Enter** to approve, and **N** or **Esc** to deny.
+In the default `auto` permission mode, reads and searches run without asking, as do file edits inside the working directory. A `bash` command, a file change outside the working directory, or an edit to protected config such as `.git` or `.vscode` opens an approval prompt unless a rule settles it first: press **Y** to approve, and **N** or **Esc** to deny. Enter does nothing, so a keystroke meant for the input box cannot approve a call.
 
 ## What it can do
 

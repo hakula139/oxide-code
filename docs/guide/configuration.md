@@ -176,6 +176,34 @@ accent = { bold = false }
 
 See [Theming](theming.md) for the full slot reference, color value formats (hex, ANSI names, indexed, `reset`), and override semantics.
 
+### `[permission]`: Tool approval
+
+Every tool call passes a permission check before running. In the default `auto` mode, reads and edits inside the working directory run without asking, and everything else opens an approval prompt. Press `y` to approve or `n` / Esc to deny. Enter does nothing, and the prompt ignores keys until you pause typing for 300 ms, so keystrokes or a paste meant for the input box cannot approve a call. Headless runs (`-p`, `--no-tui`) deny anything that would prompt.
+
+| Key     | Type   | Default  | Description                                                    |
+| ------- | ------ | -------- | -------------------------------------------------------------- |
+| `mode`  | string | `"auto"` | `"auto"`, `"plan"` (read-only), or `"yolo"` (user config only) |
+| `allow` | array  | `[]`     | Rules that run without asking (user config only)               |
+| `deny`  | array  | `[]`     | Rules that never run, in every mode                            |
+
+```toml
+[permission]
+allow = ["bash(cargo test:*)", "bash(git status)", "edit(~/notes/**)"]
+deny = ["read(**/.env)", "bash(git push:*)"]
+```
+
+Rules follow the format `class(specifier)`. The class is `read` (read, grep, and glob tools), `edit` (edit and write), or `bash`, and a bare class name or `class(*)` matches every call in that class.
+
+- **`bash`** specifiers match commands exactly (`bash(git status)`), by prefix (`bash(cargo test:*)`), or by wildcard (`bash(git *)`). Allow rules never match a command containing `;`, `|`, `&`, a newline, `>`, `<`, `$(`, or a backtick, while deny rules match the full command or any part between `;`, `|`, `&`, or newlines.
+- **`read` and `edit`** specifiers are path globs where `*` and `?` match within one path segment and `**` spans segments. A relative glob matches paths inside the working directory, so `edit(*.json)` covers `package.json` but not `src/a.json`. A glob starting with `/` or `~/` matches the absolute path after symlinks resolve.
+- **Deny and allow** match paths differently. An allow rule matches only the resolved path, with exact case and spelling. A deny rule also matches the path as the call writes it and, when the rule's literal leading directories run through a symlink at startup, the location they resolve to. It treats names that differ only in case, Unicode normalization, invisible characters, or trailing dots as the same name, so `read(**/.env)` also blocks `.ENV`.
+
+Edits to these paths always ask, even when an allow rule matches: `.git`, `.githooks`, `.husky`, `.vscode`, `.idea`, `.devcontainer`, and `.codex` directories at any depth, shell startup files such as `.bashrc` and `.zshrc`, `.envrc`, `.gitconfig`, `.gitmodules`, `.cargo/config.toml`, `.claude/settings.json`, `.claude/settings.local.json`, `.claude/hooks`, `rust-toolchain.toml`, `ox.toml`, and oxide-code's own config, data, and state directories. Their names compare the way deny rules compare names, in the path as written and as resolved, and a symlinked protected name in the launch directory protects its target as well.
+
+Launching from `/` or your home directory turns off the auto-allow for edits inside it, so those edits need an allow rule or an approval. On macOS and Linux, so does an edit to a file with more than one hard link.
+
+`plan` mode denies all edit and `bash` calls. `yolo` mode never asks and skips the built-in deny list (`rm -rf`, `curl | sh`, and similar), but it still honors your `deny` rules. A project `ox.toml` can only add `deny` rules, and setting `mode` or `allow` there fails the config load, so a repository can restrict what runs but never widen it. The environment variable `OX_PERMISSION_MODE` overrides `mode`.
+
 ## Authentication
 
 oxide-code checks three credential sources in order:
