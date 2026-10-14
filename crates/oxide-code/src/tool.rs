@@ -20,6 +20,7 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 use crate::agent::event::{ApprovalBody, ApprovalPreview};
 use crate::permission::{GateTarget, PermissionClass};
+use crate::util::path::lexical_normalize;
 use crate::util::text::ELLIPSIS;
 
 // ── Tool Definition ──
@@ -437,6 +438,16 @@ fn display_cwd_path_from(path: &str, cwd: Option<&Path>) -> String {
     }
 }
 
+/// The [`FileTracker`](crate::file_tracker::FileTracker) key for a file tool's `file_path`. An
+/// existing path canonicalizes, so relative, dotted, and symlinked spellings of one file share an
+/// entry. A missing path falls back to its lexically clean absolute form.
+pub(crate) async fn tracker_key(path: &str) -> PathBuf {
+    let absolute = std::env::current_dir().unwrap_or_default().join(path);
+    tokio::fs::canonicalize(&absolute)
+        .await
+        .unwrap_or_else(|_| lexical_normalize(&absolute))
+}
+
 /// Renders a `Name(path)` summary for a tool call whose primary argument is a filesystem path.
 ///
 /// `path_key` names the JSON field to extract from `input` (e.g. `"file_path"`, `"path"`).
@@ -587,25 +598,19 @@ pub(crate) fn bytes_to_mb(bytes: u64) -> f64 {
     bytes as f64 / (1024.0 * 1024.0)
 }
 
-pub(crate) const MAX_LINE_LENGTH: usize = 500;
-
-/// Caps a line at [`MAX_LINE_LENGTH`] characters and appends `... [N chars]` when truncation
-/// fires.
-///
-/// Returns `Cow::Borrowed` (no allocation) when the line already fits — both the byte fast-path
-/// and the char-count fallback short-circuit. The `[N chars]` footer surfaces the original length
-/// so the model can decide whether to read more.
-pub(crate) fn truncate_line(line: &str) -> Cow<'_, str> {
-    if line.len() <= MAX_LINE_LENGTH {
+/// Caps a line at `max_chars` characters, appending `... [N chars]` with the original length so the
+/// model can decide whether to read more. Borrows when the line already fits.
+pub(crate) fn truncate_line(line: &str, max_chars: usize) -> Cow<'_, str> {
+    if line.len() <= max_chars {
         return Cow::Borrowed(line);
     }
     let total_chars = line.chars().count();
-    if total_chars <= MAX_LINE_LENGTH {
+    if total_chars <= max_chars {
         return Cow::Borrowed(line);
     }
     let boundary = line
         .char_indices()
-        .nth(MAX_LINE_LENGTH)
+        .nth(max_chars)
         .map_or(line.len(), |(i, _)| i);
     Cow::Owned(format!(
         "{}{ELLIPSIS} [{total_chars} chars]",
@@ -1032,25 +1037,20 @@ mod tests {
 
     // ── ToolRegistry::run ──
 
-    fn write_oversize_file() -> (tempfile::TempDir, std::path::PathBuf) {
+    fn oversize_grep_input() -> (tempfile::TempDir, serde_json::Value) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("big.txt");
-        let line = "x".repeat(600);
-        let content = format!("{line}\n").repeat(500);
-        std::fs::write(&path, &content).unwrap();
-        (dir, path)
+        let line = "x".repeat(400);
+        std::fs::write(&path, format!("{line}\n").repeat(500)).unwrap();
+        let input = serde_json::json!({"pattern": "x", "path": path, "head_limit": 0});
+        (dir, input)
     }
 
     #[tokio::test]
     async fn run_dispatches_and_caps_byte_overflow() {
-        let (_dir, path) = write_oversize_file();
-        let registry = ToolRegistry::new(vec![Box::new(ReadTool::new(tracker()))]);
-        let output = registry
-            .run(
-                "read",
-                serde_json::json!({"file_path": path.to_str().unwrap()}),
-            )
-            .await;
+        let (_dir, input) = oversize_grep_input();
+        let registry = ToolRegistry::new(vec![Box::new(GrepTool)]);
+        let output = registry.run("grep", input).await;
 
         assert!(!output.is_error);
         assert!(output.content.len() <= MAX_OUTPUT_BYTES + TRUNCATION_OVERHEAD);
@@ -1079,14 +1079,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_byte_cap_on_read_falls_through_to_text_view() {
-        let (_dir, path) = write_oversize_file();
-        let registry = ToolRegistry::new(vec![Box::new(ReadTool::new(tracker()))]);
-        let input = serde_json::json!({"file_path": path.to_str().unwrap()});
-        let output = registry.run("read", input.clone()).await;
+    async fn run_byte_cap_on_grep_falls_through_to_text_view() {
+        let (_dir, input) = oversize_grep_input();
+        let registry = ToolRegistry::new(vec![Box::new(GrepTool)]);
+        let output = registry.run("grep", input.clone()).await;
+        assert!(output.metadata.truncated_bytes.is_some());
 
         let view = registry.result_view(
-            "read",
+            "grep",
             &input,
             &output.content,
             &output.metadata,
@@ -1377,6 +1377,37 @@ mod tests {
         );
     }
 
+    // ── tracker_key ──
+
+    #[tokio::test]
+    async fn tracker_key_resolves_relative_and_dotted_spellings_to_one_key() {
+        let absolute = std::env::current_dir().unwrap().join("src/main.rs");
+        assert_eq!(tracker_key("src/main.rs").await, absolute);
+        assert_eq!(tracker_key("./src/../src/main.rs").await, absolute);
+        assert_eq!(tracker_key(absolute.to_str().unwrap()).await, absolute);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn tracker_key_resolves_a_symlinked_spelling_to_the_target() {
+        let dir = canonical_tempdir();
+        std::fs::create_dir(dir.path().join("real")).unwrap();
+        std::fs::write(dir.path().join("real/a.rs"), "").unwrap();
+        std::os::unix::fs::symlink(dir.path().join("real"), dir.path().join("link")).unwrap();
+
+        let via_link = dir.path().join("link/a.rs");
+        assert_eq!(
+            tracker_key(via_link.to_str().unwrap()).await,
+            dir.path().join("real/a.rs"),
+        );
+    }
+
+    #[tokio::test]
+    async fn tracker_key_missing_path_falls_back_to_a_lexically_clean_absolute_path() {
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(tracker_key("missing/../a.rs").await, cwd.join("a.rs"));
+    }
+
     // ── display_path ──
 
     #[test]
@@ -1517,39 +1548,41 @@ mod tests {
 
     // ── truncate_line ──
 
+    const MAX_CHARS: usize = 500;
+
     #[test]
     fn truncate_line_short_unchanged() {
-        assert_eq!(truncate_line("hello").as_ref(), "hello");
+        assert_eq!(truncate_line("hello", MAX_CHARS).as_ref(), "hello");
     }
 
     #[test]
     fn truncate_line_long_gets_truncated() {
-        let long_line = "x".repeat(MAX_LINE_LENGTH + 100);
-        let result = truncate_line(&long_line);
-        let suffix = format!("... [{} chars]", MAX_LINE_LENGTH + 100);
-        assert_eq!(result.len(), MAX_LINE_LENGTH + suffix.len());
-        assert_eq!(&result[..MAX_LINE_LENGTH], "x".repeat(MAX_LINE_LENGTH));
-        assert_eq!(&result[MAX_LINE_LENGTH..], suffix);
+        let long_line = "x".repeat(MAX_CHARS + 100);
+        let result = truncate_line(&long_line, MAX_CHARS);
+        let suffix = format!("... [{} chars]", MAX_CHARS + 100);
+        assert_eq!(result.len(), MAX_CHARS + suffix.len());
+        assert_eq!(&result[..MAX_CHARS], "x".repeat(MAX_CHARS));
+        assert_eq!(&result[MAX_CHARS..], suffix);
     }
 
     #[test]
     fn truncate_line_multibyte_safe() {
-        let mut line = "a".repeat(MAX_LINE_LENGTH - 2);
+        let mut line = "a".repeat(MAX_CHARS - 2);
         line.push('🦀');
         line.push_str(&"b".repeat(100));
-        let result = truncate_line(&line);
+        let result = truncate_line(&line, MAX_CHARS);
 
         let (prefix, suffix) = result.split_once("... [").unwrap();
-        let expected_prefix = "a".repeat(MAX_LINE_LENGTH - 2) + "🦀" + "b";
+        let expected_prefix = "a".repeat(MAX_CHARS - 2) + "🦀" + "b";
         assert_eq!(prefix, expected_prefix);
-        assert_eq!(prefix.chars().count(), MAX_LINE_LENGTH);
-        assert_eq!(suffix, format!("{} chars]", MAX_LINE_LENGTH + 99));
+        assert_eq!(prefix.chars().count(), MAX_CHARS);
+        assert_eq!(suffix, format!("{} chars]", MAX_CHARS + 99));
     }
 
     #[test]
     fn truncate_line_multibyte_under_char_cap_unchanged() {
-        let line = "é".repeat(MAX_LINE_LENGTH);
-        let result = truncate_line(&line);
+        let line = "é".repeat(MAX_CHARS);
+        let result = truncate_line(&line, MAX_CHARS);
         assert!(matches!(result, Cow::Borrowed(_)));
         assert_eq!(result.as_ref(), line);
     }

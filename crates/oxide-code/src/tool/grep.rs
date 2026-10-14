@@ -13,6 +13,7 @@ use super::{
 };
 
 const DEFAULT_HEAD_LIMIT: usize = 250;
+const MAX_LINE_CHARS: usize = 500;
 const MAX_GREP_FILE_SIZE: u64 = 1024 * 1024;
 
 pub(crate) struct GrepTool;
@@ -174,10 +175,11 @@ async fn run(raw: serde_json::Value) -> ToolOutput {
     })
     .await
     {
-        Ok(result) => {
-            let title = grep_title(result.as_deref().ok());
-            ToolOutput::from_result(result).with_title(title)
+        Ok(Ok(content)) => {
+            let title = grep_title(&content);
+            ToolOutput::from_result(Ok(content)).with_title(title)
         }
+        Ok(Err(msg)) => ToolOutput::from_result(Err(msg)),
         Err(e) => ToolOutput {
             content: format!("Internal error: {e}"),
             is_error: true,
@@ -186,24 +188,21 @@ async fn run(raw: serde_json::Value) -> ToolOutput {
     }
 }
 
-fn grep_title(output: Option<&str>) -> String {
-    match output {
-        Some("No matches found" | "No files found") | None => "No matches found".into(),
-        Some(text) => {
-            // Count / files-with-matches modes lead with "Found N ...".
-            if let Some(line) = text.lines().find(|l| l.starts_with("Found ")) {
-                return line.trim_end_matches('.').to_owned();
-            }
-            // Content mode: count matches only — context lines share the `path:NUM` prefix.
-            let match_count = text
-                .lines()
-                .filter_map(parse_match_line)
-                .filter(|(_, m)| m.is_match)
-                .count();
-            let word = if match_count == 1 { "match" } else { "matches" };
-            format!("{match_count} {word}")
-        }
+fn grep_title(output: &str) -> String {
+    if matches!(output, "No matches found" | "No files found") {
+        return "No matches found".into();
     }
+    // Count / files-with-matches modes lead with "Found N ...".
+    if let Some(line) = output.lines().find(|l| l.starts_with("Found ")) {
+        return line.trim_end_matches('.').to_owned();
+    }
+    let match_count = output
+        .lines()
+        .filter_map(parse_match_line)
+        .filter(|(_, m)| m.is_match)
+        .count();
+    let word = if match_count == 1 { "match" } else { "matches" };
+    format!("{match_count} {word}")
 }
 
 // ── Search ──
@@ -404,7 +403,7 @@ fn search_no_context(
             return;
         }
         if re.is_match(line) {
-            let truncated = super::truncate_line(line);
+            let truncated = super::truncate_line(line, MAX_LINE_CHARS);
             output_lines.push(format!("{display_path}:{}:{truncated}", line_num + 1));
         }
     }
@@ -459,7 +458,7 @@ fn search_with_context(
             } else {
                 '-'
             };
-            let truncated = super::truncate_line(line);
+            let truncated = super::truncate_line(line, MAX_LINE_CHARS);
             output_lines.push(format!("{display_path}:{}{sep}{truncated}", i + 1));
         }
     }
@@ -700,6 +699,18 @@ mod tests {
         assert!(output.content.contains("Invalid input"));
     }
 
+    #[tokio::test]
+    async fn run_invalid_regex_omits_title() {
+        let output = run(serde_json::json!({"pattern": "(unclosed"})).await;
+        assert!(output.is_error);
+        assert!(
+            output.content.contains("Invalid regex"),
+            "{}",
+            output.content
+        );
+        assert_eq!(output.metadata.title, None, "errors are not a match count");
+    }
+
     // ── grep_title ──
 
     #[test]
@@ -722,7 +733,22 @@ mod tests {
         let mut p = params("MATCH", dir.path());
         p.context = 1;
         let result = grep_files(&p).unwrap();
-        assert_eq!(grep_title(Some(&result)), "2 matches");
+        assert_eq!(grep_title(&result), "2 matches");
+    }
+
+    #[test]
+    fn grep_title_summary_modes_reuse_the_found_line() {
+        let count = "Found 3 total occurrences across 2 files\na.rs:2\nb.rs:1";
+        assert_eq!(
+            grep_title(count),
+            "Found 3 total occurrences across 2 files"
+        );
+    }
+
+    #[test]
+    fn grep_title_empty_results_say_no_matches() {
+        assert_eq!(grep_title("No matches found"), "No matches found");
+        assert_eq!(grep_title("No files found"), "No matches found");
     }
 
     // ── grep_files (content mode) ──

@@ -32,9 +32,9 @@ impl Tool for EditTool {
     fn description(&self) -> &'static str {
         "Perform exact string replacement in a file. \
          The old_string must be unique in the file unless replace_all is true. \
-         The file must have been Read fully in this session first; \
-         a Read-before-Edit gate refuses edits to files the model hasn't seen \
-         and to files that changed externally since the last Read."
+         Read the file in this session before editing it. A Read of the lines being changed \
+         is enough. The Read-before-Edit gate refuses files that changed externally since the \
+         last Read."
     }
 
     fn permission_class(&self) -> crate::permission::PermissionClass {
@@ -172,12 +172,12 @@ async fn run(raw: serde_json::Value, tracker: Arc<FileTracker>) -> ToolOutput {
 /// - `old_string` must occur verbatim in the file (whitespace and indentation included). Without
 ///   `replace_all`, ambiguous matches are rejected so the model cannot silently edit the wrong
 ///   site.
-/// - The Read-before-Edit gate refuses files that haven't been read in this session and files
-///   whose stat / hash drifted since the last Read.
+/// - The Read-before-Edit gate refuses files not fully read in this session and files whose
+///   content changed since that Read.
 /// - CRLF is preserved: the file is normalized to LF for matching, the dominant EOL is restored
 ///   on write so we don't flip line endings just because the caller used `\n` in `old_string`.
-/// - Returns `(message, match_count, diff_chunks)` on success; `chunks` carry real post-edit line
-///   numbers shifted by cumulative delta from earlier replacements.
+/// - Returns `(message, match_count, diff_chunks)` on success. The chunks carry real post-edit line
+///   numbers, shifted by the cumulative delta of earlier replacements.
 async fn edit_file(
     path: &str,
     old_string: &str,
@@ -196,8 +196,9 @@ async fn edit_file(
     let file_path = Path::new(path);
     let (_, content_bytes) =
         super::read_validated(path, |metadata| validate_edit_target(path, metadata)).await?;
+    let key = super::tracker_key(path).await;
     tracker
-        .verify_current_content(file_path, &content_bytes, GatePurpose::Edit)
+        .verify_current_content(&key, &content_bytes, GatePurpose::Edit)
         .map_err(|e| e.to_string())?;
     let content =
         String::from_utf8(content_bytes).map_err(|e| format!("Error reading {path}: {e}"))?;
@@ -243,7 +244,7 @@ async fn edit_file(
         .map_err(|e| format!("Failed to write {path}: {e}"))?;
 
     tracker
-        .record_modify_after_write(file_path, updated.as_bytes())
+        .record_modify_after_write(&key, file_path, updated.as_bytes())
         .await;
 
     let message = if replace_all && match_count > 1 {
@@ -416,6 +417,7 @@ mod tests {
         LastView, MAX_TRACKED_FILE_SIZE,
         testing::{tracker, tracker_seeded},
     };
+    use crate::tool::testing::canonical_tempdir;
 
     // ── approval_preview ──
 
@@ -633,7 +635,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_valid_edit() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = canonical_tempdir();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello world").unwrap();
 
@@ -672,7 +674,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_without_prior_read_is_rejected() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = canonical_tempdir();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello world").unwrap();
 
@@ -688,7 +690,7 @@ mod tests {
 
         assert!(output.is_error);
         assert!(
-            output.content.contains("needs a full Read"),
+            output.content.contains("has not been read"),
             "expected must-read-first rejection, got: {}",
             output.content,
         );
@@ -697,7 +699,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_edit_error_omits_edited_title() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = canonical_tempdir();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello world").unwrap();
 
@@ -720,7 +722,7 @@ mod tests {
 
     #[tokio::test]
     async fn edit_tool_run_dispatches_through_trait_to_inner_run() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = canonical_tempdir();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello world").unwrap();
         let tracker = Arc::new(tracker_seeded(&path));
@@ -742,7 +744,7 @@ mod tests {
 
     #[tokio::test]
     async fn edit_file_replaces_unique_string() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = canonical_tempdir();
         let path = dir.path().join("test.txt");
         std::fs::write(
             &path,
@@ -775,7 +777,7 @@ mod tests {
 
     #[tokio::test]
     async fn edit_file_replace_all() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = canonical_tempdir();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "aaa bbb aaa").unwrap();
 
@@ -797,7 +799,7 @@ mod tests {
 
     #[tokio::test]
     async fn edit_file_replace_all_pins_replaced_n_occurrences_format() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = canonical_tempdir();
         let path = dir.path().join("t.txt");
         std::fs::write(&path, "a a a").unwrap();
         let (msg, replacements, _chunks) = edit_file(
@@ -818,7 +820,7 @@ mod tests {
 
     #[tokio::test]
     async fn edit_file_replace_all_single_match() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = canonical_tempdir();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello world").unwrap();
 
@@ -843,7 +845,7 @@ mod tests {
 
     #[tokio::test]
     async fn edit_file_crlf_matching_preserves_line_endings() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = canonical_tempdir();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "line1\r\nline2\r\n").unwrap();
 
@@ -863,7 +865,7 @@ mod tests {
 
     #[tokio::test]
     async fn edit_file_crlf_in_new_string_not_doubled() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = canonical_tempdir();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "aaa\r\nbbb\r\n").unwrap();
 
@@ -883,7 +885,7 @@ mod tests {
 
     #[tokio::test]
     async fn edit_file_mixed_eol_normalized_to_dominant() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = canonical_tempdir();
         let path = dir.path().join("mixed.txt");
         std::fs::write(&path, "aaa\nbbb\r\nreplace_me\r\n").unwrap();
 
@@ -903,7 +905,7 @@ mod tests {
 
     #[tokio::test]
     async fn edit_file_mixed_eol_multiline_match() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = canonical_tempdir();
         let path = dir.path().join("mixed.txt");
         std::fs::write(&path, "foo\nbar\r\nbaz\r\n").unwrap();
 
@@ -923,7 +925,7 @@ mod tests {
 
     #[tokio::test]
     async fn edit_file_rejects_empty_old_string() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = canonical_tempdir();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello").unwrap();
 
@@ -942,7 +944,7 @@ mod tests {
 
     #[tokio::test]
     async fn edit_file_rejects_identical_strings() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = canonical_tempdir();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello").unwrap();
 
@@ -960,7 +962,7 @@ mod tests {
 
     #[tokio::test]
     async fn edit_file_rejects_string_not_found() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = canonical_tempdir();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello world").unwrap();
 
@@ -978,7 +980,7 @@ mod tests {
 
     #[tokio::test]
     async fn edit_file_without_prior_read_is_rejected() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = canonical_tempdir();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello world").unwrap();
 
@@ -992,7 +994,7 @@ mod tests {
         .await
         .unwrap_err();
         assert!(
-            err.contains("needs a full Read"),
+            err.contains("has not been read"),
             "expected must-read-first rejection, got: {err}",
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello world");
@@ -1000,7 +1002,7 @@ mod tests {
 
     #[tokio::test]
     async fn edit_file_after_external_modification_is_rejected() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = canonical_tempdir();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello world").unwrap();
         let tracker = tracker_seeded(&path);
@@ -1017,7 +1019,7 @@ mod tests {
 
     #[tokio::test]
     async fn edit_file_phantom_drift_passes_via_hash_match() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = canonical_tempdir();
         let path = dir.path().join("f.rs");
         std::fs::write(&path, "old content").unwrap();
         let bytes = std::fs::read(&path).unwrap();
@@ -1040,10 +1042,58 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn edit_file_partial_read_is_rejected() {
-        let dir = tempfile::tempdir().unwrap();
+    async fn edit_file_accepts_a_read_under_another_spelling_of_the_path() {
+        let dir = canonical_tempdir();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello world").unwrap();
+        let tracker = tracker();
+
+        let read = crate::tool::read::ReadTool::new(Arc::clone(&tracker))
+            .run(serde_json::json!({"file_path": path}))
+            .await;
+        assert!(!read.is_error, "{}", read.content);
+
+        let detour = dir.path().join("sub").join("..").join("test.txt");
+        edit_file(
+            detour.to_str().unwrap(),
+            "hello",
+            "goodbye",
+            false,
+            &tracker,
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "goodbye world");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn edit_file_accepts_a_read_through_a_symlinked_directory() {
+        let dir = canonical_tempdir();
+        std::fs::create_dir(dir.path().join("real")).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("real"), dir.path().join("link")).unwrap();
+        let path = dir.path().join("real/test.txt");
+        std::fs::write(&path, "hello world").unwrap();
+        let tracker = tracker();
+
+        let via_link = dir.path().join("link/test.txt");
+        let read = crate::tool::read::ReadTool::new(Arc::clone(&tracker))
+            .run(serde_json::json!({"file_path": via_link}))
+            .await;
+        assert!(!read.is_error, "{}", read.content);
+
+        edit_file(path.to_str().unwrap(), "hello", "goodbye", false, &tracker)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "goodbye world");
+    }
+
+    #[tokio::test]
+    async fn edit_file_accepts_a_partial_read_of_current_content() {
+        let dir = canonical_tempdir();
+        let path = dir.path().join("test.txt");
+        std::fs::write(&path, "hello world\nsecond line\n").unwrap();
         let bytes = std::fs::read(&path).unwrap();
         let meta = std::fs::metadata(&path).unwrap();
         let tracker = FileTracker::default();
@@ -1052,18 +1102,15 @@ mod tests {
             &bytes,
             meta.modified().unwrap(),
             meta.len(),
-            LastView::Partial {
-                offset: 1,
-                limit: 1,
-            },
+            LastView::lines(1, 1, 2),
         );
 
-        let err = edit_file(path.to_str().unwrap(), "hello", "goodbye", false, &tracker)
+        edit_file(path.to_str().unwrap(), "hello", "goodbye", false, &tracker)
             .await
-            .unwrap_err();
-        assert!(
-            err.contains("offset / limit"),
-            "expected partial-view rejection, got: {err}",
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "goodbye world\nsecond line\n",
         );
     }
 
@@ -1083,7 +1130,7 @@ mod tests {
 
     #[tokio::test]
     async fn edit_file_rejects_non_utf8_content() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = canonical_tempdir();
         let path = dir.path().join("blob.bin");
         let bytes = [0xff_u8, 0xfe, 0xfd];
         std::fs::write(&path, bytes).unwrap();
@@ -1108,7 +1155,7 @@ mod tests {
 
     #[tokio::test]
     async fn edit_file_rejects_ambiguous_match() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = canonical_tempdir();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "aaa bbb aaa").unwrap();
 
@@ -1126,7 +1173,7 @@ mod tests {
 
     #[tokio::test]
     async fn edit_file_rejects_directory() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = canonical_tempdir();
 
         let err = edit_file(
             dir.path().to_str().unwrap(),
@@ -1147,7 +1194,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn edit_file_rejects_non_regular_file() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = canonical_tempdir();
         let path = dir.path().join("socket");
         let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
 
@@ -1169,7 +1216,7 @@ mod tests {
 
     #[tokio::test]
     async fn edit_file_rejects_too_large_file() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = canonical_tempdir();
         let path = dir.path().join("huge.txt");
         let f = std::fs::File::create(&path).unwrap();
         f.set_len(MAX_TRACKED_FILE_SIZE + 1).unwrap();
@@ -1191,7 +1238,7 @@ mod tests {
     async fn edit_file_fails_if_write_is_rejected() {
         use std::os::unix::fs::PermissionsExt;
 
-        let dir = tempfile::tempdir().unwrap();
+        let dir = canonical_tempdir();
         let path = dir.path().join("readonly.txt");
         std::fs::write(&path, "hello world").unwrap();
         let tracker = tracker_seeded(&path);
@@ -1208,7 +1255,7 @@ mod tests {
 
     #[tokio::test]
     async fn edit_file_chunks_carry_real_file_line_numbers_for_replace_all() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = canonical_tempdir();
         let path = dir.path().join("multi.txt");
         std::fs::write(
             &path,
@@ -1265,7 +1312,7 @@ mod tests {
 
     #[tokio::test]
     async fn edit_file_chunks_shift_new_side_for_growing_replace_all() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = canonical_tempdir();
         let path = dir.path().join("grow.txt");
         std::fs::write(
             &path,
@@ -1321,7 +1368,7 @@ mod tests {
 
     #[tokio::test]
     async fn edit_file_chunks_shift_new_side_for_shrinking_replace_all() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = canonical_tempdir();
         let path = dir.path().join("shrink.txt");
         std::fs::write(
             &path,

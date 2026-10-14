@@ -103,15 +103,18 @@ async fn run(raw: serde_json::Value) -> ToolOutput {
     })
     .await
     {
-        Ok(result) => {
-            let title = glob_title(result.as_ref().ok().map(|r| r.content.as_str()));
-            let truncated_total = result.as_ref().ok().and_then(|r| r.truncated_total);
-            let mut output = ToolOutput::from_result(result.map(|r| r.content)).with_title(title);
-            if let Some(total) = truncated_total {
-                output = output.with_truncated_total(total);
+        Ok(Ok(GlobOutput {
+            content,
+            truncated_total,
+        })) => {
+            let title = glob_title(&content);
+            let output = ToolOutput::from_result(Ok(content)).with_title(title);
+            match truncated_total {
+                Some(total) => output.with_truncated_total(total),
+                None => output,
             }
-            output
         }
+        Ok(Err(msg)) => ToolOutput::from_result(Err(msg)),
         Err(e) => ToolOutput {
             content: format!("Internal error: {e}"),
             is_error: true,
@@ -120,16 +123,14 @@ async fn run(raw: serde_json::Value) -> ToolOutput {
     }
 }
 
-fn glob_title(output: Option<&str>) -> String {
-    match output {
-        Some("No files found") | None => "No files found".into(),
-        Some(text) => {
-            let body = glob_output_body(text).unwrap_or(text.trim_end());
-            let count = body.lines().filter(|l| !l.trim().is_empty()).count();
-            let word = if count == 1 { "file" } else { "files" };
-            format!("Found {count} {word}")
-        }
+fn glob_title(output: &str) -> String {
+    if output == "No files found" {
+        return output.to_owned();
     }
+    let body = glob_output_body(output).unwrap_or(output.trim_end());
+    let count = body.lines().filter(|l| !l.trim().is_empty()).count();
+    let word = if count == 1 { "file" } else { "files" };
+    format!("Found {count} {word}")
 }
 
 #[derive(Debug)]
@@ -328,6 +329,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_invalid_pattern_omits_title() {
+        let output = run(serde_json::json!({"pattern": "[unclosed"})).await;
+        assert!(output.is_error);
+        assert!(
+            output.content.contains("Invalid glob pattern"),
+            "{}",
+            output.content
+        );
+        assert_eq!(output.metadata.title, None, "errors are not a file count");
+    }
+
+    #[tokio::test]
     async fn run_truncated_attaches_total_to_metadata() {
         let dir = canonical_tempdir();
         let total = MAX_RESULTS + 10;
@@ -356,7 +369,12 @@ mod tests {
             (Showing 2 of 3 matches. Use a more specific pattern.)"
         };
 
-        assert_eq!(glob_title(Some(body)), "Found 2 files");
+        assert_eq!(glob_title(body), "Found 2 files");
+    }
+
+    #[test]
+    fn glob_title_no_files_found_is_not_a_count() {
+        assert_eq!(glob_title("No files found"), "No files found");
     }
 
     // ── glob_files ──
