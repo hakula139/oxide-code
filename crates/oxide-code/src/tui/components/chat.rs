@@ -18,7 +18,7 @@ use self::blocks::{
     GitDiffBlock, InterruptedMarker, RenderCtx, StreamingAssistant, SystemMessageBlock,
     ToolCallBlock, ToolResultBlock, UserMessage,
 };
-use self::stack::{CachedBlock, RenderKey, Stack};
+use self::stack::{CachedBlock, Stack};
 use crate::agent::compaction::strip_synthetic_post_compact_prefix;
 use crate::message::Message;
 use crate::session::entry::CompactInfo;
@@ -29,11 +29,7 @@ use crate::tui::theme::Theme;
 
 /// Scrollable chat message list with auto-scroll.
 pub(crate) struct ChatView {
-    theme: Theme,
-    /// Bumped per theme swap to invalidate cached block renders.
-    theme_epoch: u64,
-    show_thinking: bool,
-
+    settings: RenderSettings,
     blocks: Vec<CachedBlock>,
 
     streaming: Option<StreamingAssistant>,
@@ -47,6 +43,24 @@ pub(crate) struct ChatView {
     new_content_since_pause: u32,
 }
 
+/// Inputs shared by every block render.
+struct RenderSettings {
+    theme: Theme,
+    /// Bumped per theme swap to invalidate cached block renders.
+    theme_epoch: u64,
+    show_thinking: bool,
+}
+
+impl RenderSettings {
+    fn ctx(&self, width: u16) -> RenderCtx<'_> {
+        RenderCtx {
+            width,
+            theme: &self.theme,
+            show_thinking: self.show_thinking,
+        }
+    }
+}
+
 /// Thinking and streaming-tail lines, rendered every frame since their buffers keep growing.
 struct LiveLines {
     thinking: Vec<Line<'static>>,
@@ -56,9 +70,11 @@ struct LiveLines {
 impl ChatView {
     pub(crate) fn new(theme: &Theme, show_thinking: bool) -> Self {
         Self {
-            theme: theme.clone(),
-            theme_epoch: 0,
-            show_thinking,
+            settings: RenderSettings {
+                theme: theme.clone(),
+                theme_epoch: 0,
+                show_thinking,
+            },
             blocks: Vec::new(),
             streaming: None,
             thinking_buffer: String::new(),
@@ -73,8 +89,8 @@ impl ChatView {
 
     /// Re-skins every subsequent render, including cached blocks and the streaming prefix.
     pub(crate) fn set_theme(&mut self, theme: &Theme) {
-        self.theme = theme.clone();
-        self.theme_epoch = self.theme_epoch.wrapping_add(1);
+        self.settings.theme = theme.clone();
+        self.settings.theme_epoch += 1;
         if let Some(s) = &mut self.streaming {
             s.invalidate_cache();
         }
@@ -168,9 +184,6 @@ impl ChatView {
             .get_or_insert_with(StreamingAssistant::new)
             .append(token);
         self.advance_streaming_cache();
-        if self.auto_scroll {
-            self.scroll_to_bottom();
-        }
     }
 
     /// Appends a thinking token to the live thinking display buffer.
@@ -179,9 +192,6 @@ impl ChatView {
             self.bump_paused_counter();
         }
         self.thinking_buffer.push_str(token);
-        if self.auto_scroll {
-            self.scroll_to_bottom();
-        }
     }
 
     /// Finalizes the streaming buffer into a committed block.
@@ -299,19 +309,19 @@ impl ChatView {
     pub(crate) fn last_is_error(&self) -> bool {
         self.blocks
             .last()
-            .is_some_and(|b| b.block.is_error_marker())
+            .is_some_and(|b| b.block().is_error_marker())
     }
 
     /// Error text of the tail block, if it is an [`ErrorBlock`].
     #[cfg(test)]
     pub(crate) fn last_error_text(&self) -> Option<&str> {
-        self.blocks.last().and_then(|b| b.block.error_text())
+        self.blocks.last().and_then(|b| b.block().error_text())
     }
 
     /// Body text of the tail block, if it is a [`SystemMessageBlock`].
     #[cfg(test)]
     pub(crate) fn last_system_text(&self) -> Option<&str> {
-        self.blocks.last().and_then(|b| b.block.system_text())
+        self.blocks.last().and_then(|b| b.block().system_text())
     }
 }
 
@@ -366,13 +376,14 @@ impl ChatView {
         self.refresh_block_renders(area.width);
         let live = self.render_live(area.width);
 
-        let content_height = self.stack(&live).height();
-        self.sync_scroll(content_height);
+        let stack = self.stack(&live);
+        let content_height = stack.height();
+        let scroll_offset = self.synced_scroll_offset(content_height);
+        let lines = stack.slice(scroll_offset, usize::from(area.height));
+        self.content_height = content_height;
+        self.scroll_offset = scroll_offset;
 
-        let lines = self
-            .stack(&live)
-            .slice(self.scroll_offset, usize::from(area.height));
-        let paragraph = Paragraph::new(lines).style(self.theme.surface());
+        let paragraph = Paragraph::new(lines).style(self.settings.theme.surface());
         frame.render_widget(paragraph, area);
     }
 
@@ -399,19 +410,23 @@ impl ChatView {
         }
     }
 
-    /// Records the stacked height, then pins the tail under auto-scroll or clamps the offset.
-    fn sync_scroll(&mut self, content_height: usize) {
-        self.content_height = content_height;
+    /// Offset for painting `content_height` rows: the tail under auto-scroll, else the current
+    /// offset clamped to the content.
+    fn synced_scroll_offset(&self, content_height: usize) -> usize {
+        let max = self.max_offset_for(content_height);
         if self.auto_scroll {
-            self.scroll_to_bottom();
+            max
         } else {
-            self.scroll_offset = self.scroll_offset.min(self.max_scroll_offset());
+            self.scroll_offset.min(max)
         }
     }
 
     fn max_scroll_offset(&self) -> usize {
-        self.content_height
-            .saturating_sub(usize::from(self.viewport_height))
+        self.max_offset_for(self.content_height)
+    }
+
+    fn max_offset_for(&self, content_height: usize) -> usize {
+        content_height.saturating_sub(usize::from(self.viewport_height))
     }
 
     fn scroll_to_bottom(&mut self) {
@@ -439,33 +454,16 @@ impl ChatView {
         }
     }
 
-    fn render_ctx(&self, width: u16) -> RenderCtx<'_> {
-        RenderCtx {
-            width,
-            theme: &self.theme,
-            show_thinking: self.show_thinking,
-        }
-    }
-
     /// Re-renders committed blocks whose cached lines predate the current width or theme.
     fn refresh_block_renders(&mut self, width: u16) {
-        let key = RenderKey {
-            width,
-            theme_epoch: self.theme_epoch,
-            show_thinking: self.show_thinking,
-        };
-        let ctx = RenderCtx {
-            width,
-            theme: &self.theme,
-            show_thinking: self.show_thinking,
-        };
+        let ctx = self.settings.ctx(width);
         for block in &mut self.blocks {
-            block.refresh(&ctx, key);
+            block.refresh(&ctx, self.settings.theme_epoch);
         }
     }
 
     fn render_live(&self, width: u16) -> LiveLines {
-        let ctx = self.render_ctx(width);
+        let ctx = self.settings.ctx(width);
         let mut thinking = Vec::new();
         if !self.thinking_buffer.is_empty() {
             let block = AssistantThinking::new(self.thinking_buffer.clone());
@@ -487,8 +485,8 @@ impl ChatView {
         let mut stack = Stack::default();
 
         let mut prev_kind: Option<BlockKind> = None;
-        for cached in self.blocks.iter().filter(|b| b.visible) {
-            let block = &cached.block;
+        for cached in self.blocks.iter().filter(|b| b.visible()) {
+            let block = cached.block();
             // Standalone blocks always take a separator. A tool `Call` after a `Result` opens a
             // new tool group, while a `Result` stays flush under its `Call`.
             if stack.last_has_width()
@@ -496,7 +494,7 @@ impl ChatView {
             {
                 stack.push_blank();
             }
-            stack.push(&cached.lines);
+            stack.push(cached.lines());
             if block.standalone() {
                 stack.push_blank();
             }
@@ -523,16 +521,8 @@ impl ChatView {
 
     fn advance_streaming_cache(&mut self) {
         let continues = self.streaming_continues_turn();
-        let width = self.viewport_width;
-        let theme = &self.theme;
-        let show_thinking = self.show_thinking;
         if let Some(s) = &mut self.streaming {
-            let ctx = RenderCtx {
-                width,
-                theme,
-                show_thinking,
-            };
-            s.advance_cache(&ctx, continues);
+            s.advance_cache(&self.settings.ctx(self.viewport_width), continues);
         }
     }
 
@@ -540,7 +530,7 @@ impl ChatView {
     fn streaming_continues_turn(&self) -> bool {
         self.blocks
             .last()
-            .is_some_and(|b| b.block.continues_assistant_turn())
+            .is_some_and(|b| b.block().continues_assistant_turn())
     }
 
     /// True when the chat has no content for the user to see (committed, streaming, or thinking).
@@ -692,7 +682,7 @@ mod tests {
         // prefix tokens would keep painting under the previous palette until commit_streaming.
         let mut chat = test_chat();
         chat.set_viewport(Rect::new(0, 0, 80, 24));
-        chat.append_stream_token("a complete paragraph\n\nnext");
+        chat.append_stream_token("a complete paragraph\n\nnext\n");
         let s = chat.streaming.as_ref().unwrap();
         assert_ne!(s.rendered().len(), 0, "cache populated");
         assert_eq!(s.cached_width(), 80);
@@ -1380,7 +1370,7 @@ mod tests {
         let mut chat = test_chat();
         chat.viewport_width = 80;
         chat.append_stream_token("para1\n\n");
-        chat.append_stream_token("para2\n\ntail");
+        chat.append_stream_token("para2\n\ntail\n");
 
         let text = all_text(&mut chat);
         let lines: Vec<&str> = text.lines().collect();
@@ -2640,7 +2630,7 @@ mod tests {
         let mut chat = test_chat();
         chat.set_viewport(Rect::new(0, 0, 80, 24));
         assert_eq!((chat.viewport_width, chat.viewport_height), (80, 24));
-        chat.append_stream_token("a complete paragraph\n\nnext");
+        chat.append_stream_token("a complete paragraph\n\nnext\n");
         let s = chat.streaming.as_ref().unwrap();
         assert_ne!(s.rendered().len(), 0);
         assert_eq!(s.cached_width(), 80);
@@ -2659,31 +2649,29 @@ mod tests {
         assert_eq!(s.cached_width(), 0);
     }
 
-    // ── sync_scroll ──
+    // ── synced_scroll_offset ──
 
     #[test]
-    fn sync_scroll_auto_scroll_pins_offset_to_tail() {
+    fn synced_scroll_offset_auto_scroll_pins_to_tail() {
         let mut chat = test_chat();
         chat.viewport_height = 20;
         chat.scroll_offset = 3;
-        chat.sync_scroll(100);
-        assert_eq!(chat.content_height, 100);
-        assert_eq!(chat.scroll_offset, 80);
+        assert_eq!(chat.synced_scroll_offset(100), 80);
+        assert_eq!(chat.synced_scroll_offset(10), 0);
     }
 
     #[test]
-    fn sync_scroll_paused_clamps_offset_to_shrunk_content() {
+    fn synced_scroll_offset_paused_clamps_to_shrunk_content() {
         let mut chat = test_chat();
         chat.viewport_height = 20;
         chat.auto_scroll = false;
-
         chat.scroll_offset = 25;
-        chat.sync_scroll(100);
-        assert_eq!(chat.scroll_offset, 25, "an in-range offset is kept");
-
-        chat.sync_scroll(30);
-        assert_eq!(chat.scroll_offset, 10);
-        assert!(!chat.auto_scroll, "clamping must not re-arm auto-scroll");
+        assert_eq!(
+            chat.synced_scroll_offset(100),
+            25,
+            "an in-range offset is kept"
+        );
+        assert_eq!(chat.synced_scroll_offset(30), 10);
     }
 
     // ── scroll_to_bottom / scroll_up / scroll_down ──
@@ -2806,10 +2794,13 @@ mod tests {
     }
 
     #[test]
-    fn advance_streaming_cache_paragraph_boundary_commits() {
+    fn advance_streaming_cache_paragraph_boundary_commits_once_the_next_line_ends() {
         let mut chat = test_chat();
         chat.viewport_width = 80;
         chat.append_stream_token("para1\n\npartial");
+        assert_eq!(chat.streaming.as_ref().unwrap().rendered_boundary(), 0);
+
+        chat.append_stream_token("\n");
         let s = chat.streaming.as_ref().unwrap();
         assert_eq!(s.rendered_boundary(), "para1\n\n".len());
         assert_eq!(s.rendered().len(), 1);
@@ -2819,7 +2810,7 @@ mod tests {
     fn advance_streaming_cache_multiple_paragraphs_commit_to_last_block_start() {
         let mut chat = test_chat();
         chat.viewport_width = 80;
-        chat.append_stream_token("p1\n\np2\n\np3\n\npartial");
+        chat.append_stream_token("p1\n\np2\n\np3\n\np4\n");
         let s = chat.streaming.as_ref().unwrap();
         assert_eq!(s.rendered_boundary(), "p1\n\np2\n\np3\n\n".len());
     }
@@ -2829,7 +2820,7 @@ mod tests {
         let mut chat = test_chat();
         chat.viewport_width = 80;
 
-        chat.append_stream_token("para1\n\npara2");
+        chat.append_stream_token("para1\n\npara2\n");
         let (first_boundary, first_len) = {
             let s = chat.streaming.as_ref().unwrap();
             (s.rendered_boundary(), s.rendered().len())
@@ -2837,7 +2828,7 @@ mod tests {
         assert_eq!(first_boundary, "para1\n\n".len());
         assert!(first_len >= 1);
 
-        chat.append_stream_token("\n\npara3");
+        chat.append_stream_token("\npara3\n");
         let s = chat.streaming.as_ref().unwrap();
         assert_eq!(s.rendered_boundary(), "para1\n\npara2\n\n".len());
         let final_len = s.rendered().len();
@@ -2855,15 +2846,27 @@ mod tests {
         chat.append_stream_token("- item 1\n\n");
         assert_eq!(chat.streaming.as_ref().unwrap().rendered_boundary(), 0);
 
-        chat.append_stream_token("- item 2\n\nafter");
+        chat.append_stream_token("- item 2\n\nafter\n");
         let s = chat.streaming.as_ref().unwrap();
         assert_eq!(s.rendered_boundary(), "- item 1\n\n- item 2\n\n".len());
     }
 
     #[test]
-    fn advance_streaming_cache_fenced_blank_line_matches_committed_render() {
+    fn advance_streaming_cache_matches_committed_render_at_every_char() {
         let body = indoc! {"
             Here:
+
+            | a | b |
+            | - | - |
+            | 1 | 2 |
+
+            text
+            #tag
+
+            para
+            ```x
+            code
+            ```
 
             ```c
             #include <a.h>
@@ -2878,11 +2881,9 @@ mod tests {
         chat.set_viewport(Rect::new(0, 0, 80, 20));
         for (i, ch) in body.char_indices() {
             chat.append_stream_token(&ch.to_string());
-            if ch == '\n' {
-                let prefix = &body[..=i];
-                let committed = AssistantText::new(prefix).render(&chat.render_ctx(80));
-                assert_eq!(all_lines(&mut chat, 80), committed, "after {prefix:?}");
-            }
+            let prefix = &body[..i + ch.len_utf8()];
+            let committed = AssistantText::new(prefix).render(&chat.settings.ctx(80));
+            assert_eq!(all_lines(&mut chat, 80), committed, "after {prefix:?}");
         }
     }
 

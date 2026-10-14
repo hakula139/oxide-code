@@ -14,21 +14,20 @@ static BLANK: [Line<'static>; 1] = [Line {
 
 // ── CachedBlock ──
 
-/// Render inputs beyond a block's own state. A cached render stays valid while its key matches.
+/// Render inputs that can change after a block is pushed.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) struct RenderKey {
-    pub(super) width: u16,
-    pub(super) theme_epoch: u64,
-    pub(super) show_thinking: bool,
+struct RenderKey {
+    width: u16,
+    theme_epoch: u64,
 }
 
 /// A committed block with its most recent render. Blocks never change after push, so the cached
-/// lines only go stale when the [`RenderKey`] changes.
+/// lines only go stale when the width or theme epoch changes.
 pub(super) struct CachedBlock {
-    pub(super) block: Box<dyn ChatBlock>,
+    block: Box<dyn ChatBlock>,
     key: Option<RenderKey>,
-    pub(super) visible: bool,
-    pub(super) lines: Vec<Line<'static>>,
+    visible: bool,
+    lines: Vec<Line<'static>>,
 }
 
 impl CachedBlock {
@@ -41,8 +40,24 @@ impl CachedBlock {
         }
     }
 
-    /// Re-renders unless the cached lines were produced under `key`.
-    pub(super) fn refresh(&mut self, ctx: &RenderCtx<'_>, key: RenderKey) {
+    pub(super) fn block(&self) -> &dyn ChatBlock {
+        self.block.as_ref()
+    }
+
+    pub(super) fn visible(&self) -> bool {
+        self.visible
+    }
+
+    pub(super) fn lines(&self) -> &[Line<'static>] {
+        &self.lines
+    }
+
+    /// Re-renders unless the cached lines were produced at this width and theme epoch.
+    pub(super) fn refresh(&mut self, ctx: &RenderCtx<'_>, theme_epoch: u64) {
+        let key = RenderKey {
+            width: ctx.width,
+            theme_epoch,
+        };
         if self.key == Some(key) {
             return;
         }

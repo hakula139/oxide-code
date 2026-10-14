@@ -41,7 +41,7 @@ tokio::select! {
 
 ## Streaming Markdown
 
-Block-based commit with a stable-prefix cache. A top-level markdown block is complete once another top-level block starts after it, so the cache renders complete blocks once into owned `Line<'static>` values and each frame re-parses only the tail from the last block start. Blank lines inside a fenced code block or a loose list stay in the tail, which keeps the streaming render identical to the committed one.
+Block-based commit with a stable-prefix cache. A top-level markdown block is complete once another top-level block starts after it, so the cache renders complete blocks once into owned `Line<'static>` values and each frame re-parses only the tail from the last block start. Block starts are found in newline-terminated lines only, because a partial line can still change which block it opens. Blank lines inside a fenced code block or a loose list stay in the tail. The streaming render matches the committed one except for the spacing around HTML blocks and link reference definitions.
 
 An open code block stays in the tail and is re-highlighted each frame until the next block starts.
 

@@ -142,7 +142,7 @@ ox                                          # Start an interactive session
 │   │   │   │   │   ├── read_excerpt.rs     # Read-tool line-numbered excerpt body + path / range header
 │   │   │   │   │   └── text.rs             # Default truncated-text body (fallback for tools without a richer view)
 │   │   │   │   └── user.rs                 # UserMessage
-│   │   │   └── stack.rs                    # CachedBlock (render memo keyed by width / theme epoch / show_thinking) + Stack (borrowed row runs, visible-slice copy)
+│   │   │   └── stack.rs                    # CachedBlock (render memo keyed by width / theme epoch) + Stack (borrowed row runs, visible-slice copy)
 │   │   ├── input.rs                        # Multi-line input area (ratatui-textarea) + slash-popup wiring + arg-mode `[id]` ghost text
 │   │   ├── input/
 │   │   │   ├── popup.rs                    # Slash-command autocomplete overlay: dim non-selected, bold selected, alias parens

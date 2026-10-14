@@ -60,11 +60,11 @@ impl StreamingAssistant {
 
         let boundary = self.rendered_boundary;
         let tail = &self.buffer[boundary..];
-        // A second block can only start after a line break.
-        if !tail.contains('\n') {
+        // A partial last line can still change which block it starts, so only whole lines count.
+        let Some(last_newline) = tail.rfind('\n') else {
             return;
-        }
-        let complete_len = complete_blocks_len(tail);
+        };
+        let complete_len = complete_blocks_len(&tail[..=last_newline]);
         if complete_len == 0 {
             return;
         }

@@ -27,7 +27,8 @@ pub(crate) fn render_markdown(input: &str, theme: &Theme, width: usize) -> Text<
 ///
 /// A block is complete once another top-level block starts after it, so the run ends at the line
 /// where the last block starts. Rendering the run and the remainder separately and joining them
-/// with a blank line matches a single render of `input`.
+/// with a blank line matches a single render of `input`, except for the spacing around HTML blocks
+/// and link reference definitions.
 pub(crate) fn complete_blocks_len(input: &str) -> usize {
     let mut depth = 0_usize;
     let mut last_start = 0;
