@@ -24,6 +24,7 @@ error = "#d20f39"
 # Code
 code = "#179299"
 inline_code = "#fe640b"
+syntax_theme = "InspiredGitHub"
 
 # Diff backgrounds (light pastels for the light variant)
 diff_add = { bg = "#c8e4ce" }

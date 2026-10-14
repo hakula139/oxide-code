@@ -56,14 +56,6 @@ impl ChatBlock for GitDiffBlock {
                     ctx.theme.text().add_modifier(Modifier::BOLD),
                 );
                 in_hunk = false;
-            } else if line.starts_with("index ")
-                || line.starts_with("--- ")
-                || line.starts_with("+++ ")
-                || line.starts_with("similarity ")
-                || line.starts_with("rename ")
-                || line.starts_with("new file ")
-                || line.starts_with("deleted file ")
-            {
             } else if let Some((o, n)) = parse_hunk_starts(line) {
                 old_ln = o;
                 new_ln = n;
@@ -73,6 +65,9 @@ impl ChatBlock for GitDiffBlock {
                 in_hunk = false;
                 bordered_row::render(&mut out, ctx, border, String::new(), ctx.theme.dim());
             } else if !in_hunk {
+                if is_file_header(line) {
+                    continue;
+                }
                 // Untracked heading / paths / truncation footer.
                 let style = if line.starts_with("Untracked") || line.starts_with("(truncated") {
                     ctx.theme.dim()
@@ -80,10 +75,10 @@ impl ChatBlock for GitDiffBlock {
                     ctx.theme.text()
                 };
                 bordered_row::render(&mut out, ctx, border, line.to_owned(), style);
-            } else if let Some(text) = strip_marker(line, '+') {
+            } else if let Some(text) = line.strip_prefix('+') {
                 add.render(&mut out, new_ln, text, ctx.theme.text());
                 new_ln += 1;
-            } else if let Some(text) = strip_marker(line, '-') {
+            } else if let Some(text) = line.strip_prefix('-') {
                 del.render(&mut out, old_ln, text, ctx.theme.text());
                 old_ln += 1;
             } else if let Some(text) = line.strip_prefix(' ') {
@@ -104,6 +99,21 @@ impl ChatBlock for GitDiffBlock {
 
 // ── Diff Parsing ──
 
+/// Extended header lines between `diff --git` and the first `@@`, which the path row already covers.
+fn is_file_header(line: &str) -> bool {
+    [
+        "index ",
+        "--- ",
+        "+++ ",
+        "similarity ",
+        "rename ",
+        "new file ",
+        "deleted file ",
+    ]
+    .iter()
+    .any(|prefix| line.starts_with(prefix))
+}
+
 fn parse_diff_git_path(line: &str) -> Option<&str> {
     let rest = line.strip_prefix("diff --git ")?;
     let after_a = rest.strip_prefix("a/")?;
@@ -123,11 +133,6 @@ fn parse_hunk_starts(line: &str) -> Option<(usize, usize)> {
 fn parse_first_number(s: &str) -> Option<usize> {
     let stop = s.find([',', ' ']).unwrap_or(s.len());
     s[..stop].parse().ok()
-}
-
-fn strip_marker(line: &str, marker: char) -> Option<&str> {
-    line.strip_prefix(marker)
-        .filter(|rest| !rest.starts_with(marker))
 }
 
 // ── Gutter Sizing ──
@@ -209,22 +214,6 @@ mod tests {
     fn parse_hunk_starts_is_none_for_non_hunk() {
         assert_eq!(parse_hunk_starts("+ added line"), None);
         assert_eq!(parse_hunk_starts(""), None);
-    }
-
-    // ── strip_marker ──
-
-    #[test]
-    fn strip_marker_extracts_body_for_real_diff_lines() {
-        assert_eq!(strip_marker("+added", '+'), Some("added"));
-        assert_eq!(strip_marker("-removed", '-'), Some("removed"));
-    }
-
-    #[test]
-    fn strip_marker_rejects_diff_metadata_double_marker() {
-        // Safety net: if the renderer's metadata-skip branch ever
-        // drops, `+++ b/X` / `--- a/X` must not render as green/red.
-        assert_eq!(strip_marker("+++ b/path", '+'), None);
-        assert_eq!(strip_marker("--- a/path", '-'), None);
     }
 
     // ── max_line_number_width ──
@@ -313,6 +302,40 @@ mod tests {
         "});
         let lines = block.render(&ctx_at(80, &theme));
         assert_eq!(lines.len(), 1, "only path header should remain: {lines:#?}");
+    }
+
+    #[test]
+    fn render_classifies_hunk_lines_by_first_char() {
+        let theme = Theme::default();
+        let block = GitDiffBlock::new(indoc! {"
+            diff --git a/notes.md b/notes.md
+            --- a/notes.md
+            +++ b/notes.md
+            @@ -10,4 +10,3 @@
+             intro
+            -- item
+            --- yaml
+            +++ counter
+             outro
+        "});
+        let lines = block.render(&ctx_at(80, &theme));
+        let body: Vec<String> = lines[2..]
+            .iter()
+            .map(|line| {
+                let row: String = line.spans[1..].iter().map(|s| s.content.as_ref()).collect();
+                row.trim_end().to_owned()
+            })
+            .collect();
+        assert_eq!(
+            body,
+            [
+                "10 │ intro",
+                "11 - - item",
+                "12 - -- yaml",
+                "11 + ++ counter",
+                "12 │ outro",
+            ],
+        );
     }
 
     #[test]

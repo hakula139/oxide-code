@@ -1,6 +1,7 @@
-//! Text utilities — display-width-aware operations.
+//! Display-width-aware text utilities.
 
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 pub(crate) const ELLIPSIS: &str = "...";
 
@@ -8,29 +9,18 @@ pub(crate) const ELLIPSIS_WIDTH: usize = 3;
 
 /// Truncates `s` to `max_width` display columns, appending [`ELLIPSIS`] when shortened.
 ///
-/// Width is measured in terminal columns (CJK and emoji = 2, zero-width = 0), not bytes or
-/// `char` count. The ellipsis is dropped when `max_width < ELLIPSIS_WIDTH` because emitting it
-/// would itself overflow the budget.
+/// Width is measured in terminal columns (CJK and emoji take 2), and cuts fall between grapheme
+/// clusters so ZWJ emoji and combining marks stay whole. The ellipsis is dropped when
+/// `max_width < ELLIPSIS_WIDTH` because emitting it would itself overflow the budget.
 pub(crate) fn truncate_to_width(s: &str, max_width: usize) -> String {
     if s.width() <= max_width {
         return s.to_owned();
     }
-    let (budget, tail) = if max_width >= ELLIPSIS_WIDTH {
-        (max_width - ELLIPSIS_WIDTH, ELLIPSIS)
-    } else {
-        (max_width, "")
-    };
-    let mut out = String::with_capacity(s.len());
-    let mut used = 0;
-    for ch in s.chars() {
-        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if used + w > budget {
-            break;
-        }
-        out.push(ch);
-        used += w;
+    if max_width < ELLIPSIS_WIDTH {
+        return take_head(s, max_width);
     }
-    out.push_str(tail);
+    let mut out = take_head(s, max_width - ELLIPSIS_WIDTH);
+    out.push_str(ELLIPSIS);
     out
 }
 
@@ -59,31 +49,27 @@ pub(crate) fn center_truncate_to_width(s: &str, max_width: usize) -> String {
 }
 
 fn take_head(s: &str, budget: usize) -> String {
-    let mut out = String::new();
     let mut used = 0;
-    for ch in s.chars() {
-        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if used + w > budget {
-            break;
-        }
-        out.push(ch);
-        used += w;
-    }
-    out
+    s.graphemes(true)
+        .take_while(|g| {
+            used += g.width();
+            used <= budget
+        })
+        .collect()
 }
 
 fn take_tail(s: &str, budget: usize) -> String {
-    let mut chars: Vec<char> = Vec::new();
     let mut used = 0;
-    for ch in s.chars().rev() {
-        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if used + w > budget {
-            break;
-        }
-        chars.push(ch);
-        used += w;
-    }
-    chars.into_iter().rev().collect()
+    let len: usize = s
+        .graphemes(true)
+        .rev()
+        .take_while(|g| {
+            used += g.width();
+            used <= budget
+        })
+        .map(str::len)
+        .sum();
+    s[s.len() - len..].to_owned()
 }
 
 #[cfg(test)]
@@ -120,6 +106,11 @@ mod tests {
         // Drop the marker — emitting "..." into a 1- or 2-col slot would overflow the budget.
         assert_eq!(truncate_to_width("abc", 1), "a");
         assert_eq!(truncate_to_width("abc", 2), "ab");
+    }
+
+    #[test]
+    fn truncate_to_width_keeps_zwj_emoji_whole() {
+        assert_eq!(truncate_to_width("👨‍👩‍👧 family photo", 5), "👨‍👩‍👧...");
     }
 
     // ── center_truncate_to_width ──
@@ -160,5 +151,10 @@ mod tests {
         // 中文测试 = 8 cols; max=5 → budget=2, half=1 — neither side fits a 2-col char. Centering
         // would yield bare "..." (3 cols of 5), so fall back to right-truncate ("中...", 5 cols).
         assert_eq!(center_truncate_to_width("中文测试", 5), "中...");
+    }
+
+    #[test]
+    fn center_truncate_to_width_keeps_zwj_emoji_whole_on_both_sides() {
+        assert_eq!(center_truncate_to_width("👨‍👩‍👧 photos/2026 👨‍👩‍👧", 7), "👨‍👩‍👧...👨‍👩‍👧",);
     }
 }

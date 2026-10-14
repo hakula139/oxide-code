@@ -2532,7 +2532,20 @@ mod tests {
             replacements: 1,
         };
         chat.push_tool_result_view("Edited f.rs", view, true);
-        insta::assert_snapshot!(render_chat(&mut chat, 60, 10));
+        let backend = render_chat(&mut chat, 60, 10);
+
+        let theme = Theme::default();
+        let buffer = backend.buffer();
+        let error_fg = theme.error().fg.unwrap();
+        assert_ne!(theme.tool_border().fg.unwrap(), error_fg);
+        assert_eq!(buffer[(0, 0)].fg, theme.tool_border().fg.unwrap());
+        for y in 1..=3 {
+            assert_eq!(buffer[(0, y)].fg, error_fg, "result bar on row {y}");
+        }
+        assert_eq!(buffer[(2, 1)].fg, error_fg, "error indicator");
+        assert_eq!(buffer[(4, 2)].bg, theme.diff_del.bg.unwrap());
+        assert_eq!(buffer[(4, 3)].bg, theme.diff_add.bg.unwrap());
+        insta::assert_snapshot!(backend);
     }
 
     #[test]
@@ -2599,7 +2612,18 @@ mod tests {
     fn render_error_entry_is_styled_distinctly() {
         let mut chat = test_chat();
         chat.push_error("API error (HTTP 503): overloaded");
-        insta::assert_snapshot!(render_chat(&mut chat, 60, 4));
+        let backend = render_chat(&mut chat, 60, 4);
+
+        let theme = Theme::default();
+        let buffer = backend.buffer();
+        let error_fg = theme.error().fg.unwrap();
+        assert_ne!(theme.text().fg.unwrap(), error_fg);
+        let message_width = u16::try_from("✗ API error (HTTP 503): overloaded".width()).unwrap();
+        for x in 0..message_width {
+            assert_eq!(buffer[(x, 0)].fg, error_fg, "column {x}");
+            assert_eq!(buffer[(x, 0)].bg, theme.surface().bg.unwrap(), "column {x}");
+        }
+        insta::assert_snapshot!(backend);
     }
 
     #[test]

@@ -4,6 +4,7 @@ use std::sync::LazyLock;
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
+use syntect::highlighting::Theme as SyntaxTheme;
 
 mod builtin;
 mod color;
@@ -115,6 +116,8 @@ macro_rules! define_theme_struct {
                 #[doc = $doc]
                 pub(crate) $name: Slot,
             )*
+            /// Syntect theme that colors tokens in fenced code with a recognized language.
+            pub(crate) syntax: &'static SyntaxTheme,
         }
 
         #[cfg(test)]

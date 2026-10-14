@@ -24,6 +24,7 @@ error = "#ed8796"
 # Code
 code = "#8bd5ca"
 inline_code = "#f5a97f"
+syntax_theme = "base16-ocean.dark"
 
 # Diff backgrounds
 diff_add = { bg = "#283834" }

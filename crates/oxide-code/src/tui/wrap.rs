@@ -2,16 +2,18 @@
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Wraps a line to fit within `max_width`, preserving visual indentation on continuation lines.
 ///
-/// `continuation_indent` is the column count reserved on every wrapped sub-line after the first;
+/// `continuation_indent` is the column count reserved on every wrapped sub-line after the first.
 /// `continuation_prefix`, when supplied, replaces the default whitespace fill with styled spans
-/// (used by blockquotes to repeat the `> ` marker, by lists to keep nested indentation, etc.).
-/// The first line is never indented — callers prepend the original prefix themselves.
+/// (blockquote `> ` markers, nested list indentation). The first line is never indented, since
+/// callers prepend the original prefix themselves. Breaks fall between grapheme clusters, so ZWJ
+/// emoji and combining sequences stay whole.
 ///
-/// `max_width == 0` is a width-disabled passthrough; deep indents that would leave less than one
+/// `max_width == 0` passes the line through unwrapped. Deep indents that would leave less than one
 /// column for content fall back to a one-column minimum so wrapping still terminates.
 pub(crate) fn wrap_line(
     line: Line<'static>,
@@ -28,21 +30,20 @@ pub(crate) fn wrap_line(
         return vec![line];
     }
 
-    // Flatten spans into (char, style) pairs for character-level wrapping.
-    let styled: Vec<(char, Style)> = line
+    let styled: Vec<(&str, Style)> = line
         .spans
         .iter()
-        .flat_map(|s| s.content.chars().map(move |ch| (ch, s.style)))
+        .flat_map(|s| s.content.graphemes(true).map(move |g| (g, s.style)))
         .collect();
 
-    // Reserve >=1 column on continuations so deep indents don't produce one char per line.
+    // Keep at least one column on continuations so deep indents still make progress.
     let cont_content_width = max_width.saturating_sub(continuation_indent).max(1);
     let wrapped = greedy_word_wrap(&styled, max_width, cont_content_width);
 
     wrapped
         .into_iter()
         .enumerate()
-        .map(|(i, chars)| {
+        .map(|(i, graphemes)| {
             let mut spans = if i > 0 && continuation_indent > 0 {
                 if let Some(prefix) = continuation_prefix {
                     prefix.to_vec()
@@ -52,7 +53,7 @@ pub(crate) fn wrap_line(
             } else {
                 Vec::new()
             };
-            spans.extend(chars_to_spans(&chars));
+            spans.extend(graphemes_to_spans(graphemes));
             Line::from(spans)
         })
         .collect()
@@ -64,89 +65,88 @@ fn line_width(line: &Line<'_>) -> usize {
 
 // ── Word Wrap Algorithm ──
 
-/// Greedy word-wrap over styled characters; first line wraps at `first_width`, the rest at
-/// `subsequent_width` (caller pre-subtracts the continuation indent).
-fn greedy_word_wrap(
-    chars: &[(char, Style)],
+/// Greedy word-wrap over styled graphemes. The first line wraps at `first_width` and the rest at
+/// `subsequent_width`, which already excludes the continuation indent.
+fn greedy_word_wrap<'a>(
+    graphemes: &'a [(&'a str, Style)],
     first_width: usize,
     subsequent_width: usize,
-) -> Vec<Vec<(char, Style)>> {
-    let mut lines: Vec<Vec<(char, Style)>> = Vec::new();
+) -> Vec<&'a [(&'a str, Style)]> {
+    let mut lines = Vec::new();
     let mut pos = 0;
     let mut is_first = true;
 
-    while pos < chars.len() {
+    while pos < graphemes.len() {
         let budget = if is_first {
             first_width
         } else {
             subsequent_width
         };
-        let (line, next) = take_one_line(chars, pos, budget);
-        lines.push(line);
+        let (end, next) = take_one_line(graphemes, pos, budget);
+        lines.push(&graphemes[pos..end]);
         pos = next;
         is_first = false;
     }
 
     if lines.is_empty() {
-        lines.push(Vec::new());
+        lines.push(&graphemes[..0]);
     }
 
     lines
 }
 
-/// Consumes one visual line starting at `start`; returns the line and the next start index.
-fn take_one_line(
-    chars: &[(char, Style)],
-    start: usize,
-    max_width: usize,
-) -> (Vec<(char, Style)>, usize) {
+/// Measures one visual line starting at `start`, returning its end and the next line's start.
+fn take_one_line(graphemes: &[(&str, Style)], start: usize, max_width: usize) -> (usize, usize) {
     let mut width = 0;
-    let mut last_break = None;
+    let mut last_break: Option<usize> = None;
 
-    for i in start..chars.len() {
-        let ch_width = chars[i].0.width().unwrap_or(0);
+    for (i, &(g, _)) in graphemes.iter().enumerate().skip(start) {
+        let g_width = g.width();
 
-        if width + ch_width > max_width {
+        if width + g_width > max_width {
             if let Some(bp) = last_break {
-                let line = chars[start..=bp].to_vec();
                 let mut next = bp + 1;
-                while next < chars.len() && chars[next].0.is_whitespace() {
+                while next < graphemes.len() && is_whitespace(graphemes[next].0) {
                     next += 1;
                 }
-                return (line, next);
+                return (bp + 1, next);
             }
-            // No whitespace break point — force break at current position.
+            // No whitespace to break at, so split before the overflowing grapheme.
             let end = if i == start { i + 1 } else { i };
-            return (chars[start..end].to_vec(), end);
+            return (end, end);
         }
 
-        width += ch_width;
+        width += g_width;
 
-        if chars[i].0.is_whitespace() {
+        if is_whitespace(g) {
             last_break = Some(i);
         }
     }
 
-    (chars[start..].to_vec(), chars.len())
+    (graphemes.len(), graphemes.len())
+}
+
+fn is_whitespace(grapheme: &str) -> bool {
+    grapheme.chars().all(char::is_whitespace)
 }
 
 // ── Span Reconstruction ──
 
-fn chars_to_spans(chars: &[(char, Style)]) -> Vec<Span<'static>> {
-    if chars.is_empty() {
+fn graphemes_to_spans(graphemes: &[(&str, Style)]) -> Vec<Span<'static>> {
+    let Some(&(_, first_style)) = graphemes.first() else {
         return Vec::new();
-    }
+    };
 
     let mut spans = Vec::new();
     let mut buf = String::new();
-    let mut current_style = chars[0].1;
+    let mut current_style = first_style;
 
-    for &(ch, style) in chars {
+    for &(g, style) in graphemes {
         if style != current_style && !buf.is_empty() {
             spans.push(Span::styled(std::mem::take(&mut buf), current_style));
             current_style = style;
         }
-        buf.push(ch);
+        buf.push_str(g);
     }
 
     if !buf.is_empty() {
@@ -165,18 +165,37 @@ pub(crate) fn expand_tabs(s: &str) -> String {
     if !s.contains('\t') {
         return s.to_owned();
     }
-    let mut out = String::with_capacity(s.len() + 16);
+    expand_tabs_from(s, &mut 0)
+}
+
+/// Expands tabs across `spans`, carrying the column so stops align for the whole line.
+pub(crate) fn expand_tabs_in_spans(spans: Vec<Span<'static>>) -> Vec<Span<'static>> {
     let mut col = 0;
+    spans
+        .into_iter()
+        .map(|mut span| {
+            if span.content.contains('\t') {
+                span.content = expand_tabs_from(&span.content, &mut col).into();
+            } else {
+                col += span.content.width();
+            }
+            span
+        })
+        .collect()
+}
+
+fn expand_tabs_from(s: &str, col: &mut usize) -> String {
+    let mut out = String::with_capacity(s.len() + 16);
     for ch in s.chars() {
         if ch == '\t' {
-            let spaces = TAB_WIDTH - (col % TAB_WIDTH);
+            let spaces = TAB_WIDTH - (*col % TAB_WIDTH);
             for _ in 0..spaces {
                 out.push(' ');
             }
-            col += spaces;
+            *col += spaces;
         } else {
             out.push(ch);
-            col += ch.width().unwrap_or(0);
+            *col += ch.width().unwrap_or(0);
         }
     }
     out
@@ -187,7 +206,11 @@ mod tests {
     use ratatui::style::{Color, Modifier, Style};
     use ratatui::text::{Line, Span};
 
-    use super::{expand_tabs, wrap_line};
+    use super::{expand_tabs, expand_tabs_in_spans, wrap_line};
+
+    fn texts(lines: &[Line<'_>]) -> Vec<String> {
+        lines.iter().map(ToString::to_string).collect()
+    }
 
     // ── wrap_line ──
 
@@ -309,6 +332,19 @@ mod tests {
         assert_eq!(cont.spans[0].style.fg, Some(Color::Green));
     }
 
+    #[test]
+    fn wrap_line_breaks_cjk_by_display_width() {
+        let result = wrap_line(Line::from("你好世界再见"), 5, 0, None);
+        assert_eq!(texts(&result), ["你好", "世界", "再见"]);
+    }
+
+    #[test]
+    fn wrap_line_keeps_zwj_emoji_whole() {
+        let family = "👨‍👩‍👧";
+        let result = wrap_line(Line::from(format!("ab{family}{family}")), 3, 0, None);
+        assert_eq!(texts(&result), ["ab", family, family]);
+    }
+
     // ── expand_tabs ──
 
     #[test]
@@ -327,5 +363,17 @@ mod tests {
     fn expand_tabs_mid_line_aligns_to_stop() {
         assert_eq!(expand_tabs("ab\tcd"), "ab  cd");
         assert_eq!(expand_tabs("abcd\tx"), "abcd    x");
+    }
+
+    // ── expand_tabs_in_spans ──
+
+    #[test]
+    fn expand_tabs_in_spans_aligns_stops_across_span_boundaries() {
+        let red = Style::default().fg(Color::Red);
+        let spans = vec![Span::raw("ab"), Span::styled("\tx", red)];
+        let expanded = expand_tabs_in_spans(spans);
+        assert_eq!(expanded[0].content, "ab");
+        assert_eq!(expanded[1].content, "  x");
+        assert_eq!(expanded[1].style, red);
     }
 }

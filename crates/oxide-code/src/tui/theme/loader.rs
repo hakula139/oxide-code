@@ -1,6 +1,7 @@
 //! Theme TOML parsing and resolution.
 //!
-//! A theme document is a flat TOML body, one entry per slot. Each value is either:
+//! A theme document is a flat TOML body with one entry per slot plus an optional `syntax_theme`
+//! naming a bundled syntect theme for highlighted code. Each slot value is either:
 //!
 //! - a **bare color string** (`text = "#cdd6f4"`): sets `fg` only.
 //! - an **inline table** (`accent = { fg = "#89b4fa", bold = true }`): explicit `fg` / `bg` plus
@@ -14,10 +15,12 @@
 //! so the TUI still launches.
 
 use std::collections::HashMap;
+use std::sync::LazyLock;
 
 use anyhow::{Context, Result, bail};
 use ratatui::style::Modifier;
 use serde::Deserialize;
+use syntect::highlighting::{Theme as SyntaxTheme, ThemeSet};
 use tracing::warn;
 
 use super::{Slot, Theme, builtin, color::parse_color};
@@ -190,6 +193,7 @@ macro_rules! define_theme_file {
         #[serde(deny_unknown_fields)]
         struct ThemeFile {
             $( $name: SlotDef, )*
+            syntax_theme: Option<String>,
         }
 
         impl ThemeFile {
@@ -199,6 +203,7 @@ macro_rules! define_theme_file {
                 };
                 Ok(Theme {
                     $( $name: parse(self.$name, stringify!($name))?, )*
+                    syntax: syntax_theme(self.syntax_theme.as_deref())?,
                 })
             }
         }
@@ -206,6 +211,20 @@ macro_rules! define_theme_file {
 }
 
 super::for_each_slot!(define_theme_file);
+
+static SYNTAX_THEMES: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_defaults);
+
+/// Looks up a bundled syntect theme by name, defaulting to `base16-ocean.dark` when unset.
+fn syntax_theme(name: Option<&str>) -> Result<&'static SyntaxTheme> {
+    let name = name.unwrap_or("base16-ocean.dark");
+    SYNTAX_THEMES.themes.get(name).with_context(|| {
+        let known: Vec<&str> = SYNTAX_THEMES.themes.keys().map(String::as_str).collect();
+        format!(
+            "syntax_theme {name:?}: expected one of {}",
+            known.join(", ")
+        )
+    })
+}
 
 /// One slot's TOML representation; `untagged` accepts either bare string or inline table.
 #[derive(Deserialize)]
@@ -894,6 +913,44 @@ mod tests {
         // diagnostic, but the offending line (with `sparkle`) is
         // included in the rendered TOML error context.
         assert!(msg.contains("sparkle"), "{msg}");
+    }
+
+    // ── parse_theme: syntax_theme ──
+
+    #[test]
+    fn parse_theme_builtins_pick_syntax_theme_for_their_background() {
+        for (name, body, expected) in [
+            ("mocha", builtin::MOCHA, "base16-ocean.dark"),
+            ("macchiato", builtin::MACCHIATO, "base16-ocean.dark"),
+            ("frappe", builtin::FRAPPE, "base16-ocean.dark"),
+            ("latte", builtin::LATTE, "InspiredGitHub"),
+            ("material", builtin::MATERIAL, "base16-ocean.dark"),
+        ] {
+            let t = parse_theme(body).unwrap_or_else(|e| panic!("{name} parse: {e:#}"));
+            assert_eq!(
+                t.syntax.name, SYNTAX_THEMES.themes[expected].name,
+                "{name} should use {expected}",
+            );
+        }
+    }
+
+    #[test]
+    fn parse_theme_without_syntax_theme_defaults_to_base16_ocean_dark() {
+        let body = mocha_with_slot_replacement(r#"syntax_theme = "base16-ocean.dark""#, "");
+        let t = parse_theme(&body).unwrap();
+        assert_eq!(t.syntax.name.as_deref(), Some("Base16 Ocean Dark"));
+    }
+
+    #[test]
+    fn parse_theme_unknown_syntax_theme_lists_bundled_names() {
+        let body = mocha_with_slot_replacement(
+            r#"syntax_theme = "base16-ocean.dark""#,
+            r#"syntax_theme = "dracula""#,
+        );
+        let err = parse_theme(&body).expect_err("unknown syntax theme rejected");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("dracula"), "{msg}");
+        assert!(msg.contains("InspiredGitHub"), "{msg}");
     }
 
     /// Replace one `accent` / `thinking` / etc. line in the embedded

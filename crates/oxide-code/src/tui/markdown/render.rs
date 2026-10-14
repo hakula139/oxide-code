@@ -2,7 +2,9 @@
 //! lines wrapped to terminal width; wrapping is block-aware so it respects the enclosing
 //! block's continuation indent.
 
-use pulldown_cmark::{Alignment, CodeBlockKind, CowStr, Event, HeadingLevel, Tag, TagEnd};
+use pulldown_cmark::{
+    Alignment, CodeBlockKind, CowStr, Event, HeadingLevel, LinkType, Tag, TagEnd,
+};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use tracing::{debug, warn};
@@ -10,7 +12,7 @@ use unicode_width::UnicodeWidthStr;
 
 use super::highlight::highlight_code;
 use crate::tui::theme::Theme;
-use crate::tui::wrap::wrap_line;
+use crate::tui::wrap::{expand_tabs_in_spans, wrap_line};
 
 // ── Renderer ──
 
@@ -44,10 +46,17 @@ pub(super) struct MarkdownRenderer<I> {
     pending_marker: Option<Vec<Span<'static>>>,
 
     inline_styles: Vec<Style>,
-    link_url: Option<String>,
+    link: Option<OpenLink>,
 
     code_block: CodeBlockState,
     table: TableState,
+}
+
+enum OpenLink {
+    /// Autolink whose text is already the URL, so it is styled as a link with no suffix.
+    Bare,
+    /// Labeled link whose URL prints after the text.
+    Labeled(String),
 }
 
 #[derive(Default)]
@@ -83,7 +92,7 @@ where
             list_stack: Vec::new(),
             pending_marker: None,
             inline_styles: Vec::new(),
-            link_url: None,
+            link: None,
             code_block: CodeBlockState::default(),
             table: TableState::default(),
         }
@@ -130,9 +139,11 @@ where
             Tag::Strikethrough => {
                 self.push_inline_style(Style::new().add_modifier(Modifier::CROSSED_OUT));
             }
-            Tag::Link { dest_url, .. } => {
-                self.link_url = Some(dest_url.to_string());
-            }
+            Tag::Link {
+                link_type,
+                dest_url,
+                ..
+            } => self.start_link(link_type, dest_url),
             Tag::Table(alignments) => self.start_table(alignments),
             Tag::TableHead => self.table.in_head = true,
             Tag::TableRow => {}
@@ -307,11 +318,20 @@ where
         let code = std::mem::take(&mut self.code_block.buf);
         let lang = self.code_block.lang.take();
 
-        let highlighted = highlight_code(lang.as_deref().unwrap_or(""), &code, self.theme.code());
-        for line in highlighted {
-            self.lines.push(line);
+        for line in highlight_code(lang.as_deref().unwrap_or(""), &code, &self.theme) {
+            self.push_code_line(line);
         }
         self.needs_newline = true;
+    }
+
+    /// Pushes one highlighted line through the block indent and wrapping, keeping its line style.
+    fn push_code_line(&mut self, line: Line<'static>) {
+        let style = line.style;
+        let start = self.lines.len();
+        self.push_line(Line::from(expand_tabs_in_spans(line.spans)));
+        for row in &mut self.lines[start..] {
+            row.style = style;
+        }
     }
 
     // ── Tables ──
@@ -473,11 +493,34 @@ where
 
     // ── Links ──
 
+    fn start_link(&mut self, link_type: LinkType, dest_url: CowStr<'a>) {
+        if matches!(link_type, LinkType::Autolink | LinkType::Email) {
+            self.push_inline_style(self.theme.link());
+            self.link = Some(OpenLink::Bare);
+        } else {
+            self.link = Some(OpenLink::Labeled(dest_url.into_string()));
+        }
+    }
+
     fn pop_link(&mut self) {
-        if let Some(url) = self.link_url.take() {
-            self.push_span(Span::raw(" ("));
-            self.push_span(Span::styled(url, self.theme.link()));
-            self.push_span(Span::raw(")"));
+        if let Some(link) = self.link.take() {
+            match link {
+                OpenLink::Bare => self.pop_inline_style(),
+                OpenLink::Labeled(url) => {
+                    let suffix = [
+                        Span::raw(" ("),
+                        Span::styled(url, self.theme.link()),
+                        Span::raw(")"),
+                    ];
+                    if self.table.active {
+                        self.table.cell_buf.extend(suffix);
+                    } else {
+                        for span in suffix {
+                            self.push_span(span);
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1126,6 +1169,64 @@ mod tests {
         assert!(has_rgb, "syntax highlighting should produce RGB colors");
     }
 
+    #[test]
+    fn fenced_code_block_expands_tabs_to_stops() {
+        let lines = rendered_text("```go\nfunc f() {\n\treturn\n}\n```\n");
+        assert_eq!(lines, ["func f() {", "    return", "}"]);
+    }
+
+    #[test]
+    fn fenced_code_block_wraps_long_lines_and_keeps_line_style() {
+        let t = theme();
+        let text = render_markdown(
+            indoc! {"
+                ```
+                alpha beta gamma delta epsilon
+                ```
+            "},
+            &t,
+            12,
+        );
+        let rows: Vec<String> = text.lines.iter().map(ToString::to_string).collect();
+        assert_eq!(rows, ["alpha beta ", "gamma delta ", "epsilon"]);
+        assert!(text.lines.iter().all(|l| l.style == t.code()), "{text:?}");
+    }
+
+    #[test]
+    fn fenced_code_block_in_list_item_keeps_item_indent() {
+        let lines = rendered_text(indoc! {"
+            - item
+
+              ```
+              let x = 1;
+              ```
+        "});
+        assert_eq!(lines, ["- item", "", "  let x = 1;"]);
+    }
+
+    #[test]
+    fn fenced_code_block_as_first_item_child_takes_the_marker() {
+        let lines = rendered_text(indoc! {"
+            - ```
+              let x = 1;
+              ```
+        "});
+        assert_eq!(lines, ["- let x = 1;"]);
+    }
+
+    #[test]
+    fn fenced_code_block_in_blockquote_keeps_marker_on_wrapped_rows() {
+        let lines = rendered_text_at_width(
+            indoc! {"
+                > ```
+                > alpha beta gamma
+                > ```
+            "},
+            12,
+        );
+        assert_eq!(lines, ["> alpha ", "> beta gamma"]);
+    }
+
     // ── Tables ──
 
     #[test]
@@ -1641,6 +1742,37 @@ mod tests {
             .unwrap();
         assert!(url_span.style.add_modifier.contains(Modifier::UNDERLINED));
         assert_eq!(url_span.style.fg, t.accent.fg);
+    }
+
+    #[test]
+    fn link_autolink_renders_url_once_in_link_style() {
+        let t = theme();
+        let text = render_markdown("<https://x.io>", &t, 0);
+        assert_eq!(
+            text.lines[0].spans,
+            [Span::styled("https://x.io", t.link())]
+        );
+    }
+
+    #[test]
+    fn link_email_autolink_renders_address_once() {
+        assert_eq!(rendered_text("<me@x.io>"), ["me@x.io"]);
+    }
+
+    #[test]
+    fn link_in_table_cell_keeps_url_in_the_cell() {
+        let lines = rendered_text(indoc! {"
+            intro
+
+            | site |
+            | ---- |
+            | [x](https://x.io) |
+        "});
+        assert_eq!(lines[0], "intro");
+        assert!(
+            lines.iter().any(|l| l.contains("x (https://x.io)")),
+            "{lines:#?}"
+        );
     }
 
     // ── Word Wrapping ──
