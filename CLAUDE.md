@@ -167,7 +167,6 @@ ox                                          # Start an interactive session
     ├── env.rs                              # Environment-variable helpers (`string`, `bool`: empty-is-absent semantics)
     ├── fs.rs                               # Filesystem helpers: `create_private_dir_all` (0o700) + `atomic_write_private` (0o600 temp+rename)
     ├── git.rs                              # Git / `gh` probes for branch + open PR (best-effort, debug-logged failures)
-    ├── lock.rs                             # Async retry helper for advisory locks (used by oauth)
     ├── log.rs                              # `tracing` subscriber init: file under $XDG_STATE_HOME in TUI mode, stderr otherwise
     ├── path.rs                             # Path display + expansion helpers (`tildify`: $HOME → ~/, `expand_user`: ~/ → $HOME)
     ├── text.rs                             # Display-width-aware text helpers (`truncate_to_width`, `ELLIPSIS`)
