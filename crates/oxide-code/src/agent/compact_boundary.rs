@@ -50,7 +50,7 @@ mod tests {
     use crate::file_tracker::LastView;
     use crate::message::{ContentBlock, Message};
     use crate::session::handle;
-    use crate::session::store::test_store;
+    use crate::session::store::testing::test_store;
 
     struct FailingSink;
 

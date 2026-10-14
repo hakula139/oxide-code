@@ -1,0 +1,613 @@
+//! Session listing: stat-only directory walks that parse only the transcripts a caller needs.
+
+use std::fs::{self, File};
+use std::io::BufReader;
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result};
+use time::OffsetDateTime;
+use tracing::warn;
+
+use super::super::entry::{Entry, ExitInfo, SessionInfo, TitleInfo};
+use super::{HeaderInfo, JsonlLines, SessionStore, file_session_id, read_header};
+
+pub(crate) const DEFAULT_SESSION_LIST_LIMIT: usize = 30;
+
+// ── ListPage ──
+
+/// One page of sessions. `total` also counts the files the page never reached.
+#[derive(Debug, Default)]
+pub(crate) struct ListPage {
+    sessions: Vec<SessionInfo>,
+    total: usize,
+}
+
+impl ListPage {
+    pub(crate) fn new(sessions: Vec<SessionInfo>, total: usize) -> Self {
+        debug_assert!(
+            total >= sessions.len(),
+            "ListPage total must include the materialised sessions",
+        );
+        Self { sessions, total }
+    }
+
+    pub(crate) fn sessions(&self) -> &[SessionInfo] {
+        &self.sessions
+    }
+
+    pub(crate) fn into_sessions(self) -> Vec<SessionInfo> {
+        self.sessions
+    }
+
+    pub(crate) fn total(&self) -> usize {
+        self.total
+    }
+}
+
+// ── Listing ──
+
+impl SessionStore {
+    /// Every readable session in the home project, most recently active first.
+    #[cfg(test)]
+    pub(crate) fn list(&self) -> Result<Vec<SessionInfo>> {
+        Ok(self.list_paged(None, false)?.into_sessions())
+    }
+
+    /// Up to `limit` most recently active readable sessions, unbounded for `None`. `all` widens
+    /// the walk from the home project to every project.
+    pub(crate) fn list_paged(&self, limit: Option<usize>, all: bool) -> Result<ListPage> {
+        let mut paths = self.session_paths(all)?.into_iter();
+        let sessions: Vec<_> = read_session_infos(paths.by_ref())
+            .take(limit.unwrap_or(usize::MAX))
+            .collect();
+        let total = sessions.len() + paths.len();
+        Ok(ListPage::new(sessions, total))
+    }
+
+    /// Readable sessions whose id starts with `prefix`, most recently active first. Ids are
+    /// matched on file names, so only the matching files are parsed.
+    pub(crate) fn list_matching(&self, prefix: &str, all: bool) -> Result<Vec<SessionInfo>> {
+        let mut paths = self.session_paths(all)?;
+        paths.retain(|(path, _)| file_session_id(path).is_some_and(|id| id.starts_with(prefix)));
+        Ok(read_session_infos(paths.into_iter()).collect())
+    }
+
+    /// Session files paired with their mtimes, most recently active first.
+    fn session_paths(&self, all: bool) -> Result<Vec<(PathBuf, OffsetDateTime)>> {
+        let mut paths = if all {
+            self.collect_paths_all_projects()?
+        } else {
+            collect_session_paths(&self.project_dir)?
+        };
+        sort_paths_recent_first(&mut paths);
+        Ok(paths)
+    }
+
+    fn collect_paths_all_projects(&self) -> Result<Vec<(PathBuf, OffsetDateTime)>> {
+        let mut out = Vec::new();
+        for entry in read_dir_entries(&self.sessions_dir)? {
+            if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                match collect_session_paths(&entry.path()) {
+                    Ok(mut paths) => out.append(&mut paths),
+                    Err(e) => warn!("skipping project dir {}: {e}", entry.path().display()),
+                }
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// Pairs each `.jsonl` file in `dir` with its mtime. A failed stat is warn-skipped, because an
+/// epoch fallback would quietly sort the file out of every page.
+fn collect_session_paths(dir: &Path) -> Result<Vec<(PathBuf, OffsetDateTime)>> {
+    Ok(read_dir_entries(dir)?
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "jsonl"))
+        .filter_map(|e| {
+            let path = e.path();
+            e.metadata()
+                .and_then(|m| m.modified())
+                .inspect_err(|err| {
+                    warn!("skipping session {} (stat failed): {err}", path.display());
+                })
+                .ok()
+                .map(|t| (path, OffsetDateTime::from(t)))
+        })
+        .collect())
+}
+
+/// The entries of `dir`, warn-skipping any the OS fails to read.
+fn read_dir_entries(dir: &Path) -> Result<impl Iterator<Item = fs::DirEntry>> {
+    let entries = fs::read_dir(dir).with_context(|| format!("cannot read {}", dir.display()))?;
+    Ok(entries.filter_map(|entry| {
+        entry
+            .inspect_err(|e| warn!("skipping directory entry: {e}"))
+            .ok()
+    }))
+}
+
+fn sort_paths_recent_first(paths: &mut [(PathBuf, OffsetDateTime)]) {
+    paths
+        .sort_by(|(p1, m1), (p2, m2)| m2.cmp(m1).then_with(|| p2.file_name().cmp(&p1.file_name())));
+}
+
+/// Parses `paths` in order, warn-skipping unreadable files.
+fn read_session_infos(
+    paths: impl Iterator<Item = (PathBuf, OffsetDateTime)>,
+) -> impl Iterator<Item = SessionInfo> {
+    paths.filter_map(
+        |(path, modified)| match read_session_info(&path, modified) {
+            Ok(info) => Some(info),
+            Err(e) => {
+                warn!("skipping unreadable session file {}: {e}", path.display());
+                None
+            }
+        },
+    )
+}
+
+// ── Session Info Extraction ──
+
+// Cheap pre-filter: `serde(tag = "type")` always emits `type` first.
+const TITLE_LINE_PREFIX: &str = r#"{"type":"title""#;
+const SUMMARY_LINE_PREFIX: &str = r#"{"type":"summary""#;
+
+/// Reads the header and the latest title and summary. `last_active_at` is the mtime the walk sorted
+/// by, so the listed time matches the order.
+fn read_session_info(path: &Path, last_active_at: OffsetDateTime) -> Result<SessionInfo> {
+    let file = File::open(path).with_context(|| format!("cannot open {}", path.display()))?;
+    let mut lines = JsonlLines::new(BufReader::new(&file));
+    let HeaderInfo {
+        session_id,
+        cwd,
+        git_branch,
+    } = read_header(&mut lines, path)?;
+
+    let mut title: Option<TitleInfo> = None;
+    let mut exit: Option<ExitInfo> = None;
+    while let Some((_, line)) = lines.next_line()? {
+        if line.starts_with(TITLE_LINE_PREFIX)
+            && let Ok(Entry::Title {
+                title: text,
+                updated_at,
+                ..
+            }) = serde_json::from_str(line)
+            && title.as_ref().is_none_or(|cur| updated_at > cur.updated_at)
+        {
+            title = Some(TitleInfo {
+                title: text,
+                updated_at,
+            });
+        } else if line.starts_with(SUMMARY_LINE_PREFIX)
+            && let Ok(Entry::Summary {
+                message_count,
+                updated_at,
+            }) = serde_json::from_str(line)
+            && exit.as_ref().is_none_or(|cur| updated_at > cur.updated_at)
+        {
+            exit = Some(ExitInfo {
+                message_count,
+                updated_at,
+            });
+        }
+    }
+
+    Ok(SessionInfo {
+        session_id,
+        path: path.to_owned(),
+        cwd,
+        last_active_at,
+        title,
+        exit,
+        git_branch,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use time::macros::datetime;
+    use uuid::Uuid;
+
+    use super::super::testing::{
+        sample_header, sample_message_entry, sample_summary_entry, sample_title_entry,
+        seed_test_session, test_project_dir, test_session_file, test_store,
+        write_newest_corrupt_session,
+    };
+    use super::*;
+    use crate::session::entry::{CURRENT_VERSION, TitleSource};
+
+    // ── list ──
+
+    #[tokio::test]
+    async fn list_orders_sessions_by_mtime_newest_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+
+        let mut wa = store
+            .create(
+                &Entry::Header {
+                    session_id: "aaa".to_owned(),
+                    cwd: "/a".to_owned(),
+                    model: "m".to_owned(),
+                    created_at: datetime!(2026-04-15 10:00:00 UTC),
+                    version: CURRENT_VERSION,
+                    git_branch: None,
+                },
+                &[],
+            )
+            .unwrap();
+        wa.append(&[sample_title_entry("Older")]).unwrap();
+        wa.append(&[sample_summary_entry(3)]).unwrap();
+
+        let mut wb = store
+            .create(
+                &Entry::Header {
+                    session_id: "bbb".to_owned(),
+                    cwd: "/b".to_owned(),
+                    model: "m".to_owned(),
+                    created_at: datetime!(2026-04-16 12:00:00 UTC),
+                    version: CURRENT_VERSION,
+                    git_branch: None,
+                },
+                &[],
+            )
+            .unwrap();
+        wb.append(&[sample_title_entry("Newer")]).unwrap();
+        wb.append(&[sample_summary_entry(5)]).unwrap();
+
+        let sessions = store.list().unwrap();
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].session_id, "bbb");
+        assert_eq!(sessions[0].title.as_ref().unwrap().title, "Newer");
+        assert_eq!(sessions[0].exit.as_ref().unwrap().message_count, 5);
+        assert_eq!(sessions[1].session_id, "aaa");
+    }
+
+    #[tokio::test]
+    async fn list_mtime_overrides_header_created_at_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+
+        let mut w_old = store
+            .create(
+                &Entry::Header {
+                    session_id: "aaa-old-header".to_owned(),
+                    cwd: "/a".to_owned(),
+                    model: "m".to_owned(),
+                    created_at: datetime!(2026-01-01 10:00:00 UTC),
+                    version: CURRENT_VERSION,
+                    git_branch: None,
+                },
+                &[],
+            )
+            .unwrap();
+        w_old.append(&[sample_title_entry("Old")]).unwrap();
+        drop(w_old);
+
+        let mut w_new = store
+            .create(
+                &Entry::Header {
+                    session_id: "zzz-new-header".to_owned(),
+                    cwd: "/z".to_owned(),
+                    model: "m".to_owned(),
+                    created_at: datetime!(2026-04-17 10:00:00 UTC),
+                    version: CURRENT_VERSION,
+                    git_branch: None,
+                },
+                &[],
+            )
+            .unwrap();
+        w_new.append(&[sample_title_entry("New")]).unwrap();
+        drop(w_new);
+
+        let new_path = test_session_file(dir.path(), "zzz-new-header");
+        let far_past = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let times = std::fs::FileTimes::new().set_modified(far_past);
+        File::options()
+            .write(true)
+            .open(&new_path)
+            .unwrap()
+            .set_times(times)
+            .unwrap();
+
+        let sessions = store.list().unwrap();
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(
+            sessions[0].session_id, "aaa-old-header",
+            "freshly-touched file with older header should come first"
+        );
+        assert!(
+            sessions[0].last_active_at > sessions[1].last_active_at,
+            "mtime drives ordering"
+        );
+        assert_eq!(sessions[1].session_id, "zzz-new-header");
+    }
+
+    #[tokio::test]
+    async fn list_picks_latest_title_when_re_appended() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut writer = store.create(&sample_header("retitled"), &[]).unwrap();
+        writer
+            .append(&[Entry::Title {
+                title: "original prompt".to_owned(),
+                source: TitleSource::FirstPrompt,
+                updated_at: datetime!(2026-04-16 12:00:00 UTC),
+            }])
+            .unwrap();
+        writer
+            .append(&[Entry::Title {
+                title: "AI generated".to_owned(),
+                source: TitleSource::AiGenerated,
+                updated_at: datetime!(2026-04-16 12:01:00 UTC),
+            }])
+            .unwrap();
+
+        let sessions = store.list().unwrap();
+        let title = sessions[0].title.as_ref().unwrap();
+        assert_eq!(title.title, "AI generated");
+    }
+
+    #[tokio::test]
+    async fn list_finds_ai_title_buried_between_head_and_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut writer = store.create(&sample_header("buried"), &[]).unwrap();
+        writer
+            .append(&[Entry::Title {
+                title: "first prompt".to_owned(),
+                source: TitleSource::FirstPrompt,
+                updated_at: datetime!(2026-04-16 12:00:00 UTC),
+            }])
+            .unwrap();
+        writer
+            .append(&[sample_message_entry(Uuid::new_v4(), "short user text")])
+            .unwrap();
+        writer
+            .append(&[Entry::Title {
+                title: "AI picked".to_owned(),
+                source: TitleSource::AiGenerated,
+                updated_at: datetime!(2026-04-16 12:00:05 UTC),
+            }])
+            .unwrap();
+        let bulky_body = "x".repeat(16_000);
+        writer
+            .append(&[sample_message_entry(Uuid::new_v4(), &bulky_body)])
+            .unwrap();
+        writer.append(&[sample_summary_entry(2)]).unwrap();
+
+        let sessions = store.list().unwrap();
+        let title = sessions[0].title.as_ref().unwrap();
+        assert_eq!(title.title, "AI picked");
+        let exit = sessions[0].exit.as_ref().unwrap();
+        assert_eq!(exit.message_count, 2);
+    }
+
+    #[tokio::test]
+    async fn list_absent_title_and_exit_fields_are_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let _writer = store.create(&sample_header("bare"), &[]).unwrap();
+
+        let sessions = store.list().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, "bare");
+        assert!(sessions[0].title.is_none());
+        assert!(sessions[0].exit.is_none());
+    }
+
+    #[test]
+    fn list_skips_non_session_files_and_malformed_jsonl() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let project_dir = test_project_dir(dir.path());
+        fs::write(project_dir.join("notes.txt"), "not a session").unwrap();
+        fs::write(
+            project_dir.join("bad.jsonl"),
+            r#"{"type":"message","uuid":"00000000-0000-0000-0000-000000000000","message":{"role":"user","content":[]},"timestamp":"2026-01-01T00:00:00Z"}"#,
+        )
+        .unwrap();
+        assert!(store.list().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_is_scoped_to_current_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let _own = store.create(&sample_header("own"), &[]).unwrap();
+
+        let sibling_store =
+            SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
+        let _foreign = sibling_store
+            .create(&sample_header("foreign"), &[])
+            .unwrap();
+        drop(sibling_store);
+
+        let sessions = store.list().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, "own");
+    }
+
+    // ── list_paged ──
+
+    /// Builds `count` sessions whose mtimes and file names both ascend in seed order.
+    fn seed_n_sessions(store: &SessionStore, count: usize) {
+        for i in 0..count {
+            let id = format!("session-{i:04}");
+            let offset = i64::try_from(i).expect("test count fits i64");
+            let mut writer = store
+                .create(
+                    &Entry::Header {
+                        session_id: id.clone(),
+                        cwd: "/work/project".to_owned(),
+                        model: "m".to_owned(),
+                        created_at: datetime!(2026-04-15 10:00:00 UTC)
+                            + time::Duration::seconds(offset),
+                        version: CURRENT_VERSION,
+                        git_branch: None,
+                    },
+                    &[],
+                )
+                .unwrap();
+            writer
+                .append(&[sample_title_entry(&format!("Title {i}"))])
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn list_paged_caps_at_limit_keeping_most_recent() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        seed_n_sessions(&store, 10);
+
+        let page = store.list_paged(Some(3), false).unwrap();
+        assert_eq!(page.sessions().len(), 3, "cap honored");
+        assert_eq!(page.total(), 10, "total reflects pre-cap count");
+        assert_eq!(page.sessions()[0].session_id, "session-0009");
+        assert_eq!(page.sessions()[2].session_id, "session-0007");
+    }
+
+    #[tokio::test]
+    async fn list_paged_unbounded_returns_total_equal_to_len() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        seed_n_sessions(&store, 4);
+
+        let page = store.list_paged(None, false).unwrap();
+        assert_eq!(page.sessions().len(), 4);
+        assert_eq!(page.total(), 4, "no cap → total equals returned len");
+    }
+
+    #[tokio::test]
+    async fn list_paged_all_spans_every_project_subdirectory() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let _own = store.create(&sample_header("own"), &[]).unwrap();
+
+        let foreign_store =
+            SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
+        let _foreign = foreign_store
+            .create(&sample_header("foreign"), &[])
+            .unwrap();
+        drop(foreign_store);
+
+        let all = store.list_paged(None, true).unwrap().into_sessions();
+        let mut ids: Vec<_> = all.iter().map(|s| s.session_id.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec!["foreign", "own"]);
+    }
+
+    #[test]
+    fn list_paged_leaves_unreadable_files_out_of_rows_and_total() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        seed_n_sessions(&store, 3);
+        write_newest_corrupt_session(dir.path());
+
+        let page = store.list_paged(Some(2), false).unwrap();
+        let ids: Vec<_> = page
+            .sessions()
+            .iter()
+            .map(|s| s.session_id.as_str())
+            .collect();
+        assert_eq!(ids, ["session-0002", "session-0001"]);
+        assert_eq!(
+            page.total(),
+            3,
+            "total counts the unparsed file and skips the unreadable one"
+        );
+
+        let unbounded = store.list_paged(None, false).unwrap();
+        assert_eq!(unbounded.sessions().len(), 3);
+        assert_eq!(unbounded.total(), 3, "an unbounded page hides no rows");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_paged_all_skips_stray_files_and_unreadable_project_dirs() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let _own = store.create(&sample_header("own"), &[]).unwrap();
+        fs::write(dir.path().join("stray.jsonl"), "").unwrap();
+        let locked = dir.path().join("locked-project");
+        fs::create_dir(&locked).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let page = store.list_paged(None, true);
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let ids: Vec<_> = page
+            .unwrap()
+            .into_sessions()
+            .into_iter()
+            .map(|s| s.session_id)
+            .collect();
+        assert_eq!(ids, ["own"]);
+    }
+
+    #[tokio::test]
+    async fn list_paged_zero_limit_yields_no_rows_but_full_total() {
+        // The CLI maps `--limit 0` to `None`, so `Some(0)` reaching the store means zero rows.
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        seed_n_sessions(&store, 3);
+
+        let page = store.list_paged(Some(0), false).unwrap();
+        assert!(page.sessions().is_empty());
+        assert_eq!(page.total(), 3, "total still reflects what's on disk");
+    }
+
+    // ── list_matching ──
+
+    #[test]
+    fn list_matching_matches_the_id_part_of_file_names_newest_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        for (id, created_at) in [
+            ("abc-older", datetime!(2026-04-16 12:00:00 UTC)),
+            ("abd-newer", datetime!(2026-04-16 12:00:01 UTC)),
+            ("xyz", datetime!(2026-04-16 12:00:02 UTC)),
+        ] {
+            seed_test_session(&store, id, None, None, created_at);
+        }
+        let ids = |prefix: &str| -> Vec<String> {
+            let sessions = store.list_matching(prefix, false).unwrap();
+            sessions.into_iter().map(|s| s.session_id).collect()
+        };
+
+        assert_eq!(ids("ab"), ["abd-newer", "abc-older"]);
+        assert_eq!(ids("abc-older"), ["abc-older"]);
+        assert!(
+            ids("older").is_empty(),
+            "a prefix must not match the end of an id"
+        );
+        assert!(
+            ids("1776").is_empty(),
+            "the timestamp in a file name is not part of the id",
+        );
+    }
+
+    #[test]
+    fn list_matching_skips_unreadable_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        seed_test_session(
+            &store,
+            "corrupt-twin",
+            None,
+            None,
+            datetime!(2026-04-16 12:00:00 UTC),
+        );
+        write_newest_corrupt_session(dir.path());
+
+        let ids: Vec<_> = store
+            .list_matching("corrupt", false)
+            .unwrap()
+            .into_iter()
+            .map(|s| s.session_id)
+            .collect();
+        assert_eq!(ids, ["corrupt-twin"]);
+    }
+}

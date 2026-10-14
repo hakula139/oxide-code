@@ -73,14 +73,14 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 - **`/resume`** (alias `/continue`): Bare opens a searchable session picker ([modals.md](modals.md)), while `/resume <id-prefix>` resolves directly via a current-project-first lookup that widens to all projects on miss. Both forms refuse mid-turn and forward `UserAction::Resume`. Bare suppresses echo while typed-arg echoes. Full design: [resume.md](resume.md).
 
-- **`/delete`**: Typed-arg only, while bare returns a friendly redirect. Picker entry is Ctrl+D inside `/resume`. Both push `ConfirmDeleteSessionModal` ([modals.md](modals.md)), which runs `SessionStore::delete` on Y / Enter and emits a `Deleted session {id}: {title}` line in chat. Live-session refusal is layered across the picker filter, the resolver, and the store-layer bail.
+- **`/delete`**: Typed-arg only, while bare returns a friendly redirect. Picker entry is Ctrl+D inside `/resume`. Both push `ConfirmDeleteSessionModal` ([modals.md](modals.md)), which runs `delete_at` on the session's file on Y / Enter and emits a `Deleted session {id}: {title}` line in chat. Live-session refusal is layered across the picker filter, the resolver, and the store-layer bail.
 
 ## Sources
 
 - `crates/oxide-code/src/agent.rs`: `agent_turn` `Clear` and `SwapConfig` arms.
 - `crates/oxide-code/src/session/display.rs`: shared `id_prefix`, `display_title`, and `format_metadata_line` used by the picker row and the delete confirm modal.
 - `crates/oxide-code/src/session/resolver.rs`: `resolve_prefix_to_info` (current-project-first, widen on miss, scoped error messages).
-- `crates/oxide-code/src/session/store.rs`: `SessionStore::delete` (live-session refusal at the FS boundary).
+- `crates/oxide-code/src/session/store.rs`: `delete_at` (live-session refusal at the FS boundary).
 - `crates/oxide-code/src/slash.rs`: dispatch, `SlashOutcome`, shared test fixtures (`stamped_id`, `with_isolated_xdg`).
 - `crates/oxide-code/src/slash/clear.rs`: `ClearCmd`, send-first ordering.
 - `crates/oxide-code/src/slash/config.rs`: `/config` row builder plus sectioned `KvOverview` constructor.

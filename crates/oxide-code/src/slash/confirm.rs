@@ -1,6 +1,8 @@
 //! Destructive-action confirm modal scoped to session deletion. Generalize when a second use
 //! case lands.
 
+use std::path::PathBuf;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -9,7 +11,7 @@ use ratatui::widgets::Paragraph;
 use tracing::warn;
 
 use crate::session::display::id_prefix;
-use crate::session::store::SessionStore;
+use crate::session::store::delete_at;
 use crate::tui::modal::chrome::{FOOTER_HEIGHT, Header, render_footer};
 use crate::tui::modal::{Modal, ModalAction, ModalKey};
 use crate::tui::theme::Theme;
@@ -26,11 +28,11 @@ const MIN_BUDGET: usize = 8;
 
 // ── ConfirmDeleteSessionModal ──
 
-/// Confirm-and-delete overlay. Owns the `SessionStore` clone so the unlink fires synchronously on
-/// Y without a roundtrip through the agent loop.
+/// Confirm-and-delete overlay. The unlink fires synchronously on Y without a roundtrip through the
+/// agent loop.
 pub(super) struct ConfirmDeleteSessionModal {
     header: Header,
-    store: SessionStore,
+    path: PathBuf,
     session_id: String,
     display_title: String,
     /// Pre-formatted metadata ("14 msgs · 2 hours ago"). Caller builds it so the modal stays
@@ -43,7 +45,7 @@ pub(super) struct ConfirmDeleteSessionModal {
 
 impl ConfirmDeleteSessionModal {
     pub(super) fn new(
-        store: SessionStore,
+        path: PathBuf,
         session_id: String,
         display_title: String,
         metadata: String,
@@ -51,7 +53,7 @@ impl ConfirmDeleteSessionModal {
     ) -> Self {
         Self {
             header: Header::new(TITLE),
-            store,
+            path,
             session_id,
             display_title,
             metadata,
@@ -60,10 +62,10 @@ impl ConfirmDeleteSessionModal {
         }
     }
 
-    /// Run `store.delete`. On Ok, pop and emit a chat-stream confirmation. On Err, stay open with
-    /// a sticky inline error.
+    /// Deletes the session file. On Ok, pop and emit a chat-stream confirmation. On Err, stay open
+    /// with a sticky inline error.
     fn confirm(&mut self) -> ModalKey {
-        match self.store.delete(&self.session_id, &self.live_session_id) {
+        match delete_at(&self.path, &self.live_session_id) {
             Ok(()) => ModalKey::Submitted(ModalAction::SystemMessage(format!(
                 "Deleted session {}: {}",
                 id_prefix(&self.session_id),
@@ -138,7 +140,8 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use super::*;
-    use crate::session::store::{seed_test_session, test_store};
+    use crate::session::store::SessionStore;
+    use crate::session::store::testing::{seed_test_session, test_store};
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::from(code)
@@ -164,7 +167,7 @@ mod tests {
             time::macros::datetime!(2026-04-18 09:00:00 UTC),
         );
         ConfirmDeleteSessionModal::new(
-            store.clone(),
+            store.find_session_path(&stamped_id).unwrap(),
             stamped_id,
             title.to_owned(),
             "3 msgs · 2 hours ago".to_owned(),
@@ -328,11 +331,11 @@ mod tests {
 
     #[test]
     fn confirm_failure_latches_error_until_a_deliberate_y_or_n_choice() {
-        // Same-id-as-live triggers store.delete's refusal; modal must stay on screen with the
-        // error visible. Stray keys (arrows, unrecognized chars, modifier events) MUST NOT wipe
-        // the latch — only Y / Enter (re-attempt) or N (cancel) clears it. This pins the
-        // diagnostic against a stray-keystroke race that would otherwise leave the user with no
-        // explanation for why the row reappeared after delete.
+        // Same-id-as-live triggers delete_at's refusal, so the modal stays on screen with the
+        // error visible. Stray keys (arrows, unrecognized chars, modifier events) must leave the
+        // latch, which only Y / Enter (re-attempt) or N (cancel) clears. This pins the diagnostic
+        // against a stray-keystroke race that would otherwise leave the user with no explanation
+        // for why the row reappeared after delete.
         let (_dir, store) = isolated_store();
         let live_id = format!("{:0<36}", "abcd1234");
         seed_test_session(
@@ -343,7 +346,7 @@ mod tests {
             time::macros::datetime!(2026-04-18 09:00:00 UTC),
         );
         let mut modal = ConfirmDeleteSessionModal::new(
-            store.clone(),
+            store.find_session_path(&live_id).unwrap(),
             live_id.clone(),
             "Fix auth flow".to_owned(),
             "3 msgs · 2 hours ago".to_owned(),

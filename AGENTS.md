@@ -91,7 +91,10 @@ ox                                          # Start an interactive session
 │   ├── sanitize.rs                         # Resume-time transcript repair (drop unresolved / orphan tool blocks, collapse roles, sentinels)
 │   ├── snapshots/                          # `cargo insta` baseline JSONL byte-shape snapshots for `actor` round-trip tests
 │   ├── state.rs                            # SessionState: pure-data lifecycle struct owned by the actor (uuid chain, counts, finish gating)
-│   ├── store.rs                            # SessionStore / SessionWriter: file I/O, torn-line repair, XDG path, listing
+│   ├── store.rs                            # SessionStore / SessionWriter: file I/O, torn-line repair, partial-write rollback, path-keyed load / append / delete
+│   ├── store/
+│   │   ├── listing.rs                      # Stat-only session walks: newest-first paging, file-name id prefix match, title / summary scan
+│   │   └── testing.rs                      # Cfg-test session fixtures and id-keyed lookups shared by session and slash tests
 │   └── title_generator.rs                  # Background AI title generation (Haiku) with detached task
 ├── slash.rs                                # Slash-command surface root: re-exports + dispatch
 ├── slash/

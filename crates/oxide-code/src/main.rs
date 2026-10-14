@@ -30,7 +30,8 @@ use file_tracker::FileTracker;
 use session::handle::ResumedSession;
 use session::list_view::render_list;
 use session::resolver::resolve_session;
-use session::store::{DEFAULT_SESSION_LIST_LIMIT, SessionStore};
+use session::store::SessionStore;
+use session::store::listing::DEFAULT_SESSION_LIST_LIMIT;
 use tool::{
     ToolRegistry, bash::BashTool, edit::EditTool, glob::GlobTool, grep::GrepTool, read::ReadTool,
     write::WriteTool,

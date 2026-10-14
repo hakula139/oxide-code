@@ -1,5 +1,7 @@
 //! JSONL entry schema for session files.
 
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -110,6 +112,9 @@ pub(crate) struct CompactInfo {
 #[derive(Debug, Clone)]
 pub(crate) struct SessionInfo {
     pub(crate) session_id: String,
+    /// File this info was read from. Resume and delete act on it, since a renamed file's header
+    /// id can name another file.
+    pub(crate) path: PathBuf,
     pub(crate) cwd: String,
     pub(crate) last_active_at: OffsetDateTime,
     pub(crate) title: Option<TitleInfo>,

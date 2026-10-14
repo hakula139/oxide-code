@@ -939,7 +939,7 @@ mod tests {
     use crate::message::Role;
     use crate::model::ResolvedModelId;
     use crate::session::handle::{self, SessionHandle};
-    use crate::session::store::test_store;
+    use crate::session::store::testing::test_store;
     use crate::tool::{Tool, ToolDefinition, ToolMetadata, ToolOutput, ToolRegistry};
 
     // ── TurnAbort ──

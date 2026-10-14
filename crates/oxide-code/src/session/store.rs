@@ -1,5 +1,9 @@
 //! Session file I/O.
 
+pub(crate) mod listing;
+#[cfg(test)]
+pub(crate) mod testing;
+
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
@@ -11,7 +15,7 @@ use tracing::{debug, warn};
 use uuid::Uuid;
 
 use super::chain::ChainBuilder;
-use super::entry::{CURRENT_VERSION, CompactInfo, Entry, ExitInfo, SessionInfo, TitleInfo};
+use super::entry::{CURRENT_VERSION, CompactInfo, Entry, TitleInfo};
 use super::path::{UNKNOWN_PROJECT_DIR, sanitize_cwd};
 use crate::file_tracker::FileSnapshot;
 use crate::message::Message;
@@ -22,7 +26,6 @@ use crate::util::path::xdg_dir;
 
 const DATA_DIR: &str = "ox";
 const SESSIONS_DIR: &str = "sessions";
-pub(crate) const DEFAULT_SESSION_LIST_LIMIT: usize = 30;
 
 // ── SessionStore ──
 
@@ -31,36 +34,6 @@ pub(crate) const DEFAULT_SESSION_LIST_LIMIT: usize = 30;
 pub(crate) struct SessionStore {
     sessions_dir: PathBuf,
     project_dir: PathBuf,
-}
-
-/// A paginated slice of [`Self::list_paged`]'s output. `total` is the count before truncation,
-/// so renderers can display `... and N more` footers without re-walking the directory.
-#[derive(Debug, Default)]
-pub(crate) struct ListPage {
-    sessions: Vec<SessionInfo>,
-    total: usize,
-}
-
-impl ListPage {
-    pub(crate) fn new(sessions: Vec<SessionInfo>, total: usize) -> Self {
-        debug_assert!(
-            total >= sessions.len(),
-            "ListPage total must include the materialised sessions",
-        );
-        Self { sessions, total }
-    }
-
-    pub(crate) fn sessions(&self) -> &[SessionInfo] {
-        &self.sessions
-    }
-
-    pub(crate) fn into_sessions(self) -> Vec<SessionInfo> {
-        self.sessions
-    }
-
-    pub(crate) fn total(&self) -> usize {
-        self.total
-    }
 }
 
 impl SessionStore {
@@ -117,130 +90,6 @@ impl SessionStore {
         Ok(SessionWriter {
             path,
             file: Some(file),
-        })
-    }
-
-    /// Opens an existing session file in append mode, searching all projects.
-    pub(crate) fn open_append(&self, session_id: &str) -> Result<SessionWriter> {
-        let path = self.find_session_path(session_id)?;
-        open_append_at(&path)
-    }
-
-    /// Loads a session's message chain via DAG resolution (newest-leaf-wins).
-    pub(crate) fn load_session_data(&self, session_id: &str) -> Result<SessionData> {
-        let path = self.find_session_path(session_id)?;
-        load_session_data_from_path(&path)
-    }
-
-    /// List sessions for the current project, most recently active first. Wrapper around
-    /// [`Self::list_paged`] for callers that don't need a cap.
-    pub(crate) fn list(&self) -> Result<Vec<SessionInfo>> {
-        Ok(self.list_paged(None, false)?.into_sessions())
-    }
-
-    /// List sessions across every project subdirectory. Wrapper around [`Self::list_paged`].
-    pub(crate) fn list_all(&self) -> Result<Vec<SessionInfo>> {
-        Ok(self.list_paged(None, true)?.into_sessions())
-    }
-
-    /// List the `limit` most-recently-active sessions and report the total available so callers
-    /// can render a "and N more" footer. `None` is unbounded; `Some(n)` parses at most `n`
-    /// files past the cheap stat-only pre-sort. `all` widens from the home project to every
-    /// project subdir.
-    pub(crate) fn list_paged(&self, limit: Option<usize>, all: bool) -> Result<ListPage> {
-        let mut paths = if all {
-            self.collect_paths_all_projects()?
-        } else {
-            collect_session_paths(&self.project_dir)?
-        };
-        sort_paths_recent_first(&mut paths);
-        let total = paths.len();
-        if let Some(cap) = limit {
-            paths.truncate(cap);
-        }
-        let sessions = paths
-            .into_iter()
-            .filter_map(|(path, _)| match read_session_info(&path) {
-                Ok(info) => Some(info),
-                Err(e) => {
-                    warn!("skipping unreadable session file {}: {e}", path.display());
-                    None
-                }
-            })
-            .collect();
-        Ok(ListPage::new(sessions, total))
-    }
-
-    /// Stat-only walk across every project subdir; defers JSONL parsing to the caller's cap.
-    fn collect_paths_all_projects(&self) -> Result<Vec<(PathBuf, OffsetDateTime)>> {
-        let mut out = Vec::new();
-        for entry in fs::read_dir(&self.sessions_dir)
-            .with_context(|| format!("cannot read {}", self.sessions_dir.display()))?
-        {
-            let entry = match entry {
-                Ok(e) => e,
-                Err(e) => {
-                    warn!("skipping directory entry: {e}");
-                    continue;
-                }
-            };
-            if entry.file_type().is_ok_and(|t| t.is_dir()) {
-                match collect_session_paths(&entry.path()) {
-                    Ok(mut paths) => out.append(&mut paths),
-                    Err(e) => warn!("skipping project dir {}: {e}", entry.path().display()),
-                }
-            }
-        }
-        Ok(out)
-    }
-
-    /// Remove a session's JSONL from disk. Refuses when `session_id == live_id` as the FS-boundary
-    /// defense against unlinking the open append-writer's file. Upstream callers (resume picker
-    /// filter, `/delete` resolver) also filter the live id, so this layer catches genuine bugs.
-    pub(crate) fn delete(&self, session_id: &str, live_id: &str) -> Result<()> {
-        validate_session_id(session_id)?;
-        if session_id == live_id {
-            bail!("refusing to delete the live session: {session_id}");
-        }
-        let path = self.find_session_path(session_id)?;
-        fs::remove_file(&path)
-            .with_context(|| format!("failed to remove session file {}", path.display()))
-    }
-
-    /// Finds a session file by suffix match, checking the home project first.
-    fn find_session_path(&self, session_id: &str) -> Result<PathBuf> {
-        validate_session_id(session_id)?;
-        if let Some(path) = find_session_in(&self.project_dir, session_id)? {
-            return Ok(path);
-        }
-        for entry in fs::read_dir(&self.sessions_dir)
-            .with_context(|| format!("cannot read {}", self.sessions_dir.display()))?
-        {
-            let entry = match entry {
-                Ok(e) => e,
-                Err(e) => {
-                    warn!("skipping directory entry while resolving {session_id}: {e}");
-                    continue;
-                }
-            };
-            if !entry.file_type().is_ok_and(|t| t.is_dir()) {
-                continue;
-            }
-            if let Some(path) = find_session_in(&entry.path(), session_id)? {
-                return Ok(path);
-            }
-        }
-        bail!("session not found: {session_id}")
-    }
-
-    #[cfg(test)]
-    pub(crate) fn open_at(sessions_dir: PathBuf, project_name: &str) -> Result<Self> {
-        fs::create_dir_all(&sessions_dir)?;
-        let project_dir = sessions_dir.join(project_name);
-        fs::create_dir_all(&project_dir)?;
-        Ok(Self {
-            sessions_dir,
-            project_dir,
         })
     }
 }
@@ -437,6 +286,17 @@ pub(crate) fn read_session_id_from_path(path: &Path) -> Result<String> {
     Ok(header.session_id)
 }
 
+/// Removes the session file at `path`. Refuses the live session's file, which callers already
+/// filter out, so a bug upstream cannot unlink the file under its open writer.
+pub(crate) fn delete_at(path: &Path, live_id: &str) -> Result<()> {
+    let session_id = read_session_id_from_path(path)?;
+    if session_id == live_id {
+        bail!("refusing to delete the live session: {session_id}");
+    }
+    fs::remove_file(path)
+        .with_context(|| format!("failed to remove session file {}", path.display()))
+}
+
 fn validate_session_id(session_id: &str) -> Result<()> {
     let ok = !session_id.is_empty()
         && session_id.len() <= 64
@@ -453,61 +313,10 @@ fn session_filename(session_id: &str, created_at: OffsetDateTime) -> String {
     format!("{}-{session_id}.jsonl", created_at.unix_timestamp())
 }
 
-fn find_session_in(dir: &Path, session_id: &str) -> Result<Option<PathBuf>> {
-    let suffix = format!("-{session_id}.jsonl");
-    let entries = match fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => {
-            return Err(anyhow::Error::new(e).context(format!("cannot read {}", dir.display())));
-        }
-    };
-    for entry in entries {
-        let Ok(entry) = entry else {
-            continue;
-        };
-        let name = entry.file_name();
-        let Some(name_str) = name.to_str() else {
-            continue;
-        };
-        if name_str.ends_with(&suffix) {
-            return Ok(Some(entry.path()));
-        }
-    }
-    Ok(None)
-}
-
-/// Stat-only scan of one project subdirectory: returns `.jsonl` files paired with mtime so the
-/// caller can sort and truncate before paying the per-file JSONL parse cost in
-/// [`read_session_info`]. Stat failures warn-skip — bucketing them at `UNIX_EPOCH` would silently
-/// sort them out of any cap window.
-fn collect_session_paths(dir: &Path) -> Result<Vec<(PathBuf, OffsetDateTime)>> {
-    let entries = fs::read_dir(dir).with_context(|| format!("cannot read {}", dir.display()))?;
-    Ok(entries
-        .filter_map(|entry| match entry {
-            Ok(e) => Some(e),
-            Err(e) => {
-                warn!("skipping directory entry: {e}");
-                None
-            }
-        })
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "jsonl"))
-        .filter_map(|e| {
-            let path = e.path();
-            e.metadata()
-                .and_then(|m| m.modified())
-                .inspect_err(|err| {
-                    warn!("skipping session {} (stat failed): {err}", path.display());
-                })
-                .ok()
-                .map(|t| (path, OffsetDateTime::from(t)))
-        })
-        .collect())
-}
-
-fn sort_paths_recent_first(paths: &mut [(PathBuf, OffsetDateTime)]) {
-    paths
-        .sort_by(|(p1, m1), (p2, m2)| m2.cmp(m1).then_with(|| p2.file_name().cmp(&p1.file_name())));
+/// The session id in a `{ts}-{id}.jsonl` file name.
+fn file_session_id(path: &Path) -> Option<&str> {
+    let stem = path.file_name()?.to_str()?.strip_suffix(".jsonl")?;
+    stem.split_once('-').map(|(_, id)| id)
 }
 
 // ── SessionWriter ──
@@ -688,7 +497,6 @@ impl<R: BufRead> JsonlLines<R> {
 struct HeaderInfo {
     session_id: String,
     cwd: String,
-    created_at: OffsetDateTime,
     git_branch: Option<String>,
 }
 
@@ -700,7 +508,6 @@ fn read_header<R: BufRead>(lines: &mut JsonlLines<R>, path: &Path) -> Result<Hea
     let Entry::Header {
         session_id,
         cwd,
-        created_at,
         git_branch,
         ..
     } = serde_json::from_str(line)
@@ -712,162 +519,8 @@ fn read_header<R: BufRead>(lines: &mut JsonlLines<R>, path: &Path) -> Result<Hea
     Ok(HeaderInfo {
         session_id,
         cwd,
-        created_at,
         git_branch,
     })
-}
-
-// ── Session Info Extraction ──
-
-// Cheap pre-filter: `serde(tag = "type")` always emits `type` first.
-const TITLE_LINE_PREFIX: &str = r#"{"type":"title""#;
-const SUMMARY_LINE_PREFIX: &str = r#"{"type":"summary""#;
-
-fn read_session_info(path: &Path) -> Result<SessionInfo> {
-    let file = File::open(path).with_context(|| format!("cannot open {}", path.display()))?;
-    let metadata = file
-        .metadata()
-        .with_context(|| format!("cannot stat {}", path.display()))?;
-    let mut lines = JsonlLines::new(BufReader::new(&file));
-    let HeaderInfo {
-        session_id,
-        cwd,
-        created_at,
-        git_branch,
-    } = read_header(&mut lines, path)?;
-
-    let mut title: Option<TitleInfo> = None;
-    let mut exit: Option<ExitInfo> = None;
-    while let Some((_, line)) = lines.next_line()? {
-        if line.starts_with(TITLE_LINE_PREFIX) {
-            if let Some(t) = parse_title(line)
-                && title
-                    .as_ref()
-                    .is_none_or(|cur| t.updated_at > cur.updated_at)
-            {
-                title = Some(t);
-            }
-        } else if line.starts_with(SUMMARY_LINE_PREFIX)
-            && let Ok(Entry::Summary {
-                message_count,
-                updated_at,
-            }) = serde_json::from_str(line)
-            && exit.as_ref().is_none_or(|cur| updated_at > cur.updated_at)
-        {
-            exit = Some(ExitInfo {
-                message_count,
-                updated_at,
-            });
-        }
-    }
-
-    let last_active_at = match metadata.modified() {
-        Ok(t) => OffsetDateTime::from(t),
-        Err(e) => {
-            warn!(
-                "cannot read mtime of {} (falling back to created_at): {e}",
-                path.display()
-            );
-            created_at
-        }
-    };
-
-    Ok(SessionInfo {
-        session_id,
-        cwd,
-        last_active_at,
-        title,
-        exit,
-        git_branch,
-    })
-}
-
-fn parse_title(line: &str) -> Option<TitleInfo> {
-    match serde_json::from_str(line).ok()? {
-        Entry::Title {
-            title, updated_at, ..
-        } => Some(TitleInfo { title, updated_at }),
-        _ => None,
-    }
-}
-
-#[cfg(test)]
-pub(crate) const TEST_PROJECT: &str = "test-project";
-
-#[cfg(test)]
-pub(crate) fn test_store(dir: &Path) -> SessionStore {
-    SessionStore::open_at(dir.to_path_buf(), TEST_PROJECT).unwrap()
-}
-
-/// Seed a session for cross-module tests. `last_active_at` derives from `created_at`. Title and
-/// summary are written only when their args are `Some`; with `message_count: None` the session
-/// is left unfinished. Title source is hard-coded to `UserProvided`.
-#[cfg(test)]
-pub(crate) fn seed_test_session(
-    store: &SessionStore,
-    session_id: &str,
-    title: Option<&str>,
-    message_count: Option<u32>,
-    created_at: time::OffsetDateTime,
-) {
-    let mut writer = store
-        .create(
-            &Entry::Header {
-                session_id: session_id.to_owned(),
-                cwd: "/work/proj".to_owned(),
-                model: "claude-opus-4-7".to_owned(),
-                created_at,
-                version: CURRENT_VERSION,
-                git_branch: None,
-            },
-            &[],
-        )
-        .unwrap();
-    if let Some(t) = title {
-        writer
-            .append(&[Entry::Title {
-                title: t.to_owned(),
-                source: super::entry::TitleSource::UserProvided,
-                updated_at: created_at,
-            }])
-            .unwrap();
-    }
-    if let Some(count) = message_count {
-        writer
-            .append(&[Entry::Summary {
-                message_count: count,
-                updated_at: created_at,
-            }])
-            .unwrap();
-    }
-}
-
-#[cfg(test)]
-pub(super) fn test_session_file(dir: &Path, session_id: &str) -> PathBuf {
-    let project_dir = test_project_dir(dir);
-    find_session_in(&project_dir, session_id)
-        .unwrap()
-        .unwrap_or_else(|| panic!("no session file for id {session_id} in {project_dir:?}"))
-}
-
-#[cfg(test)]
-pub(crate) fn test_project_dir(dir: &Path) -> PathBuf {
-    dir.join(TEST_PROJECT)
-}
-
-#[cfg(test)]
-impl SessionWriter {
-    /// Writer whose first append fails on a read-only handle and whose next one reopens `path`.
-    pub(super) fn failing_once(path: &Path) -> Self {
-        Self {
-            path: path.to_owned(),
-            file: Some(File::open(path).unwrap()),
-        }
-    }
-
-    pub(super) fn append(&mut self, entries: &[Entry]) -> Result<()> {
-        self.append_lines(&encode_lines(entries)?)
-    }
 }
 
 #[cfg(test)]
@@ -875,57 +528,16 @@ mod tests {
     use indoc::indoc;
     use time::macros::datetime;
 
-    use super::super::entry::TitleSource;
+    use super::testing::{
+        TEST_PROJECT, sample_header, sample_message_at, sample_message_entry, sample_summary_entry,
+        sample_title_entry, test_session_file, test_store,
+    };
     use super::*;
     use crate::message::ContentBlock;
     use crate::prompt::PromptParts;
 
     fn test_project_path(dir: &Path, filename: &str) -> PathBuf {
         dir.join(TEST_PROJECT).join(filename)
-    }
-
-    fn sample_header(session_id: &str) -> Entry {
-        Entry::Header {
-            session_id: session_id.to_owned(),
-            cwd: "/tmp/project".to_owned(),
-            model: "claude-opus-4-6".to_owned(),
-            created_at: datetime!(2026-04-16 12:00:00 UTC),
-            version: CURRENT_VERSION,
-            git_branch: None,
-        }
-    }
-
-    fn sample_message_entry(uuid: Uuid, text: &str) -> Entry {
-        sample_message_at(uuid, None, datetime!(2026-04-16 12:00:01 UTC), text)
-    }
-
-    fn sample_message_at(
-        uuid: Uuid,
-        parent_uuid: Option<Uuid>,
-        timestamp: OffsetDateTime,
-        text: &str,
-    ) -> Entry {
-        Entry::Message {
-            uuid,
-            parent_uuid,
-            message: Message::user(text),
-            timestamp,
-        }
-    }
-
-    fn sample_title_entry(title: &str) -> Entry {
-        Entry::Title {
-            title: title.to_owned(),
-            source: TitleSource::FirstPrompt,
-            updated_at: datetime!(2026-04-16 12:00:01 UTC),
-        }
-    }
-
-    fn sample_summary_entry(message_count: u32) -> Entry {
-        Entry::Summary {
-            message_count,
-            updated_at: datetime!(2026-04-16 12:05:00 UTC),
-        }
     }
 
     fn session_context(date: &str) -> SessionContext {
@@ -1079,10 +691,10 @@ mod tests {
         assert_eq!(meta.permissions().mode() & 0o777, 0o600);
     }
 
-    // ── open_append ──
+    // ── open_append_at ──
 
     #[tokio::test]
-    async fn open_append_writes_to_existing_file() {
+    async fn open_append_at_writes_to_existing_file() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let mut writer = store.create(&sample_header("append-test"), &[]).unwrap();
@@ -1097,7 +709,7 @@ mod tests {
             .unwrap();
         drop(writer);
 
-        let mut writer = store.open_append("append-test").unwrap();
+        let mut writer = open_append_at(&test_session_file(dir.path(), "append-test")).unwrap();
         writer
             .append(&[sample_message_at(
                 Uuid::new_v4(),
@@ -1119,17 +731,16 @@ mod tests {
     }
 
     #[test]
-    fn open_append_starts_an_empty_file_without_a_blank_line() {
+    fn open_append_at_starts_an_empty_file_without_a_blank_line() {
         let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
+        let _store = test_store(dir.path());
         let path = test_project_path(
             dir.path(),
             &session_filename("empty", datetime!(2026-04-16 12:00:00 UTC)),
         );
         fs::write(&path, "").unwrap();
 
-        store
-            .open_append("empty")
+        open_append_at(&path)
             .unwrap()
             .append(&[sample_summary_entry(0)])
             .unwrap();
@@ -1141,21 +752,23 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn open_append_fails_for_nonexistent_session() {
+    #[test]
+    fn open_append_at_fails_for_a_missing_file() {
         let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        assert!(store.open_append("no-such-session").is_err());
+        let err = open_append_at(&dir.path().join("ghost.jsonl"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("session not found"), "got: {err}");
     }
 
     #[tokio::test]
-    async fn open_append_allows_concurrent_resumes_without_blocking() {
+    async fn open_append_at_allows_concurrent_resumes_without_blocking() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let _writer_a = store.create(&sample_header("concurrent"), &[]).unwrap();
 
         let start = std::time::Instant::now();
-        let writer_b = store.open_append("concurrent");
+        let writer_b = open_append_at(&test_session_file(dir.path(), "concurrent"));
         let elapsed = start.elapsed();
 
         assert!(
@@ -1164,7 +777,7 @@ mod tests {
         );
         assert!(
             elapsed < std::time::Duration::from_millis(200),
-            "open_append should not block on a concurrent writer: {elapsed:?}"
+            "open_append_at should not block on a concurrent writer: {elapsed:?}"
         );
     }
 
@@ -1548,28 +1161,10 @@ mod tests {
     #[test]
     fn load_session_data_nonexistent_session_errors() {
         let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        assert!(store.load_session_data("nonexistent").is_err());
-    }
-
-    #[test]
-    fn load_session_data_rejects_malicious_session_ids() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let too_long = "a".repeat(65);
-        for bogus in [
-            "",
-            "../etc/passwd",
-            r"..\..\etc\passwd",
-            "session\0evil",
-            "foo:bar",
-            "foo|bar",
-            "foo*",
-            &too_long,
-        ] {
-            let err = store.load_session_data(bogus).unwrap_err().to_string();
-            assert!(err.contains("invalid session ID"), "{bogus:?}: {err}");
-        }
+        let err = load_session_data_from_path(&dir.path().join("ghost.jsonl"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("session not found"), "got: {err}");
     }
 
     #[tokio::test]
@@ -1860,314 +1455,17 @@ mod tests {
         assert!(err.contains("session not found"), "got: {err}");
     }
 
-    // ── list ──
-
-    #[tokio::test]
-    async fn list_orders_sessions_by_mtime_newest_first() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-
-        let mut wa = store
-            .create(
-                &Entry::Header {
-                    session_id: "aaa".to_owned(),
-                    cwd: "/a".to_owned(),
-                    model: "m".to_owned(),
-                    created_at: datetime!(2026-04-15 10:00:00 UTC),
-                    version: CURRENT_VERSION,
-                    git_branch: None,
-                },
-                &[],
-            )
-            .unwrap();
-        wa.append(&[sample_title_entry("Older")]).unwrap();
-        wa.append(&[sample_summary_entry(3)]).unwrap();
-
-        let mut wb = store
-            .create(
-                &Entry::Header {
-                    session_id: "bbb".to_owned(),
-                    cwd: "/b".to_owned(),
-                    model: "m".to_owned(),
-                    created_at: datetime!(2026-04-16 12:00:00 UTC),
-                    version: CURRENT_VERSION,
-                    git_branch: None,
-                },
-                &[],
-            )
-            .unwrap();
-        wb.append(&[sample_title_entry("Newer")]).unwrap();
-        wb.append(&[sample_summary_entry(5)]).unwrap();
-
-        let sessions = store.list().unwrap();
-        assert_eq!(sessions.len(), 2);
-        assert_eq!(sessions[0].session_id, "bbb");
-        assert_eq!(sessions[0].title.as_ref().unwrap().title, "Newer");
-        assert_eq!(sessions[0].exit.as_ref().unwrap().message_count, 5);
-        assert_eq!(sessions[1].session_id, "aaa");
-    }
-
-    #[tokio::test]
-    async fn list_mtime_overrides_header_created_at_order() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-
-        let mut w_old = store
-            .create(
-                &Entry::Header {
-                    session_id: "aaa-old-header".to_owned(),
-                    cwd: "/a".to_owned(),
-                    model: "m".to_owned(),
-                    created_at: datetime!(2026-01-01 10:00:00 UTC),
-                    version: CURRENT_VERSION,
-                    git_branch: None,
-                },
-                &[],
-            )
-            .unwrap();
-        w_old.append(&[sample_title_entry("Old")]).unwrap();
-        drop(w_old);
-
-        let mut w_new = store
-            .create(
-                &Entry::Header {
-                    session_id: "zzz-new-header".to_owned(),
-                    cwd: "/z".to_owned(),
-                    model: "m".to_owned(),
-                    created_at: datetime!(2026-04-17 10:00:00 UTC),
-                    version: CURRENT_VERSION,
-                    git_branch: None,
-                },
-                &[],
-            )
-            .unwrap();
-        w_new.append(&[sample_title_entry("New")]).unwrap();
-        drop(w_new);
-
-        let new_path = test_session_file(dir.path(), "zzz-new-header");
-        let far_past = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
-        let times = std::fs::FileTimes::new().set_modified(far_past);
-        File::options()
-            .write(true)
-            .open(&new_path)
-            .unwrap()
-            .set_times(times)
-            .unwrap();
-
-        let sessions = store.list().unwrap();
-        assert_eq!(sessions.len(), 2);
-        assert_eq!(
-            sessions[0].session_id, "aaa-old-header",
-            "freshly-touched file with older header should come first"
-        );
-        assert!(
-            sessions[0].last_active_at > sessions[1].last_active_at,
-            "mtime drives ordering"
-        );
-        assert_eq!(sessions[1].session_id, "zzz-new-header");
-    }
-
-    #[tokio::test]
-    async fn list_picks_latest_title_when_re_appended() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let mut writer = store.create(&sample_header("retitled"), &[]).unwrap();
-        writer
-            .append(&[Entry::Title {
-                title: "original prompt".to_owned(),
-                source: TitleSource::FirstPrompt,
-                updated_at: datetime!(2026-04-16 12:00:00 UTC),
-            }])
-            .unwrap();
-        writer
-            .append(&[Entry::Title {
-                title: "AI generated".to_owned(),
-                source: TitleSource::AiGenerated,
-                updated_at: datetime!(2026-04-16 12:01:00 UTC),
-            }])
-            .unwrap();
-
-        let sessions = store.list().unwrap();
-        let title = sessions[0].title.as_ref().unwrap();
-        assert_eq!(title.title, "AI generated");
-    }
-
-    #[tokio::test]
-    async fn list_finds_ai_title_buried_between_head_and_tail() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let mut writer = store.create(&sample_header("buried"), &[]).unwrap();
-        writer
-            .append(&[Entry::Title {
-                title: "first prompt".to_owned(),
-                source: TitleSource::FirstPrompt,
-                updated_at: datetime!(2026-04-16 12:00:00 UTC),
-            }])
-            .unwrap();
-        writer
-            .append(&[sample_message_entry(Uuid::new_v4(), "short user text")])
-            .unwrap();
-        writer
-            .append(&[Entry::Title {
-                title: "AI picked".to_owned(),
-                source: TitleSource::AiGenerated,
-                updated_at: datetime!(2026-04-16 12:00:05 UTC),
-            }])
-            .unwrap();
-        let bulky_body = "x".repeat(16_000);
-        writer
-            .append(&[sample_message_entry(Uuid::new_v4(), &bulky_body)])
-            .unwrap();
-        writer.append(&[sample_summary_entry(2)]).unwrap();
-
-        let sessions = store.list().unwrap();
-        let title = sessions[0].title.as_ref().unwrap();
-        assert_eq!(title.title, "AI picked");
-        let exit = sessions[0].exit.as_ref().unwrap();
-        assert_eq!(exit.message_count, 2);
-    }
-
-    #[tokio::test]
-    async fn list_absent_title_and_exit_fields_are_none() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let _writer = store.create(&sample_header("bare"), &[]).unwrap();
-
-        let sessions = store.list().unwrap();
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].session_id, "bare");
-        assert!(sessions[0].title.is_none());
-        assert!(sessions[0].exit.is_none());
-    }
+    // ── delete_at ──
 
     #[test]
-    fn list_skips_non_session_files_and_malformed_jsonl() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        fs::write(test_project_path(dir.path(), "notes.txt"), "not a session").unwrap();
-        fs::write(
-            test_project_path(dir.path(), "bad.jsonl"),
-            r#"{"type":"message","uuid":"00000000-0000-0000-0000-000000000000","message":{"role":"user","content":[]},"timestamp":"2026-01-01T00:00:00Z"}"#,
-        )
-        .unwrap();
-        assert!(store.list().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn list_is_scoped_to_current_project() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let _own = store.create(&sample_header("own"), &[]).unwrap();
-
-        let sibling_store =
-            SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
-        let _foreign = sibling_store
-            .create(&sample_header("foreign"), &[])
-            .unwrap();
-        drop(sibling_store);
-
-        let sessions = store.list().unwrap();
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].session_id, "own");
-    }
-
-    // ── list_all ──
-
-    #[tokio::test]
-    async fn list_all_spans_every_project_subdirectory() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let _own = store.create(&sample_header("own"), &[]).unwrap();
-
-        let foreign_store =
-            SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
-        let _foreign = foreign_store
-            .create(&sample_header("foreign"), &[])
-            .unwrap();
-        drop(foreign_store);
-
-        let all = store.list_all().unwrap();
-        let mut ids: Vec<_> = all.iter().map(|s| s.session_id.as_str()).collect();
-        ids.sort_unstable();
-        assert_eq!(ids, vec!["foreign", "own"]);
-    }
-
-    // ── list_paged ──
-
-    /// Builds `count` finished sessions in monotonically increasing mtime order.
-    fn seed_n_sessions(store: &SessionStore, count: usize) {
-        for i in 0..count {
-            let id = format!("session-{i:04}");
-            let offset = i64::try_from(i).expect("test count fits i64");
-            let mut writer = store
-                .create(
-                    &Entry::Header {
-                        session_id: id.clone(),
-                        cwd: "/work/project".to_owned(),
-                        model: "m".to_owned(),
-                        created_at: datetime!(2026-04-15 10:00:00 UTC)
-                            + time::Duration::seconds(offset),
-                        version: CURRENT_VERSION,
-                        git_branch: None,
-                    },
-                    &[],
-                )
-                .unwrap();
-            writer
-                .append(&[sample_title_entry(&format!("Title {i}"))])
-                .unwrap();
-        }
-    }
-
-    #[tokio::test]
-    async fn list_paged_caps_at_limit_keeping_most_recent() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        seed_n_sessions(&store, 10);
-
-        let page = store.list_paged(Some(3), false).unwrap();
-        assert_eq!(page.sessions().len(), 3, "cap honored");
-        assert_eq!(page.total(), 10, "total reflects pre-cap count");
-        // mtime descends in seed order; newest three are the last three created.
-        assert_eq!(page.sessions()[0].session_id, "session-0009");
-        assert_eq!(page.sessions()[2].session_id, "session-0007");
-    }
-
-    #[tokio::test]
-    async fn list_paged_unbounded_returns_total_equal_to_len() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        seed_n_sessions(&store, 4);
-
-        let page = store.list_paged(None, false).unwrap();
-        assert_eq!(page.sessions().len(), 4);
-        assert_eq!(page.total(), 4, "no cap → total equals returned len");
-    }
-
-    #[tokio::test]
-    async fn list_paged_zero_limit_yields_no_rows_but_full_total() {
-        // `Some(0)` means "parse no rows"; the CLI's `--limit 0` unbounded sentinel translates
-        // to `None` upstream. Pin that the store layer faithfully applies the cap.
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        seed_n_sessions(&store, 3);
-
-        let page = store.list_paged(Some(0), false).unwrap();
-        assert!(page.sessions().is_empty());
-        assert_eq!(page.total(), 3, "total still reflects what's on disk");
-    }
-
-    // ── delete ──
-
-    #[tokio::test]
-    async fn delete_removes_the_session_file_from_disk() {
+    fn delete_at_removes_the_session_file() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let _writer = store.create(&sample_header("doomed"), &[]).unwrap();
         let path = test_session_file(dir.path(), "doomed");
-        assert!(path.exists(), "fixture path materialized: {path:?}");
 
-        store.delete("doomed", "live-session-id").unwrap();
+        delete_at(&path, "live-session-id").unwrap();
+
         assert!(!path.exists(), "delete must unlink the file: {path:?}");
         assert!(
             store.list().unwrap().is_empty(),
@@ -2175,111 +1473,34 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn delete_falls_through_to_other_project_subdirectories() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let foreign_store =
-            SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
-        let _w = foreign_store
-            .create(&sample_header("foreign-doomed"), &[])
-            .unwrap();
-        drop(foreign_store);
-
-        store.delete("foreign-doomed", "live-session-id").unwrap();
-        let foreign_dir = dir.path().join("other-project");
-        let remaining: Vec<_> = fs::read_dir(&foreign_dir)
-            .unwrap()
-            .filter_map(Result::ok)
-            .collect();
-        assert!(
-            remaining.is_empty(),
-            "foreign project dir empty: {remaining:?}"
-        );
-    }
-
     #[test]
-    fn delete_refuses_when_id_matches_live_session() {
-        // Defense in depth: the resume picker filters the live session id from rows, but a typed
-        // `/delete <live-id>` would otherwise reach this method and unlink the open writer's file.
+    fn delete_at_refuses_the_live_session_file() {
+        // Defense in depth: the resume picker filters the live session from its rows, but a bug
+        // upstream would otherwise unlink the open writer's file.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let _writer = store.create(&sample_header("live-id"), &[]).unwrap();
-        let err = store
-            .delete("live-id", "live-id")
-            .expect_err("self-delete must be rejected");
+        let path = test_session_file(dir.path(), "live-id");
+
+        let err = delete_at(&path, "live-id").expect_err("self-delete must be rejected");
+
         assert!(
             err.to_string()
                 .contains("refusing to delete the live session"),
             "error must explain the refusal: {err:#}",
         );
-        assert!(
-            test_session_file(dir.path(), "live-id").exists(),
-            "file untouched"
-        );
+        assert!(path.exists(), "file untouched");
     }
 
     #[test]
-    fn delete_errors_when_session_file_is_missing() {
+    fn delete_at_errors_when_the_file_is_missing() {
         let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let err = store
-            .delete("ghost", "live-id")
+        let err = delete_at(&dir.path().join("ghost.jsonl"), "live-id")
             .expect_err("missing session must error");
         assert!(
             err.to_string().contains("session not found"),
             "got: {err:#}"
         );
-    }
-
-    #[test]
-    fn delete_rejects_invalid_session_ids() {
-        // Path-traversal / NUL / oversize ids must hit `validate_session_id` before any disk op.
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        for bogus in ["", "../etc/passwd", "session\0evil", &"a".repeat(65)] {
-            let err = store
-                .delete(bogus, "live-id")
-                .expect_err("must reject `{bogus}`");
-            assert!(
-                err.to_string().contains("invalid session ID"),
-                "id `{bogus}` must surface invalid-id error: {err:#}",
-            );
-        }
-    }
-
-    // ── find_session_path ──
-
-    #[tokio::test]
-    async fn find_session_path_falls_back_to_other_projects() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-
-        let foreign_store =
-            SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
-        let _w = foreign_store
-            .create(&sample_header("foreign"), &[])
-            .unwrap();
-        drop(foreign_store);
-
-        let found = store.find_session_path("foreign").unwrap();
-        assert_eq!(
-            found.parent(),
-            Some(dir.path().join("other-project").as_path())
-        );
-        let name = found.file_name().unwrap().to_string_lossy();
-        assert!(
-            name.ends_with("-foreign.jsonl"),
-            "unexpected filename: {name}"
-        );
-    }
-
-    #[test]
-    fn find_session_path_errors_for_unknown_session() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let err = store.find_session_path("ghost").unwrap_err().to_string();
-        assert!(err.contains("session not found"), "got: {err}");
     }
 
     // ── append ──
@@ -2289,17 +1510,31 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let mut writer = store.create(&sample_header("multi"), &[]).unwrap();
+        let (hello, world) = (Uuid::new_v4(), Uuid::new_v4());
 
         writer
-            .append(&[sample_message_entry(Uuid::new_v4(), "hello")])
-            .unwrap();
-        writer
-            .append(&[sample_message_entry(Uuid::new_v4(), "world")])
+            .append(&[
+                sample_message_entry(hello, "hello"),
+                sample_message_entry(world, "world"),
+            ])
             .unwrap();
 
         let content = fs::read_to_string(test_session_file(dir.path(), "multi")).unwrap();
-        let lines: Vec<&str> = content.lines().collect();
-        assert_eq!(lines.len(), 3); // header + 2 messages
+        let entries: Vec<Entry> = content
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert!(
+            matches!(
+                entries.as_slice(),
+                [
+                    Entry::Header { .. },
+                    Entry::Message { uuid: first, .. },
+                    Entry::Message { uuid: second, .. },
+                ] if *first == hello && *second == world
+            ),
+            "got: {entries:?}"
+        );
     }
 
     #[test]

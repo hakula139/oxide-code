@@ -194,7 +194,7 @@ mod tests {
     use crate::client::anthropic::testing::{completion_body, test_client};
     use crate::config::Auth;
     use crate::message::Message;
-    use crate::session::store::test_store;
+    use crate::session::store::testing::test_store;
 
     // ── Fixtures ──
 

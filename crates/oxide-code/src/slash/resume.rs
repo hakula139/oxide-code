@@ -3,7 +3,7 @@
 //! future searchable modal.
 
 use std::borrow::Cow;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
@@ -18,7 +18,8 @@ use crate::agent::event::UserAction;
 use crate::session::display::{display_title, format_metadata_line};
 use crate::session::entry::SessionInfo;
 use crate::session::resolver::resolve_prefix_to_info;
-use crate::session::store::{DEFAULT_SESSION_LIST_LIMIT, SessionStore};
+use crate::session::store::SessionStore;
+use crate::session::store::listing::{DEFAULT_SESSION_LIST_LIMIT, ListPage};
 use crate::tui::modal::chrome::{FOOTER_HEIGHT, render_footer};
 use crate::tui::modal::searchable_list::{SearchableItem, SearchableList};
 use crate::tui::modal::{Modal, ModalAction, ModalKey};
@@ -41,6 +42,7 @@ const TITLE_FLOOR: usize = 8;
 /// Row payload for the resume picker — display strings + a search haystack.
 struct SessionRow {
     session_id: String,
+    path: PathBuf,
     last_active_at: time::OffsetDateTime,
     local_offset: UtcOffset,
     title: String,
@@ -68,6 +70,7 @@ impl SessionRow {
         };
         Self {
             session_id: info.session_id,
+            path: info.path,
             last_active_at: info.last_active_at,
             local_offset,
             title,
@@ -168,7 +171,7 @@ impl ResumePicker {
             Err(err) => {
                 tracing::warn!("resume picker: list_paged failed: {err:#}");
                 self.load_error = Some(format!("failed to load sessions: {err:#}"));
-                crate::session::store::ListPage::default()
+                ListPage::default()
             }
         };
         let local_offset = self.local_offset;
@@ -190,7 +193,7 @@ impl ResumePicker {
     fn submit(&self) -> ModalKey {
         match self.list.selected() {
             Some(row) => ModalKey::Submitted(ModalAction::User(UserAction::Resume {
-                session_id: row.session_id.clone(),
+                path: row.path.clone(),
             })),
             // Stay open so the user can Tab the scope or Esc out. Silent dismissal hides why
             // nothing happened.
@@ -206,7 +209,7 @@ impl ResumePicker {
             return ModalKey::Consumed;
         };
         ModalKey::Push(Box::new(ConfirmDeleteSessionModal::new(
-            self.store.clone(),
+            row.path.clone(),
             row.session_id.clone(),
             row.title.clone(),
             row.metadata_line(),
@@ -351,16 +354,16 @@ impl SlashCommand for ResumeCmd {
                 ctx.info.session_id.clone(),
             ))));
         }
-        let session_id = resolve_prefix(&store, arg, ctx.info.session_id.as_str())?;
-        Ok(SlashOutcome::Forward(UserAction::Resume { session_id }))
+        let path = resolve_prefix(&store, arg, ctx.info.session_id.as_str())?;
+        Ok(SlashOutcome::Forward(UserAction::Resume { path }))
     }
 }
 
-/// Project the shared resolver onto a session id. `/resume` carries no live-id-specific error
+/// Project the shared resolver onto a session file. `/resume` carries no live-id-specific error
 /// since the picker already filters the live session out of its rows.
-fn resolve_prefix(store: &SessionStore, prefix: &str, live_id: &str) -> Result<String, String> {
+fn resolve_prefix(store: &SessionStore, prefix: &str, live_id: &str) -> Result<PathBuf, String> {
     resolve_prefix_to_info(store, prefix, live_id)?
-        .map(|info| info.session_id)
+        .map(|info| info.path)
         .ok_or_else(|| format!("no session matching `{prefix}`"))
 }
 
@@ -374,7 +377,7 @@ mod tests {
     use super::*;
     use crate::session::display::UNTITLED_MARKER;
     use crate::session::entry::TitleInfo;
-    use crate::session::store::{seed_test_session, test_store};
+    use crate::session::store::testing::{seed_test_session, test_store};
     use crate::slash::{stamped_id, test_session_info, with_isolated_xdg};
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -407,6 +410,7 @@ mod tests {
     ) -> SessionInfo {
         SessionInfo {
             session_id,
+            path: PathBuf::new(),
             cwd: cwd.to_owned(),
             last_active_at,
             title: title.map(|t| TitleInfo {
@@ -428,6 +432,7 @@ mod tests {
     ) -> SessionInfo {
         SessionInfo {
             session_id,
+            path: PathBuf::new(),
             cwd: cwd.to_owned(),
             last_active_at,
             title: title.map(|t| TitleInfo {
@@ -714,7 +719,7 @@ mod tests {
         // `load_error` lets the footer distinguish "load failed" from "0 sessions"; without it
         // the user has no signal that the listing call errored.
         let (dir, store) = isolated_store();
-        let project_dir = crate::session::store::test_project_dir(dir.path());
+        let project_dir = crate::session::store::testing::test_project_dir(dir.path());
         std::fs::remove_dir_all(&project_dir).unwrap();
 
         let picker = ResumePicker::new(store, "live-session-id".to_owned());
@@ -738,13 +743,13 @@ mod tests {
             3,
             datetime!(2026-04-18 09:00:00 UTC),
         );
+        let expected = store.find_session_path(&stamped_id(0x11)).unwrap();
         let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
         let outcome = picker.handle_key(&key(KeyCode::Enter));
-        let ModalKey::Submitted(ModalAction::User(UserAction::Resume { session_id })) = outcome
-        else {
+        let ModalKey::Submitted(ModalAction::User(UserAction::Resume { path })) = outcome else {
             panic!("expected Submitted(Resume), got {outcome:?}");
         };
-        assert_eq!(session_id, stamped_id(0x11));
+        assert_eq!(path, expected);
     }
 
     #[test]
@@ -1184,7 +1189,7 @@ mod tests {
         let mut picker = ResumePicker::new(store.clone(), "live-session-id".to_owned());
         assert_eq!(picker.total, 2, "both seeded rows present");
 
-        store.delete(&id_a, "live-session-id").unwrap();
+        std::fs::remove_file(store.find_session_path(&id_a).unwrap()).unwrap();
         picker.on_focus_regained();
         assert_eq!(picker.total, 1, "deleted row drops on reload");
     }
@@ -1233,7 +1238,7 @@ mod tests {
         picker.list.cursor_to(|row| row.session_id == target);
         assert_eq!(picker.list.selected().unwrap().session_id, target);
 
-        store.delete(&target, "live-session-id").unwrap();
+        std::fs::remove_file(store.find_session_path(&target).unwrap()).unwrap();
         picker.on_focus_regained();
         assert_eq!(picker.total, 2, "deleted row dropped");
         assert_ne!(
@@ -1252,7 +1257,7 @@ mod tests {
     fn ctrl_d_then_y_through_modal_stack_unlinks_the_session() {
         // End-to-end: picker on the stack, Ctrl+D pushes the confirm child, Y on the child runs
         // the unlink and pops back. Pins the wiring across ResumePicker, ModalKey::Push,
-        // ModalStack::handle_key, ConfirmDeleteSessionModal, and SessionStore::delete.
+        // ModalStack::handle_key, ConfirmDeleteSessionModal, and delete_at.
         let (_dir, store) = isolated_store();
         for (byte, title) in [(0x11_u8, "first"), (0x22, "second")] {
             seed_session(
@@ -1337,7 +1342,7 @@ mod tests {
     }
 
     #[test]
-    fn execute_typed_arg_unique_match_emits_forward_with_resolved_id() {
+    fn execute_typed_arg_unique_match_forwards_the_matched_session_file() {
         with_isolated_xdg(|_dir| {
             let store = SessionStore::open().unwrap();
             let target_id = stamped_id(0xab);
@@ -1353,10 +1358,10 @@ mod tests {
             let outcome = ResumeCmd
                 .execute(&target_id[..4], &SlashContext::new(&info, None))
                 .unwrap();
-            let SlashOutcome::Forward(UserAction::Resume { session_id }) = outcome else {
+            let SlashOutcome::Forward(UserAction::Resume { path }) = outcome else {
                 panic!("expected Forward(Resume), got {outcome:?}");
             };
-            assert_eq!(session_id, target_id);
+            assert_eq!(path, store.find_session_path(&target_id).unwrap());
         });
     }
 
@@ -1378,7 +1383,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_prefix_unique_match_returns_session_id() {
+    fn resolve_prefix_unique_match_returns_its_session_file() {
         let (_dir, store) = isolated_store();
         seed_session(
             &store,
@@ -1394,8 +1399,8 @@ mod tests {
             3,
             datetime!(2026-04-18 09:05:00 UTC),
         );
-        let id = resolve_prefix(&store, "1111", "other").unwrap();
-        assert_eq!(id, stamped_id(0x11));
+        let path = resolve_prefix(&store, "1111", "other").unwrap();
+        assert_eq!(path, store.find_session_path(&stamped_id(0x11)).unwrap());
     }
 
     #[test]
@@ -1415,7 +1420,7 @@ mod tests {
         );
         let store = test_store(dir.path());
         let resolved = resolve_prefix(&store, &target[..4], "live").unwrap();
-        assert_eq!(resolved, target);
+        assert_eq!(resolved, other.find_session_path(&target).unwrap());
     }
 
     #[test]
@@ -1438,7 +1443,10 @@ mod tests {
             1,
             datetime!(2026-04-18 09:00:01 UTC),
         );
-        assert_eq!(resolve_prefix(&store, &id, "other").unwrap(), id);
+        assert_eq!(
+            resolve_prefix(&store, &id, "other").unwrap(),
+            store.find_session_path(&id).unwrap(),
+        );
     }
 
     #[test]

@@ -380,9 +380,9 @@ pub(crate) async fn roll_into(
     session: &mut SessionHandle,
     store: &SessionStore,
     file_tracker: &FileTracker,
-    target_session_id: &str,
+    target: &Path,
 ) -> Result<RollIntoOutcome> {
-    if target_session_id == session.session_id() {
+    if read_session_id_from_path(target)? == session.session_id() {
         bail!("already resumed: target id matches the live session");
     }
     // Load + sanitize FIRST so a target-load error leaves the live session untouched.
@@ -394,7 +394,7 @@ pub(crate) async fn roll_into(
         title,
         tool_result_metadata,
         file_snapshots,
-    } = resume(store, target_session_id)?;
+    } = resume_from_path(store, target)?;
 
     let old_snapshots = file_tracker.snapshot_all();
     file_tracker.clear();
@@ -413,15 +413,7 @@ pub(crate) async fn roll_into(
     })
 }
 
-/// Resume by session ID — loads, sanitizes, opens for append, spawns the actor.
-pub(crate) fn resume(store: &SessionStore, session_id: &str) -> Result<ResumedSession> {
-    let data = store.load_session_data(session_id)?;
-    let writer = store.open_append(session_id)?;
-    from_resumed_data(store, session_id.to_owned(), data, writer)
-}
-
-/// Resume by explicit path, bypassing the XDG project lookup. Used by
-/// `ox -c <path.jsonl>` for sessions copied between machines.
+/// Resumes the session file at `path`: loads, sanitizes, opens it for append, and spawns the actor.
 pub(crate) fn resume_from_path(store: &SessionStore, path: &Path) -> Result<ResumedSession> {
     let session_id = read_session_id_from_path(path)?;
     let data = load_session_data_from_path(path)?;
@@ -484,13 +476,18 @@ fn spawn_actor(state: SessionState) -> SessionHandle {
 
 #[cfg(test)]
 mod tests {
-    use super::super::store::{test_session_file, test_store};
+    use super::super::store::testing::{test_session_file, test_store};
     use super::*;
     use crate::file_tracker::{
         FileTracker, GateError, GatePurpose,
         testing::{record_tracked_file, seed_full_read},
     };
     use crate::message::{ContentBlock, Role};
+
+    /// Resumes the session whose file name carries `session_id`.
+    fn resume_id(store: &SessionStore, session_id: &str) -> Result<ResumedSession> {
+        resume_from_path(store, &store.find_session_path(session_id)?)
+    }
 
     // ── SharedState ──
 
@@ -613,7 +610,7 @@ mod tests {
         original.finish(Vec::new()).await;
         drop(original);
 
-        let resumed = resume(&store, &session_id).unwrap().handle;
+        let resumed = resume_id(&store, &session_id).unwrap().handle;
         let outcome = resumed.record_message(Message::user("more text")).await;
         assert!(outcome.ai_title_seed.is_none());
     }
@@ -951,7 +948,7 @@ mod tests {
         handle.finish(Vec::new()).await;
         drop(handle);
 
-        let project_dir = super::super::store::test_project_dir(dir.path());
+        let project_dir = super::super::store::testing::test_project_dir(dir.path());
         assert!(
             std::fs::read_dir(&project_dir).unwrap().next().is_none(),
             "empty session must not write a file",
@@ -972,7 +969,7 @@ mod tests {
         original.finish(Vec::new()).await;
         drop(original);
 
-        let resumed = resume(&store, &session_id).unwrap().handle;
+        let resumed = resume_id(&store, &session_id).unwrap().handle;
         resumed.finish(Vec::new()).await;
         drop(resumed);
 
@@ -1158,7 +1155,7 @@ mod tests {
         let store = test_store(dir.path());
         let handle = start(&store, "test-model");
 
-        let project_dir = super::super::store::test_project_dir(dir.path());
+        let project_dir = super::super::store::testing::test_project_dir(dir.path());
         assert!(
             std::fs::read_dir(&project_dir).unwrap().next().is_none(),
             "fresh session must not create a file before the first record",
@@ -1262,7 +1259,8 @@ mod tests {
         let original_id = session.session_id().to_owned();
         session.record_message(Message::user("live")).await;
 
-        let outcome = roll_into(&mut session, &store, &tracker, &target_id)
+        let target = test_session_file(dir.path(), &target_id);
+        let outcome = roll_into(&mut session, &store, &tracker, &target)
             .await
             .expect("roll_into must succeed for healthy target");
 
@@ -1304,8 +1302,9 @@ mod tests {
         let original_id = session.session_id().to_owned();
         session.record_message(Message::user("live")).await;
 
-        let result = roll_into(&mut session, &store, &tracker, "missing-target-id").await;
-        assert!(result.is_err(), "missing target id must error");
+        let missing = dir.path().join("missing-target.jsonl");
+        let result = roll_into(&mut session, &store, &tracker, &missing).await;
+        assert!(result.is_err(), "missing target file must error");
         assert_eq!(
             session.session_id(),
             original_id,
@@ -1328,7 +1327,8 @@ mod tests {
         let live_id = session.session_id().to_owned();
         session.record_message(Message::user("live")).await;
 
-        let err = roll_into(&mut session, &store, &tracker, &live_id)
+        let live_path = test_session_file(dir.path(), &live_id);
+        let err = roll_into(&mut session, &store, &tracker, &live_path)
             .await
             .expect_err("self-resume must be rejected");
         assert!(
@@ -1364,7 +1364,8 @@ mod tests {
         let original_id = session.session_id().to_owned();
         session.record_message(Message::user("live")).await;
 
-        roll_into(&mut session, &store, &tracker, &target_id)
+        let target = test_session_file(dir.path(), &target_id);
+        roll_into(&mut session, &store, &tracker, &target)
             .await
             .expect("roll_into must succeed");
 
@@ -1390,7 +1391,7 @@ mod tests {
         );
     }
 
-    // ── resume ──
+    // ── resume_from_path ──
 
     #[tokio::test]
     async fn resume_loads_messages_and_keeps_session_id() {
@@ -1407,7 +1408,7 @@ mod tests {
             handle: resumed,
             messages,
             ..
-        } = resume(&store, &session_id).unwrap();
+        } = resume_id(&store, &session_id).unwrap();
         assert_eq!(resumed.session_id(), session_id);
         assert_eq!(messages.len(), 2);
     }
@@ -1422,7 +1423,7 @@ mod tests {
         // Skip finish — `shutdown` drains the queued record cmd anyway.
         original.shutdown().await;
 
-        let ResumedSession { messages, .. } = resume(&store, &session_id).unwrap();
+        let ResumedSession { messages, .. } = resume_id(&store, &session_id).unwrap();
         assert_eq!(messages.len(), 1);
     }
 
@@ -1432,7 +1433,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let session_id = "title-only-fixture";
-        super::super::store::seed_test_session(
+        super::super::store::testing::seed_test_session(
             &store,
             session_id,
             Some("User-named"),
@@ -1440,7 +1441,7 @@ mod tests {
             time::macros::datetime!(2026-01-01 00:00:00 UTC),
         );
 
-        let resumed = resume(&store, session_id).expect("title-only session must resume");
+        let resumed = resume_id(&store, session_id).expect("title-only session must resume");
         assert!(resumed.messages.is_empty(), "no messages on disk yet");
         assert_eq!(resumed.title.as_deref(), Some("User-named"));
 
@@ -1481,7 +1482,7 @@ mod tests {
         original.finish(Vec::new()).await;
         drop(original);
 
-        assert!(resume(&store, &session_id).is_err());
+        assert!(resume_id(&store, &session_id).is_err());
     }
 
     #[tokio::test]
@@ -1503,7 +1504,7 @@ mod tests {
             .await;
         drop(original);
 
-        let err = resume(&store, &session_id)
+        let err = resume_id(&store, &session_id)
             .err()
             .expect("all messages sanitized must be an error");
         assert!(
@@ -1531,7 +1532,7 @@ mod tests {
             .await;
         original.shutdown().await;
 
-        let ResumedSession { messages, .. } = resume(&store, &session_id).unwrap();
+        let ResumedSession { messages, .. } = resume_id(&store, &session_id).unwrap();
         assert_eq!(
             messages.len(),
             1,
@@ -1551,7 +1552,7 @@ mod tests {
         original.finish(Vec::new()).await;
         drop(original);
 
-        let resumed = resume(&store, &session_id).unwrap().handle;
+        let resumed = resume_id(&store, &session_id).unwrap().handle;
         resumed.record_message(Message::user("follow up")).await;
         resumed.finish(Vec::new()).await;
         drop(resumed);
@@ -1597,7 +1598,7 @@ mod tests {
         drop(handle);
 
         let resumed_tracker = FileTracker::default();
-        let resumed = resume(&store, &session_id).unwrap();
+        let resumed = resume_id(&store, &session_id).unwrap();
         resumed_tracker.restore_verified(resumed.file_snapshots);
 
         let result = resumed_tracker.verify_current_content(&path_a, b"alpha", GatePurpose::Edit);
@@ -1622,7 +1623,7 @@ mod tests {
         std::fs::write(&path_a, b"externally edited bytes").unwrap();
 
         let resumed_tracker = FileTracker::default();
-        let resumed = resume(&store, &session_id).unwrap();
+        let resumed = resume_id(&store, &session_id).unwrap();
         resumed_tracker.restore_verified(resumed.file_snapshots);
 
         let result = resumed_tracker.verify_current_content(
@@ -1657,7 +1658,7 @@ mod tests {
         std::fs::remove_file(&path_a).unwrap();
 
         let resumed_tracker = FileTracker::default();
-        let resumed = resume(&store, &session_id).unwrap();
+        let resumed = resume_id(&store, &session_id).unwrap();
         // restore_verified must drop silently; the tracker should
         // end up empty for this path rather than panic.
         resumed_tracker.restore_verified(resumed.file_snapshots);

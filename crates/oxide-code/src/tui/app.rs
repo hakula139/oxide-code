@@ -1951,7 +1951,7 @@ mod tests {
         // `clear_history` wipes it. `finalize_idle` inside the resumed handler re-enables input.
         let (mut app, mut rx, _agent_tx) = test_app(None);
         let action = UserAction::Resume {
-            session_id: "resume-target".to_owned(),
+            path: "resume-target.jsonl".into(),
         };
         app.dispatch_user_action(action.clone());
 
