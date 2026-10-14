@@ -79,8 +79,12 @@
           inherit src;
           cargoLock.lockFile = ./Cargo.lock;
 
-          # Several test modules shell out to `git`; HOME must be writable for `git init`.
-          nativeCheckInputs = [ pkgs.git ];
+          # Tests run `git init`, which needs a writable HOME, and build TLS clients that load the
+          # platform trust store, which the sandbox leaves empty without cacert.
+          nativeCheckInputs = [
+            pkgs.cacert
+            pkgs.git
+          ];
           preCheck = ''
             export HOME=$TMPDIR
           '';

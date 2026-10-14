@@ -88,7 +88,7 @@ Use `base_url` only in `~/.config/ox/config.toml` or `ANTHROPIC_BASE_URL`. Proje
 
 #### `extra_ca_certs`: corporate trust anchors
 
-For corporate gateways or other private-CA endpoints, point `extra_ca_certs` at a PEM bundle to append those roots to oxide-code's trust store:
+oxide-code verifies TLS certificates using the operating system's trust store, so a corporate CA installed system-wide works without extra configuration. For gateways and other private-CA endpoints whose root CA isn't in that store, set `extra_ca_certs` to a PEM bundle to add those roots to oxide-code's trust store:
 
 ```toml
 [client]
