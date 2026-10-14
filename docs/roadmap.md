@@ -47,7 +47,7 @@ The direction is simple:
 
 ### System Prompt
 
-- Project environment and model context are injected every turn.
+- Project environment, current date, and model context are captured once per session, so every turn reuses the cached prompt prefix.
 - `CLAUDE.md` / `AGENTS.md` instructions are loaded from user and project scopes.
 
 ### Session Persistence

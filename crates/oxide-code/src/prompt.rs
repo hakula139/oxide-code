@@ -17,24 +17,37 @@ use sections::{
 /// Marker between cacheable static and per-session dynamic sections.
 pub(crate) const SYSTEM_PROMPT_DYNAMIC_BOUNDARY: &str = "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__";
 
-/// Output of [`build_prompt`].
+/// Output of [`build_prompt`], held for a whole session so every request shares a byte-identical
+/// prefix and the conversation history stays append-only.
 ///
 /// `system_sections` is ordered: cacheable static sections, then [`SYSTEM_PROMPT_DYNAMIC_BOUNDARY`]
 /// as its own element, then per-session dynamic sections. The client splits on the marker to apply
-/// `cache_control` to the static prefix only. `user_context` is the per-session CLAUDE.md /
-/// AGENTS.md reminder, attached as the first user message rather than to the system prompt.
+/// `cache_control` to the static prefix only. `user_context` is the CLAUDE.md / AGENTS.md and
+/// current-date reminder. It rides as the first user message because some gateways cap the size of
+/// `system` blocks.
+#[cfg_attr(test, derive(Default))]
 pub(crate) struct PromptParts {
+    environment: Environment,
     pub(crate) system_sections: Vec<String>,
-    pub(crate) user_context: Option<String>,
+    pub(crate) user_context: String,
 }
 
 impl PromptParts {
+    /// Re-renders the system prompt for `model`. `user_context` stays untouched so the
+    /// conversation history sent after the swap is unchanged.
+    pub(crate) fn set_model(&mut self, model: &str) {
+        self.environment.set_model(model);
+        self.system_sections = system_sections(&self.environment);
+    }
+
     #[cfg(test)]
     fn system_joined(&self) -> String {
         self.system_sections.join("\n\n")
     }
 }
 
+/// Detects the environment and loads instruction files. Callers build once per session and reuse
+/// the result, since any change to it rewrites the start of every later request.
 pub(crate) async fn build_prompt(model: &str) -> PromptParts {
     let cwd = std::env::current_dir().ok();
     let git_root = match &cwd {
@@ -46,12 +59,22 @@ pub(crate) async fn build_prompt(model: &str) -> PromptParts {
 }
 
 async fn assemble(model: &str, cwd: Option<&Path>, git_root: Option<&Path>) -> PromptParts {
-    let env = Environment::detect(model, cwd, git_root);
+    let environment = Environment::detect(model, cwd, git_root);
     let claude_md = instructions::load(cwd, git_root).await;
 
-    let env_section = env.render();
-    let system_sections: Vec<String> = [
-        // Cacheable static above the boundary; per-session dynamic below.
+    let system_sections = system_sections(&environment);
+    let user_context = build_user_context(&claude_md, &environment.date());
+
+    PromptParts {
+        environment,
+        system_sections,
+        user_context,
+    }
+}
+
+fn system_sections(environment: &Environment) -> Vec<String> {
+    let env_section = environment.render();
+    [
         INTRO,
         SYSTEM_SECTION,
         TASK_GUIDANCE,
@@ -64,37 +87,33 @@ async fn assemble(model: &str, cwd: Option<&Path>, git_root: Option<&Path>) -> P
     ]
     .into_iter()
     .map(String::from)
-    .collect();
-
-    let user_context = build_user_context(&claude_md, &env.date());
-
-    PromptParts {
-        system_sections,
-        user_context,
-    }
+    .collect()
 }
 
-fn build_user_context(claude_md: &str, date: &str) -> Option<String> {
-    if claude_md.is_empty() {
-        return None;
-    }
+fn build_user_context(claude_md: &str, date: &str) -> String {
+    let claude_md_section = if claude_md.is_empty() {
+        String::new()
+    } else {
+        formatdoc! {"
+            # CLAUDE.md
 
-    Some(formatdoc! {"
+            {claude_md}
+
+        "}
+    };
+
+    formatdoc! {"
         <system-reminder>
         As you answer the user's questions, you can use the following context:
 
-        # CLAUDE.md
-
-        {claude_md}
-
-        # Current date
+        {claude_md_section}# Current date
 
         {date}
 
         IMPORTANT: this context may or may not be relevant to your tasks. You should
         not respond to this context unless it is highly relevant to your task.
         </system-reminder>"
-    })
+    }
 }
 
 async fn find_git_root(cwd: &Path) -> Option<PathBuf> {
@@ -121,6 +140,22 @@ async fn find_git_root(cwd: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── PromptParts::set_model ──
+
+    #[tokio::test]
+    async fn set_model_rerenders_system_and_keeps_user_context() {
+        let tmp = tempfile::tempdir().expect("failed to create tempdir");
+        let mut parts = assemble("claude-opus-4-6", Some(tmp.path()), None).await;
+        let user_context = parts.user_context.clone();
+
+        parts.set_model("claude-sonnet-4-6");
+
+        let joined = parts.system_joined();
+        assert!(joined.contains("The exact model ID is claude-sonnet-4-6."));
+        assert!(!joined.contains("claude-opus-4-6"));
+        assert_eq!(parts.user_context, user_context);
+    }
 
     // ── build_prompt ──
 
@@ -224,10 +259,7 @@ mod tests {
             "system_sections should contain the boundary marker"
         );
 
-        let ctx = parts
-            .user_context
-            .as_deref()
-            .expect("expected user context");
+        let ctx = &parts.user_context;
         assert!(ctx.contains("Test project rules."));
         assert!(ctx.contains("<system-reminder>"));
     }
@@ -256,10 +288,7 @@ mod tests {
         std::fs::write(sub.join("CLAUDE.md"), "Subdir rules.").unwrap();
 
         let parts = assemble("test-model", Some(&sub), Some(root)).await;
-        let ctx = parts
-            .user_context
-            .as_deref()
-            .expect("expected user context");
+        let ctx = &parts.user_context;
 
         assert!(ctx.contains("Root rules."));
         assert!(ctx.contains("Subdir rules."));
@@ -276,8 +305,7 @@ mod tests {
 
     #[test]
     fn build_user_context_with_claude_md() {
-        let ctx = build_user_context("Project rules.", "Today's date is 2026-04-12.")
-            .expect("expected Some");
+        let ctx = build_user_context("Project rules.", "Today's date is 2026-04-12.");
         assert!(ctx.starts_with("<system-reminder>"));
         assert!(ctx.ends_with("</system-reminder>"));
         assert!(ctx.contains("# CLAUDE.md\n\nProject rules."));
@@ -286,8 +314,17 @@ mod tests {
     }
 
     #[test]
-    fn build_user_context_empty_claude_md_is_absent() {
-        assert!(build_user_context("", "Today's date is 2026-04-12.").is_none());
+    fn build_user_context_empty_claude_md_still_carries_date() {
+        let ctx = build_user_context("", "Today's date is 2026-04-12.");
+        assert!(ctx.starts_with("<system-reminder>"));
+        assert!(ctx.contains(indoc::indoc! {"
+            following context:
+
+            # Current date
+
+            Today's date is 2026-04-12.
+        "}));
+        assert!(!ctx.contains("# CLAUDE.md"));
     }
 
     // ── find_git_root ──

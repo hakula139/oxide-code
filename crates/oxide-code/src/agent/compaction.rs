@@ -70,7 +70,7 @@ pub(crate) async fn compact_session(
     }
     messages.push(Message::user(build_user_message(instructions)));
 
-    let mut rx = client.stream_message(&messages, &[SUMMARIZATION_SYSTEM], None, &[])?;
+    let mut rx = client.stream_one_shot(&messages, &[SUMMARIZATION_SYSTEM], &[])?;
 
     let mut summary = String::new();
     while let Some(event) = rx.recv().await {
@@ -350,6 +350,10 @@ mod tests {
         let body = sink.lock().unwrap().clone().expect("body captured");
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert!(v.get("tools").is_none(), "tools omitted: {body}");
+        assert!(
+            !v["messages"].to_string().contains("cache_control"),
+            "one-shot transcript carries no breakpoint: {body}"
+        );
 
         let body_text = body.as_str();
         assert!(

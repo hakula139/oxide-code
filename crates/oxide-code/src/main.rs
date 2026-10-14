@@ -32,6 +32,7 @@ use config::{Config, Effort};
 use file_tracker::FileTracker;
 use message::Message;
 use model::ResolvedModelId;
+use prompt::PromptParts;
 use session::handle::{ResumedSession, SessionHandle, roll as roll_session};
 use session::list_view::render_list;
 use session::resolver::resolve_session;
@@ -345,6 +346,7 @@ async fn agent_loop_task(
     store: SessionStore,
     file_tracker: Arc<FileTracker>,
 ) -> Result<()> {
+    let prompt = prompt::build_prompt(client.model()).await;
     AgentLoopTask {
         client,
         tools,
@@ -352,6 +354,7 @@ async fn agent_loop_task(
         user_rx,
         session,
         messages: resumed_messages,
+        prompt,
         store,
         file_tracker,
         auto_compaction_failures: 0,
@@ -370,6 +373,7 @@ struct AgentLoopTask {
     user_rx: mpsc::Receiver<UserAction>,
     session: SessionHandle,
     messages: Vec<Message>,
+    prompt: PromptParts,
     store: SessionStore,
     file_tracker: Arc<FileTracker>,
     auto_compaction_failures: u8,
@@ -417,6 +421,7 @@ impl AgentLoopTask {
                     .session_write_error(outcome.finalize_failure.as_deref());
                 self.client.set_session_id(outcome.new_id.clone());
                 self.messages.clear();
+                self.prompt = prompt::build_prompt(self.client.model()).await;
                 self.reset_auto_compaction();
                 self.reset_usage_display();
                 // /clear succeeded server-side, so dropping `SessionRolled` would strand the TUI
@@ -439,6 +444,7 @@ impl AgentLoopTask {
                 )
                 .await;
                 if resumed {
+                    self.prompt = prompt::build_prompt(self.client.model()).await;
                     self.reset_auto_compaction();
                     self.reset_usage_display();
                 }
@@ -479,7 +485,11 @@ impl AgentLoopTask {
                 LoopControl::Continue
             }
             UserAction::SwapConfig { model, effort } => {
+                let model_swapped = model.is_some();
                 if apply_swap_config(&mut self.client, &self.sink, model, effort) {
+                    if model_swapped {
+                        self.prompt.set_model(self.client.model());
+                    }
                     self.auto_compaction_failures = 0;
                     self.emit_usage_update();
                 }
@@ -542,7 +552,6 @@ impl AgentLoopTask {
             );
         }
 
-        let prompt = prompt::build_prompt(self.client.model()).await;
         let cwd = std::env::current_dir().unwrap_or_default();
         let gate = agent::GateContext {
             policy: self.client.permission(),
@@ -553,7 +562,7 @@ impl AgentLoopTask {
             &self.client,
             &self.tools,
             &mut self.messages,
-            &prompt,
+            &self.prompt,
             &self.sink,
             &self.session,
             &mut self.user_rx,
@@ -852,6 +861,7 @@ async fn bare_repl(
     let (_user_tx, mut user_rx) = inert_user_action_channel();
     let mut auto_compaction_failures = 0_u8;
     let mut last_usage = None;
+    let prompt = prompt::build_prompt(model).await;
 
     let result: Result<()> = async {
         loop {
@@ -906,7 +916,6 @@ async fn bare_repl(
                 &sink,
             )
             .await;
-            let prompt = prompt::build_prompt(model).await;
             let cwd = std::env::current_dir().unwrap_or_default();
             let gate = non_interactive_gate(client, &cwd);
             let turn = agent_turn(
@@ -1100,6 +1109,138 @@ mod tests {
         }));
     }
 
+    const SESSION_CONTEXT: &str = "<system-reminder>session context</system-reminder>";
+
+    /// Loop task whose prompt carries [`SESSION_CONTEXT`], so tests can tell the session prompt
+    /// apart from a freshly built one. Hold the returned sender: dropping it reads as `Quit`.
+    fn loop_task_with_session_context(
+        base_url: String,
+        store_dir: &std::path::Path,
+    ) -> (
+        AgentLoopTask,
+        mpsc::Receiver<AgentEvent>,
+        mpsc::Sender<UserAction>,
+    ) {
+        let config = test_config(base_url, api_key(), "claude-opus-4-7[1m]");
+        let client = Client::new(config, Some("sid".to_owned())).unwrap();
+        let store = test_store(store_dir);
+        let session = session::handle::start(&store, "claude-opus-4-7[1m]");
+        let (sink, event_rx) = tui::event::channel();
+        let (user_tx, user_rx) = agent::event::inert_user_action_channel();
+        let mut prompt = PromptParts::default();
+        SESSION_CONTEXT.clone_into(&mut prompt.user_context);
+        let task = AgentLoopTask {
+            client,
+            tools: Arc::new(ToolRegistry::new(Vec::new())),
+            sink,
+            user_rx,
+            session,
+            messages: Vec::new(),
+            prompt,
+            store,
+            file_tracker: Arc::new(FileTracker::default()),
+            auto_compaction_failures: 0,
+            last_usage: None,
+            displayed_usage: None,
+            total_estimated_cost_usd: 0.0,
+        };
+        (task, event_rx, user_tx)
+    }
+
+    #[tokio::test]
+    async fn handle_action_submit_prompt_reuses_session_prompt_across_turns() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(streamed_summary_body("reply"))
+                    .insert_header("content-type", "text/event-stream"),
+            )
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let (mut task, _event_rx, _user_tx) =
+            loop_task_with_session_context(server.uri(), dir.path());
+
+        for text in ["first", "second"] {
+            let control = task
+                .handle_action(UserAction::SubmitPrompt(text.to_owned()))
+                .await;
+            assert!(matches!(control, LoopControl::Continue));
+        }
+
+        // The background title request also posts here, so keep only the streamed turns.
+        let turns: Vec<serde_json::Value> = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .map(|request| serde_json::from_slice(&request.body).unwrap())
+            .filter(|body: &serde_json::Value| body["stream"] == true)
+            .collect();
+        assert_eq!(turns.len(), 2);
+        let (first, second) = (&turns[0]["messages"], &turns[1]["messages"]);
+        assert_eq!(first[0]["content"][0]["text"], SESSION_CONTEXT);
+        assert_eq!(
+            second[0], first[0],
+            "session context must not change between turns"
+        );
+        assert_eq!(second[1]["content"][0]["text"], "first");
+        assert_eq!(second[2]["content"][0]["text"], "reply");
+        assert_eq!(second[3]["content"][0]["text"], "second");
+    }
+
+    #[tokio::test]
+    async fn handle_action_clear_and_resume_rebuild_session_prompt() {
+        let server = MockServer::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        let (mut task, _event_rx, _user_tx) =
+            loop_task_with_session_context(server.uri(), dir.path());
+        let target = session::handle::start(&task.store, "claude-opus-4-7[1m]");
+        let target_id = target.session_id().to_owned();
+        target.record_message(Message::user("earlier prompt")).await;
+        target
+            .record_message(Message::assistant("earlier reply"))
+            .await;
+        target.finish(Vec::new()).await;
+        drop(target);
+
+        task.handle_action(UserAction::Clear).await;
+        assert_ne!(task.prompt.user_context, SESSION_CONTEXT);
+        assert!(task.prompt.user_context.contains("# Current date"));
+
+        SESSION_CONTEXT.clone_into(&mut task.prompt.user_context);
+        task.handle_action(UserAction::Resume {
+            session_id: target_id.clone(),
+        })
+        .await;
+        assert_eq!(task.session.session_id(), target_id);
+        assert_ne!(task.prompt.user_context, SESSION_CONTEXT);
+    }
+
+    #[tokio::test]
+    async fn handle_action_swap_config_model_rerenders_system_and_keeps_user_context() {
+        let server = MockServer::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        let (mut task, _event_rx, _user_tx) =
+            loop_task_with_session_context(server.uri(), dir.path());
+
+        task.handle_action(UserAction::SwapConfig {
+            model: Some(ResolvedModelId::new("claude-sonnet-4-6".to_owned())),
+            effort: None,
+        })
+        .await;
+
+        assert!(
+            task.prompt
+                .system_sections
+                .iter()
+                .any(|section| section.contains("The exact model ID is claude-sonnet-4-6.")),
+        );
+        assert_eq!(task.prompt.user_context, SESSION_CONTEXT);
+    }
+
     #[tokio::test]
     async fn handle_action_swap_config_resets_auto_compaction_breaker() {
         let server = MockServer::start().await;
@@ -1118,6 +1259,7 @@ mod tests {
             user_rx,
             session,
             messages: Vec::new(),
+            prompt: PromptParts::default(),
             store,
             file_tracker,
             auto_compaction_failures: 3,
@@ -1168,6 +1310,7 @@ mod tests {
             user_rx,
             session,
             messages: vec![Message::user("still here")],
+            prompt: PromptParts::default(),
             store,
             file_tracker,
             auto_compaction_failures: 2,

@@ -88,7 +88,7 @@ During TUI auto-compaction, the status bar uses the existing `Compacting` state.
 
 3. **Boundary-only compaction.** Compaction runs between persisting a coherent transcript unit and starting the next prompt. This avoids partial tool loops and makes session replay identical to manual `/compact`.
 
-4. **Same summarizer as `/compact`.** Auto-compaction has no model setting of its own, as the `Client::stream_message` path already handles auth, model, effort, betas, prompt caching, and first-party gateway constraints.
+4. **Same summarizer as `/compact`.** Auto-compaction has no model setting of its own. The summarization request goes through `Client::stream_one_shot`, which shares the agent loop's request path and so already handles auth, model, effort, betas, prompt caching, and first-party gateway constraints.
 
 5. **Same persistence boundary as `/compact`.** Auto-compaction should not create a second session format. `Entry::Compact` can later gain a trigger field if the UI needs to distinguish manual from automatic in history.
 

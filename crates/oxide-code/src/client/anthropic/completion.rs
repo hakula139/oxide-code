@@ -6,7 +6,7 @@ use tracing::debug;
 
 use super::betas::{api_model_id, compute_betas, supports_structured_outputs};
 use super::sse::format_api_error;
-use super::wire::{CreateMessageRequest, OutputConfig, OutputFormat};
+use super::wire::{CreateMessageRequest, OutputConfig, OutputFormat, RequestMessages};
 use super::{CLAUDE_CLI_VERSION, Client, billing, build_metadata, build_system_blocks};
 use crate::config::Auth;
 use crate::message::{ContentBlock, Message};
@@ -112,7 +112,10 @@ fn build_completion_body(
         thinking: None,
         output_config: OutputConfig::new(output_format, None),
         context_management: None,
-        messages: &messages,
+        messages: RequestMessages {
+            messages: &messages,
+            breakpoint: None,
+        },
     })
     .context("failed to serialize request")?;
 

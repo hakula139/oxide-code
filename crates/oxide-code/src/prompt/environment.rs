@@ -7,9 +7,11 @@ use platform_info::{PlatformInfo, PlatformInfoAPI, UNameAPI};
 
 use crate::model::lookup;
 use crate::util::env;
+use crate::util::time::local_offset;
 
 const UNKNOWN_MARKER: &str = "(unknown)";
 
+#[cfg_attr(test, derive(Default))]
 pub(super) struct Environment {
     cwd: String,
     is_git: bool,
@@ -42,6 +44,10 @@ impl Environment {
             date,
             model: model.to_owned(),
         }
+    }
+
+    pub(super) fn set_model(&mut self, model: &str) {
+        model.clone_into(&mut self.model);
     }
 
     pub(super) fn date(&self) -> String {
@@ -129,10 +135,11 @@ fn detect_os_version() -> String {
 // ── Date Detection ──
 
 fn current_date() -> String {
-    // now_local() fails on multi-threaded Linux (time crate safety), falling back to UTC there.
-    let date = time::OffsetDateTime::now_local()
-        .unwrap_or_else(|_| time::OffsetDateTime::now_utc())
-        .date();
+    format_local_date(time::OffsetDateTime::now_utc(), local_offset())
+}
+
+fn format_local_date(now: time::OffsetDateTime, offset: time::UtcOffset) -> String {
+    let date = now.to_offset(offset).date();
     format!(
         "{}-{:02}-{:02}",
         date.year(),
@@ -319,5 +326,21 @@ mod tests {
         assert!((2025..=2100).contains(&year), "unexpected year: {year}");
         assert!((1..=12).contains(&month), "unexpected month: {month}");
         assert!((1..=31).contains(&day), "unexpected day: {day}");
+    }
+
+    // ── format_local_date ──
+
+    #[test]
+    fn format_local_date_applies_offset_across_midnight() {
+        let now = time::macros::datetime!(2026-04-12 20:30:00 UTC);
+        assert_eq!(
+            format_local_date(now, time::macros::offset!(+8)),
+            "2026-04-13"
+        );
+        assert_eq!(
+            format_local_date(now, time::macros::offset!(-5)),
+            "2026-04-12"
+        );
+        assert_eq!(format_local_date(now, time::UtcOffset::UTC), "2026-04-12");
     }
 }

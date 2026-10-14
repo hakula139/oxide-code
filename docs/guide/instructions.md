@@ -1,6 +1,6 @@
 # Instruction Files
 
-Instruction files let you give the assistant persistent, project-specific context. oxide-code rereads these Markdown files on every turn and sends their contents verbatim in a context block ahead of the conversation.
+Instruction files let you give the assistant persistent, project-specific context. They are Markdown files loaded when a session starts and sent with every request. Edits made mid-session take effect after `/clear`, `/resume`, or a new session.
 
 ## Supported filenames
 
