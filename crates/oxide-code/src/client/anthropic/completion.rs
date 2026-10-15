@@ -7,8 +7,8 @@ use tracing::debug;
 use super::betas::compute_betas;
 use super::transport::{post_messages, with_retry};
 use super::wire::{CreateMessageRequest, OutputConfig, OutputFormat, RequestMessages};
-use super::{CLAUDE_CLI_VERSION, Client, billing, build_metadata, build_system_blocks};
-use crate::config::{Auth, Effort};
+use super::{Client, attribution_text, billing, build_metadata, build_system_blocks};
+use crate::config::Effort;
 use crate::message::{ContentBlock, Message};
 use crate::model::ModelSpec;
 
@@ -16,11 +16,11 @@ use crate::model::ModelSpec;
 
 impl Client {
     /// Non-streaming completion. Returns the concatenated assistant text and drops tool-use and
-    /// thinking blocks.
+    /// thinking blocks. `output_format` is dropped when the config turns structured outputs off,
+    /// so callers can pass it unconditionally.
     ///
     /// Distinct from [`Client::stream_message`]: no agentic beta stack, no `context_management`
-    /// directive, and the billing block ships **only** on OAuth. API-key one-shots omit it because
-    /// 3P gateways do not gate non-streaming traffic on the attestation.
+    /// directive, and the billing block ships only on OAuth (see [`Client::attributes`]).
     pub(crate) async fn complete(
         &self,
         model: &ModelSpec,
@@ -30,16 +30,19 @@ impl Client {
         effort: Option<Effort>,
         output_format: Option<&OutputFormat>,
     ) -> Result<String> {
+        let attribution = self
+            .attributes(false)
+            .then(|| attribution_text(user, self.is_first_party));
         let body = build_completion_body(
             model.id(),
             system,
             user,
             max_tokens,
             effort,
-            &self.config.auth,
+            attribution.as_deref(),
             &self.device_id,
             &self.session_id,
-            output_format,
+            output_format.filter(|_| self.config.gateway.structured_outputs),
         )?;
 
         debug!(
@@ -48,7 +51,7 @@ impl Client {
             "sending completion request"
         );
 
-        let betas = compute_betas(model, None, &self.config.auth, false).join(",");
+        let betas = compute_betas(model, None, self.config.auth.kind(), false).join(",");
         let request = &self.messages_request(betas, body);
         let CompletionResponse { content } = with_retry(
             |retry| async move {
@@ -67,10 +70,10 @@ impl Client {
 
 // ── Body Builder ──
 
-/// System block order: billing (OAuth only) → identity prefix → caller system.
+/// System block order: `attribution` (when set) → identity prefix → caller system.
 #[expect(
     clippy::too_many_arguments,
-    reason = "9 distinct wire fields, and a wrapper struct would only rename them"
+    reason = "9 distinct request inputs, and a wrapper struct would only rename them"
 )]
 fn build_completion_body(
     model: &str,
@@ -78,19 +81,14 @@ fn build_completion_body(
     user: &str,
     max_tokens: u32,
     effort: Option<Effort>,
-    auth: &Auth,
+    attribution: Option<&str>,
     device_id: &str,
     session_id: &str,
     output_format: Option<&OutputFormat>,
 ) -> Result<String> {
     let messages = [Message::user(user)];
 
-    let billing_header = matches!(auth, Auth::OAuth(_)).then(|| {
-        let fingerprint = billing::compute_fingerprint(user, CLAUDE_CLI_VERSION);
-        billing::build_billing_header(CLAUDE_CLI_VERSION, &fingerprint)
-    });
-
-    let system_blocks = build_system_blocks(billing_header.as_deref(), [(system, None)]);
+    let system_blocks = build_system_blocks(attribution, [(system, None)]);
 
     let mut body = serde_json::to_string(&CreateMessageRequest {
         model,
@@ -109,7 +107,7 @@ fn build_completion_body(
     })
     .context("failed to serialize request")?;
 
-    if billing_header.is_some() {
+    if attribution.is_some_and(billing::is_hashed) {
         body = billing::inject_cch(&body)?;
     }
     Ok(body)
@@ -139,10 +137,11 @@ mod tests {
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
     use super::super::betas::{CLAUDE_CODE_BETA_HEADER, OAUTH_BETA_HEADER};
-    use super::super::testing::{Captured, api_key, captured, oauth, test_config};
+    use super::super::testing::{Captured, api_key, auth_token, captured, oauth, test_config};
     use super::*;
-    use crate::client::anthropic::SYSTEM_PROMPT_PREFIX;
     use crate::client::anthropic::testing::completion_body;
+    use crate::client::anthropic::{CLAUDE_CLI_VERSION, SYSTEM_PROMPT_PREFIX};
+    use crate::config::auth::{Auth, AuthSource};
 
     fn haiku() -> ModelSpec {
         ModelSpec::resolve("claude-haiku-5-5".to_owned())
@@ -255,6 +254,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn complete_401_names_the_gateway_token_variable() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(401).set_body_string("unauthorized"))
+            .mount(&server)
+            .await;
+
+        let client = Client::new(
+            test_config(server.uri(), auth_token(), "claude-haiku-5-5"),
+            Some("sid".to_owned()),
+        )
+        .unwrap();
+        let err = client
+            .complete(&haiku(), "", "u", 40, None, None)
+            .await
+            .expect_err("expected 401");
+        assert!(
+            format!("{err:#}").contains("Check ANTHROPIC_AUTH_TOKEN."),
+            "{err:#}"
+        );
+    }
+
+    #[tokio::test]
     async fn complete_malformed_response_body_errors_with_parse_context() {
         // A 200 with non-JSON must surface a parse error so the title path falls back cleanly.
         let server = MockServer::start().await;
@@ -280,7 +303,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn complete_ships_effort_and_format_in_output_config_without_beta_tags() {
+    async fn complete_ships_effort_and_format_without_beta_tags_unless_structured_outputs_off() {
         // Both fields are GA, so neither may drag a beta tag along.
         let schema = serde_json::json!({
             "type": "object",
@@ -289,39 +312,44 @@ mod tests {
             "additionalProperties": false,
         });
         let fmt = OutputFormat::json_schema(schema.clone());
-        let server = MockServer::start().await;
-        let sink: Captured<(String, String)> = captured();
-        let sink_clone = std::sync::Arc::clone(&sink);
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .respond_with(move |req: &Request| {
-                let body = String::from_utf8_lossy(&req.body).into_owned();
-                let beta = req
-                    .headers
-                    .get("anthropic-beta")
-                    .map(|v| v.to_str().unwrap().to_owned())
-                    .unwrap_or_default();
-                *sink_clone.lock().unwrap() = Some((body, beta));
-                ResponseTemplate::new(200).set_body_string(completion_body("ok"))
-            })
-            .mount(&server)
-            .await;
+        for structured_outputs in [true, false] {
+            let server = MockServer::start().await;
+            let sink: Captured<(String, String)> = captured();
+            let sink_clone = std::sync::Arc::clone(&sink);
+            Mock::given(method("POST"))
+                .and(path("/v1/messages"))
+                .respond_with(move |req: &Request| {
+                    let body = String::from_utf8_lossy(&req.body).into_owned();
+                    let beta = req
+                        .headers
+                        .get("anthropic-beta")
+                        .map(|v| v.to_str().unwrap().to_owned())
+                        .unwrap_or_default();
+                    *sink_clone.lock().unwrap() = Some((body, beta));
+                    ResponseTemplate::new(200).set_body_string(completion_body("ok"))
+                })
+                .mount(&server)
+                .await;
 
-        let client = Client::new(
-            test_config(server.uri(), oauth(), "claude-haiku-5-5"),
-            Some("sid".to_owned()),
-        )
-        .unwrap();
-        _ = client
-            .complete(&haiku(), "sys", "prompt", 40, Some(Effort::Low), Some(&fmt))
-            .await
-            .unwrap();
+            let mut config = test_config(server.uri(), oauth(), "claude-haiku-5-5");
+            config.gateway.structured_outputs = structured_outputs;
+            let client = Client::new(config, Some("sid".to_owned())).unwrap();
+            _ = client
+                .complete(&haiku(), "sys", "prompt", 40, Some(Effort::Low), Some(&fmt))
+                .await
+                .unwrap();
 
-        let (body, beta) = sink.lock().unwrap().clone().expect("request captured");
-        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(v["output_config"]["effort"], "low", "{body}");
-        assert_eq!(v["output_config"]["format"]["schema"], schema, "{body}");
-        assert_eq!(beta, OAUTH_BETA_HEADER, "only the auth tag ships: {beta}");
+            let (body, beta) = sink.lock().unwrap().clone().expect("request captured");
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(v["output_config"]["effort"], "low", "{body}");
+            let expected_format = if structured_outputs {
+                serde_json::json!({"type": "json_schema", "schema": schema})
+            } else {
+                serde_json::Value::Null
+            };
+            assert_eq!(v["output_config"]["format"], expected_format, "{body}");
+            assert_eq!(beta, OAUTH_BETA_HEADER, "only the auth tag ships: {beta}");
+        }
     }
 
     #[tokio::test]
@@ -348,7 +376,7 @@ mod tests {
         let client = Client::new(
             test_config(
                 server.uri(),
-                Auth::OAuth("tok".to_owned()),
+                Auth::new(AuthSource::ClaudeCodeLogin, "tok"),
                 "claude-haiku-5-5",
             ),
             Some("sid".to_owned()),
@@ -415,7 +443,7 @@ mod tests {
             "hi",
             40,
             None,
-            &api_key(),
+            None,
             "did",
             "sid",
             None,
@@ -436,48 +464,47 @@ mod tests {
     }
 
     #[test]
-    fn build_completion_body_system_blocks_match_auth_mode() {
-        // API key → 2 blocks (identity + system); OAuth → 3 blocks (billing + identity + system).
-        let api_body = build_completion_body(
+    fn build_completion_body_attribution_prepends_attested_billing_block() {
+        let plain_body = build_completion_body(
             "claude-haiku-5-5",
             "sys-prompt",
             "hi",
             40,
             None,
-            &api_key(),
+            None,
             "did",
             "sid",
             None,
         )
         .unwrap();
-        let api = parse_body(&api_body);
-        let api_system = api["system"].as_array().unwrap();
-        assert_eq!(api_system.len(), 2);
-        assert_eq!(api_system[0]["text"], SYSTEM_PROMPT_PREFIX);
-        assert_eq!(api_system[1]["text"], "sys-prompt");
-        assert!(!api_body.contains("x-anthropic-billing-header:"));
+        let plain = parse_body(&plain_body);
+        let plain_system = plain["system"].as_array().unwrap();
+        assert_eq!(plain_system.len(), 2);
+        assert_eq!(plain_system[0]["text"], SYSTEM_PROMPT_PREFIX);
+        assert_eq!(plain_system[1]["text"], "sys-prompt");
+        assert!(!plain_body.contains("x-anthropic-billing-header:"));
 
-        let oauth_body = build_completion_body(
+        let attributed_body = build_completion_body(
             "claude-haiku-5-5",
             "sys-prompt",
             "Fix login",
             40,
             None,
-            &oauth(),
+            Some(&attribution_text("Fix login", true)),
             "did",
             "sid",
             None,
         )
         .unwrap();
-        let oa = parse_body(&oauth_body);
-        let oa_system = oa["system"].as_array().unwrap();
-        assert_eq!(oa_system.len(), 3);
-        let first = oa_system[0]["text"].as_str().unwrap();
+        let attributed = parse_body(&attributed_body);
+        let attributed_system = attributed["system"].as_array().unwrap();
+        assert_eq!(attributed_system.len(), 3);
+        let first = attributed_system[0]["text"].as_str().unwrap();
         assert!(first.starts_with("x-anthropic-billing-header:"));
         assert!(first.contains(&format!("cc_version={CLAUDE_CLI_VERSION}")));
-        assert_eq!(oa_system[1]["text"], SYSTEM_PROMPT_PREFIX);
-        assert_eq!(oa_system[2]["text"], "sys-prompt");
-        assert!(!oauth_body.contains("cch=00000"));
+        assert_eq!(attributed_system[1]["text"], SYSTEM_PROMPT_PREFIX);
+        assert_eq!(attributed_system[2]["text"], "sys-prompt");
+        assert!(!attributed_body.contains("cch=00000"));
     }
 
     #[test]
@@ -489,7 +516,7 @@ mod tests {
             "hi",
             40,
             None,
-            &api_key(),
+            None,
             "did",
             "sid",
             None,
@@ -522,7 +549,7 @@ mod tests {
                 "hi",
                 40,
                 effort,
-                &api_key(),
+                None,
                 "did",
                 "sid",
                 format,
@@ -540,7 +567,7 @@ mod tests {
             "hi",
             40,
             None,
-            &api_key(),
+            None,
             "did-456",
             "sid-789",
             None,

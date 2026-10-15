@@ -2,8 +2,12 @@
 
 use std::sync::{Arc, Mutex};
 
+use reqwest::header::HeaderMap;
+
 use super::Client;
-use crate::config::{Auth, CompactionConfig, Config, PromptCacheTtl, StatusLineSegment};
+use crate::config::auth::{Auth, AuthSource};
+use crate::config::gateway::GatewayCompat;
+use crate::config::{CompactionConfig, Config, PromptCacheTtl, StatusLineSegment};
 use crate::model::ModelSpec;
 use crate::tui::theme::Theme;
 
@@ -13,6 +17,11 @@ pub(crate) fn test_config(base_url: impl Into<String>, auth: Auth, model: &str) 
         auth,
         base_url: base_url.into(),
         extra_ca_certs: None,
+        gateway: GatewayCompat {
+            custom_headers: HeaderMap::new(),
+            attribution: true,
+            structured_outputs: true,
+        },
         model: ModelSpec::resolve(model.to_owned()),
         effort: None,
         max_tokens: Some(128),
@@ -72,11 +81,15 @@ pub(crate) fn text_stream_body(start_text: &str, delta_text: &str) -> String {
 }
 
 pub(crate) fn api_key() -> Auth {
-    Auth::ApiKey("k".to_owned())
+    Auth::new(AuthSource::ApiKeyEnv, "k")
+}
+
+pub(crate) fn auth_token() -> Auth {
+    Auth::new(AuthSource::AuthTokenEnv, "g")
 }
 
 pub(crate) fn oauth() -> Auth {
-    Auth::OAuth("t".to_owned())
+    Auth::new(AuthSource::ClaudeCodeLogin, "t")
 }
 
 /// Slot for data captured by a wiremock responder. `Fn` capture + cross-await inspection require

@@ -11,6 +11,7 @@ use tracing::warn;
 
 use super::Client;
 use super::wire::ErrorResponse;
+use crate::config::auth::AuthSource;
 
 // ── Retry Policy ──
 
@@ -47,6 +48,7 @@ pub(super) struct MessagesRequest {
     pub(super) betas: String,
     pub(super) session_id: String,
     pub(super) body: String,
+    pub(super) auth: AuthSource,
 }
 
 impl Client {
@@ -56,6 +58,7 @@ impl Client {
             betas,
             session_id: self.session_id.clone(),
             body,
+            auth: self.config.auth.source(),
         }
     }
 }
@@ -178,13 +181,16 @@ pub(super) async fn post_messages(
                 AttemptError::retryable("Connection failed", e.into())
             }
         })?;
-    error_for_status(response).await
+    error_for_status(response, request.auth).await
 }
 
 /// Passes a 2xx response through. Otherwise reads the body into a user-facing error. As in the
 /// Anthropic SDKs, `x-should-retry: true` or `false` decides whether to retry, and without it 408,
 /// 409, 429, and 5xx retry.
-async fn error_for_status(response: reqwest::Response) -> Result<reqwest::Response, AttemptError> {
+async fn error_for_status(
+    response: reqwest::Response,
+    auth: AuthSource,
+) -> Result<reqwest::Response, AttemptError> {
     let status = response.status();
     if status.is_success() {
         return Ok(response);
@@ -198,9 +204,10 @@ async fn error_for_status(response: reqwest::Response) -> Result<reqwest::Respon
             .map(str::to_owned)
     };
     let retry_after = header("retry-after").as_deref().and_then(parse_retry_after);
+    let location = header("location");
     let should_retry = header("x-should-retry");
     let body = response.text().await.unwrap_or_default();
-    let diagnostic = format_api_error(status, retry_after, &body);
+    let diagnostic = format_api_error(auth, status, retry_after, location.as_deref(), &body);
     let error = if status == StatusCode::BAD_REQUEST
         && let Some(message) = prompt_too_long_message(&body)
     {
@@ -274,9 +281,28 @@ fn parse_retry_after(value: &str) -> Option<Duration> {
 
 /// Renders a user-facing diagnostic for a non-2xx Anthropic response, with a per-status hint and
 /// the response body appended for debugging.
-fn format_api_error(status: StatusCode, retry_after: Option<Duration>, body: &str) -> String {
+fn format_api_error(
+    auth: AuthSource,
+    status: StatusCode,
+    retry_after: Option<Duration>,
+    location: Option<&str>,
+    body: &str,
+) -> String {
     let prefix = match status.as_u16() {
-        401 => "Anthropic API rejected credentials (HTTP 401). Check ANTHROPIC_API_KEY, or run `claude` to refresh OAuth.".to_owned(),
+        300..=399 => {
+            let target = location
+                .and_then(|location| reqwest::Url::parse(location).ok())
+                .and_then(|url| url.host_str().map(|host| format!(" to {host}")))
+                .unwrap_or_default();
+            format!(
+                "Anthropic API endpoint redirected (HTTP {status}){target}. Redirects are not \
+                 followed, so point the base URL at the final endpoint."
+            )
+        }
+        401 => format!(
+            "Anthropic API rejected credentials (HTTP 401). {}",
+            auth.rejection_hint(),
+        ),
         429 => match retry_after {
             Some(after) => format!(
                 "Anthropic API rate limited (HTTP 429). Retry after {} s.",
@@ -308,6 +334,7 @@ mod tests {
             betas: String::new(),
             session_id: "sid".to_owned(),
             body: "{}".to_owned(),
+            auth: AuthSource::ApiKeyEnv,
         }
     }
 
@@ -497,6 +524,7 @@ mod tests {
             betas: String::new(),
             session_id: "sid".to_owned(),
             body: "{}".to_owned(),
+            auth: AuthSource::ApiKeyEnv,
         };
         let err = post_messages(&reqwest::Client::new(), &req, 0)
             .await
@@ -511,6 +539,7 @@ mod tests {
             betas: String::new(),
             session_id: "sid".to_owned(),
             body: "{}".to_owned(),
+            auth: AuthSource::ApiKeyEnv,
         };
         let err = post_messages(&reqwest::Client::new(), &req, 0)
             .await
@@ -527,6 +556,7 @@ mod tests {
             (500, true),
             (502, true),
             (529, true),
+            (307, false),
             (400, false),
             (401, false),
             (404, false),
@@ -707,7 +737,7 @@ mod tests {
             (
                 401,
                 None,
-                "Anthropic API rejected credentials (HTTP 401). Check ANTHROPIC_API_KEY, or run `claude` to refresh OAuth.",
+                "Anthropic API rejected credentials (HTTP 401). CLAUDE_CODE_OAUTH_TOKEN may be expired or revoked. Generate a new one with `claude setup-token`.",
             ),
             (
                 429,
@@ -733,8 +763,34 @@ mod tests {
         ] {
             let status = StatusCode::from_u16(status).unwrap();
             assert_eq!(
-                format_api_error(status, retry_after, "body"),
+                format_api_error(AuthSource::OAuthTokenEnv, status, retry_after, None, "body"),
                 format!("{prefix} Details: body"),
+            );
+        }
+    }
+
+    #[test]
+    fn format_api_error_3xx_names_the_redirect_host() {
+        let redirected = "Anthropic API endpoint redirected (HTTP 307 Temporary Redirect)";
+        let advice = "Redirects are not followed, so point the base URL at the final endpoint.";
+        for (location, target) in [
+            (
+                Some("https://other.example.com/v1/messages"),
+                " to other.example.com",
+            ),
+            (Some("/v2/messages"), ""),
+            (None, ""),
+        ] {
+            assert_eq!(
+                format_api_error(
+                    AuthSource::ApiKeyEnv,
+                    StatusCode::TEMPORARY_REDIRECT,
+                    None,
+                    location,
+                    "moved",
+                ),
+                format!("{redirected}{target}. {advice} Details: moved"),
+                "{location:?}",
             );
         }
     }

@@ -1,6 +1,7 @@
 //! Per-request `anthropic-beta` header computation.
 
-use crate::config::{Auth, PromptCacheTtl, ThinkingConfig, ThinkingDisplay};
+use crate::config::auth::AuthKind;
+use crate::config::{PromptCacheTtl, ThinkingConfig, ThinkingDisplay};
 use crate::model::{Family, ModelSpec};
 
 use super::wire::CacheControl;
@@ -29,7 +30,7 @@ const THINKING_TOKEN_COUNT_BETA_HEADER: &str = "thinking-token-count-2026-05-13"
 pub(super) fn compute_betas(
     model: &ModelSpec,
     thinking: Option<&ThinkingConfig>,
-    auth: &Auth,
+    auth: AuthKind,
     is_agentic: bool,
 ) -> Vec<&'static str> {
     let is_haiku = model
@@ -41,7 +42,7 @@ pub(super) fn compute_betas(
     if !is_haiku {
         out.push(CLAUDE_CODE_BETA_HEADER);
     }
-    if matches!(auth, Auth::OAuth(_)) {
+    if auth == AuthKind::OAuth {
         out.push(OAUTH_BETA_HEADER);
     }
     if is_agentic {
@@ -75,22 +76,8 @@ pub(super) fn compute_betas(
     out
 }
 
-/// Whether `base_url` points at Anthropic's production or staging host. Gates body-side
-/// `cache_control.scope = "global"`, which 3P gateways reject downstream of tools.
-pub(super) fn is_first_party_base_url(base_url: &str) -> bool {
-    reqwest::Url::parse(base_url)
-        .ok()
-        .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
-        .is_some_and(|h| {
-            matches!(
-                h.as_str(),
-                "api.anthropic.com" | "api-staging.anthropic.com"
-            )
-        })
-}
-
 /// `cache_control` for the static system prefix. `scope: "global"` shares the cache across
-/// sessions and is 1P-only (see [`is_first_party_base_url`]).
+/// sessions and is 1P-only (see [`crate::config::is_first_party_base_url`]).
 pub(super) fn static_prefix_cache_control(
     is_first_party: bool,
     ttl: PromptCacheTtl,
@@ -115,14 +102,6 @@ pub(super) fn conversation_cache_control(ttl: PromptCacheTtl) -> CacheControl {
 mod tests {
     use super::super::CLAUDE_CLI_VERSION;
     use super::*;
-
-    fn api_key() -> Auth {
-        Auth::ApiKey("k".to_owned())
-    }
-
-    fn oauth() -> Auth {
-        Auth::OAuth("t".to_owned())
-    }
 
     fn spec(id: &str) -> ModelSpec {
         ModelSpec::resolve(id.to_owned())
@@ -151,7 +130,13 @@ mod tests {
         ] {
             let model = spec(id);
             assert_eq!(
-                compute_betas(&model, model.thinking(true).as_ref(), &api_key(), true).join(","),
+                compute_betas(
+                    &model,
+                    model.thinking(true).as_ref(),
+                    AuthKind::ApiKey,
+                    true
+                )
+                .join(","),
                 format!("{captured},thinking-binding-controls-2026-08-01"),
                 "{id}",
             );
@@ -161,7 +146,7 @@ mod tests {
     #[test]
     fn compute_betas_oauth_slots_auth_header_after_claude_code_tag() {
         assert_eq!(
-            compute_betas(&spec("claude-opus-5-5"), None, &oauth(), true)[..3],
+            compute_betas(&spec("claude-opus-5-5"), None, AuthKind::OAuth, true)[..3],
             [
                 CLAUDE_CODE_BETA_HEADER,
                 OAUTH_BETA_HEADER,
@@ -170,15 +155,23 @@ mod tests {
         );
         // Haiku's agentic claude-code tag comes later, so the auth header leads.
         assert_eq!(
-            compute_betas(&spec("claude-haiku-5-5"), None, &oauth(), true)[..2],
+            compute_betas(&spec("claude-haiku-5-5"), None, AuthKind::OAuth, true)[..2],
             [OAUTH_BETA_HEADER, INTERLEAVED_THINKING_BETA_HEADER],
         );
+        // A gateway auth token keeps the API-key beta set, since the OAuth beta is
+        // subscription-only.
+        let opus = spec("claude-opus-5-5");
+        assert_eq!(
+            compute_betas(&opus, None, AuthKind::AuthToken, true),
+            compute_betas(&opus, None, AuthKind::ApiKey, true),
+        );
+        assert!(!compute_betas(&opus, None, AuthKind::ApiKey, true).contains(&OAUTH_BETA_HEADER));
     }
 
     #[test]
     fn compute_betas_updates_display_appends_its_beta_last() {
         let opus = spec("claude-opus-5-5");
-        let betas = compute_betas(&opus, opus.thinking(false).as_ref(), &api_key(), true);
+        let betas = compute_betas(&opus, opus.thinking(false).as_ref(), AuthKind::ApiKey, true);
         assert_eq!(
             betas[betas.len() - 3..],
             [
@@ -190,15 +183,20 @@ mod tests {
         // Haiku has no progress updates, so hidden thinking sends no display and no beta.
         let haiku = spec("claude-haiku-5-5");
         assert!(
-            !compute_betas(&haiku, haiku.thinking(false).as_ref(), &api_key(), true)
-                .contains(&THINKING_DISPLAY_UPDATES_BETA_HEADER),
+            !compute_betas(
+                &haiku,
+                haiku.thinking(false).as_ref(),
+                AuthKind::ApiKey,
+                true
+            )
+            .contains(&THINKING_DISPLAY_UPDATES_BETA_HEADER),
         );
     }
 
     #[test]
     fn compute_betas_agentic_unknown_model_sends_only_tag_and_cache_scope() {
         assert_eq!(
-            compute_betas(&spec("custom-model"), None, &api_key(), true),
+            compute_betas(&spec("custom-model"), None, AuthKind::ApiKey, true),
             vec![CLAUDE_CODE_BETA_HEADER, PROMPT_CACHING_SCOPE_BETA_HEADER],
         );
     }
@@ -206,11 +204,11 @@ mod tests {
     #[test]
     fn compute_betas_haiku_non_agentic_minimal() {
         assert_eq!(
-            compute_betas(&spec("claude-haiku-5-5"), None, &api_key(), false),
+            compute_betas(&spec("claude-haiku-5-5"), None, AuthKind::ApiKey, false),
             Vec::<&str>::new(),
         );
         assert_eq!(
-            compute_betas(&spec("claude-haiku-5-5"), None, &oauth(), false),
+            compute_betas(&spec("claude-haiku-5-5"), None, AuthKind::OAuth, false),
             vec![OAUTH_BETA_HEADER],
         );
     }
@@ -218,34 +216,14 @@ mod tests {
     #[test]
     fn compute_betas_non_haiku_non_agentic_keeps_claude_code_tag() {
         assert_eq!(
-            compute_betas(&spec("claude-sonnet-5-5"), None, &oauth(), false),
+            compute_betas(&spec("claude-sonnet-5-5"), None, AuthKind::OAuth, false),
             vec![CLAUDE_CODE_BETA_HEADER, OAUTH_BETA_HEADER],
         );
         // Family comes from the catalogue row, so a retired Haiku id is treated as unknown.
         assert_eq!(
-            compute_betas(&spec("claude-haiku-4-5"), None, &api_key(), false),
+            compute_betas(&spec("claude-haiku-4-5"), None, AuthKind::ApiKey, false),
             vec![CLAUDE_CODE_BETA_HEADER],
         );
-    }
-
-    // ── is_first_party_base_url ──
-
-    #[test]
-    fn is_first_party_base_url_accepts_official_hosts() {
-        assert!(is_first_party_base_url("https://api.anthropic.com"));
-        assert!(is_first_party_base_url("https://api.anthropic.com/"));
-        assert!(is_first_party_base_url("https://api-staging.anthropic.com"));
-        assert!(is_first_party_base_url("https://API.ANTHROPIC.COM"));
-    }
-
-    #[test]
-    fn is_first_party_base_url_rejects_proxies_and_malformed_urls() {
-        assert!(!is_first_party_base_url("https://api.openai.com"));
-        assert!(!is_first_party_base_url("https://proxy.example.com"));
-        assert!(!is_first_party_base_url("https://anthropic.com.evil.io"));
-        assert!(!is_first_party_base_url("http://127.0.0.1:8080"));
-        assert!(!is_first_party_base_url(""));
-        assert!(!is_first_party_base_url("not-a-url"));
     }
 
     // ── static_prefix_cache_control ──

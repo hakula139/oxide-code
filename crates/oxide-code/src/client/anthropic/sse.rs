@@ -194,6 +194,7 @@ mod tests {
 
     use super::*;
     use crate::client::anthropic::wire::Delta;
+    use crate::config::auth::AuthSource;
 
     // ── Fixtures ──
 
@@ -255,6 +256,7 @@ mod tests {
             betas: String::new(),
             session_id: "sid".to_owned(),
             body: "{}".to_owned(),
+            auth: AuthSource::ApiKeyEnv,
         };
         let (tx, mut rx) = mpsc::channel(64);
         let result = stream_sse(&reqwest::Client::new(), &request, &tx).await;
@@ -445,6 +447,7 @@ mod tests {
             betas: String::new(),
             session_id: "sid".to_owned(),
             body: "{}".to_owned(),
+            auth: AuthSource::ApiKeyEnv,
         };
         let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(1);
         drop(rx);
