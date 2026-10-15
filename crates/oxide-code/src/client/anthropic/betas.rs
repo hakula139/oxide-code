@@ -81,14 +81,23 @@ pub(super) fn is_first_party_base_url(base_url: &str) -> bool {
 }
 
 /// `cache_control` for the static system prefix. `scope: "global"` shares the cache across
-/// sessions and is 1P-only — see [`is_first_party_base_url`].
+/// sessions and is 1P-only (see [`is_first_party_base_url`]).
 pub(super) fn static_prefix_cache_control(
     is_first_party: bool,
     ttl: PromptCacheTtl,
 ) -> CacheControl {
     CacheControl {
-        r#type: "ephemeral",
         scope: is_first_party.then_some("global"),
+        ..conversation_cache_control(ttl)
+    }
+}
+
+/// `cache_control` for the breakpoint on the conversation's final block. The transcript is
+/// session-specific, so it never carries `scope`.
+pub(super) fn conversation_cache_control(ttl: PromptCacheTtl) -> CacheControl {
+    CacheControl {
+        r#type: "ephemeral",
+        scope: None,
         ttl: ttl.wire(),
     }
 }
@@ -288,6 +297,20 @@ mod tests {
         let five_min = static_prefix_cache_control(false, PromptCacheTtl::FiveMin);
         assert_eq!(
             serde_json::to_string(&five_min).unwrap(),
+            r#"{"type":"ephemeral"}"#,
+        );
+    }
+
+    // ── conversation_cache_control ──
+
+    #[test]
+    fn conversation_cache_control_carries_ttl_without_scope() {
+        assert_eq!(
+            serde_json::to_string(&conversation_cache_control(PromptCacheTtl::OneHour)).unwrap(),
+            r#"{"type":"ephemeral","ttl":"1h"}"#,
+        );
+        assert_eq!(
+            serde_json::to_string(&conversation_cache_control(PromptCacheTtl::FiveMin)).unwrap(),
             r#"{"type":"ephemeral"}"#,
         );
     }

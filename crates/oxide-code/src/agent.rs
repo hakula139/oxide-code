@@ -52,6 +52,17 @@ pub(crate) trait AgentClient: Send + Sync {
         user_context: Option<&str>,
         tools: &[ToolDefinition],
     ) -> Result<mpsc::Receiver<Result<StreamEvent>>>;
+
+    /// Streams a request no later request extends, so caching its transcript tail would only add
+    /// a write premium. Defaults to [`Self::stream_message`] for clients that do no caching.
+    fn stream_one_shot(
+        &self,
+        messages: &[Message],
+        system_sections: &[&str],
+        tools: &[ToolDefinition],
+    ) -> Result<mpsc::Receiver<Result<StreamEvent>>> {
+        self.stream_message(messages, system_sections, None, tools)
+    }
 }
 
 impl AgentClient for Client {
@@ -63,6 +74,15 @@ impl AgentClient for Client {
         tools: &[ToolDefinition],
     ) -> Result<mpsc::Receiver<Result<StreamEvent>>> {
         Client::stream_message(self, messages, system_sections, user_context, tools)
+    }
+
+    fn stream_one_shot(
+        &self,
+        messages: &[Message],
+        system_sections: &[&str],
+        tools: &[ToolDefinition],
+    ) -> Result<mpsc::Receiver<Result<StreamEvent>>> {
+        Client::stream_one_shot(self, messages, system_sections, tools)
     }
 }
 
@@ -771,12 +791,8 @@ async fn stream_response(
     sink: &dyn AgentSink,
 ) -> Result<StreamOutcome> {
     let section_refs: Vec<&str> = prompt.system_sections.iter().map(String::as_str).collect();
-    let mut rx = client.stream_message(
-        messages,
-        &section_refs,
-        prompt.user_context.as_deref(),
-        tools,
-    )?;
+    let mut rx =
+        client.stream_message(messages, &section_refs, Some(&prompt.user_context), tools)?;
 
     let mut blocks: Vec<Option<BlockAccumulator>> = Vec::new();
     let mut usage = TokenUsage::default();
@@ -1321,10 +1337,7 @@ mod tests {
     }
 
     fn empty_prompt() -> PromptParts {
-        PromptParts {
-            system_sections: vec![],
-            user_context: None,
-        }
+        PromptParts::default()
     }
 
     /// Gate that bypasses every rule (`yolo`), so the dispatch tests exercise the turn loop without

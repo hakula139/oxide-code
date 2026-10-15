@@ -269,7 +269,7 @@ Accepted values: `"5m"` (server default, equivalent to omitting the field) and `
 
 **oxide-code default.** `prompt_cache_ttl = "1h"`. The hit-rate recovery on real agent sessions (tool-use loops, resumed conversations) dominates the write premium, so 1 h is the right safe default. Users opt down via `[client].prompt_cache_ttl = "5m"` or `OX_PROMPT_CACHE_TTL=5m`.
 
-Invalidation order (from the Anthropic caching docs) is `tools → system → messages`: any change at a level busts that level and every level after it. oxide-code attaches a single `cache_control` to the static system-prompt prefix block (scope-gated on 1 P / 3 P per the previous section). The TTL rides through on both paths.
+Invalidation order (from the Anthropic caching docs) is `tools → system → messages`: any change at a level busts that level and every level after it. oxide-code sends two breakpoints with the configured TTL. The first sits on the static system-prompt prefix block (scope-gated on 1 P / 3 P per the previous section). The second sits on the last content block of the final message, without `scope`, so each turn reads the previous turn's transcript from cache. The prompt context is built once per session, which keeps that prefix stable from turn to turn. Compaction summaries are one-off requests that no later request extends, so they skip the second breakpoint.
 
 ### `thinking.display`
 

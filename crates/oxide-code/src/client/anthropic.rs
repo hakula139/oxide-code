@@ -29,11 +29,11 @@ use crate::prompt::SYSTEM_PROMPT_DYNAMIC_BOUNDARY;
 use crate::tool::ToolDefinition;
 use crate::util::tls::apply_extra_ca_certs;
 
-use betas::{compute_betas, static_prefix_cache_control};
+use betas::{compute_betas, conversation_cache_control, static_prefix_cache_control};
 use sse::stream_sse;
 use wire::{
-    CacheControl, ContextManagement, CreateMessageRequest, OutputConfig, RequestMetadata,
-    StreamEvent, SystemBlock,
+    CacheControl, ContextManagement, CreateMessageRequest, OutputConfig, RequestMessages,
+    RequestMetadata, StreamEvent, SystemBlock,
 };
 
 // ── Constants ──
@@ -206,17 +206,47 @@ impl Client {
     /// stream ends, the receiver is dropped, or an unrecoverable transport error is forwarded as
     /// a final `Err`.
     ///
-    /// `system_sections` ship as individual `system` blocks so `cache_control` covers only the
-    /// prefix up to [`SYSTEM_PROMPT_DYNAMIC_BOUNDARY`]. `user_context` rides as a synthetic user
-    /// message to keep dynamic content (CLAUDE.md and friends) out of the cached `system`
-    /// parameter. The billing attestation block is always injected because 3P gateways reject
-    /// API-key traffic without it.
+    /// Two `cache_control` breakpoints ship: one on the static `system` prefix up to
+    /// [`SYSTEM_PROMPT_DYNAMIC_BOUNDARY`], shared across sessions, and one on the last content
+    /// block of the final message, so the next request in the conversation reads the whole
+    /// transcript from cache. `user_context` rides as a synthetic leading user message to keep
+    /// dynamic content (CLAUDE.md and friends) out of the `system` parameter. The billing
+    /// attestation block is always injected because 3P gateways reject API-key traffic without it.
     pub(crate) fn stream_message(
         &self,
         messages: &[Message],
         system_sections: &[&str],
         user_context: Option<&str>,
         tools: &[ToolDefinition],
+    ) -> Result<mpsc::Receiver<Result<StreamEvent>>> {
+        let breakpoint = conversation_cache_control(self.config.prompt_cache_ttl);
+        self.stream(
+            messages,
+            system_sections,
+            user_context,
+            tools,
+            Some(breakpoint),
+        )
+    }
+
+    /// [`Self::stream_message`] without the transcript-tail breakpoint, for a request no later
+    /// request extends.
+    pub(crate) fn stream_one_shot(
+        &self,
+        messages: &[Message],
+        system_sections: &[&str],
+        tools: &[ToolDefinition],
+    ) -> Result<mpsc::Receiver<Result<StreamEvent>>> {
+        self.stream(messages, system_sections, None, tools, None)
+    }
+
+    fn stream(
+        &self,
+        messages: &[Message],
+        system_sections: &[&str],
+        user_context: Option<&str>,
+        tools: &[ToolDefinition],
+        breakpoint: Option<CacheControl>,
     ) -> Result<mpsc::Receiver<Result<StreamEvent>>> {
         let effective_messages: Vec<Message> = match user_context {
             Some(ctx) => std::iter::once(Message::user(ctx))
@@ -264,7 +294,10 @@ impl Client {
             context_management: caps
                 .context_management
                 .then(ContextManagement::clear_thinking_keep_all),
-            messages: &effective_messages,
+            messages: RequestMessages {
+                messages: &effective_messages,
+                breakpoint,
+            },
         })
         .context("failed to serialize request")?;
 
@@ -1071,6 +1104,73 @@ mod tests {
         );
         // TTL rides through on 3P. Only `scope` is gated on 1P.
         assert_eq!(cc["ttl"], "1h", "default 1h ttl survives on 3P: {body}");
+    }
+
+    #[tokio::test]
+    async fn stream_message_breakpoints_cover_static_prefix_and_conversation_tail() {
+        let server = MockServer::start().await;
+        let sink: Captured<String> = captured();
+        let sink_clone = std::sync::Arc::clone(&sink);
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(move |req: &Request| {
+                *sink_clone.lock().unwrap() = Some(String::from_utf8_lossy(&req.body).into_owned());
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(text_stream_body())
+            })
+            .mount(&server)
+            .await;
+
+        let mut client = Client::new(
+            test_config(server.uri(), api_key(), "claude-sonnet-4-6"),
+            Some("sid".to_owned()),
+        )
+        .unwrap();
+        // Pins that the conversation breakpoint omits `scope` even where the system prefix is global.
+        client.is_first_party = true;
+        let messages = [
+            Message::user("question"),
+            Message::assistant("answer"),
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "toolu_1".to_owned(),
+                    content: "ok".to_owned(),
+                    is_error: false,
+                }],
+            },
+        ];
+        collect_events(
+            client
+                .stream_message(
+                    &messages,
+                    &["static", SYSTEM_PROMPT_DYNAMIC_BOUNDARY, "dynamic"],
+                    Some("<system-reminder>context</system-reminder>"),
+                    &[],
+                )
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let body = sink.lock().unwrap().clone().expect("request captured");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            v["system"][2]["cache_control"],
+            serde_json::json!({"type": "ephemeral", "scope": "global", "ttl": "1h"}),
+        );
+        let sent = v["messages"].as_array().expect("messages array");
+        assert_eq!(sent.len(), 4, "user context leads the transcript: {body}");
+        assert_eq!(
+            sent[3]["content"][0]["cache_control"],
+            serde_json::json!({"type": "ephemeral", "ttl": "1h"}),
+        );
+        assert_eq!(
+            body.matches(r#""cache_control""#).count(),
+            2,
+            "only the static prefix and the final block carry breakpoints: {body}",
+        );
     }
 
     #[tokio::test]

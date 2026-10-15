@@ -1,10 +1,11 @@
 //! Pure data wire types for the Anthropic Messages API. Builders / interpreters live in sibling
 //! modules.
 
-use serde::{Deserialize, Serialize};
+use serde::ser::SerializeSeq;
+use serde::{Deserialize, Serialize, Serializer};
 
 use crate::config::{Effort, ThinkingConfig};
-use crate::message::Message;
+use crate::message::{ContentBlock, Message, Role};
 use crate::tool::ToolDefinition;
 
 // ── Request types ──
@@ -33,7 +34,78 @@ pub(super) struct CreateMessageRequest<'a> {
     /// Partners the `context-management-2025-06-27` beta on streaming requests for capable models.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) context_management: Option<ContextManagement>,
+    pub(super) messages: RequestMessages<'a>,
+}
+
+/// Serializes `messages` verbatim, except that `breakpoint` (when set) is stamped onto the last
+/// content block of the final message. The marker exists only on the wire, so in-memory
+/// [`Message`]s never carry cache state.
+pub(super) struct RequestMessages<'a> {
     pub(super) messages: &'a [Message],
+    pub(super) breakpoint: Option<CacheControl>,
+}
+
+impl Serialize for RequestMessages<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let Some(cache_control) = &self.breakpoint else {
+            return self.messages.serialize(serializer);
+        };
+        serialize_marking_last(serializer, self.messages, |message| MarkedMessage {
+            role: message.role,
+            content: MarkedBlocks {
+                blocks: &message.content,
+                cache_control,
+            },
+        })
+    }
+}
+
+#[derive(Serialize)]
+struct MarkedMessage<'a> {
+    role: Role,
+    content: MarkedBlocks<'a>,
+}
+
+struct MarkedBlocks<'a> {
+    blocks: &'a [ContentBlock],
+    cache_control: &'a CacheControl,
+}
+
+impl Serialize for MarkedBlocks<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serialize_marking_last(serializer, self.blocks, |block| MarkedBlock {
+            block,
+            cache_control: self.cache_control,
+        })
+    }
+}
+
+#[derive(Serialize)]
+struct MarkedBlock<'a> {
+    #[serde(flatten)]
+    block: &'a ContentBlock,
+    cache_control: &'a CacheControl,
+}
+
+/// Serializes `items` as a sequence with the last element replaced by `mark(last)`.
+fn serialize_marking_last<'a, S, T, M>(
+    serializer: S,
+    items: &'a [T],
+    mark: impl FnOnce(&'a T) -> M,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+    T: Serialize,
+    M: Serialize,
+{
+    let mut seq = serializer.serialize_seq(Some(items.len()))?;
+    if let Some((last, earlier)) = items.split_last() {
+        for item in earlier {
+            seq.serialize_element(item)?;
+        }
+        seq.serialize_element(&mark(last))?;
+    }
+    seq.end()
 }
 
 #[derive(Serialize)]
@@ -257,7 +329,107 @@ pub(crate) struct ApiError {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
+
+    // ── RequestMessages ──
+
+    fn one_hour_breakpoint() -> CacheControl {
+        CacheControl {
+            r#type: "ephemeral",
+            scope: None,
+            ttl: Some("1h"),
+        }
+    }
+
+    #[test]
+    fn request_messages_breakpoint_marks_only_last_block_of_final_message() {
+        let messages = [
+            Message::user("question"),
+            Message::assistant("answer"),
+            Message {
+                role: Role::User,
+                content: vec![
+                    ContentBlock::ToolResult {
+                        tool_use_id: "toolu_1".to_owned(),
+                        content: "ok".to_owned(),
+                        is_error: false,
+                    },
+                    ContentBlock::Text {
+                        text: "follow-up".to_owned(),
+                    },
+                ],
+            },
+        ];
+        let v = serde_json::to_value(RequestMessages {
+            messages: &messages,
+            breakpoint: Some(one_hour_breakpoint()),
+        })
+        .unwrap();
+
+        assert_eq!(
+            v,
+            json!([
+                {"role": "user", "content": [{"type": "text", "text": "question"}]},
+                {"role": "assistant", "content": [{"type": "text", "text": "answer"}]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"},
+                    {
+                        "type": "text",
+                        "text": "follow-up",
+                        "cache_control": {"type": "ephemeral", "ttl": "1h"},
+                    },
+                ]},
+            ]),
+        );
+    }
+
+    #[test]
+    fn request_messages_breakpoint_keeps_tool_result_fields_on_marked_block() {
+        let messages = [Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "toolu_1".to_owned(),
+                content: "boom".to_owned(),
+                is_error: true,
+            }],
+        }];
+        let v = serde_json::to_value(RequestMessages {
+            messages: &messages,
+            breakpoint: Some(one_hour_breakpoint()),
+        })
+        .unwrap();
+
+        assert_eq!(
+            v[0]["content"][0],
+            json!({
+                "type": "tool_result",
+                "tool_use_id": "toolu_1",
+                "content": "boom",
+                "is_error": true,
+                "cache_control": {"type": "ephemeral", "ttl": "1h"},
+            }),
+        );
+    }
+
+    #[test]
+    fn request_messages_without_breakpoint_or_messages_serializes_verbatim() {
+        let messages = [Message::user("question"), Message::assistant("answer")];
+        let v = serde_json::to_value(RequestMessages {
+            messages: &messages,
+            breakpoint: None,
+        })
+        .unwrap();
+        assert_eq!(v, serde_json::to_value(messages).unwrap());
+
+        let empty = serde_json::to_value(RequestMessages {
+            messages: &[],
+            breakpoint: Some(one_hour_breakpoint()),
+        })
+        .unwrap();
+        assert_eq!(empty, json!([]));
+    }
 
     // ── ContextManagement ──
 
