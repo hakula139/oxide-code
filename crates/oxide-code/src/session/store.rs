@@ -15,6 +15,7 @@ use super::entry::{CURRENT_VERSION, CompactInfo, Entry, ExitInfo, SessionInfo, T
 use super::path::{UNKNOWN_PROJECT_DIR, sanitize_cwd};
 use crate::file_tracker::FileSnapshot;
 use crate::message::Message;
+use crate::prompt::SessionContext;
 use crate::tool::ToolMetadata;
 use crate::util::fs::create_private_dir_all;
 use crate::util::path::xdg_dir;
@@ -298,6 +299,7 @@ pub(crate) fn load_session_data_from_path(path: &Path) -> Result<SessionData> {
 
 struct SessionDataBuilder {
     chain: ChainBuilder,
+    context: Option<SessionContext>,
     compact: Option<CompactInfo>,
     latest_title: Option<TitleInfo>,
     compact_tail_uuids: Option<HashSet<Uuid>>,
@@ -310,6 +312,7 @@ impl SessionDataBuilder {
     fn new() -> Self {
         Self {
             chain: ChainBuilder::new(),
+            context: None,
             compact: None,
             latest_title: None,
             compact_tail_uuids: None,
@@ -326,6 +329,7 @@ impl SessionDataBuilder {
                     "session format version {version} is newer than supported ({CURRENT_VERSION}); please upgrade oxide-code"
                 );
             }
+            Entry::Context { context, .. } => self.context = Some(*context),
             Entry::Message {
                 uuid,
                 parent_uuid,
@@ -409,6 +413,7 @@ impl SessionDataBuilder {
         instructions: Option<String>,
     ) {
         self.chain = ChainBuilder::new();
+        self.context = None;
         self.compact = Some(CompactInfo {
             summary,
             pre_message_count,
@@ -429,6 +434,7 @@ impl SessionDataBuilder {
         SessionData {
             messages,
             last_uuid,
+            context: self.context,
             compact: self.compact,
             title: self.latest_title,
             tool_result_metadata: self.tool_result_metadata,
@@ -563,6 +569,9 @@ impl SessionWriter {
 pub(crate) struct SessionData {
     pub(crate) messages: Vec<Message>,
     pub(crate) last_uuid: Option<Uuid>,
+    /// Recorded prompt state, `None` for a transcript that predates recording or whose last
+    /// compaction no user message followed.
+    pub(crate) context: Option<SessionContext>,
     pub(crate) compact: Option<CompactInfo>,
     pub(crate) title: Option<TitleInfo>,
     pub(crate) tool_result_metadata: HashMap<String, ToolMetadata>,
@@ -751,6 +760,7 @@ mod tests {
     use super::super::entry::TitleSource;
     use super::*;
     use crate::message::ContentBlock;
+    use crate::prompt::PromptParts;
 
     fn test_project_path(dir: &Path, filename: &str) -> PathBuf {
         dir.join(TEST_PROJECT).join(filename)
@@ -797,6 +807,19 @@ mod tests {
         Entry::Summary {
             message_count,
             updated_at: datetime!(2026-04-16 12:05:00 UTC),
+        }
+    }
+
+    fn session_context(date: &str) -> SessionContext {
+        let mut prompt = PromptParts::default();
+        date.clone_into(&mut prompt.seen.date);
+        prompt.session_context()
+    }
+
+    fn sample_context(date: &str) -> Entry {
+        Entry::Context {
+            context: Box::new(session_context(date)),
+            timestamp: datetime!(2026-04-16 12:00:00 UTC),
         }
     }
 
@@ -1106,6 +1129,34 @@ mod tests {
         );
         assert_eq!(data.file_snapshots.len(), 1);
         assert!(data.file_snapshots[0].path.ends_with("post.txt"));
+    }
+
+    #[test]
+    fn load_session_data_takes_the_latest_context_since_the_last_compact_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut writer = store.create(&sample_header("compact-context")).unwrap();
+        let load = || store.load_session_data("compact-context").unwrap().context;
+
+        writer.append(&sample_context("2026-04-16")).unwrap();
+        writer
+            .append(&sample_message_entry(Uuid::new_v4(), "first"))
+            .unwrap();
+        writer.append(&sample_context("2026-04-17")).unwrap();
+        assert_eq!(load(), Some(session_context("2026-04-17")));
+
+        writer
+            .append(&Entry::Compact {
+                summary: "summary".to_owned(),
+                pre_message_count: 1,
+                instructions: None,
+                timestamp: datetime!(2026-04-17 12:00:00 UTC),
+            })
+            .unwrap();
+        assert_eq!(load(), None, "a compacted transcript no longer carries it");
+
+        writer.append(&sample_context("2026-04-18")).unwrap();
+        assert_eq!(load(), Some(session_context("2026-04-18")));
     }
 
     #[test]

@@ -443,7 +443,7 @@ mod tests {
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
     use super::billing::build_billing_header;
-    use super::testing::{Captured, api_key, captured, oauth, test_config};
+    use super::testing::{Captured, api_key, captured, oauth, test_config, text_stream_body};
     use super::wire::{ContentBlockInfo, Delta};
     use super::*;
     use crate::config::{
@@ -475,33 +475,6 @@ mod tests {
             out.push(event?);
         }
         Ok(out)
-    }
-
-    /// Well-formed SSE body for a short text response.
-    fn text_stream_body() -> String {
-        sse_body(&[
-            (
-                "message_start",
-                r#"{"type":"message_start","message":{"id":"msg_1","model":"claude-sonnet-4-6","usage":{"input_tokens":5,"output_tokens":0}}}"#,
-            ),
-            (
-                "content_block_start",
-                r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
-            ),
-            (
-                "content_block_delta",
-                r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}"#,
-            ),
-            (
-                "content_block_stop",
-                r#"{"type":"content_block_stop","index":0}"#,
-            ),
-            (
-                "message_delta",
-                r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}"#,
-            ),
-            ("message_stop", r#"{"type":"message_stop"}"#),
-        ])
     }
 
     // ── Client::new / Client::model ──
@@ -626,7 +599,7 @@ mod tests {
             .respond_with(
                 ResponseTemplate::new(200)
                     .insert_header("content-type", "text/event-stream")
-                    .set_body_string(text_stream_body()),
+                    .set_body_string(text_stream_body("", "Hi")),
             )
             .mount(&server)
             .await;
@@ -802,7 +775,7 @@ mod tests {
             .respond_with(
                 ResponseTemplate::new(200)
                     .insert_header("content-type", "text/event-stream")
-                    .set_body_string(text_stream_body()),
+                    .set_body_string(text_stream_body("", "Hi")),
             )
             .mount(&server)
             .await;
@@ -896,7 +869,7 @@ mod tests {
             .respond_with(
                 ResponseTemplate::new(200)
                     .insert_header("content-type", "text/event-stream")
-                    .set_body_string(text_stream_body()),
+                    .set_body_string(text_stream_body("", "Hi")),
             )
             .mount(&server)
             .await;
@@ -930,7 +903,7 @@ mod tests {
             .respond_with(
                 ResponseTemplate::new(200)
                     .insert_header("content-type", "text/event-stream")
-                    .set_body_string(text_stream_body()),
+                    .set_body_string(text_stream_body("", "Hi")),
             )
             .mount(&server)
             .await;
@@ -968,7 +941,7 @@ mod tests {
                         Some(String::from_utf8_lossy(&req.body).into_owned());
                     ResponseTemplate::new(200)
                         .insert_header("content-type", "text/event-stream")
-                        .set_body_string(text_stream_body())
+                        .set_body_string(text_stream_body("", "Hi"))
                 })
                 .mount(&server)
                 .await;
@@ -1006,7 +979,7 @@ mod tests {
                 *sink_clone.lock().unwrap() = Some(String::from_utf8_lossy(&req.body).into_owned());
                 ResponseTemplate::new(200)
                     .insert_header("content-type", "text/event-stream")
-                    .set_body_string(text_stream_body())
+                    .set_body_string(text_stream_body("", "Hi"))
             })
             .mount(&server)
             .await;
@@ -1062,7 +1035,7 @@ mod tests {
                 *sink_clone.lock().unwrap() = Some((body, beta));
                 ResponseTemplate::new(200)
                     .insert_header("content-type", "text/event-stream")
-                    .set_body_string(text_stream_body())
+                    .set_body_string(text_stream_body("", "Hi"))
             })
             .mount(&server)
             .await;
@@ -1117,7 +1090,7 @@ mod tests {
                 *sink_clone.lock().unwrap() = Some(String::from_utf8_lossy(&req.body).into_owned());
                 ResponseTemplate::new(200)
                     .insert_header("content-type", "text/event-stream")
-                    .set_body_string(text_stream_body())
+                    .set_body_string(text_stream_body("", "Hi"))
             })
             .mount(&server)
             .await;
@@ -1331,7 +1304,7 @@ mod tests {
             .respond_with(
                 ResponseTemplate::new(200)
                     .insert_header("content-type", "text/event-stream")
-                    .set_body_string(text_stream_body())
+                    .set_body_string(text_stream_body("", "Hi"))
                     .set_delay(Duration::from_millis(50)),
             )
             .mount(&server)
@@ -1363,7 +1336,7 @@ mod tests {
                 *sink_clone.lock().unwrap() = Some(String::from_utf8_lossy(&req.body).into_owned());
                 ResponseTemplate::new(200)
                     .insert_header("content-type", "text/event-stream")
-                    .set_body_string(text_stream_body())
+                    .set_body_string(text_stream_body("", "Hi"))
             })
             .mount(&server)
             .await;

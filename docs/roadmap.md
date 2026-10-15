@@ -47,7 +47,7 @@ The direction is simple:
 
 ### System Prompt
 
-- Project environment, current date, and model context are captured once per session, so every turn reuses the cached prompt prefix.
+- The project environment, instructions, current date, and model context are captured once per session and replayed on resume so every turn reuses the cached prompt prefix, while subsequent updates to instructions or the date reach the model as reminders with the next prompt.
 - `CLAUDE.md` / `AGENTS.md` instructions are loaded from user and project scopes.
 
 ### Session Persistence

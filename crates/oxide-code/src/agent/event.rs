@@ -231,6 +231,7 @@ pub(crate) trait AgentSink: Send + Sync {
 /// [`AgentSink`] for the `--no-tui` REPL and `--prompt` headless modes: assistant tokens stream
 /// to stdout, everything else (tool calls, errors, the interrupted marker) to stderr so piped
 /// output stays clean.
+#[derive(Clone)]
 pub(crate) struct StdioSink {
     show_thinking: bool,
     tools: Arc<ToolRegistry>,

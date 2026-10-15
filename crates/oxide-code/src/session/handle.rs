@@ -20,6 +20,7 @@ use super::store::{
 };
 use crate::file_tracker::{FileSnapshot, FileTracker};
 use crate::message::Message;
+use crate::prompt::SessionContext;
 use crate::tool::ToolMetadata;
 
 #[cfg(test)]
@@ -131,10 +132,19 @@ impl SessionHandle {
 
     /// Record a conversation message. Returns after the batch flush completes.
     pub(crate) async fn record_message(&self, msg: Message) -> RecordOutcome {
+        self.record_message_with_context(msg, None).await
+    }
+
+    /// [`Self::record_message`], with the prompt state `msg` is the first to carry.
+    pub(crate) async fn record_message_with_context(
+        &self,
+        msg: Message,
+        context: Option<SessionContext>,
+    ) -> RecordOutcome {
         let (ack, rx) = oneshot::channel();
         if self
             .cmd_tx
-            .send(SessionCmd::Record { msg, ack })
+            .send(SessionCmd::Record { msg, context, ack })
             .await
             .is_err()
         {
@@ -295,6 +305,8 @@ impl SessionHandle {
 pub(crate) struct ResumedSession {
     pub(crate) handle: SessionHandle,
     pub(crate) messages: Vec<Message>,
+    /// Recorded prompt state the resumed conversation replays.
+    pub(crate) context: Option<SessionContext>,
     pub(crate) compact: Option<CompactInfo>,
     pub(crate) title: Option<String>,
     pub(crate) tool_result_metadata: HashMap<String, ToolMetadata>,
@@ -338,10 +350,11 @@ pub(crate) async fn roll(
 }
 
 /// Resumed transcript + finalize failure from the old session. The handle swap happens via
-/// `&mut SessionHandle`. This struct only carries the UI-rebuild payload.
+/// `&mut SessionHandle`. This struct only carries what the conversation and UI rebuild from.
 #[derive(Debug)]
 pub(crate) struct RollIntoOutcome {
     pub(crate) messages: Vec<Message>,
+    pub(crate) context: Option<SessionContext>,
     pub(crate) compact: Option<CompactInfo>,
     pub(crate) title: Option<String>,
     pub(crate) tool_result_metadata: HashMap<String, ToolMetadata>,
@@ -370,6 +383,7 @@ pub(crate) async fn roll_into(
     let ResumedSession {
         handle: target_handle,
         messages,
+        context,
         compact,
         title,
         tool_result_metadata,
@@ -384,6 +398,7 @@ pub(crate) async fn roll_into(
     let finalize_failure = old_session.finalize(old_snapshots).await;
     Ok(RollIntoOutcome {
         messages,
+        context,
         compact,
         title,
         tool_result_metadata,
@@ -439,6 +454,7 @@ fn from_resumed_data(
     Ok(ResumedSession {
         handle,
         messages: data.messages,
+        context: data.context,
         compact: data.compact,
         title,
         tool_result_metadata: data.tool_result_metadata,

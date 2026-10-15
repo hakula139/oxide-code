@@ -47,6 +47,30 @@ pub(crate) fn completion_body(text: &str) -> String {
     .to_string()
 }
 
+/// Streamed `end_turn` reply whose text opens as `start_text` and ends with one `delta_text`
+/// delta, billed at 1,000 input and 100 output tokens.
+pub(crate) fn text_stream_body(start_text: &str, delta_text: &str) -> String {
+    use std::fmt::Write as _;
+
+    let frames = [
+        serde_json::json!({"type": "message_start", "message": {"id": "msg_1", "model": "claude-sonnet-4-6", "usage": {"input_tokens": 1_000, "output_tokens": 0}}}),
+        serde_json::json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": start_text}}),
+        serde_json::json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": delta_text}}),
+        serde_json::json!({"type": "content_block_stop", "index": 0}),
+        serde_json::json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 100}}),
+        serde_json::json!({"type": "message_stop"}),
+    ];
+    let mut body = String::new();
+    for frame in &frames {
+        _ = writeln!(
+            body,
+            "event: {}\ndata: {frame}\n",
+            frame["type"].as_str().unwrap()
+        );
+    }
+    body
+}
+
 pub(crate) fn api_key() -> Auth {
     Auth::ApiKey("k".to_owned())
 }

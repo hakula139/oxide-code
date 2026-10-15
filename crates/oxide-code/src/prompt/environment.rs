@@ -4,13 +4,13 @@ use std::path::Path;
 
 use indoc::formatdoc;
 use platform_info::{PlatformInfo, PlatformInfoAPI, UNameAPI};
+use serde::{Deserialize, Serialize};
 
 use crate::model::lookup;
 use crate::util::env;
 use crate::util::time::local_offset;
 
-const UNKNOWN_MARKER: &str = "(unknown)";
-
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(Default))]
 pub(super) struct Environment {
     cwd: String,
@@ -18,30 +18,23 @@ pub(super) struct Environment {
     platform: String,
     shell: String,
     os_version: String,
-    date: String,
     model: String,
 }
 
 impl Environment {
     /// Best-effort detection; failures produce fallback values.
-    pub(super) fn detect(model: &str, cwd: Option<&Path>, git_root: Option<&Path>) -> Self {
-        let cwd_str = cwd.map_or_else(
-            || UNKNOWN_MARKER.to_owned(),
-            |p| p.to_string_lossy().into_owned(),
-        );
+    pub(super) fn detect(model: &str, cwd: &Path, git_root: Option<&Path>) -> Self {
         let is_git = git_root.is_some();
         let platform = normalize_node_platform(std::env::consts::OS).to_owned();
         let shell = detect_shell();
         let os_version = detect_os_version();
-        let date = current_date();
 
         Self {
-            cwd: cwd_str,
+            cwd: cwd.to_string_lossy().into_owned(),
             is_git,
             platform,
             shell,
             os_version,
-            date,
             model: model.to_owned(),
         }
     }
@@ -50,8 +43,8 @@ impl Environment {
         model.clone_into(&mut self.model);
     }
 
-    pub(super) fn date(&self) -> String {
-        format!("Today's date is {}.", self.date)
+    pub(super) fn describes(&self, cwd: &Path) -> bool {
+        self.cwd == cwd.to_string_lossy()
     }
 
     pub(super) fn render(&self) -> String {
@@ -134,7 +127,7 @@ fn detect_os_version() -> String {
 
 // ── Date Detection ──
 
-fn current_date() -> String {
+pub(super) fn current_date() -> String {
     format_local_date(time::OffsetDateTime::now_utc(), local_offset())
 }
 
@@ -157,42 +150,19 @@ mod tests {
     #[test]
     fn detect_inside_repo_sets_is_git_true() {
         let cwd = std::env::current_dir().expect("cwd should be available");
-        let env = Environment::detect("test-model", Some(&cwd), Some(&cwd));
+        let env = Environment::detect("test-model", &cwd, Some(&cwd));
         assert!(env.is_git);
     }
 
     #[test]
     fn detect_with_cwd_but_no_git_root_sets_is_git_false() {
         let tmp = tempfile::tempdir().expect("failed to create tempdir");
-        let env = Environment::detect("test-model", Some(tmp.path()), None);
+        let env = Environment::detect("test-model", tmp.path(), None);
         assert!(!env.is_git);
         assert!(
             env.cwd
                 .ends_with(tmp.path().file_name().unwrap().to_str().unwrap())
         );
-    }
-
-    #[test]
-    fn detect_without_cwd_uses_unknown_and_skips_git() {
-        let env = Environment::detect("test-model", None, None);
-        assert_eq!(env.cwd, "(unknown)");
-        assert!(!env.is_git);
-    }
-
-    // ── Environment::date ──
-
-    #[test]
-    fn date_produces_formatted_string() {
-        let env = Environment {
-            cwd: "/tmp".to_owned(),
-            is_git: false,
-            platform: "darwin".to_owned(),
-            shell: "zsh".to_owned(),
-            os_version: "Darwin 25.3.0".to_owned(),
-            date: "2026-04-12".to_owned(),
-            model: "test-model".to_owned(),
-        };
-        assert_eq!(env.date(), "Today's date is 2026-04-12.");
     }
 
     // ── Environment::render ──
@@ -205,7 +175,6 @@ mod tests {
             platform: "linux".to_owned(),
             shell: "bash".to_owned(),
             os_version: "Linux 6.1.0".to_owned(),
-            date: "2026-04-05".to_owned(),
             model: "claude-opus-4-6".to_owned(),
         };
         let rendered = env.render();
@@ -232,7 +201,6 @@ mod tests {
             platform: "darwin".to_owned(),
             shell: "zsh".to_owned(),
             os_version: "Darwin 24.6.0".to_owned(),
-            date: "2026-04-05".to_owned(),
             model: "test-model".to_owned(),
         };
         let rendered = env.render();
@@ -247,7 +215,6 @@ mod tests {
             platform: "darwin".to_owned(),
             shell: "zsh".to_owned(),
             os_version: "Darwin 25.3.0".to_owned(),
-            date: "2026-04-05".to_owned(),
             model: "custom-model-v1".to_owned(),
         };
         let rendered = env.render();

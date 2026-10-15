@@ -62,21 +62,21 @@ Explicit thresholds snap into a usable range. Token values below `50_000` rise t
 
 ## Trigger Flow
 
-The main loop owns the automatic trigger because it can compact before a new prompt is recorded. The agent turn reports the latest usage signal after each completed turn.
+`Conversation` owns the automatic trigger because it can compact before a new prompt is recorded. The agent turn reports the latest usage signal after each completed turn.
 
 1. `agent_turn` streams a complete turn, persists the transcript tail, and returns the latest token usage from `StreamOutcome`.
-2. The main loop stores that usage as the pending automatic trigger signal.
-3. When the next `SubmitPrompt` arrives, `auto_compact_before_prompt` checks the stored usage before recording the prompt.
+2. `Conversation` stores that usage as the pending automatic trigger signal.
+3. When the next prompt arrives, `Conversation::auto_compact` checks the stored usage before `submit_prompt` records the prompt.
 4. If the total crosses the threshold, it calls the same compact driver used by `/compact`.
-5. The agent loop emits `AutoCompactionStarted` so the TUI can show compaction status while the summarizer runs.
+5. `auto_compact_if_needed` emits `AutoCompactionStarted` so the TUI can show compaction status while the summarizer runs.
 6. On success, `compact_boundary` persists the compact boundary, clears the file tracker, replaces `messages` with the synthetic post-compact message, and emits `SessionCompacted`.
-7. On failure, the loop increments the auto-compaction failure counter and records the new prompt against the unchanged transcript.
+7. On failure, `auto_compact_if_needed` increments the failure counter and emits an `Error`, and `submit_prompt` records the new prompt against the unchanged transcript.
 
-The failure counter is per agent-loop task. Three consecutive automatic failures disable further automatic attempts for the current session. Manual `/compact` does not consult this counter and resets it on success.
+The failure counter lives on `Conversation`. Three consecutive automatic failures disable further automatic attempts until a successful compaction, a model or effort change, `/clear`, or `/resume` resets the counter. Manual `/compact` does not consult it.
 
 ## User Experience
 
-Manual and automatic compaction use the same visible `CompactedBlock`. When an automatic attempt fails, chat surfaces an error (`Auto-compaction failed: ...` from the summarizer, or `Session write failed: ...` from the boundary write) while the user's prompt proceeds against the unchanged transcript. After the third consecutive failure, a one-time notice appears and automatic attempts stop until a `/model` or `/effort` swap, `/clear`, `/resume`, or a successful `/compact` resets the counter.
+Manual and automatic compaction use the same visible `CompactedBlock`. When an automatic attempt fails, chat surfaces an error (`Auto-compaction failed: ...` from the summarizer, or `Session write failed: ...` from the boundary write) while the user's prompt proceeds against the unchanged transcript. The TUI ends its busy state on every `Error`, so it treats that failure as the end of the turn while the reply still streams. After the third consecutive failure, a one-time notice appears and automatic attempts stop until a `/model` or `/effort` swap, `/clear`, `/resume`, or a successful `/compact` resets the counter.
 
 During TUI auto-compaction, the status bar uses the existing `Compacting` state. Automatic `SessionCompacted` events keep the TUI busy until the queued prompt drains or the prompt submission finishes. In the bare REPL, `StdioSink` renders `SessionCompacted` as a stderr boundary line.
 

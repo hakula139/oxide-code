@@ -39,7 +39,7 @@ Segment render rules:
 
 Anthropic `Usage` carries `cache_creation_input_tokens` and `cache_read_input_tokens`. `TokenUsage::context_tokens()` returns input + cache creation + cache read. `TokenUsage::total_tokens()` returns context + output and is the auto-compaction trigger input.
 
-A successful `agent_turn` returns the latest provider usage. `AgentLoopTask` keeps that usage for the next auto-compaction check, updates the displayed usage snapshot, adds the turn's estimated cost when rates are known, then emits `AgentEvent::UsageUpdated(UsageSnapshot)` before `TurnComplete`.
+A successful `agent_turn` returns the latest provider usage. `Conversation` keeps that usage for the next auto-compaction check, updates the displayed usage snapshot, adds the turn's estimated cost when rates are known, then emits `AgentEvent::UsageUpdated(UsageSnapshot)` before `TurnComplete`.
 
 Known first-party Claude API rates live in `model/pricing.rs`, and the `model.rs` catalogue attaches them to each model. Unknown models render context without session cost. The estimate excludes account discounts, marketplace billing, data-residency multipliers, fast mode, and server-side tool surcharges.
 
@@ -87,7 +87,7 @@ The default order tracks reading flow: location and branch orient the user, mode
 
 - [Status line research](../../research/tui/status-line.md)
 - [Auto-compaction design](../agent/auto-compaction.md)
-- `crates/oxide-code/src/main.rs`
+- `crates/oxide-code/src/driver.rs`
 - `crates/oxide-code/src/tui/components/status.rs`
 - `crates/oxide-code/src/tui/components/status/line.rs`
 - `crates/oxide-code/src/tui/git_probes.rs`
