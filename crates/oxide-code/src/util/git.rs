@@ -129,6 +129,60 @@ fn stderr_summary(stderr: &[u8]) -> String {
 }
 
 #[cfg(test)]
+pub(crate) mod testing {
+    use std::path::Path;
+    use std::process::Command;
+
+    /// Clears git's repository-local variables (`git rev-parse --local-env-vars`) and discovery
+    /// ceiling, and skips the system and global configs.
+    const ISOLATED_GIT_ENV: [(&str, Option<&str>); 18] = [
+        ("GIT_ALTERNATE_OBJECT_DIRECTORIES", None),
+        ("GIT_CEILING_DIRECTORIES", None),
+        ("GIT_COMMON_DIR", None),
+        ("GIT_CONFIG", None),
+        ("GIT_CONFIG_COUNT", None),
+        ("GIT_CONFIG_PARAMETERS", None),
+        ("GIT_DIR", None),
+        ("GIT_GRAFT_FILE", None),
+        ("GIT_IMPLICIT_WORK_TREE", None),
+        ("GIT_INDEX_FILE", None),
+        ("GIT_NO_REPLACE_OBJECTS", None),
+        ("GIT_OBJECT_DIRECTORY", None),
+        ("GIT_PREFIX", None),
+        ("GIT_REPLACE_REF_BASE", None),
+        ("GIT_SHALLOW_FILE", None),
+        ("GIT_WORK_TREE", None),
+        ("GIT_CONFIG_GLOBAL", Some("/dev/null")),
+        ("GIT_CONFIG_NOSYSTEM", Some("1")),
+    ];
+
+    /// `git` in `cwd` under [`ISOLATED_GIT_ENV`].
+    pub(crate) fn isolated_git(cwd: &Path) -> Command {
+        let mut command = Command::new("git");
+        command.current_dir(cwd);
+        for (key, value) in ISOLATED_GIT_ENV {
+            match value {
+                Some(value) => command.env(key, value),
+                None => command.env_remove(key),
+            };
+        }
+        command
+    }
+
+    /// Runs `f` under [`ISOLATED_GIT_ENV`], so production probes under test see only the fixture.
+    /// `git rebase --exec` exports `GIT_DIR`, which would otherwise aim them at the caller's
+    /// repository.
+    pub(crate) fn with_isolated_git_env<R>(f: impl FnOnce() -> R) -> R {
+        temp_env::with_vars(ISOLATED_GIT_ENV, f)
+    }
+
+    /// [`with_isolated_git_env`] for async probes.
+    pub(crate) async fn with_isolated_git_env_async<F: Future>(future: F) -> F::Output {
+        temp_env::async_with_vars(ISOLATED_GIT_ENV, future).await
+    }
+}
+
+#[cfg(test)]
 mod tests {
     #[cfg(unix)]
     use std::ffi::OsStr;
@@ -137,6 +191,7 @@ mod tests {
     #[cfg(unix)]
     use std::path::PathBuf;
 
+    use super::testing::{isolated_git, with_isolated_git_env, with_isolated_git_env_async};
     use super::*;
 
     // ── current_branch ──
@@ -148,7 +203,7 @@ mod tests {
             return;
         }
         assert_eq!(
-            current_branch(dir.path()),
+            with_isolated_git_env(|| current_branch(dir.path())),
             Some("fixture-branch".to_owned())
         );
     }
@@ -156,7 +211,7 @@ mod tests {
     #[test]
     fn current_branch_outside_a_repo_is_absent() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(current_branch(dir.path()), None);
+        assert_eq!(with_isolated_git_env(|| current_branch(dir.path())), None);
     }
 
     #[test]
@@ -170,9 +225,8 @@ mod tests {
 
     /// Commits once on `fixture-branch` in `cwd`. Returns `false` when git is unavailable.
     fn init_fixture_repo(cwd: &Path) -> bool {
-        let Ok(status) = Command::new("git")
+        let Ok(status) = isolated_git(cwd)
             .args(["init", "-q", "-b", "fixture-branch"])
-            .current_dir(cwd)
             .status()
         else {
             return false;
@@ -183,14 +237,9 @@ mod tests {
         for args in [
             ["config", "user.email", "test@example.com"].as_slice(),
             ["config", "user.name", "Test"].as_slice(),
-            ["config", "commit.gpgsign", "false"].as_slice(),
             ["commit", "-q", "--allow-empty", "-m", "init"].as_slice(),
         ] {
-            Command::new("git")
-                .args(args)
-                .current_dir(cwd)
-                .status()
-                .unwrap();
+            isolated_git(cwd).args(args).status().unwrap();
         }
         true
     }
@@ -204,7 +253,7 @@ mod tests {
             return;
         }
         assert_eq!(
-            current_branch_async(dir.path()).await,
+            with_isolated_git_env_async(current_branch_async(dir.path())).await,
             Some("fixture-branch".to_owned()),
         );
     }
@@ -212,7 +261,10 @@ mod tests {
     #[tokio::test]
     async fn current_branch_async_outside_a_repo_is_absent() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(current_branch_async(dir.path()).await, None);
+        assert_eq!(
+            with_isolated_git_env_async(current_branch_async(dir.path())).await,
+            None
+        );
     }
 
     // ── current_branch_str ──
@@ -220,7 +272,8 @@ mod tests {
     #[test]
     fn current_branch_str_outside_a_repo_is_absent() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(current_branch_str(dir.path().to_str().unwrap()), None);
+        let cwd = dir.path().to_str().unwrap();
+        assert_eq!(with_isolated_git_env(|| current_branch_str(cwd)), None);
     }
 
     // ── parse_branch ──
@@ -239,7 +292,10 @@ mod tests {
     #[tokio::test]
     async fn current_pull_request_outside_a_repo_is_absent() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(current_pull_request(dir.path()).await, None);
+        assert_eq!(
+            with_isolated_git_env_async(current_pull_request(dir.path())).await,
+            None
+        );
     }
 
     #[tokio::test]

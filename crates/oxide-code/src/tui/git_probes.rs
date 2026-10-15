@@ -132,6 +132,7 @@ impl Schedule {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::git::testing::with_isolated_git_env_async;
 
     const RECV_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -155,44 +156,47 @@ mod tests {
 
     #[tokio::test]
     async fn recv_delivers_each_probe_result_and_reschedules_from_completion() {
-        let dir = tempfile::tempdir().unwrap();
-        let now = Instant::now();
-        let mut probes = GitProbes::new(Some(dir.path().to_path_buf()), true, now);
+        with_isolated_git_env_async(async {
+            let dir = tempfile::tempdir().unwrap();
+            let now = Instant::now();
+            let mut probes = GitProbes::new(Some(dir.path().to_path_buf()), true, now);
 
-        probes.poll(now + BRANCH_REFRESH_INTERVAL);
-        probes.poll(now + PULL_REQUEST_REFRESH_INTERVAL * 2);
-        assert_eq!(probes.branch.next_due, None, "branch in flight");
-        assert_eq!(
-            probes.pull_request.as_ref().unwrap().next_due,
-            None,
-            "pull request in flight",
-        );
+            probes.poll(now + BRANCH_REFRESH_INTERVAL);
+            probes.poll(now + PULL_REQUEST_REFRESH_INTERVAL * 2);
+            assert_eq!(probes.branch.next_due, None, "branch in flight");
+            assert_eq!(
+                probes.pull_request.as_ref().unwrap().next_due,
+                None,
+                "pull request in flight",
+            );
 
-        let mut updates = Vec::new();
-        for _ in 0..2 {
-            let update = tokio::time::timeout(RECV_TIMEOUT, probes.recv())
-                .await
-                .expect("probe finishes");
-            updates.push(update.unwrap());
-        }
-        assert!(
-            updates.contains(&GitUpdate::Branch(None)),
-            "updates={updates:?}"
-        );
-        assert!(
-            updates.contains(&GitUpdate::PullRequest(None)),
-            "updates={updates:?}"
-        );
+            let mut updates = Vec::new();
+            for _ in 0..2 {
+                let update = tokio::time::timeout(RECV_TIMEOUT, probes.recv())
+                    .await
+                    .expect("probe finishes");
+                updates.push(update.unwrap());
+            }
+            assert!(
+                updates.contains(&GitUpdate::Branch(None)),
+                "updates={updates:?}"
+            );
+            assert!(
+                updates.contains(&GitUpdate::PullRequest(None)),
+                "updates={updates:?}"
+            );
 
-        let after = Instant::now();
-        assert!(probes.branch.next_due.is_some_and(|due| due > after));
-        assert!(
-            probes
-                .pull_request
-                .unwrap()
-                .next_due
-                .is_some_and(|due| due > after)
-        );
+            let after = Instant::now();
+            assert!(probes.branch.next_due.is_some_and(|due| due > after));
+            assert!(
+                probes
+                    .pull_request
+                    .unwrap()
+                    .next_due
+                    .is_some_and(|due| due > after)
+            );
+        })
+        .await;
     }
 
     // ── Schedule::start ──
