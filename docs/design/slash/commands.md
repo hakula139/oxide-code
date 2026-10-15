@@ -55,7 +55,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 - **`/init`**: Returns `Forward(UserAction::SubmitPrompt(PROMPT))` with a static body asking the model to author / update AGENTS.md. The expanded body is invisible in the live session but recorded in JSONL for resume.
 
-- **`/model`**: Bare opens the combined picker ([modals.md](modals.md)). `/model <arg>` resolves via alias → exact / dated id → unique suffix → unique substring. `[1m]` is an opt-in tag (strip → resolve → reattach). Both forms are mutating and idle-gated because they can emit `UserAction::SwapConfig` and re-clamp current effort against the new model.
+- **`/model`**: Bare opens the combined picker ([modals.md](modals.md)). `/model <arg>` resolves an exact catalogue id first, then a unique substring, so `opus`, `sonnet`, and `haiku` act as aliases. Both forms are mutating and idle-gated because they can emit `UserAction::SwapConfig`, which re-resolves the current effort against the new model.
 
 - **`/effort`**: Bare opens the Speed ↔ Intelligence slider ([modals.md](modals.md)), since a two-axis picker would force users through models they didn't mean to change. `/effort <level>` accepts the five concrete tiers, with no `auto` state. Both forms are mutating and idle-gated because they can emit `UserAction::SwapConfig`.
 

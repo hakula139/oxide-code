@@ -265,14 +265,14 @@ mod tests {
     #[tokio::test]
     async fn set_model_rerenders_system_and_keeps_user_context() {
         let tmp = tempfile::tempdir().expect("failed to create tempdir");
-        let mut parts = assemble("claude-opus-4-6", tmp.path(), None).await;
+        let mut parts = assemble("claude-opus-5-5", tmp.path(), None).await;
         let user_context = parts.user_context.clone();
 
-        parts.set_model("claude-sonnet-4-6");
+        parts.set_model("claude-sonnet-5-5");
 
         let joined = parts.system_joined();
-        assert!(joined.contains("The exact model ID is claude-sonnet-4-6."));
-        assert!(!joined.contains("claude-opus-4-6"));
+        assert!(joined.contains("The exact model ID is claude-sonnet-5-5."));
+        assert!(!joined.contains("claude-opus-5-5"));
         assert_eq!(parts.user_context, user_context);
     }
 
@@ -384,14 +384,14 @@ mod tests {
 
         let parts = restore_prompt(
             recorded_context(tmp.path()),
-            "claude-sonnet-4-6",
+            "claude-sonnet-5-5",
             tmp.path(),
         )
         .await;
 
         let joined = parts.system_joined();
         assert!(joined.contains("- Platform: plan9"), "{joined}");
-        assert!(joined.contains("The exact model ID is claude-sonnet-4-6."));
+        assert!(joined.contains("The exact model ID is claude-sonnet-5-5."));
         assert_eq!(parts.user_context, "recorded context");
         assert_eq!(parts.seen, context("Recorded rules.", "2026-04-12"));
     }
@@ -403,7 +403,7 @@ mod tests {
 
         let parts = restore_prompt(
             recorded_context(recorded_in.path()),
-            "claude-opus-4-6",
+            "claude-opus-5-5",
             resumed_in.path(),
         )
         .await;
@@ -601,7 +601,7 @@ mod tests {
                 "platform": "plan9",
                 "shell": "rc",
                 "os_version": "Plan 9 4e",
-                "model": "claude-opus-4-6",
+                "model": "claude-opus-5-5",
             },
             "user_context": "recorded context",
             "seen": {"instructions": "Recorded rules.", "date": "2026-04-12"},

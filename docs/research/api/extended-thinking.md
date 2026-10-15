@@ -45,12 +45,13 @@ When thinking is enabled, `temperature` must be omitted from the request (API re
 
 ### Display modes (Opus 4.7+)
 
-Opus 4.7 adds a `thinking.display` field with two wire values:
+`thinking.display`, added in Opus 4.7, takes three wire values:
 
-| Value          | Meaning                                                 |
-| -------------- | ------------------------------------------------------- |
-| `"summarized"` | Thinking blocks stream summarized reasoning text.       |
-| `"omitted"`    | Thinking blocks still ship but `thinking: ""` is empty. |
+| Value          | Meaning                                                      |
+| -------------- | ------------------------------------------------------------ |
+| `"summarized"` | Thinking blocks stream summarized reasoning text.            |
+| `"omitted"`    | Thinking blocks still ship but `thinking: ""` is empty.      |
+| `"updates"`    | Only progress notes stream as text (Opus / Sonnet 5.5, beta) |
 
 **Silent default change.** On Opus 4.6, the server defaulted to `"summarized"`. On Opus 4.7 the default is `"omitted"`, so any UI that renders streaming reasoning (including oxide-code's `show_thinking` TUI mode) sees a long pause followed by the final answer unless it opts back in:
 
@@ -60,9 +61,13 @@ Opus 4.7 adds a `thinking.display` field with two wire values:
 }
 ```
 
-Older models (4.6, 4.5) accept the field and ignore it, so sending it unconditionally is safe when the caller wants summarized output. oxide-code couples `display` to `config.show_thinking`: `Some(Summarized)` when the TUI is set up to render reasoning, `None` (field absent) otherwise. The `None` path preserves the pre-4.7 wire shape and lets 4.7's `omitted` default do what it says.
+Older models (4.6, 4.5) accept the field and ignore it, so sending it unconditionally is safe when the caller wants summarized output.
 
-No beta header gates `display` because it is GA on 4.7.
+Claude Opus 5.5 and Sonnet 5.5 return the notes the model writes between tool calls as progress-update thinking blocks, which are empty under `"omitted"`. Each note is its own thinking block directly before the tool call it introduces. A response that stops early (`max_tokens`, context window, stop sequence) can end with a note whose text is exactly `This part of the response was interrupted before it finished.`, and continuing means passing that turn back unchanged with a new user message.
+
+oxide-code couples `display` to `config.show_thinking`: `"summarized"` when the TUI renders reasoning, otherwise `"updates"` on models that support it and no field on the rest.
+
+`"summarized"` and `"omitted"` are GA since Opus 4.7, and `"updates"` needs the `thinking-display-updates-2026-08-18` beta.
 
 ## Thinking Block Lifecycle
 
@@ -92,7 +97,7 @@ Order matters: trailing thinking must be stripped before whitespace filtering, o
 
 ### Constraints
 
-- **Trailing thinking**: Assistant messages must not end with a thinking block. Stripping can leave a thinking-only message empty, so a placeholder text block must be inserted to preserve user / assistant alternation. Deleting the message would create consecutive user messages, which the API rejects.
+- **Trailing thinking**: A final assistant message must not end with a thinking block. Stripping can leave a thinking-only message empty, so a placeholder text block must be inserted to preserve user / assistant alternation. Deleting the message would create consecutive user messages, which the API rejects.
 - **Credential rotation**: Signatures are cryptographically bound to the API key that generated them, so when credentials change (e.g., user logs in with a different account) all thinking and redacted_thinking blocks must be stripped from history. Old signatures become invalid and the API rejects them with 400.
 
 ## Signatures
@@ -106,7 +111,7 @@ Every `thinking` block includes a `signature` field received via `signature_delt
 
 Claude Code handles credential rotation in `stripSignatureBlocks()`, which removes all thinking / redacted_thinking blocks when the active credential changes.
 
-oxide-code implements the full thinking data pipeline: typed `Thinking`, `RedactedThinking`, and `ServerToolUse` content blocks with streaming accumulation, signature handling, round-trip preservation, and trailing thinking stripping with placeholder insertion. Adaptive thinking is enabled by default. `thinking.display` is set to `"summarized"` whenever the TUI's `show_thinking` flag is on, and omitted otherwise so 4.7's `"omitted"` default applies. Credential rotation stripping is not yet implemented. When OAuth credentials rotate mid-session, stale signatures should be stripped from history before the next API call.
+oxide-code implements the full thinking data pipeline: typed `Thinking`, `RedactedThinking`, and `ServerToolUse` content blocks with streaming accumulation, signature handling, and round-trip preservation. Requests always end on a user message, so no trailing-thinking strip is needed. Adaptive thinking is enabled by default with `block_binding.prefix_mismatch_behavior = "drop_block"` (beta `thinking-binding-controls-2026-08-01`), so a change to the system prompt, the tools, or earlier messages drops the affected replayed blocks for that request. With `show_thinking` off, the chat renders each progress note as its tool use starts streaming, and a live or resumed turn that ends on the interrupted-work note asks the user to send a message. Credential rotation stripping is not yet implemented. When OAuth credentials rotate mid-session, stale signatures should be stripped from history before the next API call.
 
 ## Sources
 

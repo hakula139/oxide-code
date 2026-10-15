@@ -21,11 +21,7 @@ Anthropic's delta usage often carries only output tokens, so stream processing k
 
 ## Threshold
 
-Each model has a known context window in `model.rs`:
-
-- normal Claude context: `200_000`;
-- `[1m]` models with the 1M beta: `1_000_000`;
-- unknown models: no window, so auto-compaction is disabled.
+Every supported model in `model.rs` has a `1_000_000`-token context window. Unknown model ids have no window, so auto-compaction stays disabled for them.
 
 The threshold is:
 
@@ -34,7 +30,7 @@ effective_window = context_window - min(max_tokens, 20_000)
 threshold = effective_window - 13_000
 ```
 
-The 20k summary reserve mirrors Claude Code's p99 summary-output headroom and keeps a compact request from firing at the hard limit. The 13k buffer leaves room for the next prompt, dynamic instructions, and small tool-schema drift. If the subtraction would underflow, auto-compaction stays disabled.
+The 20k summary reserve mirrors Claude Code's p99 summary-output headroom and keeps a compact request from firing at the hard limit. The 13k buffer leaves room for the next prompt, dynamic instructions, and small tool-schema drift. With the default `max_tokens`, supported models compact at `967_000` tokens. If the subtraction would underflow, auto-compaction stays disabled.
 
 ## Configuration
 

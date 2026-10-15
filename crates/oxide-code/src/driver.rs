@@ -20,7 +20,7 @@ use crate::client::anthropic::Client;
 use crate::config::Effort;
 use crate::file_tracker::FileTracker;
 use crate::message::{ContentBlock, Message};
-use crate::model::{self, ResolvedModelId};
+use crate::model::ResolvedModelId;
 use crate::prompt::{self, PromptParts, SessionContext, UserContext};
 use crate::session::handle::{self, SessionHandle};
 use crate::session::store::SessionStore;
@@ -133,7 +133,7 @@ impl Conversation {
         interactive: bool,
     ) -> Self {
         let prompt_unrecorded = context.is_none();
-        let prompt = session_prompt(context, client.model(), &cwd).await;
+        let prompt = session_prompt(context, client.model().id(), &cwd).await;
         Self {
             client,
             tools,
@@ -209,7 +209,7 @@ impl Conversation {
             &gate,
         )
         .await;
-        self.account_usage(sink, report);
+        self.account_usage(sink, &report);
         match result {
             Ok(()) => {
                 sink.emit(AgentEvent::TurnComplete, "turn-complete");
@@ -303,7 +303,7 @@ impl Conversation {
             &mut self.session,
             store,
             &self.file_tracker,
-            self.client.model(),
+            self.client.model().id(),
         )
         .await;
         sink.session_write_error(outcome.finalize_failure.as_deref());
@@ -352,6 +352,7 @@ impl Conversation {
             );
         }
         report_drift(sink, &outcome.drifted_paths);
+        agent::notify_if_interrupted(&self.messages, sink);
     }
 
     async fn adopt_session(&mut self, messages: Vec<Message>, context: Option<SessionContext>) {
@@ -359,7 +360,7 @@ impl Conversation {
             .set_session_id(self.session.session_id().to_owned());
         self.messages = messages;
         self.prompt_unrecorded = context.is_none();
-        self.prompt = session_prompt(context, self.client.model(), &self.cwd).await;
+        self.prompt = session_prompt(context, self.client.model().id(), &self.cwd).await;
         self.reset_usage();
     }
 
@@ -378,7 +379,7 @@ impl Conversation {
         );
     }
 
-    /// Applies a model and / or effort pick. The model goes first because it re-clamps effort.
+    /// Applies a model and / or effort pick. The model goes first because it re-resolves effort.
     fn swap_config(
         &mut self,
         sink: &dyn AgentSink,
@@ -393,7 +394,7 @@ impl Conversation {
                 );
                 return;
             }
-            self.prompt.set_model(self.client.model());
+            self.prompt.set_model(self.client.model().id());
         }
         let resolved = match effort {
             Some(pick) => self.client.set_effort(pick),
@@ -401,7 +402,7 @@ impl Conversation {
         };
         sink.emit(
             AgentEvent::ConfigChanged {
-                model_id: self.client.model().to_owned(),
+                model: self.client.model().clone(),
                 effort: resolved,
                 compaction: self.client.compaction(),
                 requested_effort: effort,
@@ -412,18 +413,17 @@ impl Conversation {
         self.emit_usage_update(sink);
     }
 
-    fn account_usage(&mut self, sink: &dyn AgentSink, report: TurnReport) {
+    fn account_usage(&mut self, sink: &dyn AgentSink, report: &TurnReport) {
         self.last_usage = report.usage;
         if let Some(usage) = report.usage {
             self.displayed_usage = Some(usage);
         }
-        if let Some(cost) = report
-            .billable_usage
-            .and_then(|usage| estimate_usage_cost_usd(&self.client, usage))
-        {
-            self.total_estimated_cost_usd += cost;
-        }
-        if report.usage.is_some() || report.billable_usage.is_some() {
+        self.total_estimated_cost_usd += report
+            .billable_rounds
+            .iter()
+            .filter_map(|&usage| estimate_usage_cost_usd(&self.client, usage))
+            .sum::<f64>();
+        if report.usage.is_some() || !report.billable_rounds.is_empty() {
             self.emit_usage_update(sink);
         }
     }
@@ -442,7 +442,7 @@ impl Conversation {
         sink.emit(
             AgentEvent::UsageUpdated(UsageSnapshot {
                 context_tokens: usage.context_tokens(),
-                context_window: model::context_window_for(self.client.model()),
+                context_window: self.client.model().context_window(),
                 estimated_cost_usd: (self.total_estimated_cost_usd > 0.0)
                     .then_some(self.total_estimated_cost_usd),
             }),
@@ -467,7 +467,7 @@ async fn session_prompt(context: Option<SessionContext>, model: &str, cwd: &Path
 }
 
 fn estimate_usage_cost_usd(client: &Client, usage: TokenUsage) -> Option<f64> {
-    model::token_cost_rates_for(client.model()).map(|rates| {
+    client.model().cost_rates().map(|rates| {
         rates.estimate_usd(
             usage.input_tokens(),
             usage.cache_creation_input_tokens(),
@@ -639,8 +639,8 @@ mod tests {
         assert_eq!(usage.context_window, Some(1_000_000));
         let cost = usage.estimated_cost_usd.unwrap();
         assert!(
-            (cost - 0.015).abs() < 1e-12,
-            "two turns at $0.0075 each: {cost}"
+            (cost - 0.012).abs() < 1e-12,
+            "two turns at $0.006 each: {cost}"
         );
     }
 
@@ -690,7 +690,7 @@ mod tests {
         assert_eq!(conversation.messages.len(), 3);
         assert_eq!(conversation.last_usage, Some(TokenUsage::new(1_000, 100)));
         assert!(
-            (conversation.total_estimated_cost_usd - 0.0075).abs() < 1e-12,
+            (conversation.total_estimated_cost_usd - 0.006).abs() < 1e-12,
             "compaction must reset the session cost before the turn bills: {}",
             conversation.total_estimated_cost_usd,
         );
@@ -937,7 +937,7 @@ mod tests {
 
         conversation.swap_config(
             &CapturingSink::new(),
-            Some(ResolvedModelId::new("claude-sonnet-4-6".to_owned())),
+            Some(ResolvedModelId::new("claude-sonnet-5-5".to_owned())),
             None,
         );
 
@@ -946,7 +946,7 @@ mod tests {
                 .prompt
                 .system_sections
                 .iter()
-                .any(|section| section.contains("The exact model ID is claude-sonnet-4-6.")),
+                .any(|section| section.contains("The exact model ID is claude-sonnet-5-5.")),
         );
         assert_eq!(conversation.prompt.user_context, SESSION_CONTEXT);
     }

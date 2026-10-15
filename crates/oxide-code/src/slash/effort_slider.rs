@@ -11,7 +11,6 @@ use ratatui::widgets::Paragraph;
 use super::context::LiveSessionInfo;
 use crate::agent::event::UserAction;
 use crate::config::Effort;
-use crate::model::capabilities_for;
 use crate::tui::modal::{Modal, ModalAction, ModalKey};
 use crate::tui::theme::Theme;
 
@@ -45,46 +44,29 @@ pub(super) fn tier_color(level: Effort) -> Color {
 
 // ── EffortSlider ──
 
-/// Opened by bare `/effort` when the active model supports an effort tier.
+/// Opened by bare `/effort` when the active model has an effort tier.
 pub(super) struct EffortSlider {
-    /// Tiers the active model accepts, low → high.
-    supported: Vec<Effort>,
-    /// Cursor index into `supported`.
+    /// Cursor index into [`Effort::ALL`].
     selected: usize,
     /// Effort at modal open. Submit short-circuits when unchanged.
     initial: Effort,
 }
 
 impl EffortSlider {
-    /// `None` when the active model has no effort tier; caller errors before opening.
+    /// `None` when the active model has no effort tier. The caller errors before opening.
     pub(super) fn new(info: &LiveSessionInfo) -> Option<Self> {
-        let caps = capabilities_for(&info.config.model_id);
-        if !caps.has_effort() {
-            return None;
-        }
-        let supported: Vec<Effort> = Effort::ALL
-            .iter()
-            .copied()
-            .filter(|level| caps.accepts_effort(*level))
-            .collect();
-        let initial = caps
-            .resolve_effort(info.config.effort)
-            .expect("caps.has_effort() implies a resolvable tier");
-        let selected = supported
+        let initial = info.config.model.resolve_effort(info.config.effort)?;
+        let selected = Effort::ALL
             .iter()
             .position(|e| *e == initial)
-            .expect("resolve_effort lands inside `supported`");
-        Some(Self {
-            supported,
-            selected,
-            initial,
-        })
+            .expect("Effort::ALL lists every level");
+        Some(Self { selected, initial })
     }
 
     /// No-touch Enter (or a touch that returns to the initial pick) cancels — avoids a spurious
     /// `SwapConfig` that would re-resolve config defaults.
     fn submit(&self) -> ModalKey {
-        let picked = self.supported[self.selected];
+        let picked = Effort::ALL[self.selected];
         if picked == self.initial {
             return ModalKey::Cancelled;
         }
@@ -95,17 +77,16 @@ impl EffortSlider {
     }
 
     /// Width every render line targets so `Paragraph::Center` aligns them on a single axis.
-    fn slider_width(&self) -> usize {
-        let units: usize = self
-            .supported
+    fn slider_width() -> usize {
+        let units: usize = Effort::ALL
             .iter()
             .map(|e| GLYPH_PREFIX_WIDTH + format!("{e}").len())
             .sum();
-        units + self.supported.len().saturating_sub(1) * TIER_GAP
+        units + (Effort::ALL.len() - 1) * TIER_GAP
     }
 
-    fn line_speed_intel(&self, theme: &Theme) -> Line<'static> {
-        let total = self.slider_width();
+    fn line_speed_intel(theme: &Theme) -> Line<'static> {
+        let total = Self::slider_width();
         let middle = total
             .saturating_sub(SPEED_LABEL.len())
             .saturating_sub(INTEL_LABEL.len());
@@ -113,15 +94,15 @@ impl EffortSlider {
         Line::from(Span::styled(buf, theme.dim()))
     }
 
-    fn line_track(&self, theme: &Theme) -> Line<'static> {
-        let total = self.slider_width();
+    fn line_track(theme: &Theme) -> Line<'static> {
+        let total = Self::slider_width();
         let buf: String = std::iter::repeat_n(TRACK_GLYPH, total).collect();
         Line::from(Span::styled(buf, theme.dim()))
     }
 
     fn line_tier_labels(&self) -> Line<'static> {
-        let mut spans: Vec<Span<'static>> = Vec::with_capacity(self.supported.len() * 2);
-        for (idx, level) in self.supported.iter().enumerate() {
+        let mut spans: Vec<Span<'static>> = Vec::with_capacity(Effort::ALL.len() * 2);
+        for (idx, level) in Effort::ALL.iter().enumerate() {
             if idx > 0 {
                 spans.push(Span::raw(" ".repeat(TIER_GAP)));
             }
@@ -149,8 +130,8 @@ impl Modal for EffortSlider {
                 theme.accent().add_modifier(Modifier::BOLD),
             )),
             Line::default(),
-            self.line_speed_intel(theme),
-            self.line_track(theme),
+            Self::line_speed_intel(theme),
+            Self::line_track(theme),
             self.line_tier_labels(),
             Line::default(),
             Line::from(Span::styled(FOOTER, theme.dim())),
@@ -168,7 +149,7 @@ impl Modal for EffortSlider {
         match event.code {
             KeyCode::Enter => self.submit(),
             KeyCode::Right | KeyCode::Char('l') => {
-                if self.selected + 1 < self.supported.len() {
+                if self.selected + 1 < Effort::ALL.len() {
                     self.selected += 1;
                 }
                 ModalKey::Consumed
@@ -188,13 +169,18 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use super::*;
+    use crate::model::ModelSpec;
     use crate::slash::test_session_info;
 
     fn slider_for(model_id: &str, effort: Option<Effort>) -> EffortSlider {
         let mut info = test_session_info();
-        info.config.model_id = model_id.to_owned();
+        info.config.model = ModelSpec::resolve(model_id.to_owned());
         info.config.effort = effort;
         EffortSlider::new(&info).expect("model accepts effort")
+    }
+
+    fn selected_level(s: &EffortSlider) -> Effort {
+        Effort::ALL[s.selected]
     }
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -204,39 +190,32 @@ mod tests {
     // ── new ──
 
     #[test]
-    fn new_is_absent_for_no_effort_model() {
+    fn new_is_absent_for_unknown_model() {
         let mut info = test_session_info();
-        info.config.model_id = "claude-haiku-4-5".to_owned();
+        info.config.model = ModelSpec::resolve("custom-model".to_owned());
+        info.config.effort = None;
         assert!(EffortSlider::new(&info).is_none());
     }
 
     #[test]
-    fn new_lists_only_supported_tiers_low_to_high() {
-        // Sonnet 4.6 supports low / medium / high but not xhigh / max — the slider must drop the
-        // unsupported tiers entirely so the cursor never lands on a value the API would reject.
-        let s = slider_for("claude-sonnet-4-6", Some(Effort::High));
-        assert_eq!(s.supported, vec![Effort::Low, Effort::Medium, Effort::High]);
-    }
-
-    #[test]
     fn new_seeds_selected_to_active_effort() {
-        let s = slider_for("claude-opus-4-7", Some(Effort::High));
-        assert_eq!(s.supported[s.selected], Effort::High);
+        let s = slider_for("claude-opus-5-5", Some(Effort::High));
+        assert_eq!(selected_level(&s), Effort::High);
         assert_eq!(s.initial, Effort::High);
     }
 
     #[test]
     fn new_falls_back_to_model_default_when_effort_unset() {
-        let s = slider_for("claude-opus-4-7", None);
-        assert_eq!(s.initial, Effort::Xhigh);
-        assert_eq!(s.supported[s.selected], Effort::Xhigh);
+        let s = slider_for("claude-sonnet-5-5", None);
+        assert_eq!(s.initial, Effort::High);
+        assert_eq!(selected_level(&s), Effort::High);
     }
 
     // ── handle_key ──
 
     #[test]
     fn right_arrow_advances_selected_within_supported() {
-        let mut s = slider_for("claude-opus-4-7", Some(Effort::Low));
+        let mut s = slider_for("claude-opus-5-5", Some(Effort::Low));
         let before = s.selected;
         s.handle_key(&key(KeyCode::Right));
         assert_eq!(s.selected, before + 1);
@@ -244,40 +223,40 @@ mod tests {
 
     #[test]
     fn right_arrow_at_top_clamps_without_panicking() {
-        let mut s = slider_for("claude-opus-4-7", Some(Effort::Max));
+        let mut s = slider_for("claude-opus-5-5", Some(Effort::Max));
         s.handle_key(&key(KeyCode::Right));
-        assert_eq!(s.supported[s.selected], Effort::Max, "must stay clamped");
+        assert_eq!(selected_level(&s), Effort::Max, "must stay clamped");
     }
 
     #[test]
     fn left_arrow_retreats_selected_until_low() {
-        let mut s = slider_for("claude-opus-4-7", Some(Effort::Medium));
+        let mut s = slider_for("claude-opus-5-5", Some(Effort::Medium));
         s.handle_key(&key(KeyCode::Left));
-        assert_eq!(s.supported[s.selected], Effort::Low);
+        assert_eq!(selected_level(&s), Effort::Low);
         s.handle_key(&key(KeyCode::Left));
-        assert_eq!(s.supported[s.selected], Effort::Low, "stays clamped");
+        assert_eq!(selected_level(&s), Effort::Low, "stays clamped");
     }
 
     #[test]
     fn vim_keys_mirror_arrow_navigation() {
-        let mut s = slider_for("claude-opus-4-7", Some(Effort::Low));
+        let mut s = slider_for("claude-opus-5-5", Some(Effort::Low));
         s.handle_key(&key(KeyCode::Char('l')));
-        assert_eq!(s.supported[s.selected], Effort::Medium);
+        assert_eq!(selected_level(&s), Effort::Medium);
         s.handle_key(&key(KeyCode::Char('h')));
-        assert_eq!(s.supported[s.selected], Effort::Low);
+        assert_eq!(selected_level(&s), Effort::Low);
     }
 
     #[test]
     fn enter_with_no_change_returns_cancelled() {
         // Open + Enter without moving is the same shape as Esc — nothing to dispatch.
-        let mut s = slider_for("claude-opus-4-7", Some(Effort::High));
+        let mut s = slider_for("claude-opus-5-5", Some(Effort::High));
         let outcome = s.handle_key(&key(KeyCode::Enter));
         assert!(matches!(outcome, ModalKey::Cancelled));
     }
 
     #[test]
     fn enter_after_change_emits_swap_config_with_effort_only() {
-        let mut s = slider_for("claude-opus-4-7", Some(Effort::Low));
+        let mut s = slider_for("claude-opus-5-5", Some(Effort::Low));
         s.handle_key(&key(KeyCode::Right));
         let outcome = s.handle_key(&key(KeyCode::Enter));
         match outcome {
@@ -293,7 +272,7 @@ mod tests {
     fn unhandled_key_is_consumed_without_state_change() {
         // Esc / Ctrl+C are intercepted at ModalStack; everything else (Up, Tab, letters other
         // than h / l) must fall through to `Consumed` and leave the cursor put.
-        let mut s = slider_for("claude-opus-4-7", Some(Effort::Medium));
+        let mut s = slider_for("claude-opus-5-5", Some(Effort::Medium));
         let before = s.selected;
         for code in [KeyCode::Up, KeyCode::Down, KeyCode::Tab, KeyCode::Char('q')] {
             let outcome = s.handle_key(&key(code));
@@ -310,31 +289,21 @@ mod tests {
     #[test]
     fn render_emits_title_at_typical_widths() {
         let theme = Theme::default();
-        // Cover both a full-ladder model (Opus 4.7 → 5 tiers) and a short-ladder one
-        // (Sonnet 4.6 → 3 tiers) so the n-dependent width arithmetic gets exercised.
-        for (model, effort) in [
-            ("claude-opus-4-7", Some(Effort::High)),
-            ("claude-sonnet-4-6", Some(Effort::Medium)),
-        ] {
-            let s = slider_for(model, effort);
-            for width in [40_u16, 80, 120] {
-                let h = s.height(width, u16::MAX);
-                let mut terminal = Terminal::new(TestBackend::new(width, h)).unwrap();
-                terminal
-                    .draw(|frame| s.render(frame, Rect::new(0, 0, width, h), &theme))
-                    .expect("render must not panic");
-                let buf = terminal.backend().buffer().clone();
-                let title_visible = (0..h).any(|y| {
-                    (0..width)
-                        .map(|x| buf[(x, y)].symbol())
-                        .collect::<String>()
-                        .contains(TITLE)
-                });
-                assert!(
-                    title_visible,
-                    "{model} at width {width}: title `{TITLE}` must render"
-                );
-            }
+        let s = slider_for("claude-opus-5-5", Some(Effort::High));
+        for width in [40_u16, 80, 120] {
+            let h = s.height(width, u16::MAX);
+            let mut terminal = Terminal::new(TestBackend::new(width, h)).unwrap();
+            terminal
+                .draw(|frame| s.render(frame, Rect::new(0, 0, width, h), &theme))
+                .expect("render must not panic");
+            let buf = terminal.backend().buffer().clone();
+            let title_visible = (0..h).any(|y| {
+                (0..width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+                    .contains(TITLE)
+            });
+            assert!(title_visible, "width {width}: title `{TITLE}` must render");
         }
     }
 
@@ -342,7 +311,7 @@ mod tests {
     fn render_active_glyph_column_tracks_selected_tier() {
         let theme = Theme::default();
         let width: u16 = 80;
-        let mut s = slider_for("claude-opus-4-7", Some(Effort::Low));
+        let mut s = slider_for("claude-opus-5-5", Some(Effort::Low));
         let height = s.height(width, u16::MAX);
 
         let active_x = |s: &EffortSlider| -> u16 {

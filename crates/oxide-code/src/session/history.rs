@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use crate::message::{ContentBlock, Message, Role};
+use crate::message::{ContentBlock, Message, Role, progress_update_before};
 use crate::prompt::is_system_reminder;
 
 /// A logical interaction derived from a transcript, in display order.
@@ -13,6 +13,9 @@ pub(crate) enum Interaction<'a> {
     UserText(String),
     AssistantText(String),
     AssistantThinking(&'a str),
+    /// Note introducing the next tool call. Its text also appears in the preceding
+    /// [`Self::AssistantThinking`], so renderers show one or the other.
+    ProgressUpdate(&'a str),
     ToolCall {
         id: &'a str,
         name: &'a str,
@@ -51,7 +54,7 @@ pub(crate) fn walk_transcript(messages: &[Message]) -> Vec<Interaction<'_>> {
     let mut out = Vec::new();
     for msg in messages {
         let mut text_buf = String::new();
-        for block in &msg.content {
+        for (index, block) in msg.content.iter().enumerate() {
             match block {
                 ContentBlock::Text { text }
                     if msg.role == Role::User && is_system_reminder(text) => {}
@@ -64,6 +67,9 @@ pub(crate) fn walk_transcript(messages: &[Message]) -> Vec<Interaction<'_>> {
                 ContentBlock::ToolUse { id, name, input }
                 | ContentBlock::ServerToolUse { id, name, input } => {
                     flush_text(&mut out, &mut text_buf, msg.role);
+                    if let Some(text) = progress_update_before(&msg.content, index) {
+                        out.push(Interaction::ProgressUpdate(text));
+                    }
                     out.push(Interaction::ToolCall { id, name, input });
                     if let Some((content, is_error)) = pairs.remove(id.as_str()) {
                         out.push(Interaction::ToolResult {
@@ -415,6 +421,30 @@ mod tests {
         }];
         let out = walk_transcript(&messages);
         assert!(matches!(&out[..], [Interaction::AssistantText(t)] if t == "reply"));
+    }
+
+    #[test]
+    fn walk_transcript_emits_progress_update_between_thinking_and_its_tool_call() {
+        let messages = [Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Thinking {
+                    thinking: "Reading a.".to_owned(),
+                    signature: "sig".to_owned(),
+                },
+                ContentBlock::ToolUse {
+                    id: "t1".to_owned(),
+                    name: "read".to_owned(),
+                    input: serde_json::json!({}),
+                },
+            ],
+        }];
+        let out = walk_transcript(&messages);
+        assert!(matches!(&out[..], [
+            Interaction::AssistantThinking(t),
+            Interaction::ProgressUpdate(p),
+            Interaction::ToolCall { id: "t1", .. },
+        ] if *t == "Reading a." && *p == "Reading a."));
     }
 
     #[test]

@@ -16,7 +16,7 @@ All fields are optional. Only specify the values you want to override.
 # or ox.toml in your project root (per-project, except the user-only keys listed above)
 
 [client]
-model = "claude-sonnet-4-6"
+model = "claude-sonnet-5-5"
 effort = "high"
 max_tokens = 32000
 prompt_cache_ttl = "1h"
@@ -45,38 +45,40 @@ status_line = [
 | `api_key`          | string  | -                           | Anthropic API key (user config only)                      |
 | `base_url`         | string  | `https://api.anthropic.com` | API base URL (user config only)                           |
 | `extra_ca_certs`   | string  | -                           | PEM bundle appended to the trust store (user config only) |
-| `model`            | string  | `claude-opus-4-8[1m]`       | Model to use                                              |
+| `model`            | string  | `claude-opus-5-5`           | Model to use                                              |
 | `effort`           | string  | per-model (see below)       | Intelligence-vs-latency tier                              |
-| `max_tokens`       | integer | effort-derived (see below)  | Max tokens per response                                   |
+| `max_tokens`       | integer | per-model (see below)       | Max tokens per response                                   |
 | `max_tool_rounds`  | integer | unset (unbounded)           | Per-turn safety cap on tool rounds                        |
 | `prompt_cache_ttl` | string  | `"1h"`                      | Prompt-cache TTL (`"5m"` or `"1h"`)                       |
 
+#### `model`: supported models
+
+oxide-code supports `claude-opus-5-5`, `claude-sonnet-5-5`, and `claude-haiku-5-5`, each with a 1M-token context window and adaptive thinking. Any other id, such as a gateway alias, is sent verbatim without `effort`, `thinking`, or context management. Its `max_tokens` defaults to `16000`, it gets no cost estimate, and its automatic compaction trigger stays off unless you set `auto_threshold_tokens`. oxide-code warns about such an id at startup, and for a retired `claude-*` id or a `[1m]` suffix it suggests the matching 5.5 model.
+
 #### `effort`: intelligence tier
 
-`effort` maps 1:1 to the `output_config.effort` body field. Accepted values: `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`. Values above a model's per-model ceiling are silently clamped down to the highest supported level (so `"xhigh"` on Sonnet 4.6 becomes `"high"`). Models that don't accept the parameter at all (Sonnet 4.5 and older, Haiku, Opus 4.5 and older) drop it entirely from the request.
+`effort` maps 1:1 to the `output_config.effort` body field. Accepted values: `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`. Every supported model accepts all five.
 
-Per-model defaults when `effort` is unset:
+Per-model defaults when `effort` is unset, matching the API's own defaults:
 
-| Model           | Default |
-| --------------- | ------- |
-| Opus 4.7        | `xhigh` |
-| Opus 4.8 / 4.6  | `high`  |
-| Sonnet 4.6      | `high`  |
-| Everything else | (unset) |
+| Model      | Default  |
+| ---------- | -------- |
+| Opus 5.5   | `medium` |
+| Sonnet 5.5 | `high`   |
+| Haiku 5.5  | `medium` |
 
-oxide-code mirrors Claude Code here: `high` is the upstream API default, and Opus 4.7 ships `xhigh`. `xhigh` stays the recommended pick for coding on both 4.7 and 4.8, so set it explicitly (or via `/effort`) when you want it on 4.8.
+A `/model` swap carries the current effort over to the new model.
 
-Tier guide (from Anthropic's [effort documentation](https://platform.claude.com/docs/en/build-with-claude/effort)):
+Tier guide for the 5.5 models (from Anthropic's [effort documentation](https://platform.claude.com/docs/en/build-with-claude/effort)):
 
-- `max`: Deepest reasoning, Opus-only, with diminishing returns on some tasks.
-- `xhigh`: Recommended default for coding and agentic work on Opus 4.7 / 4.8.
-- `high`: Balanced, minimum recommended for intelligence-sensitive tasks.
-- `medium`: Cost-sensitive workloads.
-- `low`: Scoped, latency-sensitive tasks.
+- `max` / `xhigh`: Only where you have measured a quality gain, since turns run much longer and cost more.
+- `high`: Knowledge work, long agent tasks, and strict instruction following.
+- `medium`: The starting point for most work, including agentic coding and multistep tool use.
+- `low`: Chat and short, latency-sensitive tasks. At this level, long agent tasks are more likely to stop early or skip verifying a change.
 
 #### `max_tokens`: response ceiling
 
-When unset, oxide-code derives `max_tokens` from the resolved `effort`: 64 000 for `xhigh` / `max`, 32 000 for `high`, 16 000 otherwise. Setting `max_tokens` explicitly (via TOML or `ANTHROPIC_MAX_TOKENS`) overrides the derivation.
+When unset, `max_tokens` is `64000` on the supported models, half their 128K output ceiling. `effort` controls how much the model thinks, so this cap only bounds runaway output. Other ids get `16000`, which fits the lower output ceilings of older or smaller models, and the default follows a `/model` swap. Set `max_tokens` (via TOML or `ANTHROPIC_MAX_TOKENS`) to change it.
 
 #### `max_tool_rounds`: agent-loop safety cap
 
@@ -104,7 +106,7 @@ Accepted values: `"5m"` (matches the server default as of 2026-03-06) and `"1h"`
 
 ### `[client.compaction]`: context compression
 
-Auto-compaction is enabled by default for known model context windows. The default trigger leaves room for the next response and a safety buffer. Set one threshold override when you want compaction to happen earlier:
+Auto-compaction is enabled by default for the supported models. The default trigger leaves room for the next response and a safety buffer. Set one threshold override when you want compaction to happen earlier:
 
 | Key                      | Type    | Default       | Description                                               |
 | ------------------------ | ------- | ------------- | --------------------------------------------------------- |
@@ -114,18 +116,7 @@ Auto-compaction is enabled by default for known model context windows. The defau
 
 `auto_threshold_tokens` and `auto_threshold_percent` are mutually exclusive. Percent must be between `1` and `100`. Either form resolves to a token count clamped into the usable range: values below `50000` tokens snap up to that floor, and values above the model-derived safe trigger snap down. The model-derived ceiling shifts with `/model`, so a global threshold sized for a larger context window keeps working after a swap.
 
-For models without known context windows, the default and percent-based automatic triggers stay off. An explicit token threshold still works, snapped to the `50000` floor when set lower.
-
-#### 1M Context Window: `[1m]` Tag
-
-Append `[1m]` to `model` to opt into the 1M-token context window on models that support it (any Sonnet 4.x, plus Opus 4.6 and newer):
-
-```toml
-[client]
-model = "claude-opus-4-8[1m]"
-```
-
-1M access depends on your subscription or gateway, so you have to opt in explicitly. The tag is silently ignored on models without 1M support (e.g. Haiku).
+For other model ids, the default and percent-based automatic triggers stay off. An explicit token threshold still works, snapped to the `50000` floor when set lower.
 
 ### `[tui]`: Terminal UI
 
@@ -135,7 +126,7 @@ model = "claude-opus-4-8[1m]"
 | `show_welcome`  | boolean | `true`    | Paint the welcome splash on an empty chat |
 | `status_line`   | array   | see below | Ordered status-line segments              |
 
-On Opus 4.7 / 4.8, `show_thinking = true` opts the request into `thinking.display = "summarized"` so the API streams reasoning text. Otherwise the `"omitted"` default applies and the UI sees nothing until the final answer arrives.
+`show_thinking = true` opts the request into `thinking.display = "summarized"` so the API streams reasoning text. Otherwise reasoning stays hidden, and on Opus 5.5 and Sonnet 5.5 the chat still shows the short progress notes the model writes before each tool call.
 
 `show_welcome = false` blanks the chat region until you submit a prompt, which is useful when piping or screen-recording.
 
@@ -146,9 +137,9 @@ On Opus 4.7 / 4.8, `show_thinking = true` opts the request into `thinking.displa
 | `current-dir`       | Tildified working directory                  | At startup      |
 | `git-branch`        | Current branch (omitted on detached HEAD)    | Every 5 s       |
 | `pull-request`      | Open PR as clickable `#86` when OSC 8 works  | Every 60 s      |
-| `model`             | Compact model label (e.g., `Opus 4.8`)       | On `/model`     |
+| `model`             | Compact model label (e.g., `Opus 5.5`)       | On `/model`     |
 | `model-with-effort` | Model label plus the effort tier in parens   | On `/model`     |
-| `context-used`      | `Ctx: 50% (100k/200k)` after the first turn  | Per turn        |
+| `context-used`      | `Ctx: 10% (100k/1M)` after the first turn    | Per turn        |
 | `session-cost`      | `Sess: $0.4321` running USD estimate         | Per turn        |
 | `run-state`         | `Ready` / spinner + label / Ctrl+C exit hint | On state change |
 | `thread-title`      | AI-generated session title                   | After turn 1    |
@@ -226,9 +217,9 @@ Environment variables override all config file values.
 | -------------------------------------- | ------------------------------------------ | --------------------------- | ---------------------------- |
 | `ANTHROPIC_API_KEY`                    | `client.api_key`                           | -                           | Anthropic API key            |
 | `ANTHROPIC_BASE_URL`                   | `client.base_url`                          | `https://api.anthropic.com` | API base URL                 |
-| `ANTHROPIC_MODEL`                      | `client.model`                             | `claude-opus-4-8[1m]`       | Model to use                 |
+| `ANTHROPIC_MODEL`                      | `client.model`                             | `claude-opus-5-5`           | Model to use                 |
 | `ANTHROPIC_EFFORT`                     | `client.effort`                            | per-model                   | Intelligence-vs-latency tier |
-| `ANTHROPIC_MAX_TOKENS`                 | `client.max_tokens`                        | effort-derived              | Max tokens per response      |
+| `ANTHROPIC_MAX_TOKENS`                 | `client.max_tokens`                        | per-model                   | Max tokens per response      |
 | `OX_EXTRA_CA_CERTS`                    | `client.extra_ca_certs`                    | -                           | Path to a PEM trust bundle   |
 | `OX_MAX_TOOL_ROUNDS`                   | `client.max_tool_rounds`                   | unset (unbounded)           | Per-turn tool-round cap      |
 | `OX_PROMPT_CACHE_TTL`                  | `client.prompt_cache_ttl`                  | `1h`                        | Prompt-cache TTL             |

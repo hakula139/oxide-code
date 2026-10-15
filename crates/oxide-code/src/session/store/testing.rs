@@ -110,7 +110,7 @@ pub(crate) fn seed_test_session(
             &Entry::Header {
                 session_id: session_id.to_owned(),
                 cwd: "/work/proj".to_owned(),
-                model: "claude-opus-4-7".to_owned(),
+                model: "claude-opus-5-5".to_owned(),
                 created_at,
                 version: CURRENT_VERSION,
                 git_branch: None,
@@ -151,7 +151,7 @@ pub(crate) fn sample_header(session_id: &str) -> Entry {
     Entry::Header {
         session_id: session_id.to_owned(),
         cwd: "/tmp/project".to_owned(),
-        model: "claude-opus-4-6".to_owned(),
+        model: "claude-opus-5-5".to_owned(),
         created_at: datetime!(2026-04-16 12:00:00 UTC),
         version: CURRENT_VERSION,
         git_branch: None,

@@ -423,7 +423,7 @@ mod tests {
     fn parse_sse_frame_message_start() {
         let frame = indoc! {r#"
             event: message_start
-            data: {"type":"message_start","message":{"id":"msg_123","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-6","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":25,"output_tokens":1}}}
+            data: {"type":"message_start","message":{"id":"msg_123","type":"message","role":"assistant","content":[],"model":"claude-sonnet-5-5","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":25,"output_tokens":1}}}
         "#};
         let event = parse_sse_frame(frame).unwrap().unwrap();
         assert!(matches!(
@@ -439,7 +439,7 @@ mod tests {
                         output_tokens: 1,
                     }),
                 },
-            } if id == "msg_123" && model == "claude-sonnet-4-6",
+            } if id == "msg_123" && model == "claude-sonnet-5-5",
         ));
     }
 

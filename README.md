@@ -20,6 +20,7 @@ Early development. What works today:
 - Terminal UI: streaming output, markdown rendering, syntax-highlighted code blocks, [configurable status line](docs/guide/configuration.md#tui-terminal-ui), and 5 built-in themes with custom-TOML overrides
 - Bare REPL (`--no-tui`) and headless one-shot mode (`-p`) for scripts and pipelines
 - Agent loop with extended thinking and tool-use round-trip
+- Claude Opus 5.5, Sonnet 5.5, and Haiku 5.5, each with a 1M-token context window and adjustable effort
 - File and search tools: `read`, `write`, `edit`, `glob`, `grep`, `bash`
 - Tool permissions: `auto` (default), `plan`, and `yolo` modes, allow / deny rules, protected config paths whose edits need approval in `auto` mode even when an allow rule matches, and a TUI approval prompt for gated calls
 - Turn interruption (Esc / Ctrl+C) plus mid-turn queued follow-up prompts that splice into the same turn between tool calls, with double-press Ctrl+C exit confirmation

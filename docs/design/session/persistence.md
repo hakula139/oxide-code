@@ -53,7 +53,7 @@ Starting a session stages the header in memory. The on-disk file is created by t
 
 ### Resume and sanitization
 
-`ox -c` reopens the existing session file. The loader walks `Entry::Message` lines into a UUID-indexed DAG, picks the newest-timestamped leaf as the tip, and walks back via `parent_uuid` to produce a linear chain. The sanitization pipeline then strips trailing thinking, drops unresolved tool_use / orphan tool_result, Merges adjacent same-role survivors and injects head and tail sentinels.
+`ox -c` reopens the existing session file. The loader walks `Entry::Message` lines into a UUID-indexed DAG, picks the newest-timestamped leaf as the tip, and walks back via `parent_uuid` to produce a linear chain. The sanitization pipeline then drops unresolved tool_use / orphan tool_result, merges adjacent same-role survivors, and injects head / tail sentinels.
 
 ### Prompt context
 

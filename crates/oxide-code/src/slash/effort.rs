@@ -9,7 +9,7 @@ use super::matcher::rank_by_prefix;
 use super::registry::{ArgCompletion, SlashCommand, SlashKind, SlashOutcome};
 use crate::agent::event::UserAction;
 use crate::config::Effort;
-use crate::model::{capabilities_for, display_name};
+use crate::model::ModelSpec;
 
 pub(super) struct EffortCmd;
 
@@ -47,17 +47,16 @@ impl SlashCommand for EffortCmd {
     fn execute(&self, args: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
         let arg = args.trim();
         if arg.is_empty() {
-            // No-effort model has nothing to slide — error with the same recovery hint the
+            // An unknown model has nothing to slide, so error with the same recovery hint the
             // typed-arg path uses.
             let Some(slider) = EffortSlider::new(ctx.info) else {
-                return Err(no_effort_tier_msg(&ctx.info.config.model_id));
+                return Err(no_effort_tier_msg(&ctx.info.config.model));
             };
             return Ok(SlashOutcome::Modal(Box::new(slider)));
         }
         let pick = parse_effort_arg(arg)?;
-        let caps = capabilities_for(&ctx.info.config.model_id);
-        if !caps.has_effort() {
-            return Err(no_effort_tier_msg(&ctx.info.config.model_id));
+        if ctx.info.config.model.info().is_none() {
+            return Err(no_effort_tier_msg(&ctx.info.config.model));
         }
         Ok(SlashOutcome::Forward(UserAction::SwapConfig {
             model: None,
@@ -66,10 +65,10 @@ impl SlashCommand for EffortCmd {
     }
 }
 
-fn no_effort_tier_msg(model_id: &str) -> String {
+fn no_effort_tier_msg(model: &ModelSpec) -> String {
     format!(
-        "{} has no effort tier. Pick an effort-capable model first with /model (e.g. /model opus, /model sonnet).",
-        display_name(model_id),
+        "{} has no effort tier. Switch to a supported model first with /model (e.g. /model opus).",
+        model.display_name(),
     )
 }
 
@@ -140,12 +139,12 @@ mod tests {
     // ── EffortCmd::execute ──
 
     fn run_execute(args: &str) -> Result<SlashOutcome, String> {
-        run_execute_with_model(&test_session_info().config.model_id, args)
+        run_execute_with_model(test_session_info().config.model.id(), args)
     }
 
     fn run_execute_with_model(model_id: &str, args: &str) -> Result<SlashOutcome, String> {
         let mut info = test_session_info();
-        info.config.model_id = model_id.to_owned();
+        info.config.model = ModelSpec::resolve(model_id.to_owned());
         EffortCmd.execute(args, &SlashContext::new(&info, None))
     }
 
@@ -156,9 +155,9 @@ mod tests {
 
     #[test]
     fn execute_no_args_on_no_tier_model_errors_with_recovery_hint() {
-        let msg = run_execute_with_model("claude-haiku-4-5", "").expect_err("must error");
+        let msg = run_execute_with_model("custom-model", "").expect_err("must error");
         assert!(
-            msg.contains("Claude Haiku 4.5") && msg.contains("/model"),
+            msg.contains("custom-model") && msg.contains("/model"),
             "display name + recovery hint: {msg}",
         );
     }
@@ -185,10 +184,10 @@ mod tests {
 
     #[test]
     fn execute_explicit_level_on_no_tier_model_errors_with_recovery_hint() {
-        // Without this, xhigh on Haiku silently resolves to None and confuses the user.
-        let msg = run_execute_with_model("claude-haiku-4-5", "xhigh").expect_err("must error");
+        // Without this, the pick silently resolves to None and confuses the user.
+        let msg = run_execute_with_model("custom-model", "xhigh").expect_err("must error");
         assert!(
-            msg.contains("Claude Haiku 4.5") && msg.contains("/model"),
+            msg.contains("custom-model") && msg.contains("/model"),
             "display name + recovery hint: {msg}",
         );
     }

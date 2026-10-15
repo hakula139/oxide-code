@@ -10,7 +10,7 @@ mod system;
 mod tool;
 mod user;
 
-pub(super) use assistant::{AssistantText, AssistantThinking};
+pub(super) use assistant::{AssistantText, AssistantThinking, ProgressUpdate};
 pub(super) use compacted::CompactedBlock;
 pub(super) use error::ErrorBlock;
 pub(super) use git_diff::GitDiffBlock;

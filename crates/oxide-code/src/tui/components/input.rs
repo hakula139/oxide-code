@@ -1149,7 +1149,7 @@ mod tests {
     #[test]
     fn handle_event_popup_enter_with_typed_arg_prefix_still_commits_picked_row() {
         let mut input = test_input();
-        type_text(&mut input, "/model claude-opus-4");
+        type_text(&mut input, "/model claude-opus");
         input.refresh_popup();
         assert!(input.popup_visible());
         let picked = selected_value(&input);
@@ -1164,10 +1164,9 @@ mod tests {
 
     #[test]
     fn handle_event_popup_esc_then_enter_submits_typed_buffer_literally() {
-        // Popup is always a picker; Esc is the seam for submitting custom text. Mirrors the
-        // direct-id paths users want for retired or custom model ids.
+        // Popup is always a picker. Esc is the seam for submitting the typed text verbatim.
         let mut input = test_input();
-        type_text(&mut input, "/model claude-opus-4");
+        type_text(&mut input, "/model claude-opus");
         input.refresh_popup();
         assert!(input.popup_visible());
 
@@ -1177,7 +1176,7 @@ mod tests {
         let outcome = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(
             outcome,
-            InputOutcome::Action(UserAction::SubmitPrompt("/model claude-opus-4".to_owned())),
+            InputOutcome::Action(UserAction::SubmitPrompt("/model claude-opus".to_owned())),
         );
     }
 

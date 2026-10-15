@@ -73,7 +73,7 @@ mod tests {
     async fn replace_session_with_summary_clears_tracker_and_replaces_messages() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let session = handle::start(&store, "claude-sonnet-4-6");
+        let session = handle::start(&store, "claude-sonnet-5-5");
         let tracker = FileTracker::default();
         tracker.record_read(
             std::path::Path::new("/tmp/example.rs"),
@@ -145,7 +145,7 @@ mod tests {
     async fn replace_session_with_summary_still_replaces_messages_when_event_send_fails() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let session = handle::start(&store, "claude-sonnet-4-6");
+        let session = handle::start(&store, "claude-sonnet-5-5");
         let tracker = FileTracker::default();
         tracker.record_read(
             std::path::Path::new("/tmp/example.rs"),

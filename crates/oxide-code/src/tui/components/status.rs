@@ -312,7 +312,7 @@ mod tests {
         StatusBar::new(
             &Theme::default(),
             vec![StatusLineSegment::PullRequest, StatusLineSegment::RunState],
-            "Opus 4.8".into(),
+            "Opus 5.5".into(),
             None,
             String::new(),
             None,
@@ -355,11 +355,11 @@ mod tests {
     #[test]
     fn set_model_replaces_displayed_model_label() {
         let mut bar = test_bar();
-        bar.set_model("Opus 4.8".to_owned());
-        assert_eq!(bar.model(), "Opus 4.8");
+        bar.set_model("Opus 5.5".to_owned());
+        assert_eq!(bar.model(), "Opus 5.5");
         let output = render_top_row(&mut bar, 80);
         assert!(
-            output.contains("Opus 4.8"),
+            output.contains("Opus 5.5"),
             "new label must reach the rendered bar: {output:?}",
         );
         assert!(
@@ -552,7 +552,7 @@ mod tests {
         let mut bar = StatusBar::new(
             &Theme::default(),
             StatusLineSegment::DEFAULT.to_vec(),
-            "Opus 4.8".into(),
+            "Opus 5.5".into(),
             Some(Effort::Xhigh),
             cwd.into(),
             Some("main".to_owned()),
@@ -638,14 +638,14 @@ mod tests {
                 StatusLineSegment::Model,
                 StatusLineSegment::CurrentDir,
             ],
-            "Opus 4.8".into(),
+            "Opus 5.5".into(),
             Some(Effort::Xhigh),
             "~/projects/demo".into(),
             Some("main".to_owned()),
         );
         let output = render_top_row(&mut bar, 120);
         let state_at = output.find("Ready").unwrap();
-        let model_at = output.find("Opus 4.8").unwrap();
+        let model_at = output.find("Opus 5.5").unwrap();
         let cwd_at = output.find("~/projects/demo").unwrap();
         assert!(state_at < model_at, "run state should lead: {output:?}");
         assert!(model_at < cwd_at, "cwd should follow model: {output:?}");
@@ -665,13 +665,13 @@ mod tests {
                 StatusLineSegment::ModelWithEffort,
                 StatusLineSegment::RunState,
             ],
-            "Opus 4.8".into(),
+            "Opus 5.5".into(),
             Some(Effort::Xhigh),
             "~/projects/demo".into(),
             Some("feat/status-line".to_owned()),
         );
         let output = render_top_row(&mut bar, 120);
-        assert!(output.contains("~/projects/demo │ feat/status-line │ Opus 4.8 (xhigh) │ Ready"));
+        assert!(output.contains("~/projects/demo │ feat/status-line │ Opus 5.5 (xhigh) │ Ready"));
     }
 
     #[test]

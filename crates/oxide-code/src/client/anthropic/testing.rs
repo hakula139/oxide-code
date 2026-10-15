@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use super::Client;
 use crate::config::{Auth, CompactionConfig, Config, PromptCacheTtl, StatusLineSegment};
+use crate::model::ModelSpec;
 use crate::tui::theme::Theme;
 
 /// Minimal [`Config`] for unit / wiremock tests.
@@ -12,14 +13,13 @@ pub(crate) fn test_config(base_url: impl Into<String>, auth: Auth, model: &str) 
         auth,
         base_url: base_url.into(),
         extra_ca_certs: None,
-        model: model.to_owned(),
+        model: ModelSpec::resolve(model.to_owned()),
         effort: None,
-        max_tokens: 128,
+        max_tokens: Some(128),
         max_tool_rounds: None,
         prompt_cache_ttl: PromptCacheTtl::OneHour,
         compaction: CompactionConfig::disabled(),
         permission: crate::permission::Policy::default(),
-        thinking: None,
         show_thinking: false,
         show_welcome: true,
         status_line: StatusLineSegment::DEFAULT.to_vec(),
@@ -39,7 +39,7 @@ pub(crate) fn completion_body(text: &str) -> String {
         "id": "msg_1",
         "type": "message",
         "role": "assistant",
-        "model": "claude-haiku-4-5",
+        "model": "claude-haiku-5-5",
         "stop_reason": "end_turn",
         "content": [{"type": "text", "text": text}],
         "usage": {"input_tokens": 5, "output_tokens": 3}
@@ -53,7 +53,7 @@ pub(crate) fn text_stream_body(start_text: &str, delta_text: &str) -> String {
     use std::fmt::Write as _;
 
     let frames = [
-        serde_json::json!({"type": "message_start", "message": {"id": "msg_1", "model": "claude-sonnet-4-6", "usage": {"input_tokens": 1_000, "output_tokens": 0}}}),
+        serde_json::json!({"type": "message_start", "message": {"id": "msg_1", "model": "claude-sonnet-5-5", "usage": {"input_tokens": 1_000, "output_tokens": 0}}}),
         serde_json::json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": start_text}}),
         serde_json::json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": delta_text}}),
         serde_json::json!({"type": "content_block_stop", "index": 0}),

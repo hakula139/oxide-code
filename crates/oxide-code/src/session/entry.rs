@@ -138,7 +138,7 @@ mod tests {
         let entry = Entry::Header {
             session_id: "abc-123".to_owned(),
             cwd: "/home/user/project".to_owned(),
-            model: "claude-opus-4-6".to_owned(),
+            model: "claude-opus-5-5".to_owned(),
             created_at: datetime!(2026-04-16 12:00:00 UTC),
             version: CURRENT_VERSION,
             git_branch: None,
@@ -161,7 +161,7 @@ mod tests {
         };
         assert_eq!(session_id, "abc-123");
         assert_eq!(cwd, "/home/user/project");
-        assert_eq!(model, "claude-opus-4-6");
+        assert_eq!(model, "claude-opus-5-5");
         assert_eq!(created_at, datetime!(2026-04-16 12:00:00 UTC));
         assert_eq!(version, CURRENT_VERSION);
         assert!(git_branch.is_none());

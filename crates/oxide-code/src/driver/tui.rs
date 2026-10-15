@@ -9,6 +9,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 use super::{Conversation, Exit, TurnEnd, report_drift, shutdown_signal};
+use crate::agent;
 use crate::agent::event::UserAction;
 use crate::config::ConfigSnapshot;
 use crate::session::entry::CompactInfo;
@@ -69,8 +70,12 @@ pub(crate) async fn run(
             title: history.title,
         },
     );
+    if let Some(notice) = conversation.client.model().unsupported_notice() {
+        app.push_system_message(notice);
+    }
 
     report_drift(&sink, drifted);
+    agent::notify_if_interrupted(&conversation.messages, &sink);
     let agent = tokio::spawn(serve_actions(conversation, sink, user_rx, store));
 
     let result = tokio::select! {

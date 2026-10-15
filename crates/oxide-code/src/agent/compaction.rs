@@ -185,7 +185,7 @@ mod tests {
     #[tokio::test]
     async fn compact_session_too_short_transcript_errors_before_request() {
         let server = MockServer::start().await;
-        let client = test_client(server.uri(), api_key(), "claude-haiku-4-5");
+        let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
         let err = compact_session(&client, &[Message::user("hi")], None)
             .await
             .expect_err("must refuse short transcript");
@@ -195,7 +195,7 @@ mod tests {
     #[tokio::test]
     async fn compact_session_refuses_when_stripped_transcript_is_too_short() {
         let server = MockServer::start().await;
-        let client = test_client(server.uri(), api_key(), "claude-haiku-4-5");
+        let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
         let transcript = vec![
             Message::user("fix the bug"),
             Message {
@@ -236,7 +236,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = test_client(server.uri(), api_key(), "claude-haiku-4-5");
+        let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
         let summary = compact_session(&client, &fake_transcript(), None)
             .await
             .unwrap();
@@ -256,7 +256,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = test_client(server.uri(), api_key(), "claude-haiku-4-5");
+        let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
         let summary = compact_session(&client, &fake_transcript(), None)
             .await
             .unwrap();
@@ -276,7 +276,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = test_client(server.uri(), api_key(), "claude-haiku-4-5");
+        let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
         let err = compact_session(&client, &fake_transcript(), None)
             .await
             .expect_err("empty summary must error");
@@ -300,7 +300,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = test_client(server.uri(), api_key(), "claude-haiku-4-5");
+        let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
         let mut transcript = fake_transcript();
         transcript[1] = Message {
             role: Role::Assistant,
@@ -359,7 +359,7 @@ mod tests {
                 ResponseTemplate::new(200)
                     .set_body_string(indoc! {r#"
                         event: ping
-                        data: {"type":"message_start","message":{"id":"m","model":"claude-haiku-4-5"}}
+                        data: {"type":"message_start","message":{"id":"m","model":"claude-haiku-5-5"}}
 
                         event: ping
                         data: {"type":"error","error":{"type":"overloaded_error","message":"servers overloaded"}}
@@ -370,7 +370,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = test_client(server.uri(), api_key(), "claude-haiku-4-5");
+        let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
         let err = compact_session(&client, &fake_transcript(), None)
             .await
             .expect_err("in-band error must propagate");
@@ -391,7 +391,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = test_client(server.uri(), api_key(), "claude-haiku-4-5");
+        let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
         let err = compact_session(&client, &fake_transcript(), None)
             .await
             .expect_err("expected error");

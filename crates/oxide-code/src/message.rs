@@ -76,27 +76,28 @@ impl Message {
     }
 }
 
-// ── Message normalization ──
+// ── Progress updates ──
 
-/// Drops trailing thinking blocks from the last assistant message (the API rejects them);
-/// inserts a placeholder if stripping empties the content.
-pub(crate) fn strip_trailing_thinking(messages: &mut [Message]) {
-    let Some(msg) = messages.iter_mut().rfind(|m| m.role == Role::Assistant) else {
-        return;
-    };
-    while msg.content.last().is_some_and(|b| {
-        matches!(
-            b,
-            ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. }
-        )
-    }) {
-        msg.content.pop();
-    }
-    if msg.content.is_empty() {
-        msg.content.push(ContentBlock::Text {
-            text: "[No message content]".to_owned(),
-        });
-    }
+/// The progress note introducing the tool use at `blocks[index]`. See [`progress_note`].
+pub(crate) fn progress_update_before(blocks: &[ContentBlock], index: usize) -> Option<&str> {
+    progress_note(blocks[..index].iter().map(|block| match block {
+        ContentBlock::Thinking { thinking, .. } => Some(thinking.as_str()),
+        ContentBlock::RedactedThinking { .. } => Some(""),
+        _ => None,
+    }))
+}
+
+/// Picks the progress note from the blocks before a tool use, given in order as each block's
+/// thinking text (`""` for redacted thinking, `None` for any other block): the non-empty text in
+/// the run of thinking blocks directly before the tool use. Under `thinking.display = "updates"`
+/// reasoning comes back empty, so that text is the note.
+pub(crate) fn progress_note<'a>(
+    thinking: impl DoubleEndedIterator<Item = Option<&'a str>>,
+) -> Option<&'a str> {
+    thinking
+        .rev()
+        .map_while(|text| text)
+        .find(|text| !text.trim().is_empty())
 }
 
 #[cfg(test)]
@@ -237,141 +238,62 @@ mod tests {
         assert!(matches!(&msg.content[0], ContentBlock::Text { text } if text == "hi"));
     }
 
-    // ── strip_trailing_thinking ──
+    // ── progress_update_before ──
 
-    #[test]
-    fn strip_trailing_thinking_removes_thinking_at_end() {
-        let mut messages = vec![Message {
-            role: Role::Assistant,
-            content: vec![
-                ContentBlock::Text {
-                    text: "answer".to_owned(),
-                },
-                ContentBlock::Thinking {
-                    thinking: "reasoning".to_owned(),
-                    signature: "sig".to_owned(),
-                },
-            ],
-        }];
-        strip_trailing_thinking(&mut messages);
-        assert_eq!(messages[0].content.len(), 1);
-        assert!(matches!(&messages[0].content[0], ContentBlock::Text { .. }));
+    fn thinking(text: &str) -> ContentBlock {
+        ContentBlock::Thinking {
+            thinking: text.to_owned(),
+            signature: "sig".to_owned(),
+        }
+    }
+
+    fn tool_use() -> ContentBlock {
+        ContentBlock::ToolUse {
+            id: "t1".to_owned(),
+            name: "read".to_owned(),
+            input: serde_json::json!({}),
+        }
     }
 
     #[test]
-    fn strip_trailing_thinking_preserves_non_trailing() {
-        let mut messages = vec![Message {
-            role: Role::Assistant,
-            content: vec![
-                ContentBlock::Thinking {
-                    thinking: "reasoning".to_owned(),
-                    signature: "sig".to_owned(),
-                },
-                ContentBlock::Text {
-                    text: "answer".to_owned(),
-                },
-            ],
-        }];
-        strip_trailing_thinking(&mut messages);
-        assert_eq!(messages[0].content.len(), 2);
-        assert!(matches!(
-            &messages[0].content[0],
-            ContentBlock::Thinking { .. }
-        ));
-        assert!(matches!(&messages[0].content[1], ContentBlock::Text { text } if text == "answer"));
+    fn progress_update_before_finds_note_beside_empty_reasoning() {
+        for blocks in [
+            [thinking(""), thinking("Found the loader."), tool_use()],
+            [thinking("Found the loader."), thinking("  "), tool_use()],
+        ] {
+            assert_eq!(
+                progress_update_before(&blocks, 2),
+                Some("Found the loader.")
+            );
+        }
     }
 
     #[test]
-    fn strip_trailing_thinking_skips_user_messages() {
-        let mut messages = vec![Message {
-            role: Role::User,
-            content: vec![ContentBlock::Text {
-                text: "question".to_owned(),
-            }],
-        }];
-        strip_trailing_thinking(&mut messages);
-        assert_eq!(messages[0].content.len(), 1);
-    }
+    fn progress_update_before_stops_at_non_thinking_blocks() {
+        let empty = [thinking(""), tool_use()];
+        assert_eq!(progress_update_before(&empty, 1), None);
 
-    #[test]
-    fn strip_trailing_thinking_removes_multiple_consecutive() {
-        let mut messages = vec![Message {
-            role: Role::Assistant,
-            content: vec![
-                ContentBlock::Text {
-                    text: "answer".to_owned(),
-                },
-                ContentBlock::Thinking {
-                    thinking: "first".to_owned(),
-                    signature: "sig1".to_owned(),
-                },
-                ContentBlock::RedactedThinking {
-                    data: "opaque".to_owned(),
-                },
-            ],
-        }];
-        strip_trailing_thinking(&mut messages);
-        assert_eq!(messages[0].content.len(), 1);
-        assert!(matches!(&messages[0].content[0], ContentBlock::Text { .. }));
-    }
-
-    #[test]
-    fn strip_trailing_thinking_targets_only_last_assistant() {
-        let mut messages = vec![
-            Message {
-                role: Role::Assistant,
-                content: vec![
-                    ContentBlock::Text {
-                        text: "first".to_owned(),
-                    },
-                    ContentBlock::Thinking {
-                        thinking: "old".to_owned(),
-                        signature: "sig_old".to_owned(),
-                    },
-                ],
+        let text = [
+            thinking("Found it."),
+            ContentBlock::Text {
+                text: "Checking.".to_owned(),
             },
-            Message {
-                role: Role::User,
-                content: vec![ContentBlock::Text {
-                    text: "follow-up".to_owned(),
-                }],
-            },
-            Message {
-                role: Role::Assistant,
-                content: vec![
-                    ContentBlock::Text {
-                        text: "second".to_owned(),
-                    },
-                    ContentBlock::Thinking {
-                        thinking: "new".to_owned(),
-                        signature: "sig_new".to_owned(),
-                    },
-                ],
-            },
+            tool_use(),
         ];
-        strip_trailing_thinking(&mut messages);
-        assert_eq!(messages[0].content.len(), 2);
-        assert!(matches!(
-            &messages[0].content[1],
-            ContentBlock::Thinking { thinking, .. } if thinking == "old"
-        ));
-        assert_eq!(messages[2].content.len(), 1);
-        assert!(matches!(&messages[2].content[0], ContentBlock::Text { text } if text == "second"));
+        assert_eq!(progress_update_before(&text, 2), None);
+
+        assert_eq!(progress_update_before(&[tool_use()], 0), None);
     }
 
     #[test]
-    fn strip_trailing_thinking_inserts_placeholder_for_thinking_only() {
-        let mut messages = vec![Message {
-            role: Role::Assistant,
-            content: vec![ContentBlock::Thinking {
-                thinking: "reasoning".to_owned(),
-                signature: "sig".to_owned(),
-            }],
-        }];
-        strip_trailing_thinking(&mut messages);
-        assert_eq!(messages[0].content.len(), 1);
-        assert!(
-            matches!(&messages[0].content[0], ContentBlock::Text { text } if text == "[No message content]")
-        );
+    fn progress_update_before_reads_through_redacted_thinking() {
+        let blocks = [
+            thinking("note"),
+            ContentBlock::RedactedThinking {
+                data: "opaque".to_owned(),
+            },
+            tool_use(),
+        ];
+        assert_eq!(progress_update_before(&blocks, 2), Some("note"));
     }
 }

@@ -21,6 +21,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::{ArgGroup, Parser};
+use tracing::warn;
 
 use client::anthropic::Client;
 use config::Config;
@@ -105,6 +106,9 @@ async fn async_main() -> Result<Exit> {
     }
 
     let config = Config::load().await?;
+    if let Some(notice) = config.model.unsupported_notice() {
+        warn!("{notice}");
+    }
     let show_thinking = config.show_thinking;
     let theme = config.theme.clone();
     let snapshot = config.snapshot();
@@ -120,7 +124,7 @@ async fn async_main() -> Result<Exit> {
         title,
         tool_result_metadata,
         file_snapshots,
-    } = resolve_session(&store, &config.model, cli.r#continue.as_ref(), cli.all).await?;
+    } = resolve_session(&store, config.model.id(), cli.r#continue.as_ref(), cli.all).await?;
     let drifted = file_tracker.restore_verified(file_snapshots);
 
     let client = Client::new(config, Some(handle.session_id().to_owned()))?;

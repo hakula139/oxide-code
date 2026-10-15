@@ -89,8 +89,8 @@ mod tests {
         let block = ErrorBlock::new(indoc! {"
             Unknown model: `gpt-4`. Supported models:
 
-            - `claude-opus-4-7` — Claude Opus 4.7
-            - `claude-haiku-4-5` — Claude Haiku 4.5"
+            - `claude-opus-5-5` — Claude Opus 5.5
+            - `claude-haiku-5-5` — Claude Haiku 5.5"
         });
         let lines = block.render(&ctx_at(80, &theme));
         let bodies: Vec<&str> = lines
@@ -102,8 +102,8 @@ mod tests {
             vec![
                 "Unknown model: `gpt-4`. Supported models:",
                 "",
-                "- `claude-opus-4-7` — Claude Opus 4.7",
-                "- `claude-haiku-4-5` — Claude Haiku 4.5",
+                "- `claude-opus-5-5` — Claude Opus 5.5",
+                "- `claude-haiku-5-5` — Claude Haiku 5.5",
             ],
         );
     }

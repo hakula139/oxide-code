@@ -1,11 +1,9 @@
 //! Inputs to [`SlashCommand::execute`](super::registry::SlashCommand::execute): [`SlashContext`]
 //! borrows App-owned state, and [`LiveSessionInfo`] is the session-level snapshot.
 
-use std::borrow::Cow;
 use std::path::PathBuf;
 
 use crate::config::ConfigSnapshot;
-use crate::model::{display_name, short_display_name};
 
 /// Live snapshot of the running session handed to every slash command. Built at TUI startup and
 /// rebound by `SessionRolled` / `ConfigChanged` so commands always see the current model, effort,
@@ -19,16 +17,6 @@ pub(crate) struct LiveSessionInfo {
     pub(crate) version: &'static str,
     pub(crate) session_id: String,
     pub(crate) config: ConfigSnapshot,
-}
-
-impl LiveSessionInfo {
-    pub(crate) fn display_name(&self) -> Cow<'_, str> {
-        display_name(&self.config.model_id)
-    }
-
-    pub(crate) fn short_display_name(&self) -> Cow<'_, str> {
-        short_display_name(&self.config.model_id)
-    }
 }
 
 /// Read-only App state for one [`super::registry::SlashCommand::execute`] call. Commands report

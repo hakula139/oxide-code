@@ -89,7 +89,7 @@ impl WelcomeSnapshot {
     fn from_live_with_seed(info: &LiveSessionInfo, seed: u64) -> Self {
         Self {
             version: info.version,
-            model_label: info.display_name().into_owned(),
+            model_label: info.config.model.display_name().to_owned(),
             effort_label: display_effort(info.config.effort),
             auth_label: info.config.auth_label,
             cwd: info.cwd.clone(),
@@ -353,7 +353,7 @@ mod tests {
                 auth_label: "OAuth",
                 base_url: "https://api.test.invalid".to_owned(),
                 extra_ca_certs: None,
-                model_id: "claude-opus-4-8".to_owned(),
+                model: crate::model::ModelSpec::resolve("claude-opus-5-5".to_owned()),
                 effort: Some(Effort::Xhigh),
                 max_tokens: 64_000,
                 max_tool_rounds: None,
@@ -408,7 +408,7 @@ mod tests {
         let info = fixture();
         let snap = snap_for(&info);
         assert_eq!(snap.version, "0.1.0");
-        assert_eq!(snap.model_label, "Claude Opus 4.8");
+        assert_eq!(snap.model_label, "Claude Opus 5.5");
         assert_eq!(snap.effort_label, "xhigh");
         assert_eq!(snap.auth_label, "OAuth");
         assert_eq!(snap.cwd, "~/github/oxide-code");

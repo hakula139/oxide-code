@@ -25,6 +25,7 @@ use uuid::Uuid;
 
 use crate::config::{Auth, CompactionConfig, Config, Effort};
 use crate::message::{ContentBlock, Message, Role};
+use crate::model::ModelSpec;
 use crate::prompt::SYSTEM_PROMPT_DYNAMIC_BOUNDARY;
 use crate::tool::ToolDefinition;
 use crate::util::tls::apply_extra_ca_certs;
@@ -140,7 +141,7 @@ impl Client {
         })
     }
 
-    pub(crate) fn model(&self) -> &str {
+    pub(crate) fn model(&self) -> &ModelSpec {
         &self.config.model
     }
 
@@ -180,24 +181,24 @@ impl Client {
         self.session_id = id;
     }
 
-    /// Swaps the active model and re-clamps model-derived config against the new caps.
-    pub(crate) fn set_model(&mut self, model: String) -> Result<Option<Effort>> {
-        let caps = crate::model::capabilities_for(&model);
-        let effort = caps.resolve_effort(self.config.effort);
+    /// Swaps the active model and re-resolves effort and the compaction threshold. Thinking,
+    /// betas, context management, and the default `max_tokens` derive from the model per request.
+    pub(crate) fn set_model(&mut self, id: String) -> Result<Option<Effort>> {
+        let model = ModelSpec::resolve(id);
+        let effort = model.resolve_effort(self.config.effort);
         let compaction = self
             .config
             .compaction
-            .for_model(&model, self.config.max_tokens)?;
+            .for_model(&model, model.resolve_max_tokens(self.config.max_tokens))?;
         self.config.effort = effort;
         self.config.compaction = compaction;
         self.config.model = model;
         Ok(effort)
     }
 
-    /// Swaps the active effort, clamped against the current model's caps.
+    /// Swaps the active effort. Stays `None` on unknown models.
     pub(crate) fn set_effort(&mut self, pick: Effort) -> Option<Effort> {
-        let caps = crate::model::capabilities_for(&self.config.model);
-        let effort = caps.clamp_effort(pick);
+        let effort = self.config.model.resolve_effort(Some(pick));
         self.config.effort = effort;
         effort
     }
@@ -278,22 +279,22 @@ impl Client {
             ],
         );
 
-        let caps = crate::model::capabilities_for(&self.config.model);
-
+        let model = &self.config.model;
+        let thinking = model.thinking(self.config.show_thinking);
         let url = format!("{}/v1/messages?beta=true", self.config.base_url);
         let mut body = serde_json::to_string(&CreateMessageRequest {
-            model: betas::api_model_id(&self.config.model),
-            max_tokens: self.config.max_tokens,
+            model: model.id(),
+            max_tokens: model.resolve_max_tokens(self.config.max_tokens),
             stream: true,
             metadata: build_metadata(&self.device_id, &self.session_id),
             system: system_blocks,
             tools: (!tools.is_empty()).then_some(tools),
-            thinking: self.config.thinking.as_ref(),
+            thinking: thinking.as_ref(),
             output_config: OutputConfig::new(None, self.config.effort),
-            // Body must accompany the beta header. claude-code 2.1.119 ships both on every 4.6+.
-            context_management: caps
-                .context_management
-                .then(ContextManagement::clear_thinking_keep_all),
+            // Body must accompany the beta header, which `compute_betas` gates the same way.
+            context_management: model
+                .info()
+                .map(|_| ContextManagement::clear_thinking_keep_all()),
             messages: RequestMessages {
                 messages: &effective_messages,
                 breakpoint,
@@ -307,7 +308,7 @@ impl Client {
 
         let (tx, rx) = mpsc::channel(64);
         let http = self.http.clone();
-        let betas = compute_betas(&self.config.model, &self.config.auth, true, false).join(",");
+        let betas = compute_betas(model, thinking.as_ref(), &self.config.auth, true).join(",");
         let session_id = self.session_id.clone();
 
         tokio::spawn(async move {
@@ -447,14 +448,13 @@ mod tests {
     use super::wire::{ContentBlockInfo, Delta};
     use super::*;
     use crate::config::{
-        AutoCompactionConfig, CompactionConfig, Effort, PromptCacheTtl, ThinkingConfig,
-        test_thresholds,
+        AutoCompactionConfig, CompactionConfig, Effort, PromptCacheTtl, test_thresholds,
     };
 
     // ── Fixtures ──
 
     const OFFLINE_URL: &str = "https://example.invalid";
-    const TEST_MODEL: &str = "claude-sonnet-4-6";
+    const TEST_MODEL: &str = "claude-sonnet-5-5";
 
     fn sse_body(frames: &[(&str, &str)]) -> String {
         use std::fmt::Write;
@@ -486,7 +486,7 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(client.model(), "claude-sonnet-4-6");
+        assert_eq!(client.model().id(), TEST_MODEL);
     }
 
     #[test]
@@ -500,7 +500,7 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(client.model(), "claude-sonnet-4-6");
+        assert_eq!(client.model().id(), TEST_MODEL);
     }
 
     #[test]
@@ -645,40 +645,21 @@ mod tests {
 
     #[test]
     fn set_model_resolves_effort_and_persists_full_state() {
-        // Rows cover each resolution arm: clamp-down, pass-through, no-tier clear, model-default
-        // fallback, and unknown-id. Checking both returned and stored effort catches the
-        // "returned but not persisted" mutation.
+        // Checking both returned and stored effort catches a "returned but not persisted" mutation.
         for (from_model, from_effort, swap_to, expect) in [
             (
-                "claude-opus-4-7",
+                "claude-opus-5-5",
                 Some(Effort::Xhigh),
-                "claude-sonnet-4-6",
+                "claude-sonnet-5-5",
+                Some(Effort::Xhigh),
+            ),
+            (
+                "custom-model",
+                None,
+                "claude-sonnet-5-5",
                 Some(Effort::High),
             ),
-            (
-                "claude-sonnet-4-6",
-                Some(Effort::Low),
-                "claude-opus-4-7",
-                Some(Effort::Low),
-            ),
-            (
-                "claude-opus-4-7",
-                Some(Effort::Xhigh),
-                "claude-haiku-4-5",
-                None,
-            ),
-            (
-                "claude-haiku-4-5",
-                None,
-                "claude-opus-4-7",
-                Some(Effort::Xhigh),
-            ),
-            (
-                "claude-opus-4-7",
-                Some(Effort::High),
-                "claude-opus-5-0",
-                None,
-            ),
+            ("claude-opus-5-5", Some(Effort::High), "custom-model", None),
         ] {
             let mut client = client_with(from_model, from_effort);
             let returned = client.set_model(swap_to.to_owned()).unwrap();
@@ -687,73 +668,94 @@ mod tests {
                 client.config.effort, expect,
                 "{from_model} → {swap_to}: stored effort",
             );
-            assert_eq!(client.model(), swap_to, "{swap_to}: stored id");
+            assert_eq!(client.model().id(), swap_to, "{swap_to}: stored id");
         }
     }
 
-    #[test]
-    fn set_model_preserves_1m_tag_round_trip() {
-        // `[1m]` is a client-side opt-in. The swap must store it verbatim so `compute_betas` keeps
-        // sending the 1M context beta. Regressing this drops 1M context silently.
-        let mut client = client_with("claude-opus-4-6", Some(Effort::Max));
-        client.set_model("claude-opus-4-7[1m]".to_owned()).unwrap();
-        assert_eq!(client.model(), "claude-opus-4-7[1m]");
+    #[tokio::test]
+    async fn set_model_rederives_every_model_gated_request_field() {
+        let mut cfg = test_config(OFFLINE_URL, api_key(), "custom-model");
+        cfg.max_tokens = None;
+        cfg.show_thinking = true;
+        let mut client = Client::new(cfg, Some("sid".to_owned())).unwrap();
+
+        let (unknown, unknown_betas) = capture_stream_request(client.clone()).await;
+        for field in ["thinking", "output_config", "context_management"] {
+            assert!(unknown.get(field).is_none(), "{field} absent: {unknown}");
+        }
+        assert_eq!(unknown["max_tokens"], 16_000);
+        for beta in ["context-management", "thinking-binding-controls"] {
+            assert!(!unknown_betas.contains(beta), "{beta}: {unknown_betas}");
+        }
+
+        client.set_model("claude-opus-5-5".to_owned()).unwrap();
+        let (known, known_betas) = capture_stream_request(client).await;
+        assert_eq!(known["model"], "claude-opus-5-5");
+        assert_eq!(known["max_tokens"], 64_000);
+        assert_eq!(
+            known["thinking"],
+            serde_json::json!({
+                "type": "adaptive",
+                "display": "summarized",
+                "block_binding": {"prefix_mismatch_behavior": "drop_block"},
+            }),
+        );
+        assert_eq!(known["output_config"]["effort"], "medium");
+        assert_eq!(
+            known["context_management"]["edits"][0]["type"],
+            "clear_thinking_20251015",
+        );
+        assert!(
+            known_betas.contains("context-management-2025-06-27"),
+            "{known_betas}"
+        );
     }
 
     #[test]
-    fn set_model_recomputes_compaction_threshold_from_new_context_window() {
-        let mut config = test_config(OFFLINE_URL, api_key(), "claude-opus-4-7[1m]");
-        config.max_tokens = 64_000;
-        config.compaction = CompactionConfig::default_for_test(&config.model, config.max_tokens);
+    fn set_model_enables_compaction_threshold_from_new_context_window() {
+        let mut config = test_config(OFFLINE_URL, api_key(), "custom-model");
+        config.max_tokens = None;
+        config.compaction = CompactionConfig::default_for_test(&config.model, 16_000);
+        assert!(!config.compaction.auto.enabled, "precondition: no window");
         let mut client = Client::new(config, Some("sid".to_owned())).unwrap();
 
-        let effort = client.set_model("claude-sonnet-4-6".to_owned()).unwrap();
+        client.set_model("claude-sonnet-5-5".to_owned()).unwrap();
 
-        assert_eq!(effort, Some(Effort::High));
-        assert_eq!(client.model(), "claude-sonnet-4-6");
         assert_eq!(
             client.compaction().auto.threshold_tokens,
-            Some(test_thresholds::WINDOW_200K),
+            Some(test_thresholds::WINDOW_1M),
         );
     }
 
     #[test]
     fn set_model_clamps_threshold_above_new_context_window() {
-        let mut config = test_config(OFFLINE_URL, api_key(), "claude-opus-4-7[1m]");
-        config.max_tokens = 64_000;
+        let mut config = test_config(OFFLINE_URL, api_key(), "custom-model");
+        config.max_tokens = None;
         config.compaction = CompactionConfig::resolved_for_test(AutoCompactionConfig {
             enabled: true,
-            threshold_tokens: Some(test_thresholds::WINDOW_1M),
+            threshold_tokens: Some(1_500_000),
         });
         let mut client = Client::new(config, Some("sid".to_owned())).unwrap();
 
-        client.set_model("claude-sonnet-4-6".to_owned()).unwrap();
-        assert_eq!(client.model(), "claude-sonnet-4-6");
+        client.set_model("claude-sonnet-5-5".to_owned()).unwrap();
         assert_eq!(
             client.compaction().auto.threshold_tokens,
-            Some(test_thresholds::WINDOW_200K),
+            Some(test_thresholds::WINDOW_1M),
         );
     }
 
     // ── Client::set_effort ──
 
     #[test]
-    fn set_effort_resolves_pick_against_active_model_caps() {
-        // Rows cover pass-through, clamp-down, and explicit effort on a no-tier model.
+    fn set_effort_resolves_pick_against_active_model() {
         for (model, initial, pick, expect) in [
             (
-                "claude-opus-4-7",
+                "claude-sonnet-5-5",
                 Some(Effort::High),
-                Effort::Xhigh,
-                Some(Effort::Xhigh),
+                Effort::Max,
+                Some(Effort::Max),
             ),
-            (
-                "claude-sonnet-4-6",
-                Some(Effort::High),
-                Effort::Xhigh,
-                Some(Effort::High),
-            ),
-            ("claude-haiku-4-5", None, Effort::High, None),
+            ("custom-model", None, Effort::High, None),
         ] {
             let mut client = client_with(model, initial);
             assert_eq!(client.set_effort(pick), expect, "{model} pick={pick:?}");
@@ -781,7 +783,7 @@ mod tests {
             .await;
 
         let client = Client::new(
-            test_config(server.uri(), api_key(), "claude-sonnet-4-6"),
+            test_config(server.uri(), api_key(), TEST_MODEL),
             Some("sid".to_owned()),
         )
         .unwrap();
@@ -838,7 +840,7 @@ mod tests {
             .await;
 
         let client = Client::new(
-            test_config(server.uri(), api_key(), "claude-sonnet-4-6"),
+            test_config(server.uri(), api_key(), TEST_MODEL),
             Some("sid".to_owned()),
         )
         .unwrap();
@@ -875,11 +877,7 @@ mod tests {
             .await;
 
         let client = Client::new(
-            test_config(
-                server.uri(),
-                Auth::ApiKey("sk-test".to_owned()),
-                "claude-sonnet-4-6",
-            ),
+            test_config(server.uri(), Auth::ApiKey("sk-test".to_owned()), TEST_MODEL),
             Some("sid-abc".to_owned()),
         )
         .unwrap();
@@ -909,11 +907,7 @@ mod tests {
             .await;
 
         let client = Client::new(
-            test_config(
-                server.uri(),
-                Auth::OAuth("tok".to_owned()),
-                "claude-sonnet-4-6",
-            ),
+            test_config(server.uri(), Auth::OAuth("tok".to_owned()), TEST_MODEL),
             Some("sid".to_owned()),
         )
         .unwrap();
@@ -947,7 +941,7 @@ mod tests {
                 .await;
 
             let client = Client::new(
-                test_config(server.uri(), auth, "claude-sonnet-4-6"),
+                test_config(server.uri(), auth, TEST_MODEL),
                 Some("sid".to_owned()),
             )
             .unwrap();
@@ -985,7 +979,7 @@ mod tests {
             .await;
 
         let client = Client::new(
-            test_config(server.uri(), api_key(), "claude-sonnet-4-6"),
+            test_config(server.uri(), api_key(), TEST_MODEL),
             Some("sid".to_owned()),
         )
         .unwrap();
@@ -1041,7 +1035,7 @@ mod tests {
             .await;
 
         let client = Client::new(
-            test_config(server.uri(), api_key(), "claude-sonnet-4-6"),
+            test_config(server.uri(), api_key(), TEST_MODEL),
             Some("sid".to_owned()),
         )
         .unwrap();
@@ -1096,7 +1090,7 @@ mod tests {
             .await;
 
         let mut client = Client::new(
-            test_config(server.uri(), api_key(), "claude-sonnet-4-6"),
+            test_config(server.uri(), api_key(), "claude-sonnet-5-5"),
             Some("sid".to_owned()),
         )
         .unwrap();
@@ -1172,7 +1166,7 @@ mod tests {
             .await;
 
         let client = Client::new(
-            test_config(server.uri(), api_key(), "claude-sonnet-4-6"),
+            test_config(server.uri(), api_key(), TEST_MODEL),
             Some("sid".to_owned()),
         )
         .unwrap();
@@ -1213,7 +1207,7 @@ mod tests {
             .await;
 
         let client = Client::new(
-            test_config(server.uri(), api_key(), "claude-sonnet-4-6"),
+            test_config(server.uri(), api_key(), TEST_MODEL),
             Some("sid".to_owned()),
         )
         .unwrap();
@@ -1249,7 +1243,7 @@ mod tests {
                 .await;
 
             let client = Client::new(
-                test_config(server.uri(), api_key(), "claude-sonnet-4-6"),
+                test_config(server.uri(), api_key(), TEST_MODEL),
                 Some("sid".to_owned()),
             )
             .unwrap();
@@ -1282,7 +1276,7 @@ mod tests {
             .await;
 
         let client = Client::new(
-            test_config(server.uri(), api_key(), "claude-sonnet-4-6"),
+            test_config(server.uri(), api_key(), TEST_MODEL),
             Some("sid".to_owned()),
         )
         .unwrap();
@@ -1311,7 +1305,7 @@ mod tests {
             .await;
 
         let client = Client::new(
-            test_config(server.uri(), api_key(), "claude-sonnet-4-6"),
+            test_config(server.uri(), api_key(), TEST_MODEL),
             Some("sid".to_owned()),
         )
         .unwrap();
@@ -1326,14 +1320,21 @@ mod tests {
 
     // ── Client::stream_message / agentic body fields ──
 
-    async fn capture_stream_body(config: Config) -> serde_json::Value {
+    /// Body and `anthropic-beta` header of one streamed turn sent through `client`.
+    async fn capture_stream_request(mut client: Client) -> (serde_json::Value, String) {
         let server = MockServer::start().await;
-        let sink: Captured<String> = captured();
+        let sink: Captured<(String, String)> = captured();
         let sink_clone = std::sync::Arc::clone(&sink);
         Mock::given(method("POST"))
             .and(path("/v1/messages"))
             .respond_with(move |req: &Request| {
-                *sink_clone.lock().unwrap() = Some(String::from_utf8_lossy(&req.body).into_owned());
+                let body = String::from_utf8_lossy(&req.body).into_owned();
+                let beta = req
+                    .headers
+                    .get("anthropic-beta")
+                    .map(|v| v.to_str().unwrap().to_owned())
+                    .unwrap_or_default();
+                *sink_clone.lock().unwrap() = Some((body, beta));
                 ResponseTemplate::new(200)
                     .insert_header("content-type", "text/event-stream")
                     .set_body_string(text_stream_body("", "Hi"))
@@ -1341,9 +1342,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let mut cfg = config;
-        cfg.base_url = server.uri();
-        let client = Client::new(cfg, Some("sid".to_owned())).unwrap();
+        client.config.base_url = server.uri();
         collect_events(
             client
                 .stream_message(&[Message::user("hi")], &[], None, &[])
@@ -1351,13 +1350,18 @@ mod tests {
         )
         .await
         .unwrap();
-        let body = sink.lock().unwrap().clone().expect("request captured");
-        serde_json::from_str(&body).unwrap()
+        let (body, beta) = sink.lock().unwrap().clone().expect("request captured");
+        (serde_json::from_str(&body).unwrap(), beta)
+    }
+
+    async fn capture_stream_body(config: Config) -> serde_json::Value {
+        let client = Client::new(config, Some("sid".to_owned())).unwrap();
+        capture_stream_request(client).await.0
     }
 
     #[tokio::test]
-    async fn stream_message_opus_4_7_emits_output_config_effort_xhigh() {
-        let mut cfg = test_config("https://placeholder.invalid", api_key(), "claude-opus-4-7");
+    async fn stream_message_emits_output_config_effort() {
+        let mut cfg = test_config(OFFLINE_URL, api_key(), "claude-opus-5-5");
         cfg.effort = Some(Effort::Xhigh);
         let body = capture_stream_body(cfg).await;
         assert_eq!(body["output_config"]["effort"], "xhigh");
@@ -1365,13 +1369,8 @@ mod tests {
 
     #[tokio::test]
     async fn stream_message_omits_output_config_when_effort_is_none() {
-        // Non-effort-capable models resolve to `Config.effort == None`, so `output_config` is
-        // absent rather than `{}`.
-        let cfg = test_config(
-            "https://placeholder.invalid",
-            api_key(),
-            "claude-sonnet-4-5",
-        );
+        // Unknown models resolve to `Config.effort == None`, so the body omits `output_config`.
+        let cfg = test_config(OFFLINE_URL, api_key(), "custom-model");
         assert!(cfg.effort.is_none(), "precondition: effort unset");
         let body = capture_stream_body(cfg).await;
         assert!(
@@ -1381,60 +1380,68 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_message_context_management_body_present_on_4_6_plus() {
-        // Every model with the `context_management` capability must ship the body directive
-        // alongside the beta header.
-        for model in [
-            "claude-opus-4-7",
-            "claude-opus-4-6",
-            "claude-sonnet-4-6",
-            "claude-haiku-4-5",
-        ] {
-            let cfg = test_config("https://placeholder.invalid", api_key(), model);
+    async fn stream_message_context_management_body_present_on_every_known_model() {
+        // The body directive must accompany the beta header `compute_betas` sends for these.
+        for info in crate::model::MODELS {
+            let cfg = test_config(OFFLINE_URL, api_key(), info.id);
             let body = capture_stream_body(cfg).await;
             let edits = body["context_management"]["edits"]
                 .as_array()
-                .unwrap_or_else(|| panic!("context_management.edits missing for {model}: {body}"));
-            assert_eq!(edits.len(), 1, "{model}");
-            assert_eq!(edits[0]["type"], "clear_thinking_20251015", "{model}");
-            assert_eq!(edits[0]["keep"], "all", "{model}");
+                .unwrap_or_else(|| panic!("context_management.edits missing for {}", info.id));
+            assert_eq!(edits.len(), 1, "{}", info.id);
+            assert_eq!(edits[0]["type"], "clear_thinking_20251015", "{}", info.id);
+            assert_eq!(edits[0]["keep"], "all", "{}", info.id);
         }
     }
 
     #[tokio::test]
-    async fn stream_message_context_management_absent_on_unknown_model() {
-        // Unknown ids fall back to all-false `Capabilities::default()`, preserving the
-        // "beta sent ⇒ body populated" invariant.
-        let cfg = test_config("https://placeholder.invalid", api_key(), "claude-opus-5-0");
-        let body = capture_stream_body(cfg).await;
-        assert!(
-            body.get("context_management").is_none(),
-            "context_management absent on unknown models: {body}",
-        );
+    async fn stream_message_hidden_thinking_requests_updates_where_supported() {
+        for (id, display, sends_beta) in [
+            ("claude-opus-5-5", Some("updates"), true),
+            ("claude-haiku-5-5", None, false),
+        ] {
+            let client = Client::new(
+                test_config(OFFLINE_URL, api_key(), id),
+                Some("sid".to_owned()),
+            )
+            .unwrap();
+            let (body, betas) = capture_stream_request(client).await;
+            assert_eq!(
+                body["thinking"].get("display"),
+                display.map(Into::into).as_ref(),
+                "{id}"
+            );
+            assert_eq!(
+                betas.contains("thinking-display-updates-2026-08-18"),
+                sends_beta,
+                "{id}: {betas}",
+            );
+        }
     }
 
     #[tokio::test]
-    async fn stream_message_show_thinking_emits_display_summarized() {
-        let mut cfg = test_config("https://placeholder.invalid", api_key(), "claude-opus-4-7");
-        cfg.thinking = Some(ThinkingConfig::Adaptive {
-            display: Some(crate::config::ThinkingDisplay::Summarized),
-        });
-        let body = capture_stream_body(cfg).await;
-        assert_eq!(body["thinking"]["type"], "adaptive");
-        assert_eq!(body["thinking"]["display"], "summarized");
-    }
-
-    #[tokio::test]
-    async fn stream_message_show_thinking_false_omits_display_field() {
-        // `Adaptive { display: None }` must serialize without a `display` key.
-        let mut cfg = test_config("https://placeholder.invalid", api_key(), "claude-opus-4-7");
-        cfg.thinking = Some(ThinkingConfig::Adaptive { display: None });
-        let body = capture_stream_body(cfg).await;
-        assert_eq!(body["thinking"]["type"], "adaptive");
-        assert!(
-            body["thinking"].get("display").is_none(),
-            "display field absent: {body}",
-        );
+    async fn stream_message_known_model_drops_stale_thinking_blocks_under_binding_beta() {
+        for info in crate::model::MODELS {
+            let client = Client::new(
+                test_config(OFFLINE_URL, api_key(), info.id),
+                Some("sid".to_owned()),
+            )
+            .unwrap();
+            let (body, betas) = capture_stream_request(client).await;
+            assert_eq!(
+                body["thinking"]["block_binding"],
+                serde_json::json!({"prefix_mismatch_behavior": "drop_block"}),
+                "{}",
+                info.id,
+            );
+            assert!(
+                betas
+                    .split(',')
+                    .any(|beta| beta == "thinking-binding-controls-2026-08-01"),
+                "{}: {betas}",
+                info.id,
+            );
+        }
     }
 
     // ── build_metadata ──

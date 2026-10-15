@@ -13,7 +13,7 @@ use crate::session::handle;
 use crate::session::store::SessionStore;
 use crate::tool::ToolRegistry;
 
-pub(super) const MODEL: &str = "claude-opus-4-7[1m]";
+pub(super) const MODEL: &str = "claude-opus-5-5";
 pub(super) const SESSION_CONTEXT: &str = "<system-reminder>session context</system-reminder>";
 
 /// Non-interactive conversation on a fresh session in `store`. Its prompt carries

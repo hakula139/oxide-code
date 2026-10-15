@@ -1,69 +1,78 @@
 //! Per-request `anthropic-beta` header computation.
 
-use crate::config::{Auth, PromptCacheTtl};
+use crate::config::{Auth, PromptCacheTtl, ThinkingConfig, ThinkingDisplay};
+use crate::model::{Family, ModelSpec};
 
 use super::wire::CacheControl;
 
+const ADVISOR_TOOL_BETA_HEADER: &str = "advisor-tool-2026-03-01";
 pub(super) const CLAUDE_CODE_BETA_HEADER: &str = "claude-code-20250219";
-const CONTEXT_1M_BETA_HEADER: &str = "context-1m-2025-08-07";
 const CONTEXT_MANAGEMENT_BETA_HEADER: &str = "context-management-2025-06-27";
 const EFFORT_BETA_HEADER: &str = "effort-2025-11-24";
 const INTERLEAVED_THINKING_BETA_HEADER: &str = "interleaved-thinking-2025-05-14";
+const MID_CONVERSATION_SYSTEM_BETA_HEADER: &str = "mid-conversation-system-2026-04-07";
 pub(super) const OAUTH_BETA_HEADER: &str = "oauth-2025-04-20";
+const PER_TURN_CONTROL_BETA_HEADER: &str = "per-turn-control-2026-07-01";
 const PROMPT_CACHING_SCOPE_BETA_HEADER: &str = "prompt-caching-scope-2026-01-05";
-pub(super) const STRUCTURED_OUTPUTS_BETA_HEADER: &str = "structured-outputs-2025-12-15";
+const THINKING_BINDING_CONTROLS_BETA_HEADER: &str = "thinking-binding-controls-2026-08-01";
+const THINKING_DISPLAY_UPDATES_BETA_HEADER: &str = "thinking-display-updates-2026-08-18";
+const THINKING_TOKEN_COUNT_BETA_HEADER: &str = "thinking-token-count-2026-05-13";
 
 /// Builds the comma-joined `anthropic-beta` header value.
 ///
-/// Order is load-bearing: 3P proxies fingerprint the exact sequence and reject mismatches. The
-/// `is_agentic` gate distinguishes streaming turns (full agentic stack) from one-shots (only the
-/// claude-code tag plus auth / structured-output extensions).
+/// Order is load-bearing: 3P proxies fingerprint the exact sequence and reject mismatches. Agentic
+/// turns on catalogue models send the sequence Claude Code 2.1.296 sends for them, captured from
+/// `claude -p` with an API key, so it includes betas for features this client leaves unused.
+/// `oauth` takes the slot Claude Code's `getAllModelBetas` gives it. One-shots carry at most the
+/// claude-code tag and the auth extension. The thinking betas derive from the request body's
+/// `thinking` field, so they always match it.
 pub(super) fn compute_betas(
-    model: &str,
+    model: &ModelSpec,
+    thinking: Option<&ThinkingConfig>,
     auth: &Auth,
     is_agentic: bool,
-    want_structured: bool,
 ) -> Vec<&'static str> {
-    let caps = crate::model::capabilities_for(model);
     let is_haiku = model
-        .split('-')
-        .any(|tok| tok.eq_ignore_ascii_case("haiku"));
+        .info()
+        .is_some_and(|info| info.family == Family::Haiku);
 
-    let mut out = Vec::with_capacity(8);
+    let mut out = Vec::with_capacity(12);
 
-    if !is_haiku || is_agentic {
+    if !is_haiku {
         out.push(CLAUDE_CODE_BETA_HEADER);
     }
     if matches!(auth, Auth::OAuth(_)) {
         out.push(OAUTH_BETA_HEADER);
     }
-
-    // 3P proxies fingerprint exact header ordering.
     if is_agentic {
-        if caps.interleaved_thinking {
-            out.push(INTERLEAVED_THINKING_BETA_HEADER);
-        }
-        if caps.context_management {
-            out.push(CONTEXT_MANAGEMENT_BETA_HEADER);
-        }
-        out.push(PROMPT_CACHING_SCOPE_BETA_HEADER);
-        if caps.has_effort() {
-            out.push(EFFORT_BETA_HEADER);
+        if model.info().is_some() {
+            out.extend([
+                INTERLEAVED_THINKING_BETA_HEADER,
+                THINKING_TOKEN_COUNT_BETA_HEADER,
+                CONTEXT_MANAGEMENT_BETA_HEADER,
+                PROMPT_CACHING_SCOPE_BETA_HEADER,
+                MID_CONVERSATION_SYSTEM_BETA_HEADER,
+            ]);
+            if is_haiku {
+                out.push(CLAUDE_CODE_BETA_HEADER);
+            }
+            out.extend([
+                PER_TURN_CONTROL_BETA_HEADER,
+                ADVISOR_TOOL_BETA_HEADER,
+                EFFORT_BETA_HEADER,
+            ]);
+        } else {
+            out.push(PROMPT_CACHING_SCOPE_BETA_HEADER);
         }
     }
-
-    if has_1m_tag(model) && caps.context_1m {
-        out.push(CONTEXT_1M_BETA_HEADER);
-    }
-    if want_structured && caps.structured_outputs {
-        out.push(STRUCTURED_OUTPUTS_BETA_HEADER);
+    if let Some(ThinkingConfig::Adaptive { display, .. }) = thinking {
+        out.push(THINKING_BINDING_CONTROLS_BETA_HEADER);
+        if *display == Some(ThinkingDisplay::Updates) {
+            out.push(THINKING_DISPLAY_UPDATES_BETA_HEADER);
+        }
     }
 
     out
-}
-
-pub(super) fn supports_structured_outputs(model: &str) -> bool {
-    crate::model::capabilities_for(model).structured_outputs
 }
 
 /// Whether `base_url` points at Anthropic's production or staging host. Gates body-side
@@ -102,22 +111,6 @@ pub(super) fn conversation_cache_control(ttl: PromptCacheTtl) -> CacheControl {
     }
 }
 
-/// Strips the `[1m]` tag from a model string before sending to the API.
-pub(super) fn api_model_id(model: &str) -> &str {
-    tag_offset(model).map_or(model, |i| model[..i].trim_end())
-}
-
-fn has_1m_tag(model: &str) -> bool {
-    tag_offset(model).is_some()
-}
-
-fn tag_offset(model: &str) -> Option<usize> {
-    model
-        .as_bytes()
-        .windows(4)
-        .position(|w| w.eq_ignore_ascii_case(b"[1m]"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,127 +123,104 @@ mod tests {
         Auth::OAuth("t".to_owned())
     }
 
+    fn spec(id: &str) -> ModelSpec {
+        ModelSpec::resolve(id.to_owned())
+    }
+
     // ── compute_betas ──
 
     #[test]
-    fn compute_betas_agentic_opus_4_6_plain_carries_full_set_except_1m() {
-        let betas = compute_betas("claude-opus-4-6", &api_key(), true, false);
+    fn compute_betas_agentic_known_model_mirrors_claude_code_then_appends_binding() {
+        let claude_code = "claude-code-20250219,interleaved-thinking-2025-05-14,\
+            thinking-token-count-2026-05-13,context-management-2025-06-27,\
+            prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,\
+            per-turn-control-2026-07-01,advisor-tool-2026-03-01,effort-2025-11-24";
+        let haiku = "interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,\
+            context-management-2025-06-27,prompt-caching-scope-2026-01-05,\
+            mid-conversation-system-2026-04-07,claude-code-20250219,per-turn-control-2026-07-01,\
+            advisor-tool-2026-03-01,effort-2025-11-24";
+        for (id, captured) in [
+            ("claude-opus-5-5", claude_code),
+            ("claude-sonnet-5-5", claude_code),
+            ("claude-haiku-5-5", haiku),
+        ] {
+            let model = spec(id);
+            assert_eq!(
+                compute_betas(&model, model.thinking(true).as_ref(), &api_key(), true).join(","),
+                format!("{captured},thinking-binding-controls-2026-08-01"),
+                "{id}",
+            );
+        }
+    }
+
+    #[test]
+    fn compute_betas_oauth_slots_auth_header_after_claude_code_tag() {
         assert_eq!(
-            betas,
-            vec![
+            compute_betas(&spec("claude-opus-5-5"), None, &oauth(), true)[..3],
+            [
                 CLAUDE_CODE_BETA_HEADER,
+                OAUTH_BETA_HEADER,
                 INTERLEAVED_THINKING_BETA_HEADER,
-                CONTEXT_MANAGEMENT_BETA_HEADER,
-                PROMPT_CACHING_SCOPE_BETA_HEADER,
-                EFFORT_BETA_HEADER,
             ],
+        );
+        // Haiku's agentic claude-code tag comes later, so the auth header leads.
+        assert_eq!(
+            compute_betas(&spec("claude-haiku-5-5"), None, &oauth(), true)[..2],
+            [OAUTH_BETA_HEADER, INTERLEAVED_THINKING_BETA_HEADER],
         );
     }
 
     #[test]
-    fn compute_betas_opus_4_6_with_1m_tag_adds_context_1m() {
-        let betas = compute_betas("claude-opus-4-6[1m]", &api_key(), true, false);
-        assert!(betas.contains(&CONTEXT_1M_BETA_HEADER));
-        assert!(betas.contains(&EFFORT_BETA_HEADER));
+    fn compute_betas_updates_display_appends_its_beta_last() {
+        let opus = spec("claude-opus-5-5");
+        let betas = compute_betas(&opus, opus.thinking(false).as_ref(), &api_key(), true);
+        assert_eq!(
+            betas[betas.len() - 3..],
+            [
+                EFFORT_BETA_HEADER,
+                THINKING_BINDING_CONTROLS_BETA_HEADER,
+                THINKING_DISPLAY_UPDATES_BETA_HEADER,
+            ],
+        );
+        // Haiku has no progress updates, so hidden thinking sends no display and no beta.
+        let haiku = spec("claude-haiku-5-5");
+        assert!(
+            !compute_betas(&haiku, haiku.thinking(false).as_ref(), &api_key(), true)
+                .contains(&THINKING_DISPLAY_UPDATES_BETA_HEADER),
+        );
     }
 
     #[test]
-    fn compute_betas_oauth_adds_oauth_header() {
-        let betas = compute_betas("claude-opus-4-6", &oauth(), true, false);
-        assert!(betas.contains(&OAUTH_BETA_HEADER));
-    }
-
-    #[test]
-    fn compute_betas_sonnet_4_5_has_thinking_but_not_effort() {
-        let betas = compute_betas("claude-sonnet-4-5", &api_key(), true, false);
-        assert!(betas.contains(&INTERLEAVED_THINKING_BETA_HEADER));
-        assert!(betas.contains(&CONTEXT_MANAGEMENT_BETA_HEADER));
-        assert!(!betas.contains(&CONTEXT_1M_BETA_HEADER));
-        assert!(!betas.contains(&EFFORT_BETA_HEADER));
-    }
-
-    #[test]
-    fn compute_betas_haiku_4_5_agentic_omits_1m_effort_and_thinking() {
-        let betas = compute_betas("claude-haiku-4-5", &api_key(), true, false);
-        assert!(betas.contains(&CLAUDE_CODE_BETA_HEADER));
-        assert!(betas.contains(&CONTEXT_MANAGEMENT_BETA_HEADER));
-        assert!(!betas.contains(&CONTEXT_1M_BETA_HEADER));
-        assert!(!betas.contains(&INTERLEAVED_THINKING_BETA_HEADER));
-        assert!(!betas.contains(&EFFORT_BETA_HEADER));
-    }
-
-    #[test]
-    fn compute_betas_haiku_4_5_with_1m_tag_silently_drops_1m() {
-        let betas = compute_betas("claude-haiku-4-5[1m]", &api_key(), true, false);
-        assert!(!betas.contains(&CONTEXT_1M_BETA_HEADER));
+    fn compute_betas_agentic_unknown_model_sends_only_tag_and_cache_scope() {
+        assert_eq!(
+            compute_betas(&spec("custom-model"), None, &api_key(), true),
+            vec![CLAUDE_CODE_BETA_HEADER, PROMPT_CACHING_SCOPE_BETA_HEADER],
+        );
     }
 
     #[test]
     fn compute_betas_haiku_non_agentic_minimal() {
         assert_eq!(
-            compute_betas("claude-haiku-4-5", &api_key(), false, false),
+            compute_betas(&spec("claude-haiku-5-5"), None, &api_key(), false),
             Vec::<&str>::new(),
         );
         assert_eq!(
-            compute_betas("claude-haiku-4-5", &oauth(), false, false),
+            compute_betas(&spec("claude-haiku-5-5"), None, &oauth(), false),
             vec![OAUTH_BETA_HEADER],
         );
     }
 
     #[test]
     fn compute_betas_non_haiku_non_agentic_keeps_claude_code_tag() {
-        let betas = compute_betas("claude-sonnet-4-6", &oauth(), false, false);
-        assert!(betas.contains(&CLAUDE_CODE_BETA_HEADER));
-        assert!(betas.contains(&OAUTH_BETA_HEADER));
-        assert!(!betas.contains(&PROMPT_CACHING_SCOPE_BETA_HEADER));
-        assert!(!betas.contains(&INTERLEAVED_THINKING_BETA_HEADER));
-    }
-
-    #[test]
-    fn compute_betas_opus_4_7_matches_opus_4_6_family() {
-        let plain = compute_betas("claude-opus-4-7", &api_key(), true, false);
-        assert!(plain.contains(&INTERLEAVED_THINKING_BETA_HEADER));
-        assert!(plain.contains(&CONTEXT_MANAGEMENT_BETA_HEADER));
-        assert!(plain.contains(&EFFORT_BETA_HEADER));
-        assert!(!plain.contains(&CONTEXT_1M_BETA_HEADER));
-
-        let with_1m = compute_betas("claude-opus-4-7[1m]", &api_key(), true, false);
-        assert!(with_1m.contains(&CONTEXT_1M_BETA_HEADER));
-    }
-
-    #[test]
-    fn compute_betas_opus_4_8_matches_opus_4_7_header_order() {
-        // 4.8 shares 4.7's capability flags, so the fingerprinted header sequence must be
-        // byte-identical (3P gateways reject mismatches).
         assert_eq!(
-            compute_betas("claude-opus-4-8", &api_key(), true, false),
-            compute_betas("claude-opus-4-7", &api_key(), true, false),
+            compute_betas(&spec("claude-sonnet-5-5"), None, &oauth(), false),
+            vec![CLAUDE_CODE_BETA_HEADER, OAUTH_BETA_HEADER],
         );
-        let with_1m = compute_betas("claude-opus-4-8[1m]", &api_key(), true, false);
-        assert!(with_1m.contains(&CONTEXT_1M_BETA_HEADER));
-        assert!(with_1m.contains(&EFFORT_BETA_HEADER));
-    }
-
-    #[test]
-    fn compute_betas_structured_outputs_gated_by_model_capability() {
+        // Family comes from the catalogue row, so a retired Haiku id is treated as unknown.
         assert_eq!(
-            compute_betas("claude-haiku-4-5", &api_key(), false, true),
-            vec![STRUCTURED_OUTPUTS_BETA_HEADER],
+            compute_betas(&spec("claude-haiku-4-5"), None, &api_key(), false),
+            vec![CLAUDE_CODE_BETA_HEADER],
         );
-        assert!(
-            !compute_betas("claude-haiku-4", &api_key(), false, true)
-                .contains(&STRUCTURED_OUTPUTS_BETA_HEADER),
-        );
-    }
-
-    // ── supports_structured_outputs ──
-
-    #[test]
-    fn supports_structured_outputs_reflects_capability_table() {
-        assert!(supports_structured_outputs("claude-haiku-4-5"));
-        assert!(supports_structured_outputs("claude-opus-4-7"));
-        assert!(!supports_structured_outputs("claude-haiku-4"));
-        assert!(!supports_structured_outputs("claude-opus-5-0"));
     }
 
     // ── is_first_party_base_url ──
@@ -313,24 +283,5 @@ mod tests {
             serde_json::to_string(&conversation_cache_control(PromptCacheTtl::FiveMin)).unwrap(),
             r#"{"type":"ephemeral"}"#,
         );
-    }
-
-    // ── api_model_id ──
-
-    #[test]
-    fn api_model_id_strips_1m_tag_case_insensitively() {
-        assert_eq!(api_model_id("claude-opus-4-7[1m]"), "claude-opus-4-7");
-        assert_eq!(api_model_id("claude-opus-4-7[1M]"), "claude-opus-4-7");
-        assert_eq!(api_model_id("claude-opus-4-7 [1m]"), "claude-opus-4-7");
-        assert_eq!(api_model_id("claude-opus-4-7"), "claude-opus-4-7");
-    }
-
-    // ── has_1m_tag ──
-
-    #[test]
-    fn has_1m_tag_is_case_insensitive() {
-        assert!(has_1m_tag("claude-opus-4-7[1m]"));
-        assert!(has_1m_tag("claude-opus-4-7[1M]"));
-        assert!(!has_1m_tag("claude-opus-4-7"));
     }
 }
