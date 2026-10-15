@@ -1,7 +1,5 @@
 //! Headless driver for `--prompt`: one turn, streamed to stdout.
 
-use std::sync::Arc;
-
 use super::{Exit, render_turn, shutdown_signal};
 use crate::agent::event::{AgentSink, StdioSink, UserAction};
 use crate::engine::{Engine, EngineHandle, TurnEnd};
@@ -10,7 +8,7 @@ use crate::slash;
 /// Runs `prompt` as a single turn. A failed or cancelled turn exits with failure, and a signal
 /// exits with its own status.
 pub(crate) async fn run(engine: Engine, show_thinking: bool, prompt: &str) -> Exit {
-    let sink = StdioSink::new(show_thinking, Arc::clone(engine.tools()));
+    let sink = StdioSink::new(show_thinking);
     drive(engine.spawn(&[]), &sink, prompt).await
 }
 

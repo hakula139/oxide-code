@@ -12,7 +12,9 @@ use anyhow::{Context, Result, anyhow, bail};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
-use crate::agent::event::{AgentEvent, AgentSink, ApprovalDecision, UserAction};
+use crate::agent::event::{
+    AgentEvent, AgentSink, ApprovalDecision, ToolCall, ToolResult, UserAction,
+};
 use crate::client::anthropic::Client;
 use crate::client::anthropic::wire::{
     ContentBlockInfo, Delta, StopDetails, StopReason, StreamEvent, Usage,
@@ -625,11 +627,12 @@ async fn run_tool_round(
     let mut calls = tool_uses.into_iter();
     for (id, name, input) in calls.by_ref() {
         sink.emit(
-            AgentEvent::ToolCallStart {
+            AgentEvent::ToolCallStart(ToolCall {
                 id: id.clone(),
                 name: name.clone(),
-                input: input.clone(),
-            },
+                icon: tools.icon(&name).to_owned(),
+                label: tools.label(&name, &input),
+            }),
             "tool-call-start",
         );
 
@@ -637,7 +640,7 @@ async fn run_tool_round(
             tools,
             &id,
             &name,
-            input,
+            input.clone(),
             parse_errors.get(&id),
             sink,
             user_rx,
@@ -646,12 +649,19 @@ async fn run_tool_round(
         )
         .await;
         sink.emit(
-            AgentEvent::ToolCallEnd {
+            AgentEvent::ToolCallEnd(ToolResult {
                 id: id.clone(),
                 content: output.content.clone(),
                 is_error: output.is_error,
-                metadata: output.metadata.clone(),
-            },
+                title: output.metadata.title.clone(),
+                view: tools.result_view(
+                    &name,
+                    &input,
+                    &output.content,
+                    &output.metadata,
+                    output.is_error,
+                ),
+            }),
             "tool-call-end",
         );
         round.push(id, output);
@@ -1174,6 +1184,7 @@ fn apply_delta(block: &mut BlockAccumulator, delta: Delta, sink: &dyn AgentSink)
 mod tests {
     use std::collections::VecDeque;
     use std::future::Future;
+    use std::path::Path;
     use std::pin::Pin;
     use std::sync::Arc;
     use std::sync::Mutex as StdMutex;
@@ -1196,9 +1207,13 @@ mod tests {
     use crate::file_tracker::FileTracker;
     use crate::message::Role;
     use crate::model::ResolvedModelId;
+    use crate::permission::GateTarget;
     use crate::session::handle::{self, SessionHandle};
     use crate::session::store::testing::test_store;
-    use crate::tool::{Tool, ToolDefinition, ToolMetadata, ToolOutput, ToolRegistry};
+    use crate::tool::{
+        DEFAULT_TOOL_ICON, ReadExcerptLine, Tool, ToolDefinition, ToolMetadata, ToolOutput,
+        ToolRegistry, ToolResultView,
+    };
 
     // ── TurnAbort ──
 
@@ -1698,6 +1713,66 @@ mod tests {
         }
     }
 
+    /// Path tool whose result view shows the input and metadata it was resolved from.
+    struct PathViewTool;
+
+    impl Tool for PathViewTool {
+        fn name(&self) -> &'static str {
+            "path_view"
+        }
+
+        fn description(&self) -> &'static str {
+            "view a path"
+        }
+
+        fn permission_class(&self) -> crate::permission::PermissionClass {
+            crate::permission::PermissionClass::Read
+        }
+
+        fn input_schema(&self) -> serde_json::Value {
+            json!({"type": "object"})
+        }
+
+        fn path_field(&self) -> Option<&'static str> {
+            Some("file_path")
+        }
+
+        fn run(
+            &self,
+            input: serde_json::Value,
+        ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + '_>> {
+            Box::pin(async move {
+                if input.get("fail").is_some() {
+                    return ToolOutput::error("cannot view notes");
+                }
+                ToolOutput {
+                    content: input["file_path"].as_str().unwrap_or_default().to_owned(),
+                    is_error: false,
+                    metadata: ToolMetadata {
+                        title: Some("Viewed notes".into()),
+                        ..Default::default()
+                    },
+                }
+            })
+        }
+
+        fn result_view(
+            &self,
+            input: &serde_json::Value,
+            _content: &str,
+            metadata: &ToolMetadata,
+        ) -> Option<ToolResultView> {
+            Some(ToolResultView::ReadExcerpt {
+                path: input["file_path"].as_str().unwrap_or_default().to_owned(),
+                lines: vec![ReadExcerptLine {
+                    number: 1,
+                    text: metadata.title.clone().unwrap_or_default(),
+                }],
+                total_lines: 1,
+            })
+        }
+    }
+
     /// Signals on entry then blocks forever, so cancel tests can synchronize on the agent being
     /// parked inside the tool future before sending the interrupt.
     struct GateTool {
@@ -1739,6 +1814,20 @@ mod tests {
         let (tx, rx) = crate::agent::event::inert_user_action_channel();
         std::mem::forget(tx);
         rx
+    }
+
+    /// The tool calls and results among `events`, each in emission order.
+    fn tool_events(events: &[AgentEvent]) -> (Vec<ToolCall>, Vec<ToolResult>) {
+        let mut calls = Vec::new();
+        let mut results = Vec::new();
+        for event in events {
+            match event {
+                AgentEvent::ToolCallStart(call) => calls.push(call.clone()),
+                AgentEvent::ToolCallEnd(result) => results.push(result.clone()),
+                _ => {}
+            }
+        }
+        (calls, results)
     }
 
     fn empty_prompt() -> PromptParts {
@@ -2589,16 +2678,100 @@ mod tests {
             ContentBlock::Text { text } if text == "Done",
         ));
 
-        let events = sink.events();
-        assert!(events.iter().any(|e| matches!(
-            e,
-            AgentEvent::ToolCallStart { id, name, .. } if id == "tool_1" && name == "echo",
-        )));
-        assert!(events.iter().any(|e| matches!(
-            e,
-            AgentEvent::ToolCallEnd { id, metadata, is_error: false, .. }
-                if id == "tool_1" && metadata.title.as_deref() == Some("echoed"),
-        )));
+        let (calls, results) = tool_events(&sink.events());
+        assert_eq!(
+            calls,
+            [ToolCall {
+                id: "tool_1".to_owned(),
+                name: "echo".to_owned(),
+                icon: DEFAULT_TOOL_ICON.to_owned(),
+                label: "Echo".to_owned(),
+            }]
+        );
+        assert_eq!(
+            results,
+            [ToolResult {
+                id: "tool_1".to_owned(),
+                content: r#"{"v":42}"#.to_owned(),
+                is_error: false,
+                title: Some("echoed".to_owned()),
+                view: ToolResultView::Text {
+                    content: r#"{"v":42}"#.to_owned(),
+                },
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_turn_resolves_result_views_from_the_unpinned_input_and_tool_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let client = FakeClient::new(vec![
+            tool_use_turn("tool_1", "path_view", r#"{"file_path":"notes.txt"}"#),
+            tool_use_turn(
+                "tool_2",
+                "path_view",
+                r#"{"file_path":"notes.txt","fail":true}"#,
+            ),
+            text_turn("Done"),
+        ]);
+        let tools = ToolRegistry::new(vec![Box::new(PathViewTool)]);
+        let sink = CapturingSink::new();
+        let mut messages = vec![Message::user("view notes")];
+
+        agent_turn(
+            &client,
+            &tools,
+            &mut messages,
+            &empty_prompt(),
+            &sink,
+            &session,
+            &mut inert_user_rx(),
+            None,
+            &yolo_gate(),
+        )
+        .await
+        .unwrap();
+
+        let mut pinned = json!({"file_path": "notes.txt"});
+        PathViewTool.pin_target(
+            &mut pinned,
+            &GateTarget::for_path("notes.txt", Path::new(".")),
+        );
+        let pinned = pinned["file_path"].as_str().unwrap();
+        assert_ne!(
+            pinned, "notes.txt",
+            "the gate must pin the path the tool runs on"
+        );
+        let (_, results) = tool_events(&sink.events());
+        assert_eq!(
+            results,
+            [
+                ToolResult {
+                    id: "tool_1".to_owned(),
+                    content: pinned.to_owned(),
+                    is_error: false,
+                    title: Some("Viewed notes".to_owned()),
+                    view: ToolResultView::ReadExcerpt {
+                        path: "notes.txt".to_owned(),
+                        lines: vec![ReadExcerptLine {
+                            number: 1,
+                            text: "Viewed notes".to_owned(),
+                        }],
+                        total_lines: 1,
+                    },
+                },
+                ToolResult {
+                    id: "tool_2".to_owned(),
+                    content: "cannot view notes".to_owned(),
+                    is_error: true,
+                    title: None,
+                    view: ToolResultView::Text {
+                        content: "cannot view notes".to_owned(),
+                    },
+                },
+            ]
+        );
     }
 
     #[tokio::test]
@@ -2986,7 +3159,7 @@ mod tests {
         assert!(
             !events
                 .iter()
-                .any(|e| matches!(e, AgentEvent::ToolCallStart { id, .. } if id == "tool_3")),
+                .any(|e| matches!(e, AgentEvent::ToolCallStart(call) if call.id == "tool_3")),
             "a call after the interrupt never starts: {events:?}",
         );
         drop(tx);
@@ -3134,7 +3307,7 @@ mod tests {
         let events = sink.events();
         assert!(events.iter().any(|e| matches!(
             e,
-            AgentEvent::ToolCallEnd { id, is_error: true, content, .. }
+            AgentEvent::ToolCallEnd(ToolResult { id, is_error: true, content, .. })
                 if id == "tool_1" && content.contains("Tool input JSON failed to parse"),
         )));
     }
@@ -3365,8 +3538,8 @@ mod tests {
             .filter_map(|e| match e {
                 AgentEvent::StreamToken(text) => Some(format!("token {text}")),
                 AgentEvent::ProgressUpdate(text) => Some(format!("progress {text}")),
-                AgentEvent::ToolCallStart { id, .. } => Some(format!("start {id}")),
-                AgentEvent::ToolCallEnd { id, .. } => Some(format!("end {id}")),
+                AgentEvent::ToolCallStart(ToolCall { id, .. }) => Some(format!("start {id}")),
+                AgentEvent::ToolCallEnd(ToolResult { id, .. }) => Some(format!("end {id}")),
                 _ => None,
             })
             .collect();
@@ -3548,7 +3721,7 @@ mod tests {
             !sink
                 .events()
                 .iter()
-                .any(|e| matches!(e, AgentEvent::ToolCallStart { .. })),
+                .any(|e| matches!(e, AgentEvent::ToolCallStart(_))),
         );
     }
 
@@ -3819,7 +3992,7 @@ mod tests {
         assert!(
             !events
                 .iter()
-                .any(|e| matches!(e, AgentEvent::ToolCallStart { .. })),
+                .any(|e| matches!(e, AgentEvent::ToolCallStart(_))),
             "refused tool calls never run",
         );
         let notices: Vec<&str> = events
