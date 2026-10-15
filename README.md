@@ -48,6 +48,8 @@ Out of scope for now:
 - Compatibility with Claude Code settings files, hook formats, or permission rule syntax. oxide-code reads `CLAUDE.md` instructions and Claude Code OAuth credentials, and its own configuration may diverge where its design calls for it.
 - Feature parity with Claude Code. Focus on the core workflow first.
 
+Releases follow the [versioning policy](RELEASING.md#versioning), and stable releases keep the [stability surface](RELEASING.md#stability-surface) compatible within a minor version.
+
 ## Installation
 
 Four install paths are supported: prebuilt tarball, Homebrew tap, `cargo install`, and Nix flake. See [Installation](docs/guide/install.md) for the full matrix. The most common one-liners:
