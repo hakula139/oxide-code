@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{AutoCompactionConfig, Effort};
 use crate::model::{ModelSpec, ResolvedModelId};
+use crate::permission::SessionGrant;
+use crate::permission::rule::Rule;
 use crate::tool::{ApprovalPreview, ToolResultView};
 
 // ── Ops ──
@@ -53,10 +55,15 @@ pub(crate) enum Op {
 }
 
 /// The user's verdict on a pending approval, carried back on [`Op::Resolve`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub(crate) enum Decision {
     Approve,
+    /// Approve, and allow every later call `rule` matches for the rest of the session. The engine
+    /// admits `rule` against its own grant for the call and denies the call when it fails.
+    AllowForSession {
+        rule: Box<Rule>,
+    },
     Deny,
 }
 
@@ -150,11 +157,15 @@ pub(crate) enum Event {
     Error(String),
     /// A gated tool call needs the user's approval before it runs. Carries the tool-use id so a
     /// stale decision for a dropped call is ignored, plus a small preview for the modal to render.
+    /// `grant` is the session allow rule the user may add instead, when one can name the call.
     /// The agent loop blocks on the matching [`Op::Resolve`].
     ApprovalRequested {
         id: String,
         preview: ApprovalPreview,
+        grant: Option<Box<SessionGrant>>,
     },
+    /// The user granted a session allow rule. Carries every session allow rule now in force.
+    SessionRulesUpdated(Vec<Rule>),
 }
 
 // ── Tool Calls ──
@@ -288,6 +299,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::permission::{GateTarget, PermissionClass, Policy};
     use crate::tool::{
         ApprovalBody, DiffChunk, DiffLine, GrepFileGroup, GrepMatchLine, ReadExcerptLine,
     };
@@ -409,6 +421,12 @@ mod tests {
                 id: "t1".to_owned(),
                 decision: Decision::Approve,
             },
+            Op::Resolve {
+                id: "t1".to_owned(),
+                decision: Decision::AllowForSession {
+                    rule: Box::new(Rule::parse("bash(cargo test:*)").unwrap()),
+                },
+            },
             Op::SetModel {
                 model: Some(ResolvedModelId::new("claude-opus-5-5".to_owned())),
                 effort: Some(Effort::High),
@@ -451,6 +469,7 @@ mod tests {
             Event::ConfigChanged { .. } => "config_changed",
             Event::Error(_) => "error",
             Event::ApprovalRequested { .. } => "approval_requested",
+            Event::SessionRulesUpdated(_) => "session_rules_updated",
         }
     }
 
@@ -515,6 +534,7 @@ mod tests {
                     title: "Edit".to_owned(),
                     body: ApprovalBody::Diff(diff_chunks()),
                 },
+                grant: None,
             },
             Event::ApprovalRequested {
                 id: "t3".to_owned(),
@@ -522,7 +542,16 @@ mod tests {
                     title: "Bash".to_owned(),
                     body: ApprovalBody::Command("cargo test".to_owned()),
                 },
+                grant: Some(Box::new(
+                    Policy::default()
+                        .session_grant(
+                            PermissionClass::Bash,
+                            &GateTarget::Command("cargo test".to_owned()),
+                        )
+                        .unwrap(),
+                )),
             },
+            Event::SessionRulesUpdated(vec![Rule::parse("bash(cargo test:*)").unwrap()]),
         ]
     }
 
@@ -550,6 +579,13 @@ mod tests {
             })
             .unwrap(),
             json!({"type": "resolve", "data": {"id": "t1", "decision": {"type": "deny"}}}),
+        );
+        assert_eq!(
+            serde_json::to_value(Decision::AllowForSession {
+                rule: Box::new(Rule::parse("bash(cargo test:*)").unwrap()),
+            })
+            .unwrap(),
+            json!({"type": "allow_for_session", "data": {"rule": "bash(cargo test:*)"}}),
         );
         assert_eq!(
             serde_json::to_value(Op::Interrupt).unwrap(),

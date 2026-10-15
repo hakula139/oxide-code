@@ -53,12 +53,22 @@ fn build_modal(info: &LiveSessionInfo) -> KvOverview {
             display_bool(info.config.show_welcome).to_owned(),
         ),
     ];
-    KvOverview::new("Status", vec![KvSection::new(rows)])
+    let mut sections = vec![KvSection::new(rows)];
+    if !info.session_allow.is_empty() {
+        let rules = info
+            .session_allow
+            .iter()
+            .map(|rule| ("Allow".to_owned(), rule.to_string()))
+            .collect();
+        sections.push(KvSection::new(rules).with_heading("Session Rules"));
+    }
+    KvOverview::new("Status", sections)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::permission::rule::Rule;
     use crate::slash::test_session_info;
     use crate::tui::modal::Modal;
     use crate::tui::theme::Theme;
@@ -111,6 +121,27 @@ mod tests {
         let m = build_modal(&info);
         // Title + blank + 10 rows + blank + footer = 14.
         assert_eq!(m.height(80, u16::MAX), 14);
+    }
+
+    #[test]
+    fn build_modal_lists_session_rules_under_their_own_heading() {
+        let mut info = test_session_info();
+        let without = render_modal(&build_modal(&info), 80);
+        assert!(!without.contains("Session Rules"), "{without}");
+
+        info.session_allow = ["bash(cargo test:*)", "edit(out/**)"]
+            .map(|text| Rule::parse(text).unwrap())
+            .to_vec();
+        let rendered = render_modal(&build_modal(&info), 80);
+        let rules: Vec<&str> = rendered
+            .lines()
+            .skip_while(|line| !line.contains("Session Rules"))
+            .filter(|line| line.contains("Allow"))
+            .map(str::trim)
+            .collect();
+        assert_eq!(rules.len(), 2, "{rendered}");
+        assert!(rules[0].ends_with("bash(cargo test:*)"), "{rendered}");
+        assert!(rules[1].ends_with("edit(out/**)"), "{rendered}");
     }
 
     #[test]

@@ -32,8 +32,10 @@ pub(super) const SESSION_CONTEXT: &str = "<system-reminder>session context</syst
 pub(crate) async fn engine(base_url: String, store: &SessionStore, cwd: &Path) -> Engine {
     let mut prompt = prompt::build_prompt(&ModelSpec::resolve(MODEL.to_owned()), cwd).await;
     SESSION_CONTEXT.clone_into(&mut prompt.user_context);
+    let client = test_client(base_url, api_key(), MODEL);
     Engine {
-        client: test_client(base_url, api_key(), MODEL),
+        policy: client.permission().clone(),
+        client,
         tools: Arc::new(ToolRegistry::new(Vec::new())),
         store: store.clone(),
         session: handle::start(store, MODEL),

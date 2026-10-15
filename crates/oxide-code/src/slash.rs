@@ -122,6 +122,7 @@ pub(crate) fn test_session_info() -> LiveSessionInfo {
         git_branch: Some("main".to_owned()),
         version: "0.0.0-test",
         session_id: "test-session".to_owned(),
+        session_allow: Vec::new(),
         config: ConfigSnapshot {
             auth: crate::config::auth::AuthSource::ApiKeyEnv,
             base_url: "https://api.test.invalid".to_owned(),

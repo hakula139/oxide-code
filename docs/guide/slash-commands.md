@@ -6,23 +6,23 @@ For commands with curated arguments (`/model`, `/effort`, `/theme`), the popup s
 
 ## Built-in Commands
 
-| Command                                     | Description                                                                               |
-| ------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| `/archive [<id-prefix>]`                    | Archive this session and start a fresh one, or archive a saved session by id prefix.      |
-| `/clear` (aliases `/new`, `/reset`)         | Start a fresh session. The previous one stays resumable via `ox -c`.                      |
-| `/compact [<instructions>]`                 | Compress the conversation into a summary. Trailing text steers the focus.                 |
-| `/config`                                   | Open the resolved configuration, where each value came from, and the loaded config files. |
-| `/delete <id-prefix>`                       | Delete a saved session by id prefix, with a Y/N confirm modal before the unlink.          |
-| `/diff`                                     | Show uncommitted git changes plus untracked files in chat, capped at 64 KB.               |
-| `/effort [<level>]`                         | Open the slider, or set the tier directly (`low`, `medium`, `high`, `xhigh`, `max`).      |
-| `/help`                                     | Open a read-only modal listing available commands.                                        |
-| `/init`                                     | Generate or update the project's `AGENTS.md` / `CLAUDE.md`.                               |
-| `/model [<id>]`                             | Open the model + effort picker, or swap directly (alias / substring / exact id).          |
-| `/rename [<title>]`                         | Open a single-line modal pre-filled with the current title, or set it directly.           |
-| `/resume [<id-prefix>]` (alias `/continue`) | Open the session picker (search, scope and archived toggles), or jump by id prefix.       |
-| `/status`                                   | Open a read-only modal of model, effort, cwd, version, auth, and session id.              |
-| `/theme [<name>]`                           | Open the theme picker (live preview), or swap directly to a built-in theme.               |
-| `/unarchive <id-prefix>`                    | List an archived session again.                                                           |
+| Command                                     | Description                                                                                 |
+| ------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| `/archive [<id-prefix>]`                    | Archive this session and start a fresh one, or archive a saved session by id prefix.        |
+| `/clear` (aliases `/new`, `/reset`)         | Start a fresh session. The previous one stays resumable via `ox -c`.                        |
+| `/compact [<instructions>]`                 | Compress the conversation into a summary. Trailing text steers the focus.                   |
+| `/config`                                   | Open the resolved configuration, where each value came from, and the loaded config files.   |
+| `/delete <id-prefix>`                       | Delete a saved session by id prefix, with a Y/N confirm modal before the unlink.            |
+| `/diff`                                     | Show uncommitted git changes plus untracked files in chat, capped at 64 KB.                 |
+| `/effort [<level>]`                         | Open the slider, or set the tier directly (`low`, `medium`, `high`, `xhigh`, `max`).        |
+| `/help`                                     | Open a read-only modal listing available commands.                                          |
+| `/init`                                     | Generate or update the project's `AGENTS.md` / `CLAUDE.md`.                                 |
+| `/model [<id>]`                             | Open the model + effort picker, or swap directly (alias / substring / exact id).            |
+| `/rename [<title>]`                         | Open a single-line modal pre-filled with the current title, or set it directly.             |
+| `/resume [<id-prefix>]` (alias `/continue`) | Open the session picker (search, scope and archived toggles), or jump by id prefix.         |
+| `/status`                                   | Open a read-only modal of model, effort, cwd, version, auth, session id, and session rules. |
+| `/theme [<name>]`                           | Open the theme picker (live preview), or swap directly to a built-in theme.                 |
+| `/unarchive <id-prefix>`                    | List an archived session again.                                                             |
 
 ## Sending a Literal `/foo`
 

@@ -1,6 +1,6 @@
 # Tool Permissions and Approval
 
-Every tool call passes through a tiered permission gate. Static rules settle the clear cases, and the user is asked only when no rule does. Planned extensions, including a classifier, session approvals, and an OS sandbox, are tracked in [#130](https://github.com/hakula139/oxide-code/issues/130).
+Every tool call passes through a tiered permission gate. Static rules settle the clear cases, and the user is asked only when no rule does. Planned extensions, including a classifier and an OS sandbox, are tracked in [#130](https://github.com/hakula139/oxide-code/issues/130).
 
 Companion docs: [research/tools/permissions.md](../../research/tools/permissions.md), [slash/modals.md](../slash/modals.md), [session/file-tracking.md](../session/file-tracking.md).
 
@@ -23,7 +23,7 @@ The gate evaluates each call in a fixed order and stops at the first match.
 5. **`plan` mode** → deny.
 6. **Edit-class call on a protected path** → ask, regardless of what the allow rules say.
 7. **Edit-class call inside the workspace** → allow.
-8. **Allow match** → allow.
+8. **Allow or session allow match** → allow.
 9. **Otherwise** → ask in interactive mode or deny in headless mode.
 
 Every deny comes before every allow, so an allow rule cannot override an explicit deny. The shipped defaults form a separate deny set that holds in `auto` and `plan`.
@@ -65,11 +65,18 @@ The `bash` command string is unparsed (`bash -c "..."`), so prefix and wildcard 
 
 When the gate resolves to ask, the decision travels through the existing `ops` channel polled by the turn loop. Tool dispatch is sequential, so at most one approval can be outstanding and no id fan-out is needed.
 
-`run_tool_round` passes the tool-use `id` and `sink` to `dispatch_tool_call`. The latter emits `Event::ApprovalRequested { id, preview }`, carrying the id and a small `Clone` preview: an edit diff from `edit::synthesize_chunk`, a diff against the file's current content for `write`, or the command string under the tool name for `bash`. The gate intercepts the call before `tools.run`, the same way the parse-error short-circuit returns a synthetic `ToolOutput`. It waits for a decision in a sibling of `await_unless_aborted`, whose select loop maps `Op::Interrupt` to `Cancelled` and `Op::Shutdown` to `Shutdown`, buffers an `Op::Queue` in `pending`, and matches `Op::Resolve { id, decision }`. Decisions with an id that does not match the outstanding call are ignored, and dropping the wait future is cancel-safe.
+`run_tool_round` passes the tool-use `id` and `sink` to `dispatch_tool_call`. The latter emits `Event::ApprovalRequested { id, preview, grant }`, carrying the id, the session grant described below, and a small `Clone` preview: an edit diff from `edit::synthesize_chunk`, a diff against the file's current content for `write`, or the command string under the tool name for `bash`. The gate intercepts the call before `tools.run`, the same way the parse-error short-circuit returns a synthetic `ToolOutput`. It waits for a decision in a sibling of `await_unless_aborted`, whose select loop maps `Op::Interrupt` to `Cancelled` and `Op::Shutdown` to `Shutdown`, buffers an `Op::Queue` in `pending`, and matches `Op::Resolve { id, decision }`. Decisions with an id that does not match the outstanding call are ignored, and dropping the wait future is cancel-safe.
 
 On the TUI side, an `ApprovalModal` joins the `ModalStack` and follows the `ConfirmDeleteSessionModal` template. The blocked agent must receive a decision on every dismissal path, but `ModalStack::handle_key` intercepts Esc and Ctrl+C before delegation, while `clear` drops modals outright. Both paths yield `ModalAction::Cancelled`. The stack therefore has a cancel hook (`Modal::on_cancel` returning an optional `ModalAction`) that resolves a pending approval to `Decision::Deny` on universal cancel or session-swap `clear`. A denied call returns a synthetic error `ToolOutput`, so the model receives the refusal as a tool result and can choose another approach.
 
 `Y` approves, and `N` or Esc denies. Enter does nothing. The modal answers key presses only, so a key release or repeat cannot approve. Apart from the stack-level Esc / Ctrl+C cancel, it ignores every key until 300 ms pass without one, and each key inside that window restarts it, so neither a keystroke typed for the prompt underneath nor a pasted burst can approve the call. `Y` also waits until a render has shown the first body row, so a modal clipped to a short terminal cannot approve a call the user never saw.
+
+`A` allows the call and every later call a session rule covers:
+
+- **Grant:** when the gate asks, `Policy::session_grant` derives the narrowest rule that names the call with `Rule::for_call`. That is the command as written for `bash`, or the escaped path for an edit, relative inside the launch directory and canonical outside it. The grant rides on `Event::ApprovalRequested` and is offered only if adding its rule would let the call through, so a protected path or a compound command offers none. A command containing `*`, which would parse as a wildcard, and a call with a character the editor cannot show as itself offer none either, so the user always sees the exact rule they grant.
+- **Editor:** `A` opens a one-line editor prefilled with the rule, where the user can widen or narrow it, such as `bash(cargo test:*)`. Enter checks the edit with `SessionGrant::accept`, which keeps the class and requires the rule to still cover the call, and shows the reason inline when it does not. Esc returns to the choice through `Modal::captures_esc`, while Ctrl+C still denies.
+- **Engine check:** the accepted rule answers `Decision::AllowForSession`. A frontend's check is advisory, so the gate keeps its own grant for the pending call, admits the answered rule against it with `SessionGrant::admit`, and denies the call with an error when the rule fails.
+- **Precedence and lifetime:** an admitted rule joins the engine's policy, where step 8 weighs it like a configured allow rule, so deny rules and protected paths still take precedence. The list lives only in the engine's memory and empties on `/clear`, `/archive`, and a successful `/resume`. `Event::SessionRulesUpdated` carries it to the frontend, and `/status` lists it under Session Rules.
 
 The preview must show everything it approves. Every row wraps. If the body exceeds 16 rows, it scrolls with Up / Down, PageUp / PageDown, and Home / End, with a `rows a-b of n` position line. Control and zero-width characters render as `\u{..}` escapes. In a command, each whitespace character beyond the indentation renders as `·` unless it is a single space, so padding that pushes a chained command off-screen appears as a dotted run.
 
@@ -118,19 +125,21 @@ In `-p` / `--no-tui` runs there is no human to prompt, so a would-ask call denie
 
 ## Sources
 
-- `crates/oxide-code/src/agent.rs`: `check_permission` (resolve, pin, decide), `dispatch_tool_call`, `await_unless_aborted`, `run_tool_round`.
+- `crates/oxide-code/src/agent.rs`: `check_permission` (resolve, pin, decide), `allow_for_session` (admit against the call's grant), `dispatch_tool_call`, `await_unless_aborted`, `run_tool_round`.
 - `crates/oxide-code/src/config.rs`: `Config::load`, `OX_PERMISSION_MODE`, `Effort` enum template.
 - `crates/oxide-code/src/config/load.rs`: `reject_project_secrets`, `reject_project_permissions`.
 - `crates/oxide-code/src/config/merge.rs`: `APPENDED` rule lists, `merge`.
-- `crates/oxide-code/src/permission.rs`: `Mode`, `PermissionClass`, `GateTarget::for_path`, protected paths, `Policy::decide`, `ReadDeny`.
-- `crates/oxide-code/src/permission/rule.rs`: `class(specifier)` parsing and path-glob matching.
-- `crates/oxide-code/src/protocol.rs`: `Event::ApprovalRequested`, `Op::Resolve`, `Decision`.
+- `crates/oxide-code/src/engine.rs`: the live policy, whose session allow rules reset when the session changes.
+- `crates/oxide-code/src/permission.rs`: `Mode`, `PermissionClass`, `GateTarget::for_path`, protected paths, `Policy::decide`, `Policy::session_grant`, `SessionGrant`, `ReadDeny`.
+- `crates/oxide-code/src/permission/rule.rs`: `class(specifier)` parsing, path-glob matching, and `Rule::for_call`.
+- `crates/oxide-code/src/protocol.rs`: `Event::ApprovalRequested`, `Event::SessionRulesUpdated`, `Op::Resolve`, `Decision`.
 - `crates/oxide-code/src/slash/confirm.rs`: `ConfirmDeleteSessionModal`, the approval-modal template.
+- `crates/oxide-code/src/slash/status.rs`: the Session Rules listing.
 - `crates/oxide-code/src/tool.rs`: `Tool` trait (`permission_class`, `path_field`, `gate_target`, `pin_target`, `approval_preview`), `ApprovalPreview`, `read_validated`, `write_no_follow`, `open_no_follow`, `push_withheld_note`.
 - `crates/oxide-code/src/tool/bash.rs`: unbounded execution surface.
 - `crates/oxide-code/src/tool/edit.rs`: read-before-edit gate, `synthesize_chunk` preview.
 - `crates/oxide-code/src/tool/glob.rs`: read-deny filter on each match.
 - `crates/oxide-code/src/tool/grep.rs`: read-deny filter in `collect_files`.
 - `crates/oxide-code/src/tool/write.rs`: new-file creation, symlink refusal, current-content preview.
-- `crates/oxide-code/src/tui/modal.rs`: `ModalStack`, the cancel hook.
-- `crates/oxide-code/src/tui/modal/approval.rs`: `ApprovalModal` wrapping, scrolling, and character reveal.
+- `crates/oxide-code/src/tui/modal.rs`: `ModalStack`, the cancel hook, `captures_esc`.
+- `crates/oxide-code/src/tui/modal/approval.rs`: `ApprovalModal` wrapping, scrolling, character reveal, and the session-rule editor.

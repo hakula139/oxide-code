@@ -5,7 +5,7 @@
 //! The gate is the whole safety boundary: oxide-code has no sandbox, so the decision pipeline is
 //! the only thing standing between the model and an unchecked tool call.
 
-mod rule;
+pub(crate) mod rule;
 
 use std::ffi::{OsStr, OsString};
 use std::fmt;
@@ -13,7 +13,7 @@ use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, LazyLock};
 
-use anyhow::{Result, bail};
+use anyhow::{Result, bail, ensure};
 use caseless::Caseless;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -81,7 +81,8 @@ impl FromStr for Mode {
 /// The rule namespace a tool's calls fall under, which also sets the pipeline's default treatment.
 /// Rules address classes, so one `read(...)` deny covers every tool that reads a file. Each tool
 /// declares its class through [`crate::tool::Tool::permission_class`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub(crate) enum PermissionClass {
     /// Never mutates (`read`, `grep`, `glob`), so it allows unless a deny rule matches.
     Read,
@@ -93,6 +94,20 @@ pub(crate) enum PermissionClass {
 
 impl PermissionClass {
     const VALID_VALUES: &str = "read, edit, bash";
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Edit => "edit",
+            Self::Bash => "bash",
+        }
+    }
+}
+
+impl fmt::Display for PermissionClass {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 impl FromStr for PermissionClass {
@@ -185,7 +200,8 @@ const MAX_SYMLINK_HOPS: usize = 40;
 // ── Target ──
 
 /// Where a path target sits, which settles the edit-class steps of the pipeline.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum Zone {
     /// Inside a project working directory, so an edit allows without a rule.
     Workspace,
@@ -215,7 +231,8 @@ pub(crate) enum Target<'a> {
 /// Owned form of [`Target`] produced by [`crate::tool::Tool::gate_target`]. A tool extracts the
 /// command or resolved path from its input once, and the borrowing [`Self::as_target`] then feeds
 /// the allocation-free matcher. Owned because a resolved path is not a substring of the input.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub(crate) enum GateTarget {
     /// No extractable specifier, so only a class-wide rule matches.
     #[default]
@@ -586,6 +603,8 @@ pub(crate) enum Decision {
 pub(crate) struct Policy {
     mode: Mode,
     allow: Vec<Rule>,
+    /// Rules the user granted from an approval for the rest of the session. In memory only.
+    session_allow: Vec<Rule>,
     /// User and project deny rules, which hold in every mode.
     deny: Vec<Rule>,
     /// The parsed [`DANGEROUS_DEFAULTS`], which `yolo` skips.
@@ -599,6 +618,7 @@ impl Policy {
         Self {
             mode,
             allow,
+            session_allow: Vec::new(),
             deny,
             defaults: Vec::new(),
         }
@@ -616,6 +636,7 @@ impl Policy {
         Ok(Self {
             mode,
             allow: parse_rules(allow)?,
+            session_allow: Vec::new(),
             deny: with_resolved_prefixes(parse_rules(deny)?, cwd)?,
             defaults: with_resolved_prefixes(parse_rules(DANGEROUS_DEFAULTS)?, cwd)?,
         })
@@ -623,6 +644,39 @@ impl Policy {
 
     pub(crate) const fn mode(&self) -> Mode {
         self.mode
+    }
+
+    pub(crate) fn session_allow(&self) -> &[Rule] {
+        &self.session_allow
+    }
+
+    /// Adds a session allow rule, which [`Self::decide`] weighs like a configured allow rule.
+    pub(crate) fn allow_for_session(&mut self, rule: Rule) {
+        if !self.session_allow.contains(&rule) {
+            self.session_allow.push(rule);
+        }
+    }
+
+    pub(crate) fn clear_session_allow(&mut self) {
+        self.session_allow.clear();
+    }
+
+    /// The "allow for this session" offer for a call that asks: the narrowest rule naming it, when
+    /// a session allow rule could let the call through at all. `None` on a protected path, which
+    /// asks before any allow rule is consulted.
+    pub(crate) fn session_grant(
+        &self,
+        class: PermissionClass,
+        target: &GateTarget,
+    ) -> Option<SessionGrant> {
+        let suggested = Rule::for_call(class, &target.as_target())?;
+        let mut trial = self.clone();
+        trial.session_allow.push(suggested.clone());
+        (trial.decide(class, &target.as_target()) == Decision::Allow).then(|| SessionGrant {
+            class,
+            target: target.clone(),
+            suggested,
+        })
     }
 
     /// The user and project `read` deny rules, for a tool that reaches files below the root the gate
@@ -648,7 +702,7 @@ impl Policy {
     /// 5. `plan` denies.
     /// 6. An edit-class call on a protected path asks.
     /// 7. An edit-class call inside a project working directory allows.
-    /// 8. An allow rule allows.
+    /// 8. An allow rule or a session allow rule allows.
     /// 9. Otherwise ask.
     pub(crate) fn decide(&self, class: PermissionClass, target: &Target<'_>) -> Decision {
         let any_match = |rules: &[Rule], discipline: MatchDiscipline| {
@@ -685,11 +739,47 @@ impl Policy {
             }
         }
 
-        if any_match(&self.allow, MatchDiscipline::Allow) {
+        if any_match(&self.allow, MatchDiscipline::Allow)
+            || any_match(&self.session_allow, MatchDiscipline::Allow)
+        {
             return Decision::Allow;
         }
 
         Decision::Ask
+    }
+}
+
+/// An approval's "allow for this session" offer: the suggested rule, plus the call that any edit
+/// of it must keep covering.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct SessionGrant {
+    class: PermissionClass,
+    target: GateTarget,
+    suggested: Rule,
+}
+
+impl SessionGrant {
+    pub(crate) fn suggested(&self) -> &Rule {
+        &self.suggested
+    }
+
+    /// Parses the user's edit of the suggested rule and [admits](Self::admit) it.
+    pub(crate) fn accept(&self, text: &str) -> Result<Rule> {
+        self.admit(Rule::parse(text)?)
+    }
+
+    /// Checks that `rule` stays in the call's class and still allows the call.
+    pub(crate) fn admit(&self, rule: Rule) -> Result<Rule> {
+        ensure!(
+            rule.class() == self.class,
+            "the rule must stay a `{}` rule",
+            self.class
+        );
+        ensure!(
+            rule.matches(self.class, &self.target.as_target(), MatchDiscipline::Allow),
+            "the rule no longer covers this call"
+        );
+        Ok(rule)
     }
 }
 
@@ -775,6 +865,7 @@ fn with_resolved_prefixes(mut rules: Vec<Rule>, cwd: &Path) -> Result<Vec<Rule>>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::path::slash_separated;
     use crate::util::path::testing::{HOME_VAR, abs};
 
     fn policy(mode: Mode, allow: &[&str], deny: &[&str]) -> Policy {
@@ -1427,6 +1518,89 @@ mod tests {
         }
     }
 
+    // ── Policy::allow_for_session ──
+
+    #[test]
+    fn allow_for_session_allows_what_asked_until_cleared() {
+        let mut p = policy(Mode::Auto, &[], &[]);
+        let hosts = abs("/etc/hosts");
+        let edit_hosts = format!("edit({})", slash_separated(Path::new(&hosts)));
+        assert_eq!(
+            p.decide(PermissionClass::Bash, &command("cargo test --all")),
+            Decision::Ask
+        );
+
+        for raw in ["bash(cargo test:*)", "bash(cargo test:*)", &edit_hosts] {
+            p.allow_for_session(Rule::parse(raw).unwrap());
+        }
+        let held: Vec<String> = p.session_allow().iter().map(ToString::to_string).collect();
+        assert_eq!(held, ["bash(cargo test:*)", edit_hosts.as_str()]);
+        assert_eq!(
+            p.decide(PermissionClass::Bash, &command("cargo test --all")),
+            Decision::Allow
+        );
+        assert_eq!(
+            p.decide(PermissionClass::Edit, &outside(&hosts)),
+            Decision::Allow
+        );
+
+        p.clear_session_allow();
+        assert_eq!(p.session_allow(), []);
+        assert_eq!(
+            p.decide(PermissionClass::Bash, &command("cargo test --all")),
+            Decision::Ask
+        );
+    }
+
+    #[test]
+    fn allow_for_session_yields_to_deny_rules_and_protected_paths() {
+        let mut p = policy(Mode::Auto, &[], &["bash(cargo test --release)"]);
+        p.allow_for_session(Rule::parse("bash(cargo test:*)").unwrap());
+        p.allow_for_session(Rule::parse("edit(**)").unwrap());
+
+        assert_eq!(
+            p.decide(PermissionClass::Bash, &command("cargo test --release")),
+            Decision::Deny
+        );
+        let git_config = abs("/repo/.git/config");
+        assert_eq!(
+            p.decide(
+                PermissionClass::Edit,
+                &path(&git_config, Some(".git/config"), Zone::Protected)
+            ),
+            Decision::Ask
+        );
+    }
+
+    // ── Policy::session_grant ──
+
+    #[test]
+    fn session_grant_suggests_a_rule_that_allows_the_call() {
+        let p = policy(Mode::Auto, &[], &[]);
+        let target = GateTarget::Command("cargo test".to_owned());
+
+        let grant = p.session_grant(PermissionClass::Bash, &target).unwrap();
+        assert_eq!(grant.suggested().to_string(), "bash(cargo test)");
+        let mut granted = p.clone();
+        granted.allow_for_session(grant.suggested().clone());
+        assert_eq!(
+            granted.decide(PermissionClass::Bash, &target.as_target()),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn session_grant_declines_a_protected_path_and_an_unnamable_command() {
+        let (_dir, cwd) = temp_cwd();
+        std::fs::create_dir(cwd.join(".git")).unwrap();
+        let p = policy(Mode::Auto, &[], &[]);
+
+        let protected = GateTarget::for_path(".git/config", &cwd);
+        assert!(p.session_grant(PermissionClass::Edit, &protected).is_none());
+        let wildcard = GateTarget::Command("ls *.rs".to_owned());
+        assert!(p.session_grant(PermissionClass::Bash, &wildcard).is_none());
+    }
+
     // ── Policy::read_deny ──
 
     #[test]
@@ -1703,6 +1877,51 @@ mod tests {
         assert_eq!(
             p.decide(PermissionClass::Read, &key.as_target()),
             Decision::Deny
+        );
+    }
+
+    // ── SessionGrant::accept ──
+
+    #[test]
+    fn session_grant_accept_takes_an_edit_that_still_covers_the_call() {
+        let target = GateTarget::Command("cargo test --all".to_owned());
+        let grant = policy(Mode::Auto, &[], &[])
+            .session_grant(PermissionClass::Bash, &target)
+            .unwrap();
+
+        let rule = grant.accept(" bash(cargo test:*) ").unwrap();
+        assert_eq!(rule.to_string(), "bash(cargo test:*)");
+        for (text, error) in [
+            ("bash(cargo build)", "no longer covers this call"),
+            ("edit(**)", "must stay a `bash` rule"),
+            ("bash(cargo test", "unbalanced parenthesis"),
+        ] {
+            let err = grant.accept(text).unwrap_err().to_string();
+            assert!(err.contains(error), "{text}: {err}");
+        }
+    }
+
+    // ── SessionGrant: serde ──
+
+    #[test]
+    fn session_grant_round_trips_through_json_and_still_admits_the_call() {
+        let (_dir, root) = temp_cwd();
+        let cwd = root.join("cwd");
+        std::fs::create_dir(&cwd).unwrap();
+        let target = GateTarget::for_path("../notes.md", &cwd);
+        let grant = policy(Mode::Auto, &[], &[])
+            .session_grant(PermissionClass::Edit, &target)
+            .unwrap();
+
+        let json = serde_json::to_value(&grant).unwrap();
+        assert_eq!(json["class"], "edit");
+        assert_eq!(json["target"]["type"], "path");
+        assert_eq!(json["suggested"], grant.suggested().to_string());
+        let back: SessionGrant = serde_json::from_value(json).unwrap();
+        assert_eq!(back, grant);
+        assert_eq!(
+            back.accept(&grant.suggested().to_string()).unwrap(),
+            *grant.suggested()
         );
     }
 
