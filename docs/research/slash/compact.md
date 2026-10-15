@@ -93,7 +93,7 @@ Dedicated `compaction` agent, anchored re-summarization via `<previous-summary>`
 
 2. **Synthetic `role: user` message carrying the summary.** All three CLIs converge on this. Sidesteps two API constraints (assistant can't lead a turn, system is one-shot at the prefix) and keeps the next turn shape exactly like a fresh first prompt.
 
-3. **Distinct boundary entry.** Claude Code's `compact_boundary` and Codex's `RolloutItem::Compacted` both let resume loaders find the cut point in O(line). Record `pre_message_count` (and later `pre_tokens`) for the post-compact UI line, free at write time.
+3. **Distinct boundary entry.** Claude Code's `compact_boundary` and Codex's `RolloutItem::Compacted` both let resume loaders find the cut point in O(line). oxide-code records `pre_message_count` for the post-compact UI line.
 
 4. **Send the summarizer the conversation's own request prefix.** Codex's local path streams the full cloned history with the compact prompt as the last input item, and Claude Code's fork path sends the parent's system prompt, tools, and messages for cache hits. Tool calls, tool results, and reasoning drop out only of the rebuilt history.
 
@@ -109,16 +109,18 @@ Dedicated `compaction` agent, anchored re-summarization via `<previous-summary>`
 
 1. **9-section structured rubric (Claude Code).** Aimed at resumption across an indefinite gap, across sessions, across humans. oxide-code's compaction is in-process and single-user, where "All user messages: List ALL user messages" and verbatim-quote requirements bloat the summary 3-5×. A short directive (intent, decisions, code paths, next step, user constraints) gets the same outcome at one-third the size. Codex's prompt is the right reference shape.
 
-2. **Anchored `<previous-summary>` re-compaction (opencode).** Clever for very long sessions, but the summarizer must distinguish "still true" from "stale" without the original, and quality slowly degrades through repeated rewrites. Defer until the second-compaction case hits.
+2. **Anchored `<previous-summary>` re-compaction (opencode).** Clever for very long sessions, but the summarizer must distinguish "still true" from "stale" without the original, and quality slowly degrades through repeated rewrites.
 
-3. **Auto-compact mid-turn (Codex `MidTurn`).** Requires hot-path token counting, pausing the in-flight reply, and a careful resume after history rebuild. Manual plus auto-fire at turn boundaries is enough.
+3. **Microcompact / prune as a separate stage.** Useful at scale, but expensive to ship correctly without metrics (which results, when, what placeholder, how it interacts with file-tracker state).
 
-4. **Microcompact / prune as a separate stage.** Useful at scale, but expensive to ship correctly without metrics (which results, when, what placeholder, how it interacts with file-tracker state). Defer until auto-compact telemetry exists.
+4. **Partial / range compaction (Claude Code).** Adds a message-selector UI, a dual-direction summarizer, and a transcript splice.
 
-5. **Partial / range compaction (Claude Code).** Adds a message-selector UI, a dual-direction summarizer, and a transcript splice. Land full-transcript compaction first.
+5. **Synthetic auto-continue (opencode).** Quietly inserts a fake "Continue if you have next steps..." after auto-compact. oxide-code should land the summary and wait for the user. Surprises beat conveniences here.
 
-6. **Hooks (PreCompact / PostCompact).** oxide-code has no hook surface yet, so compaction should not introduce one of its own. The general hook surface is planned under [#157](https://github.com/hakula139/oxide-code/issues/157), with command hooks in [#159](https://github.com/hakula139/oxide-code/issues/159), and the `pre_compact` event is part of [#168](https://github.com/hakula139/oxide-code/issues/168).
+6. **Pre-flight `count_tokens` API call.** Every reference CLI uses last assistant `usage.total_tokens` plus tail estimate and accepts the ~2-5% drift. The extra round-trip isn't worth it.
 
-7. **Synthetic auto-continue (opencode).** Quietly inserts a fake "Continue if you have next steps..." after auto-compact. oxide-code should land the summary and wait for the user. Surprises beat conveniences here.
+## Related Issues
 
-8. **Pre-flight `count_tokens` API call.** Every reference CLI uses last assistant `usage.total_tokens` plus tail estimate and accepts the ~2-5% drift. The extra round-trip isn't worth it.
+- **Auto-compact mid-turn (Codex `MidTurn`).** Requires hot-path token counting, pausing the in-flight reply, and a careful resume after history rebuild. Tracked in [#184](https://github.com/hakula139/oxide-code/issues/184).
+
+- **Hooks (PreCompact / PostCompact).** Compaction should not introduce its own hook surface. The general hook surface is tracked in [#157](https://github.com/hakula139/oxide-code/issues/157), with command hooks in [#159](https://github.com/hakula139/oxide-code/issues/159) and the `pre_compact` event in [#168](https://github.com/hakula139/oxide-code/issues/168).

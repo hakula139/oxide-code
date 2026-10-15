@@ -13,7 +13,7 @@ Standard approach. Set `x-api-key` header directly.
 Claude Code stores OAuth tokens in **platform-specific secure storage** with a plaintext fallback:
 
 - **macOS**: macOS Keychain (service `"Claude Code-credentials"`), falling back to `~/.claude/.credentials.json`.
-- **Linux**: `~/.claude/.credentials.json` (plaintext only, libsecret support planned but not yet implemented).
+- **Linux**: `~/.claude/.credentials.json` (plaintext only).
 
 Both backends store the same JSON structure:
 
