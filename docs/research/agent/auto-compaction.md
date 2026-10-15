@@ -91,9 +91,9 @@ Key files:
 
 6. **Keep manual `/compact` independent.** Auto opt-out should not disable manual compaction.
 
-## Patterns to Defer
+## Additional Patterns
 
-1. **Mid-turn compaction.** Requires pausing a tool loop or assistant continuation, replacing history, and resuming the same logical turn. The first oxide-code version should compact before recording the next user prompt after a completed turn crosses the trigger.
+1. **Mid-turn compaction.** Requires pausing a tool loop or assistant continuation, replacing history, and resuming the same logical turn. Tracked in [#184](https://github.com/hakula139/oxide-code/issues/184).
 
 2. **Microcompact / prune.** Clearing old tool outputs can save tokens, but it is a separate retention policy with its own UI and persistence implications.
 
@@ -103,4 +103,4 @@ Key files:
 
 5. **Automatic continue prompts.** opencode can synthesize a "Continue..." prompt after auto-compaction. oxide-code should wait for the user unless a queued prompt already exists.
 
-6. **Hooks.** PreCompact / PostCompact hooks belong with a broader hook or workflow-skill system.
+6. **Hooks.** PreCompact / PostCompact hooks belong with the broader hook surface ([#157](https://github.com/hakula139/oxide-code/issues/157)), and the `pre_compact` event is tracked in [#168](https://github.com/hakula139/oxide-code/issues/168).

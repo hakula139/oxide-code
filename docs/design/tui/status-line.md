@@ -62,7 +62,7 @@ status_line = [
 ]
 ```
 
-This differs from the reference Claude Code script in two ways: oxide-code stays one row because Ratatui already owns the app chrome, and its cost segment is a local estimate, leaving account usage limits to the planned segments in [#140](https://github.com/hakula139/oxide-code/issues/140).
+Unlike Claude Code's reference script, oxide-code stays one row because Ratatui owns the app chrome, and its cost segment is a local estimate.
 
 The default order tracks reading flow: location and branch orient the user, model and usage describe cost and context pressure, run state sits near the end because it changes most often.
 

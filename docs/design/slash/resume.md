@@ -8,7 +8,14 @@ Companions: [commands.md](commands.md), [modals.md](modals.md). Underlying resea
 
 `slash/resume` hosts both `ResumeCmd` and `ResumePicker`. Bare returns the picker as `SlashOutcome::Modal`, while typed-arg resolves through `resolve_prefix_to_info` (current project first, widening to all projects on miss) and forwards `UserAction::Resume { path }` carrying the matched session file.
 
-The picker wraps [`SearchableList`](modals.md) and adds a footer line. Each row paints a two-line title plus dim metadata block (id prefix · relative time · message count · branch · project) followed by a trailing blank. Tab toggles current-project ↔ all-projects, and Ctrl+A toggles the active ↔ archived view, retitling the header to `Resume archived session`. Both reload rows from `SessionStore::list_paged` while preserving the typed query. Enter on a focused row submits, while Enter with no selection keeps the picker open so the user can Tab the scope or Esc out. Esc / Ctrl+C cancel via the universal stack gate. The footer counts the loaded rows. If more sessions follow the 30-row cap, it says so (`30 most recent sessions · more not loaded`), since queries search only loaded rows. Ctrl+D on the cursor row pushes [`ConfirmDeleteSessionModal`](modals.md). On focus regain the picker reloads and re-seeks the cursor to the previously selected row, so cancel-delete keeps the user in place.
+The picker wraps [`SearchableList`](modals.md) and adds these controls and display rules:
+
+- Each row paints a two-line title plus dim metadata block (id prefix · relative time · message count · branch · project) followed by a trailing blank.
+- Tab toggles current-project ↔ all-projects, and Ctrl+A toggles the active ↔ archived view, retitling the header to `Resume archived session`. Both reload rows from `SessionStore::list_paged` while preserving the typed query.
+- Enter on a focused row submits, while Enter with no selection keeps the picker open so the user can Tab the scope or Esc out.
+- Esc / Ctrl+C cancel via the universal stack gate.
+- The footer counts the loaded rows. If more sessions follow the 30-row cap, it says so (`30 most recent sessions · more not loaded`), since queries search only loaded rows.
+- Ctrl+D on the cursor row pushes [`ConfirmDeleteSessionModal`](modals.md). On focus regain the picker reloads and re-seeks the cursor to the previously selected row, so cancel-delete keeps the user in place.
 
 `ox --resume` starts the TUI in a fresh session with no file yet, then opens the picker on the first frame. `main.rs` builds it with `ResumePicker::at_startup`, and `driver::tui::run` pushes `Startup::picker` onto the modal stack before the event loop starts. The startup picker carries `Dismissal::Quit`, so Esc / Ctrl+C call `on_cancel`, which resolves to `UserAction::Quit`, and the footer reads `Esc to quit`. Pressing Enter resumes through the same `roll_into` path as `/resume`. A session file is created only with the first message, so neither path leaves an empty session on disk.
 
@@ -22,23 +29,23 @@ The picker wraps [`SearchableList`](modals.md) and adds a footer line. Each row 
 
 1. **Bare opens the picker, typed-arg resolves directly.** Same shape as `/model`, `/effort`, `/theme`: bare opens a modal, typed-arg switches directly. Reference CLIs converged on this exploratory-vs-direct split independently (Claude Code's `-r` vs `-c`, Codex's bare `resume` vs `resume <id>`).
 
-2. **Alias `continue`.** Matches the existing `--continue` / `-c` CLI flag, using the same word in both surfaces. Opencode's triple-alias (`/sessions`, `/resume`, `/continue`) is noise, and `sessions` would hint at a multi-action verb (list / rename / delete) that doesn't exist.
+2. **Alias `continue`.** Matches the existing `--continue` / `-c` CLI flag, using the same word in both surfaces.
 
 3. **`classify` is always `Mutating`.** Both bare and typed-arg refuse mid-turn, since the picker eventually submits a `UserAction::Resume`, and allowing it mid-stream would interleave a session swap with an in-flight response, which is exactly what the read-only fast path was designed to rule out.
 
-4. **Mid-session re-init uses `roll_into`.** `Command::exec` would kill the modal stack, queued prompts, live theme preview, and in-flight tool tracker. The in-process swap preserves those surfaces and reuses the `roll` pattern `/clear` already validated.
+4. **Mid-session re-init uses `roll_into`.** The in-process swap preserves the process and terminal state, avoids an alt-screen exit or relaunch flash, and reuses the `roll` pattern from `/clear`. It clears modals, rolls back any theme preview, and discards queued prompts.
 
 5. **`RollIntoOutcome` nests the `LoadedTranscript`.** The engine adopts a loaded transcript as one unit, at startup from `ResumedSession` and on `/resume` from `RollIntoOutcome`, so both carry the same struct. The title, the `unarchived` flag, and the diagnostic fields (`finalize_failure`, `drifted_paths`) sit beside it, since the engine reads each one separately.
 
 6. **Surface old-session finalize failures and tracker drift as distinct errors.** Two failures with two causes: the previous session failing to finalize cleanly (writer), and tracked files drifting since the resumed session (filesystem). Distinct phrasing prevents the user from reading either as a current-writer fault.
 
-7. **Drop queued prompts on resume, then surface the count.** Queued prompts belong to the source thread, so replaying them in a different transcript would amount to silent corruption. `/clear` keeps the queue (same identity, fresh slate), but `/resume` drops it and prints `N queued prompt(s) discarded` so the user knows their typing didn't carry over.
+7. **Drop queued prompts on resume, then surface the count.** Queued prompts belong to the source thread, so replaying them in a different transcript would amount to silent corruption. `/clear` keeps the queue while starting a new session, but `/resume` drops it and prints `N queued prompt(s) discarded` so the user knows their typing didn't carry over.
 
-8. **`SearchableList` as a sibling primitive to `ListPicker`.** `ListPicker` is small and focused, and bolting search + viewport onto it would double its surface area for the simpler pickers. `SearchableList` sits sibling-style with the same trait pattern and the same delegation, and if a third pattern shows up the abstraction can fold. Until then, two narrow primitives beat one wide one.
+8. **`SearchableList` as a sibling primitive to `ListPicker`.** `ListPicker` is small and focused, and bolting search + viewport onto it would double its surface area for the simpler pickers. `SearchableList` sits sibling-style with the same trait pattern and the same delegation.
 
 9. **Two-method `SearchableItem`: `haystack` plus `render`.** A substring filter and a layout callback are the only things the primitive needs from items. Date grouping, numeric mnemonics, and other UX shapes were prototyped and dropped because they bloat the trait for one consumer.
 
-10. **Substring search only.** Codex and opencode both ship plain substring and it works. `nucleo-matcher` is a small dep with a clean upgrade path if users complain.
+10. **Substring search only.** Codex and opencode both ship plain substring and it works.
 
 11. **Project scoping defaults to current cwd, with Tab widening.** Matches the existing `ox -c` resolver semantics: CLI `--all` widens up front, in-picker `Tab` toggles, and the typed query persists across the rebuild.
 

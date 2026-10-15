@@ -20,7 +20,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 ## Design Decisions
 
-1. **Trait registry.** `trait SlashCommand` mirrors `tool::Tool`, with one file per command. Adding `/foo` means editing only the new file, with no central match arm of the kind Codex carries.
+1. **Trait registry.** `trait SlashCommand` mirrors `tool::Tool`, with one file per command. Adding `/foo` means creating its implementation and adding it to `BUILT_INS`.
 
 2. **Parse at submit.** `App::dispatch_user_action` runs `parse_slash` first, then dispatches locally or forwards.
 

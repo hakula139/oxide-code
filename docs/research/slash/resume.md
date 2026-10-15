@@ -83,15 +83,15 @@ Three aliases for one overlay, plus a CLI-only listing subcommand.
 
 2. **Cwd-default plus `--all` widens.** The existing `ox --continue` resolver already does this. All three reference CLIs converge here because users almost always want their own project.
 
-3. **In-process re-init.** Claude Code and Codex both swap state without forking. Keeps modals, theme preview, and queued prompts intact, and avoids the alt-screen flash of process exit-and-relaunch. Reuses the `roll`-style helper already shipped for `/clear`.
+3. **In-process re-init.** Claude Code and Codex both swap state without forking. Avoids the alt-screen flash of process exit-and-relaunch. Reuses the `roll`-style helper already shipped for `/clear`.
 
 4. **Page size around 25-50.** Codex's 25 with near-bottom prefetch and Claude Code's 50 with `visibleCount * 3` both work. Pick the size that gives one screenful plus headroom.
 
 5. **Date grouping (`Today` / `Yesterday` / date).** Opencode's idea. Easier to scan than a flat mtime list once you have more than a screenful, and free with relative-time formatting infra.
 
-6. **Substring search only in v1.** Claude Code's agentic search is novel but expensive. Codex and opencode both ship plain substring and it works. Defer fuzzy until users ask.
+6. **Substring search only in v1.** Claude Code's agentic search is novel but expensive. Codex and opencode both ship plain substring and it works.
 
-7. **Listing budget on `ox --list`.** Currently uncapped. A default cap (with `--limit` opt-out) keeps `--list` snappy and matches every reference CLI's bulk-listing behavior.
+7. **Listing budget on `ox --list`.** oxide-code caps listings at 30 sessions by default, with `--limit 0` opting into an unbounded listing.
 
 8. **Footer key-hint line.** All three pickers use a one-row footer for discoverability. Stick to the `Enter to confirm  ·  Esc to cancel` shape and add `/ to search` etc.
 
@@ -99,16 +99,16 @@ Three aliases for one overlay, plus a CLI-only listing subcommand.
 
 1. **Ctrl-modifier toggle clusters** (Claude Code's `Ctrl+A` / `Ctrl+W` / `Ctrl+B` / `Ctrl+V`). Undiscoverable without footer hints, and the toggle state isn't visible mid-list. A single `Tab` to widen scope (Codex's pattern) or a typed `--all` flag (oxide-code's convention) covers the same ground with less keymap churn.
 
-2. **Agentic AI search.** API call per query, latency, cost, opacity. Defer indefinitely.
+2. **Agentic AI search.** API call per query, latency, cost, opacity.
 
 3. **Worktree-tree expansion (`▼` / `▶`).** Adds a navigation axis. Date-grouped flat list reads cleaner, and users who care about worktree separation can filter by typing the path.
 
 4. **Cross-project copy-to-clipboard gate.** Claude Code refuses to resume from another cwd in-process. oxide-code's store already supports cross-project resume via path or `--all`, so the picker should mirror that and resume directly on pick.
 
-5. **Custom-title rename in-picker** (Claude Code's `Ctrl+R`). Sessions get an AI-generated title shortly after the first prompt, and user-overridable titles are a separate feature. Defer with "session metadata management."
+5. **Custom-title rename in-picker** (Claude Code's `Ctrl+R`). oxide-code's `/rename` changes the live session title.
 
 6. **Triple alias** `/sessions` + `/resume` + `/continue` (opencode). Three names for one command is noise. One canonical (`/resume`) plus one alias (`/continue`) is enough.
 
-7. **Process exit / relaunch.** Even though `std::env::current_exe()` plus `Command::exec` would work on Unix, it kills the modal stack, queued prompts, and theme preview. In-process replacement is the only honest answer.
+7. **Process exit / relaunch.** In-process replacement preserves the process and terminal state, avoids an alt-screen exit or relaunch flash, and reuses the `roll` pattern from `/clear`.
 
-8. **Preview pane.** Claude Code's preview is genuinely useful but doubles the picker's layout complexity (split-pane, focus model, scrollback). Land the picker first, then treat preview as a follow-up.
+8. **Preview pane.** Claude Code's preview is genuinely useful but doubles the picker's layout complexity (split-pane, focus model, scrollback).

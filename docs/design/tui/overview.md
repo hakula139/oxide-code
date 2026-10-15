@@ -41,7 +41,12 @@ tokio::select! {
 
 ## Streaming Markdown
 
-Block-based commit with a stable-prefix cache. A top-level markdown block is complete once another top-level block starts after it, so the cache renders complete blocks once into owned `Line<'static>` values and each frame re-parses only the tail from the last block start. Block starts are found in newline-terminated lines only, because a partial line can still change which block it opens. Blank lines inside a fenced code block or a loose list stay in the tail. Each chunk starts from the renderer state the chunk before it ended with, so block separators and the icon row match a single render. The one difference from the committed render is a reference-style link whose definition is in another block, which renders literally until the turn commits.
+Streaming markdown uses a block-based stable-prefix cache:
+
+- **Commit complete blocks.** A top-level markdown block is complete once another top-level block starts after it. The cache renders complete blocks once into owned `Line<'static>` values, and each frame re-parses only the tail from the last block start.
+- **Detect stable boundaries.** Block starts are found in newline-terminated lines only, because a partial line can still change which block it opens. Blank lines inside a fenced code block or a loose list stay in the tail.
+- **Carry renderer state.** Each chunk starts from the renderer state the chunk before it ended with, so block separators and the icon row match a single render.
+- **Resolve cross-block references on completion.** The one difference from the committed render is a reference-style link whose definition is in another block, which renders literally until the turn commits.
 
 An open code block stays in the tail until the next block starts. Its highlighter resumes after the block's last complete line, so each frame highlights only the new lines, though it still wraps every row of the block.
 
@@ -55,4 +60,4 @@ An open code block stays in the tail until the next block starts. Its highlighte
 6. **Custom pulldown-cmark + syntect renderer.** Uses Codex's `pending_marker` pattern for correct list handling.
 7. **Catppuccin Mocha dark theme by default** with named color slots covering text, surfaces, accents, status, code, diff, headings, body, and chrome. Transparent background.
 8. **Two-tier tool display.** Inline summary with per-tool icons, plus truncated output body.
-9. **Per-block render cache with visible-slice paint.** A resize or theme swap still re-renders every block, and rendering only the blocks near the viewport is tracked in [#190](https://github.com/hakula139/oxide-code/issues/190).
+9. **Per-block render cache with visible-slice paint.** A resize or theme swap still re-renders every block. Viewport-only rendering is tracked in [#190](https://github.com/hakula139/oxide-code/issues/190).

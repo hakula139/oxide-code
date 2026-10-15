@@ -11,7 +11,7 @@ A modal is a self-contained UI that takes keyboard focus, owns its render, emits
 Three things drove the abstraction:
 
 1. **Live preview.** `/theme` swaps palettes as the user arrows through choices and snaps back on Esc. This was the original motivating case for the trait shape.
-2. **Multi-step interaction.** The combined `/model + /effort` picker. Plan approval. MCP server pick-then-configure.
+2. **Multi-step interaction.** The combined `/model + /effort` picker and the confirm-delete modal nested in `/resume`.
 3. **Agent-driven prompts.** When a tool call needs approval, the agent emits `AgentEvent::ApprovalRequested` and blocks until the user's decision comes back. The App pushes an `ApprovalModal`, which routes the decision back as `UserAction::ApprovalDecision`.
 
 ## Trait Shape
@@ -34,7 +34,14 @@ Bracketed pastes reach `Modal::handle_paste`, which defaults to a no-op. Text fi
 
 ## Implementation
 
-`tui/modal` defines the trait, key outcome, and `ModalStack` manager. Generic primitives sit alongside it: `list_picker` (cursor + render for selection lists), `kv_overview` (sectioned read-only kv table), and `searchable_list` (substring filter for the `/resume` picker). `chrome` supplies the shared title header and hint footer, and `line_editor` is the single-line text field behind `/rename` and the picker search query, built on `ratatui-textarea` so readline keys work and Ctrl chords never insert letters. Lists scroll through `tui::viewport`, whose window settles at render time from the height the modal was granted. Concrete modals embed these.
+The modal implementation uses these shared components:
+
+- `tui/modal` defines the trait, key outcome, and `ModalStack` manager.
+- Generic primitives sit alongside `tui/modal`: `list_picker` (cursor + render for selection lists), `kv_overview` (sectioned read-only kv table), and `searchable_list` (substring filter for the `/resume` picker).
+- `chrome` supplies the shared title header and hint footer, and `line_editor` is the single-line text field behind `/rename` and the picker search query, built on `ratatui-textarea` so readline keys work and Ctrl chords never insert letters.
+- Lists scroll through `tui::viewport`, whose window settles at render time from the height the modal was granted.
+
+Concrete modals embed these primitives.
 
 Modals shipping today:
 
@@ -105,7 +112,7 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 
 - **Concurrent modals on different layers** (e.g. toast over modal). The chat error-block path already covers what toasts would.
 
-- **Custom user-defined modal commands.** The trait is open to them, and user-defined commands are tracked as skills in [#163](https://github.com/hakula139/oxide-code/issues/163).
+- **User-defined modal commands.** The trait already supports them, and user-invocable skills are tracked in [#163](https://github.com/hakula139/oxide-code/issues/163).
 
 ## Sources
 
