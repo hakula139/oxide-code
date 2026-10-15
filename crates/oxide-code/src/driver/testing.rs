@@ -8,7 +8,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 use super::Conversation;
 use crate::client::anthropic::testing::{api_key, test_client, text_stream_body};
 use crate::file_tracker::FileTracker;
-use crate::prompt::PromptParts;
+use crate::prompt;
 use crate::session::handle;
 use crate::session::store::SessionStore;
 use crate::tool::ToolRegistry;
@@ -17,9 +17,11 @@ pub(super) const MODEL: &str = "claude-opus-4-7[1m]";
 pub(super) const SESSION_CONTEXT: &str = "<system-reminder>session context</system-reminder>";
 
 /// Non-interactive conversation on a fresh session in `store`. Its prompt carries
-/// [`SESSION_CONTEXT`] so tests can tell it apart from a rebuilt one.
-pub(super) fn conversation(base_url: String, store: &SessionStore) -> Conversation {
-    let mut prompt = PromptParts::default();
+/// [`SESSION_CONTEXT`] in place of the rendered user context, so tests can tell it apart from a
+/// rebuilt one.
+pub(super) async fn conversation(base_url: String, store: &SessionStore) -> Conversation {
+    let cwd = std::env::current_dir().unwrap();
+    let mut prompt = prompt::build_prompt(MODEL, &cwd).await;
     SESSION_CONTEXT.clone_into(&mut prompt.user_context);
     Conversation {
         client: test_client(base_url, api_key(), MODEL),
@@ -27,8 +29,9 @@ pub(super) fn conversation(base_url: String, store: &SessionStore) -> Conversati
         session: handle::start(store, MODEL),
         messages: Vec::new(),
         prompt,
+        prompt_unrecorded: true,
         file_tracker: Arc::new(FileTracker::default()),
-        cwd: std::env::current_dir().unwrap(),
+        cwd,
         interactive: false,
         auto_compaction_failures: 0,
         last_usage: None,
@@ -58,5 +61,20 @@ pub(super) async fn request_bodies(server: &MockServer) -> Vec<serde_json::Value
         .unwrap()
         .iter()
         .map(|request| serde_json::from_slice(&request.body).unwrap())
+        .collect()
+}
+
+/// The system blocks of `request` without the billing attestation, whose body hash varies with
+/// every request.
+pub(super) fn system_prompt(request: &serde_json::Value) -> Vec<&serde_json::Value> {
+    request["system"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|block| {
+            !block["text"]
+                .as_str()
+                .is_some_and(|text| text.starts_with("x-anthropic-billing-header:"))
+        })
         .collect()
 }

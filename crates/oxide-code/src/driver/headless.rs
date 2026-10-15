@@ -62,12 +62,17 @@ mod tests {
         let store = test_store(dir.path());
 
         let failed = CapturingSink::new();
-        let exit = drive(conversation(server.uri(), &store), &failed, "first").await;
+        let exit = drive(conversation(server.uri(), &store).await, &failed, "first").await;
         assert_eq!(exit, Exit::Failure);
         assert!(matches!(failed.events().last(), Some(AgentEvent::Error(_))));
 
         let completed = CapturingSink::new();
-        let exit = drive(conversation(server.uri(), &store), &completed, "second").await;
+        let exit = drive(
+            conversation(server.uri(), &store).await,
+            &completed,
+            "second",
+        )
+        .await;
         assert_eq!(exit, Exit::Success);
         assert!(matches!(
             completed.events().last(),

@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 use crate::file_tracker::FileSnapshot;
 use crate::message::Message;
+use crate::prompt::SessionContext;
 use crate::tool::ToolMetadata;
 
 /// On-disk schema version stamped into every `Header`.
@@ -26,6 +27,14 @@ pub(crate) enum Entry {
         /// branch context.
         #[serde(skip_serializing_if = "Option::is_none")]
         git_branch: Option<String>,
+    },
+    /// Prompt state a resume rebuilds the request prefix from, written ahead of the user message
+    /// that first carries it. The latest one after the last compact boundary applies.
+    Context {
+        #[serde(flatten)]
+        context: Box<SessionContext>,
+        #[serde(with = "time::serde::rfc3339")]
+        timestamp: OffsetDateTime,
     },
     Message {
         uuid: Uuid,

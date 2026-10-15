@@ -1,6 +1,6 @@
 # Instruction Files
 
-Instruction files let you give the assistant persistent, project-specific context. They are Markdown files loaded when a session starts and sent with every request. Edits made mid-session take effect after `/clear`, `/resume`, or a new session.
+Instruction files let you give the assistant persistent, project-specific context. These Markdown files are loaded when a session starts and sent with every request. A session keeps its initial instructions and date, including across `/resume`, so the cached prompt prefix stays reusable. File edits and date rollovers arrive as a reminder with your next prompt, and `/clear` and `/compact` start from the current files.
 
 ## Supported filenames
 

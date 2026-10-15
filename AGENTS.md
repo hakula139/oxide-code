@@ -69,7 +69,7 @@ ox                                          # Start an interactive session
 ├── permission.rs                           # Permission module root: Mode, Policy::decide tiered gate, Target / GateTarget, dangerous-pattern deny defaults
 ├── permission/
 │   └── rule.rs                             # Rule grammar: `tool(specifier)` parse + match (bash exact / prefix / wildcard, gitignore-style path globs)
-├── prompt.rs                               # System prompt builder (section assembly)
+├── prompt.rs                               # System prompt builder (section assembly), session prompt context replay, change reminders
 ├── prompt/
 │   ├── environment.rs                      # Runtime environment detection (platform, git, date, knowledge cutoff)
 │   ├── instructions.rs                     # Instruction file discovery and loading (CLAUDE.md, AGENTS.md)
@@ -79,7 +79,7 @@ ox                                          # Start an interactive session
 │   ├── actor.rs                            # Session actor task body + SessionCmd protocol + receive-and-drain batching loop
 │   ├── chain.rs                            # ChainBuilder: UUID-DAG message-chain reconstruction (fork-aware tip pick + parent walk)
 │   ├── display.rs                          # Shared session-listing formatters (relative time, `id · when · N msgs · branch · project` line)
-│   ├── entry.rs                            # JSONL entry types (Header, Message, Title, Summary, Compact, ToolResultMetadata, FileSnapshot) and metadata structs
+│   ├── entry.rs                            # JSONL entry types (Header, Context, Message, Title, Summary, Compact, ToolResultMetadata, FileSnapshot) and metadata structs
 │   ├── handle.rs                           # SessionHandle (cheap-to-clone async API), SharedState, start / resume / roll lifecycle
 │   ├── handle/
 │   │   └── testing.rs                      # Cfg-test SessionHandle constructors for sibling test modules (dead, acks_then_drops)

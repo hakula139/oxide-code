@@ -14,12 +14,15 @@ use super::handle::{CompactOutcome, Outcome, RecordOutcome, SharedState};
 use super::state::SessionState;
 use crate::file_tracker::FileSnapshot;
 use crate::message::Message;
+use crate::prompt::SessionContext;
 use crate::tool::ToolMetadata;
 
 /// Cross-task protocol for [`super::handle::SessionHandle`]. Acks fire after the batch flush.
 pub(super) enum SessionCmd {
     Record {
         msg: Message,
+        /// Written ahead of `msg`, so prompt state only lands alongside the message carrying it.
+        context: Option<SessionContext>,
         ack: oneshot::Sender<RecordOutcome>,
     },
     /// One or more tool-result sidecars from a single agent turn. Default-metadata items are
@@ -142,9 +145,15 @@ fn absorb(
 ) -> BatchFlow {
     let now = OffsetDateTime::now_utc();
     match cmd {
-        SessionCmd::Record { msg, ack } => {
+        SessionCmd::Record { msg, context, ack } => {
             let (msg_entries, ai_title_seed) =
                 state.queue_message_entries(&msg, now, shared.manual_title_set());
+            if let Some(context) = context {
+                entries.push(Entry::Context {
+                    context: Box::new(context),
+                    timestamp: now,
+                });
+            }
             entries.extend(msg_entries);
             acks.push(PendingAck::Record { ack, ai_title_seed });
             BatchFlow::Continue
@@ -313,6 +322,7 @@ mod tests {
         (
             SessionCmd::Record {
                 msg: Message::user(text),
+                context: None,
                 ack,
             },
             rx,

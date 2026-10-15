@@ -7,7 +7,7 @@ pub(crate) mod tui;
 #[cfg(test)]
 mod testing;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -19,9 +19,9 @@ use crate::agent::{self, AutoCompact, TokenUsage, TurnAbort, TurnOutcome, TurnRe
 use crate::client::anthropic::Client;
 use crate::config::Effort;
 use crate::file_tracker::FileTracker;
-use crate::message::Message;
+use crate::message::{ContentBlock, Message};
 use crate::model::{self, ResolvedModelId};
-use crate::prompt::{self, PromptParts};
+use crate::prompt::{self, PromptParts, SessionContext, UserContext};
 use crate::session::handle::{self, SessionHandle};
 use crate::session::store::SessionStore;
 use crate::session::title_generator;
@@ -105,6 +105,8 @@ pub(crate) struct Conversation {
     session: SessionHandle,
     messages: Vec<Message>,
     prompt: PromptParts,
+    /// `prompt` changed since the session last recorded it, so the next user message records it.
+    prompt_unrecorded: bool,
     file_tracker: Arc<FileTracker>,
     cwd: PathBuf,
     /// A TUI is attached, so the permission gate can ask and titles generate in the background.
@@ -116,22 +118,29 @@ pub(crate) struct Conversation {
 }
 
 impl Conversation {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each part comes from a separate startup step in `main`"
+    )]
     pub(crate) async fn new(
         client: Client,
         tools: Arc<ToolRegistry>,
         session: SessionHandle,
         messages: Vec<Message>,
+        context: Option<SessionContext>,
         file_tracker: Arc<FileTracker>,
         cwd: PathBuf,
         interactive: bool,
     ) -> Self {
-        let prompt = prompt::build_prompt(client.model(), &cwd).await;
+        let prompt_unrecorded = context.is_none();
+        let prompt = session_prompt(context, client.model(), &cwd).await;
         Self {
             client,
             tools,
             session,
             messages,
             prompt,
+            prompt_unrecorded,
             file_tracker,
             cwd,
             interactive,
@@ -157,8 +166,17 @@ impl Conversation {
             return report_abort(sink, abort, "auto-compact-failed");
         }
 
-        let user_msg = Message::user(text);
-        let outcome = self.session.record_message(user_msg.clone()).await;
+        let mut user_msg = Message::user(text);
+        if let Some(reminder) = self.prompt.catch_up(UserContext::load(&self.cwd).await) {
+            user_msg.content.push(ContentBlock::Text { text: reminder });
+            self.prompt_unrecorded = true;
+        }
+        let context =
+            std::mem::take(&mut self.prompt_unrecorded).then(|| self.prompt.session_context());
+        let outcome = self
+            .session
+            .record_message_with_context(user_msg.clone(), context)
+            .await;
         sink.session_write_error(outcome.failure.as_deref());
         self.messages.push(user_msg);
         agent::record_drained_prompts(pending, &mut self.messages, &self.session, sink).await;
@@ -223,6 +241,7 @@ impl Conversation {
         )
         .await?;
         if compacted {
+            self.refresh_prompt().await;
             self.reset_usage();
         }
         Ok(())
@@ -267,8 +286,15 @@ impl Conversation {
         if !compacted {
             return TurnEnd::Failed;
         }
+        self.refresh_prompt().await;
         self.reset_usage();
         TurnEnd::Completed
+    }
+
+    /// Starts the compacted transcript from the current instructions and date.
+    async fn refresh_prompt(&mut self) {
+        self.prompt.refresh(UserContext::load(&self.cwd).await);
+        self.prompt_unrecorded = true;
     }
 
     /// Finalizes the live session and continues in a fresh, empty one.
@@ -281,7 +307,7 @@ impl Conversation {
         )
         .await;
         sink.session_write_error(outcome.finalize_failure.as_deref());
-        self.adopt_session(Vec::new()).await;
+        self.adopt_session(Vec::new(), None).await;
         sink.emit(
             AgentEvent::SessionRolled { id: outcome.new_id },
             "session-rolled",
@@ -310,7 +336,8 @@ impl Conversation {
                 return;
             }
         };
-        self.adopt_session(outcome.messages.clone()).await;
+        self.adopt_session(outcome.messages.clone(), outcome.context)
+            .await;
         sink.emit(
             AgentEvent::SessionResumed {
                 id: self.session.session_id().to_owned(),
@@ -333,11 +360,12 @@ impl Conversation {
         report_drift(sink, &outcome.drifted_paths);
     }
 
-    async fn adopt_session(&mut self, messages: Vec<Message>) {
+    async fn adopt_session(&mut self, messages: Vec<Message>, context: Option<SessionContext>) {
         self.client
             .set_session_id(self.session.session_id().to_owned());
         self.messages = messages;
-        self.prompt = prompt::build_prompt(self.client.model(), &self.cwd).await;
+        self.prompt_unrecorded = context.is_none();
+        self.prompt = session_prompt(context, self.client.model(), &self.cwd).await;
         self.reset_usage();
     }
 
@@ -436,6 +464,14 @@ impl Conversation {
     }
 }
 
+/// Replays the prompt a session recorded, or builds a fresh one for a session without one.
+async fn session_prompt(context: Option<SessionContext>, model: &str, cwd: &Path) -> PromptParts {
+    match context {
+        Some(context) => prompt::restore_prompt(context, model, cwd).await,
+        None => prompt::build_prompt(model, cwd).await,
+    }
+}
+
 fn estimate_usage_cost_usd(client: &Client, usage: TokenUsage) -> Option<f64> {
     model::token_cost_rates_for(client.model()).map(|rates| {
         rates.estimate_usd(
@@ -509,12 +545,13 @@ fn format_drift_warning(drifted: &[PathBuf]) -> String {
 mod tests {
     use wiremock::MockServer;
 
-    use super::testing::{MODEL, SESSION_CONTEXT, conversation, mount_reply, request_bodies};
+    use super::testing::{
+        MODEL, SESSION_CONTEXT, conversation, mount_reply, request_bodies, system_prompt,
+    };
     use super::*;
     use crate::agent::event::CapturingSink;
     use crate::client::anthropic::testing::{api_key, test_config};
     use crate::config::{AutoCompactionConfig, CompactionConfig};
-    use crate::message::ContentBlock;
     use crate::session::store::test_store;
 
     // ── exit_status ──
@@ -531,18 +568,25 @@ mod tests {
     // ── submit_prompt ──
 
     #[tokio::test]
-    async fn submit_prompt_reuses_session_prompt_and_accumulates_cost_across_turns() {
+    async fn submit_prompt_keeps_the_prefix_and_sends_a_date_change_as_a_reminder() {
         let server = MockServer::start().await;
         mount_reply(&server, "reply").await;
         let dir = tempfile::tempdir().unwrap();
-        let mut conversation = conversation(server.uri(), &test_store(dir.path()));
+        let store = test_store(dir.path());
+        let mut conversation = conversation(server.uri(), &store).await;
+        let today = conversation.prompt.seen.date.clone();
         let sink = CapturingSink::new();
         let (_user_tx, mut user_rx) = agent::event::inert_user_action_channel();
 
-        for text in ["first", "second"] {
-            let end = conversation.submit_prompt(text, &sink, &mut user_rx).await;
-            assert_eq!(end, TurnEnd::Completed);
-        }
+        let end = conversation
+            .submit_prompt("first", &sink, &mut user_rx)
+            .await;
+        assert_eq!(end, TurnEnd::Completed);
+        "2000-01-01".clone_into(&mut conversation.prompt.seen.date);
+        let end = conversation
+            .submit_prompt("second", &sink, &mut user_rx)
+            .await;
+        assert_eq!(end, TurnEnd::Completed);
 
         let turns = request_bodies(&server).await;
         assert_eq!(
@@ -550,15 +594,44 @@ mod tests {
             2,
             "non-interactive turns must not request a title"
         );
+        assert_eq!(system_prompt(&turns[1]), system_prompt(&turns[0]));
         let (first, second) = (&turns[0]["messages"], &turns[1]["messages"]);
         assert_eq!(first[0]["content"][0]["text"], SESSION_CONTEXT);
-        assert_eq!(
-            second[0], first[0],
-            "session context must not change between turns"
-        );
+        assert_eq!(second[0], first[0], "the first message must not change");
         assert_eq!(second[1]["content"][0]["text"], "first");
         assert_eq!(second[2]["content"][0]["text"], "reply");
-        assert_eq!(second[3]["content"][0]["text"], "second");
+        let prompt = second[3]["content"].as_array().unwrap();
+        assert_eq!(prompt[0]["text"], "second");
+        let reminder = prompt[1]["text"].as_str().unwrap();
+        assert!(
+            reminder.contains(&format!("Today's date is {today}.")),
+            "{reminder}"
+        );
+        assert!(!reminder.contains("# CLAUDE.md"), "{reminder}");
+
+        let id = conversation.session.session_id().to_owned();
+        let expected = conversation.prompt.session_context();
+        conversation.finalize().await;
+        let data = store.load_session_data(&id).unwrap();
+        assert_eq!(data.context, Some(expected));
+        assert!(
+            matches!(&data.messages[2].content[..], [_, ContentBlock::Text { text }] if text == reminder)
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_prompt_reports_usage_and_accumulates_cost_across_turns() {
+        let server = MockServer::start().await;
+        mount_reply(&server, "reply").await;
+        let dir = tempfile::tempdir().unwrap();
+        let mut conversation = conversation(server.uri(), &test_store(dir.path())).await;
+        let sink = CapturingSink::new();
+        let (_user_tx, mut user_rx) = agent::event::inert_user_action_channel();
+
+        for text in ["first", "second"] {
+            conversation.submit_prompt(text, &sink, &mut user_rx).await;
+        }
+
         let usage = sink
             .events()
             .into_iter()
@@ -582,7 +655,7 @@ mod tests {
         let server = MockServer::start().await;
         mount_reply(&server, "auto summary").await;
         let dir = tempfile::tempdir().unwrap();
-        let mut conversation = conversation(server.uri(), &test_store(dir.path()));
+        let mut conversation = conversation(server.uri(), &test_store(dir.path())).await;
         let mut config = test_config(server.uri(), api_key(), MODEL);
         config.compaction = CompactionConfig::resolved_for_test(AutoCompactionConfig {
             enabled: true,
@@ -659,7 +732,7 @@ mod tests {
         let server = MockServer::start().await;
         mount_reply(&server, "manual summary").await;
         let dir = tempfile::tempdir().unwrap();
-        let mut conversation = conversation(server.uri(), &test_store(dir.path()));
+        let mut conversation = conversation(server.uri(), &test_store(dir.path())).await;
         conversation.messages = transcript();
         conversation.displayed_usage = Some(TokenUsage::new(90_000, 9));
         conversation.total_estimated_cost_usd = 1.23;
@@ -678,6 +751,11 @@ mod tests {
         ));
         assert_eq!(conversation.displayed_usage, None);
         assert!(conversation.total_estimated_cost_usd.abs() < f64::EPSILON);
+        assert_ne!(
+            conversation.prompt.user_context, SESSION_CONTEXT,
+            "the compacted transcript starts from a fresh user context"
+        );
+        assert!(conversation.prompt_unrecorded);
         assert!(matches!(
             sink.events().as_slice(),
             [AgentEvent::SessionCompacted { automatic: false, instructions: Some(focus), .. }]
@@ -690,7 +768,7 @@ mod tests {
         let server = MockServer::start().await;
         mount_reply(&server, "summary").await;
         let dir = tempfile::tempdir().unwrap();
-        let mut conversation = conversation(server.uri(), &test_store(dir.path()));
+        let mut conversation = conversation(server.uri(), &test_store(dir.path())).await;
         let sink = CapturingSink::new();
         let (user_tx, mut user_rx) = mpsc::channel(1);
 
@@ -733,7 +811,7 @@ mod tests {
         let server = MockServer::start().await;
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut conversation = conversation(server.uri(), &store);
+        let mut conversation = conversation(server.uri(), &store).await;
         let sink = CapturingSink::new();
         let target = handle::start(&store, MODEL);
         let target_id = target.session_id().to_owned();
@@ -765,11 +843,39 @@ mod tests {
     // ── resume ──
 
     #[tokio::test]
+    async fn resume_replays_the_recorded_prompt() {
+        let server = MockServer::start().await;
+        mount_reply(&server, "reply").await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut conversation = conversation(server.uri(), &store).await;
+        let recorded_id = conversation.session.session_id().to_owned();
+        let sink = CapturingSink::new();
+        let (_user_tx, mut user_rx) = agent::event::inert_user_action_channel();
+        conversation
+            .submit_prompt("first", &sink, &mut user_rx)
+            .await;
+        conversation.clear(&sink, &store).await;
+
+        conversation.resume(&sink, &store, &recorded_id).await;
+        assert_eq!(conversation.prompt.user_context, SESSION_CONTEXT);
+        assert!(!conversation.prompt_unrecorded);
+        conversation
+            .submit_prompt("second", &sink, &mut user_rx)
+            .await;
+
+        let turns = request_bodies(&server).await;
+        assert_eq!(system_prompt(&turns[1]), system_prompt(&turns[0]));
+        assert_eq!(turns[1]["messages"][0], turns[0]["messages"][0]);
+        assert_eq!(turns[1]["messages"][1]["content"][0]["text"], "first");
+    }
+
+    #[tokio::test]
     async fn resume_failure_preserves_current_session_usage_state() {
         let server = MockServer::start().await;
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut conversation = conversation(server.uri(), &store);
+        let mut conversation = conversation(server.uri(), &store).await;
         let original_id = conversation.session.session_id().to_owned();
         let last_usage = TokenUsage::new(100_000, 10);
         let displayed_usage = TokenUsage::new(90_000, 9);
@@ -802,7 +908,7 @@ mod tests {
     async fn rename_announces_only_a_persisted_title() {
         let server = MockServer::start().await;
         let dir = tempfile::tempdir().unwrap();
-        let mut conversation = conversation(server.uri(), &test_store(dir.path()));
+        let mut conversation = conversation(server.uri(), &test_store(dir.path())).await;
         let live_id = conversation.session.session_id().to_owned();
         let sink = CapturingSink::new();
 
@@ -831,7 +937,7 @@ mod tests {
     async fn swap_config_model_rerenders_system_and_keeps_user_context() {
         let server = MockServer::start().await;
         let dir = tempfile::tempdir().unwrap();
-        let mut conversation = conversation(server.uri(), &test_store(dir.path()));
+        let mut conversation = conversation(server.uri(), &test_store(dir.path())).await;
 
         conversation.swap_config(
             &CapturingSink::new(),
@@ -853,7 +959,7 @@ mod tests {
     async fn swap_config_resets_auto_compaction_breaker() {
         let server = MockServer::start().await;
         let dir = tempfile::tempdir().unwrap();
-        let mut conversation = conversation(server.uri(), &test_store(dir.path()));
+        let mut conversation = conversation(server.uri(), &test_store(dir.path())).await;
         conversation.auto_compaction_failures = 3;
         conversation.last_usage = Some(TokenUsage::new(100_000, 1));
         conversation.total_estimated_cost_usd = 1.23;

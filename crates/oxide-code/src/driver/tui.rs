@@ -173,7 +173,7 @@ mod tests {
         mount_reply(&server, "reply").await;
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let conversation = conversation(server.uri(), &store);
+        let conversation = conversation(server.uri(), &store).await;
         let tracker = Arc::clone(&conversation.file_tracker);
         let read_path = dir.path().join("read.txt");
         std::fs::write(&read_path, "contents").unwrap();
@@ -219,7 +219,7 @@ mod tests {
             .await;
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let conversation = conversation(server.uri(), &store);
+        let conversation = conversation(server.uri(), &store).await;
         let live_id = conversation.session.session_id().to_owned();
         let tracker = Arc::clone(&conversation.file_tracker);
         let read_path = dir.path().join("read.txt");

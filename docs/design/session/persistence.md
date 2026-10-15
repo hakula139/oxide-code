@@ -15,6 +15,7 @@ Every session is a single `.jsonl` file: one JSON object per line, append-only a
 | `title`                | Re-appended  | Session title + source. Latest wins                                 |
 | `tool_result_metadata` | Sidecar      | Display metadata for replaying tool results                         |
 | `file_snapshot`        | Sidecar      | File-tracker state restored on resume when disk state still matches |
+| `context`              | Sidecar      | Prompt context a resume replays. Latest since the last compact wins |
 | `compact`              | Boundary     | Summary boundary plus pre-compact count and optional instructions   |
 | `summary`              | Last line    | Exit marker: `message_count` + `updated_at`. Latest wins            |
 
@@ -50,7 +51,11 @@ Starting a session stages the header in memory. The on-disk file is created by t
 
 ### Resume and sanitization
 
-`ox -c` reopens the existing session file. The loader walks `Entry::Message` lines into a UUID-indexed DAG, picks the newest-timestamped leaf as the tip, and walks back via `parent_uuid` to produce a linear chain. The sanitization pipeline then strips trailing thinking, drops unresolved tool_use / orphan tool_result, merges adjacent same-role survivors, and injects head / tail sentinels.
+`ox -c` reopens the existing session file. The loader walks `Entry::Message` lines into a UUID-indexed DAG, picks the newest-timestamped leaf as the tip, and walks back via `parent_uuid` to produce a linear chain. The sanitization pipeline then strips trailing thinking, drops unresolved tool_use / orphan tool_result, Merges adjacent same-role survivors and injects head and tail sentinels.
+
+### Prompt context
+
+A session records its prompt context (the environment section, rendered instructions with the date, and what the model has seen of both) in a `context` entry placed ahead of the user message that first carries it. Resuming replays this entry verbatim, sending the same cached system prompt and first message. If the session resumes in another directory, the environment section is redetected, and any subsequent instruction or date changes are attached to the next user message as a `<system-reminder>` block, which transcript displays omit. A transcript lacking a `context` entry, or one where no user message followed the last compaction, rebuilds the context and records it with the next message.
 
 ### Fork-on-conflict concurrency
 

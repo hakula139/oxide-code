@@ -4,11 +4,13 @@ use std::path::Path;
 
 use indoc::formatdoc;
 use platform_info::{PlatformInfo, PlatformInfoAPI, UNameAPI};
+use serde::{Deserialize, Serialize};
 
 use crate::model::lookup;
 use crate::util::env;
 use crate::util::time::local_offset;
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(Default))]
 pub(super) struct Environment {
     cwd: String,
@@ -16,7 +18,6 @@ pub(super) struct Environment {
     platform: String,
     shell: String,
     os_version: String,
-    date: String,
     model: String,
 }
 
@@ -27,7 +28,6 @@ impl Environment {
         let platform = normalize_node_platform(std::env::consts::OS).to_owned();
         let shell = detect_shell();
         let os_version = detect_os_version();
-        let date = current_date();
 
         Self {
             cwd: cwd.to_string_lossy().into_owned(),
@@ -35,7 +35,6 @@ impl Environment {
             platform,
             shell,
             os_version,
-            date,
             model: model.to_owned(),
         }
     }
@@ -44,8 +43,8 @@ impl Environment {
         model.clone_into(&mut self.model);
     }
 
-    pub(super) fn date(&self) -> String {
-        format!("Today's date is {}.", self.date)
+    pub(super) fn describes(&self, cwd: &Path) -> bool {
+        self.cwd == cwd.to_string_lossy()
     }
 
     pub(super) fn render(&self) -> String {
@@ -128,7 +127,7 @@ fn detect_os_version() -> String {
 
 // ── Date Detection ──
 
-fn current_date() -> String {
+pub(super) fn current_date() -> String {
     format_local_date(time::OffsetDateTime::now_utc(), local_offset())
 }
 
@@ -166,22 +165,6 @@ mod tests {
         );
     }
 
-    // ── Environment::date ──
-
-    #[test]
-    fn date_produces_formatted_string() {
-        let env = Environment {
-            cwd: "/tmp".to_owned(),
-            is_git: false,
-            platform: "darwin".to_owned(),
-            shell: "zsh".to_owned(),
-            os_version: "Darwin 25.3.0".to_owned(),
-            date: "2026-04-12".to_owned(),
-            model: "test-model".to_owned(),
-        };
-        assert_eq!(env.date(), "Today's date is 2026-04-12.");
-    }
-
     // ── Environment::render ──
 
     #[test]
@@ -192,7 +175,6 @@ mod tests {
             platform: "linux".to_owned(),
             shell: "bash".to_owned(),
             os_version: "Linux 6.1.0".to_owned(),
-            date: "2026-04-05".to_owned(),
             model: "claude-opus-4-6".to_owned(),
         };
         let rendered = env.render();
@@ -219,7 +201,6 @@ mod tests {
             platform: "darwin".to_owned(),
             shell: "zsh".to_owned(),
             os_version: "Darwin 24.6.0".to_owned(),
-            date: "2026-04-05".to_owned(),
             model: "test-model".to_owned(),
         };
         let rendered = env.render();
@@ -234,7 +215,6 @@ mod tests {
             platform: "darwin".to_owned(),
             shell: "zsh".to_owned(),
             os_version: "Darwin 25.3.0".to_owned(),
-            date: "2026-04-05".to_owned(),
             model: "custom-model-v1".to_owned(),
         };
         let rendered = env.render();

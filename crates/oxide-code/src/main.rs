@@ -114,6 +114,7 @@ async fn async_main() -> Result<Exit> {
     let ResumedSession {
         handle,
         messages,
+        context,
         compact,
         title,
         tool_result_metadata,
@@ -123,8 +124,17 @@ async fn async_main() -> Result<Exit> {
 
     let client = Client::new(config, Some(handle.session_id().to_owned()))?;
     let tools = Arc::new(create_tool_registry(&file_tracker));
-    let conversation =
-        Conversation::new(client, tools, handle, messages, file_tracker, cwd, tui_mode).await;
+    let conversation = Conversation::new(
+        client,
+        tools,
+        handle,
+        messages,
+        context,
+        file_tracker,
+        cwd,
+        tui_mode,
+    )
+    .await;
 
     if let Some(prompt) = cli.prompt {
         return Ok(driver::headless::run(conversation, show_thinking, &prompt).await);

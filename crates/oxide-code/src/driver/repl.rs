@@ -123,7 +123,7 @@ mod tests {
             .await;
         mount_reply(&server, "reply").await;
         let dir = tempfile::tempdir().unwrap();
-        let conversation = conversation(server.uri(), &test_store(dir.path()));
+        let conversation = conversation(server.uri(), &test_store(dir.path())).await;
         let sink = CapturingSink::new();
         let input: &[u8] = b"first\n/clear\n//literal\n";
 

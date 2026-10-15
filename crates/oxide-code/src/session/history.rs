@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 
 use crate::message::{ContentBlock, Message, Role};
+use crate::prompt::is_system_reminder;
 
 /// A logical interaction derived from a transcript, in display order.
 #[derive(Debug)]
@@ -31,7 +32,8 @@ pub(crate) enum Interaction<'a> {
 }
 
 /// Walks a resumed transcript and emits interactions in display order. Tool calls are paired
-/// inline with their `tool_use_id` results; whitespace-only text is dropped.
+/// inline with their `tool_use_id` results. Whitespace-only text and the context reminders sent
+/// with user prompts are dropped.
 pub(crate) fn walk_transcript(messages: &[Message]) -> Vec<Interaction<'_>> {
     let mut pairs: HashMap<&str, (&str, bool)> = messages
         .iter()
@@ -51,6 +53,8 @@ pub(crate) fn walk_transcript(messages: &[Message]) -> Vec<Interaction<'_>> {
         let mut text_buf = String::new();
         for block in &msg.content {
             match block {
+                ContentBlock::Text { text }
+                    if msg.role == Role::User && is_system_reminder(text) => {}
                 ContentBlock::Text { text } if !text.trim().is_empty() => {
                     if !text_buf.is_empty() {
                         text_buf.push('\n');
@@ -152,6 +156,30 @@ mod tests {
             }],
         }];
         assert!(walk_transcript(&messages).is_empty());
+    }
+
+    #[test]
+    fn walk_transcript_drops_context_reminders_from_user_prompts() {
+        let reminder = "<system-reminder>\nToday's date is 2026-04-13.\n</system-reminder>";
+        let messages = [
+            Message {
+                role: Role::User,
+                content: vec![
+                    ContentBlock::Text {
+                        text: "fix it".to_owned(),
+                    },
+                    ContentBlock::Text {
+                        text: reminder.to_owned(),
+                    },
+                ],
+            },
+            Message::assistant(reminder),
+        ];
+        let out = walk_transcript(&messages);
+        assert!(matches!(&out[..], [
+            Interaction::UserText(u),
+            Interaction::AssistantText(a),
+        ] if u == "fix it" && a == reminder));
     }
 
     #[test]
