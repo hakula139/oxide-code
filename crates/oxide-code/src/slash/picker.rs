@@ -12,7 +12,7 @@ use super::context::LiveSessionInfo;
 use super::effort_slider::tier_color;
 use crate::agent::event::UserAction;
 use crate::config::Effort;
-use crate::model::{ResolvedModelId, capabilities_for, display_name};
+use crate::model::{MODELS, ModelInfo, ResolvedModelId};
 use crate::tui::modal::chrome::{CONFIRM_HINT, FOOTER_HEIGHT, render_footer};
 use crate::tui::modal::list_picker::{ListPicker, PickerItem, numeric_hint};
 use crate::tui::modal::{Modal, ModalAction, ModalKey};
@@ -21,34 +21,25 @@ use crate::tui::viewport::{wrap_next, wrap_prev};
 
 // ── Constants ──
 
-/// Curated roster shown in the picker AND in `/model`'s typed-arg autocomplete; `/model <id>`
-/// still resolves against the full `MODELS` table.
-pub(super) const LISTED_MODELS: &[&str] = &[
-    "claude-opus-4-8",
-    "claude-opus-4-8[1m]",
-    "claude-sonnet-4-6",
-    "claude-sonnet-4-6[1m]",
-    "claude-haiku-4-5",
-];
+/// Rows pinned below the list: a spacer, the effort row, and the footer.
+const BELOW_LIST_HEIGHT: u16 = 2 + FOOTER_HEIGHT;
 
 // ── PickerItem ──
 
 struct ModelRow {
-    id: &'static str,
+    info: &'static ModelInfo,
     is_active: bool,
-    description: String,
     hint: Option<char>,
 }
 
 impl ModelRow {
     fn build(active_id: &str) -> Vec<Self> {
-        LISTED_MODELS
+        MODELS
             .iter()
             .enumerate()
-            .map(|(idx, id)| Self {
-                id,
-                is_active: *id == active_id,
-                description: display_name(id).into_owned(),
+            .map(|(idx, info)| Self {
+                info,
+                is_active: info.id == active_id,
                 hint: numeric_hint(idx),
             })
             .collect()
@@ -57,10 +48,10 @@ impl ModelRow {
 
 impl PickerItem for ModelRow {
     fn label(&self) -> &str {
-        self.id
+        self.info.id
     }
     fn description(&self) -> Option<&str> {
-        Some(&self.description)
+        Some(self.info.display_name)
     }
     fn is_active(&self) -> bool {
         self.is_active
@@ -74,25 +65,18 @@ impl PickerItem for ModelRow {
 
 pub(super) struct ModelEffortPicker {
     list: ListPicker<ModelRow>,
-    /// Active model at open — compared on submit to detect a model-axis change.
+    /// Active model at open. Compared on submit to detect a model-axis change.
     active_model: String,
-    /// Active effort at open — drives the "(default)" suffix when the user hasn't picked.
+    /// Active effort at open. A model swap carries it over, so it seeds every row's effort axis.
     active_effort: Option<Effort>,
-    /// Resolved initial effort. Guards against spurious `SwapConfig` when `active_effort` is
-    /// `None` but the model's default resolves to a concrete tier.
-    initial_effort: Option<Effort>,
-    /// Current pick; `None` when the highlighted model lacks an effort tier.
-    effort: Option<Effort>,
-    /// Set by Left / Right navigation; lets submit distinguish a real pick from the resolved
-    /// default.
-    effort_dirty: bool,
+    /// Set by Left / Right. `None` until the user touches the effort axis.
+    picked_effort: Option<Effort>,
 }
 
 impl ModelEffortPicker {
-    /// Infallible — both axes are always populated.
+    /// Infallible because every catalogue row has an effort axis.
     pub(super) fn new(info: &LiveSessionInfo) -> Self {
-        let active_model = info.config.model_id.clone();
-        let active_effort = info.config.effort;
+        let active_model = info.config.model.id().to_owned();
         let rows = ModelRow::build(&active_model);
 
         let mut list = ListPicker::new("Select model", rows).with_description(
@@ -100,84 +84,65 @@ impl ModelEffortPicker {
         );
         list.select_initial(|row| row.is_active);
 
-        let effort = effort_for_highlighted(&list, active_effort);
-
         Self {
             list,
             active_model,
-            active_effort,
-            initial_effort: effort,
-            effort,
-            effort_dirty: false,
+            active_effort: info.config.effort,
+            picked_effort: None,
         }
     }
 
-    /// Re-resolve the effort axis after the cursor moves. Reflects the highlighted model's caps
-    /// — `None` when that model has no effort tier.
-    fn refresh_effort_for_cursor(&mut self) {
-        self.effort = effort_for_highlighted(&self.list, self.effort_or_active());
-    }
-
-    fn effort_or_active(&self) -> Option<Effort> {
-        self.effort.or(self.active_effort)
+    /// Effort the highlighted model would run at if submitted now.
+    fn shown_effort(&self) -> Option<Effort> {
+        let row = self.list.selected()?;
+        Some(
+            self.picked_effort
+                .or(self.active_effort)
+                .unwrap_or(row.info.default_effort),
+        )
     }
 
     fn cycle_effort(&mut self, direction: Direction) {
-        let Some(row) = self.list.selected() else {
+        let Some(current) = self.shown_effort() else {
             return;
         };
-        let caps = capabilities_for(row.id);
-        if !caps.has_effort() {
-            return;
-        }
-        let supported: Vec<Effort> = Effort::ALL
+        let len = Effort::ALL.len();
+        let idx = Effort::ALL
             .iter()
-            .copied()
-            .filter(|level| caps.accepts_effort(*level))
-            .collect();
-        if supported.is_empty() {
-            return;
-        }
-        let current_idx = self
-            .effort
-            .and_then(|e| supported.iter().position(|s| *s == e))
-            .unwrap_or(0);
-        let next_idx = match direction {
-            Direction::Forward => wrap_next(current_idx, supported.len()),
-            Direction::Backward => wrap_prev(current_idx, supported.len()),
+            .position(|level| *level == current)
+            .expect("Effort::ALL lists every level");
+        let next = match direction {
+            Direction::Forward => wrap_next(idx, len),
+            Direction::Backward => wrap_prev(idx, len),
         };
-        self.effort = Some(supported[next_idx]);
-        self.effort_dirty = true;
+        self.picked_effort = Some(Effort::ALL[next]);
     }
 
-    /// Commit both axes through one atomic `SwapConfig`. Each axis is `Some` only when actually
-    /// moved — a no-touch Enter (or a touch that returns to the initial pick) cancels rather than
-    /// firing a spurious swap that would re-resolve config defaults.
+    /// Commit both axes through one atomic `SwapConfig`. Each axis is `Some` only when it differs
+    /// from the open-time state, so a no-touch Enter (or a pick that returns to the active effort)
+    /// cancels without re-resolving config defaults.
     fn submit(&self) -> ModalKey {
         let model = self
             .list
             .selected()
-            .map_or_else(|| self.active_model.clone(), |row| row.id.to_owned());
+            .map_or_else(|| self.active_model.clone(), |row| row.info.id.to_owned());
         let model_changed = model != self.active_model;
-        let effort_changed = self.effort_dirty && self.effort != self.initial_effort;
+        let effort = self
+            .picked_effort
+            .filter(|pick| Some(*pick) != self.active_effort);
 
-        if !model_changed && !effort_changed {
+        if !model_changed && effort.is_none() {
             return ModalKey::Cancelled;
         }
         ModalKey::Submitted(ModalAction::User(UserAction::SwapConfig {
             model: model_changed.then(|| ResolvedModelId::new(model)),
-            effort: effort_changed.then_some(self.effort).flatten(),
+            effort,
         }))
     }
 
     fn render_effort_row(&self, theme: &Theme) -> Option<Line<'static>> {
-        let row = self.list.selected()?;
-        let caps = capabilities_for(row.id);
-        if !caps.has_effort() {
-            return None;
-        }
-        let level = self.effort_or_active()?;
-        let was_default = self.active_effort.is_none() && !self.effort_dirty;
+        let level = self.shown_effort()?;
+        let was_default = self.picked_effort.is_none() && self.active_effort.is_none();
         let suffix = if was_default { " (default)" } else { "" };
         let color = tier_color(level);
         Some(Line::from(vec![
@@ -189,27 +154,17 @@ impl ModelEffortPicker {
             Span::styled("  ← →  to adjust", theme.dim()),
         ]))
     }
-
-    /// Rows pinned below the list: a spacer and the effort row when the highlighted model has a
-    /// tier, then the footer.
-    fn below_list_height(&self) -> u16 {
-        let effort_rows = if self.list.selected().is_some_and(has_effort_tier) {
-            2
-        } else {
-            0
-        };
-        effort_rows + FOOTER_HEIGHT
-    }
 }
 
 impl Modal for ModelEffortPicker {
     fn height(&self, width: u16, max_height: u16) -> u16 {
-        let below = self.below_list_height();
-        self.list.height(width, max_height.saturating_sub(below)) + below
+        self.list
+            .height(width, max_height.saturating_sub(BELOW_LIST_HEIGHT))
+            + BELOW_LIST_HEIGHT
     }
 
     fn render(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
-        let list_h = area.height.saturating_sub(self.below_list_height());
+        let list_h = area.height.saturating_sub(BELOW_LIST_HEIGHT);
         self.list.render(
             frame,
             Rect {
@@ -243,12 +198,10 @@ impl Modal for ModelEffortPicker {
             KeyCode::Enter => self.submit(),
             KeyCode::Up | KeyCode::Char('k') => {
                 self.list.select_prev();
-                self.refresh_effort_for_cursor();
                 ModalKey::Consumed
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 self.list.select_next();
-                self.refresh_effort_for_cursor();
                 ModalKey::Consumed
             }
             KeyCode::Right | KeyCode::Char('l') => {
@@ -260,9 +213,7 @@ impl Modal for ModelEffortPicker {
                 ModalKey::Consumed
             }
             KeyCode::Char(c @ '1'..='9') => {
-                if self.list.select_by_hint(c) {
-                    self.refresh_effort_for_cursor();
-                }
+                self.list.select_by_hint(c);
                 ModalKey::Consumed
             }
             _ => ModalKey::Consumed,
@@ -278,136 +229,101 @@ enum Direction {
     Backward,
 }
 
-fn has_effort_tier(row: &ModelRow) -> bool {
-    capabilities_for(row.id).has_effort()
-}
-
-fn effort_for_highlighted(list: &ListPicker<ModelRow>, fallback: Option<Effort>) -> Option<Effort> {
-    let row = list.selected()?;
-    let caps = capabilities_for(row.id);
-    if !caps.has_effort() {
-        return None;
-    }
-    Some(caps.resolve_effort(fallback).unwrap_or(Effort::High))
-}
-
 #[cfg(test)]
 mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
     use super::*;
+    use crate::model::ModelSpec;
     use crate::slash::test_session_info;
 
+    /// `test_session_info` ships Opus 5.5 active at `high`.
     fn picker() -> ModelEffortPicker {
         ModelEffortPicker::new(&test_session_info())
+    }
+
+    fn picker_on_unknown_model() -> ModelEffortPicker {
+        let mut info = test_session_info();
+        info.config.model = ModelSpec::resolve("custom-model".to_owned());
+        info.config.effort = None;
+        ModelEffortPicker::new(&info)
     }
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::from(code)
     }
 
+    fn submitted_swap(outcome: ModalKey) -> (Option<String>, Option<Effort>) {
+        match outcome {
+            ModalKey::Submitted(ModalAction::User(UserAction::SwapConfig { model, effort })) => {
+                (model.map(ResolvedModelId::into_inner), effort)
+            }
+            other => panic!("expected Submitted SwapConfig, got {other:?}"),
+        }
+    }
+
     // ── new ──
 
     #[test]
-    fn new_positions_cursor_on_active_model() {
-        // `test_session_info` ships claude-opus-4-8 active.
+    fn new_lists_catalogue_and_positions_cursor_on_active_model() {
         let p = picker();
         let row = p.list.selected().expect("active row");
-        assert_eq!(row.id, "claude-opus-4-8");
+        assert_eq!(row.info.id, "claude-opus-5-5");
         assert!(row.is_active);
+        assert_eq!(p.shown_effort(), Some(Effort::High));
     }
 
     #[test]
-    fn new_opens_with_clean_effort_axis() {
-        // Effort dirty must start false so a no-touch Enter cancels rather than firing a
-        // spurious SwapConfig (matters when the model resolves a default effort but the user
-        // hasn't expressed a pick).
-        let p = picker();
-        assert!(!p.effort_dirty);
+    fn new_on_unknown_model_shows_highlighted_row_default() {
+        let mut p = picker_on_unknown_model();
+        assert_eq!(p.shown_effort(), Some(Effort::Medium), "Opus 5.5 default");
+        p.handle_key(&key(KeyCode::Char('2')));
+        assert_eq!(p.shown_effort(), Some(Effort::High), "Sonnet 5.5 default");
     }
 
     // ── handle_key ──
 
     #[test]
-    fn down_arrow_advances_cursor_and_refreshes_effort() {
-        let mut p = picker();
-        let before = p.list.selected_index();
-        p.handle_key(&key(KeyCode::Down));
-        assert_eq!(p.list.selected_index(), before + 1);
-    }
-
-    #[test]
     fn numeric_jump_routes_cursor_to_matching_row() {
-        // `5` jumps to the fifth listed model — Haiku 4.5.
         let mut p = picker();
-        p.handle_key(&key(KeyCode::Char('5')));
+        p.handle_key(&key(KeyCode::Char('3')));
         let row = p.list.selected().expect("selected row");
-        assert_eq!(row.id, "claude-haiku-4-5");
+        assert_eq!(row.info.id, "claude-haiku-5-5");
     }
 
     #[test]
-    fn right_arrow_cycles_effort_within_supported_levels() {
-        // Opus 4.8 supports the full ladder. Pressing Right walks
-        // through it; Left walks back.
+    fn right_and_left_walk_the_full_ladder_with_wrap() {
         let mut p = picker();
-        let initial = p.effort;
         p.handle_key(&key(KeyCode::Right));
-        assert_ne!(p.effort, initial, "Right must change effort");
-        assert!(p.effort_dirty, "navigation marks effort dirty");
-    }
-
-    #[test]
-    fn right_arrow_on_no_tier_model_is_a_noop() {
-        // Haiku 4.5 has no effort tier — Left / Right must not mutate the (None) effort state.
-        let mut p = picker();
-        p.handle_key(&key(KeyCode::Char('5'))); // jump to Haiku
-        assert!(p.effort.is_none());
-        assert!(!p.effort_dirty);
+        assert_eq!(p.shown_effort(), Some(Effort::Xhigh));
         p.handle_key(&key(KeyCode::Right));
-        assert!(p.effort.is_none(), "no-tier model must stay None");
-        assert!(
-            !p.effort_dirty,
-            "navigation that no-ops must not mark effort dirty",
-        );
+        p.handle_key(&key(KeyCode::Right));
+        assert_eq!(p.shown_effort(), Some(Effort::Low), "Right wraps past max");
+        p.handle_key(&key(KeyCode::Left));
+        assert_eq!(p.shown_effort(), Some(Effort::Max), "Left wraps past low");
     }
 
     #[test]
-    fn left_arrow_walks_effort_backward_with_wrap() {
-        // Backward branch in `cycle_effort` has different arithmetic from the forward branch
-        // — pin it independently. Cycle Left until the effort returns to the initial pick.
+    fn effort_pick_survives_cursor_moves() {
         let mut p = picker();
-        p.handle_key(&key(KeyCode::Right)); // arm the axis with a known starting tier
-        let initial = p.effort.expect("Opus 4.8 has an effort axis");
-        for _ in 0..16 {
-            p.handle_key(&key(KeyCode::Left));
-            if p.effort == Some(initial) {
-                return;
-            }
-        }
-        panic!(
-            "Left-arrow cycle never returned to the starting tier; got {:?}",
-            p.effort
-        );
-    }
-
-    #[test]
-    fn navigating_from_no_tier_back_to_tier_model_restores_effort() {
-        let mut p = picker();
-        p.handle_key(&key(KeyCode::Char('5'))); // jump to Haiku
-        assert!(p.effort.is_none(), "Haiku has no effort tier");
-        p.handle_key(&key(KeyCode::Up)); // back to Sonnet 4.6 [1m] (index 3)
-        assert!(
-            p.effort.is_some(),
-            "tier model must restore effort via effort_or_active fallback",
-        );
+        p.handle_key(&key(KeyCode::Left));
+        p.handle_key(&key(KeyCode::Down));
+        assert_eq!(p.shown_effort(), Some(Effort::Medium));
     }
 
     #[test]
     fn enter_with_no_changes_returns_cancelled() {
-        // Open + Enter without touching anything is the same shape as
-        // Esc — nothing to dispatch.
         let mut p = picker();
+        let outcome = p.handle_key(&key(KeyCode::Enter));
+        assert!(matches!(outcome, ModalKey::Cancelled));
+    }
+
+    #[test]
+    fn enter_after_effort_round_trip_returns_cancelled() {
+        let mut p = picker();
+        p.handle_key(&key(KeyCode::Right));
+        p.handle_key(&key(KeyCode::Left));
         let outcome = p.handle_key(&key(KeyCode::Enter));
         assert!(matches!(outcome, ModalKey::Cancelled));
     }
@@ -416,94 +332,67 @@ mod tests {
     fn enter_after_model_change_emits_swap_with_model_only() {
         let mut p = picker();
         p.handle_key(&key(KeyCode::Down));
-        let outcome = p.handle_key(&key(KeyCode::Enter));
-        match outcome {
-            ModalKey::Submitted(ModalAction::User(UserAction::SwapConfig { model, effort })) => {
-                assert_eq!(
-                    model.map(ResolvedModelId::into_inner).as_deref(),
-                    Some("claude-opus-4-8[1m]"),
-                );
-                assert!(
-                    effort.is_none(),
-                    "effort must NOT be set when only the model axis moved",
-                );
-            }
-            other => panic!("expected Submitted(SwapConfig {{ model: Some, .. }}), got {other:?}"),
-        }
+        let (model, effort) = submitted_swap(p.handle_key(&key(KeyCode::Enter)));
+        assert_eq!(model.as_deref(), Some("claude-sonnet-5-5"));
+        assert_eq!(effort, None, "effort stays unset when only the model moved");
     }
 
     #[test]
     fn enter_after_effort_change_emits_swap_with_effort_only() {
-        // Opus 4.8 active + High; cycle effort Forward once → Xhigh.
         let mut p = picker();
         p.handle_key(&key(KeyCode::Right));
-        let outcome = p.handle_key(&key(KeyCode::Enter));
-        match outcome {
-            ModalKey::Submitted(ModalAction::User(UserAction::SwapConfig { model, effort })) => {
-                assert!(
-                    model.is_none(),
-                    "model must NOT be set when only the effort axis moved",
-                );
-                assert_eq!(effort, Some(Effort::Xhigh));
-            }
-            other => panic!("expected Submitted with effort-only SwapConfig, got {other:?}"),
-        }
+        let (model, effort) = submitted_swap(p.handle_key(&key(KeyCode::Enter)));
+        assert_eq!(model, None, "model stays unset when only the effort moved");
+        assert_eq!(effort, Some(Effort::Xhigh));
     }
 
-    // ── height ──
-
     #[test]
-    fn height_drops_when_highlighted_model_lacks_effort_tier() {
-        // The effort row + spacer (2 rows) only render when the highlighted model has an
-        // effort tier. Pin the no-tier path so a regression that always reserves the row
-        // fails here.
-        let mut p = picker();
-        let with_tier = p.height(80, u16::MAX);
-        p.handle_key(&key(KeyCode::Char('5'))); // jump to Haiku 4.5
-        let no_tier = p.height(80, u16::MAX);
-        assert_eq!(
-            with_tier.saturating_sub(no_tier),
-            2,
-            "no-tier model drops exactly the effort row + spacer",
-        );
+    fn enter_on_unknown_model_without_touch_swaps_model_only() {
+        // The highlighted row's default is what a model-only swap resolves to, so it is not sent.
+        let mut p = picker_on_unknown_model();
+        let (model, effort) = submitted_swap(p.handle_key(&key(KeyCode::Enter)));
+        assert_eq!(model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(effort, None);
     }
 
     // ── render ──
 
     #[test]
+    fn render_effort_row_marks_default_only_without_active_effort() {
+        let theme = Theme::default();
+        let row_text = |p: &ModelEffortPicker| -> String {
+            p.render_effort_row(&theme)
+                .expect("effort row")
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect()
+        };
+        assert!(row_text(&picker()).starts_with("● high effort  "));
+        assert!(row_text(&picker_on_unknown_model()).starts_with("● medium effort (default)"));
+    }
+
+    #[test]
     fn render_runs_at_typical_widths_without_panicking() {
         let theme = Theme::default();
-        // Two cursor positions: an effort-tier model (Opus 4.8) so the effort row renders, and
-        // a no-tier model (Haiku 4.5) so the hide branch executes.
-        for setup in [
-            None,                     // Opus 4.8 — has effort tier
-            Some(KeyCode::Char('5')), // Haiku 4.5 — no effort tier
-        ] {
-            let mut p = picker();
-            if let Some(jump) = setup {
-                p.handle_key(&key(jump));
-            }
-            for width in [40_u16, 80, 120] {
-                let h = p.height(width, 20);
-                let mut terminal = Terminal::new(TestBackend::new(width, h)).unwrap();
-                terminal
-                    .draw(|frame| {
-                        p.render(frame, Rect::new(0, 0, width, h), &theme);
-                    })
-                    .expect("render must not panic");
-            }
+        let p = picker();
+        for width in [40_u16, 80, 120] {
+            let h = p.height(width, 20);
+            let mut terminal = Terminal::new(TestBackend::new(width, h)).unwrap();
+            terminal
+                .draw(|frame| {
+                    p.render(frame, Rect::new(0, 0, width, h), &theme);
+                })
+                .expect("render must not panic");
         }
     }
 
     #[test]
     fn render_pins_the_effort_row_and_footer_below_a_scrolled_list() {
         let theme = Theme::default();
-        let last_tiered = LISTED_MODELS
-            .iter()
-            .rposition(|id| capabilities_for(id).has_effort())
-            .unwrap();
+        let last = MODELS.len() - 1;
         let mut p = picker();
-        for _ in 0..last_tiered {
+        for _ in 0..last {
             p.handle_key(&key(KeyCode::Down));
         }
         let (width, height) = (60, 8);
@@ -522,7 +411,7 @@ mod tests {
         };
         let cursor_row = row(3);
         assert!(
-            cursor_row.contains(LISTED_MODELS[last_tiered]),
+            cursor_row.contains(MODELS[last].id),
             "cursor row: {cursor_row:?}"
         );
         assert!(row(5).contains("effort"), "effort row: {:?}", row(5));

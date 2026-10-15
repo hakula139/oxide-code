@@ -45,8 +45,8 @@ fn build_modal(
 ) -> KvOverview {
     let cfg = &info.config;
     let resolved = vec![
-        ("Model".to_owned(), info.display_name().into_owned()),
-        ("Model ID".to_owned(), cfg.model_id.clone()),
+        ("Model".to_owned(), cfg.model.display_name().to_owned()),
+        ("Model ID".to_owned(), cfg.model.id().to_owned()),
         ("Effort".to_owned(), display_effort(cfg.effort)),
         ("Auth".to_owned(), cfg.auth_label.to_owned()),
         ("Base URL".to_owned(), cfg.base_url.clone()),

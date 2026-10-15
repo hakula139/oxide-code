@@ -636,7 +636,7 @@ mod tests {
             &path,
             indoc! {r#"
                 [client]
-                model = "claude-sonnet-4-6"
+                model = "claude-sonnet-5-5"
                 max_tokens = 8192
             "#},
         )
@@ -646,7 +646,7 @@ mod tests {
             .expect("project settings should parse")
             .expect("file exists");
         let client = config.client.expect("client section present");
-        assert_eq!(client.model.as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(client.model.as_deref(), Some("claude-sonnet-5-5"));
         assert_eq!(client.max_tokens, Some(8192));
     }
 

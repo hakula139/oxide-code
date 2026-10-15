@@ -27,11 +27,10 @@ pub(super) struct CreateMessageRequest<'a> {
     pub(super) tools: Option<&'a [ToolDefinition]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) thinking: Option<&'a ThinkingConfig>,
-    /// `format` (JSON-schema for one-shots) + `effort` (agentic tier). Optional so an empty
-    /// `OutputConfig` never ships.
+    /// `format` (JSON schema for one-shots) + `effort`. `None` omits the field entirely.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) output_config: Option<OutputConfig<'a>>,
-    /// Partners the `context-management-2025-06-27` beta on streaming requests for capable models.
+    /// Partners the `context-management-2025-06-27` beta on streaming requests for known models.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) context_management: Option<ContextManagement>,
     pub(super) messages: RequestMessages<'a>,

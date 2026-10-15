@@ -4,48 +4,52 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use tracing::debug;
 
-use super::betas::{api_model_id, compute_betas, supports_structured_outputs};
+use super::betas::compute_betas;
 use super::sse::format_api_error;
 use super::wire::{CreateMessageRequest, OutputConfig, OutputFormat, RequestMessages};
 use super::{CLAUDE_CLI_VERSION, Client, billing, build_metadata, build_system_blocks};
-use crate::config::Auth;
+use crate::config::{Auth, Effort};
 use crate::message::{ContentBlock, Message};
+use crate::model::ModelSpec;
 
 // ── Client::complete ──
 
 impl Client {
-    /// Non-streaming completion. Returns the concatenated assistant text; tool-use and thinking
-    /// blocks are dropped. `output_format` is silently ignored on models without the
-    /// structured-outputs capability so callers can pass it unconditionally.
+    /// Non-streaming completion. Returns the concatenated assistant text and drops tool-use and
+    /// thinking blocks.
     ///
     /// Distinct from [`Client::stream_message`]: no agentic beta stack, no `context_management`
-    /// directive, and the billing block ships **only** on OAuth — API-key one-shots omit it
-    /// because 3P gateways do not gate non-streaming traffic on the attestation.
+    /// directive, and the billing block ships **only** on OAuth. API-key one-shots omit it because
+    /// 3P gateways do not gate non-streaming traffic on the attestation.
     pub(crate) async fn complete(
         &self,
-        model: &str,
+        model: &ModelSpec,
         system: &str,
         user: &str,
         max_tokens: u32,
+        effort: Option<Effort>,
         output_format: Option<&OutputFormat>,
     ) -> Result<String> {
-        let effective_format = output_format.filter(|_| supports_structured_outputs(model));
         let body = build_completion_body(
-            model,
+            model.id(),
             system,
             user,
             max_tokens,
+            effort,
             &self.config.auth,
             &self.device_id,
             &self.session_id,
-            effective_format,
+            output_format,
         )?;
 
         let url = format!("{}/v1/messages?beta=true", self.config.base_url);
-        debug!(model, body_len = body.len(), "sending completion request");
+        debug!(
+            model = model.id(),
+            body_len = body.len(),
+            "sending completion request"
+        );
 
-        let betas =
-            compute_betas(model, &self.config.auth, false, effective_format.is_some()).join(",");
+        let betas = compute_betas(model, None, &self.config.auth, false).join(",");
         let response = self
             .http
             .post(&url)
@@ -81,13 +85,14 @@ impl Client {
 /// System block order: billing (OAuth only) → identity prefix → caller system.
 #[expect(
     clippy::too_many_arguments,
-    reason = "8 distinct wire fields; a wrapper struct would just rename them"
+    reason = "9 distinct wire fields, and a wrapper struct would only rename them"
 )]
 fn build_completion_body(
     model: &str,
     system: &str,
     user: &str,
     max_tokens: u32,
+    effort: Option<Effort>,
     auth: &Auth,
     device_id: &str,
     session_id: &str,
@@ -103,14 +108,14 @@ fn build_completion_body(
     let system_blocks = build_system_blocks(billing_header.as_deref(), [(system, None)]);
 
     let mut body = serde_json::to_string(&CreateMessageRequest {
-        model: api_model_id(model),
+        model,
         max_tokens,
         stream: false,
         metadata: build_metadata(device_id, session_id),
         system: system_blocks,
         tools: None,
         thinking: None,
-        output_config: OutputConfig::new(output_format, None),
+        output_config: OutputConfig::new(output_format, effort),
         context_management: None,
         messages: RequestMessages {
             messages: &messages,
@@ -148,13 +153,15 @@ mod tests {
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
-    use super::super::betas::{
-        CLAUDE_CODE_BETA_HEADER, OAUTH_BETA_HEADER, STRUCTURED_OUTPUTS_BETA_HEADER,
-    };
+    use super::super::betas::{CLAUDE_CODE_BETA_HEADER, OAUTH_BETA_HEADER};
     use super::super::testing::{Captured, api_key, captured, oauth, test_config};
     use super::*;
     use crate::client::anthropic::SYSTEM_PROMPT_PREFIX;
     use crate::client::anthropic::testing::completion_body;
+
+    fn haiku() -> ModelSpec {
+        ModelSpec::resolve("claude-haiku-5-5".to_owned())
+    }
 
     fn parse_body(body: &str) -> serde_json::Value {
         serde_json::from_str(body).expect("serialized body must be valid JSON")
@@ -174,12 +181,12 @@ mod tests {
             .await;
 
         let client = Client::new(
-            test_config(server.uri(), api_key(), "claude-haiku-4-5"),
+            test_config(server.uri(), api_key(), "claude-haiku-5-5"),
             Some("sid-complete".to_owned()),
         )
         .unwrap();
         client
-            .complete("claude-haiku-4-5", "", "u", 40, None)
+            .complete(&haiku(), "", "u", 40, None, None)
             .await
             .unwrap();
     }
@@ -196,12 +203,12 @@ mod tests {
             .await;
 
         let client = Client::new(
-            test_config(server.uri(), api_key(), "claude-haiku-4-5"),
+            test_config(server.uri(), api_key(), "claude-haiku-5-5"),
             Some("sid".to_owned()),
         )
         .unwrap();
         let text = client
-            .complete("claude-haiku-4-5", "sys", "user input", 40, None)
+            .complete(&haiku(), "sys", "user input", 40, None, None)
             .await
             .unwrap();
         assert_eq!(text, "Fix login bug");
@@ -220,12 +227,12 @@ mod tests {
             .await;
 
         let client = Client::new(
-            test_config(server.uri(), api_key(), "claude-haiku-4-5"),
+            test_config(server.uri(), api_key(), "claude-haiku-5-5"),
             Some("sid".to_owned()),
         )
         .unwrap();
         let err = client
-            .complete("claude-haiku-4-5", "", "u", 40, None)
+            .complete(&haiku(), "", "u", 40, None, None)
             .await
             .expect_err("expected error");
         let msg = format!("{err:#}");
@@ -247,12 +254,12 @@ mod tests {
             .await;
 
         let client = Client::new(
-            test_config(server.uri(), api_key(), "claude-haiku-4-5"),
+            test_config(server.uri(), api_key(), "claude-haiku-5-5"),
             Some("sid".to_owned()),
         )
         .unwrap();
         let err = client
-            .complete("claude-haiku-4-5", "", "u", 40, None)
+            .complete(&haiku(), "", "u", 40, None, None)
             .await
             .expect_err("expected 429 error");
         let msg = format!("{err:#}");
@@ -273,12 +280,12 @@ mod tests {
             .await;
 
         let client = Client::new(
-            test_config(server.uri(), api_key(), "claude-haiku-4-5"),
+            test_config(server.uri(), api_key(), "claude-haiku-5-5"),
             Some("sid".to_owned()),
         )
         .unwrap();
         let err = client
-            .complete("claude-haiku-4-5", "", "u", 40, None)
+            .complete(&haiku(), "", "u", 40, None, None)
             .await
             .expect_err("expected parse error");
         assert!(
@@ -288,56 +295,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn complete_structured_output_gated_by_model_capability() {
-        // Supported → body + beta tag ship; unsupported → both silently dropped.
-        let fmt = OutputFormat::json_schema(serde_json::json!({
+    async fn complete_ships_effort_and_format_in_output_config_without_beta_tags() {
+        // Both fields are GA, so neither may drag a beta tag along.
+        let schema = serde_json::json!({
             "type": "object",
             "properties": {"title": {"type": "string"}},
             "required": ["title"],
             "additionalProperties": false,
-        }));
-        for (model, expect_structured) in [("claude-haiku-4-5", true), ("claude-haiku-4", false)] {
-            let server = MockServer::start().await;
-            let sink: Captured<(String, String)> = captured();
-            let sink_clone = std::sync::Arc::clone(&sink);
-            Mock::given(method("POST"))
-                .and(path("/v1/messages"))
-                .respond_with(move |req: &Request| {
-                    let body = String::from_utf8_lossy(&req.body).into_owned();
-                    let beta = req
-                        .headers
-                        .get("anthropic-beta")
-                        .map(|v| v.to_str().unwrap().to_owned())
-                        .unwrap_or_default();
-                    *sink_clone.lock().unwrap() = Some((body, beta));
-                    ResponseTemplate::new(200).set_body_string(completion_body("ok"))
-                })
-                .mount(&server)
-                .await;
+        });
+        let fmt = OutputFormat::json_schema(schema.clone());
+        let server = MockServer::start().await;
+        let sink: Captured<(String, String)> = captured();
+        let sink_clone = std::sync::Arc::clone(&sink);
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(move |req: &Request| {
+                let body = String::from_utf8_lossy(&req.body).into_owned();
+                let beta = req
+                    .headers
+                    .get("anthropic-beta")
+                    .map(|v| v.to_str().unwrap().to_owned())
+                    .unwrap_or_default();
+                *sink_clone.lock().unwrap() = Some((body, beta));
+                ResponseTemplate::new(200).set_body_string(completion_body("ok"))
+            })
+            .mount(&server)
+            .await;
 
-            let client = Client::new(
-                test_config(server.uri(), api_key(), model),
-                Some("sid".to_owned()),
-            )
+        let client = Client::new(
+            test_config(server.uri(), oauth(), "claude-haiku-5-5"),
+            Some("sid".to_owned()),
+        )
+        .unwrap();
+        _ = client
+            .complete(&haiku(), "sys", "prompt", 40, Some(Effort::Low), Some(&fmt))
+            .await
             .unwrap();
-            _ = client
-                .complete(model, "sys", "prompt", 40, Some(&fmt))
-                .await
-                .unwrap();
 
-            let (body, beta) = sink.lock().unwrap().clone().expect("request captured");
-            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-            assert_eq!(
-                beta.contains(STRUCTURED_OUTPUTS_BETA_HEADER),
-                expect_structured,
-                "beta tag on {model}: {beta}",
-            );
-            assert_eq!(
-                v.get("output_config").is_some(),
-                expect_structured,
-                "output_config on {model}: {body}",
-            );
-        }
+        let (body, beta) = sink.lock().unwrap().clone().expect("request captured");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["output_config"]["effort"], "low", "{body}");
+        assert_eq!(v["output_config"]["format"]["schema"], schema, "{body}");
+        assert_eq!(beta, OAUTH_BETA_HEADER, "only the auth tag ships: {beta}");
     }
 
     #[tokio::test]
@@ -365,13 +364,13 @@ mod tests {
             test_config(
                 server.uri(),
                 Auth::OAuth("tok".to_owned()),
-                "claude-haiku-4-5",
+                "claude-haiku-5-5",
             ),
             Some("sid".to_owned()),
         )
         .unwrap();
         _ = client
-            .complete("claude-haiku-4-5", "", "hi", 40, None)
+            .complete(&haiku(), "", "hi", 40, None, None)
             .await
             .unwrap();
 
@@ -390,8 +389,7 @@ mod tests {
 
     #[tokio::test]
     async fn complete_does_not_emit_context_management_edits() {
-        // `context_management.edits` is agentic-only; must stay off `complete` even on
-        // capability-bearing models (Haiku 4.5 here).
+        // `context_management.edits` is agentic-only, so `complete` omits it even on known models.
         let server = MockServer::start().await;
         let sink: Captured<String> = captured();
         let sink_clone = std::sync::Arc::clone(&sink);
@@ -405,12 +403,12 @@ mod tests {
             .await;
 
         let client = Client::new(
-            test_config(server.uri(), api_key(), "claude-haiku-4-5"),
+            test_config(server.uri(), api_key(), "claude-haiku-5-5"),
             Some("sid".to_owned()),
         )
         .unwrap();
         _ = client
-            .complete("claude-haiku-4-5", "sys", "hi", 40, None)
+            .complete(&haiku(), "sys", "hi", 40, None, None)
             .await
             .unwrap();
 
@@ -427,10 +425,11 @@ mod tests {
     #[test]
     fn build_completion_body_omits_tools_thinking_and_output_config_by_default() {
         let body = build_completion_body(
-            "claude-haiku-4-5",
+            "claude-haiku-5-5",
             "sys",
             "hi",
             40,
+            None,
             &api_key(),
             "did",
             "sid",
@@ -438,7 +437,7 @@ mod tests {
         )
         .unwrap();
         let v = parse_body(&body);
-        assert_eq!(v["model"], "claude-haiku-4-5");
+        assert_eq!(v["model"], "claude-haiku-5-5");
         assert_eq!(v["max_tokens"], 40);
         assert_eq!(v["stream"], false);
         assert!(v.get("tools").is_none(), "tools omitted: {v}");
@@ -455,10 +454,11 @@ mod tests {
     fn build_completion_body_system_blocks_match_auth_mode() {
         // API key → 2 blocks (identity + system); OAuth → 3 blocks (billing + identity + system).
         let api_body = build_completion_body(
-            "claude-haiku-4-5",
+            "claude-haiku-5-5",
             "sys-prompt",
             "hi",
             40,
+            None,
             &api_key(),
             "did",
             "sid",
@@ -473,10 +473,11 @@ mod tests {
         assert!(!api_body.contains("x-anthropic-billing-header:"));
 
         let oauth_body = build_completion_body(
-            "claude-haiku-4-5",
+            "claude-haiku-5-5",
             "sys-prompt",
             "Fix login",
             40,
+            None,
             &oauth(),
             "did",
             "sid",
@@ -498,10 +499,11 @@ mod tests {
     fn build_completion_body_empty_system_keeps_identity_prefix_alone() {
         // Non-Haiku OAuth requires the identity prefix in block 0 even with no caller system.
         let body = build_completion_body(
-            "claude-haiku-4-5",
+            "claude-haiku-5-5",
             "",
             "hi",
             40,
+            None,
             &api_key(),
             "did",
             "sid",
@@ -515,37 +517,44 @@ mod tests {
     }
 
     #[test]
-    fn build_completion_body_with_output_format_emits_output_config() {
-        let schema = serde_json::json!({
-            "type": "object",
-            "properties": {"title": {"type": "string"}},
-            "required": ["title"],
-            "additionalProperties": false,
-        });
-        let fmt = OutputFormat::json_schema(schema.clone());
-        let body = build_completion_body(
-            "claude-haiku-4-5",
-            "sys",
-            "hi",
-            40,
-            &api_key(),
-            "did",
-            "sid",
-            Some(&fmt),
-        )
-        .unwrap();
-        let v = parse_body(&body);
-        assert_eq!(v["output_config"]["format"]["type"], "json_schema");
-        assert_eq!(v["output_config"]["format"]["schema"], schema);
+    fn build_completion_body_with_effort_or_format_emits_output_config() {
+        let fmt = OutputFormat::json_schema(serde_json::json!({"type": "object"}));
+        for (effort, format, expected) in [
+            (
+                Some(Effort::Low),
+                None,
+                serde_json::json!({"effort": "low"}),
+            ),
+            (
+                None,
+                Some(&fmt),
+                serde_json::json!({"format": {"type": "json_schema", "schema": {"type": "object"}}}),
+            ),
+        ] {
+            let body = build_completion_body(
+                "claude-haiku-5-5",
+                "sys",
+                "hi",
+                40,
+                effort,
+                &api_key(),
+                "did",
+                "sid",
+                format,
+            )
+            .unwrap();
+            assert_eq!(parse_body(&body)["output_config"], expected);
+        }
     }
 
     #[test]
     fn build_completion_body_routes_device_and_session_ids_into_metadata() {
         let body = build_completion_body(
-            "claude-haiku-4-5",
+            "claude-haiku-5-5",
             "",
             "hi",
             40,
+            None,
             &api_key(),
             "did-456",
             "sid-789",
@@ -571,7 +580,7 @@ mod tests {
             "id": "msg_1",
             "type": "message",
             "role": "assistant",
-            "model": "claude-haiku-4-5",
+            "model": "claude-haiku-5-5",
             "stop_reason": "end_turn",
             "content": [
                 {"type":"thinking","thinking":"pondering","signature":"sig"},

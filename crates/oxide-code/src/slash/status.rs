@@ -27,7 +27,8 @@ impl SlashCommand for StatusCmd {
 }
 
 fn build_modal(info: &LiveSessionInfo) -> KvOverview {
-    let model = format!("{} ({})", info.display_name(), info.config.model_id);
+    let model = &info.config.model;
+    let model = format!("{} ({})", model.display_name(), model.id());
     let rows = vec![
         ("Model".to_owned(), model),
         ("Effort".to_owned(), display_effort(info.config.effort)),

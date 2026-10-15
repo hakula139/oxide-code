@@ -77,9 +77,9 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 
 ## Per-Modal Notes
 
-- **Combined `/model + /effort` picker**: `ModelEffortPicker` wraps `ListPicker<ModelRow>` and tracks the effort axis separately. The effort row hides on no-tier models. Left / Right cycles only through tiers the highlighted model supports, recomputed per cursor move so the display never claims a tier the next request would clamp. Submit emits one `UserAction::SwapConfig { model, effort }` with `Option` axes (only changed axes populated). Enter on a no-op cancels.
+- **Combined `/model + /effort` picker**: `ModelEffortPicker` wraps `ListPicker<ModelRow>` and tracks the effort axis separately. Left / Right cycles the effort row through all five tiers, which every supported model accepts. Until the user picks a tier, the row shows the active effort, falling back to the highlighted model's default. Submit emits one `UserAction::SwapConfig { model, effort }` with `Option` axes (only changed axes populated). Enter on a no-op cancels.
 
-- **`/effort` slider**: `EffortSlider` is a horizontal Speed ↔ Intelligence visual. Lists only tiers the active model accepts and seeds the cursor at the resolved active effort. Tiers render with uniform `●` / `○` glyphs plus per-tier ANSI color along blue → red. Color encodes identity, bold encodes the active pick. ANSI-named colors decouple the gradient from theme TOML so the user's terminal palette supplies the actual rendering.
+- **`/effort` slider**: `EffortSlider` is a horizontal Speed ↔ Intelligence visual. Lists all five tiers and seeds the cursor at the active effort. Unknown model ids have no effort, so bare `/effort` errors on them. Tiers render with uniform `●` / `○` glyphs plus per-tier ANSI color along blue → red. Color encodes identity, bold encodes the active pick. ANSI-named colors decouple the gradient from theme TOML so the user's terminal palette supplies the actual rendering.
 
 - **`/theme` picker**: `ThemePicker` wraps `ListPicker<ThemeRow>` over the curated built-in roster and emits `UserAction::PreviewTheme` on every cursor move so the App repaints the chat in the candidate palette without committing. Esc snaps back via the cached `preview_theme_snapshot`, while Enter promotes the preview to a `SwapTheme` swap. Numeric `1`–`9` shortcuts jump to a row to match the visual ladder.
 

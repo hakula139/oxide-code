@@ -30,6 +30,7 @@ use super::theme::Theme;
 use crate::agent::event::{AgentEvent, UserAction};
 use crate::config::{CompactionConfig, Effort, StatusLineSegment, display_auto_compaction};
 use crate::message::Message;
+use crate::model::ModelSpec;
 use crate::session::entry::CompactInfo;
 use crate::slash::{self, LiveSessionInfo, Parsed, SlashContext, SlashKind, SlashOutcome};
 use crate::tool::{ToolMetadata, ToolRegistry, ToolResultView};
@@ -94,7 +95,7 @@ impl App {
         let mut status_bar = StatusBar::new(
             theme,
             session_info.config.status_line.clone(),
-            session_info.short_display_name().into_owned(),
+            session_info.config.model.short_display_name().to_owned(),
             session_info.config.effort,
             session_info.cwd.clone(),
             session_info.git_branch.clone(),
@@ -126,6 +127,11 @@ impl App {
             should_quit: false,
             dirty: true,
         }
+    }
+
+    /// Appends a system message ahead of the first frame, for warnings raised at startup.
+    pub(crate) fn push_system_message(&mut self, body: String) {
+        self.chat.push_system_message(body);
     }
 
     /// Runs until the user quits or the agent channel closes.
@@ -473,6 +479,7 @@ impl App {
                 self.chat.append_thinking_token(&token);
                 self.set_active_status(Status::Streaming);
             }
+            AgentEvent::ProgressUpdate(text) => self.chat.push_progress_update(text),
             AgentEvent::ToolCallStart { id, name, input } => {
                 let icon = self.tools.icon(&name);
                 let label = self.tools.label(&name, &input);
@@ -550,11 +557,11 @@ impl App {
                 automatic,
             ),
             AgentEvent::ConfigChanged {
-                model_id,
+                model,
                 effort,
                 compaction,
                 requested_effort,
-            } => self.apply_config_changed(model_id, effort, compaction, requested_effort),
+            } => self.apply_config_changed(model, effort, compaction, requested_effort),
             AgentEvent::Error(msg) => {
                 self.chat.push_error(&msg);
                 self.finish_turn();
@@ -635,16 +642,16 @@ impl App {
 
     fn apply_config_changed(
         &mut self,
-        model_id: String,
+        model: ModelSpec,
         effort: Option<Effort>,
         compaction: CompactionConfig,
         requested_effort: Option<Effort>,
     ) {
-        let model_changed = model_id != self.session_info.config.model_id;
+        let model_changed = model.id() != self.session_info.config.model.id();
         let prev_effort = self.session_info.config.effort;
         let prev_compaction = self.session_info.config.compaction;
         let confirmation = format_config_change(
-            &model_id,
+            &model,
             model_changed,
             prev_effort,
             effort,
@@ -654,10 +661,10 @@ impl App {
         );
         if model_changed {
             self.status_bar
-                .set_model(crate::model::short_display_name(&model_id).into_owned());
+                .set_model(model.short_display_name().to_owned());
         }
         self.status_bar.set_effort(effort);
-        self.session_info.config.model_id = model_id;
+        self.session_info.config.model = model;
         self.session_info.config.effort = effort;
         self.session_info.config.compaction = compaction;
         self.chat.push_system_message(confirmation);
@@ -880,7 +887,7 @@ fn preview_line(prompt: &str, theme: &Theme, body_width: usize) -> Line<'static>
 
 /// `AgentEvent::ConfigChanged` confirmation, surfacing silent effort shifts.
 fn format_config_change(
-    model_id: &str,
+    model: &ModelSpec,
     model_changed: bool,
     prev_effort: Option<crate::config::Effort>,
     new_effort: Option<crate::config::Effort>,
@@ -889,33 +896,24 @@ fn format_config_change(
     new_compaction: CompactionConfig,
 ) -> String {
     let message = if model_changed {
-        let head = format!(
-            "Switched to {} ({model_id})",
-            crate::model::display_name(model_id)
-        );
+        let head = format!("Switched to {} ({})", model.display_name(), model.id());
         match (requested_effort, prev_effort, new_effort) {
-            (Some(req), _, Some(eff)) if req == eff => format!("{head} · effort {eff}."),
-            (Some(req), _, Some(eff)) => format!("{head} · effort {eff} (clamped from {req})."),
             (Some(req), _, None) => {
                 format!("{head}. Effort unchanged: model has no effort tier (asked for {req}).")
             }
             (None, None, None) => format!("{head}."),
             (None, Some(_), None) => format!("{head}. Effort cleared (model has no effort tier)."),
             (None, None, Some(eff)) => format!("{head} · effort {eff} (model default)."),
-            (None, Some(prev), Some(new)) if new < prev => {
-                format!("{head} · effort {new} (clamped from {prev}).")
-            }
-            (None, Some(_), Some(eff)) => format!("{head} · effort {eff}."),
+            (_, _, Some(eff)) => format!("{head} · effort {eff}."),
         }
     } else {
         match (requested_effort, new_effort) {
-            (Some(req), Some(eff)) if req == eff => format!("Effort set to {eff}."),
-            (Some(req), Some(eff)) => format!("Effort set to {eff} (clamped from {req})."),
             (Some(req), None) => {
                 format!("Effort unchanged: model has no effort tier (asked for {req}).")
             }
+            (_, Some(eff)) => format!("Effort set to {eff}."),
             // Slash dispatch keeps this unreachable, but a clear fallback beats a panic.
-            (None, _) => "Config unchanged.".to_owned(),
+            (None, None) => "Config unchanged.".to_owned(),
         }
     };
     if model_changed && prev_compaction.auto != new_compaction.auto {
@@ -1018,7 +1016,7 @@ mod tests {
                 auth_label: "API key",
                 base_url: "https://api.test.invalid".to_owned(),
                 extra_ca_certs: None,
-                model_id: "test-model".to_owned(),
+                model: ModelSpec::resolve("test-model".to_owned()),
                 effort: Some(Effort::High),
                 max_tokens: 32_000,
                 max_tool_rounds: None,
@@ -1034,6 +1032,10 @@ mod tests {
                 theme_name: "mocha".to_owned(),
             },
         }
+    }
+
+    fn spec(id: &str) -> ModelSpec {
+        ModelSpec::resolve(id.to_owned())
     }
 
     fn base_compaction() -> CompactionConfig {
@@ -1189,6 +1191,16 @@ mod tests {
         // Status bar filters whitespace-only titles so a resumed blank title doesn't leave a slot.
         let (app, _rx, _agent_tx) = test_app(Some("   \n "));
         assert!(app.status_bar.title().is_none());
+    }
+
+    // ── push_system_message ──
+
+    #[test]
+    fn push_system_message_replaces_welcome_with_notice() {
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.push_system_message("Model not supported.".to_owned());
+        assert!(rendered_text(&mut app, 80, 24).contains("Model not supported."));
+        assert!(!app.chat.is_empty());
     }
 
     // ── run_with_events ──
@@ -1924,7 +1936,7 @@ mod tests {
         for action in [
             UserAction::SwapConfig {
                 model: Some(crate::model::ResolvedModelId::new(
-                    "claude-opus-4-7".to_owned(),
+                    "claude-opus-5-5".to_owned(),
                 )),
                 effort: None,
             },
@@ -2383,7 +2395,7 @@ mod tests {
             UserAction::SwapConfig { model, effort } => {
                 assert_eq!(
                     model.as_ref().map(crate::model::ResolvedModelId::as_str),
-                    Some("claude-haiku-4-5")
+                    Some("claude-haiku-5-5")
                 );
                 assert_eq!(effort, None);
             }
@@ -2470,39 +2482,38 @@ mod tests {
 
     #[test]
     fn handle_config_changed_model_swap_refreshes_status_and_chat() {
-        // Three surfaces refresh in one shot: status-bar label,
-        // `session_info` (backs `/status` / `/config`), and a chat
-        // confirmation block. Display name is derived locally from `model_id`.
+        // Three surfaces refresh in one shot: status-bar label, `session_info` (backs `/status` /
+        // `/config`), and a chat confirmation block.
         let (mut app, _rx, _agent_tx) = test_app(None);
         app.handle_agent_event(AgentEvent::ConfigChanged {
-            model_id: "claude-sonnet-4-6".to_owned(),
+            model: spec("claude-sonnet-5-5"),
             effort: Some(crate::config::Effort::High),
             compaction: crate::config::CompactionConfig::resolved_for_test(
                 crate::config::AutoCompactionConfig {
                     enabled: true,
-                    threshold_tokens: Some(test_thresholds::WINDOW_200K),
+                    threshold_tokens: Some(test_thresholds::WINDOW_1M),
                 },
             ),
             requested_effort: None,
         });
 
-        assert_eq!(app.session_info.config.model_id, "claude-sonnet-4-6");
+        assert_eq!(app.session_info.config.model.id(), "claude-sonnet-5-5");
         assert_eq!(
             app.session_info.config.effort,
             Some(crate::config::Effort::High),
         );
-        assert_eq!(app.status_bar.model(), "Sonnet 4.6");
+        assert_eq!(app.status_bar.model(), "Sonnet 5.5");
         assert_eq!(
             app.session_info.config.compaction.auto.threshold_tokens,
-            Some(test_thresholds::WINDOW_200K),
+            Some(test_thresholds::WINDOW_1M),
         );
         let body = app.chat.last_system_text().expect("confirmation block");
         assert_eq!(
             body,
             format!(
-                "Switched to Claude Sonnet 4.6 (claude-sonnet-4-6) · effort high. \
+                "Switched to Claude Sonnet 5.5 (claude-sonnet-5-5) · effort high. \
                  Auto compaction at {} tokens.",
-                test_thresholds::WINDOW_200K,
+                test_thresholds::WINDOW_1M,
             ),
         );
         assert!(app.dirty);
@@ -2515,7 +2526,7 @@ mod tests {
         let (mut app, _rx, _agent_tx) = test_app(None);
         let original_model = app.status_bar.model().to_owned();
         app.handle_agent_event(AgentEvent::ConfigChanged {
-            model_id: app.session_info.config.model_id.clone(),
+            model: app.session_info.config.model.clone(),
             effort: Some(crate::config::Effort::Xhigh),
             compaction: app.session_info.config.compaction,
             requested_effort: Some(crate::config::Effort::Xhigh),
@@ -2537,7 +2548,7 @@ mod tests {
         // Pin: no `effort` substring at all, never a stray "none"
         // word. Mutation that prints `effort none.` would surface here.
         let s = format_config_change(
-            "claude-haiku-4-5",
+            &spec("custom-model"),
             true,
             None,
             None,
@@ -2545,7 +2556,7 @@ mod tests {
             base_compaction(),
             base_compaction(),
         );
-        assert_eq!(s, "Switched to Claude Haiku 4.5 (claude-haiku-4-5).");
+        assert_eq!(s, "Switched to custom-model (custom-model).");
     }
 
     #[test]
@@ -2554,7 +2565,7 @@ mod tests {
         // the requested tier didn't apply, otherwise a silent drop reads as a config change
         // landing.
         let s = format_config_change(
-            "claude-haiku-4-5",
+            &spec("custom-model"),
             true,
             None,
             None,
@@ -2564,7 +2575,7 @@ mod tests {
         );
         assert_eq!(
             s,
-            "Switched to Claude Haiku 4.5 (claude-haiku-4-5). \
+            "Switched to custom-model (custom-model). \
              Effort unchanged: model has no effort tier (asked for high).",
         );
     }
@@ -2574,7 +2585,7 @@ mod tests {
         // User had a tier; new model has none. Surface the change so
         // the user knows their effort just disappeared.
         let s = format_config_change(
-            "claude-haiku-4-5",
+            &spec("custom-model"),
             true,
             Some(crate::config::Effort::Xhigh),
             None,
@@ -2584,7 +2595,7 @@ mod tests {
         );
         assert_eq!(
             s,
-            "Switched to Claude Haiku 4.5 (claude-haiku-4-5). Effort cleared (model has no effort tier)."
+            "Switched to custom-model (custom-model). Effort cleared (model has no effort tier)."
         );
     }
 
@@ -2594,80 +2605,48 @@ mod tests {
         // distinguishing this from "user's pick survived" prevents
         // the user from thinking they chose this tier.
         let s = format_config_change(
-            "claude-opus-4-7",
+            &spec("claude-opus-5-5"),
             true,
             None,
-            Some(crate::config::Effort::Xhigh),
-            None,
-            base_compaction(),
-            base_compaction(),
-        );
-        assert_eq!(
-            s,
-            "Switched to Claude Opus 4.7 (claude-opus-4-7) · effort xhigh (model default)."
-        );
-    }
-
-    #[test]
-    fn format_config_change_swap_marks_clamp_when_new_effort_below_previous() {
-        // The effective tier changed; surface the temporary clamp.
-        let s = format_config_change(
-            "claude-sonnet-4-6",
-            true,
-            Some(crate::config::Effort::Xhigh),
-            Some(crate::config::Effort::High),
-            None,
-            base_compaction(),
-            base_compaction(),
-        );
-        assert_eq!(
-            s,
-            "Switched to Claude Sonnet 4.6 (claude-sonnet-4-6) · effort high (clamped from xhigh)."
-        );
-    }
-
-    #[test]
-    fn format_config_change_swap_quiet_when_effort_unchanged() {
-        // Same tier survives — no clamp / default annotation. Pin
-        // exact format so a stray suffix (`(unchanged)`) would fail.
-        let s = format_config_change(
-            "claude-opus-4-7",
-            true,
-            Some(crate::config::Effort::High),
-            Some(crate::config::Effort::High),
-            None,
-            base_compaction(),
-            base_compaction(),
-        );
-        assert_eq!(
-            s,
-            "Switched to Claude Opus 4.7 (claude-opus-4-7) · effort high.",
-        );
-    }
-
-    #[test]
-    fn format_config_change_swap_with_explicit_effort_clamped_against_new_caps() {
-        // Combined picker case: user asks for xhigh on Sonnet (caps at
-        // high). Surface that the *requested* tier was clamped — not the previous-effort delta.
-        let s = format_config_change(
-            "claude-sonnet-4-6",
-            true,
             Some(crate::config::Effort::Medium),
-            Some(crate::config::Effort::High),
-            Some(crate::config::Effort::Xhigh),
+            None,
             base_compaction(),
             base_compaction(),
         );
         assert_eq!(
             s,
-            "Switched to Claude Sonnet 4.6 (claude-sonnet-4-6) · effort high (clamped from xhigh)."
+            "Switched to Claude Opus 5.5 (claude-opus-5-5) · effort medium (model default)."
         );
+    }
+
+    #[test]
+    fn format_config_change_swap_reports_carried_or_picked_effort_plainly() {
+        // A carried-over tier and an explicit pick both read as the plain effort clause. Pin
+        // exact format so a stray suffix (`(unchanged)`) would fail.
+        for (prev, requested, new) in [
+            (Some(Effort::High), None, Effort::High),
+            (Some(Effort::Medium), Some(Effort::Max), Effort::Max),
+        ] {
+            let s = format_config_change(
+                &spec("claude-opus-5-5"),
+                true,
+                prev,
+                Some(new),
+                requested,
+                base_compaction(),
+                base_compaction(),
+            );
+            assert_eq!(
+                s,
+                format!("Switched to Claude Opus 5.5 (claude-opus-5-5) · effort {new}."),
+            );
+        }
     }
 
     #[test]
     fn format_config_change_effort_explicit_pick_matches_resolution() {
         let s = format_config_change(
-            "claude-opus-4-7",
+            &spec("claude-opus-5-5"),
             false,
             Some(crate::config::Effort::High),
             Some(crate::config::Effort::Xhigh),
@@ -2679,25 +2658,11 @@ mod tests {
     }
 
     #[test]
-    fn format_config_change_effort_clamp_surfaces_what_user_asked_for() {
-        let s = format_config_change(
-            "claude-sonnet-4-6",
-            false,
-            Some(crate::config::Effort::Medium),
-            Some(crate::config::Effort::High),
-            Some(crate::config::Effort::Xhigh),
-            base_compaction(),
-            base_compaction(),
-        );
-        assert_eq!(s, "Effort set to high (clamped from xhigh).");
-    }
-
-    #[test]
     fn format_config_change_effort_pick_on_no_tier_model_surfaces_loss() {
         // The slash command preflight stops this through /effort, but
         // client-driven flows could still emit it.
         let s = format_config_change(
-            "claude-haiku-4-5",
+            &spec("custom-model"),
             false,
             None,
             None,
@@ -2712,15 +2677,29 @@ mod tests {
     }
 
     #[test]
+    fn format_config_change_without_model_or_effort_reports_no_change() {
+        let s = format_config_change(
+            &spec("custom-model"),
+            false,
+            None,
+            None,
+            None,
+            base_compaction(),
+            base_compaction(),
+        );
+        assert_eq!(s, "Config unchanged.");
+    }
+
+    #[test]
     fn format_config_change_model_swap_mentions_compaction_threshold_change() {
         let new_compaction =
             CompactionConfig::resolved_for_test(crate::config::AutoCompactionConfig {
                 enabled: true,
-                threshold_tokens: Some(test_thresholds::WINDOW_200K),
+                threshold_tokens: Some(test_thresholds::WINDOW_1M),
             });
 
         let s = format_config_change(
-            "claude-sonnet-4-6",
+            &spec("claude-sonnet-5-5"),
             true,
             Some(crate::config::Effort::High),
             Some(crate::config::Effort::High),
@@ -2732,9 +2711,9 @@ mod tests {
         assert_eq!(
             s,
             format!(
-                "Switched to Claude Sonnet 4.6 (claude-sonnet-4-6) · effort high. \
+                "Switched to Claude Sonnet 5.5 (claude-sonnet-5-5) · effort high. \
                  Auto compaction at {} tokens.",
-                test_thresholds::WINDOW_200K,
+                test_thresholds::WINDOW_1M,
             ),
         );
     }
@@ -3052,6 +3031,13 @@ mod tests {
         assert_eq!(app.status_bar.status(), &Status::Streaming);
         // Unlike StreamToken, thinking does not disable input on its
         // own — the matching SubmitPrompt already did that.
+    }
+
+    #[test]
+    fn handle_progress_update_renders_note_in_chat() {
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.handle_agent_event(AgentEvent::ProgressUpdate("Running the suite.".to_owned()));
+        assert!(rendered_text(&mut app, 80, 24).contains("Running the suite."));
     }
 
     #[test]

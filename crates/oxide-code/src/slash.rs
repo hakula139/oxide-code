@@ -113,7 +113,7 @@ pub(crate) fn test_session_info() -> LiveSessionInfo {
         AutoCompactionConfig, CompactionConfig, ConfigSnapshot, Effort, PromptCacheTtl,
     };
 
-    // Real MODELS row so `display_name()` resolves to a known label.
+    // Real MODELS row so the display name resolves to a known label.
     LiveSessionInfo {
         cwd: "~/test".to_owned(),
         git_cwd: None,
@@ -124,7 +124,7 @@ pub(crate) fn test_session_info() -> LiveSessionInfo {
             auth_label: "API key",
             base_url: "https://api.test.invalid".to_owned(),
             extra_ca_certs: None,
-            model_id: "claude-opus-4-8".to_owned(),
+            model: crate::model::ModelSpec::resolve("claude-opus-5-5".to_owned()),
             effort: Some(Effort::High),
             max_tokens: 32_000,
             max_tool_rounds: None,

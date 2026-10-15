@@ -44,7 +44,7 @@ ox                                          # Start an interactive session
 ├── client/
 │   ├── anthropic.rs                        # Anthropic Messages API client (Client struct + streaming)
 │   └── anthropic/
-│       ├── betas.rs                        # Per-request `anthropic-beta` header computation, [1m] gating
+│       ├── betas.rs                        # Per-request `anthropic-beta` header computation
 │       ├── billing.rs                      # Anthropic billing attestation (fingerprint, cch hash, x-anthropic-billing-header)
 │       ├── completion.rs                   # Non-streaming `Client::complete` + body builder for one-shots
 │       ├── identity.rs                     # Per-machine `device_id` for `metadata.user_id`: lazy mint + persist at $XDG_DATA_HOME/ox/user-id
@@ -63,10 +63,10 @@ ox                                          # Start an interactive session
 │   └── tui.rs                              # TUI driver: App event loop beside the agent task, which serves UserActions and finalizes the live session
 ├── file_tracker.rs                         # Per-session FileTracker: Read-before-Edit gate, mtime+xxh64 staleness check, persist-on-finish + verify-on-resume
 ├── main.rs                                 # CLI entry point: config + session resolution, mode dispatch to a driver, process exit code
-├── message.rs                              # Conversation message types
-├── model.rs                                # Ground-truth table: display name, cutoff, capabilities, and unknown raw-id fallback
+├── message.rs                              # Conversation message types + progress-update lookup
+├── model.rs                                # Supported-model catalogue + ModelSpec (resolved id → effort, thinking, context window, display)
 ├── model/
-│   └── pricing.rs                          # Per-million-token cost rates + USD estimator (excludes account / marketplace adjustments)
+│   └── pricing.rs                          # Per-million-token cost rates + per-request USD estimator with prompt-size tiers (excludes account / marketplace adjustments)
 ├── permission.rs                           # Permission module root: Mode, PermissionClass, Policy::decide tiered gate, GateTarget path resolution (symlinks, protected paths, workspace zone), dangerous-pattern deny defaults
 ├── permission/
 │   └── rule.rs                             # Rule grammar: `class(specifier)` parse + match (bash exact / prefix / wildcard, cwd-relative or absolute path globs)
@@ -110,7 +110,7 @@ ox                                          # Start an interactive session
 │   ├── help.rs                             # /help: opens a KvOverview modal listing every registered command
 │   ├── init.rs                             # /init: synthesize an AGENTS.md / CLAUDE.md author-or-update prompt
 │   ├── matcher.rs                          # filter_and_rank: tier-ranked popup matches
-│   ├── model.rs                            # /model: bare opens picker. `/model <id>` resolves alias → lookup → unique suffix → unique substring. `[1m]` first-class
+│   ├── model.rs                            # /model: bare opens picker. `/model <id>` resolves exact id → unique substring (`opus`, `sonnet`, `haiku`)
 │   ├── parser.rs                           # parse_slash + popup_state: detect `/cmd args`. Allows `:` and `.`. unescape_literal maps `//x` to `/x`
 │   ├── picker.rs                           # ModelEffortPicker: combined model + effort modal. Emits a single SwapConfig
 │   ├── registry.rs                         # SlashCommand trait + SlashOutcome (Forward / Modal / chat output) + echoes_input + BUILT_INS slice + alias-aware lookup
@@ -135,7 +135,7 @@ ox                                          # Start an interactive session
 │   │   ├── chat/
 │   │   │   ├── blocks.rs                   # ChatBlock trait + RenderCtx + icon-prefix helpers
 │   │   │   ├── blocks/
-│   │   │   │   ├── assistant.rs            # AssistantText + AssistantThinking
+│   │   │   │   ├── assistant.rs            # AssistantText + AssistantThinking + ProgressUpdate
 │   │   │   │   ├── compacted.rs            # CompactedBlock: bordered surface with bold accent header (count + optional focus) + markdown summary body
 │   │   │   │   ├── error.rs                # ErrorBlock
 │   │   │   │   ├── git_diff.rs             # GitDiffBlock: unified-diff render reusing the Edit-tool `+` / `-` row-bg + line-number gutter

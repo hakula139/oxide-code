@@ -15,8 +15,8 @@ use ratatui::widgets::Paragraph;
 
 use self::blocks::{
     AssistantText, AssistantThinking, BlockKind, ChatBlock, CompactedBlock, ErrorBlock,
-    GitDiffBlock, InterruptedMarker, RenderCtx, StreamingAssistant, SystemMessageBlock,
-    ToolCallBlock, ToolResultBlock, UserMessage,
+    GitDiffBlock, InterruptedMarker, ProgressUpdate, RenderCtx, StreamingAssistant,
+    SystemMessageBlock, ToolCallBlock, ToolResultBlock, UserMessage,
 };
 use self::stack::{CachedBlock, Stack};
 use crate::agent::compaction::strip_synthetic_post_compact_prefix;
@@ -125,6 +125,9 @@ impl ChatView {
                 Interaction::AssistantThinking(text) => {
                     self.push_block(AssistantThinking::new(text));
                 }
+                Interaction::ProgressUpdate(text) => {
+                    self.push_block(ProgressUpdate::new(text));
+                }
                 Interaction::ToolCall { id, name, input } => {
                     let icon = tools.icon(name);
                     let label = tools.label(name, input);
@@ -214,6 +217,14 @@ impl ChatView {
         }
         let text = std::mem::take(&mut self.thinking_buffer);
         self.push_block(AssistantThinking::new(text));
+    }
+
+    /// Appends the progress note for the tool call about to follow, flushing any in-flight
+    /// streaming buffer.
+    pub(crate) fn push_progress_update(&mut self, text: String) {
+        self.commit_streaming();
+        self.bump_paused_counter();
+        self.push_block(ProgressUpdate::new(text));
     }
 
     /// Appends a tool call, flushing any in-flight streaming buffer.
@@ -1151,6 +1162,53 @@ mod tests {
         assert!(text.contains("reply"));
     }
 
+    #[test]
+    fn load_history_shows_progress_update_once_ahead_of_its_tool_call() {
+        let messages = [
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Thinking {
+                        thinking: String::new(),
+                        signature: "sig1".to_owned(),
+                    },
+                    ContentBlock::Thinking {
+                        thinking: "Running the suite.".to_owned(),
+                        signature: "sig2".to_owned(),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "t1".to_owned(),
+                        name: "bash".to_owned(),
+                        input: serde_json::json!({"command": "cargo test"}),
+                    },
+                ],
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "t1".to_owned(),
+                    content: "ok".to_owned(),
+                    is_error: false,
+                }],
+            },
+        ];
+        for show_thinking in [false, true] {
+            let mut chat = ChatView::new(&Theme::default(), show_thinking);
+            chat.load_history(&messages, None, &HashMap::new(), &test_tools());
+            let text = all_text(&mut chat);
+            assert_eq!(
+                text.matches("Running the suite.").count(),
+                1,
+                "show_thinking={show_thinking}: {text}",
+            );
+            assert_eq!(text.contains("Thinking..."), show_thinking, "{text}");
+            assert!(
+                text.find("Running the suite.") < text.find("cargo test"),
+                "{text}"
+            );
+        }
+    }
+
     // ── push_user_message ──
 
     #[test]
@@ -1536,6 +1594,29 @@ mod tests {
         assert_eq!(chat.thinking_buffer, "");
         let text = all_text(&mut chat);
         assert!(text.contains("plan before tool"));
+    }
+
+    // ── push_progress_update ──
+
+    #[test]
+    fn push_progress_update_shows_note_once_ahead_of_tool_call() {
+        // Live, the note streams as thinking first and arrives again just before its tool call.
+        for show_thinking in [false, true] {
+            let mut chat = ChatView::new(&Theme::default(), show_thinking);
+            chat.append_thinking_token("Running the suite.");
+            chat.push_progress_update("Running the suite.".to_owned());
+            chat.push_tool_call("$", "cargo test");
+            let text = all_text(&mut chat);
+            assert_eq!(
+                text.matches("Running the suite.").count(),
+                1,
+                "show_thinking={show_thinking}: {text}",
+            );
+            assert!(
+                text.find("Running the suite.") < text.find("cargo test"),
+                "{text}"
+            );
+        }
     }
 
     // ── push_tool_call ──

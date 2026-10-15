@@ -17,7 +17,7 @@ use crate::client::anthropic::Client;
 use crate::client::anthropic::wire::{ContentBlockInfo, Delta, StreamEvent, Usage};
 use crate::config::AutoCompactionConfig;
 use crate::file_tracker::FileTracker;
-use crate::message::{ContentBlock, Message, Role, strip_trailing_thinking};
+use crate::message::{ContentBlock, Message, Role, progress_note};
 use crate::prompt::PromptParts;
 use crate::session::handle::{RecordOutcome, SessionHandle};
 use crate::tool::{ToolDefinition, ToolMetadata, ToolOutput, ToolRegistry};
@@ -133,17 +133,6 @@ impl TokenUsage {
         self.output
     }
 
-    fn add(self, other: Self) -> Self {
-        Self {
-            input: self.input.saturating_add(other.input),
-            cache_creation_input: self
-                .cache_creation_input
-                .saturating_add(other.cache_creation_input),
-            cache_read_input: self.cache_read_input.saturating_add(other.cache_read_input),
-            output: self.output.saturating_add(other.output),
-        }
-    }
-
     fn observe(&mut self, usage: &Usage) {
         // Anthropic's wire usage carries fresh totals only on the events that own them:
         // `MessageStart` reports input + cache fields with `output_tokens = 0`, and `MessageDelta`
@@ -165,14 +154,14 @@ impl TokenUsage {
 }
 
 /// Per-turn usage report emitted at the end of [`agent_turn`].
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct TurnReport {
     /// Latest single round's usage, used by the auto-compaction threshold check, which compares
     /// against the most recent prompt size rather than the historical sum.
     pub(crate) usage: Option<TokenUsage>,
-    /// Sum of every round's usage in this turn, used by session cost accumulation since each
-    /// round was billed independently.
-    pub(crate) billable_usage: Option<TokenUsage>,
+    /// Every completed round's usage in order. Each round is its own API request, and some models
+    /// pick their price tier from a single request's prompt size, so cost is estimated per entry.
+    pub(crate) billable_rounds: Vec<TokenUsage>,
 }
 
 /// Result of one [`agent_turn`] invocation. The report carries usage observed before any abort
@@ -265,14 +254,13 @@ pub(crate) async fn agent_turn(
     let tool_defs = tools.definitions();
     let mut pending_prompts: Vec<String> = Vec::new();
     let mut latest_usage = None;
-    let mut billable_usage = None;
+    let mut billable_rounds = Vec::new();
     let report = |latest, billable| TurnReport {
         usage: latest,
-        billable_usage: billable,
+        billable_rounds: billable,
     };
 
     for _ in 0..max_tool_rounds.unwrap_or(u32::MAX) {
-        strip_trailing_thinking(messages);
         let stream = await_unless_aborted(
             stream_response(client, messages, &tool_defs, prompt, sink),
             user_rx,
@@ -287,16 +275,17 @@ pub(crate) async fn agent_turn(
             Ok(Ok(outcome)) => outcome,
             Ok(Err(error)) => {
                 return TurnOutcome::aborted(
-                    report(latest_usage, billable_usage),
+                    report(latest_usage, billable_rounds),
                     TurnAbort::Failed(error),
                 );
             }
-            Err(abort) => return TurnOutcome::aborted(report(latest_usage, billable_usage), abort),
+            Err(abort) => {
+                return TurnOutcome::aborted(report(latest_usage, billable_rounds), abort);
+            }
         };
         if let Some(usage) = usage {
             latest_usage = Some(usage);
-            billable_usage =
-                Some(billable_usage.map_or(usage, |total: TokenUsage| total.add(usage)));
+            billable_rounds.push(usage);
         }
 
         let tool_uses = collect_tool_uses(&blocks);
@@ -309,7 +298,8 @@ pub(crate) async fn agent_turn(
             // Queued prompts drain on the TUI side at idle.
             record_message(session, assistant_msg.clone(), sink).await;
             messages.push(assistant_msg);
-            return TurnOutcome::completed(report(latest_usage, billable_usage));
+            notify_if_interrupted(messages, sink);
+            return TurnOutcome::completed(report(latest_usage, billable_rounds));
         }
 
         let round = run_tool_round(
@@ -324,7 +314,9 @@ pub(crate) async fn agent_turn(
         .await;
         let (results, sidecars) = match round {
             Ok(pair) => pair,
-            Err(abort) => return TurnOutcome::aborted(report(latest_usage, billable_usage), abort),
+            Err(abort) => {
+                return TurnOutcome::aborted(report(latest_usage, billable_rounds), abort);
+            }
         };
         let tool_result_msg = Message {
             role: Role::User,
@@ -341,7 +333,7 @@ pub(crate) async fn agent_turn(
     // `Some(n)` and the model ran `n` rounds without a final reply.
     let cap = max_tool_rounds.unwrap_or(u32::MAX);
     TurnOutcome::aborted(
-        report(latest_usage, billable_usage),
+        report(latest_usage, billable_rounds),
         TurnAbort::Failed(anyhow!(
             "agent stopped after {cap} tool rounds without a final response \
              — this is a safety cap against runaway loops. Ask again with a narrower request."
@@ -431,6 +423,34 @@ fn record_auto_compact_failure(
             "auto-compaction-disabled",
         );
     }
+}
+
+/// Tells the user to send a message when `messages` ends on a response that stopped early, which
+/// only a new prompt resumes.
+pub(crate) fn notify_if_interrupted(messages: &[Message], sink: &dyn AgentSink) {
+    if let Some(last) = messages.last()
+        && last.role == Role::Assistant
+        && ends_on_interrupted_work(&last.content)
+    {
+        sink.emit(
+            AgentEvent::Error(
+                "The response was interrupted before it finished. Send a message to continue."
+                    .to_owned(),
+            ),
+            "interrupted-work",
+        );
+    }
+}
+
+/// Text of the progress block that stands in for unfinished work when a response stops early.
+const INTERRUPTED_WORK_SENTINEL: &str =
+    "This part of the response was interrupted before it finished.";
+
+fn ends_on_interrupted_work(blocks: &[ContentBlock]) -> bool {
+    matches!(
+        blocks.last(),
+        Some(ContentBlock::Thinking { thinking, .. }) if thinking == INTERRUPTED_WORK_SENTINEL
+    )
 }
 
 fn collect_tool_uses(blocks: &[ContentBlock]) -> Vec<(String, String, serde_json::Value)> {
@@ -756,6 +776,15 @@ impl BlockAccumulator {
             Self::Skipped => (None, None),
         }
     }
+
+    /// The block's thinking text in the form [`progress_note`] reads.
+    fn thinking_text(&self) -> Option<&str> {
+        match self {
+            Self::Thinking { thinking, .. } => Some(thinking),
+            Self::RedactedThinking { .. } => Some(""),
+            _ => None,
+        }
+    }
 }
 
 /// Returns empty object + error string on failure.
@@ -812,10 +841,14 @@ async fn stream_response(
                     blocks.resize_with(index + 1, || None);
                 }
                 let acc = init_accumulator(content_block, index);
-                if let BlockAccumulator::Text(text) = &acc
-                    && !text.is_empty()
-                {
-                    _ = sink.send(AgentEvent::StreamToken(text.clone()));
+                match &acc {
+                    BlockAccumulator::Text(text) if !text.is_empty() => {
+                        _ = sink.send(AgentEvent::StreamToken(text.clone()));
+                    }
+                    BlockAccumulator::ToolUse { .. } | BlockAccumulator::ServerToolUse { .. } => {
+                        send_progress_note(&blocks[..index], sink);
+                    }
+                    _ => {}
                 }
                 blocks[index] = Some(acc);
             }
@@ -875,6 +908,16 @@ fn init_accumulator(content_block: ContentBlockInfo, index: usize) -> BlockAccum
             warn!("skipping unknown content block at index {index}");
             BlockAccumulator::Skipped
         }
+    }
+}
+
+/// Sends the progress note for a tool use whose block starts after `preceding`.
+fn send_progress_note(preceding: &[Option<BlockAccumulator>], sink: &dyn AgentSink) {
+    let thinking = preceding
+        .iter()
+        .map(|block| block.as_ref().and_then(BlockAccumulator::thinking_text));
+    if let Some(note) = progress_note(thinking) {
+        _ = sink.send(AgentEvent::ProgressUpdate(note.to_owned()));
     }
 }
 
@@ -1075,7 +1118,7 @@ mod tests {
             StreamEvent::MessageStart {
                 message: MessageResponse {
                     id: "msg_1".into(),
-                    model: "claude-sonnet-4-6".into(),
+                    model: "claude-sonnet-5-5".into(),
                     usage: Some(Usage {
                         input_tokens: 0,
                         cache_creation_input_tokens: 0,
@@ -1104,7 +1147,7 @@ mod tests {
             StreamEvent::MessageStart {
                 message: MessageResponse {
                     id: "msg_1".into(),
-                    model: "claude-sonnet-4-6".into(),
+                    model: "claude-sonnet-5-5".into(),
                     usage: Some(Usage {
                         input_tokens: 0,
                         cache_creation_input_tokens: 0,
@@ -1127,7 +1170,7 @@ mod tests {
             StreamEvent::MessageStart {
                 message: MessageResponse {
                     id: "msg_1".into(),
-                    model: "claude-sonnet-4-6".into(),
+                    model: "claude-sonnet-5-5".into(),
                     usage: Some(Usage {
                         input_tokens,
                         cache_creation_input_tokens: 0,
@@ -1172,7 +1215,7 @@ mod tests {
             StreamEvent::MessageStart {
                 message: MessageResponse {
                     id: "msg_1".into(),
-                    model: "claude-sonnet-4-6".into(),
+                    model: "claude-sonnet-5-5".into(),
                     usage: Some(Usage {
                         input_tokens,
                         cache_creation_input_tokens,
@@ -1239,7 +1282,7 @@ mod tests {
             StreamEvent::MessageStart {
                 message: MessageResponse {
                     id: "msg_1".into(),
-                    model: "claude-sonnet-4-6".into(),
+                    model: "claude-sonnet-5-5".into(),
                     usage: Some(Usage {
                         input_tokens,
                         cache_creation_input_tokens: 0,
@@ -1249,6 +1292,73 @@ mod tests {
                 },
             },
         );
+        events
+    }
+
+    enum Block<'a> {
+        Thinking(&'a str),
+        RedactedThinking,
+        Text(&'a str),
+        Echo(&'a str),
+        ServerTool(&'a str),
+    }
+
+    /// One response streaming `blocks` in order. `Echo` and `ServerTool` blocks are `echo` and
+    /// `web_search` calls by id.
+    fn blocks_turn(blocks: &[Block<'_>]) -> Vec<StreamEvent> {
+        let mut events = Vec::new();
+        for (index, block) in blocks.iter().enumerate() {
+            let (content_block, delta) = match block {
+                Block::Thinking(text) => (
+                    ContentBlockInfo::Thinking {
+                        thinking: String::new(),
+                        signature: "sig".into(),
+                    },
+                    Some(Delta::ThinkingDelta {
+                        thinking: (*text).into(),
+                    }),
+                ),
+                Block::RedactedThinking => (
+                    ContentBlockInfo::RedactedThinking {
+                        data: "opaque".into(),
+                    },
+                    None,
+                ),
+                Block::Text(text) => (
+                    ContentBlockInfo::Text {
+                        text: String::new(),
+                    },
+                    Some(Delta::TextDelta {
+                        text: (*text).into(),
+                    }),
+                ),
+                Block::Echo(id) => (
+                    ContentBlockInfo::ToolUse {
+                        id: (*id).into(),
+                        name: "echo".into(),
+                    },
+                    Some(Delta::InputJsonDelta {
+                        partial_json: "{}".into(),
+                    }),
+                ),
+                Block::ServerTool(id) => (
+                    ContentBlockInfo::ServerToolUse {
+                        id: (*id).into(),
+                        name: "web_search".into(),
+                    },
+                    Some(Delta::InputJsonDelta {
+                        partial_json: "{}".into(),
+                    }),
+                ),
+            };
+            events.push(StreamEvent::ContentBlockStart {
+                index,
+                content_block,
+            });
+            events.extend(delta.map(|delta| StreamEvent::ContentBlockDelta { index, delta }));
+            events.push(StreamEvent::ContentBlockStop { index });
+        }
+        events.push(StreamEvent::MessageStop);
         events
     }
 
@@ -1336,6 +1446,14 @@ mod tests {
         PromptParts::default()
     }
 
+    fn round_totals(report: &TurnReport) -> Vec<u32> {
+        report
+            .billable_rounds
+            .iter()
+            .map(|usage| usage.total_tokens())
+            .collect()
+    }
+
     /// Gate that bypasses every rule (`yolo`), so the dispatch tests exercise the turn loop without
     /// the permission layer interceding. Permission-specific behavior is covered in `permission`.
     fn yolo_gate() -> GateContext<'static> {
@@ -1399,7 +1517,7 @@ mod tests {
 
     fn test_session(dir: &std::path::Path) -> SessionHandle {
         let store = test_store(dir);
-        handle::start(&store, "claude-sonnet-4-6")
+        handle::start(&store, "claude-sonnet-5-5")
     }
 
     /// Handle whose actor channel is closed. Every write returns actor-gone.
@@ -1984,10 +2102,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(report.usage.map(TokenUsage::total_tokens), Some(107));
-        assert_eq!(
-            report.billable_usage.map(TokenUsage::total_tokens),
-            Some(107)
-        );
+        assert_eq!(round_totals(&report), [107]);
     }
 
     #[tokio::test]
@@ -2020,7 +2135,7 @@ mod tests {
         assert_eq!(usage.output_tokens(), 5);
         assert_eq!(usage.context_tokens(), 60);
         assert_eq!(usage.total_tokens(), 65);
-        assert_eq!(report.billable_usage, Some(usage));
+        assert_eq!(report.billable_rounds, [usage]);
     }
 
     #[tokio::test]
@@ -2114,10 +2229,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(report.usage.map(TokenUsage::total_tokens), Some(3));
-        assert_eq!(
-            report.billable_usage.map(TokenUsage::total_tokens),
-            Some(14)
-        );
+        assert_eq!(round_totals(&report), [11, 3]);
         assert_eq!(
             sink.events()
                 .iter()
@@ -2347,7 +2459,7 @@ mod tests {
             UserAction::ConfirmExit,
             UserAction::Clear,
             UserAction::SwapConfig {
-                model: Some(ResolvedModelId::new("claude-opus-4-7".to_owned())),
+                model: Some(ResolvedModelId::new("claude-opus-5-5".to_owned())),
                 effort: None,
             },
             UserAction::SwapConfig {
@@ -2451,7 +2563,7 @@ mod tests {
     #[tokio::test]
     async fn agent_turn_cancel_during_tool_round_preserves_completed_round_usage() {
         // Round 1's stream observes usage before the tool gates. Cancel arrives during the tool
-        // execution, so the abort must still carry billable_usage from the completed round.
+        // execution, so the abort must still carry billable_rounds from the completed round.
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let client = FakeClient::new(vec![tool_use_turn_with_usage(
@@ -2491,8 +2603,8 @@ mod tests {
             outcome.result,
         );
         assert_eq!(
-            outcome.report.billable_usage.map(TokenUsage::total_tokens),
-            Some(10),
+            round_totals(&outcome.report),
+            [10],
             "round 1 usage must reach the caller despite the abort: {:?}",
             outcome.report,
         );
@@ -2629,7 +2741,7 @@ mod tests {
     #[tokio::test]
     async fn agent_turn_safety_cap_bail_preserves_completed_round_usage() {
         // Each capped round reports usage. The cap-trip abort must still fold every round into
-        // billable_usage so the caller bills what the API charged for.
+        // billable_rounds so the caller bills what the API charged for.
         const CAP: u32 = 2;
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
@@ -2660,9 +2772,9 @@ mod tests {
             outcome.result,
         );
         assert_eq!(
-            outcome.report.billable_usage.map(TokenUsage::total_tokens),
-            Some(CAP * 7),
-            "every capped round must reach billable_usage: {:?}",
+            round_totals(&outcome.report),
+            vec![7; CAP as usize],
+            "every capped round must reach billable_rounds: {:?}",
             outcome.report,
         );
     }
@@ -2733,10 +2845,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_turn_failed_after_completed_round_preserves_billable_usage() {
+    async fn agent_turn_failed_after_completed_round_preserves_billable_rounds() {
         // Round 1 completes with reported usage. Round 2 emits a stream Error so the turn
         // bails with TurnAbort::Failed. The completed round's usage must still ride out on
-        // billable_usage so the caller bills what the API charged for.
+        // billable_rounds so the caller bills what the API charged for.
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let client = FakeClient::new(vec![
@@ -2771,36 +2883,35 @@ mod tests {
             outcome.result,
         );
         assert_eq!(
-            outcome.report.billable_usage.map(TokenUsage::total_tokens),
-            Some(13),
+            round_totals(&outcome.report),
+            [13],
             "round 1 usage must reach the caller despite the bail: {:?}",
             outcome.report,
         );
     }
 
     #[tokio::test]
-    async fn agent_turn_strips_trailing_thinking_before_next_round() {
-        // The API rejects a trailing thinking block on follow-up rounds.
+    async fn agent_turn_emits_each_progress_update_as_its_tool_use_starts_streaming() {
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
-        let client = FakeClient::new(vec![text_turn("done")]);
-        let tools = ToolRegistry::new(vec![]);
+        let client = FakeClient::new(vec![
+            blocks_turn(&[
+                Block::Thinking(""),
+                Block::Thinking("Searching."),
+                Block::ServerTool("s1"),
+                Block::Text("Found it."),
+                Block::Echo("t1"),
+                Block::Thinking("Now b."),
+                Block::RedactedThinking,
+                Block::Echo("t2"),
+                Block::Thinking("Summing up."),
+                Block::Text("Checked."),
+            ]),
+            text_turn("Done"),
+        ]);
+        let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
         let sink = CapturingSink::new();
-        let mut messages = vec![
-            Message::user("hi"),
-            Message {
-                role: Role::Assistant,
-                content: vec![
-                    ContentBlock::Text {
-                        text: "intermediate".into(),
-                    },
-                    ContentBlock::Thinking {
-                        thinking: "reasoning".into(),
-                        signature: "sig".into(),
-                    },
-                ],
-            },
-        ];
+        let mut messages = vec![Message::user("run echo twice")];
 
         agent_turn(
             &client,
@@ -2816,9 +2927,107 @@ mod tests {
         .await
         .unwrap();
 
-        let stripped = &messages[1];
-        assert_eq!(stripped.content.len(), 1);
-        assert!(matches!(&stripped.content[0], ContentBlock::Text { .. }));
+        let order: Vec<String> = sink
+            .events()
+            .into_iter()
+            .filter_map(|e| match e {
+                AgentEvent::StreamToken(text) => Some(format!("token {text}")),
+                AgentEvent::ProgressUpdate(text) => Some(format!("progress {text}")),
+                AgentEvent::ToolCallStart { id, .. } => Some(format!("start {id}")),
+                AgentEvent::ToolCallEnd { id, .. } => Some(format!("end {id}")),
+                _ => None,
+            })
+            .collect();
+        // Text cuts `t1` off from any note, and a note before text introduces no tool call.
+        assert_eq!(
+            order,
+            [
+                "progress Searching.",
+                "token Found it.",
+                "progress Now b.",
+                "token Checked.",
+                "start t1",
+                "end t1",
+                "start t2",
+                "end t2",
+                "token Done",
+            ],
+        );
+        // Every block, the empty reasoning one included, stays in history for the next round.
+        assert_eq!(messages[1].content.len(), 10);
+    }
+
+    #[tokio::test]
+    async fn agent_turn_keeps_interrupted_work_note_when_tool_results_follow() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let client = FakeClient::new(vec![
+            blocks_turn(&[
+                Block::Echo("t1"),
+                Block::Thinking(INTERRUPTED_WORK_SENTINEL),
+            ]),
+            text_turn("Done"),
+        ]);
+        let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
+        let sink = CapturingSink::new();
+        let mut messages = vec![Message::user("run echo")];
+
+        agent_turn(
+            &client,
+            &tools,
+            &mut messages,
+            &empty_prompt(),
+            &sink,
+            &session,
+            &mut inert_user_rx(),
+            None,
+            &yolo_gate(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(messages.len(), 4, "round 2 ran on the tool results");
+        assert!(ends_on_interrupted_work(&messages[1].content));
+        let events = sink.events();
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Error(_) | AgentEvent::ProgressUpdate(_))),
+            "the loop resumes on its own: {events:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_turn_ending_on_interrupted_work_tells_user_to_continue() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let client = FakeClient::new(vec![blocks_turn(&[Block::Thinking(
+            INTERRUPTED_WORK_SENTINEL,
+        )])]);
+        let tools = ToolRegistry::new(vec![]);
+        let sink = CapturingSink::new();
+        let mut messages = vec![Message::user("hi")];
+
+        agent_turn(
+            &client,
+            &tools,
+            &mut messages,
+            &empty_prompt(),
+            &sink,
+            &session,
+            &mut inert_user_rx(),
+            None,
+            &yolo_gate(),
+        )
+        .await
+        .unwrap();
+
+        assert!(sink.events().iter().any(|e| matches!(
+            e,
+            AgentEvent::Error(m) if m.contains("interrupted before it finished")
+        )));
+        assert_eq!(messages[1].content.len(), 1);
+        assert!(ends_on_interrupted_work(&messages[1].content));
     }
 
     /// Covers the real `<Client as AgentClient>` path. `FakeClient` tests above stub the trait.
@@ -2826,7 +3035,7 @@ mod tests {
     async fn agent_turn_drives_real_client_over_wiremock() {
         let server = MockServer::start().await;
         let body = indoc::indoc! {r#"event: message_start
-data: {"type":"message_start","message":{"id":"msg_1","model":"claude-sonnet-4-6","usage":{"input_tokens":5,"output_tokens":0}}}
+data: {"type":"message_start","message":{"id":"msg_1","model":"claude-sonnet-5-5","usage":{"input_tokens":5,"output_tokens":0}}}
 
 event: content_block_start
 data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
@@ -2854,7 +3063,7 @@ data: {"type":"message_stop"}
         let client = test_client(
             server.uri(),
             Auth::ApiKey("sk".to_owned()),
-            "claude-sonnet-4-6",
+            "claude-sonnet-5-5",
         );
 
         let dir = tempfile::tempdir().unwrap();
@@ -3053,6 +3262,41 @@ data: {"type":"message_stop"}
         assert!(
             content.contains("denied by the permission policy"),
             "{content}"
+        );
+    }
+
+    // ── notify_if_interrupted ──
+
+    #[test]
+    fn notify_if_interrupted_only_fires_on_a_final_interrupted_response() {
+        let interrupted = Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Thinking {
+                thinking: INTERRUPTED_WORK_SENTINEL.to_owned(),
+                signature: "sig".to_owned(),
+            }],
+        };
+        let events = |messages: &[Message]| {
+            let sink = CapturingSink::new();
+            notify_if_interrupted(messages, &sink);
+            sink.events()
+                .iter()
+                .map(|e| format!("{e:?}"))
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            events(&[Message::user("hi"), interrupted.clone()]),
+            [
+                r#"Error("The response was interrupted before it finished. Send a message to continue.")"#
+            ],
+        );
+        let none: [String; 0] = [];
+        assert_eq!(events(&[]), none);
+        assert_eq!(events(&[interrupted, Message::user("go on")]), none);
+        assert_eq!(
+            events(&[Message::user("hi"), Message::assistant("done")]),
+            none
         );
     }
 

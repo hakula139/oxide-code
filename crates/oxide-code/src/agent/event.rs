@@ -7,7 +7,7 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 
 use crate::config::{CompactionConfig, Effort};
-use crate::model::ResolvedModelId;
+use crate::model::{ModelSpec, ResolvedModelId};
 use crate::tool::ToolRegistry;
 
 // ── Visible Markers ──
@@ -41,6 +41,10 @@ pub(crate) enum AgentEvent {
     /// Extended-thinking chunk rendered separately from `StreamToken` and only when the user
     /// has thinking display enabled.
     ThinkingToken(String),
+    /// Progress note the model wrote before a tool call, emitted as that call's block starts
+    /// streaming. Sinks drop it when thinking display is on, since the same text already streamed
+    /// as a [`Self::ThinkingToken`].
+    ProgressUpdate(String),
     /// Tool call emitted by the model, used to render the call row and prepare the result slot.
     ToolCallStart {
         id: String,
@@ -90,11 +94,10 @@ pub(crate) enum AgentEvent {
         instructions: Option<String>,
         automatic: bool,
     },
-    /// Live config after a [`UserAction::SwapConfig`]. `effort` is the post-clamp resolved value.
-    /// `requested_effort` is the user's pick before clamping, used to surface `(clamped from X)`
-    /// when the two differ.
+    /// Live config after a [`UserAction::SwapConfig`]. `effort` is the resolved value.
+    /// `requested_effort` is the user's pick, surfaced when an unknown model drops it.
     ConfigChanged {
-        model_id: String,
+        model: ModelSpec,
         effort: Option<Effort>,
         compaction: CompactionConfig,
         requested_effort: Option<Effort>,
@@ -263,6 +266,11 @@ impl StdioSink {
                     stdout.flush()?;
                 }
             }
+            AgentEvent::ProgressUpdate(text) => {
+                if !self.show_thinking {
+                    writeln!(stderr, "{}", text.trim())?;
+                }
+            }
             AgentEvent::ToolCallStart { name, input, .. } => {
                 let icon = self.tools.icon(&name);
                 let label = self.tools.label(&name, &input);
@@ -413,6 +421,20 @@ mod tests {
     }
 
     #[test]
+    fn render_progress_update_writes_to_stderr_only_when_thinking_hidden() {
+        let event = || AgentEvent::ProgressUpdate("Found the loader.\n".to_owned());
+        let (stdout, stderr) = render_one(&test_sink(false), event());
+        assert_eq!(stdout, "");
+        assert_eq!(stderr, "Found the loader.\n");
+
+        // The same text already streamed as dim thinking on stdout.
+        assert_eq!(
+            render_one(&test_sink(true), event()),
+            (String::new(), String::new()),
+        );
+    }
+
+    #[test]
     fn render_tool_call_start_writes_icon_label_to_stderr() {
         let (_, stderr) = render_one(
             &test_sink(false),
@@ -475,7 +497,7 @@ mod tests {
                 id: "rolled".to_owned(),
             },
             AgentEvent::ConfigChanged {
-                model_id: "claude-opus-4-7".to_owned(),
+                model: ModelSpec::resolve("claude-opus-5-5".to_owned()),
                 effort: Some(Effort::Xhigh),
                 compaction: CompactionConfig::disabled(),
                 requested_effort: Some(Effort::Xhigh),

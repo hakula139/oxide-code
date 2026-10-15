@@ -13,11 +13,12 @@ use std::str::FromStr;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::model::ModelSpec;
 use crate::tui::theme::{self, Theme};
 use crate::util::env;
 use crate::util::path::expand_user;
 
-const DEFAULT_MODEL: &str = "claude-opus-4-8[1m]";
+const DEFAULT_MODEL: &str = "claude-opus-5-5";
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const AUTO_COMPACTION_OUTPUT_RESERVE_CAP: u32 = 20_000;
 const AUTO_COMPACTION_BUFFER_TOKENS: u32 = 13_000;
@@ -49,7 +50,7 @@ impl Auth {
 /// Resolved-config view minus the secret. Survives [`Config`] being consumed by the client.
 #[derive(Debug, Clone)]
 pub(crate) struct ConfigSnapshot {
-    pub(crate) model_id: String,
+    pub(crate) model: ModelSpec,
     pub(crate) effort: Option<Effort>,
     pub(crate) auth_label: &'static str,
     pub(crate) base_url: String,
@@ -74,18 +75,31 @@ pub(crate) struct ConfigSnapshot {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum ThinkingConfig {
-    /// Model decides the thinking budget (4.6+).
+    /// Model decides the thinking budget.
     Adaptive {
         #[serde(skip_serializing_if = "Option::is_none")]
         display: Option<ThinkingDisplay>,
+        block_binding: BlockBinding,
     },
 }
 
-/// `thinking.display` values accepted on 4.7+.
-#[derive(Debug, Clone, Copy, Serialize)]
+/// `thinking.display` values. Omitting the field returns no thinking text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ThinkingDisplay {
     Summarized,
+    /// Only the progress notes written between tool calls come back as text. Requires the
+    /// `thinking-display-updates-2026-08-18` beta.
+    Updates,
+}
+
+/// `thinking.block_binding`. `DropBlock` makes the API drop a replayed thinking block whose
+/// conversation prefix changed since it was produced, plus every later one, where it would
+/// otherwise reject the request. Requires the `thinking-binding-controls-2026-08-01` beta.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "prefix_mismatch_behavior", rename_all = "snake_case")]
+pub(crate) enum BlockBinding {
+    DropBlock,
 }
 
 // ── Effort ──
@@ -280,7 +294,7 @@ impl CompactionConfig {
         }
     }
 
-    pub(crate) fn for_model(self, model: &str, max_tokens: u32) -> Result<Self> {
+    pub(crate) fn for_model(self, model: &ModelSpec, max_tokens: u32) -> Result<Self> {
         resolve_compaction_policy(self.policy, model, max_tokens)
     }
 
@@ -298,7 +312,7 @@ impl CompactionConfig {
     }
 
     #[cfg(test)]
-    pub(crate) fn default_for_test(model: &str, max_tokens: u32) -> Self {
+    pub(crate) fn default_for_test(model: &ModelSpec, max_tokens: u32) -> Self {
         resolve_compaction_policy(AutoCompactionPolicy::Default, model, max_tokens).unwrap()
     }
 }
@@ -338,21 +352,23 @@ enum AutoCompactionPolicy {
 /// Resolved configuration.
 #[derive(Debug, Clone)]
 pub(crate) struct Config {
-    pub(crate) model: String,
-    /// `None` when the model doesn't accept it.
+    pub(crate) model: ModelSpec,
+    /// `None` for models outside the catalogue.
     pub(crate) effort: Option<Effort>,
     pub(crate) auth: Auth,
     pub(crate) base_url: String,
     /// Resolved path to a PEM bundle appended to reqwest's trust anchors. `None` means the
     /// client trusts only the platform roots.
     pub(crate) extra_ca_certs: Option<PathBuf>,
-    pub(crate) max_tokens: u32,
+    /// User-set output cap. `None` defers to [`ModelSpec::resolve_max_tokens`].
+    pub(crate) max_tokens: Option<u32>,
     /// `None` means the agent loop runs without a per-turn round cap.
     pub(crate) max_tool_rounds: Option<u32>,
     pub(crate) prompt_cache_ttl: PromptCacheTtl,
     pub(crate) compaction: CompactionConfig,
     pub(crate) permission: crate::permission::Policy,
-    pub(crate) thinking: Option<ThinkingConfig>,
+    /// Opts adaptive thinking into summarized text. The request's `thinking` field derives from
+    /// this plus the model.
     pub(crate) show_thinking: bool,
     pub(crate) show_welcome: bool,
     pub(crate) status_line: Vec<StatusLineSegment>,
@@ -392,30 +408,29 @@ impl Config {
             Auth::OAuth(token)
         };
 
-        let model = env::string("ANTHROPIC_MODEL")
-            .or(client.model)
-            .unwrap_or_else(|| DEFAULT_MODEL.to_owned());
+        let model = ModelSpec::resolve(
+            env::string("ANTHROPIC_MODEL")
+                .or(client.model)
+                .unwrap_or_else(|| DEFAULT_MODEL.to_owned()),
+        );
 
         let base_url = env::string("ANTHROPIC_BASE_URL")
             .or(client.base_url)
             .unwrap_or_else(|| DEFAULT_BASE_URL.to_owned());
         validate_base_url(&base_url)?;
 
-        let caps = crate::model::capabilities_for(&model);
-
         let effort_pick = match env::string("ANTHROPIC_EFFORT") {
             Some(raw) => Some(raw.parse::<Effort>().context("ANTHROPIC_EFFORT")?),
             None => client.effort,
         };
-        let effort = caps.resolve_effort(effort_pick);
+        let effort = model.resolve_effort(effort_pick);
 
         let max_tokens = match env::string("ANTHROPIC_MAX_TOKENS") {
-            Some(raw) => raw
-                .parse::<u32>()
-                .with_context(|| format!("ANTHROPIC_MAX_TOKENS={raw:?}"))?,
-            None => client
-                .max_tokens
-                .unwrap_or_else(|| default_max_tokens(effort)),
+            Some(raw) => Some(
+                raw.parse::<u32>()
+                    .with_context(|| format!("ANTHROPIC_MAX_TOKENS={raw:?}"))?,
+            ),
+            None => client.max_tokens,
         };
 
         let max_tool_rounds = match env::string("OX_MAX_TOOL_ROUNDS") {
@@ -443,12 +458,6 @@ impl Config {
             .context("tui.status_line")?,
         };
 
-        // 4.7 silently defaulted to `omitted`; `display` opts back into summarized. 4.6 and older
-        // ignore the field.
-        let thinking = Some(ThinkingConfig::Adaptive {
-            display: show_thinking.then_some(ThinkingDisplay::Summarized),
-        });
-
         let prompt_cache_ttl = match env::string("OX_PROMPT_CACHE_TTL") {
             Some(raw) => raw
                 .parse::<PromptCacheTtl>()
@@ -456,7 +465,11 @@ impl Config {
             None => client.prompt_cache_ttl.unwrap_or(PromptCacheTtl::OneHour),
         };
 
-        let compaction = resolve_compaction(client.compaction, &model, max_tokens)?;
+        let compaction = resolve_compaction(
+            client.compaction,
+            &model,
+            model.resolve_max_tokens(max_tokens),
+        )?;
 
         let permission = resolve_permission(fc.permission)?;
 
@@ -480,7 +493,6 @@ impl Config {
             prompt_cache_ttl,
             compaction,
             permission,
-            thinking,
             show_thinking,
             show_welcome,
             status_line,
@@ -492,12 +504,12 @@ impl Config {
     /// Descriptors for `/config` and `/status`, minus the auth secret.
     pub(crate) fn snapshot(&self) -> ConfigSnapshot {
         ConfigSnapshot {
-            model_id: self.model.clone(),
+            model: self.model.clone(),
             effort: self.effort,
             auth_label: self.auth.label(),
             base_url: self.base_url.clone(),
             extra_ca_certs: self.extra_ca_certs.clone(),
-            max_tokens: self.max_tokens,
+            max_tokens: self.model.resolve_max_tokens(self.max_tokens),
             max_tool_rounds: self.max_tool_rounds,
             prompt_cache_ttl: self.prompt_cache_ttl,
             compaction: self.compaction,
@@ -568,17 +580,9 @@ pub(crate) fn display_auto_compaction(auto: AutoCompactionConfig) -> String {
     }
 }
 
-fn default_max_tokens(effort: Option<Effort>) -> u32 {
-    match effort {
-        Some(Effort::Xhigh | Effort::Max) => 64_000,
-        Some(Effort::High) => 32_000,
-        _ => 16_000,
-    }
-}
-
 fn resolve_compaction(
     file: Option<file::CompactionConfig>,
-    model: &str,
+    model: &ModelSpec,
     max_tokens: u32,
 ) -> Result<CompactionConfig> {
     let auto_requested = env::bool("OX_COMPACTION_AUTO_ENABLED")?
@@ -616,7 +620,7 @@ fn resolve_permission(
 
 fn resolve_compaction_policy(
     policy: AutoCompactionPolicy,
-    model: &str,
+    model: &ModelSpec,
     max_tokens: u32,
 ) -> Result<CompactionConfig> {
     let auto = resolve_auto_compaction(policy, model, max_tokens)?;
@@ -625,7 +629,7 @@ fn resolve_compaction_policy(
 
 fn resolve_auto_compaction(
     policy: AutoCompactionPolicy,
-    model: &str,
+    model: &ModelSpec,
     max_tokens: u32,
 ) -> Result<AutoCompactionConfig> {
     let threshold = match policy {
@@ -666,15 +670,15 @@ fn resolve_auto_policy(file: Option<&file::CompactionConfig>) -> Result<AutoComp
     }
 }
 
-fn threshold_from_tokens(tokens: u32, model: &str, max_tokens: u32) -> u32 {
+fn threshold_from_tokens(tokens: u32, model: &ModelSpec, max_tokens: u32) -> u32 {
     clamp_threshold_floor(clamp_threshold_ceil(tokens, model, max_tokens))
 }
 
-fn threshold_from_percent(percent: u8, model: &str, max_tokens: u32) -> Result<Option<u32>> {
+fn threshold_from_percent(percent: u8, model: &ModelSpec, max_tokens: u32) -> Result<Option<u32>> {
     if !(1..=100).contains(&percent) {
         bail!("auto compaction threshold percent must be between 1 and 100");
     }
-    let Some(context_window) = crate::model::context_window_for(model) else {
+    let Some(context_window) = model.context_window() else {
         return Ok(None);
     };
     let raw = context_window.saturating_mul(u32::from(percent)) / 100;
@@ -684,7 +688,7 @@ fn threshold_from_percent(percent: u8, model: &str, max_tokens: u32) -> Result<O
 }
 
 /// Snaps `tokens` down to the model's safe trigger when one is known.
-fn clamp_threshold_ceil(tokens: u32, model: &str, max_tokens: u32) -> u32 {
+fn clamp_threshold_ceil(tokens: u32, model: &ModelSpec, max_tokens: u32) -> u32 {
     default_auto_threshold(model, max_tokens).map_or(tokens, |max| tokens.min(max))
 }
 
@@ -693,8 +697,9 @@ fn clamp_threshold_floor(tokens: u32) -> u32 {
     tokens.max(MIN_AUTO_COMPACTION_THRESHOLD_TOKENS)
 }
 
-fn default_auto_threshold(model: &str, max_tokens: u32) -> Option<u32> {
-    crate::model::context_window_for(model)
+fn default_auto_threshold(model: &ModelSpec, max_tokens: u32) -> Option<u32> {
+    model
+        .context_window()
         .and_then(|window| default_auto_threshold_for_window(window, max_tokens))
 }
 
@@ -734,10 +739,9 @@ fn is_loopback_url(url: &reqwest::Url) -> bool {
     )
 }
 
-/// Outputs of [`default_auto_threshold`] when `max_tokens` saturates the reserve cap.
+/// Output of [`default_auto_threshold`] when `max_tokens` saturates the reserve cap.
 #[cfg(test)]
 pub(crate) mod test_thresholds {
-    pub(crate) const WINDOW_200K: u32 = 167_000;
     pub(crate) const WINDOW_1M: u32 = 967_000;
 }
 
@@ -762,20 +766,24 @@ mod tests {
     // ── ThinkingConfig ──
 
     #[test]
-    fn thinking_config_adaptive_without_display_serializes_bare() {
-        let json = serde_json::to_value(&ThinkingConfig::Adaptive { display: None }).unwrap();
-        assert_eq!(json["type"], "adaptive");
-        assert!(json.get("display").is_none(), "display omitted: {json}");
-    }
-
-    #[test]
-    fn thinking_config_adaptive_with_summarized_display_serializes() {
-        let json = serde_json::to_value(&ThinkingConfig::Adaptive {
-            display: Some(ThinkingDisplay::Summarized),
-        })
-        .unwrap();
-        assert_eq!(json["type"], "adaptive");
-        assert_eq!(json["display"], "summarized");
+    fn thinking_config_adaptive_serializes_display_and_block_binding() {
+        let binding = serde_json::json!({"prefix_mismatch_behavior": "drop_block"});
+        for (display, wire) in [
+            (None, None),
+            (Some(ThinkingDisplay::Summarized), Some("summarized")),
+            (Some(ThinkingDisplay::Updates), Some("updates")),
+        ] {
+            let json = serde_json::to_value(&ThinkingConfig::Adaptive {
+                display,
+                block_binding: BlockBinding::DropBlock,
+            })
+            .unwrap();
+            let mut expected = serde_json::json!({"type": "adaptive", "block_binding": binding});
+            if let Some(wire) = wire {
+                expected["display"] = wire.into();
+            }
+            assert_eq!(json, expected);
+        }
     }
 
     // ── Effort ──
@@ -907,15 +915,14 @@ mod tests {
 
     #[tokio::test]
     async fn load_defaults_apply_when_no_config_and_no_env() {
-        // Opus 4.8 defaults to `high` (mirroring Claude Code); `max_tokens` derives from that.
         let dir = tempfile::tempdir().unwrap();
         let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
             .await
             .unwrap();
-        assert_eq!(config.model, DEFAULT_MODEL);
+        assert_eq!(config.model.id(), "claude-opus-5-5");
         assert_eq!(config.base_url, DEFAULT_BASE_URL);
-        assert_eq!(config.max_tokens, 32_000);
-        assert_eq!(config.effort, Some(Effort::High));
+        assert_eq!(config.max_tokens, None);
+        assert_eq!(config.effort, Some(Effort::Medium));
         assert_eq!(config.prompt_cache_ttl, PromptCacheTtl::OneHour);
         assert!(config.compaction.auto.enabled);
         assert_eq!(
@@ -954,7 +961,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let vars = env_vars(vec![
             xdg(&dir),
-            env("ANTHROPIC_MODEL", "claude-opus-4-7"),
+            env("ANTHROPIC_MODEL", "claude-sonnet-5-5"),
             env("ANTHROPIC_BASE_URL", "https://example.invalid"),
             env("ANTHROPIC_MAX_TOKENS", "64"),
             env("OX_MAX_TOOL_ROUNDS", "200"),
@@ -965,9 +972,9 @@ mod tests {
         let config = temp_env::async_with_vars(vars, Config::load())
             .await
             .unwrap();
-        assert_eq!(config.model, "claude-opus-4-7");
+        assert_eq!(config.model.id(), "claude-sonnet-5-5");
         assert_eq!(config.base_url, "https://example.invalid");
-        assert_eq!(config.max_tokens, 64);
+        assert_eq!(config.max_tokens, Some(64));
         assert_eq!(config.max_tool_rounds, Some(200));
         assert!(config.compaction.auto.enabled);
         assert!(config.show_thinking);
@@ -992,7 +999,7 @@ mod tests {
             dir.path(),
             indoc::indoc! {r#"
                 [client]
-                model = "claude-sonnet-4-6"
+                model = "claude-haiku-5-5"
                 base_url = "https://config-file.invalid"
                 max_tokens = 128
                 max_tool_rounds = 75
@@ -1006,9 +1013,9 @@ mod tests {
         let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
             .await
             .unwrap();
-        assert_eq!(config.model, "claude-sonnet-4-6");
+        assert_eq!(config.model.id(), "claude-haiku-5-5");
         assert_eq!(config.base_url, "https://config-file.invalid");
-        assert_eq!(config.max_tokens, 128);
+        assert_eq!(config.max_tokens, Some(128));
         assert_eq!(config.max_tool_rounds, Some(75));
         assert!(config.compaction.auto.enabled);
         assert!(config.show_thinking);
@@ -1113,7 +1120,7 @@ mod tests {
             dir.path(),
             indoc::indoc! {r#"
                 [client]
-                model = "claude-sonnet-4-6"
+                model = "claude-haiku-5-5"
                 max_tokens = 128
 
                 [tui]
@@ -1122,15 +1129,15 @@ mod tests {
         );
         let vars = env_vars(vec![
             xdg(&dir),
-            env("ANTHROPIC_MODEL", "claude-opus-4-7"),
+            env("ANTHROPIC_MODEL", "claude-sonnet-5-5"),
             // `max_tokens` env is unset — the file value must win.
             env("OX_SHOW_THINKING", "0"),
         ]);
         let config = temp_env::async_with_vars(vars, Config::load())
             .await
             .unwrap();
-        assert_eq!(config.model, "claude-opus-4-7");
-        assert_eq!(config.max_tokens, 128);
+        assert_eq!(config.model.id(), "claude-sonnet-5-5");
+        assert_eq!(config.max_tokens, Some(128));
         assert!(!config.show_thinking, "env `0` overrides file `true`");
     }
 
@@ -1166,18 +1173,6 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(config.auth, Auth::ApiKey(k) if k == "sk-from-file"));
-    }
-
-    #[tokio::test]
-    async fn load_adaptive_thinking_is_always_enabled() {
-        let dir = tempfile::tempdir().unwrap();
-        let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
-            .await
-            .unwrap();
-        assert!(matches!(
-            config.thinking,
-            Some(ThinkingConfig::Adaptive { display: None }),
-        ));
     }
 
     #[tokio::test]
@@ -1234,7 +1229,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let vars = env_vars(vec![
             xdg(&dir),
-            env("ANTHROPIC_MODEL", "claude-opus-4-7[1m]"),
+            env("ANTHROPIC_MODEL", "claude-opus-5-5"),
             env("OX_COMPACTION_AUTO_THRESHOLD_PERCENT", "40"),
         ]);
         let config = temp_env::async_with_vars(vars, Config::load())
@@ -1295,7 +1290,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let vars = env_vars(vec![
             xdg(&dir),
-            env("ANTHROPIC_MODEL", "claude-opus-4-7[1m]"),
+            env("ANTHROPIC_MODEL", "claude-opus-5-5"),
             env("OX_COMPACTION_AUTO_THRESHOLD_PERCENT", "4"),
         ]);
         let config = temp_env::async_with_vars(vars, Config::load())
@@ -1311,10 +1306,10 @@ mod tests {
             dir.path(),
             indoc::indoc! {r#"
                 [client]
-                model = "claude-sonnet-4-6"
+                model = "claude-sonnet-5-5"
 
                 [client.compaction]
-                auto_threshold_tokens = 400000
+                auto_threshold_tokens = 990000
             "#},
         );
         let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
@@ -1322,7 +1317,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             config.compaction.auto.threshold_tokens,
-            Some(test_thresholds::WINDOW_200K),
+            Some(test_thresholds::WINDOW_1M),
         );
     }
 
@@ -1583,11 +1578,10 @@ mod tests {
 
     #[tokio::test]
     async fn load_effort_defaults_to_per_model_value() {
-        // 4.7 ships xhigh, 4.8 rides the high default; no-effort models stay unset.
         for (model, expected) in [
-            ("claude-opus-4-7", Some(Effort::Xhigh)),
-            ("claude-opus-4-8", Some(Effort::High)),
-            ("claude-haiku-4-5", None),
+            ("claude-opus-5-5", Some(Effort::Medium)),
+            ("claude-sonnet-5-5", Some(Effort::High)),
+            ("custom-model", None),
         ] {
             let dir = tempfile::tempdir().unwrap();
             let vars = env_vars(vec![xdg(&dir), env("ANTHROPIC_MODEL", model)]);
@@ -1603,7 +1597,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let vars = env_vars(vec![
             xdg(&dir),
-            env("ANTHROPIC_MODEL", "claude-opus-4-7"),
+            env("ANTHROPIC_MODEL", "claude-opus-5-5"),
             env("ANTHROPIC_EFFORT", "low"),
         ]);
         let config = temp_env::async_with_vars(vars, Config::load())
@@ -1613,26 +1607,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_effort_clamps_xhigh_down_to_high_on_sonnet_4_6() {
-        // Sonnet 4.6 has effort but caps below `xhigh`. Clamping keeps the request from 400ing.
+    async fn load_effort_pick_is_dropped_on_unknown_model() {
         let dir = tempfile::tempdir().unwrap();
         let vars = env_vars(vec![
             xdg(&dir),
-            env("ANTHROPIC_MODEL", "claude-sonnet-4-6"),
-            env("ANTHROPIC_EFFORT", "xhigh"),
-        ]);
-        let config = temp_env::async_with_vars(vars, Config::load())
-            .await
-            .unwrap();
-        assert_eq!(config.effort, Some(Effort::High));
-    }
-
-    #[tokio::test]
-    async fn load_effort_clamps_to_none_on_non_effort_capable_model() {
-        let dir = tempfile::tempdir().unwrap();
-        let vars = env_vars(vec![
-            xdg(&dir),
-            env("ANTHROPIC_MODEL", "claude-haiku-4-5"),
+            env("ANTHROPIC_MODEL", "custom-model"),
             env("ANTHROPIC_EFFORT", "max"),
         ]);
         let config = temp_env::async_with_vars(vars, Config::load())
@@ -1648,7 +1627,7 @@ mod tests {
             dir.path(),
             indoc::indoc! {r#"
                 [client]
-                model = "claude-opus-4-7"
+                model = "claude-sonnet-5-5"
                 effort = "medium"
             "#},
         );
@@ -1665,7 +1644,7 @@ mod tests {
             dir.path(),
             indoc::indoc! {r#"
                 [client]
-                model = "claude-opus-4-7"
+                model = "claude-opus-5-5"
                 effort = "low"
             "#},
         );
@@ -1754,9 +1733,9 @@ mod tests {
             auth: Auth::OAuth("token-must-not-leak".to_owned()),
             base_url: "https://api.example.test".to_owned(),
             extra_ca_certs: Some(PathBuf::from("/etc/ssl/corp-ca.pem")),
-            model: "claude-test-1-0".to_owned(),
+            model: ModelSpec::resolve("claude-test-1-0".to_owned()),
             effort: Some(Effort::Xhigh),
-            max_tokens: 64_000,
+            max_tokens: None,
             max_tool_rounds: Some(100),
             prompt_cache_ttl: PromptCacheTtl::FiveMin,
             compaction: CompactionConfig::resolved_for_test(AutoCompactionConfig {
@@ -1770,7 +1749,6 @@ mod tests {
                 Path::new(""),
             )
             .unwrap(),
-            thinking: None,
             show_thinking: true,
             show_welcome: false,
             status_line: vec![
@@ -1787,9 +1765,12 @@ mod tests {
             snap.extra_ca_certs.as_deref(),
             Some(Path::new("/etc/ssl/corp-ca.pem")),
         );
-        assert_eq!(snap.model_id, "claude-test-1-0");
+        assert_eq!(snap.model.id(), "claude-test-1-0");
         assert_eq!(snap.effort, Some(Effort::Xhigh));
-        assert_eq!(snap.max_tokens, 64_000);
+        assert_eq!(
+            snap.max_tokens, 16_000,
+            "unknown ids resolve to the smaller cap"
+        );
         assert_eq!(snap.max_tool_rounds, Some(100));
         assert_eq!(snap.prompt_cache_ttl, PromptCacheTtl::FiveMin);
         assert_eq!(snap.compaction.auto.threshold_tokens, Some(42));
@@ -1869,32 +1850,20 @@ mod tests {
         );
     }
 
-    // ── default_max_tokens ──
-
-    #[test]
-    fn default_max_tokens_scales_with_effort() {
-        assert_eq!(default_max_tokens(Some(Effort::Max)), 64_000);
-        assert_eq!(default_max_tokens(Some(Effort::Xhigh)), 64_000);
-        assert_eq!(default_max_tokens(Some(Effort::High)), 32_000);
-        assert_eq!(default_max_tokens(Some(Effort::Medium)), 16_000);
-        assert_eq!(default_max_tokens(Some(Effort::Low)), 16_000);
-        assert_eq!(default_max_tokens(None), 16_000);
-    }
-
     // ── test_thresholds ──
 
     #[test]
     fn test_thresholds_pin_default_auto_threshold_per_window() {
-        for model in ["claude-sonnet-4-6", "claude-opus-4-7", "claude-haiku-4-5"] {
+        for info in crate::model::MODELS {
+            let model = ModelSpec::resolve(info.id.to_owned());
             assert_eq!(
-                default_auto_threshold(model, 32_000),
-                Some(test_thresholds::WINDOW_200K),
-                "{model}",
+                default_auto_threshold(&model, 64_000),
+                Some(test_thresholds::WINDOW_1M),
+                "{}",
+                info.id,
             );
         }
-        assert_eq!(
-            default_auto_threshold("claude-opus-4-7[1m]", 64_000),
-            Some(test_thresholds::WINDOW_1M),
-        );
+        let unknown = ModelSpec::resolve("custom-model".to_owned());
+        assert_eq!(default_auto_threshold(&unknown, 64_000), None);
     }
 }

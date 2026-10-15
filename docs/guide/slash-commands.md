@@ -34,7 +34,7 @@ State-mutating commands are refused while a turn is in flight, so retry them aft
 
 Bare `/model` and `/effort` open pickers. Both apply on Enter and cancel on Esc.
 
-`/model <id>` accepts aliases (`opus`, `sonnet`, `haiku`), full ids, unique suffixes, unique substrings, and a `[1m]` suffix for the 1M-context variants. Haiku has no effort tier, so `/effort` on Haiku errors with a recovery hint. See [Configuration](configuration.md) for tier defaults.
+`/model <id>` accepts a full id or any unique substring of one, so `opus`, `sonnet`, and `haiku` work as aliases. Swapping models keeps the current effort. `/effort` errors on a model id outside the supported catalogue. See [Configuration](configuration.md) for per-model effort defaults.
 
 ## Compaction
 

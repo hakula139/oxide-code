@@ -20,7 +20,7 @@ use crate::client::anthropic::Client;
 use crate::config::Effort;
 use crate::file_tracker::FileTracker;
 use crate::message::{ContentBlock, Message};
-use crate::model::{self, ResolvedModelId};
+use crate::model::ResolvedModelId;
 use crate::prompt::{self, PromptParts, SessionContext, UserContext};
 use crate::session::handle::{self, SessionHandle};
 use crate::session::store::SessionStore;
@@ -133,7 +133,7 @@ impl Conversation {
         interactive: bool,
     ) -> Self {
         let prompt_unrecorded = context.is_none();
-        let prompt = session_prompt(context, client.model(), &cwd).await;
+        let prompt = session_prompt(context, client.model().id(), &cwd).await;
         Self {
             client,
             tools,
@@ -209,7 +209,7 @@ impl Conversation {
             &gate,
         )
         .await;
-        self.account_usage(sink, report);
+        self.account_usage(sink, &report);
         match result {
             Ok(()) => {
                 sink.emit(AgentEvent::TurnComplete, "turn-complete");
@@ -303,7 +303,7 @@ impl Conversation {
             &mut self.session,
             store,
             &self.file_tracker,
-            self.client.model(),
+            self.client.model().id(),
         )
         .await;
         sink.session_write_error(outcome.finalize_failure.as_deref());
@@ -352,6 +352,7 @@ impl Conversation {
             );
         }
         report_drift(sink, &outcome.drifted_paths);
+        agent::notify_if_interrupted(&self.messages, sink);
     }
 
     async fn adopt_session(&mut self, messages: Vec<Message>, context: Option<SessionContext>) {
@@ -359,7 +360,7 @@ impl Conversation {
             .set_session_id(self.session.session_id().to_owned());
         self.messages = messages;
         self.prompt_unrecorded = context.is_none();
-        self.prompt = session_prompt(context, self.client.model(), &self.cwd).await;
+        self.prompt = session_prompt(context, self.client.model().id(), &self.cwd).await;
         self.reset_usage();
     }
 
@@ -378,7 +379,7 @@ impl Conversation {
         );
     }
 
-    /// Applies a model and / or effort pick. The model goes first because it re-clamps effort.
+    /// Applies a model and / or effort pick. The model goes first because it re-resolves effort.
     fn swap_config(
         &mut self,
         sink: &dyn AgentSink,
@@ -393,7 +394,7 @@ impl Conversation {
                 );
                 return;
             }
-            self.prompt.set_model(self.client.model());
+            self.prompt.set_model(self.client.model().id());
         }
         let resolved = match effort {
             Some(pick) => self.client.set_effort(pick),
@@ -401,7 +402,7 @@ impl Conversation {
         };
         sink.emit(
             AgentEvent::ConfigChanged {
-                model_id: self.client.model().to_owned(),
+                model: self.client.model().clone(),
                 effort: resolved,
                 compaction: self.client.compaction(),
                 requested_effort: effort,
@@ -412,18 +413,17 @@ impl Conversation {
         self.emit_usage_update(sink);
     }
 
-    fn account_usage(&mut self, sink: &dyn AgentSink, report: TurnReport) {
+    fn account_usage(&mut self, sink: &dyn AgentSink, report: &TurnReport) {
         self.last_usage = report.usage;
         if let Some(usage) = report.usage {
             self.displayed_usage = Some(usage);
         }
-        if let Some(cost) = report
-            .billable_usage
-            .and_then(|usage| estimate_usage_cost_usd(&self.client, usage))
-        {
-            self.total_estimated_cost_usd += cost;
-        }
-        if report.usage.is_some() || report.billable_usage.is_some() {
+        self.total_estimated_cost_usd += report
+            .billable_rounds
+            .iter()
+            .filter_map(|&usage| estimate_usage_cost_usd(&self.client, usage))
+            .sum::<f64>();
+        if report.usage.is_some() || !report.billable_rounds.is_empty() {
             self.emit_usage_update(sink);
         }
     }
@@ -442,7 +442,7 @@ impl Conversation {
         sink.emit(
             AgentEvent::UsageUpdated(UsageSnapshot {
                 context_tokens: usage.context_tokens(),
-                context_window: model::context_window_for(self.client.model()),
+                context_window: self.client.model().context_window(),
                 estimated_cost_usd: (self.total_estimated_cost_usd > 0.0)
                     .then_some(self.total_estimated_cost_usd),
             }),
@@ -467,7 +467,7 @@ async fn session_prompt(context: Option<SessionContext>, model: &str, cwd: &Path
 }
 
 fn estimate_usage_cost_usd(client: &Client, usage: TokenUsage) -> Option<f64> {
-    model::token_cost_rates_for(client.model()).map(|rates| {
+    client.model().cost_rates().map(|rates| {
         rates.estimate_usd(
             usage.input_tokens(),
             usage.cache_creation_input_tokens(),
@@ -541,10 +541,11 @@ mod tests {
 
     use super::testing::{
         MODEL, SESSION_CONTEXT, conversation, mount_reply, request_bodies, system_prompt,
+        with_pinned_home,
     };
     use super::*;
     use crate::agent::event::CapturingSink;
-    use crate::client::anthropic::testing::{api_key, test_config};
+    use crate::client::anthropic::testing::{api_key, test_client, test_config};
     use crate::config::{AutoCompactionConfig, CompactionConfig};
     use crate::session::store::testing::test_store;
 
@@ -559,58 +560,102 @@ mod tests {
         assert_eq!(Shutdown::Terminate.exit_status(), 143);
     }
 
+    // ── new ──
+
+    #[tokio::test]
+    async fn new_replays_a_recorded_context_under_the_client_model() {
+        let server = MockServer::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let recorded = conversation(server.uri(), &store)
+            .await
+            .prompt
+            .session_context();
+
+        for (context, replayed) in [(Some(recorded), true), (None, false)] {
+            let conversation = Conversation::new(
+                test_client(server.uri(), api_key(), "claude-sonnet-5-5"),
+                Arc::new(ToolRegistry::new(Vec::new())),
+                handle::start(&store, "claude-sonnet-5-5"),
+                Vec::new(),
+                context,
+                Arc::new(FileTracker::default()),
+                std::env::current_dir().unwrap(),
+                false,
+            )
+            .await;
+
+            assert_eq!(
+                conversation.prompt.user_context == SESSION_CONTEXT,
+                replayed
+            );
+            assert_eq!(conversation.prompt_unrecorded, !replayed);
+            assert!(
+                conversation
+                    .prompt
+                    .system_sections
+                    .iter()
+                    .any(|section| section.contains("The exact model ID is claude-sonnet-5-5.")),
+                "replayed: {replayed}",
+            );
+        }
+    }
+
     // ── submit_prompt ──
 
     #[tokio::test]
     async fn submit_prompt_keeps_the_prefix_and_sends_a_date_change_as_a_reminder() {
-        let server = MockServer::start().await;
-        mount_reply(&server, "reply").await;
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let mut conversation = conversation(server.uri(), &store).await;
-        let today = conversation.prompt.seen.date.clone();
-        let sink = CapturingSink::new();
-        let (_user_tx, mut user_rx) = agent::event::inert_user_action_channel();
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            mount_reply(&server, "reply").await;
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let mut conversation = conversation(server.uri(), &store).await;
+            let today = conversation.prompt.seen.date.clone();
+            let sink = CapturingSink::new();
+            let (_user_tx, mut user_rx) = agent::event::inert_user_action_channel();
 
-        let end = conversation
-            .submit_prompt("first", &sink, &mut user_rx)
-            .await;
-        assert_eq!(end, TurnEnd::Completed);
-        "2000-01-01".clone_into(&mut conversation.prompt.seen.date);
-        let end = conversation
-            .submit_prompt("second", &sink, &mut user_rx)
-            .await;
-        assert_eq!(end, TurnEnd::Completed);
+            let end = conversation
+                .submit_prompt("first", &sink, &mut user_rx)
+                .await;
+            assert_eq!(end, TurnEnd::Completed);
+            "2000-01-01".clone_into(&mut conversation.prompt.seen.date);
+            let end = conversation
+                .submit_prompt("second", &sink, &mut user_rx)
+                .await;
+            assert_eq!(end, TurnEnd::Completed);
 
-        let turns = request_bodies(&server).await;
-        assert_eq!(
-            turns.len(),
-            2,
-            "non-interactive turns must not request a title"
-        );
-        assert_eq!(system_prompt(&turns[1]), system_prompt(&turns[0]));
-        let (first, second) = (&turns[0]["messages"], &turns[1]["messages"]);
-        assert_eq!(first[0]["content"][0]["text"], SESSION_CONTEXT);
-        assert_eq!(second[0], first[0], "the first message must not change");
-        assert_eq!(second[1]["content"][0]["text"], "first");
-        assert_eq!(second[2]["content"][0]["text"], "reply");
-        let prompt = second[3]["content"].as_array().unwrap();
-        assert_eq!(prompt[0]["text"], "second");
-        let reminder = prompt[1]["text"].as_str().unwrap();
-        assert!(
-            reminder.contains(&format!("Today's date is {today}.")),
-            "{reminder}"
-        );
-        assert!(!reminder.contains("# CLAUDE.md"), "{reminder}");
+            let turns = request_bodies(&server).await;
+            assert_eq!(
+                turns.len(),
+                2,
+                "non-interactive turns must not request a title"
+            );
+            assert_eq!(system_prompt(&turns[1]), system_prompt(&turns[0]));
+            let (first, second) = (&turns[0]["messages"], &turns[1]["messages"]);
+            assert_eq!(first[0]["content"][0]["text"], SESSION_CONTEXT);
+            assert_eq!(second[0], first[0], "the first message must not change");
+            assert_eq!(second[1]["content"][0]["text"], "first");
+            assert_eq!(second[2]["content"][0]["text"], "reply");
+            let prompt = second[3]["content"].as_array().unwrap();
+            assert_eq!(prompt[0]["text"], "second");
+            let reminder = prompt[1]["text"].as_str().unwrap();
+            assert!(
+                reminder.contains(&format!("Today's date is {today}.")),
+                "{reminder}"
+            );
+            assert!(!reminder.contains("# CLAUDE.md"), "{reminder}");
 
-        let id = conversation.session.session_id().to_owned();
-        let expected = conversation.prompt.session_context();
-        conversation.finalize().await;
-        let data = store.load_session_data(&id).unwrap();
-        assert_eq!(data.context, Some(expected));
-        assert!(
-            matches!(&data.messages[2].content[..], [_, ContentBlock::Text { text }] if text == reminder)
-        );
+            let id = conversation.session.session_id().to_owned();
+            let expected = conversation.prompt.session_context();
+            conversation.finalize().await;
+            let data = store.load_session_data(&id).unwrap();
+            assert_eq!(data.context, Some(expected));
+            assert!(
+                matches!(&data.messages[2].content[..], [_, ContentBlock::Text { text }] if text == reminder)
+            );
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -639,8 +684,8 @@ mod tests {
         assert_eq!(usage.context_window, Some(1_000_000));
         let cost = usage.estimated_cost_usd.unwrap();
         assert!(
-            (cost - 0.015).abs() < 1e-12,
-            "two turns at $0.0075 each: {cost}"
+            (cost - 0.012).abs() < 1e-12,
+            "two turns at $0.006 each: {cost}"
         );
     }
 
@@ -690,7 +735,7 @@ mod tests {
         assert_eq!(conversation.messages.len(), 3);
         assert_eq!(conversation.last_usage, Some(TokenUsage::new(1_000, 100)));
         assert!(
-            (conversation.total_estimated_cost_usd - 0.0075).abs() < 1e-12,
+            (conversation.total_estimated_cost_usd - 0.006).abs() < 1e-12,
             "compaction must reset the session cost before the turn bills: {}",
             conversation.total_estimated_cost_usd,
         );
@@ -937,7 +982,7 @@ mod tests {
 
         conversation.swap_config(
             &CapturingSink::new(),
-            Some(ResolvedModelId::new("claude-sonnet-4-6".to_owned())),
+            Some(ResolvedModelId::new("claude-sonnet-5-5".to_owned())),
             None,
         );
 
@@ -946,7 +991,7 @@ mod tests {
                 .prompt
                 .system_sections
                 .iter()
-                .any(|section| section.contains("The exact model ID is claude-sonnet-4-6.")),
+                .any(|section| section.contains("The exact model ID is claude-sonnet-5-5.")),
         );
         assert_eq!(conversation.prompt.user_context, SESSION_CONTEXT);
     }

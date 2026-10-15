@@ -79,19 +79,18 @@ Cell legend: `✓` always on, `-` not supported (or stripped), `[1m]` opt-in via
 | `effort-2025-11-24`               | -             | -              | ✓         | -               | -          | ✓           | -              | -                   | -                    |
 | `structured-outputs-2025-12-15`   | -             | `*`            | `*`       | -               | `*`        | `*`         | -              | `*`                 | `*`                  |
 
-Key rules:
+Claude Code applies these rules to 4.x models:
 
-- **Haiku + `context-1m`**: Rejected because Haiku has a 200K window. The `[1m]` tag is silently stripped rather than forwarded.
+- **Haiku + `context-1m`**: Rejected because Haiku has a 200K window. Claude Code silently strips the `[1m]` tag before sending.
 - **Haiku + `interleaved-thinking`**: Third-party gateways reject it, while first-party accepts.
 - **Haiku one-shots** (title generation, compaction classifier): Strip agentic markers entirely. `claude-code-20250219` is re-added only when the call is agentic.
-- **`prompt-caching-scope` ships unconditionally.** The header alone is a server-side no-op without a matching `cache_control.scope` field, but 3P gateways fingerprint its absence. oxide-code therefore emits the beta on every agentic request and gates only the body-side `cache_control.scope: "global"` on `is_first_party_base_url()` (see [Prompt Caching Scope](#prompt-caching-scope) for why).
-- **`context-1m` is user opt-in via `[1m]`.** Appending `[1m]` to the model string (e.g., `claude-opus-4-8[1m]`) adds the 1M beta and strips the tag before the request hits the wire. Family-based auto-enable would 400 on subscriptions or gateways that do not carry 1M access. Convention matches Claude Code.
-- **`effort` is Opus 4.6+ and Sonnet 4.6+ only.** Opus 4.5 and older, Sonnet 4.5 and older, and all Haiku variants reject it per upstream's `modelSupportsEffort`. Per-model support is encoded in `Capabilities::supported_efforts`; `accepts_effort`, `clamp_effort`, and `default_effort` keep user picks and defaults inside that set.
-- **`effort` and `context-management` betas need a body field.** Sending the header alone is a silent no-op: the request runs at the server default. See [Agentic Request Body Fields](#agentic-request-body-fields) for the matching `output_config.effort` and `context_management.edits` shapes. oxide-code pairs each capability with both its beta and its body field so the two stay in sync.
-- **`structured-outputs` is per-version and caller-opt-in.** The upstream allowlist is Opus 4.1+, Sonnet 4.5+, Haiku 4.5. The beta ships only when a caller supplies an `output_config.format` (today: the AI-title generator). The body field and header are paired on the same capability flag. A schema passed to an unsupported model silently falls back to free-form text, mirroring the `[1m]` × `context_1m` silent-strip pattern.
-- **Unknown model aliases** fall through substring matching on the family stem. `claude-opus-5-x` would miss every row and ship with only the identity / caching betas. Bump the `MODELS` table when a new family lands.
+- **`prompt-caching-scope` ships unconditionally.** The header alone is a server-side no-op without a matching `cache_control.scope` field, but 3P gateways fingerprint its absence.
+- **`context-1m` is user opt-in via `[1m]`.** Appending `[1m]` to the model string (e.g., `claude-opus-4-8[1m]`) adds the 1M beta and strips the tag before the request hits the wire. Family-based auto-enable would 400 on subscriptions or gateways that do not carry 1M access.
+- **`effort` is Opus 4.6+ and Sonnet 4.6+ only.** Opus 4.5 and older, Sonnet 4.5 and older, and all Haiku variants reject it per upstream's `modelSupportsEffort`.
+- **`effort` and `context-management` betas need a body field.** Sending the header alone is a silent no-op: the request runs at the server default. See [Agentic Request Body Fields](#agentic-request-body-fields) for the matching `output_config.effort` and `context_management.edits` shapes.
+- **`structured-outputs` is per-version and caller-opt-in.** The upstream allowlist is Opus 4.1+, Sonnet 4.5+, Haiku 4.5. Claude Code ships the beta only when a caller supplies an `output_config.format`.
 
-oxide-code gates each beta header on the target model in `client::anthropic::compute_betas`, which consults the ground-truth `Capabilities` flags in `crate::model::MODELS`. New models ship by adding a row to that table, with no beta-logic changes needed.
+This client supports only the Claude 5.5 models, where effort, interleaved thinking, the 1M window, and structured outputs are GA. On their agentic turns, `client::anthropic::compute_betas` sends the sequence Claude Code 2.1.296 sends (see [Third-Party Gateway Validation](#third-party-gateway-validation)), which includes betas for features this client leaves unused. It then appends `thinking-binding-controls-2026-08-01`, plus `thinking-display-updates-2026-08-18` when the request sets `thinking.display = "updates"`. Agentic turns on other model ids carry `claude-code-20250219`, `oauth-2025-04-20` (OAuth only), and `prompt-caching-scope-2026-01-05`, and go without effort, thinking, or context management. One-shots carry `claude-code-20250219` (skipped on Haiku) and `oauth-2025-04-20` (OAuth only). The body-side `cache_control.scope: "global"` stays gated on the base URL, as [Prompt Caching Scope](#prompt-caching-scope) describes.
 
 ### 2. System prompt prefix (as a separate block)
 
@@ -236,10 +235,10 @@ GA as of Opus 4.6. Controls the intelligence-vs-latency tier of agentic turns vi
 }
 ```
 
-- **The `effort-2025-11-24` beta header is necessary but not sufficient.** oxide-code used to send the header without the body field. The header became a no-op and the model ran at an undefined default.
-- **Per-model ceiling.** `max` is Opus-only, and Sonnet 4.6 400s on it. `xhigh` is Opus 4.7 / 4.8-only. `Capabilities::supported_efforts` encodes the allowed set, and `Capabilities::clamp_effort` clamps a user pick down to the highest supported level at or below it.
-- **Per-model default.** The raw API default is `high` for every effort-capable model (`high` is equivalent to omitting the field), and `xhigh` is Anthropic's coding recommendation rather than a stock default. Claude Code bumps Opus 4.7 to `xhigh` but rides the `high` default on Opus 4.8; oxide-code mirrors this in `Capabilities::default_effort` (`xhigh` on 4.7, `high` on 4.8 / 4.6 / Sonnet 4.6, omitted on models without effort).
-- **`max_tokens` should scale with effort.** Claude Code uses 64 K on Opus 4.7 at `xhigh`, 32 K on Sonnet 4.6 at `high`. oxide-code's `default_max_tokens(effort)` matches the upper tiers and uses 16 K otherwise when the user hasn't set `ANTHROPIC_MAX_TOKENS` explicitly.
+- **The `effort-2025-11-24` beta header is necessary but not sufficient.** The header alone is a no-op, so the model runs at its default effort until the body carries `output_config.effort`.
+- **Per-model ceiling.** `max` is Opus-only, and Sonnet 4.6 400s on it. `xhigh` is Opus 4.7 / 4.8-only. Every Claude 5.5 model accepts all five.
+- **Per-model default.** On the 4.x models the raw API default was `high` for every effort-capable model (equivalent to omitting the field), and Claude Code bumped Opus 4.7 to `xhigh`. The Claude 5.5 API defaults are `medium` on Opus and Haiku and `high` on Sonnet, and oxide-code sends them explicitly.
+- **`max_tokens` should scale with effort.** Claude Code uses 64 K on Opus 4.7 at `xhigh`, 32 K on Sonnet 4.6 at `high`. oxide-code defaults to 64 K on the supported models, since effort already steers thinking depth, and to 16 K on other ids.
 
 ### `context_management.edits`
 
@@ -253,7 +252,7 @@ Partners the `context-management-2025-06-27` beta header. Claude Code ships the 
 }
 ```
 
-oxide-code applies the body-header coupling as an invariant: the body field is populated on every request whose model has `Capabilities::context_management` set, the same condition that enables the beta header. One-shot completions (the `complete` path in `client::anthropic`) skip both, matching the reference wire and keeping the title-generation path minimal.
+oxide-code applies the body-header coupling as an invariant: the body field is populated on every request whose model is in the supported catalogue, the same condition that enables the beta header. One-shot completions (the `complete` path in `client::anthropic`) skip both, matching the reference wire and keeping the title-generation path minimal.
 
 ### `cache_control.ttl`
 
@@ -273,7 +272,7 @@ Invalidation order (from the Anthropic caching docs) is `tools → system → me
 
 ### `thinking.display`
 
-See [Extended Thinking § Display modes (Opus 4.7+)](extended-thinking.md#display-modes-opus-47). Opus 4.7 silently flipped the default to `"omitted"`. `show_thinking=true` in oxide-code opts back into `"summarized"`.
+See [Extended Thinking § Display modes (Opus 4.7+)](extended-thinking.md#display-modes-opus-47). Opus 4.7 silently flipped the default to `"omitted"`. `show_thinking=true` in oxide-code opts back into `"summarized"`. With it off, Opus 5.5 and Sonnet 5.5 requests use `"updates"`.
 
 ## Third-Party Tool Restrictions
 
@@ -293,7 +292,7 @@ Re-distribution gateways front the upstream API and reject anything that does no
 1. **`User-Agent` version.** `CLAUDE_CLI_VERSION` in `client::anthropic` must track the latest packaged Claude Code release. Pre-allowlist versions trip the verifier even when the rest of the request shape is correct.
 2. **Stainless SDK headers.** Claude Code's TS SDK auto-emits the `lang` / `os` / `arch` triple plus `x-stainless-package-version`, `x-stainless-runtime`, `x-stainless-runtime-version`, `x-stainless-timeout`, and `x-stainless-retry-count`. Absence of any one fingerprints as "not from Stainless". Gateways often return HTTP 403 with `"user agent not allowed"`.
 3. **Billing attestation under both auth modes.** Claude Code emits the `x-anthropic-billing-header` block (with the `cch` xxHash64) on API-key requests too. An OAuth-only guard leaves API-key traffic without the integrity primitive the gateway verifies. See [Attribution header](#3-attribution-header).
-4. **Beta header set and order.** Match Claude Code's emit order on agentic 4.6+ requests: `claude-code-20250219, [oauth-2025-04-20,] interleaved-thinking-2025-05-14, context-management-2025-06-27, prompt-caching-scope-2026-01-05, effort-2025-11-24`. `prompt-caching-scope-2026-01-05` ships unconditionally. The matching `cache_control.scope: "global"` body field stays gated on `is_first_party_base_url` because 3P gateways reject the scope downstream of tool definitions, but the header alone keeps the wire fingerprint intact.
+4. **Beta header set and order.** Match Claude Code's emit order. On agentic Opus 5.5 and Sonnet 5.5 requests, Claude Code 2.1.296 sends `claude-code-20250219, interleaved-thinking-2025-05-14, thinking-token-count-2026-05-13, context-management-2025-06-27, prompt-caching-scope-2026-01-05, mid-conversation-system-2026-04-07, per-turn-control-2026-07-01, advisor-tool-2026-03-01, effort-2025-11-24`. On Haiku 5.5 it moves `claude-code-20250219` to just after `mid-conversation-system-2026-04-07`. Both sequences were captured from `claude --bare -p` with an API key on 2026-10-15. Under OAuth, the frozen 2.1.87 source puts `oauth-2025-04-20` right after the leading `claude-code-20250219`, or first on Haiku. That slot was not captured. `prompt-caching-scope-2026-01-05` ships unconditionally. The matching `cache_control.scope: "global"` body field stays gated on `is_first_party_base_url` because 3P gateways reject the scope downstream of tool definitions, but the header alone keeps the wire fingerprint intact.
 5. **`metadata.user_id` shape.** Field order: `device_id`, `account_uuid`, `session_id`. Empty `account_uuid` must be present because missing the key changes the fingerprint. Use a typed struct so the wire order matches the source declaration. `serde_json::json!` ships fields alphabetically without the `preserve_order` feature, which trips the verifier. `device_id` is minted as 64 lowercase hex chars (32 random bytes) and persisted at `$XDG_DATA_HOME/ox/user-id`. Verifiers check shape without caring whether the value round-trips to Claude Code's `~/.claude.json#userID`.
 
 System-prompt block content is a separate gateway-validation axis. See [System Prompt § Third-Party Gateway Validation](system-prompt.md#third-party-gateway-validation) for the prompt-content side of the same check.
@@ -343,4 +342,4 @@ oxide-code implements the same refresh flow: proactive refresh with the 5-minute
 - `claude-code/src/utils/secureStorage/macOsKeychainStorage.ts`: macOS Keychain backend
 - `claude-code/src/utils/secureStorage/plainTextStorage.ts`: credential file I/O
 
-Body-field research is empirical rather than source-backed: the `output_config.effort`, `context_management.edits`, and `cache_control.ttl` wire shapes documented above were captured live from a `claude-code --bare -p --model claude-opus-4-7` session against a local SSE proxy on 2026-04-24 and cross-referenced with the [Opus 4.7 migration guide](https://platform.claude.com/docs/en/about-claude/models/migration-guide) and [Anthropic prompt-caching docs](https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching).
+Body-field research is empirical. The `output_config.effort`, `context_management.edits`, and `cache_control.ttl` wire shapes documented above were captured live from a `claude-code --bare -p --model claude-opus-4-7` session against a local SSE proxy on 2026-04-24 and cross-referenced with the [Opus 4.7 migration guide](https://platform.claude.com/docs/en/about-claude/models/migration-guide) and [Anthropic prompt-caching docs](https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching).

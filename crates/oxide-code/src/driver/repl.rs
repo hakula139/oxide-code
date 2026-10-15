@@ -8,6 +8,7 @@ use anyhow::Result;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, BufReader};
 
 use super::{Conversation, Exit, TurnEnd, report_drift, shutdown_signal};
+use crate::agent;
 use crate::agent::event::{AgentEvent, AgentSink, StdioSink, inert_user_action_channel};
 use crate::slash;
 
@@ -34,6 +35,7 @@ where
     R: AsyncBufRead + Unpin,
 {
     report_drift(sink, drifted);
+    agent::notify_if_interrupted(&conversation.messages, sink);
     let mut lines = input.lines();
     let (_user_tx, mut user_rx) = inert_user_action_channel();
     let mut signal = None;

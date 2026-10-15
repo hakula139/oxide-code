@@ -1,199 +1,211 @@
-//! Ground-truth table of known Claude models. Substring-matched, most-specific entry first.
+//! Catalogue of the supported Claude models, matched by exact id.
+//!
+//! Every row shares one request surface: adaptive thinking, the full `output_config.effort`
+//! ladder, `clear_thinking` context management, a 1M-token context window, and 128K output.
+//! Other ids (custom gateway names, retired models) pass through verbatim with no known
+//! capabilities, so their requests carry none of those opt-ins and auto-compaction stays off.
 
 mod pricing;
 
-use std::borrow::Cow;
+use std::fmt::Write;
 
-use crate::config::Effort;
+use crate::config::{BlockBinding, Effort, ThinkingConfig, ThinkingDisplay};
 
 pub(crate) use pricing::TokenCostRates;
-use pricing::{HAIKU_RATES, OPUS_4_5_PLUS_RATES, SONNET_RATES};
+use pricing::{HAIKU_5_5_RATES, OPUS_5_5_RATES, SONNET_5_5_RATES};
 
 // ── ModelInfo ──
 
-/// One row in the [`MODELS`] catalogue. Pure data — no methods. Looked up by substring against a
-/// caller-supplied model id (alias-resolved + `[1m]`-stripped); see [`lookup`].
+/// One row in the [`MODELS`] catalogue.
+#[derive(Debug)]
 pub(crate) struct ModelInfo {
-    /// First substring match in [`MODELS`] wins; ordering matters.
-    pub(crate) id_substr: &'static str,
+    pub(crate) id: &'static str,
     pub(crate) display_name: &'static str,
+    pub(crate) family: Family,
     pub(crate) cutoff: Option<&'static str>,
-    pub(crate) capabilities: Capabilities,
+    /// The API's own default when a request omits `output_config.effort`. Sent explicitly so the
+    /// UI shows the level the request actually runs at.
+    pub(crate) default_effort: Effort,
+    /// Accepts `thinking.display = "updates"`.
+    pub(crate) progress_updates: bool,
     /// First-party Claude API token prices in USD per million tokens.
-    pub(crate) cost_rates: Option<TokenCostRates>,
+    pub(crate) cost_rates: TokenCostRates,
 }
 
-const STANDARD_CONTEXT_WINDOW: u32 = 200_000;
-const CONTEXT_1M_WINDOW: u32 = 1_000_000;
-
-// ── Capabilities ──
-
-/// Per-model gate set consumed by the wire-builder (header + body fields), the slash commands
-/// (`/effort` rejects unsupported tiers, `/model` rejects `[1m]` on non-1M models), and the
-/// effort picker (renders only the supported ladder).
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "each flag is an independent capability gate"
-)]
-#[derive(Clone, Copy, Default)]
-pub(crate) struct Capabilities {
-    pub(crate) interleaved_thinking: bool,
-    pub(crate) context_management: bool,
-    /// `context-1m-2025-08-07` beta.
-    pub(crate) context_1m: bool,
-    /// `output_config.effort` levels accepted upstream. Empty when the model rejects `effort`.
-    pub(crate) supported_efforts: &'static [Effort],
-    /// Effort sent when the user picks none. Mirrors Claude Code's per-model stock default, which
-    /// differs from a model's ceiling (Opus 4.7 ships `xhigh`, Opus 4.8 rides the `high` default).
-    /// `None` when the model rejects `effort`.
-    pub(crate) default_effort: Option<Effort>,
-    /// `structured-outputs-2025-12-15` beta.
-    pub(crate) structured_outputs: bool,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Family {
+    Opus,
+    Sonnet,
+    Haiku,
 }
+
+impl Family {
+    /// The family's name as it appears in model ids.
+    const fn id_token(self) -> &'static str {
+        match self {
+            Self::Opus => "opus",
+            Self::Sonnet => "sonnet",
+            Self::Haiku => "haiku",
+        }
+    }
+}
+
+const CONTEXT_WINDOW: u32 = 1_000_000;
+/// Half the 128K output ceiling every catalogue model shares. `effort` steers thinking depth, so
+/// this only bounds runaway output.
+const MAX_TOKENS: u32 = 64_000;
+/// Fits the lower output ceilings of the older or smaller models an unknown id may name.
+const UNKNOWN_MODEL_MAX_TOKENS: u32 = 16_000;
 
 // ── MODELS ──
 
-/// Most-specific substring first.
+/// Listing order is the `/model` picker order.
 pub(crate) const MODELS: &[ModelInfo] = &[
     ModelInfo {
-        id_substr: "claude-opus-4-8",
-        display_name: "Claude Opus 4.8",
-        cutoff: Some("January 2026"),
-        capabilities: Capabilities {
-            interleaved_thinking: true,
-            context_management: true,
-            context_1m: true,
-            supported_efforts: &[
-                Effort::Low,
-                Effort::Medium,
-                Effort::High,
-                Effort::Xhigh,
-                Effort::Max,
-            ],
-            default_effort: Some(Effort::High),
-            structured_outputs: true,
-        },
-        cost_rates: Some(OPUS_4_5_PLUS_RATES),
+        id: "claude-opus-5-5",
+        display_name: "Claude Opus 5.5",
+        family: Family::Opus,
+        cutoff: Some("June 2026"),
+        default_effort: Effort::Medium,
+        progress_updates: true,
+        cost_rates: OPUS_5_5_RATES,
     },
     ModelInfo {
-        id_substr: "claude-opus-4-7",
-        display_name: "Claude Opus 4.7",
-        cutoff: Some("January 2026"),
-        capabilities: Capabilities {
-            interleaved_thinking: true,
-            context_management: true,
-            context_1m: true,
-            supported_efforts: &[
-                Effort::Low,
-                Effort::Medium,
-                Effort::High,
-                Effort::Xhigh,
-                Effort::Max,
-            ],
-            default_effort: Some(Effort::Xhigh),
-            structured_outputs: true,
-        },
-        cost_rates: Some(OPUS_4_5_PLUS_RATES),
+        id: "claude-sonnet-5-5",
+        display_name: "Claude Sonnet 5.5",
+        family: Family::Sonnet,
+        cutoff: None,
+        default_effort: Effort::High,
+        progress_updates: true,
+        cost_rates: SONNET_5_5_RATES,
     },
     ModelInfo {
-        id_substr: "claude-opus-4-6",
-        display_name: "Claude Opus 4.6",
-        cutoff: Some("May 2025"),
-        capabilities: Capabilities {
-            interleaved_thinking: true,
-            context_management: true,
-            context_1m: true,
-            supported_efforts: &[Effort::Low, Effort::Medium, Effort::High, Effort::Max],
-            default_effort: Some(Effort::High),
-            structured_outputs: true,
-        },
-        cost_rates: Some(OPUS_4_5_PLUS_RATES),
-    },
-    ModelInfo {
-        id_substr: "claude-sonnet-4-6",
-        display_name: "Claude Sonnet 4.6",
-        cutoff: Some("August 2025"),
-        capabilities: Capabilities {
-            interleaved_thinking: true,
-            context_management: true,
-            context_1m: true,
-            supported_efforts: &[Effort::Low, Effort::Medium, Effort::High],
-            default_effort: Some(Effort::High),
-            structured_outputs: true,
-        },
-        cost_rates: Some(SONNET_RATES),
-    },
-    ModelInfo {
-        id_substr: "claude-opus-4-5",
-        display_name: "Claude Opus 4.5",
-        cutoff: Some("May 2025"),
-        capabilities: Capabilities {
-            interleaved_thinking: true,
-            context_management: true,
-            context_1m: false,
-            supported_efforts: &[],
-            default_effort: None,
-            structured_outputs: true,
-        },
-        cost_rates: Some(OPUS_4_5_PLUS_RATES),
-    },
-    ModelInfo {
-        id_substr: "claude-sonnet-4-5",
-        display_name: "Claude Sonnet 4.5",
-        cutoff: Some("January 2025"),
-        capabilities: Capabilities {
-            interleaved_thinking: true,
-            context_management: true,
-            context_1m: true,
-            supported_efforts: &[],
-            default_effort: None,
-            structured_outputs: true,
-        },
-        cost_rates: Some(SONNET_RATES),
-    },
-    ModelInfo {
-        id_substr: "claude-haiku-4-5",
-        display_name: "Claude Haiku 4.5",
-        cutoff: Some("February 2025"),
-        capabilities: Capabilities {
-            // 3P gateways 400 on `interleaved-thinking` for Haiku 4.5.
-            interleaved_thinking: false,
-            context_management: true,
-            context_1m: false,
-            supported_efforts: &[],
-            default_effort: None,
-            structured_outputs: true,
-        },
-        cost_rates: Some(HAIKU_RATES),
+        id: "claude-haiku-5-5",
+        display_name: "Claude Haiku 5.5",
+        family: Family::Haiku,
+        cutoff: None,
+        default_effort: Effort::Medium,
+        progress_updates: false,
+        cost_rates: HAIKU_5_5_RATES,
     },
 ];
 
-impl Capabilities {
-    /// Whether `output_config.effort` is sent at all for this model.
-    pub(crate) fn has_effort(self) -> bool {
-        !self.supported_efforts.is_empty()
-    }
+pub(crate) fn lookup(id: &str) -> Option<&'static ModelInfo> {
+    MODELS.iter().find(|info| info.id == id)
+}
 
-    /// Whether the model accepts `level`. Anthropic 400s on unsupported tiers — no silent clamp.
-    pub(crate) fn accepts_effort(self, level: Effort) -> bool {
-        self.supported_efforts.contains(&level)
-    }
-
-    /// Highest accepted level ≤ `pick`. `None` when the model rejects effort entirely.
-    pub(crate) fn clamp_effort(self, pick: Effort) -> Option<Effort> {
-        self.supported_efforts
+/// The catalogue row to suggest for an unknown `id` that carries a `[1m]` suffix or starts with
+/// `claude-`: the row the id names once the suffix is dropped, else the row of the family it names.
+pub(crate) fn replacement_for(id: &str) -> Option<&'static ModelInfo> {
+    let id = id.to_ascii_lowercase();
+    let base = match id.strip_suffix("[1m]") {
+        Some(base) => base,
+        None if id.starts_with("claude-") => &id,
+        None => return None,
+    };
+    lookup(base).or_else(|| {
+        MODELS
             .iter()
-            .copied()
-            .rev()
-            .find(|&level| level <= pick)
+            .find(|info| base.split('-').any(|token| token == info.family.id_token()))
+    })
+}
+
+// ── ModelSpec ──
+
+/// A model id resolved against [`MODELS`] once. Every model-derived request field (effort,
+/// thinking, betas, context management) and every label reads from here, so a swap re-derives
+/// them all together.
+#[derive(Debug, Clone)]
+pub(crate) struct ModelSpec {
+    id: String,
+    info: Option<&'static ModelInfo>,
+}
+
+impl ModelSpec {
+    pub(crate) fn resolve(id: String) -> Self {
+        let info = lookup(&id);
+        Self { id, info }
     }
 
-    /// Clamps `pick` when present, otherwise falls back to the model's stock `default_effort`.
-    pub(crate) fn resolve_effort(self, pick: Option<Effort>) -> Option<Effort> {
-        match pick {
-            Some(p) => self.clamp_effort(p),
-            None => self.default_effort,
+    /// The id sent verbatim as the request's `model`.
+    pub(crate) fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// `None` for ids outside the catalogue.
+    pub(crate) fn info(&self) -> Option<&'static ModelInfo> {
+        self.info
+    }
+
+    /// Effort to send: the user's `pick`, else the model's default. `None` for unknown ids, whose
+    /// upstream may reject `output_config.effort`.
+    pub(crate) fn resolve_effort(&self, pick: Option<Effort>) -> Option<Effort> {
+        self.info.map(|info| pick.unwrap_or(info.default_effort))
+    }
+
+    /// Output cap to send: the user's `pick`, else 64K for catalogue models and 16K for unknown
+    /// ids, whose models may cap output lower.
+    pub(crate) fn resolve_max_tokens(&self, pick: Option<u32>) -> u32 {
+        pick.unwrap_or(self.info.map_or(UNKNOWN_MODEL_MAX_TOKENS, |_| MAX_TOKENS))
+    }
+
+    /// Adaptive thinking for known models, dropping replayed blocks whose conversation prefix
+    /// changed. `show_thinking` opts into summarized thinking text, otherwise models with progress
+    /// updates return only those. `None` for unknown ids, whose upstream may reject the field.
+    pub(crate) fn thinking(&self, show_thinking: bool) -> Option<ThinkingConfig> {
+        self.info.map(|info| ThinkingConfig::Adaptive {
+            display: if show_thinking {
+                Some(ThinkingDisplay::Summarized)
+            } else {
+                info.progress_updates.then_some(ThinkingDisplay::Updates)
+            },
+            block_binding: BlockBinding::DropBlock,
+        })
+    }
+
+    /// `None` for unknown ids, which disables auto-compaction.
+    pub(crate) fn context_window(&self) -> Option<u32> {
+        self.info.map(|_| CONTEXT_WINDOW)
+    }
+
+    pub(crate) fn cost_rates(&self) -> Option<TokenCostRates> {
+        self.info.map(|info| info.cost_rates)
+    }
+
+    /// Human-facing label. Falls back to the raw id when the model is unknown.
+    pub(crate) fn display_name(&self) -> &str {
+        self.info.map_or(&self.id, |info| info.display_name)
+    }
+
+    /// Width-constrained variant for the status bar. Drops the `Claude ` family prefix. Falls
+    /// back to the raw id when the model is unknown.
+    pub(crate) fn short_display_name(&self) -> &str {
+        self.info.map_or(&self.id, |info| {
+            info.display_name
+                .strip_prefix("Claude ")
+                .unwrap_or(info.display_name)
+        })
+    }
+
+    /// Warning for an id outside the catalogue, naming what its requests go without and the
+    /// [`replacement_for`] suggestion. `None` for catalogue models.
+    pub(crate) fn unsupported_notice(&self) -> Option<String> {
+        if self.info.is_some() {
+            return None;
         }
+        let mut notice = format!(
+            "`{}` is not a supported model, so requests go without thinking, effort, and context \
+             management, and auto-compaction and cost tracking stay off.",
+            self.id,
+        );
+        if let Some(info) = replacement_for(&self.id) {
+            _ = write!(
+                notice,
+                " Did you mean `{}` ({})?",
+                info.id, info.display_name
+            );
+        }
+        Some(notice)
     }
 }
 
@@ -218,447 +230,273 @@ impl ResolvedModelId {
     }
 }
 
-// ── Lookup ──
-
-/// First-match substring lookup against [`MODELS`].
-pub(crate) fn lookup(model: &str) -> Option<&'static ModelInfo> {
-    MODELS.iter().find(|info| model.contains(info.id_substr))
-}
-
-/// Capabilities for `model`, falling back to [`Capabilities::default`] for unknown ids.
-pub(crate) fn capabilities_for(model: &str) -> Capabilities {
-    lookup(model)
-        .map(|info| info.capabilities)
-        .unwrap_or_default()
-}
-
-/// Effective context window for known Claude models. `[1m]` opts into the 1M beta only on
-/// models that advertise that capability; unknown raw ids stay disabled for auto-compaction.
-pub(crate) fn context_window_for(model: &str) -> Option<u32> {
-    let info = lookup(model)?;
-    if model.ends_with("[1m]") && info.capabilities.context_1m {
-        Some(CONTEXT_1M_WINDOW)
-    } else {
-        Some(STANDARD_CONTEXT_WINDOW)
-    }
-}
-
-pub(crate) fn token_cost_rates_for(model: &str) -> Option<TokenCostRates> {
-    lookup(model).and_then(|info| info.cost_rates)
-}
-
-/// Human-facing label: the row's [`ModelInfo::display_name`] plus a ` (1M context)` suffix on
-/// `[1m]` ids. Falls back to the raw id when the model is unknown.
-pub(crate) fn display_name(model: &str) -> Cow<'_, str> {
-    let base = lookup(model).map_or(Cow::Borrowed(model), |info| {
-        Cow::Borrowed(info.display_name)
-    });
-    if model.ends_with("[1m]") {
-        Cow::Owned(format!("{base} (1M context)"))
-    } else {
-        base
-    }
-}
-
-/// Width-constrained variant for the status bar. Drops the `Claude ` family prefix and
-/// abbreviates the 1M opt-in to ` [1M]`. Falls back to the raw id when the model is unknown.
-pub(crate) fn short_display_name(model: &str) -> Cow<'_, str> {
-    let Some(info) = lookup(model) else {
-        return Cow::Borrowed(model);
-    };
-    let base = info
-        .display_name
-        .strip_prefix("Claude ")
-        .unwrap_or(info.display_name);
-    if model.ends_with("[1m]") {
-        Cow::Owned(format!("{base} [1M]"))
-    } else {
-        Cow::Borrowed(base)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::PromptCacheTtl;
 
-    // ── capability rows ──
-
-    #[test]
-    fn capability_flags_match_upstream_substring_predicates() {
-        // Locks substring-derived flags to upstream's `modelSupports*` predicates. Opus 4.7 and
-        // 4.8 postdate the predicate set and are skipped.
-        for info in MODELS {
-            if matches!(info.id_substr, "claude-opus-4-7" | "claude-opus-4-8") {
-                continue;
-            }
-            let m = info.id_substr;
-            let is_opus_or_sonnet_4 = m.contains("opus-4") || m.contains("sonnet-4");
-            let expect_interleaved_thinking = is_opus_or_sonnet_4;
-            let expect_context_management = is_opus_or_sonnet_4 || m.contains("haiku-4");
-            let expect_context_1m = m.contains("claude-sonnet-4") || m.contains("opus-4-6");
-            let expect_effort = m.contains("opus-4-6") || m.contains("sonnet-4-6");
-
-            assert_eq!(
-                info.capabilities.interleaved_thinking, expect_interleaved_thinking,
-                "{m}"
-            );
-            assert_eq!(
-                info.capabilities.context_management, expect_context_management,
-                "{m}"
-            );
-            assert_eq!(info.capabilities.context_1m, expect_context_1m, "{m}");
-            assert_eq!(info.capabilities.has_effort(), expect_effort, "{m}");
-        }
+    fn spec(id: &str) -> ModelSpec {
+        ModelSpec::resolve(id.to_owned())
     }
 
-    #[test]
-    fn opus_4_7_and_4_8_support_the_full_effort_ladder() {
-        // Upstream predates 4.7 / 4.8; pin so a future "alignment" edit doesn't strip our caps.
-        for id in ["claude-opus-4-7", "claude-opus-4-8"] {
-            let caps = lookup(id).unwrap().capabilities;
-            assert!(caps.interleaved_thinking, "{id}");
-            assert!(caps.context_management, "{id}");
-            assert!(caps.context_1m, "{id}");
-            assert!(caps.accepts_effort(Effort::Xhigh), "{id}");
-            assert!(caps.accepts_effort(Effort::Max), "{id}");
-            assert!(caps.structured_outputs, "{id}");
-        }
+    // ── replacement_for ──
 
-        for other in [
-            "claude-opus-4-6",
-            "claude-sonnet-4-6",
-            "claude-opus-4-5",
-            "claude-sonnet-4-5",
-            "claude-haiku-4-5",
+    #[test]
+    fn replacement_for_maps_1m_suffix_and_retired_claude_ids_to_catalogue_rows() {
+        for (id, expected) in [
+            ("claude-opus-5-5[1m]", "claude-opus-5-5"),
+            ("opus[1m]", "claude-opus-5-5"),
+            ("CLAUDE-SONNET-4-6[1M]", "claude-sonnet-5-5"),
+            ("claude-opus-4-8", "claude-opus-5-5"),
+            ("claude-3-5-sonnet-20241022", "claude-sonnet-5-5"),
+            ("claude-haiku-4-5", "claude-haiku-5-5"),
         ] {
-            assert!(
-                !lookup(other)
-                    .unwrap()
-                    .capabilities
-                    .accepts_effort(Effort::Xhigh),
-                "{other} must not accept Xhigh — it 400s on pre-4.7 models",
+            assert_eq!(
+                replacement_for(id).map(|info| info.id),
+                Some(expected),
+                "{id}"
             );
         }
     }
 
     #[test]
-    fn effort_max_is_opus_only() {
-        for supported in ["claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6"] {
-            assert!(
-                lookup(supported)
-                    .unwrap()
-                    .capabilities
-                    .accepts_effort(Effort::Max),
-                "{supported}",
-            );
-        }
-        for unsupported in [
-            "claude-sonnet-4-6",
-            "claude-opus-4-5",
-            "claude-sonnet-4-5",
-            "claude-haiku-4-5",
+    fn replacement_for_leaves_gateway_and_familyless_ids_without_a_suggestion() {
+        for id in [
+            "gpt-5",
+            "my-opus-gateway",
+            "anthropic.claude-opus-4-8",
+            "claude-future-9",
         ] {
-            assert!(
-                !lookup(unsupported)
-                    .unwrap()
-                    .capabilities
-                    .accepts_effort(Effort::Max),
-                "{unsupported}",
-            );
+            assert!(replacement_for(id).is_none(), "{id}");
         }
     }
 
+    // ── ModelSpec::resolve ──
+
     #[test]
-    fn supported_efforts_is_ascending_for_every_models_row() {
-        // `clamp_effort` and `default_effort` walk the slice in reverse to find the highest
-        // tier ≤ pick. They depend on the slice being authored in ascending order.
+    fn resolve_finds_every_row_by_exact_id() {
         for info in MODELS {
-            let efforts = info.capabilities.supported_efforts;
-            assert!(
-                efforts.windows(2).all(|w| w[0] < w[1]),
-                "{}: supported_efforts must be ascending: {efforts:?}",
-                info.id_substr,
-            );
+            let resolved = spec(info.id).info().map(|row| row.id);
+            assert_eq!(resolved, Some(info.id));
         }
     }
 
     #[test]
-    fn structured_outputs_flag_tracks_upstream_allowlist() {
-        for supported in [
+    fn resolve_keeps_near_miss_and_retired_ids_unknown() {
+        // Exact match only, so prefixed gateway names, retired generations, and a `[1m]` suffix all
+        // resolve with no catalogue row.
+        for unknown in [
+            "claude-opus-5",
+            "claude-opus-5-5[1m]",
+            "claude-opus-5-5-20261001",
+            "anthropic.claude-opus-5-5",
             "claude-opus-4-8",
-            "claude-opus-4-7",
-            "claude-opus-4-6",
-            "claude-opus-4-5",
-            "claude-sonnet-4-6",
-            "claude-sonnet-4-5",
             "claude-haiku-4-5",
+            "gpt-5",
         ] {
-            assert!(
-                lookup(supported).unwrap().capabilities.structured_outputs,
-                "{supported}"
-            );
+            let model = spec(unknown);
+            assert!(model.info().is_none(), "{unknown} must not resolve");
+            assert_eq!(model.id(), unknown);
         }
     }
 
-    // ── Capabilities::accepts_effort ──
+    // ── ModelSpec::resolve_effort ──
 
     #[test]
-    fn accepts_effort_matches_per_tier_capability_flag() {
-        let opus_4_7 = lookup("claude-opus-4-7").unwrap().capabilities;
-        let opus_4_6 = lookup("claude-opus-4-6").unwrap().capabilities;
-        let sonnet_4_6 = lookup("claude-sonnet-4-6").unwrap().capabilities;
-        let sonnet_4_5 = lookup("claude-sonnet-4-5").unwrap().capabilities;
-
-        // Opus 4.7 — full ladder.
-        assert!(opus_4_7.accepts_effort(Effort::Low));
-        assert!(opus_4_7.accepts_effort(Effort::High));
-        assert!(opus_4_7.accepts_effort(Effort::Xhigh));
-        assert!(opus_4_7.accepts_effort(Effort::Max));
-
-        // Opus 4.6 — base + max but no xhigh.
-        assert!(opus_4_6.accepts_effort(Effort::High));
-        assert!(opus_4_6.accepts_effort(Effort::Max));
-        assert!(!opus_4_6.accepts_effort(Effort::Xhigh));
-
-        // Sonnet 4.6 — base only, no max / xhigh.
-        assert!(sonnet_4_6.accepts_effort(Effort::High));
-        assert!(!sonnet_4_6.accepts_effort(Effort::Max));
-        assert!(!sonnet_4_6.accepts_effort(Effort::Xhigh));
-
-        // Sonnet 4.5 — no effort at all.
-        assert!(!sonnet_4_5.accepts_effort(Effort::Low));
-        assert!(!sonnet_4_5.accepts_effort(Effort::Max));
+    fn resolve_effort_falls_back_to_per_model_default() {
+        for (id, expected) in [
+            ("claude-opus-5-5", Effort::Medium),
+            ("claude-sonnet-5-5", Effort::High),
+            ("claude-haiku-5-5", Effort::Medium),
+        ] {
+            assert_eq!(spec(id).resolve_effort(None), Some(expected), "{id}");
+        }
     }
 
-    // ── Capabilities::clamp_effort ──
-
     #[test]
-    fn clamp_effort_picks_highest_supported_at_or_below_user_pick() {
-        let opus_4_7 = lookup("claude-opus-4-7").unwrap().capabilities;
-        assert_eq!(opus_4_7.clamp_effort(Effort::Max), Some(Effort::Max));
-        assert_eq!(opus_4_7.clamp_effort(Effort::Xhigh), Some(Effort::Xhigh));
-        assert_eq!(opus_4_7.clamp_effort(Effort::Low), Some(Effort::Low));
-
-        // Opus 4.6: Max ✓, Xhigh ✗ — `xhigh` clamps down to `high`, never up to `max`.
-        let opus_4_6 = lookup("claude-opus-4-6").unwrap().capabilities;
-        assert_eq!(opus_4_6.clamp_effort(Effort::Max), Some(Effort::Max));
-        assert_eq!(opus_4_6.clamp_effort(Effort::Xhigh), Some(Effort::High));
-        assert_eq!(opus_4_6.clamp_effort(Effort::High), Some(Effort::High));
-
-        // Sonnet 4.6: Max ✗, Xhigh ✗ — both clamp to `high`.
-        let sonnet_4_6 = lookup("claude-sonnet-4-6").unwrap().capabilities;
-        assert_eq!(sonnet_4_6.clamp_effort(Effort::Max), Some(Effort::High));
-        assert_eq!(sonnet_4_6.clamp_effort(Effort::Xhigh), Some(Effort::High));
-        assert_eq!(
-            sonnet_4_6.clamp_effort(Effort::Medium),
-            Some(Effort::Medium)
-        );
-
-        // No `effort` at all → None regardless of pick.
-        let haiku_4_5 = lookup("claude-haiku-4-5").unwrap().capabilities;
-        assert_eq!(haiku_4_5.clamp_effort(Effort::Max), None);
-        assert_eq!(haiku_4_5.clamp_effort(Effort::Low), None);
-    }
-
-    // ── Capabilities::default_effort ──
-
-    #[test]
-    fn default_effort_stays_within_supported_efforts() {
-        // Each row's stock default must be a tier the model accepts (or `None` when it rejects
-        // effort), so resolve_effort never emits a level the API would 400 on.
+    fn resolve_effort_passes_every_pick_through_on_supported_models() {
         for info in MODELS {
-            let caps = info.capabilities;
-            match caps.default_effort {
-                Some(level) => assert!(caps.accepts_effort(level), "{}", info.id_substr),
-                None => assert!(!caps.has_effort(), "{}", info.id_substr),
+            for level in Effort::ALL {
+                assert_eq!(
+                    spec(info.id).resolve_effort(Some(level)),
+                    Some(level),
+                    "{} {level}",
+                    info.id,
+                );
             }
         }
     }
 
-    // ── Capabilities::resolve_effort ──
+    #[test]
+    fn resolve_effort_is_none_for_unknown_model() {
+        let model = spec("custom-model");
+        assert_eq!(model.resolve_effort(None), None);
+        assert_eq!(model.resolve_effort(Some(Effort::High)), None);
+    }
+
+    // ── ModelSpec::resolve_max_tokens ──
 
     #[test]
-    fn resolve_effort_passes_pick_through_when_model_accepts_it() {
-        let opus_4_7 = lookup("claude-opus-4-7").unwrap().capabilities;
+    fn resolve_max_tokens_prefers_pick_then_catalogue_default() {
+        for (id, default) in [
+            ("claude-opus-5-5", 64_000),
+            ("claude-sonnet-5-5", 64_000),
+            ("claude-haiku-5-5", 64_000),
+            ("custom-model", 16_000),
+        ] {
+            let model = spec(id);
+            assert_eq!(model.resolve_max_tokens(None), default, "{id}");
+            assert_eq!(model.resolve_max_tokens(Some(4_096)), 4_096, "{id}");
+        }
+    }
+
+    // ── ModelSpec::thinking ──
+
+    #[test]
+    fn thinking_known_model_is_adaptive_with_display_following_show_thinking() {
+        let drop_block = serde_json::json!({"prefix_mismatch_behavior": "drop_block"});
+        for (id, hidden_display) in [
+            ("claude-opus-5-5", Some("updates")),
+            ("claude-sonnet-5-5", Some("updates")),
+            ("claude-haiku-5-5", None),
+        ] {
+            let model = spec(id);
+            assert_eq!(
+                serde_json::to_value(model.thinking(true)).unwrap(),
+                serde_json::json!({
+                    "type": "adaptive",
+                    "display": "summarized",
+                    "block_binding": drop_block,
+                }),
+                "{id}",
+            );
+            let mut hidden = serde_json::json!({"type": "adaptive", "block_binding": drop_block});
+            if let Some(display) = hidden_display {
+                hidden["display"] = display.into();
+            }
+            assert_eq!(
+                serde_json::to_value(model.thinking(false)).unwrap(),
+                hidden,
+                "{id}"
+            );
+        }
+    }
+
+    #[test]
+    fn thinking_unknown_model_is_omitted() {
+        assert!(spec("custom-model").thinking(true).is_none());
+    }
+
+    // ── ModelSpec::context_window ──
+
+    #[test]
+    fn context_window_supported_models_is_1m() {
+        for info in MODELS {
+            assert_eq!(
+                spec(info.id).context_window(),
+                Some(1_000_000),
+                "{}",
+                info.id
+            );
+        }
+    }
+
+    #[test]
+    fn context_window_unknown_model_is_none() {
+        assert_eq!(spec("claude-future-9").context_window(), None);
+    }
+
+    // ── ModelSpec::cost_rates ──
+
+    #[test]
+    fn cost_rates_route_each_model_to_its_own_card() {
+        // 100K input + 1M output stays within Haiku's base card: Opus $0.40 + $20, Sonnet
+        // $0.20 + $10, Haiku $0.01 + $0.50.
+        for (id, expected) in [
+            ("claude-opus-5-5", 20.4),
+            ("claude-sonnet-5-5", 10.2),
+            ("claude-haiku-5-5", 0.51),
+        ] {
+            let rates = spec(id).cost_rates().unwrap();
+            let cost = rates.estimate_usd(100_000, 0, 0, 1_000_000, PromptCacheTtl::FiveMin);
+            assert!((cost - expected).abs() < 1e-9, "{id}: {cost} vs {expected}");
+        }
+    }
+
+    #[test]
+    fn cost_rates_unknown_model_is_absent() {
+        assert!(spec("claude-future-9").cost_rates().is_none());
+    }
+
+    // ── ModelSpec::display_name ──
+
+    #[test]
+    fn display_name_known_id_renders_row_label() {
+        for (id, expected) in [
+            ("claude-opus-5-5", "Claude Opus 5.5"),
+            ("claude-sonnet-5-5", "Claude Sonnet 5.5"),
+            ("claude-haiku-5-5", "Claude Haiku 5.5"),
+        ] {
+            assert_eq!(spec(id).display_name(), expected, "{id}");
+        }
+    }
+
+    #[test]
+    fn display_name_unknown_id_falls_through_to_raw() {
+        assert_eq!(spec("custom-model").display_name(), "custom-model");
+    }
+
+    // ── ModelSpec::short_display_name ──
+
+    #[test]
+    fn short_display_name_strips_claude_family_prefix() {
+        for (id, expected) in [
+            ("claude-opus-5-5", "Opus 5.5"),
+            ("claude-sonnet-5-5", "Sonnet 5.5"),
+            ("claude-haiku-5-5", "Haiku 5.5"),
+        ] {
+            assert_eq!(spec(id).short_display_name(), expected, "{id}");
+        }
+    }
+
+    #[test]
+    fn short_display_name_unknown_id_falls_through_to_raw() {
+        assert_eq!(spec("custom-model").short_display_name(), "custom-model");
+    }
+
+    // ── ModelSpec::unsupported_notice ──
+
+    #[test]
+    fn unsupported_notice_names_lost_features_and_suggests_replacement() {
         assert_eq!(
-            opus_4_7.resolve_effort(Some(Effort::Xhigh)),
-            Some(Effort::Xhigh)
+            spec("claude-opus-4-8").unsupported_notice().as_deref(),
+            Some(
+                "`claude-opus-4-8` is not a supported model, so requests go without thinking, \
+                 effort, and context management, and auto-compaction and cost tracking stay off. \
+                 Did you mean `claude-opus-5-5` (Claude Opus 5.5)?"
+            ),
+        );
+        assert_eq!(
+            spec("gateway-model").unsupported_notice().as_deref(),
+            Some(
+                "`gateway-model` is not a supported model, so requests go without thinking, \
+                 effort, and context management, and auto-compaction and cost tracking stay off."
+            ),
         );
     }
 
     #[test]
-    fn resolve_effort_clamps_pick_against_model_ceiling() {
-        // Sonnet 4.6 caps at `high`.
-        let sonnet_4_6 = lookup("claude-sonnet-4-6").unwrap().capabilities;
-        assert_eq!(
-            sonnet_4_6.resolve_effort(Some(Effort::Xhigh)),
-            Some(Effort::High)
-        );
-    }
-
-    #[test]
-    fn resolve_effort_falls_back_to_per_model_default_when_pick_is_none() {
-        // 4.7 and 4.8 share the full ladder but default differently: 4.7 ships xhigh, 4.8 rides
-        // the high default (mirrors Claude Code).
-        let opus_4_7 = lookup("claude-opus-4-7").unwrap().capabilities;
-        assert_eq!(opus_4_7.resolve_effort(None), Some(Effort::Xhigh));
-        let opus_4_8 = lookup("claude-opus-4-8").unwrap().capabilities;
-        assert_eq!(opus_4_8.resolve_effort(None), Some(Effort::High));
-    }
-
-    #[test]
-    fn resolve_effort_is_none_on_no_tier_model() {
-        // Haiku 4.5 rejects the effort field; both pick=None and pick=Some collapse to None.
-        let haiku_4_5 = lookup("claude-haiku-4-5").unwrap().capabilities;
-        assert_eq!(haiku_4_5.resolve_effort(None), None);
-        assert_eq!(haiku_4_5.resolve_effort(Some(Effort::High)), None);
+    fn unsupported_notice_is_absent_for_catalogue_models() {
+        for info in MODELS {
+            assert_eq!(spec(info.id).unsupported_notice(), None, "{}", info.id);
+        }
     }
 
     // ── ResolvedModelId ──
 
     #[test]
     fn resolved_model_id_into_inner_returns_wrapped_string() {
-        let id = ResolvedModelId::new("claude-opus-4-7".to_owned());
-        assert_eq!(id.into_inner(), "claude-opus-4-7");
-    }
-
-    // ── lookup ──
-
-    #[test]
-    fn lookup_picks_first_matching_substring_row() {
-        let info = lookup("claude-opus-4-6").unwrap();
-        assert_eq!(info.display_name, "Claude Opus 4.6");
-        assert!(info.capabilities.has_effort());
-    }
-
-    #[test]
-    fn lookup_ignores_1m_suffix_tag_for_matching() {
-        // `[1m]` is a client-side opt-in marker; substring match still finds the base row.
-        let info = lookup("claude-opus-4-6[1m]").unwrap();
-        assert_eq!(info.display_name, "Claude Opus 4.6");
-    }
-
-    #[test]
-    fn lookup_unknown_or_retired_model_family_is_absent() {
-        for unknown in [
-            "claude-opus-5-0",
-            "claude-opus-4",
-            "claude-sonnet-4",
-            "claude-haiku-4",
-            "claude-opus-4-20250514",
-            "claude-opus-4-1",
-            "gpt-4",
-        ] {
-            assert!(lookup(unknown).is_none(), "{unknown} must not resolve");
-        }
-    }
-
-    // ── context_window_for ──
-
-    #[test]
-    fn context_window_for_known_models_defaults_to_standard_window() {
-        assert_eq!(context_window_for("claude-opus-4-7"), Some(200_000));
-        assert_eq!(context_window_for("claude-haiku-4-5"), Some(200_000));
-    }
-
-    #[test]
-    fn context_window_for_1m_suffix_requires_model_capability() {
-        assert_eq!(context_window_for("claude-opus-4-7[1m]"), Some(1_000_000));
-        assert_eq!(context_window_for("claude-haiku-4-5[1m]"), Some(200_000));
-    }
-
-    #[test]
-    fn context_window_for_unknown_model_is_none() {
-        assert_eq!(context_window_for("claude-future-9"), None);
-    }
-
-    // ── token_cost_rates_for ──
-
-    #[test]
-    fn token_cost_rates_for_known_model_estimates_prompt_cache_ttl() {
-        let rates = token_cost_rates_for("claude-opus-4-7[1m]").unwrap();
-        let five_min = rates.estimate_usd(
-            1_000_000,
-            1_000_000,
-            1_000_000,
-            1_000_000,
-            PromptCacheTtl::FiveMin,
-        );
-        let one_hour = rates.estimate_usd(
-            1_000_000,
-            1_000_000,
-            1_000_000,
-            1_000_000,
-            PromptCacheTtl::OneHour,
-        );
-
-        assert!((five_min - 36.75).abs() < 1e-9);
-        assert!((one_hour - 40.5).abs() < 1e-9);
-    }
-
-    #[test]
-    fn token_cost_rates_for_unknown_model_is_absent() {
-        assert!(token_cost_rates_for("claude-future-9").is_none());
-    }
-
-    // ── display_name ──
-
-    #[test]
-    fn display_name_known_plain_id_renders_row_label() {
-        for (id, expected) in [
-            ("claude-opus-4-8", "Claude Opus 4.8"),
-            ("claude-opus-4-7", "Claude Opus 4.7"),
-            ("claude-opus-4-6", "Claude Opus 4.6"),
-            ("claude-sonnet-4-6", "Claude Sonnet 4.6"),
-            ("claude-opus-4-5", "Claude Opus 4.5"),
-            ("claude-sonnet-4-5", "Claude Sonnet 4.5"),
-            ("claude-haiku-4-5", "Claude Haiku 4.5"),
-        ] {
-            assert_eq!(display_name(id), expected, "{id}");
-        }
-    }
-
-    #[test]
-    fn display_name_dated_suffix_falls_through_to_substring_row() {
-        assert_eq!(display_name("claude-opus-4-6-20260401"), "Claude Opus 4.6");
-    }
-
-    #[test]
-    fn display_name_appends_1m_context_suffix_on_1m_id() {
-        assert_eq!(
-            display_name("claude-opus-4-7[1m]"),
-            "Claude Opus 4.7 (1M context)"
-        );
-    }
-
-    #[test]
-    fn display_name_unknown_id_falls_through_to_raw() {
-        assert_eq!(display_name("gpt-4"), "gpt-4");
-        assert_eq!(display_name("custom-model"), "custom-model");
-    }
-
-    // ── short_display_name ──
-
-    #[test]
-    fn short_display_name_strips_claude_family_prefix() {
-        for (id, expected) in [
-            ("claude-opus-4-8", "Opus 4.8"),
-            ("claude-opus-4-7", "Opus 4.7"),
-            ("claude-sonnet-4-6", "Sonnet 4.6"),
-            ("claude-haiku-4-5", "Haiku 4.5"),
-        ] {
-            assert_eq!(short_display_name(id), expected, "{id}");
-        }
-    }
-
-    #[test]
-    fn short_display_name_replaces_1m_context_with_compact_tag() {
-        assert_eq!(short_display_name("claude-opus-4-7[1m]"), "Opus 4.7 [1M]");
-    }
-
-    #[test]
-    fn short_display_name_unknown_id_falls_through_to_raw() {
-        assert_eq!(short_display_name("gpt-4"), "gpt-4");
+        let id = ResolvedModelId::new("claude-opus-5-5".to_owned());
+        assert_eq!(id.into_inner(), "claude-opus-5-5");
     }
 }

@@ -1,4 +1,4 @@
-//! Assistant text and thinking blocks.
+//! Assistant text, thinking, and progress-update blocks.
 
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
@@ -125,6 +125,31 @@ fn apply_thinking_style(mut line: Line<'static>, theme: &Theme) -> Line<'static>
     line
 }
 
+// ── ProgressUpdate ──
+
+/// A note the model wrote before a tool call, rendered as assistant prose. Hidden when
+/// `show_thinking` is on, since the thinking block already shows the same text.
+pub(crate) struct ProgressUpdate {
+    text: String,
+}
+
+impl ProgressUpdate {
+    pub(crate) fn new(text: impl Into<String>) -> Self {
+        Self { text: text.into() }
+    }
+}
+
+impl ChatBlock for ProgressUpdate {
+    fn render(&self, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
+        let text = render_markdown(&self.text, ctx.theme, assistant_markdown_width(ctx));
+        with_assistant_gutter(text.lines, ctx, true)
+    }
+
+    fn visible(&self, ctx: &RenderCtx<'_>) -> bool {
+        !ctx.show_thinking
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use indoc::indoc;
@@ -225,5 +250,25 @@ mod tests {
         let out = apply_thinking_style(line, &theme);
         assert_eq!(out.spans[0].style.fg, theme.thinking().fg);
         assert_eq!(out.spans[1].style.fg, theme.code.fg);
+    }
+
+    // ── ProgressUpdate::visible ──
+
+    #[test]
+    fn progress_update_visible_only_while_thinking_hidden() {
+        let theme = Theme::default();
+        let block = ProgressUpdate::new("Found the loader.");
+        let mut ctx = ctx_at(60, &theme);
+        assert!(
+            !block.visible(&ctx),
+            "the thinking block already shows the text"
+        );
+
+        ctx.show_thinking = false;
+        assert!(block.visible(&ctx));
+        assert_eq!(
+            block.render(&ctx),
+            AssistantText::new("Found the loader.").render(&ctx),
+        );
     }
 }

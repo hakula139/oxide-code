@@ -10,15 +10,18 @@ use tracing::warn;
 use crate::agent::event::{AgentEvent, AgentSink};
 use crate::client::anthropic::Client;
 use crate::client::anthropic::wire::OutputFormat;
+use crate::config::Effort;
+use crate::model::ModelSpec;
 use crate::session::handle::SessionHandle;
 
 // ── Constants ──
 
 /// Haiku model used for title generation. Cheap enough to fire on every fresh session.
-const HAIKU_MODEL: &str = "claude-haiku-4-5";
+const HAIKU_MODEL: &str = "claude-haiku-5-5";
 
-/// Output budget. 40 tokens comfortably fits the 3-7 word JSON envelope.
-const MAX_TOKENS: u32 = 40;
+/// Output budget. Haiku 5.5 always runs adaptive thinking, so this leaves room for a short think
+/// ahead of the 3-7 word JSON envelope.
+const MAX_TOKENS: u32 = 1_024;
 
 /// Clamp on the prompt. Long first messages with pasted code stay cheap to title.
 const MAX_PROMPT_CHARS: usize = 1_000;
@@ -75,10 +78,11 @@ async fn generate_and_record(
     let output_format = title_output_format();
     let raw = client
         .complete(
-            HAIKU_MODEL,
+            &ModelSpec::resolve(HAIKU_MODEL.to_owned()),
             SYSTEM_PROMPT,
             &prompt,
             MAX_TOKENS,
+            Some(Effort::Low),
             Some(&output_format),
         )
         .await
@@ -186,7 +190,7 @@ struct TitleEnvelope {
 mod tests {
     use std::path::Path;
 
-    use wiremock::matchers::{method, path as wm_path};
+    use wiremock::matchers::{body_partial_json, method, path as wm_path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
@@ -288,6 +292,11 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(wm_path("/v1/messages"))
+            .and(body_partial_json(serde_json::json!({
+                "model": "claude-haiku-5-5",
+                "max_tokens": 1_024,
+                "output_config": {"effort": "low"},
+            })))
             .respond_with(
                 ResponseTemplate::new(200)
                     .set_body_string(completion_body(r#"{"title":"Fix login"}"#)),

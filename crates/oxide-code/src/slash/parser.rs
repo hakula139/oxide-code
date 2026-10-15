@@ -84,9 +84,9 @@ mod tests {
 
     #[test]
     fn parse_slash_name_with_args_keeps_remainder_trimmed() {
-        let parsed = parse_slash("/model claude-sonnet-4-6").unwrap();
+        let parsed = parse_slash("/model claude-sonnet-5-5").unwrap();
         assert_eq!(parsed.name, "model");
-        assert_eq!(parsed.args, "claude-sonnet-4-6");
+        assert_eq!(parsed.args, "claude-sonnet-5-5");
     }
 
     #[test]

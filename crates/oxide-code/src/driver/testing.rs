@@ -13,7 +13,7 @@ use crate::session::handle;
 use crate::session::store::SessionStore;
 use crate::tool::ToolRegistry;
 
-pub(super) const MODEL: &str = "claude-opus-4-7[1m]";
+pub(super) const MODEL: &str = "claude-opus-5-5";
 pub(super) const SESSION_CONTEXT: &str = "<system-reminder>session context</system-reminder>";
 
 /// Non-interactive conversation on a fresh session in `store`. Its prompt carries
@@ -38,6 +38,13 @@ pub(super) async fn conversation(base_url: String, store: &SessionStore) -> Conv
         displayed_usage: None,
         total_estimated_cost_usd: 0.0,
     }
+}
+
+/// Runs `test` with `HOME` pinned to an empty directory. Parallel tests swap `HOME`, which would
+/// otherwise change the user instructions between two context loads of one test.
+pub(super) async fn with_pinned_home(test: impl Future<Output = ()>) {
+    let home = tempfile::tempdir().unwrap();
+    temp_env::async_with_vars([("HOME", Some(home.path()))], test).await;
 }
 
 /// Answers every Messages request with a streamed reply of `text`.

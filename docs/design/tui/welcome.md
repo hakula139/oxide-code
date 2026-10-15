@@ -21,12 +21,12 @@ The welcome answers three questions:
 
 ## Layout
 
-At 80 cols with the test fixture (`claude-opus-4-8` plain, `xhigh` effort, OAuth), the render is:
+At 80 cols with the test fixture (`claude-opus-5-5`, `xhigh` effort, OAuth), the render is:
 
 ```text
                            ━━━━ oxide-code v0.1.0 ━━━━
 
-                  Claude Opus 4.8 · xhigh effort · OAuth
+                  Claude Opus 5.5 · xhigh effort · OAuth
                   ~/github/oxide-code
 
                   Try one of:
@@ -38,7 +38,7 @@ At 80 cols with the test fixture (`claude-opus-4-8` plain, `xhigh` effort, OAuth
                   Tip — ox --continue resumes your last session
 ```
 
-Starter rows and the tip are sampled per session from `STARTER_POOL` and `TIP_POOL`, so a different launch shows different picks. `[1m]` model ids render a trailing `(1M context)` suffix on the model line.
+Starter rows and the tip are sampled per session from `STARTER_POOL` and `TIP_POOL`, so a different launch shows different picks.
 
 Sections: identity ribbon above a body column (env, cwd, starter list, trailer). Body lines pad to one shared width so they keep one left edge under `Paragraph::alignment(Center)`. Without that pad, each line floats to its own visual center and the welcome reads as a "ransom note" stack. The ribbon centers as its own unit, and the body column centers on the same axis because every padded line has the same width.
 

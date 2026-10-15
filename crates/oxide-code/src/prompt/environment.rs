@@ -48,7 +48,8 @@ impl Environment {
     }
 
     pub(super) fn render(&self) -> String {
-        let model_bullet = match lookup(&self.model) {
+        let info = lookup(&self.model);
+        let model_bullet = match info {
             Some(info) => format!(
                 "- You are powered by the model named {}. \
                 The exact model ID is {}.",
@@ -56,9 +57,11 @@ impl Environment {
             ),
             None => format!("- You are powered by the model {}.", self.model),
         };
-        let cutoff_bullet = knowledge_cutoff(&self.model).map_or(String::new(), |c| {
-            format!("- Assistant knowledge cutoff is {c}.")
-        });
+        let cutoff_bullet = info
+            .and_then(|info| info.cutoff)
+            .map_or(String::new(), |c| {
+                format!("- Assistant knowledge cutoff is {c}.")
+            });
 
         formatdoc! {"
             # Environment
@@ -79,12 +82,6 @@ impl Environment {
             os_version = self.os_version,
         }
     }
-}
-
-// ── Model Metadata ──
-
-fn knowledge_cutoff(model: &str) -> Option<&'static str> {
-    lookup(model).and_then(|info| info.cutoff)
 }
 
 // ── Platform Detection ──
@@ -145,6 +142,17 @@ fn format_local_date(now: time::OffsetDateTime, offset: time::UtcOffset) -> Stri
 mod tests {
     use super::*;
 
+    fn env_with_model(model: &str) -> Environment {
+        Environment {
+            cwd: "/tmp".to_owned(),
+            is_git: false,
+            platform: "darwin".to_owned(),
+            shell: "zsh".to_owned(),
+            os_version: "Darwin 25.3.0".to_owned(),
+            model: model.to_owned(),
+        }
+    }
+
     // ── Environment::detect ──
 
     #[test]
@@ -175,7 +183,7 @@ mod tests {
             platform: "linux".to_owned(),
             shell: "bash".to_owned(),
             os_version: "Linux 6.1.0".to_owned(),
-            model: "claude-opus-4-6".to_owned(),
+            model: "claude-opus-5-5".to_owned(),
         };
         let rendered = env.render();
 
@@ -187,61 +195,30 @@ mod tests {
         assert!(rendered.contains("- Shell: bash"));
         assert!(rendered.contains("- OS Version: Linux 6.1.0"));
         assert!(rendered.contains(
-            "- You are powered by the model named Claude Opus 4.6. \
-             The exact model ID is claude-opus-4-6."
+            "- You are powered by the model named Claude Opus 5.5. \
+             The exact model ID is claude-opus-5-5."
         ));
-        assert!(rendered.contains("- Assistant knowledge cutoff is May 2025."));
+        assert!(rendered.contains("- Assistant knowledge cutoff is June 2026."));
     }
 
     #[test]
     fn render_without_git_shows_false() {
-        let env = Environment {
-            cwd: "/tmp".to_owned(),
-            is_git: false,
-            platform: "darwin".to_owned(),
-            shell: "zsh".to_owned(),
-            os_version: "Darwin 24.6.0".to_owned(),
-            model: "test-model".to_owned(),
-        };
-        let rendered = env.render();
+        let rendered = env_with_model("test-model").render();
         assert!(rendered.contains("  - Is a git repository: false"));
     }
 
     #[test]
-    fn render_unknown_model_uses_fallback_description() {
-        let env = Environment {
-            cwd: "/tmp".to_owned(),
-            is_git: false,
-            platform: "darwin".to_owned(),
-            shell: "zsh".to_owned(),
-            os_version: "Darwin 25.3.0".to_owned(),
-            model: "custom-model-v1".to_owned(),
-        };
-        let rendered = env.render();
-        assert!(rendered.contains("- You are powered by the model custom-model-v1."));
+    fn render_known_model_without_cutoff_omits_cutoff_bullet() {
+        let rendered = env_with_model("claude-sonnet-5-5").render();
+        assert!(rendered.contains("- You are powered by the model named Claude Sonnet 5.5."));
         assert!(!rendered.contains("knowledge cutoff"));
     }
 
-    // ── knowledge_cutoff ──
-
     #[test]
-    fn knowledge_cutoff_known_models() {
-        for (id, expected) in [
-            ("claude-opus-4-8", "January 2026"),
-            ("claude-opus-4-7", "January 2026"),
-            ("claude-sonnet-4-6", "August 2025"),
-            ("claude-opus-4-6", "May 2025"),
-            ("claude-opus-4-5", "May 2025"),
-            ("claude-haiku-4-5", "February 2025"),
-            ("claude-sonnet-4-5", "January 2025"),
-        ] {
-            assert_eq!(knowledge_cutoff(id), Some(expected), "{id}");
-        }
-    }
-
-    #[test]
-    fn knowledge_cutoff_unknown_model() {
-        assert_eq!(knowledge_cutoff("custom-model"), None);
+    fn render_unknown_model_uses_fallback_description() {
+        let rendered = env_with_model("custom-model-v1").render();
+        assert!(rendered.contains("- You are powered by the model custom-model-v1."));
+        assert!(!rendered.contains("knowledge cutoff"));
     }
 
     // ── normalize_node_platform ──
