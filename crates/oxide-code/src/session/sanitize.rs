@@ -528,6 +528,6 @@ mod tests {
     fn insert_resume_sentinels_noop_on_empty_input() {
         let mut messages: Vec<Message> = Vec::new();
         insert_resume_sentinels(&mut messages);
-        assert!(messages.is_empty());
+        assert_eq!(messages, []);
     }
 }

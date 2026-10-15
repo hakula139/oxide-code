@@ -122,7 +122,7 @@ mod tests {
     #[test]
     fn resolve_empty_builder_yields_no_chain() {
         let (chain, tip) = ChainBuilder::new().resolve();
-        assert!(chain.is_empty());
+        assert_eq!(chain, []);
         assert!(tip.is_none());
     }
 
@@ -299,7 +299,7 @@ mod tests {
 
         let (chain, tip) = b.resolve();
         assert!(tip.is_none(), "no leaf means no tip");
-        assert!(chain.is_empty());
+        assert_eq!(chain, []);
     }
 
     #[test]
@@ -315,7 +315,7 @@ mod tests {
 
         let (chain, tip) = b.resolve();
         assert!(tip.is_none());
-        assert!(chain.is_empty());
+        assert_eq!(chain, []);
     }
 
     #[test]
