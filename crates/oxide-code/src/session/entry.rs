@@ -30,8 +30,9 @@ pub(crate) enum Entry {
         #[serde(skip_serializing_if = "Option::is_none")]
         git_branch: Option<String>,
     },
-    /// Prompt state a resume rebuilds the request prefix from, written ahead of the user message
-    /// that first carries it. The latest one after the last compact boundary applies.
+    /// Prompt state a resume rebuilds the request prefix from. Written in one batch ahead of the
+    /// user message that first carries it, with the same timestamp, and bound to the next message
+    /// entry whose timestamp matches. Resume applies the latest one on the chain it resolves.
     Context {
         #[serde(flatten)]
         context: Box<SessionContext>,
