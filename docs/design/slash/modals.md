@@ -1,6 +1,6 @@
 # Modal UI
 
-Focus-grabbing UI overlays opened by slash commands, and by the App when an agent event requests tool approval. Lives in the band between the chat scroll and the input area, the same row range the slash autocomplete popup uses, but wider.
+Focus-grabbing UI overlays opened by slash commands, by the App in response to agent events requesting tool approval, and at startup with `ox --resume`. Lives in the band between the chat scroll and the input area, the same row range the slash autocomplete popup uses, but wider.
 
 Companion: [commands.md](commands.md) covers the slash-command surface that opens modals.
 
@@ -30,7 +30,7 @@ Dispatched actions flow through the same channel as keyboard input, so the modal
 
 Bracketed pastes reach `Modal::handle_paste`, which defaults to a no-op. Text fields such as `/rename` and the picker search accept them, and a paste never answers a confirm or approval prompt.
 
-`Modal::on_cancel` fires whenever a modal leaves the stack without submitting: the stack-level Esc / Ctrl+C cancel, a `Cancelled` outcome, or `ModalStack::clear` on resume or compaction. It returns an optional `ModalAction` that the App dispatches in place of the silent close. The default returns `None`, and `ApprovalModal` overrides it to emit a deny decision so a blocked agent always receives an answer.
+`Modal::on_cancel` fires whenever a modal leaves the stack without submitting: the stack-level Esc / Ctrl+C cancel, a `Cancelled` outcome, or `ModalStack::clear` on resume or compaction. It returns an optional `ModalAction` that the App dispatches in place of the silent close. The default returns `None`. `ApprovalModal` overrides it to emit a deny decision so the blocked agent always gets an answer. The `ox --resume` picker overrides it to emit `UserAction::Quit` because dismissing the picker quits `ox`.
 
 ## Implementation
 

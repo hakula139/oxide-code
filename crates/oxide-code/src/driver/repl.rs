@@ -2,7 +2,6 @@
 
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use anyhow::{Result, bail};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, BufReader};
@@ -15,7 +14,7 @@ use crate::slash;
 /// Reads prompts until EOF or a signal, then finalizes the session. EOF after a failed turn exits
 /// with failure.
 pub(crate) async fn run(engine: Engine, show_thinking: bool, drifted: &[PathBuf]) -> Result<Exit> {
-    let sink = StdioSink::new(show_thinking, Arc::clone(engine.tools()));
+    let sink = StdioSink::new(show_thinking);
     let stdin = BufReader::new(tokio::io::stdin());
     drive(engine.spawn(drifted), &sink, stdin).await
 }

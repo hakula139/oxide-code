@@ -31,14 +31,14 @@ const MAX_TOOL_OUTPUT_LINE_BYTES: usize = 512;
 
 /// One bordered line with the tool icon and input summary.
 pub(crate) struct ToolCallBlock {
-    icon: &'static str,
+    icon: String,
     label: String,
 }
 
 impl ToolCallBlock {
-    pub(crate) fn new(icon: &'static str, label: impl Into<String>) -> Self {
+    pub(crate) fn new(icon: impl Into<String>, label: impl Into<String>) -> Self {
         Self {
-            icon,
+            icon: icon.into(),
             label: label.into(),
         }
     }
@@ -50,7 +50,7 @@ impl ChatBlock for ToolCallBlock {
         let cont_prefix = bar_continuation_prefix(TOOL_BORDER_CONT, border_style);
         let line = Line::from(vec![
             Span::styled(TOOL_BORDER_PREFIX.to_owned(), border_style),
-            Span::styled(self.icon.to_owned(), ctx.theme.tool_icon()),
+            Span::styled(self.icon.clone(), ctx.theme.tool_icon()),
             Span::raw(" "),
             Span::styled(self.label.clone(), ctx.theme.text()),
         ]);

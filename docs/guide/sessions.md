@@ -65,6 +65,15 @@ ox -c ./conversation.jsonl
 ox -c /home/me/archive/2026-04/session.jsonl
 ```
 
+Pick a session from a list with `--resume` / `-r`:
+
+```bash
+ox -r              # sessions in the current project
+ox -r --all        # sessions in every project
+```
+
+This opens the TUI to the same picker as [`/resume`](#mid-session-resume). Press Enter to resume the highlighted session, or Esc to quit `ox` without creating a session file. `--resume` cannot be combined with `--continue`, `--list`, `--no-tui`, or `-p`. The picker requires the TUI, so this also fails when stdout is not a terminal.
+
 On resume, oxide-code loads the saved history and appends new messages to the same file, so the session keeps its original ID.
 
 ### Mid-Session Resume

@@ -269,7 +269,7 @@ mod tests {
     use super::*;
     use crate::file_tracker::{GateError, GatePurpose, MAX_TRACKED_FILE_SIZE, testing::tracker};
     use crate::tool::MAX_OUTPUT_BYTES;
-    use crate::tool::testing::canonical_tempdir;
+    use crate::tool::testing::{canonical_tempdir, symlink_file};
 
     // ── run ──
 
@@ -636,7 +636,6 @@ mod tests {
         assert!(err.contains("beyond the end"));
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn read_file_refuses_a_symlink_at_the_final_component() {
         // The gate pins the resolved path, so a link there was swapped in after the check and its
@@ -645,7 +644,7 @@ mod tests {
         let secret = dir.path().join("secret.txt");
         std::fs::write(&secret, "SECRET=1\n").unwrap();
         let path = dir.path().join("notes.md");
-        std::os::unix::fs::symlink(&secret, &path).unwrap();
+        symlink_file(&secret, &path);
 
         let err = read_file(path.to_str().unwrap(), None, None, &FileTracker::default())
             .await

@@ -187,7 +187,7 @@ Rules follow the format `class(specifier)`. The class is `read` (read, grep, and
 
 - **`bash`** specifiers match commands exactly (`bash(git status)`), by prefix (`bash(cargo test:*)`), or by wildcard (`bash(git *)`). Allow rules never match a command containing `;`, `|`, `&`, a newline, `>`, `<`, `$(`, or a backtick, while deny rules match the full command or any part between `;`, `|`, `&`, or newlines.
 - **`read` and `edit`** specifiers are path globs where `*` and `?` match within one path segment and `**` spans segments. A relative glob matches paths inside the working directory, so `edit(*.json)` covers `package.json` but not `src/a.json`. A glob starting with `/` or `~/` matches the absolute path after symlinks resolve.
-- **Deny and allow** match paths differently. An allow rule matches only the resolved path, with exact case and spelling. A deny rule also matches the path as the call writes it and, when the rule's literal leading directories run through a symlink at startup, the location they resolve to. It treats names that differ only in case, Unicode normalization, invisible characters, or trailing dots as the same name, so `read(**/.env)` also blocks `.ENV`.
+- **Deny and allow** match paths differently. An allow rule matches only the resolved path, with exact case and spelling. A deny rule also matches the path as the call writes it and, when the rule's literal leading directories run through a symlink at startup, the location they resolve to. It treats names that differ only in case, Unicode normalization, invisible characters, or trailing dots as the same name, so `read(**/.env)` also blocks `.ENV`. A `read` deny rule also hides the files it matches from a `grep` or `glob` over their directory, and the output counts the hidden files without naming them.
 
 In `auto` mode, edits to these paths need approval even when an allow rule matches:
 
@@ -198,7 +198,7 @@ In `auto` mode, edits to these paths need approval even when an allow rule match
 
 Their names compare the way deny rules compare names, in the path as written and as resolved, and a symlinked protected name in the launch directory protects its target as well. A `deny` rule still denies such an edit, and the built-in deny list blocks edits under the launch directory's own `.git`.
 
-Launching from `/` or your home directory turns off the auto-allow for edits inside it, so those edits need an allow rule or an approval. On macOS and Linux, so does an edit to a file with more than one hard link.
+Launching from `/` or your home directory turns off the auto-allow for edits inside it, so those edits need an allow rule or an approval. So does an edit to a file with more than one hard link.
 
 `plan` mode denies all edit and `bash` calls. `yolo` mode never asks and skips the built-in deny list (`rm -rf`, `curl | sh`, and similar), but it still honors your `deny` rules. A project `ox.toml` can only add `deny` rules, and setting `mode` or `allow` there fails the config load, so a repository can restrict what runs but never widen it. The environment variable `OX_PERMISSION_MODE` overrides `mode`.
 

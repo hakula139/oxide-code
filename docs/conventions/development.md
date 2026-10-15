@@ -4,7 +4,7 @@ Learn how to set up the development environment, what the pre-commit hooks check
 
 ## Dev Shell
 
-The Nix flake provides the pinned Rust toolchain, `cargo-llvm-cov`, `cargo-mutants`, `git-cliff`, Node.js, and pnpm:
+The Nix flake provides the pinned Rust toolchain, `cargo-about`, `cargo-deny`, `cargo-llvm-cov`, `cargo-mutants`, `git-cliff`, Node.js, and pnpm:
 
 ```bash
 nix develop                                        # Dev shell with the Rust toolchain and pre-commit hooks
@@ -33,14 +33,15 @@ The Node-based hooks require `node_modules` and silently skip when it is missing
 
 CI runs on pushes to `main`, pull requests, and manual dispatch, and the release workflow calls it again for each tag before publishing:
 
-| Job             | Checks                                                                        |
-| --------------- | ----------------------------------------------------------------------------- |
-| Nix Flake Check | `nix flake check`, which runs the pre-commit hooks without the Node ones      |
-| Node Check      | `pnpm format`, `pnpm lint`, and `pnpm spellcheck`                             |
-| Rust Check      | `cargo fmt --all --check` and `cargo clippy --all-targets -- -D warnings`     |
-| MSRV Check      | `cargo hack check --rust-version` against `rust-version`                      |
-| Windows Check   | Clippy and the test suite on Windows                                          |
-| Coverage        | The test suite under `cargo llvm-cov`, uploaded to Codecov                    |
-| Nix Build       | The package build on Linux and macOS, which runs the tests and `ox --version` |
+| Job              | Checks                                                                        |
+| ---------------- | ----------------------------------------------------------------------------- |
+| Nix Flake Check  | `nix flake check`, which runs the pre-commit hooks without the Node ones      |
+| Node Check       | `pnpm format`, `pnpm lint`, and `pnpm spellcheck`                             |
+| Rust Check       | `cargo fmt --all --check` and `cargo clippy --all-targets -- -D warnings`     |
+| Dependency Check | `cargo deny check licenses advisories sources bans`                           |
+| MSRV Check       | `cargo hack check --rust-version` against `rust-version`                      |
+| Windows Check    | Clippy and the test suite on Windows                                          |
+| Coverage         | The test suite under `cargo llvm-cov`, uploaded to Codecov                    |
+| Nix Build        | The package build on Linux and macOS, which runs the tests and `ox --version` |
 
 No job runs a plain `cargo build`, so run it locally for a quick compile check. See [RELEASING.md](../../RELEASING.md) for the release workflow.

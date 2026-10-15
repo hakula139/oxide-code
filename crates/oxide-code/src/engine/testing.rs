@@ -1,5 +1,6 @@
 //! Test-only [`Engine`] fixtures. Child of `engine` so it can build the private fields.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -37,6 +38,8 @@ pub(crate) async fn engine(base_url: String, store: &SessionStore, cwd: &Path) -
         store: store.clone(),
         session: handle::start(store, MODEL),
         messages: Vec::new(),
+        compact: None,
+        tool_metadata: HashMap::new(),
         prompt,
         prompt_unrecorded: true,
         file_tracker: Arc::new(FileTracker::default()),

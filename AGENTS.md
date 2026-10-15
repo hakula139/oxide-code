@@ -17,9 +17,13 @@ ox -p "<prompt>"                            # Headless: run one turn and print t
 ├── .agents/                                # Agent skills (release procedure)
 ├── .cspell/                                # Project spelling dictionary
 ├── .github/                                # CI and release workflows, plus the shared Nix setup action
+├── about.hbs                               # Plain-text third-party notice template
+├── about.toml                              # Release dependency license selection
 ├── crates/oxide-code/                      # The `ox` crate, mapped in docs/design/architecture.md
+├── deny.toml                               # Dependency license, advisory, source, and ban policy
 ├── docs/                                   # User guides, conventions, design specs, and research notes
 ├── Formula/                                # Homebrew formula, served from this repo as a tap
+├── licenses/                               # Licenses for bundled syntax definitions and themes
 └── scripts/                                # Release helpers and pre-commit checks
 ```
 

@@ -54,6 +54,10 @@ nix.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+winapi-util.workspace = true
+windows-sys.workspace = true
+
 [dev-dependencies]
 insta.workspace = true
 temp-env.workspace = true

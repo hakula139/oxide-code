@@ -527,8 +527,8 @@ pub(crate) fn is_binary(bytes: &[u8]) -> bool {
 // ── File Reading ──
 
 /// Reads `path` once `validate` accepts its metadata, checked by path before the open and again on
-/// the opened file, so a file swapped in between cannot skip the check. On Unix the open also
-/// refuses a symlink at the final component and never blocks on a fifo.
+/// the opened file, so a file swapped in between cannot skip the check. The open refuses a symlink
+/// at the final component and never blocks on a fifo, as [`open_no_follow`] describes.
 pub(crate) async fn read_validated(
     path: &str,
     validate: impl Fn(&std::fs::Metadata) -> Result<(), String>,
@@ -536,11 +536,11 @@ pub(crate) async fn read_validated(
     let error = |e: std::io::Error| format!("Error reading {path}: {e}");
     validate(&tokio::fs::metadata(path).await.map_err(error)?)?;
 
-    let mut options = tokio::fs::OpenOptions::new();
+    let mut options = std::fs::OpenOptions::new();
     options.read(true);
-    #[cfg(unix)]
-    options.custom_flags((nix::fcntl::OFlag::O_NOFOLLOW | nix::fcntl::OFlag::O_NONBLOCK).bits());
-    let mut file = options.open(path).await.map_err(error)?;
+    let mut file = open_no_follow(Path::new(path), options)
+        .await
+        .map_err(error)?;
     let metadata = file.metadata().await.map_err(error)?;
     validate(&metadata)?;
 
@@ -551,25 +551,20 @@ pub(crate) async fn read_validated(
 
 // ── File Writing ──
 
-/// Writes `bytes` to `path`, on Unix without following a symlink at the final component, so a link
-/// swapped in after the gate resolved the path cannot redirect the write. `create_new` refuses any
-/// existing entry, a dangling symlink included.
+/// Writes `bytes` to `path` through [`open_no_follow`]. `create_new` refuses any existing entry, a
+/// dangling symlink included, and otherwise the file is truncated only once the open succeeds.
 pub(crate) async fn write_no_follow(
     path: &Path,
     bytes: &[u8],
     create_new: bool,
 ) -> std::io::Result<()> {
-    let mut options = tokio::fs::OpenOptions::new();
-    options.write(true);
-    if create_new {
-        options.create_new(true);
-    } else {
-        options.truncate(true);
-    }
-    #[cfg(unix)]
-    options.custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits());
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(create_new);
+    let mut file = open_no_follow(path, options).await?;
 
-    let mut file = options.open(path).await?;
+    if !create_new {
+        file.set_len(0).await?;
+    }
     file.write_all(bytes).await?;
     file.flush().await
 }
@@ -589,6 +584,79 @@ pub(crate) async fn write_tracked(
             Ok((tracker_key(&path).await, bytes))
         })
         .await
+}
+
+// ── No-Follow Open ──
+
+/// Opens `path` without following a symlink at the final component, so a link swapped in after the
+/// gate resolved the path cannot redirect the call, and without blocking on a fifo.
+async fn open_no_follow(
+    path: &Path,
+    options: std::fs::OpenOptions,
+) -> std::io::Result<tokio::fs::File> {
+    let path = path.to_owned();
+    let file =
+        tokio::task::spawn_blocking(move || open_no_follow_blocking(&path, options)).await??;
+    Ok(tokio::fs::File::from_std(file))
+}
+
+#[cfg(unix)]
+fn open_no_follow_blocking(
+    path: &Path,
+    mut options: std::fs::OpenOptions,
+) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    use nix::fcntl::OFlag;
+
+    options
+        .custom_flags((OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK).bits())
+        .open(path)
+}
+
+/// `FILE_FLAG_OPEN_REPARSE_POINT` opens a reparse point itself, so a symlink or junction there
+/// fails the open as `O_NOFOLLOW` makes it fail on Unix. Any other reparse point, such as a
+/// deduplicated file, reads only through the file system filter the flag bypasses, so it opens
+/// again without the flag and keeps that handle only when it reaches the same file.
+#[cfg(windows)]
+fn open_no_follow_blocking(
+    path: &Path,
+    mut options: std::fs::OpenOptions,
+) -> std::io::Result<std::fs::File> {
+    use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
+
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT,
+    };
+
+    let file = options
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0 {
+        return Ok(file);
+    }
+    if metadata.file_type().is_symlink() {
+        return Err(std::io::Error::other(
+            "the final path component is a symlink",
+        ));
+    }
+
+    let reopened = options.custom_flags(0).open(path)?;
+    if file_id(&reopened)? == file_id(&file)? {
+        Ok(reopened)
+    } else {
+        Err(std::io::Error::other(
+            "the file changed while it was opened",
+        ))
+    }
+}
+
+/// The volume and file index that identify a file across handles.
+#[cfg(windows)]
+fn file_id(file: &std::fs::File) -> std::io::Result<(u64, u64)> {
+    let info = winapi_util::file::information(file)?;
+    Ok((info.volume_serial_number(), info.file_index()))
 }
 
 // ── File Walking ──
@@ -656,6 +724,26 @@ pub(crate) fn truncate_line(line: &str, max_chars: usize) -> Cow<'_, str> {
     ))
 }
 
+const WITHHELD_NOTE_END: &str = "withheld by read deny rules)";
+
+/// Appends the note a search tool adds when read deny rules withheld `count` of the files it found.
+/// The note counts them without naming any.
+pub(crate) fn push_withheld_note(content: &mut String, count: usize) {
+    if count == 0 {
+        return;
+    }
+    let word = if count == 1 { "file" } else { "files" };
+    _ = write!(content, "\n\n({count} {word} {WITHHELD_NOTE_END}");
+}
+
+/// `content` without the note [`push_withheld_note`] appended, for parsing the rest.
+pub(crate) fn strip_withheld_note(content: &str) -> &str {
+    match content.rsplit_once("\n\n") {
+        Some((rest, note)) if note.starts_with('(') && note.ends_with(WITHHELD_NOTE_END) => rest,
+        _ => content,
+    }
+}
+
 // ── Testing ──
 
 #[cfg(test)]
@@ -681,6 +769,15 @@ pub(crate) mod testing {
         let path = dunce::canonicalize(dir.path()).unwrap();
         CanonicalTempDir { _dir: dir, path }
     }
+
+    /// A symlink to a file. Windows needs Developer Mode or admin rights for it, which CI runners
+    /// have.
+    pub(crate) fn symlink_file(target: &Path, link: &Path) {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(target, link).unwrap();
+    }
 }
 
 #[cfg(test)]
@@ -693,7 +790,7 @@ mod tests {
     use super::glob::GlobTool;
     use super::grep::GrepTool;
     use super::read::ReadTool;
-    use super::testing::canonical_tempdir;
+    use super::testing::{canonical_tempdir, symlink_file};
     use super::write::WriteTool;
     use super::*;
     use crate::file_tracker::testing::tracker;
@@ -704,8 +801,8 @@ mod tests {
         vec![
             Box::new(BashTool),
             Box::new(EditTool::new(Arc::clone(&tracker))),
-            Box::new(GlobTool),
-            Box::new(GrepTool),
+            Box::new(GlobTool::default()),
+            Box::new(GrepTool::default()),
             Box::new(ReadTool::new(Arc::clone(&tracker))),
             Box::new(WriteTool::new(tracker)),
         ]
@@ -968,7 +1065,7 @@ mod tests {
             zone: Zone::Workspace,
         };
         let mut input = serde_json::json!({"pattern": "x", "path": "."});
-        GrepTool.pin_target(&mut input, &resolved);
+        GrepTool::default().pin_target(&mut input, &resolved);
         assert_eq!(input, serde_json::json!({"pattern": "x", "path": "."}));
     }
 
@@ -1039,7 +1136,7 @@ mod tests {
 
     #[test]
     fn label_delegates_to_registered_tool() {
-        let registry = ToolRegistry::new(vec![Box::new(BashTool), Box::new(GrepTool)]);
+        let registry = ToolRegistry::new(vec![Box::new(BashTool), Box::new(GrepTool::default())]);
         assert_eq!(
             registry.label("bash", &serde_json::json!({"command": "echo hi"})),
             "echo hi",
@@ -1071,7 +1168,7 @@ mod tests {
     #[tokio::test]
     async fn run_dispatches_and_caps_byte_overflow() {
         let (_dir, input) = oversize_grep_input();
-        let registry = ToolRegistry::new(vec![Box::new(GrepTool)]);
+        let registry = ToolRegistry::new(vec![Box::new(GrepTool::default())]);
         let output = registry.run("grep", input).await;
 
         assert!(!output.is_error);
@@ -1103,7 +1200,7 @@ mod tests {
     #[tokio::test]
     async fn run_byte_cap_on_grep_falls_through_to_text_view() {
         let (_dir, input) = oversize_grep_input();
-        let registry = ToolRegistry::new(vec![Box::new(GrepTool)]);
+        let registry = ToolRegistry::new(vec![Box::new(GrepTool::default())]);
         let output = registry.run("grep", input.clone()).await;
         assert!(output.metadata.truncated_bytes.is_some());
 
@@ -1165,7 +1262,7 @@ mod tests {
 
     #[test]
     fn result_view_delegates_grep_matches() {
-        let registry = ToolRegistry::new(vec![Box::new(GrepTool)]);
+        let registry = ToolRegistry::new(vec![Box::new(GrepTool::default())]);
         let input = serde_json::json!({"pattern": "fn"});
         let metadata = ToolMetadata::default();
         let view =
@@ -1207,7 +1304,7 @@ mod tests {
 
     #[test]
     fn result_view_delegates_glob_files() {
-        let registry = ToolRegistry::new(vec![Box::new(GlobTool)]);
+        let registry = ToolRegistry::new(vec![Box::new(GlobTool::default())]);
         let input = serde_json::json!({"pattern": "*.rs"});
         let metadata = ToolMetadata::default();
         let view =
@@ -1467,14 +1564,13 @@ mod tests {
 
     // ── read_validated ──
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn read_validated_reads_a_regular_file_but_refuses_a_symlink() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("target.txt");
         std::fs::write(&target, "original").unwrap();
         let link = dir.path().join("link.txt");
-        std::os::unix::fs::symlink(&target, &link).unwrap();
+        symlink_file(&target, &link);
 
         let accept = |_: &std::fs::Metadata| Ok(());
         let (metadata, bytes) = read_validated(target.to_str().unwrap(), accept)
@@ -1484,10 +1580,17 @@ mod tests {
             (metadata.len(), bytes.as_slice()),
             (8, b"original".as_slice())
         );
+        let err = read_validated(link.to_str().unwrap(), accept)
+            .await
+            .unwrap_err();
         assert!(
-            read_validated(link.to_str().unwrap(), accept)
-                .await
-                .is_err()
+            err.starts_with(&format!("Error reading {}: ", link.display())),
+            "{err}"
+        );
+        #[cfg(windows)]
+        assert!(
+            err.ends_with("the final path component is a symlink"),
+            "{err}"
         );
     }
 
@@ -1539,7 +1642,6 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "short");
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn write_no_follow_create_new_refuses_existing_entries_and_dangling_links() {
         let dir = tempfile::tempdir().unwrap();
@@ -1547,7 +1649,7 @@ mod tests {
         std::fs::write(&existing, "original").unwrap();
         let target = dir.path().join("target.txt");
         let link = dir.path().join("link.txt");
-        std::os::unix::fs::symlink(&target, &link).unwrap();
+        symlink_file(&target, &link);
 
         assert!(write_no_follow(&existing, b"x", true).await.is_err());
         assert_eq!(std::fs::read_to_string(&existing).unwrap(), "original");
@@ -1555,17 +1657,61 @@ mod tests {
         assert!(!target.exists(), "the link target must not be created");
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn write_no_follow_overwrite_refuses_a_symlink() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("target.txt");
         std::fs::write(&target, "original").unwrap();
         let link = dir.path().join("link.txt");
-        std::os::unix::fs::symlink(&target, &link).unwrap();
+        symlink_file(&target, &link);
 
-        assert!(write_no_follow(&link, b"x", false).await.is_err());
+        let err = write_no_follow(&link, b"x", false).await.unwrap_err();
+        #[cfg(unix)]
+        assert_eq!(err.raw_os_error(), Some(nix::errno::Errno::ELOOP as i32));
+        #[cfg(windows)]
+        assert_eq!(err.to_string(), "the final path component is a symlink");
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "original");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_no_follow_overwrite_refuses_a_fifo_without_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("pipe");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRWXU).unwrap();
+
+        let write = write_no_follow(&fifo, b"x", false);
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), write).await;
+        assert!(result.expect("the open must not block").is_err());
+    }
+
+    // ── open_no_follow ──
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn open_no_follow_reads_and_rewrites_a_compressed_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notes.txt");
+        let content = "a compressible line\n".repeat(4096);
+        std::fs::write(&path, &content).unwrap();
+        // `compact /EXE` stores the data compressed behind the WOF filter. Skip where the volume
+        // cannot compress.
+        let compacted = std::process::Command::new("compact.exe")
+            .args(["/C", "/EXE:XPRESS4K"])
+            .arg(&path)
+            .output()
+            .is_ok_and(|output| output.status.success());
+        if !compacted {
+            return;
+        }
+
+        let accept = |_: &std::fs::Metadata| Ok(());
+        let (_, bytes) = read_validated(path.to_str().unwrap(), accept)
+            .await
+            .unwrap();
+        assert_eq!(bytes, content.as_bytes());
+        write_no_follow(&path, b"rewritten", false).await.unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"rewritten");
     }
 
     // ── truncate_line ──
@@ -1607,5 +1753,36 @@ mod tests {
         let result = truncate_line(&line, MAX_CHARS);
         assert!(matches!(result, Cow::Borrowed(_)));
         assert_eq!(result.as_ref(), line);
+    }
+
+    // ── push_withheld_note ──
+
+    #[test]
+    fn push_withheld_note_counts_files_and_strips_back_off() {
+        for (count, note) in [
+            (1, "(1 file withheld by read deny rules)"),
+            (3, "(3 files withheld by read deny rules)"),
+        ] {
+            let mut content = "a.rs".to_owned();
+            push_withheld_note(&mut content, count);
+            assert_eq!(content, format!("a.rs\n\n{note}"));
+            assert_eq!(strip_withheld_note(&content), "a.rs");
+        }
+
+        let mut content = "a.rs".to_owned();
+        push_withheld_note(&mut content, 0);
+        assert_eq!(content, "a.rs");
+    }
+
+    // ── strip_withheld_note ──
+
+    #[test]
+    fn strip_withheld_note_keeps_content_without_one() {
+        for content in [
+            "a.rs",
+            "a.rs\n\n(Showing 100 of 120 matches. Use a more specific pattern.)",
+        ] {
+            assert_eq!(strip_withheld_note(content), content);
+        }
     }
 }

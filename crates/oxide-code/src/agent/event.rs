@@ -1,13 +1,12 @@
 //! Agent event types and the sink trait for delivering them to a UI.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use anyhow::Result;
 
 use crate::config::{CompactionConfig, Effort};
 use crate::model::{ModelSpec, ResolvedModelId};
-use crate::tool::ToolRegistry;
+use crate::tool::ToolResultView;
 
 // ── Visible Markers ──
 
@@ -47,19 +46,10 @@ pub(crate) enum AgentEvent {
     /// A request failed before any content and will be sent again after a delay. Leaves the turn
     /// running and renders as a dim notice.
     Retrying(String),
-    /// Tool call emitted by the model, used to render the call row and prepare the result slot.
-    ToolCallStart {
-        id: String,
-        name: String,
-        input: serde_json::Value,
-    },
-    /// Tool result for the slot opened by the matching [`Self::ToolCallStart`].
-    ToolCallEnd {
-        id: String,
-        content: String,
-        is_error: bool,
-        metadata: crate::tool::ToolMetadata,
-    },
+    /// Tool call emitted by the model.
+    ToolCallStart(ToolCall),
+    /// Result of the call the matching [`Self::ToolCallStart`] opened.
+    ToolCallEnd(ToolResult),
     /// A [`UserAction::QueuePrompt`] was spliced into the live transcript, so the UI moves it from
     /// the queue into the chat.
     PromptDrained(String),
@@ -81,16 +71,14 @@ pub(crate) enum AgentEvent {
     /// `/clear` or `/archive` rolled the session, making a new session UUID active. `archived`
     /// marks an `/archive` roll, so the UI can name the session it archived.
     SessionRolled { id: String, archived: bool },
-    /// `/resume` swapped to an existing session in place. Payload carries the target's
-    /// transcript so the UI can rebuild chat without restarting the process. `unarchived` reports
-    /// that the target stayed archived until this resume.
+    /// `/resume` swapped to an existing session in place. Payload carries the target's transcript
+    /// projected for display, so the UI can rebuild chat without restarting the process.
+    /// `unarchived` reports that the target stayed archived until this resume.
     SessionResumed {
         id: String,
         title: Option<String>,
         unarchived: bool,
-        messages: Vec<crate::message::Message>,
-        compact: Option<crate::session::entry::CompactInfo>,
-        tool_metadata: std::collections::HashMap<String, crate::tool::ToolMetadata>,
+        history: Vec<Interaction>,
     },
     /// `/compact` finished. The in-memory transcript has already been swapped to the synthetic
     /// continuation, so the UI clears its chat and replays a single boundary block. `automatic`
@@ -120,6 +108,53 @@ pub(crate) enum AgentEvent {
         id: String,
         preview: ApprovalPreview,
     },
+}
+
+// ── Tool Calls ──
+
+/// A tool call as the row a UI shows for it, live in [`AgentEvent::ToolCallStart`] and resumed in
+/// [`Interaction::ToolCall`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ToolCall {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) icon: String,
+    pub(crate) label: String,
+}
+
+/// A tool call's result, live in [`AgentEvent::ToolCallEnd`] and resumed in
+/// [`Interaction::ToolResult`]. `content` is what the model sees, `title` the tool's own header for
+/// the result, and `view` its structured body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ToolResult {
+    pub(crate) id: String,
+    pub(crate) content: String,
+    pub(crate) is_error: bool,
+    pub(crate) title: Option<String>,
+    pub(crate) view: ToolResultView,
+}
+
+// ── History ──
+
+/// A unit of a resumed transcript as a frontend shows it, in display order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Interaction {
+    /// The boundary a compaction left, which the rest of the transcript continues from. Renders
+    /// like a live [`AgentEvent::SessionCompacted`].
+    Compacted {
+        summary: String,
+        pre_count: u32,
+        instructions: Option<String>,
+    },
+    UserText(String),
+    AssistantText(String),
+    AssistantThinking(String),
+    /// Note introducing the next tool call. Its text also appears in the preceding
+    /// [`Self::AssistantThinking`], so renderers show one or the other.
+    ProgressUpdate(String),
+    ToolCall(ToolCall),
+    /// A result that follows its call, or stands alone when the transcript lost the call.
+    ToolResult(ToolResult),
 }
 
 // ── Approval ──
@@ -242,15 +277,11 @@ pub(crate) trait AgentSink: Send + Sync {
 /// output stays clean.
 pub(crate) struct StdioSink {
     show_thinking: bool,
-    tools: Arc<ToolRegistry>,
 }
 
 impl StdioSink {
-    pub(crate) fn new(show_thinking: bool, tools: Arc<ToolRegistry>) -> Self {
-        Self {
-            show_thinking,
-            tools,
-        }
+    pub(crate) fn new(show_thinking: bool) -> Self {
+        Self { show_thinking }
     }
 
     fn render<W1: std::io::Write, W2: std::io::Write>(
@@ -275,15 +306,11 @@ impl StdioSink {
                     writeln!(stderr, "{}", text.trim())?;
                 }
             }
-            AgentEvent::ToolCallStart { name, input, .. } => {
-                let icon = self.tools.icon(&name);
-                let label = self.tools.label(&name, &input);
+            AgentEvent::ToolCallStart(ToolCall { icon, label, .. }) => {
                 writeln!(stderr, "{icon} {label}")?;
             }
-            AgentEvent::ToolCallEnd {
-                content, metadata, ..
-            } => {
-                if let Some(title) = metadata.title {
+            AgentEvent::ToolCallEnd(ToolResult { content, title, .. }) => {
+                if let Some(title) = title {
                     writeln!(stderr, "  {title}")?;
                 }
                 let trimmed = content.trim();
@@ -388,12 +415,11 @@ impl AgentSink for FailingSink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tool::ToolRegistry;
 
     // ── StdioSink::render ──
 
     fn test_sink(show_thinking: bool) -> StdioSink {
-        StdioSink::new(show_thinking, Arc::new(ToolRegistry::new(Vec::new())))
+        StdioSink::new(show_thinking)
     }
 
     fn render_one(sink: &StdioSink, event: AgentEvent) -> (String, String) {
@@ -405,6 +431,18 @@ mod tests {
             String::from_utf8(stdout).expect("stdout is UTF-8"),
             String::from_utf8(stderr).expect("stderr is UTF-8"),
         )
+    }
+
+    fn text_result(id: &str, content: &str, is_error: bool, title: Option<&str>) -> ToolResult {
+        ToolResult {
+            id: id.to_owned(),
+            content: content.to_owned(),
+            is_error,
+            title: title.map(ToOwned::to_owned),
+            view: ToolResultView::Text {
+                content: content.to_owned(),
+            },
+        }
     }
 
     #[test]
@@ -452,50 +490,33 @@ mod tests {
 
     #[test]
     fn render_tool_call_start_writes_icon_label_to_stderr() {
-        let (_, stderr) = render_one(
+        let (stdout, stderr) = render_one(
             &test_sink(false),
-            AgentEvent::ToolCallStart {
+            AgentEvent::ToolCallStart(ToolCall {
                 id: "t1".to_owned(),
-                name: "unregistered".to_owned(),
-                input: serde_json::Value::Null,
-            },
+                name: "bash".to_owned(),
+                icon: "$".to_owned(),
+                label: "ls".to_owned(),
+            }),
         );
-        assert!(stderr.ends_with('\n'));
-        assert_eq!(stderr.lines().count(), 1);
-        assert!(stderr.contains("unregistered"));
+        assert_eq!(stdout, "");
+        assert_eq!(stderr, "$ ls\n");
     }
 
     #[test]
     fn render_tool_call_end_with_title_writes_title_then_content() {
         let (_, stderr) = render_one(
             &test_sink(false),
-            AgentEvent::ToolCallEnd {
-                id: "t1".to_owned(),
-                content: "file1\nfile2\n".to_owned(),
-                is_error: false,
-                metadata: crate::tool::ToolMetadata {
-                    title: Some("ls".to_owned()),
-                    ..crate::tool::ToolMetadata::default()
-                },
-            },
+            AgentEvent::ToolCallEnd(text_result("t1", "file1\nfile2\n", false, Some("Listed"))),
         );
-        let lines: Vec<&str> = stderr.lines().collect();
-        assert_eq!(lines[0], "  ls");
-        assert_eq!(lines[1], "file1");
-        assert_eq!(lines[2], "file2");
-        assert!(stderr.ends_with("\n\n"));
+        assert_eq!(stderr, "  Listed\nfile1\nfile2\n\n");
     }
 
     #[test]
     fn render_tool_call_end_without_title_skips_header_and_whitespace_content() {
         let (_, stderr) = render_one(
             &test_sink(false),
-            AgentEvent::ToolCallEnd {
-                id: "t2".to_owned(),
-                content: "   \n".to_owned(),
-                is_error: true,
-                metadata: crate::tool::ToolMetadata::default(),
-            },
+            AgentEvent::ToolCallEnd(text_result("t2", "   \n", true, None)),
         );
         assert_eq!(stderr, "\n");
     }

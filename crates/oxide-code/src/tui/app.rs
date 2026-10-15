@@ -4,8 +4,7 @@
 //! loop multiplexing crossterm events, agent events, git probe results, and a 60 FPS render tick.
 //! A dirty flag coalesces redraws so each state change renders once.
 
-use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -23,18 +22,14 @@ use super::components::status::{Status, StatusBar};
 use super::components::welcome::{self, WelcomeSnapshot};
 use super::git_probes::{GitProbes, GitUpdate};
 use super::glyphs::{NEWLINE_GLYPH, USER_PROMPT_PREFIX, USER_PROMPT_PREFIX_WIDTH};
-use super::modal::{ModalAction, ModalStack};
-use super::pending_calls::{PendingCall, PendingCalls, result_header};
+use super::modal::{Modal, ModalAction, ModalStack};
 use super::terminal::{Tui, synchronized_update, write_status_hyperlinks};
 use super::theme::Theme;
-use crate::agent::event::{AgentEvent, UserAction};
+use crate::agent::event::{AgentEvent, Interaction, UserAction};
 use crate::config::{CompactionConfig, Effort, StatusLineSegment, display_auto_compaction};
-use crate::message::Message;
 use crate::model::ModelSpec;
 use crate::session::display::archive_notice;
-use crate::session::entry::CompactInfo;
 use crate::slash::{self, LiveSessionInfo, Parsed, SlashContext, SlashKind, SlashOutcome};
-use crate::tool::{ToolMetadata, ToolRegistry, ToolResultView};
 use crate::util::text::{center_truncate_to_width, truncate_to_width};
 
 /// Tick interval for animation frames and render coalescing (~60 FPS).
@@ -55,9 +50,6 @@ pub(crate) struct App {
     session_info: LiveSessionInfo,
     agent_rx: mpsc::UnboundedReceiver<AgentEvent>,
     user_tx: mpsc::Sender<UserAction>,
-    tools: Arc<ToolRegistry>,
-    /// Correlates `ToolCallStart` with its matching `ToolCallEnd`.
-    pending_calls: PendingCalls,
     /// Prompt already painted for the in-flight turn. Replayed if auto-compaction clears chat.
     active_prompt: Option<String>,
     /// FIFO of prompts submitted mid-turn, kept as typed so Esc restores a `//` escape. The TUI owns
@@ -72,10 +64,8 @@ pub(crate) struct App {
     dirty: bool,
 }
 
-pub(crate) struct AppHistory<'a> {
-    pub(crate) messages: &'a [Message],
-    pub(crate) compact: Option<&'a CompactInfo>,
-    pub(crate) tool_metadata: &'a HashMap<String, ToolMetadata>,
+pub(crate) struct AppHistory {
+    pub(crate) interactions: Vec<Interaction>,
     pub(crate) title: Option<String>,
     /// Resuming the session unarchived it, so the chat opens with a note saying so.
     pub(crate) unarchived: bool,
@@ -88,16 +78,10 @@ impl App {
         show_thinking: bool,
         agent_rx: mpsc::UnboundedReceiver<AgentEvent>,
         user_tx: mpsc::Sender<UserAction>,
-        tools: Arc<ToolRegistry>,
-        history: AppHistory<'_>,
+        history: AppHistory,
     ) -> Self {
         let mut chat = ChatView::new(theme, show_thinking);
-        chat.load_history(
-            history.messages,
-            history.compact,
-            history.tool_metadata,
-            tools.as_ref(),
-        );
+        chat.load_history(history.interactions);
         if history.unarchived {
             chat.push_system_message(archive_notice(&session_info.session_id, false));
         }
@@ -127,8 +111,6 @@ impl App {
             session_info,
             agent_rx,
             user_tx,
-            tools,
-            pending_calls: PendingCalls::new(),
             active_prompt: None,
             pending_prompts: VecDeque::new(),
             forwarded_prompts: 0,
@@ -142,6 +124,12 @@ impl App {
     /// Appends a system message ahead of the first frame, for warnings raised at startup.
     pub(crate) fn push_system_message(&mut self, body: String) {
         self.chat.push_system_message(body);
+    }
+
+    /// Opens a modal ahead of the first frame, for overlays raised at startup.
+    pub(crate) fn push_modal(&mut self, modal: Box<dyn Modal>) {
+        self.modals.push(modal);
+        self.dirty = true;
     }
 
     /// Runs until the user quits or the agent channel closes.
@@ -284,12 +272,6 @@ impl App {
         self.chat.set_theme(theme);
         self.status_bar.set_theme(theme);
         self.input.set_theme(theme);
-        self.dirty = true;
-    }
-
-    #[cfg(test)]
-    pub(crate) fn push_modal(&mut self, modal: Box<dyn super::modal::Modal>) {
-        self.modals.push(modal);
         self.dirty = true;
     }
 
@@ -508,20 +490,13 @@ impl App {
             }
             AgentEvent::ProgressUpdate(text) => self.chat.push_progress_update(text),
             AgentEvent::Retrying(notice) => self.chat.push_notice(notice),
-            AgentEvent::ToolCallStart { id, name, input } => {
-                let icon = self.tools.icon(&name);
-                let label = self.tools.label(&name, &input);
-                self.chat.push_tool_call(icon, &label);
-                self.set_active_status(Status::ToolRunning { name: name.clone() });
-                self.pending_calls
-                    .insert(id, PendingCall { label, name, input });
+            AgentEvent::ToolCallStart(call) => {
+                self.set_active_status(Status::ToolRunning {
+                    name: call.name.clone(),
+                });
+                self.chat.push_tool_call(call);
             }
-            AgentEvent::ToolCallEnd {
-                id,
-                content,
-                is_error,
-                metadata,
-            } => self.apply_tool_call_end(&id, &content, is_error, &metadata),
+            AgentEvent::ToolCallEnd(result) => self.chat.push_tool_result(result),
             AgentEvent::PromptDrained(text) => self.apply_prompt_drained(text),
             AgentEvent::UsageUpdated(usage) => {
                 self.status_bar.set_usage(Some(usage));
@@ -557,17 +532,8 @@ impl App {
                 id,
                 title,
                 unarchived,
-                messages,
-                compact,
-                tool_metadata,
-            } => self.apply_session_resumed(
-                id,
-                title,
-                unarchived,
-                compact.as_ref(),
-                &messages,
-                &tool_metadata,
-            ),
+                history,
+            } => self.apply_session_resumed(id, title, unarchived, history),
             AgentEvent::SessionCompacted {
                 summary,
                 pre_count,
@@ -593,28 +559,6 @@ impl App {
             AgentEvent::ApprovalRequested { id, preview } => self.push_approval_modal(id, preview),
         }
         self.dirty = true;
-    }
-
-    /// Renders a tool result into the slot its [`AgentEvent::ToolCallStart`] opened.
-    fn apply_tool_call_end(
-        &mut self,
-        id: &str,
-        content: &str,
-        is_error: bool,
-        metadata: &ToolMetadata,
-    ) {
-        let pending = self.pending_calls.remove(id);
-        let view = pending.as_ref().map_or_else(
-            || ToolResultView::Text {
-                content: content.to_owned(),
-            },
-            |p| {
-                self.tools
-                    .result_view(&p.name, &p.input, content, metadata, is_error)
-            },
-        );
-        let header = result_header(metadata, pending.as_ref().map(|p| p.label.as_str()));
-        self.chat.push_tool_result_view(&header, view, is_error);
     }
 
     fn apply_prompt_drained(&mut self, text: String) {
@@ -658,21 +602,20 @@ impl App {
         id: String,
         title: Option<String>,
         unarchived: bool,
-        compact: Option<&CompactInfo>,
-        messages: &[Message],
-        tool_metadata: &HashMap<String, ToolMetadata>,
+        history: Vec<Interaction>,
     ) {
         self.session_info.session_id = id;
         self.status_bar.set_title(title);
         self.status_bar.set_usage(None);
         self.chat.clear_history();
-        self.chat
-            .load_history(messages, compact, tool_metadata, self.tools.as_ref());
+        self.chat.load_history(history);
         if unarchived {
             self.chat
                 .push_system_message(archive_notice(&self.session_info.session_id, false));
         }
-        self.pending_calls.clear();
+        if let Some(notice) = self.session_info.config.model.unsupported_notice() {
+            self.chat.push_system_message(notice);
+        }
         self.active_prompt = None;
         // Queued prompts belonged to the previous thread, so resume drops them.
         let dropped = self.pending_prompts.len();
@@ -697,7 +640,6 @@ impl App {
         automatic: bool,
     ) {
         self.chat.clear_history();
-        self.pending_calls.clear();
         self.status_bar.set_usage(None);
         self.chat
             .push_compacted_block(pre_count, instructions, summary.to_owned());
@@ -750,7 +692,7 @@ impl App {
     /// Resets to idle, clears orphan calls, and re-enables input. Queued prompts stay queued, and
     /// the ended turn no longer holds any of them.
     fn enter_idle(&mut self) {
-        self.pending_calls.clear();
+        self.chat.clear_pending_calls();
         self.forwarded_prompts = 0;
         self.status_bar.set_status(Status::Idle);
         self.input.set_enabled(true);
@@ -1034,44 +976,15 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
-    use crate::agent::event::UsageSnapshot;
+    use crate::agent::event::{ToolCall, ToolResult, UsageSnapshot};
     use crate::config::test_thresholds;
-    use crate::tool::ToolRegistry;
+    use crate::tool::ToolResultView;
     use crate::tui::modal::testing::ScriptedModal;
 
     /// Idle `App` plus the `user_tx` consumer and an `agent_tx` kept alive so `agent_rx` stays
     /// open.
     fn test_app(
         title: Option<&str>,
-    ) -> (
-        App,
-        mpsc::Receiver<UserAction>,
-        mpsc::UnboundedSender<AgentEvent>,
-    ) {
-        test_app_with_registry(title, Arc::new(ToolRegistry::new(Vec::new())))
-    }
-
-    /// Variant with the real tool catalog so `ToolCallStart` labels match production.
-    fn test_app_with_tools() -> (
-        App,
-        mpsc::Receiver<UserAction>,
-        mpsc::UnboundedSender<AgentEvent>,
-    ) {
-        let tracker = crate::file_tracker::testing::tracker();
-        let tools = ToolRegistry::new(vec![
-            Box::new(crate::tool::bash::BashTool),
-            Box::new(crate::tool::read::ReadTool::new(Arc::clone(&tracker))),
-            Box::new(crate::tool::write::WriteTool::new(Arc::clone(&tracker))),
-            Box::new(crate::tool::edit::EditTool::new(tracker)),
-            Box::new(crate::tool::glob::GlobTool),
-            Box::new(crate::tool::grep::GrepTool),
-        ]);
-        test_app_with_registry(None, Arc::new(tools))
-    }
-
-    fn test_app_with_registry(
-        title: Option<&str>,
-        tools: Arc<ToolRegistry>,
     ) -> (
         App,
         mpsc::Receiver<UserAction>,
@@ -1085,16 +998,34 @@ mod tests {
             false,
             agent_rx,
             user_tx,
-            tools,
             AppHistory {
-                messages: &[],
-                compact: None,
-                tool_metadata: &HashMap::new(),
+                interactions: Vec::new(),
                 title: title.map(ToOwned::to_owned),
                 unarchived: false,
             },
         );
         (app, user_rx, agent_tx)
+    }
+
+    fn bash_call_start(id: &str, command: &str) -> AgentEvent {
+        AgentEvent::ToolCallStart(ToolCall {
+            id: id.to_owned(),
+            name: "bash".to_owned(),
+            icon: "$".to_owned(),
+            label: command.to_owned(),
+        })
+    }
+
+    fn text_call_end(id: &str, content: &str, is_error: bool, title: Option<&str>) -> AgentEvent {
+        AgentEvent::ToolCallEnd(ToolResult {
+            id: id.to_owned(),
+            content: content.to_owned(),
+            is_error,
+            title: title.map(ToOwned::to_owned),
+            view: ToolResultView::Text {
+                content: content.to_owned(),
+            },
+        })
     }
 
     fn test_session_info() -> LiveSessionInfo {
@@ -1306,11 +1237,8 @@ mod tests {
             false,
             agent_rx,
             user_tx,
-            Arc::new(ToolRegistry::new(Vec::new())),
             AppHistory {
-                messages: &[Message::user("earlier")],
-                compact: None,
-                tool_metadata: &HashMap::new(),
+                interactions: vec![Interaction::UserText("earlier".to_owned())],
                 title: None,
                 unarchived: true,
             },
@@ -2963,30 +2891,21 @@ mod tests {
     #[test]
     fn handle_session_resumed_replays_transcript_and_clears_pending() {
         let (mut app, _rx, _agent_tx) = test_app(Some("Old"));
+        app.session_info.config.model = spec("claude-opus-5-5");
         app.chat.push_user_message("live prompt".to_owned());
         app.status_bar.set_usage(Some(usage_snapshot()));
         app.pending_prompts.push_back("queued".to_owned());
-        app.pending_calls.insert(
-            "pending-1".to_owned(),
-            PendingCall {
-                label: "Bash(...)".to_owned(),
-                name: "bash".to_owned(),
-                input: serde_json::json!({}),
-            },
-        );
+        app.handle_agent_event(bash_call_start("pending-1", "ls"));
         let original_id = app.session_info.session_id.clone();
 
-        let messages = vec![
-            Message::user("resumed user"),
-            Message::assistant("resumed assistant"),
-        ];
         app.handle_agent_event(AgentEvent::SessionResumed {
             id: "resumed-session".to_owned(),
             title: Some("Resumed title".to_owned()),
             unarchived: false,
-            messages,
-            compact: None,
-            tool_metadata: HashMap::new(),
+            history: vec![
+                Interaction::UserText("resumed user".to_owned()),
+                Interaction::AssistantText("resumed assistant".to_owned()),
+            ],
         });
 
         assert_eq!(app.session_info.session_id, "resumed-session");
@@ -3002,7 +2921,7 @@ mod tests {
             "chat must reflect the resumed transcript + the queued-prompt-discarded notice",
         );
         assert_eq!(
-            app.pending_calls.len(),
+            app.chat.pending_call_count(),
             0,
             "pending tool calls must drop on resume",
         );
@@ -3018,13 +2937,12 @@ mod tests {
     #[test]
     fn handle_session_resumed_with_no_queued_prompts_is_silent() {
         let (mut app, _rx, _agent_tx) = test_app(None);
+        app.session_info.config.model = spec("claude-opus-5-5");
         app.handle_agent_event(AgentEvent::SessionResumed {
             id: "resumed".to_owned(),
             title: None,
             unarchived: false,
-            messages: vec![Message::user("only msg")],
-            compact: None,
-            tool_metadata: HashMap::new(),
+            history: vec![Interaction::UserText("only msg".to_owned())],
         });
         assert_eq!(
             app.chat.entry_count(),
@@ -3036,13 +2954,12 @@ mod tests {
     #[test]
     fn handle_session_resumed_after_unarchiving_appends_a_notice() {
         let (mut app, _rx, _agent_tx) = test_app(None);
+        app.session_info.config.model = spec("claude-opus-5-5");
         app.handle_agent_event(AgentEvent::SessionResumed {
             id: "bbbb2222-resumed".to_owned(),
             title: None,
             unarchived: true,
-            messages: vec![Message::user("only msg")],
-            compact: None,
-            tool_metadata: HashMap::new(),
+            history: vec![Interaction::UserText("only msg".to_owned())],
         });
 
         assert_eq!(app.chat.entry_count(), 2);
@@ -3053,20 +2970,19 @@ mod tests {
     #[test]
     fn handle_session_resumed_with_compact_replays_boundary_block() {
         let (mut app, _rx, _agent_tx) = test_app(None);
+        app.session_info.config.model = spec("claude-opus-5-5");
         app.handle_agent_event(AgentEvent::SessionResumed {
             id: "resumed".to_owned(),
             title: None,
             unarchived: false,
-            messages: vec![
-                crate::agent::compaction::synthesize_post_compact_message("internal summary"),
-                Message::assistant("post-compact reply"),
+            history: vec![
+                Interaction::Compacted {
+                    summary: "Compact summary".to_owned(),
+                    pre_count: 4,
+                    instructions: None,
+                },
+                Interaction::AssistantText("post-compact reply".to_owned()),
             ],
-            compact: Some(CompactInfo {
-                summary: "Compact summary".to_owned(),
-                pre_message_count: 4,
-                instructions: None,
-            }),
-            tool_metadata: HashMap::new(),
         });
 
         assert_eq!(app.chat.entry_count(), 2);
@@ -3074,19 +2990,17 @@ mod tests {
         assert!(text.contains("Compacted 4 messages"));
         assert!(text.contains("Compact summary"));
         assert!(text.contains("post-compact reply"));
-        assert!(!text.contains("internal summary"));
     }
 
     #[test]
     fn handle_session_resumed_with_no_title_clears_stale_chrome() {
         let (mut app, _rx, _agent_tx) = test_app(Some("Stale"));
+        app.session_info.config.model = spec("claude-opus-5-5");
         app.handle_agent_event(AgentEvent::SessionResumed {
             id: "resumed".to_owned(),
             title: None,
             unarchived: false,
-            messages: Vec::new(),
-            compact: None,
-            tool_metadata: HashMap::new(),
+            history: Vec::new(),
         });
         assert!(
             app.status_bar.title().is_none(),
@@ -3096,18 +3010,28 @@ mod tests {
     }
 
     #[test]
+    fn handle_session_resumed_with_an_unsupported_model_repeats_its_notice() {
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.handle_agent_event(AgentEvent::SessionResumed {
+            id: "resumed".to_owned(),
+            title: None,
+            unarchived: false,
+            history: vec![Interaction::UserText("only msg".to_owned())],
+        });
+
+        assert_eq!(app.chat.entry_count(), 2);
+        let text = rendered_text(&mut app, 120, 16);
+        let prompt_at = text.find("only msg").unwrap();
+        let notice_at = text.find("`test-model` is not a supported model").unwrap();
+        assert!(prompt_at < notice_at, "{text}");
+    }
+
+    #[test]
     fn handle_session_compacted_replays_summary_and_clears_pending_calls() {
         let (mut app, _rx, _agent_tx) = test_app(Some("Pre-compact"));
         app.chat.push_user_message("pre-compact prompt".to_owned());
         app.status_bar.set_usage(Some(usage_snapshot()));
-        app.pending_calls.insert(
-            "pending-1".to_owned(),
-            PendingCall {
-                label: "Bash(...)".to_owned(),
-                name: "bash".to_owned(),
-                input: serde_json::json!({}),
-            },
-        );
+        app.handle_agent_event(bash_call_start("pending-1", "ls"));
 
         app.handle_agent_event(AgentEvent::SessionCompacted {
             summary: "## Recap\n\nDid the thing.".to_owned(),
@@ -3122,7 +3046,7 @@ mod tests {
             "chat must collapse to the single CompactedBlock",
         );
         assert_eq!(
-            app.pending_calls.len(),
+            app.chat.pending_call_count(),
             0,
             "pending tool calls must drop on compact",
         );
@@ -3264,20 +3188,19 @@ mod tests {
     #[test]
     fn handle_tool_call_start_switches_to_tool_running() {
         let (mut app, _rx, _agent_tx) = test_app(None);
-        app.handle_agent_event(AgentEvent::ToolCallStart {
-            id: "t1".to_owned(),
-            name: "bash".to_owned(),
-            input: serde_json::json!({"command": "ls"}),
-        });
-        assert!(matches!(
+        app.handle_agent_event(bash_call_start("t1", "ls"));
+        assert_eq!(
             app.status_bar.status(),
-            Status::ToolRunning { .. }
-        ));
+            &Status::ToolRunning {
+                name: "bash".to_owned()
+            },
+        );
         assert_eq!(
             app.chat.entry_count(),
             1,
             "tool call renders one chat entry",
         );
+        assert!(rendered_text(&mut app, 60, 8).contains("$ ls"));
     }
 
     #[test]
@@ -3322,33 +3245,29 @@ mod tests {
 
         app.handle_agent_event(AgentEvent::StreamToken("late".into()));
         assert_eq!(app.status_bar.status(), &Status::Cancelling);
-        app.handle_agent_event(AgentEvent::ToolCallStart {
-            id: "t-late".to_owned(),
-            name: "bash".to_owned(),
-            input: serde_json::json!({"command": "ls"}),
-        });
+        app.handle_agent_event(bash_call_start("t-late", "ls"));
         assert_eq!(app.status_bar.status(), &Status::Cancelling);
     }
 
     #[test]
-    fn handle_tool_call_end_with_title_pushes_result_entry() {
+    fn handle_tool_call_end_renders_the_view_under_the_tool_title() {
         let (mut app, _rx, _agent_tx) = test_app(None);
-        app.handle_agent_event(AgentEvent::ToolCallStart {
-            id: "t1".to_owned(),
-            name: "bash".to_owned(),
-            input: serde_json::json!({"command": "ls"}),
-        });
+        app.handle_agent_event(bash_call_start("t1", "ls"));
         let before = app.chat.entry_count();
-        app.handle_agent_event(AgentEvent::ToolCallEnd {
+        app.handle_agent_event(AgentEvent::ToolCallEnd(ToolResult {
             id: "t1".to_owned(),
-            content: "file1\nfile2\n".to_owned(),
+            content: "raw output".to_owned(),
             is_error: false,
-            metadata: crate::tool::ToolMetadata {
-                title: Some("ls /".to_owned()),
-                ..crate::tool::ToolMetadata::default()
+            title: Some("Listed files".to_owned()),
+            view: ToolResultView::Text {
+                content: "viewed output".to_owned(),
             },
-        });
+        }));
         assert_eq!(app.chat.entry_count(), before + 1);
+        let text = rendered_text(&mut app, 60, 8);
+        assert!(text.contains("Listed files"), "{text}");
+        assert!(text.contains("viewed output"), "{text}");
+        assert!(!text.contains("raw output"), "{text}");
     }
 
     #[test]
@@ -3359,19 +3278,15 @@ mod tests {
         // pushed (silent swallow would hide the error body) and the
         // header must render the tool-call label stashed at
         // `ToolCallStart`, not a blank string or the generic `(result)` fallback.
-        let (mut app, _rx, _agent_tx) = test_app_with_tools();
-        app.handle_agent_event(AgentEvent::ToolCallStart {
-            id: "t1".to_owned(),
-            name: "bash".to_owned(),
-            input: serde_json::json!({"command": "distinctive_label_xyz"}),
-        });
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.handle_agent_event(bash_call_start("t1", "distinctive_label_xyz"));
         let before = app.chat.entry_count();
-        app.handle_agent_event(AgentEvent::ToolCallEnd {
-            id: "t1".to_owned(),
-            content: "spawn failed: permission denied".to_owned(),
-            is_error: true,
-            metadata: crate::tool::ToolMetadata::default(),
-        });
+        app.handle_agent_event(text_call_end(
+            "t1",
+            "spawn failed: permission denied",
+            true,
+            None,
+        ));
         assert_eq!(
             app.chat.entry_count(),
             before + 1,
@@ -3400,12 +3315,7 @@ mod tests {
         // output. No pending entry → header falls back to `(result)`.
         let (mut app, _rx, _agent_tx) = test_app(None);
         let before = app.chat.entry_count();
-        app.handle_agent_event(AgentEvent::ToolCallEnd {
-            id: "orphan".to_owned(),
-            content: "stray output".to_owned(),
-            is_error: false,
-            metadata: crate::tool::ToolMetadata::default(),
-        });
+        app.handle_agent_event(text_call_end("orphan", "stray output", false, None));
         assert_eq!(app.chat.entry_count(), before + 1);
         // Viewport must fit header + body or auto-scroll hides the header.
         let text = rendered_text(&mut app, 60, 8);
@@ -3693,16 +3603,12 @@ mod tests {
         // is an orphan (crashed tool, agent-loop bug, mid-turn abort).
         // The pending entry must be discarded so long sessions don't
         // accumulate stale ids across turns.
-        let (mut app, _rx, _agent_tx) = test_app_with_tools();
-        app.handle_agent_event(AgentEvent::ToolCallStart {
-            id: "orphan".to_owned(),
-            name: "bash".to_owned(),
-            input: serde_json::json!({"command": "ls"}),
-        });
-        assert_eq!(app.pending_calls.len(), 1);
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.handle_agent_event(bash_call_start("orphan", "ls"));
+        assert_eq!(app.chat.pending_call_count(), 1);
         app.handle_agent_event(AgentEvent::TurnComplete);
         assert_eq!(
-            app.pending_calls.len(),
+            app.chat.pending_call_count(),
             0,
             "turn end must evict calls whose result never arrived",
         );
@@ -3866,9 +3772,21 @@ mod tests {
     fn draw_frame_with_conversation_and_tool_call() {
         let (mut app, _rx, _agent_tx) = test_app(None);
         app.chat.push_user_message("what files are here?".into());
-        app.chat.push_tool_call("$", "ls");
-        app.chat
-            .push_tool_result("ran ls", "README.md\nCargo.toml", false);
+        app.chat.push_tool_call(ToolCall {
+            id: "t1".to_owned(),
+            name: "bash".to_owned(),
+            icon: "$".to_owned(),
+            label: "ls".to_owned(),
+        });
+        app.chat.push_tool_result(ToolResult {
+            id: "t1".to_owned(),
+            content: "README.md\nCargo.toml".to_owned(),
+            is_error: false,
+            title: Some("ran ls".to_owned()),
+            view: ToolResultView::Text {
+                content: "README.md\nCargo.toml".to_owned(),
+            },
+        });
         app.chat.append_stream_token("Two files.");
         app.chat.commit_streaming();
         insta::assert_snapshot!(render_app(&mut app, 60, 12));

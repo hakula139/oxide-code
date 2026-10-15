@@ -35,4 +35,5 @@ A module imports from its own layer and lower layers. Production code still has 
 
 - `config` imports `tui::theme` to resolve theme overrides. Issue [#147](https://github.com/hakula139/oxide-code/issues/147) removes this dependency.
 - `tool` imports approval preview types from `agent::event` to describe a gated call.
-- `session::title_generator` imports `agent::event` to report a generated title.
+- `session::history` imports `agent::event` to project a transcript into the interactions shown when a session resumes.
+- `session::title_generator` imports `agent::event` to report the generated title.

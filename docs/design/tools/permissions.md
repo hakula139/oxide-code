@@ -32,7 +32,7 @@ Every deny comes before every allow, so an allow rule cannot override an explici
 
 A path tool's target is resolved before any rules run. `GateTarget::for_path` joins the input to cwd and walks it one component at a time the way the kernel does. It follows every symlink it meets, a dangling one included, and steps `..` back from wherever the walk stands, so a `missing/..` detour cannot hide a link reached after it. Past the first missing component nothing exists yet, so the rest of the path applies as `create_dir_all` builds it. More than 40 symlink hops, or a component the walk cannot read, leave the target outside the workspace under its joined spelling, so the tool fails on it the same way the kernel would.
 
-`check_permission` then pins the tool's `file_path` field to the resolved path before building the preview or running the tool, so the approval title shows the real destination and the tool opens what the gate checked. `read` and `edit` check the size and file type by path and again on the opened file, so a file swapped in between cannot skip the check. On Unix, `read`, `edit`, and `write` also open with `O_NOFOLLOW`, so a symlink swapped into the final component afterwards fails the open, `read` and `edit` open with `O_NONBLOCK` so a swapped-in fifo cannot hang them, and `write` creates a new file with `create_new`, which also refuses a dangling link. Windows has no `O_NOFOLLOW`, so a final-component swap there is not covered ([#206](https://github.com/hakula139/oxide-code/issues/206)). On every platform, a symlink swapped into an intermediate directory between the gate and the open is not covered.
+`check_permission` then pins the tool's `file_path` field to the resolved path before building the preview or running the tool, so the approval title shows the real destination and the tool opens what the gate checked. `read` and `edit` check the size and file type by path and again on the opened file, so a file swapped in between cannot skip the check. `read`, `edit`, and `write` also refuse a symlink swapped into the final component afterwards. Unix opens with `O_NOFOLLOW`, plus `O_NONBLOCK` so a swapped-in fifo cannot hang the open. Windows opens with `FILE_FLAG_OPEN_REPARSE_POINT` and fails when the handle is a symlink or junction. Any other reparse point, such as a deduplicated file, opens again through its file system filter, and the tool keeps that handle only when it reaches the same file. `write` creates a new file with `create_new`, which also refuses a dangling link, and truncates an existing one only after the open succeeds. On every platform, a symlink swapped into an intermediate directory between the gate and the open is not covered.
 
 Each resolved target belongs to one zone:
 
@@ -41,7 +41,7 @@ Each resolved target belongs to one zone:
   - The file names `.gitconfig`, `.gitmodules`, `.envrc`, `ox.toml`, `rust-toolchain`, `rust-toolchain.toml`, and the bash / zsh / POSIX shell startup files anywhere.
   - `.cargo/config`, `.cargo/config.toml`, `.claude/settings.json`, `.claude/settings.local.json`, and everything under `.claude/hooks`. The rest of `.claude`, including `worktrees` and `plans`, stays editable.
   - Everything under oxide-code's own config, data, and state directories.
-- **Workspace**: the target sits inside cwd, so edit-class calls allow at step 7. A cwd of `/`, `$HOME`, or any ancestor of `$HOME` is never a workspace, so launching there leaves every edit to the allow rules. On Unix, an existing regular file with more than one hard link is never a workspace target either, since another link can sit outside cwd. Rust's standard library exposes no hard-link count on Windows, so a hard-linked file there still counts as a workspace target ([#205](https://github.com/hakula139/oxide-code/issues/205)).
+- **Workspace**: the target sits inside cwd, so edit-class calls allow at step 7. A cwd of `/`, `$HOME`, or any ancestor of `$HOME` is never a workspace, so launching there leaves every edit to the allow rules. An existing regular file with more than one hard link is never a workspace target either, since another link can sit outside cwd.
 - **Outside**: everything else, which needs an allow rule or an approval.
 
 ## Rule Grammar
@@ -94,7 +94,7 @@ In `-p` / `--no-tui` runs there is no human to prompt, so a would-ask call denie
 
 ## Permission Classes
 
-`Tool::permission_class` has no default, so every tool declares its class and a new tool cannot inherit a permissive class. Read-class tools are allowed at step 4, but they still extract a gate target (the file for `read`, the search root for `grep` / `glob`), allowing a path-scoped deny at step 1 or 3 to fire first. Rules target the class, so `read(**/.env)` also stops a `grep` rooted at a `.env` file. Because `grep` and `glob` gate on the search root, a deny on a file inside that root does not filter their matches ([#176](https://github.com/hakula139/oxide-code/issues/176)).
+`Tool::permission_class` has no default, so every tool declares its class and a new tool cannot inherit a permissive class. Read-class tools are allowed at step 4, but they still extract a gate target (the file for `read`, the search root for `grep` / `glob`), allowing a path-scoped deny at step 1 or 3 to fire first. Rules target the class, so `read(**/.env)` also stops a `grep` rooted at a `.env` file. Because `grep` and `glob` gate on the search root, each also checks every file its walk finds against the `read` deny rules and withholds the matches, ending its output with a count of withheld files that names none. A file is matched where it resolves and as the call spells it below the search root, as the gate matches a read of it, so `read(**/.env)` also withholds `.env` under a root that is a symlink out of the workspace. The walk follows no symlink below the canonical root, so the check needs no I/O.
 
 `edit` and `write` share a class but have different blast radii. `edit` requires the file to exist and to have been read, so it cannot create files. `write` can create new files and parent directories without a prior Read, while overwriting an existing file still goes through the tracker gate. Both declare `file_path` as their path field, so the resolution, zoning, and pinning described above treat them identically.
 
@@ -106,7 +106,7 @@ In `-p` / `--no-tui` runs there is no human to prompt, so a would-ask call denie
 
 3. **Protected paths ask.** Editing `.git/hooks`, `.vscode/tasks.json`, or `.envrc` inside the workspace can escalate to code execution outside the task. These paths therefore require approval even under a broad `edit(**)` allow. Asking keeps legitimate edits possible, while a deny would force the user to edit config.
 
-4. **Resolve once, act on the result.** Resolving in the gate and pinning the input makes the tool open the path the gate checked, and on Unix `O_NOFOLLOW` turns a symlink swapped into its final component into a failed open. A swap in an intermediate directory needs `openat`-style traversal or an OS sandbox ([#133](https://github.com/hakula139/oxide-code/issues/133)).
+4. **Resolve once, act on the result.** Resolving in the gate and pinning the input makes the tool open the path the gate checked, and the no-follow open turns a symlink swapped into its final component into a failed open. A swap in an intermediate directory needs `openat`-style traversal or an OS sandbox ([#133](https://github.com/hakula139/oxide-code/issues/133)).
 
 5. **Project files tighten only.** Honoring a project's `allow` or `mode` would let a teammate's repo broaden what the local user permitted, creating the same privilege-escalation vector as project-set credentials. Append-only `deny` lets a repo restrict itself without that risk.
 
@@ -122,12 +122,14 @@ In `-p` / `--no-tui` runs there is no human to prompt, so a would-ask call denie
 - `crates/oxide-code/src/agent/event.rs`: `AgentEvent`, `UserAction`, `ApprovalPreview`.
 - `crates/oxide-code/src/config.rs`: `Config::load`, `OX_PERMISSION_MODE`, `Effort` enum template.
 - `crates/oxide-code/src/config/file.rs`: `FileConfig::merge`, `merge_section`, `reject_project_secrets`, `reject_project_permissions`.
-- `crates/oxide-code/src/permission.rs`: `Mode`, `PermissionClass`, `GateTarget::for_path`, protected paths, `Policy::decide`.
+- `crates/oxide-code/src/permission.rs`: `Mode`, `PermissionClass`, `GateTarget::for_path`, protected paths, `Policy::decide`, `ReadDeny`.
 - `crates/oxide-code/src/permission/rule.rs`: `class(specifier)` parsing and path-glob matching.
 - `crates/oxide-code/src/slash/confirm.rs`: `ConfirmDeleteSessionModal`, the approval-modal template.
-- `crates/oxide-code/src/tool.rs`: `Tool` trait (`permission_class`, `path_field`, `gate_target`, `pin_target`, `approval_preview`), `read_validated`, `write_no_follow`.
+- `crates/oxide-code/src/tool.rs`: `Tool` trait (`permission_class`, `path_field`, `gate_target`, `pin_target`, `approval_preview`), `read_validated`, `write_no_follow`, `open_no_follow`, `push_withheld_note`.
 - `crates/oxide-code/src/tool/bash.rs`: unbounded execution surface.
 - `crates/oxide-code/src/tool/edit.rs`: read-before-edit gate, `synthesize_chunk` preview.
+- `crates/oxide-code/src/tool/glob.rs`: read-deny filter on each match.
+- `crates/oxide-code/src/tool/grep.rs`: read-deny filter in `collect_files`.
 - `crates/oxide-code/src/tool/write.rs`: new-file creation, symlink refusal, current-content preview.
 - `crates/oxide-code/src/tui/modal.rs`: `ModalStack`, the cancel hook.
 - `crates/oxide-code/src/tui/modal/approval.rs`: `ApprovalModal` wrapping, scrolling, and character reveal.

@@ -5,8 +5,6 @@
 mod blocks;
 mod stack;
 
-use std::collections::HashMap;
-
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -19,12 +17,9 @@ use self::blocks::{
     SystemMessageBlock, ToolCallBlock, ToolResultBlock, UserMessage,
 };
 use self::stack::{CachedBlock, Stack};
-use crate::agent::compaction::strip_synthetic_post_compact_prefix;
-use crate::message::Message;
-use crate::session::entry::CompactInfo;
-use crate::session::history::{Interaction, walk_transcript};
-use crate::tool::{ToolMetadata, ToolRegistry, ToolResultView};
-use crate::tui::pending_calls::{FALLBACK_RESULT_HEADER, PendingCall, PendingCalls, result_header};
+use crate::agent::event::{Interaction, ToolCall, ToolResult};
+use crate::tool::ToolResultView;
+use crate::tui::pending_calls::{PendingCalls, result_header};
 use crate::tui::theme::Theme;
 
 /// Scrollable chat message list with auto-scroll.
@@ -41,6 +36,8 @@ pub(crate) struct ChatView {
     viewport_width: u16,
     auto_scroll: bool,
     new_content_since_pause: u32,
+
+    pending_calls: PendingCalls,
 }
 
 /// Inputs shared by every block render.
@@ -84,6 +81,7 @@ impl ChatView {
             viewport_width: 0,
             auto_scroll: true,
             new_content_since_pause: 0,
+            pending_calls: PendingCalls::new(),
         }
     }
 
@@ -96,30 +94,15 @@ impl ChatView {
         }
     }
 
-    /// Populates from resumed transcript, projecting the same block shapes as live rendering.
-    pub(crate) fn load_history(
-        &mut self,
-        messages: &[Message],
-        compact: Option<&CompactInfo>,
-        metadata_by_tool_use_id: &HashMap<String, ToolMetadata>,
-        tools: &ToolRegistry,
-    ) {
-        let compact_messages = compact.map(|info| {
-            self.push_compacted_block(
-                info.pre_message_count,
-                info.instructions.as_deref(),
-                info.summary.clone(),
-            );
-            post_compact_display_messages(messages)
-        });
-        let messages = match &compact_messages {
-            Some(messages) => messages.as_slice(),
-            None => messages,
-        };
-        let mut pending = PendingCalls::new();
-        let default_metadata = ToolMetadata::default();
-        for interaction in walk_transcript(messages) {
+    /// Populates from a resumed transcript's interactions, matching the live block shapes.
+    pub(crate) fn load_history(&mut self, history: Vec<Interaction>) {
+        for interaction in history {
             match interaction {
+                Interaction::Compacted {
+                    summary,
+                    pre_count,
+                    instructions,
+                } => self.push_compacted_block(pre_count, instructions.as_deref(), summary),
                 Interaction::UserText(text) => self.push_block(UserMessage::new(text)),
                 Interaction::AssistantText(text) => self.push_block(AssistantText::new(text)),
                 Interaction::AssistantThinking(text) => {
@@ -128,40 +111,8 @@ impl ChatView {
                 Interaction::ProgressUpdate(text) => {
                     self.push_block(ProgressUpdate::new(text));
                 }
-                Interaction::ToolCall { id, name, input } => {
-                    let icon = tools.icon(name);
-                    let label = tools.label(name, input);
-                    self.push_block(ToolCallBlock::new(icon, label.clone()));
-                    pending.insert(
-                        id.to_owned(),
-                        PendingCall {
-                            label,
-                            name: name.to_owned(),
-                            input: input.clone(),
-                        },
-                    );
-                }
-                Interaction::ToolResult {
-                    tool_use_id,
-                    content,
-                    is_error,
-                } => {
-                    let p = pending
-                        .remove(tool_use_id)
-                        .expect("walk_transcript pairs every ToolResult with its ToolCall");
-                    let metadata = metadata_by_tool_use_id
-                        .get(tool_use_id)
-                        .unwrap_or(&default_metadata);
-                    let view = tools.result_view(&p.name, &p.input, content, metadata, is_error);
-                    let header = result_header(metadata, Some(p.label.as_str()));
-                    self.push_block(ToolResultBlock::new(header, view, is_error));
-                }
-                Interaction::OrphanToolResult { content, is_error } => {
-                    let view = ToolResultView::Text {
-                        content: content.to_owned(),
-                    };
-                    self.push_block(ToolResultBlock::new(FALLBACK_RESULT_HEADER, view, is_error));
-                }
+                Interaction::ToolCall(call) => self.push_tool_call(call),
+                Interaction::ToolResult(result) => self.push_tool_result(result),
             }
         }
     }
@@ -228,30 +179,32 @@ impl ChatView {
     }
 
     /// Appends a tool call, flushing any in-flight streaming buffer.
-    pub(crate) fn push_tool_call(&mut self, icon: &'static str, label: &str) {
+    pub(crate) fn push_tool_call(&mut self, call: ToolCall) {
         self.commit_streaming();
         self.bump_paused_counter();
-        self.push_block(ToolCallBlock::new(icon, label));
+        self.pending_calls.insert(call.id, call.label.clone());
+        self.push_block(ToolCallBlock::new(call.icon, call.label));
     }
 
-    /// Appends a tool result with a pre-built structured view.
-    pub(crate) fn push_tool_result_view(
-        &mut self,
-        label: &str,
-        view: ToolResultView,
-        is_error: bool,
-    ) {
+    /// Appends a tool result under the header [`result_header`] picks.
+    pub(crate) fn push_tool_result(&mut self, result: ToolResult) {
+        let header = result_header(result.title, self.pending_calls.remove(&result.id));
+        self.push_tool_result_view(&header, result.view, result.is_error);
+    }
+
+    fn push_tool_result_view(&mut self, header: &str, view: ToolResultView, is_error: bool) {
         self.bump_paused_counter();
-        self.push_block(ToolResultBlock::new(label, view, is_error));
+        self.push_block(ToolResultBlock::new(header, view, is_error));
     }
 
-    /// Test-only shortcut for the Text variant.
+    /// Forgets calls whose results never arrived, such as those of a cancelled turn.
+    pub(crate) fn clear_pending_calls(&mut self) {
+        self.pending_calls.clear();
+    }
+
     #[cfg(test)]
-    pub(crate) fn push_tool_result(&mut self, label: &str, content: &str, is_error: bool) {
-        let view = ToolResultView::Text {
-            content: content.to_owned(),
-        };
-        self.push_tool_result_view(label, view, is_error);
+    pub(crate) fn pending_call_count(&self) -> usize {
+        self.pending_calls.len()
     }
 
     /// Appends an error message.
@@ -305,6 +258,7 @@ impl ChatView {
         self.content_height = 0;
         self.auto_scroll = true;
         self.new_content_since_pause = 0;
+        self.pending_calls.clear();
     }
 
     pub(crate) const fn is_scrolled_up(&self) -> bool {
@@ -556,22 +510,10 @@ impl ChatView {
     }
 }
 
-fn post_compact_display_messages(messages: &[Message]) -> Vec<Message> {
-    let mut messages = messages.to_vec();
-    if let Some(first) = messages.first_mut()
-        && strip_synthetic_post_compact_prefix(first)
-        && first.content.is_empty()
-    {
-        messages.remove(0);
-    }
-    messages
-}
-
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
     use std::rc::Rc;
-    use std::sync::Arc;
 
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
     use indoc::indoc;
@@ -580,8 +522,6 @@ mod tests {
     use unicode_width::UnicodeWidthStr;
 
     use super::*;
-    use crate::file_tracker::testing::tracker;
-    use crate::message::{ContentBlock, Role};
     use crate::tui::glyphs::{ASSISTANT_PREFIX, BAR, TOOL_BORDER_CONT, TOOL_ERROR, TOOL_SUCCESS};
 
     // ── Fixtures ──
@@ -590,16 +530,31 @@ mod tests {
         ChatView::new(&Theme::default(), true)
     }
 
-    fn test_tools() -> ToolRegistry {
-        let tracker = tracker();
-        ToolRegistry::new(vec![
-            Box::new(crate::tool::bash::BashTool),
-            Box::new(crate::tool::read::ReadTool::new(Arc::clone(&tracker))),
-            Box::new(crate::tool::write::WriteTool::new(Arc::clone(&tracker))),
-            Box::new(crate::tool::edit::EditTool::new(tracker)),
-            Box::new(crate::tool::glob::GlobTool),
-            Box::new(crate::tool::grep::GrepTool),
-        ])
+    /// A call keyed by its label.
+    fn call(icon: &str, label: &str) -> ToolCall {
+        ToolCall {
+            id: label.to_owned(),
+            name: "tool".to_owned(),
+            icon: icon.to_owned(),
+            label: label.to_owned(),
+        }
+    }
+
+    fn text_result(id: &str, content: &str, is_error: bool, title: Option<&str>) -> ToolResult {
+        ToolResult {
+            id: id.to_owned(),
+            content: content.to_owned(),
+            is_error,
+            title: title.map(ToOwned::to_owned),
+            view: ToolResultView::Text {
+                content: content.to_owned(),
+            },
+        }
+    }
+
+    /// A text result headed by its own `title`, matching no call.
+    fn titled_result(title: &str, content: &str, is_error: bool) -> ToolResult {
+        text_result("titled", content, is_error, Some(title))
     }
 
     /// Stacks every row at `width`, leaving the viewport and scroll state untouched.
@@ -728,479 +683,79 @@ mod tests {
     // ── load_history ──
 
     #[test]
-    fn load_history_populates_user_and_assistant_entries() {
+    fn load_history_renders_each_interaction_in_order() {
         let mut chat = test_chat();
-        chat.load_history(
-            &[Message::user("hello"), Message::assistant("hi there")],
-            None,
-            &HashMap::new(),
-            &test_tools(),
-        );
-        assert_eq!(chat.blocks.len(), 2);
-        let text = all_text(&mut chat);
-        assert!(text.contains("hello"));
-        assert!(text.contains("hi there"));
-    }
+        chat.load_history(vec![
+            Interaction::Compacted {
+                summary: "Kept the important decisions.".to_owned(),
+                pre_count: 4,
+                instructions: Some("focus on auth".to_owned()),
+            },
+            Interaction::UserText("hello".to_owned()),
+            Interaction::AssistantText("hi there".to_owned()),
+            Interaction::ToolCall(call("$", "ls")),
+            Interaction::ToolResult(text_result("ls", "file a", false, None)),
+        ]);
 
-    #[test]
-    fn load_history_multi_tool_turn_pairs_inline_with_orphan_fallback() {
-        let mut chat = test_chat();
-        chat.load_history(
-            &[
-                Message {
-                    role: Role::Assistant,
-                    content: vec![
-                        ContentBlock::ToolUse {
-                            id: "t1".to_owned(),
-                            name: "read".to_owned(),
-                            input: serde_json::json!({"file_path": "a.rs"}),
-                        },
-                        ContentBlock::ToolUse {
-                            id: "t2".to_owned(),
-                            name: "grep".to_owned(),
-                            input: serde_json::json!({"pattern": "TODO"}),
-                        },
-                    ],
-                },
-                Message {
-                    role: Role::User,
-                    content: vec![
-                        ContentBlock::ToolResult {
-                            tool_use_id: "t1".to_owned(),
-                            content: "file a".to_owned(),
-                            is_error: false,
-                        },
-                        ContentBlock::ToolResult {
-                            tool_use_id: "ghost".to_owned(),
-                            content: "stale output".to_owned(),
-                            is_error: true,
-                        },
-                        ContentBlock::ToolResult {
-                            tool_use_id: "t2".to_owned(),
-                            content: "3 matches".to_owned(),
-                            is_error: false,
-                        },
-                    ],
-                },
-            ],
-            None,
-            &HashMap::new(),
-            &test_tools(),
-        );
         assert_eq!(chat.blocks.len(), 5);
         let text = all_text(&mut chat);
-        let a_call = text.find("a.rs").unwrap();
-        let file_a = text.find("file a").unwrap();
-        let todo_call = text.find("TODO").unwrap();
-        let matches = text.find("3 matches").unwrap();
-        let stale = text.find("stale output").unwrap();
-        let result_label = text.find("(result)").unwrap();
-        assert!(a_call < file_a);
-        assert!(file_a < todo_call);
-        assert!(todo_call < matches);
-        assert!(matches < stale);
-        assert!(result_label < stale);
-    }
-
-    #[test]
-    fn load_history_renders_tool_result_after_paired_tool_use() {
-        let mut chat = test_chat();
-        chat.load_history(
-            &[
-                Message::user("ask"),
-                Message {
-                    role: Role::Assistant,
-                    content: vec![ContentBlock::ToolUse {
-                        id: "t1".to_owned(),
-                        name: "bash".to_owned(),
-                        input: serde_json::json!({"command": "ls"}),
-                    }],
-                },
-                Message {
-                    role: Role::User,
-                    content: vec![ContentBlock::ToolResult {
-                        tool_use_id: "t1".to_owned(),
-                        content: "output".to_owned(),
-                        is_error: false,
-                    }],
-                },
-                Message::assistant("reply"),
-            ],
-            None,
-            &HashMap::new(),
-            &test_tools(),
-        );
-        assert_eq!(chat.blocks.len(), 4);
-        let text = all_text(&mut chat);
-        assert!(
-            text.find("ask")
-                < text
-                    .find("ls")
-                    .and_then(|i| text[i..].find("output").map(|j| i + j))
-        );
-        assert!(text.contains("ask"));
-        assert!(text.contains("ls"));
-        assert!(text.contains("output"));
-        assert!(text.contains("reply"));
-    }
-
-    #[test]
-    fn load_history_tool_result_without_matching_tool_use_uses_fallback_label() {
-        let mut chat = test_chat();
-        chat.load_history(
-            &[Message {
-                role: Role::User,
-                content: vec![ContentBlock::ToolResult {
-                    tool_use_id: "missing".to_owned(),
-                    content: "stderr".to_owned(),
-                    is_error: true,
-                }],
-            }],
-            None,
-            &HashMap::new(),
-            &test_tools(),
-        );
-        assert_eq!(chat.blocks.len(), 1);
-        let text = all_text(&mut chat);
-        assert!(text.contains("(result)"));
-        assert!(text.contains("stderr"));
-        assert!(text.contains(TOOL_ERROR));
-    }
-
-    #[test]
-    fn load_history_joins_multiple_text_blocks() {
-        let mut chat = test_chat();
-        chat.load_history(
-            &[Message {
-                role: Role::Assistant,
-                content: vec![
-                    ContentBlock::Text {
-                        text: "first".to_owned(),
-                    },
-                    ContentBlock::Text {
-                        text: "second".to_owned(),
-                    },
-                ],
-            }],
-            None,
-            &HashMap::new(),
-            &test_tools(),
-        );
-        assert_eq!(chat.blocks.len(), 1);
-        let text = all_text(&mut chat);
-        assert!(text.contains("first"));
-        assert!(text.contains("second"));
-        assert!(
-            !text.contains(BAR),
-            "assistant text should render without the left bar: {text}"
-        );
-    }
-
-    #[test]
-    fn load_history_skips_whitespace_only_text() {
-        let mut chat = test_chat();
-        chat.load_history(
-            &[Message {
-                role: Role::User,
-                content: vec![ContentBlock::Text {
-                    text: "  \n  ".to_owned(),
-                }],
-            }],
-            None,
-            &HashMap::new(),
-            &test_tools(),
-        );
-        assert!(chat.blocks.is_empty());
-    }
-
-    #[test]
-    fn load_history_empty_slice_is_noop() {
-        let mut chat = test_chat();
-        chat.load_history(&[], None, &HashMap::new(), &test_tools());
-        assert!(chat.blocks.is_empty());
-    }
-
-    #[test]
-    fn load_history_renders_compact_boundary_and_hides_synthetic_root() {
-        let mut chat = test_chat();
-        let compact = CompactInfo {
-            summary: "Kept the important decisions.".to_owned(),
-            pre_message_count: 4,
-            instructions: Some("focus on auth".to_owned()),
-        };
-
-        chat.load_history(
-            &[
-                crate::agent::compaction::synthesize_post_compact_message("internal summary"),
-                Message::assistant("post-compact reply"),
-            ],
-            Some(&compact),
-            &HashMap::new(),
-            &test_tools(),
-        );
-
-        assert_eq!(chat.blocks.len(), 2);
-        let text = all_text(&mut chat);
-        assert!(text.contains("Compacted 4 messages"));
-        assert!(text.contains("Kept the important decisions."));
-        assert!(text.contains("post-compact reply"));
-        assert!(!text.contains("internal summary"));
-    }
-
-    #[test]
-    fn load_history_keeps_real_prompt_merged_into_compact_root() {
-        let mut chat = test_chat();
-        let compact = CompactInfo {
-            summary: "Kept the important decisions.".to_owned(),
-            pre_message_count: 4,
-            instructions: None,
-        };
-        let mut merged = crate::agent::compaction::synthesize_post_compact_message("internal");
-        merged.content.push(ContentBlock::Text {
-            text: "real follow-up".to_owned(),
+        let order = [
+            "Compacted 4 messages",
+            "focus on auth",
+            "Kept the important decisions.",
+            "hello",
+            "hi there",
+            "$ ls",
+            "file a",
+        ]
+        .map(|needle| {
+            text.find(needle)
+                .unwrap_or_else(|| panic!("{needle}: {text}"))
         });
-
-        chat.load_history(
-            &[merged, Message::assistant("post-compact reply")],
-            Some(&compact),
-            &HashMap::new(),
-            &test_tools(),
+        assert!(order.is_sorted(), "{order:?}: {text}");
+        assert!(
+            text.contains(&format!("{TOOL_SUCCESS} ls")),
+            "an untitled result reuses its call's label: {text}",
         );
-
-        let text = all_text(&mut chat);
-        assert!(text.contains("real follow-up"));
-        assert!(text.contains("post-compact reply"));
-        assert!(!text.contains("internal"));
     }
 
     #[test]
-    fn load_history_restores_tool_call_after_assistant_text() {
+    fn load_history_titles_results_before_falling_back_for_orphans() {
         let mut chat = test_chat();
-        chat.load_history(
-            &[Message {
-                role: Role::Assistant,
-                content: vec![
-                    ContentBlock::Text {
-                        text: "Let me check that.".to_owned(),
-                    },
-                    ContentBlock::ToolUse {
-                        id: "t1".to_owned(),
-                        name: "bash".to_owned(),
-                        input: serde_json::json!({"command": "ls -la"}),
-                    },
-                ],
-            }],
-            None,
-            &HashMap::new(),
-            &test_tools(),
-        );
-        assert_eq!(chat.blocks.len(), 2);
-        let text = all_text(&mut chat);
-        assert!(text.find("Let me check that.") < text.find("ls -la"));
-        assert!(text.contains('$')); // bash icon
-    }
+        chat.load_history(vec![
+            Interaction::ToolCall(call("✎", "Edit(f.rs)")),
+            Interaction::ToolResult(text_result(
+                "Edit(f.rs)",
+                "done",
+                false,
+                Some("Edited f.rs"),
+            )),
+            Interaction::ToolResult(text_result("ghost", "stderr", true, None)),
+        ]);
 
-    #[test]
-    fn load_history_unknown_tool_falls_back_to_tool_name_as_label() {
-        let mut chat = test_chat();
-        chat.load_history(
-            &[Message {
-                role: Role::Assistant,
-                content: vec![ContentBlock::ToolUse {
-                    id: "t1".to_owned(),
-                    name: "custom_tool".to_owned(),
-                    input: serde_json::json!({"arg": "value"}),
-                }],
-            }],
-            None,
-            &HashMap::new(),
-            &test_tools(),
-        );
-        assert_eq!(chat.blocks.len(), 1);
-        let text = all_text(&mut chat);
-        assert!(text.contains('⟡'));
-        assert!(text.contains("custom_tool"));
-    }
-
-    #[test]
-    fn load_history_server_tool_use_renders_like_local_tool_call() {
-        let mut chat = test_chat();
-        chat.load_history(
-            &[Message {
-                role: Role::Assistant,
-                content: vec![ContentBlock::ServerToolUse {
-                    id: "srv1".to_owned(),
-                    name: "web_search".to_owned(),
-                    input: serde_json::json!({"query": "rust"}),
-                }],
-            }],
-            None,
-            &HashMap::new(),
-            &test_tools(),
-        );
-        assert_eq!(chat.blocks.len(), 1);
-        let text = all_text(&mut chat);
-        assert!(text.contains('⟡'));
-        assert!(text.contains("web_search"));
-    }
-
-    #[test]
-    fn load_history_redacted_thinking_is_dropped() {
-        let mut chat = test_chat();
-        chat.load_history(
-            &[Message {
-                role: Role::Assistant,
-                content: vec![
-                    ContentBlock::RedactedThinking {
-                        data: "opaque-ciphertext".to_owned(),
-                    },
-                    ContentBlock::Text {
-                        text: "fine".to_owned(),
-                    },
-                ],
-            }],
-            None,
-            &HashMap::new(),
-            &test_tools(),
-        );
-        assert_eq!(chat.blocks.len(), 1);
-        let text = all_text(&mut chat);
-        assert!(text.contains("fine"));
-        assert!(!text.contains("opaque-ciphertext"));
-    }
-
-    #[test]
-    fn load_history_renders_resumed_thinking_when_show_thinking_enabled() {
-        let mut chat = test_chat();
-        chat.load_history(
-            &[Message {
-                role: Role::Assistant,
-                content: vec![
-                    ContentBlock::Thinking {
-                        thinking: "resumed reasoning".to_owned(),
-                        signature: "sig".to_owned(),
-                    },
-                    ContentBlock::Text {
-                        text: "reply".to_owned(),
-                    },
-                ],
-            }],
-            None,
-            &HashMap::new(),
-            &test_tools(),
-        );
-        let text = all_text(&mut chat);
-        assert!(text.contains("Thinking..."));
-        assert!(text.contains("resumed reasoning"));
-    }
-
-    #[test]
-    fn load_history_uses_persisted_metadata_title_and_replacements() {
-        let tools = test_tools();
-        let mut chat = test_chat();
-        let history = vec![
-            Message {
-                role: Role::Assistant,
-                content: vec![ContentBlock::ToolUse {
-                    id: "edit1".to_owned(),
-                    name: "edit".to_owned(),
-                    input: serde_json::json!({
-                        "file_path": "/tmp/f.rs",
-                        "old_string": "a",
-                        "new_string": "b",
-                        "replace_all": true,
-                    }),
-                }],
-            },
-            Message {
-                role: Role::User,
-                content: vec![ContentBlock::ToolResult {
-                    tool_use_id: "edit1".to_owned(),
-                    content: "Replaced 4 occurrences in /tmp/f.rs.".to_owned(),
-                    is_error: false,
-                }],
-            },
-        ];
-        let mut metadata_map = HashMap::new();
-        metadata_map.insert(
-            "edit1".to_owned(),
-            crate::tool::ToolMetadata {
-                title: Some("Edited f.rs".to_owned()),
-                replacements: Some(4),
-                ..crate::tool::ToolMetadata::default()
-            },
-        );
-        chat.load_history(&history, None, &metadata_map, &tools);
         let text = all_text(&mut chat);
         assert!(
-            text.contains("✓ Edited f.rs"),
-            "persisted title should drive the result row: {text}",
+            text.contains(&format!("{TOOL_SUCCESS} Edited f.rs")),
+            "{text}"
         );
-        assert!(
-            text.contains("4 occurrences replaced"),
-            "metadata.replacements should drive the diff footer: {text}",
-        );
-    }
-
-    #[test]
-    fn load_history_hides_resumed_thinking_when_show_thinking_disabled() {
-        let mut chat = ChatView::new(&Theme::default(), false);
-        chat.load_history(
-            &[Message {
-                role: Role::Assistant,
-                content: vec![
-                    ContentBlock::Thinking {
-                        thinking: "private reasoning".to_owned(),
-                        signature: "sig".to_owned(),
-                    },
-                    ContentBlock::Text {
-                        text: "reply".to_owned(),
-                    },
-                ],
-            }],
-            None,
-            &HashMap::new(),
-            &test_tools(),
-        );
-        let text = all_text(&mut chat);
-        assert!(!text.contains("Thinking..."));
-        assert!(!text.contains("private reasoning"));
-        assert!(text.contains("reply"));
+        assert_eq!(text.matches("Edit(f.rs)").count(), 1, "{text}");
+        assert!(text.contains(&format!("{TOOL_ERROR} (result)")), "{text}");
+        assert!(text.contains("stderr"), "{text}");
     }
 
     #[test]
     fn load_history_shows_progress_update_once_ahead_of_its_tool_call() {
-        let messages = [
-            Message {
-                role: Role::Assistant,
-                content: vec![
-                    ContentBlock::Thinking {
-                        thinking: String::new(),
-                        signature: "sig1".to_owned(),
-                    },
-                    ContentBlock::Thinking {
-                        thinking: "Running the suite.".to_owned(),
-                        signature: "sig2".to_owned(),
-                    },
-                    ContentBlock::ToolUse {
-                        id: "t1".to_owned(),
-                        name: "bash".to_owned(),
-                        input: serde_json::json!({"command": "cargo test"}),
-                    },
-                ],
-            },
-            Message {
-                role: Role::User,
-                content: vec![ContentBlock::ToolResult {
-                    tool_use_id: "t1".to_owned(),
-                    content: "ok".to_owned(),
-                    is_error: false,
-                }],
-            },
-        ];
+        let history = || {
+            vec![
+                Interaction::AssistantThinking("Running the suite.".to_owned()),
+                Interaction::ProgressUpdate("Running the suite.".to_owned()),
+                Interaction::ToolCall(call("$", "cargo test")),
+                Interaction::ToolResult(text_result("cargo test", "ok", false, None)),
+            ]
+        };
         for show_thinking in [false, true] {
             let mut chat = ChatView::new(&Theme::default(), show_thinking);
-            chat.load_history(&messages, None, &HashMap::new(), &test_tools());
+            chat.load_history(history());
             let text = all_text(&mut chat);
             assert_eq!(
                 text.matches("Running the suite.").count(),
@@ -1234,7 +789,7 @@ mod tests {
     fn push_user_message_has_trailing_blank_before_tool_call() {
         let mut chat = test_chat();
         chat.push_user_message("hello".to_owned());
-        chat.push_tool_call("$", "ls");
+        chat.push_tool_call(call("$", "ls"));
         let text = all_text(&mut chat);
         let lines: Vec<&str> = text.lines().collect();
         let user = lines.iter().rposition(|l| l.contains("hello")).unwrap();
@@ -1372,7 +927,7 @@ mod tests {
     #[test]
     fn append_stream_token_inserts_blank_separator_after_tool_output() {
         let mut chat = test_chat();
-        chat.push_tool_call("$", "ls");
+        chat.push_tool_call(call("$", "ls"));
         chat.append_stream_token("response");
 
         let text = all_text(&mut chat);
@@ -1542,7 +1097,7 @@ mod tests {
     #[test]
     fn append_thinking_token_after_tool_call_has_separator() {
         let mut chat = test_chat();
-        chat.push_tool_call("$", "ls");
+        chat.push_tool_call(call("$", "ls"));
         chat.append_thinking_token("deep thought");
 
         let text = all_text(&mut chat);
@@ -1611,7 +1166,7 @@ mod tests {
             let mut chat = ChatView::new(&Theme::default(), show_thinking);
             chat.append_thinking_token("Running the suite.");
             chat.push_progress_update("Running the suite.".to_owned());
-            chat.push_tool_call("$", "cargo test");
+            chat.push_tool_call(call("$", "cargo test"));
             let text = all_text(&mut chat);
             assert_eq!(
                 text.matches("Running the suite.").count(),
@@ -1630,7 +1185,7 @@ mod tests {
     #[test]
     fn push_tool_call_shows_icon_and_label() {
         let mut chat = test_chat();
-        chat.push_tool_call("$", "ls -la");
+        chat.push_tool_call(call("$", "ls -la"));
         let text = all_text(&mut chat);
         assert!(text.contains('$'));
         assert!(text.contains("ls -la"));
@@ -1644,7 +1199,7 @@ mod tests {
     fn push_tool_call_after_assistant_has_blank_separator() {
         let mut chat = test_chat();
         chat.push_block(AssistantText::new("some text"));
-        chat.push_tool_call("$", "ls");
+        chat.push_tool_call(call("$", "ls"));
         let text = all_text(&mut chat);
         let lines: Vec<&str> = text.lines().collect();
         let assistant = lines.iter().rposition(|l| l.contains("some text")).unwrap();
@@ -1658,10 +1213,10 @@ mod tests {
     #[test]
     fn tool_result_followed_by_new_tool_call_has_borderless_spacer() {
         let mut chat = test_chat();
-        chat.push_tool_call("$", "ls");
-        chat.push_tool_result("ran ls", "output one", false);
-        chat.push_tool_call("$", "pwd");
-        chat.push_tool_result("ran pwd", "output two", false);
+        chat.push_tool_call(call("$", "ls"));
+        chat.push_tool_result(titled_result("ran ls", "output one", false));
+        chat.push_tool_call(call("$", "pwd"));
+        chat.push_tool_result(titled_result("ran pwd", "output two", false));
         let text = all_text(&mut chat);
         let lines: Vec<&str> = text.lines().collect();
         let first_result = lines.iter().position(|l| l.contains("output one")).unwrap();
@@ -1685,8 +1240,8 @@ mod tests {
     #[test]
     fn consecutive_tool_calls_have_no_gap() {
         let mut chat = test_chat();
-        chat.push_tool_call("$", "ls");
-        chat.push_tool_call("$", "cat foo");
+        chat.push_tool_call(call("$", "ls"));
+        chat.push_tool_call(call("$", "cat foo"));
         let text = all_text(&mut chat);
         let lines: Vec<&str> = text.lines().collect();
         let ls_line = lines.iter().position(|l| l.contains("ls")).unwrap();
@@ -1703,7 +1258,7 @@ mod tests {
         let mut chat = test_chat();
         let long_cmd =
             "cd /home/user/projects/example-app && ls ${XDG_DATA_HOME:-$HOME/.local/share}/ox";
-        chat.push_tool_call("$", long_cmd);
+        chat.push_tool_call(call("$", long_cmd));
         let lines = all_lines(&mut chat, 60);
         assert!(
             lines.len() > 1,
@@ -1992,7 +1547,7 @@ mod tests {
     #[test]
     fn push_tool_result_success() {
         let mut chat = test_chat();
-        chat.push_tool_result("done", "output text", false);
+        chat.push_tool_result(titled_result("done", "output text", false));
         let text = all_text(&mut chat);
         assert!(text.contains(TOOL_SUCCESS));
         assert!(text.contains("done"));
@@ -2002,7 +1557,7 @@ mod tests {
     #[test]
     fn push_tool_result_error() {
         let mut chat = test_chat();
-        chat.push_tool_result("failed", "error details", true);
+        chat.push_tool_result(titled_result("failed", "error details", true));
         let text = all_text(&mut chat);
         assert!(text.contains(TOOL_ERROR));
         assert!(text.contains("failed"));
@@ -2025,7 +1580,7 @@ mod tests {
         let mut chat = test_chat();
         let long_label =
             "some-very-long-file-path-that-exceeds.the.width.budget/and/then/more/path";
-        chat.push_tool_result(long_label, "", false);
+        chat.push_tool_result(titled_result(long_label, "", false));
         let lines = all_lines(&mut chat, 50);
         assert!(
             lines.len() > 1,
@@ -2045,7 +1600,7 @@ mod tests {
     fn push_tool_result_truncation() {
         let mut chat = test_chat();
         let long_output = (0..10).map(|i| format!("line {i}")).collect::<Vec<_>>();
-        chat.push_tool_result("result", &long_output.join("\n"), false);
+        chat.push_tool_result(titled_result("result", &long_output.join("\n"), false));
         let text = all_text(&mut chat);
 
         assert!(text.contains("line 0"));
@@ -2061,11 +1616,11 @@ mod tests {
     #[test]
     fn push_tool_result_empty_content_adds_nothing() {
         let mut chat = test_chat();
-        chat.push_tool_result("result", "  \n  ", false);
+        chat.push_tool_result(titled_result("result", "  \n  ", false));
         let before = line_count(&mut chat);
 
         let mut chat2 = test_chat();
-        chat2.push_tool_result("result", "", false);
+        chat2.push_tool_result(titled_result("result", "", false));
         let after = line_count(&mut chat2);
 
         assert_eq!(before, after);
@@ -2074,7 +1629,7 @@ mod tests {
     #[test]
     fn push_tool_result_dedup_drops_first_body_line_matching_label() {
         let mut chat = test_chat();
-        chat.push_tool_result(
+        chat.push_tool_result(titled_result(
             "Found 2 files",
             indoc! {"
                 Found 2 files
@@ -2082,7 +1637,7 @@ mod tests {
                 b.rs"
             },
             false,
-        );
+        ));
         let text = all_text(&mut chat);
         assert_eq!(
             text.matches("Found 2 files").count(),
@@ -2096,14 +1651,14 @@ mod tests {
     #[test]
     fn push_tool_result_dedup_leaves_unrelated_first_line_intact() {
         let mut chat = test_chat();
-        chat.push_tool_result(
+        chat.push_tool_result(titled_result(
             "Found 2 files",
             indoc! {"
                 Found 2 files in cache
                 a.rs"
             },
             false,
-        );
+        ));
         let text = all_text(&mut chat);
         assert!(
             text.contains("Found 2 files in cache"),
@@ -2114,7 +1669,7 @@ mod tests {
     #[test]
     fn push_tool_result_preserves_leading_whitespace_on_first_body_line() {
         let mut chat = test_chat();
-        chat.push_tool_result("out", " a.rs | 1 +\n b.rs | 2 +", false);
+        chat.push_tool_result(titled_result("out", " a.rs | 1 +\n b.rs | 2 +", false));
         let text = all_text(&mut chat);
         assert!(
             text.contains(" a.rs | 1 +"),
@@ -2126,7 +1681,7 @@ mod tests {
     #[test]
     fn push_tool_result_drops_surrounding_blank_lines() {
         let mut chat = test_chat();
-        chat.push_tool_result("out", "\n\n real line\n\n\n", false);
+        chat.push_tool_result(titled_result("out", "\n\n real line\n\n\n", false));
         let text = all_text(&mut chat);
         let body_row_count = text
             .lines()
@@ -2145,7 +1700,7 @@ mod tests {
     #[test]
     fn push_tool_result_dedup_collapses_body_when_only_line_matches_label() {
         let mut chat = test_chat();
-        chat.push_tool_result("No matches found", "No matches found", false);
+        chat.push_tool_result(titled_result("No matches found", "No matches found", false));
         let text = all_text(&mut chat);
         assert_eq!(
             text.matches("No matches found").count(),
@@ -2159,7 +1714,7 @@ mod tests {
         const MAX: usize = 5; // matches MAX_TOOL_OUTPUT_LINES in tool.rs
         let mut chat = test_chat();
         let output: Vec<_> = (0..MAX).map(|i| format!("line {i}")).collect();
-        chat.push_tool_result("result", &output.join("\n"), false);
+        chat.push_tool_result(titled_result("result", &output.join("\n"), false));
         let text = all_text(&mut chat);
         assert!(
             !text.contains("... +"),
@@ -2172,7 +1727,7 @@ mod tests {
         const MAX: usize = 5;
         let mut chat = test_chat();
         let output: Vec<_> = (0..=MAX).map(|i| format!("line {i}")).collect();
-        chat.push_tool_result("result", &output.join("\n"), false);
+        chat.push_tool_result(titled_result("result", &output.join("\n"), false));
         let text = all_text(&mut chat);
         assert!(text.contains("... +1 line"));
         assert!(!text.contains("lines"), "singular 'line' expected: {text}");
@@ -2183,7 +1738,7 @@ mod tests {
         const MAX_CHARS: usize = 512;
         let mut chat = test_chat();
         let long_line = "x".repeat(MAX_CHARS + 100);
-        chat.push_tool_result("result", &long_line, false);
+        chat.push_tool_result(titled_result("result", &long_line, false));
         let text = all_text(&mut chat);
         assert!(text.contains("..."), "long line should be truncated");
         assert!(
@@ -2213,7 +1768,7 @@ mod tests {
     fn clear_history_drops_blocks_streaming_thinking_and_resets_scroll() {
         let mut chat = test_chat();
         chat.push_user_message("user prompt".to_owned());
-        chat.push_tool_call("$", "ls");
+        chat.push_tool_call(call("$", "ls"));
         chat.append_stream_token("partial reply");
         chat.append_thinking_token("considering");
         chat.scroll_offset = 25;
@@ -2225,6 +1780,7 @@ mod tests {
         chat.clear_history();
 
         assert_eq!(chat.entry_count(), 0);
+        assert_eq!(chat.pending_call_count(), 0);
         assert!(chat.streaming.is_none());
         assert_eq!(chat.thinking_buffer, "");
         assert_eq!(chat.scroll_offset, 0);
@@ -2249,10 +1805,10 @@ mod tests {
         chat.push_user_message("hello".into());
         assert!(!chat.last_is_error());
 
-        chat.push_tool_call("$", "ls");
+        chat.push_tool_call(call("$", "ls"));
         assert!(!chat.last_is_error());
 
-        chat.push_tool_result("failed", "boom", true);
+        chat.push_tool_result(titled_result("failed", "boom", true));
         assert!(
             !chat.last_is_error(),
             "failed tool result is not an error marker"
@@ -2280,7 +1836,7 @@ mod tests {
         chat.push_user_message("a user prompt".into());
         assert_eq!(chat.last_system_text(), None);
 
-        chat.push_tool_call("$", "ls");
+        chat.push_tool_call(call("$", "ls"));
         assert_eq!(chat.last_system_text(), None);
 
         chat.push_error("boom");
@@ -2564,15 +2120,15 @@ mod tests {
     #[test]
     fn render_tool_call_followed_by_result() {
         let mut chat = test_chat();
-        chat.push_tool_call("$", "echo hi");
-        chat.push_tool_result("ran echo", "hi", false);
+        chat.push_tool_call(call("$", "echo hi"));
+        chat.push_tool_result(titled_result("ran echo", "hi", false));
         insta::assert_snapshot!(render_chat(&mut chat, 60, 10));
     }
 
     #[test]
     fn render_tool_call_with_edit_diff_result() {
         let mut chat = test_chat();
-        chat.push_tool_call("✎", "Edit(/tmp/f.rs)");
+        chat.push_tool_call(call("✎", "Edit(/tmp/f.rs)"));
         let view = crate::tool::ToolResultView::Diff {
             chunks: vec![crate::tool::edit::synthesize_chunk(
                 "fn foo() {}",
@@ -2588,7 +2144,7 @@ mod tests {
     #[test]
     fn render_tool_call_with_edit_diff_over_budget_truncates_both_sides() {
         let mut chat = test_chat();
-        chat.push_tool_call("✎", "Edit(/tmp/big.rs)");
+        chat.push_tool_call(call("✎", "Edit(/tmp/big.rs)"));
         let old = (0..14)
             .map(|i| format!("old{i}"))
             .collect::<Vec<_>>()
@@ -2609,7 +2165,7 @@ mod tests {
     #[test]
     fn render_tool_call_with_edit_diff_error_uses_error_border_color() {
         let mut chat = test_chat();
-        chat.push_tool_call("✎", "Edit(/tmp/f.rs)");
+        chat.push_tool_call(call("✎", "Edit(/tmp/f.rs)"));
         let view = crate::tool::ToolResultView::Diff {
             chunks: vec![crate::tool::edit::synthesize_chunk(
                 "fn foo() {}",
@@ -2638,7 +2194,7 @@ mod tests {
     #[test]
     fn render_tool_call_with_edit_diff_identical_sides_emits_no_change_marker() {
         let mut chat = test_chat();
-        chat.push_tool_call("✎", "Edit(/tmp/f.rs)");
+        chat.push_tool_call(call("✎", "Edit(/tmp/f.rs)"));
         let view = crate::tool::ToolResultView::Diff {
             chunks: vec![crate::tool::edit::synthesize_chunk(
                 "unchanged",
@@ -2654,7 +2210,7 @@ mod tests {
     #[test]
     fn render_tool_call_with_edit_diff_trims_identical_boundary_lines() {
         let mut chat = test_chat();
-        chat.push_tool_call("✎", "Edit(/tmp/f.rs)");
+        chat.push_tool_call(call("✎", "Edit(/tmp/f.rs)"));
         let view = crate::tool::ToolResultView::Diff {
             chunks: vec![crate::tool::edit::synthesize_chunk(
                 "fn foo()",
@@ -2670,7 +2226,7 @@ mod tests {
     #[test]
     fn render_tool_call_with_edit_diff_wraps_long_lines_under_bar() {
         let mut chat = test_chat();
-        chat.push_tool_call("✎", "Edit(/tmp/f.rs)");
+        chat.push_tool_call(call("✎", "Edit(/tmp/f.rs)"));
         let view = crate::tool::ToolResultView::Diff {
             chunks: vec![crate::tool::edit::synthesize_chunk(
                 "short",
@@ -2686,12 +2242,12 @@ mod tests {
     #[test]
     fn render_tool_result_overflow_shows_line_count() {
         let mut chat = test_chat();
-        chat.push_tool_call("$", "ls");
+        chat.push_tool_call(call("$", "ls"));
         let long = (0..5 + 3)
             .map(|i| format!("line {i}"))
             .collect::<Vec<_>>()
             .join("\n");
-        chat.push_tool_result("ls out", &long, false);
+        chat.push_tool_result(titled_result("ls out", &long, false));
         insta::assert_snapshot!(render_chat(&mut chat, 60, 14));
     }
 
@@ -2716,21 +2272,11 @@ mod tests {
     #[test]
     fn render_history_with_resumed_thinking_block() {
         let mut chat = ChatView::new(&Theme::default(), true);
-        let tools = test_tools();
-        let history = vec![
-            Message::user("hello"),
-            Message {
-                role: Role::Assistant,
-                content: vec![
-                    ContentBlock::Thinking {
-                        thinking: "pondering...".into(),
-                        signature: "sig".into(),
-                    },
-                    ContentBlock::Text { text: "Hi!".into() },
-                ],
-            },
-        ];
-        chat.load_history(&history, None, &HashMap::new(), &tools);
+        chat.load_history(vec![
+            Interaction::UserText("hello".to_owned()),
+            Interaction::AssistantThinking("pondering...".to_owned()),
+            Interaction::AssistantText("Hi!".to_owned()),
+        ]);
         insta::assert_snapshot!(render_chat(&mut chat, 60, 10));
     }
 
@@ -2869,8 +2415,8 @@ mod tests {
         let mut chat = test_chat();
         chat.push_user_message("What is 2+2?".to_owned());
         chat.push_block(AssistantText::new("The answer is 4."));
-        chat.push_tool_call("$", "python -c 'print(2+2)'");
-        chat.push_tool_result("4", "4", false);
+        chat.push_tool_call(call("$", "python -c 'print(2+2)'"));
+        chat.push_tool_result(titled_result("4", "4", false));
         chat.push_user_message("Thanks!".to_owned());
         chat.append_stream_token("You're welcome");
 
