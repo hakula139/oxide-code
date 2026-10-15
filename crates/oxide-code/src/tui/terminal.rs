@@ -2,6 +2,7 @@
 
 use std::fmt;
 use std::io::{self, Stdout, Write};
+use std::sync::{Mutex, PoisonError};
 
 use anyhow::Result;
 use crossterm::Command;
@@ -49,15 +50,15 @@ fn enter_tui_mode(stdout: &mut impl Write) -> Result<()> {
     Ok(())
 }
 
-/// Restores the terminal to its original state. Safe to call multiple times.
-///
-/// Errors from each step are intentionally swallowed — restore runs on the panic path and during
-/// normal shutdown, where surfacing an `io::Error` would either mask the original panic or
-/// abort cleanup midway and leave the terminal in raw mode.
+/// Restores the terminal, then prints deferred background panic reports. Later panics print
+/// directly. Safe to call multiple times.
 pub(crate) fn restore() {
+    // Errors are swallowed because restore runs on the panic path, where surfacing one would mask
+    // the original panic or abort cleanup with the terminal still in raw mode.
     let mut stdout = io::stdout();
     _ = leave_tui_mode(&mut stdout);
     _ = disable_raw_mode();
+    _ = write_deferred_panics(&DEFERRED_PANICS, &mut io::stderr());
 }
 
 fn leave_tui_mode(stdout: &mut impl Write) -> Result<()> {
@@ -69,6 +70,19 @@ fn leave_tui_mode(stdout: &mut impl Write) -> Result<()> {
         LeaveAlternateScreen,
         crossterm::cursor::Show,
     )?;
+    Ok(())
+}
+
+/// Marks the terminal restored and drains the deferred panic reports into `out`, one per line.
+fn write_deferred_panics(deferred: &Mutex<DeferredPanics>, out: &mut impl Write) -> io::Result<()> {
+    let reports = {
+        let mut deferred = deferred.lock().unwrap_or_else(PoisonError::into_inner);
+        deferred.restored = true;
+        std::mem::take(&mut deferred.reports)
+    };
+    for report in reports {
+        writeln!(out, "{report}")?;
+    }
     Ok(())
 }
 
@@ -118,36 +132,26 @@ impl Command for DisableAlternateScroll {
     }
 }
 
-/// Brackets a render closure with DEC synchronized-update (mode 2026) sequences so the terminal
-/// presents the new frame atomically; without this, fast successive renders can show partial
-/// frames with mid-line tearing.
-pub(crate) fn draw_sync<W: Write>(
+/// Runs `f` inside a DEC synchronized update (mode 2026), so the terminal presents everything it
+/// writes as one tear-free frame.
+pub(crate) fn synchronized_update<W: Write>(
     terminal: &mut Terminal<CrosstermBackend<W>>,
-    f: impl FnOnce(&mut ratatui::Frame),
+    f: impl FnOnce(&mut Terminal<CrosstermBackend<W>>) -> Result<()>,
 ) -> Result<()> {
     queue!(terminal.backend_mut(), terminal::BeginSynchronizedUpdate)?;
-    terminal.draw(f)?;
+    let result = f(terminal);
     queue!(terminal.backend_mut(), terminal::EndSynchronizedUpdate)?;
     terminal.backend_mut().flush()?;
-    Ok(())
+    result
 }
 
-/// Writes status-link OSC 8 envelopes, using tmux DCS pass-through when needed.
 pub(crate) fn write_status_hyperlinks<W: Write>(
     out: &mut W,
     links: &[StatusHyperlink],
 ) -> io::Result<()> {
-    let envelope = build_status_hyperlink_envelope(links)?;
-    if envelope.is_empty() {
-        return Ok(());
-    }
-    if running_inside_tmux() {
-        out.write_all(&tmux_passthrough(&envelope))?;
-    } else {
-        out.write_all(&envelope)?;
-    }
-    out.flush()?;
-    Ok(())
+    // Plain OSC 8 suits tmux as well: 3.4+ maps it to pane cells and forwards it to outer
+    // terminals with the `hyperlinks` feature, and older versions drop the OSC but keep the text.
+    out.write_all(&build_status_hyperlink_envelope(links)?)
 }
 
 /// Builds the OSC 8 byte stream for the link batch. Empty when no link has a usable URL.
@@ -179,25 +183,6 @@ fn build_status_hyperlink_envelope(links: &[StatusHyperlink]) -> io::Result<Vec<
         queue!(&mut buf, RestorePosition)?;
     }
     Ok(buf)
-}
-
-/// Empty `$TMUX` is treated as absent to avoid writing DCS bytes to a raw terminal.
-fn running_inside_tmux() -> bool {
-    std::env::var("TMUX").is_ok_and(|v| !v.is_empty())
-}
-
-/// Wraps an escape sequence in tmux's DCS pass-through so OSC 8 reaches the outer terminal.
-fn tmux_passthrough(escape: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(escape.len() + 8);
-    out.extend_from_slice(b"\x1bPtmux;");
-    for &b in escape {
-        if b == 0x1b {
-            out.push(0x1b);
-        }
-        out.push(b);
-    }
-    out.extend_from_slice(b"\x1b\\");
-    out
 }
 
 /// Replays one captured cell, resetting SGR first so modifiers cannot leak across cells.
@@ -254,17 +239,74 @@ fn ratatui_color_to_crossterm(c: ratatui::style::Color) -> CtColor {
     }
 }
 
-/// Installs a panic hook that restores the terminal before delegating to the previous hook.
+/// Background-thread panic reports waiting for [`restore`] to print them.
+#[derive(Default)]
+struct DeferredPanics {
+    /// Set by [`restore`]. From then on panics print through the original hook.
+    restored: bool,
+    reports: Vec<String>,
+}
+
+static DEFERRED_PANICS: Mutex<DeferredPanics> = Mutex::new(DeferredPanics {
+    restored: false,
+    reports: Vec::new(),
+});
+
+/// What the panic hook does with one panic.
+#[derive(Debug, PartialEq, Eq)]
+enum PanicRoute {
+    /// Restore the terminal, then print through the original hook.
+    RestoreThenPrint,
+    /// Print through the original hook, since the terminal is already restored.
+    Print,
+    /// Held for [`restore`] to print.
+    Deferred,
+}
+
+/// Installs a panic hook that restores the terminal before delegating to the previous hook when
+/// the calling (UI) thread panics.
 ///
-/// Without this, a panic inside the TUI loop would leave the terminal in raw mode + alternate
-/// screen, hiding the panic message and forcing the user to reset their shell. The original hook
-/// is preserved so any custom panic handler (test harness, backtrace printer, etc.) still runs.
+/// tokio catches a spawned task's panic and the TUI keeps running, so that report goes to the log
+/// and waits for [`restore`]. Printing it mid-session would scribble over the frame.
 pub(crate) fn install_panic_hook() {
+    let ui_thread = std::thread::current().id();
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
-        restore();
-        original_hook(panic_info);
+        let thread = std::thread::current();
+        let on_ui_thread = thread.id() == ui_thread;
+        match route_panic(&DEFERRED_PANICS, on_ui_thread, thread.name(), panic_info) {
+            PanicRoute::RestoreThenPrint => {
+                restore();
+                original_hook(panic_info);
+            }
+            PanicRoute::Print => original_hook(panic_info),
+            PanicRoute::Deferred => {}
+        }
     }));
+}
+
+/// Routes one panic, queueing a background thread's report while the TUI owns the terminal.
+fn route_panic(
+    deferred: &Mutex<DeferredPanics>,
+    on_ui_thread: bool,
+    thread_name: Option<&str>,
+    panic_info: &dyn fmt::Display,
+) -> PanicRoute {
+    let mut deferred = deferred.lock().unwrap_or_else(PoisonError::into_inner);
+    if deferred.restored {
+        return PanicRoute::Print;
+    }
+    if on_ui_thread {
+        return PanicRoute::RestoreThenPrint;
+    }
+    let report = format!(
+        "thread '{}' {panic_info}",
+        thread_name.unwrap_or("<unnamed>")
+    );
+    deferred.reports.push(report.clone());
+    drop(deferred);
+    tracing::error!("{report}");
+    PanicRoute::Deferred
 }
 
 #[cfg(test)]
@@ -350,7 +392,37 @@ mod tests {
         );
     }
 
-    // ── draw_sync ──
+    // ── write_deferred_panics ──
+
+    #[test]
+    fn write_deferred_panics_prints_each_report_once() {
+        let deferred = Mutex::new(DeferredPanics::default());
+        route_panic(&deferred, false, Some("a"), &"panicked at x.rs:1:1:\nfirst");
+        route_panic(
+            &deferred,
+            false,
+            Some("b"),
+            &"panicked at y.rs:2:2:\nsecond",
+        );
+
+        let mut first = Vec::new();
+        write_deferred_panics(&deferred, &mut first).unwrap();
+        let mut second = Vec::new();
+        write_deferred_panics(&deferred, &mut second).unwrap();
+
+        assert_eq!(
+            String::from_utf8(first).unwrap(),
+            indoc::indoc! {"
+                thread 'a' panicked at x.rs:1:1:
+                first
+                thread 'b' panicked at y.rs:2:2:
+                second
+            "},
+        );
+        assert!(second.is_empty(), "a repeat restore must not reprint");
+    }
+
+    // ── synchronized_update ──
 
     const BEGIN_SYNC: &[u8] = b"\x1b[?2026h";
     const END_SYNC: &[u8] = b"\x1b[?2026l";
@@ -387,73 +459,62 @@ mod tests {
         }
     }
 
-    #[test]
-    fn draw_sync_brackets_the_render_with_sync_update_bytes() {
-        let buf = Arc::new(Mutex::new(Vec::new()));
-        let backend = CrosstermBackend::new(SharedWriter(buf.clone()));
-        // `Terminal::new` queries stdout size and fails on CI without a TTY; `Viewport::Fixed`
+    fn fixed_terminal(buf: &Arc<Mutex<Vec<u8>>>) -> Terminal<CrosstermBackend<SharedWriter>> {
+        // `Terminal::new` queries stdout size and fails on CI without a TTY. `Viewport::Fixed`
         // skips that query.
         let opts = TerminalOptions {
             viewport: Viewport::Fixed(Rect::new(0, 0, 80, 24)),
         };
-        let mut terminal = Terminal::with_options(backend, opts).unwrap();
+        Terminal::with_options(CrosstermBackend::new(SharedWriter(Arc::clone(buf))), opts).unwrap()
+    }
 
-        let mut drew = false;
-        draw_sync(&mut terminal, |_frame| drew = true).unwrap();
+    #[test]
+    fn synchronized_update_brackets_everything_the_closure_writes() {
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let mut terminal = fixed_terminal(&buf);
 
-        assert!(drew, "render closure must be invoked");
+        synchronized_update(&mut terminal, |terminal| {
+            terminal.draw(|_frame| {})?;
+            terminal.backend_mut().write_all(b"LINKS")?;
+            Ok(())
+        })
+        .unwrap();
+
         let bytes = buf.lock().unwrap();
         let begin = index_of(&bytes, BEGIN_SYNC).expect("BeginSynchronizedUpdate emitted");
+        let links = index_of(&bytes, b"LINKS").expect("closure output written");
         let end = index_of(&bytes, END_SYNC).expect("EndSynchronizedUpdate emitted");
-        assert!(begin < end, "sync update must bracket the render");
+        assert!(begin < links && links < end, "{bytes:?}");
+    }
+
+    #[test]
+    fn synchronized_update_ends_the_update_when_the_closure_fails() {
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let mut terminal = fixed_terminal(&buf);
+
+        let result = synchronized_update(&mut terminal, |_| Err(anyhow::anyhow!("draw failed")));
+
+        assert!(result.is_err());
+        let bytes = buf.lock().unwrap();
+        assert!(
+            index_of(&bytes, END_SYNC).is_some(),
+            "a failed draw must not leave the terminal holding frames",
+        );
     }
 
     // ── write_status_hyperlinks ──
 
     #[test]
-    fn write_status_hyperlinks_passes_envelope_through_unchanged_outside_tmux() {
+    fn write_status_hyperlinks_writes_the_plain_envelope_inside_and_outside_tmux() {
         let link = plain_hyperlink(Rect::new(0, 0, 1, 1), "https://x", &["x"]);
-        let mut buf: Vec<u8> = Vec::new();
-        temp_env::with_var_unset("TMUX", || {
-            write_status_hyperlinks(&mut buf, std::slice::from_ref(&link)).unwrap();
-        });
         let envelope = build_status_hyperlink_envelope(std::slice::from_ref(&link)).unwrap();
-        assert_eq!(
-            buf, envelope,
-            "outside tmux the wire bytes match the raw envelope",
-        );
-    }
-
-    #[test]
-    fn write_status_hyperlinks_wraps_envelope_in_dcs_passthrough_inside_tmux() {
-        let link = plain_hyperlink(Rect::new(0, 0, 1, 1), "https://x", &["x"]);
-        let mut buf: Vec<u8> = Vec::new();
-        temp_env::with_var("TMUX", Some("/tmp/tmux-1000/default,1234,0"), || {
-            write_status_hyperlinks(&mut buf, &[link]).unwrap();
-        });
-        assert!(
-            buf.starts_with(b"\x1bPtmux;"),
-            "DCS opener brackets the envelope: {buf:?}",
-        );
-        assert!(
-            buf.ends_with(b"\x1b\\"),
-            "ST closer terminates the DCS: {buf:?}",
-        );
-        assert!(
-            buf.windows(8).any(|w| w == b"\x1b\x1b]8;;ht"),
-            "inner ESC before OSC 8 opener is doubled: {buf:?}",
-        );
-    }
-
-    #[test]
-    fn write_status_hyperlinks_treats_empty_tmux_env_as_outside_tmux() {
-        let link = plain_hyperlink(Rect::new(0, 0, 1, 1), "https://x", &["x"]);
-        let mut buf: Vec<u8> = Vec::new();
-        temp_env::with_var("TMUX", Some(""), || {
-            write_status_hyperlinks(&mut buf, std::slice::from_ref(&link)).unwrap();
-        });
-        let envelope = build_status_hyperlink_envelope(std::slice::from_ref(&link)).unwrap();
-        assert_eq!(buf, envelope, "empty $TMUX is treated as absent");
+        for tmux in [None, Some("/tmp/tmux-1000/default,1234,0")] {
+            let mut buf: Vec<u8> = Vec::new();
+            temp_env::with_var("TMUX", tmux, || {
+                write_status_hyperlinks(&mut buf, std::slice::from_ref(&link)).unwrap();
+            });
+            assert_eq!(buf, envelope, "TMUX={tmux:?}");
+        }
     }
 
     #[test]
@@ -588,16 +649,6 @@ mod tests {
         );
     }
 
-    // ── tmux_passthrough ──
-
-    #[test]
-    fn tmux_passthrough_doubles_inner_escape_and_wraps_in_dcs() {
-        let inner = b"\x1b]8;;https://x\x07X\x1b]8;;\x07";
-        let wrapped = tmux_passthrough(inner);
-        let expected = b"\x1bPtmux;\x1b\x1b]8;;https://x\x07X\x1b\x1b]8;;\x07\x1b\\";
-        assert_eq!(&wrapped, expected);
-    }
-
     // ── ratatui_color_to_crossterm ──
 
     #[test]
@@ -631,5 +682,47 @@ mod tests {
                 "color {input:?}"
             );
         }
+    }
+
+    // ── route_panic ──
+
+    #[test]
+    fn route_panic_restores_before_printing_a_ui_thread_panic() {
+        let deferred = Mutex::new(DeferredPanics::default());
+        let route = route_panic(
+            &deferred,
+            true,
+            Some("main"),
+            &"panicked at x.rs:1:1:\nboom",
+        );
+        assert_eq!(route, PanicRoute::RestoreThenPrint);
+        assert_eq!(deferred.lock().unwrap().reports, [] as [String; 0]);
+    }
+
+    #[test]
+    fn route_panic_defers_a_background_panic_and_names_its_thread() {
+        let deferred = Mutex::new(DeferredPanics::default());
+        let route = route_panic(&deferred, false, None, &"panicked at x.rs:1:1:\nboom");
+        assert_eq!(route, PanicRoute::Deferred);
+        assert_eq!(
+            deferred.lock().unwrap().reports,
+            ["thread '<unnamed>' panicked at x.rs:1:1:\nboom"],
+        );
+    }
+
+    #[test]
+    fn route_panic_prints_directly_once_the_terminal_is_restored() {
+        let deferred = Mutex::new(DeferredPanics::default());
+        write_deferred_panics(&deferred, &mut Vec::new()).unwrap();
+
+        for on_ui_thread in [false, true] {
+            let route = route_panic(&deferred, on_ui_thread, Some("worker"), &"late");
+            assert_eq!(route, PanicRoute::Print, "on_ui_thread = {on_ui_thread}");
+        }
+        assert_eq!(
+            deferred.lock().unwrap().reports,
+            [] as [String; 0],
+            "nothing is left for a restore that already ran",
+        );
     }
 }

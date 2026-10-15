@@ -25,7 +25,7 @@ use super::git_probes::{GitProbes, GitUpdate};
 use super::glyphs::{NEWLINE_GLYPH, USER_PROMPT_PREFIX, USER_PROMPT_PREFIX_WIDTH};
 use super::modal::{ModalAction, ModalStack};
 use super::pending_calls::{PendingCall, PendingCalls, result_header};
-use super::terminal::{Tui, draw_sync, write_status_hyperlinks};
+use super::terminal::{Tui, synchronized_update, write_status_hyperlinks};
 use super::theme::Theme;
 use crate::agent::event::{AgentEvent, UserAction};
 use crate::config::{CompactionConfig, Effort, StatusLineSegment, display_auto_compaction};
@@ -708,12 +708,13 @@ impl App {
         &mut self,
         terminal: &mut ratatui::Terminal<ratatui::prelude::CrosstermBackend<W>>,
     ) -> Result<()> {
-        draw_sync(terminal, |frame| self.draw_frame(frame))?;
-        self.emit_status_hyperlinks(terminal)?;
-        Ok(())
+        synchronized_update(terminal, |terminal| {
+            terminal.draw(|frame| self.draw_frame(frame))?;
+            self.emit_status_hyperlinks(terminal)
+        })
     }
 
-    /// Replays captured status links as OSC 8 envelopes after the frame flush.
+    /// Replays captured status links as OSC 8 envelopes over the drawn frame.
     fn emit_status_hyperlinks<W: std::io::Write>(
         &mut self,
         terminal: &mut ratatui::Terminal<ratatui::prelude::CrosstermBackend<W>>,
@@ -3377,6 +3378,25 @@ mod tests {
         let begin = index_of(&bytes, BEGIN_SYNC).expect("BeginSynchronizedUpdate emitted");
         let end = index_of(&bytes, END_SYNC).expect("EndSynchronizedUpdate emitted");
         assert!(begin < end, "sync update must bracket the rendered frame");
+    }
+
+    #[test]
+    fn render_replays_status_hyperlinks_inside_the_synchronized_update() {
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.apply_git_update(GitUpdate::PullRequest(Some(
+            crate::util::git::PullRequest {
+                number: 7,
+                url: "https://example.com/pull/7".to_owned(),
+            },
+        )));
+        let (mut terminal, buf) = crossterm_test_terminal(120, 8);
+
+        app.render(&mut terminal).unwrap();
+
+        let bytes = buf.lock().unwrap();
+        let link = index_of(&bytes, b"\x1b]8;;https://example.com/pull/7").expect("OSC 8 emitted");
+        let end = index_of(&bytes, END_SYNC).expect("EndSynchronizedUpdate emitted");
+        assert!(link < end, "sync update must bracket the status links");
     }
 
     #[test]
