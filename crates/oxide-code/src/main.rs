@@ -101,7 +101,7 @@ async fn async_main() -> Result<Exit> {
     let _log_guard = util::log::init_tracing(tui_mode)?;
 
     if cli.list {
-        list_sessions(cli.all, cli.limit)?;
+        list_sessions(&mut std::io::stdout().lock(), cli.all, cli.limit)?;
         return Ok(Exit::Success);
     }
 
@@ -168,19 +168,12 @@ async fn async_main() -> Result<Exit> {
 
 // ── Session Helpers ──
 
-fn list_sessions(all: bool, limit: usize) -> Result<()> {
+fn list_sessions(out: &mut dyn std::io::Write, all: bool, limit: usize) -> Result<()> {
     let store = SessionStore::open()?;
     let local_offset = util::time::local_offset();
     let term_width = detect_terminal_width();
     let cap = (limit > 0).then_some(limit);
-    render_list(
-        &mut std::io::stdout().lock(),
-        &store,
-        all,
-        local_offset,
-        term_width,
-        cap,
-    )
+    render_list(out, &store, all, local_offset, term_width, cap)
 }
 
 fn detect_terminal_width() -> Option<usize> {
@@ -201,4 +194,109 @@ fn create_tool_registry(tracker: &Arc<FileTracker>) -> ToolRegistry {
         Box::new(GlobTool),
         Box::new(GrepTool),
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    use time::macros::datetime;
+
+    use super::*;
+    use crate::session::store::testing::seed_test_session;
+
+    // ── list_sessions ──
+
+    #[test]
+    fn list_sessions_scope_and_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        temp_env::with_var("XDG_DATA_HOME", Some(dir.path()), || {
+            let store = SessionStore::open().unwrap();
+            seed_test_session(
+                &store,
+                "local-session",
+                Some("Local session"),
+                Some(2),
+                datetime!(2026-01-01 00:00 UTC),
+            );
+            let other = SessionStore::open_at(dir.path().join("ox/sessions"), "other").unwrap();
+            seed_test_session(
+                &other,
+                "other-session",
+                Some("Other session"),
+                Some(3),
+                datetime!(2026-01-02 00:00 UTC),
+            );
+
+            let mut output = Vec::new();
+            list_sessions(&mut output, false, 0).unwrap();
+            let local = String::from_utf8(output).unwrap();
+            assert!(local.contains("Local session"));
+            assert!(!local.contains("Other session"));
+            assert!(!local.contains("Project"));
+
+            let mut output = Vec::new();
+            list_sessions(&mut output, true, 0).unwrap();
+            let all = String::from_utf8(output).unwrap();
+            assert!(all.contains("Local session"));
+            assert!(all.contains("Other session"));
+            assert!(all.contains("Project"));
+            assert!(!all.contains("and 1 more"));
+
+            let mut output = Vec::new();
+            list_sessions(&mut output, true, 1).unwrap();
+            let capped = String::from_utf8(output).unwrap();
+            assert!(capped.contains("Other session"));
+            assert!(!capped.contains("Local session"));
+            assert!(capped.contains("... and 1 more"));
+        });
+    }
+
+    #[test]
+    fn list_sessions_storage_error() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        temp_env::with_var("XDG_DATA_HOME", Some(file.path()), || {
+            assert!(list_sessions(&mut Vec::new(), false, 0).is_err());
+        });
+    }
+
+    // ── create_tool_registry ──
+
+    #[tokio::test]
+    async fn create_tool_registry_shares_file_tracking() {
+        let tracker = Arc::new(FileTracker::default());
+        let tools = create_tool_registry(&tracker);
+        let names: Vec<_> = tools.definitions().iter().map(|tool| tool.name).collect();
+        assert_eq!(names, ["bash", "read", "write", "edit", "glob", "grep"]);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("example.txt");
+        std::fs::write(&path, "original").unwrap();
+        let edit = serde_json::json!({
+            "file_path": path,
+            "old_string": "original",
+            "new_string": "edited",
+        });
+        let rejected = tools.run("edit", edit.clone()).await;
+        assert!(rejected.is_error);
+        assert!(rejected.content.contains("has not been read"));
+
+        let read = tools
+            .run("read", serde_json::json!({ "file_path": path }))
+            .await;
+        assert!(!read.is_error, "{}", read.content);
+        let edited = tools.run("edit", edit).await;
+        assert!(!edited.is_error, "{}", edited.content);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "edited");
+
+        let written = tools
+            .run(
+                "write",
+                serde_json::json!({
+                    "file_path": path,
+                    "content": "rewritten",
+                }),
+            )
+            .await;
+        assert!(!written.is_error, "{}", written.content);
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "rewritten");
+    }
 }
