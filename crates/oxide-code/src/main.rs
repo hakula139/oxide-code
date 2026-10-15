@@ -143,12 +143,9 @@ async fn async_main() -> Result<Exit> {
     let file_tracker = Arc::new(FileTracker::default());
     let ResumedSession {
         handle,
-        messages,
-        context,
-        compact,
+        transcript,
         title,
         unarchived,
-        tool_result_metadata,
         file_snapshots,
     } = resolve_session(&store, config.model.id(), cli.r#continue.as_ref(), cli.all).await?;
     if unarchived && !tui_mode {
@@ -167,8 +164,7 @@ async fn async_main() -> Result<Exit> {
         tools,
         store,
         handle,
-        messages,
-        context,
+        transcript,
         file_tracker,
         cwd,
         tui_mode,
@@ -184,9 +180,7 @@ async fn async_main() -> Result<Exit> {
     }
 
     let startup = Startup {
-        compact,
         picker,
-        tool_metadata: tool_result_metadata,
         title,
         unarchived,
     };

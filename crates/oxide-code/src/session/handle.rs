@@ -323,19 +323,26 @@ impl SessionHandle {
     }
 }
 
-// ── ResumedSession ──
+// ── Resumed Sessions ──
 
-/// Live handle plus display-only extras the TUI uses to reconstruct what the user saw live.
-pub(crate) struct ResumedSession {
-    pub(crate) handle: SessionHandle,
+/// A session's transcript as loaded from disk, with the prompt state and display extras saved
+/// beside its messages.
+#[derive(Debug, Default)]
+pub(crate) struct LoadedTranscript {
     pub(crate) messages: Vec<Message>,
     /// Recorded prompt state the resumed conversation replays.
     pub(crate) context: Option<SessionContext>,
     pub(crate) compact: Option<CompactInfo>,
+    pub(crate) tool_metadata: HashMap<String, ToolMetadata>,
+}
+
+/// Live handle plus display-only extras the TUI uses to reconstruct what the user saw live.
+pub(crate) struct ResumedSession {
+    pub(crate) handle: SessionHandle,
+    pub(crate) transcript: LoadedTranscript,
     pub(crate) title: Option<String>,
     /// The session was archived, so resuming it appended an entry unarchiving it.
     pub(crate) unarchived: bool,
-    pub(crate) tool_result_metadata: HashMap<String, ToolMetadata>,
     /// Persisted tracker snapshots passed to `FileTracker::restore_verified` so the
     /// Read-before-Edit gate clears for files that still match disk.
     pub(crate) file_snapshots: Vec<FileSnapshot>,
@@ -379,12 +386,9 @@ pub(crate) async fn roll(
 /// `&mut SessionHandle`. This struct only carries what the conversation and UI rebuild from.
 #[derive(Debug)]
 pub(crate) struct RollIntoOutcome {
-    pub(crate) messages: Vec<Message>,
-    pub(crate) context: Option<SessionContext>,
-    pub(crate) compact: Option<CompactInfo>,
+    pub(crate) transcript: LoadedTranscript,
     pub(crate) title: Option<String>,
     pub(crate) unarchived: bool,
-    pub(crate) tool_result_metadata: HashMap<String, ToolMetadata>,
     pub(crate) finalize_failure: Option<String>,
     /// Tracker snapshots that drifted on disk between save and resume — caller surfaces these so
     /// the user knows those files need a fresh Read before any Edit.
@@ -410,12 +414,9 @@ pub(crate) async fn roll_into(
     // Load + sanitize FIRST so a target-load error leaves the live session untouched.
     let ResumedSession {
         handle: target_handle,
-        messages,
-        context,
-        compact,
+        transcript,
         title,
         unarchived,
-        tool_result_metadata,
         file_snapshots,
     } = resume_from_path(store, target)?;
 
@@ -426,12 +427,9 @@ pub(crate) async fn roll_into(
     let old_session = std::mem::replace(session, target_handle);
     let finalize_failure = old_session.finalize(old_snapshots).await;
     Ok(RollIntoOutcome {
-        messages,
-        context,
-        compact,
+        transcript,
         title,
         unarchived,
-        tool_result_metadata,
         finalize_failure,
         drifted_paths,
     })
@@ -480,12 +478,14 @@ fn from_resumed_data(
     let handle = spawn_actor(state);
     Ok(ResumedSession {
         handle,
-        messages: data.messages,
-        context: data.context,
-        compact: data.compact,
+        transcript: LoadedTranscript {
+            messages: data.messages,
+            context: data.context,
+            compact: data.compact,
+            tool_metadata: data.tool_result_metadata,
+        },
         title,
         unarchived: data.archived,
-        tool_result_metadata: data.tool_result_metadata,
         file_snapshots: data.file_snapshots,
     })
 }
@@ -1000,7 +1000,7 @@ mod tests {
 
         let resumed = resume_id(&store, &session_id).unwrap();
         assert!(resumed.unarchived);
-        assert_eq!(resumed.messages, [Message::user("hello")]);
+        assert_eq!(resumed.transcript.messages, [Message::user("hello")]);
         resumed.handle.shutdown().await;
         assert!(!store.load_session_data(&session_id).unwrap().archived);
 
@@ -1382,7 +1382,7 @@ mod tests {
             "handle now points at target"
         );
         assert_eq!(
-            outcome.messages.len(),
+            outcome.transcript.messages.len(),
             2,
             "resumed payload carries the target's transcript",
         );
@@ -1517,11 +1517,11 @@ mod tests {
 
         let ResumedSession {
             handle: resumed,
-            messages,
+            transcript,
             ..
         } = resume_id(&store, &session_id).unwrap();
         assert_eq!(resumed.session_id(), session_id);
-        assert_eq!(messages.len(), 2);
+        assert_eq!(transcript.messages.len(), 2);
     }
 
     #[tokio::test]
@@ -1534,8 +1534,8 @@ mod tests {
         // Skip finish — `shutdown` drains the queued record cmd anyway.
         original.shutdown().await;
 
-        let ResumedSession { messages, .. } = resume_id(&store, &session_id).unwrap();
-        assert_eq!(messages.len(), 1);
+        let ResumedSession { transcript, .. } = resume_id(&store, &session_id).unwrap();
+        assert_eq!(transcript.messages.len(), 1);
     }
 
     #[tokio::test]
@@ -1553,7 +1553,10 @@ mod tests {
         );
 
         let resumed = resume_id(&store, session_id).expect("title-only session must resume");
-        assert!(resumed.messages.is_empty(), "no messages on disk yet");
+        assert!(
+            resumed.transcript.messages.is_empty(),
+            "no messages on disk yet"
+        );
         assert_eq!(resumed.title.as_deref(), Some("User-named"));
 
         resumed.handle.record_message(Message::user("hi")).await;
@@ -1643,13 +1646,13 @@ mod tests {
             .await;
         original.shutdown().await;
 
-        let ResumedSession { messages, .. } = resume_id(&store, &session_id).unwrap();
+        let ResumedSession { transcript, .. } = resume_id(&store, &session_id).unwrap();
         assert_eq!(
-            messages.len(),
+            transcript.messages.len(),
             1,
             "assistant-only-tool-use should be dropped"
         );
-        assert_eq!(messages[0].role, Role::User);
+        assert_eq!(transcript.messages[0].role, Role::User);
     }
 
     #[tokio::test]

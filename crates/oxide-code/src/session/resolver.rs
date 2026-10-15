@@ -8,7 +8,7 @@ use tracing::debug;
 
 use super::display::id_prefix;
 use super::entry::SessionInfo;
-use super::handle::{self, ResumedSession};
+use super::handle::{self, LoadedTranscript, ResumedSession};
 use super::store::SessionStore;
 use crate::util::text::ELLIPSIS;
 
@@ -42,12 +42,9 @@ pub(crate) async fn resolve_session(
         ResumeMode::Fresh => {
             return Ok(ResumedSession {
                 handle: handle::start(store, model),
-                messages: Vec::new(),
-                context: None,
-                compact: None,
+                transcript: LoadedTranscript::default(),
                 title: None,
                 unarchived: false,
-                tool_result_metadata: std::collections::HashMap::new(),
                 file_snapshots: Vec::new(),
             });
         }
@@ -193,9 +190,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let resumed = resolve_session(&store, "m", None, false).await.unwrap();
-        assert_eq!(resumed.messages, []);
+        assert_eq!(resumed.transcript.messages, []);
         assert!(resumed.title.is_none());
-        assert!(resumed.tool_result_metadata.is_empty());
+        assert!(resumed.transcript.tool_metadata.is_empty());
         assert!(
             std::fs::read_dir(test_project_dir(dir.path()))
                 .unwrap()
@@ -230,7 +227,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resumed.handle.session_id(), full_id);
-        assert_eq!(resumed.messages.len(), 1);
+        assert_eq!(resumed.transcript.messages.len(), 1);
         assert_eq!(resumed.title.as_deref(), Some("external path test"));
     }
 
@@ -251,7 +248,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resumed.handle.session_id(), full_id);
-        assert_eq!(resumed.messages.len(), 1);
+        assert_eq!(resumed.transcript.messages.len(), 1);
         assert_eq!(resumed.title.as_deref(), Some("hello"));
     }
 
@@ -278,7 +275,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resumed.handle.session_id(), full_id);
-        assert_eq!(resumed.messages.len(), 1);
+        assert_eq!(resumed.transcript.messages.len(), 1);
         assert_eq!(resumed.title.as_deref(), Some("all scope"));
 
         let missing = Some("zzzz".to_owned());

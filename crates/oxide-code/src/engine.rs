@@ -4,6 +4,7 @@
 #[cfg(test)]
 pub(crate) mod testing;
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -12,7 +13,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::warn;
 
-use crate::agent::event::{AgentEvent, AgentSink, UsageSnapshot, UserAction};
+use crate::agent::event::{AgentEvent, AgentSink, Interaction, UsageSnapshot, UserAction};
 use crate::agent::{self, AutoCompact, TokenUsage, TurnAbort, TurnOutcome, TurnReport};
 use crate::client::anthropic::Client;
 use crate::config::Effort;
@@ -20,10 +21,12 @@ use crate::file_tracker::FileTracker;
 use crate::message::{ContentBlock, Message};
 use crate::model::{ModelSpec, ResolvedModelId};
 use crate::prompt::{self, PromptParts, SessionContext, UserContext};
-use crate::session::handle::{self, SessionHandle};
+use crate::session::entry::CompactInfo;
+use crate::session::handle::{self, LoadedTranscript, SessionHandle};
+use crate::session::history;
 use crate::session::store::SessionStore;
 use crate::session::title_generator;
-use crate::tool::ToolRegistry;
+use crate::tool::{ToolMetadata, ToolRegistry};
 
 /// Ops a frontend can queue before the engine reads them. A turn keeps reading ops while it runs,
 /// so this only absorbs a burst of queued prompts.
@@ -86,6 +89,11 @@ pub(crate) struct Engine {
     store: SessionStore,
     session: SessionHandle,
     messages: Vec<Message>,
+    /// Compaction boundary the transcript loaded with, until [`Self::take_history`] projects it.
+    compact: Option<CompactInfo>,
+    /// Metadata the loaded transcript's tool results persisted, until [`Self::take_history`]
+    /// projects it.
+    tool_metadata: HashMap<String, ToolMetadata>,
     prompt: PromptParts,
     /// `prompt` changed since the session last recorded it, so the next user message records it.
     prompt_unrecorded: bool,
@@ -109,12 +117,17 @@ impl Engine {
         tools: Arc<ToolRegistry>,
         store: SessionStore,
         session: SessionHandle,
-        messages: Vec<Message>,
-        context: Option<SessionContext>,
+        transcript: LoadedTranscript,
         file_tracker: Arc<FileTracker>,
         cwd: PathBuf,
         interactive: bool,
     ) -> Self {
+        let LoadedTranscript {
+            messages,
+            context,
+            compact,
+            tool_metadata,
+        } = transcript;
         let prompt_unrecorded = context.is_none();
         let prompt = session_prompt(context, client.model(), &cwd).await;
         Self {
@@ -123,6 +136,8 @@ impl Engine {
             store,
             session,
             messages,
+            compact,
+            tool_metadata,
             prompt,
             prompt_unrecorded,
             file_tracker,
@@ -135,20 +150,25 @@ impl Engine {
         }
     }
 
-    pub(crate) fn tools(&self) -> &Arc<ToolRegistry> {
-        &self.tools
-    }
-
     pub(crate) fn session_id(&self) -> &str {
         self.session.session_id()
     }
 
-    pub(crate) fn messages(&self) -> &[Message] {
-        &self.messages
-    }
-
     pub(crate) fn cwd(&self) -> &Path {
         &self.cwd
+    }
+
+    /// Projects the loaded transcript for a frontend to show. Takes the compaction boundary and
+    /// tool metadata it loaded with, so a later call projects without them.
+    pub(crate) fn take_history(&mut self) -> Vec<Interaction> {
+        let compact = self.compact.take();
+        let tool_metadata = std::mem::take(&mut self.tool_metadata);
+        history::interactions(
+            &self.messages,
+            compact.as_ref(),
+            &tool_metadata,
+            &self.tools,
+        )
     }
 
     /// Starts the engine task. The first events warn about the tracked files in `drifted`, which
@@ -413,7 +433,7 @@ impl Engine {
         )
         .await;
         sink.session_write_error(outcome.finalize_failure.as_deref());
-        self.adopt_session(Vec::new(), None).await;
+        self.adopt_session(LoadedTranscript::default()).await;
         sink.emit(
             AgentEvent::SessionRolled {
                 id: outcome.new_id,
@@ -441,16 +461,13 @@ impl Engine {
                     return;
                 }
             };
-        self.adopt_session(outcome.messages.clone(), outcome.context)
-            .await;
+        self.adopt_session(outcome.transcript).await;
         sink.emit(
             AgentEvent::SessionResumed {
                 id: self.session.session_id().to_owned(),
                 title: outcome.title,
                 unarchived: outcome.unarchived,
-                messages: outcome.messages,
-                compact: outcome.compact,
-                tool_metadata: outcome.tool_result_metadata,
+                history: self.take_history(),
             },
             "session-resumed",
         );
@@ -467,10 +484,18 @@ impl Engine {
         agent::notify_if_interrupted(&self.messages, sink);
     }
 
-    async fn adopt_session(&mut self, messages: Vec<Message>, context: Option<SessionContext>) {
+    async fn adopt_session(&mut self, transcript: LoadedTranscript) {
+        let LoadedTranscript {
+            messages,
+            context,
+            compact,
+            tool_metadata,
+        } = transcript;
         self.client
             .set_session_id(self.session.session_id().to_owned());
         self.messages = messages;
+        self.compact = compact;
+        self.tool_metadata = tool_metadata;
         self.prompt_unrecorded = context.is_none();
         self.prompt = session_prompt(context, self.client.model(), &self.cwd).await;
         self.reset_usage();
@@ -814,8 +839,10 @@ mod tests {
                     Arc::new(ToolRegistry::new(Vec::new())),
                     store.clone(),
                     handle::start(&store, "claude-sonnet-5-5"),
-                    Vec::new(),
-                    context,
+                    LoadedTranscript {
+                        context,
+                        ..LoadedTranscript::default()
+                    },
                     Arc::new(FileTracker::default()),
                     dir.path().to_owned(),
                     false,
@@ -1068,14 +1095,23 @@ mod tests {
             let path = store.find_session_path(&target_id).unwrap();
             handle.ops.send(UserAction::Resume { path }).await.unwrap();
             let resumed = next_matching(&mut handle.events, |event| match event {
-                AgentEvent::SessionResumed { id, messages, .. } => Some((id, messages.len())),
+                AgentEvent::SessionResumed { id, history, .. } => Some((id, history)),
                 _ => None,
             })
             .await;
             submit(&mut handle, "again").await;
             handle.shutdown().await;
 
-            assert_eq!(resumed, (target_id.clone(), 2));
+            assert_eq!(
+                resumed,
+                (
+                    target_id.clone(),
+                    vec![
+                        Interaction::UserText("earlier prompt".to_owned()),
+                        Interaction::AssistantText("earlier reply".to_owned()),
+                    ],
+                )
+            );
             let requests = request_bodies(&server).await;
             assert_eq!(
                 texts(&requests[0])[1..],
