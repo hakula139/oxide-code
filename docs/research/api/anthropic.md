@@ -34,6 +34,14 @@ Both backends store the same JSON structure:
 
 OAuth requests use `Authorization: Bearer <token>` (not `x-api-key`).
 
+### Long-lived OAuth token
+
+`claude setup-token` issues a long-lived subscription token. Claude Code reads it from `CLAUDE_CODE_OAUTH_TOKEN`, sends it with the same OAuth request shape as a stored login, and never refreshes it. It ranks below `ANTHROPIC_API_KEY` and above the stored login ([authentication precedence](https://code.claude.com/docs/en/authentication#authentication-precedence)).
+
+### Auth token (LLM gateways)
+
+`ANTHROPIC_AUTH_TOKEN` sends `Authorization: Bearer <token>` with the API-key request shape, so the `oauth-2025-04-20` beta stays off. It ranks above every other credential. Gateways may also require extra headers, which Claude Code reads from `ANTHROPIC_CUSTOM_HEADERS` as one `Name: value` per line.
+
 ## Required Headers and Parameters
 
 Four things make up the canonical Claude Code request shape. The first two are OAuth-load-bearing because their absence triggers 401 / 429 against `api.anthropic.com` on non-Haiku models (see [What Happens Without These](#what-happens-without-these)). The latter two ship on every request and are also fingerprinted by strict 3P re-distribution gateways (see [Third-Party Gateway Validation](#third-party-gateway-validation)).
@@ -283,7 +291,7 @@ As of April 4, 2026, Anthropic enforces that OAuth subscription credits (Pro / M
 
 The `cch` hash is the primary technical enforcement mechanism, and both the algorithm (xxHash64, non-cryptographic) and the constants are publicly known. No additional protections exist: no TLS fingerprinting, binary attestation, pre-registration handshake, replay detection, or connection association. Anthropic could escalate enforcement at any time, but today's scheme reads as billing plumbing with no security boundary behind it.
 
-oxide-code computes valid `cch` hashes on every outbound request, both OAuth and API-key. Claude Code 2.1.121 emits the attestation block under both auth modes. 3P re-distribution gateways treat absence as a missing client signature and reject. The fingerprint salt and xxHash64 seed are version-specific constants, so they may change with Claude Code releases. The 2.1.296 bundle keeps the same salt and character indices. Its seed lives in the native Bun HTTP stack, outside the JavaScript bundle, and was not rechecked.
+oxide-code attaches the attestation block to every streaming request (agent turns and `/compact` summaries) under every auth mode, and to non-streaming one-shots (session titles) under OAuth. `CLAUDE_CODE_ATTRIBUTION_HEADER=0` drops it everywhere. Claude Code emits the block under both auth modes, and 3P re-distribution gateways treat its absence as a missing client signature and reject. Requests to the Anthropic API carry a valid `cch` hash. Since 2.1.181, Claude Code sends custom base URLs the block without `cch`, so a gateway that caches on the request body sees a stable prefix, and oxide-code matches that. The fingerprint salt and xxHash64 seed are version-specific constants, so they may change with Claude Code releases. The 2.1.296 bundle keeps the same salt and character indices. Its seed lives in the native Bun HTTP stack, outside the JavaScript bundle, and was not rechecked.
 
 ## Third-Party Gateway Validation
 
@@ -291,7 +299,7 @@ Re-distribution gateways front the upstream API and reject anything that does no
 
 1. **`User-Agent` version.** `CLAUDE_CLI_VERSION` in `client::anthropic` names the Claude Code release the beta sequence in item 4 was captured from, and the `compute_betas` sequence test fails when the two drift apart. The billing attestation's `cc_version` reports the same release. Pre-allowlist versions trip the verifier even when the rest of the request shape is correct.
 2. **Stainless SDK headers.** Claude Code's TS SDK auto-emits the `lang` / `os` / `arch` triple plus `x-stainless-package-version`, `x-stainless-runtime`, `x-stainless-runtime-version`, `x-stainless-timeout`, and `x-stainless-retry-count`. Absence of any one fingerprints as "not from Stainless". Gateways often return HTTP 403 with `"user agent not allowed"`.
-3. **Billing attestation under both auth modes.** Claude Code emits the `x-anthropic-billing-header` block (with the `cch` xxHash64) on API-key requests too. An OAuth-only guard leaves API-key traffic without the integrity primitive the gateway verifies. See [Attribution header](#3-attribution-header).
+3. **Billing attestation under both auth modes.** Claude Code emits the `x-anthropic-billing-header` block on API-key requests too, without `cch` on custom base URLs since 2.1.181. An OAuth-only guard leaves API-key traffic without the block the gateway verifies. See [Attribution header](#3-attribution-header).
 4. **Beta header set and order.** Match Claude Code's emit order. On agentic Opus 5.5 and Sonnet 5.5 requests, Claude Code 2.1.296 sends `claude-code-20250219, interleaved-thinking-2025-05-14, thinking-token-count-2026-05-13, context-management-2025-06-27, prompt-caching-scope-2026-01-05, mid-conversation-system-2026-04-07, per-turn-control-2026-07-01, advisor-tool-2026-03-01, effort-2025-11-24`. On Haiku 5.5 it moves `claude-code-20250219` to just after `mid-conversation-system-2026-04-07`. Both sequences were captured from `claude --bare -p` with an API key on 2026-10-15. Under OAuth, the frozen 2.1.87 source puts `oauth-2025-04-20` right after the leading `claude-code-20250219`, or first on Haiku. That slot was not captured. `prompt-caching-scope-2026-01-05` ships unconditionally. The matching `cache_control.scope: "global"` body field stays gated on `is_first_party_base_url` because 3P gateways reject the scope downstream of tool definitions, but the header alone keeps the wire fingerprint intact.
 5. **`metadata.user_id` shape.** Field order: `device_id`, `account_uuid`, `session_id`. Empty `account_uuid` must be present because missing the key changes the fingerprint. Use a typed struct so the wire order matches the source declaration. `serde_json::json!` ships fields alphabetically without the `preserve_order` feature, which trips the verifier. `device_id` is minted as 64 lowercase hex chars (32 random bytes) and persisted at `$XDG_DATA_HOME/ox/user-id`. Verifiers check shape without caring whether the value round-trips to Claude Code's `~/.claude.json#userID`.
 

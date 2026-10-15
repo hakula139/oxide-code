@@ -29,7 +29,7 @@ Early development. What works today:
 - `CLAUDE.md` / `AGENTS.md` instruction-file discovery
 - Session persistence with JSONL conversation logs, AI-generated titles, listing, and resume
 - Per-session file-change tracking with a Read-before-Edit gate and on-disk drift detection
-- Authentication (Anthropic API key, Claude Code OAuth) and layered TOML config
+- Authentication (Anthropic API key, Claude Code login or long-lived OAuth token, LLM gateway bearer token with custom headers) and layered TOML config
 
 ## Scope
 

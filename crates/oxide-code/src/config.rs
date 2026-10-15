@@ -1,9 +1,11 @@
 //! Configuration loading.
 //!
 //! Precedence (highest wins): env > project `ox.toml` > user `~/.config/ox/config.toml` > defaults.
-//! Auth stops at the first source that resolves (API key env > API key in file > OAuth).
+//! Auth stops at the first source that resolves, in [`auth::AuthSource`] order.
 
+pub(crate) mod auth;
 pub(crate) mod file;
+pub(crate) mod gateway;
 mod oauth;
 
 use std::fmt;
@@ -12,11 +14,15 @@ use std::str::FromStr;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
+use self::auth::{Auth, AuthSource};
+use self::gateway::{GatewayCompat, GatewaySnapshot};
 use crate::model::ModelSpec;
 use crate::tui::theme::{self, Theme};
 use crate::util::env;
 use crate::util::path::expand_user;
+use crate::util::tls::load_extra_ca_certs;
 
 const DEFAULT_MODEL: &str = "claude-opus-5-5";
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
@@ -26,25 +32,6 @@ const MIN_AUTO_COMPACTION_THRESHOLD_TOKENS: u32 = 50_000;
 /// Mirrors the fallback `loader::resolve_theme` applies when no `[tui.theme] base` is set.
 pub(crate) const DEFAULT_THEME: &str = "mocha";
 
-// ── Auth ──
-
-/// Resolved credential. First source wins, in order: `ANTHROPIC_API_KEY` env, `client.api_key`
-/// in the user config file, then OAuth (macOS Keychain → `~/.claude/.credentials.json`).
-#[derive(Debug, Clone)]
-pub(crate) enum Auth {
-    ApiKey(String),
-    OAuth(String),
-}
-
-impl Auth {
-    pub(crate) const fn label(&self) -> &'static str {
-        match self {
-            Self::ApiKey(_) => "API key",
-            Self::OAuth(_) => "OAuth",
-        }
-    }
-}
-
 // ── ConfigSnapshot ──
 
 /// Resolved-config view minus the secret. Survives [`Config`] being consumed by the client.
@@ -52,10 +39,11 @@ impl Auth {
 pub(crate) struct ConfigSnapshot {
     pub(crate) model: ModelSpec,
     pub(crate) effort: Option<Effort>,
-    pub(crate) auth_label: &'static str,
+    pub(crate) auth: AuthSource,
     pub(crate) base_url: String,
-    /// User-config path appended to reqwest's trust anchors.
+    /// PEM bundle appended to reqwest's trust anchors.
     pub(crate) extra_ca_certs: Option<PathBuf>,
+    pub(crate) gateway: GatewaySnapshot,
     pub(crate) max_tokens: u32,
     /// `None` means the agent loop runs without a per-turn round cap.
     pub(crate) max_tool_rounds: Option<u32>,
@@ -360,6 +348,7 @@ pub(crate) struct Config {
     /// Resolved path to a PEM bundle appended to reqwest's trust anchors. `None` means the
     /// client trusts only the platform roots.
     pub(crate) extra_ca_certs: Option<PathBuf>,
+    pub(crate) gateway: GatewayCompat,
     /// User-set output cap. `None` defers to [`ModelSpec::resolve_max_tokens`].
     pub(crate) max_tokens: Option<u32>,
     /// `None` means the agent loop runs without a per-turn round cap.
@@ -389,35 +378,30 @@ impl Config {
         let tui = fc.tui.unwrap_or_default();
         let theme_config = tui.theme.unwrap_or_default();
 
+        let base_url = env::string("ANTHROPIC_BASE_URL")
+            .or(client.base_url)
+            .unwrap_or_else(|| DEFAULT_BASE_URL.to_owned());
+        validate_base_url(&base_url)?;
+
         // Resolve before `auth` so the OAuth refresh can also thread the extra trust anchors
         // through reqwest (relevant under SSL-inspecting corporate proxies).
-        let extra_ca_certs = env::string("OX_EXTRA_CA_CERTS")
-            .or(client.extra_ca_certs)
-            .map(|raw| expand_user(&raw))
-            .transpose()
-            .context("invalid client.extra_ca_certs")?;
+        let extra_ca_certs = resolve_extra_ca_certs(client.extra_ca_certs)?;
 
-        let auth = if let Some(key) = env::string("ANTHROPIC_API_KEY").or(client.api_key) {
-            Auth::ApiKey(key)
-        } else {
-            let token = oauth::load_token(extra_ca_certs.as_deref()).await.context(
-                "no credentials available: set ANTHROPIC_API_KEY, add `api_key` to \
-                 ~/.config/ox/config.toml, or sign in with Claude Code (checks macOS Keychain and \
-                 ~/.claude/.credentials.json)",
-            )?;
-            Auth::OAuth(token)
-        };
+        let gateway = GatewayCompat::load()?;
+
+        let auth = auth::resolve(
+            auth::explicit_credentials(client.api_key),
+            &base_url,
+            oauth::load_token(extra_ca_certs.as_deref()),
+        )
+        .await?;
+        gateway.check_credential_header(auth.source())?;
 
         let model = ModelSpec::resolve(
             env::string("ANTHROPIC_MODEL")
                 .or(client.model)
                 .unwrap_or_else(|| DEFAULT_MODEL.to_owned()),
         );
-
-        let base_url = env::string("ANTHROPIC_BASE_URL")
-            .or(client.base_url)
-            .unwrap_or_else(|| DEFAULT_BASE_URL.to_owned());
-        validate_base_url(&base_url)?;
 
         let effort_pick = match env::string("ANTHROPIC_EFFORT") {
             Some(raw) => Some(raw.parse::<Effort>().context("ANTHROPIC_EFFORT")?),
@@ -488,6 +472,7 @@ impl Config {
             auth,
             base_url,
             extra_ca_certs,
+            gateway,
             max_tokens,
             max_tool_rounds,
             prompt_cache_ttl,
@@ -506,9 +491,10 @@ impl Config {
         ConfigSnapshot {
             model: self.model.clone(),
             effort: self.effort,
-            auth_label: self.auth.label(),
+            auth: self.auth.source(),
             base_url: self.base_url.clone(),
             extra_ca_certs: self.extra_ca_certs.clone(),
+            gateway: self.gateway.snapshot(),
             max_tokens: self.model.resolve_max_tokens(self.max_tokens),
             max_tool_rounds: self.max_tool_rounds,
             prompt_cache_ttl: self.prompt_cache_ttl,
@@ -722,6 +708,30 @@ fn env_u8(key: &'static str) -> Result<Option<u8>> {
         .transpose()
 }
 
+/// `OX_EXTRA_CA_CERTS` > `client.extra_ca_certs` > `NODE_EXTRA_CA_CERTS`. Node is often exported
+/// shell-wide for npm, so like Node itself, an unreadable bundle there warns and is skipped.
+fn resolve_extra_ca_certs(file_path: Option<String>) -> Result<Option<PathBuf>> {
+    let explicit = env::string("OX_EXTRA_CA_CERTS")
+        .map(|raw| ("OX_EXTRA_CA_CERTS", raw))
+        .or(file_path.map(|raw| ("client.extra_ca_certs", raw)));
+    if let Some((source, raw)) = explicit {
+        return expand_user(&raw)
+            .map(Some)
+            .with_context(|| format!("invalid {source}"));
+    }
+
+    let Some(raw) = env::string("NODE_EXTRA_CA_CERTS") else {
+        return Ok(None);
+    };
+    match expand_user(&raw).and_then(|path| load_extra_ca_certs(&path).map(|_| path)) {
+        Ok(path) => Ok(Some(path)),
+        Err(e) => {
+            warn!("ignoring NODE_EXTRA_CA_CERTS: {e:#}");
+            Ok(None)
+        }
+    }
+}
+
 fn validate_base_url(raw: &str) -> Result<()> {
     let url = reqwest::Url::parse(raw).with_context(|| format!("invalid base URL {raw:?}"))?;
     match url.scheme() {
@@ -739,6 +749,20 @@ fn is_loopback_url(url: &reqwest::Url) -> bool {
     )
 }
 
+/// Whether `base_url` points at Anthropic's production or staging host. Gates the stored-login
+/// fallback and body-side `cache_control.scope = "global"`, which gateways reject.
+pub(crate) fn is_first_party_base_url(base_url: &str) -> bool {
+    reqwest::Url::parse(base_url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+        .is_some_and(|h| {
+            matches!(
+                h.as_str(),
+                "api.anthropic.com" | "api-staging.anthropic.com"
+            )
+        })
+}
+
 /// Output of [`default_auto_threshold`] when `max_tokens` saturates the reserve cap.
 #[cfg(test)]
 pub(crate) mod test_thresholds {
@@ -753,15 +777,6 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-
-    // ── Auth::label ──
-
-    #[test]
-    fn label_distinguishes_api_key_from_oauth() {
-        // Swap would mislabel every user's auth source.
-        assert_eq!(Auth::ApiKey("secret".to_owned()).label(), "API key");
-        assert_eq!(Auth::OAuth("token".to_owned()).label(), "OAuth");
-    }
 
     // ── ThinkingConfig ──
 
@@ -852,14 +867,20 @@ mod tests {
     // ── Config::load ──
 
     /// Env keys `Config::load` reads. `ANTHROPIC_API_KEY` defaults non-empty in [`env_vars`] so
-    /// tests land on `ApiKey` without consulting OAuth.
+    /// tests land on `ApiKey` without consulting the stored login.
     const ENV_KEYS: &[&str] = &[
+        "ANTHROPIC_AUTH_TOKEN",
         "ANTHROPIC_API_KEY",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "ANTHROPIC_CUSTOM_HEADERS",
+        "CLAUDE_CODE_ATTRIBUTION_HEADER",
+        "CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS",
         "ANTHROPIC_MODEL",
         "ANTHROPIC_BASE_URL",
         "ANTHROPIC_MAX_TOKENS",
         "ANTHROPIC_EFFORT",
         "OX_EXTRA_CA_CERTS",
+        "NODE_EXTRA_CA_CERTS",
         "OX_MAX_TOOL_ROUNDS",
         "OX_COMPACTION_AUTO_ENABLED",
         "OX_COMPACTION_AUTO_THRESHOLD_PERCENT",
@@ -913,6 +934,11 @@ mod tests {
         (key, Some(value.to_owned()))
     }
 
+    fn assert_auth(config: &Config, source: AuthSource, secret: &str) {
+        assert_eq!(config.auth.source(), source);
+        assert_eq!(config.auth.secret(), secret);
+    }
+
     #[tokio::test]
     async fn load_defaults_apply_when_no_config_and_no_env() {
         let dir = tempfile::tempdir().unwrap();
@@ -935,7 +961,10 @@ mod tests {
             "default-on so the empty chat surfaces the welcome"
         );
         assert_eq!(config.status_line, StatusLineSegment::DEFAULT);
-        assert!(matches!(config.auth, Auth::ApiKey(k) if k == "sk-default"));
+        assert_auth(&config, AuthSource::ApiKeyEnv, "sk-default");
+        assert!(config.gateway.custom_headers.is_empty());
+        assert!(config.gateway.attribution);
+        assert!(config.gateway.structured_outputs);
         assert_eq!(config.theme_name, DEFAULT_THEME);
         assert_eq!(config.permission.mode(), crate::permission::Mode::Auto);
     }
@@ -1155,7 +1184,7 @@ mod tests {
         let config = temp_env::async_with_vars(vars, Config::load())
             .await
             .unwrap();
-        assert!(matches!(config.auth, Auth::ApiKey(k) if k == "sk-from-env"));
+        assert_auth(&config, AuthSource::ApiKeyEnv, "sk-from-env");
     }
 
     #[tokio::test]
@@ -1172,7 +1201,98 @@ mod tests {
         let config = temp_env::async_with_vars(vars, Config::load())
             .await
             .unwrap();
-        assert!(matches!(config.auth, Auth::ApiKey(k) if k == "sk-from-file"));
+        assert_auth(&config, AuthSource::ApiKeyFile, "sk-from-file");
+    }
+
+    // ── Config::load / auth ──
+
+    #[tokio::test]
+    async fn load_resolves_credentials_in_precedence_order() {
+        // Each row drops the previous winner. `ANTHROPIC_API_KEY` stays unset throughout.
+        for (auth_token, file_key, winner, secret) in [
+            (
+                Some("gateway-token"),
+                true,
+                AuthSource::AuthTokenEnv,
+                "gateway-token",
+            ),
+            (None, true, AuthSource::ApiKeyFile, "sk-from-file"),
+            (None, false, AuthSource::OAuthTokenEnv, "oauth-token"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            if file_key {
+                write_user_config(
+                    dir.path(),
+                    indoc::indoc! {r#"
+                        [client]
+                        api_key = "sk-from-file"
+                    "#},
+                );
+            }
+            let vars = env_vars(vec![
+                xdg(&dir),
+                ("ANTHROPIC_API_KEY", None),
+                ("ANTHROPIC_AUTH_TOKEN", auth_token.map(str::to_owned)),
+                env("CLAUDE_CODE_OAUTH_TOKEN", "oauth-token"),
+            ]);
+            let config = temp_env::async_with_vars(vars, Config::load())
+                .await
+                .unwrap();
+            assert_auth(&config, winner, secret);
+        }
+    }
+
+    #[tokio::test]
+    async fn load_malformed_custom_headers_fail_before_credentials_resolve() {
+        // No credential exists for the gateway, so reaching auth would fail with a different error.
+        let dir = tempfile::tempdir().unwrap();
+        let vars = env_vars(vec![
+            xdg(&dir),
+            ("ANTHROPIC_API_KEY", None),
+            env("ANTHROPIC_BASE_URL", "https://gateway.example.com"),
+            env("ANTHROPIC_CUSTOM_HEADERS", "missing colon"),
+        ]);
+        let err = temp_env::async_with_vars(vars, Config::load())
+            .await
+            .expect_err("malformed header must fail startup");
+        assert_eq!(
+            format!("{err:#}"),
+            "invalid ANTHROPIC_CUSTOM_HEADERS: line 1: expected `Name: value`",
+        );
+    }
+
+    #[tokio::test]
+    async fn load_custom_header_carrying_the_active_credential_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let vars = env_vars(vec![
+            xdg(&dir),
+            env("ANTHROPIC_CUSTOM_HEADERS", "Authorization: Bearer other"),
+            env("ANTHROPIC_AUTH_TOKEN", "gateway-token"),
+        ]);
+        let err = temp_env::async_with_vars(vars, Config::load())
+            .await
+            .expect_err("custom header must not replace the credential");
+        assert_eq!(
+            format!("{err:#}"),
+            "invalid ANTHROPIC_CUSTOM_HEADERS: authorization carries the Auth token \
+             (ANTHROPIC_AUTH_TOKEN) credential and cannot be overridden",
+        );
+    }
+
+    #[tokio::test]
+    async fn load_gateway_without_credential_names_the_env_vars() {
+        let dir = tempfile::tempdir().unwrap();
+        let vars = env_vars(vec![
+            xdg(&dir),
+            ("ANTHROPIC_API_KEY", None),
+            env("ANTHROPIC_BASE_URL", "https://gateway.example.com"),
+        ]);
+        let err = temp_env::async_with_vars(vars, Config::load())
+            .await
+            .expect_err("stored login must not go to a gateway");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("https://gateway.example.com"), "{msg}");
+        assert!(msg.contains("ANTHROPIC_AUTH_TOKEN"), "{msg}");
     }
 
     #[tokio::test]
@@ -1489,6 +1609,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn load_extra_ca_certs_node_env_is_the_last_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = dir.path().join("node.pem");
+        std::fs::write(&bundle, crate::util::tls::TEST_CA_PEM).unwrap();
+        let node = env("NODE_EXTRA_CA_CERTS", bundle.to_str().unwrap());
+
+        let vars = env_vars(vec![xdg(&dir), node.clone()]);
+        let config = temp_env::async_with_vars(vars, Config::load())
+            .await
+            .unwrap();
+        assert_eq!(config.extra_ca_certs, Some(bundle));
+
+        write_user_config(
+            dir.path(),
+            indoc::indoc! {r#"
+                [client]
+                extra_ca_certs = "/etc/ssl/from-file.pem"
+            "#},
+        );
+        let vars = env_vars(vec![xdg(&dir), node]);
+        let config = temp_env::async_with_vars(vars, Config::load())
+            .await
+            .unwrap();
+        assert_eq!(
+            config.extra_ca_certs,
+            Some(PathBuf::from("/etc/ssl/from-file.pem")),
+        );
+    }
+
+    #[tokio::test]
+    async fn load_extra_ca_certs_skips_unreadable_node_bundle() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.pem");
+        let vars = env_vars(vec![
+            xdg(&dir),
+            env("NODE_EXTRA_CA_CERTS", missing.to_str().unwrap()),
+        ]);
+        let config = temp_env::async_with_vars(vars, Config::load())
+            .await
+            .unwrap();
+        assert!(config.extra_ca_certs.is_none());
+    }
+
+    #[tokio::test]
     async fn load_extra_ca_certs_file_used_when_env_unset() {
         let dir = tempfile::tempdir().unwrap();
         write_user_config(
@@ -1728,11 +1892,16 @@ mod tests {
 
     #[test]
     fn snapshot_copies_every_user_facing_field_and_drops_secret() {
-        // `/config` prints from the snapshot, so the secret must reduce to `label()`.
+        // `/config` prints from the snapshot, so secrets must reduce to their source and names.
         let cfg = Config {
-            auth: Auth::OAuth("token-must-not-leak".to_owned()),
+            auth: Auth::new(AuthSource::ClaudeCodeLogin, "token-must-not-leak"),
             base_url: "https://api.example.test".to_owned(),
             extra_ca_certs: Some(PathBuf::from("/etc/ssl/corp-ca.pem")),
+            gateway: GatewayCompat {
+                custom_headers: gateway::parse_headers("x-team: secret-team").unwrap(),
+                attribution: false,
+                structured_outputs: true,
+            },
             model: ModelSpec::resolve("claude-test-1-0".to_owned()),
             effort: Some(Effort::Xhigh),
             max_tokens: None,
@@ -1759,7 +1928,13 @@ mod tests {
             theme_name: "macchiato".to_owned(),
         };
         let snap = cfg.snapshot();
-        assert_eq!(snap.auth_label, "OAuth");
+        assert_eq!(snap.auth, AuthSource::ClaudeCodeLogin);
+        assert_eq!(snap.gateway.custom_header_names, ["x-team"]);
+        assert!(!snap.gateway.attribution);
+        assert!(snap.gateway.structured_outputs);
+        let debug = format!("{snap:?}");
+        assert!(!debug.contains("token-must-not-leak"), "{debug}");
+        assert!(!debug.contains("secret-team"), "{debug}");
         assert_eq!(snap.base_url, "https://api.example.test");
         assert_eq!(
             snap.extra_ca_certs.as_deref(),
@@ -1848,6 +2023,26 @@ mod tests {
             }
             .should_trigger(100)
         );
+    }
+
+    // ── is_first_party_base_url ──
+
+    #[test]
+    fn is_first_party_base_url_accepts_official_hosts() {
+        assert!(is_first_party_base_url("https://api.anthropic.com"));
+        assert!(is_first_party_base_url("https://api.anthropic.com/"));
+        assert!(is_first_party_base_url("https://api-staging.anthropic.com"));
+        assert!(is_first_party_base_url("https://API.ANTHROPIC.COM"));
+    }
+
+    #[test]
+    fn is_first_party_base_url_rejects_proxies_and_malformed_urls() {
+        assert!(!is_first_party_base_url("https://api.openai.com"));
+        assert!(!is_first_party_base_url("https://proxy.example.com"));
+        assert!(!is_first_party_base_url("https://anthropic.com.evil.io"));
+        assert!(!is_first_party_base_url("http://127.0.0.1:8080"));
+        assert!(!is_first_party_base_url(""));
+        assert!(!is_first_party_base_url("not-a-url"));
     }
 
     // ── test_thresholds ──

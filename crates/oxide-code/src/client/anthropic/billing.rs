@@ -25,14 +25,22 @@ pub(super) fn compute_fingerprint(first_user_message: &str, version: &str) -> St
     format!("{:02x}{:02x}", hash[0], hash[1])[..3].to_string()
 }
 
-/// Builds the billing attribution header; [`inject_cch`] replaces the `cch=00000` placeholder.
-pub(super) fn build_billing_header(version: &str, fingerprint: &str) -> String {
-    format!(
-        "x-anthropic-billing-header: \
-         cc_version={version}.{fingerprint}; \
-         cc_entrypoint=cli; \
-         {CCH_PLACEHOLDER};"
-    )
+/// Builds the billing attribution header. With `hashed`, it ends in the `cch=00000` placeholder
+/// that [`inject_cch`] replaces.
+pub(super) fn build_billing_header(version: &str, fingerprint: &str, hashed: bool) -> String {
+    let header = format!(
+        "x-anthropic-billing-header: cc_version={version}.{fingerprint}; cc_entrypoint=cli;"
+    );
+    if hashed {
+        format!("{header} {CCH_PLACEHOLDER};")
+    } else {
+        header
+    }
+}
+
+/// Whether `attribution` carries the placeholder [`inject_cch`] fills.
+pub(super) fn is_hashed(attribution: &str) -> bool {
+    attribution.contains(CCH_PLACEHOLDER)
 }
 
 /// Replaces the first `cch=00000` with `cch={5-hex of xxHash64(body)}`. Errors if absent.
@@ -95,11 +103,19 @@ mod tests {
 
     #[test]
     fn build_billing_header_format() {
-        let header = build_billing_header("2.1.87", "abc");
+        let hashed = build_billing_header("2.1.87", "abc", true);
         assert_eq!(
-            header,
+            hashed,
             "x-anthropic-billing-header: cc_version=2.1.87.abc; cc_entrypoint=cli; cch=00000;"
         );
+        assert!(is_hashed(&hashed));
+
+        let stable = build_billing_header("2.1.87", "abc", false);
+        assert_eq!(
+            stable,
+            "x-anthropic-billing-header: cc_version=2.1.87.abc; cc_entrypoint=cli;"
+        );
+        assert!(!is_hashed(&stable));
     }
 
     // ── inject_cch ──

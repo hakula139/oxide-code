@@ -1190,7 +1190,8 @@ mod tests {
         ApiError, ContentBlockInfo, MessageDeltaBody, MessageResponse, StopDetails, StopReason,
         StreamEvent, Usage,
     };
-    use crate::config::{Auth, AutoCompactionConfig, Effort};
+    use crate::config::auth::{Auth, AuthSource};
+    use crate::config::{AutoCompactionConfig, Effort};
     use crate::file_tracker::FileTracker;
     use crate::message::Role;
     use crate::model::ResolvedModelId;
@@ -3657,7 +3658,7 @@ mod tests {
         }
         let client = test_client(
             server.uri(),
-            Auth::ApiKey("sk".to_owned()),
+            Auth::new(AuthSource::ApiKeyEnv, "sk"),
             "claude-sonnet-5-5",
         );
         let dir = tempfile::tempdir().unwrap();

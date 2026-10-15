@@ -34,7 +34,7 @@ fn build_modal(info: &LiveSessionInfo) -> KvOverview {
         ("Effort".to_owned(), display_effort(info.config.effort)),
         ("Working Directory".to_owned(), info.cwd.clone()),
         ("Session".to_owned(), info.session_id.clone()),
-        ("Auth".to_owned(), info.config.auth_label.to_owned()),
+        ("Auth".to_owned(), info.config.auth.to_string()),
         ("Version".to_owned(), info.version.to_owned()),
         (
             "Prompt Cache TTL".to_owned(),

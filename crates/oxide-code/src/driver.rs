@@ -608,42 +608,45 @@ mod tests {
 
     #[tokio::test]
     async fn new_replays_a_recorded_context_or_builds_one_for_the_client_model() {
-        let server = MockServer::start().await;
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let recorded = conversation(server.uri(), &store)
-            .await
-            .prompt
-            .session_context();
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let recorded = conversation(server.uri(), &store, dir.path())
+                .await
+                .prompt
+                .session_context();
 
-        for (context, replayed) in [(Some(recorded), true), (None, false)] {
-            let conversation = Conversation::new(
-                test_client(server.uri(), api_key(), "claude-sonnet-5-5"),
-                Arc::new(ToolRegistry::new(Vec::new())),
-                handle::start(&store, "claude-sonnet-5-5"),
-                Vec::new(),
-                context,
-                Arc::new(FileTracker::default()),
-                std::env::current_dir().unwrap(),
-                false,
-            )
-            .await;
+            for (context, replayed) in [(Some(recorded), true), (None, false)] {
+                let conversation = Conversation::new(
+                    test_client(server.uri(), api_key(), "claude-sonnet-5-5"),
+                    Arc::new(ToolRegistry::new(Vec::new())),
+                    handle::start(&store, "claude-sonnet-5-5"),
+                    Vec::new(),
+                    context,
+                    Arc::new(FileTracker::default()),
+                    std::env::current_dir().unwrap(),
+                    false,
+                )
+                .await;
 
-            assert_eq!(
-                conversation.prompt.user_context == SESSION_CONTEXT,
-                replayed
-            );
-            assert_eq!(conversation.prompt_unrecorded, !replayed);
-            let model = if replayed { MODEL } else { "claude-sonnet-5-5" };
-            assert!(
-                conversation
-                    .prompt
-                    .seen
-                    .model
-                    .contains(&format!("The exact model ID is {model}.")),
-                "replayed: {replayed}",
-            );
-        }
+                assert_eq!(
+                    conversation.prompt.user_context == SESSION_CONTEXT,
+                    replayed
+                );
+                assert_eq!(conversation.prompt_unrecorded, !replayed);
+                let model = if replayed { MODEL } else { "claude-sonnet-5-5" };
+                assert!(
+                    conversation
+                        .prompt
+                        .seen
+                        .model
+                        .contains(&format!("The exact model ID is {model}.")),
+                    "replayed: {replayed}",
+                );
+            }
+        })
+        .await;
     }
 
     // ── submit_prompt ──
@@ -655,7 +658,7 @@ mod tests {
             mount_reply(&server, "reply").await;
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
-            let mut conversation = conversation(server.uri(), &store).await;
+            let mut conversation = conversation(server.uri(), &store, dir.path()).await;
             let today = conversation.prompt.seen.date.clone();
             let sink = CapturingSink::new();
             let (_user_tx, mut user_rx) = agent::event::inert_user_action_channel();
@@ -705,41 +708,46 @@ mod tests {
 
     #[tokio::test]
     async fn submit_prompt_reports_usage_and_accumulates_cost_across_turns() {
-        let server = MockServer::start().await;
-        mount_reply(&server, "reply").await;
-        let dir = tempfile::tempdir().unwrap();
-        let mut conversation = conversation(server.uri(), &test_store(dir.path())).await;
-        let sink = CapturingSink::new();
-        let (_user_tx, mut user_rx) = agent::event::inert_user_action_channel();
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            mount_reply(&server, "reply").await;
+            let dir = tempfile::tempdir().unwrap();
+            let mut conversation =
+                conversation(server.uri(), &test_store(dir.path()), dir.path()).await;
+            let sink = CapturingSink::new();
+            let (_user_tx, mut user_rx) = agent::event::inert_user_action_channel();
 
-        for text in ["first", "second"] {
-            conversation.submit_prompt(text, &sink, &mut user_rx).await;
-        }
+            for text in ["first", "second"] {
+                conversation.submit_prompt(text, &sink, &mut user_rx).await;
+            }
 
-        let usage = sink
-            .events()
-            .into_iter()
-            .rev()
-            .find_map(|event| match event {
-                AgentEvent::UsageUpdated(usage) => Some(usage),
-                _ => None,
-            });
-        let usage = usage.expect("each turn reports usage");
-        assert_eq!(usage.context_tokens, Some(1_000));
-        assert_eq!(usage.context_window, Some(1_000_000));
-        let cost = usage.estimated_cost_usd.unwrap();
-        assert!(
-            (cost - 0.012).abs() < 1e-12,
-            "two turns at $0.006 each: {cost}"
-        );
+            let usage = sink
+                .events()
+                .into_iter()
+                .rev()
+                .find_map(|event| match event {
+                    AgentEvent::UsageUpdated(usage) => Some(usage),
+                    _ => None,
+                });
+            let usage = usage.expect("each turn reports usage");
+            assert_eq!(usage.context_tokens, Some(1_000));
+            assert_eq!(usage.context_window, Some(1_000_000));
+            let cost = usage.estimated_cost_usd.unwrap();
+            assert!(
+                (cost - 0.012).abs() < 1e-12,
+                "two turns at $0.006 each: {cost}"
+            );
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn submit_prompt_auto_compacts_before_recording_the_new_prompt() {
+        with_pinned_home(async {
         let server = MockServer::start().await;
         mount_reply(&server, "auto summary").await;
         let dir = tempfile::tempdir().unwrap();
-        let mut conversation = conversation(server.uri(), &test_store(dir.path())).await;
+        let mut conversation = conversation(server.uri(), &test_store(dir.path()), dir.path()).await;
         let mut config = test_config(server.uri(), api_key(), MODEL);
         config.compaction = CompactionConfig::resolved_for_test(AutoCompactionConfig {
             enabled: true,
@@ -810,6 +818,8 @@ mod tests {
             .iter()
             .position(|event| matches!(event, AgentEvent::TurnComplete));
         assert!(compacted < completed.unwrap());
+        })
+        .await;
     }
 
     // ── compact ──
@@ -825,10 +835,11 @@ mod tests {
 
     #[tokio::test]
     async fn compact_replaces_the_transcript_and_bills_the_summary() {
+        with_pinned_home(async {
         let server = MockServer::start().await;
         mount_reply(&server, "manual summary").await;
         let dir = tempfile::tempdir().unwrap();
-        let mut conversation = conversation(server.uri(), &test_store(dir.path())).await;
+        let mut conversation = conversation(server.uri(), &test_store(dir.path()), dir.path()).await;
         conversation.messages = transcript();
         conversation.displayed_usage = Some(TokenUsage::new(90_000, 9));
         conversation.total_estimated_cost_usd = 1.23;
@@ -871,236 +882,259 @@ mod tests {
         assert_eq!(focus, "focus");
         assert_eq!(usage.context_tokens, None);
         assert!((usage.estimated_cost_usd.unwrap() - (1.23 + 0.006)).abs() < 1e-12);
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn compact_failure_or_cancel_keeps_the_transcript() {
-        let server = MockServer::start().await;
-        mount_reply(&server, "summary").await;
-        let dir = tempfile::tempdir().unwrap();
-        let mut conversation = conversation(server.uri(), &test_store(dir.path())).await;
-        let sink = CapturingSink::new();
-        let (user_tx, mut user_rx) = mpsc::channel(1);
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            mount_reply(&server, "summary").await;
+            let dir = tempfile::tempdir().unwrap();
+            let mut conversation =
+                conversation(server.uri(), &test_store(dir.path()), dir.path()).await;
+            let sink = CapturingSink::new();
+            let (user_tx, mut user_rx) = mpsc::channel(1);
 
-        conversation.messages = vec![Message::user("too short")];
-        let end = conversation.compact(&sink, &mut user_rx, None).await;
-        assert_eq!(end, TurnEnd::Failed);
-        assert_eq!(conversation.messages.len(), 1);
+            conversation.messages = vec![Message::user("too short")];
+            let end = conversation.compact(&sink, &mut user_rx, None).await;
+            assert_eq!(end, TurnEnd::Failed);
+            assert_eq!(conversation.messages.len(), 1);
 
-        conversation.messages = transcript();
-        user_tx.send(UserAction::Cancel).await.unwrap();
-        let end = conversation.compact(&sink, &mut user_rx, None).await;
-        assert_eq!(end, TurnEnd::Cancelled);
-        assert_eq!(conversation.messages.len(), 4);
+            conversation.messages = transcript();
+            user_tx.send(UserAction::Cancel).await.unwrap();
+            let end = conversation.compact(&sink, &mut user_rx, None).await;
+            assert_eq!(end, TurnEnd::Cancelled);
+            assert_eq!(conversation.messages.len(), 4);
 
-        conversation.session = handle::testing::dead("dead");
-        let end = conversation.compact(&sink, &mut user_rx, None).await;
-        assert_eq!(
-            end,
-            TurnEnd::Failed,
-            "an unwritten boundary is a failed compaction"
-        );
-        assert_eq!(conversation.messages.len(), 4);
+            conversation.session = handle::testing::dead("dead");
+            let end = conversation.compact(&sink, &mut user_rx, None).await;
+            assert_eq!(
+                end,
+                TurnEnd::Failed,
+                "an unwritten boundary is a failed compaction"
+            );
+            assert_eq!(conversation.messages.len(), 4);
 
-        let events = sink.events();
-        assert!(
-            matches!(
-                events.as_slice(),
-                [
-                    AgentEvent::TurnFailed(short),
-                    AgentEvent::Cancelled,
-                    AgentEvent::Error(write),
-                    AgentEvent::UsageUpdated(UsageSnapshot {
-                        context_tokens: None,
-                        estimated_cost_usd: Some(cost),
-                        ..
-                    }),
-                    AgentEvent::TurnFailed(unsaved),
-                ] if short.starts_with("Compaction failed: session is too short")
-                    && write.starts_with("Session write failed")
-                    && (cost - 0.006).abs() < 1e-12
-                    && unsaved.starts_with("Compaction was not saved")
-            ),
-            "{events:?}",
-        );
+            let events = sink.events();
+            assert!(
+                matches!(
+                    events.as_slice(),
+                    [
+                        AgentEvent::TurnFailed(short),
+                        AgentEvent::Cancelled,
+                        AgentEvent::Error(write),
+                        AgentEvent::UsageUpdated(UsageSnapshot {
+                            context_tokens: None,
+                            estimated_cost_usd: Some(cost),
+                            ..
+                        }),
+                        AgentEvent::TurnFailed(unsaved),
+                    ] if short.starts_with("Compaction failed: session is too short")
+                        && write.starts_with("Session write failed")
+                        && (cost - 0.006).abs() < 1e-12
+                        && unsaved.starts_with("Compaction was not saved")
+                ),
+                "{events:?}",
+            );
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn compact_failure_bills_and_shows_the_summary_cost() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_string(
-                        text_stream_body("", "partial").replace("end_turn", "max_tokens"),
-                    )
-                    .insert_header("content-type", "text/event-stream"),
-            )
-            .mount(&server)
-            .await;
-        let dir = tempfile::tempdir().unwrap();
-        let mut conversation = conversation(server.uri(), &test_store(dir.path())).await;
-        conversation.messages = transcript();
-        conversation.displayed_usage = Some(TokenUsage::new(50_000, 1));
-        conversation.total_estimated_cost_usd = 1.23;
-        let sink = CapturingSink::new();
-        let (_user_tx, mut user_rx) = agent::event::inert_user_action_channel();
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/messages"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_string(
+                            text_stream_body("", "partial").replace("end_turn", "max_tokens"),
+                        )
+                        .insert_header("content-type", "text/event-stream"),
+                )
+                .mount(&server)
+                .await;
+            let dir = tempfile::tempdir().unwrap();
+            let mut conversation =
+                conversation(server.uri(), &test_store(dir.path()), dir.path()).await;
+            conversation.messages = transcript();
+            conversation.displayed_usage = Some(TokenUsage::new(50_000, 1));
+            conversation.total_estimated_cost_usd = 1.23;
+            let sink = CapturingSink::new();
+            let (_user_tx, mut user_rx) = agent::event::inert_user_action_channel();
 
-        let end = conversation.compact(&sink, &mut user_rx, None).await;
+            let end = conversation.compact(&sink, &mut user_rx, None).await;
 
-        assert_eq!(end, TurnEnd::Failed);
-        assert_eq!(conversation.messages.len(), 4);
-        assert_eq!(
-            conversation.displayed_usage,
-            Some(TokenUsage::new(50_000, 1))
-        );
-        let expected = 1.23 + 0.006;
-        assert!(
-            (conversation.total_estimated_cost_usd - expected).abs() < 1e-12,
-            "a rejected summary is still billed: {}",
-            conversation.total_estimated_cost_usd,
-        );
-        let events = sink.events();
-        let [AgentEvent::UsageUpdated(usage), AgentEvent::TurnFailed(msg)] = events.as_slice()
-        else {
-            panic!("expected the cost update before the failure: {events:?}");
-        };
-        assert_eq!(usage.context_tokens, Some(50_000));
-        assert!((usage.estimated_cost_usd.unwrap() - expected).abs() < 1e-12);
-        assert!(
-            msg.starts_with("Compaction failed") && msg.contains("max_tokens"),
-            "{msg}"
-        );
+            assert_eq!(end, TurnEnd::Failed);
+            assert_eq!(conversation.messages.len(), 4);
+            assert_eq!(
+                conversation.displayed_usage,
+                Some(TokenUsage::new(50_000, 1))
+            );
+            let expected = 1.23 + 0.006;
+            assert!(
+                (conversation.total_estimated_cost_usd - expected).abs() < 1e-12,
+                "a rejected summary is still billed: {}",
+                conversation.total_estimated_cost_usd,
+            );
+            let events = sink.events();
+            let [AgentEvent::UsageUpdated(usage), AgentEvent::TurnFailed(msg)] = events.as_slice()
+            else {
+                panic!("expected the cost update before the failure: {events:?}");
+            };
+            assert_eq!(usage.context_tokens, Some(50_000));
+            assert!((usage.estimated_cost_usd.unwrap() - expected).abs() < 1e-12);
+            assert!(
+                msg.starts_with("Compaction failed") && msg.contains("max_tokens"),
+                "{msg}"
+            );
+        })
+        .await;
     }
 
     // ── clear ──
 
     #[tokio::test]
     async fn clear_and_resume_rebuild_session_prompt() {
-        let server = MockServer::start().await;
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let mut conversation = conversation(server.uri(), &store).await;
-        let sink = CapturingSink::new();
-        let target = handle::start(&store, MODEL);
-        let target_id = target.session_id().to_owned();
-        target.record_message(Message::user("earlier prompt")).await;
-        target
-            .record_message(Message::assistant("earlier reply"))
-            .await;
-        target.finish(Vec::new()).await;
-        drop(target);
-        conversation.messages = vec![Message::user("before clear")];
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let mut conversation = conversation(server.uri(), &store, dir.path()).await;
+            let sink = CapturingSink::new();
+            let target = handle::start(&store, MODEL);
+            let target_id = target.session_id().to_owned();
+            target.record_message(Message::user("earlier prompt")).await;
+            target
+                .record_message(Message::assistant("earlier reply"))
+                .await;
+            target.finish(Vec::new()).await;
+            drop(target);
+            conversation.messages = vec![Message::user("before clear")];
 
-        conversation.clear(&sink, &store).await;
-        assert_eq!(conversation.messages, []);
-        assert_ne!(conversation.prompt.user_context, SESSION_CONTEXT);
-        assert!(conversation.prompt.user_context.contains("# Current date"));
-        assert_eq!(
-            conversation.client.session_id(),
-            conversation.session.session_id()
-        );
+            conversation.clear(&sink, &store).await;
+            assert_eq!(conversation.messages, []);
+            assert_ne!(conversation.prompt.user_context, SESSION_CONTEXT);
+            assert!(conversation.prompt.user_context.contains("# Current date"));
+            assert_eq!(
+                conversation.client.session_id(),
+                conversation.session.session_id()
+            );
 
-        SESSION_CONTEXT.clone_into(&mut conversation.prompt.user_context);
-        let target_path = store.find_session_path(&target_id).unwrap();
-        conversation.resume(&sink, &store, &target_path).await;
-        assert_eq!(conversation.session.session_id(), target_id);
-        assert_eq!(conversation.client.session_id(), target_id);
-        assert_eq!(conversation.messages.len(), 2);
-        assert_ne!(conversation.prompt.user_context, SESSION_CONTEXT);
+            SESSION_CONTEXT.clone_into(&mut conversation.prompt.user_context);
+            let target_path = store.find_session_path(&target_id).unwrap();
+            conversation.resume(&sink, &store, &target_path).await;
+            assert_eq!(conversation.session.session_id(), target_id);
+            assert_eq!(conversation.client.session_id(), target_id);
+            assert_eq!(conversation.messages.len(), 2);
+            assert_ne!(conversation.prompt.user_context, SESSION_CONTEXT);
+        })
+        .await;
     }
 
     // ── resume ──
 
     #[tokio::test]
     async fn resume_replays_the_recorded_prompt() {
-        let server = MockServer::start().await;
-        mount_reply(&server, "reply").await;
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let mut conversation = conversation(server.uri(), &store).await;
-        let recorded_id = conversation.session.session_id().to_owned();
-        let sink = CapturingSink::new();
-        let (_user_tx, mut user_rx) = agent::event::inert_user_action_channel();
-        conversation
-            .submit_prompt("first", &sink, &mut user_rx)
-            .await;
-        conversation.clear(&sink, &store).await;
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            mount_reply(&server, "reply").await;
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let mut conversation = conversation(server.uri(), &store, dir.path()).await;
+            let recorded_id = conversation.session.session_id().to_owned();
+            let sink = CapturingSink::new();
+            let (_user_tx, mut user_rx) = agent::event::inert_user_action_channel();
+            conversation
+                .submit_prompt("first", &sink, &mut user_rx)
+                .await;
+            conversation.clear(&sink, &store).await;
 
-        let recorded_path = store.find_session_path(&recorded_id).unwrap();
-        conversation.resume(&sink, &store, &recorded_path).await;
-        assert_eq!(conversation.prompt.user_context, SESSION_CONTEXT);
-        assert!(!conversation.prompt_unrecorded);
-        conversation
-            .submit_prompt("second", &sink, &mut user_rx)
-            .await;
+            let recorded_path = store.find_session_path(&recorded_id).unwrap();
+            conversation.resume(&sink, &store, &recorded_path).await;
+            assert_eq!(conversation.prompt.user_context, SESSION_CONTEXT);
+            assert!(!conversation.prompt_unrecorded);
+            conversation
+                .submit_prompt("second", &sink, &mut user_rx)
+                .await;
 
-        let turns = request_bodies(&server).await;
-        assert_eq!(system_prompt(&turns[1]), system_prompt(&turns[0]));
-        assert_eq!(turns[1]["messages"][0], turns[0]["messages"][0]);
-        assert_eq!(turns[1]["messages"][1]["content"][0]["text"], "first");
+            let turns = request_bodies(&server).await;
+            assert_eq!(system_prompt(&turns[1]), system_prompt(&turns[0]));
+            assert_eq!(turns[1]["messages"][0], turns[0]["messages"][0]);
+            assert_eq!(turns[1]["messages"][1]["content"][0]["text"], "first");
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn resume_failure_preserves_current_session_usage_state() {
-        let server = MockServer::start().await;
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let mut conversation = conversation(server.uri(), &store).await;
-        let original_id = conversation.session.session_id().to_owned();
-        let last_usage = TokenUsage::new(100_000, 10);
-        let displayed_usage = TokenUsage::new(90_000, 9);
-        conversation.messages = vec![Message::user("still here")];
-        conversation.auto_compaction_failures = 2;
-        conversation.last_usage = Some(last_usage);
-        conversation.displayed_usage = Some(displayed_usage);
-        conversation.total_estimated_cost_usd = 1.23;
-        let sink = CapturingSink::new();
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let mut conversation = conversation(server.uri(), &store, dir.path()).await;
+            let original_id = conversation.session.session_id().to_owned();
+            let last_usage = TokenUsage::new(100_000, 10);
+            let displayed_usage = TokenUsage::new(90_000, 9);
+            conversation.messages = vec![Message::user("still here")];
+            conversation.auto_compaction_failures = 2;
+            conversation.last_usage = Some(last_usage);
+            conversation.displayed_usage = Some(displayed_usage);
+            conversation.total_estimated_cost_usd = 1.23;
+            let sink = CapturingSink::new();
 
-        conversation
-            .resume(&sink, &store, Path::new("missing-target.jsonl"))
-            .await;
+            conversation
+                .resume(&sink, &store, Path::new("missing-target.jsonl"))
+                .await;
 
-        assert_eq!(conversation.session.session_id(), original_id);
-        assert_eq!(conversation.messages.len(), 1);
-        assert_eq!(conversation.auto_compaction_failures, 2);
-        assert_eq!(conversation.last_usage, Some(last_usage));
-        assert_eq!(conversation.displayed_usage, Some(displayed_usage));
-        assert!((conversation.total_estimated_cost_usd - 1.23).abs() < f64::EPSILON);
-        assert!(matches!(
-            sink.events().as_slice(),
-            [AgentEvent::TurnFailed(msg)] if msg.contains("still on session")
-        ));
+            assert_eq!(conversation.session.session_id(), original_id);
+            assert_eq!(conversation.messages.len(), 1);
+            assert_eq!(conversation.auto_compaction_failures, 2);
+            assert_eq!(conversation.last_usage, Some(last_usage));
+            assert_eq!(conversation.displayed_usage, Some(displayed_usage));
+            assert!((conversation.total_estimated_cost_usd - 1.23).abs() < f64::EPSILON);
+            assert!(matches!(
+                sink.events().as_slice(),
+                [AgentEvent::TurnFailed(msg)] if msg.contains("still on session")
+            ));
+        })
+        .await;
     }
 
     // ── rename ──
 
     #[tokio::test]
     async fn rename_announces_only_a_persisted_title() {
-        let server = MockServer::start().await;
-        let dir = tempfile::tempdir().unwrap();
-        let mut conversation = conversation(server.uri(), &test_store(dir.path())).await;
-        let live_id = conversation.session.session_id().to_owned();
-        let sink = CapturingSink::new();
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            let dir = tempfile::tempdir().unwrap();
+            let mut conversation =
+                conversation(server.uri(), &test_store(dir.path()), dir.path()).await;
+            let live_id = conversation.session.session_id().to_owned();
+            let sink = CapturingSink::new();
 
-        conversation.rename(&sink, "Fix login".to_owned()).await;
-        assert!(conversation.session.manual_title_set());
-        conversation.session = handle::testing::dead("dead");
-        conversation.rename(&sink, "Lost".to_owned()).await;
+            conversation.rename(&sink, "Fix login".to_owned()).await;
+            assert!(conversation.session.manual_title_set());
+            conversation.session = handle::testing::dead("dead");
+            conversation.rename(&sink, "Lost".to_owned()).await;
 
-        let events = sink.events();
-        assert!(
-            matches!(
-                events.as_slice(),
-                [
-                    AgentEvent::SessionTitleUpdated { session_id, title },
-                    AgentEvent::Error(write),
-                ] if *session_id == live_id && title == "Fix login"
-                    && write.starts_with("Session write failed")
-            ),
-            "{events:?}",
-        );
+            let events = sink.events();
+            assert!(
+                matches!(
+                    events.as_slice(),
+                    [
+                        AgentEvent::SessionTitleUpdated { session_id, title },
+                        AgentEvent::Error(write),
+                    ] if *session_id == live_id && title == "Fix login"
+                        && write.starts_with("Session write failed")
+                ),
+                "{events:?}",
+            );
+        })
+        .await;
     }
 
     // ── swap_config ──
@@ -1111,7 +1145,7 @@ mod tests {
             let server = MockServer::start().await;
             mount_reply(&server, "reply").await;
             let dir = tempfile::tempdir().unwrap();
-            let mut conversation = conversation(server.uri(), &test_store(dir.path())).await;
+            let mut conversation = conversation(server.uri(), &test_store(dir.path()), dir.path()).await;
             let sink = CapturingSink::new();
             let (_user_tx, mut user_rx) = agent::event::inert_user_action_channel();
 
@@ -1149,27 +1183,31 @@ mod tests {
 
     #[tokio::test]
     async fn swap_config_resets_auto_compaction_breaker() {
-        let server = MockServer::start().await;
-        let dir = tempfile::tempdir().unwrap();
-        let mut conversation = conversation(server.uri(), &test_store(dir.path())).await;
-        conversation.auto_compaction_failures = 3;
-        conversation.last_usage = Some(TokenUsage::new(100_000, 1));
-        conversation.total_estimated_cost_usd = 1.23;
-        let sink = CapturingSink::new();
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            let dir = tempfile::tempdir().unwrap();
+            let mut conversation =
+                conversation(server.uri(), &test_store(dir.path()), dir.path()).await;
+            conversation.auto_compaction_failures = 3;
+            conversation.last_usage = Some(TokenUsage::new(100_000, 1));
+            conversation.total_estimated_cost_usd = 1.23;
+            let sink = CapturingSink::new();
 
-        conversation.swap_config(&sink, None, Some(Effort::Xhigh));
+            conversation.swap_config(&sink, None, Some(Effort::Xhigh));
 
-        assert_eq!(conversation.auto_compaction_failures, 0);
-        assert_eq!(conversation.last_usage, Some(TokenUsage::new(100_000, 1)));
-        assert!(
-            (conversation.total_estimated_cost_usd - 1.23).abs() < f64::EPSILON,
-            "session cost must accumulate across swaps: {}",
-            conversation.total_estimated_cost_usd,
-        );
-        assert!(matches!(
-            sink.events().first(),
-            Some(AgentEvent::ConfigChanged { .. })
-        ));
+            assert_eq!(conversation.auto_compaction_failures, 0);
+            assert_eq!(conversation.last_usage, Some(TokenUsage::new(100_000, 1)));
+            assert!(
+                (conversation.total_estimated_cost_usd - 1.23).abs() < f64::EPSILON,
+                "session cost must accumulate across swaps: {}",
+                conversation.total_estimated_cost_usd,
+            );
+            assert!(matches!(
+                sink.events().first(),
+                Some(AgentEvent::ConfigChanged { .. })
+            ));
+        })
+        .await;
     }
 
     // ── report_abort ──
