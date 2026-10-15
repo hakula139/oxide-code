@@ -340,7 +340,7 @@ cargo fmt --all --check                            # Check formatting
 cargo build                                        # Build
 cargo clippy --all-targets -- -D warnings          # Lint (pedantic, zero warnings)
 cargo test                                         # Run tests
-cargo llvm-cov --ignore-filename-regex 'main\.rs'  # Check test coverage
+cargo llvm-cov                                     # Check test coverage
 pnpm format                                        # Check Markdown, TOML, JSON, and YAML formatting
 pnpm lint                                          # Lint Markdown
 pnpm spellcheck                                    # Spell check
