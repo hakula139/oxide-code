@@ -11,6 +11,7 @@ use super::{
     GrepFileGroup, GrepMatchLine, Tool, ToolMetadata, ToolOutput, ToolResultView,
     extract_input_field,
 };
+use crate::permission::PermissionClass;
 
 const DEFAULT_HEAD_LIMIT: usize = 250;
 const MAX_LINE_CHARS: usize = 500;
@@ -27,8 +28,8 @@ impl Tool for GrepTool {
         "Search file contents using a regular expression."
     }
 
-    fn permission_class(&self) -> crate::permission::PermissionClass {
-        crate::permission::PermissionClass::Read
+    fn permission_class(&self) -> PermissionClass {
+        PermissionClass::Read
     }
 
     fn gate_target(
@@ -177,14 +178,10 @@ async fn run(raw: serde_json::Value) -> ToolOutput {
     {
         Ok(Ok(content)) => {
             let title = grep_title(&content);
-            ToolOutput::from_result(Ok(content)).with_title(title)
+            ToolOutput::success(content).with_title(title)
         }
-        Ok(Err(msg)) => ToolOutput::from_result(Err(msg)),
-        Err(e) => ToolOutput {
-            content: format!("Internal error: {e}"),
-            is_error: true,
-            metadata: super::ToolMetadata::default(),
-        },
+        Ok(Err(msg)) => ToolOutput::error(msg),
+        Err(e) => ToolOutput::error(format!("Internal error: {e}")),
     }
 }
 
@@ -594,9 +591,8 @@ fn parse_content_view(content: &str) -> Option<ToolResultView> {
 
 /// Parses one row: `path:NUM:text` (match) or `path:NUM-text` (context).
 ///
-/// Iterates through colons left-to-right because paths can themselves contain `:` (Windows drive
-/// letters, URL-shaped names) — the row only commits on the first colon followed by digits and a
-/// `:` / `-` separator, which uniquely identifies the line-number column.
+/// Paths can contain `:` (Windows drive letters, URL-shaped names), so the row commits on the first
+/// colon followed by digits and a `:` / `-` separator, which marks the line-number column.
 fn parse_match_line(line: &str) -> Option<(&str, GrepMatchLine)> {
     let mut search_start = 0;
     while let Some(off) = line[search_start..].find(':') {

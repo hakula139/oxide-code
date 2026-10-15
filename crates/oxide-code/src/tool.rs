@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 use crate::agent::event::{ApprovalBody, ApprovalPreview};
+use crate::file_tracker::{TrackableFileError, validate_trackable_file};
 use crate::permission::{GateTarget, PermissionClass};
 use crate::util::path::lexical_normalize;
 use crate::util::text::ELLIPSIS;
@@ -60,18 +61,19 @@ pub(crate) struct ToolMetadata {
 }
 
 impl ToolOutput {
-    pub(crate) fn from_result(result: Result<String, String>) -> Self {
-        match result {
-            Ok(content) => Self {
-                content,
-                is_error: false,
-                metadata: ToolMetadata::default(),
-            },
-            Err(content) => Self {
-                content,
-                is_error: true,
-                metadata: ToolMetadata::default(),
-            },
+    pub(crate) fn success(content: impl Into<String>) -> Self {
+        Self {
+            content: content.into(),
+            is_error: false,
+            metadata: ToolMetadata::default(),
+        }
+    }
+
+    pub(crate) fn error(content: impl Into<String>) -> Self {
+        Self {
+            content: content.into(),
+            is_error: true,
+            metadata: ToolMetadata::default(),
         }
     }
 
@@ -166,8 +168,8 @@ pub(crate) struct GrepMatchLine {
 
 /// A tool that the agent can invoke.
 ///
-/// Per-instance metadata (name, icon, schema, input summary) lives on the trait so that adding a
-/// new tool requires editing only its module — the registry never matches on `name`.
+/// Per-instance metadata (name, icon, schema, input summary) lives on the trait, so adding a tool
+/// means editing only its module.
 pub(crate) trait Tool: Send + Sync {
     fn name(&self) -> &'static str;
     fn description(&self) -> &'static str;
@@ -204,7 +206,7 @@ pub(crate) trait Tool: Send + Sync {
     }
 
     fn icon(&self) -> &'static str {
-        "⟡"
+        DEFAULT_TOOL_ICON
     }
 
     /// Pulls the tool's primary argument out of `input` for terse `Name(arg)` labels in the UI.
@@ -311,11 +313,7 @@ impl ToolRegistry {
     /// pathological output sizes.
     pub(crate) async fn run(&self, name: &str, input: serde_json::Value) -> ToolOutput {
         let Some(tool) = self.get(name) else {
-            return ToolOutput {
-                content: format!("Unknown tool: {name}"),
-                is_error: true,
-                metadata: ToolMetadata::default(),
-            };
+            return ToolOutput::error(format!("Unknown tool: {name}"));
         };
         let mut output = tool.run(input).await;
         let (content, original_len) = cap_output(output.content);
@@ -359,9 +357,9 @@ const TRUNCATION_OVERHEAD: usize = 80;
 /// Trims `content` to fit under [`MAX_OUTPUT_BYTES`], keeping the head and tail and replacing the
 /// middle with a `[N bytes truncated]` marker.
 ///
-/// Returns `(content, original_len)` — `original_len` is `Some` only when truncation actually
-/// fired, so the caller can record the pre-cap size. Skips truncation when the omitted slice is
-/// smaller than the marker itself (truncating would grow the output rather than shrink it).
+/// Returns `(content, original_len)`, where `original_len` is `Some` only when truncation fired so
+/// the caller can record the pre-cap size. Skips truncation when the omitted slice is smaller than
+/// the marker, which would otherwise grow the output.
 /// Char-boundary floors keep the returned `String` valid UTF-8 even when the cap lands inside a
 /// multibyte sequence.
 fn cap_output(content: String) -> (String, Option<usize>) {
@@ -392,21 +390,14 @@ fn cap_output(content: String) -> (String, Option<usize>) {
 
 // ── Input Parsing ──
 
-/// Deserializes a tool's typed input from the raw JSON the agent loop hands us.
-///
-/// On failure returns a fully-formed [`ToolOutput`] with `is_error: true` (not a normal
-/// `serde_json::Error`) so the caller can short-circuit straight back to the model with a
-/// user-visible "Invalid input: ..." message — no extra mapping needed at every call site.
+/// Deserializes a tool's typed input from the raw JSON the agent loop hands us. On failure returns
+/// an "Invalid input: ..." error [`ToolOutput`] that callers hand back to the model as-is.
 #[expect(
     clippy::result_large_err,
     reason = "ToolOutput carries the full tool result; the Err here is the cold input-validation path constructed at most once per tool call"
 )]
 pub(crate) fn parse_input<T: DeserializeOwned>(raw: serde_json::Value) -> Result<T, ToolOutput> {
-    serde_json::from_value(raw).map_err(|e| ToolOutput {
-        content: format!("Invalid input: {e}"),
-        is_error: true,
-        metadata: ToolMetadata::default(),
-    })
+    serde_json::from_value(raw).map_err(|e| ToolOutput::error(format!("Invalid input: {e}")))
 }
 
 // ── Path Utilities ──
@@ -491,6 +482,34 @@ pub(crate) fn file_name(path: &str) -> &str {
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or(path)
+}
+
+// ── File Target Validation ──
+
+/// Rejects targets the [`FileTracker`](crate::file_tracker::FileTracker) cannot gate, phrasing each
+/// refusal for `verb` (`read`, `edit`, `write`).
+pub(crate) fn validate_file_target(
+    path: &str,
+    metadata: &std::fs::Metadata,
+    verb: &str,
+) -> Result<(), String> {
+    match validate_trackable_file(metadata) {
+        Ok(()) => Ok(()),
+        Err(TrackableFileError::Directory) => Err(format!(
+            "{path} is a directory. Use the glob tool to list directory contents."
+        )),
+        Err(TrackableFileError::NonRegular) => Err(format!(
+            "{path} is not a regular file (fifo, socket, or device). Refusing to {verb}.",
+        )),
+        Err(TrackableFileError::TooLarge { size, max }) => {
+            let mb = bytes_to_mb(size);
+            let limit_mb = max / (1024 * 1024);
+            Err(format!(
+                "File is too large ({mb:.1} MB, max {limit_mb} MB). \
+                 Use the bash tool to {verb} large files.",
+            ))
+        }
+    }
 }
 
 // ── Binary Detection ──
@@ -578,8 +597,8 @@ pub(crate) fn walk_files(base: &Path) -> impl Iterator<Item = ignore::DirEntry> 
 /// Reads the entry's modification time for sorting / display.
 ///
 /// Falls back to [`SystemTime::UNIX_EPOCH`] when stat fails (entry vanished, permission denied,
-/// platform without mtime). Callers use the result for ordering only — a synthetic epoch
-/// timestamp sorts oldest, which is a sane default for unreadable entries.
+/// platform without mtime). Callers use the result only for ordering, where the epoch sorts
+/// unreadable entries oldest.
 pub(crate) fn entry_mtime(entry: &ignore::DirEntry) -> SystemTime {
     entry
         .metadata()
@@ -671,22 +690,6 @@ mod tests {
             Box::new(ReadTool::new(Arc::clone(&tracker))),
             Box::new(WriteTool::new(tracker)),
         ]
-    }
-
-    // ── ToolOutput::from_result ──
-
-    #[test]
-    fn from_result_ok_clears_is_error() {
-        let out = ToolOutput::from_result(Ok("success".into()));
-        assert!(!out.is_error);
-        assert_eq!(out.content, "success");
-    }
-
-    #[test]
-    fn from_result_err_sets_is_error() {
-        let out = ToolOutput::from_result(Err("something went wrong".into()));
-        assert!(out.is_error);
-        assert_eq!(out.content, "something went wrong");
     }
 
     // ── Tool trait contract (all tools) ──

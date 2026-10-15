@@ -12,7 +12,8 @@ use super::{
     DiffChunk, DiffLine, Tool, ToolMetadata, ToolOutput, ToolResultView, extract_input_field,
     summarize_path_call,
 };
-use crate::file_tracker::{FileTracker, GatePurpose, TrackableFileError, validate_trackable_file};
+use crate::file_tracker::{FileTracker, GatePurpose};
+use crate::permission::PermissionClass;
 
 pub(crate) struct EditTool {
     tracker: Arc<FileTracker>,
@@ -37,8 +38,8 @@ impl Tool for EditTool {
          last Read."
     }
 
-    fn permission_class(&self) -> crate::permission::PermissionClass {
-        crate::permission::PermissionClass::Edit
+    fn permission_class(&self) -> PermissionClass {
+        PermissionClass::Edit
     }
 
     fn path_field(&self) -> Option<&'static str> {
@@ -157,11 +158,11 @@ async fn run(raw: serde_json::Value, tracker: Arc<FileTracker>) -> ToolOutput {
     )
     .await
     {
-        Ok((content, replacements, chunks)) => ToolOutput::from_result(Ok(content))
+        Ok((content, replacements, chunks)) => ToolOutput::success(content)
             .with_title(format!("Edited {name}"))
             .with_replacements(replacements)
             .with_diff_chunks(chunks),
-        Err(msg) => ToolOutput::from_result(Err(msg)),
+        Err(msg) => ToolOutput::error(msg),
     }
 }
 
@@ -194,8 +195,10 @@ async fn edit_file(
     }
 
     let file_path = Path::new(path);
-    let (_, content_bytes) =
-        super::read_validated(path, |metadata| validate_edit_target(path, metadata)).await?;
+    let (_, content_bytes) = super::read_validated(path, |metadata| {
+        super::validate_file_target(path, metadata, "edit")
+    })
+    .await?;
     let key = super::tracker_key(path).await;
     tracker
         .verify_current_content(&key, &content_bytes, GatePurpose::Edit)
@@ -253,26 +256,6 @@ async fn edit_file(
         format!("Successfully edited {path}.")
     };
     Ok((message, match_count, chunks))
-}
-
-fn validate_edit_target(path: &str, metadata: &std::fs::Metadata) -> Result<(), String> {
-    match validate_trackable_file(metadata) {
-        Ok(()) => Ok(()),
-        Err(TrackableFileError::Directory) => Err(format!(
-            "{path} is a directory. Use the glob tool to list directory contents."
-        )),
-        Err(TrackableFileError::NonRegular) => Err(format!(
-            "{path} is not a regular file (fifo, socket, or device). Refusing to edit.",
-        )),
-        Err(TrackableFileError::TooLarge { size, max }) => {
-            let mb = super::bytes_to_mb(size);
-            let limit_mb = max / (1024 * 1024);
-            Err(format!(
-                "File is too large ({mb:.1} MB, max {limit_mb} MB). \
-                 Use the bash tool for large-file edits.",
-            ))
-        }
-    }
 }
 
 // ── Diff Production ──
@@ -418,6 +401,16 @@ mod tests {
         testing::{tracker, tracker_seeded},
     };
     use crate::tool::testing::canonical_tempdir;
+
+    // ── permission_class ──
+
+    #[test]
+    fn permission_class_is_edit() {
+        assert_eq!(
+            EditTool::new(tracker()).permission_class(),
+            PermissionClass::Edit
+        );
+    }
 
     // ── approval_preview ──
 
@@ -639,15 +632,13 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello world").unwrap();
 
-        let output = run(
-            serde_json::json!({
+        let output = EditTool::new(Arc::new(tracker_seeded(&path)))
+            .run(serde_json::json!({
                 "file_path": path.to_str().unwrap(),
                 "old_string": "hello",
                 "new_string": "goodbye"
-            }),
-            Arc::new(tracker_seeded(&path)),
-        )
-        .await;
+            }))
+            .await;
 
         assert!(!output.is_error);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "goodbye world");
@@ -673,31 +664,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_without_prior_read_is_rejected() {
-        let dir = canonical_tempdir();
-        let path = dir.path().join("test.txt");
-        std::fs::write(&path, "hello world").unwrap();
-
-        let output = run(
-            serde_json::json!({
-                "file_path": path.to_str().unwrap(),
-                "old_string": "hello",
-                "new_string": "goodbye",
-            }),
-            tracker(),
-        )
-        .await;
-
-        assert!(output.is_error);
-        assert!(
-            output.content.contains("has not been read"),
-            "expected must-read-first rejection, got: {}",
-            output.content,
-        );
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello world");
-    }
-
-    #[tokio::test]
     async fn run_edit_error_omits_edited_title() {
         let dir = canonical_tempdir();
         let path = dir.path().join("test.txt");
@@ -718,26 +684,6 @@ mod tests {
             output.metadata.title, None,
             "error path must not claim the edit happened",
         );
-    }
-
-    #[tokio::test]
-    async fn edit_tool_run_dispatches_through_trait_to_inner_run() {
-        let dir = canonical_tempdir();
-        let path = dir.path().join("test.txt");
-        std::fs::write(&path, "hello world").unwrap();
-        let tracker = Arc::new(tracker_seeded(&path));
-        let tool = EditTool::new(Arc::clone(&tracker));
-
-        let output = tool
-            .run(serde_json::json!({
-                "file_path": path.to_str().unwrap(),
-                "old_string": "hello",
-                "new_string": "goodbye",
-            }))
-            .await;
-
-        assert!(!output.is_error);
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "goodbye world");
     }
 
     // ── edit_file ──
@@ -791,31 +737,13 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(msg.contains("2 occurrences"));
+        assert_eq!(
+            msg,
+            format!("Replaced 2 occurrences in {}.", path.display())
+        );
         assert_eq!(replacements, 2);
         assert_eq!(chunks.len(), 2, "replace_all emits one chunk per match");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "ccc bbb ccc");
-    }
-
-    #[tokio::test]
-    async fn edit_file_replace_all_pins_replaced_n_occurrences_format() {
-        let dir = canonical_tempdir();
-        let path = dir.path().join("t.txt");
-        std::fs::write(&path, "a a a").unwrap();
-        let (msg, replacements, _chunks) = edit_file(
-            path.to_str().unwrap(),
-            "a",
-            "b",
-            true,
-            &tracker_seeded(&path),
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            msg,
-            format!("Replaced 3 occurrences in {}.", path.display())
-        );
-        assert_eq!(replacements, 3);
     }
 
     #[tokio::test]

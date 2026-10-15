@@ -11,9 +11,8 @@ use super::{
     ReadExcerptLine, Tool, ToolMetadata, ToolOutput, ToolResultView, display_cwd_path,
     extract_input_field, summarize_path_call,
 };
-use crate::file_tracker::{
-    CACHE_HIT_STUB, FileTracker, LastView, RecordRead, TrackableFileError, validate_trackable_file,
-};
+use crate::file_tracker::{CACHE_HIT_STUB, FileTracker, LastView, RecordRead};
+use crate::permission::PermissionClass;
 
 const DEFAULT_LINE_LIMIT: usize = 2000;
 const MAX_LINE_CHARS: usize = 2000;
@@ -42,8 +41,8 @@ impl Tool for ReadTool {
         "Read the contents of a file with line numbers."
     }
 
-    fn permission_class(&self) -> crate::permission::PermissionClass {
-        crate::permission::PermissionClass::Read
+    fn permission_class(&self) -> PermissionClass {
+        PermissionClass::Read
     }
 
     fn path_field(&self) -> Option<&'static str> {
@@ -122,9 +121,9 @@ async fn run(raw: serde_json::Value, tracker: Arc<FileTracker>) -> ToolOutput {
     };
 
     match read_file(&input.file_path, input.offset, input.limit, &tracker).await {
-        Ok(content) => ToolOutput::from_result(Ok(content))
+        Ok(content) => ToolOutput::success(content)
             .with_title(format!("Read {}", super::file_name(&input.file_path))),
-        Err(msg) => ToolOutput::from_result(Err(msg)),
+        Err(msg) => ToolOutput::error(msg),
     }
 }
 
@@ -142,8 +141,10 @@ async fn read_file(
     limit: Option<usize>,
     tracker: &FileTracker,
 ) -> Result<String, String> {
-    let (metadata, bytes) =
-        super::read_validated(path, |metadata| validate_read_target(path, metadata)).await?;
+    let (metadata, bytes) = super::read_validated(path, |metadata| {
+        super::validate_file_target(path, metadata, "read")
+    })
+    .await?;
 
     if super::is_binary(&bytes) {
         return Err("File appears to be binary. Use the bash tool to inspect binary files.".into());
@@ -205,27 +206,6 @@ async fn read_file(
     let view = LastView::lines(offset_n, last_shown, total_lines);
     let outcome = tracker.record_read(&key, &bytes, mtime, size, view);
     Ok(stub_or(outcome, &output).into_owned())
-}
-
-fn validate_read_target(path: &str, metadata: &std::fs::Metadata) -> Result<(), String> {
-    // Pseudo-files report len() == 0, bypassing the size gate.
-    match validate_trackable_file(metadata) {
-        Ok(()) => Ok(()),
-        Err(TrackableFileError::Directory) => Err(format!(
-            "{path} is a directory. Use the glob tool to list directory contents."
-        )),
-        Err(TrackableFileError::NonRegular) => Err(format!(
-            "{path} is not a regular file (fifo, socket, or device). Refusing to read.",
-        )),
-        Err(TrackableFileError::TooLarge { size, max }) => {
-            let mb = super::bytes_to_mb(size);
-            let limit_mb = max / (1024 * 1024);
-            Err(format!(
-                "File is too large ({mb:.1} MB, max {limit_mb} MB). \
-                 Use offset and limit to read specific portions.",
-            ))
-        }
-    }
 }
 
 fn stub_or(outcome: RecordRead, body: &str) -> std::borrow::Cow<'_, str> {
@@ -608,7 +588,10 @@ mod tests {
         let err = read_file(path.to_str().unwrap(), None, None, &FileTracker::default())
             .await
             .unwrap_err();
-        assert!(err.contains("too large"));
+        assert!(
+            err.contains("too large") && err.contains("Use the bash tool to read large files"),
+            "{err}",
+        );
     }
 
     #[cfg(unix)]

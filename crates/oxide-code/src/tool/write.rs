@@ -8,7 +8,8 @@ use std::sync::Arc;
 use serde::Deserialize;
 
 use super::{Tool, ToolOutput, extract_input_field, summarize_path_call};
-use crate::file_tracker::{FileTracker, GatePurpose, TrackableFileError, validate_trackable_file};
+use crate::file_tracker::{FileTracker, GatePurpose};
+use crate::permission::PermissionClass;
 
 pub(crate) struct WriteTool {
     tracker: Arc<FileTracker>,
@@ -33,8 +34,8 @@ impl Tool for WriteTool {
          externally since the last Read. Creating a new file skips the gate."
     }
 
-    fn permission_class(&self) -> crate::permission::PermissionClass {
-        crate::permission::PermissionClass::Edit
+    fn permission_class(&self) -> PermissionClass {
+        PermissionClass::Edit
     }
 
     fn path_field(&self) -> Option<&'static str> {
@@ -124,10 +125,10 @@ async fn run(raw: serde_json::Value, tracker: Arc<FileTracker>) -> ToolOutput {
     match write_file(&input.file_path, &input.content, &tracker).await {
         Ok((content, is_new)) => {
             let verb = if is_new { "Created" } else { "Updated" };
-            ToolOutput::from_result(Ok(content))
+            ToolOutput::success(content)
                 .with_title(format!("{verb} {}", super::file_name(&input.file_path)))
         }
-        Err(msg) => ToolOutput::from_result(Err(msg)),
+        Err(msg) => ToolOutput::error(msg),
     }
 }
 
@@ -181,23 +182,7 @@ fn validate_write_target(path: &str, metadata: &std::fs::Metadata) -> Result<(),
             "{path} is a symlink. Refusing to write through it."
         ));
     }
-    match validate_trackable_file(metadata) {
-        Ok(()) => Ok(()),
-        Err(TrackableFileError::Directory) => Err(format!(
-            "{path} is a directory. Use the glob tool to list directory contents."
-        )),
-        Err(TrackableFileError::NonRegular) => Err(format!(
-            "{path} is not a regular file (fifo, socket, or device). Refusing to write.",
-        )),
-        Err(TrackableFileError::TooLarge { size, max }) => {
-            let mb = super::bytes_to_mb(size);
-            let limit_mb = max / (1024 * 1024);
-            Err(format!(
-                "File is too large ({mb:.1} MB, max {limit_mb} MB). \
-                 Use the bash tool for large-file writes.",
-            ))
-        }
-    }
+    super::validate_file_target(path, metadata, "write")
 }
 
 async fn check_gate(key: &Path, path: &str, tracker: &FileTracker) -> Result<(), String> {
@@ -220,6 +205,16 @@ mod tests {
     };
     use crate::tool::read::ReadTool;
     use crate::tool::testing::canonical_tempdir;
+
+    // ── permission_class ──
+
+    #[test]
+    fn permission_class_is_edit() {
+        assert_eq!(
+            WriteTool::new(tracker()).permission_class(),
+            PermissionClass::Edit
+        );
+    }
 
     // ── approval_preview ──
 
@@ -290,17 +285,16 @@ mod tests {
         let dir = canonical_tempdir();
         let path = dir.path().join("new.txt");
 
-        let output = run(
-            serde_json::json!({
+        let output = WriteTool::new(tracker())
+            .run(serde_json::json!({
                 "file_path": path.to_str().unwrap(),
                 "content": "hello world"
-            }),
-            tracker(),
-        )
-        .await;
+            }))
+            .await;
 
         assert!(!output.is_error);
         assert!(output.content.contains("created"));
+        assert_eq!(output.metadata.title.as_deref(), Some("Created new.txt"));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello world");
     }
 
@@ -358,25 +352,6 @@ mod tests {
             output.metadata.title, None,
             "error path must not claim the write happened",
         );
-    }
-
-    #[tokio::test]
-    async fn write_tool_run_dispatches_through_trait_to_inner_run() {
-        // Pin the trait shim's `Arc::clone` of the tracker.
-        let dir = canonical_tempdir();
-        let path = dir.path().join("new.txt");
-        let tracker_arc = Arc::new(FileTracker::default());
-        let tool = WriteTool::new(Arc::clone(&tracker_arc));
-
-        let output = tool
-            .run(serde_json::json!({
-                "file_path": path.to_str().unwrap(),
-                "content": "hello",
-            }))
-            .await;
-
-        assert!(!output.is_error);
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
     }
 
     // ── write_file ──

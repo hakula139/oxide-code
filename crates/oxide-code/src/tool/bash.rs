@@ -10,7 +10,8 @@ use serde::Deserialize;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 
-use super::{Tool, ToolMetadata, ToolOutput, extract_input_field, title_case};
+use super::{Tool, ToolOutput, extract_input_field, title_case};
+use crate::permission::PermissionClass;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_mins(2);
 const MAX_TIMEOUT: Duration = Duration::from_mins(10);
@@ -36,8 +37,8 @@ impl Tool for BashTool {
         "Execute a shell command and return its output."
     }
 
-    fn permission_class(&self) -> crate::permission::PermissionClass {
-        crate::permission::PermissionClass::Bash
+    fn permission_class(&self) -> PermissionClass {
+        PermissionClass::Bash
     }
 
     fn gate_target(
@@ -145,11 +146,7 @@ async fn execute(command: &str, timeout: Duration) -> ToolOutput {
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            return ToolOutput {
-                content: format!("Failed to execute command: {e}"),
-                is_error: true,
-                metadata: ToolMetadata::default(),
-            };
+            return ToolOutput::error(format!("Failed to execute command: {e}"));
         }
     };
 
@@ -189,26 +186,14 @@ async fn execute(command: &str, timeout: Duration) -> ToolOutput {
     let status = match status {
         Ok(status) => status,
         Err(e) => {
-            return ToolOutput {
-                content: format!("Failed to execute command: {e}"),
-                is_error: true,
-                metadata: ToolMetadata::default(),
-            };
+            return ToolOutput::error(format!("Failed to execute command: {e}"));
         }
     };
     if let Err(e) = stdout_read {
-        return ToolOutput {
-            content: format!("Failed to read command stdout: {e}"),
-            is_error: true,
-            metadata: ToolMetadata::default(),
-        };
+        return ToolOutput::error(format!("Failed to read command stdout: {e}"));
     }
     if let Err(e) = stderr_read {
-        return ToolOutput {
-            content: format!("Failed to read command stderr: {e}"),
-            is_error: true,
-            metadata: ToolMetadata::default(),
-        };
+        return ToolOutput::error(format!("Failed to read command stderr: {e}"));
     }
 
     let mut content = render_streams(&stdout_capture, &stderr_capture);
@@ -219,15 +204,10 @@ async fn execute(command: &str, timeout: Duration) -> ToolOutput {
         content.push_str(NO_OUTPUT_MARKER);
     }
 
-    // Nonzero exit is reported in the body, not as `is_error`: tools the model invokes (`grep`
-    // returning 1 on no match, `test`-style probes) are expected to use the exit code as a signal.
-    // Reserving `is_error` for spawn / timeout failures keeps the model from treating those probes
-    // as hard failures.
-    ToolOutput {
-        content,
-        is_error: false,
-        metadata: ToolMetadata::default(),
-    }
+    // A nonzero exit stays in the body because commands like `grep` (1 on no match) and `test`
+    // probes signal through their exit code. Reserving `is_error` for spawn, pipe, and timeout
+    // failures keeps the model from treating those probes as hard failures.
+    ToolOutput::success(content)
 }
 
 fn timeout_output(timeout: Duration, stdout: &PipeCapture, stderr: &PipeCapture) -> ToolOutput {
@@ -236,11 +216,7 @@ fn timeout_output(timeout: Duration, stdout: &PipeCapture, stderr: &PipeCapture)
         &mut content,
         &format!("Command timed out after {}ms", timeout.as_millis()),
     );
-    ToolOutput {
-        content,
-        is_error: true,
-        metadata: ToolMetadata::default(),
-    }
+    ToolOutput::error(content)
 }
 
 fn exit_footer(status: ExitStatus) -> String {
@@ -387,6 +363,13 @@ mod tests {
     use crate::permission::GateTarget;
     use crate::tool::MAX_OUTPUT_BYTES;
 
+    // ── permission_class ──
+
+    #[test]
+    fn permission_class_is_bash() {
+        assert_eq!(BashTool.permission_class(), PermissionClass::Bash);
+    }
+
     // ── gate_target ──
 
     #[test]
@@ -461,13 +444,6 @@ mod tests {
 
     async fn run_default(cmd: &str) -> ToolOutput {
         execute(cmd, DEFAULT_TIMEOUT).await
-    }
-
-    #[tokio::test]
-    async fn execute_echo() {
-        let output = run_default("echo hello").await;
-        assert!(!output.is_error);
-        assert_eq!(output.content, "hello");
     }
 
     #[tokio::test]

@@ -8,6 +8,7 @@ use std::pin::Pin;
 use serde::Deserialize;
 
 use super::{Tool, ToolMetadata, ToolOutput, ToolResultView, extract_input_field};
+use crate::permission::PermissionClass;
 
 const MAX_RESULTS: usize = 100;
 
@@ -22,8 +23,8 @@ impl Tool for GlobTool {
         "Find files matching a glob pattern. Returns paths sorted by modification time (newest first)."
     }
 
-    fn permission_class(&self) -> crate::permission::PermissionClass {
-        crate::permission::PermissionClass::Read
+    fn permission_class(&self) -> PermissionClass {
+        PermissionClass::Read
     }
 
     fn gate_target(
@@ -108,18 +109,14 @@ async fn run(raw: serde_json::Value) -> ToolOutput {
             truncated_total,
         })) => {
             let title = glob_title(&content);
-            let output = ToolOutput::from_result(Ok(content)).with_title(title);
+            let output = ToolOutput::success(content).with_title(title);
             match truncated_total {
                 Some(total) => output.with_truncated_total(total),
                 None => output,
             }
         }
-        Ok(Err(msg)) => ToolOutput::from_result(Err(msg)),
-        Err(e) => ToolOutput {
-            content: format!("Internal error: {e}"),
-            is_error: true,
-            metadata: super::ToolMetadata::default(),
-        },
+        Ok(Err(msg)) => ToolOutput::error(msg),
+        Err(e) => ToolOutput::error(format!("Internal error: {e}")),
     }
 }
 

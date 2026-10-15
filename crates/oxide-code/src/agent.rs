@@ -532,11 +532,9 @@ async fn dispatch_tool_call(
     gate: &GateContext<'_>,
 ) -> AbortResult<ToolOutput> {
     if let Some(err) = parse_error {
-        return Ok(ToolOutput {
-            content: format!("tool input JSON failed to parse: {err}; retry with a valid object"),
-            is_error: true,
-            metadata: ToolMetadata::default(),
-        });
+        return Ok(ToolOutput::error(format!(
+            "Tool input JSON failed to parse: {err}. Retry with a valid JSON object."
+        )));
     }
 
     if let Some(denial) =
@@ -607,14 +605,10 @@ async fn check_permission(
 /// The synthetic tool result returned for a denied call. Marked `is_error` so the model treats it
 /// as a failed call and can try another approach.
 fn denied_output(name: &str) -> ToolOutput {
-    ToolOutput {
-        content: format!(
-            "The {name} call was denied by the permission policy. Do not retry it; \
-             choose a different approach or ask the user to adjust permissions."
-        ),
-        is_error: true,
-        metadata: ToolMetadata::default(),
-    }
+    ToolOutput::error(format!(
+        "The {name} call was denied by the permission policy. Do not retry it. \
+         Choose a different approach or ask the user to adjust permissions."
+    ))
 }
 
 /// Blocks on the `user_rx` channel for the [`UserAction::ApprovalDecision`] matching `id`, the same
@@ -2588,8 +2582,8 @@ mod tests {
                 content,
                 is_error: true,
             } if tool_use_id == "tool_1"
-                && content.contains("tool input JSON failed to parse")
-                && content.contains("retry with a valid object"),
+                && content.contains("Tool input JSON failed to parse")
+                && content.contains("Retry with a valid JSON object"),
         ));
 
         // Sink also reflects the failure via ToolCallEnd { is_error: true }.
@@ -2597,7 +2591,7 @@ mod tests {
         assert!(events.iter().any(|e| matches!(
             e,
             AgentEvent::ToolCallEnd { id, is_error: true, content, .. }
-                if id == "tool_1" && content.contains("tool input JSON failed to parse"),
+                if id == "tool_1" && content.contains("Tool input JSON failed to parse"),
         )));
     }
 
