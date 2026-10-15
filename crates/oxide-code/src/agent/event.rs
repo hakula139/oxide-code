@@ -22,13 +22,13 @@ pub(crate) const INTERRUPTED_MARKER: &str = "(interrupted)";
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct UsageSnapshot {
     /// Cache-aware input total: `input + cache_creation + cache_read`. Drives the context-pressure
-    /// percentage and auto-compaction threshold. Cleared on session roll (`/clear`), `/resume`,
-    /// and any compaction (manual `/compact` or automatic).
-    pub(crate) context_tokens: u32,
+    /// percentage and auto-compaction threshold. `None` after a compaction (manual `/compact` or
+    /// automatic) until the next request reports usage, which hides the context segment.
+    pub(crate) context_tokens: Option<u32>,
     /// Active model context window. `None` hides the percentage.
     pub(crate) context_window: Option<u32>,
-    /// Running session cost in USD, accumulated across every turn. Cleared on the same boundaries
-    /// as `context_tokens`. `None` hides the cost segment.
+    /// Running session cost in USD, accumulated across every request, summaries included. Cleared
+    /// on session roll (`/clear`) and `/resume`. `None` hides the cost segment.
     pub(crate) estimated_cost_usd: Option<f64>,
 }
 

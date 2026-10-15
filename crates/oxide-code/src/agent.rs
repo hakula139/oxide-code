@@ -61,9 +61,10 @@ pub(crate) trait AgentClient: Send + Sync {
         &self,
         messages: &[Message],
         system_sections: &[&str],
+        user_context: Option<&str>,
         tools: &[ToolDefinition],
     ) -> Result<mpsc::Receiver<Result<StreamEvent>>> {
-        self.stream_message(messages, system_sections, None, tools)
+        self.stream_message(messages, system_sections, user_context, tools)
     }
 }
 
@@ -82,9 +83,10 @@ impl AgentClient for Client {
         &self,
         messages: &[Message],
         system_sections: &[&str],
+        user_context: Option<&str>,
         tools: &[ToolDefinition],
     ) -> Result<mpsc::Receiver<Result<StreamEvent>>> {
-        Client::stream_one_shot(self, messages, system_sections, tools)
+        Client::stream_one_shot(self, messages, system_sections, user_context, tools)
     }
 }
 
@@ -155,20 +157,27 @@ impl TokenUsage {
     }
 }
 
-/// Per-turn usage report emitted at the end of [`agent_turn`].
+/// Usage the API reported for one turn's requests.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct TurnReport {
     /// Latest single round's usage, used by the auto-compaction threshold check, which compares
     /// against the most recent prompt size rather than the historical sum.
     pub(crate) usage: Option<TokenUsage>,
-    /// Every completed round's usage in order. Each round is its own API request, and some models
-    /// pick their price tier from a single request's prompt size, so cost is estimated per entry.
+    /// Every request's usage in order, including one that failed or was cancelled partway. Some
+    /// models pick their price tier from a single request's prompt size, so cost is per entry.
     pub(crate) billable_rounds: Vec<TokenUsage>,
 }
 
-/// Result of one [`agent_turn`] invocation. The report carries usage observed before any abort
-/// so the outer loop can still bill rounds the API already charged for, even when the user
-/// cancels mid-stream or a later round fails.
+impl TurnReport {
+    fn record(&mut self, round: Option<TokenUsage>) {
+        let Some(round) = round else { return };
+        self.usage = Some(round);
+        self.billable_rounds.push(round);
+    }
+}
+
+/// Result of one [`agent_turn`] invocation. The report counts every request whose stream
+/// reported usage, including one the user cancelled or that failed partway.
 #[derive(Debug)]
 pub(crate) struct TurnOutcome {
     pub(crate) report: TurnReport,
@@ -222,6 +231,11 @@ pub(crate) struct AutoCompact<'a> {
     pub(crate) config: AutoCompactionConfig,
     pub(crate) failures: &'a mut u8,
     pub(crate) file_tracker: &'a FileTracker,
+    /// The conversation's request prefix, which the summarizer reuses to read its prompt cache.
+    pub(crate) prompt: &'a PromptParts,
+    pub(crate) tools: &'a [ToolDefinition],
+    /// Each summary request's usage, recorded even when the summary fails or the user cancels it.
+    pub(crate) spent: &'a mut Vec<TokenUsage>,
 }
 
 /// Inputs the permission gate needs at each tool call: the resolved policy, the working directory
@@ -257,36 +271,27 @@ pub(crate) async fn agent_turn(
 ) -> TurnOutcome {
     let tool_defs = tools.definitions();
     let mut pending_prompts: Vec<String> = Vec::new();
-    let mut latest_usage = None;
-    let mut billable_rounds = Vec::new();
-    let report = |latest, billable| TurnReport {
-        usage: latest,
-        billable_rounds: billable,
-    };
+    let mut report = TurnReport::default();
 
     for _ in 0..max_tool_rounds.unwrap_or(u32::MAX) {
+        let mut round_usage = None;
         let stream = await_unless_aborted(
-            stream_response(client, messages, &tool_defs, prompt, sink),
+            stream_response(client, messages, &tool_defs, prompt, sink, &mut round_usage),
             user_rx,
             &mut pending_prompts,
         )
         .await;
+        report.record(round_usage);
         let StreamOutcome {
             blocks,
             parse_errors,
-            usage,
             stop_reason,
             stop_details,
-        } = match stream.and_then(|result| result.map_err(TurnAbort::Failed)) {
-            Ok(outcome) => outcome,
-            Err(abort) => {
-                return TurnOutcome::aborted(report(latest_usage, billable_rounds), abort);
-            }
+        } = match stream {
+            Ok(Ok(outcome)) => outcome,
+            Ok(Err(error)) => return TurnOutcome::aborted(report, TurnAbort::Failed(error)),
+            Err(abort) => return TurnOutcome::aborted(report, abort),
         };
-        if let Some(usage) = usage {
-            latest_usage = Some(usage);
-            billable_rounds.push(usage);
-        }
 
         let blocks = match settle_stop_reason(
             stop_reason,
@@ -300,12 +305,7 @@ pub(crate) async fn agent_turn(
         {
             StopAction::Proceed(blocks) => blocks,
             StopAction::Resume => continue,
-            StopAction::Finish(result) => {
-                return TurnOutcome {
-                    report: report(latest_usage, billable_rounds),
-                    result,
-                };
-            }
+            StopAction::Finish(result) => return TurnOutcome { report, result },
         };
 
         let tool_uses = collect_tool_uses(&blocks);
@@ -313,7 +313,7 @@ pub(crate) async fn agent_turn(
             // Queued prompts drain on the TUI side at idle.
             commit_assistant_message(session, sink, messages, blocks).await;
             notify_if_interrupted(messages, sink);
-            return TurnOutcome::completed(report(latest_usage, billable_rounds));
+            return TurnOutcome::completed(report);
         }
         let assistant_msg = Message {
             role: Role::Assistant,
@@ -341,7 +341,7 @@ pub(crate) async fn agent_turn(
         )
         .await;
         if let Some(abort) = round.abort {
-            return TurnOutcome::aborted(report(latest_usage, billable_rounds), abort);
+            return TurnOutcome::aborted(report, abort);
         }
         record_drained_prompts(pending_prompts.drain(..), messages, session, sink).await;
     }
@@ -350,7 +350,7 @@ pub(crate) async fn agent_turn(
     // `Some(n)` and the model ran `n` rounds without a final reply.
     let cap = max_tool_rounds.unwrap_or(u32::MAX);
     TurnOutcome::aborted(
-        report(latest_usage, billable_rounds),
+        report,
         TurnAbort::Failed(anyhow!(
             "agent stopped after {cap} tool rounds without a final response. This safety cap \
              guards against runaway loops, so ask again with a narrower request."
@@ -497,7 +497,7 @@ pub(crate) async fn auto_compact_if_needed(
 
     sink.emit(AgentEvent::AutoCompactionStarted, "auto-compaction-started");
     let summary = match await_unless_aborted(
-        compaction::compact_session(client, messages, None),
+        compaction::compact_session(client, auto.prompt, auto.tools, messages, None, auto.spent),
         user_rx,
         pending,
     )
@@ -987,26 +987,33 @@ fn parse_tool_json(json_buf: &str) -> (serde_json::Value, Option<String>) {
 struct StreamOutcome {
     blocks: Vec<ContentBlock>,
     parse_errors: HashMap<String, String>,
-    usage: Option<TokenUsage>,
     /// `None` when the stream omitted it, in which case the content alone decides the next step.
     stop_reason: Option<StopReason>,
     stop_details: Option<StopDetails>,
 }
 
+/// Streams one conversation request and collects its reply with [`collect_response`].
 async fn stream_response(
     client: &dyn AgentClient,
     messages: &[Message],
     tools: &[ToolDefinition],
     prompt: &PromptParts,
     sink: &dyn AgentSink,
+    usage: &mut Option<TokenUsage>,
 ) -> Result<StreamOutcome> {
     let section_refs: Vec<&str> = prompt.system_sections.iter().map(String::as_str).collect();
-    let mut rx =
-        client.stream_message(messages, &section_refs, Some(&prompt.user_context), tools)?;
+    let rx = client.stream_message(messages, &section_refs, Some(&prompt.user_context), tools)?;
+    collect_response(rx, sink, usage).await
+}
 
+/// Accumulates one response stream into its reply. `usage` tracks what the API has reported so
+/// far, so it stays accurate when the stream fails or the caller drops the future.
+async fn collect_response(
+    mut rx: mpsc::Receiver<Result<StreamEvent>>,
+    sink: &dyn AgentSink,
+    usage: &mut Option<TokenUsage>,
+) -> Result<StreamOutcome> {
     let mut blocks: Vec<Option<BlockAccumulator>> = Vec::new();
-    let mut usage = TokenUsage::default();
-    let mut saw_usage = false;
     let mut stop_reason = None;
     let mut stop_details = None;
     let mut finished = false;
@@ -1018,10 +1025,9 @@ async fn stream_response(
             StreamEvent::MessageStart { message } => {
                 // A retried request starts over with its own `message_start`, so the usage of the
                 // failed attempt is discarded.
-                usage = TokenUsage::default();
-                saw_usage = message.usage.is_some();
+                *usage = None;
                 if let Some(observed) = message.usage {
-                    usage.observe(&observed);
+                    usage.get_or_insert_default().observe(&observed);
                 }
             }
             StreamEvent::ContentBlockStart {
@@ -1059,8 +1065,7 @@ async fn stream_response(
                 usage: observed,
             } => {
                 if let Some(observed) = observed {
-                    usage.observe(&observed);
-                    saw_usage = true;
+                    usage.get_or_insert_default().observe(&observed);
                 }
                 stop_reason = delta.stop_reason;
                 stop_details = delta.stop_details;
@@ -1078,7 +1083,6 @@ async fn stream_response(
     }
 
     let mut outcome = StreamOutcome {
-        usage: saw_usage.then_some(usage),
         stop_reason,
         stop_details,
         ..StreamOutcome::default()
@@ -1884,6 +1888,9 @@ mod tests {
                 },
                 failures: &mut failures,
                 file_tracker: &tracker,
+                prompt: &empty_prompt(),
+                tools: &[],
+                spent: &mut Vec::new(),
             }),
             None,
         )
@@ -1905,6 +1912,9 @@ mod tests {
                 },
                 failures: &mut failures,
                 file_tracker: &tracker,
+                prompt: &empty_prompt(),
+                tools: &[],
+                spent: &mut Vec::new(),
             }),
             Some(TokenUsage {
                 input: 20,
@@ -1949,6 +1959,9 @@ mod tests {
                 },
                 failures: &mut failures,
                 file_tracker: &tracker,
+                prompt: &empty_prompt(),
+                tools: &[],
+                spent: &mut Vec::new(),
             }),
             Some(TokenUsage {
                 input: 20,
@@ -2000,6 +2013,9 @@ mod tests {
                 },
                 failures: &mut failures,
                 file_tracker: &tracker,
+                prompt: &empty_prompt(),
+                tools: &[],
+                spent: &mut Vec::new(),
             }),
             Some(TokenUsage {
                 input: 20,
@@ -2050,6 +2066,9 @@ mod tests {
                 },
                 failures: &mut failures,
                 file_tracker: &tracker,
+                prompt: &empty_prompt(),
+                tools: &[],
+                spent: &mut Vec::new(),
             }),
             Some(TokenUsage {
                 input: 20,
@@ -2107,6 +2126,9 @@ mod tests {
                 },
                 failures: &mut failures,
                 file_tracker: &tracker,
+                prompt: &empty_prompt(),
+                tools: &[],
+                spent: &mut Vec::new(),
             }),
             usage,
         )
@@ -2126,6 +2148,9 @@ mod tests {
                 },
                 failures: &mut failures,
                 file_tracker: &tracker,
+                prompt: &empty_prompt(),
+                tools: &[],
+                spent: &mut Vec::new(),
             }),
             usage,
         )
@@ -2166,6 +2191,9 @@ mod tests {
             },
             failures: &mut failures,
             file_tracker: &tracker,
+            prompt: &empty_prompt(),
+            tools: &[],
+            spent: &mut Vec::new(),
         };
 
         let compact = auto_compact_if_needed(
@@ -2212,6 +2240,86 @@ mod tests {
             }
         )));
         assert_eq!(messages.len(), 1);
+        assert!(
+            matches!(&messages[0].content[0], ContentBlock::Text { text } if text.contains("auto summary"))
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_compact_if_needed_retries_an_overflowing_summary_without_the_oldest_rounds() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let client = FakeClient::new(vec![
+            with_stop(
+                text_turn("partial"),
+                StopReason::ModelContextWindowExceeded,
+                None,
+            ),
+            text_turn("auto summary"),
+        ]);
+        let tracker = FileTracker::default();
+        let mut messages = vec![
+            Message::user("hi"),
+            Message::assistant("there"),
+            Message::user("next"),
+            Message::assistant("done"),
+        ];
+        let mut failures = 0;
+
+        let compacted = auto_compact_if_needed(
+            &client,
+            &session,
+            &mut messages,
+            &CapturingSink::new(),
+            &mut inert_user_rx(),
+            &mut Vec::new(),
+            Some(&mut AutoCompact {
+                config: AutoCompactionConfig {
+                    enabled: true,
+                    threshold_tokens: Some(10),
+                },
+                failures: &mut failures,
+                file_tracker: &tracker,
+                prompt: &empty_prompt(),
+                tools: &[],
+                spent: &mut Vec::new(),
+            }),
+            Some(TokenUsage {
+                input: 20,
+                cache_creation_input: 0,
+                cache_read_input: 0,
+                output: 1,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert!(compacted);
+        let sent_texts: Vec<Vec<String>> = client
+            .requests()
+            .iter()
+            .map(|request| {
+                request
+                    .iter()
+                    .flat_map(|m| &m.content)
+                    .filter_map(|block| match block {
+                        ContentBlock::Text { text } => Some(text.clone()),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .collect();
+        let [first, retry] = &sent_texts[..] else {
+            panic!("expected the overflow and one retry: {sent_texts:?}");
+        };
+        assert_eq!(first[..4], ["hi", "there", "next", "done"]);
+        assert!(
+            !retry
+                .iter()
+                .any(|text| ["hi", "there", "next"].contains(&text.as_str())),
+            "the retry keeps only the newest round: {retry:?}",
+        );
+        assert!(retry.iter().any(|text| text == "done"), "{retry:?}");
         assert!(
             matches!(&messages[0].content[0], ContentBlock::Text { text } if text.contains("auto summary"))
         );

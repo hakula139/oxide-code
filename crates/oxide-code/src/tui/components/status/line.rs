@@ -121,7 +121,7 @@ impl StatusLine {
             )),
             StatusLineSegment::ContextUsed => state
                 .usage
-                .map(context_label)
+                .and_then(context_label)
                 .map(|label| Span::styled(label, Self::segment_style(theme, SegmentStyle::Dim))),
             StatusLineSegment::SessionCost => state
                 .usage
@@ -257,18 +257,19 @@ fn model_with_effort(model: &str, effort: Option<Effort>) -> String {
     }
 }
 
-fn context_label(usage: UsageSnapshot) -> String {
-    match usage.context_window {
+fn context_label(usage: UsageSnapshot) -> Option<String> {
+    let tokens = usage.context_tokens?;
+    Some(match usage.context_window {
         Some(window) if window > 0 => {
-            let percent = usage.context_tokens.saturating_mul(100) / window;
+            let percent = tokens.saturating_mul(100) / window;
             format!(
                 "Ctx: {percent}% ({}/{})",
-                compact_tokens(usage.context_tokens),
+                compact_tokens(tokens),
                 compact_tokens(window),
             )
         }
-        _ => format!("Ctx: {}", compact_tokens(usage.context_tokens)),
-    }
+        _ => format!("Ctx: {}", compact_tokens(tokens)),
+    })
 }
 
 fn session_cost_label(usage: UsageSnapshot) -> Option<String> {
@@ -318,7 +319,7 @@ mod tests {
                 effort: Some(Effort::High),
                 title: Some("title"),
                 usage: Some(UsageSnapshot {
-                    context_tokens: 100_000,
+                    context_tokens: Some(100_000),
                     context_window: Some(200_000),
                     estimated_cost_usd: Some(0.1234),
                 }),
@@ -493,11 +494,24 @@ mod tests {
     fn context_label_omits_unknown_context_window() {
         assert_eq!(
             context_label(UsageSnapshot {
-                context_tokens: 987,
+                context_tokens: Some(987),
                 context_window: None,
                 estimated_cost_usd: None,
+            })
+            .as_deref(),
+            Some("Ctx: 987"),
+        );
+    }
+
+    #[test]
+    fn context_label_hides_context_a_compaction_cleared() {
+        assert_eq!(
+            context_label(UsageSnapshot {
+                context_tokens: None,
+                context_window: Some(200_000),
+                estimated_cost_usd: Some(1.0),
             }),
-            "Ctx: 987",
+            None,
         );
     }
 
