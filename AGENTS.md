@@ -84,25 +84,26 @@ ox                                          # Start an interactive session
 ├── session/
 │   ├── actor.rs                            # Session actor task body + SessionCmd protocol + receive-and-drain batching loop
 │   ├── chain.rs                            # ChainBuilder: UUID-DAG message-chain reconstruction (fork-aware tip pick + parent walk)
-│   ├── display.rs                          # Shared session-listing formatters (relative time, `id · when · N msgs · branch · project` line)
-│   ├── entry.rs                            # JSONL entry types (Header, Context, Message, Title, Summary, Compact, ToolResultMetadata, FileSnapshot) and metadata structs
+│   ├── display.rs                          # Shared session-listing formatters (relative time, `id · when · N msgs · branch · project` line, archive notices)
+│   ├── entry.rs                            # JSONL entry types (Header, Context, Message, Title, Archive, Summary, Compact, ToolResultMetadata, FileSnapshot) and metadata structs
 │   ├── handle.rs                           # SessionHandle (cheap-to-clone async API), SharedState, start / resume / roll lifecycle
 │   ├── handle/
 │   │   └── testing.rs                      # Cfg-test SessionHandle constructors for sibling test modules (dead, acks_then_drops)
 │   ├── history.rs                          # Transcript → display interaction stream (pair ToolUse with ToolResult inline)
-│   ├── list_view.rs                        # `ox --list` table rendering (writes to any `impl Write`)
+│   ├── list_view.rs                        # `ox --list` table rendering (writes to any `impl Write`), active or archived sessions
 │   ├── path.rs                             # Filesystem-safe project subdirectory derivation (sanitize_cwd)
 │   ├── resolver.rs                         # CLI `--continue` argument resolution (ResumeMode, resolve_session)
 │   ├── sanitize.rs                         # Resume-time transcript repair (drop unresolved / orphan tool blocks, collapse roles, sentinels)
 │   ├── snapshots/                          # `cargo insta` baseline JSONL byte-shape snapshots for `actor` round-trip tests
 │   ├── state.rs                            # SessionState: pure-data lifecycle struct owned by the actor (uuid chain, counts, finish gating)
-│   ├── store.rs                            # SessionStore / SessionWriter: file I/O, torn-line repair, partial-write rollback, path-keyed load / append / delete
+│   ├── store.rs                            # SessionStore / SessionWriter: file I/O, torn-line repair, partial-write rollback, path-keyed load / append / archive / delete
 │   ├── store/
-│   │   ├── listing.rs                      # Stat-only session walks: newest-first paging, file-name id prefix match, title / summary scan
+│   │   ├── listing.rs                      # Stat-only session walks: newest-first paging filtered by archive state, file-name id prefix match, title / summary / archive scan
 │   │   └── testing.rs                      # Cfg-test session fixtures and id-keyed lookups shared by session and slash tests
 │   └── title_generator.rs                  # Background AI title generation (Haiku) with detached task
 ├── slash.rs                                # Slash-command surface root: re-exports + dispatch
 ├── slash/
+│   ├── archive.rs                          # /archive [<id-prefix>]: bare forwards UserAction::Archive (archive the live session, then roll). Typed form and /unarchive <id-prefix> append an Archive entry to a saved session
 │   ├── clear.rs                            # /clear (new, reset): forwards UserAction::Clear, resets ChatView, drops the AI title
 │   ├── compact.rs                          # /compact [<instructions>]: forwards UserAction::Compact. Agent loop drives the summarization
 │   ├── config.rs                           # /config: opens a KvOverview modal of resolved config + layered file paths
@@ -120,7 +121,7 @@ ox                                          # Start an interactive session
 │   ├── picker.rs                           # ModelEffortPicker: combined model + effort modal. Emits a single SwapConfig
 │   ├── registry.rs                         # SlashCommand trait + SlashOutcome (Forward / Modal / chat output) + echoes_input + BUILT_INS slice + alias-aware lookup
 │   ├── rename.rs                           # /rename: bare opens a single-line title editor. `/rename <title>` applies directly and locks out AI title generation
-│   ├── resume.rs                           # /resume (alias /continue): bare opens a searchable session picker (Tab toggles current-project ↔ all-projects, Ctrl+D pushes the confirm-delete modal). `/resume <id-prefix>` jumps directly
+│   ├── resume.rs                           # /resume (alias /continue): bare opens a searchable session picker (Tab toggles current-project ↔ all-projects, Ctrl+A toggles the archived view, Ctrl+D pushes the confirm-delete modal). `/resume <id-prefix>` jumps directly
 │   ├── status.rs                           # /status: opens a KvOverview modal of session descriptors
 │   └── theme.rs                            # /theme: bare opens the picker (live preview). `/theme <name>` validates against the curated roster and swaps
 ├── tool.rs                                 # Tool trait, registry, definitions

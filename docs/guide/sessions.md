@@ -9,10 +9,11 @@ Sessions are stored under `$XDG_DATA_HOME/ox/sessions/` (default: `~/.local/shar
 ## Listing Sessions
 
 ```bash
-ox --list                # 30 most recent sessions in the current project
+ox --list                # Shows the 30 most recent unarchived sessions in the current project
 ox -la                   # same, across every project
 ox --list --limit 100    # raise the cap for one run
 ox --list --limit 0      # unbounded
+ox --list --archived     # archived sessions only
 ```
 
 Prints a table of recent sessions (most recently active first, local time):
@@ -33,11 +34,11 @@ a1b2c3d4   2026-04-18 09:20    12     ~/work/oxide     Fix authentication bug
 
 Titles that overflow the terminal width are truncated with `...`. When output is piped, titles render untruncated so downstream tools can wrap at their own width.
 
-By default the listing caps at 30 rows so a long-running project doesn't dump hundreds of sessions on every invocation. When the cap clips the result, the trailing line shows the hidden count and how to widen it (`--limit N` or `--limit 0`).
+By default, the listing shows at most 30 rows, so long-running projects don't dump hundreds of sessions on every invocation. If more sessions remain, a trailing `... more` line explains how to widen the listing with `--limit N` or `--limit 0`.
 
 ## Resuming a Session
 
-Resume the most recent session in the current project:
+Resume the most recent unarchived session in the current project:
 
 ```bash
 ox -c              # short form
@@ -53,7 +54,7 @@ ox -c a1b2
 Widen the search to every project with `--all` / `-a`:
 
 ```bash
-ox -c --all        # latest session anywhere
+ox -c --all        # latest unarchived session across all projects
 ox -c a1b2 -a      # prefix match across all projects
 ```
 
@@ -68,11 +69,23 @@ On resume, oxide-code loads the saved history and appends new messages to the sa
 
 ### Mid-Session Resume
 
-Inside the TUI, `/resume` (alias `/continue`) opens a session picker without restarting the process. Type to filter by id, title, or project, press Tab to widen the scope from current-project to all projects, and press Enter to resume the highlighted session in place. To skip the picker, pass `/resume <id-prefix>` to jump directly. An ambiguous prefix lists the candidates. The picker loads the 30 most recent sessions in scope and its footer says when older ones were left out, while `/resume <id-prefix>` searches every saved session. Chat repopulates from the resumed transcript, and any queued prompts are discarded because they were typed for the previous session. The next prompt continues the resumed thread just as it would after `ox -c`.
+Inside the TUI, `/resume` (alias `/continue`) opens a session picker without restarting the process. Type to filter by id, title, or project, press Tab to widen the scope from current-project to all projects, and press Enter to resume the highlighted session in place. To skip the picker, pass `/resume <id-prefix>` to jump directly. An ambiguous prefix lists the candidates. The picker loads the 30 most recent unarchived sessions in scope and notes in its footer when older ones are omitted. `/resume <id-prefix>` searches every saved session, including archived ones. Chat repopulates from the resumed transcript, and any queued prompts are discarded because they were typed for the previous session. The next prompt continues the resumed thread just as it would after `ox -c`.
 
 ### Deleting a Session
 
-Inside the `/resume` picker, **Ctrl+D** on the cursor row opens a Y/N confirm modal. **Y / Enter** unlinks the session JSONL and prints a `Deleted session {id}: {title}` line in chat. **N / Esc / Ctrl+C** dismisses. `/delete <id-prefix>` opens the same confirm directly for any saved session except the live one.
+Inside the `/resume` picker, **Ctrl+D** on the cursor row opens a Y/N confirm modal. **Y / Enter** unlinks the session JSONL and prints a `Deleted session {id}: {title}` line in chat. **N / Esc / Ctrl+C** dismisses. `/delete <id-prefix>` opens the same confirmation for any saved session except the live one.
+
+### Archiving a Session
+
+Archiving hides a session from `ox --list`, the `/resume` picker, and bare `ox -c`, while leaving its file in place.
+
+- `/archive` archives the live session and starts a fresh one, as `/clear` does. A note in the new chat names the archived session.
+- `/archive <id-prefix>` archives another saved session. If the prefix matches only the live session, the command is refused and points to bare `/archive`.
+- `/unarchive <id-prefix>` makes a saved session visible in the list again.
+
+The typed forms leave a session's last-active time unchanged, so an unarchived session returns to its previous place in the list.
+
+To find archived sessions, run `ox --list --archived` or press **Ctrl+A** in the `/resume` picker to switch to the archived view. Resuming an archived session unarchives it and displays a note, whether you select it in that view or specify it with `/resume <id-prefix>`, `ox -c <id-prefix>`, or a file path.
 
 ## Titles
 

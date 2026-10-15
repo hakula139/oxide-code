@@ -282,7 +282,7 @@ impl CompactionConfig {
         }
     }
 
-    pub(crate) fn for_model(self, model: &ModelSpec, max_tokens: u32) -> Result<Self> {
+    pub(crate) fn for_model(self, model: &ModelSpec, max_tokens: u32) -> Self {
         resolve_compaction_policy(self.policy, model, max_tokens)
     }
 
@@ -301,7 +301,7 @@ impl CompactionConfig {
 
     #[cfg(test)]
     pub(crate) fn default_for_test(model: &ModelSpec, max_tokens: u32) -> Self {
-        resolve_compaction_policy(AutoCompactionPolicy::Default, model, max_tokens).unwrap()
+        resolve_compaction_policy(AutoCompactionPolicy::Default, model, max_tokens)
     }
 }
 
@@ -332,7 +332,20 @@ enum AutoCompactionPolicy {
     Disabled,
     Default,
     Tokens(u32),
-    Percent(u8),
+    Percent(ThresholdPercent),
+}
+
+/// A share of the context window, validated to 1 through 100 when the config loads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ThresholdPercent(u8);
+
+impl ThresholdPercent {
+    fn new(percent: u8) -> Result<Self> {
+        if !(1..=100).contains(&percent) {
+            bail!("auto compaction threshold percent must be between 1 and 100, got {percent}");
+        }
+        Ok(Self(percent))
+    }
 }
 
 // ── Config ──
@@ -580,7 +593,7 @@ fn resolve_compaction(
     } else {
         AutoCompactionPolicy::Disabled
     };
-    resolve_compaction_policy(policy, model, max_tokens)
+    Ok(resolve_compaction_policy(policy, model, max_tokens))
 }
 
 /// Resolves the permission policy from the merged file config plus the `OX_PERMISSION_MODE`
@@ -608,30 +621,30 @@ fn resolve_compaction_policy(
     policy: AutoCompactionPolicy,
     model: &ModelSpec,
     max_tokens: u32,
-) -> Result<CompactionConfig> {
-    let auto = resolve_auto_compaction(policy, model, max_tokens)?;
-    Ok(CompactionConfig { auto, policy })
+) -> CompactionConfig {
+    let auto = resolve_auto_compaction(policy, model, max_tokens);
+    CompactionConfig { auto, policy }
 }
 
 fn resolve_auto_compaction(
     policy: AutoCompactionPolicy,
     model: &ModelSpec,
     max_tokens: u32,
-) -> Result<AutoCompactionConfig> {
+) -> AutoCompactionConfig {
     let threshold = match policy {
-        AutoCompactionPolicy::Disabled => return Ok(AutoCompactionConfig::disabled()),
+        AutoCompactionPolicy::Disabled => return AutoCompactionConfig::disabled(),
         AutoCompactionPolicy::Default => default_auto_threshold(model, max_tokens),
         AutoCompactionPolicy::Tokens(tokens) => {
             Some(threshold_from_tokens(tokens, model, max_tokens))
         }
         AutoCompactionPolicy::Percent(percent) => {
-            threshold_from_percent(percent, model, max_tokens)?
+            threshold_from_percent(percent, model, max_tokens)
         }
     };
-    Ok(AutoCompactionConfig {
+    AutoCompactionConfig {
         enabled: threshold.is_some(),
         threshold_tokens: threshold,
-    })
+    }
 }
 
 fn resolve_auto_policy(file: Option<&file::CompactionConfig>) -> Result<AutoCompactionPolicy> {
@@ -651,7 +664,7 @@ fn resolve_auto_policy(file: Option<&file::CompactionConfig>) -> Result<AutoComp
             bail!("set only one of auto_threshold_tokens or auto_threshold_percent for compaction")
         }
         (Some(tokens), None) => Ok(AutoCompactionPolicy::Tokens(tokens)),
-        (None, Some(percent)) => Ok(AutoCompactionPolicy::Percent(percent)),
+        (None, Some(percent)) => ThresholdPercent::new(percent).map(AutoCompactionPolicy::Percent),
         (None, None) => Ok(AutoCompactionPolicy::Default),
     }
 }
@@ -660,17 +673,16 @@ fn threshold_from_tokens(tokens: u32, model: &ModelSpec, max_tokens: u32) -> u32
     clamp_threshold_floor(clamp_threshold_ceil(tokens, model, max_tokens))
 }
 
-fn threshold_from_percent(percent: u8, model: &ModelSpec, max_tokens: u32) -> Result<Option<u32>> {
-    if !(1..=100).contains(&percent) {
-        bail!("auto compaction threshold percent must be between 1 and 100");
-    }
-    let Some(context_window) = model.context_window() else {
-        return Ok(None);
-    };
+fn threshold_from_percent(
+    ThresholdPercent(percent): ThresholdPercent,
+    model: &ModelSpec,
+    max_tokens: u32,
+) -> Option<u32> {
+    let context_window = model.context_window()?;
     let raw = context_window.saturating_mul(u32::from(percent)) / 100;
-    Ok(Some(clamp_threshold_floor(clamp_threshold_ceil(
+    Some(clamp_threshold_floor(clamp_threshold_ceil(
         raw, model, max_tokens,
-    ))))
+    )))
 }
 
 /// Snaps `tokens` down to the model's safe trigger when one is known.
@@ -862,6 +874,28 @@ mod tests {
         assert!(msg.contains("30m"), "{msg}");
         assert!(msg.contains("5m"), "{msg}");
         assert!(msg.contains("1h"), "{msg}");
+    }
+
+    // ── CompactionConfig::for_model ──
+
+    #[test]
+    fn for_model_re_resolves_a_percent_threshold_against_the_new_window() {
+        let policy = AutoCompactionPolicy::Percent(ThresholdPercent::new(40).unwrap());
+        let unknown = ModelSpec::resolve("custom-model".to_owned());
+        let compaction = resolve_compaction_policy(policy, &unknown, 16_000);
+        assert!(!compaction.auto.enabled, "precondition: no window");
+
+        let known = ModelSpec::resolve("claude-opus-5-5".to_owned());
+        let swapped = compaction.for_model(&known, 64_000);
+
+        assert_eq!(
+            swapped.auto,
+            AutoCompactionConfig {
+                enabled: true,
+                threshold_tokens: Some(400_000),
+            }
+        );
+        assert_eq!(swapped.policy, policy);
     }
 
     // ── Config::load ──
@@ -1443,16 +1477,21 @@ mod tests {
 
     #[tokio::test]
     async fn load_compaction_rejects_out_of_range_auto_threshold_percent() {
-        let dir = tempfile::tempdir().unwrap();
-        let vars = env_vars(vec![
-            xdg(&dir),
-            env("OX_COMPACTION_AUTO_THRESHOLD_PERCENT", "101"),
-        ]);
-        let err = temp_env::async_with_vars(vars, Config::load())
-            .await
-            .expect_err("out-of-range threshold percent must fail config load");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("between 1 and 100"), "{msg}");
+        for percent in ["0", "101"] {
+            let dir = tempfile::tempdir().unwrap();
+            let vars = env_vars(vec![
+                xdg(&dir),
+                env("OX_COMPACTION_AUTO_THRESHOLD_PERCENT", percent),
+            ]);
+            let err = temp_env::async_with_vars(vars, Config::load())
+                .await
+                .expect_err("out-of-range threshold percent must fail config load");
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains(&format!("between 1 and 100, got {percent}")),
+                "{msg}"
+            );
+        }
     }
 
     #[tokio::test]

@@ -875,6 +875,7 @@ where
                     action @ (UserAction::SubmitPrompt(_)
                     | UserAction::ConfirmExit
                     | UserAction::Clear
+                    | UserAction::Archive
                     | UserAction::Resume { .. }
                     | UserAction::Compact { .. }
                     | UserAction::Rename { .. }

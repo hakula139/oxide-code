@@ -30,6 +30,7 @@ use driver::Exit;
 use driver::tui::History;
 use engine::Engine;
 use file_tracker::FileTracker;
+use session::display::archive_notice;
 use session::handle::ResumedSession;
 use session::list_view::render_list;
 use session::resolver::resolve_session;
@@ -47,10 +48,18 @@ use tool::{
         .args(["list", "continue"])
         .multiple(true),
 ))]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each bool is an independent CLI switch that clap parses into its own field"
+)]
 struct Cli {
     /// Widen `--list` / `--continue` from the current cwd to every project.
     #[arg(short, long, requires = "scope")]
     all: bool,
+
+    /// With `--list`, show only archived sessions.
+    #[arg(long, requires = "list")]
+    archived: bool,
 
     /// Resume a session: bare flag picks the most recent, an ID prefix picks a specific one.
     #[expect(
@@ -103,7 +112,12 @@ async fn async_main() -> Result<Exit> {
     let _log_guard = util::log::init_tracing(tui_mode)?;
 
     if cli.list {
-        list_sessions(&mut std::io::stdout().lock(), cli.all, cli.limit)?;
+        list_sessions(
+            &mut std::io::stdout().lock(),
+            cli.all,
+            cli.archived,
+            cli.limit,
+        )?;
         return Ok(Exit::Success);
     }
 
@@ -124,9 +138,13 @@ async fn async_main() -> Result<Exit> {
         context,
         compact,
         title,
+        unarchived,
         tool_result_metadata,
         file_snapshots,
     } = resolve_session(&store, config.model.id(), cli.r#continue.as_ref(), cli.all).await?;
+    if unarchived && !tui_mode {
+        eprintln!("{}", archive_notice(handle.session_id(), false));
+    }
     let drifted = file_tracker.restore_verified(file_snapshots);
 
     let client = Client::new(config, Some(handle.session_id().to_owned()))?;
@@ -156,18 +174,24 @@ async fn async_main() -> Result<Exit> {
         compact,
         tool_metadata: tool_result_metadata,
         title,
+        unarchived,
     };
     driver::tui::run(engine, &theme, snapshot, show_thinking, history, &drifted).await
 }
 
 // ── Session Helpers ──
 
-fn list_sessions(out: &mut dyn std::io::Write, all: bool, limit: usize) -> Result<()> {
+fn list_sessions(
+    out: &mut dyn std::io::Write,
+    all: bool,
+    archived: bool,
+    limit: usize,
+) -> Result<()> {
     let store = SessionStore::open()?;
     let local_offset = util::time::local_offset();
     let term_width = detect_terminal_width();
     let cap = (limit > 0).then_some(limit);
-    render_list(out, &store, all, local_offset, term_width, cap)
+    render_list(out, &store, all, archived, local_offset, term_width, cap)
 }
 
 fn detect_terminal_width() -> Option<usize> {
@@ -195,12 +219,13 @@ mod tests {
     use time::macros::datetime;
 
     use super::*;
+    use crate::session::store::set_archived_at;
     use crate::session::store::testing::seed_test_session;
 
     // ── list_sessions ──
 
     #[test]
-    fn list_sessions_scope_and_limit() {
+    fn list_sessions_scope_limit_and_archive_state() {
         let dir = tempfile::tempdir().unwrap();
         temp_env::with_var("XDG_DATA_HOME", Some(dir.path()), || {
             let store = SessionStore::open().unwrap();
@@ -221,26 +246,33 @@ mod tests {
             );
 
             let mut output = Vec::new();
-            list_sessions(&mut output, false, 0).unwrap();
+            list_sessions(&mut output, false, false, 0).unwrap();
             let local = String::from_utf8(output).unwrap();
             assert!(local.contains("Local session"));
             assert!(!local.contains("Other session"));
             assert!(!local.contains("Project"));
 
             let mut output = Vec::new();
-            list_sessions(&mut output, true, 0).unwrap();
+            list_sessions(&mut output, true, false, 0).unwrap();
             let all = String::from_utf8(output).unwrap();
             assert!(all.contains("Local session"));
             assert!(all.contains("Other session"));
             assert!(all.contains("Project"));
-            assert!(!all.contains("and 1 more"));
+            assert!(!all.contains("... more"));
 
             let mut output = Vec::new();
-            list_sessions(&mut output, true, 1).unwrap();
+            list_sessions(&mut output, true, false, 1).unwrap();
             let capped = String::from_utf8(output).unwrap();
             assert!(capped.contains("Other session"));
             assert!(!capped.contains("Local session"));
-            assert!(capped.contains("... and 1 more"));
+            assert!(capped.contains("... more"));
+
+            set_archived_at(&other.find_session_path("other-session").unwrap(), true).unwrap();
+            let mut output = Vec::new();
+            list_sessions(&mut output, true, true, 0).unwrap();
+            let archived = String::from_utf8(output).unwrap();
+            assert!(archived.contains("Other session"));
+            assert!(!archived.contains("Local session"));
         });
     }
 
@@ -248,7 +280,7 @@ mod tests {
     fn list_sessions_storage_error() {
         let file = tempfile::NamedTempFile::new().unwrap();
         temp_env::with_var("XDG_DATA_HOME", Some(file.path()), || {
-            assert!(list_sessions(&mut Vec::new(), false, 0).is_err());
+            assert!(list_sessions(&mut Vec::new(), false, false, 0).is_err());
         });
     }
 

@@ -27,34 +27,38 @@ const PROJECT_COL_MIN: usize = 8;
 /// title column for every row in the listing.
 const PROJECT_COL_MAX: usize = 40;
 
-/// Renders `--list` output to `out`. `all` spans every project, and a `term_width` of `None`
-/// skips title truncation for piped output. `limit` caps the rows printed, unbounded for `None`.
+/// Renders `--list` output to `out`. `all` spans every project, and `archived` lists archived
+/// sessions in place of active ones. A `term_width` of `None` skips title truncation for piped
+/// output. `limit` caps the rows printed, unbounded for `None`.
 pub(crate) fn render_list(
     out: &mut dyn Write,
     store: &SessionStore,
     all: bool,
+    archived: bool,
     local_offset: UtcOffset,
     term_width: Option<usize>,
     limit: Option<usize>,
 ) -> Result<()> {
-    let page = store.list_paged(limit, all)?;
-    render_sessions(out, &page, all, local_offset, term_width)
+    let page = store.list_paged(limit, all, archived)?;
+    render_sessions(out, &page, all, archived, local_offset, term_width)
 }
 
-/// Pure formatter — split from [`render_list`] so tests can skip building a real store. `all`
-/// inserts a `Project` column to disambiguate cross-project rows. Appends a `... and N more`
-/// footer when `page.total` exceeds the rendered slice.
+/// Pure formatter, split from [`render_list`] so tests can skip building a real store. `all`
+/// inserts a `Project` column to disambiguate cross-project rows. Appends a `... more` footer
+/// when sessions follow the page.
 fn render_sessions(
     out: &mut dyn Write,
     page: &ListPage,
     all: bool,
+    archived: bool,
     local_offset: UtcOffset,
     term_width: Option<usize>,
 ) -> Result<()> {
     let sessions = page.sessions();
     if sessions.is_empty() {
+        let kind = if archived { "archived " } else { "" };
         let scope = if all { "" } else { " in this project" };
-        writeln!(out, "No sessions found{scope}.").context("write list output")?;
+        writeln!(out, "No {kind}sessions found{scope}.").context("write list output")?;
         return Ok(());
     }
 
@@ -129,11 +133,10 @@ fn render_sessions(
                 .context("write list row")?;
         }
     }
-    let hidden = page.total().saturating_sub(sessions.len());
-    if hidden > 0 {
+    if page.has_more() {
         writeln!(
             out,
-            "... and {hidden} more (use `--limit N` or `--limit 0` to disable the cap)",
+            "... more (use `--limit N` to raise the cap or `--limit 0` to list all)"
         )
         .context("write list footer")?;
     }
@@ -156,16 +159,8 @@ mod tests {
             title: None,
             exit: None,
             git_branch: None,
+            archived: false,
         }
-    }
-
-    fn page(sessions: Vec<SessionInfo>) -> ListPage {
-        let total = sessions.len();
-        ListPage::new(sessions, total)
-    }
-
-    fn page_with_total(sessions: Vec<SessionInfo>, total: usize) -> ListPage {
-        ListPage::new(sessions, total)
     }
 
     fn render_to_string(sessions: &[SessionInfo], all: bool) -> String {
@@ -176,8 +171,9 @@ mod tests {
         let mut buf = Vec::new();
         render_sessions(
             &mut buf,
-            &page(sessions.to_vec()),
+            &ListPage::new(sessions.to_vec(), false),
             all,
+            false,
             UtcOffset::UTC,
             term_width,
         )
@@ -193,54 +189,98 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = super::super::store::testing::test_store(dir.path());
         let mut buf = Vec::new();
-        render_list(&mut buf, &store, false, UtcOffset::UTC, None, None).unwrap();
+        render_list(&mut buf, &store, false, false, UtcOffset::UTC, None, None).unwrap();
         assert_eq!(
             String::from_utf8(buf).unwrap(),
             "No sessions found in this project.\n",
         );
 
         let mut buf = Vec::new();
-        render_list(&mut buf, &store, true, UtcOffset::UTC, None, None).unwrap();
+        render_list(&mut buf, &store, true, false, UtcOffset::UTC, None, None).unwrap();
         assert_eq!(String::from_utf8(buf).unwrap(), "No sessions found.\n",);
+
+        let mut buf = Vec::new();
+        render_list(&mut buf, &store, false, true, UtcOffset::UTC, None, None).unwrap();
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            "No archived sessions found in this project.\n",
+        );
     }
 
     #[test]
-    fn render_list_appends_more_footer_when_capped() {
-        // `total > sessions.len()` is the only signal `render_sessions` has that the cap clipped
-        // — pin it via a constructed `ListPage`.
-        let mut buf = Vec::new();
-        render_sessions(
-            &mut buf,
-            &page_with_total(
-                vec![session("aaaa1234", datetime!(2026-04-18 09:00:00 UTC))],
-                7,
-            ),
-            false,
-            UtcOffset::UTC,
-            None,
-        )
-        .unwrap();
-        let out = String::from_utf8(buf).unwrap();
-        assert!(out.contains("... and 6 more"), "got: {out}");
-        assert!(out.contains("--limit"), "got: {out}");
-    }
-
-    #[test]
-    fn render_list_omits_more_footer_when_total_equals_rendered() {
-        let mut buf = Vec::new();
-        render_sessions(
-            &mut buf,
-            &page(vec![session(
-                "aaaa1234",
+    fn render_list_archived_lists_only_archived_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = super::super::store::testing::test_store(dir.path());
+        for id in ["aaaa1111", "bbbb2222"] {
+            super::super::store::testing::seed_test_session(
+                &store,
+                id,
+                Some(id),
+                Some(1),
                 datetime!(2026-04-18 09:00:00 UTC),
-            )]),
-            false,
-            UtcOffset::UTC,
-            None,
-        )
-        .unwrap();
-        let out = String::from_utf8(buf).unwrap();
-        assert!(!out.contains("more"), "got: {out}");
+            );
+        }
+        let archived = store.find_session_path("bbbb2222").unwrap();
+        super::super::store::set_archived_at(&archived, true).unwrap();
+        let render = |archived: bool| {
+            let mut buf = Vec::new();
+            render_list(
+                &mut buf,
+                &store,
+                false,
+                archived,
+                UtcOffset::UTC,
+                None,
+                None,
+            )
+            .unwrap();
+            String::from_utf8(buf).unwrap()
+        };
+
+        let active = render(false);
+        assert!(active.contains("aaaa1111"), "{active}");
+        assert!(!active.contains("bbbb2222"), "{active}");
+        let archived = render(true);
+        assert!(archived.contains("bbbb2222"), "{archived}");
+        assert!(!archived.contains("aaaa1111"), "{archived}");
+    }
+
+    #[test]
+    fn render_list_appends_more_footer_only_when_capped() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = super::super::store::testing::test_store(dir.path());
+        for id in ["aaaa1111", "bbbb2222"] {
+            super::super::store::testing::seed_test_session(
+                &store,
+                id,
+                Some(id),
+                Some(1),
+                datetime!(2026-04-18 09:00:00 UTC),
+            );
+        }
+        let render = |limit: usize| {
+            let mut buf = Vec::new();
+            render_list(
+                &mut buf,
+                &store,
+                false,
+                false,
+                UtcOffset::UTC,
+                None,
+                Some(limit),
+            )
+            .unwrap();
+            String::from_utf8(buf).unwrap()
+        };
+
+        let capped = render(1);
+        assert_eq!(
+            capped.lines().last(),
+            Some("... more (use `--limit N` to raise the cap or `--limit 0` to list all)"),
+            "{capped}",
+        );
+        let full = render(2);
+        assert!(!full.contains("... more"), "{full}");
     }
 
     // ── render_sessions ──

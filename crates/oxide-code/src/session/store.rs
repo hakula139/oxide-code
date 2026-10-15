@@ -133,6 +133,7 @@ struct SessionDataBuilder {
     /// A compact boundary that takes effect only once its post-compact root follows it.
     pending_compact: Option<CompactInfo>,
     latest_title: Option<TitleInfo>,
+    archived: bool,
     compact_tail_uuids: Option<HashSet<Uuid>>,
     compact_tail_accepts_sidecars: bool,
     tool_result_metadata: HashMap<String, ToolMetadata>,
@@ -147,6 +148,7 @@ impl SessionDataBuilder {
             compact: None,
             pending_compact: None,
             latest_title: None,
+            archived: false,
             compact_tail_uuids: None,
             compact_tail_accepts_sidecars: true,
             tool_result_metadata: HashMap::new(),
@@ -179,6 +181,7 @@ impl SessionDataBuilder {
             {
                 self.latest_title = Some(TitleInfo { title, updated_at });
             }
+            Entry::Archive { archived, .. } => self.archived = archived,
             Entry::ToolResultMetadata {
                 tool_use_id,
                 metadata,
@@ -285,6 +288,7 @@ impl SessionDataBuilder {
             context: context.map(|context| *context),
             compact: self.compact,
             title: self.latest_title,
+            archived: self.archived,
             tool_result_metadata: self.tool_result_metadata,
             file_snapshots: self.file_snapshots,
         }
@@ -308,6 +312,25 @@ pub(crate) fn delete_at(path: &Path, live_id: &str) -> Result<()> {
     }
     fs::remove_file(path)
         .with_context(|| format!("failed to remove session file {}", path.display()))
+}
+
+/// Sets the archive state of the session file at `path`. The file keeps its mtime, since listings
+/// order sessions by activity and toggling the state is not activity.
+pub(crate) fn set_archived_at(path: &Path, archived: bool) -> Result<()> {
+    let mut writer = open_append_at(path)?;
+    let modified = fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .with_context(|| format!("cannot stat {}", path.display()))?;
+    writer.set_archived(archived)?;
+    if let Some(file) = &writer.file
+        && let Err(e) = file.set_modified(modified)
+    {
+        warn!(
+            "archive toggle moved {} up the listing: {e}",
+            path.display()
+        );
+    }
+    Ok(())
 }
 
 fn validate_session_id(session_id: &str) -> Result<()> {
@@ -353,6 +376,15 @@ impl SessionWriter {
         self.file = Some(file);
         Ok(())
     }
+
+    /// Appends an [`Entry::Archive`] setting the session's archive state.
+    pub(super) fn set_archived(&mut self, archived: bool) -> Result<()> {
+        let entry = Entry::Archive {
+            archived,
+            at: OffsetDateTime::now_utc(),
+        };
+        self.append_lines(&encode_lines([&entry])?)
+    }
 }
 
 /// Encodes `entries` as JSONL, one line each.
@@ -377,6 +409,7 @@ pub(crate) struct SessionData {
     pub(crate) context: Option<SessionContext>,
     pub(crate) compact: Option<CompactInfo>,
     pub(crate) title: Option<TitleInfo>,
+    pub(crate) archived: bool,
     pub(crate) tool_result_metadata: HashMap<String, ToolMetadata>,
     pub(crate) file_snapshots: Vec<FileSnapshot>,
 }
@@ -1729,6 +1762,49 @@ mod tests {
             err.to_string().contains("session not found"),
             "got: {err:#}"
         );
+    }
+
+    // ── set_archived_at ──
+
+    #[test]
+    fn set_archived_at_latest_entry_wins_keeping_the_transcript_and_mtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut writer = store.create(&sample_header("shelved"), &[]).unwrap();
+        writer
+            .append(&[sample_message_entry(Uuid::new_v4(), "hello")])
+            .unwrap();
+        drop(writer);
+        let path = test_session_file(dir.path(), "shelved");
+        let last_active = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        open_append_file(&path)
+            .unwrap()
+            .set_modified(last_active)
+            .unwrap();
+        let modified = || fs::metadata(&path).unwrap().modified().unwrap();
+        assert!(!load_session_data_from_path(&path).unwrap().archived);
+
+        set_archived_at(&path, true).unwrap();
+        let data = load_session_data_from_path(&path).unwrap();
+        assert!(data.archived);
+        assert_eq!(data.messages, [Message::user("hello")]);
+        assert_eq!(modified(), last_active, "archiving is not activity");
+
+        set_archived_at(&path, false).unwrap();
+        assert!(!load_session_data_from_path(&path).unwrap().archived);
+        assert_eq!(modified(), last_active, "unarchiving is not activity");
+    }
+
+    #[test]
+    fn set_archived_at_missing_file_errors_without_creating_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ghost.jsonl");
+        let err = set_archived_at(&path, true).expect_err("missing session must error");
+        assert!(
+            err.to_string().contains("session not found"),
+            "got: {err:#}"
+        );
+        assert!(!path.exists());
     }
 
     // ── append ──

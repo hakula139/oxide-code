@@ -297,9 +297,9 @@ mod tests {
             .iter()
             .map(|r| r.value.clone().into_owned())
             .collect();
-        // BUILT_INS is alphabetical, so empty-query first row is `clear`.
+        // BUILT_INS is alphabetical, so empty-query first row is `archive`.
         assert_ne!(values, [] as [String; 0]);
-        assert_eq!(values[0], "clear");
+        assert_eq!(values[0], "archive");
     }
 
     #[test]
