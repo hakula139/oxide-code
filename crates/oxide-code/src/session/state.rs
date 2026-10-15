@@ -182,14 +182,20 @@ impl SessionState {
         self.first_user_prompt_seen = true;
     }
 
-    /// Unqueues a failed compact so a retry cannot persist a compaction the agent abandoned. Relies
-    /// on a compact ending its batch, which leaves its entries at the tail of the queue.
+    /// Unqueues a failed compact so a retry cannot persist a compaction the agent abandoned.
     pub(super) fn abandon_compact(&mut self) {
-        if let Some(start) = self
-            .unwritten
-            .iter()
-            .rposition(|entry| matches!(entry, Entry::Compact { .. }))
-        {
+        self.truncate_from_last(|entry| matches!(entry, Entry::Compact { .. }));
+    }
+
+    /// Unqueues a failed archive so a retry cannot hide the session the user stayed in.
+    pub(super) fn abandon_archive(&mut self) {
+        self.truncate_from_last(|entry| matches!(entry, Entry::Archive { .. }));
+    }
+
+    /// Drops the queue from the last entry matching `starts_batch`. Relies on the abandoned cmd
+    /// ending its batch, which leaves its entries at the tail of the queue.
+    fn truncate_from_last(&mut self, starts_batch: impl Fn(&Entry) -> bool) {
+        if let Some(start) = self.unwritten.iter().rposition(starts_batch) {
             self.unwritten.truncate(start);
         }
     }

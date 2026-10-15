@@ -7,6 +7,7 @@
 //! Persistence: commands never write config. Mutations are session-local. Restart returns to the
 //! user-declared config (see `docs/design/slash/commands.md` § Design Decisions 6).
 
+mod archive;
 mod clear;
 mod compact;
 mod config;

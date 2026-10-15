@@ -15,20 +15,16 @@ pub(crate) const DEFAULT_SESSION_LIST_LIMIT: usize = 30;
 
 // ── ListPage ──
 
-/// One page of sessions. `total` also counts the files the page never reached.
+/// One page of sessions, and whether more matching sessions follow it.
 #[derive(Debug, Default)]
 pub(crate) struct ListPage {
     sessions: Vec<SessionInfo>,
-    total: usize,
+    more: bool,
 }
 
 impl ListPage {
-    pub(crate) fn new(sessions: Vec<SessionInfo>, total: usize) -> Self {
-        debug_assert!(
-            total >= sessions.len(),
-            "ListPage total must include the materialised sessions",
-        );
-        Self { sessions, total }
+    pub(crate) fn new(sessions: Vec<SessionInfo>, more: bool) -> Self {
+        Self { sessions, more }
     }
 
     pub(crate) fn sessions(&self) -> &[SessionInfo] {
@@ -39,29 +35,42 @@ impl ListPage {
         self.sessions
     }
 
-    pub(crate) fn total(&self) -> usize {
-        self.total
+    pub(crate) fn has_more(&self) -> bool {
+        self.more
     }
 }
 
 // ── Listing ──
 
 impl SessionStore {
-    /// Every readable session in the home project, most recently active first.
+    /// Every readable unarchived session in the home project, most recently active first.
     #[cfg(test)]
     pub(crate) fn list(&self) -> Result<Vec<SessionInfo>> {
-        Ok(self.list_paged(None, false)?.into_sessions())
+        Ok(self.list_paged(None, false, false)?.into_sessions())
     }
 
-    /// Up to `limit` most recently active readable sessions, unbounded for `None`. `all` widens
-    /// the walk from the home project to every project.
-    pub(crate) fn list_paged(&self, limit: Option<usize>, all: bool) -> Result<ListPage> {
-        let mut paths = self.session_paths(all)?.into_iter();
-        let sessions: Vec<_> = read_session_infos(paths.by_ref())
-            .take(limit.unwrap_or(usize::MAX))
+    /// Up to `limit` most recently active readable sessions whose archive state is `archived`,
+    /// unbounded for `None`. `all` widens the walk from the home project to every project. Archive
+    /// state lives in each file, so the walk parses sessions until it finds one past the page.
+    pub(crate) fn list_paged(
+        &self,
+        limit: Option<usize>,
+        all: bool,
+        archived: bool,
+    ) -> Result<ListPage> {
+        let limit = limit.unwrap_or(usize::MAX);
+        let mut sessions: Vec<_> = read_session_infos(self.session_paths(all)?.into_iter())
+            .filter(|info| info.archived == archived)
+            .take(limit.saturating_add(1))
             .collect();
-        let total = sessions.len() + paths.len();
-        Ok(ListPage::new(sessions, total))
+        let more = sessions.len() > limit;
+        sessions.truncate(limit);
+        Ok(ListPage::new(sessions, more))
+    }
+
+    /// The most recently active readable unarchived session.
+    pub(crate) fn latest(&self, all: bool) -> Result<Option<SessionInfo>> {
+        Ok(read_session_infos(self.session_paths(all)?.into_iter()).find(|info| !info.archived))
     }
 
     /// Readable sessions whose id starts with `prefix`, most recently active first. Ids are
@@ -149,10 +158,11 @@ fn read_session_infos(
 
 // Cheap pre-filter: `serde(tag = "type")` always emits `type` first.
 const TITLE_LINE_PREFIX: &str = r#"{"type":"title""#;
+const ARCHIVE_LINE_PREFIX: &str = r#"{"type":"archive""#;
 const SUMMARY_LINE_PREFIX: &str = r#"{"type":"summary""#;
 
-/// Reads the header and the latest title and summary. `last_active_at` is the mtime the walk sorted
-/// by, so the listed time matches the order.
+/// Reads the header, the latest title and summary, and the archive state. `last_active_at` is the
+/// mtime the walk sorted by, so the listed time matches the order.
 fn read_session_info(path: &Path, last_active_at: OffsetDateTime) -> Result<SessionInfo> {
     let file = File::open(path).with_context(|| format!("cannot open {}", path.display()))?;
     let mut lines = JsonlLines::new(BufReader::new(&file));
@@ -164,6 +174,7 @@ fn read_session_info(path: &Path, last_active_at: OffsetDateTime) -> Result<Sess
 
     let mut title: Option<TitleInfo> = None;
     let mut exit: Option<ExitInfo> = None;
+    let mut archived = false;
     while let Some((_, line)) = lines.next_line()? {
         if line.starts_with(TITLE_LINE_PREFIX)
             && let Ok(Entry::Title {
@@ -188,6 +199,12 @@ fn read_session_info(path: &Path, last_active_at: OffsetDateTime) -> Result<Sess
                 message_count,
                 updated_at,
             });
+        } else if line.starts_with(ARCHIVE_LINE_PREFIX)
+            && let Ok(Entry::Archive {
+                archived: state, ..
+            }) = serde_json::from_str(line)
+        {
+            archived = state;
         }
     }
 
@@ -199,6 +216,7 @@ fn read_session_info(path: &Path, last_active_at: OffsetDateTime) -> Result<Sess
         title,
         exit,
         git_branch,
+        archived,
     })
 }
 
@@ -207,6 +225,7 @@ mod tests {
     use time::macros::datetime;
     use uuid::Uuid;
 
+    use super::super::set_archived_at;
     use super::super::testing::{
         sample_header, sample_message_entry, sample_summary_entry, sample_title_entry,
         seed_test_session, test_project_dir, test_session_file, test_store,
@@ -460,22 +479,22 @@ mod tests {
         let store = test_store(dir.path());
         seed_n_sessions(&store, 10);
 
-        let page = store.list_paged(Some(3), false).unwrap();
+        let page = store.list_paged(Some(3), false, false).unwrap();
         assert_eq!(page.sessions().len(), 3, "cap honored");
-        assert_eq!(page.total(), 10, "total reflects pre-cap count");
+        assert!(page.has_more(), "seven sessions follow the page");
         assert_eq!(page.sessions()[0].session_id, "session-0009");
         assert_eq!(page.sessions()[2].session_id, "session-0007");
     }
 
     #[tokio::test]
-    async fn list_paged_unbounded_returns_total_equal_to_len() {
+    async fn list_paged_unbounded_returns_every_session_with_none_more() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         seed_n_sessions(&store, 4);
 
-        let page = store.list_paged(None, false).unwrap();
+        let page = store.list_paged(None, false, false).unwrap();
         assert_eq!(page.sessions().len(), 4);
-        assert_eq!(page.total(), 4, "no cap → total equals returned len");
+        assert!(!page.has_more());
     }
 
     #[tokio::test]
@@ -491,35 +510,77 @@ mod tests {
             .unwrap();
         drop(foreign_store);
 
-        let all = store.list_paged(None, true).unwrap().into_sessions();
+        let all = store.list_paged(None, true, false).unwrap().into_sessions();
         let mut ids: Vec<_> = all.iter().map(|s| s.session_id.as_str()).collect();
         ids.sort_unstable();
         assert_eq!(ids, vec!["foreign", "own"]);
     }
 
     #[test]
-    fn list_paged_leaves_unreadable_files_out_of_rows_and_total() {
+    fn list_paged_lists_one_archive_state_by_its_latest_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        seed_n_sessions(&store, 4);
+        let path = |id: &str| test_session_file(dir.path(), id);
+        set_archived_at(&path("session-0001"), true).unwrap();
+        set_archived_at(&path("session-0002"), true).unwrap();
+        set_archived_at(&path("session-0003"), true).unwrap();
+        set_archived_at(&path("session-0003"), false).unwrap();
+        let ids = |archived: bool| -> Vec<String> {
+            let mut ids: Vec<_> = store
+                .list_paged(None, false, archived)
+                .unwrap()
+                .into_sessions()
+                .into_iter()
+                .map(|s| s.session_id)
+                .collect();
+            ids.sort_unstable();
+            ids
+        };
+
+        assert_eq!(ids(false), ["session-0000", "session-0003"]);
+        assert_eq!(ids(true), ["session-0001", "session-0002"]);
+        assert!(store.list_paged(Some(1), false, true).unwrap().has_more());
+        assert!(
+            !store.list_paged(Some(2), false, true).unwrap().has_more(),
+            "active sessions past the page are not more archived ones",
+        );
+    }
+
+    #[test]
+    fn list_paged_skips_unreadable_files() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         seed_n_sessions(&store, 3);
         write_newest_corrupt_session(dir.path());
 
-        let page = store.list_paged(Some(2), false).unwrap();
+        let page = store.list_paged(Some(2), false, false).unwrap();
         let ids: Vec<_> = page
             .sessions()
             .iter()
             .map(|s| s.session_id.as_str())
             .collect();
         assert_eq!(ids, ["session-0002", "session-0001"]);
-        assert_eq!(
-            page.total(),
-            3,
-            "total counts the unparsed file and skips the unreadable one"
-        );
+        assert!(page.has_more());
 
-        let unbounded = store.list_paged(None, false).unwrap();
-        assert_eq!(unbounded.sessions().len(), 3);
-        assert_eq!(unbounded.total(), 3, "an unbounded page hides no rows");
+        let full = store.list_paged(Some(3), false, false).unwrap();
+        assert_eq!(full.sessions().len(), 3);
+        assert!(
+            !full.has_more(),
+            "an unreadable file is not a session past the page"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_paged_zero_limit_yields_no_rows_but_flags_more() {
+        // The CLI maps `--limit 0` to `None`, so `Some(0)` reaching the store means zero rows.
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        seed_n_sessions(&store, 3);
+
+        let page = store.list_paged(Some(0), false, false).unwrap();
+        assert!(page.sessions().is_empty());
+        assert!(page.has_more());
     }
 
     #[cfg(unix)]
@@ -535,7 +596,7 @@ mod tests {
         fs::create_dir(&locked).unwrap();
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
 
-        let page = store.list_paged(None, true);
+        let page = store.list_paged(None, true, false);
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
 
         let ids: Vec<_> = page
@@ -547,16 +608,21 @@ mod tests {
         assert_eq!(ids, ["own"]);
     }
 
-    #[tokio::test]
-    async fn list_paged_zero_limit_yields_no_rows_but_full_total() {
-        // The CLI maps `--limit 0` to `None`, so `Some(0)` reaching the store means zero rows.
+    // ── latest ──
+
+    #[test]
+    fn latest_skips_archived_sessions() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        seed_n_sessions(&store, 3);
+        seed_n_sessions(&store, 2);
+        let latest_id = || store.latest(false).unwrap().map(|s| s.session_id);
+        assert_eq!(latest_id().as_deref(), Some("session-0001"));
 
-        let page = store.list_paged(Some(0), false).unwrap();
-        assert!(page.sessions().is_empty());
-        assert_eq!(page.total(), 3, "total still reflects what's on disk");
+        set_archived_at(&test_session_file(dir.path(), "session-0001"), true).unwrap();
+        assert_eq!(latest_id().as_deref(), Some("session-0000"));
+
+        set_archived_at(&test_session_file(dir.path(), "session-0000"), true).unwrap();
+        assert_eq!(latest_id(), None);
     }
 
     // ── list_matching ──

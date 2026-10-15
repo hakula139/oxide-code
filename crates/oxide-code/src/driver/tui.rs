@@ -24,6 +24,8 @@ pub(crate) struct History {
     pub(crate) compact: Option<CompactInfo>,
     pub(crate) tool_metadata: HashMap<String, ToolMetadata>,
     pub(crate) title: Option<String>,
+    /// Resuming the session unarchived it.
+    pub(crate) unarchived: bool,
 }
 
 /// Runs the TUI until the user quits or a signal arrives, then waits for the engine to finalize the
@@ -65,6 +67,7 @@ pub(crate) async fn run(
             compact: history.compact.as_ref(),
             tool_metadata: &history.tool_metadata,
             title: history.title,
+            unarchived: history.unarchived,
         },
     );
     if let Some(notice) = unsupported_notice {

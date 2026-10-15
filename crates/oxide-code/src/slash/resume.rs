@@ -31,6 +31,8 @@ use crate::util::text::truncate_to_width;
 
 const PICKER_TITLE: &str = "Resume session";
 const PICKER_DESCRIPTION: &str = "Pick a session to resume in place.";
+const ARCHIVED_PICKER_TITLE: &str = "Resume archived session";
+const ARCHIVED_PICKER_DESCRIPTION: &str = "Pick a session to unarchive and resume in place.";
 const VIEWPORT_HEIGHT: u16 = 6;
 /// Each row paints title + metadata + a trailing blank for breathing room between sessions.
 const ROW_HEIGHT: u16 = 3;
@@ -129,13 +131,15 @@ pub(super) struct ResumePicker {
     list: SearchableList<SessionRow>,
     /// `false` = current project, `true` = every project.
     all: bool,
+    /// `false` = active sessions, `true` = archived ones.
+    archived: bool,
     local_offset: UtcOffset,
     /// Filtered out of every reload so the user can't self-resume onto the open append-writer.
     live_session_id: String,
     /// Rows loaded into the list, at most [`DEFAULT_SESSION_LIST_LIMIT`].
     loaded: usize,
-    /// Resumable sessions in scope, including those past the load cap.
-    total: usize,
+    /// More sessions in scope follow the loaded rows.
+    more: bool,
     /// Last reload's failure, surfaced inline so failures don't disguise themselves as "no
     /// sessions found". Cleared on the next successful reload.
     load_error: Option<String>,
@@ -149,10 +153,11 @@ impl ResumePicker {
             list: SearchableList::new(PICKER_TITLE, Vec::new(), VIEWPORT_HEIGHT)
                 .with_description(PICKER_DESCRIPTION),
             all: false,
+            archived: false,
             local_offset,
             live_session_id,
             loaded: 0,
-            total: 0,
+            more: false,
             load_error: None,
         };
         picker.reload();
@@ -160,10 +165,10 @@ impl ResumePicker {
     }
 
     fn reload(&mut self) {
-        let page = match self
-            .store
-            .list_paged(Some(DEFAULT_SESSION_LIST_LIMIT), self.all)
-        {
+        let result =
+            self.store
+                .list_paged(Some(DEFAULT_SESSION_LIST_LIMIT), self.all, self.archived);
+        let page = match result {
             Ok(p) => {
                 self.load_error = None;
                 p
@@ -177,17 +182,26 @@ impl ResumePicker {
         let local_offset = self.local_offset;
         let live_id = self.live_session_id.as_str();
         let show_project = self.all;
-        let total = page.total();
-        let sessions = page.into_sessions();
-        let fetched = sessions.len();
-        let rows: Vec<SessionRow> = sessions
+        self.more = page.has_more();
+        let rows: Vec<SessionRow> = page
+            .into_sessions()
             .into_iter()
             .filter(|info| info.session_id != live_id)
             .map(|info| SessionRow::from_info(info, local_offset, show_project))
             .collect();
         self.loaded = rows.len();
-        self.total = total - (fetched - rows.len());
         self.list.replace_items(rows);
+    }
+
+    fn toggle_archived(&mut self) {
+        self.archived = !self.archived;
+        if self.archived {
+            self.list
+                .set_header(ARCHIVED_PICKER_TITLE, ARCHIVED_PICKER_DESCRIPTION);
+        } else {
+            self.list.set_header(PICKER_TITLE, PICKER_DESCRIPTION);
+        }
+        self.reload();
     }
 
     fn submit(&self) -> ModalKey {
@@ -223,17 +237,29 @@ impl ResumePicker {
         } else {
             "current project"
         };
-        let (loaded, total) = (self.loaded, self.total);
+        let (kind, other_view) = if self.archived {
+            ("archived ", "active")
+        } else {
+            ("", "archived")
+        };
+        let loaded = self.loaded;
         let matched = self.list.visible_len();
-        let count = match (self.list.is_filtered(), total > loaded) {
-            (true, true) => format!("{matched} matching in the {loaded} most recent of {total}"),
+        let count = match (self.list.is_filtered(), self.more) {
+            (true, true) => {
+                format!("{matched} matching in the {loaded} most recent · more not loaded")
+            }
             (true, false) => format!("{matched} / {loaded} matching"),
-            (false, true) => format!("{loaded} most recent of {total} sessions"),
-            (false, false) => format!("{loaded} session{}", if loaded == 1 { "" } else { "s" }),
+            (false, true) => format!("{loaded} most recent {kind}sessions · more not loaded"),
+            (false, false) => {
+                format!(
+                    "{loaded} {kind}session{}",
+                    if loaded == 1 { "" } else { "s" }
+                )
+            }
         };
         format!(
-            "{count} · scope: {scope} · Tab to toggle · Enter to resume · Ctrl+D to delete · \
-             Esc to cancel"
+            "{count} · scope: {scope} · Tab to toggle · Ctrl+A for {other_view} · Enter to resume · \
+             Ctrl+D to delete · Esc to cancel"
         )
     }
 }
@@ -282,6 +308,10 @@ impl Modal for ResumePicker {
             KeyCode::Tab => {
                 self.all = !self.all;
                 self.reload();
+                ModalKey::Consumed
+            }
+            KeyCode::Char('a') if event.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.toggle_archived();
                 ModalKey::Consumed
             }
             KeyCode::Char('d') if event.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -377,6 +407,7 @@ mod tests {
     use super::*;
     use crate::session::display::UNTITLED_MARKER;
     use crate::session::entry::TitleInfo;
+    use crate::session::store::set_archived_at;
     use crate::session::store::testing::{seed_test_session, test_store};
     use crate::slash::{stamped_id, test_session_info, with_isolated_xdg};
 
@@ -419,6 +450,7 @@ mod tests {
             }),
             exit: None,
             git_branch: None,
+            archived: false,
         }
     }
 
@@ -444,6 +476,7 @@ mod tests {
                 updated_at: last_active_at,
             }),
             git_branch: git_branch.map(str::to_owned),
+            archived: false,
         }
     }
 
@@ -651,7 +684,7 @@ mod tests {
         );
         let picker = ResumePicker::new(store, "live-session-id".to_owned());
         assert_eq!(
-            picker.total, 2,
+            picker.loaded, 2,
             "both seeded sessions should populate the list",
         );
     }
@@ -677,7 +710,7 @@ mod tests {
             datetime!(2026-04-18 09:01:00 UTC),
         );
         let picker = ResumePicker::new(store, live_id.clone());
-        assert_eq!(picker.total, 1, "live session must be filtered out");
+        assert_eq!(picker.loaded, 1, "live session must be filtered out");
         let visible_id = picker
             .list
             .selected()
@@ -706,12 +739,7 @@ mod tests {
         let picker = ResumePicker::new(store, "live-session-id".to_owned());
 
         assert_eq!(picker.list.visible_len(), DEFAULT_SESSION_LIST_LIMIT);
-        assert_eq!(picker.total, DEFAULT_SESSION_LIST_LIMIT + 1);
-        let footer = picker.footer_text();
-        assert!(
-            footer.starts_with("30 most recent of 31 sessions · scope:"),
-            "{footer}"
-        );
+        assert!(picker.more);
     }
 
     #[test]
@@ -728,7 +756,7 @@ mod tests {
             "reload should surface list_paged failure: {:?}",
             picker.load_error,
         );
-        assert_eq!(picker.total, 0, "no rows materialise on the Err arm");
+        assert_eq!(picker.loaded, 0, "no rows materialise on the Err arm");
     }
 
     // ── ResumePicker::submit ──
@@ -779,8 +807,8 @@ mod tests {
         let picker = ResumePicker::new(store, "live-session-id".to_owned());
         assert_eq!(
             picker.footer_text(),
-            "1 session · scope: current project · Tab to toggle · Enter to resume · \
-             Ctrl+D to delete · Esc to cancel",
+            "1 session · scope: current project · Tab to toggle · Ctrl+A for archived · \
+             Enter to resume · Ctrl+D to delete · Esc to cancel",
         );
 
         let (_dir2, empty_store) = isolated_store();
@@ -788,8 +816,8 @@ mod tests {
         empty.handle_key(&key(KeyCode::Tab));
         assert_eq!(
             empty.footer_text(),
-            "0 sessions · scope: all projects · Tab to toggle · Enter to resume · \
-             Ctrl+D to delete · Esc to cancel",
+            "0 sessions · scope: all projects · Tab to toggle · Ctrl+A for archived · \
+             Enter to resume · Ctrl+D to delete · Esc to cancel",
         );
 
         let (_dir3, two_store) = isolated_store();
@@ -811,7 +839,7 @@ mod tests {
     }
 
     #[test]
-    fn footer_text_shows_filtered_over_total_when_query_active() {
+    fn footer_text_shows_matches_over_loaded_rows_when_query_active() {
         let (_dir, store) = isolated_store();
         for (byte, title) in [
             (0x11_u8, "auth fix"),
@@ -833,7 +861,7 @@ mod tests {
         let footer = picker.footer_text();
         assert!(
             footer.starts_with("1 / 3 matching · scope:"),
-            "filter `fix` should narrow to one title but keep `total` visible: {footer}",
+            "filter `fix` should narrow to one title but keep the loaded count visible: {footer}",
         );
     }
 
@@ -855,8 +883,8 @@ mod tests {
         let mut picker = ResumePicker::new(store, live_id);
         let footer = picker.footer_text();
         assert!(
-            footer.starts_with("29 most recent of 30 sessions · scope:"),
-            "the live session counts toward neither side: {footer}",
+            footer.starts_with("29 most recent sessions · more not loaded · scope:"),
+            "the live session is not a loaded row: {footer}",
         );
 
         for c in "oldest".chars() {
@@ -864,7 +892,7 @@ mod tests {
         }
         let footer = picker.footer_text();
         assert!(
-            footer.starts_with("0 matching in the 29 most recent of 30 · scope:"),
+            footer.starts_with("0 matching in the 29 most recent · more not loaded · scope:"),
             "the filter only searches loaded rows: {footer}",
         );
     }
@@ -1083,14 +1111,14 @@ mod tests {
         );
 
         let mut picker = ResumePicker::new(store, live_id.clone());
-        assert_eq!(picker.total, 1, "scoped: only the home project");
+        assert_eq!(picker.loaded, 1, "scoped: only the home project");
         for c in "11".chars() {
             picker.handle_key(&key(KeyCode::Char(c)));
         }
         assert_eq!(picker.list.query(), "11");
         picker.handle_key(&key(KeyCode::Tab));
         assert_eq!(
-            picker.total, 2,
+            picker.loaded, 2,
             "Tab widens to all projects but excludes the live session",
         );
         assert_eq!(
@@ -1101,8 +1129,66 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_a_toggles_between_active_and_archived_sessions() {
+        let (_dir, store) = isolated_store();
+        let active_id = stamped_id(0x11);
+        let archived_id = stamped_id(0x22);
+        seed_session(
+            &store,
+            &active_id,
+            Some("active"),
+            1,
+            datetime!(2026-04-18 09:00:00 UTC),
+        );
+        seed_session(
+            &store,
+            &archived_id,
+            Some("archived"),
+            1,
+            datetime!(2026-04-18 09:01:00 UTC),
+        );
+        let archived_path = store.find_session_path(&archived_id).unwrap();
+        set_archived_at(&archived_path, true).unwrap();
+        let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
+        let selected_id =
+            |picker: &ResumePicker| picker.list.selected().unwrap().session_id.clone();
+        let mut ctrl_a = KeyEvent::from(KeyCode::Char('a'));
+        ctrl_a.modifiers = KeyModifiers::CONTROL;
+        assert_eq!(picker.loaded, 1);
+        assert_eq!(selected_id(&picker), active_id);
+
+        picker.handle_key(&ctrl_a);
+        assert_eq!(picker.loaded, 1);
+        assert_eq!(selected_id(&picker), archived_id);
+        assert_eq!(
+            picker.footer_text(),
+            "1 archived session · scope: current project · Tab to toggle · Ctrl+A for active · \
+             Enter to resume · Ctrl+D to delete · Esc to cancel",
+        );
+        let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
+        terminal
+            .draw(|frame| picker.render(frame, Rect::new(0, 0, 60, 20), &Theme::default()))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let title: String = (0..60_u16).map(|x| buf[(x, 0)].symbol()).collect();
+        assert_eq!(title.trim_end(), ARCHIVED_PICKER_TITLE);
+        let outcome = picker.handle_key(&key(KeyCode::Enter));
+        assert!(
+            matches!(
+                &outcome,
+                ModalKey::Submitted(ModalAction::User(UserAction::Resume { path }))
+                    if *path == archived_path
+            ),
+            "Enter must resume the archived session: {outcome:?}",
+        );
+
+        picker.handle_key(&ctrl_a);
+        assert_eq!(selected_id(&picker), active_id);
+    }
+
+    #[test]
     fn unrecognized_keys_are_consumed_without_side_effects() {
-        // Both bare unhandled keys (Insert) and Ctrl + non-`u` chars are absorbed silently —
+        // Both bare unhandled keys (Insert) and unbound Ctrl chars are absorbed silently —
         // neither may push into the filter or move the cursor.
         let (_dir, store) = isolated_store();
         seed_session(
@@ -1118,7 +1204,7 @@ mod tests {
         assert_eq!(picker.list.query(), "");
         assert_eq!(picker.list.cursor_index(), 0);
 
-        let mut event = KeyEvent::from(KeyCode::Char('a'));
+        let mut event = KeyEvent::from(KeyCode::Char('g'));
         event.modifiers = KeyModifiers::CONTROL;
         picker.handle_key(&event);
         assert_eq!(picker.list.query(), "");
@@ -1187,11 +1273,11 @@ mod tests {
             );
         }
         let mut picker = ResumePicker::new(store.clone(), "live-session-id".to_owned());
-        assert_eq!(picker.total, 2, "both seeded rows present");
+        assert_eq!(picker.loaded, 2, "both seeded rows present");
 
         std::fs::remove_file(store.find_session_path(&id_a).unwrap()).unwrap();
         picker.on_focus_regained();
-        assert_eq!(picker.total, 1, "deleted row drops on reload");
+        assert_eq!(picker.loaded, 1, "deleted row drops on reload");
     }
 
     #[test]
@@ -1240,7 +1326,7 @@ mod tests {
 
         std::fs::remove_file(store.find_session_path(&target).unwrap()).unwrap();
         picker.on_focus_regained();
-        assert_eq!(picker.total, 2, "deleted row dropped");
+        assert_eq!(picker.loaded, 2, "deleted row dropped");
         assert_ne!(
             picker.list.selected().unwrap().session_id,
             target,

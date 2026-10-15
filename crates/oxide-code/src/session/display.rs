@@ -1,5 +1,5 @@
-//! Shared display-layer helpers for session listings, used by the resume picker and the
-//! `/delete` confirm modal.
+//! Shared display-layer helpers for session listings and archive notices, used by the resume
+//! picker, the `/delete` confirm modal, and the archive commands.
 
 use std::fmt::Write as _;
 
@@ -75,6 +75,18 @@ pub(crate) fn format_metadata_line(
     meta
 }
 
+/// Notice that `session_id` was archived or unarchived.
+pub(crate) fn archive_notice(session_id: &str, archived: bool) -> String {
+    let id = id_prefix(session_id);
+    if archived {
+        format!(
+            "Archived session {id}. Press Ctrl+A in the /resume picker to list archived sessions."
+        )
+    } else {
+        format!("Unarchived session {id}.")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,6 +117,7 @@ mod tests {
             title: None,
             exit: None,
             git_branch: None,
+            archived: false,
         };
         assert_eq!(display_title(&info), UNTITLED_MARKER);
 
@@ -211,6 +224,21 @@ mod tests {
             line.matches(SEPARATOR).count(),
             1,
             "exactly one separator between prefix and when: {line}",
+        );
+    }
+
+    // ── archive_notice ──
+
+    #[test]
+    fn archive_notice_names_the_id_prefix_and_where_archived_sessions_list() {
+        assert_eq!(
+            archive_notice("abcdefghij", true),
+            "Archived session abcdefgh. Press Ctrl+A in the /resume picker to list archived \
+             sessions.",
+        );
+        assert_eq!(
+            archive_notice("abcdefghij", false),
+            "Unarchived session abcdefgh."
         );
     }
 }
