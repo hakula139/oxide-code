@@ -30,6 +30,7 @@ disambiguable
 dtolnay
 EACCES
 EISDIR
+ELOOP
 ENOENT
 ENOSPC
 ENOTDIR
@@ -130,6 +131,7 @@ vſcode
 vtable
 writeln
 xhigh
+XPRESS
 Xresources
 xxhash
 yazi

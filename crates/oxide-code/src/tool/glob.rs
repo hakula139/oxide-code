@@ -8,11 +8,21 @@ use std::pin::Pin;
 use serde::Deserialize;
 
 use super::{Tool, ToolMetadata, ToolOutput, ToolResultView, extract_input_field};
-use crate::permission::PermissionClass;
+use crate::permission::{PermissionClass, ReadDeny};
 
 const MAX_RESULTS: usize = 100;
 
-pub(crate) struct GlobTool;
+/// Withholds each path a `read` deny rule matches from the results.
+#[cfg_attr(test, derive(Default))]
+pub(crate) struct GlobTool {
+    read_deny: ReadDeny,
+}
+
+impl GlobTool {
+    pub(crate) fn new(read_deny: ReadDeny) -> Self {
+        Self { read_deny }
+    }
+}
 
 impl Tool for GlobTool {
     fn name(&self) -> &'static str {
@@ -76,7 +86,7 @@ impl Tool for GlobTool {
         &self,
         input: serde_json::Value,
     ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + '_>> {
-        Box::pin(run(input))
+        Box::pin(run(input, self.read_deny.clone()))
     }
 }
 
@@ -91,7 +101,7 @@ struct Input {
 
 // ── Execution ──
 
-async fn run(raw: serde_json::Value) -> ToolOutput {
+async fn run(raw: serde_json::Value, read_deny: ReadDeny) -> ToolOutput {
     let input: Input = match super::parse_input(raw) {
         Ok(v) => v,
         Err(e) => return e,
@@ -100,7 +110,7 @@ async fn run(raw: serde_json::Value) -> ToolOutput {
     let Input { pattern, path } = input;
 
     match tokio::task::spawn_blocking(move || {
-        super::working_dir().and_then(|cwd| glob_files(&pattern, path.as_deref(), &cwd))
+        super::working_dir().and_then(|cwd| glob_files(&pattern, path.as_deref(), &cwd, &read_deny))
     })
     .await
     {
@@ -108,7 +118,7 @@ async fn run(raw: serde_json::Value) -> ToolOutput {
             content,
             truncated_total,
         })) => {
-            let title = glob_title(&content);
+            let title = glob_title(super::strip_withheld_note(&content));
             let output = ToolOutput::success(content).with_title(title);
             match truncated_total {
                 Some(total) => output.with_truncated_total(total),
@@ -138,12 +148,17 @@ struct GlobOutput {
 
 /// Walks `search_path` (resolved against `cwd`, defaulting to it), filters entries against
 /// `pattern`, and returns up to `MAX_RESULTS` matches sorted newest-first by mtime, rendered
-/// relative to the canonical `cwd`.
+/// relative to the canonical `cwd`. Matches `read_deny` withholds are counted in a trailing note.
 ///
 /// `walk_files` skips files matched by `.gitignore` or a global ignore file, so only non-ignored
 /// files reach the matcher. Truncation past `MAX_RESULTS` is announced inline and surfaced
 /// separately on `truncated_total` for the structured view.
-fn glob_files(pattern: &str, search_path: Option<&str>, cwd: &Path) -> Result<GlobOutput, String> {
+fn glob_files(
+    pattern: &str,
+    search_path: Option<&str>,
+    cwd: &Path,
+    read_deny: &ReadDeny,
+) -> Result<GlobOutput, String> {
     let base = super::resolve_base_dir(search_path, cwd)?;
     if !base.is_dir() {
         return Err(format!(
@@ -154,10 +169,17 @@ fn glob_files(pattern: &str, search_path: Option<&str>, cwd: &Path) -> Result<Gl
 
     let glob = compile_glob(pattern)?;
 
+    let read_deny = read_deny.walk(&base, Path::new(search_path.unwrap_or(".")), cwd);
+    let mut withheld = 0;
     let mut matches: Vec<(String, std::time::SystemTime)> = super::walk_files(&base)
         .filter(|entry| {
             let rel = entry.path().strip_prefix(&base).unwrap_or(entry.path());
             glob.is_match(rel)
+        })
+        .filter(|entry| {
+            let denied = read_deny.denies(entry.path());
+            withheld += usize::from(denied);
+            !denied
         })
         .map(|entry| {
             let mtime = super::entry_mtime(&entry);
@@ -168,8 +190,10 @@ fn glob_files(pattern: &str, search_path: Option<&str>, cwd: &Path) -> Result<Gl
     matches.sort_by_key(|entry| std::cmp::Reverse(entry.1));
 
     if matches.is_empty() {
+        let mut content = "No files found".to_owned();
+        super::push_withheld_note(&mut content, withheld);
         return Ok(GlobOutput {
-            content: "No files found".into(),
+            content,
             truncated_total: None,
         });
     }
@@ -192,6 +216,7 @@ fn glob_files(pattern: &str, search_path: Option<&str>, cwd: &Path) -> Result<Gl
             "\n\n(Showing {MAX_RESULTS} of {total} matches. Use a more specific pattern.)"
         );
     }
+    super::push_withheld_note(&mut content, withheld);
 
     Ok(GlobOutput {
         content,
@@ -291,6 +316,7 @@ mod tests {
     use indoc::{formatdoc, indoc};
 
     use super::*;
+    use crate::permission::{Mode, Policy};
     use crate::tool::testing::canonical_tempdir;
     use crate::util::path::slash_separated;
 
@@ -302,7 +328,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cwd = dunce::canonicalize(dir.path()).unwrap();
 
-        let target = GlobTool.gate_target(&serde_json::json!({"pattern": "*.rs"}), &cwd);
+        let target = GlobTool::default().gate_target(&serde_json::json!({"pattern": "*.rs"}), &cwd);
         let crate::permission::GateTarget::Path { relative, .. } = target else {
             panic!("expected a path target");
         };
@@ -317,11 +343,12 @@ mod tests {
         std::fs::write(dir.path().join("a.txt"), "").unwrap();
         std::fs::write(dir.path().join("b.rs"), "").unwrap();
 
-        let output = run(serde_json::json!({
-            "pattern": "*.txt",
-            "path": dir.path().to_str().unwrap()
-        }))
-        .await;
+        let output = GlobTool::default()
+            .run(serde_json::json!({
+                "pattern": "*.txt",
+                "path": dir.path().to_str().unwrap()
+            }))
+            .await;
 
         assert!(!output.is_error);
         assert!(output.content.contains("a.txt"));
@@ -331,14 +358,16 @@ mod tests {
 
     #[tokio::test]
     async fn run_missing_pattern() {
-        let output = run(serde_json::json!({})).await;
+        let output = GlobTool::default().run(serde_json::json!({})).await;
         assert!(output.is_error);
         assert!(output.content.contains("Invalid input"));
     }
 
     #[tokio::test]
     async fn run_invalid_pattern_omits_title() {
-        let output = run(serde_json::json!({"pattern": "[unclosed"})).await;
+        let output = GlobTool::default()
+            .run(serde_json::json!({"pattern": "[unclosed"}))
+            .await;
         assert!(output.is_error);
         assert!(
             output.content.contains("Invalid glob pattern"),
@@ -356,11 +385,12 @@ mod tests {
             std::fs::write(dir.path().join(format!("{i:04}.txt")), "").unwrap();
         }
 
-        let output = run(serde_json::json!({
-            "pattern": "*.txt",
-            "path": dir.path().to_str().unwrap(),
-        }))
-        .await;
+        let output = GlobTool::default()
+            .run(serde_json::json!({
+                "pattern": "*.txt",
+                "path": dir.path().to_str().unwrap(),
+            }))
+            .await;
 
         assert!(!output.is_error);
         assert_eq!(output.metadata.truncated_total, Some(total));
@@ -394,7 +424,7 @@ mod tests {
         std::fs::write(dir.path().join("bar.txt"), "").unwrap();
         std::fs::write(dir.path().join("baz.rs"), "").unwrap();
 
-        let result = glob_files("*.txt", None, dir.path()).unwrap();
+        let result = glob_files("*.txt", None, dir.path(), &ReadDeny::default()).unwrap();
         let mut files: Vec<&str> = result.content.lines().collect();
         files.sort_unstable();
         assert_eq!(files, ["bar.txt", "foo.txt"]);
@@ -409,7 +439,7 @@ mod tests {
         std::fs::write(dir.path().join("top.rs"), "").unwrap();
         std::fs::write(sub.join("nested.rs"), "").unwrap();
 
-        let result = glob_files("**/*.rs", None, dir.path()).unwrap();
+        let result = glob_files("**/*.rs", None, dir.path(), &ReadDeny::default()).unwrap();
         assert!(result.content.lines().any(|l| l == "top.rs"));
         assert!(result.content.lines().any(|l| l == "sub/nested.rs"));
     }
@@ -422,11 +452,11 @@ mod tests {
         std::fs::write(dir.path().join("src/a.rs"), "").unwrap();
         std::fs::write(nested.join("b.rs"), "").unwrap();
 
-        let scoped = glob_files("src/*.rs", None, dir.path()).unwrap();
+        let scoped = glob_files("src/*.rs", None, dir.path(), &ReadDeny::default()).unwrap();
         assert_eq!(scoped.content, "src/a.rs");
 
         // A pattern without `/` matches the file name at any depth.
-        let bare = glob_files("b.rs", None, dir.path()).unwrap();
+        let bare = glob_files("b.rs", None, dir.path(), &ReadDeny::default()).unwrap();
         assert_eq!(bare.content, "src/nested/b.rs");
     }
 
@@ -438,11 +468,13 @@ mod tests {
         std::fs::write(dir.path().join("src/b.rs"), "").unwrap();
 
         assert_eq!(
-            glob_files("./*.rs", None, dir.path()).unwrap().content,
+            glob_files("./*.rs", None, dir.path(), &ReadDeny::default())
+                .unwrap()
+                .content,
             "a.rs"
         );
         assert_eq!(
-            glob_files("././src/*.rs", None, dir.path())
+            glob_files("././src/*.rs", None, dir.path(), &ReadDeny::default())
                 .unwrap()
                 .content,
             "src/b.rs"
@@ -459,10 +491,11 @@ mod tests {
         std::fs::create_dir(&outside).unwrap();
         std::fs::write(outside.join("x.rs"), "").unwrap();
 
-        let inside = glob_files("*.rs", Some("src"), &cwd).unwrap();
+        let inside = glob_files("*.rs", Some("src"), &cwd, &ReadDeny::default()).unwrap();
         assert_eq!(inside.content, "src/lib.rs");
 
-        let outside_hit = glob_files("*.rs", Some("../outside"), &cwd).unwrap();
+        let outside_hit =
+            glob_files("*.rs", Some("../outside"), &cwd, &ReadDeny::default()).unwrap();
         assert_eq!(
             outside_hit.content,
             slash_separated(&outside.join("x.rs")),
@@ -478,7 +511,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(50));
         std::fs::write(dir.path().join("new.txt"), "new").unwrap();
 
-        let result = glob_files("*.txt", None, dir.path()).unwrap();
+        let result = glob_files("*.txt", None, dir.path(), &ReadDeny::default()).unwrap();
         assert_eq!(result.content, "new.txt\nold.txt");
     }
 
@@ -487,7 +520,7 @@ mod tests {
         let dir = canonical_tempdir();
         std::fs::write(dir.path().join("a.txt"), "").unwrap();
 
-        let result = glob_files("*.rs", None, dir.path()).unwrap();
+        let result = glob_files("*.rs", None, dir.path(), &ReadDeny::default()).unwrap();
         assert_eq!(result.content, "No files found");
         assert!(result.truncated_total.is_none());
     }
@@ -495,7 +528,7 @@ mod tests {
     #[test]
     fn glob_files_invalid_pattern() {
         let dir = canonical_tempdir();
-        let err = glob_files("[invalid", None, dir.path()).unwrap_err();
+        let err = glob_files("[invalid", None, dir.path(), &ReadDeny::default()).unwrap_err();
         assert!(err.contains("Invalid glob pattern"));
     }
 
@@ -503,7 +536,7 @@ mod tests {
     fn glob_files_absolute_pattern_points_at_path() {
         let dir = canonical_tempdir();
         let pattern = format!("{}/*.rs", dir.path().display());
-        let err = glob_files(&pattern, None, dir.path()).unwrap_err();
+        let err = glob_files(&pattern, None, dir.path(), &ReadDeny::default()).unwrap_err();
         assert_eq!(
             err,
             format!(
@@ -515,11 +548,12 @@ mod tests {
     #[test]
     fn glob_files_invalid_directory() {
         let dir = canonical_tempdir();
-        let err = glob_files("*.txt", Some("missing"), dir.path()).unwrap_err();
+        let err =
+            glob_files("*.txt", Some("missing"), dir.path(), &ReadDeny::default()).unwrap_err();
         assert!(err.starts_with("Cannot access missing: "), "{err}");
 
         std::fs::write(dir.path().join("a.txt"), "").unwrap();
-        let err = glob_files("*.txt", Some("a.txt"), dir.path()).unwrap_err();
+        let err = glob_files("*.txt", Some("a.txt"), dir.path(), &ReadDeny::default()).unwrap_err();
         assert_eq!(err, "a.txt is not a directory");
     }
 
@@ -530,7 +564,7 @@ mod tests {
             std::fs::write(dir.path().join(format!("{i:04}.txt")), "").unwrap();
         }
 
-        let result = glob_files("*.txt", None, dir.path()).unwrap();
+        let result = glob_files("*.txt", None, dir.path(), &ReadDeny::default()).unwrap();
         let file_count = result
             .content
             .lines()
@@ -546,6 +580,67 @@ mod tests {
     }
 
     #[test]
+    fn glob_files_withholds_paths_a_read_deny_rule_matches() {
+        let dir = canonical_tempdir();
+        std::fs::write(dir.path().join("config.toml"), "").unwrap();
+        std::fs::create_dir(dir.path().join("secrets")).unwrap();
+        std::fs::write(dir.path().join("secrets/key.toml"), "").unwrap();
+        let deny = ["read(secrets/**)".to_owned()];
+        let read_deny = Policy::resolve(Mode::Auto, &[], &deny, dir.path())
+            .unwrap()
+            .read_deny();
+
+        let result = glob_files("*.toml", None, dir.path(), &read_deny).unwrap();
+        assert_eq!(
+            result.content,
+            "config.toml\n\n(1 file withheld by read deny rules)"
+        );
+        assert_eq!(result.truncated_total, None);
+        assert_eq!(
+            glob_title(crate::tool::strip_withheld_note(&result.content)),
+            "Found 1 file"
+        );
+        // The structured view would drop the note, so the text view shows it.
+        let view = GlobTool::default().result_view(
+            &serde_json::json!({"pattern": "*.toml"}),
+            &result.content,
+            &ToolMetadata::default(),
+        );
+        assert_eq!(view, None);
+
+        let result = glob_files("secrets/*", None, dir.path(), &read_deny).unwrap();
+        assert_eq!(
+            result.content,
+            "No files found\n\n(1 file withheld by read deny rules)"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn glob_files_withholds_a_denied_file_below_a_symlinked_root() {
+        let dir = canonical_tempdir();
+        let (cwd, outside) = (dir.path().join("cwd"), dir.path().join("outside"));
+        std::fs::create_dir(&cwd).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join(".env"), "").unwrap();
+        std::fs::write(outside.join("app.toml"), "").unwrap();
+        std::os::unix::fs::symlink(&outside, cwd.join("config")).unwrap();
+        let deny = ["read(**/.env)".to_owned()];
+        let read_deny = Policy::resolve(Mode::Auto, &[], &deny, &cwd)
+            .unwrap()
+            .read_deny();
+
+        let result = glob_files("*", Some("config"), &cwd, &read_deny).unwrap();
+        assert_eq!(
+            result.content,
+            format!(
+                "{}\n\n(1 file withheld by read deny rules)",
+                outside.join("app.toml").display()
+            )
+        );
+    }
+
+    #[test]
     fn glob_files_includes_hidden_paths_but_skips_vcs_dirs() {
         let dir = canonical_tempdir();
         let workflows = dir.path().join(".github/workflows");
@@ -555,10 +650,16 @@ mod tests {
         std::fs::create_dir(&git).unwrap();
         std::fs::write(git.join("hook.yml"), "").unwrap();
 
-        let result = glob_files(".github/workflows/*.yml", None, dir.path()).unwrap();
+        let result = glob_files(
+            ".github/workflows/*.yml",
+            None,
+            dir.path(),
+            &ReadDeny::default(),
+        )
+        .unwrap();
         assert_eq!(result.content, ".github/workflows/ci.yml");
 
-        let all = glob_files("*.yml", None, dir.path()).unwrap();
+        let all = glob_files("*.yml", None, dir.path(), &ReadDeny::default()).unwrap();
         assert_eq!(all.content, ".github/workflows/ci.yml");
     }
 
@@ -570,7 +671,7 @@ mod tests {
         std::fs::write(dir.path().join("ignored.txt"), "").unwrap();
         std::fs::write(dir.path().join("tracked.txt"), "").unwrap();
 
-        let result = glob_files("*.txt", None, dir.path()).unwrap();
+        let result = glob_files("*.txt", None, dir.path(), &ReadDeny::default()).unwrap();
         assert_eq!(result.content, "tracked.txt");
     }
 
@@ -578,7 +679,7 @@ mod tests {
 
     #[test]
     fn result_view_builds_glob_files() {
-        let view = GlobTool
+        let view = GlobTool::default()
             .result_view(
                 &serde_json::json!({"pattern": "*.rs"}),
                 indoc! {"
@@ -612,7 +713,7 @@ mod tests {
             truncated_total: Some(1234),
             ..ToolMetadata::default()
         };
-        let view = GlobTool
+        let view = GlobTool::default()
             .result_view(
                 &serde_json::json!({"pattern": "**/*.rs"}),
                 &content,
@@ -639,7 +740,7 @@ mod tests {
 
             (Showing {MAX_RESULTS} of 1234 matches. Use a more specific pattern.)"
         };
-        let view = GlobTool
+        let view = GlobTool::default()
             .result_view(
                 &serde_json::json!({"pattern": "**/*.rs"}),
                 &content,
@@ -659,7 +760,7 @@ mod tests {
 
     #[test]
     fn result_view_handles_no_files_found() {
-        let view = GlobTool
+        let view = GlobTool::default()
             .result_view(
                 &serde_json::json!({"pattern": "*.nope"}),
                 "No files found",
@@ -679,7 +780,7 @@ mod tests {
 
     #[test]
     fn result_view_falls_back_for_empty_content() {
-        let view = GlobTool.result_view(
+        let view = GlobTool::default().result_view(
             &serde_json::json!({"pattern": "*.rs"}),
             "",
             &ToolMetadata::default(),
@@ -689,7 +790,7 @@ mod tests {
 
     #[test]
     fn result_view_falls_back_when_input_has_no_pattern() {
-        let view = GlobTool.result_view(
+        let view = GlobTool::default().result_view(
             &serde_json::json!({}),
             "src/main.rs",
             &ToolMetadata::default(),
@@ -699,7 +800,7 @@ mod tests {
 
     #[test]
     fn result_view_single_file_no_footer() {
-        let view = GlobTool
+        let view = GlobTool::default()
             .result_view(
                 &serde_json::json!({"pattern": "*.rs"}),
                 "src/only.rs",
@@ -718,7 +819,7 @@ mod tests {
 
     #[test]
     fn result_view_normalises_trailing_newline() {
-        let view = GlobTool
+        let view = GlobTool::default()
             .result_view(
                 &serde_json::json!({"pattern": "*.rs"}),
                 "a.rs\nb.rs\n",
@@ -741,7 +842,7 @@ mod tests {
             truncated_total: Some(2),
             ..ToolMetadata::default()
         };
-        let view = GlobTool
+        let view = GlobTool::default()
             .result_view(
                 &serde_json::json!({"pattern": "*.rs"}),
                 "a.rs\nb.rs",
@@ -779,7 +880,7 @@ mod tests {
             truncated_total: Some(1),
             ..ToolMetadata::default()
         };
-        let view = GlobTool.result_view(
+        let view = GlobTool::default().result_view(
             &serde_json::json!({"pattern": "*.rs"}),
             "a.rs\nb.rs",
             &metadata,
@@ -789,7 +890,7 @@ mod tests {
 
     #[test]
     fn result_view_falls_back_for_unrecognised_trailing_prose() {
-        let view = GlobTool.result_view(
+        let view = GlobTool::default().result_view(
             &serde_json::json!({"pattern": "*.rs"}),
             indoc! {"
                 src/main.rs

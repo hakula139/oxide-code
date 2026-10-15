@@ -115,6 +115,10 @@ impl Rule {
         Ok(Self { class, spec })
     }
 
+    pub(super) const fn class(&self) -> PermissionClass {
+        self.class
+    }
+
     /// Whether this rule matches a call in `class` with `target` under `discipline`.
     pub(crate) fn matches(
         &self,
@@ -149,7 +153,7 @@ impl Rule {
                 },
             ) => {
                 glob.is_match(canonical, discipline)
-                    || (deny && glob.is_match(requested, discipline))
+                    || (deny && requested != canonical && glob.is_match(requested, discipline))
             }
             _ => false,
         }

@@ -20,22 +20,24 @@ use std::io::IsTerminal;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{ArgGroup, Parser};
 use tracing::warn;
 
 use client::anthropic::Client;
 use config::Config;
 use driver::Exit;
-use driver::tui::History;
+use driver::tui::Startup;
 use engine::Engine;
 use file_tracker::FileTracker;
+use permission::ReadDeny;
 use session::display::archive_notice;
 use session::handle::ResumedSession;
 use session::list_view::render_list;
 use session::resolver::resolve_session;
 use session::store::SessionStore;
 use session::store::listing::DEFAULT_SESSION_LIST_LIMIT;
+use slash::ResumePicker;
 use tool::{
     ToolRegistry, bash::BashTool, edit::EditTool, glob::GlobTool, grep::GrepTool, read::ReadTool,
     write::WriteTool,
@@ -45,7 +47,7 @@ use tool::{
 #[command(name = "ox", version, about = "A terminal-based AI coding assistant")]
 #[command(group(
     ArgGroup::new("scope")
-        .args(["list", "continue"])
+        .args(["list", "continue", "resume"])
         .multiple(true),
 ))]
 #[expect(
@@ -53,7 +55,7 @@ use tool::{
     reason = "each bool is an independent CLI switch that clap parses into its own field"
 )]
 struct Cli {
-    /// Widen `--list` / `--continue` from the current cwd to every project.
+    /// Widen `--list`, `--continue`, and `--resume` from the current cwd to every project.
     #[arg(short, long, requires = "scope")]
     all: bool,
 
@@ -89,6 +91,10 @@ struct Cli {
     /// Run in headless mode: send a single prompt and print the response.
     #[arg(short, long, value_name = "PROMPT")]
     prompt: Option<String>,
+
+    /// Open the TUI on the session picker. Quitting the picker exits without starting a session.
+    #[arg(short, long, conflicts_with_all = ["continue", "list", "no_tui", "prompt"])]
+    resume: bool,
 }
 
 fn main() -> Result<ExitCode> {
@@ -109,6 +115,9 @@ async fn async_main() -> Result<Exit> {
 
     let tui_mode =
         !cli.no_tui && cli.prompt.is_none() && !cli.list && std::io::stdout().is_terminal();
+    if cli.resume && !tui_mode {
+        bail!("--resume opens the session picker in the TUI, which needs a terminal on stdout");
+    }
     let _log_guard = util::log::init_tracing(tui_mode)?;
 
     if cli.list {
@@ -146,9 +155,13 @@ async fn async_main() -> Result<Exit> {
         eprintln!("{}", archive_notice(handle.session_id(), false));
     }
     let drifted = file_tracker.restore_verified(file_snapshots);
+    let picker = cli
+        .resume
+        .then(|| ResumePicker::at_startup(store.clone(), handle.session_id().to_owned(), cli.all));
 
+    let read_deny = config.permission.read_deny();
     let client = Client::new(config, Some(handle.session_id().to_owned()))?;
-    let tools = Arc::new(create_tool_registry(&file_tracker));
+    let tools = Arc::new(create_tool_registry(&file_tracker, &read_deny));
     let engine = Engine::new(
         client,
         tools,
@@ -170,13 +183,14 @@ async fn async_main() -> Result<Exit> {
         return driver::repl::run(engine, show_thinking, &drifted).await;
     }
 
-    let history = History {
+    let startup = Startup {
         compact,
+        picker,
         tool_metadata: tool_result_metadata,
         title,
         unarchived,
     };
-    driver::tui::run(engine, &theme, snapshot, show_thinking, history, &drifted).await
+    driver::tui::run(engine, &theme, snapshot, show_thinking, startup, &drifted).await
 }
 
 // ── Session Helpers ──
@@ -203,24 +217,49 @@ fn detect_terminal_width() -> Option<usize> {
         .map(|(cols, _)| usize::from(cols))
 }
 
-fn create_tool_registry(tracker: &Arc<FileTracker>) -> ToolRegistry {
+fn create_tool_registry(tracker: &Arc<FileTracker>, read_deny: &ReadDeny) -> ToolRegistry {
     ToolRegistry::new(vec![
         Box::new(BashTool),
         Box::new(ReadTool::new(Arc::clone(tracker))),
         Box::new(WriteTool::new(Arc::clone(tracker))),
         Box::new(EditTool::new(Arc::clone(tracker))),
-        Box::new(GlobTool),
-        Box::new(GrepTool),
+        Box::new(GlobTool::new(read_deny.clone())),
+        Box::new(GrepTool::new(read_deny.clone())),
     ])
 }
 
 #[cfg(test)]
 mod tests {
+    use clap::error::ErrorKind;
     use time::macros::datetime;
 
     use super::*;
+    use crate::permission::{Mode, Policy};
     use crate::session::store::set_archived_at;
     use crate::session::store::testing::seed_test_session;
+    use crate::tool::testing::canonical_tempdir;
+    use crate::util::path::slash_separated;
+
+    // ── Cli ──
+
+    #[test]
+    fn cli_resume_takes_all_to_widen_the_picker() {
+        let cli = Cli::try_parse_from(["ox", "-r", "--all"]).unwrap();
+        assert!(cli.resume);
+        assert!(cli.all);
+    }
+
+    #[test]
+    fn cli_resume_conflicts_with_every_mode_that_skips_the_picker() {
+        let kinds = [
+            &["ox", "--resume", "--continue"][..],
+            &["ox", "--resume", "--list"],
+            &["ox", "--resume", "--no-tui"],
+            &["ox", "--resume", "-p", "hello"],
+        ]
+        .map(|args| Cli::try_parse_from(args).err().map(|error| error.kind()));
+        assert_eq!(kinds, [Some(ErrorKind::ArgumentConflict); 4]);
+    }
 
     // ── list_sessions ──
 
@@ -289,7 +328,7 @@ mod tests {
     #[tokio::test]
     async fn create_tool_registry_shares_file_tracking() {
         let tracker = Arc::new(FileTracker::default());
-        let tools = create_tool_registry(&tracker);
+        let tools = create_tool_registry(&tracker, &ReadDeny::default());
         let names: Vec<_> = tools.definitions().iter().map(|tool| tool.name).collect();
         assert_eq!(names, ["bash", "read", "write", "edit", "glob", "grep"]);
 
@@ -324,5 +363,41 @@ mod tests {
             .await;
         assert!(!written.is_error, "{}", written.content);
         assert_eq!(std::fs::read_to_string(path).unwrap(), "rewritten");
+    }
+
+    #[tokio::test]
+    async fn create_tool_registry_hands_read_deny_to_the_search_tools() {
+        let dir = canonical_tempdir();
+        std::fs::write(dir.path().join("notes.txt"), "token").unwrap();
+        std::fs::write(dir.path().join("secret.txt"), "token").unwrap();
+        // An absolute rule, since the tools search from the process cwd, which the dir sits outside.
+        let deny = [format!("read({}/secret.txt)", slash_separated(dir.path()))];
+        let read_deny = Policy::resolve(Mode::Auto, &[], &deny, dir.path())
+            .unwrap()
+            .read_deny();
+        let tools = create_tool_registry(&Arc::new(FileTracker::default()), &read_deny);
+
+        for (tool, pattern) in [("glob", "*.txt"), ("grep", "token")] {
+            let input = serde_json::json!({"pattern": pattern, "path": dir.path()});
+            let output = tools.run(tool, input).await;
+            assert!(!output.is_error, "{tool}: {}", output.content);
+            assert!(
+                output.content.contains("notes.txt"),
+                "{tool}: {}",
+                output.content
+            );
+            assert!(
+                !output.content.contains("secret"),
+                "{tool}: {}",
+                output.content
+            );
+            assert!(
+                output
+                    .content
+                    .ends_with("(1 file withheld by read deny rules)"),
+                "{tool}: {}",
+                output.content
+            );
+        }
     }
 }

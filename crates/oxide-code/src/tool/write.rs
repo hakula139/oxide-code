@@ -199,7 +199,7 @@ mod tests {
         testing::{seed_full_read, tracker},
     };
     use crate::tool::read::ReadTool;
-    use crate::tool::testing::canonical_tempdir;
+    use crate::tool::testing::{canonical_tempdir, symlink_file};
 
     // ── permission_class ──
 
@@ -250,14 +250,13 @@ mod tests {
         assert_eq!(added, ["new line"]);
     }
 
-    #[cfg(unix)]
     #[test]
     fn approval_preview_does_not_read_through_a_symlink() {
         let dir = tempfile::tempdir().unwrap();
         let secret = dir.path().join("secret.txt");
         std::fs::write(&secret, "token").unwrap();
         let link = dir.path().join("link.txt");
-        std::os::unix::fs::symlink(&secret, &link).unwrap();
+        symlink_file(&secret, &link);
         let tool = WriteTool::new(Arc::new(FileTracker::default()));
 
         let preview = tool.approval_preview(&serde_json::json!({
@@ -532,6 +531,24 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn write_file_refuses_a_dangling_symlink_at_the_final_component() {
+        let dir = canonical_tempdir();
+        std::fs::create_dir(dir.path().join("outside")).unwrap();
+        let target = dir.path().join("outside").join("escape.txt");
+        let link = dir.path().join("notes.md");
+        symlink_file(&target, &link);
+
+        let err = write_file(link.to_str().unwrap(), "payload", &tracker())
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("is a symlink"),
+            "expected symlink refusal, got: {err}"
+        );
+        assert!(!target.exists(), "the link target must not be created");
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn write_file_rejects_non_regular_file_before_gate() {
@@ -546,25 +563,6 @@ mod tests {
             err.contains("not a regular file"),
             "expected non-regular-file rejection, got: {err}",
         );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn write_file_refuses_a_dangling_symlink_at_the_final_component() {
-        let dir = canonical_tempdir();
-        std::fs::create_dir(dir.path().join("outside")).unwrap();
-        let target = dir.path().join("outside").join("escape.txt");
-        let link = dir.path().join("notes.md");
-        std::os::unix::fs::symlink(&target, &link).unwrap();
-
-        let err = write_file(link.to_str().unwrap(), "payload", &tracker())
-            .await
-            .unwrap_err();
-        assert!(
-            err.contains("is a symlink"),
-            "expected symlink refusal, got: {err}"
-        );
-        assert!(!target.exists(), "the link target must not be created");
     }
 
     #[cfg(unix)]
