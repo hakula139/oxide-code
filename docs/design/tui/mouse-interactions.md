@@ -13,13 +13,13 @@ The cleanest way to deliver both is to let the terminal do the work. The TUI doe
 
 ## Decision
 
-`enter_tui_mode` enables raw mode, the alternate screen, Kitty keyboard disambiguation, and DECSET 1007 (alternate-scroll). It does **not** enable `EnableMouseCapture`. Pairs unwind on `leave_tui_mode`.
+`enter_tui_mode` enables raw mode, the alternate screen, bracketed paste, Kitty keyboard disambiguation, and DECSET 1007 (alternate-scroll). It does **not** enable `EnableMouseCapture`. Pairs unwind on `leave_tui_mode`.
 
 `App::handle_crossterm_event` still forwards any mouse event it receives to `ChatView::handle_event`, but real sessions rely on DECSET 1007 for wheel scroll because the TUI does not claim mouse capture.
 
 ## DECSET 1007 (alternate-scroll)
 
-`\x1b[?1007h` on enter, `\x1b[?1007l` on leave. While the alt-screen is active the terminal translates physical wheel events into `\x1b[A` / `\x1b[B` arrow-key sequences, so `ChatView::handle_event` sees `KeyCode::Up` / `KeyCode::Down` and scrolls. The user's terminal handles the wheel without `EnableMouseCapture`, so native drag-select stays available.
+`\x1b[?1007h` on enter, `\x1b[?1007l` on leave. While the alt-screen is active the terminal translates physical wheel events into `\x1b[A` / `\x1b[B` arrow-key sequences. The input moves its cursor while a multi-line draft allows it, and otherwise returns the key as ignored so `ChatView::handle_event` scrolls. The user's terminal handles the wheel without `EnableMouseCapture`, so native drag-select stays available.
 
 Modern emulators (iTerm2, WezTerm, kitty, Alacritty, foot, Ghostty, Windows Terminal, VS Code / Cursor's xterm.js, recent GNOME Terminal, Konsole, Terminal.app via vim-mode) implement 1007. Older emulators ignore it with no fallback, so users there scroll with the keyboard (`PageUp` / `PageDown` / `Ctrl+End`).
 
