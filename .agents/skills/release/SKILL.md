@@ -7,4 +7,4 @@ description: Cut an oxide-code release tag. Use whenever the user asks to releas
 
 Read the root `RELEASING.md` and follow its release procedure step by step. It is the source of truth for releases.
 
-After the tag is pushed, watch the workflow with `gh run watch` and report the resulting release URL.
+After the tag is pushed, watch the workflow with `gh run watch`, then report the release URL and the Homebrew formula PR, if the workflow opened one.

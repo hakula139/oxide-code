@@ -60,7 +60,7 @@ VERSION=v0.1.0-alpha.2
 curl -fsSL "https://github.com/hakula139/oxide-code/releases/download/$VERSION/oxide-code-aarch64-apple-darwin.tar.gz" | tar -xz
 sudo mv ox /usr/local/bin/
 
-# Homebrew (macOS, Linux)
+# Homebrew (Apple Silicon macOS, x86_64 Linux)
 brew tap hakula139/oxide-code https://github.com/hakula139/oxide-code
 brew install oxide-code
 

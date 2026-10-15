@@ -1,6 +1,6 @@
 # Releasing
 
-Pushing a tag that matches `v[0-9]+.*` starts `.github/workflows/release.yml`, which builds every target and publishes a GitHub Release with the tag's `CHANGELOG.md` section as its notes. A tag with a prerelease suffix, such as `v0.1.0-rc.1`, publishes a prerelease.
+Pushing a tag that matches `v[0-9]+.*` starts `.github/workflows/release.yml`, which runs CI, builds and checks every target, and publishes a GitHub Release with the tag's `CHANGELOG.md` section as its notes. A tag with a prerelease suffix, such as `v0.1.0-rc.1`, publishes a prerelease.
 
 ## Versioning
 
@@ -68,18 +68,10 @@ git push origin vX.Y.Z
 Watch the [Release workflow](https://github.com/hakula139/oxide-code/actions/workflows/release.yml) with `gh run watch` and check:
 
 - The release notes match the changelog section, and a prerelease tag published a prerelease.
-- Every [target](#targets) archive and its `.sha256` sidecar are attached.
+- Every [target](#targets) archive and its `.sha256` sidecar are attached, and `gh attestation verify <archive> --repo hakula139/oxide-code` passes for one of them.
 - `nix run github:hakula139/oxide-code/vX.Y.Z -- --version` prints the version on one host.
 
-Then refresh the Homebrew formula through a PR of its own. The script fetches each `.sha256` sidecar from the published release:
-
-```bash
-git switch -c chore/homebrew-vX.Y.Z
-./scripts/update-homebrew-formula.sh vX.Y.Z
-git commit -am "chore(release): refresh Homebrew formula for vX.Y.Z"
-```
-
-After it merges, check that `brew upgrade oxide-code` installs the version.
+The workflow then opens a `chore(release): refresh Homebrew formula for vX.Y.Z` PR and dispatches CI on it. Merging that PR is the final release step, so merge it like any other PR, then check that `brew upgrade oxide-code` installs the version. The formula follows the latest release, or the newest prerelease until the first stable release, so other tags skip this job. If the job fails, fix the cause and rerun it, since a rerun rebuilds the branch and reuses an open PR.
 
 ## Re-cut an existing tag
 
@@ -91,6 +83,8 @@ git tag -f vX.Y.Z <commit>                                           # without h
 git tag -f -a --cleanup=verbatim -F highlights.md vX.Y.Z <commit>    # with highlights
 git push origin vX.Y.Z
 ```
+
+Either way, the new run updates the open formula PR with the new checksums, or opens a new one.
 
 ## Stable gates for 0.1.0
 
@@ -112,4 +106,10 @@ The `v0.1.0` release PR also switches the install snippets to `releases/latest/d
 
 ## Targets
 
-The matrix in `release.yml` covers `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin`, `x86_64-apple-darwin`, and `x86_64-pc-windows-msvc`. Each release attaches `oxide-code-<target>.tar.gz`, or `.zip` on Windows, with an `oxide-code-<target>.sha256` sidecar, and each archive contains the `ox` binary. Add a target by extending the matrix, since the archive name template (`oxide-code-$target`) and `bin: ox` apply uniformly. Pull requests that change `release.yml`, the Cargo manifests, `Cargo.lock`, or `rust-toolchain.toml` build every target without publishing.
+The matrix in `release.yml` builds `x86_64-unknown-linux-gnu` on the latest Ubuntu runner, `aarch64-apple-darwin` on macOS, and `x86_64-pc-windows-msvc` on Windows. Each release attaches `oxide-code-<target>.tar.gz`, or `.zip` on Windows, with an `oxide-code-<target>.sha256` sidecar and a build provenance attestation, and each archive contains the `ox` binary.
+
+- Every build job extracts its archive on its own runner and checks that `ox --version` reports the tag's version, or the Cargo version outside a tag.
+- The Linux job fails when the binary needs a newer glibc than the floor in `docs/guide/install.md`. The check reads the floor from the guide's OS line. If a runner image update trips it, either pin the Linux build to the previous image or raise the floor in the guide.
+- Publishing also waits for the full CI workflow, which the release workflow calls on the tag.
+- Pull requests that change `release.yml`, the Cargo manifests, `Cargo.lock`, or `rust-toolchain.toml` build and check every target without publishing. Running the workflow from the Actions tab on a branch adds the CI run.
+- Add a target by extending the matrix, since the archive name template (`oxide-code-$target`) and `bin: ox` apply uniformly. Each target needs a runner that executes its binary.
