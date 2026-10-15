@@ -41,8 +41,9 @@ use wire::{
 
 const API_VERSION: &str = "2023-06-01";
 
-/// Pinned to the claude-code version accepted by gateways because pre-allowlist versions fail.
-const CLAUDE_CLI_VERSION: &str = "2.1.121";
+/// Claude Code release the user agent, billing header, and agentic beta sequence all mirror.
+/// Gateways reject pre-allowlist versions, so bump it only together with a fresh beta capture.
+const CLAUDE_CLI_VERSION: &str = "2.1.296";
 const STAINLESS_PACKAGE_VERSION: &str = "0.81.0";
 const STAINLESS_RUNTIME_VERSION: &str = "v24.3.0";
 const STAINLESS_TIMEOUT_SECS: &str = "600";
