@@ -11,7 +11,7 @@ use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 use anyhow::{Result, bail};
 use caseless::Caseless;
@@ -310,12 +310,16 @@ fn loose_relative_to(path: &Path, base: &Path) -> Option<String> {
     if !base.is_absolute() {
         return None;
     }
-    let base = folded_names(base);
+    relative_to_folded(path, &folded_names(base))
+}
+
+/// [`loose_relative_to`] against a base already split into [`fold_name`]-folded names.
+fn relative_to_folded(path: &Path, base: &[String]) -> Option<String> {
     let names: Vec<&OsStr> = names(path).collect();
     let rest = names.get(base.len()..)?;
     names
         .iter()
-        .zip(&base)
+        .zip(base)
         .all(|(name, folded)| fold_name(&name.to_string_lossy()) == *folded)
         .then(|| {
             rest.iter()
@@ -620,6 +624,18 @@ impl Policy {
         self.mode
     }
 
+    /// The user and project `read` deny rules, for a tool that reaches files below the root the gate
+    /// checked.
+    pub(crate) fn read_deny(&self) -> ReadDeny {
+        ReadDeny(
+            self.deny
+                .iter()
+                .filter(|rule| rule.class() == PermissionClass::Read)
+                .cloned()
+                .collect(),
+        )
+    }
+
     /// Resolves a call to a [`Decision`]. Pure and synchronous: no I/O, no async, no classifier.
     /// A classifier slots in where this returns [`Decision::Ask`] from the last step.
     ///
@@ -673,6 +689,69 @@ impl Policy {
         }
 
         Decision::Ask
+    }
+}
+
+/// The `read` deny rules a search tool applies to each file it finds, since the gate checked only
+/// the search root. Cheap to clone.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ReadDeny(Arc<[Rule]>);
+
+impl ReadDeny {
+    /// The filter for one walk of `base`, the resolved search root, which the call spelled as
+    /// `requested` (relative to `cwd`, the resolved working directory).
+    pub(crate) fn walk(&self, base: &Path, requested: &Path, cwd: &Path) -> WalkDeny<'_> {
+        let requested = lexical_normalize(&cwd.join(requested));
+        WalkDeny {
+            rules: &self.0,
+            base: base.to_path_buf(),
+            requested_base: (requested != base).then_some(requested),
+            folded_cwd: cwd.is_absolute().then(|| folded_names(cwd)),
+        }
+    }
+}
+
+/// [`ReadDeny`] bound to one walk, with the spellings every file of the walk shares.
+pub(crate) struct WalkDeny<'a> {
+    rules: &'a [Rule],
+    base: PathBuf,
+    /// The base as the call spelled it, when that differs from `base`.
+    requested_base: Option<PathBuf>,
+    folded_cwd: Option<Vec<String>>,
+}
+
+impl WalkDeny<'_> {
+    /// Whether a rule denies reading `path`, a file the walk found below its base, as the gate denies
+    /// a read of it. The walk follows no symlink, so `path` is where the file resolves, and the same
+    /// names below the requested base spell it the way the call does.
+    pub(crate) fn denies(&self, path: &Path) -> bool {
+        if self.rules.is_empty() {
+            return false;
+        }
+        let requested = self
+            .requested_base
+            .as_ref()
+            .and_then(|base| Some(base.join(path.strip_prefix(&self.base).ok()?)));
+        let mut deny_relative: Vec<String> = [Some(path), requested.as_deref()]
+            .into_iter()
+            .flatten()
+            .filter_map(|spelling| relative_to_folded(spelling, self.folded_cwd.as_deref()?))
+            .collect();
+        deny_relative.dedup();
+
+        let canonical = path.to_string_lossy();
+        let requested = requested.as_deref().map(Path::to_string_lossy);
+        // Deny matching also tries every `deny_relative` spelling, which covers `relative`.
+        let target = Target::Path {
+            canonical: &canonical,
+            relative: None,
+            requested: requested.as_deref().unwrap_or(&canonical),
+            deny_relative: &deny_relative,
+            zone: Zone::Outside,
+        };
+        self.rules
+            .iter()
+            .any(|rule| rule.matches(PermissionClass::Read, &target, MatchDiscipline::Deny))
     }
 }
 
@@ -1345,6 +1424,44 @@ mod tests {
         }
     }
 
+    // ── Policy::read_deny ──
+
+    #[test]
+    fn read_deny_denies_exactly_the_files_the_gate_denies_reading() {
+        let (_dir, cwd) = temp_cwd();
+        let deny = [
+            "read(**/.env)".to_owned(),
+            format!("read({}/secrets/**)", cwd.display()),
+            "edit(**/notes.md)".to_owned(),
+        ];
+        let p = Policy::resolve(Mode::Auto, &[], &deny, &cwd).unwrap();
+        let read_deny = p.read_deny();
+        let walk = read_deny.walk(&cwd, Path::new("."), &cwd);
+
+        for (name, denied) in [
+            (".env", true),
+            ("sub/.ENV", true),
+            ("secrets/key", true),
+            ("notes.md", false),
+            ("src/main.rs", false),
+        ] {
+            let path = cwd.join(name);
+            let gate = GateTarget::for_path(name, &cwd);
+            assert_eq!(walk.denies(&path), denied, "{name}");
+            assert_eq!(
+                p.decide(PermissionClass::Read, &gate.as_target()) == Decision::Deny,
+                denied,
+                "{name}"
+            );
+        }
+        let empty = ReadDeny::default();
+        assert!(
+            !empty
+                .walk(&cwd, Path::new("."), &cwd)
+                .denies(&cwd.join(".env"))
+        );
+    }
+
     // ── Policy::decide ──
 
     #[test]
@@ -1584,5 +1701,46 @@ mod tests {
             p.decide(PermissionClass::Read, &key.as_target()),
             Decision::Deny
         );
+    }
+
+    // ── WalkDeny::denies ──
+
+    #[cfg(unix)]
+    #[test]
+    fn walk_deny_denies_a_file_by_the_spelling_the_call_used() {
+        let (_dir, root) = temp_cwd();
+        let (cwd, outside) = (root.join("cwd"), root.join("outside"));
+        std::fs::create_dir(&cwd).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, cwd.join("config")).unwrap();
+        let p = Policy::resolve(Mode::Auto, &[], &["read(**/.env)".to_owned()], &cwd).unwrap();
+        let read_deny = p.read_deny();
+        let env = outside.join(".env");
+
+        for (spelled, denied) in [("config", true), ("../outside", false)] {
+            let walk = read_deny.walk(&outside, Path::new(spelled), &cwd);
+            assert_eq!(walk.denies(&env), denied, "{spelled}");
+            let gate = GateTarget::for_path(&format!("{spelled}/.env"), &cwd);
+            assert_eq!(
+                p.decide(PermissionClass::Read, &gate.as_target()) == Decision::Deny,
+                denied,
+                "{spelled}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn walk_deny_denies_where_a_rule_prefix_resolves_through_a_symlink() {
+        let (_dir, root) = temp_cwd();
+        let (cwd, outside) = (root.join("cwd"), root.join("outside"));
+        std::fs::create_dir(&cwd).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, cwd.join("link")).unwrap();
+        let p = Policy::resolve(Mode::Auto, &[], &["read(link/**)".to_owned()], &cwd).unwrap();
+
+        let read_deny = p.read_deny();
+        let walk = read_deny.walk(&outside, Path::new("../outside"), &cwd);
+        assert!(walk.denies(&outside.join("key")));
     }
 }

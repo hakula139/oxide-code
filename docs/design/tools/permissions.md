@@ -94,7 +94,7 @@ In `-p` / `--no-tui` runs there is no human to prompt, so a would-ask call denie
 
 ## Permission Classes
 
-`Tool::permission_class` has no default, so every tool declares its class and a new tool cannot inherit a permissive class. Read-class tools are allowed at step 4, but they still extract a gate target (the file for `read`, the search root for `grep` / `glob`), allowing a path-scoped deny at step 1 or 3 to fire first. Rules target the class, so `read(**/.env)` also stops a `grep` rooted at a `.env` file. Because `grep` and `glob` gate on the search root, a deny on a file inside that root does not filter their matches ([#176](https://github.com/hakula139/oxide-code/issues/176)).
+`Tool::permission_class` has no default, so every tool declares its class and a new tool cannot inherit a permissive class. Read-class tools are allowed at step 4, but they still extract a gate target (the file for `read`, the search root for `grep` / `glob`), allowing a path-scoped deny at step 1 or 3 to fire first. Rules target the class, so `read(**/.env)` also stops a `grep` rooted at a `.env` file. Because `grep` and `glob` gate on the search root, each also checks every file its walk finds against the `read` deny rules and withholds the matches, ending its output with a count of withheld files that names none. A file is matched where it resolves and as the call spells it below the search root, as the gate matches a read of it, so `read(**/.env)` also withholds `.env` under a root that is a symlink out of the workspace. The walk follows no symlink below the canonical root, so the check needs no I/O.
 
 `edit` and `write` share a class but have different blast radii. `edit` requires the file to exist and to have been read, so it cannot create files. `write` can create new files and parent directories without a prior Read, while overwriting an existing file still goes through the tracker gate. Both declare `file_path` as their path field, so the resolution, zoning, and pinning described above treat them identically.
 
@@ -122,12 +122,14 @@ In `-p` / `--no-tui` runs there is no human to prompt, so a would-ask call denie
 - `crates/oxide-code/src/agent/event.rs`: `AgentEvent`, `UserAction`, `ApprovalPreview`.
 - `crates/oxide-code/src/config.rs`: `Config::load`, `OX_PERMISSION_MODE`, `Effort` enum template.
 - `crates/oxide-code/src/config/file.rs`: `FileConfig::merge`, `merge_section`, `reject_project_secrets`, `reject_project_permissions`.
-- `crates/oxide-code/src/permission.rs`: `Mode`, `PermissionClass`, `GateTarget::for_path`, protected paths, `Policy::decide`.
+- `crates/oxide-code/src/permission.rs`: `Mode`, `PermissionClass`, `GateTarget::for_path`, protected paths, `Policy::decide`, `ReadDeny`.
 - `crates/oxide-code/src/permission/rule.rs`: `class(specifier)` parsing and path-glob matching.
 - `crates/oxide-code/src/slash/confirm.rs`: `ConfirmDeleteSessionModal`, the approval-modal template.
-- `crates/oxide-code/src/tool.rs`: `Tool` trait (`permission_class`, `path_field`, `gate_target`, `pin_target`, `approval_preview`), `read_validated`, `write_no_follow`.
+- `crates/oxide-code/src/tool.rs`: `Tool` trait (`permission_class`, `path_field`, `gate_target`, `pin_target`, `approval_preview`), `read_validated`, `write_no_follow`, `push_withheld_note`.
 - `crates/oxide-code/src/tool/bash.rs`: unbounded execution surface.
 - `crates/oxide-code/src/tool/edit.rs`: read-before-edit gate, `synthesize_chunk` preview.
+- `crates/oxide-code/src/tool/glob.rs`: read-deny filter on each match.
+- `crates/oxide-code/src/tool/grep.rs`: read-deny filter in `collect_files`.
 - `crates/oxide-code/src/tool/write.rs`: new-file creation, symlink refusal, current-content preview.
 - `crates/oxide-code/src/tui/modal.rs`: `ModalStack`, the cancel hook.
 - `crates/oxide-code/src/tui/modal/approval.rs`: `ApprovalModal` wrapping, scrolling, and character reveal.
