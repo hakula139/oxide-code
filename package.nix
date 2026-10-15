@@ -3,6 +3,7 @@
   git,
   lib,
   rustPlatform,
+  versionCheckHook,
 }:
 
 let
@@ -34,6 +35,9 @@ rustPlatform.buildRustPackage {
   preCheck = ''
     export HOME=$TMPDIR
   '';
+
+  doInstallCheck = true;
+  nativeInstallCheckInputs = [ versionCheckHook ];
 
   meta = {
     description = "Terminal-based AI coding assistant written in Rust";
