@@ -28,7 +28,7 @@ Double the leading slash. Typing `//etc` sends the literal `/etc`.
 
 ## Mid-Turn Behavior
 
-State-mutating commands are refused while a turn is in flight; retry after the turn finishes. That includes `/clear`, `/compact`, `/delete`, `/init`, `/rename`, `/resume`, typed `/theme <name>`, and both bare and typed forms of `/effort` and `/model`. Read-only commands (`/config`, `/diff`, `/help`, `/status`) and the bare `/theme` picker run immediately.
+State-mutating commands are refused while a turn is in flight, so retry them after the turn finishes. That includes `/clear`, `/compact`, `/delete`, `/init`, `/rename`, `/resume`, typed `/theme <name>`, and both bare and typed forms of `/effort` and `/model`. Read-only commands (`/config`, `/diff`, `/help`, `/status`) and the bare `/theme` picker run immediately.
 
 ## Model and Effort
 
@@ -38,21 +38,17 @@ Bare `/model` and `/effort` open pickers. Both apply on Enter and cancel on Esc.
 
 ## Compaction
 
-`/compact` summarizes the visible conversation into a single `Compacted N messages → 1 summary` block. The next prompt continues from that summary rather than the full prior chat.
+`/compact` summarizes the visible conversation into a single `Compacted N messages → 1 summary` block. The next prompt continues from that summary, which replaces the prior chat in the model's context.
 
 `/compact <instructions>` appends free-text focus instructions to the rubric (e.g., `/compact focus on the build error and how we fixed it`). Useful when only a slice of the work matters going forward.
 
 The pre-compact transcript stays on disk, but resuming via `ox -c` starts from the compacted summary and post-compact tail. The file-change tracker resets on compact, so any `Edit` after `/compact` requires a fresh `Read`. Queued prompts survive the compaction.
 
-`/compact` refuses on sessions with fewer than 4 messages, when the model returns an empty summary, or while a turn is in flight.
+`/compact` refuses to run if fewer than 4 messages contain text or if the model returns an empty summary.
 
 ## Sessions
 
-`/rename` opens a modal pre-filled with the current title. `/rename <title>` sets it directly. The chosen title sticks and replaces the auto-generated AI title for the rest of the session.
-
-`/resume` opens a searchable session picker. Type to filter by id, title, or project, press Tab to widen the scope from current-project to all projects, and press Enter to resume the highlighted session. `/resume <id-prefix>` jumps directly, and ambiguous prefixes list candidates. Switching sessions preserves the running TUI: chat repopulates and the next prompt continues that thread.
-
-Inside the picker, **Ctrl+D** (or **Delete**) on the cursor row opens a Y/N confirm modal. **Y / Enter** unlinks the JSONL and prints a `Deleted session {id}: {title}` line in chat. **N / Esc / Ctrl+C** dismisses. `/delete <id-prefix>` opens the same confirm directly. The live session is excluded; any saved non-live session matched by id prefix can be deleted.
+`/rename`, `/resume`, and `/delete` manage session titles and saved sessions without leaving the TUI. See [Titles](sessions.md#titles), [Mid-Session Resume](sessions.md#mid-session-resume), and [Deleting a Session](sessions.md#deleting-a-session).
 
 ## Theme
 
@@ -62,4 +58,4 @@ Inside the picker, **Ctrl+D** (or **Delete**) on the cursor row opens a Y/N conf
 
 ## Persistence
 
-Slash-command choices stay session-local. Restart returns to your declared configuration in `ox.toml`. No slash command writes user config files.
+Slash-command choices stay session-local and no slash command writes config files, so a restart returns to your configured values.

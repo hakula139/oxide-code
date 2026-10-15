@@ -4,7 +4,7 @@ oxide-code loads configuration from multiple sources, merged in order of increas
 
 1. **Built-in defaults.**
 2. **User config file**: `~/.config/ox/config.toml` (or `$XDG_CONFIG_HOME/ox/config.toml`).
-3. **Project config file**: the nearest `ox.toml` found by walking up from the current directory. Project config cannot set `client.api_key`, `client.base_url`, or `client.extra_ca_certs`.
+3. **Project config file**: the nearest `ox.toml` found by walking up from the current directory. Project config cannot set `client.api_key`, `client.base_url`, `client.extra_ca_certs`, `permission.mode`, or `permission.allow`.
 4. **Environment variables**: always win.
 
 ## Config file
@@ -13,7 +13,7 @@ All fields are optional. Only specify the values you want to override.
 
 ```toml
 # ~/.config/ox/config.toml (user-wide)
-# or ox.toml in your project root (per-project, except api_key / base_url)
+# or ox.toml in your project root (per-project, except the user-only keys listed above)
 
 [client]
 model = "claude-sonnet-4-6"
@@ -112,7 +112,7 @@ Auto-compaction is enabled by default for known model context windows. The defau
 | `auto_threshold_tokens`  | integer | model-derived | Absolute trigger, snapped into `50000`-safe-trigger range |
 | `auto_threshold_percent` | integer | model-derived | Percent of context, snapped into the same range           |
 
-`auto_threshold_tokens` and `auto_threshold_percent` are mutually exclusive. Both are clamped into the usable range: values below `50000` tokens snap up to that floor, and values above the model-derived safe trigger snap down. The model-derived ceiling shifts with `/model`, so a global threshold sized for a larger context window keeps working after a swap. Percent must be `1-100`; resolved tokens follow the same snap-into-range rule.
+`auto_threshold_tokens` and `auto_threshold_percent` are mutually exclusive. Percent must be between `1` and `100`. Either form resolves to a token count clamped into the usable range: values below `50000` tokens snap up to that floor, and values above the model-derived safe trigger snap down. The model-derived ceiling shifts with `/model`, so a global threshold sized for a larger context window keeps working after a swap.
 
 For models without known context windows, the default and percent-based automatic triggers stay off. An explicit token threshold still works, snapped to the `50000` floor when set lower.
 
@@ -139,24 +139,24 @@ On Opus 4.7 / 4.8, `show_thinking = true` opts the request into `thinking.displa
 
 `show_welcome = false` blanks the chat region until you submit a prompt, which is useful when piping or screen-recording.
 
-`status_line` accepts these segment names: `current-dir`, `git-branch`, `pull-request`, `model`, `model-with-effort`, `context-used`, `session-cost`, `run-state`, `thread-title`, `current-time`. The list must contain at least one segment. Segments with no data, such as a missing git branch, an unopened pull request, or usage before the first completed turn, are omitted. The `pull-request` segment shells out to `gh pr view` so it requires the GitHub CLI on PATH. In supporting terminals, Ctrl-click or Cmd-click the segment to open the PR URL. The separator is part of the active theme's `separator` slot; there is no separate status-line separator setting.
+`status_line` accepts these segment names: `current-dir`, `git-branch`, `pull-request`, `model`, `model-with-effort`, `context-used`, `session-cost`, `run-state`, `thread-title`, `current-time`. The list must contain at least one segment. Segments with no data, such as a missing git branch, an unopened pull request, or usage before the first completed turn, are omitted. The `pull-request` segment shells out to `gh pr view` so it requires the GitHub CLI on PATH. In supporting terminals, Ctrl-click or Cmd-click the segment to open the PR URL. The separator takes its style from the active theme's `separator` slot and has no setting of its own.
 
-| Segment             | Renders                                        | Refresh         |
-| ------------------- | ---------------------------------------------- | --------------- |
-| `current-dir`       | Tildified working directory                    | At startup      |
-| `git-branch`        | Current branch (omitted on detached HEAD)      | Every 5 s       |
-| `pull-request`      | Open PR as clickable `#86` when OSC 8 works    | Every 60 s      |
-| `model`             | Compact model label (e.g., `Opus 4.8`)         | On `/model`     |
-| `model-with-effort` | Model label plus the effort tier in parens     | On `/model`     |
-| `context-used`      | `Ctx: 50% (100k/200k)` after the first turn    | Per turn        |
-| `session-cost`      | `Sess: $0.4321` running USD estimate           | Per turn        |
-| `run-state`         | `Ready` / spinner + label / Ctrl+C exit hint   | On state change |
-| `thread-title`      | AI-generated session title                     | After turn 1    |
-| `current-time`      | `HH:MM` in the local timezone                  | Per minute      |
+| Segment             | Renders                                      | Refresh         |
+| ------------------- | -------------------------------------------- | --------------- |
+| `current-dir`       | Tildified working directory                  | At startup      |
+| `git-branch`        | Current branch (omitted on detached HEAD)    | Every 5 s       |
+| `pull-request`      | Open PR as clickable `#86` when OSC 8 works  | Every 60 s      |
+| `model`             | Compact model label (e.g., `Opus 4.8`)       | On `/model`     |
+| `model-with-effort` | Model label plus the effort tier in parens   | On `/model`     |
+| `context-used`      | `Ctx: 50% (100k/200k)` after the first turn  | Per turn        |
+| `session-cost`      | `Sess: $0.4321` running USD estimate         | Per turn        |
+| `run-state`         | `Ready` / spinner + label / Ctrl+C exit hint | On state change |
+| `thread-title`      | AI-generated session title                   | After turn 1    |
+| `current-time`      | `HH:MM` in the local timezone                | Per minute      |
 
 When the row is too narrow to fit every configured segment, low-utility ones drop in this order before the remaining content gets truncated: `thread-title` → `current-time` → `pull-request` → `git-branch` → `current-dir` → `session-cost` → `context-used` → `model` → `model-with-effort` → `run-state`. Run state, the model labels, and the bar's last surviving segment are always preserved.
 
-`OX_STATUS_LINE` accepts the same segment names, comma-separated, with optional whitespace (`OX_STATUS_LINE="model, run-state"`). An empty value, an empty entry between commas (`"model,,run-state"`), or any unknown segment name fails startup with a parse error rather than silently dropping the offending part.
+`OX_STATUS_LINE` accepts the same segment names, comma-separated, with optional whitespace (`OX_STATUS_LINE="model, run-state"`). A value with no segments (`","`), an empty entry between commas (`"model,,run-state"`), or an unknown segment name fails startup with a parse error.
 
 ### `[tui.theme]`: Terminal theme
 
@@ -188,7 +188,7 @@ oxide-code checks three credential sources in order:
 
    Expired tokens are refreshed automatically. No configuration needed.
 
-Prefer the environment variable (or OAuth) over `api_key` in a config file. `ox.toml` resolves by walking up from the current directory, so oxide-code rejects project-level `api_key`, `base_url`, and `extra_ca_certs`. User-level `~/.config/ox/config.toml` is safer, but still plaintext on disk.
+The environment variable and OAuth keep credentials out of config files. An `api_key` in `~/.config/ox/config.toml` works but sits on disk in plaintext, and a project `ox.toml` cannot set it.
 
 ## Environment variables
 
@@ -207,12 +207,9 @@ Environment variables override all config file values.
 | `OX_COMPACTION_AUTO_ENABLED`           | `client.compaction.auto_enabled`           | `true`                      | Enable auto-compaction       |
 | `OX_COMPACTION_AUTO_THRESHOLD_TOKENS`  | `client.compaction.auto_threshold_tokens`  | model-derived               | Absolute compaction trigger  |
 | `OX_COMPACTION_AUTO_THRESHOLD_PERCENT` | `client.compaction.auto_threshold_percent` | model-derived               | Percent compaction trigger   |
+| `OX_PERMISSION_MODE`                   | `permission.mode`                          | `auto`                      | Tool permission mode         |
 | `OX_SHOW_THINKING`                     | `tui.show_thinking`                        | `false`                     | Show extended thinking       |
 | `OX_SHOW_WELCOME`                      | `tui.show_welcome`                         | `true`                      | Paint the welcome splash     |
 | `OX_STATUS_LINE`                       | `tui.status_line`                          | see `[tui]`                 | Comma-separated segments     |
 
-Boolean variables accept `1`, `true`, `yes`, or `on` to enable and `0`, `false`, `no`, or `off` to disable, in any letter case. Any other value makes `ox` exit at startup with an error naming the variable.
-
-Set `OX_SHOW_THINKING=1` to display the model's thinking process (dimmed text) when extended thinking is enabled for the model.
-
-Set `OX_SHOW_WELCOME=0` to suppress the welcome splash on an empty chat.
+Every variable treats an empty value as unset. Boolean variables accept `1`, `true`, `yes`, or `on` to enable and `0`, `false`, `no`, or `off` to disable, in any letter case. Any other value makes `ox` exit at startup with an error naming the variable.

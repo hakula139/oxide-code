@@ -33,7 +33,7 @@ The important pattern is not the exact segment list. The useful part for oxide-c
 
 ## opencode
 
-opencode keeps usage in the prompt footer rather than a fully configurable status line. It derives context from the latest assistant message usage, includes cache read and cache write tokens, and sums assistant-message cost across the session. Context percentage disappears when the provider model has no advertised context limit.
+opencode keeps usage in a fixed prompt footer with no configurable status line. It derives context from the latest assistant message usage, includes cache read and cache write tokens, and sums assistant-message cost across the session. Context percentage disappears when the provider model has no advertised context limit.
 
 ## Pricing Reference
 
@@ -53,12 +53,12 @@ Cost display should stay best-effort because account discounts, marketplace bill
 1. **Typed ordered roster.** A list of built-in segment names is simpler and safer than a command DSL for the first version.
 2. **Local usage first.** Context use and in-process session cost should come from provider usage already observed by oxide-code.
 3. **Cache-aware accounting.** Context and cost should include cache creation and cache read tokens because prompt caching is part of the real request shape.
-4. **Graceful omission.** Segments with no data should disappear instead of rendering placeholders.
-5. **Theme-owned colors.** Status-line colors should come from the active theme rather than a separate status-line flag.
+4. **Graceful omission.** Segments with no data should disappear entirely.
+5. **Theme-owned colors.** Status-line colors should come from the active theme.
 
 ## Patterns to Defer
 
 1. **ccusage integration.** Block and daily billing are useful, but shelling out to an external npm package adds installation, trust, cache, and schema concerns. A future version should either define a first-class external provider boundary or persist enough local usage to avoid it.
 2. **Account-limit telemetry.** Five-hour and weekly limits need provider-specific state that is separate from per-turn token usage.
-3. **PR and task-progress segments.** Those need reliable project metadata and task state that oxide-code does not own yet.
+3. **Task-progress segments.** Those need task state that oxide-code does not own yet.
 4. **Command-based status lines.** Claude Code's command hook is powerful but moves rendering, errors, and latency outside the Rust UI loop.

@@ -33,9 +33,9 @@ Single strum-derived `enum SlashCommand` (~50 variants) with per-variant methods
 
 ## opencode (TypeScript)
 
-Slash entries are derived from the command palette and keymap rather than a fixed slash-only table.
+Slash entries are derived from the command palette and keymap, with no fixed slash-only table.
 
-- **Registry**: `CommandPaletteProvider.slashes()` walks reachable palette entries, route commands, and server commands. Slash metadata comes from `slashName` / `slashAliases`; the same action can also have keybindings and palette-only metadata.
+- **Registry**: `CommandPaletteProvider.slashes()` walks reachable palette entries, route commands, and server commands. Slash metadata comes from `slashName` / `slashAliases`, and the same action can also have keybindings and palette-only metadata.
 - **Parser**: Regex `^\/(\S*)$` (line start only, normal mode). `@` for file mentions, `!` for shell mode.
 - **Dispatch**: Built-in closures + server-side `client.session.command()` for custom.
 - **Output**: `showToast()` for notifications, `dialog.show()` for pickers.

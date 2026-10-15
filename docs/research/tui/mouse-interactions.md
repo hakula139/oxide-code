@@ -28,7 +28,7 @@ No selection support, no copy-on-select. Native terminal selection works because
 
 ## opencode
 
-opencode is built on opentui (TypeScript / SolidJS), not bubbletea / Go. The `mouse` config field defaults to `true` and combines with `OPENCODE_DISABLE_MOUSE` (env var wins) to set `useMouse` on the opentui renderer config (`app.tsx:120-130`).
+opencode is built on opentui (TypeScript / SolidJS). The `mouse` config field defaults to `true` and combines with `OPENCODE_DISABLE_MOUSE` (env var wins) to set `useMouse` on the opentui renderer config (`app.tsx:120-130`).
 
 The renderer exposes `<box onMouseUp>` / `<box onMouseOver>` element-level events. Click affordances include tool-output expand / collapse (`session/index.tsx:1678`), subagent inline tool navigation (`index.tsx:2055`), revert-message banner, subagent footer nav, question / option dialog rows, permission-dialog options, error-screen copy-issue-URL button. The clickable `<Link href>` component fires `open(href)` from the npm `open` package on mouse-up, with no allowlist or sanitization.
 
@@ -63,7 +63,7 @@ Modern support: iTerm2, WezTerm, kitty, Alacritty, foot, Konsole, Ghostty, recen
 
 Two ratatui-specific traps appear when embedding the envelope inside a frame buffer cell:
 
-1. **`Buffer::set_string` strips control chars.** Embedding ESC in a `Span::raw` strips the leading and trailing escape and leaks the printable middle. `Cell::set_symbol` bypasses that filter and stores the symbol verbatim; crossterm's `Print(cell.symbol())` writes the bytes unchanged.
+1. **`Buffer::set_string` strips control chars.** Embedding ESC in a `Span::raw` strips the leading and trailing escape and leaks the printable middle. `Cell::set_symbol` bypasses that filter and stores the symbol verbatim, and crossterm's `Print(cell.symbol())` writes the bytes unchanged.
 2. **`Buffer::diff` over-counts the cell's width.** The diff reads `cell.symbol().width()` to compute `to_skip` for trailing cells (multi-width handling). A symbol like `\x1b]8;;https://github.com/o/r/pull/86\x07#\x1b]8;;\x07` is mostly plain ASCII (the URL), so `unicode-width` reports ~30. The diff then skips ~30 trailing cells, dropping the rest of `#86` and shifting later text into the gap. Codex's `mark_url_hyperlink` writes the envelope into cell symbols too, but no Codex test exercises `Terminal::flush`, so the same bug lurks there.
 
 The clean workaround: emit the OSC 8 envelope **out-of-band**, after `terminal.draw()` has flushed. Capture the link rect + visible cells at render time, then write CUP + `\x1b]8;;<URL>\x07` + replayed styled cells + `\x1b]8;;\x07` + SGR reset directly to the crossterm backend. Buffer cells stay plain (width 1) and the diff math behaves.
@@ -82,7 +82,7 @@ Some terminals skip `?1003` for performance. SGR (`?1006`) is the only encoding 
 
 ## User-environment signal
 
-The author's tmux config enables tmux mouse mode, vi copy-mode bindings, and `y` for yank. With `set -g set-clipboard on`, OSC 52 from an inner app passes through to the outer terminal. Wheel-up enters copy-mode when the pane isn't already receiving mouse events. An app that captures mouse intercepts those gestures. The author also runs `ox` inside VS Code's and Cursor's integrated terminals, which are xterm.js-based; those have looser OSC parsing than xterm proper, so any per-cell escape sequence has to use the safest forms (BEL terminator, no relying on OSC 52 reaching the OS clipboard).
+The author's tmux config enables tmux mouse mode, vi copy-mode bindings, and `y` for yank. With `set -g set-clipboard on`, OSC 52 from an inner app passes through to the outer terminal. Wheel-up enters copy-mode when the pane isn't already receiving mouse events. An app that captures mouse intercepts those gestures. The author also runs `ox` inside VS Code's and Cursor's integrated terminals, which are xterm.js-based. Those have looser OSC parsing than xterm proper, so any per-cell escape sequence has to use the safest forms (BEL terminator, no relying on OSC 52 reaching the OS clipboard).
 
 ## Takeaway for oxide-code
 

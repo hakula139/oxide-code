@@ -13,7 +13,7 @@ Threshold math is token-buffer based:
 - Warning and error indicators use `threshold - 20_000`.
 - Manual blocking limit uses `effectiveWindow - 3_000`.
 
-The token signal is `tokenCountWithEstimation(messages)`, which uses the last API usage plus estimates for unsampled tail content. Auto-compaction defaults on, can be disabled by global `autoCompactEnabled`, and is also gated by `DISABLE_COMPACT` / `DISABLE_AUTO_COMPACT`. `DISABLE_COMPACT` disables manual and automatic compaction; `DISABLE_AUTO_COMPACT` leaves `/compact` available.
+The token signal is `tokenCountWithEstimation(messages)`, which uses the last API usage plus estimates for unsampled tail content. Auto-compaction defaults on, can be disabled by global `autoCompactEnabled`, and is also gated by `DISABLE_COMPACT` / `DISABLE_AUTO_COMPACT`. `DISABLE_COMPACT` disables manual and automatic compaction, while `DISABLE_AUTO_COMPACT` leaves `/compact` available.
 
 Failures are deliberately quiet. Auto-compaction first tries session-memory compaction, falls back to the full summarizer, and stops retrying after 3 consecutive failures. The circuit breaker is important because an over-limit session can otherwise retry a doomed compact request every turn.
 
@@ -23,7 +23,7 @@ Claude Code also has pre-stages that oxide-code should not copy yet:
 - **Session-memory compaction** prunes memory-specific slices.
 - **Context-collapse** can own the headroom problem in feature-gated builds, so proactive auto-compact is suppressed when it is active.
 
-User-facing behavior is minimal: token warnings mention "until auto-compact" when enabled, and a compact boundary renders after success. Automatic failures are logged rather than surfaced in chat.
+User-facing behavior is minimal: token warnings mention "until auto-compact" when enabled, and a compact boundary renders after success. Automatic failures go to the log without a chat message.
 
 Key files:
 
@@ -44,7 +44,7 @@ Triggers:
 
 The token signal is `Session::get_total_token_usage()`, which combines cached last API token usage with estimates after the last model-generated item. Local compaction streams a normal model request. OpenAI / Azure providers use a remote compaction path, and a newer feature-gated path expects a `context_compaction` response item.
 
-Codex exposes configuration for `model_context_window`, `model_auto_compact_token_limit`, and `compact_prompt`. The auto limit is absolute; percentage values are not part of that surface. Hooks can run before and after manual or automatic compaction.
+Codex exposes configuration for `model_context_window`, `model_auto_compact_token_limit`, and `compact_prompt`. The auto limit is an absolute token count, with no percentage form. Hooks can run before and after manual or automatic compaction.
 
 Key files:
 
@@ -64,7 +64,7 @@ Threshold math is based on usable input context:
 - Otherwise usable tokens are `context - maxOutputTokens(model)`.
 - Auto-overflow is disabled when `compaction.auto === false` or model context is `0`.
 
-The overflow count prefers provider `tokens.total`; when absent, it falls back to `input + output + cache.read + cache.write`. opencode also reacts to provider context overflow errors by scheduling compaction.
+The overflow count prefers provider `tokens.total` and falls back to `input + output + cache.read + cache.write` when that is absent. opencode also reacts to provider context overflow errors by scheduling compaction.
 
 Compaction preserves a recent tail. Defaults are 2 user turns and a recent-token budget of 25% of usable context, clamped to 2,000-8,000 tokens unless configured. Old tool-output pruning is a separate pass: it can wipe older completed tool outputs once enough tokens are reclaimable after protecting recent results.
 

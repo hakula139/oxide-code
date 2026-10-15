@@ -16,7 +16,7 @@ The Anthropic Messages API streams multiple content block types beyond `text` an
 
 ### Server Tool Use
 
-Server tool use blocks stream identically to client `tool_use`: `input_json_delta` events accumulate the JSON input. The difference is execution, since server tools are handled by the API rather than the client. Claude Code currently handles the `advisor` tool (internal).
+Server tool use blocks stream identically to client `tool_use`: `input_json_delta` events accumulate the JSON input. The difference is execution, since the API runs server tools itself. Claude Code currently handles the `advisor` tool (internal).
 
 ## Thinking Configuration
 

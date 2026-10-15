@@ -1,6 +1,6 @@
 # Research Notes
 
-External research and API reference for oxide-code development. Covers Claude Code, OpenAI Codex, opencode, and the Anthropic API.
+External research and API reference for oxide-code development. The notes cover [Claude Code](https://github.com/hakula139/claude-code), [OpenAI Codex](https://github.com/openai/codex), [opencode](https://github.com/anomalyco/opencode), and the Anthropic API.
 
 Organized by topic. Each subdirectory mirrors the corresponding directory in [`docs/design/`](../design/), where shipped decisions live.
 

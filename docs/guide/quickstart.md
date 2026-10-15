@@ -33,6 +33,8 @@ This opens an interactive terminal session. Type a task and press Enter:
 
 The assistant reads files, runs commands, and edits code using its built-in tools until it produces a final answer.
 
+In the default `auto` permission mode, reads and searches run without asking, as do file edits inside the working directory. A `bash` command or a file change outside the working directory opens an approval prompt unless a rule settles it first: press **Y** or **Enter** to approve, and **N** or **Esc** to deny.
+
 ## What it can do
 
 oxide-code has six built-in tools:

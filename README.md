@@ -19,6 +19,7 @@ Early development. What works today:
 - Terminal UI: streaming output, markdown rendering, syntax-highlighted code blocks, [configurable status line](docs/guide/configuration.md#tui-terminal-ui), and 5 built-in themes with custom-TOML overrides
 - Agent loop with extended thinking and tool-use round-trip
 - File and search tools: `read`, `write`, `edit`, `glob`, `grep`, `bash`
+- Tool permissions: `auto` (default), `plan`, and `yolo` modes, allow / deny rules, and a TUI approval prompt for gated calls
 - Turn interruption (Esc / Ctrl+C) plus mid-turn queued follow-up prompts that splice into the same turn between tool calls, with double-press Ctrl+C exit confirmation
 - Slash commands with `/`-triggered autocomplete (name and curated-arg modes): `/clear`, `/compact`, `/config`, `/delete`, `/diff`, `/effort`, `/help`, `/init`, `/model`, `/rename`, `/resume`, `/status`, `/theme`
 - `CLAUDE.md` / `AGENTS.md` instruction-file discovery
@@ -33,8 +34,9 @@ See [`docs/roadmap.md`](docs/roadmap.md) for current focus and plans.
 Four install paths are supported: prebuilt tarball, Homebrew tap, `cargo install`, and Nix flake. See [Installation](docs/guide/install.md) for the full matrix. The most common one-liners:
 
 ```bash
-# macOS aarch64 (Apple Silicon)
-curl -fsSL https://github.com/hakula139/oxide-code/releases/latest/download/oxide-code-aarch64-apple-darwin.tar.gz | tar -xz
+# macOS aarch64 (Apple Silicon). Set VERSION to the newest tag on the Releases page.
+VERSION=v0.1.0-alpha.2
+curl -fsSL "https://github.com/hakula139/oxide-code/releases/download/$VERSION/oxide-code-aarch64-apple-darwin.tar.gz" | tar -xz
 sudo mv ox /usr/local/bin/
 
 # Homebrew (macOS, Linux)
@@ -71,7 +73,7 @@ pnpm lint                                          # Lint Markdown
 pnpm spellcheck                                    # Spell check
 ```
 
-CI runs fmt, clippy, tests, coverage, Markdown lint, and spellcheck on every push and pull request. `cargo build` is a local quick compile check.
+CI runs on pushes to `main`, pull requests targeting `main`, and manual dispatch. It checks fmt, clippy, tests, coverage, Markdown lint, and spellcheck, and also runs `nix flake check` plus Nix builds on Linux and macOS. `cargo build` is a local quick compile check.
 
 ## License
 

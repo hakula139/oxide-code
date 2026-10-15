@@ -33,6 +33,12 @@ The direction is simple:
 | `glob`  | Find files by pattern           |
 | `grep`  | Search file contents with regex |
 
+### Permission & Approval
+
+- `auto` (default) runs read-only tools anywhere and file edits inside the working directory without asking, and prompts for any other call that no rule settles. `plan` denies every mutating tool for read-only analysis, and `yolo` allows every call, including ones a deny rule matches.
+- Allow / deny rules for `bash` commands and file paths, with dangerous-command and repository-metadata denies on by default. Project config files can only add deny rules.
+- An approval prompt in the TUI shows the command or diff for each call the rules leave open. The bare REPL and headless runs deny those calls.
+
 ### Turn Interruption & Queueing
 
 - Interrupt busy turns without losing partial output.
@@ -76,9 +82,8 @@ The direction is simple:
 
 ### Permission & Approval
 
-- Approval prompts for destructive tool actions.
-- Project allowlists for trusted commands.
-- Plan mode for reviewing the assistant's proposed work before tools run.
+- A cheap model classifier that allows clearly safe calls before falling back to the approval prompt.
+- Session-scoped "don't ask again" approvals.
 
 ### Slash Commands (continuation)
 

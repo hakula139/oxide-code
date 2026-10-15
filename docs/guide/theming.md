@@ -35,7 +35,7 @@ Each ships as a vendored TOML file [in the source tree][themes-src] and doubles 
 
 ## Custom theme files
 
-`base` accepts any filesystem path to a TOML body using the same shape as the vendored themes. A leading `~/` expands to `$HOME`, but no other expansion happens: environment variables (`$HOME`, `${XDG_CONFIG_HOME}`) and Windows-style references (`%USERPROFILE%`) pass through literally and will fail to read. Relative paths resolve against the process working directory rather than the config file directory, so prefer absolute or `~/`-anchored paths.
+`base` accepts any filesystem path to a TOML body using the same shape as the vendored themes. A leading `~/` expands to `$HOME`, but no other expansion happens: environment variables (`$HOME`, `${XDG_CONFIG_HOME}`) and Windows-style references (`%USERPROFILE%`) pass through literally and will fail to read. Relative paths resolve against the directory you launched `ox` from, so prefer absolute or `~/`-anchored paths.
 
 ```toml
 [tui.theme]
@@ -66,7 +66,7 @@ See the [ANSI escape code reference][ansi] for what each name maps to in your te
 
 ## Slot definitions
 
-A custom theme file must define **every slot**, since a missing slot is a parse error so typos surface immediately. For partial customization on top of a base, use `[tui.theme.overrides]` instead (see [Overrides](#overrides) below).
+A custom theme file must define **every slot**. A missing slot is a parse error, so typos surface immediately. For partial customization on top of a base, use `[tui.theme.overrides]` instead (see [Overrides](#overrides) below).
 
 > **Note:** the same `slot = "#hex"` line means different things in a theme file vs an override. Inside a theme file body, it's a bare-color slot definition with `fg` set and `bg` / modifiers cleared. Inside `[tui.theme.overrides]`, it's a _patch_ that updates only `fg` and preserves the base slot's `bg` and modifiers. The override semantics are detailed in [Overrides](#overrides).
 
@@ -124,7 +124,7 @@ Each slot maps to one role in the TUI. Override a slot by name to restyle that r
 | --------- | -------------------------------------------------- |
 | `info`    | In-progress / neutral signals (e.g., streaming)    |
 | `success` | Successful tool results, ready status              |
-| `warning` | Warnings, caution status (reserved for future use) |
+| `warning` | Caution status (e.g., the Ctrl+C exit hint)        |
 | `error`   | Errors, failed tools, critical status              |
 
 ### Code
@@ -181,22 +181,22 @@ Each slot maps to one role in the TUI. Override a slot by name to restyle that r
 
 Each status-line segment routes to one of the slots above so re-skinning the slot re-skins everywhere it appears. To restyle one segment, override the slot it uses.
 
-| Segment              | Slot     |
-| -------------------- | -------- |
-| `current-dir`        | `muted`  |
-| `git-branch`         | `accent` |
-| `pull-request`       | `accent` |
-| `model`              | `text`   |
-| `model-with-effort`  | `text`   |
-| `context-used`       | `dim`    |
-| `session-cost`       | `dim`    |
-| `run-state` (idle)   | `success`|
-| `run-state` (busy)   | `info`   |
-| `run-state` (warn)   | `warning`|
-| `thread-title`       | `muted`  |
-| `current-time`       | `dim`    |
+| Segment             | Slot      |
+| ------------------- | --------- |
+| `current-dir`       | `muted`   |
+| `git-branch`        | `accent`  |
+| `pull-request`      | `accent`  |
+| `model`             | `text`    |
+| `model-with-effort` | `text`    |
+| `context-used`      | `dim`     |
+| `session-cost`      | `dim`     |
+| `run-state` (idle)  | `success` |
+| `run-state` (busy)  | `info`    |
+| `run-state` (warn)  | `warning` |
+| `thread-title`      | `muted`   |
+| `current-time`      | `dim`     |
 
-The separator glyph itself (`│`) is fixed; the `separator` slot only controls its color and modifiers.
+The separator glyph itself (`│`) is fixed, and the `separator` slot controls only its color and modifiers.
 
 ## Overrides
 
@@ -227,7 +227,7 @@ So `accent = { bold = false }` removes bold from the base accent without disturb
 Bisected severity:
 
 - **Theme selection errors** are fatal. An unknown built-in name with no matching file path, a file that cannot be read, or a file with a parse error in the base body stops oxide-code at startup with a message identifying what went wrong.
-- **Per-slot value errors** warn and fall back. If an override's color string can't be parsed, its slot name isn't recognized, or an inline patch is empty, oxide-code logs a warning to stderr and uses the base slot's value for that role. The TUI still launches.
+- **Per-slot value errors** warn and fall back. If an override's color string can't be parsed, its slot name isn't recognized, or an inline patch is empty, oxide-code logs a warning and uses the base slot's value for that role. The TUI still launches.
 
 The default tracing level is `warn`, so per-slot fallback messages surface without requiring `RUST_LOG`. Routing depends on mode:
 
@@ -237,13 +237,6 @@ The default tracing level is `warn`, so per-slot fallback messages surface witho
 Set `RUST_LOG=info` (or `debug`) for more detail.
 
 ## Examples
-
-### Minimal: switch to Latte
-
-```toml
-[tui.theme]
-base = "latte"
-```
 
 ### Mocha base + a brighter error color
 

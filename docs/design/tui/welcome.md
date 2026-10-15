@@ -4,11 +4,11 @@ Empty-state surface that paints when the chat has no blocks: identity, session e
 
 ## Goals
 
-The minimal `Welcome to ox / Ask anything to begin.` banner gets users to the prompt but says little about the loaded agent. The richer surface answers three questions:
+The welcome answers three questions:
 
 1. **What am I running?** Name, version, active model + effort, auth source.
 2. **Where am I?** Working directory.
-3. **What can I do?** Three sampled starter commands plus a randomized `Tip - ...` hint.
+3. **What can I do?** Three sampled starter commands plus a randomized tip.
 
 ## Implementation
 
@@ -17,7 +17,7 @@ The minimal `Welcome to ox / Ask anything to begin.` banner gets users to the pr
 - `chat.is_empty()` (no blocks, no streaming, no thinking buffer), AND
 - `session_info.config.show_welcome` resolves to true (default: true).
 
-`ChatView` keeps its own empty-state branch but now returns an empty `Text` for that case, and `App` paints the welcome on top instead. The "is the chat empty?" predicate stays where the data lives.
+`ChatView` keeps its own empty-state branch, which returns an empty `Text`, and `App` paints the welcome into that space. The "is the chat empty?" predicate stays where the data lives.
 
 ## Layout
 
@@ -59,16 +59,16 @@ Below 25 cols nothing paints, since the terminal is too narrow to read the welco
 
 ## Design Decisions
 
-1. **Empty-chat branch stays in `ChatView`, while rendering moves to App.** `ChatView::is_empty()` remains the predicate, and `App::draw_frame` decides which renderer to invoke. The welcome is an ephemeral placeholder in the chat region. Pushing it into `ChatView::blocks` would mix onboarding UI with persisted transcript content and break the `is_empty` check.
+1. **Empty-chat predicate in `ChatView`, welcome rendering in App.** `ChatView::is_empty()` remains the predicate, and `App::draw_frame` decides which renderer to invoke. The welcome is an ephemeral placeholder in the chat region. Pushing it into `ChatView::blocks` would mix onboarding UI with persisted transcript content and break the `is_empty` check.
 2. **Stateless `paint(frame, area, theme, snapshot)` function.** The welcome owns no state across frames because it's a pure projection of `LiveSessionInfo`, and a struct would only invite caches and lifecycle hooks the welcome doesn't need.
 3. **`WelcomeSnapshot` projects only what the welcome needs.** Model display, effort, auth label, cwd, version, and starter rows. Keeping the shape narrow makes snapshot-test fixtures cheap and decouples the welcome from `LiveSessionInfo` evolution.
-4. **Starter rows sample 3 from a curated pool, plus a randomized tip.** Advertising all thirteen slash commands defeats the point of "try one of". The 9-entry `STARTER_POOL` and 6-entry `TIP_POOL` add variety without becoming a dashboard, and every entry is an action a user can take next. Picks are seeded from `session_id`, so a session is stable while `/clear` yields a fresh pick.
+4. **Starter rows sample 3 from a curated pool, plus a randomized tip.** Advertising every slash command defeats the point of "try one of". The curated `STARTER_POOL` and `TIP_POOL` add variety without becoming a dashboard, and every entry is an action a user can take next. Picks are seeded from `session_id`, so a session is stable while `/clear` yields a fresh pick.
 5. **Curated rows live alongside the welcome.** Adding `is_starter() -> bool` to `SlashCommand` would push welcome-specific curation into every command.
-6. **Editorial ribbon `━━━━ oxide-code v{ver} ━━━━` with no ASCII mark and no animation.** A four-side box reads as generic CLI chrome, and an ASCII mascot (Claude Code) or animation (Codex) is outsized for the value. The ribbon is a single line that anchors horizontally without surrounding the wordmark, giving the welcome typographic identity rather than container chrome. The wordmark itself is `oxide-code` (project name, the brand a migrator searches for) rather than `ox` (binary command).
+6. **Editorial ribbon `━━━━ oxide-code v{ver} ━━━━` with no ASCII mark and no animation.** A four-side box reads as generic CLI chrome, and an ASCII mascot (Claude Code) or animation (Codex) is outsized for the value. The ribbon is a single line that anchors horizontally without surrounding the wordmark, giving the welcome a typographic identity. The wordmark uses the project name `oxide-code`, the brand a migrator searches for, while `ox` stays the binary name.
 7. **Coarse three-tier width ladder (full / collapsed / suppressed).** Codex and Claude Code lean on truncate-and-reflow, while opencode uses flex-shrink. For fixed content, a coarse ladder is simpler than per-element shrink rules.
-8. **Body lines pad to one shared column width, while the box centers independently.** `Paragraph::alignment(Center)` centers each line separately, so a naive layout gives every line its own indent. Padding env / cwd / starters / trailer to one width forces a shared left edge. The identity box stays centered above the body column.
+8. **Body lines pad to one shared column width, while the ribbon centers independently.** `Paragraph::alignment(Center)` centers each line separately, so padding env / cwd / starters / trailer to one width is what gives the body a shared left edge.
 9. **`[tui] show_welcome = true` (default) + `OX_SHOW_WELCOME` env override.** Mirrors the existing `show_thinking` knob shape: TOML option + env, empty-is-absent. When false, the chat region is blank and the input field anchors the empty session.
-10. **`/clear` re-shows the welcome automatically.** `/clear` clears `chat.blocks`, which restores `is_empty()` → welcome paints on next frame. No special re-emission path needed (the opposite of Codex's history-cell shape).
+10. **`/clear` re-shows the welcome automatically.** `/clear` clears `chat.blocks`, which restores `is_empty()` → welcome paints on next frame. No special re-emission path is needed.
 11. **Resume never shows the welcome.** Resume populates `chat.blocks` from the JSONL transcript, so `is_empty()` returns false on first paint. No special-casing needed.
 
 ## Out of Scope / Deferred
@@ -85,6 +85,6 @@ Below 25 cols nothing paints, since the terminal is too narrow to read the welco
 - `crates/oxide-code/src/config/file.rs`: `[tui] show_welcome` TOML option.
 - `crates/oxide-code/src/slash/context.rs`: `LiveSessionInfo` (snapshot input).
 - `crates/oxide-code/src/tui/app.rs`: `draw_frame` empty-chat branch, `show_welcome` gate.
-- `crates/oxide-code/src/tui/components/chat.rs`: `is_empty()` predicate (existing).
+- `crates/oxide-code/src/tui/components/chat.rs`: `is_empty()` predicate.
 - `crates/oxide-code/src/tui/components/welcome.rs`: `paint`, `WelcomeSnapshot`, starter rows.
 - `crates/oxide-code/src/util/path.rs`: `tildify` (cwd display).

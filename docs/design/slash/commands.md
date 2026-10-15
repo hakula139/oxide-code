@@ -29,7 +29,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 5. **Mid-session model + effort swap via `&mut Client`.** Both `/model <id>` and `/effort <level>` return `Forward(UserAction::SwapConfig { model, effort })`, the same payload both modals emit, so the typed-arg path and the modals share one resolver. Per-request paths re-read config every call so betas and `output_config` pick up the swap. Bare `/model` (combined picker) and bare `/effort` (slider) are also mutating because their submit path emits `SwapConfig`, so both forms refuse mid-turn. See [modals.md](modals.md).
 
-6. **Slash commands never write user config files.** State stays session-only and a restart returns to config.toml values. Cross-session persistence will land as an explicit subcommand writing to a user-opted-in path, never a silent merge into a `~/.claude.json`-style file.
+6. **Slash commands never write user config files.** State is session-only, so a restart reverts to the configured values.
 
 7. **Aliases resolve to canonical but display by surface.** `/clear` is canonical, while `/new` and `/reset` are aliases. The popup shows only the alias the user typed.
 
@@ -37,13 +37,13 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 9. **Read-only kv views go through one shared modal primitive.** `/status`, `/config`, and `/help` all open a [`KvOverview`](modals.md) with title + sectioned label-value rows + footer. The modal is the response, so the typed `> /foo` line stays out of chat history (see decision 14).
 
-10. **Built-in only in v1.** The trait registry leaves room for `~/.config/ox/commands/*.md` discovery later.
+10. **Built-in commands only.** `BUILT_INS` is the entire registry, with no discovery of user-defined commands.
 
 11. **Read-only commands fast-path the busy turn.** `classify` defaults to `SlashKind::ReadOnly`, and the dispatcher runs them client-side even when input is disabled. State-mutating commands override to `SlashKind::Mutating` and refuse mid-turn.
 
 12. **Two command kinds, one trait return: `SlashOutcome { Done, Forward(UserAction) }`.** `Done` covers read-only commands. `Forward(_)` is state-mutating, handed back to the App which forwards to the agent loop.
 
-13. **Modals open via a `SlashContext` side-channel.** Commands set `ctx.open_modal(Box::new(...))` and return `Done`. The dispatcher then harvests the slot after `execute` and pushes onto the App's modal stack. This keeps `SlashOutcome` derive-clean rather than adding a third variant. See [modals.md](modals.md) for the full modal design.
+13. **Modals open via a `SlashContext` side-channel.** Commands set `ctx.open_modal(Box::new(...))` and return `Done`. The dispatcher then harvests the slot after `execute` and pushes onto the App's modal stack. This keeps `SlashOutcome` derive-clean with its two variants. See [modals.md](modals.md) for the full modal design.
 
 14. **Modal-only commands suppress their own echo.** `SlashCommand::echoes_input(args) -> bool` defaults to true. Modal-only forms (`/status`, `/config`, `/help`, plus bare `/effort`, `/model`, `/rename`, `/resume`, and `/theme`) override to false, since the modal IS the response and the typed `> /foo` line would orphan in history once the modal closes. Typed forms keep echoing because the swap-confirmation system message anchors the pair.
 
@@ -61,7 +61,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 - **`/theme`**: Bare opens a live-preview list picker ([modals.md](modals.md)) over the built-in palettes. Up / Down repaints the TUI in the candidate, and Esc snaps back. `/theme <name>` validates against the curated roster and swaps directly. Custom file-path themes aren't accepted via the slash form.
 
-- **`/status`**: Opens a [`KvOverview`](modals.md) of session descriptors. No args, no chat output. Esc / Enter both dismiss.
+- **`/status`**: Opens a [`KvOverview`](modals.md) of session descriptors. No args, no chat output. Esc / Ctrl+C dismiss.
 
 - **`/config`**: Opens a [`KvOverview`](modals.md) with two headed sections: resolved effective config, and the layered TOML source paths it was assembled from. Path discovery runs per-invocation so mid-session edits surface immediately.
 

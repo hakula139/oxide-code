@@ -14,8 +14,8 @@ It does not interrupt an in-flight stream or tool call. If another prompt arrive
 
 The agent loop records the maximum observed token usage from each stream:
 
-- `message_start.message.usage.input_tokens + cache_creation_input_tokens + cache_read_input_tokens + output_tokens`;
-- `message_delta.usage.input_tokens + cache_creation_input_tokens + cache_read_input_tokens + output_tokens`.
+- `message_start.message.usage.input_tokens + cache_creation_input_tokens + cache_read_input_tokens + output_tokens`
+- `message_delta.usage.input_tokens + cache_creation_input_tokens + cache_read_input_tokens + output_tokens`
 
 Anthropic's delta usage often carries only output tokens, so stream processing keeps the latest non-zero input, cache-creation input, cache-read input, and output values separately. The status-line context segment reuses the same cache-aware signal. Missing usage means "do not auto-compact".
 
@@ -50,15 +50,15 @@ auto_threshold_percent = 40
 
 Environment:
 
-| Variable                                 | Effect                                      |
-| ---------------------------------------- | ------------------------------------------- |
-| `OX_COMPACTION_AUTO_ENABLED`             | Overrides `client.compaction.auto_enabled`  |
-| `OX_COMPACTION_AUTO_THRESHOLD_TOKENS`    | Absolute automatic trigger threshold        |
-| `OX_COMPACTION_AUTO_THRESHOLD_PERCENT`   | Percent of context, capped by safe trigger  |
+| Variable                               | Effect                                     |
+| -------------------------------------- | ------------------------------------------ |
+| `OX_COMPACTION_AUTO_ENABLED`           | Overrides `client.compaction.auto_enabled` |
+| `OX_COMPACTION_AUTO_THRESHOLD_TOKENS`  | Absolute automatic trigger threshold       |
+| `OX_COMPACTION_AUTO_THRESHOLD_PERCENT` | Percent of context, capped by safe trigger |
 
 Manual `/compact` remains available. The config controls only whether automatic compaction triggers and where that trigger fires. Token and percent thresholds are mutually exclusive so the resolved trigger stays obvious.
 
-Explicit token thresholds must be at least `50_000` tokens and, for models with known context windows, no higher than the model-derived safe trigger. Percent thresholds must be 1-100, are capped by the same safe trigger after they resolve to tokens, and must still resolve to at least `50_000` tokens. Lower values create frequent summarization loops, extra latency, and avoidable summary loss long before context pressure exists.
+Explicit thresholds snap into a usable range. Token values below `50_000` rise to that floor, and for models with known context windows, values above the model-derived safe trigger drop to it. Percent thresholds must be 1-100 and snap the same way once resolved to tokens. The floor exists because lower values create frequent summarization loops, extra latency, and avoidable summary loss long before context pressure exists.
 
 ## Trigger Flow
 
@@ -76,19 +76,19 @@ The failure counter is per agent-loop task. Three consecutive automatic failures
 
 ## User Experience
 
-Manual and automatic compaction use the same visible `CompactedBlock`. Automatic compaction does not need a separate chat error on failure; repeated automatic failure is a background recovery problem, and the user's next regular request should proceed. The error still lands in logs.
+Manual and automatic compaction use the same visible `CompactedBlock`. When an automatic attempt fails, chat surfaces an error (`Auto-compaction failed: ...` from the summarizer, or `Session write failed: ...` from the boundary write) while the user's prompt proceeds against the unchanged transcript. After the third consecutive failure, a one-time notice appears and automatic attempts stop until a `/model` or `/effort` swap, `/clear`, `/resume`, or a successful `/compact` resets the counter.
 
-During TUI auto-compaction, the status bar uses the existing `Compacting` state. Automatic `SessionCompacted` events keep the TUI busy until the queued prompt drains or the prompt submission finishes. In bare REPL / headless mode, `StdioSink` already renders `SessionCompacted` as a stderr boundary line.
+During TUI auto-compaction, the status bar uses the existing `Compacting` state. Automatic `SessionCompacted` events keep the TUI busy until the queued prompt drains or the prompt submission finishes. In the bare REPL, `StdioSink` renders `SessionCompacted` as a stderr boundary line.
 
 ## Design Decisions
 
 1. **Default-on.** Running out of context is worse than a well-marked summary boundary. A separate opt-out preserves user control.
 
-2. **Response usage over preflight counting.** The stream already carries usage. A count-tokens request would add latency and still be approximate once dynamic system context and tool definitions are included.
+2. **Response usage as the token signal.** The stream already carries usage. A count-tokens request would add latency and still be approximate once dynamic system context and tool definitions are included.
 
-3. **Boundary-only compaction.** The first version compacts after a coherent transcript unit is persisted and before the next prompt starts. This avoids partial tool loops and makes session replay identical to manual `/compact`.
+3. **Boundary-only compaction.** Compaction runs between persisting a coherent transcript unit and starting the next prompt. This avoids partial tool loops and makes session replay identical to manual `/compact`.
 
-4. **Same summarizer as `/compact`.** No separate compaction model knob yet. The current `Client::stream_message` path already handles auth, model, effort, betas, prompt caching, and first-party gateway constraints.
+4. **Same summarizer as `/compact`.** Auto-compaction has no model setting of its own, as the `Client::stream_message` path already handles auth, model, effort, betas, prompt caching, and first-party gateway constraints.
 
 5. **Same persistence boundary as `/compact`.** Auto-compaction should not create a second session format. `Entry::Compact` can later gain a trigger field if the UI needs to distinguish manual from automatic in history.
 
