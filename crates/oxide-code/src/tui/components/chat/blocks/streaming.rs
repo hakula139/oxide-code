@@ -4,8 +4,8 @@
 use ratatui::text::Line;
 
 use super::RenderCtx;
-use super::assistant::{Opening, render_assistant_markdown};
-use crate::tui::markdown::complete_blocks_len;
+use super::assistant::{assistant_markdown_width, with_assistant_gutter};
+use crate::tui::markdown::{complete_blocks_len, render_markdown_chunk};
 
 /// In-flight assistant turn buffered between stream tokens.
 ///
@@ -16,6 +16,8 @@ pub(crate) struct StreamingAssistant {
     /// Rendered lines for the complete blocks before `rendered_boundary`.
     rendered: Vec<Line<'static>>,
     rendered_boundary: usize,
+    /// Whether the cached chunks end after a block, so the next chunk opens with a separator.
+    after_block: bool,
     /// Width at which `rendered` was produced.
     cached_width: u16,
 }
@@ -26,6 +28,7 @@ impl StreamingAssistant {
             buffer: String::new(),
             rendered: Vec::new(),
             rendered_boundary: 0,
+            after_block: false,
             cached_width: 0,
         }
     }
@@ -49,6 +52,7 @@ impl StreamingAssistant {
     pub(crate) fn invalidate_cache(&mut self) {
         self.rendered.clear();
         self.rendered_boundary = 0;
+        self.after_block = false;
         self.cached_width = 0;
     }
 
@@ -69,9 +73,9 @@ impl StreamingAssistant {
             return;
         }
 
-        let rendered =
-            render_assistant_markdown(&tail[..complete_len], ctx, self.opening(continues_turn));
-        self.rendered.extend(rendered);
+        let (rows, after_block) = self.render_chunk(&tail[..complete_len], ctx, continues_turn);
+        self.rendered.extend(rows);
+        self.after_block = after_block;
 
         self.rendered_boundary = boundary + complete_len;
         self.cached_width = ctx.width;
@@ -88,17 +92,24 @@ impl StreamingAssistant {
         continues_turn: bool,
     ) -> Vec<Line<'static>> {
         let tail = &self.buffer[self.rendered_boundary..];
-        render_assistant_markdown(tail, ctx, self.opening(continues_turn))
+        self.render_chunk(tail, ctx, continues_turn).0
     }
 
-    fn opening(&self, continues_turn: bool) -> Opening {
-        if !self.rendered.is_empty() {
-            Opening::AfterBlocks
-        } else if continues_turn {
-            Opening::SameTurn
-        } else {
-            Opening::NewTurn
-        }
+    /// Renders the chunk after the cached rows, returning its rows and whether it ends after a
+    /// block. The chunk takes the assistant icon only when it opens a new turn.
+    fn render_chunk(
+        &self,
+        chunk: &str,
+        ctx: &RenderCtx<'_>,
+        continues_turn: bool,
+    ) -> (Vec<Line<'static>>, bool) {
+        let width = assistant_markdown_width(ctx);
+        let (text, after_block) = render_markdown_chunk(chunk, ctx.theme, width, self.after_block);
+        let starts_new_turn = !continues_turn && self.rendered.is_empty();
+        (
+            with_assistant_gutter(text.lines, ctx, starts_new_turn),
+            after_block,
+        )
     }
 
     #[cfg(test)]

@@ -2878,6 +2878,9 @@ mod tests {
     #[test]
     fn advance_streaming_cache_matches_committed_render_at_every_char() {
         let body = indoc! {"
+            ```
+            ```
+
             Here:
 
             | a | b |

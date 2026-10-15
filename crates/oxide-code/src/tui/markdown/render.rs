@@ -31,8 +31,8 @@ pub(super) struct MarkdownRenderer<I> {
     width: usize,
     pub(super) lines: Vec<Line<'static>>,
 
-    /// Set after a block ends; the next block opener emits a blank separator before its content.
-    needs_newline: bool,
+    /// Set after a block ends, so the next block opener emits a blank separator before its content.
+    pub(super) needs_newline: bool,
 
     /// Block-prefix stack — each entry is the spans prepended to every line inside that block
     /// (blockquote `> `, list-item continuation indent, etc.). Wrapping uses the concatenation
