@@ -2677,6 +2677,20 @@ mod tests {
     }
 
     #[test]
+    fn format_config_change_without_model_or_effort_reports_no_change() {
+        let s = format_config_change(
+            &spec("custom-model"),
+            false,
+            None,
+            None,
+            None,
+            base_compaction(),
+            base_compaction(),
+        );
+        assert_eq!(s, "Config unchanged.");
+    }
+
+    #[test]
     fn format_config_change_model_swap_mentions_compaction_threshold_change() {
         let new_compaction =
             CompactionConfig::resolved_for_test(crate::config::AutoCompactionConfig {

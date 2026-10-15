@@ -544,7 +544,7 @@ mod tests {
     };
     use super::*;
     use crate::agent::event::CapturingSink;
-    use crate::client::anthropic::testing::{api_key, test_config};
+    use crate::client::anthropic::testing::{api_key, test_client, test_config};
     use crate::config::{AutoCompactionConfig, CompactionConfig};
     use crate::session::store::testing::test_store;
 
@@ -557,6 +557,47 @@ mod tests {
         assert_eq!(Shutdown::Interrupt.exit_status(), 130);
         #[cfg(unix)]
         assert_eq!(Shutdown::Terminate.exit_status(), 143);
+    }
+
+    // ── new ──
+
+    #[tokio::test]
+    async fn new_replays_a_recorded_context_under_the_client_model() {
+        let server = MockServer::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let recorded = conversation(server.uri(), &store)
+            .await
+            .prompt
+            .session_context();
+
+        for (context, replayed) in [(Some(recorded), true), (None, false)] {
+            let conversation = Conversation::new(
+                test_client(server.uri(), api_key(), "claude-sonnet-5-5"),
+                Arc::new(ToolRegistry::new(Vec::new())),
+                handle::start(&store, "claude-sonnet-5-5"),
+                Vec::new(),
+                context,
+                Arc::new(FileTracker::default()),
+                std::env::current_dir().unwrap(),
+                false,
+            )
+            .await;
+
+            assert_eq!(
+                conversation.prompt.user_context == SESSION_CONTEXT,
+                replayed
+            );
+            assert_eq!(conversation.prompt_unrecorded, !replayed);
+            assert!(
+                conversation
+                    .prompt
+                    .system_sections
+                    .iter()
+                    .any(|section| section.contains("The exact model ID is claude-sonnet-5-5.")),
+                "replayed: {replayed}",
+            );
+        }
     }
 
     // ── submit_prompt ──
