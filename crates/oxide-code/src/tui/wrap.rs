@@ -125,8 +125,15 @@ fn take_one_line(
                 }
                 return (end, next);
             }
-            // No break opportunity, so split before the overflowing grapheme.
-            let end = if i == start { i + 1 } else { i };
+            // No break opportunity, so split before the overflowing grapheme, or one earlier when
+            // it is closing punctuation.
+            let end = if i == start {
+                i + 1
+            } else if i - 1 > start && is_closing_punctuation(g) {
+                i - 1
+            } else {
+                i
+            };
             return (end, end);
         }
 
@@ -144,9 +151,19 @@ fn is_whitespace(grapheme: &str) -> bool {
 }
 
 /// Whether a row may end between `before` and `after` with no whitespace there. CJK text has no
-/// spaces, so a wide grapheme can break from either neighbor.
+/// spaces, so a wide grapheme can break from either neighbor unless closing punctuation follows.
 fn breaks_around_wide(before: &str, after: &str) -> bool {
-    !is_whitespace(before) && !is_whitespace(after) && (before.width() > 1 || after.width() > 1)
+    !is_whitespace(before)
+        && !is_whitespace(after)
+        && (before.width() > 1 || after.width() > 1)
+        && !is_closing_punctuation(after)
+}
+
+/// Punctuation that must not start a row.
+const CLOSING_PUNCTUATION: &str = "、。，．：；！？）］｝〉》」』】〕,.:;!?)]}";
+
+fn is_closing_punctuation(grapheme: &str) -> bool {
+    grapheme.chars().all(|c| CLOSING_PUNCTUATION.contains(c))
 }
 
 // ── Span Reconstruction ──
@@ -355,6 +372,8 @@ mod tests {
     fn wrap_line_breaks_cjk_by_display_width() {
         let result = wrap_line(Line::from("你好世界再见"), 5, 0, None);
         assert_eq!(texts(&result), ["你好", "世界", "再见"]);
+        let too_narrow = wrap_line(Line::from("你好"), 1, 0, None);
+        assert_eq!(texts(&too_narrow), ["你", "好"]);
     }
 
     #[test]
@@ -373,6 +392,14 @@ mod tests {
         );
         assert_eq!(wrap("中 文abcd", 5), ["中 文", "abcd"]);
         assert_eq!(wrap("中 ab文字", 5), ["中 ab", "文字"]);
+    }
+
+    #[test]
+    fn wrap_line_keeps_closing_punctuation_off_the_row_start() {
+        let wrap = |s, width| texts(&wrap_line(Line::from(s), width, 0, None));
+        assert_eq!(wrap("中文字，好", 6), ["中文", "字，好"]);
+        assert_eq!(wrap("中文字.", 6), ["中文", "字."]);
+        assert_eq!(wrap("abcde，", 5), ["abcd", "e，"]);
     }
 
     #[test]
