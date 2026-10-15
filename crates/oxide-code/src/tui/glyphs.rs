@@ -55,6 +55,10 @@ pub(crate) const ERROR_PREFIX: &str = "✗ ";
 /// Inline newline replacement for collapsed multi-line previews.
 pub(crate) const NEWLINE_GLYPH: &str = " ⏎ ";
 
+/// Line marking where a cancelled turn's reply stopped, in the chat and on stderr in `--no-tui`
+/// mode.
+pub(crate) const INTERRUPTED_MARKER: &str = "(interrupted)";
+
 // ── Status spinner ──
 
 /// 8-dot Braille spinner (counterclockwise); cycle by modulo index.

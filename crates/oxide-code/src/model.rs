@@ -9,6 +9,8 @@ mod pricing;
 
 use std::fmt::Write;
 
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
 use crate::config::{BlockBinding, Effort, ThinkingConfig, ThinkingDisplay};
 
 pub(crate) use pricing::TokenCostRates;
@@ -209,10 +211,32 @@ impl ModelSpec {
     }
 }
 
+impl PartialEq for ModelSpec {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl Eq for ModelSpec {}
+
+impl Serialize for ModelSpec {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.id)
+    }
+}
+
+impl<'de> Deserialize<'de> for ModelSpec {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer).map(Self::resolve)
+    }
+}
+
 // ── ResolvedModelId ──
 
-/// A model id that has passed through the `/model` resolver.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A model id a frontend picked, such as the `/model` resolver's match. The engine accepts any id,
+/// since [`ModelSpec::resolve`] keeps an unknown one without catalogue info.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
 pub(crate) struct ResolvedModelId(String);
 
 impl ResolvedModelId {

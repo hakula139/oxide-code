@@ -6,7 +6,7 @@ Companions: [commands.md](commands.md), [session/persistence.md](../session/pers
 
 ## Implementation
 
-`slash/compact` hosts `CompactCmd`. Bare or whitespace-only args become `None`, and non-empty args trim into a `Some(instructions)` that the agent loop forwards verbatim into the summarization request. Both shapes echo the input line and forward `UserAction::Compact { instructions }`. The classifier is always `Mutating`, so the input is refused mid-turn (the in-flight reply is allowed to finish first).
+`slash/compact` hosts `CompactCmd`. Bare or whitespace-only args become `None`, and non-empty args trim into a `Some(instructions)` that the agent loop forwards verbatim into the summarization request. Both shapes echo the input line and forward `Op::Compact { instructions }`. The classifier is always `Mutating`, so the input is refused mid-turn (the in-flight reply is allowed to finish first).
 
 `agent/compaction` owns the summarization request:
 
@@ -25,10 +25,10 @@ Companions: [commands.md](commands.md), [session/persistence.md](../session/pers
 
 `Engine::compact` in `engine.rs` coordinates compaction:
 
-- On success, it hands the summary to `agent/compact_boundary`'s `replace_session_with_summary`, which calls `session.compact(...)`, clears the file tracker, replaces the in-memory `Vec<Message>` with the synthetic continuation, and emits `AgentEvent::SessionCompacted { summary, pre_count, instructions, automatic }` with `automatic: false`.
-- Failure paths (stream error, unfinished or empty summary, too-few-messages guard) emit `AgentEvent::TurnFailed` and leave the session untouched.
-- Cancellation routes through the existing cancel infrastructure and emits `AgentEvent::Cancelled` like a regular turn, and a quit ends the compaction without a terminal event.
-- The summarizer's estimated cost joins the session total whether the summary succeeds, fails, or is cancelled. An `AgentEvent::UsageUpdated` then shows the new total, after `SessionCompacted` on success and before the terminal event otherwise.
+- On success, it hands the summary to `agent/compact_boundary`'s `replace_session_with_summary`, which calls `session.compact(...)`, clears the file tracker, replaces the in-memory `Vec<Message>` with the synthetic continuation, and emits `Event::SessionCompacted { summary, pre_count, instructions, automatic }` with `automatic: false`.
+- Failure paths (stream error, unfinished or empty summary, too-few-messages guard) emit `Event::TurnFailed` and leave the session untouched.
+- Cancellation routes through the existing cancel infrastructure and emits `Event::Cancelled` like a regular turn, and a quit ends the compaction without a terminal event.
+- The summarizer's estimated cost joins the session total whether the summary succeeds, fails, or is cancelled. An `Event::UsageUpdated` then shows the new total, after `SessionCompacted` on success and before the terminal event otherwise.
 
 The TUI's `App::apply_session_compacted` clears the chat, pushes a single `CompactedBlock` with a count header and markdown summary body, keeps queued prompts for the normal idle drain, clears the modal stack, and resumes idle after a manual compact. Resume renders the same boundary block and skips the synthetic root in visible chat.
 
@@ -61,7 +61,7 @@ The TUI's `App::apply_session_compacted` clears the chat, pushes a single `Compa
 
 11. **Keep queued prompts.** Unlike `/resume` (queued prompts belong to the source thread and get dropped), `/compact` _preserves_ the user's intent. Queued prompts continue to make sense after compaction, and dropping them would surprise the user. `/clear` also keeps queued prompts, though it starts a new session.
 
-12. **Render the summary once it completes.** The spinner runs during compaction, then `AgentEvent::SessionCompacted` arrives once with the full summary. Streaming the summary is tracked in [#186](https://github.com/hakula139/oxide-code/issues/186).
+12. **Render the summary once it completes.** The spinner runs during compaction, then `Event::SessionCompacted` arrives once with the full summary. Streaming the summary is tracked in [#186](https://github.com/hakula139/oxide-code/issues/186).
 
 13. **Refuse mid-turn (`classify = Mutating`).** All three reference CLIs treat manual compaction as a between-turns operation. `Mutating` is the existing oxide-code lever for that. The slash registry refuses if a turn is in flight, and the user retries after the in-flight reply finishes.
 
@@ -79,17 +79,17 @@ The TUI's `App::apply_session_compacted` clears the chat, pushes a single `Compa
 
 ## Per-Component Notes
 
-- **`CompactCmd`**: `name = "compact"`, no aliases. `description = "Compress conversation context into a summary"`. `usage() = Some("[<instructions>]")`. `classify` is always `Mutating`. `echoes_input` uses the trait default of `true`. `execute` parses args via `args.trim()` and returns `SlashOutcome::Forward(UserAction::Compact { instructions })` with `instructions = (!s.is_empty()).then_some(s.to_owned())`.
+- **`CompactCmd`**: `name = "compact"`, no aliases. `description = "Compress conversation context into a summary"`. `usage() = Some("[<instructions>]")`. `classify` is always `Mutating`. `echoes_input` uses the trait default of `true`. `execute` parses args via `args.trim()` and returns `SlashOutcome::Forward(Action::Op(Op::Compact { instructions }))` with `instructions = (!s.is_empty()).then_some(s.to_owned())`.
 
-- **`UserAction::Compact { instructions }`**: `Option<String>`. Empty or whitespace input becomes `None` at the slash boundary so `Engine::compact` doesn't repeat the trim.
+- **`Op::Compact { instructions }`**: `Option<String>`. Empty or whitespace input becomes `None` at the slash boundary so `Engine::compact` doesn't repeat the trim.
 
-- **`AgentEvent::SessionCompacted { summary, pre_count, instructions, automatic }`**: Emitted post-success. `summary` is the rendered body, `pre_count` is for the count header, `instructions` becomes the header's `(focus: ...)` suffix, and `automatic` is false for `/compact` and true for auto-compaction. The TUI repaints from it, and `StdioSink` prints a `Compacted N messages into summary` line to stderr (`Auto-compacted` when automatic).
+- **`Event::SessionCompacted { summary, pre_count, instructions, automatic }`**: Emitted post-success. `summary` is the rendered body, `pre_count` is for the count header, `instructions` becomes the header's `(focus: ...)` suffix, and `automatic` is false for `/compact` and true for auto-compaction. The TUI repaints from it, and `StdioSink` prints a `Compacted N messages into summary` line to stderr (`Auto-compacted` when automatic).
 
 - **`agent::compaction::compact_session`**: Async fn taking the client, the conversation's `PromptParts` and tool definitions, the transcript, optional instructions, and a `&mut Option<TokenUsage>` that receives the usage of every request it sends, even when the summary fails or the caller drops the future. Returns the trimmed summary or an error.
 
 - **`SUMMARIZATION_USER_RUBRIC`**, **`SUMMARY_PREFIX`**: Two `&'static str` constants. The rubric is the terse list (intent, decisions, code paths touched, current state, next step) and ends by asking for text only. The prefix is the next-turn framing prepended to the synthetic message.
 
-- **`Engine::compact` (`engine.rs`)**: Drive `compact_session` with the conversation's prompt and tool definitions, add its cost to the session total, and surface failure as `AgentEvent::TurnFailed`. On success, `replace_session_with_summary` synthesizes the continuation and calls `session.compact(summary, instructions, synthetic_message)`. A session-write failure surfaces through the sink and ends the compaction with `TurnFailed` before the file tracker or the in-memory transcript changes. Otherwise it clears the file tracker, swaps the in-memory `Vec<Message>` for the synthetic continuation, and emits `SessionCompacted`.
+- **`Engine::compact` (`engine.rs`)**: Drive `compact_session` with the conversation's prompt and tool definitions, add its cost to the session total, and surface failure as `Event::TurnFailed`. On success, `replace_session_with_summary` synthesizes the continuation and calls `session.compact(summary, instructions, synthetic_message)`. A session-write failure surfaces through the sink and ends the compaction with `TurnFailed` before the file tracker or the in-memory transcript changes. Otherwise it clears the file tracker, swaps the in-memory `Vec<Message>` for the synthetic continuation, and emits `SessionCompacted`.
 
 - **`Entry::Compact`**: Variant on the internally tagged `Entry` enum. Fields: `summary: String`, `pre_message_count: u32`, `instructions: Option<String>`, `timestamp: OffsetDateTime`. Tagged `"type": "compact"` (lowercase, snake_case).
 
@@ -120,9 +120,9 @@ A `pre_compact` hook is tracked in [#168](https://github.com/hakula139/oxide-cod
 - `crates/oxide-code/src/agent.rs`: `await_unless_aborted` races the summarization against cancel and quit, and `collect_response` reads its reply the way it reads a turn's.
 - `crates/oxide-code/src/agent/compact_boundary.rs`: `replace_session_with_summary`, shared by manual and automatic compaction.
 - `crates/oxide-code/src/agent/compaction.rs`: `compact_session` driver, the context-window retries (`drop_oldest_rounds`, `retry_request`), and the `SUMMARIZATION_USER_RUBRIC` / `SUMMARY_PREFIX` constants.
-- `crates/oxide-code/src/agent/event.rs`: `UserAction::Compact`, `AgentEvent::SessionCompacted`.
 - `crates/oxide-code/src/client/anthropic/transport.rs`: `PromptTooLong`, the typed HTTP 400 that carries the reported overflow.
 - `crates/oxide-code/src/engine.rs`: `Engine::compact` beside `Engine::resume`, and session-cost accounting.
+- `crates/oxide-code/src/protocol.rs`: `Op::Compact`, `Event::SessionCompacted`.
 - `crates/oxide-code/src/session/actor.rs`: `SessionCmd::Compact` handler.
 - `crates/oxide-code/src/session/entry.rs`: `Entry::Compact` variant.
 - `crates/oxide-code/src/session/handle.rs`: `SessionHandle::compact`, `CompactOutcome`.

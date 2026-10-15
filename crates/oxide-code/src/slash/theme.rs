@@ -11,7 +11,7 @@ use ratatui::text::{Line, Span};
 use super::context::SlashContext;
 use super::matcher::rank_by_prefix;
 use super::registry::{ArgCompletion, SlashCommand, SlashKind, SlashOutcome};
-use crate::agent::event::UserAction;
+use crate::tui::action::Action;
 use crate::tui::modal::chrome::{CONFIRM_HINT, FOOTER_HEIGHT, render_footer};
 use crate::tui::modal::list_picker::{ListPicker, PickerItem, numeric_hint};
 use crate::tui::modal::{Modal, ModalAction, ModalKey};
@@ -81,7 +81,7 @@ impl ThemePicker {
     /// `Preview` of the row under the cursor, or `Consumed` when the list is empty.
     fn preview_current(&self) -> ModalKey {
         match self.list.selected() {
-            Some(row) => ModalKey::Preview(ModalAction::User(UserAction::PreviewTheme {
+            Some(row) => ModalKey::Preview(ModalAction::Dispatch(Action::PreviewTheme {
                 name: row.name.to_owned(),
             })),
             None => ModalKey::Consumed,
@@ -96,7 +96,7 @@ impl ThemePicker {
         if row.name == self.original_name {
             return ModalKey::Cancelled;
         }
-        ModalKey::Submitted(ModalAction::User(UserAction::SwapTheme {
+        ModalKey::Submitted(ModalAction::Dispatch(Action::SwapTheme {
             name: row.name.to_owned(),
         }))
     }
@@ -192,7 +192,7 @@ impl SlashCommand for ThemeCmd {
             ))));
         }
         let name = resolve_theme_arg(arg)?;
-        Ok(SlashOutcome::Forward(UserAction::SwapTheme {
+        Ok(SlashOutcome::Forward(Action::SwapTheme {
             name: name.to_owned(),
         }))
     }
@@ -284,7 +284,7 @@ mod tests {
             let mut p = picker_with_active("mocha");
             let outcome = p.handle_key(&key(code));
             match outcome {
-                ModalKey::Preview(ModalAction::User(UserAction::PreviewTheme { name })) => {
+                ModalKey::Preview(ModalAction::Dispatch(Action::PreviewTheme { name })) => {
                     assert_eq!(name, "macchiato", "{code:?} from mocha lands on macchiato");
                 }
                 other => panic!("expected Preview(PreviewTheme) for {code:?}, got {other:?}"),
@@ -299,7 +299,7 @@ mod tests {
             let mut p = picker_with_active("mocha");
             let outcome = p.handle_key(&key(code));
             match outcome {
-                ModalKey::Preview(ModalAction::User(UserAction::PreviewTheme { name })) => {
+                ModalKey::Preview(ModalAction::Dispatch(Action::PreviewTheme { name })) => {
                     assert_eq!(
                         name,
                         BUILT_IN.last().unwrap().name,
@@ -316,7 +316,7 @@ mod tests {
         let mut p = picker_with_active("mocha");
         let outcome = p.handle_key(&key(KeyCode::Char('4')));
         match outcome {
-            ModalKey::Preview(ModalAction::User(UserAction::PreviewTheme { name })) => {
+            ModalKey::Preview(ModalAction::Dispatch(Action::PreviewTheme { name })) => {
                 assert_eq!(name, "latte", "row 4 is latte");
             }
             other => panic!("expected Preview, got {other:?}"),
@@ -347,7 +347,7 @@ mod tests {
         p.handle_key(&key(KeyCode::Down)); // → macchiato
         let outcome = p.handle_key(&key(KeyCode::Enter));
         match outcome {
-            ModalKey::Submitted(ModalAction::User(UserAction::SwapTheme { name })) => {
+            ModalKey::Submitted(ModalAction::Dispatch(Action::SwapTheme { name })) => {
                 assert_eq!(name, "macchiato");
             }
             other => panic!("expected Submitted(SwapTheme), got {other:?}"),
@@ -441,7 +441,7 @@ mod tests {
         for theme in BUILT_IN {
             assert_eq!(
                 run_execute(theme.name).unwrap().into_forward(),
-                UserAction::SwapTheme {
+                Action::SwapTheme {
                     name: theme.name.to_owned(),
                 },
                 "`{}` must forward SwapTheme",
@@ -454,7 +454,7 @@ mod tests {
     fn execute_is_case_insensitive() {
         assert_eq!(
             run_execute("LATTE").unwrap().into_forward(),
-            UserAction::SwapTheme {
+            Action::SwapTheme {
                 name: "latte".to_owned(),
             },
         );

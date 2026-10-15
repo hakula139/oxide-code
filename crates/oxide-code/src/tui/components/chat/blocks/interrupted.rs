@@ -1,11 +1,11 @@
-//! Cancellation marker — dim italic `(interrupted)` line shown after a
-//! turn is dropped via [`UserAction::Cancel`](crate::agent::event::UserAction).
+//! Cancellation marker: a dim italic `(interrupted)` line after a turn that
+//! [`Op::Interrupt`](crate::protocol::Op::Interrupt) cut short.
 
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 
 use super::{ChatBlock, RenderCtx};
-use crate::agent::event::INTERRUPTED_MARKER;
+use crate::tui::glyphs::INTERRUPTED_MARKER;
 
 /// Trails a cancelled turn's partial assistant block so the transcript shows where the cancel
 /// landed.

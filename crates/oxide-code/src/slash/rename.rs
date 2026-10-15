@@ -10,7 +10,8 @@ use ratatui::widgets::Paragraph;
 
 use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashKind, SlashOutcome};
-use crate::agent::event::UserAction;
+use crate::protocol::Op;
+use crate::tui::action::Action;
 use crate::tui::modal::chrome::{FOOTER_HEIGHT, Header, render_footer};
 use crate::tui::modal::line_editor::LineEditor;
 use crate::tui::modal::{Modal, ModalAction, ModalKey};
@@ -51,9 +52,9 @@ impl SlashCommand for RenameCmd {
         if trimmed.is_empty() {
             return Ok(SlashOutcome::Modal(Box::new(RenameModal::new(ctx.title))));
         }
-        Ok(SlashOutcome::Forward(UserAction::Rename {
+        Ok(SlashOutcome::Forward(Action::Op(Op::Rename {
             title: trimmed.to_owned(),
-        }))
+        })))
     }
 }
 
@@ -77,9 +78,9 @@ impl RenameModal {
         if trimmed.is_empty() {
             return ModalKey::Consumed;
         }
-        ModalKey::Submitted(ModalAction::User(UserAction::Rename {
+        ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::Rename {
             title: trimmed.to_owned(),
-        }))
+        })))
     }
 }
 
@@ -164,9 +165,9 @@ mod tests {
     fn execute_typed_arg_forwards_rename_action_with_trimmed_title() {
         assert_eq!(
             run_execute("  Fix auth bug  ", None).into_forward(),
-            UserAction::Rename {
+            Action::Op(Op::Rename {
                 title: "Fix auth bug".to_owned(),
-            },
+            }),
         );
     }
 
@@ -174,7 +175,8 @@ mod tests {
     fn execute_bare_form_opens_modal_pre_filled_with_current_title() {
         let mut modal = run_execute("", Some("Existing title")).into_modal();
         let result = modal.handle_key(&KeyEvent::from(KeyCode::Enter));
-        let ModalKey::Submitted(ModalAction::User(UserAction::Rename { title })) = result else {
+        let ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::Rename { title }))) = result
+        else {
             panic!("Enter on pre-filled buffer must submit; got {result:?}");
         };
         assert_eq!(title, "Existing title");
@@ -202,7 +204,8 @@ mod tests {
             ));
         }
         let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Enter));
-        let ModalKey::Submitted(ModalAction::User(UserAction::Rename { title })) = outcome else {
+        let ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::Rename { title }))) = outcome
+        else {
             panic!("trim happens at submit time; got {outcome:?}");
         };
         assert_eq!(title, "Fix auth");
@@ -216,7 +219,8 @@ mod tests {
             ModalKey::Consumed,
         ));
         let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Enter));
-        let ModalKey::Submitted(ModalAction::User(UserAction::Rename { title })) = outcome else {
+        let ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::Rename { title }))) = outcome
+        else {
             panic!("expected Submitted, got {outcome:?}");
         };
         assert_eq!(title, "a");
@@ -237,7 +241,8 @@ mod tests {
         let mut modal = RenameModal::new(Some(&prefilled));
         modal.handle_key(&KeyEvent::from(KeyCode::Char('z')));
         let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Enter));
-        let ModalKey::Submitted(ModalAction::User(UserAction::Rename { title })) = outcome else {
+        let ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::Rename { title }))) = outcome
+        else {
             panic!("expected Submitted, got {outcome:?}");
         };
         assert_eq!(title.chars().count(), MAX_TITLE_CHARS, "extra char dropped");
@@ -260,7 +265,8 @@ mod tests {
             );
         }
         let submit = modal.handle_key(&KeyEvent::from(KeyCode::Enter));
-        let ModalKey::Submitted(ModalAction::User(UserAction::Rename { title })) = submit else {
+        let ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::Rename { title }))) = submit
+        else {
             panic!("buffer should still submit cleanly; got {submit:?}");
         };
         assert_eq!(title, "abc", "Tab and Ctrl+G must not edit the title");

@@ -305,7 +305,7 @@ impl CompactionConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct AutoCompactionConfig {
     pub(crate) enabled: bool,
     pub(crate) threshold_tokens: Option<u32>,

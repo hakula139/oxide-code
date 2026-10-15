@@ -4,6 +4,7 @@
 //! [`components`] owns the chat / input / status regions. [`markdown`] renders assistant text.
 //! [`theme`] centralizes all styling.
 
+pub(crate) mod action;
 pub(crate) mod app;
 pub(crate) mod components;
 pub(crate) mod cursor;

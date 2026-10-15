@@ -5,7 +5,8 @@ use indoc::indoc;
 
 use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashKind, SlashOutcome};
-use crate::agent::event::UserAction;
+use crate::protocol::Op;
+use crate::tui::action::Action;
 
 pub(super) struct InitCmd;
 
@@ -23,9 +24,9 @@ impl SlashCommand for InitCmd {
     }
 
     fn execute(&self, _args: &str, _ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
-        Ok(SlashOutcome::Forward(UserAction::SubmitPrompt(
+        Ok(SlashOutcome::Forward(Action::Op(Op::Prompt(
             PROMPT.to_owned(),
-        )))
+        ))))
     }
 }
 
@@ -107,7 +108,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             outcome.into_forward(),
-            UserAction::SubmitPrompt(PROMPT.to_owned())
+            Action::Op(Op::Prompt(PROMPT.to_owned()))
         );
         let p = PROMPT;
         assert!(p.contains("AGENTS.md") && p.contains("CLAUDE.md"), "{p}");

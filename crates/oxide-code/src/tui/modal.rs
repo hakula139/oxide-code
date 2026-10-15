@@ -17,7 +17,7 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use crate::agent::event::UserAction;
+use crate::tui::action::Action;
 use crate::tui::theme::Theme;
 
 const TOP_BORDER_HEIGHT: u16 = 1;
@@ -85,8 +85,8 @@ impl std::fmt::Debug for ModalKey {
 pub(crate) enum ModalAction {
     /// The modal closed without an action of its own. The App reverts any live preview.
     Cancelled,
-    /// Forward a [`UserAction`] to the agent loop, sharing the keyboard-typed dispatch path.
-    User(UserAction),
+    /// Dispatch an [`Action`] through the same path as a keyboard-typed one.
+    Dispatch(Action),
     /// Push a confirmation line into chat after the modal pops. Used by destructive-action
     /// modals so the user has chat-stream evidence the action ran.
     SystemMessage(String),
@@ -328,6 +328,7 @@ mod tests {
 
     use super::testing::ScriptedModal;
     use super::*;
+    use crate::protocol::Op;
 
     fn key(c: char) -> KeyEvent {
         KeyEvent::from(KeyCode::Char(c))
@@ -380,9 +381,9 @@ mod tests {
         // isn't stranded. The hook runs per modal, top-down, before the stack empties.
         let mut stack = ModalStack::new();
         let mut bottom = ScriptedModal::new(ModalAction::Cancelled);
-        bottom.cancel_action = Some(ModalAction::User(UserAction::Clear));
+        bottom.cancel_action = Some(ModalAction::Dispatch(Action::Op(Op::Clear)));
         let mut top = ScriptedModal::new(ModalAction::Cancelled);
-        top.cancel_action = Some(ModalAction::User(UserAction::Cancel));
+        top.cancel_action = Some(ModalAction::Dispatch(Action::Op(Op::Interrupt)));
         stack.push(Box::new(bottom));
         stack.push(Box::new(top));
 
@@ -392,8 +393,8 @@ mod tests {
             matches!(
                 actions.as_slice(),
                 [
-                    ModalAction::User(UserAction::Clear),
-                    ModalAction::User(UserAction::Cancel),
+                    ModalAction::Dispatch(Action::Op(Op::Clear)),
+                    ModalAction::Dispatch(Action::Op(Op::Interrupt)),
                 ],
             ),
             "clear must surface each modal's cancel action in stack order: {actions:?}",
@@ -495,12 +496,12 @@ mod tests {
         // surfaced on a ModalKey::Cancelled, not swallowed as a silent close.
         let mut stack = ModalStack::new();
         let mut modal = ScriptedModal::new(ModalAction::Cancelled);
-        modal.cancel_action = Some(ModalAction::User(UserAction::Cancel));
+        modal.cancel_action = Some(ModalAction::Dispatch(Action::Op(Op::Interrupt)));
         stack.push(Box::new(modal));
         let outcome = stack.handle_key(&key('c'));
         assert!(matches!(
             outcome,
-            Some(ModalAction::User(UserAction::Cancel))
+            Some(ModalAction::Dispatch(Action::Op(Op::Interrupt)))
         ));
         assert!(!stack.is_active());
     }
@@ -515,11 +516,14 @@ mod tests {
         ] {
             let mut stack = ModalStack::new();
             let mut modal = ScriptedModal::new(ModalAction::Cancelled);
-            modal.cancel_action = Some(ModalAction::User(UserAction::Cancel));
+            modal.cancel_action = Some(ModalAction::Dispatch(Action::Op(Op::Interrupt)));
             stack.push(Box::new(modal));
             let outcome = stack.handle_key(&cancel);
             assert!(
-                matches!(outcome, Some(ModalAction::User(UserAction::Cancel))),
+                matches!(
+                    outcome,
+                    Some(ModalAction::Dispatch(Action::Op(Op::Interrupt)))
+                ),
                 "{cancel:?} must surface the on_cancel action",
             );
             assert!(!stack.is_active());
@@ -529,14 +533,14 @@ mod tests {
     #[test]
     fn handle_key_submit_pops_and_yields_modal_action_user() {
         let mut stack = ModalStack::new();
-        let action = UserAction::Cancel;
-        stack.push(Box::new(ScriptedModal::new(ModalAction::User(
+        let action = Action::Op(Op::Interrupt);
+        stack.push(Box::new(ScriptedModal::new(ModalAction::Dispatch(
             action.clone(),
         ))));
         let outcome = stack.handle_key(&key('s'));
         assert!(
-            matches!(outcome, Some(ModalAction::User(a)) if a == action),
-            "submit must surface the modal's UserAction unchanged",
+            matches!(outcome, Some(ModalAction::Dispatch(a)) if a == action),
+            "submit must surface the modal's Action unchanged",
         );
         assert!(!stack.is_active());
     }
@@ -547,13 +551,16 @@ mod tests {
         // repaint, but the modal must stay on screen until Enter or Esc.
         let mut stack = ModalStack::new();
         let mut modal = ScriptedModal::new(ModalAction::Cancelled);
-        modal.preview_action = ModalAction::User(UserAction::Cancel);
+        modal.preview_action = ModalAction::Dispatch(Action::Op(Op::Interrupt));
         stack.push(Box::new(modal));
 
         let outcome = stack.handle_key(&key('p'));
         assert!(
-            matches!(outcome, Some(ModalAction::User(UserAction::Cancel))),
-            "preview must surface the modal's UserAction unchanged",
+            matches!(
+                outcome,
+                Some(ModalAction::Dispatch(Action::Op(Op::Interrupt)))
+            ),
+            "preview must surface the modal's Action unchanged",
         );
         assert!(stack.is_active(), "preview must NOT pop the stack");
     }
@@ -571,8 +578,8 @@ mod tests {
         // Bypass the modal entirely — the ScriptedModal has no Esc handler, so this would
         // fall through to `Consumed` if Esc were not intercepted at the stack layer.
         let mut stack = ModalStack::new();
-        stack.push(Box::new(ScriptedModal::new(ModalAction::User(
-            UserAction::Clear,
+        stack.push(Box::new(ScriptedModal::new(ModalAction::Dispatch(
+            Action::Op(Op::Clear),
         ))));
         let outcome = stack.handle_key(&key_with_mods(KeyCode::Esc, KeyModifiers::NONE));
         assert!(matches!(outcome, Some(ModalAction::Cancelled)));
@@ -603,8 +610,8 @@ mod tests {
     fn handle_key_with_nested_stack_routes_to_top_modal_only() {
         // Pin: a regression that fans keys to every layer must fail here.
         let mut stack = ModalStack::new();
-        stack.push(Box::new(ScriptedModal::new(ModalAction::User(
-            UserAction::Clear,
+        stack.push(Box::new(ScriptedModal::new(ModalAction::Dispatch(
+            Action::Op(Op::Clear),
         ))));
         let mut top = ScriptedModal::new(ModalAction::Cancelled);
         top.declared_height = 5;

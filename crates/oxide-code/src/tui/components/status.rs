@@ -11,8 +11,8 @@ use ratatui::text::Span;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use self::line::{RenderedStatusLine, StatusLine, StatusLineState};
-use crate::agent::event::UsageSnapshot;
 use crate::config::{Effort, StatusLineSegment};
+use crate::protocol::UsageSnapshot;
 use crate::tui::glyphs::SPINNER_FRAMES;
 use crate::tui::theme::Theme;
 use crate::util::git;

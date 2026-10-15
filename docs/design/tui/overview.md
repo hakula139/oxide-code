@@ -24,7 +24,7 @@ Components are concrete structs (`ChatView`, `InputArea`, `StatusBar`, modals) t
 ```text
 tokio::select! {
     event = crossterm_events.next()       => { /* keyboard, mouse, resize */ }
-    event = self.agent_rx.recv()          => { /* AgentEvent: stream tokens, tool calls, session updates */ }
+    event = self.events.recv()            => { /* Event: stream tokens, tool calls, session updates */ }
     Some(update) = self.git_probes.recv() => { /* branch / PR probe results for the status line */ }
     _ = tick.tick()                       => { /* spinner frame, probe scheduling, exit-arm expiry, render when dirty */ }
 }

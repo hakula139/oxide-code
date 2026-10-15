@@ -14,12 +14,12 @@ use anyhow::{Result, bail};
 use indoc::{formatdoc, indoc};
 use tokio::sync::mpsc;
 
-use crate::agent::event::{AgentEvent, AgentSink};
 use crate::agent::{AgentClient, StreamOutcome, TokenUsage};
 use crate::client::anthropic::transport::PromptTooLong;
 use crate::client::anthropic::wire::{StopReason, StreamEvent};
 use crate::message::{ContentBlock, Message, Role};
 use crate::prompt::PromptParts;
+use crate::protocol::{Event, EventSink};
 use crate::tool::ToolDefinition;
 
 /// Minimum messages required for compaction to be worthwhile. Below this, the summary is
@@ -268,8 +268,8 @@ fn retry_request(kept: &[Message], rubric: &Message) -> Vec<Message> {
 /// Discards the summary's stream tokens, which belong to no visible turn.
 struct QuietSink;
 
-impl AgentSink for QuietSink {
-    fn send(&self, _event: AgentEvent) -> Result<()> {
+impl EventSink for QuietSink {
+    fn send(&self, _event: Event) -> Result<()> {
         Ok(())
     }
 }

@@ -17,7 +17,7 @@ use self::blocks::{
     SystemMessageBlock, ToolCallBlock, ToolResultBlock, UserMessage,
 };
 use self::stack::{CachedBlock, Stack};
-use crate::agent::event::{Interaction, ToolCall, ToolResult};
+use crate::protocol::{Interaction, ToolCall, ToolResult};
 use crate::tool::ToolResultView;
 use crate::tui::pending_calls::{PendingCalls, result_header};
 use crate::tui::theme::Theme;
@@ -535,6 +535,7 @@ mod tests {
         ToolCall {
             id: label.to_owned(),
             name: "tool".to_owned(),
+            input: serde_json::json!({}),
             icon: icon.to_owned(),
             label: label.to_owned(),
         }

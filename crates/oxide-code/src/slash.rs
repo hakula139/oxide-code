@@ -173,7 +173,9 @@ pub(crate) fn with_isolated_xdg<R>(f: impl FnOnce(&std::path::Path) -> R) -> R {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::Op;
     use crate::slash::registry::SlashCommand;
+    use crate::tui::action::Action;
 
     fn run_dispatch(name: &str) -> Result<SlashOutcome, String> {
         let parsed = Parsed {
@@ -196,10 +198,10 @@ mod tests {
         assert!(
             matches!(
                 &action,
-                crate::agent::event::UserAction::SubmitPrompt(body)
+                Action::Op(Op::Prompt(body))
                     if body.contains("AGENTS.md")
             ),
-            "expected SubmitPrompt with AGENTS.md body, got {action:?}",
+            "expected a prompt with the AGENTS.md body, got {action:?}",
         );
     }
 

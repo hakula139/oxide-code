@@ -9,8 +9,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use super::context::LiveSessionInfo;
-use crate::agent::event::UserAction;
 use crate::config::Effort;
+use crate::protocol::Op;
+use crate::tui::action::Action;
 use crate::tui::modal::{Modal, ModalAction, ModalKey};
 use crate::tui::theme::Theme;
 
@@ -63,17 +64,17 @@ impl EffortSlider {
         Some(Self { selected, initial })
     }
 
-    /// No-touch Enter (or a touch that returns to the initial pick) cancels — avoids a spurious
-    /// `SwapConfig` that would re-resolve config defaults.
+    /// No-touch Enter, or a touch that returns to the initial pick, cancels. That avoids a spurious
+    /// `SetModel` that would re-resolve config defaults.
     fn submit(&self) -> ModalKey {
         let picked = Effort::ALL[self.selected];
         if picked == self.initial {
             return ModalKey::Cancelled;
         }
-        ModalKey::Submitted(ModalAction::User(UserAction::SwapConfig {
+        ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::SetModel {
             model: None,
             effort: Some(picked),
-        }))
+        })))
     }
 
     /// Width every render line targets so `Paragraph::Center` aligns them on a single axis.
@@ -255,16 +256,19 @@ mod tests {
     }
 
     #[test]
-    fn enter_after_change_emits_swap_config_with_effort_only() {
+    fn enter_after_change_emits_set_model_with_effort_only() {
         let mut s = slider_for("claude-opus-5-5", Some(Effort::Low));
         s.handle_key(&key(KeyCode::Right));
         let outcome = s.handle_key(&key(KeyCode::Enter));
         match outcome {
-            ModalKey::Submitted(ModalAction::User(UserAction::SwapConfig { model, effort })) => {
+            ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::SetModel {
+                model,
+                effort,
+            }))) => {
                 assert!(model.is_none(), "effort-only swap; model unchanged");
                 assert_eq!(effort, Some(Effort::Medium));
             }
-            other => panic!("expected Submitted SwapConfig, got {other:?}"),
+            other => panic!("expected Submitted SetModel, got {other:?}"),
         }
     }
 

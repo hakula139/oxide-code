@@ -3,15 +3,10 @@
 
 pub(crate) mod headless;
 pub(crate) mod repl;
+mod stdio;
 pub(crate) mod tui;
 
 use std::process::ExitCode;
-
-use tokio::sync::mpsc;
-use tracing::debug;
-
-use crate::agent::event::{AgentEvent, AgentSink};
-use crate::engine::TurnEnd;
 
 // ── Exit Status ──
 
@@ -82,41 +77,9 @@ async fn shutdown_signal() -> Shutdown {
     }
 }
 
-// ── Stdio Rendering ──
-
-/// Renders `events` on `sink` until the prompt in flight ends, returning how it ended, or `None`
-/// once the engine has stopped.
-async fn render_turn(
-    events: &mut mpsc::UnboundedReceiver<AgentEvent>,
-    sink: &dyn AgentSink,
-) -> Option<TurnEnd> {
-    while let Some(event) = events.recv().await {
-        let end = TurnEnd::of_prompt(&event);
-        render(sink, event);
-        if end.is_some() {
-            return end;
-        }
-    }
-    None
-}
-
-/// Renders the events already queued, such as the engine's startup warnings.
-fn render_queued(events: &mut mpsc::UnboundedReceiver<AgentEvent>, sink: &dyn AgentSink) {
-    while let Ok(event) = events.try_recv() {
-        render(sink, event);
-    }
-}
-
-fn render(sink: &dyn AgentSink, event: AgentEvent) {
-    if let Err(e) = sink.send(event) {
-        debug!("stdio render failed: {e}");
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::event::{CapturingSink, FailingSink};
 
     // ── exit_status ──
 
@@ -127,41 +90,5 @@ mod tests {
         assert_eq!(Shutdown::Interrupt.exit_status(), 130);
         #[cfg(unix)]
         assert_eq!(Shutdown::Terminate.exit_status(), 143);
-    }
-
-    // ── render_turn ──
-
-    #[tokio::test]
-    async fn render_turn_stops_at_the_terminal_event_even_when_rendering_fails() {
-        let (tx, mut events) = mpsc::unbounded_channel();
-        for event in [
-            AgentEvent::StreamToken("reply".to_owned()),
-            AgentEvent::Cancelled,
-            AgentEvent::TurnComplete,
-        ] {
-            tx.send(event).unwrap();
-        }
-
-        let end = render_turn(&mut events, &FailingSink).await;
-
-        assert_eq!(end, Some(TurnEnd::Cancelled));
-        assert!(matches!(events.try_recv(), Ok(AgentEvent::TurnComplete)));
-    }
-
-    #[tokio::test]
-    async fn render_turn_reports_a_stopped_engine() {
-        let (tx, mut events) = mpsc::unbounded_channel();
-        tx.send(AgentEvent::StreamToken("partial".to_owned()))
-            .unwrap();
-        drop(tx);
-        let sink = CapturingSink::new();
-
-        let end = render_turn(&mut events, &sink).await;
-
-        assert_eq!(end, None);
-        assert!(matches!(
-            sink.events().as_slice(),
-            [AgentEvent::StreamToken(token)] if token == "partial"
-        ));
     }
 }

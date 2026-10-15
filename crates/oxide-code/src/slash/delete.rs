@@ -26,8 +26,7 @@ impl SlashCommand for DeleteCmd {
     }
 
     fn classify(&self, _args: &str) -> SlashKind {
-        // Mutating so the typed-arg confirm modal and bare-form error block aren't dropped
-        // mid-turn by the agent loop's user-action drop.
+        // Mutating keeps both forms idle-gated, since the typed-arg form deletes a session file.
         SlashKind::Mutating
     }
 

@@ -10,6 +10,7 @@ mod message;
 mod model;
 mod permission;
 mod prompt;
+mod protocol;
 mod session;
 mod slash;
 mod tool;

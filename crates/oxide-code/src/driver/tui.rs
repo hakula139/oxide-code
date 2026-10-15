@@ -79,7 +79,7 @@ pub(crate) async fn run(
 
     terminal::restore();
 
-    // Dropping the app closes the op channel, which the engine reads as `Quit`.
+    // Dropping the app closes the op channel, which the engine reads as `Shutdown`.
     drop(app);
     if let Some(failure) = task.join().await {
         warn!("session finish failed: {failure}");

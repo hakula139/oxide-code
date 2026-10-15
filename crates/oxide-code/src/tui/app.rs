@@ -1,14 +1,14 @@
 //! Root TUI application.
 //!
 //! [`App`] owns every component, holds the cross-task channels, and runs the `tokio::select!`
-//! loop multiplexing crossterm events, agent events, git probe results, and a 60 FPS render tick.
+//! loop multiplexing crossterm events, engine events, git probe results, and a 60 FPS render tick.
 //! A dirty flag coalesces redraws so each state change renders once.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{Event as CrosstermEvent, EventStream, KeyCode, KeyEvent, KeyEventKind};
 use futures::{Stream, StreamExt};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
@@ -16,6 +16,7 @@ use ratatui::widgets::{Block, Paragraph};
 use tokio::sync::mpsc;
 use unicode_width::UnicodeWidthStr;
 
+use super::action::Action;
 use super::components::chat::ChatView;
 use super::components::input::{InputArea, InputOutcome};
 use super::components::status::{Status, StatusBar};
@@ -25,11 +26,12 @@ use super::glyphs::{NEWLINE_GLYPH, USER_PROMPT_PREFIX, USER_PROMPT_PREFIX_WIDTH}
 use super::modal::{Modal, ModalAction, ModalStack};
 use super::terminal::{Tui, synchronized_update, write_status_hyperlinks};
 use super::theme::Theme;
-use crate::agent::event::{AgentEvent, Interaction, UserAction};
-use crate::config::{CompactionConfig, Effort, StatusLineSegment, display_auto_compaction};
+use crate::config::{AutoCompactionConfig, Effort, StatusLineSegment, display_auto_compaction};
 use crate::model::ModelSpec;
+use crate::protocol::{Event, Interaction, Op};
 use crate::session::display::archive_notice;
 use crate::slash::{self, LiveSessionInfo, Parsed, SlashContext, SlashKind, SlashOutcome};
+use crate::tool::ApprovalPreview;
 use crate::util::text::{center_truncate_to_width, truncate_to_width};
 
 /// Tick interval for animation frames and render coalescing (~60 FPS).
@@ -48,12 +50,12 @@ pub(crate) struct App {
     chat: ChatView,
     input: InputArea,
     session_info: LiveSessionInfo,
-    agent_rx: mpsc::UnboundedReceiver<AgentEvent>,
-    user_tx: mpsc::Sender<UserAction>,
+    events: mpsc::UnboundedReceiver<Event>,
+    ops: mpsc::Sender<Op>,
     /// Prompt already painted for the in-flight turn. Replayed if auto-compaction clears chat.
     active_prompt: Option<String>,
     /// FIFO of prompts submitted mid-turn, kept as typed so Esc restores a `//` escape. The TUI owns
-    /// each one until the agent confirms it with `PromptDrained` or it starts a turn of its own.
+    /// each one until the engine confirms it with `PromptDrained` or it starts a turn of its own.
     pending_prompts: VecDeque<String>,
     /// How many leading `pending_prompts` the in-flight turn already holds.
     forwarded_prompts: usize,
@@ -76,8 +78,8 @@ impl App {
         theme: &Theme,
         session_info: LiveSessionInfo,
         show_thinking: bool,
-        agent_rx: mpsc::UnboundedReceiver<AgentEvent>,
-        user_tx: mpsc::Sender<UserAction>,
+        events: mpsc::UnboundedReceiver<Event>,
+        ops: mpsc::Sender<Op>,
         history: AppHistory,
     ) -> Self {
         let mut chat = ChatView::new(theme, show_thinking);
@@ -109,8 +111,8 @@ impl App {
             chat,
             input: InputArea::new(theme),
             session_info,
-            agent_rx,
-            user_tx,
+            events,
+            ops,
             active_prompt: None,
             pending_prompts: VecDeque::new(),
             forwarded_prompts: 0,
@@ -132,7 +134,7 @@ impl App {
         self.dirty = true;
     }
 
-    /// Runs until the user quits or the agent channel closes.
+    /// Runs until the user quits or the engine's event channel closes.
     pub(crate) async fn run(&mut self, terminal: &mut Tui) -> Result<()> {
         self.run_with_events(terminal, EventStream::new()).await
     }
@@ -144,7 +146,7 @@ impl App {
     ) -> Result<()>
     where
         W: std::io::Write,
-        S: Stream<Item = std::io::Result<Event>> + Unpin,
+        S: Stream<Item = std::io::Result<CrosstermEvent>> + Unpin,
     {
         let mut tick = tokio::time::interval(TICK_INTERVAL);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -162,10 +164,10 @@ impl App {
                         None => self.should_quit = true,
                     }
                 }
-                event = self.agent_rx.recv() => {
+                event = self.events.recv() => {
                     match event {
-                        Some(event) => self.handle_agent_event(event),
-                        // Agent channel closed. Quit instead of spinning.
+                        Some(event) => self.handle_engine_event(event),
+                        // The engine stopped, and `recv` would keep returning `None`, so quit.
                         None => self.should_quit = true,
                     }
                 }
@@ -195,9 +197,9 @@ impl App {
 
     // ── Event Handling ──
 
-    fn handle_crossterm_event(&mut self, event: &Event) {
+    fn handle_crossterm_event(&mut self, event: &CrosstermEvent) {
         // Windows also reports key releases, which would otherwise act as a second press.
-        if let Event::Key(key) = event
+        if let CrosstermEvent::Key(key) = event
             && key.kind == KeyEventKind::Release
         {
             return;
@@ -206,14 +208,14 @@ impl App {
         // reach chat.
         if self.modals.is_active() {
             match event {
-                Event::Key(key) => {
+                CrosstermEvent::Key(key) => {
                     if let Some(action) = self.modals.handle_key(key) {
                         self.apply_modal_action(action);
                     }
                     self.dirty = true;
                     return;
                 }
-                Event::Paste(text) => {
+                CrosstermEvent::Paste(text) => {
                     self.modals.handle_paste(text);
                     self.dirty = true;
                     return;
@@ -222,7 +224,7 @@ impl App {
             }
         }
         match event {
-            Event::Key(KeyEvent {
+            CrosstermEvent::Key(KeyEvent {
                 code: KeyCode::Esc, ..
             }) => {
                 if self.input.popup_visible() {
@@ -231,15 +233,17 @@ impl App {
                     self.handle_esc();
                 }
             }
-            Event::Key(..) | Event::Paste(..) => match self.input.handle_event(event) {
-                InputOutcome::Action(action) => self.dispatch_user_action(action),
-                InputOutcome::Consumed => {}
-                InputOutcome::Ignored => self.chat.handle_event(event),
-            },
-            Event::Mouse(_) => {
+            CrosstermEvent::Key(..) | CrosstermEvent::Paste(..) => {
+                match self.input.handle_event(event) {
+                    InputOutcome::Action(action) => self.dispatch_action(action),
+                    InputOutcome::Consumed => {}
+                    InputOutcome::Ignored => self.chat.handle_event(event),
+                }
+            }
+            CrosstermEvent::Mouse(_) => {
                 self.chat.handle_event(event);
             }
-            Event::Resize(..) => {}
+            CrosstermEvent::Resize(..) => {}
             _ => return,
         }
         self.dirty = true;
@@ -248,7 +252,7 @@ impl App {
     fn apply_modal_action(&mut self, action: ModalAction) {
         match action {
             ModalAction::Cancelled => self.cancel_theme_preview(),
-            ModalAction::User(user_action) => self.dispatch_user_action(user_action),
+            ModalAction::Dispatch(action) => self.dispatch_action(action),
             ModalAction::SystemMessage(msg) => self.chat.push_system_message(msg),
         }
     }
@@ -278,7 +282,7 @@ impl App {
     /// Cancels if busy, restores one queued prompt if idle, or no-ops.
     fn handle_esc(&mut self) {
         if !self.input.is_enabled() {
-            self.dispatch_user_action(UserAction::Cancel);
+            self.dispatch_op(Op::Interrupt);
         } else if self.input.is_empty()
             && let Some(prompt) = self.pending_prompts.pop_back()
         {
@@ -286,20 +290,42 @@ impl App {
         }
     }
 
-    /// Applies UI side-effects then forwards to the agent channel.
-    ///
-    /// `apply_action_locally` returns `false` when the UI already handled the action, such as a
-    /// prompt that forwards itself or an armed exit, so the agent loop never sees it.
-    fn dispatch_user_action(&mut self, action: UserAction) {
-        if !self.apply_action_locally(&action) {
-            return;
+    /// Routes an input, slash-command, or modal action. TUI-only actions apply here, and an op goes
+    /// through [`Self::dispatch_op`].
+    fn dispatch_action(&mut self, action: Action) {
+        match action {
+            Action::Submit(text) => self.handle_submit_prompt(&text),
+            Action::Op(op) => self.dispatch_op(op),
+            Action::ConfirmExit => self.confirm_exit(),
+            Action::PreviewTheme { name } => self.preview_theme(&name),
+            Action::SwapTheme { name } => self.swap_theme(&name),
         }
-        self.forward_to_agent(action);
     }
 
-    /// Sends `action` to the agent loop. Channel errors surface as chat error blocks.
-    fn forward_to_agent(&mut self, action: UserAction) {
-        if let Err(e) = self.user_tx.try_send(action) {
+    /// Applies the op's local state change, then sends it to the engine. A prompt starts a turn.
+    fn dispatch_op(&mut self, op: Op) {
+        match &op {
+            Op::Prompt(_) => return self.start_turn(op),
+            Op::Interrupt => self.status_bar.set_status(Status::Cancelling),
+            Op::Shutdown => self.should_quit = true,
+            Op::Resume { .. } => self.input.set_enabled(false),
+            Op::Compact { .. } => {
+                self.input.set_enabled(false);
+                self.status_bar.set_status(Status::Compacting);
+            }
+            Op::Queue(_)
+            | Op::Resolve { .. }
+            | Op::SetModel { .. }
+            | Op::Clear
+            | Op::Archive
+            | Op::Rename { .. } => {}
+        }
+        self.send_op(op);
+    }
+
+    /// Sends `op` to the engine. Channel errors surface as chat error blocks.
+    fn send_op(&mut self, op: Op) {
+        if let Err(e) = self.ops.try_send(op) {
             match e {
                 mpsc::error::TrySendError::Closed(_) => {
                     self.chat
@@ -307,86 +333,53 @@ impl App {
                     self.input.set_enabled(false);
                     self.should_quit = true;
                 }
-                // An approval decision is a control-plane reply the agent is actively waiting for, so
-                // a dropped one leaves the turn blocked rather than merely losing a prompt. Point the
-                // user at the recovery path instead of the generic prompt-dropped message.
-                mpsc::error::TrySendError::Full(UserAction::ApprovalDecision { .. }) => {
+                // An approval decision is a control-plane reply the engine is waiting for, so a
+                // dropped one leaves the turn blocked until the user cancels it.
+                mpsc::error::TrySendError::Full(Op::Resolve { .. }) => {
                     self.chat.push_error(
                         "approval could not be delivered; press Esc to cancel the blocked turn",
                     );
                 }
                 mpsc::error::TrySendError::Full(_) => {
                     self.chat
-                        .push_error("user-action channel full; prompt dropped (this is a bug)");
+                        .push_error("op channel full, so the request was dropped (this is a bug)");
                 }
             }
         }
     }
 
-    /// Applies UI-state changes and returns whether to forward to the agent.
-    fn apply_action_locally(&mut self, action: &UserAction) -> bool {
-        match action {
-            UserAction::SubmitPrompt(text) => {
-                self.handle_submit_prompt(text);
-                false
+    /// Quits on a second Ctrl+C inside the exit window, or arms the window.
+    fn confirm_exit(&mut self) {
+        if let Status::ExitArmed { until } = self.status_bar.status()
+            && Instant::now() < *until
+        {
+            self.should_quit = true;
+        } else {
+            let until = Instant::now() + EXIT_WINDOW;
+            self.status_bar.set_status(Status::ExitArmed { until });
+        }
+    }
+
+    fn preview_theme(&mut self, name: &str) {
+        if let Some(preview) = super::theme::load_builtin(name) {
+            if self.preview_theme_snapshot.is_none() {
+                self.preview_theme_snapshot = Some(self.theme.clone());
             }
-            UserAction::Cancel => {
-                self.status_bar.set_status(Status::Cancelling);
-                true
-            }
-            UserAction::ConfirmExit => {
-                if let Status::ExitArmed { until } = self.status_bar.status()
-                    && Instant::now() < *until
-                {
-                    self.should_quit = true;
-                } else {
-                    let until = Instant::now() + EXIT_WINDOW;
-                    self.status_bar.set_status(Status::ExitArmed { until });
-                }
-                false
-            }
-            UserAction::Quit => {
-                self.should_quit = true;
-                true
-            }
-            UserAction::QueuePrompt(_)
-            | UserAction::Clear
-            | UserAction::Archive
-            | UserAction::Rename { .. }
-            | UserAction::SwapConfig { .. }
-            | UserAction::ApprovalDecision { .. } => true,
-            UserAction::Resume { .. } => {
-                self.input.set_enabled(false);
-                true
-            }
-            UserAction::Compact { .. } => {
-                self.input.set_enabled(false);
-                self.status_bar.set_status(Status::Compacting);
-                true
-            }
-            UserAction::PreviewTheme { name } => {
-                if let Some(preview) = super::theme::load_builtin(name) {
-                    if self.preview_theme_snapshot.is_none() {
-                        self.preview_theme_snapshot = Some(self.theme.clone());
-                    }
-                    self.apply_theme(&preview);
-                } else {
-                    tracing::warn!(name, "PreviewTheme: unknown built-in; picker roster drift");
-                }
-                false
-            }
-            UserAction::SwapTheme { name } => {
-                self.preview_theme_snapshot = None;
-                if let Some(theme) = super::theme::load_builtin(name) {
-                    self.session_info.config.theme_name.clone_from(name);
-                    self.apply_theme(&theme);
-                    self.chat
-                        .push_system_message(format!("Theme set to {name}."));
-                } else {
-                    tracing::warn!(name, "SwapTheme: unknown built-in; picker roster drift");
-                }
-                false
-            }
+            self.apply_theme(&preview);
+        } else {
+            tracing::warn!(name, "PreviewTheme: unknown built-in; picker roster drift");
+        }
+    }
+
+    fn swap_theme(&mut self, name: &str) {
+        self.preview_theme_snapshot = None;
+        if let Some(theme) = super::theme::load_builtin(name) {
+            name.clone_into(&mut self.session_info.config.theme_name);
+            self.apply_theme(&theme);
+            self.chat
+                .push_system_message(format!("Theme set to {name}."));
+        } else {
+            tracing::warn!(name, "SwapTheme: unknown built-in; picker roster drift");
         }
     }
 
@@ -399,14 +392,10 @@ impl App {
                     self.chat.push_user_message(text.to_owned());
                 }
                 if let Some(action) = self.run_slash(&parsed) {
-                    if matches!(action, UserAction::SubmitPrompt(_)) {
-                        if slash::echoes_input(&parsed) {
-                            self.active_prompt = Some(text.to_owned());
-                        }
-                        self.start_turn(action);
-                    } else {
-                        self.dispatch_user_action(action);
+                    if matches!(action, Action::Op(Op::Prompt(_))) && slash::echoes_input(&parsed) {
+                        self.active_prompt = Some(text.to_owned());
                     }
+                    self.dispatch_action(action);
                 }
                 return;
             }
@@ -435,10 +424,10 @@ impl App {
     }
 
     /// Starts a turn, then hands it the queued prompts so they splice in at its round boundaries.
-    fn start_turn(&mut self, submit: UserAction) {
+    fn start_turn(&mut self, prompt: Op) {
         self.input.set_enabled(false);
         self.status_bar.set_status(Status::Streaming);
-        self.forward_to_agent(submit);
+        self.send_op(prompt);
         self.forward_queued_prompts();
     }
 
@@ -453,20 +442,20 @@ impl App {
         }
         while let Some(queued) = self.pending_prompts.get(self.forwarded_prompts) {
             let prompt = slash::unescape_literal(queued).to_owned();
-            self.forward_to_agent(UserAction::QueuePrompt(prompt));
+            self.send_op(Op::Queue(prompt));
             self.forwarded_prompts += 1;
         }
     }
 
     /// Runs `parsed` and applies its outcome, returning the action it asks the caller to route.
-    fn run_slash(&mut self, parsed: &Parsed) -> Option<UserAction> {
+    fn run_slash(&mut self, parsed: &Parsed) -> Option<Action> {
         let ctx = SlashContext::new(&self.session_info, self.status_bar.title());
         let outcome = slash::dispatch(parsed, &ctx);
         self.apply_slash_outcome(outcome)
     }
 
     /// Shows a slash command's chat output or modal, returning a forwarded action unapplied.
-    fn apply_slash_outcome(&mut self, outcome: Result<SlashOutcome, String>) -> Option<UserAction> {
+    fn apply_slash_outcome(&mut self, outcome: Result<SlashOutcome, String>) -> Option<Action> {
         match outcome {
             Ok(SlashOutcome::Forward(action)) => return Some(action),
             Ok(SlashOutcome::Modal(modal)) => self.modals.push(modal),
@@ -477,48 +466,48 @@ impl App {
         None
     }
 
-    fn handle_agent_event(&mut self, event: AgentEvent) {
+    fn handle_engine_event(&mut self, event: Event) {
         match event {
-            AgentEvent::StreamToken(token) => {
+            Event::StreamToken(token) => {
                 self.chat.append_stream_token(&token);
                 self.set_active_status(Status::Streaming);
                 self.input.set_enabled(false);
             }
-            AgentEvent::ThinkingToken(token) => {
+            Event::ThinkingToken(token) => {
                 self.chat.append_thinking_token(&token);
                 self.set_active_status(Status::Streaming);
             }
-            AgentEvent::ProgressUpdate(text) => self.chat.push_progress_update(text),
-            AgentEvent::Retrying(notice) => self.chat.push_notice(notice),
-            AgentEvent::ToolCallStart(call) => {
+            Event::ProgressUpdate(text) => self.chat.push_progress_update(text),
+            Event::Retrying(notice) => self.chat.push_notice(notice),
+            Event::ToolCallStart(call) => {
                 self.set_active_status(Status::ToolRunning {
                     name: call.name.clone(),
                 });
                 self.chat.push_tool_call(call);
             }
-            AgentEvent::ToolCallEnd(result) => self.chat.push_tool_result(result),
-            AgentEvent::PromptDrained(text) => self.apply_prompt_drained(text),
-            AgentEvent::UsageUpdated(usage) => {
+            Event::ToolCallEnd(result) => self.chat.push_tool_result(result),
+            Event::PromptDrained(text) => self.apply_prompt_drained(text),
+            Event::UsageUpdated(usage) => {
                 self.status_bar.set_usage(Some(usage));
             }
-            AgentEvent::TurnComplete => {
+            Event::TurnComplete => {
                 self.finish_turn();
             }
-            AgentEvent::Cancelled => {
+            Event::Cancelled => {
                 self.chat.push_interrupted_marker();
                 self.active_prompt = None;
                 self.enter_idle();
             }
-            AgentEvent::AutoCompactionStarted => {
+            Event::AutoCompactionStarted => {
                 self.set_active_status(Status::Compacting);
                 self.input.set_enabled(false);
             }
-            AgentEvent::SessionTitleUpdated { session_id, title } => {
+            Event::SessionTitleUpdated { session_id, title } => {
                 if session_id == self.session_info.session_id {
                     self.status_bar.set_title(Some(title));
                 }
             }
-            AgentEvent::SessionRolled { id, archived } => {
+            Event::SessionRolled { id, archived } => {
                 let old_id = std::mem::replace(&mut self.session_info.session_id, id);
                 self.status_bar.set_title(None);
                 self.status_bar.set_usage(None);
@@ -528,13 +517,13 @@ impl App {
                     self.chat.push_system_message(archive_notice(&old_id, true));
                 }
             }
-            AgentEvent::SessionResumed {
+            Event::SessionResumed {
                 id,
                 title,
                 unarchived,
                 history,
             } => self.apply_session_resumed(id, title, unarchived, history),
-            AgentEvent::SessionCompacted {
+            Event::SessionCompacted {
                 summary,
                 pre_count,
                 instructions,
@@ -545,18 +534,18 @@ impl App {
                 instructions.as_deref(),
                 automatic,
             ),
-            AgentEvent::ConfigChanged {
+            Event::ConfigChanged {
                 model,
                 effort,
-                compaction,
                 requested_effort,
-            } => self.apply_config_changed(model, effort, compaction, requested_effort),
-            AgentEvent::TurnFailed(msg) => {
+                auto_compaction,
+            } => self.apply_config_changed(model, effort, requested_effort, auto_compaction),
+            Event::TurnFailed(msg) => {
                 self.chat.push_error(&msg);
                 self.finish_turn();
             }
-            AgentEvent::Error(msg) => self.chat.push_error(&msg),
-            AgentEvent::ApprovalRequested { id, preview } => self.push_approval_modal(id, preview),
+            Event::Error(msg) => self.chat.push_error(&msg),
+            Event::ApprovalRequested { id, preview } => self.push_approval_modal(id, preview),
         }
         self.dirty = true;
     }
@@ -577,8 +566,8 @@ impl App {
     }
 
     /// Opens the approve-or-deny overlay for a gated tool call. Pushing onto the stack lets it nest
-    /// over any open picker, and the modal's cancel hook resolves the blocked agent on dismissal.
-    fn push_approval_modal(&mut self, id: String, preview: crate::agent::event::ApprovalPreview) {
+    /// over any open picker, and the modal's cancel hook resolves the blocked turn on dismissal.
+    fn push_approval_modal(&mut self, id: String, preview: ApprovalPreview) {
         self.modals
             .push(Box::new(super::modal::approval::ApprovalModal::new(
                 id, preview,
@@ -657,20 +646,20 @@ impl App {
         &mut self,
         model: ModelSpec,
         effort: Option<Effort>,
-        compaction: CompactionConfig,
         requested_effort: Option<Effort>,
+        auto_compaction: AutoCompactionConfig,
     ) {
         let model_changed = model.id() != self.session_info.config.model.id();
         let prev_effort = self.session_info.config.effort;
-        let prev_compaction = self.session_info.config.compaction;
+        let prev_auto_compaction = self.session_info.config.compaction.auto;
         let confirmation = format_config_change(
             &model,
             model_changed,
             prev_effort,
             effort,
             requested_effort,
-            prev_compaction,
-            compaction,
+            prev_auto_compaction,
+            auto_compaction,
         );
         if model_changed {
             self.status_bar
@@ -679,7 +668,7 @@ impl App {
         self.status_bar.set_effort(effort);
         self.session_info.config.model = model;
         self.session_info.config.effort = effort;
-        self.session_info.config.compaction = compaction;
+        self.session_info.config.compaction.auto = auto_compaction;
         self.chat.push_system_message(confirmation);
     }
 
@@ -704,7 +693,7 @@ impl App {
             let prompt = slash::unescape_literal(&queued).to_owned();
             self.chat.push_user_message(prompt.clone());
             self.active_prompt = Some(prompt.clone());
-            self.start_turn(UserAction::SubmitPrompt(prompt));
+            self.start_turn(Op::Prompt(prompt));
         }
     }
 
@@ -912,15 +901,15 @@ fn preview_line(prompt: &str, theme: &Theme, body_width: usize) -> Line<'static>
     ])
 }
 
-/// `AgentEvent::ConfigChanged` confirmation, surfacing silent effort shifts.
+/// `Event::ConfigChanged` confirmation, surfacing silent effort shifts.
 fn format_config_change(
     model: &ModelSpec,
     model_changed: bool,
-    prev_effort: Option<crate::config::Effort>,
-    new_effort: Option<crate::config::Effort>,
-    requested_effort: Option<crate::config::Effort>,
-    prev_compaction: CompactionConfig,
-    new_compaction: CompactionConfig,
+    prev_effort: Option<Effort>,
+    new_effort: Option<Effort>,
+    requested_effort: Option<Effort>,
+    prev_auto_compaction: AutoCompactionConfig,
+    new_auto_compaction: AutoCompactionConfig,
 ) -> String {
     let message = if model_changed {
         let head = format!("Switched to {} ({})", model.display_name(), model.id());
@@ -943,12 +932,12 @@ fn format_config_change(
             (None, None) => "Config unchanged.".to_owned(),
         }
     };
-    if model_changed && prev_compaction.auto != new_compaction.auto {
+    if model_changed && prev_auto_compaction != new_auto_compaction {
         return append_sentence(
             message,
             &format!(
                 "Auto compaction {}",
-                display_auto_compaction(new_compaction.auto)
+                display_auto_compaction(new_auto_compaction)
             ),
         );
     }
@@ -976,48 +965,43 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
-    use crate::agent::event::{ToolCall, ToolResult, UsageSnapshot};
     use crate::config::test_thresholds;
-    use crate::tool::ToolResultView;
+    use crate::protocol::{Decision, ToolCall, ToolResult, UsageSnapshot};
+    use crate::tool::{ApprovalBody, ToolResultView};
+    use crate::tui::glyphs::INTERRUPTED_MARKER;
     use crate::tui::modal::testing::ScriptedModal;
 
-    /// Idle `App` plus the `user_tx` consumer and an `agent_tx` kept alive so `agent_rx` stays
-    /// open.
-    fn test_app(
-        title: Option<&str>,
-    ) -> (
-        App,
-        mpsc::Receiver<UserAction>,
-        mpsc::UnboundedSender<AgentEvent>,
-    ) {
-        let (agent_tx, agent_rx) = mpsc::unbounded_channel::<AgentEvent>();
-        let (user_tx, user_rx) = mpsc::channel::<UserAction>(8);
+    /// Idle `App` plus the `ops` consumer and an `event_tx` kept alive so `events` stays open.
+    fn test_app(title: Option<&str>) -> (App, mpsc::Receiver<Op>, mpsc::UnboundedSender<Event>) {
+        let (event_tx, events) = mpsc::unbounded_channel::<Event>();
+        let (ops, op_rx) = mpsc::channel::<Op>(8);
         let app = App::new(
             &Theme::default(),
             test_session_info(),
             false,
-            agent_rx,
-            user_tx,
+            events,
+            ops,
             AppHistory {
                 interactions: Vec::new(),
                 title: title.map(ToOwned::to_owned),
                 unarchived: false,
             },
         );
-        (app, user_rx, agent_tx)
+        (app, op_rx, event_tx)
     }
 
-    fn bash_call_start(id: &str, command: &str) -> AgentEvent {
-        AgentEvent::ToolCallStart(ToolCall {
+    fn bash_call_start(id: &str, command: &str) -> Event {
+        Event::ToolCallStart(ToolCall {
             id: id.to_owned(),
             name: "bash".to_owned(),
+            input: serde_json::json!({"command": command}),
             icon: "$".to_owned(),
             label: command.to_owned(),
         })
     }
 
-    fn text_call_end(id: &str, content: &str, is_error: bool, title: Option<&str>) -> AgentEvent {
-        AgentEvent::ToolCallEnd(ToolResult {
+    fn text_call_end(id: &str, content: &str, is_error: bool, title: Option<&str>) -> Event {
+        Event::ToolCallEnd(ToolResult {
             id: id.to_owned(),
             content: content.to_owned(),
             is_error,
@@ -1072,11 +1056,11 @@ mod tests {
         ModelSpec::resolve(id.to_owned())
     }
 
-    fn base_compaction() -> CompactionConfig {
-        CompactionConfig::resolved_for_test(crate::config::AutoCompactionConfig {
+    fn base_auto_compaction() -> AutoCompactionConfig {
+        AutoCompactionConfig {
             enabled: true,
             threshold_tokens: Some(155_000),
-        })
+        }
     }
 
     fn usage_snapshot() -> UsageSnapshot {
@@ -1188,8 +1172,6 @@ mod tests {
 
     /// Pushes a Bash approval past its type-ahead guard, so it answers keys at once.
     fn push_answerable_approval(app: &mut App, command: &str) {
-        use crate::agent::event::{ApprovalBody, ApprovalPreview};
-
         let mut modal = crate::tui::modal::approval::ApprovalModal::new(
             "call-1".to_owned(),
             ApprovalPreview {
@@ -1205,7 +1187,7 @@ mod tests {
 
     #[test]
     fn new_plumbs_resumed_title_into_status_bar() {
-        let (app, _rx, _agent_tx) = test_app(Some("Resumed title"));
+        let (app, _rx, _event_tx) = test_app(Some("Resumed title"));
         assert_eq!(app.status_bar.title(), Some("Resumed title"));
         assert_eq!(app.status_bar.status(), &Status::Idle);
         assert_eq!(app.chat.entry_count(), 0);
@@ -1216,27 +1198,27 @@ mod tests {
 
     #[test]
     fn new_without_title_leaves_slot_unset() {
-        let (app, _rx, _agent_tx) = test_app(None);
+        let (app, _rx, _event_tx) = test_app(None);
         assert!(app.status_bar.title().is_none());
     }
 
     #[test]
     fn new_whitespace_title_is_filtered_by_status_bar() {
         // Status bar filters whitespace-only titles so a resumed blank title doesn't leave a slot.
-        let (app, _rx, _agent_tx) = test_app(Some("   \n "));
+        let (app, _rx, _event_tx) = test_app(Some("   \n "));
         assert!(app.status_bar.title().is_none());
     }
 
     #[test]
     fn new_after_resume_unarchived_the_session_opens_with_a_notice() {
-        let (_agent_tx, agent_rx) = mpsc::unbounded_channel::<AgentEvent>();
-        let (user_tx, _user_rx) = mpsc::channel::<UserAction>(1);
+        let (_event_tx, events) = mpsc::unbounded_channel::<Event>();
+        let (ops, _op_rx) = mpsc::channel::<Op>(1);
         let mut app = App::new(
             &Theme::default(),
             test_session_info(),
             false,
-            agent_rx,
-            user_tx,
+            events,
+            ops,
             AppHistory {
                 interactions: vec![Interaction::UserText("earlier".to_owned())],
                 title: None,
@@ -1253,7 +1235,7 @@ mod tests {
 
     #[test]
     fn push_system_message_replaces_welcome_with_notice() {
-        let (mut app, _rx, _agent_tx) = test_app(None);
+        let (mut app, _rx, _event_tx) = test_app(None);
         app.push_system_message("Model not supported.".to_owned());
         assert!(rendered_text(&mut app, 80, 24).contains("Model not supported."));
         assert!(!app.chat.is_empty());
@@ -1263,7 +1245,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_with_events_expires_armed_exit_on_tick_before_channel_close() {
-        let (mut app, _rx, agent_tx) = test_app(None);
+        let (mut app, _rx, event_tx) = test_app(None);
         let until = Instant::now()
             .checked_sub(EXIT_WINDOW)
             .expect("monotonic clock has run long enough for a test deadline");
@@ -1273,12 +1255,12 @@ mod tests {
         let (mut terminal, _buf) = crossterm_test_terminal(60, 8);
         let closer = tokio::spawn(async move {
             tokio::time::sleep(TICK_INTERVAL * 2).await;
-            drop(agent_tx);
+            drop(event_tx);
         });
 
         app.run_with_events(
             &mut terminal,
-            futures::stream::pending::<std::io::Result<Event>>(),
+            futures::stream::pending::<std::io::Result<CrosstermEvent>>(),
         )
         .await
         .unwrap();
@@ -1291,19 +1273,19 @@ mod tests {
     #[tokio::test]
     async fn run_with_events_marks_dirty_when_spinner_frame_advances() {
         // Sleep past the spinner interval so `tick()` reports a visible frame change.
-        let (mut app, _rx, agent_tx) = test_app(None);
+        let (mut app, _rx, event_tx) = test_app(None);
         app.status_bar.set_status(Status::Streaming);
         app.dirty = false;
 
         let (mut terminal, _buf) = crossterm_test_terminal(60, 8);
         let driver = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(150)).await;
-            drop(agent_tx);
+            drop(event_tx);
         });
 
         app.run_with_events(
             &mut terminal,
-            futures::stream::pending::<std::io::Result<Event>>(),
+            futures::stream::pending::<std::io::Result<CrosstermEvent>>(),
         )
         .await
         .unwrap();
@@ -1313,22 +1295,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_with_events_pumps_crossterm_and_agent_events_through_select() {
+    async fn run_with_events_pumps_crossterm_and_engine_events_through_select() {
         // Pins both arms of `select!`: a key reaches input, a stream token disables it,
-        // and closing the agent channel ends the loop.
-        let (mut app, _rx, agent_tx) = test_app(None);
+        // and closing the engine's event channel ends the loop.
+        let (mut app, _rx, event_tx) = test_app(None);
         let (mut terminal, _buf) = crossterm_test_terminal(60, 8);
 
-        let key = Ok(Event::Key(KeyEvent::new(
+        let key = Ok(CrosstermEvent::Key(KeyEvent::new(
             KeyCode::Char('x'),
             KeyModifiers::NONE,
         )));
         let stream = futures::stream::iter(vec![key]).chain(futures::stream::pending());
 
         let driver = tokio::spawn(async move {
-            agent_tx.send(AgentEvent::StreamToken("hi".into())).unwrap();
+            event_tx.send(Event::StreamToken("hi".into())).unwrap();
             tokio::time::sleep(TICK_INTERVAL * 2).await;
-            drop(agent_tx);
+            drop(event_tx);
         });
 
         app.run_with_events(&mut terminal, stream).await.unwrap();
@@ -1338,25 +1320,25 @@ mod tests {
         assert_eq!(app.input.lines(), vec!["x"], "crossterm key reached input");
         assert!(
             !app.input.is_enabled(),
-            "agent StreamToken disabled the input",
+            "engine StreamToken disabled the input",
         );
     }
 
     #[tokio::test]
     async fn run_with_events_applies_git_probe_results() {
-        let (mut app, _rx, agent_tx) = test_app(None);
+        let (mut app, _rx, event_tx) = test_app(None);
         app.git_probes
             .inject(GitUpdate::Branch(Some("feat/x".to_owned())));
 
         let (mut terminal, _buf) = crossterm_test_terminal(60, 8);
         let closer = tokio::spawn(async move {
             tokio::time::sleep(TICK_INTERVAL * 2).await;
-            drop(agent_tx);
+            drop(event_tx);
         });
 
         app.run_with_events(
             &mut terminal,
-            futures::stream::pending::<std::io::Result<Event>>(),
+            futures::stream::pending::<std::io::Result<CrosstermEvent>>(),
         )
         .await
         .unwrap();
@@ -1367,7 +1349,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_with_events_returns_terminal_read_errors() {
-        let (mut app, _rx, _agent_tx) = test_app(None);
+        let (mut app, _rx, _event_tx) = test_app(None);
         let (mut terminal, _buf) = crossterm_test_terminal(60, 8);
         let stream = futures::stream::iter(vec![Err(io::Error::other("tty gone"))]);
 
@@ -1381,7 +1363,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_with_events_quits_when_the_terminal_stream_ends() {
-        let (mut app, _rx, _agent_tx) = test_app(None);
+        let (mut app, _rx, _event_tx) = test_app(None);
         let (mut terminal, _buf) = crossterm_test_terminal(60, 8);
 
         tokio::time::timeout(
@@ -1397,15 +1379,14 @@ mod tests {
 
     // ── handle_crossterm_event ──
 
-    fn key_event(code: KeyCode, modifiers: KeyModifiers) -> Event {
-        Event::Key(KeyEvent::new(code, modifiers))
+    fn key_event(code: KeyCode, modifiers: KeyModifiers) -> CrosstermEvent {
+        CrosstermEvent::Key(KeyEvent::new(code, modifiers))
     }
 
     #[tokio::test]
     async fn handle_crossterm_key_submit_forwards_through_input_to_dispatch() {
-        let (mut app, mut rx, _agent_tx) = test_app(None);
-        // Type "hi" then Enter; input returns `SubmitPrompt` which must reach
-        // `dispatch_user_action`.
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        // Type "hi" then Enter. Input returns `Action::Submit`, which must reach `dispatch_action`.
         app.handle_crossterm_event(&key_event(KeyCode::Char('h'), KeyModifiers::NONE));
         app.handle_crossterm_event(&key_event(KeyCode::Char('i'), KeyModifiers::NONE));
         app.handle_crossterm_event(&key_event(KeyCode::Enter, KeyModifiers::NONE));
@@ -1414,13 +1395,13 @@ mod tests {
         assert_eq!(app.chat.entry_count(), 1);
         assert_eq!(app.status_bar.status(), &Status::Streaming);
         let forwarded = rx.recv().await.unwrap();
-        assert!(matches!(forwarded, UserAction::SubmitPrompt(s) if s == "hi"));
+        assert!(matches!(forwarded, Op::Prompt(s) if s == "hi"));
     }
 
     #[test]
     fn handle_crossterm_key_ctrl_c_idle_arms_exit_then_confirms() {
         // First press arms; second press inside the window confirms.
-        let (mut app, _rx, _agent_tx) = test_app(None);
+        let (mut app, _rx, _event_tx) = test_app(None);
         app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::CONTROL));
         assert!(!app.should_quit, "first press only arms");
         assert!(matches!(app.status_bar.status(), Status::ExitArmed { .. }));
@@ -1430,36 +1411,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_crossterm_key_ctrl_c_busy_forwards_cancel_without_quitting() {
-        // Mid-turn Ctrl+C forwards `Cancel` to the agent loop and leaves `should_quit` clear.
-        let (mut app, mut rx, _agent_tx) = test_app(None);
-        app.handle_agent_event(AgentEvent::StreamToken("partial".into()));
+    async fn handle_crossterm_key_ctrl_c_busy_forwards_interrupt_without_quitting() {
+        // Mid-turn Ctrl+C forwards `Interrupt` to the engine and leaves `should_quit` clear.
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.handle_engine_event(Event::StreamToken("partial".into()));
         assert!(!app.input.is_enabled());
 
         app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::CONTROL));
         assert!(!app.should_quit, "busy Ctrl+C must not exit");
-        let forwarded = rx.recv().await.expect("Cancel forwarded to agent loop");
-        assert!(matches!(forwarded, UserAction::Cancel));
+        let forwarded = rx.recv().await.expect("Interrupt forwarded to the engine");
+        assert!(matches!(forwarded, Op::Interrupt));
     }
 
     #[tokio::test]
-    async fn handle_crossterm_key_esc_busy_forwards_cancel() {
-        let (mut app, mut rx, _agent_tx) = test_app(None);
-        app.handle_agent_event(AgentEvent::StreamToken("partial".into()));
+    async fn handle_crossterm_key_esc_busy_forwards_interrupt() {
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.handle_engine_event(Event::StreamToken("partial".into()));
 
         app.handle_crossterm_event(&key_event(KeyCode::Esc, KeyModifiers::NONE));
         assert!(!app.should_quit);
-        let forwarded = rx.recv().await.expect("Cancel forwarded to agent loop");
-        assert!(matches!(forwarded, UserAction::Cancel));
+        let forwarded = rx.recv().await.expect("Interrupt forwarded to the engine");
+        assert!(matches!(forwarded, Op::Interrupt));
     }
 
     #[test]
     fn handle_crossterm_event_mouse_is_forwarded_to_chat() {
-        let (mut app, _rx, _agent_tx) = test_app(None);
+        let (mut app, _rx, _event_tx) = test_app(None);
         app.chat.push_system_message(long_chat_block());
         _ = render_app(&mut app, 60, 10);
 
-        app.handle_crossterm_event(&Event::Mouse(MouseEvent {
+        app.handle_crossterm_event(&CrosstermEvent::Mouse(MouseEvent {
             kind: MouseEventKind::ScrollUp,
             column: 0,
             row: 0,
@@ -1474,28 +1455,28 @@ mod tests {
     #[test]
     fn handle_crossterm_resize_schedules_dirty_for_relayout() {
         // Resize falls through to `dirty = true` so the next tick re-splits with the new area.
-        let (mut app, _rx, _agent_tx) = test_app(None);
+        let (mut app, _rx, _event_tx) = test_app(None);
         app.dirty = false;
-        app.handle_crossterm_event(&Event::Resize(80, 24));
+        app.handle_crossterm_event(&CrosstermEvent::Resize(80, 24));
         assert!(app.dirty, "Resize must trigger a re-layout render");
     }
 
     #[test]
     fn handle_crossterm_unknown_event_is_a_noop() {
         // The `_ => return` arm prevents FocusGained / FocusLost from forcing re-renders.
-        let (mut app, _rx, _agent_tx) = test_app(None);
+        let (mut app, _rx, _event_tx) = test_app(None);
         app.dirty = false;
-        app.handle_crossterm_event(&Event::FocusGained);
+        app.handle_crossterm_event(&CrosstermEvent::FocusGained);
         assert!(!app.dirty);
     }
 
     #[test]
     fn handle_crossterm_key_release_is_ignored() {
-        let (mut app, mut rx, _agent_tx) = test_app(None);
+        let (mut app, mut rx, _event_tx) = test_app(None);
         app.input.set_text("hi");
         app.dirty = false;
 
-        app.handle_crossterm_event(&Event::Key(KeyEvent::new_with_kind(
+        app.handle_crossterm_event(&CrosstermEvent::Key(KeyEvent::new_with_kind(
             KeyCode::Enter,
             KeyModifiers::NONE,
             KeyEventKind::Release,
@@ -1508,7 +1489,7 @@ mod tests {
 
     #[test]
     fn handle_crossterm_page_up_scrolls_chat_while_idle_and_ctrl_end_jumps_back() {
-        let (mut app, _rx, _agent_tx) = test_app(None);
+        let (mut app, _rx, _event_tx) = test_app(None);
         app.chat.push_system_message(long_chat_block());
         _ = render_app(&mut app, 80, 20);
         app.input.set_text("draft");
@@ -1527,7 +1508,7 @@ mod tests {
     #[test]
     fn handle_crossterm_up_scrolls_chat_once_the_input_cursor_reaches_the_top() {
         // Alternate-scroll turns wheel ticks into Up, so an idle prompt must still scroll chat.
-        let (mut app, _rx, _agent_tx) = test_app(None);
+        let (mut app, _rx, _event_tx) = test_app(None);
         app.chat.push_system_message(long_chat_block());
         _ = render_app(&mut app, 80, 20);
         app.input.set_text("one\ntwo");
@@ -1544,10 +1525,10 @@ mod tests {
 
     #[test]
     fn handle_crossterm_popup_arrows_while_busy_leave_chat_scroll_alone() {
-        let (mut app, _rx, _agent_tx) = test_app(None);
+        let (mut app, _rx, _event_tx) = test_app(None);
         app.chat.push_system_message(long_chat_block());
         _ = render_app(&mut app, 80, 20);
-        app.handle_agent_event(AgentEvent::StreamToken("partial".into()));
+        app.handle_engine_event(Event::StreamToken("partial".into()));
         app.handle_crossterm_event(&key_event(KeyCode::Char('/'), KeyModifiers::NONE));
         assert!(app.input.popup_visible());
 
@@ -1558,10 +1539,12 @@ mod tests {
 
     #[test]
     fn handle_crossterm_paste_fills_the_input_without_submitting() {
-        let (mut app, mut rx, _agent_tx) = test_app(None);
+        let (mut app, mut rx, _event_tx) = test_app(None);
         app.dirty = false;
 
-        app.handle_crossterm_event(&Event::Paste("first line\r\nsecond line".to_owned()));
+        app.handle_crossterm_event(&CrosstermEvent::Paste(
+            "first line\r\nsecond line".to_owned(),
+        ));
 
         assert_eq!(
             app.input.lines(),
@@ -1575,8 +1558,8 @@ mod tests {
     #[tokio::test]
     async fn handle_crossterm_popup_enter_dispatches_canonical_command() {
         // `/h` filters to /help; Enter dispatches it. /help is read-only so chat
-        // lands a system message instead of forwarding to the agent.
-        let (mut app, mut rx, _agent_tx) = test_app(None);
+        // lands a system message and the engine receives nothing.
+        let (mut app, mut rx, _event_tx) = test_app(None);
         app.handle_crossterm_event(&key_event(KeyCode::Char('/'), KeyModifiers::NONE));
         app.handle_crossterm_event(&key_event(KeyCode::Char('h'), KeyModifiers::NONE));
         assert!(app.input.popup_visible());
@@ -1598,7 +1581,7 @@ mod tests {
     fn handle_crossterm_popup_tab_completes_canonical_name_into_buffer() {
         // Tab inserts `/{name} ` and hides the popup. Filter to /help so the test pins
         // the completion shape independent of BUILT_INS ordering.
-        let (mut app, _rx, _agent_tx) = test_app(None);
+        let (mut app, _rx, _event_tx) = test_app(None);
         app.handle_crossterm_event(&key_event(KeyCode::Char('/'), KeyModifiers::NONE));
         app.handle_crossterm_event(&key_event(KeyCode::Char('h'), KeyModifiers::NONE));
 
@@ -1617,9 +1600,9 @@ mod tests {
     #[tokio::test]
     async fn modal_gate_intercepts_keys_before_input_sees_them() {
         // Modal keys must not reach input.
-        let (mut app, mut rx, _agent_tx) = test_app(None);
-        app.push_modal(Box::new(ScriptedModal::new(ModalAction::User(
-            UserAction::Cancel,
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.push_modal(Box::new(ScriptedModal::new(ModalAction::Dispatch(
+            Action::Op(Op::Interrupt),
         ))));
 
         app.handle_crossterm_event(&key_event(KeyCode::Char('x'), KeyModifiers::NONE));
@@ -1629,27 +1612,27 @@ mod tests {
         );
         assert!(
             matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
-            "no UserAction must reach user_tx for a key the modal consumed",
+            "no Op must reach ops for a key the modal consumed",
         );
 
         // Modal submit flows through the normal dispatch path.
         app.handle_crossterm_event(&key_event(KeyCode::Char('s'), KeyModifiers::NONE));
         let forwarded = rx.recv().await.expect("modal-submitted action forwarded");
-        assert!(matches!(forwarded, UserAction::Cancel));
+        assert!(matches!(forwarded, Op::Interrupt));
     }
 
     #[tokio::test]
     async fn modal_gate_routes_pastes_to_the_top_modal() {
-        let (mut app, mut rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::SubmitPrompt("/rename".to_owned()));
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("/rename".to_owned()));
 
-        app.handle_crossterm_event(&Event::Paste("Fix auth\r\nflow".to_owned()));
+        app.handle_crossterm_event(&CrosstermEvent::Paste("Fix auth\r\nflow".to_owned()));
         app.handle_crossterm_event(&key_event(KeyCode::Enter, KeyModifiers::NONE));
 
         let forwarded = rx.recv().await.expect("rename forwarded");
         assert_eq!(
             forwarded,
-            UserAction::Rename {
+            Op::Rename {
                 title: "Fix auth flow".to_owned(),
             },
         );
@@ -1658,11 +1641,11 @@ mod tests {
 
     #[test]
     fn modal_gate_paste_never_answers_an_approval() {
-        let (mut app, mut rx, _agent_tx) = test_app(None);
+        let (mut app, mut rx, _event_tx) = test_app(None);
         push_answerable_approval(&mut app, "rm -rf build");
         _ = render_app(&mut app, 60, 20);
 
-        app.handle_crossterm_event(&Event::Paste("y\n".to_owned()));
+        app.handle_crossterm_event(&CrosstermEvent::Paste("y\n".to_owned()));
 
         assert!(rx.try_recv().is_err(), "a paste must not decide the call");
         assert!(app.modals.is_active());
@@ -1672,13 +1655,13 @@ mod tests {
     #[test]
     fn modal_gate_cancel_closes_modal_without_dispatching() {
         // `ModalKey::Cancelled` pops the modal without dispatching; next key reaches input.
-        let (mut app, mut rx, _agent_tx) = test_app(None);
+        let (mut app, mut rx, _event_tx) = test_app(None);
         app.push_modal(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
         app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::NONE));
 
         assert!(
             matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
-            "Cancelled must not dispatch any UserAction",
+            "Cancelled must not dispatch any Op",
         );
         // Modal closed; subsequent keys reach the input.
         app.handle_crossterm_event(&key_event(KeyCode::Char('y'), KeyModifiers::NONE));
@@ -1688,17 +1671,15 @@ mod tests {
     #[test]
     fn clear_modals_resolves_a_pending_approval_to_deny() {
         // A session swap clears the stack while an approval is outstanding. The cancel hook's Deny
-        // must reach the agent so the blocked turn is not stranded waiting for a decision.
-        use crate::agent::event::{ApprovalBody, ApprovalDecision, ApprovalPreview};
-
-        let (mut app, mut rx, _agent_tx) = test_app(None);
-        app.push_approval_modal(
-            "call-1".to_owned(),
-            ApprovalPreview {
+        // must reach the engine so the blocked turn is not stranded waiting for a decision.
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.handle_engine_event(Event::ApprovalRequested {
+            id: "call-1".to_owned(),
+            preview: ApprovalPreview {
                 title: "Bash(rm -rf /)".to_owned(),
                 body: ApprovalBody::Command("rm -rf /".to_owned()),
             },
-        );
+        });
 
         app.clear_modals();
 
@@ -1707,9 +1688,9 @@ mod tests {
             .expect("clear must forward the cancel-hook deny");
         assert!(matches!(
             forwarded,
-            UserAction::ApprovalDecision {
+            Op::Resolve {
                 id,
-                decision: ApprovalDecision::Deny,
+                decision: Decision::Deny,
             } if id == "call-1"
         ));
     }
@@ -1717,19 +1698,19 @@ mod tests {
     // ── handle_esc ──
 
     #[tokio::test]
-    async fn handle_esc_busy_dispatches_cancel() {
+    async fn handle_esc_busy_dispatches_interrupt() {
         // Esc is routed by `App` because its meaning depends on queue state and run-state.
-        let (mut app, mut rx, _agent_tx) = test_app(None);
-        app.handle_agent_event(AgentEvent::StreamToken("partial".into()));
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.handle_engine_event(Event::StreamToken("partial".into()));
         app.handle_crossterm_event(&key_event(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(app.status_bar.status(), &Status::Cancelling);
-        let forwarded = rx.recv().await.expect("Cancel forwarded");
-        assert!(matches!(forwarded, UserAction::Cancel));
+        let forwarded = rx.recv().await.expect("Interrupt forwarded");
+        assert!(matches!(forwarded, Op::Interrupt));
     }
 
     #[test]
     fn handle_esc_idle_with_empty_queue_is_silent() {
-        let (mut app, _rx, _agent_tx) = test_app(None);
+        let (mut app, _rx, _event_tx) = test_app(None);
         app.handle_crossterm_event(&key_event(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(app.status_bar.status(), &Status::Idle);
         assert!(app.pending_prompts.is_empty());
@@ -1738,7 +1719,7 @@ mod tests {
     #[test]
     fn handle_esc_idle_with_queue_pops_most_recent_into_input() {
         // The most-recent (back of FIFO) returns to input; the rest stay queued.
-        let (mut app, _rx, _agent_tx) = test_app(None);
+        let (mut app, _rx, _event_tx) = test_app(None);
         app.pending_prompts.push_back("first".into());
         app.pending_prompts.push_back("second".into());
 
@@ -1754,7 +1735,7 @@ mod tests {
     #[test]
     fn handle_esc_idle_with_buffer_content_refuses_pop() {
         // Esc must not clobber an in-progress draft.
-        let (mut app, _rx, _agent_tx) = test_app(None);
+        let (mut app, _rx, _event_tx) = test_app(None);
         app.pending_prompts.push_back("queued".into());
         app.input.set_text("draft");
 
@@ -1770,7 +1751,7 @@ mod tests {
     #[test]
     fn handle_esc_with_popup_visible_dismisses_popup_and_leaves_queue_intact() {
         // The popup gate sits in front of App's Esc routing — popup hides, queue stays put.
-        let (mut app, _rx, _agent_tx) = test_app(None);
+        let (mut app, _rx, _event_tx) = test_app(None);
         app.pending_prompts.push_back("queued".into());
         app.handle_crossterm_event(&key_event(KeyCode::Char('/'), KeyModifiers::NONE));
         assert!(app.input.popup_visible(), "/ opens the popup");
@@ -1785,26 +1766,26 @@ mod tests {
         );
     }
 
-    // ── dispatch_user_action ──
+    // ── dispatch_action ──
 
     #[tokio::test]
     async fn dispatch_submit_prompt_updates_chat_status_and_forwards_action() {
-        let (mut app, mut rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::SubmitPrompt("hello".to_owned()));
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("hello".to_owned()));
 
         assert_eq!(app.chat.entry_count(), 1);
         assert!(!app.input.is_enabled(), "streaming disables input");
         assert_eq!(app.status_bar.status(), &Status::Streaming);
         assert!(!app.should_quit);
         let forwarded = rx.recv().await.expect("forwarded action");
-        assert!(matches!(forwarded, UserAction::SubmitPrompt(s) if s == "hello"));
+        assert!(matches!(forwarded, Op::Prompt(s) if s == "hello"));
     }
 
     #[tokio::test]
     async fn dispatch_slash_command_renders_locally_without_forwarding() {
-        // Slash commands stay client-side; the agent loop never sees the prompt.
-        let (mut app, mut rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::SubmitPrompt("/help".to_owned()));
+        // Slash commands stay client-side, so the engine never sees the prompt.
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("/help".to_owned()));
 
         assert!(app.modals.is_active(), "/help opens a modal");
         assert_eq!(
@@ -1829,8 +1810,8 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_unknown_slash_command_renders_error_without_forwarding() {
-        let (mut app, mut rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::SubmitPrompt("/no-such".to_owned()));
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("/no-such".to_owned()));
 
         assert_eq!(app.chat.entry_count(), 2);
         assert!(app.input.is_enabled());
@@ -1843,8 +1824,8 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_double_slash_escapes_command_and_forwards_literal() {
-        let (mut app, mut rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::SubmitPrompt("//etc/hosts".to_owned()));
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("//etc/hosts".to_owned()));
 
         assert_eq!(app.chat.entry_count(), 1, "only the user message");
         assert!(!app.input.is_enabled(), "streaming disables input");
@@ -1853,7 +1834,7 @@ mod tests {
         let forwarded = rx.recv().await.expect("forwarded action");
         assert!(matches!(
             forwarded,
-            UserAction::SubmitPrompt(s) if s == "/etc/hosts",
+            Op::Prompt(s) if s == "/etc/hosts",
         ));
         assert_eq!(
             app.active_prompt.as_deref(),
@@ -1868,40 +1849,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatch_cancel_flips_status_to_cancelling_and_forwards() {
-        // Cancel flips status immediately; `AgentEvent::Cancelled` later returns to idle.
-        let (mut app, mut rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::SubmitPrompt("hi".to_owned()));
+    async fn dispatch_op_interrupt_flips_status_to_cancelling_and_forwards() {
+        // An interrupt flips status immediately, and `Event::Cancelled` later returns to idle.
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("hi".to_owned()));
         rx.recv().await.expect("submit forwarded");
         let entries_before = app.chat.entry_count();
 
-        app.dispatch_user_action(UserAction::Cancel);
+        app.dispatch_action(Action::Op(Op::Interrupt));
 
         assert_eq!(app.chat.entry_count(), entries_before, "no new chat entry");
         assert_eq!(app.status_bar.status(), &Status::Cancelling);
         assert!(!app.should_quit);
-        let forwarded = rx.recv().await.expect("Cancel forwarded");
-        assert!(matches!(forwarded, UserAction::Cancel));
+        let forwarded = rx.recv().await.expect("Interrupt forwarded");
+        assert!(matches!(forwarded, Op::Interrupt));
     }
 
     #[test]
-    fn dispatch_quit_sets_should_quit_and_leaves_chat_untouched() {
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::Quit);
+    fn dispatch_op_shutdown_sets_should_quit_and_leaves_chat_untouched() {
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Op(Op::Shutdown));
 
         assert!(app.should_quit);
         assert_eq!(app.chat.entry_count(), 0);
-        // Quit flows past streaming setup so tear-down doesn't have to un-spinner.
+        // Shutdown skips streaming setup so tear-down doesn't have to un-spinner.
         assert_eq!(app.status_bar.status(), &Status::Idle);
     }
 
     #[test]
     fn dispatch_closed_channel_surfaces_error_and_quits() {
-        // Dropping `user_rx` simulates a stopped engine, which the UI announces before teardown.
-        let (mut app, rx, _agent_tx) = test_app(None);
+        // Dropping `op_rx` simulates a stopped engine, which the UI announces before teardown.
+        let (mut app, rx, _event_tx) = test_app(None);
         drop(rx);
 
-        app.dispatch_user_action(UserAction::SubmitPrompt("hi".to_owned()));
+        app.dispatch_action(Action::Submit("hi".to_owned()));
 
         assert!(app.should_quit, "closed channel must trigger teardown");
         assert!(
@@ -1918,16 +1899,16 @@ mod tests {
 
     #[test]
     fn dispatch_full_channel_surfaces_error_but_keeps_app_alive() {
-        // `Cancel` always goes through `try_send`, so it's the natural way to overflow
+        // `Interrupt` always goes through `try_send`, so it's the natural way to overflow
         // (busy-turn submits buffer locally instead).
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("active".to_owned()));
         for _ in 0..7 {
-            app.dispatch_user_action(UserAction::Cancel);
+            app.dispatch_action(Action::Op(Op::Interrupt));
         }
         let before_overflow = app.chat.entry_count();
 
-        app.dispatch_user_action(UserAction::Cancel);
+        app.dispatch_action(Action::Op(Op::Interrupt));
 
         assert!(!app.should_quit, "Full is not fatal");
         assert_eq!(
@@ -1942,16 +1923,16 @@ mod tests {
     fn dispatch_full_channel_on_approval_points_to_the_cancel_recovery() {
         // A dropped approval decision blocks the turn, unlike a dropped prompt, so the error must
         // name the recovery path rather than the generic prompt-dropped message.
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("active".to_owned()));
         for _ in 0..8 {
-            app.dispatch_user_action(UserAction::Cancel);
+            app.dispatch_action(Action::Op(Op::Interrupt));
         }
 
-        app.dispatch_user_action(UserAction::ApprovalDecision {
+        app.dispatch_action(Action::Op(Op::Resolve {
             id: "call-1".to_owned(),
-            decision: crate::agent::event::ApprovalDecision::Approve,
-        });
+            decision: Decision::Approve,
+        }));
 
         assert!(!app.should_quit, "Full is not fatal");
         assert!(app.chat.last_is_error());
@@ -1965,11 +1946,11 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_submit_during_busy_queues_and_forwards_for_mid_turn_drain() {
-        let (mut app, mut rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::SubmitPrompt("first".to_owned()));
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("first".to_owned()));
         rx.recv().await.expect("first submit forwarded");
 
-        app.dispatch_user_action(UserAction::SubmitPrompt("queued".to_owned()));
+        app.dispatch_action(Action::Submit("queued".to_owned()));
 
         // Buffered for preview AND forwarded so `agent_turn` can splice it at the next
         // round boundary. Chat stays untouched until `PromptDrained` lands.
@@ -1979,47 +1960,47 @@ mod tests {
         );
         assert_eq!(app.status_bar.status(), &Status::Streaming);
         let forwarded = rx.recv().await.expect("queued submit forwarded");
-        assert_eq!(forwarded, UserAction::QueuePrompt("queued".to_owned()));
+        assert_eq!(forwarded, Op::Queue("queued".to_owned()));
     }
 
     #[tokio::test]
-    async fn dispatch_swap_config_forwards_to_agent_through_user_tx() {
-        // Modal-emitted SwapConfig must reach the agent loop so it can emit `ConfigChanged`.
-        for action in [
-            UserAction::SwapConfig {
+    async fn dispatch_op_forwards_engine_ops_unchanged() {
+        // A modal-emitted `SetModel` must reach the engine so it can emit `ConfigChanged`.
+        for op in [
+            Op::SetModel {
                 model: Some(crate::model::ResolvedModelId::new(
                     "claude-opus-5-5".to_owned(),
                 )),
                 effort: None,
             },
-            UserAction::SwapConfig {
+            Op::SetModel {
                 model: None,
-                effort: Some(crate::config::Effort::High),
+                effort: Some(Effort::High),
             },
-            UserAction::Clear,
+            Op::Clear,
         ] {
-            let (mut app, mut rx, _agent_tx) = test_app(None);
-            app.dispatch_user_action(action.clone());
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            app.dispatch_op(op.clone());
 
-            let forwarded = rx.recv().await.expect("action forwarded to agent");
-            assert_eq!(forwarded, action);
+            let forwarded = rx.recv().await.expect("op forwarded to the engine");
+            assert_eq!(forwarded, op);
             assert!(!app.should_quit);
             assert_eq!(app.chat.entry_count(), 0);
         }
     }
 
     #[tokio::test]
-    async fn dispatch_resume_forwards_to_agent_and_disables_input_until_event() {
+    async fn dispatch_resume_forwards_to_the_engine_and_disables_input_until_event() {
         // Pin: between forwarding `Resume` and the SessionResumed event landing, input must be
         // gated so a typed prompt doesn't push into chat just before `apply_session_resumed`'s
         // `clear_history` wipes it. `finalize_idle` inside the resumed handler re-enables input.
-        let (mut app, mut rx, _agent_tx) = test_app(None);
-        let action = UserAction::Resume {
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        let action = Op::Resume {
             path: "resume-target.jsonl".into(),
         };
-        app.dispatch_user_action(action.clone());
+        app.dispatch_op(action.clone());
 
-        let forwarded = rx.recv().await.expect("Resume must reach the agent loop");
+        let forwarded = rx.recv().await.expect("Resume must reach the engine");
         assert_eq!(forwarded, action);
         assert!(
             !app.input.is_enabled(),
@@ -2028,16 +2009,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatch_compact_forwards_to_agent_and_disables_input_until_event() {
+    async fn dispatch_compact_forwards_to_the_engine_and_disables_input_until_event() {
         // Mirror of the Resume gate: the chat is about to be wiped by `apply_session_compacted`,
         // so the user's input must be parked until SessionCompacted re-enables it.
-        let (mut app, mut rx, _agent_tx) = test_app(None);
-        let action = UserAction::Compact {
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        let action = Op::Compact {
             instructions: Some("focus".to_owned()),
         };
-        app.dispatch_user_action(action.clone());
+        app.dispatch_op(action.clone());
 
-        let forwarded = rx.recv().await.expect("Compact must reach the agent loop");
+        let forwarded = rx.recv().await.expect("Compact must reach the engine");
         assert_eq!(forwarded, action);
         assert!(
             !app.input.is_enabled(),
@@ -2048,18 +2029,18 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_submit_during_cancelling_holds_locally_without_forwarding() {
-        let (mut app, mut rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("active".to_owned()));
         rx.recv().await.expect("active submit forwarded");
-        app.dispatch_user_action(UserAction::Cancel);
+        app.dispatch_action(Action::Op(Op::Interrupt));
         rx.recv().await.expect("cancel forwarded");
         assert_eq!(app.status_bar.status(), &Status::Cancelling);
 
-        app.dispatch_user_action(UserAction::SubmitPrompt("typed-during-cancel".to_owned()));
+        app.dispatch_action(Action::Submit("typed-during-cancel".to_owned()));
 
         assert!(
             matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
-            "submit during cancel must not reach the agent's user_rx",
+            "submit during cancel must not reach the engine",
         );
         assert_eq!(
             app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
@@ -2069,12 +2050,12 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_submit_during_compacting_holds_locally_without_forwarding() {
-        let (mut app, mut rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::Compact { instructions: None });
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Op(Op::Compact { instructions: None }));
         rx.recv().await.expect("compact forwarded");
         assert_eq!(app.status_bar.status(), &Status::Compacting);
 
-        app.dispatch_user_action(UserAction::SubmitPrompt("typed-during-compact".to_owned()));
+        app.dispatch_action(Action::Submit("typed-during-compact".to_owned()));
 
         assert!(
             matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
@@ -2090,12 +2071,12 @@ mod tests {
     async fn dispatch_read_only_slash_during_busy_runs_client_side_without_queueing() {
         // Read-only slash commands during busy run client-side immediately; queueing them
         // would make the LLM answer `/help` literally on drain.
-        let (mut app, mut rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("active".to_owned()));
         rx.recv().await.expect("active submit forwarded");
         assert_eq!(app.status_bar.status(), &Status::Streaming);
 
-        app.dispatch_user_action(UserAction::SubmitPrompt("/help".to_owned()));
+        app.dispatch_action(Action::Submit("/help".to_owned()));
 
         assert!(
             app.pending_prompts.is_empty(),
@@ -2103,7 +2084,7 @@ mod tests {
         );
         assert!(
             matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
-            "slash command must not forward to user_tx",
+            "slash command must not forward to ops",
         );
         // Only the original "active" prompt: /help is modal-only and suppresses its own echo.
         assert_eq!(app.chat.entry_count(), 1);
@@ -2115,16 +2096,16 @@ mod tests {
     async fn dispatch_clear_during_busy_refuses_with_system_message_no_dispatch() {
         // State-mutating commands refuse mid-turn — rolling while `messages` is still draining
         // would race the in-flight turn into the wrong JSONL.
-        let (mut app, mut rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("active".to_owned()));
         rx.recv().await.expect("active submit forwarded");
 
-        app.dispatch_user_action(UserAction::SubmitPrompt("/clear".to_owned()));
+        app.dispatch_action(Action::Submit("/clear".to_owned()));
 
         assert!(app.pending_prompts.is_empty());
         assert!(
             matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
-            "neither SubmitPrompt nor Clear must reach user_tx",
+            "neither a prompt nor Clear may reach the engine",
         );
         let body = app.chat.last_system_text().expect("refusal system message");
         assert!(
@@ -2135,9 +2116,9 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_init_forwards_synthesized_prompt_and_flips_to_streaming() {
-        // Chat shows only `/init`; the agent must receive the synthesized body.
-        let (mut app, mut rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::SubmitPrompt("/init".to_owned()));
+        // Chat shows only `/init`, while the engine must receive the synthesized body.
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("/init".to_owned()));
 
         assert_eq!(app.chat.entry_count(), 1, "only the typed `/init` line");
         assert!(!app.input.is_enabled(), "Streaming disables input");
@@ -2146,25 +2127,25 @@ mod tests {
         assert!(
             matches!(
                 &forwarded,
-                UserAction::SubmitPrompt(body) if body.contains("AGENTS.md") && body != "/init"
+                Op::Prompt(body) if body.contains("AGENTS.md") && body != "/init"
             ),
-            "expected SubmitPrompt with expanded body, got {forwarded:?}",
+            "expected a prompt with the expanded body, got {forwarded:?}",
         );
     }
 
     #[tokio::test]
     async fn dispatch_init_during_busy_refuses_with_system_message_no_forward() {
         // Mutating: refuse. Typed `/init` row still lands; only the synthesized body suppresses.
-        let (mut app, mut rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("active".to_owned()));
         rx.recv().await.expect("active submit forwarded");
 
-        app.dispatch_user_action(UserAction::SubmitPrompt("/init".to_owned()));
+        app.dispatch_action(Action::Submit("/init".to_owned()));
 
         assert!(app.pending_prompts.is_empty());
         assert!(
             matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
-            "no synthesized prompt must reach user_tx mid-turn",
+            "no synthesized prompt must reach ops mid-turn",
         );
         assert_eq!(
             app.chat.entry_count(),
@@ -2186,15 +2167,15 @@ mod tests {
             ("/model opus", "/model runs only when idle"),
             ("/effort xhigh", "/effort runs only when idle"),
         ] {
-            let (mut app, mut rx, _agent_tx) = test_app(None);
-            app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            app.dispatch_action(Action::Submit("active".to_owned()));
             rx.recv().await.expect("active submit forwarded");
 
-            app.dispatch_user_action(UserAction::SubmitPrompt(cmd.to_owned()));
+            app.dispatch_action(Action::Submit(cmd.to_owned()));
 
             assert!(
                 matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
-                "{cmd}: action must not reach user_tx mid-turn",
+                "{cmd}: action must not reach ops mid-turn",
             );
             let body = app.chat.last_system_text().expect("refusal system message");
             assert!(body.contains(gate_phrase), "{cmd}: refusal: {body}");
@@ -2207,11 +2188,11 @@ mod tests {
             ("/model", "/model runs only when idle"),
             ("/effort", "/effort runs only when idle"),
         ] {
-            let (mut app, mut rx, _agent_tx) = test_app(None);
-            app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            app.dispatch_action(Action::Submit("active".to_owned()));
             rx.recv().await.expect("active submit forwarded");
 
-            app.dispatch_user_action(UserAction::SubmitPrompt(cmd.to_owned()));
+            app.dispatch_action(Action::Submit(cmd.to_owned()));
 
             assert!(
                 !app.modals.is_active(),
@@ -2219,7 +2200,7 @@ mod tests {
             );
             assert!(
                 matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
-                "{cmd}: action must not reach user_tx mid-turn",
+                "{cmd}: action must not reach ops mid-turn",
             );
             let body = app.chat.last_system_text().expect("refusal system message");
             assert!(body.contains(gate_phrase), "{cmd}: refusal: {body}");
@@ -2231,11 +2212,11 @@ mod tests {
         // Unknown commands route through `dispatch` so the user sees
         // the canonical "unknown command" error with recovery hints
         // (alternatives + `//` escape) instead of the prompt being silently sent to the LLM.
-        let (mut app, mut rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("active".to_owned()));
         rx.recv().await.expect("active submit forwarded");
 
-        app.dispatch_user_action(UserAction::SubmitPrompt("/nope".to_owned()));
+        app.dispatch_action(Action::Submit("/nope".to_owned()));
 
         assert!(app.pending_prompts.is_empty());
         assert!(matches!(
@@ -2245,13 +2226,13 @@ mod tests {
         assert!(app.chat.last_is_error());
     }
 
-    // ── apply_action_locally / theme ──
+    // ── dispatch_action: theme ──
 
     #[test]
     fn preview_theme_repaints_components_and_caches_original() {
-        let (mut app, _rx, _agent_tx) = test_app(None);
+        let (mut app, _rx, _event_tx) = test_app(None);
         let original = app.theme.clone();
-        app.dispatch_user_action(UserAction::PreviewTheme {
+        app.dispatch_action(Action::PreviewTheme {
             name: "latte".to_owned(),
         });
         assert!(
@@ -2266,9 +2247,9 @@ mod tests {
     #[test]
     fn preview_theme_then_modal_cancel_restores_original() {
         // Esc / Ctrl+C surface as ModalAction::Cancelled, so the snapshot must roll back.
-        let (mut app, _rx, _agent_tx) = test_app(None);
+        let (mut app, _rx, _event_tx) = test_app(None);
         let original = app.theme.clone();
-        app.dispatch_user_action(UserAction::PreviewTheme {
+        app.dispatch_action(Action::PreviewTheme {
             name: "latte".to_owned(),
         });
         app.apply_modal_action(ModalAction::Cancelled);
@@ -2281,10 +2262,10 @@ mod tests {
 
     #[test]
     fn clearing_modal_stack_rolls_back_theme_preview() {
-        let (mut app, _rx, _agent_tx) = test_app(None);
+        let (mut app, _rx, _event_tx) = test_app(None);
         let original = app.theme.clone();
         app.push_modal(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
-        app.dispatch_user_action(UserAction::PreviewTheme {
+        app.dispatch_action(Action::PreviewTheme {
             name: "latte".to_owned(),
         });
 
@@ -2299,7 +2280,7 @@ mod tests {
     fn modal_cancel_without_snapshot_is_a_noop() {
         // Modals that never previewed (e.g. /model picker) cancel through the same
         // ModalAction::Cancelled path, so the rollback arm must skip cleanly with no snapshot.
-        let (mut app, _rx, _agent_tx) = test_app(None);
+        let (mut app, _rx, _event_tx) = test_app(None);
         let original_text = app.theme.text;
         app.apply_modal_action(ModalAction::Cancelled);
         assert!(app.preview_theme_snapshot.is_none());
@@ -2311,7 +2292,7 @@ mod tests {
         // Destructive-action modals (e.g. confirm-delete) report success via SystemMessage so
         // the user has chat-stream evidence the action ran. Pin the body verbatim so a future
         // routing change that drops the message or pushes an empty block fails here.
-        let (mut app, _rx, _agent_tx) = test_app(None);
+        let (mut app, _rx, _event_tx) = test_app(None);
         let entries_before = app.chat.entry_count();
         let body = "Deleted session abc12345: Fix auth flow".to_owned();
         app.apply_modal_action(ModalAction::SystemMessage(body.clone()));
@@ -2326,11 +2307,11 @@ mod tests {
     #[test]
     fn preview_theme_with_unknown_name_does_nothing_and_keeps_active_theme() {
         // Roster drift between slash + builtin tables logs via tracing only — user state stays put.
-        let (mut app, _rx, _agent_tx) = test_app(None);
+        let (mut app, _rx, _event_tx) = test_app(None);
         let original_text = app.theme.text;
         let entries_before = app.chat.entry_count();
 
-        app.dispatch_user_action(UserAction::PreviewTheme {
+        app.dispatch_action(Action::PreviewTheme {
             name: "nonexistent".to_owned(),
         });
 
@@ -2348,12 +2329,12 @@ mod tests {
 
     #[test]
     fn swap_theme_commits_and_clears_snapshot() {
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::PreviewTheme {
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::PreviewTheme {
             name: "latte".to_owned(),
         });
         let previewed = app.theme.clone();
-        app.dispatch_user_action(UserAction::SwapTheme {
+        app.dispatch_action(Action::SwapTheme {
             name: "latte".to_owned(),
         });
         assert!(app.preview_theme_snapshot.is_none());
@@ -2371,11 +2352,11 @@ mod tests {
     async fn swap_theme_with_unknown_name_is_a_silent_noop() {
         // Only a dev bug can name an unknown built-in, so log via tracing and leave UI state
         // untouched.
-        let (mut app, _rx, _agent_tx) = test_app(None);
+        let (mut app, _rx, _event_tx) = test_app(None);
         let original = app.session_info.config.theme_name.clone();
         let entries_before = app.chat.entry_count();
 
-        app.dispatch_user_action(UserAction::SwapTheme {
+        app.dispatch_action(Action::SwapTheme {
             name: "nonexistent".to_owned(),
         });
 
@@ -2387,40 +2368,24 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn theme_actions_are_not_forwarded_to_agent_loop() {
-        // PreviewTheme / SwapTheme are TUI-only; reaching `user_tx` would race the client.
-        let (mut app, mut rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::PreviewTheme {
-            name: "latte".to_owned(),
-        });
-        app.dispatch_user_action(UserAction::SwapTheme {
-            name: "latte".to_owned(),
-        });
-        assert!(
-            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
-            "theme actions must stay client-side",
-        );
-    }
-
     // ── handle_submit_prompt ──
 
     #[test]
     fn submit_slash_theme_pushes_picker_onto_modal_stack() {
         // Bare `/theme` is the ReadOnly modal-opening branch, so its `SlashOutcome::Modal` must
         // land on `App::modals`.
-        let (mut app, _rx, _agent_tx) = test_app(None);
+        let (mut app, _rx, _event_tx) = test_app(None);
         assert!(!app.modals.is_active(), "stack starts empty");
-        app.dispatch_user_action(UserAction::SubmitPrompt("/theme".to_owned()));
+        app.dispatch_action(Action::Submit("/theme".to_owned()));
         assert!(app.modals.is_active(), "bare `/theme` opens a picker modal");
     }
 
     #[test]
     fn slash_typed_swap_theme_routes_through_local_handler() {
-        // Synthesized non-SubmitPrompt actions (e.g. `/theme latte`) must flow through
-        // dispatch_user_action so the local theme arm runs, not get forwarded to the agent.
-        let (mut app, mut rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::SubmitPrompt("/theme latte".to_owned()));
+        // A synthesized TUI-only action (e.g. `/theme latte`) must run the local theme arm in
+        // `dispatch_action`.
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("/theme latte".to_owned()));
 
         assert_eq!(
             app.session_info.config.theme_name, "latte",
@@ -2428,48 +2393,45 @@ mod tests {
         );
         assert!(
             matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
-            "TUI-only theme swap must not leak to the agent channel",
+            "TUI-only theme swap must not leak to the engine",
         );
     }
 
     #[tokio::test]
-    async fn slash_typed_model_routes_synthesized_swap_config_through_dispatch() {
-        // Mirrors the typed-`/theme` regression on the agent-bound side: `/model <id>` synthesizes
-        // a SwapConfig that must reach the agent via dispatch_user_action → forward_to_agent.
-        let (mut app, mut rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::SubmitPrompt("/model haiku".to_owned()));
+    async fn slash_typed_model_routes_synthesized_set_model_through_dispatch() {
+        // Mirrors the typed-`/theme` regression on the engine-bound side: `/model <id>` synthesizes
+        // a `SetModel` that must reach the engine via dispatch_action → dispatch_op.
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("/model haiku".to_owned()));
 
-        let forwarded = rx.recv().await.expect("SwapConfig forwarded to agent");
+        let forwarded = rx.recv().await.expect("SetModel forwarded to the engine");
         match forwarded {
-            UserAction::SwapConfig { model, effort } => {
+            Op::SetModel { model, effort } => {
                 assert_eq!(
                     model.as_ref().map(crate::model::ResolvedModelId::as_str),
                     Some("claude-haiku-5-5")
                 );
                 assert_eq!(effort, None);
             }
-            other => panic!("expected SwapConfig, got {other:?}"),
+            other => panic!("expected SetModel, got {other:?}"),
         }
     }
 
     #[tokio::test]
     async fn submit_after_a_cancel_runs_the_held_queue_before_the_new_prompt() {
-        let (mut app, mut rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
-        app.dispatch_user_action(UserAction::SubmitPrompt("held".to_owned()));
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("active".to_owned()));
+        app.dispatch_action(Action::Submit("held".to_owned()));
         app.handle_esc();
-        app.handle_agent_event(AgentEvent::Cancelled);
+        app.handle_engine_event(Event::Cancelled);
         let mut forwarded = || std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
         assert_eq!(forwarded().len(), 3, "submit, queue, and cancel");
 
-        app.dispatch_user_action(UserAction::SubmitPrompt("new".to_owned()));
+        app.dispatch_action(Action::Submit("new".to_owned()));
 
         assert_eq!(
             forwarded(),
-            [
-                UserAction::SubmitPrompt("held".to_owned()),
-                UserAction::QueuePrompt("new".to_owned()),
-            ],
+            [Op::Prompt("held".to_owned()), Op::Queue("new".to_owned())],
         );
         assert_eq!(
             app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
@@ -2479,35 +2441,32 @@ mod tests {
 
     #[tokio::test]
     async fn submit_busy_double_slash_queues_the_literal_and_keeps_the_escape() {
-        let (mut app, mut rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
-        app.dispatch_user_action(UserAction::SubmitPrompt("//etc/hosts".to_owned()));
-        app.dispatch_user_action(UserAction::SubmitPrompt("//tmp".to_owned()));
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("active".to_owned()));
+        app.dispatch_action(Action::Submit("//etc/hosts".to_owned()));
+        app.dispatch_action(Action::Submit("//tmp".to_owned()));
         let mut forwarded = || std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
         assert_eq!(
             forwarded(),
             [
-                UserAction::SubmitPrompt("active".to_owned()),
-                UserAction::QueuePrompt("/etc/hosts".to_owned()),
-                UserAction::QueuePrompt("/tmp".to_owned()),
+                Op::Prompt("active".to_owned()),
+                Op::Queue("/etc/hosts".to_owned()),
+                Op::Queue("/tmp".to_owned()),
             ],
         );
 
-        app.handle_agent_event(AgentEvent::PromptDrained("/etc/hosts".to_owned()));
+        app.handle_engine_event(Event::PromptDrained("/etc/hosts".to_owned()));
         assert_eq!(
             app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
             ["//tmp".to_owned()],
             "the queue keeps the typed escape so Esc restores it",
         );
 
-        app.handle_agent_event(AgentEvent::Cancelled);
-        app.dispatch_user_action(UserAction::SubmitPrompt("new".to_owned()));
+        app.handle_engine_event(Event::Cancelled);
+        app.dispatch_action(Action::Submit("new".to_owned()));
         assert_eq!(
             forwarded(),
-            [
-                UserAction::SubmitPrompt("/tmp".to_owned()),
-                UserAction::QueuePrompt("new".to_owned()),
-            ],
+            [Op::Prompt("/tmp".to_owned()), Op::Queue("new".to_owned())],
         );
         assert_eq!(app.active_prompt.as_deref(), Some("/tmp"));
     }
@@ -2525,9 +2484,9 @@ mod tests {
             +new line
         "};
         for busy in [false, true] {
-            let (mut app, mut rx, _agent_tx) = test_app(None);
+            let (mut app, mut rx, _event_tx) = test_app(None);
             if busy {
-                app.handle_agent_event(AgentEvent::StreamToken("partial".into()));
+                app.handle_engine_event(Event::StreamToken("partial".into()));
             }
 
             let clean = SlashOutcome::SystemMessage("Working tree clean.".to_owned());
@@ -2548,10 +2507,10 @@ mod tests {
             assert_eq!(app.apply_slash_outcome(Ok(modal)), None);
             assert!(app.modals.is_active());
 
-            let forward = SlashOutcome::Forward(UserAction::Clear);
+            let forward = SlashOutcome::Forward(Action::Op(Op::Clear));
             assert_eq!(
                 app.apply_slash_outcome(Ok(forward)),
-                Some(UserAction::Clear)
+                Some(Action::Op(Op::Clear)),
             );
             assert!(
                 rx.try_recv().is_err(),
@@ -2560,12 +2519,12 @@ mod tests {
         }
     }
 
-    // ── handle_agent_event ──
+    // ── handle_engine_event ──
 
     #[test]
     fn handle_session_title_updated_overwrites_existing_title_for_current_session() {
-        let (mut app, _rx, _agent_tx) = test_app(Some("First prompt"));
-        app.handle_agent_event(AgentEvent::SessionTitleUpdated {
+        let (mut app, _rx, _event_tx) = test_app(Some("First prompt"));
+        app.handle_engine_event(Event::SessionTitleUpdated {
             session_id: app.session_info.session_id.clone(),
             title: "AI-generated".to_owned(),
         });
@@ -2577,8 +2536,8 @@ mod tests {
     fn handle_session_title_updated_drops_event_for_stale_session_id() {
         // Title task spawned before `/clear` finishes after the roll;
         // its event must not paint the old session's title onto the current one.
-        let (mut app, _rx, _agent_tx) = test_app(Some("First prompt"));
-        app.handle_agent_event(AgentEvent::SessionTitleUpdated {
+        let (mut app, _rx, _event_tx) = test_app(Some("First prompt"));
+        app.handle_engine_event(Event::SessionTitleUpdated {
             session_id: "different-session".to_owned(),
             title: "Stale title".to_owned(),
         });
@@ -2593,24 +2552,19 @@ mod tests {
     fn handle_config_changed_model_swap_refreshes_status_and_chat() {
         // Three surfaces refresh in one shot: status-bar label, `session_info` (backs `/status` /
         // `/config`), and a chat confirmation block.
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        app.handle_agent_event(AgentEvent::ConfigChanged {
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.handle_engine_event(Event::ConfigChanged {
             model: spec("claude-sonnet-5-5"),
-            effort: Some(crate::config::Effort::High),
-            compaction: crate::config::CompactionConfig::resolved_for_test(
-                crate::config::AutoCompactionConfig {
-                    enabled: true,
-                    threshold_tokens: Some(test_thresholds::WINDOW_1M),
-                },
-            ),
+            effort: Some(Effort::High),
             requested_effort: None,
+            auto_compaction: AutoCompactionConfig {
+                enabled: true,
+                threshold_tokens: Some(test_thresholds::WINDOW_1M),
+            },
         });
 
         assert_eq!(app.session_info.config.model.id(), "claude-sonnet-5-5");
-        assert_eq!(
-            app.session_info.config.effort,
-            Some(crate::config::Effort::High),
-        );
+        assert_eq!(app.session_info.config.effort, Some(Effort::High),);
         assert_eq!(app.status_bar.model(), "Sonnet 5.5");
         assert_eq!(
             app.session_info.config.compaction.auto.threshold_tokens,
@@ -2632,18 +2586,15 @@ mod tests {
     fn handle_config_changed_effort_only_keeps_status_bar_model_label() {
         // Effort-only swap leaves the cached model label alone; only
         // the snapshot effort and chat confirmation update.
-        let (mut app, _rx, _agent_tx) = test_app(None);
+        let (mut app, _rx, _event_tx) = test_app(None);
         let original_model = app.status_bar.model().to_owned();
-        app.handle_agent_event(AgentEvent::ConfigChanged {
+        app.handle_engine_event(Event::ConfigChanged {
             model: app.session_info.config.model.clone(),
-            effort: Some(crate::config::Effort::Xhigh),
-            compaction: app.session_info.config.compaction,
-            requested_effort: Some(crate::config::Effort::Xhigh),
+            effort: Some(Effort::Xhigh),
+            requested_effort: Some(Effort::Xhigh),
+            auto_compaction: app.session_info.config.compaction.auto,
         });
-        assert_eq!(
-            app.session_info.config.effort,
-            Some(crate::config::Effort::Xhigh),
-        );
+        assert_eq!(app.session_info.config.effort, Some(Effort::Xhigh),);
         assert_eq!(app.status_bar.model(), original_model);
         let body = app.chat.last_system_text().expect("confirmation block");
         assert_eq!(body, "Effort set to xhigh.");
@@ -2662,8 +2613,8 @@ mod tests {
             None,
             None,
             None,
-            base_compaction(),
-            base_compaction(),
+            base_auto_compaction(),
+            base_auto_compaction(),
         );
         assert_eq!(s, "Switched to custom-model (custom-model).");
     }
@@ -2678,9 +2629,9 @@ mod tests {
             true,
             None,
             None,
-            Some(crate::config::Effort::High),
-            base_compaction(),
-            base_compaction(),
+            Some(Effort::High),
+            base_auto_compaction(),
+            base_auto_compaction(),
         );
         assert_eq!(
             s,
@@ -2696,11 +2647,11 @@ mod tests {
         let s = format_config_change(
             &spec("custom-model"),
             true,
-            Some(crate::config::Effort::Xhigh),
+            Some(Effort::Xhigh),
             None,
             None,
-            base_compaction(),
-            base_compaction(),
+            base_auto_compaction(),
+            base_auto_compaction(),
         );
         assert_eq!(
             s,
@@ -2717,10 +2668,10 @@ mod tests {
             &spec("claude-opus-5-5"),
             true,
             None,
-            Some(crate::config::Effort::Medium),
+            Some(Effort::Medium),
             None,
-            base_compaction(),
-            base_compaction(),
+            base_auto_compaction(),
+            base_auto_compaction(),
         );
         assert_eq!(
             s,
@@ -2742,8 +2693,8 @@ mod tests {
                 prev,
                 Some(new),
                 requested,
-                base_compaction(),
-                base_compaction(),
+                base_auto_compaction(),
+                base_auto_compaction(),
             );
             assert_eq!(
                 s,
@@ -2757,11 +2708,11 @@ mod tests {
         let s = format_config_change(
             &spec("claude-opus-5-5"),
             false,
-            Some(crate::config::Effort::High),
-            Some(crate::config::Effort::Xhigh),
-            Some(crate::config::Effort::Xhigh),
-            base_compaction(),
-            base_compaction(),
+            Some(Effort::High),
+            Some(Effort::Xhigh),
+            Some(Effort::Xhigh),
+            base_auto_compaction(),
+            base_auto_compaction(),
         );
         assert_eq!(s, "Effort set to xhigh.");
     }
@@ -2775,9 +2726,9 @@ mod tests {
             false,
             None,
             None,
-            Some(crate::config::Effort::High),
-            base_compaction(),
-            base_compaction(),
+            Some(Effort::High),
+            base_auto_compaction(),
+            base_auto_compaction(),
         );
         assert_eq!(
             s,
@@ -2793,28 +2744,27 @@ mod tests {
             None,
             None,
             None,
-            base_compaction(),
-            base_compaction(),
+            base_auto_compaction(),
+            base_auto_compaction(),
         );
         assert_eq!(s, "Config unchanged.");
     }
 
     #[test]
     fn format_config_change_model_swap_mentions_compaction_threshold_change() {
-        let new_compaction =
-            CompactionConfig::resolved_for_test(crate::config::AutoCompactionConfig {
-                enabled: true,
-                threshold_tokens: Some(test_thresholds::WINDOW_1M),
-            });
+        let new_auto_compaction = AutoCompactionConfig {
+            enabled: true,
+            threshold_tokens: Some(test_thresholds::WINDOW_1M),
+        };
 
         let s = format_config_change(
             &spec("claude-sonnet-5-5"),
             true,
-            Some(crate::config::Effort::High),
-            Some(crate::config::Effort::High),
+            Some(Effort::High),
+            Some(Effort::High),
             None,
-            base_compaction(),
-            new_compaction,
+            base_auto_compaction(),
+            new_auto_compaction,
         );
 
         assert_eq!(
@@ -2829,10 +2779,10 @@ mod tests {
 
     #[test]
     fn handle_usage_updated_sets_status_bar_usage() {
-        let (mut app, _rx, _agent_tx) = test_app(None);
+        let (mut app, _rx, _event_tx) = test_app(None);
         let usage = usage_snapshot();
 
-        app.handle_agent_event(AgentEvent::UsageUpdated(usage));
+        app.handle_engine_event(Event::UsageUpdated(usage));
 
         assert_eq!(app.status_bar.usage(), Some(usage));
         assert!(app.dirty);
@@ -2840,12 +2790,12 @@ mod tests {
 
     #[test]
     fn handle_session_rolled_clears_chat_rebinds_id_and_drops_stale_title() {
-        let (mut app, _rx, _agent_tx) = test_app(Some("Old session title"));
+        let (mut app, _rx, _event_tx) = test_app(Some("Old session title"));
         app.chat.push_user_message("old prompt".to_owned());
         let original_id = app.session_info.session_id.clone();
         app.status_bar.set_usage(Some(usage_snapshot()));
 
-        app.handle_agent_event(AgentEvent::SessionRolled {
+        app.handle_engine_event(Event::SessionRolled {
             id: "rolled-session".to_owned(),
             archived: false,
         });
@@ -2872,11 +2822,11 @@ mod tests {
 
     #[test]
     fn handle_session_rolled_after_archive_names_the_archived_session() {
-        let (mut app, _rx, _agent_tx) = test_app(None);
+        let (mut app, _rx, _event_tx) = test_app(None);
         app.chat.push_user_message("old prompt".to_owned());
         app.session_info.session_id = "aaaa1111-archived".to_owned();
 
-        app.handle_agent_event(AgentEvent::SessionRolled {
+        app.handle_engine_event(Event::SessionRolled {
             id: "rolled-session".to_owned(),
             archived: true,
         });
@@ -2890,15 +2840,15 @@ mod tests {
 
     #[test]
     fn handle_session_resumed_replays_transcript_and_clears_pending() {
-        let (mut app, _rx, _agent_tx) = test_app(Some("Old"));
+        let (mut app, _rx, _event_tx) = test_app(Some("Old"));
         app.session_info.config.model = spec("claude-opus-5-5");
         app.chat.push_user_message("live prompt".to_owned());
         app.status_bar.set_usage(Some(usage_snapshot()));
         app.pending_prompts.push_back("queued".to_owned());
-        app.handle_agent_event(bash_call_start("pending-1", "ls"));
+        app.handle_engine_event(bash_call_start("pending-1", "ls"));
         let original_id = app.session_info.session_id.clone();
 
-        app.handle_agent_event(AgentEvent::SessionResumed {
+        app.handle_engine_event(Event::SessionResumed {
             id: "resumed-session".to_owned(),
             title: Some("Resumed title".to_owned()),
             unarchived: false,
@@ -2936,9 +2886,9 @@ mod tests {
 
     #[test]
     fn handle_session_resumed_with_no_queued_prompts_is_silent() {
-        let (mut app, _rx, _agent_tx) = test_app(None);
+        let (mut app, _rx, _event_tx) = test_app(None);
         app.session_info.config.model = spec("claude-opus-5-5");
-        app.handle_agent_event(AgentEvent::SessionResumed {
+        app.handle_engine_event(Event::SessionResumed {
             id: "resumed".to_owned(),
             title: None,
             unarchived: false,
@@ -2953,9 +2903,9 @@ mod tests {
 
     #[test]
     fn handle_session_resumed_after_unarchiving_appends_a_notice() {
-        let (mut app, _rx, _agent_tx) = test_app(None);
+        let (mut app, _rx, _event_tx) = test_app(None);
         app.session_info.config.model = spec("claude-opus-5-5");
-        app.handle_agent_event(AgentEvent::SessionResumed {
+        app.handle_engine_event(Event::SessionResumed {
             id: "bbbb2222-resumed".to_owned(),
             title: None,
             unarchived: true,
@@ -2969,9 +2919,9 @@ mod tests {
 
     #[test]
     fn handle_session_resumed_with_compact_replays_boundary_block() {
-        let (mut app, _rx, _agent_tx) = test_app(None);
+        let (mut app, _rx, _event_tx) = test_app(None);
         app.session_info.config.model = spec("claude-opus-5-5");
-        app.handle_agent_event(AgentEvent::SessionResumed {
+        app.handle_engine_event(Event::SessionResumed {
             id: "resumed".to_owned(),
             title: None,
             unarchived: false,
@@ -2994,9 +2944,9 @@ mod tests {
 
     #[test]
     fn handle_session_resumed_with_no_title_clears_stale_chrome() {
-        let (mut app, _rx, _agent_tx) = test_app(Some("Stale"));
+        let (mut app, _rx, _event_tx) = test_app(Some("Stale"));
         app.session_info.config.model = spec("claude-opus-5-5");
-        app.handle_agent_event(AgentEvent::SessionResumed {
+        app.handle_engine_event(Event::SessionResumed {
             id: "resumed".to_owned(),
             title: None,
             unarchived: false,
@@ -3011,8 +2961,8 @@ mod tests {
 
     #[test]
     fn handle_session_resumed_with_an_unsupported_model_repeats_its_notice() {
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        app.handle_agent_event(AgentEvent::SessionResumed {
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.handle_engine_event(Event::SessionResumed {
             id: "resumed".to_owned(),
             title: None,
             unarchived: false,
@@ -3028,12 +2978,12 @@ mod tests {
 
     #[test]
     fn handle_session_compacted_replays_summary_and_clears_pending_calls() {
-        let (mut app, _rx, _agent_tx) = test_app(Some("Pre-compact"));
+        let (mut app, _rx, _event_tx) = test_app(Some("Pre-compact"));
         app.chat.push_user_message("pre-compact prompt".to_owned());
         app.status_bar.set_usage(Some(usage_snapshot()));
-        app.handle_agent_event(bash_call_start("pending-1", "ls"));
+        app.handle_engine_event(bash_call_start("pending-1", "ls"));
 
-        app.handle_agent_event(AgentEvent::SessionCompacted {
+        app.handle_engine_event(Event::SessionCompacted {
             summary: "## Recap\n\nDid the thing.".to_owned(),
             pre_count: 4,
             instructions: Some("focus on auth".to_owned()),
@@ -3063,21 +3013,21 @@ mod tests {
     async fn handle_session_compacted_drains_queued_prompts_unlike_resume() {
         // Compact preserves user intent: a queued prompt becomes the first post-compact turn
         // rather than being dropped (the way `/resume` does, since `/resume` swaps identity).
-        let (mut app, mut rx, _agent_tx) = test_app(None);
+        let (mut app, mut rx, _event_tx) = test_app(None);
         app.pending_prompts
             .push_back("queued after compact".to_owned());
 
-        app.handle_agent_event(AgentEvent::SessionCompacted {
+        app.handle_engine_event(Event::SessionCompacted {
             summary: "s".to_owned(),
             pre_count: 2,
             instructions: None,
             automatic: false,
         });
 
-        let forwarded = rx.recv().await.expect("drained prompt reaches the agent");
+        let forwarded = rx.recv().await.expect("drained prompt reaches the engine");
         assert_eq!(
             forwarded,
-            UserAction::SubmitPrompt("queued after compact".to_owned()),
+            Op::Prompt("queued after compact".to_owned()),
             "queued prompt must drain as the next user turn",
         );
         assert!(app.pending_prompts.is_empty());
@@ -3085,8 +3035,8 @@ mod tests {
 
     #[test]
     fn handle_session_compacted_without_instructions_renders_clean_block() {
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        app.handle_agent_event(AgentEvent::SessionCompacted {
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.handle_engine_event(Event::SessionCompacted {
             summary: "summary only".to_owned(),
             pre_count: 2,
             instructions: None,
@@ -3097,13 +3047,13 @@ mod tests {
 
     #[tokio::test]
     async fn handle_session_compacted_automatic_keeps_busy_state_and_queued_prompts() {
-        let (mut app, mut rx, _agent_tx) = test_app(None);
+        let (mut app, mut rx, _event_tx) = test_app(None);
         app.input.set_enabled(false);
         app.status_bar.set_status(Status::Compacting);
         app.pending_prompts
             .push_back("queued while busy".to_owned());
 
-        app.handle_agent_event(AgentEvent::SessionCompacted {
+        app.handle_engine_event(Event::SessionCompacted {
             summary: "auto summary".to_owned(),
             pre_count: 4,
             instructions: None,
@@ -3122,10 +3072,10 @@ mod tests {
 
     #[test]
     fn handle_auto_compaction_started_sets_compacting_status() {
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::SubmitPrompt("active question".to_owned()));
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("active question".to_owned()));
 
-        app.handle_agent_event(AgentEvent::AutoCompactionStarted);
+        app.handle_engine_event(Event::AutoCompactionStarted);
 
         assert_eq!(app.status_bar.status(), &Status::Compacting);
         assert!(!app.input.is_enabled());
@@ -3133,17 +3083,14 @@ mod tests {
 
     #[tokio::test]
     async fn handle_session_compacted_automatic_replays_active_prompt_after_summary() {
-        let (mut app, mut rx, _agent_tx) = test_app(None);
+        let (mut app, mut rx, _event_tx) = test_app(None);
 
-        app.dispatch_user_action(UserAction::SubmitPrompt("active question".to_owned()));
-        let forwarded = rx.recv().await.expect("prompt reaches the agent");
-        assert_eq!(
-            forwarded,
-            UserAction::SubmitPrompt("active question".to_owned())
-        );
-        app.handle_agent_event(AgentEvent::AutoCompactionStarted);
+        app.dispatch_action(Action::Submit("active question".to_owned()));
+        let forwarded = rx.recv().await.expect("prompt reaches the engine");
+        assert_eq!(forwarded, Op::Prompt("active question".to_owned()));
+        app.handle_engine_event(Event::AutoCompactionStarted);
 
-        app.handle_agent_event(AgentEvent::SessionCompacted {
+        app.handle_engine_event(Event::SessionCompacted {
             summary: "auto summary".to_owned(),
             pre_count: 4,
             instructions: None,
@@ -3160,8 +3107,8 @@ mod tests {
 
     #[test]
     fn handle_stream_token_switches_to_streaming_and_disables_input() {
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        app.handle_agent_event(AgentEvent::StreamToken("partial".to_owned()));
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.handle_engine_event(Event::StreamToken("partial".to_owned()));
         assert_eq!(app.status_bar.status(), &Status::Streaming);
         assert!(!app.input.is_enabled());
     }
@@ -3170,25 +3117,25 @@ mod tests {
     fn handle_thinking_token_routes_to_chat_and_marks_streaming() {
         // Thinking tokens land in the chat view as a separate block
         // (not interleaved with assistant text) and must flip the bar
-        // to Streaming so the user sees the agent is working even before any visible text arrives.
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        app.handle_agent_event(AgentEvent::ThinkingToken("planning...".to_owned()));
+        // to Streaming so the user sees the engine is working even before any visible text arrives.
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.handle_engine_event(Event::ThinkingToken("planning...".to_owned()));
         assert_eq!(app.status_bar.status(), &Status::Streaming);
-        // Unlike StreamToken, thinking does not disable input on its
-        // own — the matching SubmitPrompt already did that.
+        // Unlike StreamToken, thinking does not disable input on its own, since the matching
+        // prompt already did that.
     }
 
     #[test]
     fn handle_progress_update_renders_note_in_chat() {
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        app.handle_agent_event(AgentEvent::ProgressUpdate("Running the suite.".to_owned()));
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.handle_engine_event(Event::ProgressUpdate("Running the suite.".to_owned()));
         assert!(rendered_text(&mut app, 80, 24).contains("Running the suite."));
     }
 
     #[test]
     fn handle_tool_call_start_switches_to_tool_running() {
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        app.handle_agent_event(bash_call_start("t1", "ls"));
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.handle_engine_event(bash_call_start("t1", "ls"));
         assert_eq!(
             app.status_bar.status(),
             &Status::ToolRunning {
@@ -3205,13 +3152,13 @@ mod tests {
 
     #[test]
     fn handle_cancelled_commits_partial_stream_with_marker_and_becomes_idle() {
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::SubmitPrompt("hi".to_owned()));
-        app.handle_agent_event(AgentEvent::StreamToken("partial answer".into()));
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("hi".to_owned()));
+        app.handle_engine_event(Event::StreamToken("partial answer".into()));
         let entries_before = app.chat.entry_count();
         assert_eq!(app.status_bar.status(), &Status::Streaming);
 
-        app.handle_agent_event(AgentEvent::Cancelled);
+        app.handle_engine_event(Event::Cancelled);
 
         assert_eq!(app.status_bar.status(), &Status::Idle);
         assert!(app.input.is_enabled());
@@ -3225,36 +3172,33 @@ mod tests {
         );
         let text = rendered_text(&mut app, 60, 12);
         assert!(text.contains("partial answer"), "stream tail kept: {text}");
-        assert!(
-            text.contains(crate::agent::event::INTERRUPTED_MARKER),
-            "marker present: {text}",
-        );
+        assert!(text.contains(INTERRUPTED_MARKER), "marker present: {text}");
     }
 
     #[test]
     fn cancelling_status_is_sticky_against_late_buffered_events() {
-        // After the user dispatches Cancel, the agent channel may still
-        // have queued StreamToken / ToolCallStart events the agent emitted
+        // After the user dispatches Interrupt, the event channel may still
+        // have queued StreamToken / ToolCallStart events the engine emitted
         // before its select arm dropped the turn future. Those buffered
         // events must not flip the bar back to Streaming / ToolRunning —
         // otherwise the cancel acknowledgement flickers off until `Cancelled` finally arrives.
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::SubmitPrompt("hi".to_owned()));
-        app.dispatch_user_action(UserAction::Cancel);
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("hi".to_owned()));
+        app.dispatch_action(Action::Op(Op::Interrupt));
         assert_eq!(app.status_bar.status(), &Status::Cancelling);
 
-        app.handle_agent_event(AgentEvent::StreamToken("late".into()));
+        app.handle_engine_event(Event::StreamToken("late".into()));
         assert_eq!(app.status_bar.status(), &Status::Cancelling);
-        app.handle_agent_event(bash_call_start("t-late", "ls"));
+        app.handle_engine_event(bash_call_start("t-late", "ls"));
         assert_eq!(app.status_bar.status(), &Status::Cancelling);
     }
 
     #[test]
     fn handle_tool_call_end_renders_the_view_under_the_tool_title() {
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        app.handle_agent_event(bash_call_start("t1", "ls"));
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.handle_engine_event(bash_call_start("t1", "ls"));
         let before = app.chat.entry_count();
-        app.handle_agent_event(AgentEvent::ToolCallEnd(ToolResult {
+        app.handle_engine_event(Event::ToolCallEnd(ToolResult {
             id: "t1".to_owned(),
             content: "raw output".to_owned(),
             is_error: false,
@@ -3278,10 +3222,10 @@ mod tests {
         // pushed (silent swallow would hide the error body) and the
         // header must render the tool-call label stashed at
         // `ToolCallStart`, not a blank string or the generic `(result)` fallback.
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        app.handle_agent_event(bash_call_start("t1", "distinctive_label_xyz"));
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.handle_engine_event(bash_call_start("t1", "distinctive_label_xyz"));
         let before = app.chat.entry_count();
-        app.handle_agent_event(text_call_end(
+        app.handle_engine_event(text_call_end(
             "t1",
             "spawn failed: permission denied",
             true,
@@ -3313,9 +3257,9 @@ mod tests {
         // Defensive: an End without a matching Start (agent-layer bug
         // or dropped event) must still render so the user sees the
         // output. No pending entry → header falls back to `(result)`.
-        let (mut app, _rx, _agent_tx) = test_app(None);
+        let (mut app, _rx, _event_tx) = test_app(None);
         let before = app.chat.entry_count();
-        app.handle_agent_event(text_call_end("orphan", "stray output", false, None));
+        app.handle_engine_event(text_call_end("orphan", "stray output", false, None));
         assert_eq!(app.chat.entry_count(), before + 1);
         // Viewport must fit header + body or auto-scroll hides the header.
         let text = rendered_text(&mut app, 60, 8);
@@ -3327,16 +3271,16 @@ mod tests {
 
     #[tokio::test]
     async fn prompt_drained_pops_queue_head_and_pushes_user_message() {
-        let (mut app, mut rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("active".to_owned()));
         rx.recv().await.expect("active submit forwarded");
-        app.dispatch_user_action(UserAction::SubmitPrompt("queued-a".to_owned()));
+        app.dispatch_action(Action::Submit("queued-a".to_owned()));
         rx.recv().await.expect("queued-a submit forwarded");
-        app.dispatch_user_action(UserAction::SubmitPrompt("queued-b".to_owned()));
+        app.dispatch_action(Action::Submit("queued-b".to_owned()));
         rx.recv().await.expect("queued-b submit forwarded");
 
         let chat_before = app.chat.entry_count();
-        app.handle_agent_event(AgentEvent::PromptDrained("queued-a".to_owned()));
+        app.handle_engine_event(Event::PromptDrained("queued-a".to_owned()));
 
         assert_eq!(
             app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
@@ -3351,12 +3295,12 @@ mod tests {
 
     #[test]
     fn prompt_drained_outside_the_forwarded_queue_keeps_the_queue_and_shows_the_text() {
-        // The agent only drains prompts it was handed, but a desync must still show the text.
-        let (mut app, _rx, _agent_tx) = test_app(None);
+        // The engine only drains prompts it was handed, but a desync must still show the text.
+        let (mut app, _rx, _event_tx) = test_app(None);
         app.pending_prompts.push_back("held".into());
         let chat_before = app.chat.entry_count();
 
-        app.handle_agent_event(AgentEvent::PromptDrained("held".to_owned()));
+        app.handle_engine_event(Event::PromptDrained("held".to_owned()));
 
         assert_eq!(
             app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
@@ -3367,24 +3311,21 @@ mod tests {
 
     #[tokio::test]
     async fn prompt_held_during_auto_compaction_forwards_ahead_of_later_submits() {
-        let (mut app, mut rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::SubmitPrompt("first".to_owned()));
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("first".to_owned()));
         rx.recv().await.expect("first submit forwarded");
-        app.handle_agent_event(AgentEvent::AutoCompactionStarted);
-        app.dispatch_user_action(UserAction::SubmitPrompt("held".to_owned()));
+        app.handle_engine_event(Event::AutoCompactionStarted);
+        app.dispatch_action(Action::Submit("held".to_owned()));
         assert!(rx.try_recv().is_err(), "held while compacting");
 
-        app.handle_agent_event(AgentEvent::StreamToken("x".to_owned()));
-        app.dispatch_user_action(UserAction::SubmitPrompt("later".to_owned()));
-        app.handle_agent_event(AgentEvent::PromptDrained("held".to_owned()));
+        app.handle_engine_event(Event::StreamToken("x".to_owned()));
+        app.dispatch_action(Action::Submit("later".to_owned()));
+        app.handle_engine_event(Event::PromptDrained("held".to_owned()));
 
-        let forwarded: Vec<UserAction> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        let forwarded: Vec<Op> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
         assert_eq!(
             forwarded,
-            [
-                UserAction::QueuePrompt("held".to_owned()),
-                UserAction::QueuePrompt("later".to_owned()),
-            ],
+            [Op::Queue("held".to_owned()), Op::Queue("later".to_owned())],
         );
         assert_eq!(
             app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
@@ -3394,34 +3335,31 @@ mod tests {
 
     #[test]
     fn handle_turn_complete_becomes_idle_and_reenables_input() {
-        let (mut app, _rx, _agent_tx) = test_app(None);
+        let (mut app, _rx, _event_tx) = test_app(None);
         // Drive into streaming first so TurnComplete has state to tear down.
-        app.dispatch_user_action(UserAction::SubmitPrompt("hi".to_owned()));
+        app.dispatch_action(Action::Submit("hi".to_owned()));
         assert_eq!(app.status_bar.status(), &Status::Streaming);
         assert!(!app.input.is_enabled());
 
-        app.handle_agent_event(AgentEvent::TurnComplete);
+        app.handle_engine_event(Event::TurnComplete);
         assert_eq!(app.status_bar.status(), &Status::Idle);
         assert!(app.input.is_enabled());
     }
 
     #[tokio::test]
     async fn turn_complete_starts_a_turn_with_the_queue_head_and_hands_it_the_rest() {
-        let (mut app, mut rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("active".to_owned()));
         rx.recv().await.expect("active submit forwarded");
         app.pending_prompts.push_back("a".into());
         app.pending_prompts.push_back("b".into());
 
-        app.handle_agent_event(AgentEvent::TurnComplete);
+        app.handle_engine_event(Event::TurnComplete);
 
-        let forwarded: Vec<UserAction> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        let forwarded: Vec<Op> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
         assert_eq!(
             forwarded,
-            [
-                UserAction::SubmitPrompt("a".to_owned()),
-                UserAction::QueuePrompt("b".to_owned()),
-            ],
+            [Op::Prompt("a".to_owned()), Op::Queue("b".to_owned())],
         );
         assert_eq!(app.status_bar.status(), &Status::Streaming);
         assert_eq!(
@@ -3432,15 +3370,15 @@ mod tests {
 
     #[tokio::test]
     async fn turn_complete_after_a_cancel_request_leaves_the_queue_to_the_user() {
-        let (mut app, mut rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("active".to_owned()));
         rx.recv().await.expect("active submit forwarded");
-        app.dispatch_user_action(UserAction::SubmitPrompt("queued".to_owned()));
+        app.dispatch_action(Action::Submit("queued".to_owned()));
         rx.recv().await.expect("queued submit forwarded");
         app.handle_esc();
-        assert_eq!(rx.recv().await, Some(UserAction::Cancel));
+        assert_eq!(rx.recv().await, Some(Op::Interrupt));
 
-        app.handle_agent_event(AgentEvent::TurnComplete);
+        app.handle_engine_event(Event::TurnComplete);
 
         assert!(rx.try_recv().is_err(), "nothing resubmits after a cancel");
         assert_eq!(app.status_bar.status(), &Status::Idle);
@@ -3455,32 +3393,29 @@ mod tests {
         // Cancel during a tool call (or before any stream tokens) —
         // commit_streaming is a no-op, but the marker still lands so
         // the user sees where the cancel hit.
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::SubmitPrompt("hi".to_owned()));
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("hi".to_owned()));
         let entries_before = app.chat.entry_count();
 
-        app.handle_agent_event(AgentEvent::Cancelled);
+        app.handle_engine_event(Event::Cancelled);
 
         assert_eq!(app.chat.entry_count(), entries_before + 1);
         let text = rendered_text(&mut app, 60, 8);
-        assert!(
-            text.contains(crate::agent::event::INTERRUPTED_MARKER),
-            "marker present: {text}",
-        );
+        assert!(text.contains(INTERRUPTED_MARKER), "marker present: {text}");
     }
 
     #[tokio::test]
     async fn cancelled_goes_idle_and_esc_recalls_the_queued_prompt() {
-        let (mut app, mut rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::SubmitPrompt("first".to_owned()));
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("first".to_owned()));
         rx.recv().await.expect("first submit forwarded");
-        app.handle_agent_event(AgentEvent::StreamToken("x".to_owned()));
-        app.dispatch_user_action(UserAction::SubmitPrompt("second".to_owned()));
+        app.handle_engine_event(Event::StreamToken("x".to_owned()));
+        app.dispatch_action(Action::Submit("second".to_owned()));
         rx.recv().await.expect("second submit forwarded");
         app.handle_esc();
-        assert_eq!(rx.recv().await, Some(UserAction::Cancel));
+        assert_eq!(rx.recv().await, Some(Op::Interrupt));
 
-        app.handle_agent_event(AgentEvent::Cancelled);
+        app.handle_engine_event(Event::Cancelled);
 
         assert!(rx.try_recv().is_err(), "nothing resubmits after a cancel");
         assert_eq!(app.status_bar.status(), &Status::Idle);
@@ -3491,19 +3426,17 @@ mod tests {
 
     #[tokio::test]
     async fn handle_retrying_and_error_notices_keep_the_turn_running() {
-        let (mut app, mut rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("active".to_owned()));
         rx.recv().await.expect("active submit forwarded");
-        app.dispatch_user_action(UserAction::SubmitPrompt("queued".to_owned()));
+        app.dispatch_action(Action::Submit("queued".to_owned()));
         rx.recv().await.expect("queued submit forwarded");
 
-        app.handle_agent_event(AgentEvent::Retrying(
+        app.handle_engine_event(Event::Retrying(
             "HTTP 529 overloaded_error. Retrying in 1s (retry 1 of 5).".to_owned(),
         ));
         assert!(!app.chat.last_is_error(), "a retry is not an error block");
-        app.handle_agent_event(AgentEvent::Error(
-            "Session write failed: disk full".to_owned(),
-        ));
+        app.handle_engine_event(Event::Error("Session write failed: disk full".to_owned()));
 
         assert!(app.chat.last_is_error(), "error entry appended");
         assert_eq!(app.status_bar.status(), &Status::Streaming);
@@ -3517,9 +3450,9 @@ mod tests {
 
     #[test]
     fn handle_turn_failed_shows_the_error_and_finishes_the_turn() {
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::SubmitPrompt("boom".to_owned()));
-        app.handle_agent_event(AgentEvent::TurnFailed("API blew up".to_owned()));
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("boom".to_owned()));
+        app.handle_engine_event(Event::TurnFailed("API blew up".to_owned()));
 
         assert!(app.chat.last_is_error(), "error entry appended");
         assert_eq!(app.status_bar.status(), &Status::Idle);
@@ -3528,26 +3461,26 @@ mod tests {
 
     #[tokio::test]
     async fn handle_turn_failed_shows_the_error_and_starts_the_queue_head_once() {
-        let (mut app, mut rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("active".to_owned()));
         rx.recv().await.expect("active submit forwarded");
         app.pending_prompts.push_back("first".into());
         app.pending_prompts.push_back("second".into());
         let chat_before = app.chat.entry_count();
 
-        app.handle_agent_event(AgentEvent::TurnFailed("API failed".to_owned()));
+        app.handle_engine_event(Event::TurnFailed("API failed".to_owned()));
 
         assert_eq!(
             app.chat.entry_count(),
             chat_before + 2,
             "error block, then the next prompt"
         );
-        let forwarded: Vec<UserAction> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        let forwarded: Vec<Op> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
         assert_eq!(
             forwarded,
             [
-                UserAction::SubmitPrompt("first".to_owned()),
-                UserAction::QueuePrompt("second".to_owned()),
+                Op::Prompt("first".to_owned()),
+                Op::Queue("second".to_owned()),
             ],
         );
         assert_eq!(
@@ -3560,38 +3493,35 @@ mod tests {
     async fn pending_queue_resubmits_prompts_each_ended_turn_dropped() {
         // A turn that ends before its next round boundary drops the queued prompts it held, so
         // each one must come back as a later turn.
-        let (mut app, mut rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("active".to_owned()));
         rx.recv().await.expect("active submit forwarded");
         for prompt in ["a", "b", "c"] {
-            app.dispatch_user_action(UserAction::SubmitPrompt(prompt.to_owned()));
+            app.dispatch_action(Action::Submit(prompt.to_owned()));
         }
         let mut forwarded = || std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
         assert_eq!(forwarded().len(), 3);
 
-        app.handle_agent_event(AgentEvent::TurnFailed(
+        app.handle_engine_event(Event::TurnFailed(
             "agent stopped after 3 tool rounds".to_owned(),
         ));
         assert_eq!(
             forwarded(),
             [
-                UserAction::SubmitPrompt("a".to_owned()),
-                UserAction::QueuePrompt("b".to_owned()),
-                UserAction::QueuePrompt("c".to_owned()),
+                Op::Prompt("a".to_owned()),
+                Op::Queue("b".to_owned()),
+                Op::Queue("c".to_owned()),
             ],
         );
 
-        app.handle_agent_event(AgentEvent::TurnComplete);
+        app.handle_engine_event(Event::TurnComplete);
         assert_eq!(
             forwarded(),
-            [
-                UserAction::SubmitPrompt("b".to_owned()),
-                UserAction::QueuePrompt("c".to_owned()),
-            ],
+            [Op::Prompt("b".to_owned()), Op::Queue("c".to_owned())],
         );
 
-        app.handle_agent_event(AgentEvent::TurnComplete);
-        assert_eq!(forwarded(), [UserAction::SubmitPrompt("c".to_owned())]);
+        app.handle_engine_event(Event::TurnComplete);
+        assert_eq!(forwarded(), [Op::Prompt("c".to_owned())]);
         assert!(app.pending_prompts.is_empty());
     }
 
@@ -3603,10 +3533,10 @@ mod tests {
         // is an orphan (crashed tool, agent-loop bug, mid-turn abort).
         // The pending entry must be discarded so long sessions don't
         // accumulate stale ids across turns.
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        app.handle_agent_event(bash_call_start("orphan", "ls"));
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.handle_engine_event(bash_call_start("orphan", "ls"));
         assert_eq!(app.chat.pending_call_count(), 1);
-        app.handle_agent_event(AgentEvent::TurnComplete);
+        app.handle_engine_event(Event::TurnComplete);
         assert_eq!(
             app.chat.pending_call_count(),
             0,
@@ -3620,8 +3550,8 @@ mod tests {
     fn expire_armed_exit_becomes_idle_after_window() {
         // After the 1 s window the armed state evaporates so the user
         // isn't left staring at an exit hint they didn't act on.
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::ConfirmExit);
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::ConfirmExit);
         // Force an expired deadline so the test doesn't sleep.
         let until = std::time::Instant::now()
             .checked_sub(std::time::Duration::from_secs(1))
@@ -3637,7 +3567,7 @@ mod tests {
         // Tick path calls `expire_armed_exit` every frame regardless of
         // status; the false branch must leave the bar untouched and
         // skip the dirty bump that would otherwise wake the renderer.
-        let (mut app, _rx, _agent_tx) = test_app(None);
+        let (mut app, _rx, _event_tx) = test_app(None);
         assert_eq!(app.status_bar.status(), &Status::Idle);
 
         assert!(
@@ -3651,7 +3581,7 @@ mod tests {
 
     #[test]
     fn apply_git_update_marks_dirty_only_when_the_status_bar_changes() {
-        let (mut app, _rx, _agent_tx) = test_app(None);
+        let (mut app, _rx, _event_tx) = test_app(None);
         app.dirty = false;
 
         app.apply_git_update(GitUpdate::Branch(Some("main".to_owned())));
@@ -3677,7 +3607,7 @@ mod tests {
 
     #[test]
     fn render_brackets_frame_with_sync_update_bytes() {
-        let (mut app, _rx, _agent_tx) = test_app(None);
+        let (mut app, _rx, _event_tx) = test_app(None);
         let (mut terminal, buf) = crossterm_test_terminal(60, 8);
 
         app.render(&mut terminal).unwrap();
@@ -3690,7 +3620,7 @@ mod tests {
 
     #[test]
     fn render_replays_status_hyperlinks_inside_the_synchronized_update() {
-        let (mut app, _rx, _agent_tx) = test_app(None);
+        let (mut app, _rx, _event_tx) = test_app(None);
         app.apply_git_update(GitUpdate::PullRequest(Some(
             crate::util::git::PullRequest {
                 number: 7,
@@ -3712,7 +3642,7 @@ mod tests {
         use std::fmt::Write as _;
 
         // Content pushed in the same handler tick must land before a post-paint re-clamp.
-        let (mut app, _rx, _agent_tx) = test_app(None);
+        let (mut app, _rx, _event_tx) = test_app(None);
         let mut body = String::new();
         for i in 0..40 {
             _ = writeln!(body, "line {i:02} of a long system block");
@@ -3743,7 +3673,7 @@ mod tests {
             }
         }
 
-        let (mut app, _rx, _agent_tx) = test_app(None);
+        let (mut app, _rx, _event_tx) = test_app(None);
         let bytes = Arc::new(Mutex::new(Vec::<u8>::new()));
         let backend = CrosstermBackend::new(SharedSink(bytes.clone()));
         let mut terminal = Terminal::with_options(
@@ -3764,17 +3694,18 @@ mod tests {
 
     #[test]
     fn draw_frame_lays_out_status_chat_and_input_in_order() {
-        let (mut app, _rx, _agent_tx) = test_app(Some("Session title"));
+        let (mut app, _rx, _event_tx) = test_app(Some("Session title"));
         insta::assert_snapshot!(render_app(&mut app, 80, 10));
     }
 
     #[test]
     fn draw_frame_with_conversation_and_tool_call() {
-        let (mut app, _rx, _agent_tx) = test_app(None);
+        let (mut app, _rx, _event_tx) = test_app(None);
         app.chat.push_user_message("what files are here?".into());
         app.chat.push_tool_call(ToolCall {
             id: "t1".to_owned(),
             name: "bash".to_owned(),
+            input: serde_json::json!({"command": "ls"}),
             icon: "$".to_owned(),
             label: "ls".to_owned(),
         });
@@ -3794,15 +3725,15 @@ mod tests {
 
     #[test]
     fn draw_frame_streaming_shows_spinner_in_status_bar() {
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::SubmitPrompt("working...".into()));
-        app.handle_agent_event(AgentEvent::StreamToken("part".into()));
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("working...".into()));
+        app.handle_engine_event(Event::StreamToken("part".into()));
         insta::assert_snapshot!(render_app(&mut app, 60, 8));
     }
 
     #[test]
     fn draw_frame_auto_scroll_on_hides_jump_overlay() {
-        let (mut app, _rx, _agent_tx) = test_app(None);
+        let (mut app, _rx, _event_tx) = test_app(None);
         app.chat.push_system_message(long_chat_block());
 
         let text = rendered_text(&mut app, 60, 10);
@@ -3811,7 +3742,7 @@ mod tests {
 
     #[test]
     fn draw_frame_scrolled_up_shows_jump_overlay() {
-        let (mut app, _rx, _agent_tx) = test_app(None);
+        let (mut app, _rx, _event_tx) = test_app(None);
         app.chat.push_system_message(long_chat_block());
         _ = render_app(&mut app, 60, 10);
 
@@ -3824,7 +3755,7 @@ mod tests {
 
     #[test]
     fn draw_frame_scrolled_up_counts_new_content() {
-        let (mut app, _rx, _agent_tx) = test_app(None);
+        let (mut app, _rx, _event_tx) = test_app(None);
         app.chat.push_system_message(long_chat_block());
         _ = render_app(&mut app, 60, 10);
         app.chat
@@ -3838,7 +3769,7 @@ mod tests {
 
     #[test]
     fn draw_frame_narrow_width_still_renders_all_three_panels() {
-        let (mut app, _rx, _agent_tx) = test_app(Some("narrow"));
+        let (mut app, _rx, _event_tx) = test_app(Some("narrow"));
         app.chat.push_user_message("hi".into());
         insta::assert_snapshot!(render_app(&mut app, 40, 8));
     }
@@ -3847,7 +3778,7 @@ mod tests {
     fn draw_frame_renders_slash_popup_above_input_when_visible() {
         // Typing `/` opens the popup; draw_frame must reserve a band
         // above the input and paint at least one command row into it.
-        let (mut app, _rx, _agent_tx) = test_app(None);
+        let (mut app, _rx, _event_tx) = test_app(None);
         app.handle_crossterm_event(&key_event(KeyCode::Char('/'), KeyModifiers::NONE));
         assert!(app.input.popup_visible());
 
@@ -3860,8 +3791,8 @@ mod tests {
 
     #[test]
     fn draw_frame_preview_panel_renders_queued_prompts_and_overflow_tag() {
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::SubmitPrompt("active".into()));
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("active".into()));
         for i in 0..5 {
             app.pending_prompts.push_back(format!("queued {i}"));
         }
@@ -3872,7 +3803,7 @@ mod tests {
     fn draw_frame_hides_input_and_popup_while_modal_active() {
         // Modal owns focus, so the layout must collapse the input + popup bands. The user-prompt
         // marker (`❯`) is the cheapest substring proof that the input got rendered.
-        let (mut app, _rx, _agent_tx) = test_app(None);
+        let (mut app, _rx, _event_tx) = test_app(None);
         let baseline = rendered_text(&mut app, 60, 14);
         assert!(
             baseline.contains(USER_PROMPT_PREFIX),
@@ -3902,9 +3833,7 @@ mod tests {
 
     #[test]
     fn draw_frame_sizes_a_modal_before_the_queued_prompt_preview() {
-        use crate::agent::event::ApprovalDecision;
-
-        let (mut app, mut rx, _agent_tx) = test_app(None);
+        let (mut app, mut rx, _event_tx) = test_app(None);
         for i in 0..5 {
             app.pending_prompts.push_back(format!("queued {i}"));
         }
@@ -3917,8 +3846,8 @@ mod tests {
         let forwarded = rx.try_recv().expect("approval forwarded");
         assert!(matches!(
             forwarded,
-            UserAction::ApprovalDecision {
-                decision: ApprovalDecision::Approve,
+            Op::Resolve {
+                decision: Decision::Approve,
                 ..
             }
         ));
@@ -3926,9 +3855,7 @@ mod tests {
 
     #[test]
     fn draw_frame_approval_modal_wraps_and_reveals_a_padded_command() {
-        use crate::agent::event::{ApprovalBody, ApprovalPreview};
-
-        let (mut app, _rx, _agent_tx) = test_app(None);
+        let (mut app, _rx, _event_tx) = test_app(None);
         app.push_approval_modal(
             "call-1".to_owned(),
             ApprovalPreview {
@@ -3941,7 +3868,7 @@ mod tests {
 
     #[test]
     fn draw_frame_surface_fill_overwrites_unpainted_cells_with_surface_bg() {
-        let (mut app, _rx, _agent_tx) = test_app(None);
+        let (mut app, _rx, _event_tx) = test_app(None);
         let sentinel = Color::Rgb(254, 0, 254);
         let surface_bg = app.theme.surface().bg.expect("surface slot defines bg");
 
@@ -3967,13 +3894,13 @@ mod tests {
 
     #[test]
     fn preview_height_is_zero_when_queue_empty() {
-        let (app, _rx, _agent_tx) = test_app(None);
+        let (app, _rx, _event_tx) = test_app(None);
         assert_eq!(app.preview_height(), 0);
     }
 
     #[test]
     fn preview_height_caps_at_visible_plus_overflow_row() {
-        let (mut app, _rx, _agent_tx) = test_app(None);
+        let (mut app, _rx, _event_tx) = test_app(None);
         for i in 0..(PREVIEW_VISIBLE + 5) {
             app.pending_prompts.push_back(format!("p{i}"));
         }
@@ -3987,7 +3914,7 @@ mod tests {
 
     #[test]
     fn render_preview_overflow_appends_more_count_row() {
-        let (mut app, _rx, _agent_tx) = test_app(None);
+        let (mut app, _rx, _event_tx) = test_app(None);
         app.input.set_enabled(false);
         let extra = 3;
         for i in 0..(PREVIEW_VISIBLE + extra) {

@@ -7,9 +7,10 @@ use super::context::SlashContext;
 use super::effort_slider::EffortSlider;
 use super::matcher::rank_by_prefix;
 use super::registry::{ArgCompletion, SlashCommand, SlashKind, SlashOutcome};
-use crate::agent::event::UserAction;
 use crate::config::Effort;
 use crate::model::ModelSpec;
+use crate::protocol::Op;
+use crate::tui::action::Action;
 
 pub(super) struct EffortCmd;
 
@@ -58,10 +59,10 @@ impl SlashCommand for EffortCmd {
         if ctx.info.config.model.info().is_none() {
             return Err(no_effort_tier_msg(&ctx.info.config.model));
         }
-        Ok(SlashOutcome::Forward(UserAction::SwapConfig {
+        Ok(SlashOutcome::Forward(Action::Op(Op::SetModel {
             model: None,
             effort: Some(pick),
-        }))
+        })))
     }
 }
 
@@ -163,7 +164,7 @@ mod tests {
     }
 
     #[test]
-    fn execute_with_level_forwards_swap_config_with_effort_only() {
+    fn execute_with_level_forwards_set_model_with_effort_only() {
         for (arg, level) in [
             ("low", Effort::Low),
             ("medium", Effort::Medium),
@@ -173,11 +174,11 @@ mod tests {
         ] {
             assert_eq!(
                 run_execute(arg).unwrap().into_forward(),
-                UserAction::SwapConfig {
+                Action::Op(Op::SetModel {
                     model: None,
                     effort: Some(level),
-                },
-                "`{arg}` should forward SwapConfig {{ effort: Some({level:?}) }}",
+                }),
+                "`{arg}` should forward SetModel {{ effort: Some({level:?}) }}",
             );
         }
     }
