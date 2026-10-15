@@ -6,7 +6,7 @@ Companions: [commands.md](commands.md), [modals.md](modals.md). Underlying resea
 
 ## Implementation
 
-`slash/resume` hosts both `ResumeCmd` and `ResumePicker`. Bare returns the picker as `SlashOutcome::Modal`, while typed-arg resolves through `resolve_prefix_to_info` (current project first, widening to all projects on miss) and forwards `UserAction::Resume { path }` carrying the matched session file.
+`slash/resume` hosts both `ResumeCmd` and `ResumePicker`. Bare returns the picker as `SlashOutcome::Modal`, while typed-arg resolves through `resolve_prefix_to_info` (current project first, widening to all projects on miss) and forwards `Op::Resume { path }` carrying the matched session file.
 
 The picker wraps [`SearchableList`](modals.md) and adds these controls and display rules:
 
@@ -17,11 +17,11 @@ The picker wraps [`SearchableList`](modals.md) and adds these controls and displ
 - The footer counts the loaded rows. If more sessions follow the 30-row cap, it says so (`30 most recent sessions · more not loaded`), since queries search only loaded rows.
 - Ctrl+D on the cursor row pushes [`ConfirmDeleteSessionModal`](modals.md). On focus regain the picker reloads and re-seeks the cursor to the previously selected row, so cancel-delete keeps the user in place.
 
-`ox --resume` starts the TUI in a fresh session with no file yet, then opens the picker on the first frame. `main.rs` builds it with `ResumePicker::at_startup`, and `driver::tui::run` pushes `Startup::picker` onto the modal stack before the event loop starts. The startup picker carries `Dismissal::Quit`, so Esc / Ctrl+C call `on_cancel`, which resolves to `UserAction::Quit`, and the footer reads `Esc to quit`. Pressing Enter resumes through the same `roll_into` path as `/resume`. A session file is created only with the first message, so neither path leaves an empty session on disk.
+`ox --resume` starts the TUI in a fresh session with no file yet, then opens the picker on the first frame. `main.rs` builds it with `ResumePicker::at_startup`, and `driver::tui::run` pushes `Startup::picker` onto the modal stack before the event loop starts. The startup picker carries `Dismissal::Quit`, so Esc / Ctrl+C call `on_cancel`, which resolves to `Op::Shutdown`, and the footer reads `Esc to quit`. Pressing Enter resumes through the same `roll_into` path as `/resume`. A session file is created only with the first message, so neither path leaves an empty session on disk.
 
 `session/handle` provides `roll_into(...)`, which mirrors `roll(...)`. It loads and sanitizes the target first, so a load failure leaves the live session untouched. Loading an archived target appends an entry unarchiving it, which `RollIntoOutcome::unarchived` reports. It then snapshots and clears the file tracker, restores the target's tracker state through `restore_verified`, swaps the handle in place, and finalizes the old session. `RollIntoOutcome` carries the target's `LoadedTranscript` (messages, recorded prompt context, compact boundary, and tool-result metadata) and title, plus a diagnostic pair (finalize failure of the prior session, drift list from the file tracker).
 
-`Engine::resume` in `engine.rs` drives `roll_into` and adopts the loaded transcript, which rebinds `Client::set_session_id` and replays the recorded prompt context. It then emits `AgentEvent::SessionResumed { id, title, unarchived, history }` and surfaces the old session's finalize failure and any tracker-drift warning as distinct `AgentEvent::Error`s. The history comes from `Engine::take_history`, the same projection the TUI paints at startup, which runs the adopted transcript through `session::history::interactions`: the compaction boundary first, then text, thinking, and each tool call paired with its result, with icons, labels, and result views already resolved. The TUI's `App::apply_session_resumed` clears the chat, replays the history through `ChatView::load_history`, notes an unarchived session, drops queued prompts (surfaces the count as a system message), and clears the modal stack.
+`Engine::resume` in `engine.rs` drives `roll_into` and adopts the loaded transcript, which rebinds `Client::set_session_id` and replays the recorded prompt context. It then emits `Event::SessionResumed { id, title, unarchived, history }` and surfaces the old session's finalize failure and any tracker-drift warning as distinct `Event::Error`s. The history comes from `Engine::take_history`, the same projection the TUI paints at startup, which runs the adopted transcript through `session::history::interactions`: the compaction boundary first, then text, thinking, and each tool call paired with its result, with icons, labels, and result views already resolved. The TUI's `App::apply_session_resumed` clears the chat, replays the history through `ChatView::load_history`, notes an unarchived session, drops queued prompts (surfaces the count as a system message), and clears the modal stack.
 
 `SessionStore::list_paged` stats every candidate file, sorts by mtime desc, then parses files in order until it holds one readable session in the requested archive state past the page. `ListPage` carries the page and whether more matching sessions follow it. `SessionStore::list_matching` filters the same walk by the id in each file name, so a prefix lookup parses only the matching files. Each `SessionInfo` carries the file it was read from, and resume and delete act on that file. `ox --list --limit N` (default `30`, `0` = unbounded) prints ``... more (use `--limit N` to raise the cap or `--limit 0` to list all)`` when more sessions follow the cap.
 
@@ -31,7 +31,7 @@ The picker wraps [`SearchableList`](modals.md) and adds these controls and displ
 
 2. **Alias `continue`.** Matches the existing `--continue` / `-c` CLI flag, using the same word in both surfaces.
 
-3. **`classify` is always `Mutating`.** Both bare and typed-arg refuse mid-turn, since the picker eventually submits a `UserAction::Resume`, and allowing it mid-stream would interleave a session swap with an in-flight response, which is exactly what the read-only fast path was designed to rule out.
+3. **`classify` is always `Mutating`.** Both bare and typed-arg refuse mid-turn, since the picker eventually submits a `Op::Resume`, and allowing it mid-stream would interleave a session swap with an in-flight response, which is exactly what the read-only fast path was designed to rule out.
 
 4. **Mid-session re-init uses `roll_into`.** The in-process swap preserves the process and terminal state, avoids an alt-screen exit or relaunch flash, and reuses the `roll` pattern from `/clear`. It clears modals, rolls back any theme preview, and discards queued prompts.
 
@@ -67,7 +67,7 @@ The picker wraps [`SearchableList`](modals.md) and adds these controls and displ
 
 - **`ResumeCmd`**: Canonical `resume`, alias `continue`. `classify` is always `Mutating`. `echoes_input` returns false for bare (modal IS the response) and true for typed-arg (echo anchors the swap-confirmation message). Typed-arg path validates non-empty / non-whitespace, then calls `resolve_prefix_to_info`, which checks the current project first and widens on miss.
 
-- **`ResumePicker`**: Wraps `SearchableList<SessionRow>` plus a footer row. Loads rows from `SessionStore::list_paged`. Tab toggles `all` and Ctrl+A toggles `archived`, each rebuilding while preserving the query. Ctrl+U clears the query, and other unbound keys edit it through the shared `LineEditor`. Enter on a focused row dispatches `UserAction::Resume`. Enter with no selection keeps the picker open so the user can Tab the scope or Esc out. `at_startup` builds the `ox --resume` variant, whose `Dismissal::Quit` turns a dismissal into `UserAction::Quit`.
+- **`ResumePicker`**: Wraps `SearchableList<SessionRow>` plus a footer row. Loads rows from `SessionStore::list_paged`. Tab toggles `all` and Ctrl+A toggles `archived`, each rebuilding while preserving the query. Ctrl+U clears the query, and other unbound keys edit it through the shared `LineEditor`. Enter on a focused row dispatches `Op::Resume`. Enter with no selection keeps the picker open so the user can Tab the scope or Esc out. `at_startup` builds the `ox --resume` variant, whose `Dismissal::Quit` turns a dismissal into `Op::Shutdown`.
 
 - **`SearchableList<T>`**: Owns the query editor, items, filtered visible index, cursor, and viewport. The substring filter recomputes whenever the query changes, through `set_query` or an `edit_query` keystroke, and resets the cursor to the top. The viewport sizes itself from the height each render grants, and paging steps by the rows last shown. `SearchableItem::haystack` returns the composite filter source. `render(width, is_cursor, theme)` paints one or more `Line`s per row.
 
@@ -77,11 +77,11 @@ The picker wraps [`SearchableList`](modals.md) and adds these controls and displ
 
 - **`/resume <id>` resolver**: `resolve_prefix_to_info` runs the prefix lookup against the current project, then retries across all projects on miss. Returns the matched session or a user-readable error.
 
-- **`UserAction::Resume`**: Single `path` field naming the session file the user picked. The engine owns the `roll_into` call, so the slash command never touches the session handle directly.
+- **`Op::Resume`**: Single `path` field naming the session file the user picked. The engine owns the `roll_into` call, so the slash command never touches the session handle directly.
 
-- **`AgentEvent::SessionResumed`**: Carries id + title + the unarchived flag + the transcript projected for display, so the TUI renders it without a tool registry. App-only reaction. `StdioSink` ignores it (TUI-only event, like `SessionRolled`).
+- **`Event::SessionResumed`**: Carries id + title + the unarchived flag + the transcript projected for display, so the TUI renders it without a tool registry. App-only reaction. `StdioSink` ignores it (TUI-only event, like `SessionRolled`).
 
-- **`Engine::resume` (`engine.rs`)**: Drives `roll_into`, rebinds `Client::set_session_id`, emits `SessionResumed`, then surfaces `finalize_failure` and `drifted_paths` as distinct `AgentEvent::Error`s. A `roll_into` failure ends the resume with `AgentEvent::TurnFailed` and keeps the live session.
+- **`Engine::resume` (`engine.rs`)**: Drives `roll_into`, rebinds `Client::set_session_id`, emits `SessionResumed`, then surfaces `finalize_failure` and `drifted_paths` as distinct `Event::Error`s. A `roll_into` failure ends the resume with `Event::TurnFailed` and keeps the live session.
 
 - **`apply_session_resumed` (TUI)**: Swaps the session id, repaints the title, clears and replays chat history, notes an unarchived session, drops queued prompts (with a system-message surface), clears the modal stack, and resumes idle.
 
@@ -100,10 +100,10 @@ The picker wraps [`SearchableList`](modals.md) and adds these controls and displ
 
 ## Sources
 
-- `crates/oxide-code/src/agent/event.rs`: `UserAction::Resume`, `AgentEvent::SessionResumed`, `Interaction`.
 - `crates/oxide-code/src/driver/tui.rs`: `Startup::picker`, pushed over the first frame.
 - `crates/oxide-code/src/engine.rs`: `Engine::resume`, `Engine::take_history`, `format_drift_warning`.
 - `crates/oxide-code/src/main.rs`: `Cli::archived`, `Cli::limit`, `Cli::resume`.
+- `crates/oxide-code/src/protocol.rs`: `Op::Resume`, `Event::SessionResumed`, `Interaction`.
 - `crates/oxide-code/src/session/display.rs`: shared `format_metadata_line` used by the picker row.
 - `crates/oxide-code/src/session/handle.rs`: `roll_into`, `RollIntoOutcome`, `LoadedTranscript`.
 - `crates/oxide-code/src/session/history.rs`: `interactions`, the display projection `SessionResumed` carries.

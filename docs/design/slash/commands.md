@@ -22,13 +22,13 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 1. **Trait registry.** `trait SlashCommand` mirrors `tool::Tool`, with one file per command. Adding `/foo` means creating its implementation and adding it to `BUILT_INS`.
 
-2. **Parse at submit.** `App::dispatch_user_action` runs `parse_slash` first, then dispatches locally or forwards.
+2. **Parse at submit.** `App::dispatch_action` hands an `Action::Submit` to `handle_submit_prompt`, which runs `parse_slash` first, then dispatches locally or forwards.
 
 3. **One synthetic block kind: `SystemMessageBlock`.** Left-bar in `accent`. Errors reuse `ErrorBlock`.
 
 4. **Two-column popup, plain rows.** Name left, description right. Filter ranks name-prefix > alias-prefix > name-substring > alias-substring, alphabetical within each tier. Names accept `:` and `.`, so namespaced names such as `/plugin:cmd` parse.
 
-5. **Mid-session model + effort swap via `&mut Client`.** Both `/model <id>` and `/effort <level>` return `Forward(UserAction::SwapConfig { model, effort })`, the same payload both modals emit, so the typed-arg path and the modals share one resolver. Per-request paths re-read config every call so betas and `output_config` pick up the swap. Bare `/model` (combined picker) and bare `/effort` (slider) are also mutating because their submit path emits `SwapConfig`, so both forms refuse mid-turn. See [modals.md](modals.md).
+5. **Mid-session model + effort swap via `&mut Client`.** Both `/model <id>` and `/effort <level>` return `Forward(Action::Op(Op::SetModel { model, effort }))`, the same payload both modals emit, so the typed-arg path and the modals share one resolver. Per-request paths re-read config every call so betas and `output_config` pick up the swap. Bare `/model` (combined picker) and bare `/effort` (slider) are also mutating because their submit path emits `Op::SetModel`, so both forms refuse mid-turn. See [modals.md](modals.md).
 
 6. **Slash commands never write user config files.** State is session-only, so a restart reverts to the configured values. Session commands should feel reversible, and any write that outlives the session requires an explicit user action.
 
@@ -42,7 +42,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 11. **Read-only commands fast-path the busy turn.** `classify` defaults to `SlashKind::ReadOnly`, and the dispatcher runs them client-side even when input is disabled. State-mutating commands override to `SlashKind::Mutating` and refuse mid-turn.
 
-12. **One trait return carries every effect: `SlashOutcome`.** `Forward(UserAction)` hands a state-mutating action back to the App, which routes it locally or to the agent loop. `Modal(_)` opens a modal, and `SystemMessage` / `GitDiff` print into chat. A failure returns `Err(String)`, which the dispatcher prefixes with the typed command name.
+12. **One trait return carries every effect: `SlashOutcome`.** `Forward(Action)` hands a state-mutating action back to the App, which applies a TUI-only action locally and sends an op to the engine. `Modal(_)` opens a modal, and `SystemMessage` / `GitDiff` print into chat. A failure returns `Err(String)`, which the dispatcher prefixes with the typed command name.
 
 13. **Commands read a borrowed `SlashContext` and write nothing.** The context carries `LiveSessionInfo` and the live session title. The App applies the returned outcome in one place on both the idle and busy paths, so no command reaches into `ChatView` or the modal stack. See [modals.md](modals.md) for the full modal design.
 
@@ -50,15 +50,15 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 ## Per-Command Notes
 
-- **`/clear`**: Send-first ordering. Forward `UserAction::Clear` first, drop chat history only on success. `AgentEvent::SessionTitleUpdated` carries the originating session id so a slow Haiku title call straddling `/clear` doesn't repaint the cleared session.
+- **`/clear`**: Send-first ordering. Forward `Op::Clear` first, drop chat history only on success. `Event::SessionTitleUpdated` carries the originating session id so a slow Haiku title call straddling `/clear` doesn't repaint the cleared session.
 
 - **`/compact`**: Refuses mid-turn, streams a summarization request, writes a compact boundary plus synthetic continuation message, resets the file tracker, and keeps queued prompts for the post-compact turn. Full design: [compact.md](compact.md).
 
-- **`/init`**: Returns `Forward(UserAction::SubmitPrompt(PROMPT))` with a static body asking the model to author / update AGENTS.md. The expanded body is invisible in the live session but recorded in JSONL for resume.
+- **`/init`**: Returns `Forward(Action::Op(Op::Prompt(PROMPT)))` with a static body asking the model to author / update AGENTS.md. The expanded body is invisible in the live session but recorded in JSONL for resume.
 
-- **`/model`**: Bare opens the combined picker ([modals.md](modals.md)). `/model <arg>` resolves an exact catalogue id first, then a unique substring, so `opus`, `sonnet`, and `haiku` act as aliases. Both forms are mutating and idle-gated because they can emit `UserAction::SwapConfig`, which re-resolves the current effort against the new model.
+- **`/model`**: Bare opens the combined picker ([modals.md](modals.md)). `/model <arg>` resolves an exact catalogue id first, then a unique substring, so `opus`, `sonnet`, and `haiku` act as aliases. Both forms are mutating and idle-gated because they can emit `Op::SetModel`, which re-resolves the current effort against the new model.
 
-- **`/effort`**: Bare opens the Speed ↔ Intelligence slider ([modals.md](modals.md)), since a two-axis picker would force users through models they didn't mean to change. `/effort <level>` accepts the five concrete tiers, with no `auto` state. Both forms are mutating and idle-gated because they can emit `UserAction::SwapConfig`.
+- **`/effort`**: Bare opens the Speed ↔ Intelligence slider ([modals.md](modals.md)), since a two-axis picker would force users through models they didn't mean to change. `/effort <level>` accepts the five concrete tiers, with no `auto` state. Both forms are mutating and idle-gated because they can emit `Op::SetModel`.
 
 - **`/theme`**: Bare opens a live-preview list picker ([modals.md](modals.md)) over the built-in palettes. Up / Down repaints the TUI in the candidate, and Esc snaps back. `/theme <name>` validates against the curated roster and swaps directly. Custom file-path themes aren't accepted via the slash form.
 
@@ -70,18 +70,17 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 - **`/diff`**: The lone printer. Pushes uncommitted git changes plus untracked files into chat as a system message, capped at 64 KB on a UTF-8 boundary. After the first commit it uses `git diff HEAD`. Before the first commit it combines `git diff --cached` and `git diff` because `HEAD` does not exist yet. Modal output would crop without scrollback, so the diff earns its place in the transcript.
 
-- **`/rename`**: Bare opens a single-line title editor pre-filled with the current title (cap 80 chars, mirroring the actor's first-prompt cap), and `/rename <title>` applies directly. Both forms forward `UserAction::Rename` and lock out AI title generation for the rest of the session so a slow Haiku call can't overwrite the user's pick. `classify` is always `Mutating`. Bare suppresses echo because the modal IS the response, while typed-arg echoes since the swap-confirmation system message anchors the pair. See [modals.md](modals.md).
+- **`/rename`**: Bare opens a single-line title editor pre-filled with the current title (cap 80 chars, mirroring the actor's first-prompt cap), and `/rename <title>` applies directly. Both forms forward `Op::Rename` and lock out AI title generation for the rest of the session so a slow Haiku call can't overwrite the user's pick. `classify` is always `Mutating`. Bare suppresses echo because the modal IS the response, while typed-arg echoes since the swap-confirmation system message anchors the pair. See [modals.md](modals.md).
 
-- **`/resume`** (alias `/continue`): Bare opens a searchable session picker ([modals.md](modals.md)), while `/resume <id-prefix>` resolves directly via a current-project-first lookup that widens to all projects on miss. Both forms refuse mid-turn and forward `UserAction::Resume`. Bare suppresses echo while typed-arg echoes. Full design: [resume.md](resume.md).
+- **`/resume`** (alias `/continue`): Bare opens a searchable session picker ([modals.md](modals.md)), while `/resume <id-prefix>` resolves directly via a current-project-first lookup that widens to all projects on miss. Both forms refuse mid-turn and forward `Op::Resume`. Bare suppresses echo while typed-arg echoes. Full design: [resume.md](resume.md).
 
 - **`/delete`**: Typed-arg only, while bare returns a friendly redirect. Picker entry is Ctrl+D inside `/resume`. Both push `ConfirmDeleteSessionModal` ([modals.md](modals.md)), which runs `delete_at` on the session's file on Y / Enter and emits a `Deleted session {id}: {title}` line in chat. Live-session refusal is layered across the picker filter, the resolver, and the store-layer bail.
 
-- **`/archive`** / **`/unarchive`**: Bare `/archive` forwards `UserAction::Archive`. The engine appends an `Archive` entry to the live session, then rolls like `/clear` and emits `SessionRolled { archived: true }`, which the chat answers with a note naming the archived session. A session without messages has no file, so archiving one reports an error and stays put. The typed forms resolve a saved session other than the live one and call `set_archived_at` on its file synchronously, printing a confirmation, or a note when the session already has that state. `/archive <prefix>` refuses a prefix that matches only the live session and points at bare `/archive`, while `/unarchive` on the live session prints a no-op note. Both are `Mutating`. `/unarchive` is typed-arg only, and its bare form points at the picker's Ctrl+A view.
+- **`/archive`** / **`/unarchive`**: Bare `/archive` forwards `Op::Archive`. The engine appends an `Archive` entry to the live session, then rolls like `/clear` and emits `SessionRolled { archived: true }`, which the chat answers with a note naming the archived session. A session without messages has no file, so archiving one reports an error and stays put. The typed forms resolve a saved session other than the live one and call `set_archived_at` on its file synchronously, printing a confirmation, or a note when the session already has that state. `/archive <prefix>` refuses a prefix that matches only the live session and points at bare `/archive`, while `/unarchive` on the live session prints a no-op note. Both are `Mutating`. `/unarchive` is typed-arg only, and its bare form points at the picker's Ctrl+A view.
 
 ## Sources
 
-- `crates/oxide-code/src/agent.rs`: `agent_turn` arms for `Clear` and `SwapConfig`.
-- `crates/oxide-code/src/engine.rs`: `Engine::archive`, which waits for the archive entry to reach disk before rolling the session.
+- `crates/oxide-code/src/engine.rs`: `Engine::run` arms for `Op::Clear` and `Op::SetModel`, and `Engine::archive`, which waits for the archive entry to reach disk before rolling the session.
 - `crates/oxide-code/src/session/display.rs`: shared `id_prefix`, `display_title`, and `format_metadata_line` for the picker row and delete confirm modal, plus `archive_notice`.
 - `crates/oxide-code/src/session/resolver.rs`: `resolve_prefix_to_info` checks the current project first, widens the search on a miss, and returns scoped error messages. `resolve_saved_prefix` distinguishes live-only matches for `/archive`, `/unarchive`, and `/delete`.
 - `crates/oxide-code/src/session/store.rs`: `delete_at`, which refuses to delete the live session at the filesystem boundary, and `set_archived_at`.
@@ -104,7 +103,8 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 - `crates/oxide-code/src/slash/resume.rs`: `ResumeCmd` plus `ResumePicker` (see `resume.md`).
 - `crates/oxide-code/src/slash/status.rs`: `/status` row builder plus `KvOverview` constructor.
 - `crates/oxide-code/src/slash/theme.rs`: `ThemeCmd`, picker open plus typed-arg validator.
-- `crates/oxide-code/src/tui/app.rs`: `dispatch_user_action`, `apply_action_locally`, `run_slash`, `apply_slash_outcome`, modal gate, echo gate.
+- `crates/oxide-code/src/tui/action.rs`: `Action`, which slash commands forward.
+- `crates/oxide-code/src/tui/app.rs`: `dispatch_action`, `dispatch_op`, `run_slash`, `apply_slash_outcome`, modal gate, echo gate.
 - `crates/oxide-code/src/tui/modal.rs`: `Modal` trait, `ModalStack`, key routing.
 - `crates/oxide-code/src/tui/modal/kv_overview.rs`: generic `KvOverview` / `KvSection` primitive.
 - `crates/oxide-code/src/tui/modal/list_picker.rs`: generic `ListPicker` primitive.

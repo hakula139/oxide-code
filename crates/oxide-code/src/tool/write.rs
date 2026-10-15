@@ -7,7 +7,9 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 
-use super::{Tool, ToolOutput, extract_input_field, summarize_path_call};
+use super::{
+    ApprovalBody, ApprovalPreview, Tool, ToolOutput, extract_input_field, summarize_path_call,
+};
 use crate::file_tracker::{FileTracker, GatePurpose};
 use crate::permission::PermissionClass;
 
@@ -42,16 +44,14 @@ impl Tool for WriteTool {
         Some("file_path")
     }
 
-    fn approval_preview(&self, input: &serde_json::Value) -> crate::agent::event::ApprovalPreview {
+    fn approval_preview(&self, input: &serde_json::Value) -> ApprovalPreview {
         let content = extract_input_field(input, "content").unwrap_or_default();
         let current = extract_input_field(input, "file_path")
             .map(current_text)
             .unwrap_or_default();
-        crate::agent::event::ApprovalPreview {
+        ApprovalPreview {
             title: self.summarize_call(input),
-            body: crate::agent::event::ApprovalBody::Diff(vec![super::edit::synthesize_chunk(
-                &current, content,
-            )]),
+            body: ApprovalBody::Diff(vec![super::edit::synthesize_chunk(&current, content)]),
         }
     }
 
@@ -193,7 +193,6 @@ async fn check_gate(key: &Path, path: &str, tracker: &FileTracker) -> Result<(),
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::event::ApprovalBody;
     use crate::file_tracker::{
         MAX_TRACKED_FILE_SIZE,
         testing::{seed_full_read, tracker},

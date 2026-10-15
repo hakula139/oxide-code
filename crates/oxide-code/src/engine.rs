@@ -13,7 +13,6 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::warn;
 
-use crate::agent::event::{AgentEvent, AgentSink, Interaction, UsageSnapshot, UserAction};
 use crate::agent::{self, AutoCompact, TokenUsage, TurnAbort, TurnOutcome, TurnReport};
 use crate::client::anthropic::Client;
 use crate::config::Effort;
@@ -21,6 +20,7 @@ use crate::file_tracker::FileTracker;
 use crate::message::{ContentBlock, Message};
 use crate::model::{ModelSpec, ResolvedModelId};
 use crate::prompt::{self, PromptParts, SessionContext, UserContext};
+use crate::protocol::{Event, EventSink, Interaction, Op, UsageSnapshot};
 use crate::session::entry::CompactInfo;
 use crate::session::handle::{self, LoadedTranscript, SessionHandle};
 use crate::session::history;
@@ -36,8 +36,8 @@ const OP_CHANNEL_CAP: usize = 32;
 
 /// A running [`Engine`]. Closing `ops` asks it to quit.
 pub(crate) struct EngineHandle {
-    pub(crate) ops: mpsc::Sender<UserAction>,
-    pub(crate) events: mpsc::UnboundedReceiver<AgentEvent>,
+    pub(crate) ops: mpsc::Sender<Op>,
+    pub(crate) events: mpsc::UnboundedReceiver<Event>,
     pub(crate) task: EngineTask,
 }
 
@@ -67,13 +67,13 @@ impl EngineTask {
     }
 }
 
-/// [`AgentSink`] feeding [`EngineHandle::events`]. The channel is unbounded, so the engine never
+/// [`EventSink`] feeding [`EngineHandle::events`]. The channel is unbounded, so the engine never
 /// waits on or drops events for a frontend that falls behind.
 #[derive(Clone)]
-struct ChannelSink(mpsc::UnboundedSender<AgentEvent>);
+struct ChannelSink(mpsc::UnboundedSender<Event>);
 
-impl AgentSink for ChannelSink {
-    fn send(&self, event: AgentEvent) -> Result<()> {
+impl EventSink for ChannelSink {
+    fn send(&self, event: Event) -> Result<()> {
         self.0
             .send(event)
             .map_err(|_| anyhow!("the frontend stopped reading events"))
@@ -184,39 +184,29 @@ impl Engine {
         EngineHandle { ops, events, task }
     }
 
-    /// Serves ops until `Quit` or the op channel closes, then finalizes whichever session is live.
-    async fn run(
-        mut self,
-        sink: ChannelSink,
-        mut ops: mpsc::Receiver<UserAction>,
-    ) -> Option<String> {
+    /// Serves ops until `Shutdown` or the op channel closes, then finalizes the live session.
+    async fn run(mut self, sink: ChannelSink, mut ops: mpsc::Receiver<Op>) -> Option<String> {
         while let Some(op) = ops.recv().await {
             match op {
-                UserAction::SubmitPrompt(text) => {
-                    if self.submit_prompt(&text, &sink, &mut ops).await == TurnEnd::Quit {
+                Op::Prompt(text) => {
+                    if self.submit_prompt(&text, &sink, &mut ops).await == TurnEnd::Shutdown {
                         break;
                     }
                 }
-                UserAction::Compact { instructions } => {
-                    if self.compact(&sink, &mut ops, instructions).await == TurnEnd::Quit {
+                Op::Compact { instructions } => {
+                    if self.compact(&sink, &mut ops, instructions).await == TurnEnd::Shutdown {
                         break;
                     }
                 }
-                UserAction::Clear => self.clear(&sink).await,
-                UserAction::Archive => self.archive(&sink).await,
-                UserAction::Resume { path } => self.resume(&sink, &path).await,
-                UserAction::Rename { title } => self.rename(&sink, title).await,
-                UserAction::SwapConfig { model, effort } => self.swap_config(&sink, model, effort),
-                // A `QueuePrompt` here arrived after its turn ended, and the frontend still submits
-                // it. Theme actions stay in the TUI, and an approval only matters mid-turn, where
-                // `agent_turn` consumes it.
-                UserAction::QueuePrompt(_)
-                | UserAction::Cancel
-                | UserAction::ConfirmExit
-                | UserAction::PreviewTheme { .. }
-                | UserAction::SwapTheme { .. }
-                | UserAction::ApprovalDecision { .. } => {}
-                UserAction::Quit => break,
+                Op::Clear => self.clear(&sink).await,
+                Op::Archive => self.archive(&sink).await,
+                Op::Resume { path } => self.resume(&sink, &path).await,
+                Op::Rename { title } => self.rename(&sink, title).await,
+                Op::SetModel { model, effort } => self.set_model(&sink, model, effort),
+                // A `Queue` here arrived after its turn ended, and the frontend still submits it.
+                // An interrupt or approval only matters mid-turn, where `agent_turn` consumes it.
+                Op::Queue(_) | Op::Interrupt | Op::Resolve { .. } => {}
+                Op::Shutdown => break,
             }
         }
 
@@ -228,10 +218,10 @@ impl Engine {
         &mut self,
         text: &str,
         sink: &S,
-        ops: &mut mpsc::Receiver<UserAction>,
+        ops: &mut mpsc::Receiver<Op>,
     ) -> TurnEnd
     where
-        S: AgentSink + Clone + 'static,
+        S: EventSink + Clone + 'static,
     {
         let mut pending = Vec::new();
         if let Err(abort) = self.auto_compact(sink, ops, &mut pending).await {
@@ -287,7 +277,7 @@ impl Engine {
         self.account_usage(sink, &report);
         match result {
             Ok(()) => {
-                sink.emit(AgentEvent::TurnComplete, "turn-complete");
+                sink.emit(Event::TurnComplete, "turn-complete");
                 TurnEnd::Completed
             }
             Err(abort) => report_abort(sink, abort, "turn-failed"),
@@ -296,8 +286,8 @@ impl Engine {
 
     async fn auto_compact(
         &mut self,
-        sink: &dyn AgentSink,
-        ops: &mut mpsc::Receiver<UserAction>,
+        sink: &dyn EventSink,
+        ops: &mut mpsc::Receiver<Op>,
         pending: &mut Vec<String>,
     ) -> Result<(), TurnAbort> {
         let tools = self.tools.definitions();
@@ -334,8 +324,8 @@ impl Engine {
     /// Replaces the transcript with a summary steered by `instructions`. Failures leave it intact.
     async fn compact(
         &mut self,
-        sink: &dyn AgentSink,
-        ops: &mut mpsc::Receiver<UserAction>,
+        sink: &dyn EventSink,
+        ops: &mut mpsc::Receiver<Op>,
         instructions: Option<String>,
     ) -> TurnEnd {
         let tools = self.tools.definitions();
@@ -386,7 +376,7 @@ impl Engine {
     }
 
     /// Ends a compaction that left the transcript unchanged, showing the summary's cost first.
-    fn fail_compact(&self, sink: &dyn AgentSink, abort: TurnAbort) -> TurnEnd {
+    fn fail_compact(&self, sink: &dyn EventSink, abort: TurnAbort) -> TurnEnd {
         self.emit_usage_update(sink);
         report_abort(sink, abort, "compact-failed")
     }
@@ -399,24 +389,22 @@ impl Engine {
     }
 
     /// Finalizes the live session and continues in a fresh, empty one.
-    async fn clear(&mut self, sink: &dyn AgentSink) {
+    async fn clear(&mut self, sink: &dyn EventSink) {
         self.roll_session(sink, false).await;
     }
 
     /// Archives the live session, then rolls like [`Self::clear`].
-    async fn archive(&mut self, sink: &dyn AgentSink) {
+    async fn archive(&mut self, sink: &dyn EventSink) {
         if self.messages.is_empty() {
             sink.emit(
-                AgentEvent::Error(
-                    "Nothing to archive: this session has no messages yet.".to_owned(),
-                ),
+                Event::Error("Nothing to archive: this session has no messages yet.".to_owned()),
                 "archive-empty",
             );
             return;
         }
         if let Some(failure) = self.session.archive().await.failure {
             sink.emit(
-                AgentEvent::Error(format!("Archive failed: {failure}")),
+                Event::Error(format!("Archive failed: {failure}")),
                 "archive-failed",
             );
             return;
@@ -424,7 +412,7 @@ impl Engine {
         self.roll_session(sink, true).await;
     }
 
-    async fn roll_session(&mut self, sink: &dyn AgentSink, archived: bool) {
+    async fn roll_session(&mut self, sink: &dyn EventSink, archived: bool) {
         let outcome = handle::roll(
             &mut self.session,
             &self.store,
@@ -435,7 +423,7 @@ impl Engine {
         sink.session_write_error(outcome.finalize_failure.as_deref());
         self.adopt_session(LoadedTranscript::default()).await;
         sink.emit(
-            AgentEvent::SessionRolled {
+            Event::SessionRolled {
                 id: outcome.new_id,
                 archived,
             },
@@ -444,7 +432,7 @@ impl Engine {
     }
 
     /// Finalizes the live session and continues `target`. On failure the live session stays.
-    async fn resume(&mut self, sink: &dyn AgentSink, target: &Path) {
+    async fn resume(&mut self, sink: &dyn EventSink, target: &Path) {
         let outcome =
             match handle::roll_into(&mut self.session, &self.store, &self.file_tracker, target)
                 .await
@@ -452,7 +440,7 @@ impl Engine {
                 Ok(outcome) => outcome,
                 Err(e) => {
                     sink.emit(
-                        AgentEvent::TurnFailed(format!(
+                        Event::TurnFailed(format!(
                             "Resume failed (still on session {}): {e:#}",
                             self.session.session_id(),
                         )),
@@ -463,7 +451,7 @@ impl Engine {
             };
         self.adopt_session(outcome.transcript).await;
         sink.emit(
-            AgentEvent::SessionResumed {
+            Event::SessionResumed {
                 id: self.session.session_id().to_owned(),
                 title: outcome.title,
                 unarchived: outcome.unarchived,
@@ -474,7 +462,7 @@ impl Engine {
         // `SessionResumed` clears the chat, so anything about the old session must follow it.
         if let Some(failure) = outcome.finalize_failure {
             sink.emit(
-                AgentEvent::Error(format!(
+                Event::Error(format!(
                     "Previous session failed to finalize cleanly: {failure}",
                 )),
                 "previous-session-finalize-failed",
@@ -501,14 +489,14 @@ impl Engine {
         self.reset_usage();
     }
 
-    async fn rename(&self, sink: &dyn AgentSink, title: String) {
+    async fn rename(&self, sink: &dyn EventSink, title: String) {
         let outcome = self.session.set_manual_title(title.clone()).await;
         sink.session_write_error(outcome.failure.as_deref());
         if outcome.failure.is_some() {
             return;
         }
         sink.emit(
-            AgentEvent::SessionTitleUpdated {
+            Event::SessionTitleUpdated {
                 session_id: self.session.session_id().to_owned(),
                 title,
             },
@@ -517,9 +505,9 @@ impl Engine {
     }
 
     /// Applies a model and / or effort pick. The model goes first because it re-resolves effort.
-    fn swap_config(
+    fn set_model(
         &mut self,
-        sink: &dyn AgentSink,
+        sink: &dyn EventSink,
         model: Option<ResolvedModelId>,
         effort: Option<Effort>,
     ) {
@@ -531,11 +519,11 @@ impl Engine {
             None => self.client.effort(),
         };
         sink.emit(
-            AgentEvent::ConfigChanged {
+            Event::ConfigChanged {
                 model: self.client.model().clone(),
                 effort: resolved,
-                compaction: self.client.compaction(),
                 requested_effort: effort,
+                auto_compaction: self.client.compaction().auto,
             },
             "config-changed",
         );
@@ -543,7 +531,7 @@ impl Engine {
         self.emit_usage_update(sink);
     }
 
-    fn account_usage(&mut self, sink: &dyn AgentSink, report: &TurnReport) {
+    fn account_usage(&mut self, sink: &dyn EventSink, report: &TurnReport) {
         self.last_usage = report.usage;
         if let Some(usage) = report.usage {
             self.displayed_usage = Some(usage);
@@ -574,14 +562,14 @@ impl Engine {
         self.total_estimated_cost_usd = 0.0;
     }
 
-    fn emit_usage_update(&self, sink: &dyn AgentSink) {
+    fn emit_usage_update(&self, sink: &dyn EventSink) {
         let estimated_cost_usd =
             (self.total_estimated_cost_usd > 0.0).then_some(self.total_estimated_cost_usd);
         if self.displayed_usage.is_none() && estimated_cost_usd.is_none() {
             return;
         }
         sink.emit(
-            AgentEvent::UsageUpdated(UsageSnapshot {
+            Event::UsageUpdated(UsageSnapshot {
                 context_tokens: self.displayed_usage.map(TokenUsage::context_tokens),
                 context_window: self.client.model().context_window(),
                 estimated_cost_usd,
@@ -630,44 +618,44 @@ pub(crate) enum TurnEnd {
     Completed,
     Cancelled,
     Failed,
-    Quit,
+    Shutdown,
 }
 
 impl TurnEnd {
     /// How the prompt in flight ended, if `event` is its terminal event.
-    pub(crate) fn of_prompt(event: &AgentEvent) -> Option<Self> {
+    pub(crate) fn of_prompt(event: &Event) -> Option<Self> {
         match event {
-            AgentEvent::TurnComplete => Some(Self::Completed),
-            AgentEvent::Cancelled => Some(Self::Cancelled),
-            AgentEvent::TurnFailed(_) => Some(Self::Failed),
+            Event::TurnComplete => Some(Self::Completed),
+            Event::Cancelled => Some(Self::Cancelled),
+            Event::TurnFailed(_) => Some(Self::Failed),
             _ => None,
         }
     }
 }
 
 /// Shows `abort` on `sink` as the operation's one terminal event, logging `label` if a failure
-/// event is dropped. `Quit` stays silent. See `docs/design/tui/cancellation.md` for the set.
-fn report_abort(sink: &dyn AgentSink, abort: TurnAbort, label: &'static str) -> TurnEnd {
+/// event is dropped. `Shutdown` stays silent. See `docs/design/tui/cancellation.md` for the set.
+fn report_abort(sink: &dyn EventSink, abort: TurnAbort, label: &'static str) -> TurnEnd {
     match abort {
         TurnAbort::Cancelled => {
-            sink.emit(AgentEvent::Cancelled, "cancelled");
+            sink.emit(Event::Cancelled, "cancelled");
             TurnEnd::Cancelled
         }
-        TurnAbort::Quit => TurnEnd::Quit,
+        TurnAbort::Shutdown => TurnEnd::Shutdown,
         TurnAbort::Failed(e) => {
-            sink.emit(AgentEvent::TurnFailed(format!("{e:#}")), label);
+            sink.emit(Event::TurnFailed(format!("{e:#}")), label);
             TurnEnd::Failed
         }
     }
 }
 
 /// Warns that the tracked files in `drifted` changed on disk since the resumed session read them.
-fn report_drift(sink: &dyn AgentSink, drifted: &[PathBuf]) {
+fn report_drift(sink: &dyn EventSink, drifted: &[PathBuf]) {
     if drifted.is_empty() {
         return;
     }
     sink.emit(
-        AgentEvent::Error(format_drift_warning(drifted)),
+        Event::Error(format_drift_warning(drifted)),
         "resume-drift-warning",
     );
 }
@@ -704,19 +692,19 @@ mod tests {
         mount_tool_call_once, request_bodies, system_prompt, until_requested, with_pinned_home,
     };
     use super::*;
-    use crate::agent::event::CapturingSink;
     use crate::client::anthropic::testing::{
         api_key, completion_body, sse_response, test_client, test_config, text_stream_body,
     };
     use crate::config::{AutoCompactionConfig, CompactionConfig};
     use crate::file_tracker::testing::seed_full_read;
     use crate::message::Role;
+    use crate::protocol::CapturingSink;
     use crate::session::store::testing::test_store;
 
     /// Next event the engine emits that `pick` accepts, skipping the rest.
     async fn next_matching<T>(
-        events: &mut mpsc::UnboundedReceiver<AgentEvent>,
-        mut pick: impl FnMut(AgentEvent) -> Option<T>,
+        events: &mut mpsc::UnboundedReceiver<Event>,
+        mut pick: impl FnMut(Event) -> Option<T>,
     ) -> T {
         loop {
             let event = events.recv().await.expect("the engine stopped early");
@@ -727,7 +715,7 @@ mod tests {
     }
 
     /// Events up to and including the terminal event of the prompt in flight.
-    async fn turn_events(events: &mut mpsc::UnboundedReceiver<AgentEvent>) -> Vec<AgentEvent> {
+    async fn turn_events(events: &mut mpsc::UnboundedReceiver<Event>) -> Vec<Event> {
         let mut seen = Vec::new();
         loop {
             let event = events.recv().await.expect("the engine stopped early");
@@ -739,12 +727,8 @@ mod tests {
         }
     }
 
-    async fn submit(handle: &mut EngineHandle, text: &str) -> Vec<AgentEvent> {
-        handle
-            .ops
-            .send(UserAction::SubmitPrompt(text.to_owned()))
-            .await
-            .unwrap();
+    async fn submit(handle: &mut EngineHandle, text: &str) -> Vec<Event> {
+        handle.ops.send(Op::Prompt(text.to_owned())).await.unwrap();
         turn_events(&mut handle.events).await
     }
 
@@ -890,13 +874,13 @@ mod tests {
             let failure = handle.shutdown().await;
 
             assert!(
-                matches!(&drift, AgentEvent::Error(msg) if msg.ends_with("Read before Edit: a.rs")),
+                matches!(&drift, Event::Error(msg) if msg.ends_with("Read before Edit: a.rs")),
                 "{drift:?}"
             );
             assert!(
                 matches!(
                     &interrupted,
-                    AgentEvent::Error(msg) if msg.ends_with("Send a message to continue.")
+                    Event::Error(msg) if msg.ends_with("Send a message to continue.")
                 ),
                 "{interrupted:?}"
             );
@@ -925,9 +909,9 @@ mod tests {
                 matches!(
                     events.as_slice(),
                     [
-                        AgentEvent::StreamToken(token),
-                        AgentEvent::UsageUpdated(_),
-                        AgentEvent::TurnComplete,
+                        Event::StreamToken(token),
+                        Event::UsageUpdated(_),
+                        Event::TurnComplete,
                     ] if token == "reply"
                 ),
                 "{events:?}"
@@ -966,11 +950,11 @@ mod tests {
 
             handle
                 .ops
-                .send(UserAction::SubmitPrompt("hello".to_owned()))
+                .send(Op::Prompt("hello".to_owned()))
                 .await
                 .unwrap();
             let titled = next_matching(&mut handle.events, |event| match event {
-                AgentEvent::SessionTitleUpdated { session_id, title } => Some((session_id, title)),
+                Event::SessionTitleUpdated { session_id, title } => Some((session_id, title)),
                 _ => None,
             })
             .await;
@@ -992,9 +976,9 @@ mod tests {
             let mut handle = engine.spawn(&[]);
 
             for op in [
-                UserAction::QueuePrompt("early".to_owned()),
-                UserAction::SubmitPrompt("first".to_owned()),
-                UserAction::QueuePrompt("queued".to_owned()),
+                Op::Queue("early".to_owned()),
+                Op::Prompt("first".to_owned()),
+                Op::Queue("queued".to_owned()),
             ] {
                 handle.ops.send(op).await.unwrap();
             }
@@ -1004,7 +988,7 @@ mod tests {
             let drained: Vec<_> = events
                 .iter()
                 .filter_map(|event| match event {
-                    AgentEvent::PromptDrained(text) => Some(text.as_str()),
+                    Event::PromptDrained(text) => Some(text.as_str()),
                     _ => None,
                 })
                 .collect();
@@ -1015,10 +999,10 @@ mod tests {
             );
             let tool_end = events
                 .iter()
-                .position(|event| matches!(event, AgentEvent::ToolCallEnd { .. }))
+                .position(|event| matches!(event, Event::ToolCallEnd { .. }))
                 .unwrap();
             assert!(
-                matches!(&events[tool_end + 1], AgentEvent::PromptDrained(_)),
+                matches!(&events[tool_end + 1], Event::PromptDrained(_)),
                 "{events:?}"
             );
             let requests = request_bodies(&server).await;
@@ -1048,13 +1032,13 @@ mod tests {
             submit(&mut handle, "two").await;
             handle
                 .ops
-                .send(UserAction::Compact {
+                .send(Op::Compact {
                     instructions: Some("focus".to_owned()),
                 })
                 .await
                 .unwrap();
             let compacted = next_matching(&mut handle.events, |event| match event {
-                AgentEvent::SessionCompacted {
+                Event::SessionCompacted {
                     pre_count,
                     instructions,
                     automatic,
@@ -1093,9 +1077,9 @@ mod tests {
             let mut handle = engine.spawn(&[]);
 
             let path = store.find_session_path(&target_id).unwrap();
-            handle.ops.send(UserAction::Resume { path }).await.unwrap();
+            handle.ops.send(Op::Resume { path }).await.unwrap();
             let resumed = next_matching(&mut handle.events, |event| match event {
-                AgentEvent::SessionResumed { id, history, .. } => Some((id, history)),
+                Event::SessionResumed { id, history, .. } => Some((id, history)),
                 _ => None,
             })
             .await;
@@ -1143,9 +1127,9 @@ mod tests {
             let mut handle = engine.spawn(&[]);
 
             submit(&mut handle, "first").await;
-            handle.ops.send(UserAction::Archive).await.unwrap();
+            handle.ops.send(Op::Archive).await.unwrap();
             let (fresh_id, archived) = next_matching(&mut handle.events, |event| match event {
-                AgentEvent::SessionRolled { id, archived } => Some((id, archived)),
+                Event::SessionRolled { id, archived } => Some((id, archived)),
                 _ => None,
             })
             .await;
@@ -1154,9 +1138,9 @@ mod tests {
             assert!(store.load_session_data(&archived_id).unwrap().archived);
 
             let path = store.find_session_path(&archived_id).unwrap();
-            handle.ops.send(UserAction::Resume { path }).await.unwrap();
+            handle.ops.send(Op::Resume { path }).await.unwrap();
             let resumed = next_matching(&mut handle.events, |event| match event {
-                AgentEvent::SessionResumed { id, unarchived, .. } => Some((id, unarchived)),
+                Event::SessionResumed { id, unarchived, .. } => Some((id, unarchived)),
                 _ => None,
             })
             .await;
@@ -1169,7 +1153,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_applies_rename_and_config_ops_until_quit() {
+    async fn run_applies_rename_and_config_ops_until_shutdown() {
         with_pinned_home(async {
             let server = MockServer::start().await;
             let dir = tempfile::tempdir().unwrap();
@@ -1182,20 +1166,20 @@ mod tests {
             } = engine.spawn(&[]);
 
             for op in [
-                UserAction::Rename {
+                Op::Rename {
                     title: "Fix login".to_owned(),
                 },
-                UserAction::SwapConfig {
+                Op::SetModel {
                     model: None,
                     effort: Some(Effort::Low),
                 },
-                UserAction::Quit,
+                Op::Shutdown,
             ] {
                 ops.send(op).await.unwrap();
             }
             let failure = tokio::time::timeout(Duration::from_secs(5), task.join())
                 .await
-                .expect("Quit stops the engine while its op channel is still open");
+                .expect("Shutdown stops the engine while its op channel is still open");
             let mut seen = Vec::new();
             while let Ok(event) = events.try_recv() {
                 seen.push(event);
@@ -1206,8 +1190,8 @@ mod tests {
                 matches!(
                     seen.as_slice(),
                     [
-                        AgentEvent::SessionTitleUpdated { session_id, title },
-                        AgentEvent::ConfigChanged {
+                        Event::SessionTitleUpdated { session_id, title },
+                        Event::ConfigChanged {
                             requested_effort: Some(Effort::Low),
                             ..
                         },
@@ -1220,14 +1204,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_quit_before_any_prompt_leaves_no_session_file() {
+    async fn run_shutdown_before_any_prompt_leaves_no_session_file() {
         with_pinned_home(async {
             let server = MockServer::start().await;
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
             let handle = engine(server.uri(), &store, dir.path()).await.spawn(&[]);
 
-            handle.ops.send(UserAction::Quit).await.unwrap();
+            handle.ops.send(Op::Shutdown).await.unwrap();
             assert_eq!(handle.task.join().await, None);
 
             assert!(store.list().unwrap().is_empty());
@@ -1248,9 +1232,9 @@ mod tests {
             std::fs::write(&read_path, "contents").unwrap();
             let mut handle = engine.spawn(&[]);
 
-            handle.ops.send(UserAction::Clear).await.unwrap();
+            handle.ops.send(Op::Clear).await.unwrap();
             let live_id = next_matching(&mut handle.events, |event| match event {
-                AgentEvent::SessionRolled {
+                Event::SessionRolled {
                     id,
                     archived: false,
                 } => Some(id),
@@ -1269,7 +1253,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_cancel_ends_the_turn_and_the_next_prompt_still_runs() {
+    async fn run_interrupt_ends_the_turn_and_the_next_prompt_still_runs() {
         with_pinned_home(async {
             let server = MockServer::start().await;
             mount_stalled_reply_once(&server).await;
@@ -1280,20 +1264,20 @@ mod tests {
 
             handle
                 .ops
-                .send(UserAction::SubmitPrompt("slow".to_owned()))
+                .send(Op::Prompt("slow".to_owned()))
                 .await
                 .unwrap();
             until_requested(&server).await;
-            handle.ops.send(UserAction::Cancel).await.unwrap();
+            handle.ops.send(Op::Interrupt).await.unwrap();
             let cancelled = turn_events(&mut handle.events).await;
             let next = submit(&mut handle, "next").await;
             handle.shutdown().await;
 
             assert!(
-                matches!(cancelled.as_slice(), [AgentEvent::Cancelled]),
+                matches!(cancelled.as_slice(), [Event::Cancelled]),
                 "{cancelled:?}"
             );
-            assert!(matches!(next.last(), Some(AgentEvent::TurnComplete)));
+            assert!(matches!(next.last(), Some(Event::TurnComplete)));
             let requests = request_bodies(&server).await;
             assert_eq!(texts(&requests[1])[1..], ["slow", "next"]);
         })
@@ -1301,7 +1285,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_cancel_during_auto_compaction_ends_the_prompt_before_the_model_sees_it() {
+    async fn run_interrupt_during_auto_compaction_ends_the_prompt_before_the_model_sees_it() {
         with_pinned_home(async {
             let server = MockServer::start().await;
             mount_stalled_reply_once(&server).await;
@@ -1314,18 +1298,18 @@ mod tests {
 
             handle
                 .ops
-                .send(UserAction::SubmitPrompt("five".to_owned()))
+                .send(Op::Prompt("five".to_owned()))
                 .await
                 .unwrap();
             until_requested(&server).await;
-            handle.ops.send(UserAction::Cancel).await.unwrap();
+            handle.ops.send(Op::Interrupt).await.unwrap();
             let events = turn_events(&mut handle.events).await;
             handle.shutdown().await;
 
             assert!(
                 matches!(
                     events.as_slice(),
-                    [AgentEvent::AutoCompactionStarted, AgentEvent::Cancelled]
+                    [Event::AutoCompactionStarted, Event::Cancelled]
                 ),
                 "{events:?}"
             );
@@ -1339,11 +1323,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_quit_mid_request_stops_without_a_terminal_event() {
+    async fn run_shutdown_mid_request_stops_without_a_terminal_event() {
         with_pinned_home(async {
             for (label, op) in [
-                ("prompt", UserAction::SubmitPrompt("mid stream".to_owned())),
-                ("compaction", UserAction::Compact { instructions: None }),
+                ("prompt", Op::Prompt("mid stream".to_owned())),
+                ("compaction", Op::Compact { instructions: None }),
             ] {
                 let server = MockServer::start().await;
                 mount_stalled_reply_once(&server).await;
@@ -1358,11 +1342,11 @@ mod tests {
 
                 ops.send(op).await.unwrap();
                 until_requested(&server).await;
-                ops.send(UserAction::Quit).await.unwrap();
+                ops.send(Op::Shutdown).await.unwrap();
                 let failure = tokio::time::timeout(Duration::from_secs(5), task.join())
                     .await
                     .unwrap_or_else(|_| {
-                        panic!("Quit stops a {label} while the op channel is open")
+                        panic!("Shutdown stops a {label} while the op channel is open")
                     });
 
                 assert_eq!(failure, None, "{label}");
@@ -1388,7 +1372,7 @@ mod tests {
 
             handle
                 .ops
-                .send(UserAction::SubmitPrompt("mid stream".to_owned()))
+                .send(Op::Prompt("mid stream".to_owned()))
                 .await
                 .unwrap();
             until_requested(&server).await;
@@ -1420,7 +1404,7 @@ mod tests {
             let mut engine = engine(server.uri(), &store, dir.path()).await;
             let today = engine.prompt.seen.date.clone();
             let sink = CapturingSink::new();
-            let (_ops_tx, mut ops) = agent::event::inert_user_action_channel();
+            let (_ops_tx, mut ops) = crate::protocol::inert_op_channel();
 
             let end = engine.submit_prompt("first", &sink, &mut ops).await;
             assert_eq!(end, TurnEnd::Completed);
@@ -1470,7 +1454,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
             let sink = CapturingSink::new();
-            let (_ops_tx, mut ops) = agent::event::inert_user_action_channel();
+            let (_ops_tx, mut ops) = crate::protocol::inert_op_channel();
 
             for text in ["first", "second"] {
                 engine.submit_prompt(text, &sink, &mut ops).await;
@@ -1481,7 +1465,7 @@ mod tests {
                 .into_iter()
                 .rev()
                 .find_map(|event| match event {
-                    AgentEvent::UsageUpdated(usage) => Some(usage),
+                    Event::UsageUpdated(usage) => Some(usage),
                     _ => None,
                 });
             let usage = usage.expect("each turn reports usage");
@@ -1509,7 +1493,7 @@ mod tests {
             engine.displayed_usage = engine.last_usage;
             engine.total_estimated_cost_usd = 1.23;
             let sink = CapturingSink::new();
-            let (_ops_tx, mut ops) = agent::event::inert_user_action_channel();
+            let (_ops_tx, mut ops) = crate::protocol::inert_op_channel();
 
             let end = engine.submit_prompt("five", &sink, &mut ops).await;
 
@@ -1546,21 +1530,21 @@ mod tests {
                 .position(|event| {
                     matches!(
                         event,
-                        AgentEvent::SessionCompacted {
+                        Event::SessionCompacted {
                             automatic: true,
                             ..
                         }
                     )
                 })
                 .unwrap();
-            let AgentEvent::UsageUpdated(usage) = &events[compacted + 1] else {
+            let Event::UsageUpdated(usage) = &events[compacted + 1] else {
                 panic!("the summary's cost shows right after the compaction: {events:?}");
             };
             assert_eq!(usage.context_tokens, None);
             assert!((usage.estimated_cost_usd.unwrap() - (1.23 + 0.006)).abs() < 1e-12);
             let completed = events
                 .iter()
-                .position(|event| matches!(event, AgentEvent::TurnComplete));
+                .position(|event| matches!(event, Event::TurnComplete));
             assert!(compacted < completed.unwrap());
         })
         .await;
@@ -1579,7 +1563,7 @@ mod tests {
             engine.displayed_usage = Some(TokenUsage::new(90_000, 9));
             engine.total_estimated_cost_usd = 1.23;
             let sink = CapturingSink::new();
-            let (_ops_tx, mut ops) = agent::event::inert_user_action_channel();
+            let (_ops_tx, mut ops) = crate::protocol::inert_op_channel();
 
             let end = engine
                 .compact(&sink, &mut ops, Some("focus".to_owned()))
@@ -1606,12 +1590,12 @@ mod tests {
             assert!(engine.prompt_unrecorded);
             let events = sink.events();
             let [
-                AgentEvent::SessionCompacted {
+                Event::SessionCompacted {
                     automatic: false,
                     instructions: Some(focus),
                     ..
                 },
-                AgentEvent::UsageUpdated(usage),
+                Event::UsageUpdated(usage),
             ] = events.as_slice()
             else {
                 panic!("expected the compaction, then its cost: {events:?}");
@@ -1639,7 +1623,7 @@ mod tests {
             assert_eq!(engine.messages.len(), 1);
 
             engine.messages = transcript();
-            ops_tx.send(UserAction::Cancel).await.unwrap();
+            ops_tx.send(Op::Interrupt).await.unwrap();
             let end = engine.compact(&sink, &mut ops, None).await;
             assert_eq!(end, TurnEnd::Cancelled);
             assert_eq!(engine.messages.len(), 4);
@@ -1658,15 +1642,15 @@ mod tests {
                 matches!(
                     events.as_slice(),
                     [
-                        AgentEvent::TurnFailed(short),
-                        AgentEvent::Cancelled,
-                        AgentEvent::Error(write),
-                        AgentEvent::UsageUpdated(UsageSnapshot {
+                        Event::TurnFailed(short),
+                        Event::Cancelled,
+                        Event::Error(write),
+                        Event::UsageUpdated(UsageSnapshot {
                             context_tokens: None,
                             estimated_cost_usd: Some(cost),
                             ..
                         }),
-                        AgentEvent::TurnFailed(unsaved),
+                        Event::TurnFailed(unsaved),
                     ] if short.starts_with("Compaction failed: session is too short")
                         && write.starts_with("Session write failed")
                         && (cost - 0.006).abs() < 1e-12
@@ -1695,7 +1679,7 @@ mod tests {
             engine.displayed_usage = Some(TokenUsage::new(50_000, 1));
             engine.total_estimated_cost_usd = 1.23;
             let sink = CapturingSink::new();
-            let (_ops_tx, mut ops) = agent::event::inert_user_action_channel();
+            let (_ops_tx, mut ops) = crate::protocol::inert_op_channel();
 
             let end = engine.compact(&sink, &mut ops, None).await;
 
@@ -1709,8 +1693,7 @@ mod tests {
                 engine.total_estimated_cost_usd,
             );
             let events = sink.events();
-            let [AgentEvent::UsageUpdated(usage), AgentEvent::TurnFailed(msg)] = events.as_slice()
-            else {
+            let [Event::UsageUpdated(usage), Event::TurnFailed(msg)] = events.as_slice() else {
                 panic!("expected the cost update before the failure: {events:?}");
             };
             assert_eq!(usage.context_tokens, Some(50_000));
@@ -1777,7 +1760,7 @@ mod tests {
             assert!(
                 matches!(
                     events.as_slice(),
-                    [AgentEvent::Error(empty), AgentEvent::Error(first), AgentEvent::Error(again)]
+                    [Event::Error(empty), Event::Error(first), Event::Error(again)]
                         if empty.starts_with("Nothing to archive")
                             && first.starts_with("Archive failed: ")
                             && again.starts_with("Archive failed: ")
@@ -1800,7 +1783,7 @@ mod tests {
             let mut engine = engine(server.uri(), &store, dir.path()).await;
             let recorded_id = engine.session.session_id().to_owned();
             let sink = CapturingSink::new();
-            let (_ops_tx, mut ops) = agent::event::inert_user_action_channel();
+            let (_ops_tx, mut ops) = crate::protocol::inert_op_channel();
             engine.submit_prompt("first", &sink, &mut ops).await;
             engine.clear(&sink).await;
 
@@ -1836,7 +1819,7 @@ mod tests {
             assert!(
                 matches!(
                     events.as_slice(),
-                    [AgentEvent::SessionResumed { id, .. }, AgentEvent::Error(msg)]
+                    [Event::SessionResumed { id, .. }, Event::Error(msg)]
                         if *id == target_id
                             && msg.starts_with("Previous session failed to finalize cleanly")
                 ),
@@ -1875,7 +1858,7 @@ mod tests {
             assert!((engine.total_estimated_cost_usd - 1.23).abs() < f64::EPSILON);
             assert!(matches!(
                 sink.events().as_slice(),
-                [AgentEvent::TurnFailed(msg)] if msg.contains("still on session")
+                [Event::TurnFailed(msg)] if msg.contains("still on session")
             ));
         })
         .await;
@@ -1902,8 +1885,8 @@ mod tests {
                 matches!(
                     events.as_slice(),
                     [
-                        AgentEvent::SessionTitleUpdated { session_id, title },
-                        AgentEvent::Error(write),
+                        Event::SessionTitleUpdated { session_id, title },
+                        Event::Error(write),
                     ] if *session_id == live_id && title == "Fix login"
                         && write.starts_with("Session write failed")
                 ),
@@ -1913,20 +1896,20 @@ mod tests {
         .await;
     }
 
-    // ── swap_config ──
+    // ── set_model ──
 
     #[tokio::test]
-    async fn swap_config_model_keeps_the_system_prompt_and_names_the_model_next_turn() {
+    async fn set_model_swap_keeps_the_system_prompt_and_names_the_model_next_turn() {
         with_pinned_home(async {
             let server = MockServer::start().await;
             mount_reply(&server, "reply").await;
             let dir = tempfile::tempdir().unwrap();
             let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
             let sink = CapturingSink::new();
-            let (_ops_tx, mut ops) = agent::event::inert_user_action_channel();
+            let (_ops_tx, mut ops) = crate::protocol::inert_op_channel();
 
             engine.submit_prompt("first", &sink, &mut ops).await;
-            engine.swap_config(
+            engine.set_model(
                 &sink,
                 Some(ResolvedModelId::new("claude-sonnet-5-5".to_owned())),
                 None,
@@ -1954,7 +1937,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn swap_config_resets_auto_compaction_breaker() {
+    async fn set_model_resets_auto_compaction_breaker() {
         with_pinned_home(async {
             let server = MockServer::start().await;
             let dir = tempfile::tempdir().unwrap();
@@ -1964,7 +1947,7 @@ mod tests {
             engine.total_estimated_cost_usd = 1.23;
             let sink = CapturingSink::new();
 
-            engine.swap_config(&sink, None, Some(Effort::Xhigh));
+            engine.set_model(&sink, None, Some(Effort::Xhigh));
 
             assert_eq!(engine.auto_compaction_failures, 0);
             assert_eq!(engine.last_usage, Some(TokenUsage::new(100_000, 1)));
@@ -1975,7 +1958,7 @@ mod tests {
             );
             assert!(matches!(
                 sink.events().first(),
-                Some(AgentEvent::ConfigChanged { .. })
+                Some(Event::ConfigChanged { .. })
             ));
         })
         .await;
@@ -1986,11 +1969,11 @@ mod tests {
     #[test]
     fn of_prompt_reads_only_the_three_terminal_events() {
         let ends = [
-            AgentEvent::TurnComplete,
-            AgentEvent::Cancelled,
-            AgentEvent::TurnFailed("failure".to_owned()),
-            AgentEvent::StreamToken("text".to_owned()),
-            AgentEvent::Error("warning".to_owned()),
+            Event::TurnComplete,
+            Event::Cancelled,
+            Event::TurnFailed("failure".to_owned()),
+            Event::StreamToken("text".to_owned()),
+            Event::Error("warning".to_owned()),
         ]
         .iter()
         .map(TurnEnd::of_prompt)
@@ -2011,14 +1994,17 @@ mod tests {
     // ── report_abort ──
 
     #[test]
-    fn report_abort_shows_cancel_and_failure_but_keeps_quit_silent() {
+    fn report_abort_shows_cancel_and_failure_but_keeps_shutdown_silent() {
         let sink = CapturingSink::new();
 
         assert_eq!(
             report_abort(&sink, TurnAbort::Cancelled, "label"),
             TurnEnd::Cancelled
         );
-        assert_eq!(report_abort(&sink, TurnAbort::Quit, "label"), TurnEnd::Quit);
+        assert_eq!(
+            report_abort(&sink, TurnAbort::Shutdown, "label"),
+            TurnEnd::Shutdown
+        );
         assert_eq!(
             report_abort(&sink, TurnAbort::Failed(anyhow!("boom")), "label"),
             TurnEnd::Failed
@@ -2028,7 +2014,7 @@ mod tests {
         assert!(
             matches!(
                 events.as_slice(),
-                [AgentEvent::Cancelled, AgentEvent::TurnFailed(msg)] if msg == "boom"
+                [Event::Cancelled, Event::TurnFailed(msg)] if msg == "boom"
             ),
             "{events:?}",
         );

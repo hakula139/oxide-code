@@ -6,8 +6,9 @@ use std::borrow::Cow;
 use super::context::SlashContext;
 use super::matcher::rank_by_prefix;
 use super::registry::{ArgCompletion, SlashCommand, SlashKind, SlashOutcome};
-use crate::agent::event::UserAction;
 use crate::model::{MODELS, ModelInfo, ResolvedModelId, replacement_for};
+use crate::protocol::Op;
+use crate::tui::action::Action;
 
 // ── ModelCmd ──
 
@@ -52,10 +53,10 @@ impl SlashCommand for ModelCmd {
             )));
         }
         let id = resolve_model_arg(arg)?;
-        Ok(SlashOutcome::Forward(UserAction::SwapConfig {
+        Ok(SlashOutcome::Forward(Action::Op(Op::SetModel {
             model: Some(id),
             effort: None,
-        }))
+        })))
     }
 }
 
@@ -101,11 +102,11 @@ mod tests {
     use super::*;
     use crate::slash::test_session_info;
 
-    fn swap_model(id: &str) -> UserAction {
-        UserAction::SwapConfig {
+    fn swap_model(id: &str) -> Action {
+        Action::Op(Op::SetModel {
             model: Some(ResolvedModelId::new(id.to_owned())),
             effort: None,
-        }
+        })
     }
 
     // ── ModelCmd metadata ──
@@ -161,7 +162,7 @@ mod tests {
         ModelCmd.execute(args, &SlashContext::new(&test_session_info(), None))
     }
 
-    fn run_forward(args: &str) -> UserAction {
+    fn run_forward(args: &str) -> Action {
         run_execute(args).unwrap().into_forward()
     }
 

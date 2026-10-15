@@ -39,7 +39,7 @@ Segment render rules:
 
 Anthropic `Usage` carries `cache_creation_input_tokens` and `cache_read_input_tokens`. `TokenUsage::context_tokens()` returns input + cache creation + cache read. `TokenUsage::total_tokens()` returns context + output and is the auto-compaction trigger input.
 
-Each `agent_turn` reports the latest provider usage and the total across its requests, including a request the user cancelled or that failed partway. `Engine` keeps the latest usage for the next auto-compaction check, updates the displayed usage snapshot, adds the turn's estimated cost when rates are known, then emits `AgentEvent::UsageUpdated(UsageSnapshot)` before the turn's terminal event. The summarization requests behind `/compact` and auto-compaction add their estimated cost the same way.
+Each `agent_turn` reports the latest provider usage and the total across its requests, including a request the user cancelled or that failed partway. `Engine` keeps the latest usage for the next auto-compaction check, updates the displayed usage snapshot, adds the turn's estimated cost when rates are known, then emits `Event::UsageUpdated(UsageSnapshot)` before the turn's terminal event. The summarization requests behind `/compact` and auto-compaction add their estimated cost the same way.
 
 Known first-party Claude API rates live in `model/pricing.rs`, and the `model.rs` catalogue attaches them to each model. Unknown models render context without session cost. The estimate excludes account discounts, marketplace billing, data-residency multipliers, fast mode, and server-side tool surcharges.
 

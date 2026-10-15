@@ -63,11 +63,11 @@ The `bash` command string is unparsed (`bash -c "..."`), so prefix and wildcard 
 
 ## Approval Round-Trip
 
-When the gate resolves to ask, the decision travels through the existing `user_rx` channel polled by the turn loop. Tool dispatch is sequential, so at most one approval can be outstanding and no id fan-out is needed.
+When the gate resolves to ask, the decision travels through the existing `ops` channel polled by the turn loop. Tool dispatch is sequential, so at most one approval can be outstanding and no id fan-out is needed.
 
-`run_tool_round` passes the tool-use `id` and `sink` to `dispatch_tool_call`. The latter emits `AgentEvent::ApprovalRequested { id, preview }`, carrying the id and a small `Clone` preview: an edit diff from `edit::synthesize_chunk`, a diff against the file's current content for `write`, or the command string under the tool name for `bash`. The gate intercepts the call before `tools.run`, the same way the parse-error short-circuit returns a synthetic `ToolOutput`. It waits for a decision in a sibling of `await_unless_aborted`, whose select loop maps `Cancel` to `Cancelled` and `Quit` to `Quit`, buffers a `QueuePrompt` in `pending`, and matches `UserAction::ApprovalDecision { id, decision }`. Decisions with an id that does not match the outstanding call are ignored, and dropping the wait future is cancel-safe.
+`run_tool_round` passes the tool-use `id` and `sink` to `dispatch_tool_call`. The latter emits `Event::ApprovalRequested { id, preview }`, carrying the id and a small `Clone` preview: an edit diff from `edit::synthesize_chunk`, a diff against the file's current content for `write`, or the command string under the tool name for `bash`. The gate intercepts the call before `tools.run`, the same way the parse-error short-circuit returns a synthetic `ToolOutput`. It waits for a decision in a sibling of `await_unless_aborted`, whose select loop maps `Op::Interrupt` to `Cancelled` and `Op::Shutdown` to `Shutdown`, buffers an `Op::Queue` in `pending`, and matches `Op::Resolve { id, decision }`. Decisions with an id that does not match the outstanding call are ignored, and dropping the wait future is cancel-safe.
 
-On the TUI side, an `ApprovalModal` joins the `ModalStack` and follows the `ConfirmDeleteSessionModal` template. The blocked agent must receive a decision on every dismissal path, but `ModalStack::handle_key` intercepts Esc and Ctrl+C before delegation, while `clear` drops modals outright. Both paths yield `ModalAction::Cancelled`. The stack therefore has a cancel hook (`Modal::on_cancel` returning an optional `ModalAction`) that resolves a pending approval to `ApprovalDecision::Deny` on universal cancel or session-swap `clear`. A denied call returns a synthetic error `ToolOutput`, so the model receives the refusal as a tool result and can choose another approach.
+On the TUI side, an `ApprovalModal` joins the `ModalStack` and follows the `ConfirmDeleteSessionModal` template. The blocked agent must receive a decision on every dismissal path, but `ModalStack::handle_key` intercepts Esc and Ctrl+C before delegation, while `clear` drops modals outright. Both paths yield `ModalAction::Cancelled`. The stack therefore has a cancel hook (`Modal::on_cancel` returning an optional `ModalAction`) that resolves a pending approval to `Decision::Deny` on universal cancel or session-swap `clear`. A denied call returns a synthetic error `ToolOutput`, so the model receives the refusal as a tool result and can choose another approach.
 
 `Y` approves, and `N` or Esc denies. Enter does nothing. The modal answers key presses only, so a key release or repeat cannot approve. Apart from the stack-level Esc / Ctrl+C cancel, it ignores every key until 300 ms pass without one, and each key inside that window restarts it, so neither a keystroke typed for the prompt underneath nor a pasted burst can approve the call. `Y` also waits until a render has shown the first body row, so a modal clipped to a short terminal cannot approve a call the user never saw.
 
@@ -112,20 +112,20 @@ In `-p` / `--no-tui` runs there is no human to prompt, so a would-ask call denie
 
 6. **Deny rules are the enforced boundary for path tools.** The deny list matches both spellings of the path as the file system stands when the gate checks, each rule's literal prefix as it resolved when the policy loaded, and folded names. It does not cover a symlink swapped into an intermediate directory after the check or whatever a `bash` command touches, so an untrusted model still needs an external OS sandbox.
 
-7. **Decision on the existing channel.** Routing approvals through `user_rx` and the `ModalStack` reuses the cancel / quit / queue semantics that the turn loop already races, so no second channel or control-flow path is needed.
+7. **Decision on the existing channel.** Routing approvals through `ops` and the `ModalStack` reuses the cancel / quit / queue semantics that the turn loop already races, so no second channel or control-flow path is needed.
 
 8. **Approvals stay in process.** A persisted "allow bash X" has no disk ground truth to revalidate on resume, unlike a `FileSnapshot` rehash, so restoring it would regress trust. Per the slash-command persistence stance ([decision 6](../slash/commands.md#design-decisions)), session commands remain reversible, and cross-session writes wait for an explicit confirmed action.
 
 ## Sources
 
 - `crates/oxide-code/src/agent.rs`: `check_permission` (resolve, pin, decide), `dispatch_tool_call`, `await_unless_aborted`, `run_tool_round`.
-- `crates/oxide-code/src/agent/event.rs`: `AgentEvent`, `UserAction`, `ApprovalPreview`.
 - `crates/oxide-code/src/config.rs`: `Config::load`, `OX_PERMISSION_MODE`, `Effort` enum template.
 - `crates/oxide-code/src/config/file.rs`: `FileConfig::merge`, `merge_section`, `reject_project_secrets`, `reject_project_permissions`.
 - `crates/oxide-code/src/permission.rs`: `Mode`, `PermissionClass`, `GateTarget::for_path`, protected paths, `Policy::decide`, `ReadDeny`.
 - `crates/oxide-code/src/permission/rule.rs`: `class(specifier)` parsing and path-glob matching.
+- `crates/oxide-code/src/protocol.rs`: `Event::ApprovalRequested`, `Op::Resolve`, `Decision`.
 - `crates/oxide-code/src/slash/confirm.rs`: `ConfirmDeleteSessionModal`, the approval-modal template.
-- `crates/oxide-code/src/tool.rs`: `Tool` trait (`permission_class`, `path_field`, `gate_target`, `pin_target`, `approval_preview`), `read_validated`, `write_no_follow`, `open_no_follow`, `push_withheld_note`.
+- `crates/oxide-code/src/tool.rs`: `Tool` trait (`permission_class`, `path_field`, `gate_target`, `pin_target`, `approval_preview`), `ApprovalPreview`, `read_validated`, `write_no_follow`, `open_no_follow`, `push_withheld_note`.
 - `crates/oxide-code/src/tool/bash.rs`: unbounded execution surface.
 - `crates/oxide-code/src/tool/edit.rs`: read-before-edit gate, `synthesize_chunk` preview.
 - `crates/oxide-code/src/tool/glob.rs`: read-deny filter on each match.

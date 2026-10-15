@@ -28,8 +28,7 @@ const MIN_BUDGET: usize = 8;
 
 // ── ConfirmDeleteSessionModal ──
 
-/// Confirm-and-delete overlay. The unlink fires synchronously on Y without a roundtrip through the
-/// agent loop.
+/// Confirm-and-delete overlay. Y unlinks the session file synchronously, bypassing the engine.
 pub(super) struct ConfirmDeleteSessionModal {
     header: Header,
     path: PathBuf,

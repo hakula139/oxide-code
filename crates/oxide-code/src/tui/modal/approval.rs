@@ -13,8 +13,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthChar;
 
-use crate::agent::event::{ApprovalBody, ApprovalDecision, ApprovalPreview, UserAction};
-use crate::tool::DiffChunk;
+use crate::protocol::{Decision, Op};
+use crate::tool::{ApprovalBody, ApprovalPreview, DiffChunk};
+use crate::tui::action::Action;
 use crate::tui::modal::{Modal, ModalAction, ModalKey};
 use crate::tui::theme::Theme;
 use crate::tui::wrap::{expand_tabs, wrap_line};
@@ -90,11 +91,11 @@ impl ApprovalModal {
         self.guard_until = Instant::now();
     }
 
-    fn decision(&self, decision: ApprovalDecision) -> ModalAction {
-        ModalAction::User(UserAction::ApprovalDecision {
+    fn decision(&self, decision: Decision) -> ModalAction {
+        ModalAction::Dispatch(Action::Op(Op::Resolve {
             id: self.id.clone(),
             decision,
-        })
+        }))
     }
 
     /// Runs `f` on the layout for `width`. A `None` palette accepts a cached layout of any palette.
@@ -210,7 +211,7 @@ impl Modal for ApprovalModal {
         // routes there too so the deny decision lives in exactly one place.
         match event.code {
             KeyCode::Char('y' | 'Y') if is_plain_char(event) && self.body_visible() => {
-                ModalKey::Submitted(self.decision(ApprovalDecision::Approve))
+                ModalKey::Submitted(self.decision(Decision::Approve))
             }
             KeyCode::Char('n' | 'N') if is_plain_char(event) => ModalKey::Cancelled,
             KeyCode::Up => self.scroll_by(-1),
@@ -224,7 +225,7 @@ impl Modal for ApprovalModal {
     }
 
     fn on_cancel(&mut self) -> Option<ModalAction> {
-        Some(self.decision(ApprovalDecision::Deny))
+        Some(self.decision(Decision::Deny))
     }
 }
 
@@ -598,15 +599,15 @@ mod tests {
         for code in [KeyCode::Char('y'), KeyCode::Char('Y')] {
             let mut modal = shown_modal("ls");
             let outcome = modal.handle_key(&key(code));
-            let ModalKey::Submitted(ModalAction::User(UserAction::ApprovalDecision {
+            let ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::Resolve {
                 id,
                 decision,
-            })) = outcome
+            }))) = outcome
             else {
                 panic!("{code:?} must Submit an Approve decision; got {outcome:?}");
             };
             assert_eq!(id, "call-1");
-            assert_eq!(decision, ApprovalDecision::Approve);
+            assert_eq!(decision, Decision::Approve);
         }
     }
 
@@ -763,11 +764,11 @@ mod tests {
     fn on_cancel_yields_a_deny_decision_for_this_call() {
         let mut modal = command_modal("ls");
         let action = modal.on_cancel().expect("approval cancel must deny");
-        let ModalAction::User(UserAction::ApprovalDecision { id, decision }) = action else {
-            panic!("on_cancel must deny via a UserAction; got {action:?}");
+        let ModalAction::Dispatch(Action::Op(Op::Resolve { id, decision })) = action else {
+            panic!("on_cancel must deny via Op::Resolve; got {action:?}");
         };
         assert_eq!(id, "call-1");
-        assert_eq!(decision, ApprovalDecision::Deny);
+        assert_eq!(decision, Decision::Deny);
     }
 
     // ── flatten_body ──

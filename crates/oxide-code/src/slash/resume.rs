@@ -14,12 +14,13 @@ use time::UtcOffset;
 use super::confirm::ConfirmDeleteSessionModal;
 use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashKind, SlashOutcome};
-use crate::agent::event::UserAction;
+use crate::protocol::Op;
 use crate::session::display::{display_title, format_metadata_line};
 use crate::session::entry::SessionInfo;
 use crate::session::resolver::resolve_prefix_to_info;
 use crate::session::store::SessionStore;
 use crate::session::store::listing::{DEFAULT_SESSION_LIST_LIMIT, ListPage};
+use crate::tui::action::Action;
 use crate::tui::modal::chrome::{FOOTER_HEIGHT, render_footer};
 use crate::tui::modal::searchable_list::{SearchableItem, SearchableList};
 use crate::tui::modal::{Modal, ModalAction, ModalKey};
@@ -226,9 +227,9 @@ impl ResumePicker {
 
     fn submit(&self) -> ModalKey {
         match self.list.selected() {
-            Some(row) => ModalKey::Submitted(ModalAction::User(UserAction::Resume {
+            Some(row) => ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::Resume {
                 path: row.path.clone(),
-            })),
+            }))),
             // Stay open so the user can Tab the scope or Esc out. Silent dismissal hides why
             // nothing happened.
             None => ModalKey::Consumed,
@@ -366,7 +367,8 @@ impl Modal for ResumePicker {
     }
 
     fn on_cancel(&mut self) -> Option<ModalAction> {
-        (self.dismissal == Dismissal::Quit).then_some(ModalAction::User(UserAction::Quit))
+        (self.dismissal == Dismissal::Quit)
+            .then_some(ModalAction::Dispatch(Action::Op(Op::Shutdown)))
     }
 }
 
@@ -388,9 +390,8 @@ impl SlashCommand for ResumeCmd {
     }
 
     fn classify(&self, _args: &str) -> SlashKind {
-        // Mutating in both forms: bare opens a picker that submits a Resume action, typed-arg
-        // forwards Resume directly. The agent loop drops mid-turn user actions, so even the
-        // picker form must wait for idle.
+        // Mutating in both forms: bare opens a picker that submits a Resume op, and typed-arg
+        // forwards one directly. The engine drops mid-turn ops, so both forms wait for idle.
         SlashKind::Mutating
     }
 
@@ -413,7 +414,7 @@ impl SlashCommand for ResumeCmd {
             ))));
         }
         let path = resolve_prefix(&store, arg, ctx.info.session_id.as_str())?;
-        Ok(SlashOutcome::Forward(UserAction::Resume { path }))
+        Ok(SlashOutcome::Forward(Action::Op(Op::Resume { path })))
     }
 }
 
@@ -831,7 +832,8 @@ mod tests {
         let expected = store.find_session_path(&stamped_id(0x11)).unwrap();
         let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
         let outcome = picker.handle_key(&key(KeyCode::Enter));
-        let ModalKey::Submitted(ModalAction::User(UserAction::Resume { path })) = outcome else {
+        let ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::Resume { path }))) = outcome
+        else {
             panic!("expected Submitted(Resume), got {outcome:?}");
         };
         assert_eq!(path, expected);
@@ -1233,7 +1235,7 @@ mod tests {
         assert!(
             matches!(
                 &outcome,
-                ModalKey::Submitted(ModalAction::User(UserAction::Resume { path }))
+                ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::Resume { path })))
                     if *path == archived_path
             ),
             "Enter must resume the archived session: {outcome:?}",
@@ -1452,7 +1454,10 @@ mod tests {
         )));
         let outcome = stack.handle_key(&key(KeyCode::Esc));
         assert!(
-            matches!(outcome, Some(ModalAction::User(UserAction::Quit))),
+            matches!(
+                outcome,
+                Some(ModalAction::Dispatch(Action::Op(Op::Shutdown)))
+            ),
             "{outcome:?}",
         );
         assert!(!stack.is_active());
@@ -1473,8 +1478,8 @@ mod tests {
 
     #[test]
     fn classify_is_always_mutating() {
-        // Both forms reach the agent loop (typed-arg → Forward; picker → modal-submitted Resume),
-        // and mid-turn user actions get dropped, so neither may run while busy.
+        // Both forms reach the engine (typed-arg → Forward, picker → modal-submitted Resume),
+        // and mid-turn ops get dropped, so neither may run while busy.
         assert_eq!(ResumeCmd.classify(""), SlashKind::Mutating);
         assert_eq!(ResumeCmd.classify("   "), SlashKind::Mutating);
         assert_eq!(ResumeCmd.classify("ab"), SlashKind::Mutating);
@@ -1523,7 +1528,7 @@ mod tests {
             let outcome = ResumeCmd
                 .execute(&target_id[..4], &SlashContext::new(&info, None))
                 .unwrap();
-            let SlashOutcome::Forward(UserAction::Resume { path }) = outcome else {
+            let SlashOutcome::Forward(Action::Op(Op::Resume { path })) = outcome else {
                 panic!("expected Forward(Resume), got {outcome:?}");
             };
             assert_eq!(path, store.find_session_path(&target_id).unwrap());

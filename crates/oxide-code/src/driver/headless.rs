@@ -1,8 +1,9 @@
 //! Headless driver for `--prompt`: one turn, streamed to stdout.
 
-use super::{Exit, render_turn, shutdown_signal};
-use crate::agent::event::{AgentSink, StdioSink, UserAction};
+use super::stdio::{StdioSink, render_turn};
+use super::{Exit, shutdown_signal};
 use crate::engine::{Engine, EngineHandle, TurnEnd};
+use crate::protocol::{EventSink, Op};
 use crate::slash;
 
 /// Runs `prompt` as a single turn. A failed or cancelled turn exits with failure, and a signal
@@ -12,10 +13,10 @@ pub(crate) async fn run(engine: Engine, show_thinking: bool, prompt: &str) -> Ex
     drive(engine.spawn(&[]), &sink, prompt).await
 }
 
-async fn drive(mut handle: EngineHandle, sink: &dyn AgentSink, prompt: &str) -> Exit {
+async fn drive(mut handle: EngineHandle, sink: &dyn EventSink, prompt: &str) -> Exit {
     let prompt = slash::unescape_literal(prompt).to_owned();
     // A send fails only once the engine has stopped, which `render_turn` then reports.
-    _ = handle.ops.send(UserAction::SubmitPrompt(prompt)).await;
+    _ = handle.ops.send(Op::Prompt(prompt)).await;
     let exit = tokio::select! {
         end = render_turn(&mut handle.events, sink) => {
             if end == Some(TurnEnd::Completed) {
@@ -41,10 +42,10 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
-    use crate::agent::event::{AgentEvent, CapturingSink};
     use crate::engine::testing::{
         engine, mount_reply, request_bodies, stopped_engine, with_pinned_home,
     };
+    use crate::protocol::{CapturingSink, Event};
     use crate::session::store::testing::test_store;
 
     // ── drive ──
@@ -67,10 +68,7 @@ mod tests {
             let engine_failed = engine(server.uri(), &store, dir.path()).await;
             let exit = Box::pin(drive(engine_failed.spawn(&[]), &failed, "first")).await;
             assert_eq!(exit, Exit::Failure);
-            assert!(matches!(
-                failed.events().last(),
-                Some(AgentEvent::TurnFailed(_))
-            ));
+            assert!(matches!(failed.events().last(), Some(Event::TurnFailed(_))));
 
             let completed = CapturingSink::new();
             let engine_completed = engine(server.uri(), &store, dir.path()).await;
@@ -78,7 +76,7 @@ mod tests {
             assert_eq!(exit, Exit::Success);
             assert!(matches!(
                 completed.events().last(),
-                Some(AgentEvent::TurnComplete)
+                Some(Event::TurnComplete)
             ));
             let requests = request_bodies(&server).await;
             assert_eq!(requests[1]["messages"][1]["content"][0]["text"], "/second");

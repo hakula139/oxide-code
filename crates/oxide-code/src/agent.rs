@@ -3,7 +3,6 @@
 
 pub(crate) mod compact_boundary;
 pub(crate) mod compaction;
-pub(crate) mod event;
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -12,9 +11,6 @@ use anyhow::{Context, Result, anyhow, bail};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
-use crate::agent::event::{
-    AgentEvent, AgentSink, ApprovalDecision, ToolCall, ToolResult, UserAction,
-};
 use crate::client::anthropic::Client;
 use crate::client::anthropic::wire::{
     ContentBlockInfo, Delta, StopDetails, StopReason, StreamEvent, Usage,
@@ -23,6 +19,7 @@ use crate::config::AutoCompactionConfig;
 use crate::file_tracker::{self, FileTracker};
 use crate::message::{ContentBlock, Message, Role, progress_note};
 use crate::prompt::PromptParts;
+use crate::protocol::{Decision, Event, EventSink, Op, ToolCall, ToolResult};
 use crate::session::handle::{RecordOutcome, SessionHandle};
 use crate::tool::{ToolDefinition, ToolMetadata, ToolOutput, ToolRegistry};
 
@@ -30,15 +27,15 @@ const MAX_AUTO_COMPACT_FAILURES: u8 = 3;
 
 // ── Turn Abort ──
 
-/// Why a turn ended without a clean assistant reply. `Cancelled` and `Quit` are user-driven
-/// and distinct so the outer driver can keep running on cancel but tear down on quit. `Failed`
-/// wraps any other error so the caller can render it via `{e:#}`.
+/// Why a turn ended without a clean assistant reply. `Cancelled` and `Shutdown` are user-driven
+/// and distinct, so the engine keeps serving after a cancel but stops on shutdown. `Failed` wraps
+/// any other error so the caller can render it via `{e:#}`.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum TurnAbort {
     #[error("turn cancelled")]
     Cancelled,
-    #[error("turn quit")]
-    Quit,
+    #[error("engine shut down")]
+    Shutdown,
     #[error(transparent)]
     Failed(#[from] anyhow::Error),
 }
@@ -251,11 +248,10 @@ pub(crate) struct GateContext<'a> {
 
 /// Drives one user prompt to a final assistant text reply. The loop returns as soon as a round
 /// produces no tool calls, and a `pause_turn` stop re-requests without a new user message.
-/// [`UserAction::QueuePrompt`]s splice in as user messages at round boundaries. Long-running awaits
-/// race `user_rx` so `Cancel` / `Quit` abort promptly. An abort mid-stream commits nothing, while
-/// an abort mid-round commits the round with the unfinished calls marked interrupted.
-/// `max_tool_rounds = None` runs unbounded. `Some(n)` bails after `n` rounds without a final
-/// response.
+/// [`Op::Queue`]s splice in as user messages at round boundaries. Long-running awaits race `ops`
+/// so `Interrupt` / `Shutdown` abort promptly. An abort mid-stream commits nothing, while an abort
+/// mid-round commits the round with the unfinished calls marked interrupted.
+/// `max_tool_rounds = None` runs unbounded, and `Some(n)` bails after `n` rounds without a reply.
 #[expect(
     clippy::too_many_arguments,
     reason = "agent_turn owns the full per-turn dependency set; bundling them obscures lifetimes"
@@ -265,9 +261,9 @@ pub(crate) async fn agent_turn(
     tools: &ToolRegistry,
     messages: &mut Vec<Message>,
     prompt: &PromptParts,
-    sink: &dyn AgentSink,
+    sink: &dyn EventSink,
     session: &SessionHandle,
-    user_rx: &mut mpsc::Receiver<UserAction>,
+    ops: &mut mpsc::Receiver<Op>,
     max_tool_rounds: Option<u32>,
     gate: &GateContext<'_>,
 ) -> TurnOutcome {
@@ -279,7 +275,7 @@ pub(crate) async fn agent_turn(
         let mut round_usage = None;
         let stream = await_unless_aborted(
             stream_response(client, messages, &tool_defs, prompt, sink, &mut round_usage),
-            user_rx,
+            ops,
             &mut pending_prompts,
         )
         .await;
@@ -327,7 +323,7 @@ pub(crate) async fn agent_turn(
             tool_uses,
             &parse_errors,
             sink,
-            user_rx,
+            ops,
             &mut pending_prompts,
             gate,
         )
@@ -376,13 +372,13 @@ async fn settle_stop_reason(
     stop_details: Option<&StopDetails>,
     blocks: Vec<ContentBlock>,
     session: &SessionHandle,
-    sink: &dyn AgentSink,
+    sink: &dyn EventSink,
     messages: &mut Vec<Message>,
 ) -> StopAction {
     match stop_reason {
         // The API asks clients to drop refused output without running it.
         Some(StopReason::Refusal) => {
-            sink.emit(AgentEvent::Error(refusal_message(stop_details)), "refusal");
+            sink.emit(Event::Error(refusal_message(stop_details)), "refusal");
             StopAction::Finish(Ok(()))
         }
         // Running a cut-off call, or asking the model to retry it, would repeat the same
@@ -408,7 +404,7 @@ async fn settle_stop_reason(
 /// an assistant message with no content on every later request.
 async fn commit_assistant_message(
     session: &SessionHandle,
-    sink: &dyn AgentSink,
+    sink: &dyn EventSink,
     messages: &mut Vec<Message>,
     content: Vec<ContentBlock>,
 ) {
@@ -479,8 +475,8 @@ pub(crate) async fn auto_compact_if_needed(
     client: &dyn AgentClient,
     session: &SessionHandle,
     messages: &mut Vec<Message>,
-    sink: &dyn AgentSink,
-    user_rx: &mut mpsc::Receiver<UserAction>,
+    sink: &dyn EventSink,
+    ops: &mut mpsc::Receiver<Op>,
     pending: &mut Vec<String>,
     auto: Option<&mut AutoCompact<'_>>,
     usage: Option<TokenUsage>,
@@ -497,10 +493,10 @@ pub(crate) async fn auto_compact_if_needed(
         return Ok(false);
     }
 
-    sink.emit(AgentEvent::AutoCompactionStarted, "auto-compaction-started");
+    sink.emit(Event::AutoCompactionStarted, "auto-compaction-started");
     let summary = match await_unless_aborted(
         compaction::compact_session(client, auto.prompt, auto.tools, messages, None, auto.spent),
-        user_rx,
+        ops,
         pending,
     )
     .await?
@@ -535,16 +531,16 @@ pub(crate) async fn auto_compact_if_needed(
 /// already surfaced the failure (persist-fail goes through `session_write_error`).
 fn record_auto_compact_failure(
     auto: &mut AutoCompact<'_>,
-    sink: &dyn AgentSink,
+    sink: &dyn EventSink,
     detail: Option<String>,
 ) {
     *auto.failures += 1;
     if let Some(detail) = detail {
-        sink.emit(AgentEvent::Error(detail), "auto-compaction-failed");
+        sink.emit(Event::Error(detail), "auto-compaction-failed");
     }
     if *auto.failures == MAX_AUTO_COMPACT_FAILURES {
         sink.emit(
-            AgentEvent::Error(format!(
+            Event::Error(format!(
                 "Auto-compaction disabled for this session after {MAX_AUTO_COMPACT_FAILURES} failures."
             )),
             "auto-compaction-disabled",
@@ -554,13 +550,13 @@ fn record_auto_compact_failure(
 
 /// Tells the user to send a message when `messages` ends on a response that stopped early, which
 /// only a new prompt resumes.
-pub(crate) fn notify_if_interrupted(messages: &[Message], sink: &dyn AgentSink) {
+pub(crate) fn notify_if_interrupted(messages: &[Message], sink: &dyn EventSink) {
     if let Some(last) = messages.last()
         && last.role == Role::Assistant
         && ends_on_interrupted_work(&last.content)
     {
         sink.emit(
-            AgentEvent::Error(
+            Event::Error(
                 "The response was interrupted before it finished. Send a message to continue."
                     .to_owned(),
             ),
@@ -614,8 +610,8 @@ async fn run_tool_round(
     tools: &ToolRegistry,
     tool_uses: Vec<(String, String, serde_json::Value)>,
     parse_errors: &HashMap<String, String>,
-    sink: &dyn AgentSink,
-    user_rx: &mut mpsc::Receiver<UserAction>,
+    sink: &dyn EventSink,
+    ops: &mut mpsc::Receiver<Op>,
     pending: &mut Vec<String>,
     gate: &GateContext<'_>,
 ) -> ToolRound {
@@ -627,9 +623,10 @@ async fn run_tool_round(
     let mut calls = tool_uses.into_iter();
     for (id, name, input) in calls.by_ref() {
         sink.emit(
-            AgentEvent::ToolCallStart(ToolCall {
+            Event::ToolCallStart(ToolCall {
                 id: id.clone(),
                 name: name.clone(),
+                input: input.clone(),
                 icon: tools.icon(&name).to_owned(),
                 label: tools.label(&name, &input),
             }),
@@ -643,13 +640,13 @@ async fn run_tool_round(
             input.clone(),
             parse_errors.get(&id),
             sink,
-            user_rx,
+            ops,
             pending,
             gate,
         )
         .await;
         sink.emit(
-            AgentEvent::ToolCallEnd(ToolResult {
+            Event::ToolCallEnd(ToolResult {
                 id: id.clone(),
                 content: output.content.clone(),
                 is_error: output.is_error,
@@ -682,7 +679,7 @@ const NOT_RUN: &str = "Not run, because the user interrupted the turn.";
 /// Persists one tool round, then appends it to the live transcript.
 async fn commit_round(
     session: &SessionHandle,
-    sink: &dyn AgentSink,
+    sink: &dyn EventSink,
     messages: &mut Vec<Message>,
     assistant_msg: Message,
     results: Vec<ContentBlock>,
@@ -716,8 +713,8 @@ async fn dispatch_tool_call(
     name: &str,
     mut input: serde_json::Value,
     parse_error: Option<&String>,
-    sink: &dyn AgentSink,
-    user_rx: &mut mpsc::Receiver<UserAction>,
+    sink: &dyn EventSink,
+    ops: &mut mpsc::Receiver<Op>,
     pending: &mut Vec<String>,
     gate: &GateContext<'_>,
 ) -> (ToolOutput, Option<TurnAbort>) {
@@ -730,7 +727,7 @@ async fn dispatch_tool_call(
         );
     }
 
-    match check_permission(tools, id, name, &mut input, sink, user_rx, pending, gate).await {
+    match check_permission(tools, id, name, &mut input, sink, ops, pending, gate).await {
         Ok(None) => {}
         Ok(Some(denial)) => return (denial, None),
         Err(abort) => return (ToolOutput::error(NOT_RUN), Some(abort)),
@@ -738,7 +735,7 @@ async fn dispatch_tool_call(
 
     match await_unless_aborted(
         file_tracker::attribute_to(id, tools.run(name, input)),
-        user_rx,
+        ops,
         pending,
     )
     .await
@@ -755,10 +752,10 @@ async fn dispatch_tool_call(
 
 /// Runs the permission gate for one call, first pinning a path tool's `input` to the path the gate
 /// resolves so the preview and the run act on what was checked. Returns `Ok(None)` to proceed,
-/// `Ok(Some(output))` with a synthetic denial, or an abort if the user cancelled / quit while an
-/// approval was outstanding. An `ask` emits [`AgentEvent::ApprovalRequested`] and blocks on the
-/// matching [`UserAction::ApprovalDecision`]. It denies when no modal can receive the request or
-/// the session is non-interactive.
+/// `Ok(Some(output))` with a synthetic denial, or an abort on an interrupt or shutdown during an
+/// outstanding approval. An `ask` emits [`Event::ApprovalRequested`] and blocks on the matching
+/// [`Op::Resolve`], but denies at once when the session is non-interactive or no modal can receive
+/// the request.
 #[expect(
     clippy::too_many_arguments,
     reason = "the gate threads the same per-call inputs dispatch already carries"
@@ -768,8 +765,8 @@ async fn check_permission(
     id: &str,
     name: &str,
     input: &mut serde_json::Value,
-    sink: &dyn AgentSink,
-    user_rx: &mut mpsc::Receiver<UserAction>,
+    sink: &dyn EventSink,
+    ops: &mut mpsc::Receiver<Op>,
     pending: &mut Vec<String>,
     gate: &GateContext<'_>,
 ) -> AbortResult<Option<ToolOutput>> {
@@ -793,7 +790,7 @@ async fn check_permission(
             // exist to answer it and `await_approval` would block forever. Fail closed on a send
             // error rather than stranding the turn.
             if sink
-                .send(AgentEvent::ApprovalRequested {
+                .send(Event::ApprovalRequested {
                     id: id.to_owned(),
                     preview: tool.approval_preview(input),
                 })
@@ -801,9 +798,9 @@ async fn check_permission(
             {
                 return Ok(Some(denied_output(name)));
             }
-            match await_approval(id, user_rx, pending).await? {
-                ApprovalDecision::Approve => Ok(None),
-                ApprovalDecision::Deny => Ok(Some(denied_output(name))),
+            match await_approval(id, ops, pending).await? {
+                Decision::Approve => Ok(None),
+                Decision::Deny => Ok(Some(denied_output(name))),
             }
         }
     }
@@ -818,29 +815,29 @@ fn denied_output(name: &str) -> ToolOutput {
     ))
 }
 
-/// Blocks on the `user_rx` channel for the [`UserAction::ApprovalDecision`] matching `id`, the same
-/// channel the turn loop races elsewhere so no second channel is introduced. Cancel / quit abort
-/// the turn, a `QueuePrompt` buffers into `pending`, and a decision for a different id is
-/// ignored (a stale reply for an already-resolved call). Cancel-safe by drop: it holds no state.
+/// Blocks on the `ops` channel for the [`Op::Resolve`] matching `id`, the same channel the turn
+/// loop races elsewhere so no second channel is introduced. An interrupt or shutdown aborts the
+/// turn, an [`Op::Queue`] buffers into `pending`, and a decision for a different id is ignored (a
+/// stale reply for an already-resolved call). Cancel-safe by drop: it holds no state.
 async fn await_approval(
     id: &str,
-    user_rx: &mut mpsc::Receiver<UserAction>,
+    ops: &mut mpsc::Receiver<Op>,
     pending: &mut Vec<String>,
-) -> AbortResult<ApprovalDecision> {
+) -> AbortResult<Decision> {
     loop {
-        match user_rx.recv().await {
-            Some(UserAction::Cancel) => return Err(TurnAbort::Cancelled),
-            Some(UserAction::Quit) | None => return Err(TurnAbort::Quit),
-            Some(UserAction::QueuePrompt(text)) => pending.push(text),
-            Some(UserAction::ApprovalDecision {
+        match ops.recv().await {
+            Some(Op::Interrupt) => return Err(TurnAbort::Cancelled),
+            Some(Op::Shutdown) | None => return Err(TurnAbort::Shutdown),
+            Some(Op::Queue(text)) => pending.push(text),
+            Some(Op::Resolve {
                 id: target,
                 decision,
             }) if target == id => {
                 return Ok(decision);
             }
-            // A decision for a different id is a stale reply, and any other action is unreachable
+            // A decision for a different id is a stale reply, and any other op is unreachable
             // while an approval is outstanding. Log and keep waiting so the gate can't be skipped.
-            Some(other) => warn!("ignored action while awaiting approval {id}: {other:?}"),
+            Some(other) => warn!("ignored op while awaiting approval {id}: {other:?}"),
         }
     }
 }
@@ -849,22 +846,21 @@ pub(crate) async fn record_drained_prompts(
     texts: impl IntoIterator<Item = String>,
     messages: &mut Vec<Message>,
     session: &SessionHandle,
-    sink: &dyn AgentSink,
+    sink: &dyn EventSink,
 ) {
     for text in texts {
         let queued_msg = Message::user(text.clone());
         record_message(session, queued_msg.clone(), sink).await;
         messages.push(queued_msg);
-        sink.emit(AgentEvent::PromptDrained(text), "prompt-drained");
+        sink.emit(Event::PromptDrained(text), "prompt-drained");
     }
 }
 
-/// Races `fut` against user actions. Cancel / quit produce a `TurnAbort`. Submits buffer into
-/// `pending`.
-/// `fut` must be cancel-safe.
+/// Races `fut` against incoming ops. An interrupt or shutdown produces a `TurnAbort`, and a queued
+/// prompt buffers into `pending`. `fut` must be cancel-safe.
 pub(crate) async fn await_unless_aborted<F, T>(
     fut: F,
-    user_rx: &mut mpsc::Receiver<UserAction>,
+    ops: &mut mpsc::Receiver<Op>,
     pending: &mut Vec<String>,
 ) -> AbortResult<T>
 where
@@ -873,34 +869,31 @@ where
     tokio::pin!(fut);
     loop {
         tokio::select! {
-            // Biased: user actions observed before same-poll-ready futures.
+            // Biased: ops observed before same-poll-ready futures.
             biased;
-            action = user_rx.recv() => match action {
-                Some(UserAction::Cancel) => return Err(TurnAbort::Cancelled),
-                Some(UserAction::Quit) | None => return Err(TurnAbort::Quit),
-                Some(UserAction::QueuePrompt(text)) => pending.push(text),
-                // Unreachable under current wiring. Log so regressions surface. An
-                // `ApprovalDecision` here is a stale reply for an already-resolved call.
+            op = ops.recv() => match op {
+                Some(Op::Interrupt) => return Err(TurnAbort::Cancelled),
+                Some(Op::Shutdown) | None => return Err(TurnAbort::Shutdown),
+                Some(Op::Queue(text)) => pending.push(text),
+                // Unreachable under current wiring. Log so regressions surface. A `Resolve`
+                // here is a stale reply for an already-resolved call.
                 Some(
-                    action @ (UserAction::SubmitPrompt(_)
-                    | UserAction::ConfirmExit
-                    | UserAction::Clear
-                    | UserAction::Archive
-                    | UserAction::Resume { .. }
-                    | UserAction::Compact { .. }
-                    | UserAction::Rename { .. }
-                    | UserAction::SwapConfig { .. }
-                    | UserAction::PreviewTheme { .. }
-                    | UserAction::SwapTheme { .. }
-                    | UserAction::ApprovalDecision { .. }),
-                ) => warn!("dropped mid-turn action: {action:?}"),
+                    op @ (Op::Prompt(_)
+                    | Op::Clear
+                    | Op::Archive
+                    | Op::Resume { .. }
+                    | Op::Compact { .. }
+                    | Op::Rename { .. }
+                    | Op::SetModel { .. }
+                    | Op::Resolve { .. }),
+                ) => warn!("dropped mid-turn op: {op:?}"),
             },
             output = &mut fut => return Ok(output),
         }
     }
 }
 
-async fn record_message(session: &SessionHandle, msg: Message, sink: &dyn AgentSink) {
+async fn record_message(session: &SessionHandle, msg: Message, sink: &dyn EventSink) {
     let outcome: RecordOutcome = session.record_message(msg).await;
     sink.session_write_error(outcome.failure.as_deref());
 }
@@ -1009,7 +1002,7 @@ async fn stream_response(
     messages: &[Message],
     tools: &[ToolDefinition],
     prompt: &PromptParts,
-    sink: &dyn AgentSink,
+    sink: &dyn EventSink,
     usage: &mut Option<TokenUsage>,
 ) -> Result<StreamOutcome> {
     let section_refs: Vec<&str> = prompt.system_sections.iter().map(String::as_str).collect();
@@ -1021,7 +1014,7 @@ async fn stream_response(
 /// far, so it stays accurate when the stream fails or the caller drops the future.
 async fn collect_response(
     mut rx: mpsc::Receiver<Result<StreamEvent>>,
-    sink: &dyn AgentSink,
+    sink: &dyn EventSink,
     usage: &mut Option<TokenUsage>,
 ) -> Result<StreamOutcome> {
     let mut blocks: Vec<Option<BlockAccumulator>> = Vec::new();
@@ -1051,7 +1044,7 @@ async fn collect_response(
                 let acc = init_accumulator(content_block, index);
                 match &acc {
                     BlockAccumulator::Text(text) if !text.is_empty() => {
-                        _ = sink.send(AgentEvent::StreamToken(text.clone()));
+                        _ = sink.send(Event::StreamToken(text.clone()));
                     }
                     BlockAccumulator::ToolUse { .. } | BlockAccumulator::ServerToolUse { .. } => {
                         send_progress_note(&blocks[..index], sink);
@@ -1069,7 +1062,7 @@ async fn collect_response(
                 bail!("API error ({}): {}", error.error_type, error.message);
             }
             StreamEvent::Retrying { notice } => {
-                sink.emit(AgentEvent::Retrying(notice.to_string()), "retry-notice");
+                sink.emit(Event::Retrying(notice.to_string()), "retry-notice");
             }
             StreamEvent::MessageDelta {
                 delta,
@@ -1135,20 +1128,20 @@ fn init_accumulator(content_block: ContentBlockInfo, index: usize) -> BlockAccum
 }
 
 /// Sends the progress note for a tool use whose block starts after `preceding`.
-fn send_progress_note(preceding: &[Option<BlockAccumulator>], sink: &dyn AgentSink) {
+fn send_progress_note(preceding: &[Option<BlockAccumulator>], sink: &dyn EventSink) {
     let thinking = preceding
         .iter()
         .map(|block| block.as_ref().and_then(BlockAccumulator::thinking_text));
     if let Some(note) = progress_note(thinking) {
-        _ = sink.send(AgentEvent::ProgressUpdate(note.to_owned()));
+        _ = sink.send(Event::ProgressUpdate(note.to_owned()));
     }
 }
 
-fn apply_delta(block: &mut BlockAccumulator, delta: Delta, sink: &dyn AgentSink) {
+fn apply_delta(block: &mut BlockAccumulator, delta: Delta, sink: &dyn EventSink) {
     match (block, delta) {
         (BlockAccumulator::Text(buf), Delta::TextDelta { text }) => {
             buf.push_str(&text);
-            _ = sink.send(AgentEvent::StreamToken(text));
+            _ = sink.send(Event::StreamToken(text));
         }
         (
             BlockAccumulator::ToolUse { json_buf, .. }
@@ -1164,7 +1157,7 @@ fn apply_delta(block: &mut BlockAccumulator, delta: Delta, sink: &dyn AgentSink)
             },
         ) => {
             thinking.push_str(&thinking_delta);
-            _ = sink.send(AgentEvent::ThinkingToken(thinking_delta));
+            _ = sink.send(Event::ThinkingToken(thinking_delta));
         }
         (
             BlockAccumulator::Thinking { signature, .. },
@@ -1196,7 +1189,6 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
-    use crate::agent::event::CapturingSink;
     use crate::client::anthropic::testing::test_client;
     use crate::client::anthropic::wire::{
         ApiError, ContentBlockInfo, MessageDeltaBody, MessageResponse, StopDetails, StopReason,
@@ -1208,6 +1200,7 @@ mod tests {
     use crate::message::Role;
     use crate::model::ResolvedModelId;
     use crate::permission::GateTarget;
+    use crate::protocol::CapturingSink;
     use crate::session::handle::{self, SessionHandle};
     use crate::session::store::testing::test_store;
     use crate::tool::{
@@ -1236,9 +1229,9 @@ mod tests {
     }
 
     #[test]
-    fn turn_abort_display_cancelled_and_quit_use_static_labels() {
+    fn turn_abort_display_cancelled_and_shutdown_use_static_labels() {
         assert_eq!(format!("{}", TurnAbort::Cancelled), "turn cancelled");
-        assert_eq!(format!("{}", TurnAbort::Quit), "turn quit");
+        assert_eq!(format!("{}", TurnAbort::Shutdown), "engine shut down");
     }
 
     // ── Fixtures ──
@@ -1810,20 +1803,20 @@ mod tests {
 
     /// Inert receiver whose `recv()` stays pending. The sender is leaked so call sites don't
     /// need to bind it for the test's lifetime.
-    fn inert_user_rx() -> mpsc::Receiver<UserAction> {
-        let (tx, rx) = crate::agent::event::inert_user_action_channel();
+    fn inert_ops() -> mpsc::Receiver<Op> {
+        let (tx, rx) = crate::protocol::inert_op_channel();
         std::mem::forget(tx);
         rx
     }
 
     /// The tool calls and results among `events`, each in emission order.
-    fn tool_events(events: &[AgentEvent]) -> (Vec<ToolCall>, Vec<ToolResult>) {
+    fn tool_events(events: &[Event]) -> (Vec<ToolCall>, Vec<ToolResult>) {
         let mut calls = Vec::new();
         let mut results = Vec::new();
         for event in events {
             match event {
-                AgentEvent::ToolCallStart(call) => calls.push(call.clone()),
-                AgentEvent::ToolCallEnd(result) => results.push(result.clone()),
+                Event::ToolCallStart(call) => calls.push(call.clone()),
+                Event::ToolCallEnd(result) => results.push(result.clone()),
                 _ => {}
             }
         }
@@ -1881,19 +1874,19 @@ mod tests {
         }
     }
 
-    /// Answers every approval request with `decision` over the agent's own `user_rx`, the way the
+    /// Answers every approval request with `decision` over the agent's own `ops`, the way the
     /// TUI's approval modal does, while capturing every event.
     struct ReplyingSink {
         events: CapturingSink,
-        user_tx: mpsc::Sender<UserAction>,
-        decision: ApprovalDecision,
+        op_tx: mpsc::Sender<Op>,
+        decision: Decision,
     }
 
-    impl AgentSink for ReplyingSink {
-        fn send(&self, event: AgentEvent) -> Result<()> {
-            if let AgentEvent::ApprovalRequested { id, .. } = &event {
-                self.user_tx
-                    .try_send(UserAction::ApprovalDecision {
+    impl EventSink for ReplyingSink {
+        fn send(&self, event: Event) -> Result<()> {
+            if let Event::ApprovalRequested { id, .. } = &event {
+                self.op_tx
+                    .try_send(Op::Resolve {
                         id: id.clone(),
                         decision: self.decision,
                     })
@@ -1951,7 +1944,7 @@ mod tests {
             &session,
             &mut messages,
             &sink,
-            &mut inert_user_rx(),
+            &mut inert_ops(),
             &mut pending,
             None,
             Some(TokenUsage {
@@ -1970,7 +1963,7 @@ mod tests {
             &session,
             &mut messages,
             &sink,
-            &mut inert_user_rx(),
+            &mut inert_ops(),
             &mut pending,
             Some(&mut AutoCompact {
                 config: AutoCompactionConfig {
@@ -1994,7 +1987,7 @@ mod tests {
             &session,
             &mut messages,
             &sink,
-            &mut inert_user_rx(),
+            &mut inert_ops(),
             &mut pending,
             Some(&mut AutoCompact {
                 config: AutoCompactionConfig {
@@ -2041,7 +2034,7 @@ mod tests {
             &session,
             &mut messages,
             &sink,
-            &mut inert_user_rx(),
+            &mut inert_ops(),
             &mut pending,
             Some(&mut AutoCompact {
                 config: AutoCompactionConfig {
@@ -2069,9 +2062,9 @@ mod tests {
         assert!(matches!(&messages[0].content[0], ContentBlock::Text { text } if text == "hi"));
         assert!(
             sink.events().iter().any(|event| {
-                matches!(event, AgentEvent::Error(message) if message.contains("Auto-compaction failed"))
+                matches!(event, Event::Error(message) if message.contains("Auto-compaction failed"))
             }),
-            "summarizer failure must surface a user-visible AgentEvent::Error",
+            "summarizer failure must surface a user-visible Event::Error",
         );
     }
 
@@ -2095,7 +2088,7 @@ mod tests {
             &session,
             &mut messages,
             &sink,
-            &mut inert_user_rx(),
+            &mut inert_ops(),
             &mut pending,
             Some(&mut AutoCompact {
                 config: AutoCompactionConfig {
@@ -2122,7 +2115,7 @@ mod tests {
         assert_eq!(failures, MAX_AUTO_COMPACT_FAILURES);
         assert!(
             sink.events().iter().any(|event| {
-                matches!(event, AgentEvent::Error(message) if message.contains("Auto-compaction disabled"))
+                matches!(event, Event::Error(message) if message.contains("Auto-compaction disabled"))
             }),
             "the breaker-tripping failure must surface a one-time disablement notice",
         );
@@ -2148,7 +2141,7 @@ mod tests {
             &session,
             &mut messages,
             &sink,
-            &mut inert_user_rx(),
+            &mut inert_ops(),
             &mut pending,
             Some(&mut AutoCompact {
                 config: AutoCompactionConfig {
@@ -2177,7 +2170,7 @@ mod tests {
         assert!(
             sink.events()
                 .iter()
-                .any(|event| matches!(event, AgentEvent::Error(message) if message.contains("Session write failed")))
+                .any(|event| matches!(event, Event::Error(message) if message.contains("Session write failed")))
         );
     }
 
@@ -2208,7 +2201,7 @@ mod tests {
             &session,
             &mut messages,
             &sink,
-            &mut inert_user_rx(),
+            &mut inert_ops(),
             &mut pending,
             Some(&mut AutoCompact {
                 config: AutoCompactionConfig {
@@ -2230,7 +2223,7 @@ mod tests {
             &session,
             &mut messages,
             &sink,
-            &mut inert_user_rx(),
+            &mut inert_ops(),
             &mut pending,
             Some(&mut AutoCompact {
                 config: AutoCompactionConfig {
@@ -2274,7 +2267,7 @@ mod tests {
         ];
         let mut pending = Vec::new();
         let mut failures = 0;
-        let (tx, mut rx) = mpsc::channel::<UserAction>(1);
+        let (tx, mut rx) = mpsc::channel::<Op>(1);
         let mut auto = AutoCompact {
             config: AutoCompactionConfig {
                 enabled: true,
@@ -2304,7 +2297,7 @@ mod tests {
         );
         let queue_prompt = async {
             started.notified().await;
-            tx.send(UserAction::QueuePrompt("queued after summary".into()))
+            tx.send(Op::Queue("queued after summary".into()))
                 .await
                 .unwrap();
             tokio::task::yield_now().await;
@@ -2319,13 +2312,13 @@ mod tests {
         assert_eq!(
             sink.events()
                 .iter()
-                .filter(|event| matches!(event, AgentEvent::PromptDrained(_)))
+                .filter(|event| matches!(event, Event::PromptDrained(_)))
                 .count(),
             0
         );
         assert!(sink.events().iter().any(|event| matches!(
             event,
-            AgentEvent::SessionCompacted {
+            Event::SessionCompacted {
                 automatic: true,
                 ..
             }
@@ -2362,7 +2355,7 @@ mod tests {
             &session,
             &mut messages,
             &CapturingSink::new(),
-            &mut inert_user_rx(),
+            &mut inert_ops(),
             &mut Vec::new(),
             Some(&mut AutoCompact {
                 config: AutoCompactionConfig {
@@ -2434,7 +2427,7 @@ mod tests {
             &empty_prompt(),
             &sink,
             &session,
-            &mut inert_user_rx(),
+            &mut inert_ops(),
             None,
             &yolo_gate(),
         )
@@ -2444,7 +2437,7 @@ mod tests {
         let events = sink.events();
         let error_events: Vec<_> = events
             .iter()
-            .filter(|e| matches!(e, AgentEvent::Error(m) if m.contains("Session write failed")))
+            .filter(|e| matches!(e, Event::Error(m) if m.contains("Session write failed")))
             .collect();
         assert_eq!(
             error_events.len(),
@@ -2473,7 +2466,7 @@ mod tests {
             &empty_prompt(),
             &sink,
             &session,
-            &mut inert_user_rx(),
+            &mut inert_ops(),
             None,
             &yolo_gate(),
         )
@@ -2483,7 +2476,7 @@ mod tests {
         let events = sink.events();
         let error_events: Vec<_> = events
             .iter()
-            .filter(|e| matches!(e, AgentEvent::Error(m) if m.contains("Session write failed")))
+            .filter(|e| matches!(e, Event::Error(m) if m.contains("Session write failed")))
             .collect();
         assert_eq!(
             error_events.len(),
@@ -2508,7 +2501,7 @@ mod tests {
             &empty_prompt(),
             &sink,
             &session,
-            &mut inert_user_rx(),
+            &mut inert_ops(),
             None,
             &yolo_gate(),
         )
@@ -2524,7 +2517,7 @@ mod tests {
             .events()
             .into_iter()
             .filter_map(|e| match e {
-                AgentEvent::StreamToken(t) => Some(t),
+                Event::StreamToken(t) => Some(t),
                 _ => None,
             })
             .collect();
@@ -2538,7 +2531,7 @@ mod tests {
         let client = FakeClient::new(vec![text_turn_with_initial_text("Hello immediately")]);
         let tools = ToolRegistry::new(Vec::new());
         let sink = CapturingSink::new();
-        let mut user_rx = inert_user_rx();
+        let mut ops = inert_ops();
         let mut messages = vec![Message::user("hi")];
 
         agent_turn(
@@ -2548,7 +2541,7 @@ mod tests {
             &empty_prompt(),
             &sink,
             &session,
-            &mut user_rx,
+            &mut ops,
             None,
             &yolo_gate(),
         )
@@ -2563,7 +2556,7 @@ mod tests {
             .events()
             .into_iter()
             .filter_map(|e| match e {
-                AgentEvent::StreamToken(t) => Some(t),
+                Event::StreamToken(t) => Some(t),
                 _ => None,
             })
             .collect();
@@ -2586,7 +2579,7 @@ mod tests {
             &empty_prompt(),
             &sink,
             &session,
-            &mut inert_user_rx(),
+            &mut inert_ops(),
             None,
             &yolo_gate(),
         )
@@ -2613,7 +2606,7 @@ mod tests {
             &empty_prompt(),
             &sink,
             &session,
-            &mut inert_user_rx(),
+            &mut inert_ops(),
             None,
             &yolo_gate(),
         )
@@ -2649,7 +2642,7 @@ mod tests {
             &empty_prompt(),
             &sink,
             &session,
-            &mut inert_user_rx(),
+            &mut inert_ops(),
             None,
             &yolo_gate(),
         )
@@ -2684,6 +2677,7 @@ mod tests {
             [ToolCall {
                 id: "tool_1".to_owned(),
                 name: "echo".to_owned(),
+                input: serde_json::json!({"v": 42}),
                 icon: DEFAULT_TOOL_ICON.to_owned(),
                 label: "Echo".to_owned(),
             }]
@@ -2726,7 +2720,7 @@ mod tests {
             &empty_prompt(),
             &sink,
             &session,
-            &mut inert_user_rx(),
+            &mut inert_ops(),
             None,
             &yolo_gate(),
         )
@@ -2797,7 +2791,7 @@ mod tests {
             &empty_prompt(),
             &sink,
             &session,
-            &mut inert_user_rx(),
+            &mut inert_ops(),
             None,
             &yolo_gate(),
         )
@@ -2809,7 +2803,7 @@ mod tests {
         assert_eq!(
             sink.events()
                 .iter()
-                .filter(|event| matches!(event, AgentEvent::SessionCompacted { .. }))
+                .filter(|event| matches!(event, Event::SessionCompacted { .. }))
                 .count(),
             0
         );
@@ -2818,7 +2812,7 @@ mod tests {
 
     #[tokio::test]
     async fn agent_turn_drains_mid_round_submit_into_messages_at_round_boundary() {
-        // Pre-loaded QueuePrompt is consumed during the round. At the boundary the agent splices
+        // Pre-loaded `Op::Queue` is consumed during the round. At the boundary the agent splices
         // the queued text as a trailing user message and emits PromptDrained.
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
@@ -2829,11 +2823,9 @@ mod tests {
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
         let sink = CapturingSink::new();
         let mut messages = vec![Message::user("kick off")];
-        let (tx, mut rx) = mpsc::channel::<UserAction>(4);
+        let (tx, mut rx) = mpsc::channel::<Op>(4);
         // Hold the sender so `recv()` stays pending after the queued submit.
-        tx.send(UserAction::QueuePrompt("follow up".into()))
-            .await
-            .unwrap();
+        tx.send(Op::Queue("follow up".into())).await.unwrap();
 
         agent_turn(
             &client,
@@ -2868,7 +2860,7 @@ mod tests {
         let drained_count = sink
             .events()
             .iter()
-            .filter(|e| matches!(e, AgentEvent::PromptDrained(t) if t == "follow up"))
+            .filter(|e| matches!(e, Event::PromptDrained(t) if t == "follow up"))
             .count();
         assert_eq!(
             drained_count, 1,
@@ -2879,7 +2871,7 @@ mod tests {
 
     #[tokio::test]
     async fn agent_turn_drains_multiple_mid_round_submits_in_order() {
-        // Two QueuePrompts during one await must land as separate User messages in dispatch order
+        // Two `Op::Queue`s during one await must land as separate User messages in dispatch order
         // with one PromptDrained event each.
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
@@ -2890,13 +2882,9 @@ mod tests {
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
         let sink = CapturingSink::new();
         let mut messages = vec![Message::user("kick off")];
-        let (tx, mut rx) = mpsc::channel::<UserAction>(4);
-        tx.send(UserAction::QueuePrompt("first".into()))
-            .await
-            .unwrap();
-        tx.send(UserAction::QueuePrompt("second".into()))
-            .await
-            .unwrap();
+        let (tx, mut rx) = mpsc::channel::<Op>(4);
+        tx.send(Op::Queue("first".into())).await.unwrap();
+        tx.send(Op::Queue("second".into())).await.unwrap();
 
         agent_turn(
             &client,
@@ -2928,7 +2916,7 @@ mod tests {
             .events()
             .iter()
             .filter_map(|e| match e {
-                AgentEvent::PromptDrained(t) => Some(t.clone()),
+                Event::PromptDrained(t) => Some(t.clone()),
                 _ => None,
             })
             .collect();
@@ -2937,7 +2925,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_turn_cancel_during_stream_is_cancelled_abort() {
+    async fn agent_turn_interrupt_during_stream_is_cancelled_abort() {
         // Biased select picks the queued Cancel before the stream future, so the session stays at
         // its pre-turn tail and the abort is Cancelled.
         let dir = tempfile::tempdir().unwrap();
@@ -2946,8 +2934,8 @@ mod tests {
         let tools = ToolRegistry::new(vec![]);
         let sink = CapturingSink::new();
         let mut messages = vec![Message::user("hi")];
-        let (tx, mut rx) = mpsc::channel::<UserAction>(1);
-        tx.try_send(UserAction::Cancel).unwrap();
+        let (tx, mut rx) = mpsc::channel::<Op>(1);
+        tx.try_send(Op::Interrupt).unwrap();
 
         let abort = agent_turn(
             &client,
@@ -2969,16 +2957,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_turn_quit_during_stream_is_quit_abort() {
-        // Quit is the teardown signal. It must stay distinct from Cancel for the outer driver.
+    async fn agent_turn_shutdown_during_stream_is_shutdown_abort() {
+        // Shutdown is the teardown signal. It must stay distinct from an interrupt for the engine.
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let client = FakeClient::new(vec![text_turn("never reached")]);
         let tools = ToolRegistry::new(vec![]);
         let sink = CapturingSink::new();
         let mut messages = vec![Message::user("hi")];
-        let (tx, mut rx) = mpsc::channel::<UserAction>(1);
-        tx.try_send(UserAction::Quit).unwrap();
+        let (tx, mut rx) = mpsc::channel::<Op>(1);
+        tx.try_send(Op::Shutdown).unwrap();
 
         let abort = agent_turn(
             &client,
@@ -2992,22 +2980,22 @@ mod tests {
             &yolo_gate(),
         )
         .await
-        .expect_err("quit must surface as Err(Quit)");
+        .expect_err("shutdown must surface as Err(Shutdown)");
 
-        assert!(matches!(abort, TurnAbort::Quit), "got {abort:?}");
+        assert!(matches!(abort, TurnAbort::Shutdown), "got {abort:?}");
         drop(tx);
     }
 
     #[tokio::test]
-    async fn agent_turn_sender_drop_during_turn_collapses_to_quit_abort() {
-        // Closed channel resolves `recv()` to None. Treated as Quit so the outer loop exits.
+    async fn agent_turn_sender_drop_during_turn_collapses_to_shutdown_abort() {
+        // Closed channel resolves `recv()` to None. Treated as Shutdown so the engine stops.
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let client = FakeClient::new(vec![text_turn("never reached")]);
         let tools = ToolRegistry::new(vec![]);
         let sink = CapturingSink::new();
         let mut messages = vec![Message::user("hi")];
-        let (tx, mut rx) = mpsc::channel::<UserAction>(1);
+        let (tx, mut rx) = mpsc::channel::<Op>(1);
         drop(tx);
 
         let abort = agent_turn(
@@ -3022,25 +3010,33 @@ mod tests {
             &yolo_gate(),
         )
         .await
-        .expect_err("dead channel must surface as Err(Quit)");
+        .expect_err("dead channel must surface as Err(Shutdown)");
 
-        assert!(matches!(abort, TurnAbort::Quit), "got {abort:?}");
+        assert!(matches!(abort, TurnAbort::Shutdown), "got {abort:?}");
     }
 
     #[tokio::test]
     async fn agent_turn_absorbs_stragglers_without_killing_turn() {
         // Every catch-all variant in `await_unless_aborted` must let the turn complete. Returning
         // Cancelled for any of these would kill the turn from a buffered no-op.
-        for action in [
-            UserAction::ConfirmExit,
-            UserAction::Clear,
-            UserAction::SwapConfig {
-                model: Some(ResolvedModelId::new("claude-opus-5-5".to_owned())),
-                effort: None,
+        for op in [
+            Op::Prompt("late".to_owned()),
+            Op::Resolve {
+                id: "stale".to_owned(),
+                decision: Decision::Approve,
             },
-            UserAction::SwapConfig {
-                model: None,
+            Op::SetModel {
+                model: Some(ResolvedModelId::new("claude-opus-5-5".to_owned())),
                 effort: Some(Effort::High),
+            },
+            Op::Compact { instructions: None },
+            Op::Clear,
+            Op::Archive,
+            Op::Resume {
+                path: "/repo/other.jsonl".into(),
+            },
+            Op::Rename {
+                title: "Late".to_owned(),
             },
         ] {
             let dir = tempfile::tempdir().unwrap();
@@ -3049,8 +3045,8 @@ mod tests {
             let tools = ToolRegistry::new(vec![]);
             let sink = CapturingSink::new();
             let mut messages = vec![Message::user("hi")];
-            let (tx, mut rx) = mpsc::channel::<UserAction>(1);
-            tx.try_send(action.clone()).unwrap();
+            let (tx, mut rx) = mpsc::channel::<Op>(1);
+            tx.try_send(op.clone()).unwrap();
 
             let outcome = agent_turn(
                 &client,
@@ -3064,22 +3060,15 @@ mod tests {
                 &yolo_gate(),
             )
             .await;
-            assert!(
-                outcome.result.is_ok(),
-                "turn must complete despite {action:?}"
-            );
+            assert!(outcome.result.is_ok(), "turn must complete despite {op:?}");
 
-            assert_eq!(
-                messages.len(),
-                2,
-                "assistant message recorded for {action:?}"
-            );
+            assert_eq!(messages.len(), 2, "assistant message recorded for {op:?}");
             drop(tx);
         }
     }
 
     #[tokio::test]
-    async fn agent_turn_cancel_during_tool_round_commits_finished_and_interrupted_results() {
+    async fn agent_turn_interrupt_during_tool_round_commits_finished_and_interrupted_results() {
         // Synchronizes on `GateTool`'s started signal so Cancel races the tool future, not the
         // prior stream phase.
         let dir = tempfile::tempdir().unwrap();
@@ -3098,7 +3087,7 @@ mod tests {
         ]);
         let sink = CapturingSink::new();
         let mut messages = vec![Message::user("kick off")];
-        let (tx, mut rx) = mpsc::channel::<UserAction>(1);
+        let (tx, mut rx) = mpsc::channel::<Op>(1);
         let prompt = empty_prompt();
         let gate = yolo_gate();
 
@@ -3116,7 +3105,7 @@ mod tests {
             ),
             async {
                 started.notified().await;
-                tx.send(UserAction::Cancel).await.unwrap();
+                tx.send(Op::Interrupt).await.unwrap();
             },
         );
 
@@ -3159,14 +3148,14 @@ mod tests {
         assert!(
             !events
                 .iter()
-                .any(|e| matches!(e, AgentEvent::ToolCallStart(call) if call.id == "tool_3")),
+                .any(|e| matches!(e, Event::ToolCallStart(call) if call.id == "tool_3")),
             "a call after the interrupt never starts: {events:?}",
         );
         drop(tx);
     }
 
     #[tokio::test]
-    async fn agent_turn_cancel_during_tool_round_preserves_completed_round_usage() {
+    async fn agent_turn_interrupt_during_tool_round_preserves_completed_round_usage() {
         // Round 1's stream observes usage before the tool gates. Cancel arrives during the tool
         // execution, so the abort must still carry billable_rounds from the completed round.
         let dir = tempfile::tempdir().unwrap();
@@ -3180,7 +3169,7 @@ mod tests {
         })]);
         let sink = CapturingSink::new();
         let mut messages = vec![Message::user("kick off")];
-        let (tx, mut rx) = mpsc::channel::<UserAction>(1);
+        let (tx, mut rx) = mpsc::channel::<Op>(1);
         let prompt = empty_prompt();
         let gate = yolo_gate();
 
@@ -3198,7 +3187,7 @@ mod tests {
             ),
             async {
                 started.notified().await;
-                tx.send(UserAction::Cancel).await.unwrap();
+                tx.send(Op::Interrupt).await.unwrap();
             },
         );
 
@@ -3235,7 +3224,7 @@ mod tests {
             &empty_prompt(),
             &sink,
             &session,
-            &mut inert_user_rx(),
+            &mut inert_ops(),
             None,
             &yolo_gate(),
         )
@@ -3276,7 +3265,7 @@ mod tests {
             &empty_prompt(),
             &sink,
             &session,
-            &mut inert_user_rx(),
+            &mut inert_ops(),
             None,
             &yolo_gate(),
         )
@@ -3307,7 +3296,7 @@ mod tests {
         let events = sink.events();
         assert!(events.iter().any(|e| matches!(
             e,
-            AgentEvent::ToolCallEnd(ToolResult { id, is_error: true, content, .. })
+            Event::ToolCallEnd(ToolResult { id, is_error: true, content, .. })
                 if id == "tool_1" && content.contains("Tool input JSON failed to parse"),
         )));
     }
@@ -3332,7 +3321,7 @@ mod tests {
             &empty_prompt(),
             &sink,
             &session,
-            &mut inert_user_rx(),
+            &mut inert_ops(),
             Some(CAP),
             &yolo_gate(),
         )
@@ -3365,7 +3354,7 @@ mod tests {
             &empty_prompt(),
             &sink,
             &session,
-            &mut inert_user_rx(),
+            &mut inert_ops(),
             Some(CAP),
             &yolo_gate(),
         )
@@ -3404,7 +3393,7 @@ mod tests {
             &empty_prompt(),
             &sink,
             &session,
-            &mut inert_user_rx(),
+            &mut inert_ops(),
             None,
             &yolo_gate(),
         )
@@ -3435,7 +3424,7 @@ mod tests {
             &empty_prompt(),
             &sink,
             &session,
-            &mut inert_user_rx(),
+            &mut inert_ops(),
             None,
             &yolo_gate(),
         )
@@ -3476,7 +3465,7 @@ mod tests {
             &empty_prompt(),
             &sink,
             &session,
-            &mut inert_user_rx(),
+            &mut inert_ops(),
             None,
             &yolo_gate(),
         )
@@ -3525,7 +3514,7 @@ mod tests {
             &empty_prompt(),
             &sink,
             &session,
-            &mut inert_user_rx(),
+            &mut inert_ops(),
             None,
             &yolo_gate(),
         )
@@ -3536,10 +3525,10 @@ mod tests {
             .events()
             .into_iter()
             .filter_map(|e| match e {
-                AgentEvent::StreamToken(text) => Some(format!("token {text}")),
-                AgentEvent::ProgressUpdate(text) => Some(format!("progress {text}")),
-                AgentEvent::ToolCallStart(ToolCall { id, .. }) => Some(format!("start {id}")),
-                AgentEvent::ToolCallEnd(ToolResult { id, .. }) => Some(format!("end {id}")),
+                Event::StreamToken(text) => Some(format!("token {text}")),
+                Event::ProgressUpdate(text) => Some(format!("progress {text}")),
+                Event::ToolCallStart(ToolCall { id, .. }) => Some(format!("start {id}")),
+                Event::ToolCallEnd(ToolResult { id, .. }) => Some(format!("end {id}")),
                 _ => None,
             })
             .collect();
@@ -3584,7 +3573,7 @@ mod tests {
             &empty_prompt(),
             &sink,
             &session,
-            &mut inert_user_rx(),
+            &mut inert_ops(),
             None,
             &yolo_gate(),
         )
@@ -3597,7 +3586,7 @@ mod tests {
         assert!(
             !events
                 .iter()
-                .any(|e| matches!(e, AgentEvent::Error(_) | AgentEvent::ProgressUpdate(_))),
+                .any(|e| matches!(e, Event::Error(_) | Event::ProgressUpdate(_))),
             "the loop resumes on its own: {events:?}",
         );
     }
@@ -3620,7 +3609,7 @@ mod tests {
             &empty_prompt(),
             &sink,
             &session,
-            &mut inert_user_rx(),
+            &mut inert_ops(),
             None,
             &yolo_gate(),
         )
@@ -3629,7 +3618,7 @@ mod tests {
 
         assert!(sink.events().iter().any(|e| matches!(
             e,
-            AgentEvent::Error(m) if m.contains("interrupted before it finished")
+            Event::Error(m) if m.contains("interrupted before it finished")
         )));
         assert_eq!(messages[1].content.len(), 1);
         assert!(ends_on_interrupted_work(&messages[1].content));
@@ -3654,7 +3643,7 @@ mod tests {
             &empty_prompt(),
             &sink,
             &session,
-            &mut inert_user_rx(),
+            &mut inert_ops(),
             None,
             &yolo_gate(),
         )
@@ -3700,7 +3689,7 @@ mod tests {
             &empty_prompt(),
             &sink,
             &session,
-            &mut inert_user_rx(),
+            &mut inert_ops(),
             None,
             &yolo_gate(),
         )
@@ -3721,7 +3710,7 @@ mod tests {
             !sink
                 .events()
                 .iter()
-                .any(|e| matches!(e, AgentEvent::ToolCallStart(_))),
+                .any(|e| matches!(e, Event::ToolCallStart(_))),
         );
     }
 
@@ -3745,7 +3734,7 @@ mod tests {
             &empty_prompt(),
             &sink,
             &session,
-            &mut inert_user_rx(),
+            &mut inert_ops(),
             None,
             &yolo_gate(),
         )
@@ -3773,7 +3762,7 @@ mod tests {
             &empty_prompt(),
             &sink,
             &session,
-            &mut inert_user_rx(),
+            &mut inert_ops(),
             None,
             &yolo_gate(),
         )
@@ -3847,7 +3836,7 @@ mod tests {
             &empty_prompt(),
             &sink,
             &session,
-            &mut inert_user_rx(),
+            &mut inert_ops(),
             None,
             &yolo_gate(),
         )
@@ -3883,7 +3872,7 @@ mod tests {
         let notices: Vec<&str> = events
             .iter()
             .filter_map(|e| match e {
-                AgentEvent::Retrying(message) => Some(message.as_str()),
+                Event::Retrying(message) => Some(message.as_str()),
                 _ => None,
             })
             .collect();
@@ -3895,16 +3884,16 @@ mod tests {
             ],
         );
         assert!(
-            !events.iter().any(|e| matches!(e, AgentEvent::Error(_))),
+            !events.iter().any(|e| matches!(e, Event::Error(_))),
             "a recovered retry shows no error: {events:?}",
         );
         let last_notice = events
             .iter()
-            .rposition(|e| matches!(e, AgentEvent::Retrying(_)))
+            .rposition(|e| matches!(e, Event::Retrying(_)))
             .unwrap();
         let first_token = events
             .iter()
-            .position(|e| matches!(e, AgentEvent::StreamToken(_)))
+            .position(|e| matches!(e, Event::StreamToken(_)))
             .unwrap();
         assert!(last_notice < first_token, "{events:?}");
     }
@@ -3990,15 +3979,13 @@ mod tests {
         );
         let events = sink.events();
         assert!(
-            !events
-                .iter()
-                .any(|e| matches!(e, AgentEvent::ToolCallStart(_))),
+            !events.iter().any(|e| matches!(e, Event::ToolCallStart(_))),
             "refused tool calls never run",
         );
         let notices: Vec<&str> = events
             .iter()
             .filter_map(|e| match e {
-                AgentEvent::Error(message) => Some(message.as_str()),
+                Event::Error(message) => Some(message.as_str()),
                 _ => None,
             })
             .collect();
@@ -4032,7 +4019,7 @@ mod tests {
             &empty_prompt(),
             &sink,
             &session,
-            &mut inert_user_rx(),
+            &mut inert_ops(),
             None,
             &gate_with(crate::permission::Mode::Auto, &[], &["bash"], true),
         )
@@ -4057,19 +4044,16 @@ mod tests {
             !sink
                 .events()
                 .iter()
-                .any(|e| matches!(e, AgentEvent::ApprovalRequested { .. })),
+                .any(|e| matches!(e, Event::ApprovalRequested { .. })),
             "a deny rule never prompts",
         );
     }
 
     #[tokio::test]
     async fn agent_turn_approval_decision_arriving_mid_turn_settles_the_call() {
-        // An `ask` blocks the round on `user_rx` until the reply lands, and the reply alone decides
+        // An `ask` blocks the round on `ops` until the reply lands, and the reply alone decides
         // whether the tool runs.
-        for (decision, runs) in [
-            (ApprovalDecision::Approve, true),
-            (ApprovalDecision::Deny, false),
-        ] {
+        for (decision, runs) in [(Decision::Approve, true), (Decision::Deny, false)] {
             let dir = tempfile::tempdir().unwrap();
             let session = test_session(dir.path());
             let client = FakeClient::new(vec![
@@ -4077,10 +4061,10 @@ mod tests {
                 text_turn("Done"),
             ]);
             let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
-            let (user_tx, mut user_rx) = mpsc::channel(4);
+            let (op_tx, mut ops) = mpsc::channel(4);
             let sink = ReplyingSink {
                 events: CapturingSink::new(),
-                user_tx,
+                op_tx,
                 decision,
             };
             let mut messages = vec![Message::user("run echo")];
@@ -4092,7 +4076,7 @@ mod tests {
                 &empty_prompt(),
                 &sink,
                 &session,
-                &mut user_rx,
+                &mut ops,
                 None,
                 &gate_with(crate::permission::Mode::Auto, &[], &[], true),
             )
@@ -4103,7 +4087,7 @@ mod tests {
                 .events
                 .events()
                 .into_iter()
-                .filter(|e| matches!(e, AgentEvent::ApprovalRequested { id, .. } if id == "tool_1"))
+                .filter(|e| matches!(e, Event::ApprovalRequested { id, .. } if id == "tool_1"))
                 .count();
             assert_eq!(
                 prompts, 1,
@@ -4162,7 +4146,7 @@ mod tests {
             &empty_prompt(),
             &CapturingSink::new(),
             &session,
-            &mut inert_user_rx(),
+            &mut inert_ops(),
             None,
             &gate,
         )
@@ -4268,12 +4252,12 @@ mod tests {
     // ── dispatch_tool_call ──
 
     #[tokio::test]
-    async fn dispatch_tool_call_cancel_during_approval_reports_the_call_not_run() {
+    async fn dispatch_tool_call_interrupt_during_approval_reports_the_call_not_run() {
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
         let sink = CapturingSink::new();
         let gate = gate_with(crate::permission::Mode::Auto, &[], &[], true);
-        let (tx, mut rx) = mpsc::channel::<UserAction>(1);
-        tx.try_send(UserAction::Cancel).unwrap();
+        let (tx, mut rx) = mpsc::channel::<Op>(1);
+        tx.try_send(Op::Interrupt).unwrap();
 
         let (output, abort) = dispatch_tool_call(
             &tools,
@@ -4292,7 +4276,7 @@ mod tests {
         assert!(
             sink.events()
                 .iter()
-                .any(|e| matches!(e, AgentEvent::ApprovalRequested { id, .. } if id == "tool_1")),
+                .any(|e| matches!(e, Event::ApprovalRequested { id, .. } if id == "tool_1")),
             "the cancel lands while the approval is pending",
         );
         assert_eq!(
@@ -4316,7 +4300,7 @@ mod tests {
             "echo",
             &mut json!({}),
             &sink,
-            &mut inert_user_rx(),
+            &mut inert_ops(),
             &mut Vec::new(),
             &gate,
         )
@@ -4328,7 +4312,7 @@ mod tests {
             !sink
                 .events()
                 .iter()
-                .any(|e| matches!(e, AgentEvent::ApprovalRequested { .. })),
+                .any(|e| matches!(e, Event::ApprovalRequested { .. })),
             "allow must not surface an approval prompt",
         );
     }
@@ -4345,7 +4329,7 @@ mod tests {
             "echo",
             &mut json!({}),
             &sink,
-            &mut inert_user_rx(),
+            &mut inert_ops(),
             &mut Vec::new(),
             &gate,
         )
@@ -4362,7 +4346,7 @@ mod tests {
             !sink
                 .events()
                 .iter()
-                .any(|e| matches!(e, AgentEvent::ApprovalRequested { .. })),
+                .any(|e| matches!(e, Event::ApprovalRequested { .. })),
             "a deny rule never prompts",
         );
     }
@@ -4380,7 +4364,7 @@ mod tests {
             "echo",
             &mut json!({}),
             &sink,
-            &mut inert_user_rx(),
+            &mut inert_ops(),
             &mut Vec::new(),
             &gate,
         )
@@ -4393,7 +4377,7 @@ mod tests {
             !sink
                 .events()
                 .iter()
-                .any(|e| matches!(e, AgentEvent::ApprovalRequested { .. })),
+                .any(|e| matches!(e, Event::ApprovalRequested { .. })),
             "non-interactive ask must not emit an approval event no UI can answer",
         );
     }
@@ -4403,10 +4387,10 @@ mod tests {
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
         let sink = CapturingSink::new();
         let gate = gate_with(crate::permission::Mode::Auto, &[], &[], true);
-        let (tx, mut rx) = mpsc::channel::<UserAction>(1);
-        tx.try_send(UserAction::ApprovalDecision {
+        let (tx, mut rx) = mpsc::channel::<Op>(1);
+        tx.try_send(Op::Resolve {
             id: "tool_1".to_owned(),
-            decision: ApprovalDecision::Approve,
+            decision: Decision::Approve,
         })
         .unwrap();
 
@@ -4425,7 +4409,7 @@ mod tests {
 
         assert!(denial.is_none(), "an approved call proceeds");
         let prompted = sink.events().into_iter().find_map(|e| match e {
-            AgentEvent::ApprovalRequested { id, .. } => Some(id),
+            Event::ApprovalRequested { id, .. } => Some(id),
             _ => None,
         });
         assert_eq!(
@@ -4440,9 +4424,9 @@ mod tests {
         // If the approval event can't be delivered, no modal can answer it, so the gate must deny
         // rather than block in await_approval forever. An inert receiver would hang on a regression.
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
-        let sink = crate::agent::event::FailingSink;
+        let sink = crate::protocol::FailingSink;
         let gate = gate_with(crate::permission::Mode::Auto, &[], &[], true);
-        let (_tx, mut rx) = mpsc::channel::<UserAction>(1);
+        let (_tx, mut rx) = mpsc::channel::<Op>(1);
 
         let denial = check_permission(
             &tools,
@@ -4467,10 +4451,10 @@ mod tests {
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
         let sink = CapturingSink::new();
         let gate = gate_with(crate::permission::Mode::Auto, &[], &[], true);
-        let (tx, mut rx) = mpsc::channel::<UserAction>(1);
-        tx.try_send(UserAction::ApprovalDecision {
+        let (tx, mut rx) = mpsc::channel::<Op>(1);
+        tx.try_send(Op::Resolve {
             id: "tool_1".to_owned(),
-            decision: ApprovalDecision::Deny,
+            decision: Decision::Deny,
         })
         .unwrap();
 
@@ -4505,7 +4489,7 @@ mod tests {
             "mystery",
             &mut json!({}),
             &sink,
-            &mut inert_user_rx(),
+            &mut inert_ops(),
             &mut Vec::new(),
             &gate,
         )
@@ -4539,7 +4523,7 @@ mod tests {
             "read",
             &mut input,
             &CapturingSink::new(),
-            &mut inert_user_rx(),
+            &mut inert_ops(),
             &mut Vec::new(),
             &gate,
         )
@@ -4555,32 +4539,31 @@ mod tests {
     #[tokio::test]
     async fn await_approval_ignores_a_stale_decision_for_another_call() {
         // A decision for an already-resolved call must not satisfy the wait, but the matching id does.
-        let (tx, mut rx) = mpsc::channel::<UserAction>(2);
-        tx.try_send(UserAction::ApprovalDecision {
+        let (tx, mut rx) = mpsc::channel::<Op>(2);
+        tx.try_send(Op::Resolve {
             id: "other".to_owned(),
-            decision: ApprovalDecision::Approve,
+            decision: Decision::Approve,
         })
         .unwrap();
-        tx.try_send(UserAction::ApprovalDecision {
+        tx.try_send(Op::Resolve {
             id: "tool_1".to_owned(),
-            decision: ApprovalDecision::Deny,
+            decision: Decision::Deny,
         })
         .unwrap();
 
         let decision = await_approval("tool_1", &mut rx, &mut Vec::new())
             .await
             .expect("matching decision resolves");
-        assert_eq!(decision, ApprovalDecision::Deny);
+        assert_eq!(decision, Decision::Deny);
     }
 
     #[tokio::test]
     async fn await_approval_buffers_a_mid_approval_submit_into_pending() {
-        let (tx, mut rx) = mpsc::channel::<UserAction>(2);
-        tx.try_send(UserAction::QueuePrompt("queued".to_owned()))
-            .unwrap();
-        tx.try_send(UserAction::ApprovalDecision {
+        let (tx, mut rx) = mpsc::channel::<Op>(2);
+        tx.try_send(Op::Queue("queued".to_owned())).unwrap();
+        tx.try_send(Op::Resolve {
             id: "tool_1".to_owned(),
-            decision: ApprovalDecision::Approve,
+            decision: Decision::Approve,
         })
         .unwrap();
         let mut pending = Vec::new();
@@ -4588,34 +4571,34 @@ mod tests {
         let decision = await_approval("tool_1", &mut rx, &mut pending)
             .await
             .expect("approval resolves");
-        assert_eq!(decision, ApprovalDecision::Approve);
+        assert_eq!(decision, Decision::Approve);
         assert_eq!(pending, vec!["queued".to_owned()], "the submit buffers");
     }
 
     #[tokio::test]
-    async fn await_approval_cancel_and_quit_abort_the_turn() {
-        for (action, want_quit) in [(UserAction::Cancel, false), (UserAction::Quit, true)] {
-            let (tx, mut rx) = mpsc::channel::<UserAction>(1);
-            tx.try_send(action.clone()).unwrap();
+    async fn await_approval_interrupt_and_shutdown_abort_the_turn() {
+        for (op, want_shutdown) in [(Op::Interrupt, false), (Op::Shutdown, true)] {
+            let (tx, mut rx) = mpsc::channel::<Op>(1);
+            tx.try_send(op.clone()).unwrap();
             let abort = await_approval("tool_1", &mut rx, &mut Vec::new())
                 .await
-                .expect_err("cancel / quit abort the wait");
-            if want_quit {
-                assert!(matches!(abort, TurnAbort::Quit), "{action:?}");
+                .expect_err("interrupt / shutdown abort the wait");
+            if want_shutdown {
+                assert!(matches!(abort, TurnAbort::Shutdown), "{op:?}");
             } else {
-                assert!(matches!(abort, TurnAbort::Cancelled), "{action:?}");
+                assert!(matches!(abort, TurnAbort::Cancelled), "{op:?}");
             }
         }
     }
 
     #[tokio::test]
-    async fn await_approval_dropped_channel_collapses_to_quit() {
-        let (tx, mut rx) = mpsc::channel::<UserAction>(1);
+    async fn await_approval_dropped_channel_collapses_to_shutdown() {
+        let (tx, mut rx) = mpsc::channel::<Op>(1);
         drop(tx);
         let abort = await_approval("tool_1", &mut rx, &mut Vec::new())
             .await
             .expect_err("a closed channel aborts");
-        assert!(matches!(abort, TurnAbort::Quit));
+        assert!(matches!(abort, TurnAbort::Shutdown));
     }
 
     // ── BlockAccumulator::into_content_block ──
@@ -4862,7 +4845,7 @@ mod tests {
         assert_eq!(buf, "hallo");
         let events = sink.events();
         assert_eq!(events.len(), 1);
-        assert!(matches!(&events[0], AgentEvent::StreamToken(t) if t == "llo"));
+        assert!(matches!(&events[0], Event::StreamToken(t) if t == "llo"));
     }
 
     #[test]
@@ -4884,7 +4867,7 @@ mod tests {
             panic!("expected ToolUse, got {block:?}");
         };
         assert_eq!(json_buf, r#"{"x:1}"#);
-        assert!(sink.events().is_empty());
+        assert_eq!(sink.events(), []);
     }
 
     #[test]
@@ -4906,7 +4889,7 @@ mod tests {
             panic!("expected ServerToolUse, got {block:?}");
         };
         assert_eq!(json_buf, r#"{"q:"rust"}"#);
-        assert!(sink.events().is_empty());
+        assert_eq!(sink.events(), []);
     }
 
     #[test]
@@ -4929,7 +4912,7 @@ mod tests {
         assert_eq!(thinking, "step 1, step 2");
         let events = sink.events();
         assert_eq!(events.len(), 1);
-        assert!(matches!(&events[0], AgentEvent::ThinkingToken(t) if t == ", step 2"));
+        assert!(matches!(&events[0], Event::ThinkingToken(t) if t == ", step 2"));
     }
 
     #[test]
@@ -4955,7 +4938,7 @@ mod tests {
         };
         assert_eq!(thinking, "step 1");
         assert_eq!(signature, "sig_abc");
-        assert!(sink.events().is_empty());
+        assert_eq!(sink.events(), []);
     }
 
     #[test]
@@ -4973,6 +4956,6 @@ mod tests {
             panic!("expected Text, got {block:?}");
         };
         assert_eq!(buf, "hi");
-        assert!(sink.events().is_empty());
+        assert_eq!(sink.events(), []);
     }
 }

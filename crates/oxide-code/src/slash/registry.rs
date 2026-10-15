@@ -17,13 +17,13 @@ use super::rename::RenameCmd;
 use super::resume::ResumeCmd;
 use super::status::StatusCmd;
 use super::theme::ThemeCmd;
-use crate::agent::event::UserAction;
+use crate::tui::action::Action;
 use crate::tui::modal::Modal;
 
 /// What a command hands back for the App to apply.
 pub(crate) enum SlashOutcome {
-    /// Forward a state-mutating action to the agent loop.
-    Forward(UserAction),
+    /// Dispatch a state-mutating action, applied locally or sent to the engine as an op.
+    Forward(Action),
     /// Open a modal over the input. The modal is the command's whole response.
     Modal(Box<dyn Modal>),
     /// Print a system message into chat.
@@ -46,7 +46,7 @@ impl std::fmt::Debug for SlashOutcome {
 
 #[cfg(test)]
 impl SlashOutcome {
-    pub(crate) fn into_forward(self) -> UserAction {
+    pub(crate) fn into_forward(self) -> Action {
         match self {
             Self::Forward(action) => action,
             other => panic!("expected Forward, got {other:?}"),
@@ -74,7 +74,7 @@ impl SlashOutcome {
 pub(crate) enum SlashKind {
     /// Pure local read (chat output / modal open). Safe to run during streaming.
     ReadOnly,
-    /// Touches session state or forwards a `UserAction` that races the in-flight client.
+    /// Touches session state or forwards an op that races the in-flight client.
     /// Refused until the agent is idle.
     Mutating,
     /// Returned only by the free dispatcher when the name doesn't resolve. Trait impls never
@@ -158,6 +158,7 @@ mod tests {
     use std::collections::HashSet;
 
     use super::*;
+    use crate::protocol::Op;
     use crate::slash::context::SlashContext;
     use crate::tui::modal::ModalAction;
     use crate::tui::modal::testing::ScriptedModal;
@@ -181,8 +182,8 @@ mod tests {
     fn slash_outcome_debug_names_each_variant() {
         let modal = SlashOutcome::Modal(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
         assert_eq!(
-            format!("{:?}", SlashOutcome::Forward(UserAction::Clear)),
-            "Forward(Clear)"
+            format!("{:?}", SlashOutcome::Forward(Action::Op(Op::Clear))),
+            "Forward(Op(Clear))"
         );
         assert_eq!(format!("{modal:?}"), "Modal(<modal>)");
         assert_eq!(format!("{:?}", done()), r#"SystemMessage("done")"#);
@@ -207,9 +208,9 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "expected SystemMessage, got Forward(Clear)")]
+    #[should_panic(expected = "expected SystemMessage, got Forward(Op(Clear))")]
     fn into_system_message_names_the_variant_it_got() {
-        SlashOutcome::Forward(UserAction::Clear).into_system_message();
+        SlashOutcome::Forward(Action::Op(Op::Clear)).into_system_message();
     }
 
     // ── BUILT_INS contract ──

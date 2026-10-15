@@ -20,7 +20,6 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-use crate::agent::event::{ApprovalBody, ApprovalPreview};
 use crate::file_tracker::{FileTracker, TrackableFileError, validate_trackable_file};
 use crate::permission::{GateTarget, PermissionClass};
 use crate::util::path::{lexical_normalize, slash_separated};
@@ -104,7 +103,8 @@ impl ToolOutput {
 // ── Tool Result View ──
 
 /// Per-tool structured shape of a completed tool call's body.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub(crate) enum ToolResultView {
     Text {
         content: String,
@@ -131,7 +131,7 @@ pub(crate) enum ToolResultView {
 }
 
 /// One line in a `ReadExcerpt` view.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ReadExcerptLine {
     pub(crate) number: usize,
     pub(crate) text: String,
@@ -152,18 +152,41 @@ pub(crate) struct DiffChunk {
 }
 
 /// One file's match block in a grep result view.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct GrepFileGroup {
     pub(crate) path: String,
     pub(crate) lines: Vec<GrepMatchLine>,
 }
 
 /// One row in a [`GrepFileGroup`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct GrepMatchLine {
     pub(crate) number: usize,
     pub(crate) text: String,
     pub(crate) is_match: bool,
+}
+
+// ── Approval Preview ──
+
+/// What a pending approval shows the user. The body is pre-rendered by the tool's gate seam so the
+/// modal stays display-only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ApprovalPreview {
+    /// Tool display label, e.g. `Bash(cargo test)` or `Write(src/main.rs)`.
+    pub(crate) title: String,
+    /// Body lines: an edit / write diff or the command string, capped to a display height when the
+    /// modal flattens it for render.
+    pub(crate) body: ApprovalBody,
+}
+
+/// The renderable body of an [`ApprovalPreview`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+pub(crate) enum ApprovalBody {
+    /// A shell command string (`bash`).
+    Command(String),
+    /// A unified diff (`edit` / `write`), reusing the chat's `+` / `-` chunk shape.
+    Diff(Vec<DiffChunk>),
 }
 
 // ── Tool Trait ──
