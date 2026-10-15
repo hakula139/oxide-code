@@ -6,9 +6,9 @@
 use std::collections::HashMap;
 
 use crate::agent::compaction::strip_synthetic_post_compact_prefix;
-use crate::agent::event::{Interaction, ToolCall, ToolResult};
 use crate::message::{ContentBlock, Message, Role, progress_update_before};
 use crate::prompt::is_system_reminder;
+use crate::protocol::{Interaction, ToolCall, ToolResult};
 use crate::session::entry::CompactInfo;
 use crate::tool::{ToolMetadata, ToolRegistry, ToolResultView};
 
@@ -90,6 +90,7 @@ fn walk_transcript(
                     out.push(Interaction::ToolCall(ToolCall {
                         id: id.clone(),
                         name: name.clone(),
+                        input: input.clone(),
                         icon: tools.icon(name).to_owned(),
                         label: tools.label(name, input),
                     }));
@@ -205,13 +206,30 @@ mod tests {
         }
     }
 
-    fn call(id: &str, name: &str, icon: &str, label: &str) -> Interaction {
+    fn call(
+        id: &str,
+        name: &str,
+        input: serde_json::Value,
+        icon: &str,
+        label: &str,
+    ) -> Interaction {
         Interaction::ToolCall(ToolCall {
             id: id.to_owned(),
             name: name.to_owned(),
+            input,
             icon: icon.to_owned(),
             label: label.to_owned(),
         })
+    }
+
+    fn bash_call(id: &str, command: &str) -> Interaction {
+        call(
+            id,
+            "bash",
+            serde_json::json!({"command": command}),
+            "$",
+            command,
+        )
     }
 
     fn text_result(id: &str, content: &str, is_error: bool) -> Interaction {
@@ -386,7 +404,7 @@ mod tests {
             walk(&messages),
             [
                 Interaction::UserText("ask".to_owned()),
-                call("t1", "bash", "$", "ls"),
+                bash_call("t1", "ls"),
                 text_result("t1", "output", false),
                 Interaction::AssistantText("reply".to_owned()),
             ]
@@ -416,9 +434,9 @@ mod tests {
         assert_eq!(
             walk(&messages),
             [
-                call("t1", "bash", "$", "ls"),
+                bash_call("t1", "ls"),
                 text_result("t1", "file a", false),
-                call("t2", "bash", "$", "pwd"),
+                bash_call("t2", "pwd"),
                 text_result("t2", "/repo", false),
             ]
         );
@@ -498,7 +516,7 @@ mod tests {
         assert_eq!(
             walk(&messages),
             [
-                call("t1", "bash", "$", "ls"),
+                bash_call("t1", "ls"),
                 text_result("t1", "file a", false),
                 text_result("ghost", "stale", true),
             ]
@@ -553,8 +571,20 @@ mod tests {
         assert_eq!(
             walk(&messages),
             [
-                call("c1", "custom_tool", DEFAULT_TOOL_ICON, "custom_tool"),
-                call("srv1", "web_search", DEFAULT_TOOL_ICON, "web_search"),
+                call(
+                    "c1",
+                    "custom_tool",
+                    serde_json::json!({"arg": "value"}),
+                    DEFAULT_TOOL_ICON,
+                    "custom_tool",
+                ),
+                call(
+                    "srv1",
+                    "web_search",
+                    serde_json::json!({"query": "rust"}),
+                    DEFAULT_TOOL_ICON,
+                    "web_search",
+                ),
             ]
         );
     }
@@ -577,7 +607,7 @@ mod tests {
             walk(&messages),
             [
                 Interaction::AssistantText("Let me check".to_owned()),
-                call("t1", "bash", "$", "ls"),
+                bash_call("t1", "ls"),
                 Interaction::AssistantText("Done".to_owned()),
             ]
         );
@@ -646,7 +676,7 @@ mod tests {
             [
                 Interaction::AssistantThinking("Running the suite.".to_owned()),
                 Interaction::ProgressUpdate("Running the suite.".to_owned()),
-                call("t1", "bash", "$", "cargo test"),
+                bash_call("t1", "cargo test"),
             ]
         );
     }

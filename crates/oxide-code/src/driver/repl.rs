@@ -6,9 +6,10 @@ use std::path::PathBuf;
 use anyhow::{Result, bail};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, BufReader};
 
-use super::{Exit, render_queued, render_turn, shutdown_signal};
-use crate::agent::event::{AgentEvent, AgentSink, StdioSink, UserAction};
+use super::stdio::{StdioSink, render_queued, render_turn};
+use super::{Exit, shutdown_signal};
 use crate::engine::{Engine, EngineHandle, TurnEnd};
+use crate::protocol::{Event, EventSink, Op};
 use crate::slash;
 
 /// Reads prompts until EOF or a signal, then finalizes the session. EOF after a failed turn exits
@@ -19,7 +20,7 @@ pub(crate) async fn run(engine: Engine, show_thinking: bool, drifted: &[PathBuf]
     drive(engine.spawn(drifted), &sink, stdin).await
 }
 
-async fn drive<R>(mut handle: EngineHandle, sink: &dyn AgentSink, input: R) -> Result<Exit>
+async fn drive<R>(mut handle: EngineHandle, sink: &dyn EventSink, input: R) -> Result<Exit>
 where
     R: AsyncBufRead + Unpin,
 {
@@ -51,7 +52,7 @@ where
             }
             if let Some(parsed) = slash::parse_slash(input) {
                 sink.emit(
-                    AgentEvent::Error(format!(
+                    Event::Error(format!(
                         "Slash commands are available only in the TUI. Use //{} to send the \
                          literal text.",
                         parsed.name,
@@ -63,7 +64,7 @@ where
 
             let prompt = slash::unescape_literal(input).to_owned();
             // A send fails only once the engine has stopped, which `render_turn` then reports.
-            _ = handle.ops.send(UserAction::SubmitPrompt(prompt)).await;
+            _ = handle.ops.send(Op::Prompt(prompt)).await;
             tokio::select! {
                 end = render_turn(&mut handle.events, sink) => match end {
                     Some(TurnEnd::Failed) => {
@@ -100,10 +101,10 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
-    use crate::agent::event::CapturingSink;
     use crate::engine::testing::{
         engine, mount_reply, request_bodies, stopped_engine, with_pinned_home,
     };
+    use crate::protocol::CapturingSink;
     use crate::session::store::testing::test_store;
 
     // ── drive ──
@@ -166,7 +167,7 @@ mod tests {
                 .events()
                 .into_iter()
                 .filter_map(|event| match event {
-                    AgentEvent::Error(msg) | AgentEvent::TurnFailed(msg) => Some(msg),
+                    Event::Error(msg) | Event::TurnFailed(msg) => Some(msg),
                     _ => None,
                 })
                 .collect();
@@ -177,10 +178,7 @@ mod tests {
                 reports[2].contains("only in the TUI. Use //clear"),
                 "{reports:?}"
             );
-            assert!(matches!(
-                sink.events().last(),
-                Some(AgentEvent::TurnComplete)
-            ));
+            assert!(matches!(sink.events().last(), Some(Event::TurnComplete)));
             let data = store.load_session_data(&session_id).unwrap();
             assert_eq!(
                 data.messages.len(),

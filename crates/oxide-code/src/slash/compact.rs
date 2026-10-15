@@ -4,7 +4,8 @@
 
 use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashKind, SlashOutcome};
-use crate::agent::event::UserAction;
+use crate::protocol::Op;
+use crate::tui::action::Action;
 
 pub(super) struct CompactCmd;
 
@@ -28,7 +29,9 @@ impl SlashCommand for CompactCmd {
     fn execute(&self, args: &str, _ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
         let trimmed = args.trim();
         let instructions = (!trimmed.is_empty()).then(|| trimmed.to_owned());
-        Ok(SlashOutcome::Forward(UserAction::Compact { instructions }))
+        Ok(SlashOutcome::Forward(Action::Op(Op::Compact {
+            instructions,
+        })))
     }
 }
 
@@ -37,7 +40,7 @@ mod tests {
     use super::*;
     use crate::slash::test_session_info;
 
-    fn run_execute(args: &str) -> UserAction {
+    fn run_execute(args: &str) -> Action {
         let info = test_session_info();
         CompactCmd
             .execute(args, &SlashContext::new(&info, None))
@@ -65,16 +68,19 @@ mod tests {
 
     #[test]
     fn execute_bare_forwards_compact_action_with_no_instructions() {
-        assert_eq!(run_execute(""), UserAction::Compact { instructions: None },);
+        assert_eq!(
+            run_execute(""),
+            Action::Op(Op::Compact { instructions: None }),
+        );
     }
 
     #[test]
     fn execute_with_args_forwards_trimmed_instructions() {
         assert_eq!(
             run_execute("  focus on the build error  "),
-            UserAction::Compact {
+            Action::Op(Op::Compact {
                 instructions: Some("focus on the build error".to_owned()),
-            },
+            }),
         );
     }
 
@@ -82,7 +88,7 @@ mod tests {
     fn execute_whitespace_only_args_treated_as_bare() {
         assert_eq!(
             run_execute("   \n\t  "),
-            UserAction::Compact { instructions: None },
+            Action::Op(Op::Compact { instructions: None }),
         );
     }
 }

@@ -4,8 +4,8 @@ use ratatui::text::{Line, Span};
 use time::OffsetDateTime;
 use unicode_width::UnicodeWidthStr;
 
-use crate::agent::event::UsageSnapshot;
 use crate::config::{Effort, StatusLineSegment};
+use crate::protocol::UsageSnapshot;
 use crate::tui::theme::Theme;
 use crate::util::git::PullRequest;
 use crate::util::text::truncate_to_width;

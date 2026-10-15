@@ -87,7 +87,7 @@ In the TUI, the first user prompt of a fresh session spawns a detached tokio tas
 
 Write failures surface through the session handle:
 
-- First failure populates the handle's `RecordOutcome::failure` slot so the agent loop emits a one-shot `AgentEvent::Error`.
+- First failure populates the handle's `RecordOutcome::failure` slot so the agent loop emits a one-shot `Event::Error`.
 - Compact and archive acknowledgments include every failure.
 - The agent swaps in the summary only after the boundary reaches disk, and bare `/archive` rolls to a fresh session only after the archive entry is written.
 - Failed compact and archive operations are also removed from the retry queue, so a later flush cannot persist them.
@@ -119,7 +119,7 @@ Session listing separates file discovery from metadata parsing:
 6. **Resume + symmetric sanitization.** Reopen, walk DAG, sanitize, keep every transcript API-valid.
 7. **Fork-on-conflict concurrency, no file lock.** Newest-leaf rule resolves forks, and one write per batch keeps concurrent appends from splitting a line.
 8. **Fire-and-forget AI titles.** A one-shot Haiku call logs a warning on failure. The title with the newest `updated_at` wins.
-9. **First-failure-only write-error surfacing.** One `AgentEvent::Error` per failure kind plus warn-logs gives visibility without spam.
+9. **First-failure-only write-error surfacing.** One `Event::Error` per failure kind plus warn-logs gives visibility without spam.
 10. **Listing scan with message pre-filter, mtime sort.** Titles and summaries can appear anywhere in the file, so the scan reads every line and the prefix check keeps message lines out of JSON parsing.
 11. **Actor-owned writes, receive-and-drain batching.** One task owns the writer, and `tokio::join!` coalesces a tool round's records into one append.
 12. **Archive state as an appended entry.** A session keeps the same path whether it is archived or active. Because filtering listings by archive state requires parsing files, listings indicate whether more sessions follow the current page without counting them.

@@ -1,14 +1,15 @@
 //! `/archive` and `/unarchive` set whether a session shows in default listings and bare
-//! `--continue`. Bare `/archive` forwards [`UserAction::Archive`], which archives the live session
-//! and rolls to a fresh one. The typed-arg forms update a saved session's file directly.
+//! `--continue`. Bare `/archive` forwards [`Op::Archive`], which archives the live session and
+//! rolls to a fresh one. The typed-arg forms update a saved session's file directly.
 
 use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashKind, SlashOutcome};
-use crate::agent::event::UserAction;
+use crate::protocol::Op;
 use crate::session::display::{archive_notice, id_prefix};
 use crate::session::entry::SessionInfo;
 use crate::session::resolver::resolve_saved_prefix;
 use crate::session::store::{SessionStore, set_archived_at};
+use crate::tui::action::Action;
 
 // ── ArchiveCmd ──
 
@@ -34,7 +35,7 @@ impl SlashCommand for ArchiveCmd {
     fn execute(&self, args: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
         let prefix = args.trim();
         if prefix.is_empty() {
-            return Ok(SlashOutcome::Forward(UserAction::Archive));
+            return Ok(SlashOutcome::Forward(Action::Op(Op::Archive)));
         }
         match resolve_saved(prefix, &ctx.info.session_id)? {
             Some(info) => set_archived(&info, true),
@@ -158,7 +159,7 @@ mod tests {
         let outcome = ArchiveCmd
             .execute("", &SlashContext::new(&info, None))
             .unwrap();
-        assert_eq!(outcome.into_forward(), UserAction::Archive);
+        assert_eq!(outcome.into_forward(), Action::Op(Op::Archive));
     }
 
     #[test]

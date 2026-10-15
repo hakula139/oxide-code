@@ -8,8 +8,8 @@ use std::sync::Arc;
 use serde::Deserialize;
 
 use super::{
-    DiffChunk, DiffLine, Tool, ToolMetadata, ToolOutput, ToolResultView, extract_input_field,
-    summarize_path_call,
+    ApprovalBody, ApprovalPreview, DiffChunk, DiffLine, Tool, ToolMetadata, ToolOutput,
+    ToolResultView, extract_input_field, summarize_path_call,
 };
 use crate::file_tracker::{FileTracker, GatePurpose};
 use crate::permission::PermissionClass;
@@ -45,12 +45,12 @@ impl Tool for EditTool {
         Some("file_path")
     }
 
-    fn approval_preview(&self, input: &serde_json::Value) -> crate::agent::event::ApprovalPreview {
+    fn approval_preview(&self, input: &serde_json::Value) -> ApprovalPreview {
         let old = extract_input_field(input, "old_string").unwrap_or_default();
         let new = extract_input_field(input, "new_string").unwrap_or_default();
-        crate::agent::event::ApprovalPreview {
+        ApprovalPreview {
             title: self.summarize_call(input),
-            body: crate::agent::event::ApprovalBody::Diff(vec![synthesize_chunk(old, new)]),
+            body: ApprovalBody::Diff(vec![synthesize_chunk(old, new)]),
         }
     }
 
@@ -389,7 +389,6 @@ mod tests {
     use indoc::indoc;
 
     use super::*;
-    use crate::agent::event::ApprovalBody;
     use crate::file_tracker::{
         LastView, MAX_TRACKED_FILE_SIZE,
         testing::{tracker, tracker_seeded},

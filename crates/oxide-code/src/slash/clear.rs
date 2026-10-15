@@ -1,8 +1,9 @@
-//! `/clear` forwards [`UserAction::Clear`]. The agent loop rolls the session.
+//! `/clear` forwards [`Op::Clear`]. The engine rolls the session.
 
 use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashKind, SlashOutcome};
-use crate::agent::event::UserAction;
+use crate::protocol::Op;
+use crate::tui::action::Action;
 
 pub(super) struct ClearCmd;
 
@@ -24,7 +25,7 @@ impl SlashCommand for ClearCmd {
     }
 
     fn execute(&self, _args: &str, _ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
-        Ok(SlashOutcome::Forward(UserAction::Clear))
+        Ok(SlashOutcome::Forward(Action::Op(Op::Clear)))
     }
 }
 
@@ -55,6 +56,6 @@ mod tests {
         let outcome = ClearCmd
             .execute("", &SlashContext::new(&info, None))
             .expect("/clear must succeed");
-        assert_eq!(outcome.into_forward(), UserAction::Clear);
+        assert_eq!(outcome.into_forward(), Action::Op(Op::Clear));
     }
 }

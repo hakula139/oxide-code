@@ -1,5 +1,4 @@
-//! Combined model + effort picker, opened by bare `/model`. Both axes commit through one
-//! [`UserAction::SwapConfig`].
+//! Combined model + effort picker for bare `/model`. Both axes commit through one [`Op::SetModel`].
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
@@ -10,9 +9,10 @@ use ratatui::widgets::Paragraph;
 
 use super::context::LiveSessionInfo;
 use super::effort_slider::tier_color;
-use crate::agent::event::UserAction;
 use crate::config::Effort;
 use crate::model::{MODELS, ModelInfo, ResolvedModelId};
+use crate::protocol::Op;
+use crate::tui::action::Action;
 use crate::tui::modal::chrome::{CONFIRM_HINT, FOOTER_HEIGHT, render_footer};
 use crate::tui::modal::list_picker::{ListPicker, PickerItem, numeric_hint};
 use crate::tui::modal::{Modal, ModalAction, ModalKey};
@@ -118,7 +118,7 @@ impl ModelEffortPicker {
         self.picked_effort = Some(Effort::ALL[next]);
     }
 
-    /// Commit both axes through one atomic `SwapConfig`. Each axis is `Some` only when it differs
+    /// Commit both axes through one atomic `SetModel`. Each axis is `Some` only when it differs
     /// from the open-time state, so a no-touch Enter (or a pick that returns to the active effort)
     /// cancels without re-resolving config defaults.
     fn submit(&self) -> ModalKey {
@@ -134,10 +134,10 @@ impl ModelEffortPicker {
         if !model_changed && effort.is_none() {
             return ModalKey::Cancelled;
         }
-        ModalKey::Submitted(ModalAction::User(UserAction::SwapConfig {
+        ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::SetModel {
             model: model_changed.then(|| ResolvedModelId::new(model)),
             effort,
-        }))
+        })))
     }
 
     fn render_effort_row(&self, theme: &Theme) -> Option<Line<'static>> {
@@ -256,10 +256,11 @@ mod tests {
 
     fn submitted_swap(outcome: ModalKey) -> (Option<String>, Option<Effort>) {
         match outcome {
-            ModalKey::Submitted(ModalAction::User(UserAction::SwapConfig { model, effort })) => {
-                (model.map(ResolvedModelId::into_inner), effort)
-            }
-            other => panic!("expected Submitted SwapConfig, got {other:?}"),
+            ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::SetModel {
+                model,
+                effort,
+            }))) => (model.map(ResolvedModelId::into_inner), effort),
+            other => panic!("expected Submitted SetModel, got {other:?}"),
         }
     }
 

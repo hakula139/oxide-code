@@ -1,6 +1,6 @@
 # Modal UI
 
-Focus-grabbing UI overlays opened by slash commands, by the App in response to agent events requesting tool approval, and at startup with `ox --resume`. Lives in the band between the chat scroll and the input area, the same row range the slash autocomplete popup uses, but wider.
+Focus-grabbing UI overlays opened by slash commands, by the App in response to engine events requesting tool approval, and at startup with `ox --resume`. Lives in the band between the chat scroll and the input area, the same row range the slash autocomplete popup uses, but wider.
 
 Companion: [commands.md](commands.md) covers the slash-command surface that opens modals.
 
@@ -12,7 +12,7 @@ Three things drove the abstraction:
 
 1. **Live preview.** `/theme` swaps palettes as the user arrows through choices and snaps back on Esc. This was the original motivating case for the trait shape.
 2. **Multi-step interaction.** The combined `/model + /effort` picker and the confirm-delete modal nested in `/resume`.
-3. **Agent-driven prompts.** When a tool call needs approval, the agent emits `AgentEvent::ApprovalRequested` and blocks until the user's decision comes back. The App pushes an `ApprovalModal`, which routes the decision back as `UserAction::ApprovalDecision`.
+3. **Agent-driven prompts.** When a tool call needs approval, the agent emits `Event::ApprovalRequested` and blocks until the user's decision comes back. The App pushes an `ApprovalModal`, which routes the decision back as `Op::Resolve`.
 
 ## Trait Shape
 
@@ -20,17 +20,17 @@ A modal is `Send` (App lives on tokio) but not `Sync`, since modals own mutable 
 
 - **Consumed**: Stay open, key handled internally.
 - **Cancelled**: Close and dispatch the modal's `on_cancel` action, if any.
-- **Submitted**: Close and forward an action (a `UserAction` through the agent channel, or a no-op when the modal already applied its effect locally).
+- **Submitted**: Close and dispatch an `Action` (an op for the engine or a TUI-only change, or a no-op when the modal already applied its effect locally).
 - **Preview**: Forward an action without closing. Used for live-preview cursor moves like `/theme`, where each Up / Down repaints the chat in the candidate without committing.
 - **Push**: Nest a child modal above the current one. The parent regains focus on pop via `Modal::on_focus_regained` (default no-op).
 
-`Submitted` and `Preview` carry a `ModalAction`: `User(UserAction)` (forward to the agent loop) or `SystemMessage(String)` (push a confirmation line into chat after pop). A close without an action of its own surfaces as `ModalAction::Cancelled`, which reverts any live preview.
+`Submitted` and `Preview` carry a `ModalAction`: `Dispatch(Action)` (dispatched like a keyboard action) or `SystemMessage(String)` (push a confirmation line into chat after pop). A close without an action of its own surfaces as `ModalAction::Cancelled`, which reverts any live preview.
 
 Dispatched actions flow through the same channel as keyboard input, so the modal never needs to know what handler will run on the other side.
 
 Bracketed pastes reach `Modal::handle_paste`, which defaults to a no-op. Text fields such as `/rename` and the picker search accept them, and a paste never answers a confirm or approval prompt.
 
-`Modal::on_cancel` fires whenever a modal leaves the stack without submitting: the stack-level Esc / Ctrl+C cancel, a `Cancelled` outcome, or `ModalStack::clear` on resume or compaction. It returns an optional `ModalAction` that the App dispatches in place of the silent close. The default returns `None`. `ApprovalModal` overrides it to emit a deny decision so the blocked agent always gets an answer. The `ox --resume` picker overrides it to emit `UserAction::Quit` because dismissing the picker quits `ox`.
+`Modal::on_cancel` fires whenever a modal leaves the stack without submitting: the stack-level Esc / Ctrl+C cancel, a `Cancelled` outcome, or `ModalStack::clear` on resume or compaction. It returns an optional `ModalAction` that the App dispatches in place of the silent close. The default returns `None`. `ApprovalModal` overrides it to emit a deny decision so the blocked agent always gets an answer. The `ox --resume` picker overrides it to emit `Op::Shutdown` because dismissing the picker quits `ox`.
 
 ## Implementation
 
@@ -54,7 +54,7 @@ Modals shipping today:
 - **Approval modal**: Approve-or-deny gate the App pushes when the agent asks to run a gated tool call.
 - **`/status`, `/config`, `/help`**: Read-only overviews assembled from `KvOverview` + `KvSection` fixtures inside the per-command files.
 
-App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event`, so an active modal sees every key before any other component. `apply_modal_action` then dispatches the result through the same path as a keyboard `UserAction`.
+App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event`, so an active modal sees every key before any other component. `apply_modal_action` then dispatches the result through the same `App::dispatch_action` path as a keyboard action.
 
 ## Design Decisions
 
@@ -84,19 +84,19 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 
 ## Per-Modal Notes
 
-- **Combined `/model + /effort` picker**: `ModelEffortPicker` wraps `ListPicker<ModelRow>` and tracks the effort axis separately. Left / Right cycles the effort row through all five tiers, which every supported model accepts. Until the user picks a tier, the row shows the active effort, falling back to the highlighted model's default. Submit emits one `UserAction::SwapConfig { model, effort }` with `Option` axes (only changed axes populated). Enter on a no-op cancels.
+- **Combined `/model + /effort` picker**: `ModelEffortPicker` wraps `ListPicker<ModelRow>` and tracks the effort axis separately. Left / Right cycles the effort row through all five tiers, which every supported model accepts. Until the user picks a tier, the row shows the active effort, falling back to the highlighted model's default. Submit emits one `Op::SetModel { model, effort }` with `Option` axes (only changed axes populated). Enter on a no-op cancels.
 
 - **`/effort` slider**: `EffortSlider` is a horizontal Speed ↔ Intelligence visual. Lists all five tiers and seeds the cursor at the active effort. Unknown model ids have no effort, so bare `/effort` errors on them. Tiers render with uniform `●` / `○` glyphs plus per-tier ANSI color along blue → red. Color encodes identity, bold encodes the active pick. ANSI-named colors decouple the gradient from theme TOML so the user's terminal palette supplies the actual rendering.
 
-- **`/theme` picker**: `ThemePicker` wraps `ListPicker<ThemeRow>` over the curated built-in roster and emits `UserAction::PreviewTheme` on every cursor move so the App repaints the chat in the candidate palette without committing. Esc snaps back via the cached `preview_theme_snapshot`, while Enter promotes the preview to a `SwapTheme` swap. Numeric `1`–`9` shortcuts jump to a row to match the visual ladder.
+- **`/theme` picker**: `ThemePicker` wraps `ListPicker<ThemeRow>` over the curated built-in roster and emits `Action::PreviewTheme` on every cursor move so the App repaints the chat in the candidate palette without committing. Esc snaps back via the cached `preview_theme_snapshot`, while Enter promotes the preview to an `Action::SwapTheme` swap. Numeric `1`–`9` shortcuts jump to a row to match the visual ladder.
 
-- **`/rename` editor**: `RenameModal` is a single-line text editor pre-filled with the current title (cap 80 chars, mirroring the actor's first-prompt cap). Render is a fixed five-row stack: title, gap, prompt + buffer, gap, footer hint. Editing runs through the shared `LineEditor`, so the cursor moves within the title, pastes land as one line, and a title wider than the row scrolls to keep the cursor in view. Enter on a non-empty trimmed buffer submits `UserAction::Rename`, and blank Enter is a silent no-op so the user can keep typing.
+- **`/rename` editor**: `RenameModal` is a single-line text editor pre-filled with the current title (cap 80 chars, mirroring the actor's first-prompt cap). Render is a fixed five-row stack: title, gap, prompt + buffer, gap, footer hint. Editing runs through the shared `LineEditor`, so the cursor moves within the title, pastes land as one line, and a title wider than the row scrolls to keep the cursor in view. Enter on a non-empty trimmed buffer submits `Op::Rename`, and blank Enter is a silent no-op so the user can keep typing.
 
-- **`/resume` picker**: `ResumePicker` wraps `SearchableList<SessionRow>` and adds a footer line. Each row paints a two-line title plus dim metadata block (id prefix · relative time · message count · branch · project) followed by a trailing blank. Tab toggles current-project ↔ all-projects and Ctrl+A toggles the archived view, each reloading rows while the typed query survives the rebuild. Enter on a focused row submits `UserAction::Resume`. Enter with no selection stays open so the user can Tab the scope or Esc out. The footer counts the loaded rows and flags when more sessions remain beyond the 30-session load cap (`30 most recent sessions · more not loaded`). Load failures take over the footer so a failure can't disguise itself as "0 sessions". Ctrl+D on the cursor row pushes `ConfirmDeleteSessionModal`. On focus regain the picker reloads and re-seeks the cursor to the previously selected row.
+- **`/resume` picker**: `ResumePicker` wraps `SearchableList<SessionRow>` and adds a footer line. Each row paints a two-line title plus dim metadata block (id prefix · relative time · message count · branch · project) followed by a trailing blank. Tab toggles current-project ↔ all-projects and Ctrl+A toggles the archived view, each reloading rows while the typed query survives the rebuild. Enter on a focused row submits `Op::Resume`. Enter with no selection stays open so the user can Tab the scope or Esc out. The footer counts the loaded rows and flags when more sessions remain beyond the 30-session load cap (`30 most recent sessions · more not loaded`). Load failures take over the footer so a failure can't disguise itself as "0 sessions". Ctrl+D on the cursor row pushes `ConfirmDeleteSessionModal`. On focus regain the picker reloads and re-seeks the cursor to the previously selected row.
 
 - **Confirm-delete modal**: `ConfirmDeleteSessionModal` runs `delete_at` on the session's file synchronously on Y / Enter and submits `ModalAction::SystemMessage("Deleted session {id}: {title}")` on success so the user has chat-stream evidence the action ran. Failures latch into a sticky inline error that clears only on a deliberate Y / N choice, so a stray key can't wipe the diagnostic. Pushed by `/delete <id-prefix>` and by `/resume`'s Ctrl+D.
 
-- **Approval modal**: `ApprovalModal` holds the tool-use id and renders the call summary as its title above the body: the command text for `bash`, or `-` / `+` diff rows for `edit` and `write`. The body shows at most 16 rows and scrolls when the call runs longer or the band is shorter. Y submits `UserAction::ApprovalDecision` with `Approve` once a render has shown the first body row, while Enter does nothing. [permissions.md](../tools/permissions.md) covers the type-ahead guard. N returns `Cancelled`, so N, Esc, Ctrl+C, and a `clear` on resume or compaction all resolve through `on_cancel` to `Deny`.
+- **Approval modal**: `ApprovalModal` holds the tool-use id and renders the call summary as its title above the body: the command text for `bash`, or `-` / `+` diff rows for `edit` and `write`. The body shows at most 16 rows and scrolls when the call runs longer or the band is shorter. Y submits `Op::Resolve` with `Approve` once a render has shown the first body row, while Enter does nothing. [permissions.md](../tools/permissions.md) covers the type-ahead guard. N returns `Cancelled`, so N, Esc, Ctrl+C, and a `clear` on resume or compaction all resolve through `on_cancel` to `Deny`.
 
 - **`/status` overview**: Single-section `KvOverview` of session descriptors (model, effort, cwd, session id, auth, version, cache TTL, auto compaction, show-thinking, show-welcome). Constructed in `slash/status`.
 
@@ -129,7 +129,7 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 - `crates/oxide-code/src/slash/resume.rs`: `ResumeCmd` plus `ResumePicker`.
 - `crates/oxide-code/src/slash/status.rs`: `/status` row builder plus `KvOverview`.
 - `crates/oxide-code/src/slash/theme.rs`: `/theme` live-preview picker (`ThemeCmd` plus `ThemePicker`).
-- `crates/oxide-code/src/tui/app.rs`: `App::handle_crossterm_event` modal gate, `run_slash`, `apply_slash_outcome`, `apply_modal_action`, `clear_modals`, `push_approval_modal`, layout band.
+- `crates/oxide-code/src/tui/app.rs`: `App::handle_crossterm_event` modal gate, `run_slash`, `apply_slash_outcome`, `apply_modal_action`, `dispatch_action`, `clear_modals`, `push_approval_modal`, layout band.
 - `crates/oxide-code/src/tui/modal.rs`: `Modal` (including the `on_cancel` hook), `ModalKey`, `ModalAction`, `ModalStack`.
 - `crates/oxide-code/src/tui/modal/approval.rs`: `ApprovalModal` approve-or-deny gate for agent tool calls.
 - `crates/oxide-code/src/tui/modal/chrome.rs`: shared `Header` and `render_footer`.

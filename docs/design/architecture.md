@@ -20,9 +20,10 @@ Layers run from the foundation to the frontends.
 | Domain     | `permission`   | Tool permission gate: modes, allow / ask / deny rules, and path resolution                                                             |
 | Domain     | `prompt`       | System prompt assembly, environment detection, and instruction-file discovery                                                          |
 | Services   | `client`       | Anthropic Messages API client: request bodies and headers, a retrying transport, SSE streaming, and one-shot completions               |
+| Services   | `protocol`     | The serializable `Op` / `Event` contract between the engine and its frontends, its payloads, and the `EventSink` trait                 |
 | Services   | `session`      | JSONL session persistence behind an actor task, plus listing, archiving, resume, transcript repair, and AI titles                      |
 | Services   | `tool`         | The `Tool` trait, the registry, and the built-in `bash`, `edit`, `glob`, `grep`, `read`, and `write` tools                             |
-| Agent      | `agent`        | The turn loop that streams a response and dispatches tool calls, compaction, and the `AgentEvent` / `AgentSink` contract               |
+| Agent      | `agent`        | The turn loop that streams a response and dispatches tool calls, plus compaction                                                       |
 | Engine     | `engine`       | The live conversation (transcript, prompt, usage, auto-compaction) as a task that every frontend drives through `EngineHandle`         |
 | Frontend   | `driver`       | The TUI, bare REPL, and headless drivers, which drive the `Engine` through `EngineHandle`, plus exit status and shutdown signals       |
 | Frontend   | `slash`        | Slash-command parser, registry, and built-in commands                                                                                  |
@@ -34,6 +35,3 @@ Layers run from the foundation to the frontends.
 A module imports from its own layer and lower layers. Production code still has these upward imports:
 
 - `config` imports `tui::theme` to resolve theme overrides. Issue [#147](https://github.com/hakula139/oxide-code/issues/147) removes this dependency.
-- `tool` imports approval preview types from `agent::event` to describe a gated call.
-- `session::history` imports `agent::event` to project a transcript into the interactions shown when a session resumes.
-- `session::title_generator` imports `agent::event` to report the generated title.

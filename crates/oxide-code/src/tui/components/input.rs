@@ -13,8 +13,9 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui_textarea::{CursorMove, TextArea, WrapMode};
 
 use self::popup::{PopupMode, SlashPopup};
-use crate::agent::event::UserAction;
+use crate::protocol::Op;
 use crate::slash::{PopupState, arg_placeholder_for, popup_state};
+use crate::tui::action::Action;
 use crate::tui::glyphs::{USER_PROMPT_PREFIX, USER_PROMPT_PREFIX_WIDTH};
 use crate::tui::theme::Theme;
 
@@ -27,7 +28,7 @@ const MAX_VISIBLE_LINES: u16 = 6;
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum InputOutcome {
     /// The app should dispatch this action.
-    Action(UserAction),
+    Action(Action),
     /// The input handled the event, so no other component may see it.
     Consumed,
     /// The input had no use for the event, so the caller may route it to the chat.
@@ -203,16 +204,16 @@ impl InputArea {
         match (key.code, key.modifiers) {
             (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
                 return if self.enabled && self.is_empty() {
-                    InputOutcome::Action(UserAction::Quit)
+                    InputOutcome::Action(Action::Op(Op::Shutdown))
                 } else {
                     InputOutcome::Consumed
                 };
             }
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                 return InputOutcome::Action(if self.enabled {
-                    UserAction::ConfirmExit
+                    Action::ConfirmExit
                 } else {
-                    UserAction::Cancel
+                    Action::Op(Op::Interrupt)
                 });
             }
             (KeyCode::PageUp | KeyCode::PageDown, _)
@@ -324,7 +325,7 @@ impl InputArea {
         })
     }
 
-    fn popup_submit_selected(&mut self) -> Option<UserAction> {
+    fn popup_submit_selected(&mut self) -> Option<Action> {
         let row = self.popup.selected()?;
         let submission = match self.popup.mode()? {
             PopupMode::Name => format!("/{}", row.value),
@@ -332,7 +333,7 @@ impl InputArea {
         };
         self.set_text("");
         self.popup.set_state(None);
-        Some(UserAction::SubmitPrompt(submission))
+        Some(Action::Submit(submission))
     }
 
     fn refresh_popup(&mut self) {
@@ -377,7 +378,7 @@ impl InputArea {
             .all(|line| line.trim().is_empty())
     }
 
-    fn submit(&mut self) -> Option<UserAction> {
+    fn submit(&mut self) -> Option<Action> {
         if self.is_empty() {
             return None;
         }
@@ -386,7 +387,7 @@ impl InputArea {
         self.set_text("");
         self.popup.set_state(None);
 
-        Some(UserAction::SubmitPrompt(trimmed))
+        Some(Action::Submit(trimmed))
     }
 }
 
@@ -515,7 +516,7 @@ mod tests {
     fn handle_event_ctrl_c_idle_arms_exit() {
         let mut input = test_input();
         let outcome = input.handle_event(&key(KeyCode::Char('c'), KeyModifiers::CONTROL));
-        assert_eq!(outcome, InputOutcome::Action(UserAction::ConfirmExit));
+        assert_eq!(outcome, InputOutcome::Action(Action::ConfirmExit));
     }
 
     #[test]
@@ -523,7 +524,7 @@ mod tests {
         // POSIX EOF idiom: idle Ctrl+D on an empty buffer exits.
         let mut input = test_input();
         let idle = input.handle_event(&key(KeyCode::Char('d'), KeyModifiers::CONTROL));
-        assert_eq!(idle, InputOutcome::Action(UserAction::Quit));
+        assert_eq!(idle, InputOutcome::Action(Action::Op(Op::Shutdown)));
 
         // Busy Ctrl+D is a no-op even with an empty buffer — a habitual
         // EOF press shouldn't tear down an in-flight turn.
@@ -554,11 +555,11 @@ mod tests {
     }
 
     #[test]
-    fn handle_event_ctrl_c_busy_triggers_cancel() {
+    fn handle_event_ctrl_c_busy_triggers_interrupt() {
         let mut input = test_input();
         input.set_enabled(false);
         let outcome = input.handle_event(&key(KeyCode::Char('c'), KeyModifiers::CONTROL));
-        assert_eq!(outcome, InputOutcome::Action(UserAction::Cancel));
+        assert_eq!(outcome, InputOutcome::Action(Action::Op(Op::Interrupt)));
     }
 
     #[test]
@@ -589,7 +590,7 @@ mod tests {
         let outcome = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(
             outcome,
-            InputOutcome::Action(UserAction::SubmitPrompt("q".to_owned())),
+            InputOutcome::Action(Action::Submit("q".to_owned())),
         );
     }
 
@@ -715,7 +716,7 @@ mod tests {
         let outcome = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(
             outcome,
-            InputOutcome::Action(UserAction::SubmitPrompt("hi".to_owned())),
+            InputOutcome::Action(Action::Submit("hi".to_owned())),
         );
     }
 
@@ -1019,7 +1020,7 @@ mod tests {
         let outcome = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(
             outcome,
-            InputOutcome::Action(UserAction::SubmitPrompt("a".to_owned())),
+            InputOutcome::Action(Action::Submit("a".to_owned())),
         );
     }
 
@@ -1127,7 +1128,7 @@ mod tests {
         let outcome = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(
             outcome,
-            InputOutcome::Action(UserAction::SubmitPrompt(format!("/{selected}"))),
+            InputOutcome::Action(Action::Submit(format!("/{selected}"))),
         );
         assert!(input.textarea.is_empty());
     }
@@ -1141,7 +1142,7 @@ mod tests {
         let outcome = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(
             outcome,
-            InputOutcome::Action(UserAction::SubmitPrompt(format!("/effort {picked}"))),
+            InputOutcome::Action(Action::Submit(format!("/effort {picked}"))),
         );
         assert!(input.textarea.is_empty());
     }
@@ -1156,7 +1157,7 @@ mod tests {
         let outcome = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(
             outcome,
-            InputOutcome::Action(UserAction::SubmitPrompt(format!("/model {picked}"))),
+            InputOutcome::Action(Action::Submit(format!("/model {picked}"))),
         );
         assert!(input.textarea.is_empty());
         assert!(!input.popup_visible());
@@ -1176,7 +1177,7 @@ mod tests {
         let outcome = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(
             outcome,
-            InputOutcome::Action(UserAction::SubmitPrompt("/model claude-opus".to_owned())),
+            InputOutcome::Action(Action::Submit("/model claude-opus".to_owned())),
         );
     }
 

@@ -1,9 +1,9 @@
 //! Compact-boundary persistence and live transcript replacement.
 
 use crate::agent::compaction::synthesize_post_compact_message;
-use crate::agent::event::{AgentEvent, AgentSink};
 use crate::file_tracker::FileTracker;
 use crate::message::Message;
+use crate::protocol::{Event, EventSink};
 use crate::session::handle::SessionHandle;
 
 /// Persists a compact boundary and swaps the live transcript to the synthetic summary root.
@@ -11,7 +11,7 @@ pub(crate) async fn replace_session_with_summary(
     session: &SessionHandle,
     file_tracker: &FileTracker,
     messages: &mut Vec<Message>,
-    sink: &dyn AgentSink,
+    sink: &dyn EventSink,
     summary: String,
     instructions: Option<String>,
     automatic: bool,
@@ -28,7 +28,7 @@ pub(crate) async fn replace_session_with_summary(
     file_tracker.clear();
     *messages = vec![synthetic];
     sink.emit(
-        AgentEvent::SessionCompacted {
+        Event::SessionCompacted {
             summary,
             pre_count: outcome.pre_count,
             instructions,
@@ -41,22 +41,12 @@ pub(crate) async fn replace_session_with_summary(
 
 #[cfg(test)]
 mod tests {
-    use anyhow::anyhow;
-
     use super::*;
-    use crate::agent::event::{AgentSink, CapturingSink};
     use crate::file_tracker::LastView;
     use crate::message::{ContentBlock, Message};
+    use crate::protocol::{CapturingSink, FailingSink};
     use crate::session::handle;
     use crate::session::store::testing::test_store;
-
-    struct FailingSink;
-
-    impl AgentSink for FailingSink {
-        fn send(&self, _event: AgentEvent) -> anyhow::Result<()> {
-            Err(anyhow!("sink closed"))
-        }
-    }
 
     fn fake_transcript() -> Vec<Message> {
         vec![
@@ -133,7 +123,7 @@ mod tests {
         assert!(
             sink.events()
                 .iter()
-                .any(|event| matches!(event, AgentEvent::Error(message) if message.contains("Session write failed")))
+                .any(|event| matches!(event, Event::Error(message) if message.contains("Session write failed")))
         );
     }
 

@@ -1,5 +1,5 @@
 //! Background AI title generator. After the first user prompt, asks Haiku for a 3-7 word title,
-//! persists it as an `AiGenerated` `Entry::Title`, and emits `AgentEvent::SessionTitleUpdated`.
+//! persists it as an `AiGenerated` `Entry::Title`, and emits `Event::SessionTitleUpdated`.
 //! Failures warn-log only, so the first-prompt title stays on disk. Fresh sessions only.
 
 use anyhow::{Context, Result, bail};
@@ -7,11 +7,11 @@ use indoc::indoc;
 use serde::Deserialize;
 use tracing::warn;
 
-use crate::agent::event::{AgentEvent, AgentSink};
 use crate::client::anthropic::Client;
 use crate::client::anthropic::wire::OutputFormat;
 use crate::config::Effort;
 use crate::model::ModelSpec;
+use crate::protocol::{Event, EventSink};
 use crate::session::handle::SessionHandle;
 
 // ── Constants ──
@@ -55,7 +55,7 @@ const SYSTEM_PROMPT: &str = indoc! {r#"
 /// [`MAX_PROMPT_CHARS`] to keep cost bounded on long pasted code.
 pub(crate) fn spawn<S>(client: Client, session: SessionHandle, sink: S, first_prompt: String)
 where
-    S: AgentSink + Clone + Send + 'static,
+    S: EventSink + Clone + Send + 'static,
 {
     tokio::spawn(async move {
         if let Err(e) = generate_and_record(&client, &session, &sink, &first_prompt).await {
@@ -71,7 +71,7 @@ where
 async fn generate_and_record(
     client: &Client,
     session: &SessionHandle,
-    sink: &impl AgentSink,
+    sink: &impl EventSink,
     first_prompt: &str,
 ) -> Result<()> {
     let prompt = truncate_prompt(first_prompt, MAX_PROMPT_CHARS);
@@ -105,7 +105,7 @@ async fn generate_and_record(
     }
 
     sink.emit(
-        AgentEvent::SessionTitleUpdated {
+        Event::SessionTitleUpdated {
             session_id: session.session_id().to_owned(),
             title,
         },
@@ -194,10 +194,10 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
-    use crate::agent::event::CapturingSink;
     use crate::client::anthropic::testing::{completion_body, test_client};
     use crate::config::auth::{Auth, AuthSource};
     use crate::message::Message;
+    use crate::protocol::CapturingSink;
     use crate::session::store::testing::test_store;
 
     // ── Fixtures ──
@@ -213,10 +213,10 @@ mod tests {
     /// Sink backed by an mpsc channel so tests can wait on `recv()`
     /// with a timeout instead of polling `CapturingSink`.
     #[derive(Clone)]
-    struct ChannelSink(tokio::sync::mpsc::UnboundedSender<AgentEvent>);
+    struct ChannelSink(tokio::sync::mpsc::UnboundedSender<Event>);
 
-    impl crate::agent::event::AgentSink for ChannelSink {
-        fn send(&self, event: AgentEvent) -> anyhow::Result<()> {
+    impl crate::protocol::EventSink for ChannelSink {
+        fn send(&self, event: Event) -> anyhow::Result<()> {
             _ = self.0.send(event);
             Ok(())
         }
@@ -259,7 +259,7 @@ mod tests {
             .expect("channel closed before event");
 
         assert!(
-            matches!(&event, AgentEvent::SessionTitleUpdated { title, .. } if title == "Fix auth"),
+            matches!(&event, Event::SessionTitleUpdated { title, .. } if title == "Fix auth"),
             "unexpected event: {event:?}",
         );
     }
@@ -319,9 +319,9 @@ mod tests {
 
         let events = sink.events();
         assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, AgentEvent::SessionTitleUpdated { title, .. } if title == "Fix login")),
+            events.iter().any(
+                |e| matches!(e, Event::SessionTitleUpdated { title, .. } if title == "Fix login")
+            ),
             "sink got SessionTitleUpdated: {events:?}",
         );
     }
@@ -353,7 +353,7 @@ mod tests {
         assert!(
             !events
                 .iter()
-                .any(|e| matches!(e, AgentEvent::SessionTitleUpdated { .. })),
+                .any(|e| matches!(e, Event::SessionTitleUpdated { .. })),
             "AI title must not emit when manual title is already set: {events:?}",
         );
     }
@@ -385,7 +385,7 @@ mod tests {
         assert!(
             events
                 .iter()
-                .any(|e| matches!(e, AgentEvent::SessionTitleUpdated { title, .. } if title == "Add OAuth auth")),
+                .any(|e| matches!(e, Event::SessionTitleUpdated { title, .. } if title == "Add OAuth auth")),
             "sink got SessionTitleUpdated: {events:?}",
         );
     }
@@ -416,7 +416,7 @@ mod tests {
             !sink
                 .events()
                 .iter()
-                .any(|e| matches!(e, AgentEvent::SessionTitleUpdated { .. })),
+                .any(|e| matches!(e, Event::SessionTitleUpdated { .. })),
             "no title event on parse failure",
         );
     }
@@ -451,7 +451,7 @@ mod tests {
         assert!(
             events.iter().any(|e| matches!(
                 e,
-                AgentEvent::Error(msg) if msg.contains("disk full")
+                Event::Error(msg) if msg.contains("disk full")
             )),
             "writer-failure on live session must surface as Error: {events:?}",
         );
@@ -482,13 +482,13 @@ mod tests {
 
         let events = sink.events();
         assert!(
-            !events.iter().any(|e| matches!(e, AgentEvent::Error(_))),
+            !events.iter().any(|e| matches!(e, Event::Error(_))),
             "post-finalize actor-gone must not surface as Error: {events:?}",
         );
         assert!(
             !events
                 .iter()
-                .any(|e| matches!(e, AgentEvent::SessionTitleUpdated { .. })),
+                .any(|e| matches!(e, Event::SessionTitleUpdated { .. })),
             "post-finalize must skip SessionTitleUpdated — title belongs to the dead session: {events:?}",
         );
     }
