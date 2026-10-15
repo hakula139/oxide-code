@@ -212,11 +212,11 @@ mod tests {
     use crate::slash::test_session_info;
     use crate::tui::components::chat::ChatView;
     use crate::tui::theme::Theme;
+    use crate::util::git::testing::{isolated_git, with_isolated_git_env};
 
     fn git_setup(cwd: &Path, args: &[&str]) {
-        let out = Command::new("git")
+        let out = isolated_git(cwd)
             .args(args)
-            .current_dir(cwd)
             .output()
             .expect("git available on PATH");
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -248,7 +248,7 @@ mod tests {
         let (_dir, repo) = fresh_repo();
         let mut chat = ChatView::new(&Theme::default(), false);
         let info = test_session_info();
-        execute_in(&repo, &mut SlashContext::new(&mut chat, &info))
+        with_isolated_git_env(|| execute_in(&repo, &mut SlashContext::new(&mut chat, &info)))
             .expect("clean repo execute_in is Ok");
         assert_eq!(chat.entry_count(), 1);
         assert!(!chat.last_is_error());
@@ -260,7 +260,7 @@ mod tests {
         std::fs::write(repo.join("note.txt"), "hello\n").unwrap();
         let mut chat = ChatView::new(&Theme::default(), false);
         let info = test_session_info();
-        execute_in(&repo, &mut SlashContext::new(&mut chat, &info))
+        with_isolated_git_env(|| execute_in(&repo, &mut SlashContext::new(&mut chat, &info)))
             .expect("dirty repo execute_in is Ok");
         assert_eq!(chat.entry_count(), 1);
         assert!(!chat.last_is_error());
@@ -271,8 +271,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut chat = ChatView::new(&Theme::default(), false);
         let info = test_session_info();
-        let err = execute_in(dir.path(), &mut SlashContext::new(&mut chat, &info))
-            .expect_err("execute_in must error outside a repo");
+        let err = with_isolated_git_env(|| {
+            execute_in(dir.path(), &mut SlashContext::new(&mut chat, &info))
+        })
+        .expect_err("execute_in must error outside a repo");
         assert!(err.contains("not inside a git repository"), "{err}");
     }
 
@@ -281,14 +283,17 @@ mod tests {
     #[test]
     fn collect_diff_in_fresh_repo_is_empty_when_nothing_staged() {
         let (_dir, repo) = fresh_repo();
-        assert_eq!(collect_diff_in(&repo).unwrap(), "");
+        assert_eq!(
+            with_isolated_git_env(|| collect_diff_in(&repo)).unwrap(),
+            ""
+        );
     }
 
     #[test]
     fn collect_diff_in_fresh_repo_lists_untracked_files() {
         let (_dir, repo) = fresh_repo();
         std::fs::write(repo.join("new.txt"), "hi\n").unwrap();
-        let body = collect_diff_in(&repo).unwrap();
+        let body = with_isolated_git_env(|| collect_diff_in(&repo)).unwrap();
         assert!(body.contains("Untracked files:"), "{body}");
         assert!(body.contains("new.txt"), "{body}");
     }
@@ -300,7 +305,7 @@ mod tests {
         git_setup(&repo, &["add", "a.txt"]);
         std::fs::write(repo.join("a.txt"), "staged\nunstaged\n").unwrap();
 
-        let body = collect_diff_in(&repo).unwrap();
+        let body = with_isolated_git_env(|| collect_diff_in(&repo)).unwrap();
 
         assert!(body.contains("+staged"), "staged add missing: {body}");
         assert!(body.contains("+unstaged"), "unstaged edit missing: {body}");
@@ -313,7 +318,7 @@ mod tests {
         git_setup(&repo, &["add", "a.txt"]);
         git_setup(&repo, &["commit", "--quiet", "-m", "init"]);
         std::fs::write(repo.join("a.txt"), "first\nsecond\n").unwrap();
-        let body = collect_diff_in(&repo).unwrap();
+        let body = with_isolated_git_env(|| collect_diff_in(&repo)).unwrap();
         assert!(body.contains("a.txt"), "diff body missing path: {body}");
         assert!(body.contains("+second"), "diff body missing add: {body}");
     }
@@ -326,7 +331,7 @@ mod tests {
         git_setup(&repo, &["commit", "--quiet", "-m", "init"]);
         std::fs::write(repo.join("a.txt"), "first\nedit\n").unwrap();
         std::fs::write(repo.join("untracked.txt"), "u\n").unwrap();
-        let body = collect_diff_in(&repo).unwrap();
+        let body = with_isolated_git_env(|| collect_diff_in(&repo)).unwrap();
         assert!(body.contains("+edit"), "{body}");
         assert!(body.contains("Untracked files:"), "{body}");
         assert!(body.contains("untracked.txt"), "{body}");
@@ -335,7 +340,7 @@ mod tests {
     #[test]
     fn collect_diff_in_errors_outside_a_repo() {
         let dir = tempfile::tempdir().unwrap();
-        let err = collect_diff_in(dir.path()).unwrap_err();
+        let err = with_isolated_git_env(|| collect_diff_in(dir.path())).unwrap_err();
         assert!(
             format!("{err:#}").contains("not inside a git repository"),
             "{err:#}",
@@ -402,13 +407,13 @@ mod tests {
     #[test]
     fn inside_git_repo_is_true_for_real_repo() {
         let (_dir, repo) = fresh_repo();
-        assert!(inside_git_repo(&repo).unwrap());
+        assert!(with_isolated_git_env(|| inside_git_repo(&repo)).unwrap());
     }
 
     #[test]
     fn inside_git_repo_is_false_outside_a_repo() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(!inside_git_repo(dir.path()).unwrap());
+        assert!(!with_isolated_git_env(|| inside_git_repo(dir.path())).unwrap());
     }
 
     // ── has_head ──
@@ -416,7 +421,7 @@ mod tests {
     #[test]
     fn has_head_is_false_in_fresh_repo_with_no_commits() {
         let (_dir, repo) = fresh_repo();
-        assert!(!has_head(&repo));
+        assert!(!with_isolated_git_env(|| has_head(&repo)));
     }
 
     #[test]
@@ -425,7 +430,7 @@ mod tests {
         std::fs::write(repo.join("a.txt"), "hello\n").unwrap();
         git_setup(&repo, &["add", "a.txt"]);
         git_setup(&repo, &["commit", "--quiet", "-m", "init"]);
-        assert!(has_head(&repo));
+        assert!(with_isolated_git_env(|| has_head(&repo)));
     }
 
     // ── run_git_diff_in ──
@@ -451,7 +456,8 @@ mod tests {
     #[test]
     fn run_git_in_propagates_stderr_on_failure() {
         let (_dir, repo) = fresh_repo();
-        let err = run_git_in(&repo, &["cat-file", "-t", "deadbeef"]).unwrap_err();
+        let err = with_isolated_git_env(|| run_git_in(&repo, &["cat-file", "-t", "deadbeef"]))
+            .unwrap_err();
         let msg = format!("{err:#}");
         let has_sha = msg.contains("deadbeef");
         let has_not_valid = msg.to_ascii_lowercase().contains("not a valid");

@@ -258,6 +258,7 @@ async fn find_git_root(cwd: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::git::testing::{isolated_git, with_isolated_git_env_async};
 
     // ── PromptParts::set_model ──
 
@@ -540,7 +541,9 @@ mod tests {
         let tmp = tempfile::tempdir().expect("failed to create tempdir");
         init_git_repo(tmp.path());
 
-        let root = find_git_root(tmp.path()).await.expect("expected git root");
+        let root = with_isolated_git_env_async(find_git_root(tmp.path()))
+            .await
+            .expect("expected git root");
         // Compare via canonicalize — macOS routes tempdirs through `/private`.
         let expected = tmp.path().canonicalize().unwrap();
         let actual = root.canonicalize().unwrap();
@@ -551,7 +554,7 @@ mod tests {
     #[tokio::test]
     async fn find_git_root_outside_repo() {
         let tmp = tempfile::tempdir().expect("failed to create tempdir");
-        let root = find_git_root(tmp.path()).await;
+        let root = with_isolated_git_env_async(find_git_root(tmp.path())).await;
         assert!(root.is_none());
     }
 
@@ -607,9 +610,8 @@ mod tests {
     }
 
     fn init_git_repo(path: &Path) {
-        let status = std::process::Command::new("git")
+        let status = isolated_git(path)
             .args(["init"])
-            .current_dir(path)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()

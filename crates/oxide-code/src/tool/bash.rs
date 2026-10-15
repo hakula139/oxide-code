@@ -1,20 +1,27 @@
 //! Shell command execution tool with timeout.
 
-use std::fmt::Write as _;
+use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
+use std::process::ExitStatus;
 use std::time::Duration;
 
 use serde::Deserialize;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
-use tokio::task::JoinHandle;
-use tokio::time::Instant;
 
-use super::{Tool, ToolMetadata, ToolOutput, extract_input_field, title_case};
+use super::{Tool, ToolOutput, extract_input_field, title_case};
+use crate::permission::PermissionClass;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_mins(2);
-const PIPE_CAPTURE_BYTES: usize = super::MAX_OUTPUT_BYTES;
+const MAX_TIMEOUT: Duration = Duration::from_mins(10);
+const KILL_DRAIN_GRACE: Duration = Duration::from_millis(250);
+
+/// Bytes of pipe output one call renders. The reserve below the dispatcher cap holds the omission
+/// markers, the stream separator, and the footer, so the dispatcher never re-truncates bash output.
+const OUTPUT_BUDGET: usize = super::MAX_OUTPUT_BYTES - 256;
+const PIPE_HEAD_BYTES: usize = OUTPUT_BUDGET / 2;
+const PIPE_TAIL_BYTES: usize = OUTPUT_BUDGET - PIPE_HEAD_BYTES;
 const PIPE_READ_CHUNK_BYTES: usize = 8 * 1024;
 
 const NO_OUTPUT_MARKER: &str = "(no output)";
@@ -30,8 +37,8 @@ impl Tool for BashTool {
         "Execute a shell command and return its output."
     }
 
-    fn permission_class(&self) -> crate::permission::PermissionClass {
-        crate::permission::PermissionClass::Bash
+    fn permission_class(&self) -> PermissionClass {
+        PermissionClass::Bash
     }
 
     fn gate_target(
@@ -58,7 +65,7 @@ impl Tool for BashTool {
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "Timeout in milliseconds (default: 120000)"
+                    "description": "Timeout in milliseconds, at most 600000. Omit or pass 0 for the default of 120000."
                 }
             },
             "required": ["command"]
@@ -104,7 +111,7 @@ async fn run(raw: serde_json::Value) -> ToolOutput {
         Err(e) => return e,
     };
 
-    let timeout = input.timeout.map_or(DEFAULT_TIMEOUT, Duration::from_millis);
+    let timeout = resolve_timeout(input.timeout);
 
     let mut output = execute(&input.command, timeout).await;
 
@@ -113,6 +120,13 @@ async fn run(raw: serde_json::Value) -> ToolOutput {
     }
 
     output
+}
+
+fn resolve_timeout(millis: Option<u64>) -> Duration {
+    match millis {
+        None | Some(0) => DEFAULT_TIMEOUT,
+        Some(ms) => Duration::from_millis(ms).min(MAX_TIMEOUT),
+    }
 }
 
 async fn execute(command: &str, timeout: Duration) -> ToolOutput {
@@ -132,171 +146,194 @@ async fn execute(command: &str, timeout: Duration) -> ToolOutput {
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            return ToolOutput {
-                content: format!("Failed to execute command: {e}"),
-                is_error: true,
-                metadata: ToolMetadata::default(),
-            };
+            return ToolOutput::error(format!("Failed to execute command: {e}"));
         }
     };
 
     let pgid = child.id();
 
-    let stdout = child.stdout.take().expect("stdout configured as piped");
-    let stderr = child.stderr.take().expect("stderr configured as piped");
-    let mut stdout_task = tokio::spawn(read_capped_pipe(stdout));
-    let mut stderr_task = tokio::spawn(read_capped_pipe(stderr));
-    let deadline = Instant::now() + timeout;
+    let mut stdout = child.stdout.take().expect("stdout configured as piped");
+    let mut stderr = child.stderr.take().expect("stderr configured as piped");
+    let mut stdout_capture = PipeCapture::default();
+    let mut stderr_capture = PipeCapture::default();
 
-    let status = match tokio::time::timeout_at(deadline, child.wait()).await {
-        Ok(Ok(status)) => status,
-        Ok(Err(e)) => {
-            return ToolOutput {
-                content: format!("Failed to execute command: {e}"),
-                is_error: true,
-                metadata: ToolMetadata::default(),
-            };
-        }
-        Err(_) => {
-            return timeout_output(timeout, pgid, &stdout_task, &stderr_task);
-        }
+    // One deadline covers the exit and the pipe drain, so a backgrounded descendant that holds the
+    // pipes open cannot stretch the call past the timeout.
+    let finished = tokio::time::timeout(timeout, async {
+        tokio::join!(
+            child.wait(),
+            stdout_capture.drain(&mut stdout),
+            stderr_capture.drain(&mut stderr),
+        )
+    })
+    .await;
+
+    let Ok((status, stdout_read, stderr_read)) = finished else {
+        // kill_on_drop handles bash, and kill_process_group catches detached grandchildren on
+        // Unix. Killing the group closes its pipe ends, so the grace drain only waits on a holder
+        // that escaped the group.
+        kill_process_group(pgid);
+        _ = tokio::time::timeout(KILL_DRAIN_GRACE, async {
+            tokio::join!(
+                stdout_capture.drain(&mut stdout),
+                stderr_capture.drain(&mut stderr),
+            )
+        })
+        .await;
+        return timeout_output(timeout, &stdout_capture, &stderr_capture);
     };
 
-    let Ok(stdout) = tokio::time::timeout_at(deadline, collect_pipe(&mut stdout_task)).await else {
-        return timeout_output(timeout, pgid, &stdout_task, &stderr_task);
-    };
-    let stdout = match stdout {
-        Ok(output) => output,
+    let status = match status {
+        Ok(status) => status,
         Err(e) => {
-            return ToolOutput {
-                content: format!("Failed to read command stdout: {e}"),
-                is_error: true,
-                metadata: ToolMetadata::default(),
-            };
+            return ToolOutput::error(format!("Failed to execute command: {e}"));
         }
     };
-    let Ok(stderr) = tokio::time::timeout_at(deadline, collect_pipe(&mut stderr_task)).await else {
-        return timeout_output(timeout, pgid, &stdout_task, &stderr_task);
-    };
-    let stderr = match stderr {
-        Ok(output) => output,
-        Err(e) => {
-            return ToolOutput {
-                content: format!("Failed to read command stderr: {e}"),
-                is_error: true,
-                metadata: ToolMetadata::default(),
-            };
-        }
-    };
-
-    let exit_code = status.code();
-
-    let mut content = String::new();
-    let stdout = render_pipe(&stdout, true);
-    let stderr = render_pipe(&stderr, false);
-    if !stdout.is_empty() {
-        content.push_str(&stdout);
+    if let Err(e) = stdout_read {
+        return ToolOutput::error(format!("Failed to read command stdout: {e}"));
     }
-    if !stderr.is_empty() {
-        if !content.is_empty() {
-            content.push('\n');
-        }
-        content.push_str(&stderr);
+    if let Err(e) = stderr_read {
+        return ToolOutput::error(format!("Failed to read command stderr: {e}"));
     }
+
+    let mut content = render_streams(&stdout_capture, &stderr_capture);
     if !status.success() {
-        let code = exit_code.unwrap_or(-1);
-        if !content.is_empty() {
-            content.push_str("\n\n");
-        }
-        _ = write!(content, "(exit code {code})");
+        push_footer(&mut content, &exit_footer(status));
     }
     if content.is_empty() {
         content.push_str(NO_OUTPUT_MARKER);
     }
 
-    // Nonzero exit is reported in the body, not as `is_error`: tools the model invokes (`grep`
-    // returning 1 on no match, `test`-style probes) are expected to use the exit code as a signal.
-    // Reserving `is_error` for spawn / timeout failures keeps the model from treating those probes
-    // as hard failures.
-    ToolOutput {
-        content,
-        is_error: false,
-        metadata: ToolMetadata::default(),
+    // A nonzero exit stays in the body because commands like `grep` (1 on no match) and `test`
+    // probes signal through their exit code. Reserving `is_error` for spawn, pipe, and timeout
+    // failures keeps the model from treating those probes as hard failures.
+    ToolOutput::success(content)
+}
+
+fn timeout_output(timeout: Duration, stdout: &PipeCapture, stderr: &PipeCapture) -> ToolOutput {
+    let mut content = render_streams(stdout, stderr);
+    push_footer(
+        &mut content,
+        &format!("Command timed out after {}ms", timeout.as_millis()),
+    );
+    ToolOutput::error(content)
+}
+
+fn exit_footer(status: ExitStatus) -> String {
+    #[cfg(unix)]
+    if let Some(signal) = std::os::unix::process::ExitStatusExt::signal(&status) {
+        return format!("(killed by signal {signal})");
+    }
+    // Without a signal, `wait` always reports an exit code, so the fallback never renders.
+    format!("(exit code {})", status.code().unwrap_or(-1))
+}
+
+// ── Output Rendering ──
+
+fn render_streams(stdout: &PipeCapture, stderr: &PipeCapture) -> String {
+    let (stdout_budget, stderr_budget) = split_budget(stdout.kept(), stderr.kept(), OUTPUT_BUDGET);
+    let stdout = render_pipe(stdout, stdout_budget, true);
+    let stderr = render_pipe(stderr, stderr_budget, false);
+    match (stdout.is_empty(), stderr.is_empty()) {
+        (_, true) => stdout,
+        (true, false) => stderr,
+        (false, false) => format!("{stdout}\n{stderr}"),
     }
 }
 
-fn timeout_output(
-    timeout: Duration,
-    pgid: Option<u32>,
-    stdout_task: &JoinHandle<std::io::Result<CapturedPipe>>,
-    stderr_task: &JoinHandle<std::io::Result<CapturedPipe>>,
-) -> ToolOutput {
-    // kill_on_drop handles bash; kill_process_group catches detached grandchildren on Unix.
-    kill_process_group(pgid);
-    stdout_task.abort();
-    stderr_task.abort();
-    ToolOutput {
-        content: format!("Command timed out after {}ms", timeout.as_millis()),
-        is_error: true,
-        metadata: ToolMetadata::default(),
+fn push_footer(content: &mut String, footer: &str) {
+    if !content.is_empty() {
+        content.push_str("\n\n");
     }
+    content.push_str(footer);
+}
+
+/// Splits `budget` between parts wanting `first` and `second` bytes. Each gets up to half, and a
+/// part needing less hands its unused share to the other.
+fn split_budget(first: usize, second: usize, budget: usize) -> (usize, usize) {
+    let second = second.min(budget - first.min(budget / 2));
+    (first.min(budget - second), second)
+}
+
+/// Renders at most `budget` bytes of `pipe`, folding everything it drops into the omission count.
+fn render_pipe(pipe: &PipeCapture, budget: usize, trim_start_newlines: bool) -> String {
+    let tail: Vec<u8> = pipe.tail.iter().copied().collect();
+    let (head_len, tail_len) = split_budget(pipe.head.len(), tail.len(), budget);
+    let mut head = &pipe.head[..head_len];
+    let mut tail = &tail[tail.len() - tail_len..];
+    let mut omitted = pipe.omitted + (pipe.head.len() - head_len) + (pipe.tail.len() - tail_len);
+
+    let text = if omitted == 0 {
+        String::from_utf8_lossy(&[head, tail].concat()).into_owned()
+    } else {
+        // Either cut can split a multibyte char, and its stray bytes would decode as U+FFFD.
+        let split_char = head.utf8_chunks().last().map_or(0, |c| c.invalid().len());
+        let continuations = tail
+            .iter()
+            .take(3)
+            .take_while(|&&b| b & 0xC0 == 0x80)
+            .count();
+        head = &head[..head.len() - split_char];
+        tail = &tail[continuations..];
+        omitted += split_char + continuations;
+        format!(
+            "{}\n... [{omitted} bytes omitted] ...\n{}",
+            String::from_utf8_lossy(head),
+            String::from_utf8_lossy(tail),
+        )
+    };
+
+    let text = text.trim_end();
+    let text = if trim_start_newlines {
+        text.trim_start_matches('\n')
+    } else {
+        text.trim_start()
+    };
+    text.to_owned()
 }
 
 // ── Pipe Capture ──
 
-#[derive(Debug, PartialEq, Eq)]
-struct CapturedPipe {
-    bytes: Vec<u8>,
+/// Bounded capture of one pipe: the first [`PIPE_HEAD_BYTES`] and the last [`PIPE_TAIL_BYTES`],
+/// with the bytes dropped between them counted in `omitted`.
+#[derive(Debug, Default)]
+struct PipeCapture {
+    head: Vec<u8>,
+    tail: VecDeque<u8>,
     omitted: usize,
 }
 
-async fn read_capped_pipe<R>(mut reader: R) -> std::io::Result<CapturedPipe>
-where
-    R: AsyncRead + Unpin,
-{
-    let mut bytes = Vec::new();
-    let mut omitted = 0;
-    let mut buf = [0; PIPE_READ_CHUNK_BYTES];
-    loop {
-        let n = reader.read(&mut buf).await?;
-        if n == 0 {
-            break;
+impl PipeCapture {
+    /// Reads `reader` to EOF. Cancel-safe: each chunk is recorded as soon as it is read, so a drain
+    /// cut short by the timeout keeps everything that arrived, and a later call resumes it.
+    async fn drain<R>(&mut self, reader: &mut R) -> std::io::Result<()>
+    where
+        R: AsyncRead + Unpin,
+    {
+        let mut buf = vec![0; PIPE_READ_CHUNK_BYTES];
+        loop {
+            let n = reader.read(&mut buf).await?;
+            if n == 0 {
+                return Ok(());
+            }
+            self.push(&buf[..n]);
         }
-        let remaining = PIPE_CAPTURE_BYTES.saturating_sub(bytes.len());
-        let keep = remaining.min(n);
-        bytes.extend_from_slice(&buf[..keep]);
-        omitted += n - keep;
-    }
-    Ok(CapturedPipe { bytes, omitted })
-}
-
-async fn collect_pipe(
-    task: &mut JoinHandle<std::io::Result<CapturedPipe>>,
-) -> std::io::Result<CapturedPipe> {
-    task.await.map_err(std::io::Error::other)?
-}
-
-fn render_pipe(pipe: &CapturedPipe, trim_start_newlines: bool) -> String {
-    let text = String::from_utf8_lossy(&pipe.bytes);
-    let mut text = text.trim_end();
-    if trim_start_newlines {
-        text = text.trim_start_matches('\n');
-    } else {
-        text = text.trim();
     }
 
-    let mut rendered = text.to_owned();
-    if pipe.omitted > 0 {
-        if !rendered.is_empty() {
-            rendered.push('\n');
-        }
-        _ = write!(
-            rendered,
-            "(stream truncated: {} bytes omitted)",
-            pipe.omitted
-        );
+    fn kept(&self) -> usize {
+        self.head.len() + self.tail.len()
     }
-    rendered
+
+    fn push(&mut self, chunk: &[u8]) {
+        let head_room = PIPE_HEAD_BYTES.saturating_sub(self.head.len());
+        let (head, rest) = chunk.split_at(head_room.min(chunk.len()));
+        self.head.extend_from_slice(head);
+        self.tail.extend(rest);
+
+        let overflow = self.tail.len().saturating_sub(PIPE_TAIL_BYTES);
+        self.tail.drain(..overflow);
+        self.omitted += overflow;
+    }
 }
 
 // ── Process Group Cleanup ──
@@ -320,9 +357,18 @@ fn kill_process_group(_pgid: Option<u32>) {}
 mod tests {
     use std::path::Path;
 
+    use tokio::io::AsyncWriteExt as _;
+
     use super::*;
     use crate::permission::GateTarget;
-    use tokio::io::AsyncWriteExt as _;
+    use crate::tool::MAX_OUTPUT_BYTES;
+
+    // ── permission_class ──
+
+    #[test]
+    fn permission_class_is_bash() {
+        assert_eq!(BashTool.permission_class(), PermissionClass::Bash);
+    }
 
     // ── gate_target ──
 
@@ -373,27 +419,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_timeout() {
+    async fn run_timeout_keeps_partial_output() {
+        // The timeout leaves bash ample time to print before the kill, even under parallel load.
         let output = run(serde_json::json!({
-            "command": "sleep 10",
-            "timeout": 100
+            "command": "echo started; sleep 10",
+            "timeout": 1_000
         }))
         .await;
         assert!(output.is_error);
-        assert_eq!(output.content, "Command timed out after 100ms");
+        assert_eq!(output.content, "started\n\nCommand timed out after 1000ms");
+    }
+
+    // ── resolve_timeout ──
+
+    #[test]
+    fn resolve_timeout_defaults_zero_and_caps_the_ceiling() {
+        assert_eq!(resolve_timeout(None), DEFAULT_TIMEOUT);
+        assert_eq!(resolve_timeout(Some(0)), DEFAULT_TIMEOUT);
+        assert_eq!(resolve_timeout(Some(5_000)), Duration::from_secs(5));
+        assert_eq!(resolve_timeout(Some(u64::MAX)), MAX_TIMEOUT);
     }
 
     // ── execute ──
 
     async fn run_default(cmd: &str) -> ToolOutput {
         execute(cmd, DEFAULT_TIMEOUT).await
-    }
-
-    #[tokio::test]
-    async fn execute_echo() {
-        let output = run_default("echo hello").await;
-        assert!(!output.is_error);
-        assert_eq!(output.content, "hello");
     }
 
     #[tokio::test]
@@ -424,6 +474,14 @@ mod tests {
         assert_eq!(output.content, "partial\n\n(exit code 1)");
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn execute_signal_death_names_the_signal() {
+        let output = run_default("echo before; kill -9 $$").await;
+        assert!(!output.is_error);
+        assert_eq!(output.content, "before\n\n(killed by signal 9)");
+    }
+
     #[tokio::test]
     async fn execute_no_output() {
         let output = run_default("true").await;
@@ -432,18 +490,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_large_output_is_bounded_while_pipe_is_drained() {
-        let bytes = PIPE_CAPTURE_BYTES + 1024;
-        let output = run_default(&format!("yes x | head -c {bytes}")).await;
+    async fn execute_large_output_keeps_head_and_tail() {
+        // `cargo build 2>&1` puts its error summary last, so the tail must survive the pipe cap.
+        let filler = PIPE_HEAD_BYTES + PIPE_TAIL_BYTES + 1024;
+        let output = run_default(&format!("echo HEAD; yes x | head -c {filler}; echo TAIL")).await;
 
         assert!(!output.is_error);
+        assert!(output.content.starts_with("HEAD\nx\n"), "head kept");
+        assert!(output.content.ends_with("x\nTAIL"), "tail kept");
+        let omitted = "HEAD\n".len() + filler + "TAIL\n".len() - PIPE_HEAD_BYTES - PIPE_TAIL_BYTES;
         assert!(
-            output.content.len() <= PIPE_CAPTURE_BYTES + 128,
-            "output should stay near the pipe cap, got {} bytes",
-            output.content.len(),
+            output
+                .content
+                .contains(&format!("\n... [{omitted} bytes omitted] ...\n")),
+            "middle marker counts the dropped bytes",
         );
-        assert!(output.content.contains("stream truncated"));
-        assert!(output.content.contains("1024 bytes omitted"));
+        assert!(output.content.len() <= PIPE_HEAD_BYTES + PIPE_TAIL_BYTES + 64);
     }
 
     #[cfg(unix)]
@@ -459,6 +521,7 @@ mod tests {
         let start = std::time::Instant::now();
         let output = execute(&command, Duration::from_millis(100)).await;
         assert!(output.is_error, "expected timeout");
+        assert_eq!(output.content, "Command timed out after 100ms");
         assert!(
             start.elapsed() < Duration::from_millis(500),
             "timeout did not return promptly",
@@ -475,84 +538,156 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn execute_timeout_covers_background_pipe_holders() {
+        // The backgrounded `sleep` holds the pipes open past bash's exit. The timeout leaves bash
+        // ample time to print first, even under parallel load.
         let start = std::time::Instant::now();
-        let output = execute("sleep 5 & echo done", Duration::from_millis(100)).await;
+        let output = execute("sleep 5 & echo done", Duration::from_millis(1_000)).await;
 
         assert!(output.is_error, "expected timeout");
-        assert_eq!(output.content, "Command timed out after 100ms");
+        assert_eq!(output.content, "done\n\nCommand timed out after 1000ms");
         assert!(
-            start.elapsed() < Duration::from_millis(500),
+            start.elapsed() < Duration::from_secs(3),
             "timeout did not cover pipe collection",
         );
     }
 
-    // ── read_capped_pipe ──
+    // ── render_streams ──
 
-    #[tokio::test]
-    async fn read_capped_pipe_bounds_retained_bytes_and_counts_omitted() {
-        let (mut writer, reader) = tokio::io::duplex(PIPE_CAPTURE_BYTES + 16);
-        let input = vec![b'x'; PIPE_CAPTURE_BYTES + 16];
-        let writer_task = tokio::spawn(async move {
-            writer.write_all(&input).await.unwrap();
-        });
-
-        let pipe = read_capped_pipe(reader).await.unwrap();
-        writer_task.await.unwrap();
-
-        assert_eq!(pipe.bytes.len(), PIPE_CAPTURE_BYTES);
-        assert!(pipe.bytes.iter().all(|&b| b == b'x'));
-        assert_eq!(pipe.omitted, 16);
+    /// Reads the byte count out of each `[N bytes omitted]` marker in `content`.
+    fn omitted_counts(content: &str) -> Vec<usize> {
+        content
+            .split("... [")
+            .skip(1)
+            .map(|rest| rest[..rest.find(' ').unwrap()].parse().unwrap())
+            .collect()
     }
 
-    // ── collect_pipe ──
+    #[test]
+    fn render_streams_fits_overflowing_pipes_under_the_dispatcher_cap() {
+        // `a` and `z` appear nowhere in the marker text, so counting them counts kept bytes.
+        for (stdout_len, stderr_len) in [(10 << 20, 1024), (300 << 10, 300 << 10)] {
+            let mut stdout = PipeCapture::default();
+            stdout.push(&vec![b'a'; stdout_len]);
+            let mut stderr = PipeCapture::default();
+            stderr.push(&vec![b'z'; stderr_len]);
 
-    #[tokio::test]
-    async fn collect_pipe_surfaces_join_failure() {
-        let mut task =
-            tokio::spawn(async { std::future::pending::<std::io::Result<CapturedPipe>>().await });
-        task.abort();
+            let content = render_streams(&stdout, &stderr);
 
-        let err = collect_pipe(&mut task)
-            .await
-            .expect_err("join error should surface");
-        assert!(err.to_string().contains("cancelled"), "{err}");
+            assert!(
+                content.len() <= MAX_OUTPUT_BYTES,
+                "{stdout_len} / {stderr_len}"
+            );
+            let (stdout_text, stderr_text) = content.split_once("\nz").unwrap();
+            let stdout_omitted = omitted_counts(stdout_text);
+            assert_eq!(stdout_omitted.len(), 1);
+            assert_eq!(
+                stdout_text.matches('a').count() + stdout_omitted[0],
+                stdout_len
+            );
+            let stderr_omitted: usize = omitted_counts(stderr_text).iter().sum();
+            assert_eq!(
+                stderr_text.matches('z').count() + 1 + stderr_omitted,
+                stderr_len
+            );
+        }
+    }
+
+    // ── split_budget ──
+
+    #[test]
+    fn split_budget_hands_an_unused_share_to_the_other_part() {
+        assert_eq!(split_budget(10, 20, 100), (10, 20));
+        assert_eq!(split_budget(10, 1_000, 100), (10, 90));
+        assert_eq!(split_budget(1_000, 10, 100), (90, 10));
+        assert_eq!(split_budget(1_000, 1_000, 100), (50, 50));
     }
 
     // ── render_pipe ──
 
-    #[test]
-    fn render_pipe_appends_truncation_marker_after_captured_text() {
-        let pipe = CapturedPipe {
-            bytes: b"\nhello\n".to_vec(),
-            omitted: 7,
-        };
+    fn capture(head: &[u8], tail: &[u8], omitted: usize) -> PipeCapture {
+        PipeCapture {
+            head: head.to_vec(),
+            tail: tail.iter().copied().collect(),
+            omitted,
+        }
+    }
 
+    #[test]
+    fn render_pipe_marks_the_omitted_middle_between_head_and_tail() {
+        let pipe = capture(b"\nhello\n", b"world\n", 7);
         assert_eq!(
-            render_pipe(&pipe, true),
-            "hello\n(stream truncated: 7 bytes omitted)",
+            render_pipe(&pipe, OUTPUT_BUDGET, true),
+            "hello\n\n... [7 bytes omitted] ...\nworld",
         );
+    }
+
+    #[test]
+    fn render_pipe_folds_chars_split_by_the_omission_into_the_count() {
+        let crab = "🦀".as_bytes();
+        let pipe = capture(
+            &[b"ab", &crab[..2]].concat(),
+            &[&crab[1..], b"cd"].concat(),
+            5,
+        );
+        assert_eq!(
+            render_pipe(&pipe, OUTPUT_BUDGET, true),
+            "ab\n... [10 bytes omitted] ...\ncd",
+        );
+    }
+
+    #[test]
+    fn render_pipe_over_budget_drops_the_middle_and_counts_it() {
+        let pipe = capture(b"0123456789", b"abcdef4321", 0);
+        assert_eq!(
+            render_pipe(&pipe, 8, true),
+            "0123\n... [12 bytes omitted] ...\n4321",
+        );
+    }
+
+    #[test]
+    fn render_pipe_decodes_head_and_tail_together_when_nothing_was_omitted() {
+        // A multibyte char straddling the head / tail split must not decode as two replacements.
+        let crab = "🦀".as_bytes();
+        let pipe = capture(&crab[..2], &crab[2..], 0);
+        assert_eq!(render_pipe(&pipe, OUTPUT_BUDGET, true), "🦀");
     }
 
     #[test]
     fn render_pipe_trims_stderr_edges_and_keeps_internal_newlines() {
-        let pipe = CapturedPipe {
-            bytes: b"\nerr\nmore\n\n".to_vec(),
-            omitted: 0,
-        };
-
-        assert_eq!(render_pipe(&pipe, false), "err\nmore");
+        let pipe = capture(b"\nerr\nmore\n\n", b"", 0);
+        assert_eq!(render_pipe(&pipe, OUTPUT_BUDGET, false), "err\nmore");
     }
 
-    #[test]
-    fn render_pipe_renders_marker_when_every_byte_was_omitted() {
-        let pipe = CapturedPipe {
-            bytes: Vec::new(),
-            omitted: 3,
-        };
+    // ── PipeCapture::drain ──
 
-        assert_eq!(
-            render_pipe(&pipe, true),
-            "(stream truncated: 3 bytes omitted)"
+    #[tokio::test]
+    async fn drain_cut_short_keeps_what_already_arrived() {
+        let (mut writer, mut reader) = tokio::io::duplex(64);
+        writer.write_all(b"partial").await.unwrap();
+
+        let mut pipe = PipeCapture::default();
+        let drained =
+            tokio::time::timeout(Duration::from_millis(50), pipe.drain(&mut reader)).await;
+
+        assert!(
+            drained.is_err(),
+            "writer is still open, so the drain must time out"
         );
+        assert_eq!(pipe.head, b"partial");
+    }
+
+    // ── PipeCapture::push ──
+
+    #[test]
+    fn push_keeps_head_and_tail_across_chunks_and_counts_the_middle() {
+        let mut pipe = PipeCapture::default();
+        pipe.push(&vec![b'h'; PIPE_HEAD_BYTES - 1]);
+        pipe.push(b"hm");
+        pipe.push(&[b'm'; 99]);
+        pipe.push(&vec![b't'; PIPE_TAIL_BYTES]);
+
+        assert_eq!(pipe.head, vec![b'h'; PIPE_HEAD_BYTES]);
+        assert_eq!(pipe.tail, vec![b't'; PIPE_TAIL_BYTES]);
+        assert_eq!(pipe.omitted, 100);
     }
 }

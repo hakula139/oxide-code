@@ -2,7 +2,6 @@
 
 use std::fmt::Write as _;
 use std::future::Future;
-use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -12,11 +11,14 @@ use super::{
     ReadExcerptLine, Tool, ToolMetadata, ToolOutput, ToolResultView, display_cwd_path,
     extract_input_field, summarize_path_call,
 };
-use crate::file_tracker::{
-    CACHE_HIT_STUB, FileTracker, LastView, RecordRead, TrackableFileError, validate_trackable_file,
-};
+use crate::file_tracker::{CACHE_HIT_STUB, FileTracker, LastView, RecordRead};
+use crate::permission::PermissionClass;
 
 const DEFAULT_LINE_LIMIT: usize = 2000;
+const MAX_LINE_CHARS: usize = 2000;
+
+/// Excerpt bytes one Read emits, leaving room under the dispatcher cap for the footer.
+const OUTPUT_BUDGET: usize = super::MAX_OUTPUT_BYTES - 128;
 
 const EMPTY_FILE_MARKER: &str = "(empty file)";
 
@@ -39,8 +41,8 @@ impl Tool for ReadTool {
         "Read the contents of a file with line numbers."
     }
 
-    fn permission_class(&self) -> crate::permission::PermissionClass {
-        crate::permission::PermissionClass::Read
+    fn permission_class(&self) -> PermissionClass {
+        PermissionClass::Read
     }
 
     fn path_field(&self) -> Option<&'static str> {
@@ -118,28 +120,31 @@ async fn run(raw: serde_json::Value, tracker: Arc<FileTracker>) -> ToolOutput {
         Err(e) => return e,
     };
 
-    let name = super::file_name(&input.file_path);
-    ToolOutput::from_result(read_file(&input.file_path, input.offset, input.limit, &tracker).await)
-        .with_title(format!("Read {name}"))
+    match read_file(&input.file_path, input.offset, input.limit, &tracker).await {
+        Ok(content) => ToolOutput::success(content)
+            .with_title(format!("Read {}", super::file_name(&input.file_path))),
+        Err(msg) => ToolOutput::error(msg),
+    }
 }
 
 /// Reads `path` as text and returns a tab-separated `LINENO\tTEXT` excerpt.
 ///
-/// Refuses directories, non-regular files (FIFO / socket / device — these can report `len() == 0`
+/// Refuses directories, non-regular files (FIFO / socket / device, which can report `len() == 0`
 /// and would otherwise bypass the size gate), files larger than `MAX_TRACKED_FILE_SIZE`, and files
 /// with a NUL byte in the first 8 KiB. A leading UTF-8 BOM is stripped before line splitting.
 ///
-/// Records the read with the [`FileTracker`] so a follow-up Edit / Write can clear the
-/// Read-before-Edit gate. A no-arg read records [`LastView::Full`]; any `offset` or `limit`
-/// records [`LastView::Partial`] so partial views never satisfy the full-read precondition.
+/// The excerpt stops after `limit` lines or before `OUTPUT_BUDGET` bytes, and its footer names the
+/// lines shown. Those lines are recorded with the [`FileTracker`] for the Read-before-Edit gate.
 async fn read_file(
     path: &str,
     offset: Option<usize>,
     limit: Option<usize>,
     tracker: &FileTracker,
 ) -> Result<String, String> {
-    let (metadata, bytes) =
-        super::read_validated(path, |metadata| validate_read_target(path, metadata)).await?;
+    let (metadata, bytes) = super::read_validated(path, |metadata| {
+        super::validate_file_target(path, metadata, "read")
+    })
+    .await?;
 
     if super::is_binary(&bytes) {
         return Err("File appears to be binary. Use the bash tool to inspect binary files.".into());
@@ -149,7 +154,7 @@ async fn read_file(
         .modified()
         .map_err(|e| format!("Error reading {path}: {e}"))?;
     let size = metadata.len();
-    let view = view_for(offset, limit);
+    let key = super::tracker_key(path).await;
 
     let text = String::from_utf8_lossy(&bytes);
     let text = strip_bom(&text);
@@ -157,11 +162,10 @@ async fn read_file(
     let lines: Vec<&str> = text.lines().collect();
     let total_lines = lines.len();
     if total_lines == 0 {
-        let outcome = tracker.record_read(Path::new(path), &bytes, mtime, size, view);
+        let outcome = tracker.record_read(&key, &bytes, mtime, size, LastView::Full);
         return Ok(stub_or(outcome, EMPTY_FILE_MARKER).into_owned());
     }
 
-    // offset is 1-indexed; 0 is treated as 1.
     let offset_n = offset.unwrap_or(1).max(1);
     let limit_n = limit.unwrap_or(DEFAULT_LINE_LIMIT).max(1);
     let start_idx = offset_n - 1;
@@ -175,60 +179,39 @@ async fn read_file(
     let mut num_shown: usize = 0;
     for (i, line) in lines[start_idx..].iter().enumerate().take(limit_n) {
         let line_num = start_idx + i + 1;
+        let row_start = output.len();
         if !output.is_empty() {
             output.push('\n');
         }
-        _ = write!(output, "{line_num}\t{}", super::truncate_line(line));
+        _ = write!(
+            output,
+            "{line_num}\t{}",
+            super::truncate_line(line, MAX_LINE_CHARS)
+        );
+        if output.len() > OUTPUT_BUDGET {
+            output.truncate(row_start);
+            break;
+        }
         num_shown += 1;
     }
 
+    let last_shown = offset_n + num_shown - 1;
     if num_shown < total_lines {
-        let last_shown = offset_n + num_shown - 1;
         _ = write!(
             output,
             "\n\n(Showing lines {offset_n}–{last_shown} of {total_lines} total)"
         );
     }
 
-    let outcome = tracker.record_read(Path::new(path), &bytes, mtime, size, view);
+    let view = LastView::lines(offset_n, last_shown, total_lines);
+    let outcome = tracker.record_read(&key, &bytes, mtime, size, view);
     Ok(stub_or(outcome, &output).into_owned())
-}
-
-fn validate_read_target(path: &str, metadata: &std::fs::Metadata) -> Result<(), String> {
-    // Pseudo-files report len() == 0, bypassing the size gate.
-    match validate_trackable_file(metadata) {
-        Ok(()) => Ok(()),
-        Err(TrackableFileError::Directory) => Err(format!(
-            "{path} is a directory. Use the glob tool to list directory contents."
-        )),
-        Err(TrackableFileError::NonRegular) => Err(format!(
-            "{path} is not a regular file (fifo, socket, or device). Refusing to read.",
-        )),
-        Err(TrackableFileError::TooLarge { size, max }) => {
-            let mb = super::bytes_to_mb(size);
-            let limit_mb = max / (1024 * 1024);
-            Err(format!(
-                "File is too large ({mb:.1} MB, max {limit_mb} MB). \
-                 Use offset and limit to read specific portions.",
-            ))
-        }
-    }
 }
 
 fn stub_or(outcome: RecordRead, body: &str) -> std::borrow::Cow<'_, str> {
     match outcome {
         RecordRead::CacheHit => std::borrow::Cow::Borrowed(CACHE_HIT_STUB),
         RecordRead::Inserted => std::borrow::Cow::Borrowed(body),
-    }
-}
-
-fn view_for(offset: Option<usize>, limit: Option<usize>) -> LastView {
-    match (offset, limit) {
-        (None, None) => LastView::Full,
-        (offset, limit) => LastView::Partial {
-            offset: offset.unwrap_or(1),
-            limit: limit.unwrap_or(DEFAULT_LINE_LIMIT),
-        },
     }
 }
 
@@ -288,13 +271,15 @@ mod tests {
     use indoc::indoc;
 
     use super::*;
-    use crate::file_tracker::{GatePurpose, MAX_TRACKED_FILE_SIZE, testing::tracker};
+    use crate::file_tracker::{GateError, GatePurpose, MAX_TRACKED_FILE_SIZE, testing::tracker};
+    use crate::tool::MAX_OUTPUT_BYTES;
+    use crate::tool::testing::canonical_tempdir;
 
     // ── run ──
 
     #[tokio::test]
     async fn run_reads_file() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = canonical_tempdir();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello\nworld\n").unwrap();
 
@@ -311,7 +296,7 @@ mod tests {
     #[tokio::test]
     async fn run_records_full_read_in_tracker() {
         // A no-args read populates the tracker as Full so a follow-up Edit clears the gate.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = canonical_tempdir();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello\n").unwrap();
         let tracker = tracker();
@@ -329,7 +314,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_full_reread_is_cache_hit_stub() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = canonical_tempdir();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello\nworld\n").unwrap();
         let tracker = tracker();
@@ -353,7 +338,7 @@ mod tests {
     #[tokio::test]
     async fn run_partial_reread_does_not_cache_hit() {
         // Partial reads always return the slice so the model can re-request a different range.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = canonical_tempdir();
         let path = dir.path().join("test.txt");
         std::fs::write(
             &path,
@@ -384,11 +369,25 @@ mod tests {
         assert!(output.content.contains("Invalid input"));
     }
 
+    #[tokio::test]
+    async fn run_read_error_omits_title() {
+        let output = run(
+            serde_json::json!({"file_path": "/nonexistent/path.txt"}),
+            tracker(),
+        )
+        .await;
+        assert!(output.is_error);
+        assert_eq!(
+            output.metadata.title, None,
+            "error path must not claim the read happened",
+        );
+    }
+
     // ── read_file ──
 
     #[tokio::test]
     async fn read_file_with_line_numbers() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = canonical_tempdir();
         let path = dir.path().join("test.txt");
         std::fs::write(
             &path,
@@ -408,7 +407,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_file_respects_offset_and_limit() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = canonical_tempdir();
         let path = dir.path().join("test.txt");
         std::fs::write(
             &path,
@@ -434,8 +433,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_file_window_covering_every_line_records_full() {
+        let dir = canonical_tempdir();
+        let path = dir.path().join("test.txt");
+        std::fs::write(&path, "a\nb\n").unwrap();
+        let tracker = FileTracker::default();
+
+        read_file(path.to_str().unwrap(), Some(1), Some(10), &tracker)
+            .await
+            .unwrap();
+
+        let result = tracker.verify_current_content(&path, b"a\nb\n", GatePurpose::Edit);
+        assert_eq!(result, Ok(()));
+    }
+
+    #[tokio::test]
+    async fn read_file_default_window_on_long_file_records_partial() {
+        let dir = canonical_tempdir();
+        let path = dir.path().join("long.txt");
+        let content = "x\n".repeat(DEFAULT_LINE_LIMIT + 1);
+        std::fs::write(&path, &content).unwrap();
+        let tracker = FileTracker::default();
+
+        let output = read_file(path.to_str().unwrap(), None, None, &tracker)
+            .await
+            .unwrap();
+        assert!(output.ends_with(&format!("of {} total)", DEFAULT_LINE_LIMIT + 1)));
+
+        let edit = tracker.verify_current_content(&path, content.as_bytes(), GatePurpose::Edit);
+        assert_eq!(edit, Ok(()), "any Read of the current content clears Edit");
+        let write = tracker.verify_current_content(&path, content.as_bytes(), GatePurpose::Write);
+        assert!(
+            matches!(write, Err(GateError::PartialRead { .. })),
+            "unseen lines keep Write closed: {write:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn read_file_stops_before_the_output_budget_and_records_partial() {
+        let dir = canonical_tempdir();
+        let path = dir.path().join("wide.txt");
+        let content = format!("{}\n", "x".repeat(199)).repeat(1000);
+        std::fs::write(&path, &content).unwrap();
+        let tracker = FileTracker::default();
+
+        let output = read_file(path.to_str().unwrap(), None, None, &tracker)
+            .await
+            .unwrap();
+
+        assert!(output.len() <= MAX_OUTPUT_BYTES, "{}", output.len());
+        let (body, footer) = output.rsplit_once("\n\n").unwrap();
+        assert!(
+            body.len() > OUTPUT_BUDGET - 210,
+            "the budget is filled: {}",
+            body.len()
+        );
+        let shown = body.lines().count();
+        assert_eq!(footer, format!("(Showing lines 1–{shown} of 1000 total)"));
+        let write = tracker.verify_current_content(&path, content.as_bytes(), GatePurpose::Write);
+        assert!(
+            matches!(write, Err(GateError::PartialRead { .. })),
+            "lines past the budget keep Write closed: {write:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn read_file_truncates_lines_past_2000_chars() {
+        let dir = canonical_tempdir();
+        let path = dir.path().join("long_line.txt");
+        let fits = "a".repeat(2000);
+        let over = "b".repeat(2001);
+        std::fs::write(&path, format!("{fits}\n{over}\n")).unwrap();
+
+        let output = read_file(path.to_str().unwrap(), None, None, &FileTracker::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            output,
+            format!("1\t{fits}\n2\t{}... [2001 chars]", &over[..2000]),
+        );
+    }
+
+    #[tokio::test]
     async fn read_file_offset_zero_treated_as_one() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = canonical_tempdir();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "first\nsecond\n").unwrap();
 
@@ -452,7 +533,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_file_strips_bom() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = canonical_tempdir();
         let path = dir.path().join("bom.txt");
         std::fs::write(&path, "\u{feff}hello\n").unwrap();
 
@@ -465,7 +546,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_file_empty() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = canonical_tempdir();
         let path = dir.path().join("empty.txt");
         std::fs::write(&path, "").unwrap();
 
@@ -485,7 +566,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_file_directory() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = canonical_tempdir();
         let err = read_file(
             dir.path().to_str().unwrap(),
             None,
@@ -499,7 +580,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_file_too_large() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = canonical_tempdir();
         let path = dir.path().join("huge.txt");
         let f = std::fs::File::create(&path).unwrap();
         f.set_len(MAX_TRACKED_FILE_SIZE + 1).unwrap();
@@ -507,12 +588,32 @@ mod tests {
         let err = read_file(path.to_str().unwrap(), None, None, &FileTracker::default())
             .await
             .unwrap_err();
-        assert!(err.contains("too large"));
+        assert!(
+            err.contains("too large") && err.contains("Use the bash tool to read large files"),
+            "{err}",
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_file_rejects_non_regular_file() {
+        // A unix-domain socket has `len() == 0` and would bypass the size gate without is_file().
+        let dir = canonical_tempdir();
+        let path = dir.path().join("sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+
+        let err = read_file(path.to_str().unwrap(), None, None, &FileTracker::default())
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("not a regular file"),
+            "expected non-regular-file error, got: {err}",
+        );
     }
 
     #[tokio::test]
     async fn read_file_binary_detected() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = canonical_tempdir();
         let path = dir.path().join("binary.bin");
         std::fs::write(&path, b"hello\x00world").unwrap();
 
@@ -524,7 +625,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_file_offset_beyond_end() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = canonical_tempdir();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "a\nb\n").unwrap();
 
@@ -541,27 +642,10 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn read_file_rejects_non_regular_file() {
-        // A unix-domain socket has `len() == 0` and would bypass the size gate without is_file().
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("sock");
-        let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
-
-        let err = read_file(path.to_str().unwrap(), None, None, &FileTracker::default())
-            .await
-            .unwrap_err();
-        assert!(
-            err.contains("not a regular file"),
-            "expected non-regular-file error, got: {err}",
-        );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
     async fn read_file_refuses_a_symlink_at_the_final_component() {
         // The gate pins the resolved path, so a link there was swapped in after the check and its
         // target was never gated.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = canonical_tempdir();
         let secret = dir.path().join("secret.txt");
         std::fs::write(&secret, "SECRET=1\n").unwrap();
         let path = dir.path().join("notes.md");
@@ -571,35 +655,6 @@ mod tests {
             .await
             .unwrap_err();
         assert!(!err.contains("SECRET"), "{err}");
-    }
-
-    // ── view_for ──
-
-    #[test]
-    fn view_for_no_args_is_full() {
-        assert_eq!(view_for(None, None), LastView::Full);
-    }
-
-    #[test]
-    fn view_for_offset_only_uses_default_limit() {
-        assert_eq!(
-            view_for(Some(5), None),
-            LastView::Partial {
-                offset: 5,
-                limit: DEFAULT_LINE_LIMIT,
-            },
-        );
-    }
-
-    #[test]
-    fn view_for_limit_only_uses_default_offset() {
-        assert_eq!(
-            view_for(None, Some(20)),
-            LastView::Partial {
-                offset: 1,
-                limit: 20,
-            },
-        );
     }
 
     // ── read_excerpt_view ──

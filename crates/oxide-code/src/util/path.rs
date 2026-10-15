@@ -1,6 +1,6 @@
 //! Small path-related utilities shared across modules.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Result, anyhow};
 
@@ -31,7 +31,7 @@ pub(crate) fn tildify(path: &Path) -> String {
         )
 }
 
-/// Expands a leading `~` or `~/` to the user's home directory. Bare `~` resolves to `$HOME`;
+/// Expands a leading `~` or `~/` to the user's home directory. Bare `~` resolves to `$HOME`, and
 /// `~/foo/bar` resolves to `$HOME/foo/bar`. Per-user forms like `~alice/...` pass through
 /// unchanged (no passwd lookup) and non-tilde paths pass through as well. Errors when the input
 /// starts with `~` but `dirs::home_dir()` yields no value, since a literal `~`-prefixed path
@@ -49,6 +49,27 @@ pub(crate) fn expand_user(raw: &str) -> Result<PathBuf> {
         return Ok(home);
     }
     Ok(home.join(tail.trim_start_matches('/')))
+}
+
+/// Resolves `.` and `..` components without touching the filesystem, so two spellings of one path
+/// compare equal. A `..` that would climb above the root is dropped, matching how the OS clamps
+/// traversal at `/`, while a leading `..` in a relative path is kept.
+pub(crate) fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if matches!(out.components().next_back(), Some(Component::Normal(_))) {
+                    out.pop();
+                } else if !out.has_root() {
+                    out.push(component);
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -186,7 +207,7 @@ mod tests {
 
     #[test]
     fn expand_user_does_not_handle_per_user_home() {
-        // `~alice/foo` stays verbatim; no passwd lookup to resolve the user's home.
+        // `~alice/foo` stays verbatim, since there is no passwd lookup to resolve the user's home.
         assert_eq!(
             expand_user("~alice/foo").unwrap(),
             PathBuf::from("~alice/foo")
@@ -197,4 +218,38 @@ mod tests {
     // `dirs::home_dir()` falls back to `getpwuid_r` when `$HOME` is empty, so the `None`
     // arm only fires in exotic environments (no passwd entry, Windows without profile).
     // The `Result` signature is still the right contract for those cases.
+
+    // ── lexical_normalize ──
+
+    #[test]
+    fn lexical_normalize_resolves_dot_and_dot_dot_components() {
+        assert_eq!(
+            lexical_normalize(Path::new("/work/./src/../lib/a.rs")),
+            PathBuf::from("/work/lib/a.rs"),
+        );
+    }
+
+    #[test]
+    fn lexical_normalize_drops_a_leading_dot_in_relative_paths() {
+        assert_eq!(
+            lexical_normalize(Path::new("./src/a.rs")),
+            PathBuf::from("src/a.rs")
+        );
+    }
+
+    #[test]
+    fn lexical_normalize_clamps_dot_dot_at_the_root() {
+        assert_eq!(
+            lexical_normalize(Path::new("/a/../../b")),
+            PathBuf::from("/b")
+        );
+    }
+
+    #[test]
+    fn lexical_normalize_keeps_leading_dot_dot_in_relative_paths() {
+        assert_eq!(
+            lexical_normalize(Path::new("../x/./../y")),
+            PathBuf::from("../y")
+        );
+    }
 }

@@ -22,13 +22,13 @@ pub(crate) const MAX_TRACKED_FILE_SIZE: u64 = 10 * 1024 * 1024;
 ///
 /// - **Read-before-Edit**: every Edit / Write must follow a `Read` of the same path within the
 ///   session.
-/// - **Full read required**: a partial (offset / limit) Read does not satisfy the gate; the agent
-///   must Read the file in full before mutating it.
+/// - **Full coverage for Write**: overwriting a file needs every line of its current content read,
+///   in one Read or across several. An Edit accepts any Read of the current content.
 /// - **Freshness**: mutating tools must pass the current bytes through
-///   [`Self::verify_current_content`]; only matching xxh64 content qualifies as unchanged.
+///   [`Self::verify_current_content`], and only matching xxh64 content counts as unchanged.
 ///
 /// State is persisted into the session JSONL as [`FileSnapshot`]s and re-verified against disk on
-/// resume — see [`Self::restore_verified`].
+/// resume by [`Self::restore_verified`].
 #[derive(Default)]
 pub(crate) struct FileTracker {
     by_path: Mutex<HashMap<PathBuf, FileState>>,
@@ -43,13 +43,58 @@ struct FileState {
     recorded_at: OffsetDateTime,
 }
 
-/// Extent of the most recent Read. Only `Full` satisfies the Edit / Write gate; `Partial` requires
-/// the agent to re-Read the file in full before mutating.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Lines Read has shown of the tracked content, accumulated across Reads of that content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum LastView {
     Full,
-    Partial { offset: usize, limit: usize },
+    /// Sorted, disjoint, inclusive 1-indexed line windows out of `total_lines`.
+    Partial {
+        ranges: Vec<(usize, usize)>,
+        total_lines: usize,
+    },
+}
+
+impl LastView {
+    /// The view of a Read that showed lines `first..=last` of `total_lines`.
+    pub(crate) fn lines(first: usize, last: usize, total_lines: usize) -> Self {
+        Self::from_ranges(vec![(first, last)], total_lines)
+    }
+
+    fn union(self, other: Self) -> Self {
+        match (self, other) {
+            (
+                Self::Partial {
+                    mut ranges,
+                    total_lines,
+                },
+                Self::Partial { ranges: more, .. },
+            ) => {
+                ranges.extend(more);
+                Self::from_ranges(ranges, total_lines)
+            }
+            _ => Self::Full,
+        }
+    }
+
+    fn from_ranges(mut ranges: Vec<(usize, usize)>, total_lines: usize) -> Self {
+        ranges.sort_unstable();
+        let mut merged: Vec<(usize, usize)> = Vec::with_capacity(ranges.len());
+        for (first, last) in ranges {
+            match merged.last_mut() {
+                Some(prev) if first <= prev.1 + 1 => prev.1 = prev.1.max(last),
+                _ => merged.push((first, last)),
+            }
+        }
+        if merged == [(1, total_lines)] {
+            Self::Full
+        } else {
+            Self::Partial {
+                ranges: merged,
+                total_lines,
+            }
+        }
+    }
 }
 
 /// Which mutating tool is asking for the gate. Carried into [`GateError`] so rendered errors can
@@ -107,7 +152,8 @@ pub(crate) fn validate_trackable_file(metadata: &Metadata) -> Result<(), Trackab
 }
 
 impl FileTracker {
-    /// Returns `CacheHit` when an unchanged full-file re-Read can be stubbed.
+    /// Returns `CacheHit` when a file already tracked as `Full` is read in full again unchanged.
+    /// Reads of unchanged content accumulate their line windows, and changed content starts over.
     pub(crate) fn record_read(
         &self,
         path: &Path,
@@ -119,14 +165,19 @@ impl FileTracker {
         let content_hash = xxh64(bytes, HASH_SEED);
         let mut by_path = self.lock();
 
-        if matches!(view, LastView::Full)
-            && let Some(state) = by_path.get_mut(path)
-            && state.last_view == LastView::Full
+        if let Some(state) = by_path.get_mut(path)
             && state.content_hash == content_hash
         {
+            let outcome = if state.last_view == LastView::Full && view == LastView::Full {
+                RecordRead::CacheHit
+            } else {
+                RecordRead::Inserted
+            };
+            let seen = std::mem::replace(&mut state.last_view, LastView::Full);
+            state.last_view = seen.union(view);
             state.mtime = mtime;
             state.size = size;
-            return RecordRead::CacheHit;
+            return outcome;
         }
 
         by_path.insert(
@@ -142,7 +193,8 @@ impl FileTracker {
         RecordRead::Inserted
     }
 
-    /// Validates the Read-before-Edit gate against the current on-disk bytes.
+    /// Validates the Read-before-Edit gate against the current on-disk bytes. Write also needs
+    /// every line of the current content read.
     pub(crate) fn verify_current_content(
         &self,
         path: &Path,
@@ -156,20 +208,19 @@ impl FileTracker {
                 purpose,
             });
         };
-        if !matches!(entry.last_view, LastView::Full) {
+        if xxh64(current_bytes, HASH_SEED) != entry.content_hash {
+            return Err(GateError::ContentDrifted {
+                path: path.to_path_buf(),
+                purpose,
+            });
+        }
+        if purpose == GatePurpose::Write && entry.last_view != LastView::Full {
             return Err(GateError::PartialRead {
                 path: path.to_path_buf(),
                 purpose,
             });
         }
-        if xxh64(current_bytes, HASH_SEED) == entry.content_hash {
-            Ok(())
-        } else {
-            Err(GateError::ContentDrifted {
-                path: path.to_path_buf(),
-                purpose,
-            })
-        }
+        Ok(())
     }
 
     /// Records bytes the agent just wrote. Always lands as [`LastView::Full`] so a subsequent Edit
@@ -189,14 +240,14 @@ impl FileTracker {
         );
     }
 
-    /// Best-effort post-write stat + record; warn-logs on stat failure so subsequent Edit calls
-    /// re-Read the file rather than failing silently against a stale snapshot.
-    pub(crate) async fn record_modify_after_write(&self, path: &Path, bytes: &[u8]) {
+    /// Best-effort post-write stat of `path` and record under `key`. A stat failure is warn-logged
+    /// and leaves the old entry, so the next Edit fails the hash check and asks for a fresh Read.
+    pub(crate) async fn record_modify_after_write(&self, key: &Path, path: &Path, bytes: &[u8]) {
         match tokio::fs::metadata(path).await.and_then(|m| {
             let modified = m.modified()?;
             Ok((m.len(), modified))
         }) {
-            Ok((size, mtime)) => self.record_modify(path, bytes, mtime, size),
+            Ok((size, mtime)) => self.record_modify(key, bytes, mtime, size),
             Err(e) => warn!(
                 "skip post-write tracker update for {} (stat failed): {e}",
                 path.display()
@@ -212,7 +263,7 @@ impl FileTracker {
                 content_hash: state.content_hash,
                 mtime: OffsetDateTime::from(state.mtime),
                 size: state.size,
-                last_view: state.last_view,
+                last_view: state.last_view.clone(),
                 recorded_at: state.recorded_at,
             })
             .collect()
@@ -222,10 +273,9 @@ impl FileTracker {
         self.lock().clear();
     }
 
-    /// Rehydrates from session JSONL on resume. Each snapshot must still match disk by content
-    /// hash — drifted or missing files are dropped, forcing a fresh Read before any mutation. On
-    /// duplicate paths the entry with the newer `recorded_at` wins. Returns the dropped paths so
-    /// the caller can warn the user that those files need a fresh Read.
+    /// Rehydrates from session JSONL on resume. On duplicate paths the snapshot with the newer
+    /// `recorded_at` wins, and it must still match disk by content hash. Returns the dropped paths
+    /// so the caller can warn that those files need a fresh Read before any mutation.
     pub(crate) fn restore_verified(&self, snapshots: Vec<FileSnapshot>) -> Vec<PathBuf> {
         let mut by_path = self.lock();
         let mut dropped = Vec::new();
@@ -345,9 +395,8 @@ pub(crate) struct FileSnapshot {
 
 /// Outcome of [`FileTracker::record_read`].
 ///
-/// `CacheHit` means the path was already in the tracker with identical content (full-read +
-/// matching xxh64); the caller should return [`CACHE_HIT_STUB`] instead of the real bytes to
-/// save tokens. `Inserted` is the regular path — fresh read, snapshot stored.
+/// `CacheHit` means a full re-Read found identical content already tracked as `Full`, so the caller
+/// returns [`CACHE_HIT_STUB`] to save tokens. On `Inserted` the caller returns the real bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RecordRead {
     Inserted,
@@ -355,19 +404,19 @@ pub(crate) enum RecordRead {
 }
 
 /// Reasons the Read-before-Edit / Write gate refuses a tool call. Each variant's `#[error]`
-/// message tells the model exactly how to recover (Read first / Read in full / re-Read).
+/// message tells the model exactly how to recover (Read first / Read the rest / re-Read).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum GateError {
-    #[error("File {} needs a full Read before {} it.", .path.display(), .purpose.verb())]
+    #[error("File {} has not been read in this session. Read it before {} it.", .path.display(), .purpose.verb())]
     NeverRead { path: PathBuf, purpose: GatePurpose },
-    #[error("File {} was read with offset / limit. Read the full file before {} it.", .path.display(), .purpose.verb())]
+    #[error("File {} has only been read in part. Read the remaining lines, paging with `offset` and `limit` if needed, before {} it.", .path.display(), .purpose.verb())]
     PartialRead { path: PathBuf, purpose: GatePurpose },
     #[error("File {} has been modified externally since it was last read. Re-read it before {} it.", .path.display(), .purpose.verb())]
     ContentDrifted { path: PathBuf, purpose: GatePurpose },
 }
 
-/// Returned in place of file bytes when the agent re-Reads a full, unchanged file. Saves tokens
-/// without giving up the Read-before-Edit invariant — the gate already saw the original content.
+/// Returned in place of file bytes when the agent fully re-Reads an unchanged file. The tracker
+/// already holds its content hash, so the stub saves tokens without weakening Read-before-Edit.
 pub(crate) const CACHE_HIT_STUB: &str =
     "File hasn't been modified since the last read. Returning already-read file.";
 
@@ -426,6 +475,52 @@ mod tests {
     use std::time::{Duration, UNIX_EPOCH};
 
     use super::*;
+
+    // ── LastView::lines ──
+
+    #[test]
+    fn lines_covering_every_line_is_full() {
+        assert_eq!(LastView::lines(1, 3, 3), LastView::Full);
+        assert_eq!(
+            LastView::lines(2, 3, 3),
+            LastView::Partial {
+                ranges: vec![(2, 3)],
+                total_lines: 3,
+            },
+        );
+    }
+
+    // ── LastView::union ──
+
+    #[test]
+    fn union_merges_overlapping_and_adjacent_windows_until_full() {
+        let view = LastView::lines(5, 6, 10)
+            .union(LastView::lines(1, 2, 10))
+            .union(LastView::lines(3, 3, 10))
+            .union(LastView::lines(8, 9, 10))
+            .union(LastView::lines(6, 6, 10));
+        assert_eq!(
+            view,
+            LastView::Partial {
+                ranges: vec![(1, 3), (5, 6), (8, 9)],
+                total_lines: 10,
+            },
+        );
+
+        assert_eq!(view.union(LastView::lines(4, 10, 10)), LastView::Full);
+    }
+
+    #[test]
+    fn union_with_full_is_full() {
+        assert_eq!(
+            LastView::Full.union(LastView::lines(1, 1, 5)),
+            LastView::Full
+        );
+        assert_eq!(
+            LastView::lines(1, 1, 5).union(LastView::Full),
+            LastView::Full
+        );
+    }
 
     // ── TrackableFileError Display ──
 
@@ -560,11 +655,8 @@ mod tests {
     fn record_read_partial_view_does_not_cache_hit() {
         let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
-        let view = LastView::Partial {
-            offset: 1,
-            limit: 5,
-        };
-        _ = tracker.record_read(path, b"hello", UNIX_EPOCH, 5, view);
+        let view = LastView::lines(1, 1, 5);
+        _ = tracker.record_read(path, b"hello", UNIX_EPOCH, 5, view.clone());
         let outcome = tracker.record_read(path, b"hello", UNIX_EPOCH, 5, view);
         assert_eq!(outcome, RecordRead::Inserted);
     }
@@ -573,20 +665,51 @@ mod tests {
     fn record_read_full_after_partial_does_not_cache_hit() {
         let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
-        _ = tracker.record_read(
-            path,
-            b"hello",
-            UNIX_EPOCH,
-            5,
-            LastView::Partial {
-                offset: 0,
-                limit: 1,
-            },
-        );
+        _ = tracker.record_read(path, b"hello", UNIX_EPOCH, 5, LastView::lines(1, 1, 5));
         let outcome = tracker.record_read(path, b"hello", UNIX_EPOCH, 5, LastView::Full);
         assert_eq!(outcome, RecordRead::Inserted);
         let next = tracker.record_read(path, b"hello", UNIX_EPOCH, 5, LastView::Full);
         assert_eq!(next, RecordRead::CacheHit);
+    }
+
+    #[test]
+    fn record_read_partial_after_full_keeps_full_for_unchanged_content() {
+        let tracker = FileTracker::default();
+        let path = Path::new("/tmp/a.rs");
+        _ = tracker.record_read(path, b"hello", UNIX_EPOCH, 5, LastView::Full);
+
+        let outcome = tracker.record_read(path, b"hello", UNIX_EPOCH, 5, LastView::lines(2, 2, 5));
+        assert_eq!(
+            outcome,
+            RecordRead::Inserted,
+            "partial reads return the slice"
+        );
+        assert_eq!(tracker.lock()[path].last_view, LastView::Full);
+    }
+
+    #[test]
+    fn record_read_paging_unchanged_content_accumulates_to_full() {
+        let tracker = FileTracker::default();
+        let path = Path::new("/tmp/a.rs");
+        _ = tracker.record_read(path, b"hello", UNIX_EPOCH, 5, LastView::lines(1, 2, 4));
+        let first = tracker.lock()[path].clone();
+
+        let outcome = tracker.record_read(path, b"hello", UNIX_EPOCH, 5, LastView::lines(3, 4, 4));
+        assert_eq!(
+            outcome,
+            RecordRead::Inserted,
+            "paged reads return the slice"
+        );
+        let paged = tracker.lock()[path].clone();
+        assert_eq!(paged.last_view, LastView::Full);
+        assert_eq!(paged.recorded_at, first.recorded_at);
+
+        _ = tracker.record_read(path, b"world", UNIX_EPOCH, 5, LastView::lines(3, 4, 4));
+        assert_eq!(
+            tracker.lock()[path].last_view,
+            LastView::lines(3, 4, 4),
+            "changed content starts coverage over",
+        );
     }
 
     // ── verify_current_content ──
@@ -632,26 +755,27 @@ mod tests {
     }
 
     #[test]
-    fn verify_current_content_partial_view_errors_partial_read() {
+    fn verify_current_content_partial_view_blocks_write_but_not_edit() {
         let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
-        _ = tracker.record_read(
-            path,
-            b"hello",
-            UNIX_EPOCH,
-            5,
-            LastView::Partial {
-                offset: 0,
-                limit: 1,
-            },
-        );
-        let result = tracker.verify_current_content(path, b"hello", GatePurpose::Edit);
+        _ = tracker.record_read(path, b"hello", UNIX_EPOCH, 5, LastView::lines(1, 1, 2));
+
+        let edit = tracker.verify_current_content(path, b"hello", GatePurpose::Edit);
+        assert_eq!(edit, Ok(()));
+
+        let write = tracker.verify_current_content(path, b"hello", GatePurpose::Write);
         assert_eq!(
-            result,
+            write,
             Err(GateError::PartialRead {
                 path: path.to_path_buf(),
-                purpose: GatePurpose::Edit,
+                purpose: GatePurpose::Write,
             }),
+        );
+
+        let drifted = tracker.verify_current_content(path, b"world", GatePurpose::Write);
+        assert!(
+            matches!(drifted, Err(GateError::ContentDrifted { .. })),
+            "drift outranks coverage: {drifted:?}",
         );
     }
 
@@ -699,7 +823,7 @@ mod tests {
         };
         let msg = err.to_string();
         assert!(msg.contains("/tmp/a.rs"), "path is named: {msg}");
-        assert!(msg.contains("needs a full Read"));
+        assert!(msg.contains("has not been read"));
         assert!(msg.contains("editing"));
     }
 
@@ -710,20 +834,21 @@ mod tests {
             purpose: GatePurpose::Write,
         };
         let msg = err.to_string();
-        assert!(msg.contains("needs a full Read"));
+        assert!(msg.contains("has not been read"));
         assert!(msg.contains("writing to"));
     }
 
     #[test]
-    fn gate_error_partial_read_renders_with_path_and_full_read_required() {
+    fn gate_error_partial_read_renders_with_path_and_remaining_lines() {
         let err = GateError::PartialRead {
             path: PathBuf::from("/tmp/a.rs"),
-            purpose: GatePurpose::Edit,
+            purpose: GatePurpose::Write,
         };
         let msg = err.to_string();
         assert!(msg.contains("/tmp/a.rs"), "path is named: {msg}");
-        assert!(msg.contains("offset / limit"));
-        assert!(msg.contains("Read the full file"));
+        assert!(msg.contains("only been read in part"));
+        assert!(msg.contains("Read the remaining lines"));
+        assert!(msg.contains("writing to"));
     }
 
     #[test]
@@ -762,16 +887,7 @@ mod tests {
     fn record_modify_promotes_partial_view_to_full() {
         let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
-        _ = tracker.record_read(
-            path,
-            b"hello",
-            UNIX_EPOCH,
-            5,
-            LastView::Partial {
-                offset: 0,
-                limit: 1,
-            },
-        );
+        _ = tracker.record_read(path, b"hello", UNIX_EPOCH, 5, LastView::lines(1, 1, 5));
         tracker.record_modify(path, b"world", UNIX_EPOCH, 5);
         assert_eq!(tracker.lock().get(path).unwrap().last_view, LastView::Full);
     }
@@ -779,22 +895,28 @@ mod tests {
     // ── record_modify_after_write ──
 
     #[tokio::test]
-    async fn record_modify_after_write_records_disk_state() {
+    async fn record_modify_after_write_stats_the_path_and_records_under_the_key() {
         let tracker = FileTracker::default();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a.rs");
         std::fs::write(&path, b"updated").unwrap();
-        tracker.record_modify_after_write(&path, b"updated").await;
+        let key = Path::new("/key/a.rs");
+        tracker
+            .record_modify_after_write(key, &path, b"updated")
+            .await;
 
-        let result = tracker.verify_current_content(&path, b"updated", GatePurpose::Edit);
+        let result = tracker.verify_current_content(key, b"updated", GatePurpose::Write);
         assert_eq!(result, Ok(()));
+        assert_eq!(tracker.lock()[key].size, 7);
     }
 
     #[tokio::test]
     async fn record_modify_after_write_swallows_stat_failure_silently() {
         let tracker = FileTracker::default();
         let path = Path::new("/nonexistent/never-here.rs");
-        tracker.record_modify_after_write(path, b"bytes").await;
+        tracker
+            .record_modify_after_write(path, path, b"bytes")
+            .await;
         assert!(
             tracker.lock().get(path).is_none(),
             "stat failure must not insert anything",
@@ -813,10 +935,7 @@ mod tests {
             b"bbb",
             mtime,
             3,
-            LastView::Partial {
-                offset: 0,
-                limit: 2,
-            },
+            LastView::lines(1, 2, 3),
         );
 
         let mut snaps = tracker.snapshot_all();
@@ -828,13 +947,7 @@ mod tests {
         assert_eq!(snaps[0].last_view, LastView::Full);
         assert_eq!(snaps[1].path, Path::new("/tmp/b"));
         assert_eq!(snaps[1].size, 3);
-        assert_eq!(
-            snaps[1].last_view,
-            LastView::Partial {
-                offset: 0,
-                limit: 2,
-            },
-        );
+        assert_eq!(snaps[1].last_view, LastView::lines(1, 2, 3));
     }
 
     #[test]
@@ -1105,10 +1218,7 @@ mod tests {
             content_hash: xxh64(b"stale", HASH_SEED),
             mtime: mtime_dt,
             size: meta.len(),
-            last_view: LastView::Partial {
-                offset: 1,
-                limit: 1,
-            },
+            last_view: LastView::lines(1, 1, 2),
             recorded_at: OffsetDateTime::UNIX_EPOCH,
         };
         let newer = FileSnapshot {
@@ -1193,8 +1303,8 @@ mod tests {
             mtime: time::macros::datetime!(2026-04-29 12:00:00 UTC),
             size: 42,
             last_view: LastView::Partial {
-                offset: 0,
-                limit: 5,
+                ranges: vec![(1, 2), (4, 5)],
+                total_lines: 9,
             },
             recorded_at: time::macros::datetime!(2026-04-29 12:34:56 UTC),
         };
@@ -1203,9 +1313,10 @@ mod tests {
         assert_eq!(json["content_hash"], 0xDEAD_BEEF_u64);
         assert_eq!(json["mtime"], "2026-04-29T12:00:00Z");
         assert_eq!(json["size"], 42);
-        assert_eq!(json["last_view"]["kind"], "partial");
-        assert_eq!(json["last_view"]["offset"], 0);
-        assert_eq!(json["last_view"]["limit"], 5);
+        assert_eq!(
+            json["last_view"],
+            serde_json::json!({"kind": "partial", "ranges": [[1, 2], [4, 5]], "total_lines": 9}),
+        );
         assert_eq!(json["recorded_at"], "2026-04-29T12:34:56Z");
 
         let parsed: FileSnapshot = serde_json::from_value(json).unwrap();
@@ -1222,14 +1333,11 @@ mod tests {
 
     #[test]
     fn last_view_partial_round_trips_through_json() {
-        let view = LastView::Partial {
-            offset: 0,
-            limit: 5,
-        };
-        let json = serde_json::to_value(view).unwrap();
+        let view = LastView::lines(3, 5, 9);
+        let json = serde_json::to_value(&view).unwrap();
         assert_eq!(
             json,
-            serde_json::json!({"kind": "partial", "offset": 0, "limit": 5}),
+            serde_json::json!({"kind": "partial", "ranges": [[3, 5]], "total_lines": 9}),
         );
         let parsed: LastView = serde_json::from_value(json).unwrap();
         assert_eq!(parsed, view);

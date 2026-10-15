@@ -19,7 +19,9 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 use crate::agent::event::{ApprovalBody, ApprovalPreview};
+use crate::file_tracker::{TrackableFileError, validate_trackable_file};
 use crate::permission::{GateTarget, PermissionClass};
+use crate::util::path::lexical_normalize;
 use crate::util::text::ELLIPSIS;
 
 // ── Tool Definition ──
@@ -41,7 +43,7 @@ pub(crate) struct ToolOutput {
     pub(crate) metadata: ToolMetadata,
 }
 
-/// Structured data for UI display and logging; not sent to the model.
+/// Structured data for UI display and logging. The model never sees it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ToolMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -59,18 +61,19 @@ pub(crate) struct ToolMetadata {
 }
 
 impl ToolOutput {
-    pub(crate) fn from_result(result: Result<String, String>) -> Self {
-        match result {
-            Ok(content) => Self {
-                content,
-                is_error: false,
-                metadata: ToolMetadata::default(),
-            },
-            Err(content) => Self {
-                content,
-                is_error: true,
-                metadata: ToolMetadata::default(),
-            },
+    pub(crate) fn success(content: impl Into<String>) -> Self {
+        Self {
+            content: content.into(),
+            is_error: false,
+            metadata: ToolMetadata::default(),
+        }
+    }
+
+    pub(crate) fn error(content: impl Into<String>) -> Self {
+        Self {
+            content: content.into(),
+            is_error: true,
+            metadata: ToolMetadata::default(),
         }
     }
 
@@ -165,8 +168,8 @@ pub(crate) struct GrepMatchLine {
 
 /// A tool that the agent can invoke.
 ///
-/// Per-instance metadata (name, icon, schema, input summary) lives on the trait so that adding a
-/// new tool requires editing only its module — the registry never matches on `name`.
+/// Per-instance metadata (name, icon, schema, input summary) lives on the trait, so adding a tool
+/// means editing only its module.
 pub(crate) trait Tool: Send + Sync {
     fn name(&self) -> &'static str;
     fn description(&self) -> &'static str;
@@ -203,7 +206,7 @@ pub(crate) trait Tool: Send + Sync {
     }
 
     fn icon(&self) -> &'static str {
-        "⟡"
+        DEFAULT_TOOL_ICON
     }
 
     /// Pulls the tool's primary argument out of `input` for terse `Name(arg)` labels in the UI.
@@ -306,15 +309,11 @@ impl ToolRegistry {
 
     /// Dispatches to the named tool and enforces the `MAX_OUTPUT_BYTES` byte safety net on the
     /// returned content, recording the pre-cap length on `metadata.truncated_bytes` if trimming
-    /// fired. Per-tool row caps run inside the tool itself; this is the last-line defense against
+    /// fired. Per-tool row caps run inside each tool, so this is the last-line defense against
     /// pathological output sizes.
     pub(crate) async fn run(&self, name: &str, input: serde_json::Value) -> ToolOutput {
         let Some(tool) = self.get(name) else {
-            return ToolOutput {
-                content: format!("Unknown tool: {name}"),
-                is_error: true,
-                metadata: ToolMetadata::default(),
-            };
+            return ToolOutput::error(format!("Unknown tool: {name}"));
         };
         let mut output = tool.run(input).await;
         let (content, original_len) = cap_output(output.content);
@@ -358,9 +357,9 @@ const TRUNCATION_OVERHEAD: usize = 80;
 /// Trims `content` to fit under [`MAX_OUTPUT_BYTES`], keeping the head and tail and replacing the
 /// middle with a `[N bytes truncated]` marker.
 ///
-/// Returns `(content, original_len)` — `original_len` is `Some` only when truncation actually
-/// fired, so the caller can record the pre-cap size. Skips truncation when the omitted slice is
-/// smaller than the marker itself (truncating would grow the output rather than shrink it).
+/// Returns `(content, original_len)`, where `original_len` is `Some` only when truncation fired so
+/// the caller can record the pre-cap size. Skips truncation when the omitted slice is smaller than
+/// the marker, which would otherwise grow the output.
 /// Char-boundary floors keep the returned `String` valid UTF-8 even when the cap lands inside a
 /// multibyte sequence.
 fn cap_output(content: String) -> (String, Option<usize>) {
@@ -391,29 +390,31 @@ fn cap_output(content: String) -> (String, Option<usize>) {
 
 // ── Input Parsing ──
 
-/// Deserializes a tool's typed input from the raw JSON the agent loop hands us.
-///
-/// On failure returns a fully-formed [`ToolOutput`] with `is_error: true` (not a normal
-/// `serde_json::Error`) so the caller can short-circuit straight back to the model with a
-/// user-visible "Invalid input: ..." message — no extra mapping needed at every call site.
+/// Deserializes a tool's typed input from the raw JSON the agent loop hands us. On failure returns
+/// an "Invalid input: ..." error [`ToolOutput`] that callers hand back to the model as-is.
 #[expect(
     clippy::result_large_err,
     reason = "ToolOutput carries the full tool result; the Err here is the cold input-validation path constructed at most once per tool call"
 )]
 pub(crate) fn parse_input<T: DeserializeOwned>(raw: serde_json::Value) -> Result<T, ToolOutput> {
-    serde_json::from_value(raw).map_err(|e| ToolOutput {
-        content: format!("Invalid input: {e}"),
-        is_error: true,
-        metadata: ToolMetadata::default(),
-    })
+    serde_json::from_value(raw).map_err(|e| ToolOutput::error(format!("Invalid input: {e}")))
 }
 
 // ── Path Utilities ──
 
-pub(crate) fn resolve_base_dir(search_path: Option<&str>) -> Result<PathBuf, String> {
-    let cwd =
-        std::env::current_dir().map_err(|e| format!("Failed to get working directory: {e}"))?;
-    Ok(search_path.map_or(cwd, PathBuf::from))
+/// The canonical working directory, so hits under a canonical search base render relative to it.
+pub(crate) fn working_dir() -> Result<PathBuf, String> {
+    std::env::current_dir()
+        .and_then(std::fs::canonicalize)
+        .map_err(|e| format!("Failed to get working directory: {e}"))
+}
+
+/// Resolves a search tool's `path` argument against `cwd`, defaulting to `cwd` itself. The base
+/// must exist, and it is canonical so the walk covers the directory the permission gate resolved.
+pub(crate) fn resolve_base_dir(search_path: Option<&str>, cwd: &Path) -> Result<PathBuf, String> {
+    let base = search_path.map_or_else(|| cwd.to_path_buf(), |p| cwd.join(p));
+    std::fs::canonicalize(&base)
+        .map_err(|e| format!("Cannot access {}: {e}", display_path(&base, cwd)))
 }
 
 pub(crate) fn display_cwd_path(path: &str) -> String {
@@ -426,6 +427,16 @@ fn display_cwd_path_from(path: &str, cwd: Option<&Path>) -> String {
         Some(cwd) => display_path(Path::new(path), cwd),
         None => path.to_owned(),
     }
+}
+
+/// The [`FileTracker`](crate::file_tracker::FileTracker) key for a file tool's `file_path`. An
+/// existing path canonicalizes, so relative, dotted, and symlinked spellings of one file share an
+/// entry. A missing path falls back to its lexically clean absolute form.
+pub(crate) async fn tracker_key(path: &str) -> PathBuf {
+    let absolute = std::env::current_dir().unwrap_or_default().join(path);
+    tokio::fs::canonicalize(&absolute)
+        .await
+        .unwrap_or_else(|_| lexical_normalize(&absolute))
 }
 
 /// Renders a `Name(path)` summary for a tool call whose primary argument is a filesystem path.
@@ -447,9 +458,9 @@ pub(crate) fn summarize_path_call(
 
 /// Renders `path` for chat display.
 ///
-/// Strips `base` if it's a prefix; when `path == base` (relative path is empty) returns the file
-/// name so the chat row says `foo.rs` rather than `.`. Paths outside `base` render as their full
-/// string. Lossy UTF-8 conversion is acceptable here because the result is for display only.
+/// Strips `base` if it's a prefix. When `path == base` the relative path is empty, so this returns
+/// the file name (`foo.rs`). Paths outside `base` render as their full string. Lossy UTF-8
+/// conversion is acceptable here because the result is for display only.
 pub(crate) fn display_path(path: &Path, base: &Path) -> String {
     if let Ok(rel) = path.strip_prefix(base) {
         if rel.as_os_str().is_empty() {
@@ -473,12 +484,40 @@ pub(crate) fn file_name(path: &str) -> &str {
         .unwrap_or(path)
 }
 
+// ── File Target Validation ──
+
+/// Rejects targets the [`FileTracker`](crate::file_tracker::FileTracker) cannot gate, phrasing each
+/// refusal for `verb` (`read`, `edit`, `write`).
+pub(crate) fn validate_file_target(
+    path: &str,
+    metadata: &std::fs::Metadata,
+    verb: &str,
+) -> Result<(), String> {
+    match validate_trackable_file(metadata) {
+        Ok(()) => Ok(()),
+        Err(TrackableFileError::Directory) => Err(format!(
+            "{path} is a directory. Use the glob tool to list directory contents."
+        )),
+        Err(TrackableFileError::NonRegular) => Err(format!(
+            "{path} is not a regular file (fifo, socket, or device). Refusing to {verb}.",
+        )),
+        Err(TrackableFileError::TooLarge { size, max }) => {
+            let mb = bytes_to_mb(size);
+            let limit_mb = max / (1024 * 1024);
+            Err(format!(
+                "File is too large ({mb:.1} MB, max {limit_mb} MB). \
+                 Use the bash tool to {verb} large files.",
+            ))
+        }
+    }
+}
+
 // ── Binary Detection ──
 
 const BINARY_CHECK_SIZE: usize = 8192;
 
-/// Heuristic: a NUL byte in the first 8 KiB marks the file as binary. Same rule git uses; cheap
-/// enough to run before every text-mode read.
+/// Heuristic: a NUL byte in the first 8 KiB marks the file as binary. Git uses the same rule, and
+/// it is cheap enough to run before every text-mode read.
 pub(crate) fn is_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(BINARY_CHECK_SIZE).any(|&b| b == 0)
 }
@@ -537,12 +576,17 @@ pub(crate) async fn write_no_follow(
 
 const MAX_WALK_DEPTH: usize = 64;
 
+const VCS_DIRS: &[&str] = &[".bzr", ".git", ".hg", ".jj", ".sl", ".svn"];
+
 /// Recursively walks `base`, yielding regular files only.
 ///
-/// Honors `.gitignore`, global ignore files, and hidden-entry rules via the `ignore` crate's
-/// defaults, and pins the walk to the starting filesystem so symlinked mounts don't escape.
+/// Honors `.gitignore` and global ignore files, includes hidden entries such as `.github/` so
+/// dotfile config stays searchable, skips VCS metadata directories below `base`, and pins the walk
+/// to the starting filesystem so symlinked mounts don't escape.
 pub(crate) fn walk_files(base: &Path) -> impl Iterator<Item = ignore::DirEntry> {
     ignore::WalkBuilder::new(base)
+        .hidden(false)
+        .filter_entry(|e| e.depth() == 0 || !VCS_DIRS.iter().any(|d| e.file_name() == *d))
         .same_file_system(true)
         .max_depth(Some(MAX_WALK_DEPTH))
         .build()
@@ -553,8 +597,8 @@ pub(crate) fn walk_files(base: &Path) -> impl Iterator<Item = ignore::DirEntry> 
 /// Reads the entry's modification time for sorting / display.
 ///
 /// Falls back to [`SystemTime::UNIX_EPOCH`] when stat fails (entry vanished, permission denied,
-/// platform without mtime). Callers use the result for ordering only — a synthetic epoch
-/// timestamp sorts oldest, which is a sane default for unreadable entries.
+/// platform without mtime). Callers use the result only for ordering, where the epoch sorts
+/// unreadable entries oldest.
 pub(crate) fn entry_mtime(entry: &ignore::DirEntry) -> SystemTime {
     entry
         .metadata()
@@ -573,25 +617,19 @@ pub(crate) fn bytes_to_mb(bytes: u64) -> f64 {
     bytes as f64 / (1024.0 * 1024.0)
 }
 
-pub(crate) const MAX_LINE_LENGTH: usize = 500;
-
-/// Caps a line at [`MAX_LINE_LENGTH`] characters and appends `... [N chars]` when truncation
-/// fires.
-///
-/// Returns `Cow::Borrowed` (no allocation) when the line already fits — both the byte fast-path
-/// and the char-count fallback short-circuit. The `[N chars]` footer surfaces the original length
-/// so the model can decide whether to read more.
-pub(crate) fn truncate_line(line: &str) -> Cow<'_, str> {
-    if line.len() <= MAX_LINE_LENGTH {
+/// Caps a line at `max_chars` characters, appending `... [N chars]` with the original length so the
+/// model can decide whether to read more. Borrows when the line already fits.
+pub(crate) fn truncate_line(line: &str, max_chars: usize) -> Cow<'_, str> {
+    if line.len() <= max_chars {
         return Cow::Borrowed(line);
     }
     let total_chars = line.chars().count();
-    if total_chars <= MAX_LINE_LENGTH {
+    if total_chars <= max_chars {
         return Cow::Borrowed(line);
     }
     let boundary = line
         .char_indices()
-        .nth(MAX_LINE_LENGTH)
+        .nth(max_chars)
         .map_or(line.len(), |(i, _)| i);
     Cow::Owned(format!(
         "{}{ELLIPSIS} [{total_chars} chars]",
@@ -599,10 +637,36 @@ pub(crate) fn truncate_line(line: &str) -> Cow<'_, str> {
     ))
 }
 
+// ── Testing ──
+
+#[cfg(test)]
+pub(crate) mod testing {
+    use std::path::{Path, PathBuf};
+
+    use tempfile::TempDir;
+
+    /// A temp dir with a canonical path, matching the cwd [`super::working_dir`] returns.
+    pub(crate) struct CanonicalTempDir {
+        _dir: TempDir,
+        path: PathBuf,
+    }
+
+    impl CanonicalTempDir {
+        pub(crate) fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    pub(crate) fn canonical_tempdir() -> CanonicalTempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().canonicalize().unwrap();
+        CanonicalTempDir { _dir: dir, path }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
-    use std::path::PathBuf;
     use std::sync::Arc;
 
     use super::bash::BashTool;
@@ -610,6 +674,7 @@ mod tests {
     use super::glob::GlobTool;
     use super::grep::GrepTool;
     use super::read::ReadTool;
+    use super::testing::canonical_tempdir;
     use super::write::WriteTool;
     use super::*;
     use crate::file_tracker::testing::tracker;
@@ -625,22 +690,6 @@ mod tests {
             Box::new(ReadTool::new(Arc::clone(&tracker))),
             Box::new(WriteTool::new(tracker)),
         ]
-    }
-
-    // ── ToolOutput::from_result ──
-
-    #[test]
-    fn from_result_ok_clears_is_error() {
-        let out = ToolOutput::from_result(Ok("success".into()));
-        assert!(!out.is_error);
-        assert_eq!(out.content, "success");
-    }
-
-    #[test]
-    fn from_result_err_sets_is_error() {
-        let out = ToolOutput::from_result(Err("something went wrong".into()));
-        assert!(out.is_error);
-        assert_eq!(out.content, "something went wrong");
     }
 
     // ── Tool trait contract (all tools) ──
@@ -991,25 +1040,20 @@ mod tests {
 
     // ── ToolRegistry::run ──
 
-    fn write_oversize_file() -> (tempfile::TempDir, std::path::PathBuf) {
+    fn oversize_grep_input() -> (tempfile::TempDir, serde_json::Value) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("big.txt");
-        let line = "x".repeat(600);
-        let content = format!("{line}\n").repeat(500);
-        std::fs::write(&path, &content).unwrap();
-        (dir, path)
+        let line = "x".repeat(400);
+        std::fs::write(&path, format!("{line}\n").repeat(500)).unwrap();
+        let input = serde_json::json!({"pattern": "x", "path": path, "head_limit": 0});
+        (dir, input)
     }
 
     #[tokio::test]
     async fn run_dispatches_and_caps_byte_overflow() {
-        let (_dir, path) = write_oversize_file();
-        let registry = ToolRegistry::new(vec![Box::new(ReadTool::new(tracker()))]);
-        let output = registry
-            .run(
-                "read",
-                serde_json::json!({"file_path": path.to_str().unwrap()}),
-            )
-            .await;
+        let (_dir, input) = oversize_grep_input();
+        let registry = ToolRegistry::new(vec![Box::new(GrepTool)]);
+        let output = registry.run("grep", input).await;
 
         assert!(!output.is_error);
         assert!(output.content.len() <= MAX_OUTPUT_BYTES + TRUNCATION_OVERHEAD);
@@ -1038,14 +1082,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_byte_cap_on_read_falls_through_to_text_view() {
-        let (_dir, path) = write_oversize_file();
-        let registry = ToolRegistry::new(vec![Box::new(ReadTool::new(tracker()))]);
-        let input = serde_json::json!({"file_path": path.to_str().unwrap()});
-        let output = registry.run("read", input.clone()).await;
+    async fn run_byte_cap_on_grep_falls_through_to_text_view() {
+        let (_dir, input) = oversize_grep_input();
+        let registry = ToolRegistry::new(vec![Box::new(GrepTool)]);
+        let output = registry.run("grep", input.clone()).await;
+        assert!(output.metadata.truncated_bytes.is_some());
 
         let view = registry.result_view(
-            "read",
+            "grep",
             &input,
             &output.content,
             &output.metadata,
@@ -1279,15 +1323,51 @@ mod tests {
     // ── resolve_base_dir ──
 
     #[test]
-    fn resolve_base_dir_some_uses_given_path() {
-        let result = resolve_base_dir(Some("/tmp/foo")).unwrap();
-        assert_eq!(result, PathBuf::from("/tmp/foo"));
+    fn resolve_base_dir_canonicalizes_relative_and_absolute_paths() {
+        let dir = canonical_tempdir();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::create_dir(dir.path().join("lib")).unwrap();
+        let lib = dir.path().join("lib");
+
+        assert_eq!(
+            resolve_base_dir(Some("./src/../lib"), dir.path()),
+            Ok(lib.clone())
+        );
+        assert_eq!(
+            resolve_base_dir(Some(lib.to_str().unwrap()), Path::new("/")),
+            Ok(lib)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_base_dir_resolves_dot_dot_after_a_symlink_physically() {
+        let dir = canonical_tempdir();
+        std::fs::create_dir_all(dir.path().join("real/target")).unwrap();
+        let cwd = dir.path().join("cwd");
+        std::fs::create_dir(&cwd).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("real/target"), cwd.join("link")).unwrap();
+
+        assert_eq!(
+            resolve_base_dir(Some("link/.."), &cwd),
+            Ok(dir.path().join("real"))
+        );
     }
 
     #[test]
     fn resolve_base_dir_none_uses_cwd() {
-        let result = resolve_base_dir(None).unwrap();
-        assert_eq!(result, std::env::current_dir().unwrap());
+        let dir = canonical_tempdir();
+        assert_eq!(
+            resolve_base_dir(None, dir.path()),
+            Ok(dir.path().to_path_buf())
+        );
+    }
+
+    #[test]
+    fn resolve_base_dir_missing_path_is_named_relative_to_cwd() {
+        let dir = canonical_tempdir();
+        let err = resolve_base_dir(Some("missing"), dir.path()).unwrap_err();
+        assert!(err.starts_with("Cannot access missing: "), "{err}");
     }
 
     // ── display_cwd_path_from ──
@@ -1298,6 +1378,37 @@ mod tests {
             display_cwd_path_from("/tmp/example.rs", None),
             "/tmp/example.rs"
         );
+    }
+
+    // ── tracker_key ──
+
+    #[tokio::test]
+    async fn tracker_key_resolves_relative_and_dotted_spellings_to_one_key() {
+        let absolute = std::env::current_dir().unwrap().join("src/main.rs");
+        assert_eq!(tracker_key("src/main.rs").await, absolute);
+        assert_eq!(tracker_key("./src/../src/main.rs").await, absolute);
+        assert_eq!(tracker_key(absolute.to_str().unwrap()).await, absolute);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn tracker_key_resolves_a_symlinked_spelling_to_the_target() {
+        let dir = canonical_tempdir();
+        std::fs::create_dir(dir.path().join("real")).unwrap();
+        std::fs::write(dir.path().join("real/a.rs"), "").unwrap();
+        std::os::unix::fs::symlink(dir.path().join("real"), dir.path().join("link")).unwrap();
+
+        let via_link = dir.path().join("link/a.rs");
+        assert_eq!(
+            tracker_key(via_link.to_str().unwrap()).await,
+            dir.path().join("real/a.rs"),
+        );
+    }
+
+    #[tokio::test]
+    async fn tracker_key_missing_path_falls_back_to_a_lexically_clean_absolute_path() {
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(tracker_key("missing/../a.rs").await, cwd.join("a.rs"));
     }
 
     // ── display_path ──
@@ -1440,39 +1551,41 @@ mod tests {
 
     // ── truncate_line ──
 
+    const MAX_CHARS: usize = 500;
+
     #[test]
     fn truncate_line_short_unchanged() {
-        assert_eq!(truncate_line("hello").as_ref(), "hello");
+        assert_eq!(truncate_line("hello", MAX_CHARS).as_ref(), "hello");
     }
 
     #[test]
     fn truncate_line_long_gets_truncated() {
-        let long_line = "x".repeat(MAX_LINE_LENGTH + 100);
-        let result = truncate_line(&long_line);
-        let suffix = format!("... [{} chars]", MAX_LINE_LENGTH + 100);
-        assert_eq!(result.len(), MAX_LINE_LENGTH + suffix.len());
-        assert_eq!(&result[..MAX_LINE_LENGTH], "x".repeat(MAX_LINE_LENGTH));
-        assert_eq!(&result[MAX_LINE_LENGTH..], suffix);
+        let long_line = "x".repeat(MAX_CHARS + 100);
+        let result = truncate_line(&long_line, MAX_CHARS);
+        let suffix = format!("... [{} chars]", MAX_CHARS + 100);
+        assert_eq!(result.len(), MAX_CHARS + suffix.len());
+        assert_eq!(&result[..MAX_CHARS], "x".repeat(MAX_CHARS));
+        assert_eq!(&result[MAX_CHARS..], suffix);
     }
 
     #[test]
     fn truncate_line_multibyte_safe() {
-        let mut line = "a".repeat(MAX_LINE_LENGTH - 2);
+        let mut line = "a".repeat(MAX_CHARS - 2);
         line.push('🦀');
         line.push_str(&"b".repeat(100));
-        let result = truncate_line(&line);
+        let result = truncate_line(&line, MAX_CHARS);
 
         let (prefix, suffix) = result.split_once("... [").unwrap();
-        let expected_prefix = "a".repeat(MAX_LINE_LENGTH - 2) + "🦀" + "b";
+        let expected_prefix = "a".repeat(MAX_CHARS - 2) + "🦀" + "b";
         assert_eq!(prefix, expected_prefix);
-        assert_eq!(prefix.chars().count(), MAX_LINE_LENGTH);
-        assert_eq!(suffix, format!("{} chars]", MAX_LINE_LENGTH + 99));
+        assert_eq!(prefix.chars().count(), MAX_CHARS);
+        assert_eq!(suffix, format!("{} chars]", MAX_CHARS + 99));
     }
 
     #[test]
     fn truncate_line_multibyte_under_char_cap_unchanged() {
-        let line = "é".repeat(MAX_LINE_LENGTH);
-        let result = truncate_line(&line);
+        let line = "é".repeat(MAX_CHARS);
+        let result = truncate_line(&line, MAX_CHARS);
         assert!(matches!(result, Cow::Borrowed(_)));
         assert_eq!(result.as_ref(), line);
     }
