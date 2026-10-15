@@ -20,6 +20,7 @@ anyhow = "1"
 caseless = "0.2"
 clap = { version = "4", features = ["derive"] }
 crossterm = { version = "0.29", features = ["event-stream"] }
+dunce = "1"
 fastrand = "2"
 futures = "0.3"
 globset = "0.4"

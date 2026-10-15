@@ -1702,6 +1702,7 @@ dependencies = [
  "caseless",
  "clap",
  "crossterm",
+ "dunce",
  "fastrand",
  "futures",
  "globset",

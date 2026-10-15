@@ -204,7 +204,7 @@ fn glob_files(pattern: &str, search_path: Option<&str>, cwd: &Path) -> Result<Gl
 /// any depth, the way gitignore-style globs behave. Absolute patterns are rejected because the
 /// permission gate only sees `path`.
 fn compile_glob(pattern: &str) -> Result<globset::GlobMatcher, String> {
-    if pattern.starts_with('/') {
+    if Path::new(pattern).has_root() {
         return Err(format!(
             "Pattern {pattern} is absolute. Set `path` to its directory and pass a pattern relative to it."
         ));
@@ -292,6 +292,7 @@ mod tests {
 
     use super::*;
     use crate::tool::testing::canonical_tempdir;
+    use crate::util::path::slash_separated;
 
     // ── gate_target ──
 
@@ -299,7 +300,7 @@ mod tests {
     fn gate_target_defaults_the_search_root_to_cwd() {
         // With no `path`, the search root is cwd, so a deny scoped to the project root still applies.
         let dir = tempfile::tempdir().unwrap();
-        let cwd = std::fs::canonicalize(dir.path()).unwrap();
+        let cwd = dunce::canonicalize(dir.path()).unwrap();
 
         let target = GlobTool.gate_target(&serde_json::json!({"pattern": "*.rs"}), &cwd);
         let crate::permission::GateTarget::Path { relative, .. } = target else {
@@ -464,7 +465,7 @@ mod tests {
         let outside_hit = glob_files("*.rs", Some("../outside"), &cwd).unwrap();
         assert_eq!(
             outside_hit.content,
-            outside.join("x.rs").to_str().unwrap(),
+            slash_separated(&outside.join("x.rs")),
             "hits outside cwd fall back to an absolute path",
         );
     }

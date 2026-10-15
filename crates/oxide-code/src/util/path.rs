@@ -27,7 +27,7 @@ pub(crate) fn tildify(path: &Path) -> String {
         .and_then(|home| path.strip_prefix(&home).ok().map(Path::to_path_buf))
         .map_or_else(
             || path.display().to_string(),
-            |rel| format!("~/{}", rel.display()),
+            |rel| format!("~/{}", slash_separated(&rel)),
         )
 }
 
@@ -70,6 +70,12 @@ pub(crate) fn lexical_normalize(path: &Path) -> PathBuf {
         }
     }
     out
+}
+
+/// `path` as lossy UTF-8 with every platform separator written as `/`. Paths the model reads use
+/// this form, since its shell is bash, where `\` escapes the next character.
+pub(crate) fn slash_separated(path: &Path) -> String {
+    path.to_string_lossy().replace(std::path::is_separator, "/")
 }
 
 #[cfg(test)]

@@ -22,7 +22,7 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use crate::agent::event::{ApprovalBody, ApprovalPreview};
 use crate::file_tracker::{FileTracker, TrackableFileError, validate_trackable_file};
 use crate::permission::{GateTarget, PermissionClass};
-use crate::util::path::lexical_normalize;
+use crate::util::path::{lexical_normalize, slash_separated};
 use crate::util::text::ELLIPSIS;
 
 // ── Tool Definition ──
@@ -409,7 +409,7 @@ pub(crate) fn parse_input<T: DeserializeOwned>(raw: serde_json::Value) -> Result
 /// The canonical working directory, so hits under a canonical search base render relative to it.
 pub(crate) fn working_dir() -> Result<PathBuf, String> {
     std::env::current_dir()
-        .and_then(std::fs::canonicalize)
+        .and_then(dunce::canonicalize)
         .map_err(|e| format!("Failed to get working directory: {e}"))
 }
 
@@ -417,7 +417,7 @@ pub(crate) fn working_dir() -> Result<PathBuf, String> {
 /// must exist, and it is canonical so the walk covers the directory the permission gate resolved.
 pub(crate) fn resolve_base_dir(search_path: Option<&str>, cwd: &Path) -> Result<PathBuf, String> {
     let base = search_path.map_or_else(|| cwd.to_path_buf(), |p| cwd.join(p));
-    std::fs::canonicalize(&base)
+    dunce::canonicalize(&base)
         .map_err(|e| format!("Cannot access {}: {e}", display_path(&base, cwd)))
 }
 
@@ -438,9 +438,10 @@ fn display_cwd_path_from(path: &str, cwd: Option<&Path>) -> String {
 /// entry. A missing path falls back to its lexically clean absolute form.
 pub(crate) async fn tracker_key(path: &str) -> PathBuf {
     let absolute = std::env::current_dir().unwrap_or_default().join(path);
-    tokio::fs::canonicalize(&absolute)
-        .await
-        .unwrap_or_else(|_| lexical_normalize(&absolute))
+    tokio::fs::canonicalize(&absolute).await.map_or_else(
+        |_| lexical_normalize(&absolute),
+        |path| dunce::simplified(&path).to_path_buf(),
+    )
 }
 
 /// Renders a `Name(path)` summary for a tool call whose primary argument is a filesystem path.
@@ -463,19 +464,15 @@ pub(crate) fn summarize_path_call(
 /// Renders `path` for chat display.
 ///
 /// Strips `base` if it's a prefix. When `path == base` the relative path is empty, so this returns
-/// the file name (`foo.rs`). Paths outside `base` render as their full string. Lossy UTF-8
-/// conversion is acceptable here because the result is for display only.
+/// the file name (`foo.rs`). Paths outside `base` render as their full string. Either form is
+/// [`slash_separated`], and lossy UTF-8 conversion is fine since the result is display-only.
 pub(crate) fn display_path(path: &Path, base: &Path) -> String {
-    if let Ok(rel) = path.strip_prefix(base) {
-        if rel.as_os_str().is_empty() {
-            return path.file_name().map_or_else(
-                || path.to_string_lossy().into_owned(),
-                |n| n.to_string_lossy().into_owned(),
-            );
-        }
-        return rel.to_string_lossy().into_owned();
-    }
-    path.to_string_lossy().into_owned()
+    let shown = match path.strip_prefix(base) {
+        Ok(rel) if rel.as_os_str().is_empty() => path.file_name().map_or(path, Path::new),
+        Ok(rel) => rel,
+        Err(_) => path,
+    };
+    slash_separated(shown)
 }
 
 /// Returns the trailing filename component, falling back to the input string when no component
@@ -680,7 +677,7 @@ pub(crate) mod testing {
 
     pub(crate) fn canonical_tempdir() -> CanonicalTempDir {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().canonicalize().unwrap();
+        let path = dunce::canonicalize(dir.path()).unwrap();
         CanonicalTempDir { _dir: dir, path }
     }
 }
@@ -887,7 +884,7 @@ mod tests {
         // Rules address classes: a `read(...)` deny must stop grep and glob from dumping the file
         // it names, and an `edit(...)` deny must stop write as well as edit.
         let dir = tempfile::tempdir().unwrap();
-        let cwd = std::fs::canonicalize(dir.path()).unwrap();
+        let cwd = dunce::canonicalize(dir.path()).unwrap();
         std::fs::write(cwd.join(".env"), "SECRET=1").unwrap();
         let deny = [
             "read(.env)".to_owned(),
@@ -926,7 +923,7 @@ mod tests {
     #[test]
     fn gate_target_resolves_the_path_field_of_each_path_tool() {
         let dir = tempfile::tempdir().unwrap();
-        let cwd = std::fs::canonicalize(dir.path()).unwrap();
+        let cwd = dunce::canonicalize(dir.path()).unwrap();
         let tools = all_tools();
         for name in ["read", "edit", "write"] {
             let t = tools.iter().find(|t| t.name() == name).unwrap();
