@@ -1,337 +1,46 @@
 # AGENTS.md: oxide-code
 
-## Project Overview
+oxide-code is a terminal-based AI coding assistant written in Rust, inspired by [Claude Code](https://code.claude.com/docs). Its binary, `ox`, talks to LLM APIs to help developers with software engineering tasks from the terminal.
 
-oxide-code is a terminal-based AI coding assistant written in Rust, inspired by [Claude Code](https://code.claude.com/docs). It communicates with LLM APIs to help developers with software engineering tasks directly from the terminal.
-
-`README.md` highlights features and scope for users. The rest of the documentation is under `docs/`:
-
-- [`docs/README.md`](docs/README.md): top-level index of design specs, research notes, and user guides.
-- [`docs/guide/`](docs/guide/): user-facing docs (installation, quickstart, configuration, slash commands, instructions, sessions, theming).
-- [`docs/design/`](docs/design/) and [`docs/research/`](docs/research/): internal architecture decisions and external research, indexed by `docs/design/README.md` and `docs/research/README.md`.
-
-Planned work lives in open GitHub issues, and epics group the themes that span several issues.
-
-### CLI
+This file holds the rules for every change and points to the conventions for each area. `README.md` covers features and scope for users, [`docs/`](docs/README.md) holds the user guides, conventions, design specs, and research notes, and open GitHub issues track planned work.
 
 ```bash
-ox                                          # Start an interactive session
+ox                                          # Start an interactive TUI session
+ox --no-tui                                 # Bare REPL on stdin and stdout
+ox -p "<prompt>"                            # Headless: run one turn and print the reply
 ```
 
-### Project Layout
+## Project Layout
 
 ```text
 .
 ├── .agents/                                # Agent skills (release procedure)
 ├── .cspell/                                # Project spelling dictionary
 ├── .github/                                # CI and release workflows, plus the shared Nix setup action
-├── crates/oxide-code/                      # Main binary crate
-├── docs/                                   # User guides, design specs, and research notes
+├── crates/oxide-code/                      # The `ox` crate, mapped in docs/design/architecture.md
+├── docs/                                   # User guides, conventions, design specs, and research notes
 ├── Formula/                                # Homebrew formula, served from this repo as a tap
 └── scripts/                                # Release helpers and pre-commit checks
 ```
 
-### Crate Structure (`crates/oxide-code/src/`)
+## Read Before You Edit
 
-```text
-.
-├── agent.rs                                # Agent turn loop, stream accumulation, tool dispatch
-├── agent/
-│   ├── compact_boundary.rs                 # Compact boundary persistence, file-tracker reset, live transcript replacement
-│   ├── compaction.rs                       # /compact driver: conversation-fork summarization request + summary-prefix wrapping
-│   └── event.rs                            # AgentEvent, UserAction, AgentSink trait, StdioSink
-├── client.rs                               # Client module root
-├── client/
-│   ├── anthropic.rs                        # Anthropic Messages API client (Client struct + streaming)
-│   └── anthropic/
-│       ├── betas.rs                        # Per-request `anthropic-beta` header computation
-│       ├── billing.rs                      # Anthropic billing attestation (fingerprint, cch hash, x-anthropic-billing-header)
-│       ├── completion.rs                   # Non-streaming `Client::complete` + body builder for one-shots
-│       ├── identity.rs                     # Per-machine `device_id` for `metadata.user_id`: lazy mint + persist at $XDG_DATA_HOME/ox/user-id
-│       ├── sse.rs                          # SSE pump and frame decoding, retrying an overload before any content streams
-│       ├── testing.rs                      # Cfg-test fixtures shared by client, agent, engine, and title_generator tests
-│       ├── transport.rs                    # Shared `POST /v1/messages`: per-request headers, API-error classification, bounded retry with backoff
-│       └── wire.rs                         # Request / response wire types (CreateMessageRequest, StreamEvent, etc.)
-├── config.rs                               # Configuration loading and layered merging
-├── config/
-│   ├── auth.rs                             # Credential resolution: AuthSource precedence (gateway token > API key > OAuth token > stored login), first-party gate on the stored login
-│   ├── file.rs                             # TOML config file discovery, parsing, and merge (user + project)
-│   ├── gateway.rs                          # GatewayCompat from Claude Code's gateway env vars: ANTHROPIC_CUSTOM_HEADERS parsing, attribution and structured-output toggles
-│   └── oauth.rs                            # Claude Code OAuth credentials (macOS Keychain + file), token refresh, directory-based advisory lock
-├── driver.rs                               # Frontends that drive the engine through its handle: stdio turn rendering, exit status, shutdown signals
-├── driver/
-│   ├── headless.rs                         # `-p` driver: one turn, exit status from how it ended
-│   ├── repl.rs                             # `--no-tui` driver: stdin prompt loop, rejects slash commands, keeps reading after a failed turn and exits with failure at EOF
-│   └── tui.rs                              # TUI driver: App event loop over the engine handle, closing the op channel on exit
-├── engine.rs                               # Engine: the live session (transcript, prompt, usage) as a task behind EngineHandle, serving UserActions until Quit, then finalizing
-├── engine/
-│   └── testing.rs                          # Cfg-test Engine fixtures shared by engine and driver tests (engine, stopped_engine, mount_reply, request_bodies)
-├── file_tracker.rs                         # Per-session FileTracker: Read-before-Edit gate, xxh64 staleness check, persist-on-finish + verify-on-resume
-├── main.rs                                 # CLI entry point: config + session resolution, mode dispatch to a driver, process exit code
-├── message.rs                              # Conversation message types + progress-update lookup
-├── model.rs                                # Supported-model catalogue + ModelSpec (resolved id → effort, thinking, context window, display)
-├── model/
-│   └── pricing.rs                          # Per-million-token cost rates + per-request USD estimator with prompt-size tiers (excludes account / marketplace adjustments)
-├── permission.rs                           # Permission module root: Mode, PermissionClass, Policy::decide tiered gate, GateTarget path resolution (symlinks, protected paths, workspace zone), dangerous-pattern deny defaults
-├── permission/
-│   └── rule.rs                             # Rule grammar: `class(specifier)` parse + match (bash exact / prefix / wildcard, cwd-relative or absolute path globs)
-├── prompt.rs                               # System prompt builder (section assembly), session prompt context replay, change reminders
-├── prompt/
-│   ├── environment.rs                      # Runtime environment detection (platform, git, date) and the model identity line
-│   ├── instructions.rs                     # Instruction file discovery and loading (CLAUDE.md, AGENTS.md)
-│   └── sections.rs                         # Static prompt section constants (intro, guidance, style)
-├── session.rs                              # Session module root
-├── session/
-│   ├── actor.rs                            # Session actor task body + SessionCmd protocol + receive-and-drain batching loop
-│   ├── chain.rs                            # ChainBuilder: UUID-DAG message-chain reconstruction (fork-aware tip pick + parent walk)
-│   ├── display.rs                          # Shared session-listing formatters (relative time, `id · when · N msgs · branch · project` line, archive notices)
-│   ├── entry.rs                            # JSONL entry types (Header, Context, Message, Title, Archive, Summary, Compact, ToolResultMetadata, FileSnapshot) and metadata structs
-│   ├── handle.rs                           # SessionHandle (cheap-to-clone async API), SharedState, start / resume / roll lifecycle
-│   ├── handle/
-│   │   └── testing.rs                      # Cfg-test SessionHandle constructors for sibling test modules (dead, acks_then_drops)
-│   ├── history.rs                          # Transcript → display interaction stream (pair ToolUse with ToolResult inline)
-│   ├── list_view.rs                        # `ox --list` table rendering (writes to any `impl Write`), active or archived sessions
-│   ├── path.rs                             # Filesystem-safe project subdirectory derivation (sanitize_cwd)
-│   ├── resolver.rs                         # CLI `--continue` argument resolution (ResumeMode, resolve_session)
-│   ├── sanitize.rs                         # Resume-time transcript repair (drop unresolved / orphan tool blocks, collapse roles, sentinels)
-│   ├── snapshots/                          # `cargo insta` baseline JSONL byte-shape snapshots for `actor` round-trip tests
-│   ├── state.rs                            # SessionState: pure-data lifecycle struct owned by the actor (uuid chain, counts, finish gating)
-│   ├── store.rs                            # SessionStore / SessionWriter: file I/O, torn-line repair, partial-write rollback, path-keyed load / append / archive / delete
-│   ├── store/
-│   │   ├── listing.rs                      # Stat-only session walks: newest-first paging filtered by archive state, file-name id prefix match, title / summary / archive scan
-│   │   └── testing.rs                      # Cfg-test session fixtures and id-keyed lookups shared by session and slash tests
-│   └── title_generator.rs                  # Background AI title generation (Haiku) with detached task
-├── slash.rs                                # Slash-command surface root: re-exports + dispatch
-├── slash/
-│   ├── archive.rs                          # /archive [<id-prefix>]: bare forwards UserAction::Archive (archive the live session, then roll). Typed form and /unarchive <id-prefix> append an Archive entry to a saved session
-│   ├── clear.rs                            # /clear (new, reset): forwards UserAction::Clear, resets ChatView, drops the AI title
-│   ├── compact.rs                          # /compact [<instructions>]: forwards UserAction::Compact. Agent loop drives the summarization
-│   ├── config.rs                           # /config: opens a KvOverview modal of resolved config + layered file paths
-│   ├── confirm.rs                          # ConfirmDeleteSessionModal: destructive-action gate. Runs the unlink synchronously on Y, sticky inline error on failure
-│   ├── context.rs                          # SlashContext (borrowed LiveSessionInfo + live title) handed to each command's execute
-│   ├── delete.rs                           # /delete <id-prefix>: typed-arg form, resolves prefix, pushes ConfirmDeleteSessionModal. Bare /delete rejected
-│   ├── diff.rs                             # /diff: uncommitted git changes + untracked, 64 KB cap on UTF-8 boundary
-│   ├── effort.rs                           # /effort: bare opens the slider. `/effort <level>` resolves the typed-arg shortcut
-│   ├── effort_slider.rs                    # EffortSlider: Speed ↔ Intelligence horizontal slider, opened by bare /effort
-│   ├── help.rs                             # /help: opens a KvOverview modal listing every registered command
-│   ├── init.rs                             # /init: synthesize an AGENTS.md / CLAUDE.md author-or-update prompt
-│   ├── matcher.rs                          # filter_and_rank: tier-ranked popup matches
-│   ├── model.rs                            # /model: bare opens picker. `/model <id>` resolves exact id → unique substring (`opus`, `sonnet`, `haiku`)
-│   ├── parser.rs                           # parse_slash + popup_state: detect `/cmd args`. Allows `:` and `.`. unescape_literal maps `//x` to `/x`
-│   ├── picker.rs                           # ModelEffortPicker: combined model + effort modal. Emits a single SwapConfig
-│   ├── registry.rs                         # SlashCommand trait + SlashOutcome (Forward / Modal / chat output) + echoes_input + BUILT_INS slice + alias-aware lookup
-│   ├── rename.rs                           # /rename: bare opens a single-line title editor. `/rename <title>` applies directly and locks out AI title generation
-│   ├── resume.rs                           # /resume (alias /continue): bare opens a searchable session picker (Tab toggles current-project ↔ all-projects, Ctrl+A toggles the archived view, Ctrl+D pushes the confirm-delete modal). `/resume <id-prefix>` jumps directly
-│   ├── status.rs                           # /status: opens a KvOverview modal of session descriptors
-│   └── theme.rs                            # /theme: bare opens the picker (live preview). `/theme <name>` validates against the curated roster and swaps
-├── tool.rs                                 # Tool trait, registry, definitions
-├── tool/
-│   ├── bash.rs                             # Shell command execution with timeout, killing the shell's process tree (process group / Job Object), Git Bash on Windows
-│   ├── edit.rs                             # Exact string replacement in files
-│   ├── glob.rs                             # File pattern matching (glob)
-│   ├── grep.rs                             # Content search via regex
-│   ├── read.rs                             # File reading with line numbers and pagination
-│   └── write.rs                            # File writing with directory creation
-├── tui.rs                                  # TUI module root
-├── tui/
-│   ├── app.rs                              # Root App struct, tokio::select! event loop, render dispatch
-│   ├── components.rs                       # Components module root
-│   ├── components/
-│   │   ├── chat.rs                         # ChatView: scrollable chat, history load, block stacking with visible-slice paint
-│   │   ├── chat/
-│   │   │   ├── blocks.rs                   # ChatBlock trait + RenderCtx + icon-prefix helpers
-│   │   │   ├── blocks/
-│   │   │   │   ├── assistant.rs            # AssistantText + AssistantThinking + ProgressUpdate
-│   │   │   │   ├── compacted.rs            # CompactedBlock: bordered surface with bold accent header (count + optional focus) + markdown summary body
-│   │   │   │   ├── error.rs                # ErrorBlock
-│   │   │   │   ├── git_diff.rs             # GitDiffBlock: unified-diff render reusing the Edit-tool `+` / `-` row-bg + line-number gutter
-│   │   │   │   ├── interrupted.rs          # InterruptedMarker: dim italic `(interrupted)` line on cancel
-│   │   │   │   ├── notice.rs               # NoticeBlock: dim wrapped status line, such as a scheduled API retry
-│   │   │   │   ├── streaming.rs            # StreamingAssistant (in-flight buffer + complete-block render cache)
-│   │   │   │   ├── system.rs               # SystemMessageBlock: left-bar accent + body text for slash-command output
-│   │   │   │   ├── tool.rs                 # ToolCallBlock + ToolResultBlock (left-bar border machinery + per-variant dispatch)
-│   │   │   │   ├── tool/
-│   │   │   │   │   ├── bordered_row.rs     # Shared `[bar] [text]` row renderer for unnumbered body / header / footer rows
-│   │   │   │   │   ├── diff.rs             # Edit-tool unified diff body: boundary trim + per-side budget + line-number gutter
-│   │   │   │   │   ├── glob.rs             # Glob-tool body: header + flat path list + truncation footer
-│   │   │   │   │   ├── grep.rs             # Grep-tool per-file groups of line-numbered matches (content mode)
-│   │   │   │   │   ├── numbered_row.rs     # Shared `[bar] [number] [sep] [text]` row renderer: pipe sep for read / grep, sign sep for diff
-│   │   │   │   │   ├── read_excerpt.rs     # Read-tool line-numbered excerpt body + path / range header
-│   │   │   │   │   └── text.rs             # Default truncated-text body (fallback for tools without a richer view)
-│   │   │   │   └── user.rs                 # UserMessage
-│   │   │   └── stack.rs                    # CachedBlock (render memo keyed by width / theme epoch) + Stack (borrowed row runs, visible-slice copy)
-│   │   ├── input.rs                        # Multi-line input area (ratatui-textarea) + slash-popup wiring + arg-mode `[id]` ghost text
-│   │   ├── input/
-│   │   │   ├── popup.rs                    # Slash-command autocomplete overlay: dim non-selected, bold selected, alias parens
-│   │   │   └── snapshots/                  # `cargo insta` baselines for popup render tests
-│   │   ├── snapshots/                      # `cargo insta` baselines for chat, input, status, and welcome render tests
-│   │   ├── status.rs                       # Configurable status-line component state + run-state spinner
-│   │   ├── status/
-│   │   │   └── line.rs                     # Ordered segment rendering for the status line
-│   │   └── welcome.rs                      # Empty-state welcome screen: identity ribbon + body column, themed via `accent`/`text`/`dim`
-│   ├── cursor.rs                           # `place_clamped`: shared right-edge-clamp cursor placement for input surfaces
-│   ├── git_probes.rs                       # GitProbes: background branch / PR probes for the status bar, one run in flight per probe
-│   ├── glyphs.rs                           # Shared visual constants (chevrons, bar, tool indicators, spinner frames)
-│   ├── markdown.rs                         # Markdown module root (pulldown-cmark + syntect renderer)
-│   ├── markdown/
-│   │   ├── highlight.rs                    # Syntax highlighting (syntect lazy-loaded SyntaxSet, theme's `syntax_theme` colors, resumes a growing block after its last complete line)
-│   │   └── render.rs                       # pulldown-cmark event walker, inline / block / list / table rendering
-│   ├── modal.rs                            # Modal trait, ModalKey, ModalAction, ModalStack: focus-grabbing UI overlays
-│   ├── modal/
-│   │   ├── approval.rs                     # ApprovalModal: approve-or-deny overlay for a gated tool call (wrapped, scrollable, invisible characters revealed, type-ahead guarded), on_cancel resolves dismissals to Deny
-│   │   ├── chrome.rs                       # Shared modal chrome: title / description Header, bottom hint footer, CONFIRM_HINT
-│   │   ├── kv_overview.rs                  # Generic KvOverview / KvSection: read-only sectioned kv-table modal used by /status, /config, /help, scrolls when clipped
-│   │   ├── line_editor.rs                  # LineEditor: single-line ratatui-textarea field for /rename and picker search queries
-│   │   ├── list_picker.rs                  # Generic ListPicker<T: PickerItem>: cursor + render primitive used by concrete pickers
-│   │   └── searchable_list.rs              # Generic SearchableList<T: SearchableItem>: substring filter + scrollable viewport for searchable pickers
-│   ├── pending_calls.rs                    # Tool-call correlation state for streaming and transcript resume
-│   ├── snapshots/                          # `cargo insta` baselines for full App frame render tests
-│   ├── terminal.rs                         # Terminal init / restore, alternate-scroll (DECSET 1007), synchronized output, panic hook
-│   ├── theme.rs                            # Theme palette (Slot{fg,bg,modifiers} per role) + style helpers + LazyLock-cached Mocha default
-│   ├── theme/
-│   │   ├── builtin.rs                      # Built-in TOML catalogue (Mocha / Macchiato / Frappe / Latte / Material via include_str!) + picker descriptions + lookup
-│   │   ├── color.rs                        # Color string parsing (hex, ANSI named, indexed, reset)
-│   │   └── loader.rs                       # Theme TOML deserialization + `syntax_theme` lookup + base+overrides resolution (resolve_theme + SlotPatch)
-│   ├── viewport.rs                         # Viewport: render-settled scroll window for modal lists + wrap_next / wrap_prev cursor steps
-│   └── wrap.rs                             # Grapheme-aware word-wrap with continuation indent for styled lines + tab expansion
-├── util.rs                                 # Shared utilities module root
-└── util/
-    ├── env.rs                              # Environment-variable helpers (`string`, `bool`: empty-is-absent semantics)
-    ├── fs.rs                               # Filesystem helpers: `create_private_dir_all` (0o700) + `atomic_write_private` (0o600 temp+rename)
-    ├── git.rs                              # Git / `gh` probes for branch + open PR (best-effort, debug-logged failures)
-    ├── log.rs                              # `tracing` subscriber init: private size-rotated file under $XDG_STATE_HOME in TUI mode, stderr otherwise
-    ├── path.rs                             # Path helpers (`tildify`: $HOME → ~/, `expand_user`: ~/ → $HOME, `lexical_normalize`: `.` / `..` without I/O, `slash_separated`: `\` → `/` on Windows)
-    ├── text.rs                             # Display-width-aware text helpers (`truncate_to_width`, `ELLIPSIS`)
-    ├── time.rs                             # Process-wide local-offset cache (`init_local_offset` at startup, `local_offset` reads)
-    └── tls.rs                              # `load_extra_ca_certs`: parse a PEM bundle into `reqwest::Certificate`s for trust-store append
-```
+| When the change touches                              | Read                                                                               |
+| ---------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| Rust code                                            | [Rust](docs/conventions/rust.md) and the [module map](docs/design/architecture.md) |
+| Tests                                                | [Testing](docs/conventions/testing.md)                                             |
+| Comments, docs, or text that users or the model read | [Writing](docs/conventions/writing.md)                                             |
+| Commits, branches, PRs, or issues                    | [GitHub](docs/conventions/github.md)                                               |
+| The dev shell, hooks, toolchain, or CI               | [Development](docs/conventions/development.md)                                     |
+| A release                                            | [RELEASING.md](RELEASING.md)                                                       |
 
-## Coding Conventions
+## Rules for Every Change
 
-### Trait Design
-
-- Per-instance metadata (display name, icon, input summary) is a trait method, so adding an implementation requires editing only its new file.
-
-### Error Handling
-
-- Application code: `anyhow::Result` with `.context()` for actionable messages.
-- `thiserror::Error` only when callers need to match on error variants.
-- Avoid `unwrap()` / `expect()` in production code. Reserve them for cases with a clear invariant comment.
-
-### Discarding Results
-
-- Discard a result with `_ = expr` (without `let`), typically for an infallible `write!` / `writeln!` against a `String`.
-
-### Lint Suppression
-
-- Suppress lints with `#[expect(lint)]`, which warns once the suppressed lint stops triggering. `#[allow(lint)]` stays silent, so its stale suppressions accumulate.
-- `#[expect]` reason strings explain why the code triggers the lint today.
-- For complexity / size lints (`clippy::too_many_lines`, `clippy::cognitive_complexity`, etc.), the default response is to **extract a helper**. Reach for `#[expect]` only when the function is irreducibly cohesive, and explain that in the reason string.
-
-### Comments
-
-Follows the user's global instructions for comments, plus:
-
-- Keep `//` comments to one line per thought, and use multiple lines only when the rationale needs them.
-- Doc comments (`///`) default to one line, with multi-line docs reserved for contracts that need them.
-- Wrap comments at **100 columns** (matching `rustfmt` max_width).
-- Write `//` comments as prose. Promote to `///` if list structure is genuinely useful.
-
-### Section Dividers
-
-- Use `// ── Section Name ──` for section dividers in code (box-drawing character `─`, U+2500).
-- In tests, use `// ── function_name ──` as section headers grouping tests by the function they cover.
-
-### Blank Lines
-
-- One blank line between top-level items (functions, structs, enums, impls, constants). Exception: runs of closely-related one-line `const` / `static` declarations that share a theme (e.g., all the OAuth client constants, all the beta-header names) may sit together without blanks, then take one blank before unrelated items.
-- One blank line before and after section dividers (`// ── Name ──`). This applies inside `#[cfg(test)]` modules too. The first divider takes a blank line after the `use super::*` block.
-- Inside function bodies, use blank lines to separate logical phases (e.g., setup → validation → execution → result).
-- Group a single-line computation with its immediate validation guard (early-return `if`): no blank between them. Multi-line `let` bindings (async chains, builder patterns) keep the blank before their guard.
-
-### Module Organization
-
-- New-style module paths: `foo.rs` alongside `foo/` directory. Avoid `foo/mod.rs`.
-- Keep files focused: one primary type or concern per file. Split proactively when files grow large.
-- Place functions and types in the module that reflects their conceptual domain. A cross-module trait belongs in the module that owns its **contract**. Create modules as needed to keep the organization clean.
-- Avoid `pub use` re-exports that obscure where items are defined. If you re-export some items, re-export all related items so callers can use consistent paths.
-- Order helper functions after their caller (top-down reading) _within each section_.
-- Place new struct fields and enum variants at their most semantically appropriate position.
-
-### Visibility
-
-- Default to the smallest visibility needed: private → `pub(crate)` → `pub`.
-- `pub` items form the crate's API surface. Use `pub(crate)` for items shared across modules but not intended for external use.
-
-### Imports
-
-- Group `use` statements into three blocks, separated by blank lines: std → external crates → internal modules. Paths beginning with `self::`, `super::`, or `crate::` belong in the internal block.
-- Sort each block alphabetically. For internal imports, `rustfmt` orders by locality: `self` → `super` → `crate`.
-
-### String Literals
-
-- Prefer raw strings (`r"..."`) when the string contains characters that would need escaping. Always use the minimum delimiter level needed (`r"..."` → `r#"..."#` → `r##"..."##`).
-- Use `indoc!` / `formatdoc!` for multiline string content so the literal can be indented with surrounding code. Inline at the call site when the string is used once. Use a named constant only when it is shared or very large. Avoid `\n` escapes and `\x20` workarounds for multiline content.
-- Ellipsis: always `...` (three ASCII dots), never U+2026. Applies everywhere: prose, comments, doc comments, production strings, tests.
-
-### Dependencies
-
-- Versions centralized in `[workspace.dependencies]` in the root `Cargo.toml`. Member crates reference them with `dep.workspace = true`.
-- Only add dependencies to the workspace when a PR first needs them.
-- Prefer crates with minimal transitive dependencies.
-- Platform-specific dependencies (Unix-only `nix`, macOS-only `security-framework`) are declared under `[target.'cfg(unix)'.dependencies]` / `[target.'cfg(target_os = "macos")'.dependencies]` in the crate's `Cargo.toml`. Code guarded by `#[cfg(unix)]` / `#[cfg(target_os = "macos")]` stays in the same module: do not split platform variants into separate files.
-
-### Git Conventions
-
-Follows the user's global instructions for commits, branches, and PRs, plus:
-
-- **Scope**: Use the most specific area changed, such as a module (e.g., `client`, `config`, `oauth`), a documentation target (e.g., `AGENTS`, `research`), or a crate name only for cross-module changes.
-- **PRs**: Assign to `hakula139`. Label with one type label (`enhancement` for `feat`, `bug` for `fix`, `performance` for `perf`, or the label named after the type) plus the matching `area:` labels. Follow `.github/pull_request_template.md` for descriptions, close resolved issues with `Closes #N`, and give the PR the milestone of the issue it closes. Do not request a review from the PR author, since GitHub rejects it.
-- **Issues**: Open one issue per actionable outcome, using the forms in `.github/ISSUE_TEMPLATE/`, and give it acceptance criteria. Label it like a PR. A theme that spans several issues gets an `epic` parent with native sub-issues. Open issues are the record of planned work, with epics grouping the multi-issue themes. Open design questions get the `design` label and close once the decision lands in `docs/design/`. Close out-of-scope requests as not planned, pointing to the Scope section of `README.md`.
-  - The `v0.1.0` milestone holds all work that must land before the first stable release. A new issue joins it when it is a bug in shipped behavior or the maintainer accepts it into the release, and stays unassigned otherwise.
-  - When an issue cannot start until another lands, record the order as a native blocked-by dependency.
-  - An issue closes as completed when its PR merges.
-- **Self-contained text**: Issues, PRs, and their comments link only public material. Never reference gitignored or local material, such as working docs, local paths, or private repositories.
-
-### Testing
-
-- Unit tests in the same file as the code they test (`#[cfg(test)]` module).
-- Integration tests in `tests/` directory for cross-module behavior.
-- Group tests by function under `// ── function_name ──` section headers, following production function order in the same file. If several sections cover one function, add a topic after a colon, as in `// ── parse_color: hex ──`. Within each section, put portable tests before platform-specific ones, and order each group as happy path → variants → edge / error cases.
-- Name tests after the scenario they cover, prefixed by the function name (e.g., `parse_sse_frame_missing_data`). Phrase the scenario side (`string_unset_is_absent`) and keep the mechanism (`string_unset_returns_none`) out of the name.
-- Use `indoc!` for multi-line string literals in tests.
-- Use generic, fictional test data (e.g., `example.com`, `/repo`). Avoid real names and branded content unless the code under test matches on them, as with model IDs.
-- Use established test infra: `wiremock` for HTTP, `temp-env` for env isolation, `TestBackend` + `insta` for TUI snapshots, extracted trait fakes for hard-to-mock dependencies.
-- Assertions must verify actual behavior. Avoid patterns that cannot falsify a bug, such as uniform data with `starts_with`, wildcard `..` matches, or loose bounds. Each assertion should fail if the code under test has a plausible bug.
-- Aim for a concise suite with full coverage, and merge tests that cover the same path.
-
-### Documentation Maintenance
-
-Follows the user's global instructions for documentation and Markdown prose, plus:
-
-- Keep `README.md` user-facing, covering value, supported features, scope, and usage. Update its Features list when a shipped capability area changes.
-- `docs/` describes current behavior and its rationale. Planned work, deferred follow-ups, and open design questions live in GitHub issues, and docs link to the issue in place of describing future work.
-- New research and design notes cite Claude Code, [Codex](https://github.com/openai/codex), [pi](https://github.com/badlogic/pi-mono), and [oh-my-pi](https://github.com/can1357/oh-my-pi) as reference implementations. Existing notes may keep their opencode citations.
-- Crate structure diagrams must match the actual filesystem. When adding, removing, or renaming modules, update the tree in this file. Entries are sorted alphabetically. Directories sort alongside their parent `.rs` file.
-- After substantive changes, sweep docs for stale claims: `README.md` Features and Scope, open issues the change resolves or invalidates, this file's crate tree and conventions, `docs/guide/*` user instructions, and `docs/research/**/*` deferred / follow-up notes that the change now resolves.
-
-## Nix Development
-
-See [Installation](docs/guide/install.md) for toolchain requirements and other ways to install `ox`.
-
-```bash
-nix develop                                        # Dev shell with the Rust toolchain and pre-commit hooks
-nix flake check                                    # Run pre-commit hooks
-nix build '.#oxide-code'                           # Build ox from source
-```
-
-With [direnv](https://direnv.net), run `direnv allow` once so `.envrc` loads the dev shell whenever you enter the repository.
-
-### Pre-commit hooks
-
-The dev shell installs a [pre-commit](https://pre-commit.com) hook, generated by [`git-hooks.nix`](https://github.com/cachix/git-hooks.nix), that runs the compile-free subset of the [verification](#verification) checks on staged files: file hygiene, Nix formatting and lints, `rustfmt`, Prettier / dprint / Taplo formatting, `markdownlint`, and `cspell`. Hooks that fix files in place fail the commit when they change something, so stage the fixes and commit again. `clippy`, tests, and coverage stay out of the hook because their build cost would gate every commit.
-
-`nix flake check` runs the same hooks inside the Nix sandbox, which excludes `node_modules`, so the Node-based hooks skip there. Run `pnpm format`, `pnpm lint`, and `pnpm spellcheck` directly when changing documentation, comments, or config files.
+- Run the pre-commit hooks on every commit. In each new checkout or worktree, run `nix develop -c true` and `pnpm install` once to provide the generated config and Node tools the hooks need. Never bypass the hooks with `--no-verify` or `PRE_COMMIT_ALLOW_NO_CONFIG`.
+- Run the [verification](#verification) block before review.
+- Add new words to `.cspell/words.txt` in alphabetical order. `cspell` scans Rust sources too, so a new word in a doc comment fails the same way as one in `README.md`.
+- Update whatever the change makes stale: the `README.md` Features and Scope sections, the user guides, design docs and the module map, research notes whose follow-ups it resolves, and open issues it resolves or invalidates.
+- Issues, PRs, and their comments link only public material. Never reference gitignored or local material, such as working notes, local paths, or private repositories.
 
 ## Verification
 
@@ -348,29 +57,14 @@ pnpm lint                                          # Lint Markdown
 pnpm spellcheck                                    # Spell check
 ```
 
-The `pnpm` checks gate the `node-check` CI job. `cspell` covers Rust sources too, so a new word in a doc comment fails the same way as one in `README.md`.
-
-### Mutation testing
-
-Coverage reports whether a line ran. Mutation testing reports whether a mutation of that line would be caught. Run out-of-band before large-scope changes ship because a full run is slow:
-
-```bash
-cargo mutants --package oxide-code
-```
-
-Surviving mutants usually mean a test asserts something too loose. Tighten the assertion. If the mutant is genuinely equivalent, add an `exclude_re` pattern for it to `.cargo/mutants.toml`, with a comment explaining the equivalence.
+[Development](docs/conventions/development.md#ci) lists which CI job runs each check.
 
 ## Code Review
 
-Review the complete change and affected callers against these criteria:
+Review the complete change and its affected callers against the convention docs, and check in particular:
 
-- Correctness and edge cases
-- Adherence to project conventions (this file)
-- Conciseness: prefer the simplest idiomatic solution
-- DRY: flag duplicate logic across modules and look for extraction opportunities
-- Cross-file consistency: parallel types should use the same structure, naming, ordering, and derive traits
-- Comment hygiene: verbose multi-line docs that should be one-liners, missing WHY comments where non-obvious
-- Visibility: `pub(crate)` where `pub(super)` or private suffices
-- Idiomatic Rust: iterators, pattern matching, type system, ownership, standard library
-- Existing crates: flag hand-written logic that an established crate already handles
-- Test coverage gaps
+- Cross-file consistency: parallel types use the same structure, naming, ordering, and derive traits.
+- Comment hygiene: one-line docs where one line suffices, and a comment wherever a constraint is non-obvious.
+- Visibility no wider than its use.
+- Idiomatic Rust: iterators, pattern matching, the type system, ownership, and the standard library.
+- Hand-written logic that an established crate already handles.

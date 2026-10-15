@@ -4,6 +4,12 @@ Architecture decisions and implementation specs for oxide-code.
 
 Organized by topic. Each subdirectory mirrors the corresponding directory in [`docs/research/`](../research/), where the underlying research lives.
 
+## Overview
+
+| Document                        | Description                                        |
+| ------------------------------- | -------------------------------------------------- |
+| [Architecture](architecture.md) | Top-level module map and the layers imports follow |
+
 ## Agent Loop
 
 | Document                                    | Description                                           |
