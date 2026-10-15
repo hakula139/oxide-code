@@ -8,6 +8,7 @@ use tracing::warn;
 use uuid::Uuid;
 
 use crate::message::Message;
+use crate::prompt::SessionContext;
 
 /// Accumulator for messages read off disk. Loader calls [`Self::insert`] per `Entry::Message`,
 /// then [`Self::resolve`] once to flatten the recorded UUID DAG into a linear chain.
@@ -25,6 +26,16 @@ struct ChainNode {
     parent_uuid: Option<Uuid>,
     message: Message,
     timestamp: OffsetDateTime,
+    context: Option<Box<SessionContext>>,
+}
+
+/// One branch of the DAG, flattened root → tip.
+#[derive(Debug, Default)]
+pub(super) struct Chain {
+    pub(super) messages: Vec<Message>,
+    pub(super) tip: Option<Uuid>,
+    /// Newest prompt context recorded on this branch, ignoring other branches in the file.
+    pub(super) context: Option<Box<SessionContext>>,
 }
 
 impl ChainBuilder {
@@ -35,13 +46,15 @@ impl ChainBuilder {
         }
     }
 
-    /// Last-append-wins on duplicate UUIDs (retry / partial-write replay).
+    /// Last-append-wins on duplicate UUIDs (retry / partial-write replay). `context` is the prompt
+    /// context recorded with the message, if any.
     pub(super) fn insert(
         &mut self,
         uuid: Uuid,
         parent_uuid: Option<Uuid>,
         message: Message,
         timestamp: OffsetDateTime,
+        context: Option<Box<SessionContext>>,
     ) {
         if let Some(p) = parent_uuid {
             self.referenced.insert(p);
@@ -52,18 +65,19 @@ impl ChainBuilder {
                 parent_uuid,
                 message,
                 timestamp,
+                context,
             },
         );
     }
 
-    /// Returns `(messages root → tip, tip uuid)`.
+    /// Flattens the branch ending at the tip.
     ///
     /// Tip selection is fork-aware: the leaf (UUID never referenced as a parent) with the
     /// newest timestamp wins, with UUID order breaking ties so two callers loading the same
     /// file always pick the same branch. Walks back via `parent_uuid`; cycles trip the seen-set
     /// and orphan parents terminate the walk, so corrupted on-disk state cannot hang the loader.
-    /// Returns `(vec![], None)` when no leaf exists (every node referenced — pure cycle).
-    pub(super) fn resolve(mut self) -> (Vec<Message>, Option<Uuid>) {
+    /// Returns an empty chain when no leaf exists (every node referenced — pure cycle).
+    pub(super) fn resolve(mut self) -> Chain {
         let tip = self
             .nodes
             .iter()
@@ -75,10 +89,11 @@ impl ChainBuilder {
             })
             .map(|(uuid, _)| *uuid);
         let Some(tip_uuid) = tip else {
-            return (Vec::new(), None);
+            return Chain::default();
         };
 
-        let mut chain: Vec<Message> = Vec::new();
+        let mut messages: Vec<Message> = Vec::new();
+        let mut context = None;
         let mut seen: HashSet<Uuid> = HashSet::new();
         let mut cursor = Some(tip_uuid);
         while let Some(uuid) = cursor {
@@ -89,11 +104,16 @@ impl ChainBuilder {
             let Some(node) = self.nodes.remove(&uuid) else {
                 break; // orphan parent
             };
-            chain.push(node.message);
+            messages.push(node.message);
+            context = context.or(node.context);
             cursor = node.parent_uuid;
         }
-        chain.reverse();
-        (chain, Some(tip_uuid))
+        messages.reverse();
+        Chain {
+            messages,
+            tip: Some(tip_uuid),
+            context,
+        }
     }
 }
 
@@ -103,6 +123,7 @@ mod tests {
 
     use super::*;
     use crate::message::ContentBlock;
+    use crate::prompt::PromptParts;
 
     fn user_message(text: &str) -> Message {
         Message::user(text)
@@ -121,9 +142,9 @@ mod tests {
 
     #[test]
     fn resolve_empty_builder_yields_no_chain() {
-        let (chain, tip) = ChainBuilder::new().resolve();
-        assert_eq!(chain, []);
-        assert!(tip.is_none());
+        let chain = ChainBuilder::new().resolve();
+        assert_eq!(chain.messages, []);
+        assert!(chain.tip.is_none());
     }
 
     #[test]
@@ -135,12 +156,13 @@ mod tests {
             None,
             user_message("solo"),
             datetime!(2026-04-16 12:00:00 UTC),
+            None,
         );
 
-        let (chain, tip) = b.resolve();
-        assert_eq!(tip, Some(u));
-        assert_eq!(chain.len(), 1);
-        assert_chain_texts(&chain, &["solo"]);
+        let chain = b.resolve();
+        assert_eq!(chain.tip, Some(u));
+        assert_eq!(chain.messages.len(), 1);
+        assert_chain_texts(&chain.messages, &["solo"]);
     }
 
     #[test]
@@ -154,23 +176,26 @@ mod tests {
             None,
             user_message("a"),
             datetime!(2026-04-16 12:00:00 UTC),
+            None,
         );
         b.insert(
             u2,
             Some(u1),
             user_message("b"),
             datetime!(2026-04-16 12:00:01 UTC),
+            None,
         );
         b.insert(
             u3,
             Some(u2),
             user_message("c"),
             datetime!(2026-04-16 12:00:02 UTC),
+            None,
         );
 
-        let (chain, tip) = b.resolve();
-        assert_eq!(tip, Some(u3));
-        assert_chain_texts(&chain, &["a", "b", "c"]);
+        let chain = b.resolve();
+        assert_eq!(chain.tip, Some(u3));
+        assert_chain_texts(&chain.messages, &["a", "b", "c"]);
     }
 
     #[test]
@@ -184,23 +209,62 @@ mod tests {
             None,
             user_message("root"),
             datetime!(2026-04-16 12:00:00 UTC),
+            None,
         );
         b.insert(
             older,
             Some(root),
             user_message("older"),
             datetime!(2026-04-16 12:00:01 UTC),
+            None,
         );
         b.insert(
             newer,
             Some(root),
             user_message("newer"),
             datetime!(2026-04-16 12:00:02 UTC),
+            None,
         );
 
-        let (chain, tip) = b.resolve();
-        assert_eq!(tip, Some(newer), "tip should be the newer leaf");
-        assert_chain_texts(&chain, &["root", "newer"]);
+        let chain = b.resolve();
+        assert_eq!(chain.tip, Some(newer), "tip should be the newer leaf");
+        assert_chain_texts(&chain.messages, &["root", "newer"]);
+    }
+
+    #[test]
+    fn resolve_fork_takes_the_newest_context_on_the_tip_branch() {
+        let context = |date: &str| {
+            let mut prompt = PromptParts::default();
+            date.clone_into(&mut prompt.seen.date);
+            Some(Box::new(prompt.session_context()))
+        };
+        let mut b = ChainBuilder::new();
+        let root = Uuid::new_v4();
+        b.insert(
+            root,
+            None,
+            user_message("root"),
+            datetime!(2026-04-16 12:00:00 UTC),
+            context("2026-04-16"),
+        );
+        b.insert(
+            Uuid::new_v4(),
+            Some(root),
+            user_message("sibling"),
+            datetime!(2026-04-17 12:00:00 UTC),
+            context("2026-04-17"),
+        );
+        b.insert(
+            Uuid::new_v4(),
+            Some(root),
+            user_message("tip"),
+            datetime!(2026-04-18 12:00:00 UTC),
+            None,
+        );
+
+        let chain = b.resolve();
+        assert_chain_texts(&chain.messages, &["root", "tip"]);
+        assert_eq!(chain.context, context("2026-04-16"));
     }
 
     #[test]
@@ -215,11 +279,12 @@ mod tests {
             None,
             user_message("root"),
             datetime!(2026-04-16 12:00:00 UTC),
+            None,
         );
-        b.insert(lo, Some(root), user_message("lo"), same);
-        b.insert(hi, Some(root), user_message("hi"), same);
+        b.insert(lo, Some(root), user_message("lo"), same, None);
+        b.insert(hi, Some(root), user_message("hi"), same, None);
 
-        let (_, tip) = b.resolve();
+        let tip = b.resolve().tip;
         assert_eq!(
             tip,
             Some(hi),
@@ -236,12 +301,13 @@ mod tests {
             Some(Uuid::new_v4()),
             user_message("dangling"),
             datetime!(2026-04-16 12:00:01 UTC),
+            None,
         );
 
-        let (chain, tip) = b.resolve();
-        assert_eq!(tip, Some(only));
-        assert_eq!(chain.len(), 1);
-        assert_chain_texts(&chain, &["dangling"]);
+        let chain = b.resolve();
+        assert_eq!(chain.tip, Some(only));
+        assert_eq!(chain.messages.len(), 1);
+        assert_chain_texts(&chain.messages, &["dangling"]);
     }
 
     #[test]
@@ -258,23 +324,30 @@ mod tests {
             Some(mid),
             user_message("leaf"),
             datetime!(2026-04-16 12:00:03 UTC),
+            None,
         );
         b.insert(
             mid,
             Some(tail),
             user_message("mid"),
             datetime!(2026-04-16 12:00:02 UTC),
+            None,
         );
         b.insert(
             tail,
             Some(mid),
             user_message("tail"),
             datetime!(2026-04-16 12:00:01 UTC),
+            None,
         );
 
-        let (chain, tip) = b.resolve();
-        assert_eq!(tip, Some(leaf), "leaf is the only non-referenced node");
-        assert_chain_texts(&chain, &["tail", "mid", "leaf"]);
+        let chain = b.resolve();
+        assert_eq!(
+            chain.tip,
+            Some(leaf),
+            "leaf is the only non-referenced node"
+        );
+        assert_chain_texts(&chain.messages, &["tail", "mid", "leaf"]);
     }
 
     #[test]
@@ -289,17 +362,19 @@ mod tests {
             Some(bb),
             user_message("A"),
             datetime!(2026-04-16 12:00:01 UTC),
+            None,
         );
         b.insert(
             bb,
             Some(a),
             user_message("B"),
             datetime!(2026-04-16 12:00:02 UTC),
+            None,
         );
 
-        let (chain, tip) = b.resolve();
-        assert!(tip.is_none(), "no leaf means no tip");
-        assert_eq!(chain, []);
+        let chain = b.resolve();
+        assert!(chain.tip.is_none(), "no leaf means no tip");
+        assert_eq!(chain.messages, []);
     }
 
     #[test]
@@ -311,11 +386,12 @@ mod tests {
             Some(only),
             user_message("ouroboros"),
             datetime!(2026-04-16 12:00:01 UTC),
+            None,
         );
 
-        let (chain, tip) = b.resolve();
-        assert!(tip.is_none());
-        assert_eq!(chain, []);
+        let chain = b.resolve();
+        assert!(chain.tip.is_none());
+        assert_eq!(chain.messages, []);
     }
 
     #[test]
@@ -327,16 +403,18 @@ mod tests {
             None,
             user_message("first"),
             datetime!(2026-04-16 12:00:01 UTC),
+            None,
         );
         b.insert(
             u,
             None,
             user_message("second"),
             datetime!(2026-04-16 12:00:05 UTC),
+            None,
         );
 
-        let (chain, tip) = b.resolve();
-        assert_eq!(tip, Some(u));
-        assert_chain_texts(&chain, &["second"]);
+        let chain = b.resolve();
+        assert_eq!(chain.tip, Some(u));
+        assert_chain_texts(&chain.messages, &["second"]);
     }
 }
