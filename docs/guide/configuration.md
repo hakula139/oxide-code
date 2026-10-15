@@ -189,7 +189,14 @@ Rules follow the format `class(specifier)`. The class is `read` (read, grep, and
 - **`read` and `edit`** specifiers are path globs where `*` and `?` match within one path segment and `**` spans segments. A relative glob matches paths inside the working directory, so `edit(*.json)` covers `package.json` but not `src/a.json`. A glob starting with `/` or `~/` matches the absolute path after symlinks resolve.
 - **Deny and allow** match paths differently. An allow rule matches only the resolved path, with exact case and spelling. A deny rule also matches the path as the call writes it and, when the rule's literal leading directories run through a symlink at startup, the location they resolve to. It treats names that differ only in case, Unicode normalization, invisible characters, or trailing dots as the same name, so `read(**/.env)` also blocks `.ENV`.
 
-In `auto` mode, edits to these paths need approval even when an allow rule matches: `.git`, `.githooks`, `.husky`, `.vscode`, `.idea`, `.devcontainer`, and `.codex` directories at any depth, shell startup files such as `.bashrc` and `.zshrc`, `.envrc`, `.gitconfig`, `.gitmodules`, `.cargo/config.toml`, `.claude/settings.json`, `.claude/settings.local.json`, `.claude/hooks`, `rust-toolchain.toml`, `ox.toml`, and oxide-code's own config, data, and state directories. Their names compare the way deny rules compare names, in the path as written and as resolved, and a symlinked protected name in the launch directory protects its target as well. A `deny` rule still denies such an edit, and the built-in deny list blocks edits under the launch directory's own `.git`.
+In `auto` mode, edits to these paths need approval even when an allow rule matches:
+
+- **Directories at any depth.** `.git`, `.githooks`, `.husky`, `.vscode`, `.idea`, `.devcontainer`, `.codex`, and `.claude/hooks`.
+- **File names anywhere.** Shell startup files such as `.bashrc` and `.zshrc`, `.envrc`, `.gitconfig`, `.gitmodules`, `ox.toml`, `rust-toolchain`, and `rust-toolchain.toml`.
+- **Parent / file pairs.** `.cargo/config`, `.cargo/config.toml`, `.claude/settings.json`, and `.claude/settings.local.json`.
+- **Application directories.** oxide-code's own config, data, and state directories.
+
+Their names compare the way deny rules compare names, in the path as written and as resolved, and a symlinked protected name in the launch directory protects its target as well. A `deny` rule still denies such an edit, and the built-in deny list blocks edits under the launch directory's own `.git`.
 
 Launching from `/` or your home directory turns off the auto-allow for edits inside it, so those edits need an allow rule or an approval. On macOS and Linux, so does an edit to a file with more than one hard link.
 

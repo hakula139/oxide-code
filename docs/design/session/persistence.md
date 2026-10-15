@@ -44,7 +44,13 @@ The on-disk file is owned by a single `tokio::spawn`-ed actor task. The rest of 
 
 ### Writer recovery on write error
 
-`WriterStatus` is either `Pending` (file not yet on disk, staged header plus an optional deferred rename) or `Active(SessionWriter)`. Entries stay queued in `SessionState` until a write succeeds, and each batch retries the queue ahead of its own entries, so a message never reaches disk before its parent. The flush that creates the file writes the header and its batch in one write and unlinks the file if that write fails, so the session stays `Pending` with nothing on disk. A failed append drops the writer's file handle, and the next append reopens the same path, including for sessions resumed from an explicit path. A failed flush with more than 8 MiB to write drops the queue and stops persistence for the rest of the session.
+Writer recovery follows these rules:
+
+- `WriterStatus` is either `Pending` (file not yet on disk, staged header plus an optional deferred rename) or `Active(SessionWriter)`.
+- Entries stay queued in `SessionState` until a write succeeds, and each batch retries the queue ahead of its own entries, so a message never reaches disk before its parent.
+- The flush that creates the file writes the header and its batch in one write and unlinks the file if that write fails, so the session stays `Pending` with nothing on disk.
+- A failed append drops the writer's file handle, and the next append reopens the same path, including for sessions resumed from an explicit path.
+- A failed flush with more than 8 MiB to write drops the queue and stops persistence for the rest of the session.
 
 Every append first terminates a torn last line, so a crash mid-write loses only the batch it interrupted, none of which was acknowledged. A failed append truncates the bytes it wrote unless another process has appended since, so a retry never duplicates a line. A compact whose write fails is unqueued and never committed, matching the agent, which keeps its pre-compact transcript. The loader applies a compact boundary only once its post-compact root follows, so a boundary whose root never landed leaves the old chain in place.
 
@@ -58,7 +64,12 @@ Starting a session stages the header in memory. The on-disk file is created by t
 
 ### Prompt context
 
-A session records its prompt context (the environment section, the first message's rendered instructions, date, and model identity, and what the model has seen of them) Write it in a `context` entry in the same batch as the first user message that carries it, immediately before that message and with the same timestamp. The loader binds the entry to the next message with a matching timestamp, so a context entry stranded by a torn write cannot attach to another writer's message. When resuming, the latest such entry on the resolved chain is replayed verbatim, so the request sends the same cached system prompt and first message. A forked session therefore replays the context recorded on its own branch. If the session resumes in another directory, the environment section is redetected. Any later instruction, date, or model change, including a `/model` swap, is attached to the next user message as a `<system-reminder>` block, which transcript displays omit, so the system prompt stays byte-identical across a swap. A transcript lacking a `context` entry, or one where no user message followed the last compaction, rebuilds the context and records it with the next message.
+A session records its prompt context: the environment section, the first message's rendered instructions, date, model identity, and what the model has seen of them.
+
+- **Record with the carrying message.** A `context` entry is written in the same batch as the first user message that carries it, immediately before that message and with the same timestamp. The loader binds the entry to the next message with a matching timestamp, so a context entry stranded by a torn write cannot attach to another writer's message.
+- **Replay the resolved branch.** On resume, the latest context entry on the resolved chain is replayed verbatim, so the request sends the same cached system prompt and first message. A forked session replays the context recorded on its own branch.
+- **Refresh changed context.** If the session resumes in another directory, the environment section is redetected. Any later instruction, date, or model change, including a `/model` swap, is attached to the next user message as a `<system-reminder>` block, which transcript displays omit, so the system prompt stays byte-identical across a swap.
+- **Rebuild missing context.** A transcript lacking a `context` entry, or one where no user message followed the last compaction, rebuilds the context and records it with the next message.
 
 ### Archiving
 
@@ -74,11 +85,23 @@ In the TUI, the first user prompt of a fresh session spawns a detached tokio tas
 
 ### Write-error surfacing
 
-First failure populates the handle's `RecordOutcome::failure` slot so the agent loop emits a one-shot `AgentEvent::Error`. Compact and archive acknowledgments include every failure. The agent swaps in the summary only after the boundary reaches disk, and bare `/archive` rolls to a fresh session only after the archive entry is written. Failed compact and archive operations are also removed from the retry queue, so a later flush cannot persist them. Three independent sticky-once flags (`flush_failure_surfaced`, `persistence_stop_surfaced`, `actor_gone_surfaced`) keep different failure kinds from masking each other, so stopping persistence surfaces even after an earlier flush failure.
+Write failures surface through the session handle:
+
+- First failure populates the handle's `RecordOutcome::failure` slot so the agent loop emits a one-shot `AgentEvent::Error`.
+- Compact and archive acknowledgments include every failure.
+- The agent swaps in the summary only after the boundary reaches disk, and bare `/archive` rolls to a fresh session only after the archive entry is written.
+- Failed compact and archive operations are also removed from the retry queue, so a later flush cannot persist them.
+- Three independent sticky-once flags (`flush_failure_surfaced`, `persistence_stop_surfaced`, `actor_gone_surfaced`) keep different failure kinds from masking each other, so stopping persistence surfaces even after an earlier flush failure.
 
 ## Listing
 
-`ox --list` walks the current project subdirectory by default, and `--all` widens to every project. The walk only stats files, so bare `ox -c` parses files only until it finds the newest readable unarchived one, and a prefix lookup parses only the files whose name carries a matching id. A parsed file yields its header, the latest `Entry::Title` and `Entry::Summary`, and the archive state, and a cheap prefix pre-filter on the `"type"` discriminator keeps message lines off the full-parse hot path. `--list` and the `/resume` picker show unarchived sessions, or only archived ones with `--list --archived` and the picker's Ctrl+A. Archive state is stored in each file, so a listing parses sessions in order until it finds one beyond the page, then reports only whether more sessions follow. When few sessions are archived, the archived view parses further.
+Session listing separates file discovery from metadata parsing:
+
+- **Scope.** `ox --list` walks the current project subdirectory by default, and `--all` widens to every project.
+- **Discovery.** The walk only stats files, so bare `ox -c` parses files only until it finds the newest readable unarchived one, and a prefix lookup parses only files whose name carries a matching id.
+- **Metadata.** A parsed file yields its header, the latest `Entry::Title` and `Entry::Summary`, and the archive state. A prefix pre-filter on the `"type"` discriminator keeps message lines off the full-parse hot path.
+- **Archive view.** `--list` and the `/resume` picker show unarchived sessions, or only archived ones with `--list --archived` and the picker's Ctrl+A.
+- **Page budget.** Archive state is stored in each file, so a listing parses sessions in order until it finds one beyond the page, then reports only whether more sessions follow. When few sessions are archived, the archived view parses further.
 
 - Sessions without a title show `(untitled)`.
 - Sessions without a summary still list (`Msgs` displays `-`).
@@ -95,8 +118,8 @@ First failure populates the handle's `RecordOutcome::failure` slot so the agent 
 5. **Lazy file creation.** Empty sessions leave no artifact.
 6. **Resume + symmetric sanitization.** Reopen, walk DAG, sanitize, keep every transcript API-valid.
 7. **Fork-on-conflict concurrency, no file lock.** Newest-leaf rule resolves forks, and one write per batch keeps concurrent appends from splitting a line.
-8. **Fire-and-forget AI titles.** One-shot Haiku call, warn-log on failure, tail-scan's `updated_at` auto-supersedes.
+8. **Fire-and-forget AI titles.** A one-shot Haiku call logs a warning on failure. The title with the newest `updated_at` wins.
 9. **First-failure-only write-error surfacing.** One `AgentEvent::Error` per failure kind plus warn-logs gives visibility without spam.
-10. **Head + tail listing scan, mtime sort.** Head catches first-prompt title, and tail picks up later titles and summary.
+10. **Listing scan with message pre-filter, mtime sort.** Titles and summaries can appear anywhere in the file, so the scan reads every line and the prefix check keeps message lines out of JSON parsing.
 11. **Actor-owned writes, receive-and-drain batching.** One task owns the writer, and `tokio::join!` coalesces a tool round's records into one append.
 12. **Archive state as an appended entry.** A session keeps the same path whether it is archived or active. Because filtering listings by archive state requires parsing files, listings indicate whether more sessions follow the current page without counting them.
