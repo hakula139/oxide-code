@@ -49,7 +49,7 @@ ox                                          # Start an interactive session
 │       ├── completion.rs                   # Non-streaming `Client::complete` + body builder for one-shots
 │       ├── identity.rs                     # Per-machine `device_id` for `metadata.user_id`: lazy mint + persist at $XDG_DATA_HOME/ox/user-id
 │       ├── sse.rs                          # SSE pump and frame decoding, retrying an overload before any content streams
-│       ├── testing.rs                      # Cfg-test fixtures shared by client, agent, and title_generator tests
+│       ├── testing.rs                      # Cfg-test fixtures shared by client, agent, engine, and title_generator tests
 │       ├── transport.rs                    # Shared `POST /v1/messages`: per-request headers, API-error classification, bounded retry with backoff
 │       └── wire.rs                         # Request / response wire types (CreateMessageRequest, StreamEvent, etc.)
 ├── config.rs                               # Configuration loading and layered merging
@@ -58,12 +58,14 @@ ox                                          # Start an interactive session
 │   ├── file.rs                             # TOML config file discovery, parsing, and merge (user + project)
 │   ├── gateway.rs                          # GatewayCompat from Claude Code's gateway env vars: ANTHROPIC_CUSTOM_HEADERS parsing, attribution and structured-output toggles
 │   └── oauth.rs                            # Claude Code OAuth credentials (macOS Keychain + file), token refresh, directory-based advisory lock
-├── driver.rs                               # Conversation: per-session core every driver feeds prompts through (auto-compact, turn, session ops, usage), exit status, shutdown signals
+├── driver.rs                               # Frontends that drive the engine through its handle: stdio turn rendering, exit status, shutdown signals
 ├── driver/
 │   ├── headless.rs                         # `-p` driver: one turn, exit status from how it ended
 │   ├── repl.rs                             # `--no-tui` driver: stdin prompt loop, rejects slash commands, keeps reading after a failed turn and exits with failure at EOF
-│   ├── testing.rs                          # Cfg-test Conversation fixtures shared by the driver tests (conversation, mount_reply, request_bodies)
-│   └── tui.rs                              # TUI driver: App event loop beside the agent task, which serves UserActions and finalizes the live session
+│   └── tui.rs                              # TUI driver: App event loop over the engine handle, closing the op channel on exit
+├── engine.rs                               # Engine: the live session (transcript, prompt, usage) as a task behind EngineHandle, serving UserActions until Quit, then finalizing
+├── engine/
+│   └── testing.rs                          # Cfg-test Engine fixtures shared by engine and driver tests (engine, stopped_engine, mount_reply, request_bodies)
 ├── file_tracker.rs                         # Per-session FileTracker: Read-before-Edit gate, xxh64 staleness check, persist-on-finish + verify-on-resume
 ├── main.rs                                 # CLI entry point: config + session resolution, mode dispatch to a driver, process exit code
 ├── message.rs                              # Conversation message types + progress-update lookup
@@ -167,7 +169,6 @@ ox                                          # Start an interactive session
 │   │   │   └── line.rs                     # Ordered segment rendering for the status line
 │   │   └── welcome.rs                      # Empty-state welcome screen: identity ribbon + body column, themed via `accent`/`text`/`dim`
 │   ├── cursor.rs                           # `place_clamped`: shared right-edge-clamp cursor placement for input surfaces
-│   ├── event.rs                            # ChannelSink (mpsc transport for the TUI)
 │   ├── git_probes.rs                       # GitProbes: background branch / PR probes for the status bar, one run in flight per probe
 │   ├── glyphs.rs                           # Shared visual constants (chevrons, bar, tool indicators, spinner frames)
 │   ├── markdown.rs                         # Markdown module root (pulldown-cmark + syntect renderer)

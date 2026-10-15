@@ -4,6 +4,7 @@ mod agent;
 mod client;
 mod config;
 mod driver;
+mod engine;
 mod file_tracker;
 mod message;
 mod model;
@@ -25,8 +26,9 @@ use tracing::warn;
 
 use client::anthropic::Client;
 use config::Config;
+use driver::Exit;
 use driver::tui::History;
-use driver::{Conversation, Exit};
+use engine::Engine;
 use file_tracker::FileTracker;
 use session::handle::ResumedSession;
 use session::list_view::render_list;
@@ -129,9 +131,10 @@ async fn async_main() -> Result<Exit> {
 
     let client = Client::new(config, Some(handle.session_id().to_owned()))?;
     let tools = Arc::new(create_tool_registry(&file_tracker));
-    let conversation = Conversation::new(
+    let engine = Engine::new(
         client,
         tools,
+        store,
         handle,
         messages,
         context,
@@ -142,11 +145,11 @@ async fn async_main() -> Result<Exit> {
     .await;
 
     if let Some(prompt) = cli.prompt {
-        return Ok(driver::headless::run(conversation, show_thinking, &prompt).await);
+        return Ok(driver::headless::run(engine, show_thinking, &prompt).await);
     }
 
     if !tui_mode {
-        return driver::repl::run(conversation, show_thinking, &drifted).await;
+        return driver::repl::run(engine, show_thinking, &drifted).await;
     }
 
     let history = History {
@@ -154,16 +157,7 @@ async fn async_main() -> Result<Exit> {
         tool_metadata: tool_result_metadata,
         title,
     };
-    driver::tui::run(
-        conversation,
-        store,
-        &theme,
-        snapshot,
-        show_thinking,
-        history,
-        &drifted,
-    )
-    .await
+    driver::tui::run(engine, &theme, snapshot, show_thinking, history, &drifted).await
 }
 
 // ── Session Helpers ──

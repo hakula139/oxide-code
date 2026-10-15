@@ -52,7 +52,7 @@ pub(crate) struct App {
     chat: ChatView,
     input: InputArea,
     session_info: LiveSessionInfo,
-    agent_rx: mpsc::Receiver<AgentEvent>,
+    agent_rx: mpsc::UnboundedReceiver<AgentEvent>,
     user_tx: mpsc::Sender<UserAction>,
     tools: Arc<ToolRegistry>,
     /// Correlates `ToolCallStart` with its matching `ToolCallEnd`.
@@ -83,7 +83,7 @@ impl App {
         theme: &Theme,
         session_info: LiveSessionInfo,
         show_thinking: bool,
-        agent_rx: mpsc::Receiver<AgentEvent>,
+        agent_rx: mpsc::UnboundedReceiver<AgentEvent>,
         user_tx: mpsc::Sender<UserAction>,
         tools: Arc<ToolRegistry>,
         history: AppHistory<'_>,
@@ -315,7 +315,7 @@ impl App {
             match e {
                 mpsc::error::TrySendError::Closed(_) => {
                     self.chat
-                        .push_error("agent task exited unexpectedly; restart `ox` to recover");
+                        .push_error("the engine stopped unexpectedly; restart `ox` to recover");
                     self.input.set_enabled(false);
                     self.should_quit = true;
                 }
@@ -1020,12 +1020,20 @@ mod tests {
     /// open.
     fn test_app(
         title: Option<&str>,
-    ) -> (App, mpsc::Receiver<UserAction>, mpsc::Sender<AgentEvent>) {
+    ) -> (
+        App,
+        mpsc::Receiver<UserAction>,
+        mpsc::UnboundedSender<AgentEvent>,
+    ) {
         test_app_with_registry(title, Arc::new(ToolRegistry::new(Vec::new())))
     }
 
     /// Variant with the real tool catalog so `ToolCallStart` labels match production.
-    fn test_app_with_tools() -> (App, mpsc::Receiver<UserAction>, mpsc::Sender<AgentEvent>) {
+    fn test_app_with_tools() -> (
+        App,
+        mpsc::Receiver<UserAction>,
+        mpsc::UnboundedSender<AgentEvent>,
+    ) {
         let tracker = crate::file_tracker::testing::tracker();
         let tools = ToolRegistry::new(vec![
             Box::new(crate::tool::bash::BashTool),
@@ -1041,8 +1049,12 @@ mod tests {
     fn test_app_with_registry(
         title: Option<&str>,
         tools: Arc<ToolRegistry>,
-    ) -> (App, mpsc::Receiver<UserAction>, mpsc::Sender<AgentEvent>) {
-        let (agent_tx, agent_rx) = mpsc::channel::<AgentEvent>(8);
+    ) -> (
+        App,
+        mpsc::Receiver<UserAction>,
+        mpsc::UnboundedSender<AgentEvent>,
+    ) {
+        let (agent_tx, agent_rx) = mpsc::unbounded_channel::<AgentEvent>();
         let (user_tx, user_rx) = mpsc::channel::<UserAction>(8);
         let app = App::new(
             &Theme::default(),
@@ -1336,12 +1348,8 @@ mod tests {
         )));
         let stream = futures::stream::iter(vec![key]).chain(futures::stream::pending());
 
-        let agent_tx_clone = agent_tx.clone();
         let driver = tokio::spawn(async move {
-            agent_tx_clone
-                .send(AgentEvent::StreamToken("hi".into()))
-                .await
-                .unwrap();
+            agent_tx.send(AgentEvent::StreamToken("hi".into())).unwrap();
             tokio::time::sleep(TICK_INTERVAL * 2).await;
             drop(agent_tx);
         });
@@ -1912,7 +1920,7 @@ mod tests {
 
     #[test]
     fn dispatch_closed_channel_surfaces_error_and_quits() {
-        // Dropping `user_rx` simulates the agent task exiting; the UI must announce and tear down.
+        // Dropping `user_rx` simulates a stopped engine, which the UI announces before teardown.
         let (mut app, rx, _agent_tx) = test_app(None);
         drop(rx);
 

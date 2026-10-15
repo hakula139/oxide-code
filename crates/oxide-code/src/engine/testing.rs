@@ -1,14 +1,18 @@
-//! Test-only [`Conversation`] fixtures. Child of `driver` so it can build the private fields.
+//! Test-only [`Engine`] fixtures. Child of `engine` so it can build the private fields.
 
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
+use tokio::sync::mpsc;
 use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use wiremock::{Mock, MockServer};
 
-use super::Conversation;
-use crate::client::anthropic::testing::{api_key, test_client, text_stream_body};
+use super::{Engine, EngineHandle, EngineTask};
+use crate::client::anthropic::testing::{
+    api_key, sse_response, test_client, text_stream_body, tool_use_stream_body,
+};
 use crate::file_tracker::FileTracker;
 use crate::model::ModelSpec;
 use crate::prompt;
@@ -20,20 +24,17 @@ use crate::util::path::testing::HOME_VAR;
 pub(super) const MODEL: &str = "claude-opus-5-5";
 pub(super) const SESSION_CONTEXT: &str = "<system-reminder>session context</system-reminder>";
 
-/// Non-interactive conversation on a fresh session in `store`, working in `cwd`. Its prompt carries
+/// Non-interactive engine on a fresh session in `store`, working in `cwd`. Its prompt carries
 /// [`SESSION_CONTEXT`] in place of the rendered user context, so tests can tell it apart from a
 /// rebuilt one. Pass an empty directory, and run under [`with_pinned_home`], so the context never
 /// reads the developer's instruction files or git state.
-pub(super) async fn conversation(
-    base_url: String,
-    store: &SessionStore,
-    cwd: &Path,
-) -> Conversation {
+pub(crate) async fn engine(base_url: String, store: &SessionStore, cwd: &Path) -> Engine {
     let mut prompt = prompt::build_prompt(&ModelSpec::resolve(MODEL.to_owned()), cwd).await;
     SESSION_CONTEXT.clone_into(&mut prompt.user_context);
-    Conversation {
+    Engine {
         client: test_client(base_url, api_key(), MODEL),
         tools: Arc::new(ToolRegistry::new(Vec::new())),
+        store: store.clone(),
         session: handle::start(store, MODEL),
         messages: Vec::new(),
         prompt,
@@ -48,10 +49,21 @@ pub(super) async fn conversation(
     }
 }
 
+/// Handle to an engine that has already stopped, as after a panic.
+pub(crate) fn stopped_engine() -> EngineHandle {
+    let (ops, _) = mpsc::channel(1);
+    let (_, events) = mpsc::unbounded_channel();
+    EngineHandle {
+        ops,
+        events,
+        task: EngineTask(tokio::spawn(async { None })),
+    }
+}
+
 /// Runs `test` with the home directory pinned to an empty one, so context loads find no user
 /// instructions even while parallel tests swap it. Boxed, since a whole test body is too large a
 /// future to hold on the stack.
-pub(super) fn with_pinned_home<'a>(
+pub(crate) fn with_pinned_home<'a>(
     test: impl Future<Output = ()> + 'a,
 ) -> Pin<Box<dyn Future<Output = ()> + 'a>> {
     Box::pin(async {
@@ -61,20 +73,47 @@ pub(super) fn with_pinned_home<'a>(
 }
 
 /// Answers every Messages request with a streamed reply of `text`.
-pub(super) async fn mount_reply(server: &MockServer, text: &str) {
+pub(crate) async fn mount_reply(server: &MockServer, text: &str) {
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_string(text_stream_body("", text))
-                .insert_header("content-type", "text/event-stream"),
-        )
+        .respond_with(sse_response(text_stream_body("", text)))
         .mount(server)
         .await;
 }
 
+/// Answers the next Messages request with a call to the tool `name`. Mount it before the reply that
+/// should follow.
+pub(super) async fn mount_tool_call_once(server: &MockServer, name: &str) {
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(sse_response(tool_use_stream_body("call-1", name, "{}")))
+        .up_to_n_times(1)
+        .mount(server)
+        .await;
+}
+
+/// Answers the next Messages request only after a minute, so it stays in flight until the test
+/// cancels or quits it. Mount it before the reply that should follow.
+pub(super) async fn mount_stalled_reply_once(server: &MockServer) {
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(
+            sse_response(text_stream_body("", "too late")).set_delay(Duration::from_secs(60)),
+        )
+        .up_to_n_times(1)
+        .mount(server)
+        .await;
+}
+
+/// Waits until `server` has received a request, so the engine is mid-request.
+pub(super) async fn until_requested(server: &MockServer) {
+    while server.received_requests().await.unwrap().is_empty() {
+        tokio::task::yield_now().await;
+    }
+}
+
 /// Request bodies the server received, in arrival order.
-pub(super) async fn request_bodies(server: &MockServer) -> Vec<serde_json::Value> {
+pub(crate) async fn request_bodies(server: &MockServer) -> Vec<serde_json::Value> {
     server
         .received_requests()
         .await

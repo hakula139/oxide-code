@@ -2,25 +2,25 @@
 
 use std::sync::Arc;
 
-use super::{Conversation, Exit, TurnEnd, shutdown_signal};
-use crate::agent::event::{AgentSink, StdioSink, inert_user_action_channel};
+use super::{Exit, render_turn, shutdown_signal};
+use crate::agent::event::{AgentSink, StdioSink, UserAction};
+use crate::engine::{Engine, EngineHandle, TurnEnd};
 use crate::slash;
 
 /// Runs `prompt` as a single turn. A failed or cancelled turn exits with failure, and a signal
 /// exits with its own status.
-pub(crate) async fn run(conversation: Conversation, show_thinking: bool, prompt: &str) -> Exit {
-    let sink = StdioSink::new(show_thinking, Arc::clone(&conversation.tools));
-    drive(conversation, &sink, prompt).await
+pub(crate) async fn run(engine: Engine, show_thinking: bool, prompt: &str) -> Exit {
+    let sink = StdioSink::new(show_thinking, Arc::clone(engine.tools()));
+    drive(engine.spawn(&[]), &sink, prompt).await
 }
 
-async fn drive<S>(mut conversation: Conversation, sink: &S, prompt: &str) -> Exit
-where
-    S: AgentSink + Clone + 'static,
-{
-    let (_user_tx, mut user_rx) = inert_user_action_channel();
+async fn drive(mut handle: EngineHandle, sink: &dyn AgentSink, prompt: &str) -> Exit {
+    let prompt = slash::unescape_literal(prompt).to_owned();
+    // A send fails only once the engine has stopped, which `render_turn` then reports.
+    _ = handle.ops.send(UserAction::SubmitPrompt(prompt)).await;
     let exit = tokio::select! {
-        end = conversation.submit_prompt(slash::unescape_literal(prompt), sink, &mut user_rx) => {
-            if end == TurnEnd::Completed {
+        end = render_turn(&mut handle.events, sink) => {
+            if end == Some(TurnEnd::Completed) {
                 Exit::Success
             } else {
                 Exit::Failure
@@ -32,7 +32,7 @@ where
         }
     };
 
-    let failure = conversation.finalize().await;
+    let failure = handle.shutdown().await;
     sink.session_write_error(failure.as_deref());
     exit
 }
@@ -42,9 +42,11 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    use super::super::testing::{conversation, mount_reply, with_pinned_home};
     use super::*;
     use crate::agent::event::{AgentEvent, CapturingSink};
+    use crate::engine::testing::{
+        engine, mount_reply, request_bodies, stopped_engine, with_pinned_home,
+    };
     use crate::session::store::testing::test_store;
 
     // ── drive ──
@@ -64,12 +66,8 @@ mod tests {
             let store = test_store(dir.path());
 
             let failed = CapturingSink::new();
-            let exit = Box::pin(drive(
-                conversation(server.uri(), &store, dir.path()).await,
-                &failed,
-                "first",
-            ))
-            .await;
+            let engine_failed = engine(server.uri(), &store, dir.path()).await;
+            let exit = Box::pin(drive(engine_failed.spawn(&[]), &failed, "first")).await;
             assert_eq!(exit, Exit::Failure);
             assert!(matches!(
                 failed.events().last(),
@@ -77,17 +75,18 @@ mod tests {
             ));
 
             let completed = CapturingSink::new();
-            let exit = Box::pin(drive(
-                conversation(server.uri(), &store, dir.path()).await,
-                &completed,
-                "second",
-            ))
-            .await;
+            let engine_completed = engine(server.uri(), &store, dir.path()).await;
+            let exit = Box::pin(drive(engine_completed.spawn(&[]), &completed, "//second")).await;
             assert_eq!(exit, Exit::Success);
             assert!(matches!(
                 completed.events().last(),
                 Some(AgentEvent::TurnComplete)
             ));
+            let requests = request_bodies(&server).await;
+            assert_eq!(requests[1]["messages"][1]["content"][0]["text"], "/second");
+
+            let exit = Box::pin(drive(stopped_engine(), &CapturingSink::new(), "third")).await;
+            assert_eq!(exit, Exit::Failure);
         })
         .await;
     }

@@ -12,7 +12,7 @@ The picker wraps [`SearchableList`](modals.md) and adds a footer line. Each row 
 
 `session/handle` provides `roll_into(...)`, which mirrors `roll(...)`. It loads and sanitizes the target first, so a load failure leaves the live session untouched. It then snapshots and clears the file tracker, restores the target's tracker state through `restore_verified`, swaps the handle in place, and finalizes the old session. The flat `RollIntoOutcome` carries the resumed transcript (messages, compact boundary, title, tool-result metadata, and recorded prompt context) plus a diagnostic pair (finalize failure of the prior session, drift list from the file tracker).
 
-`Conversation::resume` in `driver.rs` drives `roll_into`, rebinds `Client::set_session_id`, replays the recorded prompt context, emits `AgentEvent::SessionResumed { id, title, messages, compact, tool_metadata }`, and surfaces the old session's finalize failure and any tracker-drift warning as distinct `AgentEvent::Error`s. The TUI's `App::apply_session_resumed` clears the chat, replays `load_history`, drops queued prompts (surfaces the count as a system message), and clears the modal stack.
+`Engine::resume` in `engine.rs` drives `roll_into`, rebinds `Client::set_session_id`, replays the recorded prompt context, emits `AgentEvent::SessionResumed { id, title, messages, compact, tool_metadata }`, and surfaces the old session's finalize failure and any tracker-drift warning as distinct `AgentEvent::Error`s. The TUI's `App::apply_session_resumed` clears the chat, replays `load_history`, drops queued prompts (surfaces the count as a system message), and clears the modal stack.
 
 `SessionStore::list_paged` stats every candidate file, sorts by mtime desc, then parses files in order until the page fills, skipping unreadable ones. `ListPage` carries the page plus a total that adds the files the page never reached. `SessionStore::list_matching` filters the same walk by the id in each file name, so a prefix lookup parses only the matching files. Each `SessionInfo` carries the file it was read from, and resume and delete act on that file. `ox --list --limit N` (default `30`, `0` = unbounded) prints `... and N more (use --limit N or --limit 0 to disable the cap)` when the cap clipped output.
 
@@ -64,11 +64,11 @@ The picker wraps [`SearchableList`](modals.md) and adds a footer line. Each row 
 
 - **`/resume <id>` resolver**: `resolve_prefix_to_info` runs the prefix lookup against the current project, then retries across all projects on miss. Returns the matched session or a user-readable error.
 
-- **`UserAction::Resume`**: Single `path` field naming the session file the user picked. The agent loop owns the `roll_into` call, so the slash command never touches the session handle directly.
+- **`UserAction::Resume`**: Single `path` field naming the session file the user picked. The engine owns the `roll_into` call, so the slash command never touches the session handle directly.
 
 - **`AgentEvent::SessionResumed`**: Carries id + title + messages + compact boundary + tool_metadata. App-only reaction. `StdioSink` ignores it (TUI-only event, like `SessionRolled`).
 
-- **`Conversation::resume` (`driver.rs`)**: Drives `roll_into`, rebinds `Client::set_session_id`, emits `SessionResumed`, then surfaces `finalize_failure` and `drifted_paths` as distinct `AgentEvent::Error`s. A `roll_into` failure ends the resume with `AgentEvent::TurnFailed` and keeps the live session. Channel-closed on the resume event logs a desync warning, since the TUI is then stuck on the old chat.
+- **`Engine::resume` (`engine.rs`)**: Drives `roll_into`, rebinds `Client::set_session_id`, emits `SessionResumed`, then surfaces `finalize_failure` and `drifted_paths` as distinct `AgentEvent::Error`s. A `roll_into` failure ends the resume with `AgentEvent::TurnFailed` and keeps the live session.
 
 - **`apply_session_resumed` (TUI)**: Swaps the session id, repaints the title, clears and replays chat history, drops queued prompts (with a system-message surface), clears the modal stack, and resumes idle.
 
@@ -92,7 +92,7 @@ Opening the picker from the shell with `ox --resume` is tracked in [#187](https:
 ## Sources
 
 - `crates/oxide-code/src/agent/event.rs`: `UserAction::Resume`, `AgentEvent::SessionResumed`.
-- `crates/oxide-code/src/driver.rs`: `Conversation::resume`, `format_drift_warning`.
+- `crates/oxide-code/src/engine.rs`: `Engine::resume`, `format_drift_warning`.
 - `crates/oxide-code/src/main.rs`: `Cli::limit`.
 - `crates/oxide-code/src/session/display.rs`: shared `format_metadata_line` used by the picker row.
 - `crates/oxide-code/src/session/handle.rs`: `roll_into`, `RollIntoOutcome`.

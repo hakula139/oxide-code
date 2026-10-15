@@ -568,7 +568,7 @@ pub(crate) fn notify_if_interrupted(messages: &[Message], sink: &dyn AgentSink) 
 }
 
 /// Text of the progress block that stands in for unfinished work when a response stops early.
-const INTERRUPTED_WORK_SENTINEL: &str =
+pub(crate) const INTERRUPTED_WORK_SENTINEL: &str =
     "This part of the response was interrupted before it finished.";
 
 fn ends_on_interrupted_work(blocks: &[ContentBlock]) -> bool {
