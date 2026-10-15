@@ -77,6 +77,21 @@ jobs:
       - name: Clippy
         run: nix develop -c cargo clippy --locked --all-targets -- -D warnings
 
+  cargo-deny:
+    name: Dependency Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Nix
+        uses: ./.github/actions/setup-nix
+        with:
+          cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      - name: Check dependencies
+        run: nix develop -c cargo deny --locked check licenses advisories sources bans
+
   msrv-check:
     name: MSRV Check
     runs-on: ubuntu-latest

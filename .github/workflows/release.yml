@@ -6,6 +6,10 @@ on:
   pull_request:
     paths:
       - .github/workflows/release.yml
+      - about.hbs
+      - about.toml
+      - LICENSE
+      - licenses/**
       - Cargo.lock
       - Cargo.toml
       - crates/*/Cargo.toml
@@ -54,11 +58,21 @@ jobs:
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
 
+      - name: Install cargo-about
+        uses: taiki-e/install-action@cargo-about
+
+      - name: Generate third-party notices
+        shell: bash
+        run: |
+          cargo about generate --locked about.hbs -o THIRD-PARTY-NOTICES
+          cat licenses/syntect-assets.txt >> THIRD-PARTY-NOTICES
+
       - name: Build archive
         id: binary
         uses: taiki-e/upload-rust-binary-action@v1
         with:
           bin: ox
+          include: LICENSE,THIRD-PARTY-NOTICES
           archive: oxide-code-$target
           target: ${{ matrix.target }}
           tar: unix
@@ -68,7 +82,7 @@ jobs:
           dry-run: true
           dry-run-intended: true
 
-      - name: Check version
+      - name: Check archive
         shell: bash
         env:
           ARCHIVE: ${{ steps.binary.outputs.tar || steps.binary.outputs.zip }}
@@ -79,6 +93,9 @@ jobs:
           else
             tar -xzf "$ARCHIVE" -C smoke
           fi
+
+          cmp LICENSE smoke/LICENSE
+          cmp THIRD-PARTY-NOTICES smoke/THIRD-PARTY-NOTICES
 
           if [[ "$GITHUB_REF_TYPE" == 'tag' ]]; then
             expected=${GITHUB_REF_NAME#v}

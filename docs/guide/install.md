@@ -34,7 +34,7 @@ curl -fsSLO "https://github.com/hakula139/oxide-code/releases/download/$VERSION/
 unzip oxide-code-x86_64-pc-windows-msvc.zip
 ```
 
-Each archive ships a single `ox` executable, and each release publishes an `oxide-code-<target>.sha256` checksum beside it. Releases after `v0.1.0-alpha.2` also carry a build provenance attestation, which ties each archive to the release workflow run that built it. To verify one with the GitHub CLI before extracting it, download the archive to disk first:
+Each archive includes `LICENSE` and `THIRD-PARTY-NOTICES` alongside the `ox` executable, and each release publishes an `oxide-code-<target>.sha256` checksum beside it. Releases after `v0.1.0-alpha.2` also carry a build provenance attestation, which ties each archive to the release workflow run that built it. To verify one with the GitHub CLI before extracting it, download the archive to disk first:
 
 ```bash
 curl -fsSLO "https://github.com/hakula139/oxide-code/releases/download/$VERSION/oxide-code-aarch64-apple-darwin.tar.gz"
