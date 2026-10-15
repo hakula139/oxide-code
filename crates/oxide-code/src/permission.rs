@@ -360,7 +360,43 @@ fn resolve(path: &Path) -> Option<PathBuf> {
             _ => {}
         }
     }
+
+    #[cfg(windows)]
+    let resolved = long_names(resolved);
     Some(resolved)
+}
+
+/// `path` with its existing part spelled the way the file system opens it: 8.3 short names in full
+/// and NTFS stream suffixes dropped, so `GIT~1` and `.git::$INDEX_ALLOCATION` compare as `.git`.
+#[cfg(windows)]
+fn long_names(path: PathBuf) -> PathBuf {
+    path.ancestors()
+        .find_map(|existing| {
+            let long = std::fs::canonicalize(existing).ok()?;
+            let mut spelled = respell(existing, &long);
+            spelled.extend(path.strip_prefix(existing).ok()?);
+            Some(spelled)
+        })
+        .unwrap_or(path)
+}
+
+/// `existing` with the names of `long`, its canonical form, under the root as written. [`resolve`]
+/// followed every symlink in `existing`, so only the spelling differs, and the canonical `\\?\` or
+/// UNC root would match neither cwd nor rules. When the name count differs, as under a drive
+/// substituted for a directory, the canonical path stays whole.
+#[cfg(windows)]
+fn respell(existing: &Path, long: &Path) -> PathBuf {
+    if names(existing).count() != names(long).count() {
+        return dunce::simplified(long).to_path_buf();
+    }
+    existing
+        .components()
+        .take_while(|c| matches!(c, Component::Prefix(_) | Component::RootDir))
+        .chain(
+            long.components()
+                .filter(|c| matches!(c, Component::Normal(_))),
+        )
+        .collect()
 }
 
 /// Pushes the components of `path` onto the `pending` stack so they pop in order, first restarting
@@ -863,6 +899,21 @@ mod tests {
         assert_eq!((relative, zone), (None, Zone::Outside));
     }
 
+    #[test]
+    fn for_path_deep_existing_file_stays_a_workspace_target() {
+        // Windows canonicalizes a path past 260 characters to a `\\?\` spelling the cwd lacks.
+        let (_dir, cwd) = temp_cwd();
+        let deep: PathBuf = std::iter::repeat_n("d".repeat(50), 6).collect();
+        std::fs::create_dir_all(cwd.join(&deep)).unwrap();
+        let file = deep.join("a.rs");
+        std::fs::write(cwd.join(&file), "").unwrap();
+
+        assert_eq!(
+            resolved(&GateTarget::for_path(file.to_str().unwrap(), &cwd)),
+            (&*cwd.join(&file), Some(&*file), Zone::Workspace),
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn for_path_new_file_under_a_symlinked_parent_resolves_through_the_link() {
@@ -1045,6 +1096,71 @@ mod tests {
                 None,
                 Zone::Outside
             ),
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn for_path_short_names_compare_as_the_long_names_they_open_as() {
+        let (_dir, cwd) = temp_cwd();
+        std::fs::create_dir(cwd.join(".git")).unwrap();
+        std::fs::create_dir(cwd.join("secrets-store")).unwrap();
+        std::fs::write(cwd.join(r"secrets-store\key"), "").unwrap();
+        // Short names exist only where the volume generates them, as the system drive does.
+        if !cwd.join("GIT~1").exists() || !cwd.join("SECRET~1").exists() {
+            return;
+        }
+
+        let target = GateTarget::for_path(r"GIT~1\config", &cwd);
+        assert_eq!(
+            resolved(&target),
+            (
+                &*cwd.join(r".git\config"),
+                Some(Path::new(r".git\config")),
+                Zone::Protected,
+            )
+        );
+        let p = policy(Mode::Auto, &[], &["edit(**/secrets-store/**)"]);
+        assert_eq!(
+            p.decide(PermissionClass::Edit, &target.as_target()),
+            Decision::Ask
+        );
+        let target = GateTarget::for_path(r"SECRET~1\key", &cwd);
+        assert_eq!(
+            p.decide(PermissionClass::Edit, &target.as_target()),
+            Decision::Deny
+        );
+
+        // A cwd spelled short is still the home directory, which is never a workspace.
+        let home = cwd.join("home-directory");
+        std::fs::create_dir(&home).unwrap();
+        temp_env::with_var(HOME_VAR, Some(&home), || {
+            let target = GateTarget::for_path("notes.md", &cwd.join("HOME-D~1"));
+            assert_eq!(resolved(&target).2, Zone::Outside);
+        });
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn for_path_stream_suffixes_compare_as_the_names_they_open_as() {
+        let (_dir, cwd) = temp_cwd();
+        std::fs::create_dir(cwd.join(".git")).unwrap();
+        std::fs::write(cwd.join(r".git\config"), "").unwrap();
+        std::fs::create_dir(cwd.join("secrets-store")).unwrap();
+        std::fs::write(cwd.join(r"secrets-store\key"), "").unwrap();
+
+        let target = GateTarget::for_path(r".git::$INDEX_ALLOCATION\config", &cwd);
+        let (path, relative, zone) = resolved(&target);
+        assert_eq!(path.as_os_str(), cwd.join(r".git\config").as_os_str());
+        assert_eq!(
+            (relative, zone),
+            (Some(Path::new(r".git\config")), Zone::Protected)
+        );
+        let p = policy(Mode::Auto, &[], &["edit(**/secrets-store/key)"]);
+        let target = GateTarget::for_path(r"secrets-store\key::$DATA", &cwd);
+        assert_eq!(
+            p.decide(PermissionClass::Edit, &target.as_target()),
+            Decision::Deny
         );
     }
 
