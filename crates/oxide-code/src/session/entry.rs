@@ -330,10 +330,9 @@ mod tests {
         let snapshot = FileSnapshot {
             path: std::path::PathBuf::from("/tmp/a.rs"),
             content_hash: 0xDEAD_BEEF,
-            mtime: datetime!(2026-04-29 12:00:00 UTC),
-            size: 7,
             last_view: crate::file_tracker::LastView::Full,
             recorded_at: datetime!(2026-04-29 12:34:56 UTC),
+            tool_use_id: None,
         };
         let entry = Entry::FileSnapshot {
             snapshot: snapshot.clone(),
@@ -342,7 +341,6 @@ mod tests {
         assert_eq!(json["type"], "file_snapshot");
         assert_eq!(json["path"], "/tmp/a.rs");
         assert_eq!(json["content_hash"], 0xDEAD_BEEF_u64);
-        assert_eq!(json["mtime"], "2026-04-29T12:00:00Z");
         assert!(
             json.get("snapshot").is_none(),
             "payload must flatten, not nest under `snapshot`",

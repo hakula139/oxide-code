@@ -12,6 +12,7 @@ use std::fmt::Write as _;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use serde::de::DeserializeOwned;
@@ -19,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 use crate::agent::event::{ApprovalBody, ApprovalPreview};
-use crate::file_tracker::{TrackableFileError, validate_trackable_file};
+use crate::file_tracker::{FileTracker, TrackableFileError, validate_trackable_file};
 use crate::permission::{GateTarget, PermissionClass};
 use crate::util::path::lexical_normalize;
 use crate::util::text::ELLIPSIS;
@@ -244,6 +245,9 @@ pub(crate) trait Tool: Send + Sync {
         }
     }
 
+    /// Executes the call. A user cancel can drop the future at any await, so work it started must
+    /// either stop with the drop, as a bash process group does, or finish together with its
+    /// bookkeeping, as a file write and its tracker record do.
     fn run(
         &self,
         input: serde_json::Value,
@@ -570,6 +574,23 @@ pub(crate) async fn write_no_follow(
     let mut file = options.open(path).await?;
     file.write_all(bytes).await?;
     file.flush().await
+}
+
+/// Writes `bytes` like [`write_no_follow`] and records them under the path's [`tracker_key`] as one
+/// unit, so a caller dropped mid-write cannot leave the file written but unrecorded.
+pub(crate) async fn write_tracked(
+    tracker: &Arc<FileTracker>,
+    path: &str,
+    bytes: Vec<u8>,
+    create_new: bool,
+) -> std::io::Result<()> {
+    let path = path.to_owned();
+    tracker
+        .write_and_record(async move {
+            write_no_follow(Path::new(&path), &bytes, create_new).await?;
+            Ok((tracker_key(&path).await, bytes))
+        })
+        .await
 }
 
 // ── File Walking ──

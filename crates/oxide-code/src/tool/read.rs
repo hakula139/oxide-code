@@ -141,7 +141,7 @@ async fn read_file(
     limit: Option<usize>,
     tracker: &FileTracker,
 ) -> Result<String, String> {
-    let (metadata, bytes) = super::read_validated(path, |metadata| {
+    let (_, bytes) = super::read_validated(path, |metadata| {
         super::validate_file_target(path, metadata, "read")
     })
     .await?;
@@ -150,10 +150,6 @@ async fn read_file(
         return Err("File appears to be binary. Use the bash tool to inspect binary files.".into());
     }
 
-    let mtime = metadata
-        .modified()
-        .map_err(|e| format!("Error reading {path}: {e}"))?;
-    let size = metadata.len();
     let key = super::tracker_key(path).await;
 
     let text = String::from_utf8_lossy(&bytes);
@@ -162,7 +158,7 @@ async fn read_file(
     let lines: Vec<&str> = text.lines().collect();
     let total_lines = lines.len();
     if total_lines == 0 {
-        let outcome = tracker.record_read(&key, &bytes, mtime, size, LastView::Full);
+        let outcome = tracker.record_read(&key, &bytes, LastView::Full);
         return Ok(stub_or(outcome, EMPTY_FILE_MARKER).into_owned());
     }
 
@@ -204,7 +200,7 @@ async fn read_file(
     }
 
     let view = LastView::lines(offset_n, last_shown, total_lines);
-    let outcome = tracker.record_read(&key, &bytes, mtime, size, view);
+    let outcome = tracker.record_read(&key, &bytes, view);
     Ok(stub_or(outcome, &output).into_owned())
 }
 

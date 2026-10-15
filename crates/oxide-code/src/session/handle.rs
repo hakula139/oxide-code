@@ -12,7 +12,7 @@ use tokio::task::JoinHandle;
 
 use super::actor::{self, SessionCmd};
 use super::entry::CompactInfo;
-use super::sanitize::sanitize_resumed_messages;
+use super::sanitize::{retain_visible_file_snapshots, sanitize_resumed_messages};
 use super::state::{SessionState, extract_user_text};
 use super::store::{
     SessionData, SessionStore, load_session_data_from_path, open_append_at,
@@ -434,6 +434,7 @@ fn from_resumed_data(
     if pre_sanitize_len > 0 && data.messages.is_empty() {
         bail!("session {session_id}: sanitize dropped all messages");
     }
+    retain_visible_file_snapshots(&mut data.file_snapshots, &data.messages);
 
     let first_user_prompt_seen =
         data.messages.iter().any(|m| extract_user_text(m).is_some()) || data.title.is_some();
@@ -479,7 +480,7 @@ mod tests {
     use super::super::store::testing::{test_session_file, test_store};
     use super::*;
     use crate::file_tracker::{
-        FileTracker, GateError, GatePurpose,
+        self, FileTracker, GateError, GatePurpose,
         testing::{record_tracked_file, seed_full_read},
     };
     use crate::message::{ContentBlock, Role};
@@ -487,6 +488,41 @@ mod tests {
     /// Resumes the session whose file name carries `session_id`.
     fn resume_id(store: &SessionStore, session_id: &str) -> Result<ResumedSession> {
         resume_from_path(store, &store.find_session_path(session_id)?)
+    }
+
+    async fn record_write_call(
+        handle: &SessionHandle,
+        tracker: &FileTracker,
+        tool_use_id: &str,
+        path: &std::path::Path,
+        answered: bool,
+    ) {
+        handle
+            .record_message(Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: tool_use_id.to_owned(),
+                    name: "write".to_owned(),
+                    input: serde_json::Value::Null,
+                }],
+            })
+            .await;
+        file_tracker::attribute_to(tool_use_id, async {
+            record_tracked_file(tracker, path, b"alpha");
+        })
+        .await;
+        if answered {
+            handle
+                .record_message(Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::ToolResult {
+                        tool_use_id: tool_use_id.to_owned(),
+                        content: "wrote".to_owned(),
+                        is_error: false,
+                    }],
+                })
+                .await;
+        }
     }
 
     // ── SharedState ──
@@ -1349,9 +1385,8 @@ mod tests {
         let target_id = target.session_id().to_owned();
         target.record_message(Message::user("target")).await;
         let target_seed = dir.path().join("target.txt");
-        std::fs::write(&target_seed, b"target body").unwrap();
         let target_tracker = FileTracker::default();
-        seed_full_read(&target_tracker, &target_seed);
+        record_write_call(&target, &target_tracker, "toolu_target", &target_seed, true).await;
         let target_snapshots = target_tracker.snapshot_all();
         target.finish(target_snapshots).await;
         drop(target);
@@ -1584,7 +1619,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resume_restores_unchanged_snapshots() {
+    async fn resume_restores_unchanged_snapshots_whose_tool_result_survives() {
         let dir = tempfile::tempdir().unwrap();
         let files_dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
@@ -1593,7 +1628,9 @@ mod tests {
         let session_id = handle.session_id().to_owned();
         handle.record_message(Message::user("hi")).await;
         let path_a = files_dir.path().join("a.rs");
-        record_tracked_file(&tracker, &path_a, b"alpha");
+        let path_b = files_dir.path().join("b.rs");
+        record_write_call(&handle, &tracker, "toolu_a", &path_a, true).await;
+        record_write_call(&handle, &tracker, "toolu_b", &path_b, false).await;
         handle.finish(tracker.snapshot_all()).await;
         drop(handle);
 
@@ -1601,8 +1638,18 @@ mod tests {
         let resumed = resume_id(&store, &session_id).unwrap();
         resumed_tracker.restore_verified(resumed.file_snapshots);
 
-        let result = resumed_tracker.verify_current_content(&path_a, b"alpha", GatePurpose::Edit);
-        assert_eq!(result, Ok(()));
+        let restored = resumed_tracker.verify_current_content(&path_a, b"alpha", GatePurpose::Edit);
+        assert_eq!(restored, Ok(()));
+        let unanswered =
+            resumed_tracker.verify_current_content(&path_b, b"alpha", GatePurpose::Edit);
+        assert_eq!(
+            unanswered,
+            Err(GateError::NeverRead {
+                path: path_b.clone(),
+                purpose: GatePurpose::Edit,
+            }),
+            "resume drops the unanswered call, so its write must be read again",
+        );
     }
 
     #[tokio::test]
@@ -1615,7 +1662,7 @@ mod tests {
         let session_id = handle.session_id().to_owned();
         handle.record_message(Message::user("hi")).await;
         let path_a = files_dir.path().join("a.rs");
-        record_tracked_file(&tracker, &path_a, b"alpha");
+        record_write_call(&handle, &tracker, "toolu_a", &path_a, true).await;
         handle.finish(tracker.snapshot_all()).await;
         drop(handle);
 
@@ -1651,7 +1698,7 @@ mod tests {
         let session_id = handle.session_id().to_owned();
         handle.record_message(Message::user("hi")).await;
         let path_a = files_dir.path().join("a.rs");
-        record_tracked_file(&tracker, &path_a, b"alpha");
+        record_write_call(&handle, &tracker, "toolu_a", &path_a, true).await;
         handle.finish(tracker.snapshot_all()).await;
         drop(handle);
 

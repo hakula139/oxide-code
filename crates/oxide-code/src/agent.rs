@@ -18,7 +18,7 @@ use crate::client::anthropic::wire::{
     ContentBlockInfo, Delta, StopDetails, StopReason, StreamEvent, Usage,
 };
 use crate::config::AutoCompactionConfig;
-use crate::file_tracker::FileTracker;
+use crate::file_tracker::{self, FileTracker};
 use crate::message::{ContentBlock, Message, Role, progress_note};
 use crate::prompt::PromptParts;
 use crate::session::handle::{RecordOutcome, SessionHandle};
@@ -235,10 +235,11 @@ pub(crate) struct GateContext<'a> {
 
 /// Drives one user prompt to a final assistant text reply. The loop returns as soon as a round
 /// produces no tool calls, and a `pause_turn` stop re-requests without a new user message.
-/// Mid-turn `SubmitPrompt` actions queue and splice in as user messages at round boundaries.
-/// Long-running awaits race `user_rx` so `Cancel` / `Quit` abort promptly without leaving partial
-/// round writes. `max_tool_rounds = None` runs unbounded. `Some(n)` bails after `n` rounds without
-/// a final response.
+/// [`UserAction::QueuePrompt`]s splice in as user messages at round boundaries. Long-running awaits
+/// race `user_rx` so `Cancel` / `Quit` abort promptly. An abort mid-stream commits nothing, while
+/// an abort mid-round commits the round with the unfinished calls marked interrupted.
+/// `max_tool_rounds = None` runs unbounded. `Some(n)` bails after `n` rounds without a final
+/// response.
 #[expect(
     clippy::too_many_arguments,
     reason = "agent_turn owns the full per-turn dependency set; bundling them obscures lifetimes"
@@ -329,20 +330,19 @@ pub(crate) async fn agent_turn(
             gate,
         )
         .await;
-        let (results, sidecars) = match round {
-            Ok(pair) => pair,
-            Err(abort) => {
-                return TurnOutcome::aborted(report(latest_usage, billable_rounds), abort);
-            }
-        };
-        let tool_result_msg = Message {
-            role: Role::User,
-            content: results,
-        };
-
-        commit_round_writes(session, sink, &assistant_msg, &tool_result_msg, sidecars).await;
-        messages.push(assistant_msg);
-        messages.push(tool_result_msg);
+        // Calls that finished before an abort already took effect, so the model must see them.
+        commit_round(
+            session,
+            sink,
+            messages,
+            assistant_msg,
+            round.results,
+            round.sidecars,
+        )
+        .await;
+        if let Some(abort) = round.abort {
+            return TurnOutcome::aborted(report(latest_usage, billable_rounds), abort);
+        }
         record_drained_prompts(pending_prompts.drain(..), messages, session, sink).await;
     }
 
@@ -590,6 +590,24 @@ fn collect_tool_uses(blocks: &[ContentBlock]) -> Vec<(String, String, serde_json
         .collect()
 }
 
+/// One tool round's results, with a result for every call even when a user abort stopped dispatch.
+struct ToolRound {
+    results: Vec<ContentBlock>,
+    sidecars: Vec<(String, ToolMetadata)>,
+    abort: Option<TurnAbort>,
+}
+
+impl ToolRound {
+    fn push(&mut self, id: String, output: ToolOutput) {
+        self.sidecars.push((id.clone(), output.metadata));
+        self.results.push(ContentBlock::ToolResult {
+            tool_use_id: id,
+            content: output.content,
+            is_error: output.is_error,
+        });
+    }
+}
+
 async fn run_tool_round(
     tools: &ToolRegistry,
     tool_uses: Vec<(String, String, serde_json::Value)>,
@@ -598,10 +616,14 @@ async fn run_tool_round(
     user_rx: &mut mpsc::Receiver<UserAction>,
     pending: &mut Vec<String>,
     gate: &GateContext<'_>,
-) -> AbortResult<(Vec<ContentBlock>, Vec<(String, ToolMetadata)>)> {
-    let mut results = Vec::with_capacity(tool_uses.len());
-    let mut sidecars: Vec<(String, ToolMetadata)> = Vec::with_capacity(tool_uses.len());
-    for (id, name, input) in tool_uses {
+) -> ToolRound {
+    let mut round = ToolRound {
+        results: Vec::with_capacity(tool_uses.len()),
+        sidecars: Vec::with_capacity(tool_uses.len()),
+        abort: None,
+    };
+    let mut calls = tool_uses.into_iter();
+    for (id, name, input) in calls.by_ref() {
         sink.emit(
             AgentEvent::ToolCallStart {
                 id: id.clone(),
@@ -611,7 +633,7 @@ async fn run_tool_round(
             "tool-call-start",
         );
 
-        let output = dispatch_tool_call(
+        let (output, abort) = dispatch_tool_call(
             tools,
             &id,
             &name,
@@ -622,8 +644,7 @@ async fn run_tool_round(
             pending,
             gate,
         )
-        .await?;
-
+        .await;
         sink.emit(
             AgentEvent::ToolCallEnd {
                 id: id.clone(),
@@ -633,24 +654,34 @@ async fn run_tool_round(
             },
             "tool-call-end",
         );
-
-        sidecars.push((id.clone(), output.metadata));
-        results.push(ContentBlock::ToolResult {
-            tool_use_id: id,
-            content: output.content,
-            is_error: output.is_error,
-        });
+        round.push(id, output);
+        if abort.is_some() {
+            round.abort = abort;
+            break;
+        }
     }
-    Ok((results, sidecars))
+    for (id, ..) in calls {
+        round.push(id, ToolOutput::error(NOT_RUN));
+    }
+    round
 }
 
-async fn commit_round_writes(
+/// Result of a call the user interrupted before its tool started.
+const NOT_RUN: &str = "Not run, because the user interrupted the turn.";
+
+/// Persists one tool round, then appends it to the live transcript.
+async fn commit_round(
     session: &SessionHandle,
     sink: &dyn AgentSink,
-    assistant_msg: &Message,
-    tool_result_msg: &Message,
+    messages: &mut Vec<Message>,
+    assistant_msg: Message,
+    results: Vec<ContentBlock>,
     sidecars: Vec<(String, ToolMetadata)>,
 ) {
+    let tool_result_msg = Message {
+        role: Role::User,
+        content: results,
+    };
     let assistant_fut = session.record_message(assistant_msg.clone());
     let tool_result_fut = session.record_message(tool_result_msg.clone());
     let metadata_fut = session.record_tool_metadata_batch(sidecars);
@@ -659,8 +690,12 @@ async fn commit_round_writes(
     sink.session_write_error(assistant_outcome.failure.as_deref());
     sink.session_write_error(tool_result_outcome.failure.as_deref());
     sink.session_write_error(metadata_outcome.failure.as_deref());
+    messages.push(assistant_msg);
+    messages.push(tool_result_msg);
 }
 
+/// Runs one call through the permission gate and its tool. A user abort still yields a result for
+/// the call, which says whether the tool had started.
 #[expect(
     clippy::too_many_arguments,
     reason = "dispatch threads the per-call gate inputs (id, sink, gate) alongside the run state"
@@ -675,20 +710,37 @@ async fn dispatch_tool_call(
     user_rx: &mut mpsc::Receiver<UserAction>,
     pending: &mut Vec<String>,
     gate: &GateContext<'_>,
-) -> AbortResult<ToolOutput> {
+) -> (ToolOutput, Option<TurnAbort>) {
     if let Some(err) = parse_error {
-        return Ok(ToolOutput::error(format!(
-            "Tool input JSON failed to parse: {err}. Retry with a valid JSON object."
-        )));
+        return (
+            ToolOutput::error(format!(
+                "Tool input JSON failed to parse: {err}. Retry with a valid JSON object."
+            )),
+            None,
+        );
     }
 
-    if let Some(denial) =
-        check_permission(tools, id, name, &mut input, sink, user_rx, pending, gate).await?
+    match check_permission(tools, id, name, &mut input, sink, user_rx, pending, gate).await {
+        Ok(None) => {}
+        Ok(Some(denial)) => return (denial, None),
+        Err(abort) => return (ToolOutput::error(NOT_RUN), Some(abort)),
+    }
+
+    match await_unless_aborted(
+        file_tracker::attribute_to(id, tools.run(name, input)),
+        user_rx,
+        pending,
+    )
+    .await
     {
-        return Ok(denial);
+        Ok(output) => (output, None),
+        Err(abort) => {
+            let output = ToolOutput::error(
+                "The user interrupted this call before it finished, so it may have run partially.",
+            );
+            (output, Some(abort))
+        }
     }
-
-    await_unless_aborted(tools.run(name, input), user_rx, pending).await
 }
 
 /// Runs the permission gate for one call, first pinning a path tool's `input` to the path the gate
@@ -758,7 +810,7 @@ fn denied_output(name: &str) -> ToolOutput {
 
 /// Blocks on the `user_rx` channel for the [`UserAction::ApprovalDecision`] matching `id`, the same
 /// channel the turn loop races elsewhere so no second channel is introduced. Cancel / quit abort
-/// the turn, a queued `SubmitPrompt` buffers into `pending`, and a decision for a different id is
+/// the turn, a `QueuePrompt` buffers into `pending`, and a decision for a different id is
 /// ignored (a stale reply for an already-resolved call). Cancel-safe by drop: it holds no state.
 async fn await_approval(
     id: &str,
@@ -769,7 +821,7 @@ async fn await_approval(
         match user_rx.recv().await {
             Some(UserAction::Cancel) => return Err(TurnAbort::Cancelled),
             Some(UserAction::Quit) | None => return Err(TurnAbort::Quit),
-            Some(UserAction::SubmitPrompt(text)) => pending.push(text),
+            Some(UserAction::QueuePrompt(text)) => pending.push(text),
             Some(UserAction::ApprovalDecision {
                 id: target,
                 decision,
@@ -816,11 +868,12 @@ where
             action = user_rx.recv() => match action {
                 Some(UserAction::Cancel) => return Err(TurnAbort::Cancelled),
                 Some(UserAction::Quit) | None => return Err(TurnAbort::Quit),
-                Some(UserAction::SubmitPrompt(text)) => pending.push(text),
+                Some(UserAction::QueuePrompt(text)) => pending.push(text),
                 // Unreachable under current wiring. Log so regressions surface. An
                 // `ApprovalDecision` here is a stale reply for an already-resolved call.
                 Some(
-                    action @ (UserAction::ConfirmExit
+                    action @ (UserAction::SubmitPrompt(_)
+                    | UserAction::ConfirmExit
                     | UserAction::Clear
                     | UserAction::Resume { .. }
                     | UserAction::Compact { .. }
@@ -1528,6 +1581,34 @@ mod tests {
         events
     }
 
+    /// One turn holding a `tool_use` block per `(id, name, input_json)`.
+    fn tool_uses_turn(calls: &[(&str, &str, &str)]) -> Vec<StreamEvent> {
+        let mut events: Vec<StreamEvent> = calls
+            .iter()
+            .enumerate()
+            .flat_map(|(index, (id, name, input_json))| {
+                [
+                    StreamEvent::ContentBlockStart {
+                        index,
+                        content_block: ContentBlockInfo::ToolUse {
+                            id: (*id).into(),
+                            name: (*name).into(),
+                        },
+                    },
+                    StreamEvent::ContentBlockDelta {
+                        index,
+                        delta: Delta::InputJsonDelta {
+                            partial_json: (*input_json).into(),
+                        },
+                    },
+                    StreamEvent::ContentBlockStop { index },
+                ]
+            })
+            .collect();
+        events.push(StreamEvent::MessageStop);
+        events
+    }
+
     /// Adds a `message_delta` carrying `stop_reason` just before the turn's `message_stop`.
     fn with_stop(
         mut events: Vec<StreamEvent>,
@@ -2104,7 +2185,7 @@ mod tests {
         );
         let queue_prompt = async {
             started.notified().await;
-            tx.send(UserAction::SubmitPrompt("queued after summary".into()))
+            tx.send(UserAction::QueuePrompt("queued after summary".into()))
                 .await
                 .unwrap();
             tokio::task::yield_now().await;
@@ -2454,7 +2535,7 @@ mod tests {
 
     #[tokio::test]
     async fn agent_turn_drains_mid_round_submit_into_messages_at_round_boundary() {
-        // Pre-loaded SubmitPrompt is consumed during the round. At the boundary the agent splices
+        // Pre-loaded QueuePrompt is consumed during the round. At the boundary the agent splices
         // the queued text as a trailing user message and emits PromptDrained.
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
@@ -2467,7 +2548,7 @@ mod tests {
         let mut messages = vec![Message::user("kick off")];
         let (tx, mut rx) = mpsc::channel::<UserAction>(4);
         // Hold the sender so `recv()` stays pending after the queued submit.
-        tx.send(UserAction::SubmitPrompt("follow up".into()))
+        tx.send(UserAction::QueuePrompt("follow up".into()))
             .await
             .unwrap();
 
@@ -2515,7 +2596,7 @@ mod tests {
 
     #[tokio::test]
     async fn agent_turn_drains_multiple_mid_round_submits_in_order() {
-        // Two SubmitPrompts during one await must land as separate User messages in dispatch order
+        // Two QueuePrompts during one await must land as separate User messages in dispatch order
         // with one PromptDrained event each.
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
@@ -2527,10 +2608,10 @@ mod tests {
         let sink = CapturingSink::new();
         let mut messages = vec![Message::user("kick off")];
         let (tx, mut rx) = mpsc::channel::<UserAction>(4);
-        tx.send(UserAction::SubmitPrompt("first".into()))
+        tx.send(UserAction::QueuePrompt("first".into()))
             .await
             .unwrap();
-        tx.send(UserAction::SubmitPrompt("second".into()))
+        tx.send(UserAction::QueuePrompt("second".into()))
             .await
             .unwrap();
 
@@ -2715,16 +2796,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_turn_cancel_during_tool_round_is_cancelled_outcome() {
+    async fn agent_turn_cancel_during_tool_round_commits_finished_and_interrupted_results() {
         // Synchronizes on `GateTool`'s started signal so Cancel races the tool future, not the
         // prior stream phase.
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
-        let client = FakeClient::new(vec![tool_use_turn("tool_1", "gate", r"{}")]);
+        let client = FakeClient::new(vec![tool_uses_turn(&[
+            ("tool_1", "echo", r#"{"v":1}"#),
+            ("tool_2", "gate", "{}"),
+            ("tool_3", "echo", "{}"),
+        ])]);
         let started = Arc::new(Notify::new());
-        let tools = ToolRegistry::new(vec![Box::new(GateTool {
-            started: started.clone(),
-        })]);
+        let tools = ToolRegistry::new(vec![
+            Box::new(EchoTool),
+            Box::new(GateTool {
+                started: started.clone(),
+            }),
+        ]);
         let sink = CapturingSink::new();
         let mut messages = vec![Message::user("kick off")];
         let (tx, mut rx) = mpsc::channel::<UserAction>(1);
@@ -2751,23 +2839,45 @@ mod tests {
 
         let abort = turn_result.expect_err("cancel must surface as Err(Cancelled)");
         assert!(matches!(abort, TurnAbort::Cancelled), "got {abort:?}");
-        // Cancel here happens before the round's messages are appended. Iteration-atomic so the
-        // next turn sees the pre-turn tail.
-        assert_eq!(messages.len(), 1, "{messages:#?}");
-        // ToolCallStart fires before `dispatch_tool_call` parks. The matching End must not fire
-        // because the tool future was dropped.
-        let events = sink.events();
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, AgentEvent::ToolCallStart { id, .. } if id == "tool_1")),
-            "ToolCallStart fired before cancel: {events:?}",
+        let [_, assistant, results] = &messages[..] else {
+            panic!("the round commits as one assistant / user pair: {messages:#?}");
+        };
+        assert_eq!(assistant.content.len(), 3, "{assistant:?}");
+        let results: Vec<(&str, &str, bool)> = results
+            .content
+            .iter()
+            .map(|block| match block {
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error,
+                } => (tool_use_id.as_str(), content.as_str(), *is_error),
+                other => panic!("expected ToolResult, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            results,
+            [
+                ("tool_1", r#"{"v":1}"#, false),
+                (
+                    "tool_2",
+                    "The user interrupted this call before it finished, so it may have run \
+                     partially.",
+                    true,
+                ),
+                (
+                    "tool_3",
+                    "Not run, because the user interrupted the turn.",
+                    true
+                ),
+            ],
         );
+        let events = sink.events();
         assert!(
             !events
                 .iter()
-                .any(|e| matches!(e, AgentEvent::ToolCallEnd { id, .. } if id == "tool_1")),
-            "ToolCallEnd must not fire after cancel: {events:?}",
+                .any(|e| matches!(e, AgentEvent::ToolCallStart { id, .. } if id == "tool_3")),
+            "a call after the interrupt never starts: {events:?}",
         );
         drop(tx);
     }
@@ -3872,6 +3982,42 @@ mod tests {
         );
     }
 
+    // ── dispatch_tool_call ──
+
+    #[tokio::test]
+    async fn dispatch_tool_call_cancel_during_approval_reports_the_call_not_run() {
+        let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
+        let sink = CapturingSink::new();
+        let gate = gate_with(crate::permission::Mode::Auto, &[], &[], true);
+        let (tx, mut rx) = mpsc::channel::<UserAction>(1);
+        tx.try_send(UserAction::Cancel).unwrap();
+
+        let (output, abort) = dispatch_tool_call(
+            &tools,
+            "tool_1",
+            "echo",
+            json!({"v": 1}),
+            None,
+            &sink,
+            &mut rx,
+            &mut Vec::new(),
+            &gate,
+        )
+        .await;
+
+        assert!(matches!(abort, Some(TurnAbort::Cancelled)), "got {abort:?}");
+        assert!(
+            sink.events()
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ApprovalRequested { id, .. } if id == "tool_1")),
+            "the cancel lands while the approval is pending",
+        );
+        assert_eq!(
+            (output.content.as_str(), output.is_error),
+            ("Not run, because the user interrupted the turn.", true),
+        );
+    }
+
     // ── check_permission ──
 
     #[tokio::test]
@@ -4147,7 +4293,7 @@ mod tests {
     #[tokio::test]
     async fn await_approval_buffers_a_mid_approval_submit_into_pending() {
         let (tx, mut rx) = mpsc::channel::<UserAction>(2);
-        tx.try_send(UserAction::SubmitPrompt("queued".to_owned()))
+        tx.try_send(UserAction::QueuePrompt("queued".to_owned()))
             .unwrap();
         tx.try_send(UserAction::ApprovalDecision {
             id: "tool_1".to_owned(),

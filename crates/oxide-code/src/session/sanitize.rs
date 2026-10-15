@@ -1,8 +1,10 @@
 //! Resume-time transcript repair. Drops unresolved `tool_use` / orphan `tool_result` blocks,
-//! collapses same-role neighbors, and patches head / tail edges the API would reject.
+//! collapses same-role neighbors, and patches head / tail edges the API would reject. File-tracker
+//! snapshots follow the repaired transcript.
 
 use std::collections::HashSet;
 
+use crate::file_tracker::FileSnapshot;
 use crate::message::{ContentBlock, Message, Role};
 
 // ── Constants ──
@@ -27,6 +29,27 @@ pub(super) fn sanitize_resumed_messages(messages: &mut Vec<Message>) {
     drop_orphan_tool_results(messages);
     collapse_consecutive_roles(messages);
     insert_resume_sentinels(messages);
+}
+
+/// Keeps only the snapshots whose recording tool call still has its result in the repaired
+/// `messages`, so the Read-before-Edit gate never clears for content the model cannot see.
+pub(super) fn retain_visible_file_snapshots(
+    snapshots: &mut Vec<FileSnapshot>,
+    messages: &[Message],
+) {
+    let visible: HashSet<&str> = messages
+        .iter()
+        .flat_map(|m| m.content.iter())
+        .filter_map(|b| match b {
+            ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
+            _ => None,
+        })
+        .collect();
+    snapshots.retain(|snap| {
+        snap.tool_use_id
+            .as_deref()
+            .is_some_and(|id| visible.contains(id))
+    });
 }
 
 // ── Passes ──
@@ -118,7 +141,12 @@ fn insert_resume_sentinels(messages: &mut Vec<Message>) {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
+    use time::OffsetDateTime;
+
     use super::*;
+    use crate::file_tracker::LastView;
 
     fn unresolved_tool_use(id: &str) -> ContentBlock {
         ContentBlock::ToolUse {
@@ -323,6 +351,44 @@ mod tests {
         );
         assert_eq!(messages[1].role, Role::Assistant);
         assert_eq!(messages[2].role, Role::User);
+    }
+
+    // ── retain_visible_file_snapshots ──
+
+    fn snapshot(path: &str, tool_use_id: Option<&str>) -> FileSnapshot {
+        FileSnapshot {
+            path: PathBuf::from(path),
+            content_hash: 1,
+            last_view: LastView::Full,
+            recorded_at: OffsetDateTime::UNIX_EPOCH,
+            tool_use_id: tool_use_id.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn retain_visible_file_snapshots_drops_records_whose_call_sanitize_removed() {
+        let mut messages = vec![
+            Message::user("read both"),
+            Message {
+                role: Role::Assistant,
+                content: vec![unresolved_tool_use("seen"), unresolved_tool_use("lost")],
+            },
+            Message {
+                role: Role::User,
+                content: vec![tool_result("seen", "a body")],
+            },
+            Message::assistant("done"),
+        ];
+        let mut snapshots = vec![
+            snapshot("/a", Some("seen")),
+            snapshot("/b", Some("lost")),
+            snapshot("/c", None),
+        ];
+
+        sanitize_resumed_messages(&mut messages);
+        retain_visible_file_snapshots(&mut snapshots, &messages);
+
+        assert_eq!(snapshots, [snapshot("/a", Some("seen"))]);
     }
 
     // ── drop_unresolved_tool_uses ──

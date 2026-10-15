@@ -41,8 +41,6 @@ pub(crate) async fn replace_session_with_summary(
 
 #[cfg(test)]
 mod tests {
-    use std::time::SystemTime;
-
     use anyhow::anyhow;
 
     use super::*;
@@ -78,8 +76,6 @@ mod tests {
         tracker.record_read(
             std::path::Path::new("/tmp/example.rs"),
             b"old",
-            SystemTime::UNIX_EPOCH,
-            3,
             LastView::Full,
         );
         let mut messages = fake_transcript();
@@ -109,7 +105,7 @@ mod tests {
         let session = handle::testing::dead("dead-compact-session");
         let tracker = FileTracker::default();
         let path = std::path::PathBuf::from("/tmp/example.rs");
-        tracker.record_read(&path, b"old", SystemTime::UNIX_EPOCH, 3, LastView::Full);
+        tracker.record_read(&path, b"old", LastView::Full);
         let original = fake_transcript();
         let mut messages = original.clone();
         let sink = CapturingSink::new();
@@ -150,8 +146,6 @@ mod tests {
         tracker.record_read(
             std::path::Path::new("/tmp/example.rs"),
             b"old",
-            SystemTime::UNIX_EPOCH,
-            3,
             LastView::Full,
         );
         let mut messages = fake_transcript();

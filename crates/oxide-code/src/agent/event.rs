@@ -61,8 +61,8 @@ pub(crate) enum AgentEvent {
         is_error: bool,
         metadata: crate::tool::ToolMetadata,
     },
-    /// A queued mid-turn submit was just spliced into the live transcript so the UI clears its
-    /// queued-prompt indicator.
+    /// A [`UserAction::QueuePrompt`] was spliced into the live transcript, so the UI moves it from
+    /// the queue into the chat.
     PromptDrained(String),
     /// Turn ended cleanly with a final assistant reply (no further tool rounds).
     TurnComplete,
@@ -155,7 +155,12 @@ pub(crate) enum ApprovalDecision {
 /// them against in-flight stream / tool futures with one biased `select!`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum UserAction {
+    /// Starts a turn with this prompt.
     SubmitPrompt(String),
+    /// A prompt typed while a turn runs. The turn splices it in at its next round boundary and
+    /// confirms with [`AgentEvent::PromptDrained`]. The UI keeps every unconfirmed prompt and
+    /// submits it later, so the agent drops one that arrives after its turn ended.
+    QueuePrompt(String),
     Clear,
     /// `/resume <id-prefix>` or picker selection: swap to the session file at `path` in place.
     Resume {
