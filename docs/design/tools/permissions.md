@@ -53,6 +53,7 @@ Bash specifiers can be exact, prefix (`cargo test:*`), or wildcard (`git *`). Re
 - `*` and `?` match within one path segment, while `**` spans multiple segments. `[...]` and `{a,b}` work as in `globset`.
 - A glob without a leading `/` or `~/` matches a cwd-relative path and applies only inside the working directory. `*.json` matches `package.json` but not `src/a.json`, while `**/.env` matches at any depth.
 - A glob starting with `/` matches the resolved absolute path. A glob starting with `~/` expands to the home directory first.
+- On Windows, `\` separates names like `/`, an absolute glob needs a drive (`C:/...`), and a rooted glob without one fails to load.
 - Deny rules also match the path as the call spells it, lexically normalized, so `.env -> ../shared/.env` cannot route a read around `read(**/.env)`. Allow rules match only the resolved path.
 - When the policy loads, a deny rule whose literal prefix, the components before the first glob character, runs through a symlink also matches where that prefix resolves, with relative rules resolved against the launch directory. With `secrets -> ../vault`, `read(secrets/**)` also covers `../vault/key`.
 - Allow rules match names exactly as written. Deny rules also compare names the way protected paths do, so `read(**/.env)` covers `.ENV`, `.env.`, and a path whose cwd prefix differs only in case.
