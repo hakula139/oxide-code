@@ -596,7 +596,8 @@ fn resolve_compaction(
 /// Resolves the permission policy from the merged file config plus the `OX_PERMISSION_MODE`
 /// override. The env mode wins over the file mode with the empty-is-absent and parse-error-
 /// propagates behavior `effort` uses, so a typo fails loudly rather than defaulting permissive.
-/// Allow / deny rule strings are parsed here so a malformed rule surfaces at load.
+/// Allow / deny rule strings are parsed here so a malformed rule surfaces at load. Deny prefixes
+/// resolve against the process cwd, which the gate also resolves paths against.
 fn resolve_permission(
     file: Option<file::PermissionFileConfig>,
 ) -> Result<crate::permission::Policy> {
@@ -609,7 +610,8 @@ fn resolve_permission(
 
     let allow = file.allow.unwrap_or_default();
     let deny = file.deny.unwrap_or_default();
-    crate::permission::Policy::resolve(mode, &allow, &deny)
+    let cwd = std::env::current_dir().unwrap_or_default();
+    crate::permission::Policy::resolve(mode, &allow, &deny, &cwd)
 }
 
 fn resolve_compaction_policy(
@@ -1761,8 +1763,13 @@ mod tests {
                 enabled: true,
                 threshold_tokens: Some(42),
             }),
-            permission: crate::permission::Policy::resolve(crate::permission::Mode::Plan, &[], &[])
-                .unwrap(),
+            permission: crate::permission::Policy::resolve(
+                crate::permission::Mode::Plan,
+                &[],
+                &[],
+                Path::new(""),
+            )
+            .unwrap(),
             thinking: None,
             show_thinking: true,
             show_welcome: false,

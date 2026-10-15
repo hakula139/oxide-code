@@ -16,7 +16,10 @@ use std::time::SystemTime;
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
+use crate::agent::event::{ApprovalBody, ApprovalPreview};
+use crate::permission::{GateTarget, PermissionClass};
 use crate::util::text::ELLIPSIS;
 
 // ── Tool Definition ──
@@ -160,19 +163,6 @@ pub(crate) struct GrepMatchLine {
 
 // ── Tool Trait ──
 
-/// How dangerous a tool's effects are, consulted by the permission gate. Read-only tools never
-/// mutate and auto-allow; edit-class and execute gate by mode and rules. See
-/// `docs/design/tools/permissions.md`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RiskClass {
-    /// Never mutates: `read`, `glob`, `grep`.
-    ReadOnly,
-    /// Mutates a file the call names: `edit`, `write`.
-    Edit,
-    /// Runs an opaque command with unbounded authority: `bash`.
-    Execute,
-}
-
 /// A tool that the agent can invoke.
 ///
 /// Per-instance metadata (name, icon, schema, input summary) lives on the trait so that adding a
@@ -182,16 +172,34 @@ pub(crate) trait Tool: Send + Sync {
     fn description(&self) -> &'static str;
     fn input_schema(&self) -> serde_json::Value;
 
-    /// The tool's risk class for the permission gate. No default: each tool states its own so a
-    /// new tool cannot silently inherit a permissive class.
-    fn risk_class(&self) -> RiskClass;
+    /// The permission class the gate files this tool's calls under. No default, so a new tool
+    /// cannot silently inherit a permissive class.
+    fn permission_class(&self) -> PermissionClass;
+
+    /// The input field naming the file this call acts on, if any. [`Self::gate_target`] resolves it
+    /// by default, and [`Self::pin_target`] rewrites it to the resolved path.
+    fn path_field(&self) -> Option<&'static str> {
+        None
+    }
 
     /// Extracts what the permission gate matches rules against from this call's `input`, resolving
-    /// any path against `cwd`. Defaults to [`GateTarget::None`] (only a tool-wide rule matches);
-    /// `bash` returns its command and the path tools their canonicalized target.
-    fn gate_target(&self, input: &serde_json::Value, cwd: &Path) -> crate::permission::GateTarget {
-        _ = (input, cwd);
-        crate::permission::GateTarget::None
+    /// any path against `cwd`. Defaults to the resolved [`Self::path_field`], or
+    /// [`GateTarget::None`] without one, so only a class-wide rule matches.
+    fn gate_target(&self, input: &serde_json::Value, cwd: &Path) -> GateTarget {
+        self.path_field()
+            .and_then(|field| extract_input_field(input, field))
+            .map(|path| GateTarget::for_path(path, cwd))
+            .unwrap_or_default()
+    }
+
+    /// Rewrites [`Self::path_field`] in `input` to the resolved path so the tool opens what the
+    /// gate checked. A symlink swapped into an intermediate directory afterwards is not covered.
+    fn pin_target(&self, input: &mut serde_json::Value, target: &GateTarget) {
+        if let (Some(field), GateTarget::Path { canonical, .. }) = (self.path_field(), target)
+            && let Some(value) = input.get_mut(field)
+        {
+            *value = serde_json::Value::String(canonical.clone());
+        }
     }
 
     fn icon(&self) -> &'static str {
@@ -224,13 +232,12 @@ pub(crate) trait Tool: Send + Sync {
         None
     }
 
-    /// Builds the preview the approval modal shows when this call needs the user's decision.
-    /// Defaults to the `summarize_call` label with a command-style body. `edit` / `write` override
-    /// to show a diff. Only reached when the gate returns `ask`, so it can afford to format.
-    fn approval_preview(&self, input: &serde_json::Value) -> crate::agent::event::ApprovalPreview {
-        crate::agent::event::ApprovalPreview {
-            title: self.summarize_call(input),
-            body: crate::agent::event::ApprovalBody::Command(self.summarize_call(input)),
+    /// Builds what the approval modal shows when the gate asks. Defaults to the tool name over the
+    /// `summarize_call` label. Edit and write override it with a diff.
+    fn approval_preview(&self, input: &serde_json::Value) -> ApprovalPreview {
+        ApprovalPreview {
+            title: title_case(self.name()),
+            body: ApprovalBody::Command(self.summarize_call(input)),
         }
     }
 
@@ -476,6 +483,56 @@ pub(crate) fn is_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(BINARY_CHECK_SIZE).any(|&b| b == 0)
 }
 
+// ── File Reading ──
+
+/// Reads `path` once `validate` accepts its metadata, checked by path before the open and again on
+/// the opened file, so a file swapped in between cannot skip the check. On Unix the open also
+/// refuses a symlink at the final component and never blocks on a fifo.
+pub(crate) async fn read_validated(
+    path: &str,
+    validate: impl Fn(&std::fs::Metadata) -> Result<(), String>,
+) -> Result<(std::fs::Metadata, Vec<u8>), String> {
+    let error = |e: std::io::Error| format!("Error reading {path}: {e}");
+    validate(&tokio::fs::metadata(path).await.map_err(error)?)?;
+
+    let mut options = tokio::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags((nix::fcntl::OFlag::O_NOFOLLOW | nix::fcntl::OFlag::O_NONBLOCK).bits());
+    let mut file = options.open(path).await.map_err(error)?;
+    let metadata = file.metadata().await.map_err(error)?;
+    validate(&metadata)?;
+
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).await.map_err(error)?;
+    Ok((metadata, bytes))
+}
+
+// ── File Writing ──
+
+/// Writes `bytes` to `path`, on Unix without following a symlink at the final component, so a link
+/// swapped in after the gate resolved the path cannot redirect the write. `create_new` refuses any
+/// existing entry, a dangling symlink included.
+pub(crate) async fn write_no_follow(
+    path: &Path,
+    bytes: &[u8],
+    create_new: bool,
+) -> std::io::Result<()> {
+    let mut options = tokio::fs::OpenOptions::new();
+    options.write(true);
+    if create_new {
+        options.create_new(true);
+    } else {
+        options.truncate(true);
+    }
+    #[cfg(unix)]
+    options.custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits());
+
+    let mut file = options.open(path).await?;
+    file.write_all(bytes).await?;
+    file.flush().await
+}
+
 // ── File Walking ──
 
 const MAX_WALK_DEPTH: usize = 64;
@@ -556,6 +613,7 @@ mod tests {
     use super::write::WriteTool;
     use super::*;
     use crate::file_tracker::testing::tracker;
+    use crate::permission::{Decision, Mode, Policy, Zone};
 
     fn all_tools() -> Vec<Box<dyn Tool>> {
         let tracker = tracker();
@@ -750,6 +808,110 @@ mod tests {
             let t = tools.iter().find(|t| t.name() == *name).unwrap();
             assert_eq!(t.summarize_call(input), *expected, "tool {name}");
         }
+    }
+
+    // ── Tool::permission_class ──
+
+    #[test]
+    fn permission_class_rules_cover_every_tool_in_the_class() {
+        // Rules address classes: a `read(...)` deny must stop grep and glob from dumping the file
+        // it names, and an `edit(...)` deny must stop write as well as edit.
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = std::fs::canonicalize(dir.path()).unwrap();
+        std::fs::write(cwd.join(".env"), "SECRET=1").unwrap();
+        let deny = [
+            "read(.env)".to_owned(),
+            "edit(.env)".to_owned(),
+            "bash(cat .env)".to_owned(),
+        ];
+        let policy = Policy::resolve(Mode::Auto, &[], &deny, &cwd).unwrap();
+        let cases = [
+            ("read", serde_json::json!({"file_path": ".env"})),
+            ("grep", serde_json::json!({"pattern": ".", "path": ".env"})),
+            ("glob", serde_json::json!({"pattern": "*", "path": ".env"})),
+            (
+                "edit",
+                serde_json::json!({"file_path": ".env", "old_string": "a", "new_string": "b"}),
+            ),
+            (
+                "write",
+                serde_json::json!({"file_path": ".env", "content": "x"}),
+            ),
+            ("bash", serde_json::json!({"command": "cat .env"})),
+        ];
+        let tools = all_tools();
+        for (name, input) in &cases {
+            let t = tools.iter().find(|t| t.name() == *name).unwrap();
+            let target = t.gate_target(input, &cwd);
+            assert_eq!(
+                policy.decide(t.permission_class(), &target.as_target()),
+                Decision::Deny,
+                "tool {name}",
+            );
+        }
+    }
+
+    // ── Tool::gate_target ──
+
+    #[test]
+    fn gate_target_resolves_the_path_field_of_each_path_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = std::fs::canonicalize(dir.path()).unwrap();
+        let tools = all_tools();
+        for name in ["read", "edit", "write"] {
+            let t = tools.iter().find(|t| t.name() == name).unwrap();
+            let target = t.gate_target(&serde_json::json!({"file_path": "a.rs"}), &cwd);
+            let GateTarget::Path { relative, .. } = target else {
+                panic!("tool {name}: expected a path target, got {target:?}");
+            };
+            assert_eq!(relative.as_deref(), Some("a.rs"), "tool {name}");
+
+            let missing = t.gate_target(&serde_json::json!({}), &cwd);
+            assert!(matches!(missing, GateTarget::None), "tool {name}");
+        }
+    }
+
+    // ── Tool::pin_target ──
+
+    #[test]
+    fn pin_target_rewrites_only_the_path_field() {
+        let resolved = GateTarget::Path {
+            canonical: "/repo/real.rs".to_owned(),
+            relative: Some("real.rs".to_owned()),
+            requested: "/repo/link.rs".to_owned(),
+            deny_relative: vec!["real.rs".to_owned(), "link.rs".to_owned()],
+            zone: Zone::Workspace,
+        };
+        let mut input = serde_json::json!({"file_path": "link.rs", "content": "link.rs"});
+        WriteTool::new(tracker()).pin_target(&mut input, &resolved);
+        assert_eq!(
+            input,
+            serde_json::json!({"file_path": "/repo/real.rs", "content": "link.rs"}),
+        );
+    }
+
+    #[test]
+    fn pin_target_leaves_tools_without_a_path_field_untouched() {
+        let resolved = GateTarget::Path {
+            canonical: "/repo".to_owned(),
+            relative: Some(String::new()),
+            requested: "/repo".to_owned(),
+            deny_relative: vec![String::new()],
+            zone: Zone::Workspace,
+        };
+        let mut input = serde_json::json!({"pattern": "x", "path": "."});
+        GrepTool.pin_target(&mut input, &resolved);
+        assert_eq!(input, serde_json::json!({"pattern": "x", "path": "."}));
+    }
+
+    // ── Tool::approval_preview ──
+
+    #[test]
+    fn approval_preview_default_titles_with_the_tool_name() {
+        // The body carries the full command, wrapped, so the title only names the tool.
+        let preview = BashTool.approval_preview(&serde_json::json!({"command": "cargo test"}));
+        assert_eq!(preview.title, "Bash");
+        assert_eq!(preview.body, ApprovalBody::Command("cargo test".to_owned()));
     }
 
     // ── title_case ──
@@ -1171,6 +1333,109 @@ mod tests {
     #[test]
     fn file_name_bare_name_unchanged() {
         assert_eq!(file_name("README.md"), "README.md");
+    }
+
+    // ── read_validated ──
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_validated_reads_a_regular_file_but_refuses_a_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.txt");
+        std::fs::write(&target, "original").unwrap();
+        let link = dir.path().join("link.txt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let accept = |_: &std::fs::Metadata| Ok(());
+        let (metadata, bytes) = read_validated(target.to_str().unwrap(), accept)
+            .await
+            .unwrap();
+        assert_eq!(
+            (metadata.len(), bytes.as_slice()),
+            (8, b"original".as_slice())
+        );
+        assert!(
+            read_validated(link.to_str().unwrap(), accept)
+                .await
+                .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_validated_rechecks_a_file_swapped_after_the_path_check() {
+        // Each swap runs once the path check passes, as a racing writer's would: a larger file the
+        // size limit must catch, then a fifo the open must not block on.
+        fn grow(path: &Path) {
+            let staged = path.with_extension("new");
+            std::fs::write(&staged, "SECRET=1").unwrap();
+            std::fs::rename(&staged, path).unwrap();
+        }
+        fn fifo(path: &Path) {
+            std::fs::remove_file(path).unwrap();
+            nix::unistd::mkfifo(path, nix::sys::stat::Mode::S_IRWXU).unwrap();
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notes.md");
+        for swap in [grow as fn(&Path), fifo] {
+            std::fs::write(&path, "ok").unwrap();
+            let swapped = std::cell::Cell::new(false);
+            let validate = |meta: &std::fs::Metadata| {
+                if !meta.is_file() || meta.len() > 4 {
+                    return Err("rejected".to_owned());
+                }
+                if !swapped.replace(true) {
+                    swap(&path);
+                }
+                Ok(())
+            };
+            let err = read_validated(path.to_str().unwrap(), validate)
+                .await
+                .unwrap_err();
+            assert_eq!(err, "rejected");
+        }
+    }
+
+    // ── write_no_follow ──
+
+    #[tokio::test]
+    async fn write_no_follow_overwrite_truncates_a_regular_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file.txt");
+        std::fs::write(&path, "a much longer original").unwrap();
+
+        write_no_follow(&path, b"short", false).await.unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "short");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_no_follow_create_new_refuses_existing_entries_and_dangling_links() {
+        let dir = tempfile::tempdir().unwrap();
+        let existing = dir.path().join("existing.txt");
+        std::fs::write(&existing, "original").unwrap();
+        let target = dir.path().join("target.txt");
+        let link = dir.path().join("link.txt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        assert!(write_no_follow(&existing, b"x", true).await.is_err());
+        assert_eq!(std::fs::read_to_string(&existing).unwrap(), "original");
+        assert!(write_no_follow(&link, b"x", true).await.is_err());
+        assert!(!target.exists(), "the link target must not be created");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_no_follow_overwrite_refuses_a_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.txt");
+        std::fs::write(&target, "original").unwrap();
+        let link = dir.path().join("link.txt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        assert!(write_no_follow(&link, b"x", false).await.is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "original");
     }
 
     // ── truncate_line ──

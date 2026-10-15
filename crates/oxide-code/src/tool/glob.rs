@@ -21,8 +21,8 @@ impl Tool for GlobTool {
         "Find files matching a glob pattern. Returns paths sorted by modification time (newest first)."
     }
 
-    fn risk_class(&self) -> super::RiskClass {
-        super::RiskClass::ReadOnly
+    fn permission_class(&self) -> crate::permission::PermissionClass {
+        crate::permission::PermissionClass::Read
     }
 
     fn gate_target(
@@ -265,14 +265,6 @@ mod tests {
     use indoc::{formatdoc, indoc};
 
     use super::*;
-    use crate::tool::RiskClass;
-
-    // ── risk_class ──
-
-    #[test]
-    fn risk_class_is_read_only() {
-        assert_eq!(GlobTool.risk_class(), RiskClass::ReadOnly);
-    }
 
     // ── gate_target ──
 

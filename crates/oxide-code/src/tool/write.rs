@@ -33,26 +33,23 @@ impl Tool for WriteTool {
          Creating a brand-new file bypasses the gate."
     }
 
-    fn risk_class(&self) -> super::RiskClass {
-        super::RiskClass::Edit
+    fn permission_class(&self) -> crate::permission::PermissionClass {
+        crate::permission::PermissionClass::Edit
     }
 
-    fn gate_target(
-        &self,
-        input: &serde_json::Value,
-        cwd: &std::path::Path,
-    ) -> crate::permission::GateTarget {
-        extract_input_field(input, "file_path")
-            .map(|p| crate::permission::GateTarget::for_path(p, cwd))
-            .unwrap_or_default()
+    fn path_field(&self) -> Option<&'static str> {
+        Some("file_path")
     }
 
     fn approval_preview(&self, input: &serde_json::Value) -> crate::agent::event::ApprovalPreview {
         let content = extract_input_field(input, "content").unwrap_or_default();
+        let current = extract_input_field(input, "file_path")
+            .map(current_text)
+            .unwrap_or_default();
         crate::agent::event::ApprovalPreview {
             title: self.summarize_call(input),
             body: crate::agent::event::ApprovalBody::Diff(vec![super::edit::synthesize_chunk(
-                "", content,
+                &current, content,
             )]),
         }
     }
@@ -95,6 +92,19 @@ impl Tool for WriteTool {
     }
 }
 
+/// The text an overwrite would replace. A missing file, or one the write refuses (a symlink, a
+/// non-regular or oversized file), previews as empty.
+fn current_text(path: &str) -> String {
+    let writable = std::fs::symlink_metadata(path)
+        .is_ok_and(|meta| validate_write_target(path, &meta).is_ok());
+    if !writable {
+        return String::new();
+    }
+    std::fs::read(path)
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_default()
+}
+
 // ── Input ──
 
 #[derive(Deserialize)]
@@ -123,7 +133,7 @@ async fn write_file(
     tracker: &FileTracker,
 ) -> (Result<String, String>, bool) {
     let file_path = Path::new(path);
-    let pre_meta = match tokio::fs::metadata(path).await {
+    let pre_meta = match tokio::fs::symlink_metadata(path).await {
         Ok(meta) => Some(meta),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return (Err(format!("Error reading {path}: {e}")), false),
@@ -148,7 +158,7 @@ async fn write_file(
         return (Err(format!("Failed to create directory: {e}")), is_new);
     }
 
-    if let Err(e) = tokio::fs::write(path, content).await {
+    if let Err(e) = super::write_no_follow(file_path, content.as_bytes(), is_new).await {
         return (Err(format!("Failed to write file: {e}")), is_new);
     }
 
@@ -164,7 +174,14 @@ async fn write_file(
     (Ok(msg), is_new)
 }
 
+/// Validates the un-followed `metadata` of an existing target. The gate pinned the path to its
+/// resolved location, so a symlink here appeared afterwards and is refused.
 fn validate_write_target(path: &str, metadata: &std::fs::Metadata) -> Result<(), String> {
+    if metadata.file_type().is_symlink() {
+        return Err(format!(
+            "{path} is a symlink. Refusing to write through it."
+        ));
+    }
     match validate_trackable_file(metadata) {
         Ok(()) => Ok(()),
         Err(TrackableFileError::Directory) => Err(format!(
@@ -202,31 +219,6 @@ mod tests {
         LastView, MAX_TRACKED_FILE_SIZE,
         testing::{seed_full_read, tracker},
     };
-    use crate::permission::GateTarget;
-
-    // ── gate_target ──
-
-    #[test]
-    fn gate_target_resolves_a_brand_new_file_inside_cwd() {
-        // A write target need not exist yet, but it still resolves relative to cwd so the inside-cwd
-        // allow applies to new-file writes.
-        let dir = tempfile::tempdir().unwrap();
-        let cwd = std::fs::canonicalize(dir.path()).unwrap();
-        let tool = WriteTool::new(Arc::new(FileTracker::default()));
-
-        let target = tool.gate_target(&serde_json::json!({"file_path": "new/file.rs"}), &cwd);
-        let GateTarget::Path { relative, .. } = target else {
-            panic!("expected a path target");
-        };
-        assert_eq!(relative.as_deref(), Some("new/file.rs"));
-    }
-
-    #[test]
-    fn gate_target_missing_file_path_is_none() {
-        let tool = WriteTool::new(Arc::new(FileTracker::default()));
-        let target = tool.gate_target(&serde_json::json!({}), std::path::Path::new("/"));
-        assert!(matches!(target, GateTarget::None));
-    }
 
     // ── approval_preview ──
 
@@ -245,6 +237,49 @@ mod tests {
         let chunk = &chunks[0];
         assert!(chunk.old.is_empty(), "a new file has no removed lines");
         assert!(chunk.new.iter().any(|l| l.text.contains("fn main() {}")));
+    }
+
+    #[test]
+    fn approval_preview_diffs_an_overwrite_against_the_current_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notes.txt");
+        std::fs::write(&path, "keep\nold line\n").unwrap();
+        let tool = WriteTool::new(Arc::new(FileTracker::default()));
+
+        let preview = tool.approval_preview(&serde_json::json!({
+            "file_path": path,
+            "content": "keep\nnew line\n",
+        }));
+        let ApprovalBody::Diff(chunks) = preview.body else {
+            panic!("write preview should be a diff");
+        };
+        let removed: Vec<_> = chunks[0].old.iter().map(|l| l.text.as_str()).collect();
+        let added: Vec<_> = chunks[0].new.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(removed, ["old line"]);
+        assert_eq!(added, ["new line"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn approval_preview_does_not_read_through_a_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = dir.path().join("secret.txt");
+        std::fs::write(&secret, "token").unwrap();
+        let link = dir.path().join("link.txt");
+        std::os::unix::fs::symlink(&secret, &link).unwrap();
+        let tool = WriteTool::new(Arc::new(FileTracker::default()));
+
+        let preview = tool.approval_preview(&serde_json::json!({
+            "file_path": link,
+            "content": "new",
+        }));
+        let ApprovalBody::Diff(chunks) = preview.body else {
+            panic!("write preview should be a diff");
+        };
+        assert!(
+            chunks[0].old.is_empty(),
+            "a refused target previews as empty"
+        );
     }
 
     // ── run ──
@@ -467,6 +502,24 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn write_file_rejects_oversized_file_before_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("huge.txt");
+        let f = std::fs::File::create(&path).unwrap();
+        f.set_len(MAX_TRACKED_FILE_SIZE + 1).unwrap();
+
+        let (result, is_new) =
+            write_file(path.to_str().unwrap(), "content", &FileTracker::default()).await;
+
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("too large"),
+            "expected size-limit rejection, got: {err}",
+        );
+        assert!(!is_new);
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn write_file_rejects_non_regular_file_before_gate() {
@@ -485,22 +538,25 @@ mod tests {
         assert!(!is_new);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
-    async fn write_file_rejects_oversized_file_before_gate() {
+    async fn write_file_refuses_a_dangling_symlink_at_the_final_component() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("huge.txt");
-        let f = std::fs::File::create(&path).unwrap();
-        f.set_len(MAX_TRACKED_FILE_SIZE + 1).unwrap();
+        std::fs::create_dir(dir.path().join("outside")).unwrap();
+        let target = dir.path().join("outside").join("escape.txt");
+        let link = dir.path().join("notes.md");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
 
         let (result, is_new) =
-            write_file(path.to_str().unwrap(), "content", &FileTracker::default()).await;
+            write_file(link.to_str().unwrap(), "payload", &FileTracker::default()).await;
 
         let err = result.unwrap_err();
         assert!(
-            err.contains("too large"),
-            "expected size-limit rejection, got: {err}",
+            err.contains("is a symlink"),
+            "expected symlink refusal, got: {err}"
         );
         assert!(!is_new);
+        assert!(!target.exists(), "the link target must not be created");
     }
 
     #[cfg(unix)]

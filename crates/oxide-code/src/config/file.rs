@@ -241,16 +241,15 @@ fn reject_project_secrets(config: &FileConfig, path: &Path) -> Result<()> {
     }
 
     bail!(
-        "{} cannot set {}; move credential and endpoint settings to ~/.config/ox/config.toml or environment variables",
+        "{} cannot set {}. Move credential and endpoint settings to ~/.config/ox/config.toml or \
+         environment variables",
         path.display(),
         blocked.join(", "),
     )
 }
 
-/// A project `ox.toml` is untrusted, so it may tighten permissions but never widen them. `mode` and
-/// `allow` are user / env-only, and only `deny` (which can only restrict) is honored from a project
-/// file. Setting either blocked field is a hard error rather than a silent drop so the user learns
-/// the rule did not take effect.
+/// A project `ox.toml` is untrusted, so it may only add `deny` rules. Setting `mode` or `allow`
+/// there is a hard error so the user learns the setting did not take effect.
 fn reject_project_permissions(config: &FileConfig, path: &Path) -> Result<()> {
     let Some(permission) = &config.permission else {
         return Ok(());
@@ -268,7 +267,8 @@ fn reject_project_permissions(config: &FileConfig, path: &Path) -> Result<()> {
     }
 
     bail!(
-        "{} cannot set {}; a project file may only add permission.deny. Move mode and allow rules to ~/.config/ox/config.toml or environment variables",
+        "{} cannot set {}. A project file may only add permission.deny. Set mode and allow in \
+         ~/.config/ox/config.toml (or mode via OX_PERMISSION_MODE).",
         path.display(),
         blocked.join(", "),
     )

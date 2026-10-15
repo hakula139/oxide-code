@@ -37,18 +37,12 @@ impl Tool for EditTool {
          and to files that changed externally since the last Read."
     }
 
-    fn risk_class(&self) -> super::RiskClass {
-        super::RiskClass::Edit
+    fn permission_class(&self) -> crate::permission::PermissionClass {
+        crate::permission::PermissionClass::Edit
     }
 
-    fn gate_target(
-        &self,
-        input: &serde_json::Value,
-        cwd: &std::path::Path,
-    ) -> crate::permission::GateTarget {
-        extract_input_field(input, "file_path")
-            .map(|p| crate::permission::GateTarget::for_path(p, cwd))
-            .unwrap_or_default()
+    fn path_field(&self) -> Option<&'static str> {
+        Some("file_path")
     }
 
     fn approval_preview(&self, input: &serde_json::Value) -> crate::agent::event::ApprovalPreview {
@@ -200,15 +194,8 @@ async fn edit_file(
     }
 
     let file_path = Path::new(path);
-    let metadata = tokio::fs::metadata(path)
-        .await
-        .map_err(|e| format!("Error reading {path}: {e}"))?;
-
-    validate_edit_target(path, &metadata)?;
-
-    let content_bytes = tokio::fs::read(path)
-        .await
-        .map_err(|e| format!("Error reading {path}: {e}"))?;
+    let (_, content_bytes) =
+        super::read_validated(path, |metadata| validate_edit_target(path, metadata)).await?;
     tracker
         .verify_current_content(file_path, &content_bytes, GatePurpose::Edit)
         .map_err(|e| e.to_string())?;
@@ -251,7 +238,7 @@ async fn edit_file(
     };
     let updated = apply_eol(updated, eol);
 
-    tokio::fs::write(path, &updated)
+    super::write_no_follow(file_path, updated.as_bytes(), false)
         .await
         .map_err(|e| format!("Failed to write {path}: {e}"))?;
 
@@ -429,30 +416,6 @@ mod tests {
         LastView, MAX_TRACKED_FILE_SIZE,
         testing::{tracker, tracker_seeded},
     };
-    use crate::permission::GateTarget;
-
-    // ── gate_target ──
-
-    #[test]
-    fn gate_target_resolves_the_file_path_against_cwd() {
-        let dir = tempfile::tempdir().unwrap();
-        let cwd = std::fs::canonicalize(dir.path()).unwrap();
-        std::fs::write(cwd.join("a.rs"), "x").unwrap();
-        let tool = EditTool::new(Arc::new(FileTracker::default()));
-
-        let target = tool.gate_target(&serde_json::json!({"file_path": "a.rs"}), &cwd);
-        let GateTarget::Path { relative, .. } = target else {
-            panic!("expected a path target");
-        };
-        assert_eq!(relative.as_deref(), Some("a.rs"));
-    }
-
-    #[test]
-    fn gate_target_missing_file_path_is_none() {
-        let tool = EditTool::new(Arc::new(FileTracker::default()));
-        let target = tool.gate_target(&serde_json::json!({}), Path::new("/"));
-        assert!(matches!(target, GateTarget::None));
-    }
 
     // ── approval_preview ──
 

@@ -39,18 +39,12 @@ impl Tool for ReadTool {
         "Read the contents of a file with line numbers."
     }
 
-    fn risk_class(&self) -> super::RiskClass {
-        super::RiskClass::ReadOnly
+    fn permission_class(&self) -> crate::permission::PermissionClass {
+        crate::permission::PermissionClass::Read
     }
 
-    fn gate_target(
-        &self,
-        input: &serde_json::Value,
-        cwd: &std::path::Path,
-    ) -> crate::permission::GateTarget {
-        extract_input_field(input, "file_path")
-            .map(|p| crate::permission::GateTarget::for_path(p, cwd))
-            .unwrap_or_default()
+    fn path_field(&self) -> Option<&'static str> {
+        Some("file_path")
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -144,15 +138,8 @@ async fn read_file(
     limit: Option<usize>,
     tracker: &FileTracker,
 ) -> Result<String, String> {
-    let metadata = tokio::fs::metadata(path)
-        .await
-        .map_err(|e| format!("Error reading {path}: {e}"))?;
-
-    validate_read_target(path, &metadata)?;
-
-    let bytes = tokio::fs::read(path)
-        .await
-        .map_err(|e| format!("Error reading {path}: {e}"))?;
+    let (metadata, bytes) =
+        super::read_validated(path, |metadata| validate_read_target(path, metadata)).await?;
 
     if super::is_binary(&bytes) {
         return Err("File appears to be binary. Use the bash tool to inspect binary files.".into());
@@ -302,54 +289,6 @@ mod tests {
 
     use super::*;
     use crate::file_tracker::{GatePurpose, MAX_TRACKED_FILE_SIZE, testing::tracker};
-    use crate::permission::{Decision, GateTarget, Mode, Policy};
-    use crate::tool::RiskClass;
-
-    // ── risk_class ──
-
-    #[test]
-    fn risk_class_is_read_only() {
-        let tool = ReadTool::new(tracker());
-        assert_eq!(tool.risk_class(), RiskClass::ReadOnly);
-    }
-
-    // ── gate_target ──
-
-    #[test]
-    fn gate_target_extracts_the_file_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let cwd = std::fs::canonicalize(dir.path()).unwrap();
-        std::fs::write(cwd.join(".env"), "SECRET=1").unwrap();
-        let tool = ReadTool::new(tracker());
-
-        let target = tool.gate_target(&serde_json::json!({"file_path": ".env"}), &cwd);
-        let GateTarget::Path { relative, .. } = target else {
-            panic!("expected a path target");
-        };
-        assert_eq!(relative.as_deref(), Some(".env"));
-    }
-
-    #[test]
-    fn gate_target_missing_file_path_is_none() {
-        let tool = ReadTool::new(tracker());
-        let target = tool.gate_target(&serde_json::json!({}), std::path::Path::new("/"));
-        assert!(matches!(target, GateTarget::None));
-    }
-
-    #[test]
-    fn path_scoped_deny_beats_the_read_only_auto_allow_end_to_end() {
-        // The regression the hand-built-target unit test missed: a real `read` call must resolve its
-        // own gate target so `deny = ["read(**/.env)"]` actually fires before the read-only allow.
-        let dir = tempfile::tempdir().unwrap();
-        let cwd = std::fs::canonicalize(dir.path()).unwrap();
-        std::fs::write(cwd.join(".env"), "SECRET=1").unwrap();
-        let tool = ReadTool::new(tracker());
-        let policy = Policy::resolve(Mode::Auto, &[], &["read(**/.env)".to_owned()]).unwrap();
-
-        let target = tool.gate_target(&serde_json::json!({"file_path": ".env"}), &cwd);
-        let decision = policy.decide(tool.name(), tool.risk_class(), &target.as_target());
-        assert_eq!(decision, Decision::Deny);
-    }
 
     // ── run ──
 
@@ -571,23 +510,6 @@ mod tests {
         assert!(err.contains("too large"));
     }
 
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn read_file_rejects_non_regular_file() {
-        // A unix-domain socket has `len() == 0` and would bypass the size gate without is_file().
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("sock");
-        let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
-
-        let err = read_file(path.to_str().unwrap(), None, None, &FileTracker::default())
-            .await
-            .unwrap_err();
-        assert!(
-            err.contains("not a regular file"),
-            "expected non-regular-file error, got: {err}",
-        );
-    }
-
     #[tokio::test]
     async fn read_file_binary_detected() {
         let dir = tempfile::tempdir().unwrap();
@@ -615,6 +537,40 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.contains("beyond the end"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_file_rejects_non_regular_file() {
+        // A unix-domain socket has `len() == 0` and would bypass the size gate without is_file().
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+
+        let err = read_file(path.to_str().unwrap(), None, None, &FileTracker::default())
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("not a regular file"),
+            "expected non-regular-file error, got: {err}",
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_file_refuses_a_symlink_at_the_final_component() {
+        // The gate pins the resolved path, so a link there was swapped in after the check and its
+        // target was never gated.
+        let dir = tempfile::tempdir().unwrap();
+        let secret = dir.path().join("secret.txt");
+        std::fs::write(&secret, "SECRET=1\n").unwrap();
+        let path = dir.path().join("notes.md");
+        std::os::unix::fs::symlink(&secret, &path).unwrap();
+
+        let err = read_file(path.to_str().unwrap(), None, None, &FileTracker::default())
+            .await
+            .unwrap_err();
+        assert!(!err.contains("SECRET"), "{err}");
     }
 
     // ── view_for ──

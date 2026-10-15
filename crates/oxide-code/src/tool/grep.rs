@@ -26,8 +26,8 @@ impl Tool for GrepTool {
         "Search file contents using a regular expression."
     }
 
-    fn risk_class(&self) -> super::RiskClass {
-        super::RiskClass::ReadOnly
+    fn permission_class(&self) -> crate::permission::PermissionClass {
+        crate::permission::PermissionClass::Read
     }
 
     fn gate_target(
@@ -630,7 +630,6 @@ mod tests {
     use indoc::indoc;
 
     use super::*;
-    use crate::tool::RiskClass;
 
     fn params(pattern: &str) -> GrepParams<'_> {
         GrepParams {
@@ -642,13 +641,6 @@ mod tests {
             case_insensitive: false,
             head_limit: None,
         }
-    }
-
-    // ── risk_class ──
-
-    #[test]
-    fn risk_class_is_read_only() {
-        assert_eq!(GrepTool.risk_class(), RiskClass::ReadOnly);
     }
 
     // ── gate_target ──

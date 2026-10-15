@@ -35,6 +35,7 @@ ENOSPC
 ENOTDIR
 envrc
 ESRCH
+fcntl
 feff
 frappe
 getpwuid
@@ -45,6 +46,7 @@ idna
 impls
 indoc
 insta
+IRWXU
 isatty
 katex
 killpg
@@ -54,6 +56,7 @@ latte
 macchiato
 misparse
 misparses
+mkfifo
 MMIX
 mplan
 mpsc
@@ -62,9 +65,11 @@ msys
 mtimes
 MSRV
 MULT
+nfkd
 nixfmt
 nixos
 nixpkgs
+nlink
 nohup
 nonewline
 noprefix
@@ -121,6 +126,7 @@ untap
 urandom
 URXVT
 usize
+vſcode
 vtable
 writeln
 xhigh
