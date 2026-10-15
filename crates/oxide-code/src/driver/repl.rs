@@ -108,7 +108,7 @@ mod tests {
     use super::super::testing::{conversation, mount_reply, request_bodies};
     use super::*;
     use crate::agent::event::CapturingSink;
-    use crate::session::store::test_store;
+    use crate::session::store::testing::test_store;
 
     // ── drive ──
 

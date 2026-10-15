@@ -310,7 +310,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::super::handle::SharedState;
-    use super::super::store::test_store;
+    use super::super::store::testing::test_store;
     use super::*;
     use crate::message::Message;
     use crate::session::state::SessionState;
@@ -370,7 +370,7 @@ mod tests {
 
         drive(state, vec![rec, fin]).await;
 
-        let path = super::super::store::test_session_file(dir.path(), &session_id);
+        let path = super::super::store::testing::test_session_file(dir.path(), &session_id);
         let content = std::fs::read_to_string(path).unwrap();
         let entries: Vec<Entry> = content
             .lines()
@@ -444,7 +444,7 @@ mod tests {
 
         let outcome = meta_rx.await.unwrap();
         assert!(outcome.failure.is_none());
-        let path = super::super::store::test_session_file(dir.path(), &session_id);
+        let path = super::super::store::testing::test_session_file(dir.path(), &session_id);
         let content = std::fs::read_to_string(path).unwrap();
         assert!(
             !content.contains(r#""type":"tool_result_metadata""#),
@@ -525,7 +525,7 @@ mod tests {
 
         drive(state, vec![manual_cmd, rec, fin]).await;
 
-        let path = super::super::store::test_session_file(dir.path(), &session_id);
+        let path = super::super::store::testing::test_session_file(dir.path(), &session_id);
         let content = std::fs::read_to_string(path).unwrap();
         let lines: Vec<&str> = content.lines().collect();
         let header_idx = lines
@@ -581,7 +581,7 @@ mod tests {
 
         drive(state, vec![a, b, rec, fin]).await;
 
-        let path = super::super::store::test_session_file(dir.path(), &session_id);
+        let path = super::super::store::testing::test_session_file(dir.path(), &session_id);
         let content = std::fs::read_to_string(path).unwrap();
         let title_lines: Vec<&str> = content
             .lines()
@@ -623,7 +623,7 @@ mod tests {
 
         drive(state, vec![rec, manual_cmd, ai_cmd, fin]).await;
 
-        let path = super::super::store::test_session_file(dir.path(), &session_id);
+        let path = super::super::store::testing::test_session_file(dir.path(), &session_id);
         let content = std::fs::read_to_string(path).unwrap();
         let title_lines: Vec<&str> = content
             .lines()
@@ -698,7 +698,7 @@ mod tests {
 
         drive(state, vec![rec, f1, f2]).await;
 
-        let path = super::super::store::test_session_file(dir.path(), &session_id);
+        let path = super::super::store::testing::test_session_file(dir.path(), &session_id);
         let content = std::fs::read_to_string(path).unwrap();
         let summary_count = content
             .lines()
@@ -725,7 +725,7 @@ mod tests {
 
         drive(state, vec![rec_a, rec_b, compact_cmd]).await;
 
-        let path = super::super::store::test_session_file(dir.path(), &session_id);
+        let path = super::super::store::testing::test_session_file(dir.path(), &session_id);
         let content = std::fs::read_to_string(path).unwrap();
         let compact_count = content
             .lines()
@@ -813,7 +813,7 @@ mod tests {
         let session_id = state.session_id.to_string();
         let (tx, rx) = mpsc::channel(4);
         let actor = tokio::spawn(run(state, rx, Arc::new(SharedState::default())));
-        let project_dir = super::super::store::test_project_dir(dir.path());
+        let project_dir = super::super::store::testing::test_project_dir(dir.path());
         std::fs::remove_dir_all(&project_dir).unwrap();
 
         let (rec, rec_rx) = record_cmd("before compact");
@@ -875,7 +875,7 @@ mod tests {
 
         drive(state, vec![rec, meta_cmd, fin]).await;
 
-        let path = super::super::store::test_session_file(dir.path(), &session_id);
+        let path = super::super::store::testing::test_session_file(dir.path(), &session_id);
         let content = std::fs::read_to_string(path).unwrap();
         insta::assert_snapshot!(mask_volatile(&content));
     }
@@ -887,7 +887,7 @@ mod tests {
         let store = test_store(dir.path());
         let state = SessionState::fresh(store.clone(), "m");
 
-        let project_dir = super::super::store::test_project_dir(dir.path());
+        let project_dir = super::super::store::testing::test_project_dir(dir.path());
         std::fs::remove_dir_all(&project_dir).unwrap();
 
         let (cmd, rx) = record_cmd("hello");
@@ -906,7 +906,8 @@ mod tests {
         let state = SessionState::fresh(test_store(dir.path()), "m");
         let (tx, rx) = mpsc::channel(1);
         let actor = tokio::spawn(run(state, rx, Arc::new(SharedState::default())));
-        std::fs::remove_dir_all(super::super::store::test_project_dir(dir.path())).unwrap();
+        std::fs::remove_dir_all(super::super::store::testing::test_project_dir(dir.path()))
+            .unwrap();
 
         let mut failures = Vec::new();
         let huge = "x".repeat(super::super::state::MAX_UNWRITTEN_BYTES);

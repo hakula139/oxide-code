@@ -99,6 +99,7 @@ mod tests {
     fn display_title_uses_title_when_present_else_untitled_marker() {
         let mut info = SessionInfo {
             session_id: "abc".to_owned(),
+            path: std::path::PathBuf::new(),
             cwd: String::new(),
             last_active_at: datetime!(2026-05-08 09:00:00 UTC),
             title: None,

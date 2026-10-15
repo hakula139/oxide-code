@@ -314,28 +314,22 @@ impl Conversation {
         );
     }
 
-    /// Finalizes the live session and continues `target_id`. On failure the live session stays.
-    async fn resume(&mut self, sink: &dyn AgentSink, store: &SessionStore, target_id: &str) {
-        let outcome = match handle::roll_into(
-            &mut self.session,
-            store,
-            &self.file_tracker,
-            target_id,
-        )
-        .await
-        {
-            Ok(outcome) => outcome,
-            Err(e) => {
-                sink.emit(
-                    AgentEvent::Error(format!(
-                        "Resume failed (still on session {}): {e:#}",
-                        self.session.session_id(),
-                    )),
-                    "resume-failed",
-                );
-                return;
-            }
-        };
+    /// Finalizes the live session and continues `target`. On failure the live session stays.
+    async fn resume(&mut self, sink: &dyn AgentSink, store: &SessionStore, target: &Path) {
+        let outcome =
+            match handle::roll_into(&mut self.session, store, &self.file_tracker, target).await {
+                Ok(outcome) => outcome,
+                Err(e) => {
+                    sink.emit(
+                        AgentEvent::Error(format!(
+                            "Resume failed (still on session {}): {e:#}",
+                            self.session.session_id(),
+                        )),
+                        "resume-failed",
+                    );
+                    return;
+                }
+            };
         self.adopt_session(outcome.messages.clone(), outcome.context)
             .await;
         sink.emit(
@@ -552,7 +546,7 @@ mod tests {
     use crate::agent::event::CapturingSink;
     use crate::client::anthropic::testing::{api_key, test_config};
     use crate::config::{AutoCompactionConfig, CompactionConfig};
-    use crate::session::store::test_store;
+    use crate::session::store::testing::test_store;
 
     // ── exit_status ──
 
@@ -833,7 +827,8 @@ mod tests {
         );
 
         SESSION_CONTEXT.clone_into(&mut conversation.prompt.user_context);
-        conversation.resume(&sink, &store, &target_id).await;
+        let target_path = store.find_session_path(&target_id).unwrap();
+        conversation.resume(&sink, &store, &target_path).await;
         assert_eq!(conversation.session.session_id(), target_id);
         assert_eq!(conversation.client.session_id(), target_id);
         assert_eq!(conversation.messages.len(), 2);
@@ -857,7 +852,8 @@ mod tests {
             .await;
         conversation.clear(&sink, &store).await;
 
-        conversation.resume(&sink, &store, &recorded_id).await;
+        let recorded_path = store.find_session_path(&recorded_id).unwrap();
+        conversation.resume(&sink, &store, &recorded_path).await;
         assert_eq!(conversation.prompt.user_context, SESSION_CONTEXT);
         assert!(!conversation.prompt_unrecorded);
         conversation
@@ -887,7 +883,7 @@ mod tests {
         let sink = CapturingSink::new();
 
         conversation
-            .resume(&sink, &store, "missing-target-id")
+            .resume(&sink, &store, Path::new("missing-target.jsonl"))
             .await;
 
         assert_eq!(conversation.session.session_id(), original_id);

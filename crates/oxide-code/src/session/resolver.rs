@@ -6,6 +6,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use tracing::debug;
 
+use super::display::id_prefix;
 use super::entry::SessionInfo;
 use super::handle::{self, ResumedSession};
 use super::store::SessionStore;
@@ -31,70 +32,43 @@ pub(crate) async fn resolve_session(
     resume: Option<&Option<String>>,
     all: bool,
 ) -> Result<ResumedSession> {
-    let mode = normalize_resume_arg(resume)?;
-
-    // Path resumes bypass project-subdir listing entirely.
-    if let ResumeMode::Path(path) = mode {
-        let resumed = handle::resume_from_path(store, path)?;
-        debug!("resuming session from {}", path.display());
-        return Ok(resumed);
-    }
-
-    if matches!(mode, ResumeMode::Fresh) {
-        return Ok(ResumedSession {
-            handle: handle::start(store, model),
-            messages: Vec::new(),
-            context: None,
-            compact: None,
-            title: None,
-            tool_result_metadata: std::collections::HashMap::new(),
-            file_snapshots: Vec::new(),
-        });
-    }
-
-    let sessions = if all {
-        store.list_all()?
-    } else {
-        store.list()?
-    };
-
     let scope_hint = if all {
         ""
     } else {
         " in this project (use --all to search every project)"
     };
 
-    let session_id = match mode {
-        ResumeMode::Fresh | ResumeMode::Path(_) => unreachable!("handled above"),
-        ResumeMode::Latest => sessions
-            .into_iter()
-            .next()
-            .map(|s| s.session_id)
-            .with_context(|| format!("no sessions to resume{scope_hint}"))?,
+    let path = match normalize_resume_arg(resume)? {
+        ResumeMode::Fresh => {
+            return Ok(ResumedSession {
+                handle: handle::start(store, model),
+                messages: Vec::new(),
+                context: None,
+                compact: None,
+                title: None,
+                tool_result_metadata: std::collections::HashMap::new(),
+                file_snapshots: Vec::new(),
+            });
+        }
+        ResumeMode::Path(path) => path.to_owned(),
+        ResumeMode::Latest => {
+            store
+                .list_paged(Some(1), all)?
+                .into_sessions()
+                .pop()
+                .with_context(|| format!("no sessions to resume{scope_hint}"))?
+                .path
+        }
         ResumeMode::Prefix(prefix) => {
-            let mut matched = sessions
-                .into_iter()
-                .filter(|s| s.session_id.starts_with(prefix))
-                .map(|s| s.session_id);
-            let first = matched.next();
-            let second = matched.next();
-            match (first, second) {
-                (None, _) => bail!("no session matching prefix '{prefix}'{scope_hint}"),
-                (Some(only), None) => only,
-                (Some(a), Some(b)) => {
-                    let rest: Vec<_> = matched.collect();
-                    bail!(
-                        "ambiguous prefix '{prefix}' matches {} sessions: {}",
-                        2 + rest.len(),
-                        format_session_id_preview([a, b].into_iter().chain(rest)),
-                    );
-                }
-            }
+            match_in_scope(store, prefix, None, all)
+                .map_err(anyhow::Error::msg)?
+                .with_context(|| format!("no session matching prefix `{prefix}`{scope_hint}"))?
+                .path
         }
     };
 
-    let resumed = handle::resume(store, &session_id)?;
-    debug!("resuming session {session_id}");
+    let resumed = handle::resume_from_path(store, &path)?;
+    debug!("resuming session from {}", path.display());
     Ok(resumed)
 }
 
@@ -129,23 +103,23 @@ fn looks_like_path(arg: &str) -> bool {
             .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"))
 }
 
-/// Match `prefix` against finalized sessions, current-project first then widening to all
-/// projects. Excludes `live_id`. Errors name the failing scope.
+/// Matches `prefix` against session ids in the current project, then in every project.
+/// Excludes `live_id`. Errors name the failing scope.
 pub(crate) fn resolve_prefix_to_info(
     store: &SessionStore,
     prefix: &str,
     live_id: &str,
 ) -> Result<Option<SessionInfo>, String> {
-    if let Some(info) = match_in_scope(store, prefix, live_id, false)? {
+    if let Some(info) = match_in_scope(store, prefix, Some(live_id), false)? {
         return Ok(Some(info));
     }
-    match_in_scope(store, prefix, live_id, true)
+    match_in_scope(store, prefix, Some(live_id), true)
 }
 
 fn match_in_scope(
     store: &SessionStore,
     prefix: &str,
-    live_id: &str,
+    live_id: Option<&str>,
     all: bool,
 ) -> Result<Option<SessionInfo>, String> {
     let scope = if all {
@@ -153,14 +127,10 @@ fn match_in_scope(
     } else {
         "current project"
     };
-    let page = store
-        .list_paged(None, all)
+    let mut matches = store
+        .list_matching(prefix, all)
         .map_err(|e| format!("list sessions ({scope}): {e:#}"))?;
-    let mut matches: Vec<SessionInfo> = page
-        .into_sessions()
-        .into_iter()
-        .filter(|info| info.session_id != live_id && info.session_id.starts_with(prefix))
-        .collect();
+    matches.retain(|info| live_id != Some(info.session_id.as_str()));
     match matches.len() {
         0 => Ok(None),
         1 => Ok(matches.pop()),
@@ -174,14 +144,14 @@ fn match_in_scope(
     }
 }
 
-/// Renders up to `MATCH_PREVIEW_LIMIT` IDs (truncated to 8 chars), with `, ...` for overflow.
-pub(crate) fn format_session_id_preview(ids: impl IntoIterator<Item = String>) -> String {
+/// Renders up to `MATCH_PREVIEW_LIMIT` ids as [`id_prefix`] short forms, with `, ...` for overflow.
+fn format_session_id_preview(ids: impl IntoIterator<Item = String>) -> String {
     const MATCH_PREVIEW_LIMIT: usize = 5;
     let mut iter = ids.into_iter();
     let first_batch: Vec<String> = iter
         .by_ref()
         .take(MATCH_PREVIEW_LIMIT)
-        .map(|id| id[..id.len().min(8)].to_owned())
+        .map(|id| id_prefix(&id).to_owned())
         .collect();
     let mut out = first_batch.join(", ");
     if iter.next().is_some() {
@@ -193,7 +163,10 @@ pub(crate) fn format_session_id_preview(ids: impl IntoIterator<Item = String>) -
 
 #[cfg(test)]
 mod tests {
-    use super::super::store::{test_project_dir, test_session_file, test_store};
+    use super::super::store::testing::{
+        seed_test_session, test_project_dir, test_session_file, test_store,
+        write_newest_corrupt_session,
+    };
     use super::*;
     use crate::message::Message;
 
@@ -267,17 +240,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_session_all_widens_scope_to_list_all() {
-        // `--all` flips listing to `list_all`; the error hint also drops "in this project".
+    async fn resolve_session_all_widens_scope_to_every_project() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let original = handle::start(&store, "m");
+        let other = SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
+        let original = handle::start(&other, "m");
         let full_id = original.session_id().to_owned();
         original.record_message(Message::user("all scope")).await;
         original.finish(Vec::new()).await;
         drop(original);
-
         let arg = Some(full_id[..10].to_owned());
+
+        let err = resolve_session(&store, "m", Some(&arg), false)
+            .await
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.contains("use --all"), "got: {err}");
+
         let resumed = resolve_session(&store, "m", Some(&arg), true)
             .await
             .unwrap();
@@ -285,7 +265,6 @@ mod tests {
         assert_eq!(resumed.messages.len(), 1);
         assert_eq!(resumed.title.as_deref(), Some("all scope"));
 
-        // Error path under `all = true` omits the "use --all" hint.
         let missing = Some("zzzz".to_owned());
         let err = resolve_session(&store, "m", Some(&missing), true)
             .await
@@ -296,6 +275,33 @@ mod tests {
             !err.contains("use --all"),
             "hint should not suggest --all when already set: {err}",
         );
+    }
+
+    #[tokio::test]
+    async fn resolve_session_bare_continue_resumes_the_newest_readable_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        seed_test_session(
+            &store,
+            "older",
+            Some("Older"),
+            Some(1),
+            time::macros::datetime!(2026-04-18 09:00:00 UTC),
+        );
+        seed_test_session(
+            &store,
+            "newer",
+            Some("Newer"),
+            Some(1),
+            time::macros::datetime!(2026-04-18 10:00:00 UTC),
+        );
+        write_newest_corrupt_session(dir.path());
+
+        let resumed = resolve_session(&store, "m", Some(&None), false)
+            .await
+            .unwrap();
+        assert_eq!(resumed.handle.session_id(), "newer");
+        assert_eq!(resumed.title.as_deref(), Some("Newer"));
     }
 
     #[tokio::test]
@@ -314,8 +320,6 @@ mod tests {
     async fn resolve_session_prefix_errors_on_no_match() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        // Need a real file on disk so the listing is non-empty; otherwise the prefix lookup
-        // short-circuits on "no sessions" before exercising the no-match path.
         let s = handle::start(&store, "m");
         s.record_message(Message::user("noop")).await;
         s.finish(Vec::new()).await;
@@ -446,7 +450,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let other = SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
         let target = "abcd1234-eeff-1122-3344-556677889900";
-        super::super::store::seed_test_session(
+        seed_test_session(
             &other,
             target,
             Some("Foreign"),
@@ -480,7 +484,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let live_id = "abcd1234-eeff-1122-3344-556677889900";
-        super::super::store::seed_test_session(
+        seed_test_session(
             &store,
             live_id,
             Some("Live"),
@@ -502,7 +506,7 @@ mod tests {
         let store = test_store(dir.path());
         for tail in ["a", "b"] {
             let id = format!("aaaaaaaa-{tail}eef-1122-3344-556677889900");
-            super::super::store::seed_test_session(
+            seed_test_session(
                 &store,
                 &id,
                 Some("dup"),

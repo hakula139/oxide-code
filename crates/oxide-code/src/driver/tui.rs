@@ -116,9 +116,7 @@ async fn serve_actions(
                 }
             }
             UserAction::Clear => conversation.clear(&sink, &store).await,
-            UserAction::Resume { session_id } => {
-                conversation.resume(&sink, &store, &session_id).await;
-            }
+            UserAction::Resume { path } => conversation.resume(&sink, &store, &path).await,
             UserAction::Rename { title } => conversation.rename(&sink, title).await,
             UserAction::SwapConfig { model, effort } => {
                 conversation.swap_config(&sink, model, effort);
@@ -151,7 +149,7 @@ mod tests {
     use crate::agent::event::AgentEvent;
     use crate::client::anthropic::testing::text_stream_body;
     use crate::file_tracker::testing::seed_full_read;
-    use crate::session::store::test_store;
+    use crate::session::store::testing::test_store;
 
     async fn next_matching<T>(
         event_rx: &mut mpsc::Receiver<AgentEvent>,
@@ -202,6 +200,44 @@ mod tests {
         let snapshots = store.load_session_data(&live_id).unwrap().file_snapshots;
         let paths: Vec<_> = snapshots.iter().map(|snapshot| &snapshot.path).collect();
         assert_eq!(paths, [&read_path]);
+    }
+
+    #[tokio::test]
+    async fn serve_actions_resumes_the_session_at_the_given_path() {
+        let server = MockServer::start().await;
+        mount_reply(&server, "reply").await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let conversation = conversation(server.uri(), &store).await;
+        let recorded_id = conversation.session.session_id().to_owned();
+        let (sink, mut event_rx) = crate::tui::event::channel();
+        let (user_tx, user_rx) = mpsc::channel(8);
+        let agent = tokio::spawn(serve_actions(conversation, sink, user_rx, store.clone()));
+
+        user_tx
+            .send(UserAction::SubmitPrompt("first".to_owned()))
+            .await
+            .unwrap();
+        next_matching(&mut event_rx, |event| {
+            matches!(event, AgentEvent::TurnComplete).then_some(())
+        })
+        .await;
+        user_tx.send(UserAction::Clear).await.unwrap();
+        next_matching(&mut event_rx, |event| {
+            matches!(event, AgentEvent::SessionRolled { .. }).then_some(())
+        })
+        .await;
+        let path = store.find_session_path(&recorded_id).unwrap();
+        user_tx.send(UserAction::Resume { path }).await.unwrap();
+        let resumed_id = next_matching(&mut event_rx, |event| match event {
+            AgentEvent::SessionResumed { id, .. } => Some(id),
+            _ => None,
+        })
+        .await;
+        drop(user_tx);
+        agent.await.unwrap();
+
+        assert_eq!(resumed_id, recorded_id);
     }
 
     #[tokio::test]

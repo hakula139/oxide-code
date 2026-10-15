@@ -343,9 +343,8 @@ fn truncate_title(s: &str, max_len: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::super::store::{
-        load_session_data_from_path, test_project_dir, test_session_file, test_store,
-    };
+    use super::super::store::load_session_data_from_path;
+    use super::super::store::testing::{test_project_dir, test_session_file, test_store};
     use super::*;
     use crate::file_tracker::FileTracker;
 

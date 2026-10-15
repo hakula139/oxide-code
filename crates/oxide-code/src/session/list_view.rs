@@ -7,7 +7,9 @@ use anyhow::{Context, Result};
 use time::UtcOffset;
 use unicode_width::UnicodeWidthStr;
 
+use super::display::{UNTITLED_MARKER, id_prefix};
 use super::store::SessionStore;
+use super::store::listing::ListPage;
 use crate::util::path::tildify;
 use crate::util::text::truncate_to_width;
 
@@ -25,11 +27,8 @@ const PROJECT_COL_MIN: usize = 8;
 /// title column for every row in the listing.
 const PROJECT_COL_MAX: usize = 40;
 
-const UNTITLED_MARKER: &str = "(untitled)";
-
-/// Render `--list` output to `out`. `all=true` spans every project; `term_width=None` skips
-/// title truncation (use when output is piped or width is unknown). `limit` caps the number of
-/// rows printed; `None` is unbounded (the original behavior, retained via `--limit 0`).
+/// Renders `--list` output to `out`. `all` spans every project, and a `term_width` of `None`
+/// skips title truncation for piped output. `limit` caps the rows printed, unbounded for `None`.
 pub(crate) fn render_list(
     out: &mut dyn Write,
     store: &SessionStore,
@@ -47,7 +46,7 @@ pub(crate) fn render_list(
 /// footer when `page.total` exceeds the rendered slice.
 fn render_sessions(
     out: &mut dyn Write,
-    page: &super::store::ListPage,
+    page: &ListPage,
     all: bool,
     local_offset: UtcOffset,
     term_width: Option<usize>,
@@ -98,7 +97,7 @@ fn render_sessions(
     }
 
     for s in sessions {
-        let id_prefix = &s.session_id[..s.session_id.len().min(8)];
+        let id = id_prefix(&s.session_id);
         let last_active = s
             .last_active_at
             .to_offset(local_offset)
@@ -122,11 +121,11 @@ fn render_sessions(
             let project = tildify(Path::new(&s.cwd));
             writeln!(
                 out,
-                "{id_prefix:<10} {last_active:<19} {msgs:<6} {project:<project_col_width$} {title}",
+                "{id:<10} {last_active:<19} {msgs:<6} {project:<project_col_width$} {title}",
             )
             .context("write list row")?;
         } else {
-            writeln!(out, "{id_prefix:<10} {last_active:<19} {msgs:<6} {title}")
+            writeln!(out, "{id:<10} {last_active:<19} {msgs:<6} {title}")
                 .context("write list row")?;
         }
     }
@@ -146,12 +145,12 @@ mod tests {
     use time::macros::datetime;
 
     use super::super::entry::{ExitInfo, SessionInfo, TitleInfo};
-    use super::super::store::ListPage;
     use super::*;
 
     fn session(session_id: &str, last_active_at: time::OffsetDateTime) -> SessionInfo {
         SessionInfo {
             session_id: session_id.to_owned(),
+            path: std::path::PathBuf::new(),
             cwd: "/work/project".to_owned(),
             last_active_at,
             title: None,
@@ -192,7 +191,7 @@ mod tests {
     fn render_list_empty_store_shows_no_sessions_notice() {
         // Covers the `render_list → render_sessions` glue.
         let dir = tempfile::tempdir().unwrap();
-        let store = super::super::store::test_store(dir.path());
+        let store = super::super::store::testing::test_store(dir.path());
         let mut buf = Vec::new();
         render_list(&mut buf, &store, false, UtcOffset::UTC, None, None).unwrap();
         assert_eq!(

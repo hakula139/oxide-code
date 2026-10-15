@@ -56,7 +56,7 @@ impl SlashCommand for DeleteCmd {
         let info = resolve_for_delete(&store, arg, live_id)?;
         Ok(SlashOutcome::Modal(Box::new(
             ConfirmDeleteSessionModal::new(
-                store,
+                info.path.clone(),
                 info.session_id.clone(),
                 display_title(&info),
                 metadata_line(&info),
@@ -107,7 +107,7 @@ mod tests {
     use time::macros::datetime;
 
     use super::*;
-    use crate::session::store::seed_test_session;
+    use crate::session::store::testing::seed_test_session;
     use crate::slash::registry::SlashCommand;
     use crate::slash::{stamped_id, test_session_info, with_isolated_xdg};
 
@@ -209,6 +209,47 @@ mod tests {
     }
 
     #[test]
+    fn execute_then_confirm_deletes_the_file_the_prefix_matched() {
+        // A renamed file keeps its header id, so deleting by that id would unlink whichever file
+        // is named after it.
+        with_isolated_xdg(|_| {
+            let store = SessionStore::open().unwrap();
+            let header_id = stamped_id(0xab);
+            seed_test_session(
+                &store,
+                &header_id,
+                Some("Renamed"),
+                Some(3),
+                datetime!(2026-04-18 09:00:00 UTC),
+            );
+            let original = store.find_session_path(&header_id).unwrap();
+            let renamed = original.with_file_name("1776502800-renamed.jsonl");
+            std::fs::rename(&original, &renamed).unwrap();
+            seed_test_session(
+                &store,
+                &header_id,
+                Some("Bystander"),
+                Some(1),
+                datetime!(2026-04-18 09:00:05 UTC),
+            );
+            let bystander = store.find_session_path(&header_id).unwrap();
+            let info = test_session_info();
+            let ctx = SlashContext::new(&info, None);
+
+            let mut modal = DeleteCmd.execute("renamed", &ctx).unwrap().into_modal();
+            modal.handle_key(&crossterm::event::KeyEvent::from(
+                crossterm::event::KeyCode::Char('y'),
+            ));
+
+            assert!(!renamed.exists(), "the matched file is deleted");
+            assert!(
+                bystander.exists(),
+                "the file named after the header id survives"
+            );
+        });
+    }
+
+    #[test]
     fn execute_with_live_id_prefix_returns_distinct_live_session_error() {
         // The live session id is filtered out of match results, but a prefix that matches only
         // the live id surfaces a distinct error so the user sees the real reason rather than the
@@ -295,6 +336,7 @@ mod tests {
         // rule (the picker hides project in scoped mode, the confirm modal always shows it).
         let info = SessionInfo {
             session_id: stamped_id(0xab),
+            path: std::path::PathBuf::new(),
             cwd: "/work/oxide".to_owned(),
             last_active_at: datetime!(2026-05-08 09:00:00 UTC),
             title: None,
@@ -309,6 +351,7 @@ mod tests {
     fn metadata_line_omits_project_when_cwd_is_empty() {
         let info = SessionInfo {
             session_id: stamped_id(0xab),
+            path: std::path::PathBuf::new(),
             cwd: String::new(),
             last_active_at: datetime!(2026-05-08 09:00:00 UTC),
             title: None,

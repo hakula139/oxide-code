@@ -73,11 +73,11 @@ First failure populates the handle's `RecordOutcome::failure` slot so the agent 
 
 ## Listing
 
-`ox --list` walks the current project subdirectory by default. `--all` widens to every project. For each file it reads the header, then streams the rest while tracking latest `Entry::Title` and `Entry::Summary`. A cheap prefix pre-filter on the `"type"` discriminator keeps message lines off the full-parse hot path.
+`ox --list` walks the current project subdirectory by default, and `--all` widens to every project. The walk only stats files, so each caller parses just what it needs: one page for `--list`, the newest readable file for bare `ox -c`, and the files whose name carries a matching id for a prefix lookup. A parsed file yields its header plus the latest `Entry::Title` and `Entry::Summary`, and a cheap prefix pre-filter on the `"type"` discriminator keeps message lines off the full-parse hot path.
 
 - Sessions without a title show `(untitled)`.
 - Sessions without a summary still list (`Msgs` displays `-`).
-- Sort by file mtime (session_id tiebreak).
+- Sort by file mtime, with the file name breaking ties.
 - Under `--all`, a `Project` column shows the tildified stored `cwd`.
 - Titles truncated to terminal width with trailing `...`.
 

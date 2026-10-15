@@ -1,5 +1,6 @@
 //! Agent event types and the sink trait for delivering them to a UI.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -147,9 +148,9 @@ pub(crate) enum ApprovalDecision {
 pub(crate) enum UserAction {
     SubmitPrompt(String),
     Clear,
-    /// `/resume <id-prefix>` or picker selection: swap to an existing session in place.
+    /// `/resume <id-prefix>` or picker selection: swap to the session file at `path` in place.
     Resume {
-        session_id: String,
+        path: PathBuf,
     },
     /// `/compact [instructions]`: stream a summarization request, replace the in-memory
     /// transcript with a synthetic continuation, persist a `Compact` JSONL boundary.
