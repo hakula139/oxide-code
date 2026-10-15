@@ -1,22 +1,22 @@
-//! Streaming assistant block. Buffers tokens with a rendered-prefix cache so committed text is not
-//! re-parsed each frame; promoted to [`super::AssistantText`] on `commit_streaming`.
+//! Streaming assistant block. Buffers tokens with a rendered-prefix cache so completed markdown
+//! blocks are not re-parsed each frame. Promoted to [`super::AssistantText`] on `commit_streaming`.
 
 use ratatui::text::Line;
 
 use super::RenderCtx;
-use super::assistant::render_assistant_markdown;
+use super::assistant::{assistant_blank_line, render_assistant_markdown};
+use crate::tui::markdown::complete_blocks_len;
 
 /// In-flight assistant turn buffered between stream tokens.
 ///
-/// Tokens append to `buffer`; everything up to the most recent paragraph break (`\n\n`) is
-/// pre-rendered into `rendered` so each frame only re-parses the unstable tail. The cache is
-/// keyed by viewport width and invalidated on resize.
+/// Complete top-level markdown blocks are pre-rendered into `rendered`, so each frame only
+/// re-parses the tail from the last block start. The cache is keyed by viewport width.
 pub(crate) struct StreamingAssistant {
     buffer: String,
-    /// Rendered lines for the stable prefix up to `rendered_boundary`.
+    /// Rendered lines for the complete blocks before `rendered_boundary`.
     rendered: Vec<Line<'static>>,
     rendered_boundary: usize,
-    /// Width at which `rendered` was produced; cache invalidates on resize.
+    /// Width at which `rendered` was produced.
     cached_width: u16,
 }
 
@@ -52,7 +52,7 @@ impl StreamingAssistant {
         self.cached_width = 0;
     }
 
-    /// Caches rendered lines up to the last `\n\n` boundary.
+    /// Caches rendered lines for every top-level block that is complete.
     pub(crate) fn advance_cache(&mut self, ctx: &RenderCtx<'_>, continues_turn: bool) {
         if ctx.width == 0 {
             return;
@@ -60,62 +60,61 @@ impl StreamingAssistant {
 
         let boundary = self.rendered_boundary;
         let tail = &self.buffer[boundary..];
-        let Some(rel_boundary) = tail.rfind("\n\n") else {
+        // A partial last line can still change which block it starts, so only whole lines count.
+        let Some(last_newline) = tail.rfind('\n') else {
             return;
         };
+        let complete_len = complete_blocks_len(&tail[..=last_newline]);
+        if complete_len == 0 {
+            return;
+        }
 
-        let new_committed = &self.buffer[boundary..boundary + rel_boundary];
-        if !new_committed.trim().is_empty() {
+        let complete = &tail[..complete_len];
+        if !complete.trim().is_empty() {
             let cache_empty = self.rendered.is_empty();
-            let rendered =
-                render_assistant_markdown(new_committed, ctx, !continues_turn && cache_empty);
-            if !self.rendered.is_empty() {
-                // Paragraph break that the single-pass renderer would emit between commits.
-                self.rendered.push(Line::raw(""));
+            let rendered = render_assistant_markdown(complete, ctx, !continues_turn && cache_empty);
+            if !cache_empty {
+                // Block separator that the single-pass renderer would emit between commits.
+                self.rendered.push(assistant_blank_line(ctx));
             }
             self.rendered.extend(rendered);
         }
 
-        self.rendered_boundary = boundary + rel_boundary + 2;
+        self.rendered_boundary = boundary + complete_len;
         self.cached_width = ctx.width;
     }
 
-    /// Renders streaming content; `continues_turn` suppresses the leading gap.
-    pub(crate) fn render_into(
+    pub(crate) fn rendered(&self) -> &[Line<'static>] {
+        &self.rendered
+    }
+
+    /// Renders the uncached tail, led by a separator when blocks are cached. The tail takes the
+    /// assistant icon only when it opens a new turn.
+    pub(crate) fn render_tail(
         &self,
-        out: &mut Vec<Line<'static>>,
         ctx: &RenderCtx<'_>,
         continues_turn: bool,
-    ) {
-        if !continues_turn && super::last_has_width(out) {
-            out.push(Line::raw(""));
-        }
-
-        out.extend(self.rendered.iter().cloned());
-
+    ) -> Vec<Line<'static>> {
         let tail = &self.buffer[self.rendered_boundary..];
         if tail.is_empty() {
-            return;
+            return Vec::new();
         }
 
         let cache_empty = self.rendered.is_empty();
+        let mut out = Vec::new();
         if !cache_empty {
-            out.push(Line::raw(""));
+            out.push(assistant_blank_line(ctx));
         }
 
         // Full-tail parse: splitting would lose pulldown's block separators.
         let starts_new_turn = !continues_turn && cache_empty;
         out.extend(render_assistant_markdown(tail, ctx, starts_new_turn));
+        out
     }
 
     #[cfg(test)]
     pub(crate) fn rendered_boundary(&self) -> usize {
         self.rendered_boundary
-    }
-
-    #[cfg(test)]
-    pub(crate) fn rendered_len(&self) -> usize {
-        self.rendered.len()
     }
 
     #[cfg(test)]

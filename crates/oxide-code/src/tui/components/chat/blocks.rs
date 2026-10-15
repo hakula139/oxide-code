@@ -53,8 +53,8 @@ pub(super) enum BlockKind {
 
 /// Render contract for one chat block (assistant prose, tool call, error marker, etc.).
 ///
-/// Implementations are pure functions of their state plus the [`RenderCtx`]; the chat view caches
-/// nothing and may re-render any block on every frame.
+/// `render` and `visible` must be pure functions of the block's state and the [`RenderCtx`], since
+/// the chat view caches both until the width or theme changes.
 pub(super) trait ChatBlock {
     fn render(&self, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>;
 

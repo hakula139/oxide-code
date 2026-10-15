@@ -37,13 +37,13 @@ tokio::select! {
 3. **Render throttling** at ~60 FPS. Batch streaming tokens between frames.
 4. **Overwrite, don't clear.** Never erase-then-redraw.
 5. **Hidden cursor during render**.
-6. **Viewport virtualization.** Only render visible lines (deferred).
+6. **Cached block renders.** Each committed block renders once per width and theme, and each frame paints only the rows inside the viewport.
 
 ## Streaming Markdown
 
-Line-based commit with a stable-prefix cache: buffer tokens and commit at `\n` boundaries, tracking a monotonic byte boundary so only lines past the cached boundary get re-parsed. The stable prefix is stored as owned `Line<'static>` values, which keeps the hot path at O(new lines) per token.
+Block-based commit with a stable-prefix cache. A top-level markdown block is complete once another top-level block starts after it, so the cache renders complete blocks once into owned `Line<'static>` values and each frame re-parses only the tail from the last block start. Block starts are found in newline-terminated lines only, because a partial line can still change which block it opens. Blank lines inside a fenced code block or a loose list stay in the tail. The streaming render matches the committed one except for the spacing around HTML blocks and link reference definitions.
 
-Code blocks: buffer entire block, apply syntax highlighting on completion.
+An open code block stays in the tail and is re-highlighted each frame until the next block starts.
 
 ## Design Decisions
 
@@ -51,8 +51,8 @@ Code blocks: buffer entire block, apply syntax highlighting on completion.
 2. **Concrete component structs.** `App` composes chat, input, status, and modal surfaces directly, with no shared component trait.
 3. **Synchronized output** enabled by default.
 4. **Render throttling at ~60 FPS**.
-5. **Line-based markdown commit with stable-prefix cache** during streaming, full re-render on completion.
+5. **Block-based markdown commit with stable-prefix cache** during streaming, full render on completion.
 6. **Custom pulldown-cmark + syntect renderer.** Uses Codex's `pending_marker` pattern for correct list handling.
 7. **Catppuccin Mocha dark theme by default** with named color slots covering text, surfaces, accents, status, code, diff, headings, body, and chrome. Transparent background.
 8. **Two-tier tool display.** Inline summary with per-tool icons, plus truncated output body.
-9. **Viewport virtualization** for long conversations (deferred).
+9. **Per-block render cache with visible-slice paint.** A resize or theme swap still re-renders every block.

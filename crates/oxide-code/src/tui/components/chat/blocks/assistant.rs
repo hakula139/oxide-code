@@ -59,6 +59,11 @@ pub(super) fn render_assistant_markdown(
         .collect()
 }
 
+/// Blank row between assistant markdown blocks, carrying the gutter every rendered row has.
+pub(super) fn assistant_blank_line(ctx: &RenderCtx<'_>) -> Line<'static> {
+    prepend_markdown_prefix(Line::default(), ASSISTANT_CONT, ctx.theme.assistant())
+}
+
 // ── AssistantThinking ──
 
 /// Extended-thinking block. Hidden when `show_thinking` is off.
