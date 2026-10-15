@@ -18,7 +18,6 @@ anyhow.workspace = true
 caseless.workspace = true
 clap.workspace = true
 crossterm.workspace = true
-dirs.workspace = true
 fastrand.workspace = true
 futures.workspace = true
 globset.workspace = true

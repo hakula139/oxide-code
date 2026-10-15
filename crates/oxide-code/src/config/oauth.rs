@@ -347,7 +347,7 @@ fn now_millis() -> Option<u64> {
 }
 
 fn credentials_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".claude").join(".credentials.json"))
+    std::env::home_dir().map(|h| h.join(".claude").join(".credentials.json"))
 }
 
 // ── File Locking ──
@@ -404,7 +404,7 @@ fn is_stale_lock(path: &Path) -> bool {
 }
 
 fn lock_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".claude.lock"))
+    std::env::home_dir().map(|h| h.join(".claude.lock"))
 }
 
 #[cfg(test)]

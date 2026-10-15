@@ -479,7 +479,7 @@ fn protected_roots(cwd: &Path) -> Vec<PathBuf> {
 /// oxide-code's own config, data, and state directories, resolved like a target so a symlinked
 /// XDG base still compares equal. An edit there could rewrite its config or session history.
 fn app_dirs() -> Vec<PathBuf> {
-    let home = dirs::home_dir();
+    let home = std::env::home_dir();
     [
         ("XDG_CONFIG_HOME", ".config"),
         ("XDG_DATA_HOME", ".local/share"),
@@ -501,7 +501,7 @@ fn app_dirs() -> Vec<PathBuf> {
 /// Whether the resolved `cwd` is a project directory whose contents may auto-allow edits. `/`,
 /// `$HOME`, and its ancestors are not, since "inside cwd" there spans every dotfile and project.
 fn is_workspace(cwd: &Path) -> bool {
-    let home = dirs::home_dir().map(|home| resolve(&home).unwrap_or(home));
+    let home = std::env::home_dir().map(|home| resolve(&home).unwrap_or(home));
     cwd.parent().is_some() && !home.is_some_and(|home| home.starts_with(cwd))
 }
 

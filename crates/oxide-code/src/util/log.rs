@@ -57,7 +57,7 @@ fn build_log_target(tui_mode: bool) -> Result<Option<(NonBlocking, WorkerGuard)>
 fn resolve_log_dir() -> Option<PathBuf> {
     log_dir_from(
         std::env::var_os("XDG_STATE_HOME").map(PathBuf::from),
-        dirs::home_dir(),
+        std::env::home_dir(),
     )
 }
 

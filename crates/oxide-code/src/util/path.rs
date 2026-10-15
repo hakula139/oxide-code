@@ -23,7 +23,7 @@ pub(crate) fn xdg_dir(
 
 /// Replaces a `$HOME` prefix with `~/`, falling back to the full path.
 pub(crate) fn tildify(path: &Path) -> String {
-    dirs::home_dir()
+    std::env::home_dir()
         .and_then(|home| path.strip_prefix(&home).ok().map(Path::to_path_buf))
         .map_or_else(
             || path.display().to_string(),
@@ -34,7 +34,7 @@ pub(crate) fn tildify(path: &Path) -> String {
 /// Expands a leading `~` or `~/` to the user's home directory. Bare `~` resolves to `$HOME`, and
 /// `~/foo/bar` resolves to `$HOME/foo/bar`. Per-user forms like `~alice/...` pass through
 /// unchanged (no passwd lookup) and non-tilde paths pass through as well. Errors when the input
-/// starts with `~` but `dirs::home_dir()` yields no value, since a literal `~`-prefixed path
+/// starts with `~` but [`std::env::home_dir`] yields no value, since a literal `~`-prefixed path
 /// would otherwise fail far downstream with a misleading filesystem error.
 pub(crate) fn expand_user(raw: &str) -> Result<PathBuf> {
     let Some(tail) = raw.strip_prefix('~') else {
@@ -43,8 +43,8 @@ pub(crate) fn expand_user(raw: &str) -> Result<PathBuf> {
     if !(tail.is_empty() || tail.starts_with('/')) {
         return Ok(PathBuf::from(raw));
     }
-    let home = dirs::home_dir()
-        .ok_or_else(|| anyhow!("cannot expand `~` in {raw:?}: no home directory (set $HOME)"))?;
+    let home = std::env::home_dir()
+        .ok_or_else(|| anyhow!("cannot expand `~` in {raw:?}: no home directory"))?;
     if tail.is_empty() {
         return Ok(home);
     }
@@ -215,8 +215,8 @@ mod tests {
     }
 
     // The `expand_user` home-unset error branch is unreachable from a Linux unit test:
-    // `dirs::home_dir()` falls back to `getpwuid_r` when `$HOME` is empty, so the `None`
-    // arm only fires in exotic environments (no passwd entry, Windows without profile).
+    // `std::env::home_dir()` falls back to `getpwuid_r` when `$HOME` is empty, so the `None`
+    // arm only fires in exotic environments (no passwd entry, Windows without a profile).
     // The `Result` signature is still the right contract for those cases.
 
     // ── lexical_normalize ──

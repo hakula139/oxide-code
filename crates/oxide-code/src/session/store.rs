@@ -40,7 +40,7 @@ impl SessionStore {
     pub(crate) fn open() -> Result<Self> {
         let sessions_dir = xdg_dir(
             std::env::var_os("XDG_DATA_HOME").map(PathBuf::from),
-            dirs::home_dir(),
+            std::env::home_dir(),
             Path::new(".local/share"),
             &Path::new(DATA_DIR).join(SESSIONS_DIR),
         )

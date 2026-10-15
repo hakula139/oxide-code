@@ -52,7 +52,7 @@ fn try_load_or_create_at(path: &Path) -> Result<String> {
 fn device_id_path() -> Option<PathBuf> {
     xdg_dir(
         std::env::var_os("XDG_DATA_HOME").map(PathBuf::from),
-        dirs::home_dir(),
+        std::env::home_dir(),
         Path::new(".local/share"),
         &Path::new(DATA_DIR).join(FILE_NAME),
     )

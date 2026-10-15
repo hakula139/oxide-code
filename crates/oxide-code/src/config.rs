@@ -1604,7 +1604,7 @@ mod tests {
         let config = temp_env::async_with_vars(vars, Config::load())
             .await
             .unwrap();
-        let home = dirs::home_dir().expect("HOME set");
+        let home = std::env::home_dir().expect("home directory");
         assert_eq!(config.extra_ca_certs, Some(home.join("certs/env.pem")));
     }
 
