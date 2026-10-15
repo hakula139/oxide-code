@@ -71,11 +71,10 @@ Below 25 cols nothing paints, since the terminal is too narrow to read the welco
 10. **`/clear` re-shows the welcome automatically.** `/clear` clears `chat.blocks`, which restores `is_empty()` → welcome paints on next frame. No special re-emission path is needed.
 11. **Resume never shows the welcome.** Resume populates `chat.blocks` from the JSONL transcript, so `is_empty()` returns false on first paint. No special-casing needed.
 
-## Out of Scope / Deferred
+## Out of Scope
 
 - **Live feeds** (recent sessions, release notes, upsells). Claude Code ships them, but the result is an onboarding dashboard with ongoing maintenance cost.
 - **ASCII mascot / animations**: Codex / Claude Code both ship them, but static text carries the value with less complexity.
-- **Plugin hooks for welcome content**: opencode-style slot overrides should wait for a plugin system.
 - **Tab-into-the-welcome navigation**: The welcome is read-only, and the user types in the input below it.
 - **Branch / git status on welcome**: Orthogonal to onboarding. `/diff` and the trailer hint cover the "what changed" angle.
 

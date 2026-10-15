@@ -74,17 +74,20 @@ The picker wraps [`SearchableList`](modals.md) and adds a footer line. Each row 
 
 - **`--list --limit N`**: `0` opts out of the cap, while positive values cap it. The footer line `... and N more (use --limit N or --limit 0 to disable the cap)` appears only when the cap clipped output.
 
-## Out of Scope / Deferred
+## Out of Scope
 
-- **CLI `--resume` / `-r` flag.** Picker entry from the shell makes sense, but it doesn't block the slash work and adds a new clap arm plus alt-screen run mode. Worth its own PR.
 - **Date grouping in the picker.** Considered (`Today` / `Yesterday` / ISO date) but dropped, because flat mtime list reads fine at 30 rows and the `last_active_at` column already encodes recency.
 - **Numeric `1`–`9` mnemonics.** Cursor plus Enter is enough, and mnemonics conflict with type-to-search.
 - **Worktree / branch tree expansion** (Claude Code's `▼` / `▶`) and **side preview pane.** Both double layout complexity for marginal gain.
 - **In-picker rename of other sessions.** `/rename` covers the live session's title.
-- **Background load-more on scroll near bottom.** 30-row page plus search covers the typical case. Add when a user complaint shows a >30-session-in-one-project workflow.
-- **Fuzzy search.** Substring search covers typical session counts, with `nucleo-matcher` as the upgrade path if users complain.
+- **Background load-more on scroll near bottom.** A 30-row page plus search covers the typical case.
+- **Fuzzy search.** Substring search covers typical session counts.
 - **Auto-resume on single match.** Users who type `/resume` to peek the list deserve to see it.
 - **`/sessions` listing variant.** One slash command per intent. `ox --list` already covers script-friendly listing.
+
+## Related Issues
+
+Opening the picker from the shell with `ox --resume` is tracked in [#187](https://github.com/hakula139/oxide-code/issues/187).
 
 ## Sources
 

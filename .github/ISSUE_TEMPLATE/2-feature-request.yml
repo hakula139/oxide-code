@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Check the [roadmap](https://github.com/hakula139/oxide-code/blob/main/docs/roadmap.md) first. It lists what is planned and what is out of scope for now.
+        Search the [open issues](https://github.com/hakula139/oxide-code/issues?q=is%3Aissue%20is%3Aopen) for planned work and duplicates, and read the [scope](https://github.com/hakula139/oxide-code#scope) for what oxide-code leaves out for now.
 
   - type: textarea
     id: problem

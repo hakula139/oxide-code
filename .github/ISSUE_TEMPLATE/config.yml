@@ -3,9 +3,9 @@ contact_links:
   - name: User guide
     url: https://github.com/hakula139/oxide-code/tree/main/docs/guide
     about: Installation, configuration, sessions, slash commands, and theming.
-  - name: Roadmap
-    url: https://github.com/hakula139/oxide-code/blob/main/docs/roadmap.md
-    about: What works today, the current focus, and what is out of scope.
+  - name: Planned work
+    url: https://github.com/hakula139/oxide-code/issues?q=is%3Aissue%20is%3Aopen
+    about: Open issues track what is planned, with epics grouping multi-issue themes. The README lists what works today and what is out of scope.
   - name: Security vulnerability
     url: https://github.com/hakula139/oxide-code/security/advisories/new
     about: Report vulnerabilities privately through a security advisory.

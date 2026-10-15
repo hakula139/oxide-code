@@ -55,7 +55,7 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 
 3. **Typed result delivery via `ModalAction`, no callbacks.** Modal emits `ModalKey::Submitted(ModalAction)` and the manager dispatches. Boxed `FnOnce` callbacks were rejected for the lifetime / `Send` complexity and because they hide the dispatch graph.
 
-4. **Modals receive a `&LiveSessionInfo` snapshot at open.** Reactive subscriptions are deferred, so when a value changes mid-modal (rare) the modal closes and reopens with fresh state.
+4. **Modals receive a `&LiveSessionInfo` snapshot at open.** Modals do not subscribe to updates, so when a value changes mid-modal (rare) the modal closes and reopens with fresh state.
 
 5. **Layout band sized by `ModalStack::height(width)`.** When the stack is empty, the band takes no rows. When active, it shifts the chat upward, just like the slash popup.
 
@@ -95,15 +95,15 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 
 - **`/help` overview**: Single-section `KvOverview` of every registered command. Aliases parenthesize after the canonical name, and the `usage()` placeholder appends. Constructed in `slash/help`.
 
-## Out of Scope / Deferred
+## Out of Scope
 
-- **Persistent modals in chat scroll.** Modals are ephemeral. `/diff` stays a chat-pushed printer because the diff genuinely earns scrollback, and modal cropping would lose value. Future `/model --list`-style listings can ride the same printer path.
+- **Persistent modals in chat scroll.** Modals are ephemeral. `/diff` stays a chat-pushed printer because the diff genuinely earns scrollback, and modal cropping would lose value.
 
-- **Mouse interaction.** Defer to a polish PR if the workflow asks for it.
+- **Mouse interaction.** The TUI leaves mouse capture off to keep the terminal's native drag-select ([mouse interactions](../tui/mouse-interactions.md)), which means modals never receive clicks and stay keyboard-driven.
 
 - **Concurrent modals on different layers** (e.g. toast over modal). The chat error-block path already covers what toasts would.
 
-- **Custom user-defined modal commands.** The trait is open, but `~/.config/ox/commands/*.md` discovery / loader is tracked separately under "Workflow Skills" in the roadmap.
+- **Custom user-defined modal commands.** The trait is open to them, and user-defined commands are tracked as skills in [#163](https://github.com/hakula139/oxide-code/issues/163).
 
 ## Sources
 

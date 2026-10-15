@@ -23,7 +23,7 @@ Two-layer truncation: per-tool view-shape caps + centralized byte-budget safety 
 
 1. **Two truncation layers, separated by responsibility.** View-shape stays per-tool because it needs tool-specific knowledge. Byte-budget runs after `Tool::run` as the absolute safety net.
 2. **Head + tail strategy.** Keeps the command setup and final outcome, the two slices the model needs most. Tail-only would lose the prompt, and head-only would lose the result.
-3. **No spillover to disk.** opencode-style spill needs a Task agent, and 128 KB head-tail preserves enough today. Add spill when Task lands.
+3. **No spillover to disk.** Output past the 128 KB head and tail is dropped, which keeps enough for one-shot commands. opencode-style spill pays off only once a later call can read the full output, as with background shell commands in [#137](https://github.com/hakula139/oxide-code/issues/137).
 4. **Two distinct metadata fields.** `ToolMetadata::truncated_total` (unbounded match counts from per-tool caps) vs `ToolMetadata::truncated_bytes` (pre-cap byte count from the registry's safety net). Prevents glob's `(X of N matches)` from rendering bytes when both layers fire.
 5. **Per-tool line caps.** Read allows 2000 characters per line because Edit needs the exact text of the lines it targets. Grep lists many hits per call and stays at 500.
 

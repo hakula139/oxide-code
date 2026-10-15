@@ -4,12 +4,13 @@
 
 oxide-code is a terminal-based AI coding assistant written in Rust, inspired by [Claude Code](https://code.claude.com/docs). It communicates with LLM APIs to help developers with software engineering tasks directly from the terminal.
 
-`README.md` highlights features for users. The rest of the documentation is under `docs/`:
+`README.md` highlights features and scope for users. The rest of the documentation is under `docs/`:
 
-- [`docs/README.md`](docs/README.md): top-level index of design specs, research notes, user guides, and the roadmap.
+- [`docs/README.md`](docs/README.md): top-level index of design specs, research notes, and user guides.
 - [`docs/guide/`](docs/guide/): user-facing docs (installation, quickstart, configuration, slash commands, instructions, sessions, theming).
 - [`docs/design/`](docs/design/) and [`docs/research/`](docs/research/): internal architecture decisions and external research, indexed by `docs/design/README.md` and `docs/research/README.md`.
-- [`docs/roadmap.md`](docs/roadmap.md): working features, current focus, and explicit non-goals.
+
+Planned work lives in open GitHub issues, and epics group the themes that span several issues.
 
 ### CLI
 
@@ -25,7 +26,7 @@ ox                                          # Start an interactive session
 ├── .cspell/                                # Project spelling dictionary
 ├── .github/                                # CI and release workflows, plus the shared Nix setup action
 ├── crates/oxide-code/                      # Main binary crate
-├── docs/                                   # User guides, design specs, research notes, and roadmap
+├── docs/                                   # User guides, design specs, and research notes
 ├── Formula/                                # Homebrew formula, served from this repo as a tap
 └── scripts/                                # Release helper that refreshes the Homebrew formula
 ```
@@ -273,8 +274,9 @@ Follows the user's global instructions for comments, plus:
 Follows the user's global instructions for commits, branches, and PRs, plus:
 
 - **Scope**: Use the most specific area changed, such as a module (e.g., `client`, `config`, `oauth`), a documentation target (e.g., `AGENTS`, `research`), or a crate name only for cross-module changes.
-- **PRs**: Assign to `hakula139`. Label with one type label (`enhancement` for `feat`, `bug` for `fix`, `performance` for `perf`, or the label named after the type) plus the matching `area:` labels. Follow `.github/pull_request_template.md` for descriptions, close resolved issues with `Closes #N`, and do not reference gitignored working docs. Do not request a review from the PR author, since GitHub rejects it.
-- **Issues**: Open one issue per actionable outcome, using the forms in `.github/ISSUE_TEMPLATE/`, and give it acceptance criteria. Label it like a PR. A theme that spans several issues gets an `epic` parent with native sub-issues, and `docs/roadmap.md` links the epic. Mark an issue `blocked` while it waits on another, and name the blocker in a comment. Open design questions get the `design` label and close once the decision lands in `docs/design/`. Close out-of-scope requests as not planned, pointing to the roadmap.
+- **PRs**: Assign to `hakula139`. Label with one type label (`enhancement` for `feat`, `bug` for `fix`, `performance` for `perf`, or the label named after the type) plus the matching `area:` labels. Follow `.github/pull_request_template.md` for descriptions, and close resolved issues with `Closes #N`. Do not request a review from the PR author, since GitHub rejects it.
+- **Issues**: Open one issue per actionable outcome, using the forms in `.github/ISSUE_TEMPLATE/`, and give it acceptance criteria. Label it like a PR. A theme that spans several issues gets an `epic` parent with native sub-issues. Open issues are the record of planned work, with epics grouping the multi-issue themes. Mark an issue `blocked` while it waits on another, and name the blocker in a comment. Open design questions get the `design` label and close once the decision lands in `docs/design/`. Close out-of-scope requests as not planned, pointing to the Scope section of `README.md`.
+- **Self-contained text**: Issues, PRs, and their comments link only public material. Never reference gitignored or local material, such as working docs, local paths, or private repositories.
 
 ### Testing
 
@@ -292,12 +294,11 @@ Follows the user's global instructions for commits, branches, and PRs, plus:
 
 Follows the user's global instructions for documentation and Markdown prose, plus:
 
-- Keep `README.md` user-facing, covering value, supported features, and usage.
+- Keep `README.md` user-facing, covering value, supported features, scope, and usage. Update its Features list when a shipped capability area changes.
 - `docs/` describes current behavior and its rationale. Planned work, deferred follow-ups, and open design questions live in GitHub issues, and docs link to the issue in place of describing future work.
-- Keep `docs/roadmap.md` as the themed index of shipped capabilities and planned epics. Update it when shipped capability areas or planned priorities change.
 - New research and design notes cite Claude Code, [Codex](https://github.com/openai/codex), [pi](https://github.com/badlogic/pi-mono), and [oh-my-pi](https://github.com/can1357/oh-my-pi) as reference implementations. Existing notes may keep their opencode citations.
 - Crate structure diagrams must match the actual filesystem. When adding, removing, or renaming modules, update the tree in this file. Entries are sorted alphabetically. Directories sort alongside their parent `.rs` file.
-- After substantive changes, sweep docs for stale claims: `README.md` status bullets, `docs/roadmap.md` Working Today / Current Focus sections, this file's crate tree and conventions, `docs/guide/*` user instructions, and `docs/research/**/*` deferred / follow-up notes that the change now resolves.
+- After substantive changes, sweep docs for stale claims: `README.md` Features and Scope, open issues the change resolves or invalidates, this file's crate tree and conventions, `docs/guide/*` user instructions, and `docs/research/**/*` deferred / follow-up notes that the change now resolves.
 
 ## Nix Development
 

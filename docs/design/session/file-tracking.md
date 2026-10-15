@@ -22,7 +22,7 @@ The `FileTracker` is a per-session `Arc<Mutex<HashMap>>` shared across tool call
 
 7. **xxh64 for change detection.** Cryptographic integrity isn't required, since the tracker only needs to spot drift, and xxh64 is already used elsewhere in the crate.
 
-8. **No tracker-managed file lock.** Single-agent today, so the tracker handles the "external editor changed the file" case directly. Add the `Semaphore` when multi-agent or parallel-tool-execution lands.
+8. **No tracker-managed file lock.** One agent runs tool calls one at a time, so the only concurrent writer is an external editor, which the staleness check catches. Subagents in [#136](https://github.com/hakula139/oxide-code/issues/136) would add concurrent writers within one session.
 
 ## Sources
 

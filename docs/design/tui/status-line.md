@@ -62,7 +62,7 @@ status_line = [
 ]
 ```
 
-This differs from the reference Claude Code script in two ways: oxide-code stays one row because Ratatui already owns the app chrome, and external billing data is omitted until there is a first-class provider boundary.
+This differs from the reference Claude Code script in two ways: oxide-code stays one row because Ratatui already owns the app chrome, and its cost segment is a local estimate, leaving account usage limits to the planned segments in [#140](https://github.com/hakula139/oxide-code/issues/140).
 
 The default order tracks reading flow: location and branch orient the user, model and usage describe cost and context pressure, run state sits near the end because it changes most often.
 
@@ -74,14 +74,9 @@ The default order tracks reading flow: location and branch orient the user, mode
 4. **Segment omission.** Missing usage, unknown pricing, absent branch, and blank titles disappear cleanly with no placeholder.
 5. **Background probes.** `git-branch` and `pull-request` re-probe as background child processes, 5 s and 60 s respectively after the previous probe finishes, with at most one run of each in flight. The bar stays current after `git checkout` or `gh pr create`, and a slow `gh` network round-trip never stalls input or rendering.
 
-## Deferred
+## Related Issues
 
-- ccusage or another account-usage provider boundary.
-- Five-hour and weekly account-limit telemetry.
-- Task-progress segments.
-- Persisted cost restore after resume.
-- Command-based custom status-line renderer.
-- Non-Anthropic provider pricing.
+Planned segments, including account usage limits and task progress, are tracked in [#140](https://github.com/hakula139/oxide-code/issues/140). Restoring the session cost on resume is [#185](https://github.com/hakula139/oxide-code/issues/185), a user-command segment is [#166](https://github.com/hakula139/oxide-code/issues/166), and pricing for other providers comes with the data-driven model catalog in [#152](https://github.com/hakula139/oxide-code/issues/152).
 
 ## Sources
 

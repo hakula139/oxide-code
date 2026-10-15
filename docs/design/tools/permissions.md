@@ -1,12 +1,12 @@
 # Tool Permissions and Approval
 
-Tiered permission gate in front of every mutating tool call: instant static rules settle the obvious cases, a cheap classifier judges the ambiguous middle, and the user is asked only when real risk remains.
+Every tool call passes through a tiered permission gate. Static rules settle the clear cases, and the user is asked only when no rule does. Planned extensions, including a classifier, session approvals, and an OS sandbox, are tracked in [#130](https://github.com/hakula139/oxide-code/issues/130).
 
 Companion docs: [research/tools/permissions.md](../../research/tools/permissions.md), [slash/modals.md](../slash/modals.md), [session/file-tracking.md](../session/file-tracking.md).
 
 ## Modes
 
-A mode sets the standing posture, shaped like the `Effort` enum (`ALL` / `as_str` / `Display` / `FromStr`) so it threads through config and a future `/permission` control the same way `effort` does.
+A mode sets the standing posture, shaped like the `Effort` enum (`ALL` / `as_str` / `Display` / `FromStr`) so it threads through config the same way `effort` does.
 
 - **`auto`** (default): uses the tiered pipeline below.
 - **`plan`**: performs read-only analysis. Read-class tools are allowed, while edit-class tools and `bash` calls are denied because shell commands cannot be statically proven side-effect-free.
@@ -14,7 +14,7 @@ A mode sets the standing posture, shaped like the `Effort` enum (`ALL` / `as_str
 
 ## Decision Pipeline
 
-The gate evaluates each call in a fixed order and stops at the first match. This is the shipped Phase 1 pipeline. The classifier, which comes before step 9's fallback, and session allow-always are later phases noted inline.
+The gate evaluates each call in a fixed order and stops at the first match.
 
 1. **User or project deny match** → deny in every mode.
 2. **`yolo` mode** → allow.
@@ -23,10 +23,10 @@ The gate evaluates each call in a fixed order and stops at the first match. This
 5. **`plan` mode** → deny.
 6. **Edit-class call on a protected path** → ask, regardless of what the allow rules say.
 7. **Edit-class call inside the workspace** → allow.
-8. **Allow match** → allow, with Phase 3 adding session allow-always here.
-9. **Otherwise** → ask in interactive mode or deny in headless mode. The classifier (Phase 2) will be added here, allowing a `safe` verdict before the fallback.
+8. **Allow match** → allow.
+9. **Otherwise** → ask in interactive mode or deny in headless mode.
 
-Every deny comes before every allow, so neither an allow rule nor a classifier verdict can override an explicit deny. The shipped defaults populate a separate deny set, so a classifier outage cannot allow a matching command through in `auto` or `plan`.
+Every deny comes before every allow, so an allow rule cannot override an explicit deny. The shipped defaults form a separate deny set that holds in `auto` and `plan`.
 
 ## Path Targets
 
@@ -60,12 +60,6 @@ Bash specifiers can be exact, prefix (`cargo test:*`), or wildcard (`git *`). Re
 
 The `bash` command string is unparsed (`bash -c "..."`), so prefix and wildcard matching provides best-effort UX. Since `ls; rm -rf` and `$()` indirection defeat naive matching, allow rules match conservatively: a compound command (chained, substituted, or redirected with `>` / `<`) never matches an allow rule. Deny rules match the whole command or any chained segment.
 
-## Classifier
-
-The Phase 2 classifier is planned to follow the background title generator's design: a cheap Haiku model, a JSON-schema `OutputFormat` that enforces a `{ "safe": bool, "reason": string }` envelope, prompt clamping, and a warning log followed by fallback on any HTTP, parse, or timeout failure. It would be consulted only at step 9, never for static cases.
-
-Verdicts would be cached per session, keyed by tool name and either the verbatim `bash` command string or the resolved `edit` / `write` path. The cache would be scoped to the session's resolved policy, so changing the mode or rules starts a fresh cache, and it would stay process-local and never persisted. A call reaching the classifier has already cleared both deny sets, so on a classifier failure it falls through to ask in interactive mode or deny in headless mode.
-
 ## Approval Round-Trip
 
 When the gate resolves to ask, the decision travels through the existing `user_rx` channel polled by the turn loop. Tool dispatch is sequential, so at most one approval can be outstanding and no id fan-out is needed.
@@ -95,65 +89,40 @@ A checked-in `ox.toml` is untrusted, like the project credentials `reject_projec
 
 ## Headless Behavior
 
-In `-p` / `--no-tui` runs there is no human to prompt, so a would-ask call denies directly: the gate carries an `interactive` flag the modal-less surfaces set to false, and `check_permission` turns an `Ask` verdict into a synthetic denial. With no human fallback, the deny rules, zones, and allow rules settle every call, so a headless run assumes an already-trusted invocation. The model sees the denial and can retry. Phase 2 will insert the classifier ahead of this fallback, so a `safe` verdict allows before the deny.
+In `-p` / `--no-tui` runs there is no human to prompt, so a would-ask call denies directly: the gate carries an `interactive` flag the modal-less surfaces set to false, and `check_permission` turns an `Ask` verdict into a synthetic denial. With no human fallback, the deny rules, zones, and allow rules settle every call, so a headless run assumes an already-trusted invocation. The model sees the denial and can retry.
 
 ## Permission Classes
 
-`Tool::permission_class` has no default, so every tool declares its class and a new tool cannot inherit a permissive class. Read-class tools are allowed at step 4, but they still extract a gate target (the file for `read`, the search root for `grep` / `glob`), allowing a path-scoped deny at step 1 or 3 to fire first. Rules target the class, so `read(**/.env)` also stops a `grep` rooted at a `.env` file.
+`Tool::permission_class` has no default, so every tool declares its class and a new tool cannot inherit a permissive class. Read-class tools are allowed at step 4, but they still extract a gate target (the file for `read`, the search root for `grep` / `glob`), allowing a path-scoped deny at step 1 or 3 to fire first. Rules target the class, so `read(**/.env)` also stops a `grep` rooted at a `.env` file. Because `grep` and `glob` gate on the search root, a deny on a file inside that root does not filter their matches ([#176](https://github.com/hakula139/oxide-code/issues/176)).
 
 `edit` and `write` share a class but have different blast radii. `edit` requires the file to exist and to have been read, so it cannot create files. `write` can create new files and parent directories without a prior Read, while overwriting an existing file still goes through the tracker gate. Both declare `file_path` as their path field, so the resolution, zoning, and pinning described above treat them identically.
 
-## Phasing
-
-Each phase ships independently.
-
-1. **Static tiers, modal, and modes.** The deny / read-class / protected / workspace / allow pipeline, the `ApprovalModal` and `ModalStack` cancel hook, the mode enum, and config wiring. This phase is fully deterministic and offline, with step 9 going straight to ask.
-2. **Classifier.** Add the Haiku verdict and per-session cache at step 9.
-3. **Session allow-always.** Add the in-memory "don't ask again this session" map at step 8, mirroring `FileTracker`.
-
 ## Design Decisions
 
-1. **Classifier runs last.** Static checks are instant and free, so the model round-trip runs only when neither an allow nor a deny rule settles the call. A pure rule engine would prompt on everything unmatched, breaking the non-stop goal, and a pure classifier would add a round-trip to every `bash` call. The tiered order spends neither.
+1. **Default `auto`.** Running tools unchecked is the greater hazard. `yolo` keeps unprompted execution available as an explicit opt-in.
 
-2. **Default `auto`.** Running tools unchecked is the greater hazard. `yolo` keeps unprompted execution available as an explicit opt-in.
+2. **`yolo` keeps the user's denies.** A deny written by the user or project expresses intent that no mode should override, so it runs before the `yolo` short-circuit. The shipped defaults are generic guesses that can block legitimate work, so the opt-in skips them.
 
-3. **`yolo` keeps the user's denies.** A deny written by the user or project expresses intent that no mode should override, so it runs before the `yolo` short-circuit. The shipped defaults are generic guesses that can block legitimate work, so the opt-in skips them. A granular per-rule opt-out is deferred.
+3. **Protected paths ask.** Editing `.git/hooks`, `.vscode/tasks.json`, or `.envrc` inside the workspace can escalate to code execution outside the task. These paths therefore require approval even under a broad `edit(**)` allow. Asking keeps legitimate edits possible, while a deny would force the user to edit config.
 
-4. **Protected paths ask.** Editing `.git/hooks`, `.vscode/tasks.json`, or `.envrc` inside the workspace can escalate to code execution outside the task. These paths therefore require approval even under a broad `edit(**)` allow. Asking keeps legitimate edits possible, while a deny would force the user to edit config.
+4. **Resolve once, act on the result.** Resolving in the gate and pinning the input makes the tool open the path the gate checked, and on Unix `O_NOFOLLOW` turns a symlink swapped into its final component into a failed open. A swap in an intermediate directory needs `openat`-style traversal or an OS sandbox ([#133](https://github.com/hakula139/oxide-code/issues/133)).
 
-5. **Resolve once, act on the result.** Resolving in the gate and pinning the input makes the tool open the path the gate checked, and on Unix `O_NOFOLLOW` turns a symlink swapped into its final component into a failed open. A swap in an intermediate directory needs `openat`-style traversal, which stays deferred, or an external OS sandbox.
+5. **Project files tighten only.** Honoring a project's `allow` or `mode` would let a teammate's repo broaden what the local user permitted, creating the same privilege-escalation vector as project-set credentials. Append-only `deny` lets a repo restrict itself without that risk.
 
-6. **Project files tighten only.** Honoring a project's `allow` or `mode` would let a teammate's repo broaden what the local user permitted, creating the same privilege-escalation vector as project-set credentials. Append-only `deny` lets a repo restrict itself without that risk.
+6. **Deny rules are the enforced boundary for path tools.** The deny list matches both spellings of the path as the file system stands when the gate checks, each rule's literal prefix as it resolved when the policy loaded, and folded names. It does not cover a symlink swapped into an intermediate directory after the check, a Windows 8.3 short name, or whatever a `bash` command touches, so an untrusted model still needs an external OS sandbox.
 
-7. **The classifier is a UX layer.** Because `bash` is unparsed, the classifier cannot be trusted against an adversarial model, and an unreachable classifier degrades to asking. The deny list is what the gate enforces for path tools: it matches both spellings of the path as the file system stands when the gate checks, each rule's literal prefix as it resolved when the policy loaded, and folded names. It does not cover a symlink swapped into an intermediate directory after the check, a Windows 8.3 short name, or whatever a `bash` command touches, so an untrusted model still needs an external OS sandbox.
+7. **Decision on the existing channel.** Routing approvals through `user_rx` and the `ModalStack` reuses the cancel / quit / queue semantics that the turn loop already races, so no second channel or control-flow path is needed.
 
-8. **Decision on the existing channel.** Routing approvals through `user_rx` and the `ModalStack` reuses the cancel / quit / queue semantics that the turn loop already races, so no second channel or control-flow path is needed.
-
-9. **Session memory in process only.** A persisted "allow bash X" has no disk ground truth to revalidate on resume, unlike a `FileSnapshot` rehash, so restoring it would regress trust. Per the roadmap, session commands remain reversible, and cross-session writes wait for an explicit confirmed action.
-
-10. **The classifier reuses the title-gen path.** The existing cheap-Haiku, JSON-schema, warn-and-fall-back design already handles auth, betas, and gateway constraints. A bespoke classifier client would duplicate it.
-
-## Deferred
-
-- Per-rule opt-out of a shipped dangerous-pattern default within `auto`, which only `yolo` skips.
-- Persisted project allowlists via an explicit confirmed writer (`util/fs.rs::atomic_write_private`).
-- Editable bash-prefix widening in the approval modal ("don't ask again for `cargo *`").
-- Read confidentiality beyond path-glob denies. A read-class call with no matching deny allows, and because `grep` / `glob` gate on the search root, a deny on a file inside it does not filter the walk.
-- Symlink swaps in an intermediate directory between the gate and the open, which need `openat`-style traversal.
-- Windows coverage of final-component symlink swaps, hard links, and 8.3 short names.
-- Rule env vars beyond `OX_PERMISSION_MODE`.
-- Resume survival of session allow-always through the session actor.
+8. **Approvals stay in process.** A persisted "allow bash X" has no disk ground truth to revalidate on resume, unlike a `FileSnapshot` rehash, so restoring it would regress trust. Per the slash-command persistence stance ([decision 6](../slash/commands.md#design-decisions)), session commands remain reversible, and cross-session writes wait for an explicit confirmed action.
 
 ## Sources
 
 - `crates/oxide-code/src/agent.rs`: `check_permission` (resolve, pin, decide), `dispatch_tool_call`, `await_unless_aborted`, `run_tool_round`.
 - `crates/oxide-code/src/agent/event.rs`: `AgentEvent`, `UserAction`, `ApprovalPreview`.
-- `crates/oxide-code/src/client/anthropic/wire.rs`: `OutputFormat` JSON-schema envelope.
 - `crates/oxide-code/src/config.rs`: `Config::load`, `OX_PERMISSION_MODE`, `Effort` enum template.
 - `crates/oxide-code/src/config/file.rs`: `FileConfig::merge`, `merge_section`, `reject_project_secrets`, `reject_project_permissions`.
 - `crates/oxide-code/src/permission.rs`: `Mode`, `PermissionClass`, `GateTarget::for_path`, protected paths, `Policy::decide`.
 - `crates/oxide-code/src/permission/rule.rs`: `class(specifier)` parsing and path-glob matching.
-- `crates/oxide-code/src/session/title_generator.rs`: classifier template (Haiku, structured output).
 - `crates/oxide-code/src/slash/confirm.rs`: `ConfirmDeleteSessionModal`, the approval-modal template.
 - `crates/oxide-code/src/tool.rs`: `Tool` trait (`permission_class`, `path_field`, `gate_target`, `pin_target`, `approval_preview`), `read_validated`, `write_no_follow`.
 - `crates/oxide-code/src/tool/bash.rs`: unbounded execution surface.
