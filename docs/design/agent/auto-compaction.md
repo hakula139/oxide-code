@@ -76,7 +76,7 @@ The failure counter is per agent-loop task. Three consecutive automatic failures
 
 ## User Experience
 
-Manual and automatic compaction use the same visible `CompactedBlock`. A failed automatic attempt surfaces an `Auto-compaction failed` error in chat and lets the user's prompt proceed against the unchanged transcript. The third consecutive failure adds a one-time notice that auto-compaction is off for the session.
+Manual and automatic compaction use the same visible `CompactedBlock`. When an automatic attempt fails, chat surfaces an error (`Auto-compaction failed: ...` from the summarizer, or `Session write failed: ...` from the boundary write) while the user's prompt proceeds against the unchanged transcript. After the third consecutive failure, a one-time notice appears and automatic attempts stop until a `/model` or `/effort` swap, `/clear`, `/resume`, or a successful `/compact` resets the counter.
 
 During TUI auto-compaction, the status bar uses the existing `Compacting` state. Automatic `SessionCompacted` events keep the TUI busy until the queued prompt drains or the prompt submission finishes. In the bare REPL, `StdioSink` renders `SessionCompacted` as a stderr boundary line.
 

@@ -19,6 +19,6 @@ These are the steps where mistakes are most likely, in procedure order:
 - **Compare-link footer.** `--prepend` does not regenerate the footer block. Add the new line by hand above the previous-version line. The very first tag has no compare base, so use the `releases/tag/<tag>` form instead.
 - **PR diff sanity check.** Only `Cargo.toml`, `Cargo.lock`, `CHANGELOG.md`, and possibly `.cspell/words.txt` should change. Anything else means an unrelated edit slipped in.
 - **Tag only after merge.** Wait for the PR to merge with CI green, then tag the merge commit. Pushing the tag triggers the release workflow and is hard to undo, so confirm with the user before `git push origin vX.Y.Z`.
-- **Homebrew formula.** After the release workflow finishes uploading assets, run `./scripts/update-homebrew-formula.sh vX.Y.Z` on its own branch and open a second PR. The script fetches the `.sha256` sidecars, so it 404s if run before uploads complete.
+- **Homebrew formula and install pins.** Once the release workflow finishes uploading assets, run `./scripts/update-homebrew-formula.sh vX.Y.Z` and the `VERSION=` bump from step 11 on one branch, then open a second PR. Running the script earlier 404s because it fetches the `.sha256` sidecars.
 
 After the tag is pushed, watch the workflow with `gh run watch` and report the resulting release URL.

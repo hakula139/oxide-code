@@ -207,9 +207,9 @@ Environment variables override all config file values.
 | `OX_COMPACTION_AUTO_ENABLED`           | `client.compaction.auto_enabled`           | `true`                      | Enable auto-compaction       |
 | `OX_COMPACTION_AUTO_THRESHOLD_TOKENS`  | `client.compaction.auto_threshold_tokens`  | model-derived               | Absolute compaction trigger  |
 | `OX_COMPACTION_AUTO_THRESHOLD_PERCENT` | `client.compaction.auto_threshold_percent` | model-derived               | Percent compaction trigger   |
+| `OX_PERMISSION_MODE`                   | `permission.mode`                          | `auto`                      | Tool permission mode         |
 | `OX_SHOW_THINKING`                     | `tui.show_thinking`                        | `false`                     | Show extended thinking       |
 | `OX_SHOW_WELCOME`                      | `tui.show_welcome`                         | `true`                      | Paint the welcome splash     |
 | `OX_STATUS_LINE`                       | `tui.status_line`                          | see `[tui]`                 | Comma-separated segments     |
-| `OX_PERMISSION_MODE`                   | `permission.mode`                          | `auto`                      | Tool permission mode         |
 
 Every variable treats an empty value as unset. Boolean variables accept `1`, `true`, `yes`, or `on` to enable and `0`, `false`, `no`, or `off` to disable, in any letter case. Any other value makes `ox` exit at startup with an error naming the variable.
