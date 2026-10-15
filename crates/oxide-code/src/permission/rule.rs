@@ -327,6 +327,7 @@ fn glob_to_regex(glob: &str) -> Regex {
 mod tests {
     use super::*;
     use crate::permission::Zone;
+    use crate::util::path::testing::{HOME_VAR, abs};
 
     fn cmd(s: &str) -> Target<'_> {
         Target::Command(s)
@@ -493,15 +494,15 @@ mod tests {
 
     #[test]
     fn matches_absolute_glob_against_the_canonical_path_only() {
-        let rule = Rule::parse("read(/etc/**)").unwrap();
+        let rule = Rule::parse(&format!("read({})", abs("/etc/**"))).unwrap();
         assert!(rule.matches(
             PermissionClass::Read,
-            &path("/etc/passwd", None),
+            &path(&abs("/etc/passwd"), None),
             MatchDiscipline::Allow
         ));
         assert!(!rule.matches(
             PermissionClass::Read,
-            &path("/home/u/etc/x", Some("etc/x")),
+            &path(&abs("/home/u/etc/x"), Some("etc/x")),
             MatchDiscipline::Allow
         ));
     }
@@ -510,23 +511,26 @@ mod tests {
     fn matches_the_requested_spelling_under_deny_only() {
         // `.env -> /shared/.env` and `secrets -> /vault`: a deny on the spelled path must fire, and
         // an allow on it must not reach a target that resolves elsewhere.
+        let (env_canonical, env_requested) = (abs("/shared/.env"), abs("/repo/.env"));
         let env_relative = [".env".to_owned()];
         let env = Target::Path {
-            canonical: "/shared/.env",
+            canonical: &env_canonical,
             relative: None,
-            requested: "/repo/.env",
+            requested: &env_requested,
             deny_relative: &env_relative,
             zone: Zone::Outside,
         };
+        let (key_canonical, key_requested) = (abs("/vault/key"), abs("/repo/secrets/key"));
         let key_relative = ["secrets/key".to_owned()];
         let key = Target::Path {
-            canonical: "/vault/key",
+            canonical: &key_canonical,
             relative: None,
-            requested: "/repo/secrets/key",
+            requested: &key_requested,
             deny_relative: &key_relative,
             zone: Zone::Outside,
         };
-        for (raw, target) in [("edit(**/.env)", &env), ("edit(/repo/secrets/**)", &key)] {
+        let key_rule = format!("edit({})", abs("/repo/secrets/**"));
+        for (raw, target) in [("edit(**/.env)", &env), (key_rule.as_str(), &key)] {
             let rule = Rule::parse(raw).unwrap();
             assert!(
                 rule.matches(PermissionClass::Edit, target, MatchDiscipline::Deny),
@@ -543,8 +547,9 @@ mod tests {
     fn matches_folded_names_under_deny_only() {
         let relative = Rule::parse("edit(**/.env)").unwrap();
         let upper = path("/repo/.ENV", Some(".ENV"));
-        let absolute = Rule::parse("edit(/repo/caf\u{e9}/**)").unwrap();
-        let decomposed = path("/repo/cafe\u{301}/x", None);
+        let absolute = Rule::parse(&format!("edit({})", abs("/repo/caf\u{e9}/**"))).unwrap();
+        let decomposed_path = abs("/repo/cafe\u{301}/x");
+        let decomposed = path(&decomposed_path, None);
         for (rule, target) in [(&relative, &upper), (&absolute, &decomposed)] {
             assert!(rule.matches(PermissionClass::Edit, target, MatchDiscipline::Deny));
             assert!(!rule.matches(PermissionClass::Edit, target, MatchDiscipline::Allow));
@@ -582,6 +587,7 @@ mod tests {
         std::fs::create_dir(root.join("real")).unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink("real", root.join("alias")).unwrap();
+        // A Windows symlink needs Developer Mode or admin rights, which CI runners have.
         #[cfg(windows)]
         std::os::windows::fs::symlink_dir("real", root.join("alias")).unwrap();
 
@@ -637,11 +643,11 @@ mod tests {
 
     #[test]
     fn parse_path_glob_expands_a_leading_tilde_to_an_absolute_glob() {
-        temp_env::with_var("HOME", Some("/home/u"), || {
+        temp_env::with_var(HOME_VAR, Some(abs("/home/u")), || {
             let rule = Rule::parse("edit(~/notes/**)").unwrap();
             assert!(rule.matches(
                 PermissionClass::Edit,
-                &path("/home/u/notes/today.md", None),
+                &path(&abs("/home/u/notes/today.md"), None),
                 MatchDiscipline::Allow
             ));
             assert!(!rule.matches(
@@ -660,6 +666,34 @@ mod tests {
             &path("/repo/secrets/key", Some("secrets/key")),
             MatchDiscipline::Deny
         ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn parse_path_glob_reads_backslash_tilde_and_dot_prefixes() {
+        temp_env::with_var(HOME_VAR, Some(abs("/home/u")), || {
+            let home = Rule::parse(r"edit(~\notes\**)").unwrap();
+            assert!(home.matches(
+                PermissionClass::Edit,
+                &path(&abs("/home/u/notes/today.md"), None),
+                MatchDiscipline::Allow
+            ));
+        });
+        let relative = Rule::parse(r"read(.\secrets\**)").unwrap();
+        assert!(relative.matches(
+            PermissionClass::Read,
+            &path(r"C:\repo\secrets\key", Some(r"secrets\key")),
+            MatchDiscipline::Deny
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn parse_path_glob_rejects_a_rooted_glob_without_a_drive() {
+        for raw in ["read(/secrets/**)", r"edit(\tmp\**)"] {
+            let err = format!("{:#}", Rule::parse(raw).unwrap_err());
+            assert!(err.contains("needs a drive"), "{raw}: {err}");
+        }
     }
 
     // ── BashSpec::matches ──

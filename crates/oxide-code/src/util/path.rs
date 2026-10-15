@@ -79,9 +79,23 @@ pub(crate) fn slash_separated(path: &Path) -> String {
 }
 
 #[cfg(test)]
+pub(crate) mod testing {
+    /// The variable [`std::env::home_dir`] reads first, so tests can point it at a fixture.
+    pub(crate) const HOME_VAR: &str = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+
+    /// A rooted Unix fixture path made absolute for the host. Windows needs a drive, so the path
+    /// moves onto `C:` there.
+    pub(crate) fn abs(path: &str) -> String {
+        let drive = if cfg!(windows) { "C:" } else { "" };
+        format!("{drive}{path}")
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
+    use super::testing::{HOME_VAR, abs};
     use super::*;
 
     // ── xdg_dir ──
@@ -89,12 +103,12 @@ mod tests {
     #[test]
     fn xdg_dir_prefers_absolute_xdg_over_home_fallback() {
         let result = xdg_dir(
-            Some(PathBuf::from("/custom/data")),
+            Some(PathBuf::from(abs("/custom/data"))),
             Some(PathBuf::from("/home/u")),
             Path::new(".local/share"),
             Path::new("ox/sessions"),
         );
-        assert_eq!(result, Some(PathBuf::from("/custom/data/ox/sessions")));
+        assert_eq!(result, Some(PathBuf::from(abs("/custom/data/ox/sessions"))));
     }
 
     #[test]
@@ -142,7 +156,7 @@ mod tests {
 
     #[test]
     fn tildify_rewrites_home_prefix_to_tilde() {
-        temp_env::with_var("HOME", Some("/tmp/oxide-home"), || {
+        temp_env::with_var(HOME_VAR, Some("/tmp/oxide-home"), || {
             assert_eq!(
                 tildify(&PathBuf::from("/tmp/oxide-home/work/project")),
                 "~/work/project",
@@ -152,7 +166,7 @@ mod tests {
 
     #[test]
     fn tildify_preserves_paths_outside_home() {
-        temp_env::with_var("HOME", Some("/tmp/oxide-home"), || {
+        temp_env::with_var(HOME_VAR, Some("/tmp/oxide-home"), || {
             assert_eq!(
                 tildify(&PathBuf::from("/tmp/not-home/session")),
                 "/tmp/not-home/session",
@@ -162,7 +176,7 @@ mod tests {
 
     #[test]
     fn tildify_leaves_home_itself_as_tilde() {
-        temp_env::with_var("HOME", Some("/tmp/oxide-home"), || {
+        temp_env::with_var(HOME_VAR, Some("/tmp/oxide-home"), || {
             assert_eq!(tildify(&PathBuf::from("/tmp/oxide-home")), "~/");
         });
     }
@@ -171,7 +185,7 @@ mod tests {
 
     #[test]
     fn expand_user_rewrites_leading_tilde_slash_to_home() {
-        temp_env::with_var("HOME", Some("/tmp/oxide-fake-home"), || {
+        temp_env::with_var(HOME_VAR, Some("/tmp/oxide-fake-home"), || {
             assert_eq!(
                 expand_user("~/work/project").unwrap(),
                 PathBuf::from("/tmp/oxide-fake-home/work/project")
@@ -183,7 +197,7 @@ mod tests {
     fn expand_user_collapses_redundant_slashes_after_tilde() {
         // `~//foo` and `~///foo` should land at $HOME/foo, not at /foo. PathBuf::join replaces
         // the receiver when the argument is absolute, so the tail must be trimmed first.
-        temp_env::with_var("HOME", Some("/tmp/oxide-fake-home"), || {
+        temp_env::with_var(HOME_VAR, Some("/tmp/oxide-fake-home"), || {
             for raw in ["~//foo", "~///foo/bar"] {
                 let got = expand_user(raw).unwrap();
                 assert!(
@@ -196,7 +210,7 @@ mod tests {
 
     #[test]
     fn expand_user_bare_tilde_resolves_to_home() {
-        temp_env::with_var("HOME", Some("/tmp/oxide-fake-home"), || {
+        temp_env::with_var(HOME_VAR, Some("/tmp/oxide-fake-home"), || {
             assert_eq!(
                 expand_user("~").unwrap(),
                 PathBuf::from("/tmp/oxide-fake-home")

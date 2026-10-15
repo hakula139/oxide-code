@@ -568,6 +568,7 @@ mod tests {
     use super::*;
     use crate::message::ContentBlock;
     use crate::prompt::PromptParts;
+    use crate::util::path::testing::HOME_VAR;
 
     fn test_project_path(dir: &Path, filename: &str) -> PathBuf {
         dir.join(TEST_PROJECT).join(filename)
@@ -605,7 +606,7 @@ mod tests {
         temp_env::async_with_vars(
             [
                 ("XDG_DATA_HOME", Some(xdg.to_string_lossy().into_owned())),
-                ("HOME", Some(home.path().to_string_lossy().into_owned())),
+                (HOME_VAR, Some(home.path().to_string_lossy().into_owned())),
             ],
             async { SessionStore::open() },
         )
@@ -646,7 +647,7 @@ mod tests {
         let store = temp_env::async_with_vars(
             [
                 ("XDG_DATA_HOME", None),
-                ("HOME", Some(home.path().to_string_lossy().into_owned())),
+                (HOME_VAR, Some(home.path().to_string_lossy().into_owned())),
             ],
             async { SessionStore::open() },
         )
