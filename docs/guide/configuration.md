@@ -155,7 +155,7 @@ For other model ids, the default and percent-based automatic triggers stay off. 
 
 `show_welcome = false` blanks the chat region until you submit a prompt, which is useful when piping or screen-recording.
 
-`status_line` accepts these segment names: `current-dir`, `git-branch`, `pull-request`, `model`, `model-with-effort`, `context-used`, `session-cost`, `run-state`, `thread-title`, `current-time`. The list must contain at least one segment. Segments with no data, such as a missing git branch, an unopened pull request, or usage before the first completed turn, are omitted. The `pull-request` segment shells out to `gh pr view` so it requires the GitHub CLI on PATH. In supporting terminals, Ctrl-click or Cmd-click the segment to open the PR URL. The separator takes its style from the active theme's `separator` slot and has no setting of its own.
+`status_line` accepts these segment names: `current-dir`, `git-branch`, `pull-request`, `model`, `model-with-effort`, `context-used`, `session-cost`, `run-state`, `thread-title`, `current-time`. The list must contain at least one segment. Segments with no data, such as a missing git branch, an unopened pull request, or context usage before the first completed turn, are omitted. The `pull-request` segment shells out to `gh pr view` so it requires the GitHub CLI on PATH. In supporting terminals, Ctrl-click or Cmd-click the segment to open the PR URL. The separator takes its style from the active theme's `separator` slot and has no setting of its own.
 
 | Segment             | Renders                                      | Refresh         |
 | ------------------- | -------------------------------------------- | --------------- |

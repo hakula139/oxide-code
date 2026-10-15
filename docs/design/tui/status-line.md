@@ -39,11 +39,11 @@ Segment render rules:
 
 Anthropic `Usage` carries `cache_creation_input_tokens` and `cache_read_input_tokens`. `TokenUsage::context_tokens()` returns input + cache creation + cache read. `TokenUsage::total_tokens()` returns context + output and is the auto-compaction trigger input.
 
-Each `agent_turn` reports the latest provider usage and the total across its requests, including a request the user cancelled or that failed partway. `Engine` keeps the latest usage for the next auto-compaction check, updates the displayed usage snapshot, adds the turn's estimated cost when rates are known, then emits `Event::UsageUpdated(UsageSnapshot)` before the turn's terminal event. The summarization requests behind `/compact` and auto-compaction add their estimated cost the same way.
+Each `agent_turn` reports the latest provider usage and the total across its requests, including a request the user cancelled or that failed partway. `Engine` keeps the latest usage for the next auto-compaction check, updates the displayed usage snapshot, adds the turn's estimated cost when rates are known, then emits `Event::UsageUpdated(UsageSnapshot)` before the turn's terminal event. The summarization requests behind `/compact` and auto-compaction add their estimated cost the same way. Each of these requests also lands in the session file as a `usage` entry carrying its model id and prompt-cache TTL, so a resumed session can price each request at the rates it ran with.
 
-Known first-party Claude API rates live in `model/pricing.rs`, and the `model.rs` catalogue attaches them to each model. Unknown models render context without session cost. The estimate excludes account discounts, marketplace billing, data-residency multipliers, fast mode, and server-side tool surcharges.
+Known first-party Claude API rates live in `model/pricing.rs`, and the `model.rs` catalogue attaches them to each model. Unknown models render context without session cost. The estimate excludes the background title request, account discounts, marketplace billing, data-residency multipliers, fast mode, and server-side tool surcharges.
 
-On model swap, recompute the snapshot with the new model's context window. The session cost remains the accumulated estimate from requests that reported usage. Manual and automatic compaction clear the context usage because the visible transcript basis changed, and keep the session cost, which now includes the summary. Each compaction emits `UsageUpdated` once its summary requests end, so the summary's cost shows before the next turn, and the context segment stays hidden until the next request reports usage. `/clear` and `/resume` reset both.
+On model swap, recompute the snapshot with the new model's context window. The session cost remains the accumulated estimate from requests that reported usage. Manual and automatic compaction clear the context usage because the visible transcript basis changed, and keep the session cost, which now includes the summary. Each compaction emits `UsageUpdated` once its summary requests end, so the summary's cost shows before the next turn, and the context segment stays hidden until the next request reports usage. `/clear` resets both. `/resume` and `ox -c` clear the context usage and restore the session cost from every `usage` entry in the resumed file, whichever branch or compaction it belongs to. A file without `usage` entries resumes at zero.
 
 ## Default Order
 
@@ -70,19 +70,20 @@ The default order tracks reading flow: location and branch orient the user, mode
 
 1. **Typed segment roster.** A typed segment list is enough for first-party data and keeps rendering inside Ratatui, so the config needs no format DSL.
 2. **Implemented segments only.** Unsupported names fail config parsing, so the accepted vocabulary matches the shipped segments.
-3. **Local usage first.** Context and session cost use provider usage already observed by the current process.
+3. **Local usage first.** Context and session cost use provider usage that oxide-code observed, either in the current process or recorded in the session file.
 4. **Segment omission.** Missing usage, unknown pricing, absent branch, and blank titles disappear cleanly with no placeholder.
 5. **Background probes.** `git-branch` and `pull-request` re-probe as background child processes, 5 s and 60 s respectively after the previous probe finishes, with at most one run of each in flight. The bar stays current after `git checkout` or `gh pr create`, and a slow `gh` network round-trip never stalls input or rendering.
 
 ## Related Issues
 
-Planned segments, including account usage limits and task progress, are tracked in [#140](https://github.com/hakula139/oxide-code/issues/140). Restoring the session cost on resume is [#185](https://github.com/hakula139/oxide-code/issues/185), a user-command segment is [#166](https://github.com/hakula139/oxide-code/issues/166), and pricing for other providers comes with the data-driven model catalog in [#152](https://github.com/hakula139/oxide-code/issues/152).
+Planned segments, including account usage limits and task progress, are tracked in [#140](https://github.com/hakula139/oxide-code/issues/140). A user-command segment is [#166](https://github.com/hakula139/oxide-code/issues/166), and pricing for other providers comes with the data-driven model catalog in [#152](https://github.com/hakula139/oxide-code/issues/152).
 
 ## Sources
 
 - [Status line research](../../research/tui/status-line.md)
 - [Auto-compaction design](../agent/auto-compaction.md)
-- `crates/oxide-code/src/engine.rs`: `Engine` usage accounting and `UsageUpdated` emission.
+- `crates/oxide-code/src/engine.rs`: `Engine` usage accounting, `UsageUpdated` emission, and restored-cost pricing.
+- `crates/oxide-code/src/session/entry.rs`: `Entry::Usage` and `UsageRecord`, the per-request record a resume prices.
 - `crates/oxide-code/src/tui/components/status.rs`: `StatusBar` state and the run-state `Status`.
 - `crates/oxide-code/src/tui/components/status/line.rs`: `StatusLine` segment rendering and width fitting.
 - `crates/oxide-code/src/tui/git_probes.rs`: `GitProbes` background branch and pull-request polling.

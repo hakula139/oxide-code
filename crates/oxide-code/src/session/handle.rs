@@ -11,7 +11,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use super::actor::{self, SessionCmd};
-use super::entry::CompactInfo;
+use super::entry::{CompactInfo, UsageRecord};
 use super::sanitize::{retain_visible_file_snapshots, sanitize_resumed_messages};
 use super::state::{SessionState, extract_user_text};
 use super::store::{
@@ -175,6 +175,13 @@ impl SessionHandle {
             .await
     }
 
+    /// Record the token usage of billed requests, one entry each.
+    pub(crate) async fn record_usage(&self, records: Vec<UsageRecord>) -> Outcome {
+        let (ack, rx) = oneshot::channel();
+        self.dispatch_outcome(SessionCmd::Usage { records, ack }, rx)
+            .await
+    }
+
     /// Append an AI-generated session title (supersedes the first-prompt title).
     pub(crate) async fn append_ai_title(&self, title: String) -> Outcome {
         let (ack, rx) = oneshot::channel();
@@ -196,7 +203,8 @@ impl SessionHandle {
     }
 
     /// Write the compact-boundary + synthetic post-compact message, reset the chain anchor.
-    /// Returns `pre_count` for the post-compact UI plus the standard first-failure slot.
+    /// Returns `pre_count` for the post-compact UI plus every write failure, since the caller swaps
+    /// in the summary only once the boundary is on disk.
     pub(crate) async fn compact(
         &self,
         summary: String,
@@ -204,26 +212,21 @@ impl SessionHandle {
         synthetic_message: Message,
     ) -> CompactOutcome {
         let (ack, rx) = oneshot::channel();
-        if self
-            .cmd_tx
-            .send(SessionCmd::Compact {
-                summary,
-                instructions,
-                synthetic_message,
-                ack,
-            })
-            .await
-            .is_err()
+        let cmd = SessionCmd::Compact {
+            summary,
+            instructions,
+            synthetic_message,
+            ack,
+        };
+        if self.cmd_tx.send(cmd).await.is_ok()
+            && let Ok(outcome) = rx.await
         {
-            return CompactOutcome {
-                pre_count: 0,
-                failure: self.actor_gone_failure(),
-            };
+            return outcome;
         }
-        rx.await.unwrap_or_else(|_| CompactOutcome {
+        CompactOutcome {
             pre_count: 0,
-            failure: self.actor_gone_failure(),
-        })
+            failure: Some(self.actor_stopped_failure()),
+        }
     }
 
     /// Marks the session archived, reporting every failure since the caller rolls away only once
@@ -236,11 +239,8 @@ impl SessionHandle {
         {
             return outcome;
         }
-        let failure = self
-            .actor_gone_failure()
-            .unwrap_or_else(|| "Session writer task has stopped.".to_owned());
         Outcome {
-            failure: Some(failure),
+            failure: Some(self.actor_stopped_failure()),
         }
     }
 
@@ -303,6 +303,12 @@ impl SessionHandle {
         })
     }
 
+    /// The actor-gone failure for a write the caller must know failed, in full the first time.
+    fn actor_stopped_failure(&self) -> String {
+        self.actor_gone_failure()
+            .unwrap_or_else(|| "Session writer task has stopped.".to_owned())
+    }
+
     /// Surfaces actor-gone failure once, including the underlying I/O cause if known.
     fn actor_gone_failure(&self) -> Option<String> {
         if !self.shared.surface_first_actor_gone() {
@@ -313,10 +319,9 @@ impl SessionHandle {
         let msg = match cause {
             Some(io_err) => format!(
                 "Session writer task has stopped after I/O error: {io_err}. Conversation \
-                 history may be incomplete; further write errors will be silent."
+                 history may be incomplete."
             ),
-            None => "Session writer task has stopped. Conversation history may be incomplete; \
-                     further write errors will be silent."
+            None => "Session writer task has stopped. Conversation history may be incomplete."
                 .to_owned(),
         };
         Some(msg)
@@ -334,6 +339,8 @@ pub(crate) struct LoadedTranscript {
     pub(crate) context: Option<SessionContext>,
     pub(crate) compact: Option<CompactInfo>,
     pub(crate) tool_metadata: HashMap<String, ToolMetadata>,
+    /// Every billed request the session recorded, which seeds its cost estimate.
+    pub(crate) usage: Vec<UsageRecord>,
 }
 
 /// Live handle plus display-only extras the TUI uses to reconstruct what the user saw live.
@@ -483,6 +490,7 @@ fn from_resumed_data(
             context: data.context,
             compact: data.compact,
             tool_metadata: data.tool_result_metadata,
+            usage: data.usage,
         },
         title,
         unarchived: data.archived,
@@ -781,13 +789,14 @@ mod tests {
     async fn record_tool_metadata_batch_actor_drops_ack_surfaces_actor_gone_failure() {
         // Distinguishes the rx-await fallback in dispatch_outcome from the cmd_tx.send-failed
         // early return: send succeeds, actor receives the cmd, but drops the ack (simulates a
-        // panic between recv and ack). `succeed=4` exercises each ack-bearing variant of the
-        // helper's or-pattern healthy first, then the drop arm on the 5th cmd.
-        let handle = testing::acks_then_drops("acks-then-drops", 4);
+        // panic between recv and ack). `succeed=5` exercises each ack-bearing variant of the
+        // helper's or-pattern healthy first, then the drop arm on the 6th cmd.
+        let handle = testing::acks_then_drops("acks-then-drops", 5);
 
         let title = handle.append_ai_title("ok".to_owned()).await;
         let manual = handle.set_manual_title("manual".to_owned()).await;
         let finish = handle.finish(Vec::new()).await;
+        let usage = handle.record_usage(Vec::new()).await;
         let batch_ok = handle
             .record_tool_metadata_batch(vec![(
                 "t1".to_owned(),
@@ -805,6 +814,7 @@ mod tests {
             "SetManualTitle is acked healthily"
         );
         assert!(finish.failure.is_none(), "Finish is acked healthily");
+        assert!(usage.failure.is_none(), "Usage is acked healthily");
         assert!(
             batch_ok.failure.is_none(),
             "ToolMetadata is acked healthily"
@@ -937,50 +947,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compact_actor_gone_surfaces_failure_with_zero_pre_count() {
-        let handle = testing::dead("dead");
+    async fn compact_reports_every_failure_to_reach_the_actor() {
+        async fn compact(handle: &SessionHandle) -> CompactOutcome {
+            handle
+                .compact("s".to_owned(), None, Message::user("synth"))
+                .await
+        }
 
-        let outcome = handle
-            .compact("s".to_owned(), None, Message::user("synth"))
-            .await;
+        let dead = testing::dead("dead");
+        for _ in 0..2 {
+            let outcome = compact(&dead).await;
+            assert_eq!(outcome.pre_count, 0, "no actor means no pre-count signal");
+            assert!(
+                outcome.failure.is_some(),
+                "a later failure must not read as success once actor-gone was surfaced",
+            );
+        }
 
-        assert_eq!(outcome.pre_count, 0, "no actor means no pre-count signal");
+        let stalled = testing::acks_then_drops("stalled", 1);
+        assert!(compact(&stalled).await.failure.is_none());
         assert!(
-            outcome.failure.is_some(),
-            "actor-gone surfaces on first call"
+            compact(&stalled).await.failure.is_some(),
+            "a dropped ack must surface as a failure",
         );
-    }
-
-    #[tokio::test]
-    async fn compact_actor_drops_ack_surfaces_actor_gone_failure() {
-        // Exercises the `rx.await` fallback when the actor receives the cmd but never acks.
-        let handle = testing::acks_then_drops("ack-dropped", 0);
-
-        let outcome = handle
-            .compact("s".to_owned(), None, Message::user("synth"))
-            .await;
-
-        assert_eq!(outcome.pre_count, 0);
-        assert!(
-            outcome.failure.is_some(),
-            "dropped ack must surface as actor-gone",
-        );
-    }
-
-    #[tokio::test]
-    async fn compact_actor_ack_path_returns_clean_outcome() {
-        // Complement of the drops-ack test: when the testing actor does ack, the caller sees
-        // a clean outcome. This pins the success path through `testing::acks_then_drops`.
-        let handle = testing::acks_then_drops("ack-clean", 1);
-
-        let outcome = handle
-            .compact("s".to_owned(), None, Message::user("synth"))
-            .await;
-
-        assert!(
-            outcome.failure.is_none(),
-            "acked path must report no failure"
-        );
+        stalled.shutdown().await;
     }
 
     // ── archive ──
