@@ -185,7 +185,14 @@
               pnpm
             ]);
 
-          inherit (preCommitCheck) shellHook;
+          # git-hooks.nix stores a relative hooks path, which linked worktrees can't resolve
+          # (cachix/git-hooks.nix#688), so commits there would silently skip the hooks.
+          shellHook = ''
+            ${preCommitCheck.shellHook}
+            if common_dir=$(${pkgs.lib.getExe pkgs.git} rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
+              ${pkgs.lib.getExe pkgs.git} config --local core.hooksPath "$common_dir/hooks"
+            fi
+          '';
 
           env.RUST_BACKTRACE = "1";
         };
