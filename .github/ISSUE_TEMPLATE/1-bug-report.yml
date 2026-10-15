@@ -1,0 +1,91 @@
+name: Bug report
+description: Report a crash, an error, or behavior that differs from the docs
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Search [existing issues](https://github.com/hakula139/oxide-code/issues?q=is%3Aissue) first, and add a reaction to a matching one when you find it.
+
+        Redact OAuth tokens, API keys, `Authorization` headers, and private paths from everything you paste below.
+
+  - type: input
+    id: version
+    attributes:
+      label: ox version
+      description: Output of `ox --version`.
+      placeholder: ox 0.1.0-alpha.2
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: OS and terminal
+      description: Operating system, architecture, terminal emulator, and multiplexer if any.
+      placeholder: macOS arm64, Ghostty, tmux 3.5
+    validations:
+      required: true
+
+  - type: dropdown
+    id: auth
+    attributes:
+      label: Authentication
+      options:
+        - Claude Code OAuth login
+        - Anthropic API key
+        - Custom base URL or gateway
+    validations:
+      required: true
+
+  - type: input
+    id: model
+    attributes:
+      label: Model
+      description: Model ID shown by `/status`.
+      placeholder: claude-opus-5-5
+
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Mode
+      options:
+        - TUI
+        - Bare REPL (`--no-tui`)
+        - Headless (`-p`)
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The shortest sequence of commands, prompts, or keys that triggers the problem.
+      placeholder: |
+        1. Run `ox` in a git repository
+        2. Type `/diff`
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include the full error text. Text is easier to search than a screenshot.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: The relevant lines from `$XDG_STATE_HOME/ox/log/oxide-code.log` (default `~/.local/state/ox/log/oxide-code.log`). The TUI writes its log there, and the other modes log to stderr.
+      render: text

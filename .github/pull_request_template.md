@@ -1,6 +1,6 @@
 ## Summary
 
-<!-- Describe the problem and resulting behavior. Add rationale or related PRs when needed. -->
+<!-- Describe the problem and resulting behavior. Add rationale or related PRs when needed, and link resolved issues with `Closes #N`. -->
 
 ## Test plan
 

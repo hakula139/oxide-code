@@ -266,7 +266,8 @@ Follows the user's global instructions for comments, plus:
 Follows the user's global instructions for commits, branches, and PRs, plus:
 
 - **Scope**: Use the most specific area changed, such as a module (e.g., `client`, `config`, `oauth`), a documentation target (e.g., `AGENTS`, `research`), or a crate name only for cross-module changes.
-- **PRs**: Assign to `hakula139` and label as `enhancement` for `feat` or `bug` for `fix`. Follow `.github/pull_request_template.md` for descriptions, and do not reference gitignored working docs. Do not request a review from the PR author, since GitHub rejects it.
+- **PRs**: Assign to `hakula139`. Label with one type label (`enhancement` for `feat`, `bug` for `fix`, `performance` for `perf`, or the label named after the type) plus the matching `area:` labels. Follow `.github/pull_request_template.md` for descriptions, close resolved issues with `Closes #N`, and do not reference gitignored working docs. Do not request a review from the PR author, since GitHub rejects it.
+- **Issues**: Open one issue per actionable outcome, using the forms in `.github/ISSUE_TEMPLATE/`, and give it acceptance criteria. Label it like a PR. A theme that spans several issues gets an `epic` parent with native sub-issues, and `docs/roadmap.md` links the epic. Mark an issue `blocked` while it waits on another, and name the blocker in a comment. Open design questions get the `design` label and close once the decision lands in `docs/design/`. Close out-of-scope requests as not planned, pointing to the roadmap.
 
 ### Testing
 
@@ -285,7 +286,8 @@ Follows the user's global instructions for commits, branches, and PRs, plus:
 Follows the user's global instructions for documentation and Markdown prose, plus:
 
 - Keep `README.md` user-facing, covering value, supported features, and usage.
-- Keep `docs/roadmap.md` as the canonical in-repo roadmap / status summary. Update it when shipped capability areas or planned priorities change.
+- `docs/` describes current behavior and its rationale. Planned work, deferred follow-ups, and open design questions live in GitHub issues, and docs link to the issue in place of describing future work.
+- Keep `docs/roadmap.md` as the themed index of shipped capabilities and planned epics. Update it when shipped capability areas or planned priorities change.
 - New research and design notes cite Claude Code, [Codex](https://github.com/openai/codex), [pi](https://github.com/badlogic/pi-mono), and [oh-my-pi](https://github.com/can1357/oh-my-pi) as reference implementations. Existing notes may keep their opencode citations.
 - Crate structure diagrams must match the actual filesystem. When adding, removing, or renaming modules, update the tree in this file. Entries are sorted alphabetically. Directories sort alongside their parent `.rs` file.
 - After substantive changes, sweep docs for stale claims: `README.md` status bullets, `docs/roadmap.md` Working Today / Current Focus sections, this file's crate tree and conventions, `docs/guide/*` user instructions, and `docs/research/**/*` deferred / follow-up notes that the change now resolves.

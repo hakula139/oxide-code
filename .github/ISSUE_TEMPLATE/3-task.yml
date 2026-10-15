@@ -1,0 +1,26 @@
+name: Task
+description: Plan a unit of work with a clear outcome
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: The outcome and why it matters. Link the parent epic or roadmap section when there is one.
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Observable conditions that mark the task done.
+      placeholder: |
+        - [ ] ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Constraints, design decisions, references, and known risks.
