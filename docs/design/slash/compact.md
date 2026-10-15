@@ -26,9 +26,9 @@ Companions: [commands.md](commands.md), [session/persistence.md](../session/pers
 `Engine::compact` in `engine.rs` coordinates compaction:
 
 - On success, it hands the summary to `agent/compact_boundary`'s `replace_session_with_summary`, which calls `session.compact(...)`, clears the file tracker, replaces the in-memory `Vec<Message>` with the synthetic continuation, and emits `Event::SessionCompacted { summary, pre_count, instructions, automatic }` with `automatic: false`.
-- Failure paths (stream error, unfinished or empty summary, too-few-messages guard) emit `Event::TurnFailed` and leave the session untouched.
+- Failure paths (stream error, unfinished or empty summary, too-few-messages guard) emit `Event::TurnFailed` and leave the transcript unchanged.
 - Cancellation routes through the existing cancel infrastructure and emits `Event::Cancelled` like a regular turn, and a quit ends the compaction without a terminal event.
-- The summarizer's estimated cost joins the session total whether the summary succeeds, fails, or is cancelled. An `Event::UsageUpdated` then shows the new total, after `SessionCompacted` on success and before the terminal event otherwise.
+- Each summary request is recorded as a `usage` entry, and its estimated cost joins the session total whether the summary succeeds, fails, or is cancelled. An `Event::UsageUpdated` then shows the new total, after `SessionCompacted` on success and before the terminal event otherwise.
 
 The TUI's `App::apply_session_compacted` clears the chat, pushes a single `CompactedBlock` with a count header and markdown summary body, keeps queued prompts for the normal idle drain, clears the modal stack, and resumes idle after a manual compact. Resume renders the same boundary block and skips the synthetic root in visible chat.
 
@@ -67,7 +67,7 @@ The TUI's `App::apply_session_compacted` clears the chat, pushes a single `Compa
 
 14. **Refuse on too-few messages.** The driver requires at least 4 transcript messages, at least 4 of which carry text, since below that the summary is more verbose than the transcript itself. The refusal fails the compaction and leaves the session untouched.
 
-15. **Refuse on empty summary.** If the model returns whitespace-only text (model errored quietly, content filter, etc.), fail the compaction and leave the session untouched. Better to retry than to commit a useless summary.
+15. **Refuse on empty summary.** If the model returns whitespace-only text (model errored quietly, content filter, etc.), fail the compaction and leave the transcript unchanged. Better to retry than to commit a useless summary.
 
 16. **No `pre_tokens` field.** `pre_message_count` is enough for the post-compact UI line, and auto-compaction reads its trigger from the last turn's usage without persisting it.
 
@@ -85,17 +85,17 @@ The TUI's `App::apply_session_compacted` clears the chat, pushes a single `Compa
 
 - **`Event::SessionCompacted { summary, pre_count, instructions, automatic }`**: Emitted post-success. `summary` is the rendered body, `pre_count` is for the count header, `instructions` becomes the header's `(focus: ...)` suffix, and `automatic` is false for `/compact` and true for auto-compaction. The TUI repaints from it, and `StdioSink` prints a `Compacted N messages into summary` line to stderr (`Auto-compacted` when automatic).
 
-- **`agent::compaction::compact_session`**: Async fn taking the client, the conversation's `PromptParts` and tool definitions, the transcript, optional instructions, and a `&mut Option<TokenUsage>` that receives the usage of every request it sends, even when the summary fails or the caller drops the future. Returns the trimmed summary or an error.
+- **`agent::compaction::compact_session`**: Async fn taking the client, the conversation's `PromptParts` and tool definitions, the transcript, optional instructions, and a `&mut Vec<TokenUsage>` that receives the usage of every request it sends, even when the summary fails or the caller drops the future. Returns the trimmed summary or an error.
 
 - **`SUMMARIZATION_USER_RUBRIC`**, **`SUMMARY_PREFIX`**: Two `&'static str` constants. The rubric is the terse list (intent, decisions, code paths touched, current state, next step) and ends by asking for text only. The prefix is the next-turn framing prepended to the synthetic message.
 
-- **`Engine::compact` (`engine.rs`)**: Drive `compact_session` with the conversation's prompt and tool definitions, add its cost to the session total, and surface failure as `Event::TurnFailed`. On success, `replace_session_with_summary` synthesizes the continuation and calls `session.compact(summary, instructions, synthetic_message)`. A session-write failure surfaces through the sink and ends the compaction with `TurnFailed` before the file tracker or the in-memory transcript changes. Otherwise it clears the file tracker, swaps the in-memory `Vec<Message>` for the synthetic continuation, and emits `SessionCompacted`.
+- **`Engine::compact` (`engine.rs`)**: Drive `compact_session` with the conversation's prompt and tool definitions, record each summary request as a `usage` entry, add its cost to the session total, and surface failure as `Event::TurnFailed`. On success, `replace_session_with_summary` synthesizes the continuation and calls `session.compact(summary, instructions, synthetic_message)`. A session-write failure surfaces through the sink and ends the compaction with `TurnFailed` before the file tracker or the in-memory transcript changes. Otherwise it clears the file tracker, swaps the in-memory `Vec<Message>` for the synthetic continuation, and emits `SessionCompacted`.
 
 - **`Entry::Compact`**: Variant on the internally tagged `Entry` enum. Fields: `summary: String`, `pre_message_count: u32`, `instructions: Option<String>`, `timestamp: OffsetDateTime`. Tagged `"type": "compact"` (lowercase, snake_case).
 
 - **`SessionCmd::Compact`**: Actor command carrying the new state. Writes `Entry::Compact` and the synthetic post-compact `Entry::Message` in one batched flush, resets `last_message_uuid` to the synthetic message id, resets `message_count` to `1`, and forces a batch flush before later queued commands run. Acks via `oneshot` like the rest of `SessionCmd`.
 
-- **`session::handle::compact`**: Async API. Sends `SessionCmd::Compact`, awaits the ack, and returns `CompactOutcome { pre_count, failure }`. The caller clears the file tracker only after the boundary flush succeeds.
+- **`session::handle::compact`**: Async API. Sends `SessionCmd::Compact`, awaits the ack, and returns `CompactOutcome { pre_count, failure }`. Like `archive`, it reports a failure whenever the command or its ack cannot reach the writer task. The caller clears the file tracker only after the boundary flush succeeds.
 
 - **`CompactedBlock`**: Chat block with an accent-bar surface, a `Compacted N messages → 1 summary.` header (with a `(focus: ...)` suffix when instructions were given), and the rendered summary markdown body. No footer. Reuses the existing markdown renderer.
 

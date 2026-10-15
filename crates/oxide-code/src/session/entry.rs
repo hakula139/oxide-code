@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+use crate::agent::TokenUsage;
+use crate::config::PromptCacheTtl;
 use crate::file_tracker::FileSnapshot;
 use crate::message::Message;
 use crate::prompt::SessionContext;
@@ -72,6 +74,15 @@ pub(crate) enum Entry {
         #[serde(with = "time::serde::rfc3339")]
         timestamp: OffsetDateTime,
     },
+    /// One billed request, whatever branch or compaction it belongs to. Resume sums the cost of
+    /// each `uuid` once, since a retried write can repeat a line.
+    Usage {
+        uuid: Uuid,
+        #[serde(flatten)]
+        usage: UsageRecord,
+        #[serde(with = "time::serde::rfc3339")]
+        timestamp: OffsetDateTime,
+    },
     FileSnapshot {
         #[serde(flatten)]
         snapshot: FileSnapshot,
@@ -115,6 +126,15 @@ pub(crate) struct CompactInfo {
     pub(crate) summary: String,
     pub(crate) pre_message_count: u32,
     pub(crate) instructions: Option<String>,
+}
+
+/// One billed request's token usage, with the model and prompt-cache TTL that price it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct UsageRecord {
+    pub(crate) model: String,
+    pub(crate) cache_ttl: PromptCacheTtl,
+    #[serde(flatten)]
+    pub(crate) tokens: TokenUsage,
 }
 
 #[derive(Debug, Clone)]
@@ -330,6 +350,43 @@ mod tests {
         assert_eq!(reserialized["tool_use_id"], "e");
         assert_eq!(reserialized["metadata"]["title"], "t");
         assert!(reserialized["metadata"].get("future_field").is_none());
+    }
+
+    // ── Entry::Usage ──
+
+    #[test]
+    fn usage_round_trips_with_flat_token_fields() {
+        let json = serde_json::json!({
+            "type": "usage",
+            "uuid": "00000000-0000-4000-8000-000000000001",
+            "model": "claude-opus-5-5",
+            "cache_ttl": "1h",
+            "input_tokens": 12,
+            "cache_creation_input_tokens": 3_000,
+            "cache_read_input_tokens": 40_000,
+            "output_tokens": 500,
+            "timestamp": "2026-04-16T12:07:00Z",
+        });
+
+        let parsed: Entry = serde_json::from_value(json.clone()).unwrap();
+        assert!(
+            matches!(
+                &parsed,
+                Entry::Usage { uuid, usage, timestamp }
+                    if uuid.as_u128() == 0x0000_0000_0000_4000_8000_0000_0000_0001
+                        && usage.model == "claude-opus-5-5"
+                        && usage.cache_ttl == PromptCacheTtl::OneHour
+                        && [
+                            usage.tokens.input_tokens(),
+                            usage.tokens.cache_creation_input_tokens(),
+                            usage.tokens.cache_read_input_tokens(),
+                            usage.tokens.output_tokens(),
+                        ] == [12, 3_000, 40_000, 500]
+                        && *timestamp == datetime!(2026-04-16 12:07:00 UTC)
+            ),
+            "{parsed:?}"
+        );
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), json);
     }
 
     // ── Entry::FileSnapshot ──

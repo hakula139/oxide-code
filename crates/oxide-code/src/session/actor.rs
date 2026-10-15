@@ -9,8 +9,9 @@ use std::sync::Arc;
 use time::OffsetDateTime;
 use tokio::sync::{mpsc, oneshot};
 use tracing::warn;
+use uuid::Uuid;
 
-use super::entry::Entry;
+use super::entry::{Entry, UsageRecord};
 use super::handle::{CompactOutcome, Outcome, RecordOutcome, SharedState};
 use super::state::SessionState;
 use crate::file_tracker::FileSnapshot;
@@ -30,6 +31,10 @@ pub(super) enum SessionCmd {
     /// skipped at absorb time.
     ToolMetadata {
         items: Vec<(String, ToolMetadata)>,
+        ack: oneshot::Sender<Outcome>,
+    },
+    Usage {
+        records: Vec<UsageRecord>,
         ack: oneshot::Sender<Outcome>,
     },
     AppendAiTitle {
@@ -78,7 +83,7 @@ enum PendingAck {
     Compact {
         ack: oneshot::Sender<CompactOutcome>,
         pre_count: u32,
-        synthetic_uuid: uuid::Uuid,
+        synthetic_uuid: Uuid,
     },
     Shutdown(oneshot::Sender<()>),
 }
@@ -169,6 +174,15 @@ fn absorb(
         }
         SessionCmd::ToolMetadata { items, ack } => {
             absorb_tool_metadata(items, ack, now, entries, acks);
+            BatchFlow::Continue
+        }
+        SessionCmd::Usage { records, ack } => {
+            entries.extend(records.into_iter().map(|usage| Entry::Usage {
+                uuid: Uuid::new_v4(),
+                usage,
+                timestamp: now,
+            }));
+            acks.push(PendingAck::Outcome(ack));
             BatchFlow::Continue
         }
         SessionCmd::AppendAiTitle { title, ack } => {
