@@ -65,8 +65,9 @@ This compiles `oxide-code` from the `main` branch and installs `ox` to `~/.cargo
 The repo ships a flake that source-builds `ox`:
 
 ```bash
-nix run github:hakula139/oxide-code              # one-shot
-nix profile install github:hakula139/oxide-code  # install to user profile
+nix run github:hakula139/oxide-code                     # one-shot
+nix profile install github:hakula139/oxide-code         # install to user profile
+nix profile install github:hakula139/oxide-code/vX.Y.Z  # install a specific release
 ```
 
 Or as a flake input from another project:
@@ -75,6 +76,8 @@ Or as a flake input from another project:
 inputs.oxide-code.url = "github:hakula139/oxide-code";
 # Outputs: packages.${system}.{default, oxide-code}
 ```
+
+Without a tag, these refs build the `main` branch. Tags from `v0.1.0-alpha.2` on ship the flake, and a tag suffix pins the flake input the same way.
 
 ## Verify your installation
 
@@ -92,6 +95,8 @@ If `ox` is on `PATH`, this prints the version string. A `command not found` mean
 | Homebrew        | `brew update && brew upgrade oxide-code`                                       |
 | Cargo           | `cargo install --git https://github.com/hakula139/oxide-code --locked --force` |
 | Nix profile     | `nix profile upgrade oxide-code` (or refresh the flake input in your project)  |
+
+The Cargo and Nix commands follow `main`. An install pinned to a tag stays on that tag, so update it by installing the new tag: pass `--tag vX.Y.Z` to `cargo install --force`, or run `nix profile remove oxide-code` and then install the new tag's ref.
 
 ## Uninstall `ox`
 
