@@ -60,7 +60,7 @@ VERSION=v0.1.0-alpha.2
 curl -fsSL "https://github.com/hakula139/oxide-code/releases/download/$VERSION/oxide-code-aarch64-apple-darwin.tar.gz" | tar -xz
 sudo mv ox /usr/local/bin/
 
-# Homebrew (macOS, Linux)
+# Homebrew (Apple Silicon macOS, x86_64 Linux)
 brew tap hakula139/oxide-code https://github.com/hakula139/oxide-code
 brew install oxide-code
 
@@ -89,7 +89,7 @@ cargo fmt --all --check                            # Check formatting
 cargo build                                        # Build
 cargo clippy --all-targets -- -D warnings          # Lint (pedantic, zero warnings)
 cargo test                                         # Run tests
-cargo llvm-cov --ignore-filename-regex 'main\.rs'  # Check test coverage
+cargo llvm-cov                                     # Check test coverage
 pnpm format                                        # Check Markdown, TOML, JSON, and YAML formatting
 pnpm lint                                          # Lint Markdown
 pnpm spellcheck                                    # Spell check

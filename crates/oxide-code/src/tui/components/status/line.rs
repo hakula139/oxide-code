@@ -1,3 +1,5 @@
+//! Ordered segment rendering for the status line.
+
 use ratatui::text::{Line, Span};
 use time::OffsetDateTime;
 use unicode_width::UnicodeWidthStr;

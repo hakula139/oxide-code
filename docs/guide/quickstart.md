@@ -2,7 +2,7 @@
 
 ## Install
 
-See [Installation](install.md) for the full matrix (prebuilt tarball, Homebrew, cargo, Nix). The shortest path on macOS / Linux:
+See [Installation](install.md) for the full matrix (prebuilt tarball, Homebrew, cargo, Nix). The shortest path on Apple Silicon macOS and x86_64 Linux:
 
 ```bash
 brew tap hakula139/oxide-code https://github.com/hakula139/oxide-code

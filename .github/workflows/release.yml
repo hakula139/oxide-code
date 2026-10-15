@@ -8,7 +8,7 @@ on:
       - .github/workflows/release.yml
       - Cargo.lock
       - Cargo.toml
-      - crates/oxide-code/Cargo.toml
+      - crates/*/Cargo.toml
       - rust-toolchain.toml
   workflow_dispatch:
 
@@ -23,6 +23,14 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  ci:
+    name: CI
+    # ci.yml already runs on pull requests, where a called run would also share this workflow's
+    # concurrency group and wait on it forever.
+    if: github.event_name != 'pull_request'
+    uses: ./.github/workflows/ci.yml
+    secrets: inherit
+
   build:
     name: Build (${{ matrix.target }})
     runs-on: ${{ matrix.runner }}
@@ -33,8 +41,6 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-latest
           - target: aarch64-apple-darwin
-            runner: macos-latest
-          - target: x86_64-apple-darwin
             runner: macos-latest
           - target: x86_64-pc-windows-msvc
             runner: windows-latest
@@ -62,6 +68,40 @@ jobs:
           dry-run: true
           dry-run-intended: true
 
+      - name: Check version
+        shell: bash
+        env:
+          ARCHIVE: ${{ steps.binary.outputs.tar || steps.binary.outputs.zip }}
+        run: |
+          mkdir smoke
+          if [[ "$ARCHIVE" == *.zip ]]; then
+            7z x -o"smoke" "$ARCHIVE" > /dev/null
+          else
+            tar -xzf "$ARCHIVE" -C smoke
+          fi
+
+          if [[ "$GITHUB_REF_TYPE" == 'tag' ]]; then
+            expected=${GITHUB_REF_NAME#v}
+          else
+            expected=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "oxide-code") | .version')
+          fi
+          test "$(smoke/ox --version)" = "ox $expected"
+
+      - name: Check glibc floor
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          floor=$(grep -oP 'Linux with glibc \K[0-9.]+(?= or later)' docs/guide/install.md)
+          # The loader skips a weak version need that the system glibc lacks, so only `Flags: none`
+          # entries raise the floor.
+          required=$(readelf -V --wide smoke/ox | grep -oP 'Name: GLIBC_\K[0-9.]+(?=\s+Flags: none)' | sort -uV | tail -1)
+          test -n "$required"
+          echo "ox requires glibc $required, and docs/guide/install.md promises $floor"
+          if [[ "$(printf '%s\n' "$required" "$floor" | sort -V | tail -1)" != "$floor" ]]; then
+            echo "::error::ox needs glibc $required. Raise the floor in docs/guide/install.md, or pin the previous runner image."
+            exit 1
+          fi
+
       - name: Upload archive
         uses: actions/upload-artifact@v7
         with:
@@ -76,10 +116,12 @@ jobs:
   publish:
     name: Publish GitHub Release
     if: github.ref_type == 'tag'
-    needs: build
+    needs: [ci, build]
     runs-on: ubuntu-latest
     permissions:
+      attestations: write
       contents: write
+      id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -91,10 +133,12 @@ jobs:
           path: release-assets
           merge-multiple: true
 
-      - name: Check version
-        run: |
-          tar -xzf release-assets/oxide-code-x86_64-unknown-linux-gnu.tar.gz ox
-          test "$(./ox --version)" = "ox ${GITHUB_REF_NAME#v}"
+      - name: Attest build provenance
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            release-assets/*.tar.gz
+            release-assets/*.zip
 
       - name: Install changelog parser
         uses: taiki-e/install-action@parse-changelog
@@ -111,3 +155,84 @@ jobs:
           fi
 
           gh release create "$GITHUB_REF_NAME" release-assets/* "${options[@]}"
+
+  homebrew:
+    name: Update Homebrew formula
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      checks: read
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: main
+
+      - name: Download archives
+        uses: actions/download-artifact@v8
+        with:
+          pattern: oxide-code-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Open formula PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Follow the latest release, or the newest prerelease before the first stable one.
+          latest=$(gh release list --exclude-drafts --json tagName,isLatest --jq '.[] | select(.isLatest) | .tagName')
+          if [[ -n "$latest" && "$latest" != "$GITHUB_REF_NAME" ]]; then
+            echo "Skipping $GITHUB_REF_NAME, since the formula follows $latest."
+            exit 0
+          fi
+
+          branch="chore/homebrew-$GITHUB_REF_NAME"
+          title="chore(release): refresh Homebrew formula for $GITHUB_REF_NAME"
+          git switch -c "$branch"
+          ./scripts/update-homebrew-formula.sh "$GITHUB_REF_NAME" release-assets
+          if git diff --quiet; then
+            echo "The formula on main already points at $GITHUB_REF_NAME."
+            exit 0
+          fi
+
+          git -c user.name='github-actions[bot]' \
+            -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit -am "$title"
+          # A rerun rebuilds this commit on the current main and replaces the earlier push.
+          git push --force origin "$branch"
+
+          setting='Enable "Allow GitHub Actions to create and approve pull requests" in Settings > Actions > General, then rerun this job.'
+          if [[ -z "$(gh pr list --head "$branch" --state open --json number --jq '.[].number')" ]] &&
+            ! gh pr create --base main --head "$branch" --title "$title" --assignee hakula139 --label chore \
+              --body-file - <<EOF
+          ## Summary
+
+          Points the Homebrew formula at the $GITHUB_REF_NAME release archives.
+
+          ## Test plan
+
+          - [x] The Release workflow rendered the formula from the checksums its build jobs produced.
+          EOF
+          then
+            echo "::error::Could not open the formula PR. $setting"
+            exit 1
+          fi
+
+          # A PR opened with GITHUB_TOKEN starts no workflows, so dispatch CI for its checks.
+          gh workflow run ci.yml --ref "$branch"
+
+          sha=$(git rev-parse HEAD)
+          for _ in {1..30}; do
+            names=$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs" --jq '.check_runs[].name')
+            if grep -qx 'Rust Check' <<< "$names" && grep -qx 'Node Check' <<< "$names" &&
+              grep -qx 'Nix Flake Check' <<< "$names"; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::The dispatched CI run reported no required checks on $sha. $setting"
+          exit 1
