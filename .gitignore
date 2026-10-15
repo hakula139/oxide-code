@@ -1,4 +1,5 @@
 # Build output
+/THIRD-PARTY-NOTICES
 /mutants.out*/
 /target/
 
