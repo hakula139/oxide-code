@@ -44,7 +44,7 @@ impl Tool for GlobTool {
             "properties": {
                 "pattern": {
                     "type": "string",
-                    "description": r#"The glob pattern to match (e.g. "**/*.rs", "src/**/*.ts"). "*" and "?" stay within one directory, and a pattern without "/" matches file names at any depth."#
+                    "description": r#"The glob pattern to match, relative to `path` (e.g. "**/*.rs", "src/**/*.ts"). "*" and "?" stay within one directory, and a pattern without "/" matches file names at any depth."#
                 },
                 "path": {
                     "type": "string",
@@ -146,7 +146,10 @@ struct GlobOutput {
 fn glob_files(pattern: &str, search_path: Option<&str>, cwd: &Path) -> Result<GlobOutput, String> {
     let base = super::resolve_base_dir(search_path, cwd)?;
     if !base.is_dir() {
-        return Err(format!("Directory does not exist: {}", base.display()));
+        return Err(format!(
+            "{} is not a directory",
+            super::display_path(&base, cwd)
+        ));
     }
 
     let glob = compile_glob(pattern)?;
@@ -196,11 +199,18 @@ fn glob_files(pattern: &str, search_path: Option<&str>, cwd: &Path) -> Result<Gl
     })
 }
 
-/// Compiles `pattern` so `*` and `?` never cross `/`. A pattern without `/` gains a `**/` prefix
-/// and matches file names at any depth, the way gitignore-style globs behave.
+/// Compiles `pattern` relative to the search root, so `*` and `?` never cross `/` and a leading
+/// `./` anchors at the root. A pattern without `/` gains a `**/` prefix and matches file names at
+/// any depth, the way gitignore-style globs behave. Absolute patterns are rejected because the
+/// permission gate only sees `path`.
 fn compile_glob(pattern: &str) -> Result<globset::GlobMatcher, String> {
+    if pattern.starts_with('/') {
+        return Err(format!(
+            "Pattern {pattern} is absolute. Set `path` to its directory and pass a pattern relative to it."
+        ));
+    }
     let pattern = if pattern.contains('/') {
-        pattern.to_owned()
+        pattern.trim_start_matches("./").to_owned()
     } else {
         format!("**/{pattern}")
     };
@@ -420,6 +430,25 @@ mod tests {
     }
 
     #[test]
+    fn glob_files_dot_slash_pattern_anchors_at_the_search_root() {
+        let dir = canonical_tempdir();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("a.rs"), "").unwrap();
+        std::fs::write(dir.path().join("src/b.rs"), "").unwrap();
+
+        assert_eq!(
+            glob_files("./*.rs", None, dir.path()).unwrap().content,
+            "a.rs"
+        );
+        assert_eq!(
+            glob_files("././src/*.rs", None, dir.path())
+                .unwrap()
+                .content,
+            "src/b.rs"
+        );
+    }
+
+    #[test]
     fn glob_files_renders_paths_relative_to_cwd() {
         let dir = canonical_tempdir();
         let cwd = dir.path().join("project");
@@ -470,10 +499,27 @@ mod tests {
     }
 
     #[test]
+    fn glob_files_absolute_pattern_points_at_path() {
+        let dir = canonical_tempdir();
+        let pattern = format!("{}/*.rs", dir.path().display());
+        let err = glob_files(&pattern, None, dir.path()).unwrap_err();
+        assert_eq!(
+            err,
+            format!(
+                "Pattern {pattern} is absolute. Set `path` to its directory and pass a pattern relative to it."
+            )
+        );
+    }
+
+    #[test]
     fn glob_files_invalid_directory() {
         let dir = canonical_tempdir();
         let err = glob_files("*.txt", Some("missing"), dir.path()).unwrap_err();
         assert!(err.starts_with("Cannot access missing: "), "{err}");
+
+        std::fs::write(dir.path().join("a.txt"), "").unwrap();
+        let err = glob_files("*.txt", Some("a.txt"), dir.path()).unwrap_err();
+        assert_eq!(err, "a.txt is not a directory");
     }
 
     #[test]
