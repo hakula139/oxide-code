@@ -21,11 +21,11 @@ const THINKING_TOKEN_COUNT_BETA_HEADER: &str = "thinking-token-count-2026-05-13"
 /// Builds the comma-joined `anthropic-beta` header value.
 ///
 /// Order is load-bearing: 3P proxies fingerprint the exact sequence and reject mismatches. Agentic
-/// turns on catalogue models send the sequence Claude Code 2.1.296 sends for them, captured from
-/// `claude -p` with an API key, so it includes betas for features this client leaves unused.
-/// `oauth` takes the slot Claude Code's `getAllModelBetas` gives it. One-shots carry at most the
-/// claude-code tag and the auth extension. The thinking betas derive from the request body's
-/// `thinking` field, so they always match it.
+/// turns on catalogue models send the sequence Claude Code [`super::CLAUDE_CLI_VERSION`] sends for
+/// them, captured from `claude -p` with an API key, so it includes betas for features this client
+/// leaves unused. `oauth` takes the slot Claude Code's `getAllModelBetas` gives it. One-shots carry
+/// at most the claude-code tag and the auth extension. The thinking betas derive from the request
+/// body's `thinking` field, so they always match it.
 pub(super) fn compute_betas(
     model: &ModelSpec,
     thinking: Option<&ThinkingConfig>,
@@ -113,6 +113,7 @@ pub(super) fn conversation_cache_control(ttl: PromptCacheTtl) -> CacheControl {
 
 #[cfg(test)]
 mod tests {
+    use super::super::CLAUDE_CLI_VERSION;
     use super::*;
 
     fn api_key() -> Auth {
@@ -131,6 +132,10 @@ mod tests {
 
     #[test]
     fn compute_betas_agentic_known_model_mirrors_claude_code_then_appends_binding() {
+        assert_eq!(
+            CLAUDE_CLI_VERSION, "2.1.296",
+            "the sequences below were captured from this release, so a bump needs a fresh capture",
+        );
         let claude_code = "claude-code-20250219,interleaved-thinking-2025-05-14,\
             thinking-token-count-2026-05-13,context-management-2025-06-27,\
             prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,\
