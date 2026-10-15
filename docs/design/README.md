@@ -18,19 +18,19 @@ Organized by topic. Each subdirectory mirrors the corresponding directory in [`d
 
 ## Session
 
-| Document                                         | Description                                             |
-| ------------------------------------------------ | ------------------------------------------------------- |
-| [Persistence](session/persistence.md)            | JSONL format, actor-owned writes, resume semantics      |
-| [File Change Tracking](session/file-tracking.md) | Read-before-Edit gate, staleness detection, persistence |
+| Document                                         | Description                                                                   |
+| ------------------------------------------------ | ----------------------------------------------------------------------------- |
+| [Persistence](session/persistence.md)            | JSONL schema, writes and recovery, prompt context, archiving, titles, listing |
+| [File Change Tracking](session/file-tracking.md) | Read-before-Edit gate, staleness detection, persistence                       |
 
 ## Slash Commands
 
-| Document                      | Description                                                        |
-| ----------------------------- | ------------------------------------------------------------------ |
-| [Commands](slash/commands.md) | Registry, dispatch, popup, per-command notes                       |
-| [Compact](slash/compact.md)   | `/compact`, summarization driver, `Entry::Compact`, chain reset    |
-| [Modal UI](slash/modals.md)   | `Modal` trait, `ModalStack`, `ListPicker`, model + effort + status |
-| [Resume](slash/resume.md)     | `/resume` picker, `SearchableList` primitive, `roll_into` re-init  |
+| Document                      | Description                                                                      |
+| ----------------------------- | -------------------------------------------------------------------------------- |
+| [Commands](slash/commands.md) | Registry, dispatch, autocomplete, per-command behavior                           |
+| [Compact](slash/compact.md)   | `/compact`, summarization, overflow retries, persistence boundary                |
+| [Modal UI](slash/modals.md)   | Modal trait and stack, shared primitives, pickers, editors, approvals, overviews |
+| [Resume](slash/resume.md)     | Session picker, search, archive view, listing, in-process resume                 |
 
 ## Tools
 

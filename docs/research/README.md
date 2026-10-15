@@ -6,17 +6,17 @@ Organized by topic. Each subdirectory mirrors the corresponding directory in [`d
 
 ## API References
 
-| Document                                      | Description                                        |
-| --------------------------------------------- | -------------------------------------------------- |
-| [Anthropic API](api/anthropic.md)             | OAuth flow, required headers, system prompt prefix |
-| [Extended Thinking](api/extended-thinking.md) | Content block types, signatures, round-tripping    |
-| [System Prompt](api/system-prompt.md)         | Section assembly, CLAUDE.md, caching, block layout |
+| Document                                      | Description                                                                          |
+| --------------------------------------------- | ------------------------------------------------------------------------------------ |
+| [Anthropic API](api/anthropic.md)             | Credentials, headers, caching, request fields, gateway restrictions, token refresh   |
+| [Extended Thinking](api/extended-thinking.md) | Thinking configuration, streamed blocks, signatures, replay constraints              |
+| [System Prompt](api/system-prompt.md)         | Prompt assembly, instruction discovery, context injection, caching, request metadata |
 
 ## Agent Loop
 
-| Document                                    | Description                                           |
-| ------------------------------------------- | ----------------------------------------------------- |
-| [Auto-Compaction](agent/auto-compaction.md) | Automatic compaction thresholds, triggers, fail-safes |
+| Document                                    | Description                                                                |
+| ------------------------------------------- | -------------------------------------------------------------------------- |
+| [Auto-Compaction](agent/auto-compaction.md) | Reference triggers, token signals, thresholds, summaries, failure handling |
 
 ## Session
 
@@ -36,10 +36,10 @@ Organized by topic. Each subdirectory mirrors the corresponding directory in [`d
 
 ## Tools
 
-| Document                                 | Description                                            |
-| ---------------------------------------- | ------------------------------------------------------ |
-| [Output Truncation](tools/truncation.md) | Per-tool vs central caps, spillover strategies         |
-| [Permissions](tools/permissions.md)      | Tool approval modes, rule grammar, decision precedence |
+| Document                                 | Description                                                              |
+| ---------------------------------------- | ------------------------------------------------------------------------ |
+| [Output Truncation](tools/truncation.md) | Per-tool vs central caps, spillover strategies                           |
+| [Permissions](tools/permissions.md)      | Approval modes, rules, decision precedence, oxide-code integration seams |
 
 ## Terminal UI
 
