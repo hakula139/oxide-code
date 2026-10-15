@@ -164,7 +164,7 @@ ox                                          # Start an interactive session
 │   ├── glyphs.rs                           # Shared visual constants (chevrons, bar, tool indicators, spinner frames)
 │   ├── markdown.rs                         # Markdown module root (pulldown-cmark + syntect renderer)
 │   ├── markdown/
-│   │   ├── highlight.rs                    # Syntax highlighting (syntect lazy-loaded SyntaxSet / ThemeSet)
+│   │   ├── highlight.rs                    # Syntax highlighting (syntect lazy-loaded SyntaxSet, theme's `syntax_theme` colors, resumes a growing block after its last complete line)
 │   │   └── render.rs                       # pulldown-cmark event walker, inline / block / list / table rendering
 │   ├── modal.rs                            # Modal trait, ModalKey, ModalAction, ModalStack: focus-grabbing UI overlays
 │   ├── modal/
@@ -179,8 +179,8 @@ ox                                          # Start an interactive session
 │   ├── theme/
 │   │   ├── builtin.rs                      # Built-in TOML catalogue (Mocha / Macchiato / Frappe / Latte / Material via include_str!) + lookup
 │   │   ├── color.rs                        # Color string parsing (hex, ANSI named, indexed, reset)
-│   │   └── loader.rs                       # Theme TOML deserialization + base+overrides resolution (resolve_theme + SlotPatch)
-│   └── wrap.rs                             # Word-wrap with continuation indent for styled lines
+│   │   └── loader.rs                       # Theme TOML deserialization + `syntax_theme` lookup + base+overrides resolution (resolve_theme + SlotPatch)
+│   └── wrap.rs                             # Grapheme-aware word-wrap with continuation indent for styled lines + tab expansion
 ├── util.rs                                 # Shared utilities module root
 └── util/
     ├── env.rs                              # Environment-variable helpers (`string`, `bool`: empty-is-absent semantics)

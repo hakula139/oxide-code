@@ -4,6 +4,7 @@ use ratatui::text::Line;
 
 use super::{ChatBlock, RenderCtx, push_icon_wrapped};
 use crate::tui::glyphs::{USER_PROMPT_CONT, USER_PROMPT_PREFIX};
+use crate::tui::wrap::expand_tabs;
 
 /// A user-typed message.
 pub(crate) struct UserMessage {
@@ -29,8 +30,33 @@ impl ChatBlock for UserMessage {
             } else {
                 USER_PROMPT_CONT
             };
-            push_icon_wrapped(&mut out, prefix, icon_style, text_line, text_style, width);
+            let text_line = expand_tabs(text_line);
+            push_icon_wrapped(&mut out, prefix, icon_style, &text_line, text_style, width);
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::theme::Theme;
+
+    fn ctx_at(width: u16, theme: &Theme) -> RenderCtx<'_> {
+        RenderCtx {
+            width,
+            theme,
+            show_thinking: false,
+        }
+    }
+
+    // ── render ──
+
+    #[test]
+    fn render_expands_tabs_to_stops() {
+        let theme = Theme::default();
+        let lines = UserMessage::new("a\tb\n\tc").render(&ctx_at(40, &theme));
+        let rows: Vec<String> = lines.iter().map(ToString::to_string).collect();
+        assert_eq!(rows, ["❯ a   b", "      c"]);
     }
 }

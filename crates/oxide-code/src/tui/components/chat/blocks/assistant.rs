@@ -27,7 +27,8 @@ impl AssistantText {
 
 impl ChatBlock for AssistantText {
     fn render(&self, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
-        render_assistant_markdown(&self.text, ctx, true)
+        let text = render_markdown(&self.text, ctx.theme, assistant_markdown_width(ctx));
+        with_assistant_gutter(text.lines, ctx, true)
     }
 
     fn continues_assistant_turn(&self) -> bool {
@@ -35,17 +36,20 @@ impl ChatBlock for AssistantText {
     }
 }
 
-/// Renders assistant prose as markdown with a first-line icon prefix.
-pub(super) fn render_assistant_markdown(
-    text: &str,
+/// Column budget for assistant markdown, which renders behind the assistant gutter.
+pub(super) fn assistant_markdown_width(ctx: &RenderCtx<'_>) -> usize {
+    usize::from(ctx.width).saturating_sub(ASSISTANT_PREFIX.width())
+}
+
+/// Prefixes markdown rows with the assistant gutter, putting the icon on the first row when it
+/// starts a new turn.
+pub(super) fn with_assistant_gutter(
+    lines: Vec<Line<'static>>,
     ctx: &RenderCtx<'_>,
     starts_new_turn: bool,
 ) -> Vec<Line<'static>> {
     let icon_style = ctx.theme.assistant();
-    let md_width = usize::from(ctx.width).saturating_sub(ASSISTANT_PREFIX.width());
-    let rendered = render_markdown(text, ctx.theme, md_width);
-    rendered
-        .lines
+    lines
         .into_iter()
         .enumerate()
         .map(|(i, line)| {
@@ -57,11 +61,6 @@ pub(super) fn render_assistant_markdown(
             prepend_markdown_prefix(line, prefix, icon_style)
         })
         .collect()
-}
-
-/// Blank row between assistant markdown blocks, carrying the gutter every rendered row has.
-pub(super) fn assistant_blank_line(ctx: &RenderCtx<'_>) -> Line<'static> {
-    prepend_markdown_prefix(Line::default(), ASSISTANT_CONT, ctx.theme.assistant())
 }
 
 // ── AssistantThinking ──

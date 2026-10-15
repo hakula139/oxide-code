@@ -4,8 +4,8 @@
 use ratatui::text::Line;
 
 use super::RenderCtx;
-use super::assistant::{assistant_blank_line, render_assistant_markdown};
-use crate::tui::markdown::complete_blocks_len;
+use super::assistant::{assistant_markdown_width, with_assistant_gutter};
+use crate::tui::markdown::{complete_blocks_len, render_markdown_chunk};
 
 /// In-flight assistant turn buffered between stream tokens.
 ///
@@ -16,6 +16,8 @@ pub(crate) struct StreamingAssistant {
     /// Rendered lines for the complete blocks before `rendered_boundary`.
     rendered: Vec<Line<'static>>,
     rendered_boundary: usize,
+    /// Whether the cached chunks end after a block, so the next chunk opens with a separator.
+    after_block: bool,
     /// Width at which `rendered` was produced.
     cached_width: u16,
 }
@@ -26,6 +28,7 @@ impl StreamingAssistant {
             buffer: String::new(),
             rendered: Vec::new(),
             rendered_boundary: 0,
+            after_block: false,
             cached_width: 0,
         }
     }
@@ -49,6 +52,7 @@ impl StreamingAssistant {
     pub(crate) fn invalidate_cache(&mut self) {
         self.rendered.clear();
         self.rendered_boundary = 0;
+        self.after_block = false;
         self.cached_width = 0;
     }
 
@@ -69,16 +73,9 @@ impl StreamingAssistant {
             return;
         }
 
-        let complete = &tail[..complete_len];
-        if !complete.trim().is_empty() {
-            let cache_empty = self.rendered.is_empty();
-            let rendered = render_assistant_markdown(complete, ctx, !continues_turn && cache_empty);
-            if !cache_empty {
-                // Block separator that the single-pass renderer would emit between commits.
-                self.rendered.push(assistant_blank_line(ctx));
-            }
-            self.rendered.extend(rendered);
-        }
+        let (rows, after_block) = self.render_chunk(&tail[..complete_len], ctx, continues_turn);
+        self.rendered.extend(rows);
+        self.after_block = after_block;
 
         self.rendered_boundary = boundary + complete_len;
         self.cached_width = ctx.width;
@@ -88,28 +85,31 @@ impl StreamingAssistant {
         &self.rendered
     }
 
-    /// Renders the uncached tail, led by a separator when blocks are cached. The tail takes the
-    /// assistant icon only when it opens a new turn.
+    /// Renders the uncached tail in one parse so pulldown keeps its block separators.
     pub(crate) fn render_tail(
         &self,
         ctx: &RenderCtx<'_>,
         continues_turn: bool,
     ) -> Vec<Line<'static>> {
         let tail = &self.buffer[self.rendered_boundary..];
-        if tail.is_empty() {
-            return Vec::new();
-        }
+        self.render_chunk(tail, ctx, continues_turn).0
+    }
 
-        let cache_empty = self.rendered.is_empty();
-        let mut out = Vec::new();
-        if !cache_empty {
-            out.push(assistant_blank_line(ctx));
-        }
-
-        // Full-tail parse: splitting would lose pulldown's block separators.
-        let starts_new_turn = !continues_turn && cache_empty;
-        out.extend(render_assistant_markdown(tail, ctx, starts_new_turn));
-        out
+    /// Renders the chunk after the cached rows, returning its rows and whether it ends after a
+    /// block. The chunk takes the assistant icon only when it opens a new turn.
+    fn render_chunk(
+        &self,
+        chunk: &str,
+        ctx: &RenderCtx<'_>,
+        continues_turn: bool,
+    ) -> (Vec<Line<'static>>, bool) {
+        let width = assistant_markdown_width(ctx);
+        let (text, after_block) = render_markdown_chunk(chunk, ctx.theme, width, self.after_block);
+        let starts_new_turn = !continues_turn && self.rendered.is_empty();
+        (
+            with_assistant_gutter(text.lines, ctx, starts_new_turn),
+            after_block,
+        )
     }
 
     #[cfg(test)]

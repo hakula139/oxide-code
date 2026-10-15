@@ -70,7 +70,7 @@ A custom theme file must define **every slot**. A missing slot is a parse error,
 
 > **Note:** the same `slot = "#hex"` line means different things in a theme file vs an override. Inside a theme file body, it's a bare-color slot definition with `fg` set and `bg` / modifiers cleared. Inside `[tui.theme.overrides]`, it's a _patch_ that updates only `fg` and preserves the base slot's `bg` and modifiers. The override semantics are detailed in [Overrides](#overrides).
 
-A theme TOML is a flat document with one entry per slot. Two shapes:
+A theme TOML is a flat document with one entry per slot plus an optional [`syntax_theme`](#code) key. Each slot takes one of two shapes:
 
 - **Bare color string**: `fg`-only, no modifiers:
 
@@ -133,6 +133,16 @@ Each slot maps to one role in the TUI. Override a slot by name to restyle that r
 | ------------- | ---------------------------------------------- |
 | `code`        | Fenced code blocks with no recognized language |
 | `inline_code` | Inline `code` spans (between backticks)        |
+
+Fenced code with a recognized language takes its token colors from a bundled [syntect] theme, chosen by the optional top-level `syntax_theme` key in a theme file:
+
+```toml
+syntax_theme = "InspiredGitHub"
+```
+
+Unset, it defaults to `base16-ocean.dark`, which the dark built-ins use. `latte` uses `InspiredGitHub`. The accepted names are `base16-ocean.dark`, `base16-eighties.dark`, `base16-mocha.dark`, `base16-ocean.light`, `InspiredGitHub`, `Solarized (dark)`, and `Solarized (light)`. Any other name is a theme parse error. `[tui.theme.overrides]` patches slots only, so changing `syntax_theme` on a built-in base means copying that theme's TOML into a custom file.
+
+[syntect]: https://github.com/trishume/syntect
 
 ### Diff backgrounds (bg-only)
 

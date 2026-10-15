@@ -28,6 +28,7 @@ error = "#cf6679"
 # Code (M2 dark theme baseline secondary)
 code = "#03dac6"
 inline_code = "#ffab91"
+syntax_theme = "base16-ocean.dark"
 
 # Diff backgrounds (subtle dark tints, harmonized with success / error hues)
 diff_add = { bg = "#1f3329" }

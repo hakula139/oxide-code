@@ -55,10 +55,10 @@ fn collect_diff_in(cwd: &Path) -> Result<String> {
 
     let has_head = has_head(cwd);
     let tracked = if has_head {
-        run_git_in(cwd, &["diff", "HEAD"])?
+        run_git_diff_in(cwd, &["HEAD"])?
     } else {
-        let cached = run_git_in(cwd, &["diff", "--cached"])?;
-        let unstaged = run_git_in(cwd, &["diff"])?;
+        let cached = run_git_diff_in(cwd, &["--cached"])?;
+        let unstaged = run_git_diff_in(cwd, &[])?;
         join_sections(&[cached.as_str(), unstaged.as_str()])
     };
     let untracked = run_git_in(cwd, &["ls-files", "--others", "--exclude-standard"])?;
@@ -123,6 +123,19 @@ fn inside_git_repo(cwd: &Path) -> Result<bool> {
 
 fn has_head(cwd: &Path) -> bool {
     run_git_in(cwd, &["rev-parse", "--verify", "HEAD"]).is_ok()
+}
+
+/// Runs `git diff` with the output shape the diff block parses, whatever the user's git config.
+fn run_git_diff_in(cwd: &Path, extra: &[&str]) -> Result<String> {
+    let mut args = vec![
+        "diff",
+        "--no-color",
+        "--no-ext-diff",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
+    ];
+    args.extend_from_slice(extra);
+    run_git_in(cwd, &args)
 }
 
 fn run_git_in(cwd: &Path, args: &[&str]) -> Result<String> {
@@ -413,6 +426,24 @@ mod tests {
         git_setup(&repo, &["add", "a.txt"]);
         git_setup(&repo, &["commit", "--quiet", "-m", "init"]);
         assert!(has_head(&repo));
+    }
+
+    // ── run_git_diff_in ──
+
+    #[test]
+    fn run_git_diff_in_pins_prefixes_and_color_against_user_config() {
+        let (_dir, repo) = fresh_repo();
+        std::fs::write(repo.join("a.txt"), "first\n").unwrap();
+        git_setup(&repo, &["add", "a.txt"]);
+        git_setup(&repo, &["commit", "--quiet", "-m", "init"]);
+        std::fs::write(repo.join("a.txt"), "second\n").unwrap();
+        git_setup(&repo, &["config", "diff.noprefix", "true"]);
+        git_setup(&repo, &["config", "color.ui", "always"]);
+
+        let body = run_git_diff_in(&repo, &["HEAD"]).unwrap();
+        assert!(body.starts_with("diff --git a/a.txt b/a.txt\n"), "{body}");
+        assert!(body.contains("\n--- a/a.txt\n+++ b/a.txt\n"), "{body}");
+        assert!(!body.contains('\x1b'), "{body:?}");
     }
 
     // ── run_git_in ──

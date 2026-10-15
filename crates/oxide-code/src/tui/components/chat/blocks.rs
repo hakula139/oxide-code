@@ -196,12 +196,12 @@ mod tests {
             &mut out,
             USER_PROMPT_PREFIX,
             Style::default(),
-            "one two three four five",
+            "你好 世界 再见",
             Style::default(),
             12,
         );
-        assert!(out.len() >= 2);
-        assert_eq!(out[1].spans[0].content.as_ref(), "  ");
+        let rows: Vec<String> = out.iter().map(ToString::to_string).collect();
+        assert_eq!(rows, ["❯ 你好 世界 ", "  再见"]);
     }
 
     // ── prepend_markdown_prefix ──

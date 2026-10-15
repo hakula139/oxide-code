@@ -2,7 +2,9 @@
 //! lines wrapped to terminal width; wrapping is block-aware so it respects the enclosing
 //! block's continuation indent.
 
-use pulldown_cmark::{Alignment, CodeBlockKind, CowStr, Event, HeadingLevel, Tag, TagEnd};
+use pulldown_cmark::{
+    Alignment, CodeBlockKind, CowStr, Event, HeadingLevel, LinkType, Tag, TagEnd,
+};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use tracing::{debug, warn};
@@ -10,7 +12,7 @@ use unicode_width::UnicodeWidthStr;
 
 use super::highlight::highlight_code;
 use crate::tui::theme::Theme;
-use crate::tui::wrap::wrap_line;
+use crate::tui::wrap::{expand_tabs_in_spans, wrap_line, wrap_line_keeping_lead};
 
 // ── Renderer ──
 
@@ -29,8 +31,8 @@ pub(super) struct MarkdownRenderer<I> {
     width: usize,
     pub(super) lines: Vec<Line<'static>>,
 
-    /// Set after a block ends; the next block opener emits a blank separator before its content.
-    needs_newline: bool,
+    /// Set after a block ends, so the next block opener emits a blank separator before its content.
+    pub(super) needs_newline: bool,
 
     /// Block-prefix stack — each entry is the spans prepended to every line inside that block
     /// (blockquote `> `, list-item continuation indent, etc.). Wrapping uses the concatenation
@@ -44,10 +46,17 @@ pub(super) struct MarkdownRenderer<I> {
     pending_marker: Option<Vec<Span<'static>>>,
 
     inline_styles: Vec<Style>,
-    link_url: Option<String>,
+    link: Option<OpenLink>,
 
     code_block: CodeBlockState,
     table: TableState,
+}
+
+enum OpenLink {
+    /// Autolink whose text is already the URL, so it is styled as a link with no suffix.
+    Bare,
+    /// Labeled link whose URL prints after the text.
+    Labeled(String),
 }
 
 #[derive(Default)]
@@ -72,18 +81,18 @@ impl<'a, I> MarkdownRenderer<I>
 where
     I: Iterator<Item = Event<'a>>,
 {
-    pub(super) fn new(iter: I, theme: &Theme, width: usize) -> Self {
+    pub(super) fn new(iter: I, theme: &Theme, width: usize, after_block: bool) -> Self {
         Self {
             iter,
             theme: theme.clone(),
             width,
             lines: Vec::new(),
-            needs_newline: false,
+            needs_newline: after_block,
             indent_stack: Vec::new(),
             list_stack: Vec::new(),
             pending_marker: None,
             inline_styles: Vec::new(),
-            link_url: None,
+            link: None,
             code_block: CodeBlockState::default(),
             table: TableState::default(),
         }
@@ -130,15 +139,17 @@ where
             Tag::Strikethrough => {
                 self.push_inline_style(Style::new().add_modifier(Modifier::CROSSED_OUT));
             }
-            Tag::Link { dest_url, .. } => {
-                self.link_url = Some(dest_url.to_string());
-            }
+            Tag::Link {
+                link_type,
+                dest_url,
+                ..
+            } => self.start_link(link_type, dest_url),
             Tag::Table(alignments) => self.start_table(alignments),
             Tag::TableHead => self.table.in_head = true,
             Tag::TableRow => {}
             Tag::TableCell => self.table.cell_buf.clear(),
-            Tag::HtmlBlock
-            | Tag::Image { .. }
+            Tag::HtmlBlock => self.start_html_block(),
+            Tag::Image { .. }
             | Tag::FootnoteDefinition(_)
             | Tag::MetadataBlock(_)
             | Tag::DefinitionList
@@ -156,6 +167,7 @@ where
             TagEnd::Paragraph => self.end_paragraph(),
             TagEnd::Heading(_) => self.end_heading(),
             TagEnd::BlockQuote(_) => self.end_blockquote(),
+            TagEnd::HtmlBlock => self.needs_newline = true,
             TagEnd::CodeBlock => self.end_code_block(),
             TagEnd::List(_) => self.end_list(),
             TagEnd::Item => {
@@ -252,6 +264,19 @@ where
         self.needs_newline = true;
     }
 
+    fn start_html_block(&mut self) {
+        if self.needs_newline {
+            self.push_blank_line();
+            self.needs_newline = false;
+        }
+    }
+
+    fn html(&mut self, html: &str) {
+        for line in html.lines() {
+            self.push_line(Line::from(line.to_owned()));
+        }
+    }
+
     // ── Lists ──
 
     fn start_list(&mut self, start_index: Option<u64>) {
@@ -307,11 +332,27 @@ where
         let code = std::mem::take(&mut self.code_block.buf);
         let lang = self.code_block.lang.take();
 
-        let highlighted = highlight_code(lang.as_deref().unwrap_or(""), &code, self.theme.code());
-        for line in highlighted {
-            self.lines.push(line);
+        for line in highlight_code(lang.as_deref().unwrap_or(""), &code, &self.theme) {
+            self.push_code_line(line);
         }
         self.needs_newline = true;
+    }
+
+    /// Pushes one highlighted line through the block indent and wrapping, keeping its line style.
+    /// Wrapped rows hang at the code's own indent.
+    fn push_code_line(&mut self, line: Line<'static>) {
+        let style = line.style;
+        let code = Line::from(expand_tabs_in_spans(line.spans));
+        let code_width = code.width();
+        let lead = leading_whitespace_width(&code);
+        let line = self.prefixed(code);
+        let keep = line.width() - code_width + lead;
+
+        let start = self.lines.len();
+        self.wrap_and_push_hanging(line, lead, keep);
+        for row in &mut self.lines[start..] {
+            row.style = style;
+        }
     }
 
     // ── Tables ──
@@ -448,17 +489,6 @@ where
         self.push_span(Span::styled(code.into_string(), style));
     }
 
-    fn html(&mut self, html: &str) {
-        let style = self.current_inline_style();
-        for (i, line) in html.lines().enumerate() {
-            if i > 0 || self.needs_newline {
-                self.push_line(Line::default());
-                self.needs_newline = false;
-            }
-            self.push_span(Span::styled(line.to_owned(), style));
-        }
-    }
-
     fn inline_html(&mut self, html: &str) {
         self.push_span(Span::raw(html.to_owned()));
     }
@@ -473,11 +503,34 @@ where
 
     // ── Links ──
 
+    fn start_link(&mut self, link_type: LinkType, dest_url: CowStr<'a>) {
+        if matches!(link_type, LinkType::Autolink | LinkType::Email) {
+            self.push_inline_style(self.theme.link());
+            self.link = Some(OpenLink::Bare);
+        } else {
+            self.link = Some(OpenLink::Labeled(dest_url.into_string()));
+        }
+    }
+
     fn pop_link(&mut self) {
-        if let Some(url) = self.link_url.take() {
-            self.push_span(Span::raw(" ("));
-            self.push_span(Span::styled(url, self.theme.link()));
-            self.push_span(Span::raw(")"));
+        if let Some(link) = self.link.take() {
+            match link {
+                OpenLink::Bare => self.pop_inline_style(),
+                OpenLink::Labeled(url) => {
+                    let suffix = [
+                        Span::raw(" ("),
+                        Span::styled(url, self.theme.link()),
+                        Span::raw(")"),
+                    ];
+                    if self.table.active {
+                        self.table.cell_buf.extend(suffix);
+                    } else {
+                        for span in suffix {
+                            self.push_span(span);
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -505,6 +558,12 @@ where
 
     /// Starts a new output line with indent prefixes and any pending list marker.
     fn push_line(&mut self, line: Line<'static>) {
+        let line = self.prefixed(line);
+        self.wrap_and_push(line);
+    }
+
+    /// Prepends the indent prefixes and any pending list marker.
+    fn prefixed(&mut self, line: Line<'static>) -> Line<'static> {
         let mut spans: Vec<Span<'static>> = Vec::new();
 
         // The pending list marker (if any) replaces the continuation indent at the deepest
@@ -527,26 +586,35 @@ where
         }
 
         spans.extend(line.spans);
-
-        self.wrap_and_push(Line::from(spans));
+        Line::from(spans)
     }
 
     fn wrap_and_push(&mut self, line: Line<'static>) {
+        self.wrap_and_push_hanging(line, 0, 0);
+    }
+
+    /// Wraps without breaking inside the first `keep` columns, indenting continuation rows by
+    /// `hang` extra columns, capped at half the width left after the block indent.
+    fn wrap_and_push_hanging(&mut self, line: Line<'static>, hang: usize, keep: usize) {
         if self.width == 0 {
             self.lines.push(line);
             return;
         }
-        let cont_prefix = self.continuation_indent_spans();
-        let indent = cont_prefix
+        let mut cont_prefix = self.continuation_indent_spans();
+        let indent: usize = cont_prefix
             .iter()
             .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
             .sum();
+        let hang = hang.min(self.width.saturating_sub(indent) / 2);
+        if hang > 0 {
+            cont_prefix.push(Span::raw(" ".repeat(hang)));
+        }
         let prefix = if cont_prefix.is_empty() {
             None
         } else {
             Some(cont_prefix.as_slice())
         };
-        for wrapped in wrap_line(line, self.width, indent, prefix) {
+        for wrapped in wrap_line_keeping_lead(line, self.width, indent + hang, prefix, keep) {
             self.lines.push(wrapped);
         }
     }
@@ -580,6 +648,21 @@ where
     fn push_blank_line(&mut self) {
         self.lines.push(Line::default());
     }
+}
+
+// ── Code Helpers ──
+
+fn leading_whitespace_width(line: &Line<'_>) -> usize {
+    let mut width = 0;
+    for span in &line.spans {
+        let content = span.content.as_ref();
+        let rest = content.trim_start();
+        width += content[..content.len() - rest.len()].width();
+        if !rest.is_empty() {
+            break;
+        }
+    }
+    width
 }
 
 // ── Table Helpers ──
@@ -1126,6 +1209,95 @@ mod tests {
         assert!(has_rgb, "syntax highlighting should produce RGB colors");
     }
 
+    #[test]
+    fn fenced_code_block_expands_tabs_to_stops() {
+        let lines = rendered_text("```go\nfunc f() {\n\treturn\n}\n```\n");
+        assert_eq!(lines, ["func f() {", "    return", "}"]);
+    }
+
+    #[test]
+    fn fenced_code_block_wraps_long_lines_and_keeps_line_style() {
+        let t = theme();
+        let text = render_markdown(
+            indoc! {"
+                ```
+                alpha beta gamma delta epsilon
+                ```
+            "},
+            &t,
+            12,
+        );
+        let rows: Vec<String> = text.lines.iter().map(ToString::to_string).collect();
+        assert_eq!(rows, ["alpha beta ", "gamma delta ", "epsilon"]);
+        assert!(text.lines.iter().all(|l| l.style == t.code()), "{text:?}");
+    }
+
+    #[test]
+    fn fenced_code_block_wrapped_rows_hang_at_the_code_indent_up_to_half_width() {
+        let lines = rendered_text_at_width(
+            indoc! {"
+                ```
+                        format value;
+                ```
+            "},
+            12,
+        );
+        assert_eq!(lines, ["        form", "      at ", "      value;"]);
+    }
+
+    #[test]
+    fn fenced_code_block_in_list_item_keeps_item_indent() {
+        let lines = rendered_text(indoc! {"
+            - item
+
+              ```
+              let x = 1;
+              ```
+        "});
+        assert_eq!(lines, ["- item", "", "  let x = 1;"]);
+    }
+
+    #[test]
+    fn fenced_code_block_in_list_item_hangs_wrapped_rows_past_the_item_indent() {
+        let lines = rendered_text_at_width(
+            indoc! {"
+                - item
+
+                  ```
+                      foo bar baz
+                  ```
+            "},
+            12,
+        );
+        assert_eq!(
+            lines,
+            ["- item", "", "      foo ", "      bar ", "      baz"]
+        );
+    }
+
+    #[test]
+    fn fenced_code_block_as_first_item_child_takes_the_marker() {
+        let lines = rendered_text(indoc! {"
+            - ```
+              let x = 1;
+              ```
+        "});
+        assert_eq!(lines, ["- let x = 1;"]);
+    }
+
+    #[test]
+    fn fenced_code_block_in_blockquote_keeps_marker_on_wrapped_rows() {
+        let lines = rendered_text_at_width(
+            indoc! {"
+                > ```
+                > alpha beta gamma
+                > ```
+            "},
+            12,
+        );
+        assert_eq!(lines, ["> alpha beta", "> gamma"]);
+    }
+
     // ── Tables ──
 
     #[test]
@@ -1610,9 +1782,27 @@ mod tests {
     // ── HTML ──
 
     #[test]
-    fn html_block_rendered_as_text() {
-        let lines = rendered_text("<div>hello</div>");
-        assert!(lines.iter().any(|l| l.contains("<div>hello</div>")));
+    fn html_block_renders_one_row_per_line_between_blank_separators() {
+        let lines = rendered_text(indoc! {"
+            para
+
+            <div>
+            hello
+            </div>
+
+            after
+        "});
+        assert_eq!(lines, ["para", "", "<div>", "hello", "</div>", "", "after"]);
+    }
+
+    #[test]
+    fn html_block_in_blockquote_keeps_the_marker_on_every_row() {
+        let lines = rendered_text(indoc! {"
+            > <div>
+            > x
+            > </div>
+        "});
+        assert_eq!(lines, ["> <div>", "> x", "> </div>"]);
     }
 
     #[test]
@@ -1641,6 +1831,37 @@ mod tests {
             .unwrap();
         assert!(url_span.style.add_modifier.contains(Modifier::UNDERLINED));
         assert_eq!(url_span.style.fg, t.accent.fg);
+    }
+
+    #[test]
+    fn link_autolink_renders_url_once_in_link_style() {
+        let t = theme();
+        let text = render_markdown("<https://x.io>", &t, 0);
+        assert_eq!(
+            text.lines[0].spans,
+            [Span::styled("https://x.io", t.link())]
+        );
+    }
+
+    #[test]
+    fn link_email_autolink_renders_address_once() {
+        assert_eq!(rendered_text("<me@x.io>"), ["me@x.io"]);
+    }
+
+    #[test]
+    fn link_in_table_cell_keeps_url_in_the_cell() {
+        let lines = rendered_text(indoc! {"
+            intro
+
+            | site |
+            | ---- |
+            | [x](https://x.io) |
+        "});
+        assert_eq!(lines[0], "intro");
+        assert!(
+            lines.iter().any(|l| l.contains("x (https://x.io)")),
+            "{lines:#?}"
+        );
     }
 
     // ── Word Wrapping ──
