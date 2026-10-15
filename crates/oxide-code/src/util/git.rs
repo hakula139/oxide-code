@@ -130,12 +130,12 @@ fn stderr_summary(stderr: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     #[cfg(unix)]
     use std::ffi::OsStr;
     #[cfg(unix)]
     use std::os::unix::ffi::OsStrExt;
+    #[cfg(unix)]
+    use std::path::PathBuf;
 
     use super::*;
 
