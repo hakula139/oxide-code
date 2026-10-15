@@ -5,7 +5,7 @@ use unicode_width::UnicodeWidthStr;
 
 use super::{ChatBlock, RenderCtx, prepend_markdown_prefix};
 use crate::tui::glyphs::{ASSISTANT_CONT, ASSISTANT_PREFIX, THINKING_PREFIX};
-use crate::tui::markdown::render_markdown;
+use crate::tui::markdown::{render_markdown, render_markdown_after_block};
 use crate::tui::theme::Theme;
 use crate::tui::wrap::wrap_line;
 
@@ -27,7 +27,7 @@ impl AssistantText {
 
 impl ChatBlock for AssistantText {
     fn render(&self, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
-        render_assistant_markdown(&self.text, ctx, true)
+        render_assistant_markdown(&self.text, ctx, Opening::NewTurn)
     }
 
     fn continues_assistant_turn(&self) -> bool {
@@ -35,21 +35,36 @@ impl ChatBlock for AssistantText {
     }
 }
 
-/// Renders assistant prose as markdown with a first-line icon prefix.
+/// Where an assistant markdown render starts relative to the rows above it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Opening {
+    /// Opens a turn, so the first row takes the assistant icon.
+    NewTurn,
+    /// Continues a turn whose earlier rows belong to another chat block.
+    SameTurn,
+    /// Follows rows rendered from earlier blocks of the same text.
+    AfterBlocks,
+}
+
+/// Renders assistant prose as markdown behind the assistant gutter.
 pub(super) fn render_assistant_markdown(
     text: &str,
     ctx: &RenderCtx<'_>,
-    starts_new_turn: bool,
+    opening: Opening,
 ) -> Vec<Line<'static>> {
     let icon_style = ctx.theme.assistant();
     let md_width = usize::from(ctx.width).saturating_sub(ASSISTANT_PREFIX.width());
-    let rendered = render_markdown(text, ctx.theme, md_width);
+    let rendered = if opening == Opening::AfterBlocks {
+        render_markdown_after_block(text, ctx.theme, md_width)
+    } else {
+        render_markdown(text, ctx.theme, md_width)
+    };
     rendered
         .lines
         .into_iter()
         .enumerate()
         .map(|(i, line)| {
-            let prefix = if i == 0 && starts_new_turn {
+            let prefix = if i == 0 && opening == Opening::NewTurn {
                 ASSISTANT_PREFIX
             } else {
                 ASSISTANT_CONT
@@ -57,11 +72,6 @@ pub(super) fn render_assistant_markdown(
             prepend_markdown_prefix(line, prefix, icon_style)
         })
         .collect()
-}
-
-/// Blank row between assistant markdown blocks, carrying the gutter every rendered row has.
-pub(super) fn assistant_blank_line(ctx: &RenderCtx<'_>) -> Line<'static> {
-    prepend_markdown_prefix(Line::default(), ASSISTANT_CONT, ctx.theme.assistant())
 }
 
 // ── AssistantThinking ──

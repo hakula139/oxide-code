@@ -4,7 +4,7 @@
 use ratatui::text::Line;
 
 use super::RenderCtx;
-use super::assistant::{assistant_blank_line, render_assistant_markdown};
+use super::assistant::{Opening, render_assistant_markdown};
 use crate::tui::markdown::complete_blocks_len;
 
 /// In-flight assistant turn buffered between stream tokens.
@@ -69,16 +69,9 @@ impl StreamingAssistant {
             return;
         }
 
-        let complete = &tail[..complete_len];
-        if !complete.trim().is_empty() {
-            let cache_empty = self.rendered.is_empty();
-            let rendered = render_assistant_markdown(complete, ctx, !continues_turn && cache_empty);
-            if !cache_empty {
-                // Block separator that the single-pass renderer would emit between commits.
-                self.rendered.push(assistant_blank_line(ctx));
-            }
-            self.rendered.extend(rendered);
-        }
+        let rendered =
+            render_assistant_markdown(&tail[..complete_len], ctx, self.opening(continues_turn));
+        self.rendered.extend(rendered);
 
         self.rendered_boundary = boundary + complete_len;
         self.cached_width = ctx.width;
@@ -88,28 +81,24 @@ impl StreamingAssistant {
         &self.rendered
     }
 
-    /// Renders the uncached tail, led by a separator when blocks are cached. The tail takes the
-    /// assistant icon only when it opens a new turn.
+    /// Renders the uncached tail in one parse so pulldown keeps its block separators.
     pub(crate) fn render_tail(
         &self,
         ctx: &RenderCtx<'_>,
         continues_turn: bool,
     ) -> Vec<Line<'static>> {
         let tail = &self.buffer[self.rendered_boundary..];
-        if tail.is_empty() {
-            return Vec::new();
-        }
+        render_assistant_markdown(tail, ctx, self.opening(continues_turn))
+    }
 
-        let cache_empty = self.rendered.is_empty();
-        let mut out = Vec::new();
-        if !cache_empty {
-            out.push(assistant_blank_line(ctx));
+    fn opening(&self, continues_turn: bool) -> Opening {
+        if !self.rendered.is_empty() {
+            Opening::AfterBlocks
+        } else if continues_turn {
+            Opening::SameTurn
+        } else {
+            Opening::NewTurn
         }
-
-        // Full-tail parse: splitting would lose pulldown's block separators.
-        let starts_new_turn = !continues_turn && cache_empty;
-        out.extend(render_assistant_markdown(tail, ctx, starts_new_turn));
-        out
     }
 
     #[cfg(test)]

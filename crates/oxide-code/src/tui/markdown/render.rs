@@ -81,13 +81,13 @@ impl<'a, I> MarkdownRenderer<I>
 where
     I: Iterator<Item = Event<'a>>,
 {
-    pub(super) fn new(iter: I, theme: &Theme, width: usize) -> Self {
+    pub(super) fn new(iter: I, theme: &Theme, width: usize, after_block: bool) -> Self {
         Self {
             iter,
             theme: theme.clone(),
             width,
             lines: Vec::new(),
-            needs_newline: false,
+            needs_newline: after_block,
             indent_stack: Vec::new(),
             list_stack: Vec::new(),
             pending_marker: None,

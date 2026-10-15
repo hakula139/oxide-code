@@ -17,8 +17,22 @@ const OPTIONS: Options = Options::ENABLE_STRIKETHROUGH.union(Options::ENABLE_TAB
 /// non-zero value wraps each block to that column budget, preserving the enclosing block's
 /// continuation indent (blockquote `>`, list-item gutter, etc.) on wrapped sub-lines.
 pub(crate) fn render_markdown(input: &str, theme: &Theme, width: usize) -> Text<'static> {
+    render(input, theme, width, false)
+}
+
+/// Renders `input` as the blocks after an already rendered block, so its first block opens with
+/// the blank separator a single render would give it.
+pub(crate) fn render_markdown_after_block(
+    input: &str,
+    theme: &Theme,
+    width: usize,
+) -> Text<'static> {
+    render(input, theme, width, true)
+}
+
+fn render(input: &str, theme: &Theme, width: usize, after_block: bool) -> Text<'static> {
     let parser = Parser::new_ext(input, OPTIONS);
-    let mut renderer = MarkdownRenderer::new(parser, theme, width);
+    let mut renderer = MarkdownRenderer::new(parser, theme, width, after_block);
     renderer.run();
     Text::from(renderer.lines)
 }
@@ -26,9 +40,9 @@ pub(crate) fn render_markdown(input: &str, theme: &Theme, width: usize) -> Text<
 /// Byte length of the leading run of complete top-level blocks in `input`.
 ///
 /// A block is complete once another top-level block starts after it, so the run ends at the line
-/// where the last block starts. Rendering the run and the remainder separately and joining them
-/// with a blank line matches a single render of `input`, except for the spacing around HTML blocks
-/// and link reference definitions.
+/// where the last block starts. Rendering the run with [`render_markdown`] and the remainder with
+/// [`render_markdown_after_block`] matches a single render of `input`, except that a
+/// reference-style link renders literally when its definition is on the other side of the split.
 pub(crate) fn complete_blocks_len(input: &str) -> usize {
     let mut depth = 0_usize;
     let mut last_start = 0;
@@ -53,6 +67,19 @@ mod tests {
     use indoc::indoc;
 
     use super::*;
+
+    // ── render_markdown_after_block ──
+
+    #[test]
+    fn render_markdown_after_block_separates_only_a_rendered_block() {
+        let theme = Theme::default();
+        let rows = |input| -> Vec<String> {
+            let text = render_markdown_after_block(input, &theme, 0);
+            text.lines.iter().map(ToString::to_string).collect()
+        };
+        assert_eq!(rows("para\n"), ["", "para"]);
+        assert_eq!(rows("[a]: https://example.com\n"), Vec::<String>::new());
+    }
 
     // ── complete_blocks_len ──
 

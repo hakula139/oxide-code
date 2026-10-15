@@ -2899,6 +2899,15 @@ mod tests {
             - not a bullet
             ```
 
+            [ref]: https://example.com
+
+            ```
+            ```
+
+            <div>
+            html
+            </div>
+
             Done.
         "};
         let mut chat = test_chat();
