@@ -16,7 +16,7 @@ use crate::util::text::ELLIPSIS;
 pub(crate) enum ResumeMode<'a> {
     /// No `--continue` flag — start a new session.
     Fresh,
-    /// Bare `--continue` — resume the most recent session in scope.
+    /// Bare `--continue` — resume the most recent unarchived session in scope.
     Latest,
     /// `--continue <prefix>` — resume the unique session whose ID starts with `prefix`.
     Prefix(&'a str),
@@ -46,6 +46,7 @@ pub(crate) async fn resolve_session(
                 context: None,
                 compact: None,
                 title: None,
+                unarchived: false,
                 tool_result_metadata: std::collections::HashMap::new(),
                 file_snapshots: Vec::new(),
             });
@@ -53,9 +54,7 @@ pub(crate) async fn resolve_session(
         ResumeMode::Path(path) => path.to_owned(),
         ResumeMode::Latest => {
             store
-                .list_paged(Some(1), all)?
-                .into_sessions()
-                .pop()
+                .latest(all)?
                 .with_context(|| format!("no sessions to resume{scope_hint}"))?
                 .path
         }
@@ -116,6 +115,22 @@ pub(crate) fn resolve_prefix_to_info(
     match_in_scope(store, prefix, Some(live_id), true)
 }
 
+/// [`resolve_prefix_to_info`] for commands that act on a saved session. `Ok(None)` means only the
+/// live session matched, so the caller can explain why it is excluded.
+pub(crate) fn resolve_saved_prefix(
+    store: &SessionStore,
+    prefix: &str,
+    live_id: &str,
+) -> Result<Option<SessionInfo>, String> {
+    if let Some(info) = resolve_prefix_to_info(store, prefix, live_id)? {
+        return Ok(Some(info));
+    }
+    if live_id.starts_with(prefix) {
+        return Ok(None);
+    }
+    Err(format!("no session matching `{prefix}`"))
+}
+
 fn match_in_scope(
     store: &SessionStore,
     prefix: &str,
@@ -163,6 +178,7 @@ fn format_session_id_preview(ids: impl IntoIterator<Item = String>) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::store::set_archived_at;
     use super::super::store::testing::{
         seed_test_session, test_project_dir, test_session_file, test_store,
         write_newest_corrupt_session,
@@ -278,7 +294,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_session_bare_continue_resumes_the_newest_readable_session() {
+    async fn resolve_session_bare_continue_resumes_the_newest_readable_unarchived_session() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         seed_test_session(
@@ -295,6 +311,14 @@ mod tests {
             Some(1),
             time::macros::datetime!(2026-04-18 10:00:00 UTC),
         );
+        seed_test_session(
+            &store,
+            "archived",
+            Some("Archived"),
+            Some(1),
+            time::macros::datetime!(2026-04-18 11:00:00 UTC),
+        );
+        set_archived_at(&test_session_file(dir.path(), "archived"), true).unwrap();
         write_newest_corrupt_session(dir.path());
 
         let resumed = resolve_session(&store, "m", Some(&None), false)
@@ -302,6 +326,38 @@ mod tests {
             .unwrap();
         assert_eq!(resumed.handle.session_id(), "newer");
         assert_eq!(resumed.title.as_deref(), Some("Newer"));
+        assert!(!resumed.unarchived);
+    }
+
+    #[tokio::test]
+    async fn resolve_session_prefix_resumes_and_unarchives_an_archived_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        seed_test_session(
+            &store,
+            "archived",
+            Some("Archived"),
+            Some(1),
+            time::macros::datetime!(2026-04-18 09:00:00 UTC),
+        );
+        let path = test_session_file(dir.path(), "archived");
+        set_archived_at(&path, true).unwrap();
+
+        let arg = Some("arch".to_owned());
+        let resumed = resolve_session(&store, "m", Some(&arg), false)
+            .await
+            .unwrap();
+        assert_eq!(resumed.handle.session_id(), "archived");
+        assert!(resumed.unarchived);
+        assert_eq!(
+            store
+                .latest(false)
+                .unwrap()
+                .map(|s| s.session_id)
+                .as_deref(),
+            Some("archived"),
+            "bare --continue finds the session again",
+        );
     }
 
     #[tokio::test]
@@ -518,6 +574,35 @@ mod tests {
         let err = resolve_prefix_to_info(&store, "aaaaaaaa", "live").unwrap_err();
         assert!(err.contains("ambiguous prefix"), "{err}");
         assert!(err.contains("aaaaaaaa"), "id preview present: {err}");
+    }
+
+    // ── resolve_saved_prefix ──
+
+    #[test]
+    fn resolve_saved_prefix_tells_a_live_only_match_from_no_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let live_id = "abcd1234-eeff-1122-3344-556677889900";
+        let saved_id = "abcd5678-eeff-1122-3344-556677889900";
+        seed_test_session(
+            &store,
+            saved_id,
+            Some("Saved"),
+            Some(1),
+            time::macros::datetime!(2026-04-18 09:00:00 UTC),
+        );
+
+        let saved = resolve_saved_prefix(&store, "abcd", live_id).unwrap();
+        assert_eq!(saved.map(|info| info.session_id).as_deref(), Some(saved_id));
+        assert!(
+            resolve_saved_prefix(&store, "abcd1", live_id)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            resolve_saved_prefix(&store, "zzz", live_id).unwrap_err(),
+            "no session matching `zzz`",
+        );
     }
 
     // ── format_session_id_preview ──

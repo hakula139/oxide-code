@@ -394,12 +394,12 @@ mod tests {
     // ── STARTER_POOL ──
 
     #[test]
-    fn starter_pool_lists_every_built_in_except_delete() {
-        // `/delete` is destructive, so the welcome screen never suggests it.
+    fn starter_pool_lists_every_built_in_that_runs_bare_on_an_empty_session() {
+        // `/delete` and `/unarchive` need an id, and `/archive` has nothing to archive yet.
         let mut built_ins: Vec<String> = crate::slash::filter_built_ins("")
             .into_iter()
             .map(|cmd| format!("/{}", cmd.name))
-            .filter(|name| name != "/delete")
+            .filter(|name| !["/archive", "/delete", "/unarchive"].contains(&name.as_str()))
             .collect();
         built_ins.sort_unstable();
         let starters: Vec<&str> = STARTER_POOL.iter().map(|(name, _)| *name).collect();

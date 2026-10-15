@@ -183,6 +183,7 @@ impl Engine {
                     }
                 }
                 UserAction::Clear => self.clear(&sink).await,
+                UserAction::Archive => self.archive(&sink).await,
                 UserAction::Resume { path } => self.resume(&sink, &path).await,
                 UserAction::Rename { title } => self.rename(&sink, title).await,
                 UserAction::SwapConfig { model, effort } => self.swap_config(&sink, model, effort),
@@ -379,6 +380,31 @@ impl Engine {
 
     /// Finalizes the live session and continues in a fresh, empty one.
     async fn clear(&mut self, sink: &dyn AgentSink) {
+        self.roll_session(sink, false).await;
+    }
+
+    /// Archives the live session, then rolls like [`Self::clear`].
+    async fn archive(&mut self, sink: &dyn AgentSink) {
+        if self.messages.is_empty() {
+            sink.emit(
+                AgentEvent::Error(
+                    "Nothing to archive: this session has no messages yet.".to_owned(),
+                ),
+                "archive-empty",
+            );
+            return;
+        }
+        if let Some(failure) = self.session.archive().await.failure {
+            sink.emit(
+                AgentEvent::Error(format!("Archive failed: {failure}")),
+                "archive-failed",
+            );
+            return;
+        }
+        self.roll_session(sink, true).await;
+    }
+
+    async fn roll_session(&mut self, sink: &dyn AgentSink, archived: bool) {
         let outcome = handle::roll(
             &mut self.session,
             &self.store,
@@ -389,7 +415,10 @@ impl Engine {
         sink.session_write_error(outcome.finalize_failure.as_deref());
         self.adopt_session(Vec::new(), None).await;
         sink.emit(
-            AgentEvent::SessionRolled { id: outcome.new_id },
+            AgentEvent::SessionRolled {
+                id: outcome.new_id,
+                archived,
+            },
             "session-rolled",
         );
     }
@@ -418,6 +447,7 @@ impl Engine {
             AgentEvent::SessionResumed {
                 id: self.session.session_id().to_owned(),
                 title: outcome.title,
+                unarchived: outcome.unarchived,
                 messages: outcome.messages,
                 compact: outcome.compact,
                 tool_metadata: outcome.tool_result_metadata,
@@ -1072,6 +1102,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_archive_rolls_away_and_a_resume_unarchives_the_session() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            mount_reply(&server, "reply").await;
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let engine = engine(server.uri(), &store, dir.path()).await;
+            let archived_id = engine.session.session_id().to_owned();
+            let mut handle = engine.spawn(&[]);
+
+            submit(&mut handle, "first").await;
+            handle.ops.send(UserAction::Archive).await.unwrap();
+            let (fresh_id, archived) = next_matching(&mut handle.events, |event| match event {
+                AgentEvent::SessionRolled { id, archived } => Some((id, archived)),
+                _ => None,
+            })
+            .await;
+            assert_ne!(fresh_id, archived_id);
+            assert!(archived);
+            assert!(store.load_session_data(&archived_id).unwrap().archived);
+
+            let path = store.find_session_path(&archived_id).unwrap();
+            handle.ops.send(UserAction::Resume { path }).await.unwrap();
+            let resumed = next_matching(&mut handle.events, |event| match event {
+                AgentEvent::SessionResumed { id, unarchived, .. } => Some((id, unarchived)),
+                _ => None,
+            })
+            .await;
+            handle.shutdown().await;
+
+            assert_eq!(resumed, (archived_id.clone(), true));
+            assert!(!store.load_session_data(&archived_id).unwrap().archived);
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn run_applies_rename_and_config_ops_until_quit() {
         with_pinned_home(async {
             let server = MockServer::start().await;
@@ -1137,7 +1204,10 @@ mod tests {
 
             handle.ops.send(UserAction::Clear).await.unwrap();
             let live_id = next_matching(&mut handle.events, |event| match event {
-                AgentEvent::SessionRolled { id } => Some(id),
+                AgentEvent::SessionRolled {
+                    id,
+                    archived: false,
+                } => Some(id),
                 _ => None,
             })
             .await;
@@ -1633,6 +1703,41 @@ mod tests {
             assert_eq!(engine.client.session_id(), target_id);
             assert_eq!(engine.messages.len(), 2);
             assert_ne!(engine.prompt.user_context, SESSION_CONTEXT);
+        })
+        .await;
+    }
+
+    // ── archive ──
+
+    #[tokio::test]
+    async fn archive_keeps_the_session_without_messages_or_after_each_failed_write() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let mut engine = engine(server.uri(), &store, dir.path()).await;
+            let live_id = engine.session.session_id().to_owned();
+            let sink = CapturingSink::new();
+
+            engine.archive(&sink).await;
+            assert_eq!(engine.session.session_id(), live_id);
+            engine.messages = vec![Message::user("unsaved")];
+            engine.session = handle::testing::dead("dead");
+            engine.archive(&sink).await;
+            engine.archive(&sink).await;
+            assert_eq!(engine.session.session_id(), "dead");
+
+            let events = sink.events();
+            assert!(
+                matches!(
+                    events.as_slice(),
+                    [AgentEvent::Error(empty), AgentEvent::Error(first), AgentEvent::Error(again)]
+                        if empty.starts_with("Nothing to archive")
+                            && first.starts_with("Archive failed: ")
+                            && again.starts_with("Archive failed: ")
+                ),
+                "{events:?}",
+            );
         })
         .await;
     }

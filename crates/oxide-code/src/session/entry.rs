@@ -53,6 +53,13 @@ pub(crate) enum Entry {
         #[serde(with = "time::serde::rfc3339")]
         updated_at: OffsetDateTime,
     },
+    /// Sets whether default listings and bare `--continue` skip the session. The last one in the
+    /// file wins.
+    Archive {
+        archived: bool,
+        #[serde(with = "time::serde::rfc3339")]
+        at: OffsetDateTime,
+    },
     Summary {
         message_count: u32,
         #[serde(with = "time::serde::rfc3339")]
@@ -122,6 +129,7 @@ pub(crate) struct SessionInfo {
     pub(crate) exit: Option<ExitInfo>,
     /// Branch the session started on, or `None` outside a git repo.
     pub(crate) git_branch: Option<String>,
+    pub(crate) archived: bool,
 }
 
 #[cfg(test)]

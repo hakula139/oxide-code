@@ -77,6 +77,10 @@ impl<T: SearchableItem> SearchableList<T> {
         self
     }
 
+    pub(crate) fn set_header(&mut self, title: impl Into<String>, description: impl Into<String>) {
+        self.header = Header::new(title).with_description(description);
+    }
+
     #[cfg(test)]
     pub(crate) fn query(&self) -> &str {
         self.query.text()

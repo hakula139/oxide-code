@@ -31,6 +31,7 @@ use crate::agent::event::{AgentEvent, UserAction};
 use crate::config::{CompactionConfig, Effort, StatusLineSegment, display_auto_compaction};
 use crate::message::Message;
 use crate::model::ModelSpec;
+use crate::session::display::archive_notice;
 use crate::session::entry::CompactInfo;
 use crate::slash::{self, LiveSessionInfo, Parsed, SlashContext, SlashKind, SlashOutcome};
 use crate::tool::{ToolMetadata, ToolRegistry, ToolResultView};
@@ -76,6 +77,8 @@ pub(crate) struct AppHistory<'a> {
     pub(crate) compact: Option<&'a CompactInfo>,
     pub(crate) tool_metadata: &'a HashMap<String, ToolMetadata>,
     pub(crate) title: Option<String>,
+    /// Resuming the session unarchived it, so the chat opens with a note saying so.
+    pub(crate) unarchived: bool,
 }
 
 impl App {
@@ -95,6 +98,9 @@ impl App {
             history.tool_metadata,
             tools.as_ref(),
         );
+        if history.unarchived {
+            chat.push_system_message(archive_notice(&session_info.session_id, false));
+        }
         let mut status_bar = StatusBar::new(
             theme,
             session_info.config.status_line.clone(),
@@ -363,6 +369,7 @@ impl App {
             }
             UserAction::QueuePrompt(_)
             | UserAction::Clear
+            | UserAction::Archive
             | UserAction::Rename { .. }
             | UserAction::SwapConfig { .. }
             | UserAction::ApprovalDecision { .. } => true,
@@ -536,20 +543,31 @@ impl App {
                     self.status_bar.set_title(Some(title));
                 }
             }
-            AgentEvent::SessionRolled { id } => {
-                self.session_info.session_id = id;
+            AgentEvent::SessionRolled { id, archived } => {
+                let old_id = std::mem::replace(&mut self.session_info.session_id, id);
                 self.status_bar.set_title(None);
                 self.status_bar.set_usage(None);
                 self.chat.clear_history();
                 self.active_prompt = None;
+                if archived {
+                    self.chat.push_system_message(archive_notice(&old_id, true));
+                }
             }
             AgentEvent::SessionResumed {
                 id,
                 title,
+                unarchived,
                 messages,
                 compact,
                 tool_metadata,
-            } => self.apply_session_resumed(id, title, compact.as_ref(), &messages, &tool_metadata),
+            } => self.apply_session_resumed(
+                id,
+                title,
+                unarchived,
+                compact.as_ref(),
+                &messages,
+                &tool_metadata,
+            ),
             AgentEvent::SessionCompacted {
                 summary,
                 pre_count,
@@ -639,6 +657,7 @@ impl App {
         &mut self,
         id: String,
         title: Option<String>,
+        unarchived: bool,
         compact: Option<&CompactInfo>,
         messages: &[Message],
         tool_metadata: &HashMap<String, ToolMetadata>,
@@ -649,6 +668,10 @@ impl App {
         self.chat.clear_history();
         self.chat
             .load_history(messages, compact, tool_metadata, self.tools.as_ref());
+        if unarchived {
+            self.chat
+                .push_system_message(archive_notice(&self.session_info.session_id, false));
+        }
         self.pending_calls.clear();
         self.active_prompt = None;
         // Queued prompts belonged to the previous thread, so resume drops them.
@@ -1068,6 +1091,7 @@ mod tests {
                 compact: None,
                 tool_metadata: &HashMap::new(),
                 title: title.map(ToOwned::to_owned),
+                unarchived: false,
             },
         );
         (app, user_rx, agent_tx)
@@ -1270,6 +1294,31 @@ mod tests {
         // Status bar filters whitespace-only titles so a resumed blank title doesn't leave a slot.
         let (app, _rx, _agent_tx) = test_app(Some("   \n "));
         assert!(app.status_bar.title().is_none());
+    }
+
+    #[test]
+    fn new_after_resume_unarchived_the_session_opens_with_a_notice() {
+        let (_agent_tx, agent_rx) = mpsc::unbounded_channel::<AgentEvent>();
+        let (user_tx, _user_rx) = mpsc::channel::<UserAction>(1);
+        let mut app = App::new(
+            &Theme::default(),
+            test_session_info(),
+            false,
+            agent_rx,
+            user_tx,
+            Arc::new(ToolRegistry::new(Vec::new())),
+            AppHistory {
+                messages: &[Message::user("earlier")],
+                compact: None,
+                tool_metadata: &HashMap::new(),
+                title: None,
+                unarchived: true,
+            },
+        );
+
+        assert_eq!(app.chat.entry_count(), 2);
+        let text = rendered_text(&mut app, 80, 12);
+        assert!(text.contains("Unarchived session test-ses."), "{text}");
     }
 
     // ── push_system_message ──
@@ -2870,6 +2919,7 @@ mod tests {
 
         app.handle_agent_event(AgentEvent::SessionRolled {
             id: "rolled-session".to_owned(),
+            archived: false,
         });
 
         assert_eq!(
@@ -2890,6 +2940,24 @@ mod tests {
             "clear must drain the chat so the welcome can repaint",
         );
         assert!(app.dirty);
+    }
+
+    #[test]
+    fn handle_session_rolled_after_archive_names_the_archived_session() {
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.chat.push_user_message("old prompt".to_owned());
+        app.session_info.session_id = "aaaa1111-archived".to_owned();
+
+        app.handle_agent_event(AgentEvent::SessionRolled {
+            id: "rolled-session".to_owned(),
+            archived: true,
+        });
+
+        assert_eq!(app.session_info.session_id, "rolled-session");
+        assert_eq!(app.chat.entry_count(), 1);
+        let text = rendered_text(&mut app, 100, 12);
+        assert!(text.contains("Archived session aaaa1111."), "{text}");
+        assert!(!text.contains("old prompt"), "{text}");
     }
 
     #[test]
@@ -2915,6 +2983,7 @@ mod tests {
         app.handle_agent_event(AgentEvent::SessionResumed {
             id: "resumed-session".to_owned(),
             title: Some("Resumed title".to_owned()),
+            unarchived: false,
             messages,
             compact: None,
             tool_metadata: HashMap::new(),
@@ -2952,6 +3021,7 @@ mod tests {
         app.handle_agent_event(AgentEvent::SessionResumed {
             id: "resumed".to_owned(),
             title: None,
+            unarchived: false,
             messages: vec![Message::user("only msg")],
             compact: None,
             tool_metadata: HashMap::new(),
@@ -2964,11 +3034,29 @@ mod tests {
     }
 
     #[test]
+    fn handle_session_resumed_after_unarchiving_appends_a_notice() {
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.handle_agent_event(AgentEvent::SessionResumed {
+            id: "bbbb2222-resumed".to_owned(),
+            title: None,
+            unarchived: true,
+            messages: vec![Message::user("only msg")],
+            compact: None,
+            tool_metadata: HashMap::new(),
+        });
+
+        assert_eq!(app.chat.entry_count(), 2);
+        let text = rendered_text(&mut app, 80, 12);
+        assert!(text.contains("Unarchived session bbbb2222."), "{text}");
+    }
+
+    #[test]
     fn handle_session_resumed_with_compact_replays_boundary_block() {
         let (mut app, _rx, _agent_tx) = test_app(None);
         app.handle_agent_event(AgentEvent::SessionResumed {
             id: "resumed".to_owned(),
             title: None,
+            unarchived: false,
             messages: vec![
                 crate::agent::compaction::synthesize_post_compact_message("internal summary"),
                 Message::assistant("post-compact reply"),
@@ -2995,6 +3083,7 @@ mod tests {
         app.handle_agent_event(AgentEvent::SessionResumed {
             id: "resumed".to_owned(),
             title: None,
+            unarchived: false,
             messages: Vec::new(),
             compact: None,
             tool_metadata: HashMap::new(),
@@ -3846,7 +3935,7 @@ mod tests {
 
         let text = rendered_text(&mut app, 60, 14);
         assert!(
-            text.contains("/help"),
+            text.contains("/archive"),
             "popup must paint at least one canonical command row: {text}",
         );
     }

@@ -9,7 +9,7 @@ use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashKind, SlashOutcome};
 use crate::session::display::{display_title, format_metadata_line};
 use crate::session::entry::SessionInfo;
-use crate::session::resolver::resolve_prefix_to_info;
+use crate::session::resolver::resolve_saved_prefix;
 use crate::session::store::SessionStore;
 use crate::util::path::tildify;
 
@@ -53,7 +53,9 @@ impl SlashCommand for DeleteCmd {
         let store =
             SessionStore::open().map_err(|e| format!("session store unavailable: {e:#}"))?;
         let live_id = ctx.info.session_id.as_str();
-        let info = resolve_for_delete(&store, arg, live_id)?;
+        let info = resolve_saved_prefix(&store, arg, live_id)?.ok_or_else(|| {
+            format!("cannot delete the live session: `{arg}` matches the active session")
+        })?;
         Ok(SlashOutcome::Modal(Box::new(
             ConfirmDeleteSessionModal::new(
                 info.path.clone(),
@@ -64,26 +66,6 @@ impl SlashCommand for DeleteCmd {
             ),
         )))
     }
-}
-
-// ── Resolution ──
-
-/// Wraps the shared resolver with `/delete`'s live-id behavior: prefixes that match only the
-/// live id return a dedicated error so typos keep the generic "no session matching" message.
-fn resolve_for_delete(
-    store: &SessionStore,
-    prefix: &str,
-    live_id: &str,
-) -> Result<SessionInfo, String> {
-    if let Some(info) = resolve_prefix_to_info(store, prefix, live_id)? {
-        return Ok(info);
-    }
-    if live_id.starts_with(prefix) {
-        return Err(format!(
-            "cannot delete the live session: `{prefix}` matches the active session",
-        ));
-    }
-    Err(format!("no session matching `{prefix}`"))
 }
 
 // ── Display Formatting ──
@@ -342,6 +324,7 @@ mod tests {
             title: None,
             exit: None,
             git_branch: None,
+            archived: false,
         };
         let line = metadata_line(&info);
         assert!(line.contains("/work/oxide"), "project shown: {line}");
@@ -357,6 +340,7 @@ mod tests {
             title: None,
             exit: None,
             git_branch: None,
+            archived: false,
         };
         let line = metadata_line(&info);
         assert!(!line.ends_with(" · "), "no trailing separator: {line}");

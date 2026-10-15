@@ -3,6 +3,7 @@ source: crates/oxide-code/src/tui/components/input/popup.rs
 expression: "render_to_backend(&popup, 30)"
 ---
 "──────────────────────────────"
+"/archive  Archive this sess..."
 "/clear    Reset the convers..."
 "/compact  Compress conversa..."
 "/config   Show resolved config"
@@ -10,4 +11,3 @@ expression: "render_to_backend(&popup, 30)"
 "/diff     Show uncommitted ..."
 "/effort   Adjust reasoning ..."
 "/help     List slash commands "
-"/init     Create or update ..."

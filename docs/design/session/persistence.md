@@ -17,6 +17,7 @@ Every session is a single append-only `.jsonl` file with one JSON object per lin
 | `file_snapshot`        | Sidecar        | File-tracker state restored on resume when disk state still matches |
 | `context`              | Before message | Prompt context of that message. Latest on the resolved chain wins   |
 | `compact`              | Boundary       | Summary boundary plus pre-compact count and optional instructions   |
+| `archive`              | Re-appended    | Archive state: `archived` + `at`. Latest wins                       |
 | `summary`              | Last line      | Exit marker: `message_count` + `updated_at`. Latest wins            |
 
 ### Schema Invariants
@@ -59,6 +60,10 @@ Starting a session stages the header in memory. The on-disk file is created by t
 
 A session records its prompt context (the environment section, the first message's rendered instructions, date, and model identity, and what the model has seen of them) Write it in a `context` entry in the same batch as the first user message that carries it, immediately before that message and with the same timestamp. The loader binds the entry to the next message with a matching timestamp, so a context entry stranded by a torn write cannot attach to another writer's message. When resuming, the latest such entry on the resolved chain is replayed verbatim, so the request sends the same cached system prompt and first message. A forked session therefore replays the context recorded on its own branch. If the session resumes in another directory, the environment section is redetected. Any later instruction, date, or model change, including a `/model` swap, is attached to the next user message as a `<system-reminder>` block, which transcript displays omit, so the system prompt stays byte-identical across a swap. A transcript lacking a `context` entry, or one where no user message followed the last compaction, rebuilds the context and records it with the next message.
 
+### Archiving
+
+An `archive` entry sets whether default listings and bare `ox -c` skip the session, and the latest one wins. Bare `/archive` queues one through the actor before the roll that finalizes the session, `/archive <prefix>` and `/unarchive <prefix>` append an entry to another session's file and restore its mtime, so toggling its archive status does not change its position in listings. Resuming an archived session appends an entry that unarchives it. Files never move, so path-based resume and every other reference to a session file keep working.
+
 ### Fork-on-conflict concurrency
 
 There is no file-level lock: two processes resuming the same session both append, and the newest-leaf rule resolves forks deterministically. Each batch lands in one append write (`O_APPEND` on Unix, an end-of-file-offset write on Windows), so concurrent appends interleave only between batches.
@@ -69,11 +74,11 @@ In the TUI, the first user prompt of a fresh session spawns a detached tokio tas
 
 ### Write-error surfacing
 
-First failure populates the handle's `RecordOutcome::failure` slot so the agent loop emits a one-shot `AgentEvent::Error`. Compact acks carry every failure, since the agent swaps in the summary only when the boundary reached disk. Three independent sticky-once flags (`flush_failure_surfaced`, `persistence_stop_surfaced`, `actor_gone_surfaced`) keep different failure kinds from masking each other, so stopping persistence surfaces even after an earlier flush failure.
+First failure populates the handle's `RecordOutcome::failure` slot so the agent loop emits a one-shot `AgentEvent::Error`. Compact and archive acknowledgments include every failure. The agent swaps in the summary only after the boundary reaches disk, and bare `/archive` rolls to a fresh session only after the archive entry is written. Failed compact and archive operations are also removed from the retry queue, so a later flush cannot persist them. Three independent sticky-once flags (`flush_failure_surfaced`, `persistence_stop_surfaced`, `actor_gone_surfaced`) keep different failure kinds from masking each other, so stopping persistence surfaces even after an earlier flush failure.
 
 ## Listing
 
-`ox --list` walks the current project subdirectory by default, and `--all` widens to every project. The walk only stats files, so each caller parses just what it needs: one page for `--list`, the newest readable file for bare `ox -c`, and the files whose name carries a matching id for a prefix lookup. A parsed file yields its header plus the latest `Entry::Title` and `Entry::Summary`, and a cheap prefix pre-filter on the `"type"` discriminator keeps message lines off the full-parse hot path.
+`ox --list` walks the current project subdirectory by default, and `--all` widens to every project. The walk only stats files, so bare `ox -c` parses files only until it finds the newest readable unarchived one, and a prefix lookup parses only the files whose name carries a matching id. A parsed file yields its header, the latest `Entry::Title` and `Entry::Summary`, and the archive state, and a cheap prefix pre-filter on the `"type"` discriminator keeps message lines off the full-parse hot path. `--list` and the `/resume` picker show unarchived sessions, or only archived ones with `--list --archived` and the picker's Ctrl+A. Archive state is stored in each file, so a listing parses sessions in order until it finds one beyond the page, then reports only whether more sessions follow. When few sessions are archived, the archived view parses further.
 
 - Sessions without a title show `(untitled)`.
 - Sessions without a summary still list (`Msgs` displays `-`).
@@ -94,3 +99,4 @@ First failure populates the handle's `RecordOutcome::failure` slot so the agent 
 9. **First-failure-only write-error surfacing.** One `AgentEvent::Error` per failure kind plus warn-logs gives visibility without spam.
 10. **Head + tail listing scan, mtime sort.** Head catches first-prompt title, and tail picks up later titles and summary.
 11. **Actor-owned writes, receive-and-drain batching.** One task owns the writer, and `tokio::join!` coalesces a tool round's records into one append.
+12. **Archive state as an appended entry.** A session keeps the same path whether it is archived or active. Because filtering listings by archive state requires parsing files, listings indicate whether more sessions follow the current page without counting them.

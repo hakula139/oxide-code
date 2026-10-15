@@ -8,6 +8,7 @@ For commands with curated arguments (`/model`, `/effort`, `/theme`), the popup s
 
 | Command                                     | Description                                                                          |
 | ------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `/archive [<id-prefix>]`                    | Archive this session and start a fresh one, or archive a saved session by id prefix. |
 | `/clear` (aliases `/new`, `/reset`)         | Start a fresh session. The previous one stays resumable via `ox -c`.                 |
 | `/compact [<instructions>]`                 | Compress the conversation into a summary. Trailing text steers the focus.            |
 | `/config`                                   | Open the resolved configuration and its layered file paths in a read-only modal.     |
@@ -18,9 +19,10 @@ For commands with curated arguments (`/model`, `/effort`, `/theme`), the popup s
 | `/init`                                     | Generate or update the project's `AGENTS.md` / `CLAUDE.md`.                          |
 | `/model [<id>]`                             | Open the model + effort picker, or swap directly (alias / substring / exact id).     |
 | `/rename [<title>]`                         | Open a single-line modal pre-filled with the current title, or set it directly.      |
-| `/resume [<id-prefix>]` (alias `/continue`) | Open the session picker (search, project / all toggle), or jump by id prefix.        |
+| `/resume [<id-prefix>]` (alias `/continue`) | Open the session picker (search, scope and archived toggles), or jump by id prefix.  |
 | `/status`                                   | Open a read-only modal of model, effort, cwd, version, auth, and session id.         |
 | `/theme [<name>]`                           | Open the theme picker (live preview), or swap directly to a built-in theme.          |
+| `/unarchive <id-prefix>`                    | List an archived session again.                                                      |
 
 ## Sending a Literal `/foo`
 
@@ -28,7 +30,7 @@ Double the leading slash. Typing `//etc` sends the literal `/etc`.
 
 ## Mid-Turn Behavior
 
-State-mutating commands are refused while a turn is in flight, so retry them after the turn finishes. That includes `/clear`, `/compact`, `/delete`, `/init`, `/rename`, `/resume`, typed `/theme <name>`, and both bare and typed forms of `/effort` and `/model`. Read-only commands (`/config`, `/diff`, `/help`, `/status`) and the bare `/theme` picker run immediately.
+State-mutating commands are refused while a turn is in flight, so retry them after the turn finishes. That includes `/archive`, `/clear`, `/compact`, `/delete`, `/init`, `/rename`, `/resume`, typed `/theme <name>`, `/unarchive`, and both bare and typed forms of `/effort` and `/model`. Read-only commands (`/config`, `/diff`, `/help`, `/status`) and the bare `/theme` picker run immediately.
 
 ## Model and Effort
 
@@ -48,7 +50,7 @@ The pre-compact transcript stays on disk, but resuming via `ox -c` starts from t
 
 ## Sessions
 
-`/rename`, `/resume`, and `/delete` manage session titles and saved sessions without leaving the TUI. See [Titles](sessions.md#titles), [Mid-Session Resume](sessions.md#mid-session-resume), and [Deleting a Session](sessions.md#deleting-a-session).
+`/rename`, `/resume`, `/delete`, `/archive`, and `/unarchive` manage session titles and saved sessions without leaving the TUI. See [Titles](sessions.md#titles), [Mid-Session Resume](sessions.md#mid-session-resume), [Deleting a Session](sessions.md#deleting-a-session), and [Archiving a Session](sessions.md#archiving-a-session).
 
 ## Theme
 

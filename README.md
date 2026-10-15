@@ -24,10 +24,10 @@ Early development. What works today:
 - File and search tools: `read`, `write`, `edit`, `glob`, `grep`, `bash`
 - Tool permissions: `auto` (default), `plan`, and `yolo` modes, allow / deny rules, protected config paths whose edits need approval in `auto` mode even when an allow rule matches, and a TUI approval prompt for gated calls
 - Turn interruption (Esc / Ctrl+C) plus mid-turn queued follow-up prompts that splice into the same turn between tool calls, with double-press Ctrl+C exit confirmation
-- Slash commands with `/`-triggered autocomplete (name and curated-arg modes): `/clear`, `/compact`, `/config`, `/delete`, `/diff`, `/effort`, `/help`, `/init`, `/model`, `/rename`, `/resume`, `/status`, `/theme`
+- Slash commands with `/`-triggered autocomplete (name and curated-arg modes): `/archive`, `/clear`, `/compact`, `/config`, `/delete`, `/diff`, `/effort`, `/help`, `/init`, `/model`, `/rename`, `/resume`, `/status`, `/theme`, `/unarchive`
 - Context compression with manual `/compact` and default-on auto-compaction
 - `CLAUDE.md` / `AGENTS.md` instruction-file discovery
-- Session persistence with JSONL conversation logs, AI-generated titles, listing, and resume
+- Session persistence with JSONL conversation logs, AI-generated titles, listing, archiving, and resume
 - Per-session file-change tracking with a Read-before-Edit gate and on-disk drift detection
 - Authentication (Anthropic API key, Claude Code login or long-lived OAuth token, LLM gateway bearer token with custom headers) and layered TOML config
 
