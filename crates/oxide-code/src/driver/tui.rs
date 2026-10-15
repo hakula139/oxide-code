@@ -37,7 +37,7 @@ pub(crate) async fn run(
     terminal::install_panic_hook();
 
     let cwd = engine.cwd();
-    let unsupported_notice = config.model.unsupported_notice();
+    let notices = config.notices();
     let session_info = LiveSessionInfo {
         cwd: tildify(cwd),
         git_cwd: Some(cwd.to_owned()),
@@ -62,7 +62,7 @@ pub(crate) async fn run(
             unarchived: startup.unarchived,
         },
     );
-    if let Some(notice) = unsupported_notice {
+    for notice in notices {
         app.push_system_message(notice);
     }
     if let Some(picker) = startup.picker {

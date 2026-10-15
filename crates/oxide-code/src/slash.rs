@@ -133,7 +133,7 @@ pub(crate) fn test_session_info() -> LiveSessionInfo {
             },
             model: crate::model::ModelSpec::resolve("claude-opus-5-5".to_owned()),
             effort: Some(Effort::High),
-            max_tokens: 32_000,
+            max_tokens: None,
             max_tool_rounds: None,
             prompt_cache_ttl: PromptCacheTtl::OneHour,
             compaction: CompactionConfig::resolved_for_test(AutoCompactionConfig {
@@ -145,6 +145,7 @@ pub(crate) fn test_session_info() -> LiveSessionInfo {
             show_welcome: true,
             status_line: crate::config::StatusLineSegment::DEFAULT.to_vec(),
             theme_name: "mocha".to_owned(),
+            provenance: crate::config::provenance::Provenance::default(),
         },
     }
 }

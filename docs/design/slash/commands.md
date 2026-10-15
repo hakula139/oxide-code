@@ -64,7 +64,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 - **`/status`**: Opens a [`KvOverview`](modals.md) of session descriptors. No args, no chat output. Esc / Ctrl+C dismiss.
 
-- **`/config`**: Opens a [`KvOverview`](modals.md) with two headed sections: resolved effective config, and the layered TOML source paths it was assembled from. Path discovery runs per-invocation so mid-session edits surface immediately.
+- **`/config`**: Opens a [`KvOverview`](modals.md) with two headed sections: resolved effective config with the layer that set each value, and the config files loaded at startup. Both come from the startup load, so the files listed are the ones behind the values shown.
 
 - **`/help`**: Opens a [`KvOverview`](modals.md) listing every registered command with its description. Aliases parenthesize after the canonical name, and `usage()` placeholder appends.
 

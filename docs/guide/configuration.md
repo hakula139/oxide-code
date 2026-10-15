@@ -4,16 +4,41 @@ oxide-code loads configuration from multiple sources, merged in order of increas
 
 1. **Built-in defaults.**
 2. **User config file**: `~/.config/ox/config.toml` (or `$XDG_CONFIG_HOME/ox/config.toml`).
-3. **Project config file**: the nearest `ox.toml` found by walking up from the current directory. Project config cannot set `client.api_key`, `client.base_url`, `client.extra_ca_certs`, `permission.mode`, or `permission.allow`.
-4. **Environment variables**: always win.
+3. **User drop-ins**: `*.toml` files in `~/.config/ox/config.d/` (or `$XDG_CONFIG_HOME/ox/config.d/`), in file-name order.
+4. **Project config file**: `.ox/config.toml` in the nearest directory at or above the current one that has one.
+5. **Environment variables**: always win.
+
+Run `/config` to see each resolved value next to the layer that set it: `default`, `user`, `config.d/<name>`, `project` (or `ox.toml` for a legacy project file), an environment variable such as `$ANTHROPIC_MODEL`, or `session` after a `/model` or `/effort` change.
+
+## Layers
+
+### Merging
+
+Each file sets only the keys it names, and a later layer wins key by key, so a drop-in that sets `client.effort` keeps the `client.model` from `config.toml`. Tables merge recursively, including `[tui.theme.overrides]`.
+
+- **`permission.allow` and `permission.deny`** concatenate, so the rules from every layer apply.
+- **Other arrays**, such as `tui.status_line`, come whole from the last layer that sets them.
+- **`auto_threshold_tokens` and `auto_threshold_percent`** act as one setting, so a layer that sets either replaces both.
+
+### Drop-ins
+
+`config.d/` lets a dotfile manager, a Nix module, or a team script own one file without editing your `config.toml`. Drop-ins load after `config.toml`, sorted by file name byte by byte, so a numeric prefix such as `10-team.toml` or `50-nix.toml` sets their order. Hidden files, subdirectories, and files without a `.toml` extension are skipped, and a symlink loads its target.
+
+Drop-ins share the `config.toml` schema and count as user config. An invalid drop-in, including a symlink whose target is missing, stops startup with an error that names the file. A malformed permission rule names the file that holds it in the same way.
+
+### Project config
+
+A project file comes from the checkout, so it cannot set `client.api_key`, `client.base_url`, `client.extra_ca_certs`, `permission.mode`, or `permission.allow`. Setting one fails the config load. This keeps a repository from redirecting your credentials or widening what runs without asking.
+
+A legacy `ox.toml` still loads when it sits in the nearest directory at or above the current one that has either file, below `.ox/config.toml` when that directory has both, and startup warns with the path to move it to. In the TUI the warning appears in the chat, and in `-p` and `--no-tui` runs it goes to stderr.
 
 ## Config file
 
 All fields are optional. Only specify the values you want to override.
 
 ```toml
-# ~/.config/ox/config.toml (user-wide)
-# or ox.toml in your project root (per-project, except the user-only keys listed above)
+# ~/.config/ox/config.toml, a drop-in in ~/.config/ox/config.d/,
+# or .ox/config.toml in your project (except the user-only keys)
 
 [client]
 model = "claude-sonnet-5-5"
@@ -86,7 +111,7 @@ When unset, the agent loop has no per-turn round cap. Setting `max_tool_rounds =
 
 #### `base_url`: endpoint
 
-Use `base_url` only in `~/.config/ox/config.toml` or `ANTHROPIC_BASE_URL`. Project `ox.toml` cannot set it, because project files are loaded from the checkout and should not be able to redirect credentials. The URL must use HTTPS unless it points at localhost for a local proxy.
+Set `base_url` in user config or `ANTHROPIC_BASE_URL`. A project config cannot set it, because project files are loaded from the checkout and should not be able to redirect credentials. The URL must use HTTPS unless it points at localhost for a local proxy.
 
 #### `extra_ca_certs`: corporate trust anchors
 
@@ -191,8 +216,8 @@ Rules follow the format `class(specifier)`. The class is `read` (read, grep, and
 
 In `auto` mode, edits to these paths need approval even when an allow rule matches:
 
-- **Directories at any depth.** `.git`, `.githooks`, `.husky`, `.vscode`, `.idea`, `.devcontainer`, `.codex`, and `.claude/hooks`.
-- **File names anywhere.** Shell startup files such as `.bashrc` and `.zshrc`, `.envrc`, `.gitconfig`, `.gitmodules`, `ox.toml`, `rust-toolchain`, and `rust-toolchain.toml`.
+- **Directories at any depth.** `.git`, `.githooks`, `.husky`, `.vscode`, `.idea`, `.devcontainer`, `.codex`, `.ox`, and `.claude/hooks`.
+- **File names anywhere.** Shell startup files such as `.bashrc` and `.zshrc`, `.envrc`, `.gitconfig`, `.gitmodules`, a legacy `ox.toml`, `rust-toolchain`, and `rust-toolchain.toml`.
 - **Parent / file pairs.** `.cargo/config`, `.cargo/config.toml`, `.claude/settings.json`, and `.claude/settings.local.json`.
 - **Application directories.** oxide-code's own config, data, and state directories.
 
@@ -200,7 +225,7 @@ Their names compare the way deny rules compare names, in the path as written and
 
 Launching from `/` or your home directory turns off the auto-allow for edits inside it, so those edits need an allow rule or an approval. So does an edit to a file with more than one hard link.
 
-`plan` mode denies all edit and `bash` calls. `yolo` mode never asks and skips the built-in deny list (`rm -rf`, `curl | sh`, and similar), but it still honors your `deny` rules. A project `ox.toml` can only add `deny` rules, and setting `mode` or `allow` there fails the config load, so a repository can restrict what runs but never widen it. The environment variable `OX_PERMISSION_MODE` overrides `mode`.
+`plan` mode denies all edit and `bash` calls. `yolo` mode never asks and skips the built-in deny list (`rm -rf`, `curl | sh`, and similar), but it still honors your `deny` rules. A project config can only add `deny` rules, and setting `mode` or `allow` there fails the config load, so a repository can restrict what runs but never widen it. The environment variable `OX_PERMISSION_MODE` overrides `mode`.
 
 ## Authentication
 
@@ -218,7 +243,7 @@ Each request carries one credential. oxide-code uses the first source that is se
 - **The Claude Code login** comes from the `"Claude Code-credentials"` Keychain entry on macOS, falling back to `~/.claude/.credentials.json`, which is the only store on Linux. oxide-code refreshes it automatically near expiry. It is sent only to the Anthropic API: with a custom `base_url` and no other credential, startup fails and names `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_API_KEY`, so a personal subscription token never reaches a third-party host.
 - **`/status` and `/config`** show the active source, such as `OAuth (CLAUDE_CODE_OAUTH_TOKEN)`, without its value.
 
-The environment variables and the Claude Code login keep credentials out of config files. An `api_key` in `~/.config/ox/config.toml` works but sits on disk in plaintext, and a project `ox.toml` cannot set it.
+The environment variables and the Claude Code login keep credentials out of config files. An `api_key` in `~/.config/ox/config.toml` works but sits on disk in plaintext, and a project config cannot set it.
 
 ## LLM gateways
 

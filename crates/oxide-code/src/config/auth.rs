@@ -62,15 +62,22 @@ impl AuthSource {
         }
     }
 
-    /// The env var, config key, or store the credential was read from.
-    const fn origin(self) -> &'static str {
+    /// The env var the credential was read from, `None` for the config file or stored login.
+    pub(super) const fn env_var(self) -> Option<&'static str> {
         match self {
-            Self::AuthTokenEnv => "ANTHROPIC_AUTH_TOKEN",
-            Self::ApiKeyEnv => "ANTHROPIC_API_KEY",
-            Self::ApiKeyFile => "client.api_key",
-            Self::OAuthTokenEnv => "CLAUDE_CODE_OAUTH_TOKEN",
-            Self::ClaudeCodeLogin => "Claude Code login",
+            Self::AuthTokenEnv => Some("ANTHROPIC_AUTH_TOKEN"),
+            Self::ApiKeyEnv => Some("ANTHROPIC_API_KEY"),
+            Self::OAuthTokenEnv => Some("CLAUDE_CODE_OAUTH_TOKEN"),
+            Self::ApiKeyFile | Self::ClaudeCodeLogin => None,
         }
+    }
+
+    /// The env var, config key, or store the credential was read from.
+    fn origin(self) -> &'static str {
+        self.env_var().unwrap_or(match self {
+            Self::ApiKeyFile => "client.api_key",
+            _ => "Claude Code login",
+        })
     }
 
     /// Recovery step shown when the API rejects the credential with HTTP 401.
@@ -78,7 +85,9 @@ impl AuthSource {
         match self {
             Self::AuthTokenEnv => "Check ANTHROPIC_AUTH_TOKEN.",
             Self::ApiKeyEnv => "Check ANTHROPIC_API_KEY.",
-            Self::ApiKeyFile => "Check client.api_key in ~/.config/ox/config.toml.",
+            Self::ApiKeyFile => {
+                "Check client.api_key in your user config. `/config` shows which file sets it."
+            }
             Self::OAuthTokenEnv => {
                 "CLAUDE_CODE_OAUTH_TOKEN may be expired or revoked. Generate a new one with \
                  `claude setup-token`."
@@ -244,6 +253,22 @@ mod tests {
         );
     }
 
+    // ── AuthSource::env_var ──
+
+    #[test]
+    fn env_var_names_only_environment_sources() {
+        assert_eq!(
+            ALL_SOURCES.map(AuthSource::env_var),
+            [
+                Some("ANTHROPIC_AUTH_TOKEN"),
+                Some("ANTHROPIC_API_KEY"),
+                None,
+                Some("CLAUDE_CODE_OAUTH_TOKEN"),
+                None,
+            ],
+        );
+    }
+
     // ── AuthSource::rejection_hint ──
 
     #[test]
@@ -251,7 +276,7 @@ mod tests {
         for (source, expected) in [
             (AuthSource::AuthTokenEnv, "ANTHROPIC_AUTH_TOKEN"),
             (AuthSource::ApiKeyEnv, "ANTHROPIC_API_KEY"),
-            (AuthSource::ApiKeyFile, "client.api_key"),
+            (AuthSource::ApiKeyFile, "client.api_key in your user config"),
             (AuthSource::OAuthTokenEnv, "claude setup-token"),
             (AuthSource::ClaudeCodeLogin, "Run `claude`"),
         ] {

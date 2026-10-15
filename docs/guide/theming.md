@@ -5,7 +5,7 @@ oxide-code's TUI palette is fully user-configurable. Pick one of the bundled Cat
 ## Quick start
 
 ```toml
-# ox.toml or ~/.config/ox/config.toml
+# ~/.config/ox/config.toml or .ox/config.toml
 
 # Built-in name (mocha, macchiato, frappe, latte, material) or filesystem path.
 [tui.theme]
@@ -42,7 +42,7 @@ Each ships as a vendored TOML file [in the source tree][themes-src] and doubles 
 base = "~/.config/ox/themes/dark-extra.toml"
 ```
 
-If the value isn't a built-in name AND can't be read as a file, oxide-code refuses to start with an actionable error message.
+If the value isn't a built-in name AND can't be read as a regular file of at most 64 KiB, oxide-code refuses to start with an actionable error message.
 
 ## Slot value formats
 
@@ -87,7 +87,7 @@ A theme TOML is a flat document with one entry per slot plus an optional [`synta
   diff_add = { bg = "#2a3a37" }
   ```
 
-Recognized modifier keys: `bold`, `italic`, `underlined`, `dim`, `reversed`. Unknown keys fail the parse. In a theme file, modifier keys are plain booleans defaulting to `false`.
+Recognized modifier keys: `bold`, `italic`, `underlined`, `dim`, `reversed`. An unknown key fails a theme file's parse and makes an override [fall back](#errors). In a theme file, modifier keys are plain booleans defaulting to `false`.
 
 ## Slots
 
@@ -232,12 +232,14 @@ Modifier flags use **three-state semantics**:
 
 So `accent = { bold = false }` removes bold from the base accent without disturbing its color, and `accent = { italic = true }` adds italic without removing the base bold. An entirely empty patch (`accent = {}`) warns and falls back to the base, since rewriting the base with itself is almost always a typo.
 
+Overrides from every [config layer](configuration.md#layers) merge by slot name, so a project can patch `error` while your user config patches `accent`. When two layers patch the same slot with inline tables, their fields combine and the later layer wins each field. Otherwise the later layer's patch replaces the earlier one.
+
 ## Errors
 
 Bisected severity:
 
-- **Theme selection errors** are fatal. An unknown built-in name with no matching file path, a file that cannot be read, or a file with a parse error in the base body stops oxide-code at startup with a message identifying what went wrong.
-- **Per-slot value errors** warn and fall back. If an override's color string can't be parsed, its slot name isn't recognized, or an inline patch is empty, oxide-code logs a warning and uses the base slot's value for that role. The TUI still launches.
+- **Theme selection errors** are fatal when the TUI starts. An unknown built-in name with no matching file path, a path that is not a regular file of at most 64 KiB, a file that cannot be read, or a file with a parse error in the base body stops oxide-code at startup with a message identifying what went wrong. `-p` and `--no-tui` runs never load the theme, so a theme error does not stop them.
+- **Per-slot value errors** warn and fall back. If an override's color string can't be parsed, its slot name isn't recognized, its patch is neither a color string nor a table of `fg`, `bg`, and modifier flags, or an inline patch is empty, oxide-code logs a warning and uses the base slot's value for that role. The TUI still launches.
 
 The default tracing level is `warn`, so per-slot fallback messages surface without requiring `RUST_LOG`. Routing depends on mode:
 
