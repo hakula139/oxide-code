@@ -2,6 +2,7 @@
 
 use std::borrow::Cow;
 
+use super::archive::{ArchiveCmd, UnarchiveCmd};
 use super::clear::ClearCmd;
 use super::compact::CompactCmd;
 use super::config::ConfigCmd;
@@ -56,6 +57,13 @@ impl SlashOutcome {
         match self {
             Self::Modal(modal) => modal,
             other => panic!("expected Modal, got {other:?}"),
+        }
+    }
+
+    pub(crate) fn into_system_message(self) -> String {
+        match self {
+            Self::SystemMessage(text) => text,
+            other => panic!("expected SystemMessage, got {other:?}"),
         }
     }
 }
@@ -117,6 +125,7 @@ pub(crate) trait SlashCommand: Sync {
 
 /// Alphabetical for stable `/help` and empty-query popup ordering.
 pub(super) const BUILT_INS: &[&dyn SlashCommand] = &[
+    &ArchiveCmd,
     &ClearCmd,
     &CompactCmd,
     &ConfigCmd,
@@ -130,6 +139,7 @@ pub(super) const BUILT_INS: &[&dyn SlashCommand] = &[
     &ResumeCmd,
     &StatusCmd,
     &ThemeCmd,
+    &UnarchiveCmd,
 ];
 
 /// Resolves `name` against canonical names first, then aliases.
@@ -182,7 +192,7 @@ mod tests {
         );
     }
 
-    // ── SlashOutcome::into_forward / into_modal ──
+    // ── SlashOutcome::into_forward / into_modal / into_system_message ──
 
     #[test]
     #[should_panic(expected = r#"expected Forward, got SystemMessage("done")"#)]
@@ -194,6 +204,12 @@ mod tests {
     #[should_panic(expected = r#"expected Modal, got GitDiff("+x")"#)]
     fn into_modal_names_the_variant_it_got() {
         SlashOutcome::GitDiff("+x".to_owned()).into_modal();
+    }
+
+    #[test]
+    #[should_panic(expected = "expected SystemMessage, got Forward(Clear)")]
+    fn into_system_message_names_the_variant_it_got() {
+        SlashOutcome::Forward(UserAction::Clear).into_system_message();
     }
 
     // ── BUILT_INS contract ──

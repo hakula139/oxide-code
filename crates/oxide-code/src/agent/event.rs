@@ -78,13 +78,16 @@ pub(crate) enum AgentEvent {
     AutoCompactionStarted,
     /// Background title generator finished, so the UI updates the chrome label.
     SessionTitleUpdated { session_id: String, title: String },
-    /// `/clear` rolled the session, making a new session UUID active.
-    SessionRolled { id: String },
+    /// `/clear` or `/archive` rolled the session, making a new session UUID active. `archived`
+    /// marks an `/archive` roll, so the UI can name the session it archived.
+    SessionRolled { id: String, archived: bool },
     /// `/resume` swapped to an existing session in place. Payload carries the target's
-    /// transcript so the UI can rebuild chat without restarting the process.
+    /// transcript so the UI can rebuild chat without restarting the process. `unarchived` reports
+    /// that the target stayed archived until this resume.
     SessionResumed {
         id: String,
         title: Option<String>,
+        unarchived: bool,
         messages: Vec<crate::message::Message>,
         compact: Option<crate::session::entry::CompactInfo>,
         tool_metadata: std::collections::HashMap<String, crate::tool::ToolMetadata>,
@@ -161,6 +164,8 @@ pub(crate) enum UserAction {
     /// submits it later, so the agent drops one that arrives after its turn ended.
     QueuePrompt(String),
     Clear,
+    /// Bare `/archive`: archive the live session, then roll to a fresh one like [`Self::Clear`].
+    Archive,
     /// `/resume <id-prefix>` or picker selection: swap to the session file at `path` in place.
     Resume {
         path: PathBuf,
@@ -506,6 +511,7 @@ mod tests {
             },
             AgentEvent::SessionRolled {
                 id: "rolled".to_owned(),
+                archived: true,
             },
             AgentEvent::ConfigChanged {
                 model: ModelSpec::resolve("claude-opus-5-5".to_owned()),

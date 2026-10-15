@@ -1,6 +1,7 @@
 //! Session actor — owns [`SessionState`] + writer, drains [`SessionCmd`]s, batches one flush
 //! per `recv()` wakeup. Receive-and-drain coalesces a turn's queued cmds before the first flush,
-//! except `/compact`, which ends the batch so later cmds see the committed synthetic root.
+//! except `/compact` and `/archive`. Each ends its batch so a failed one can be unqueued. Cmds
+//! after a compact see its committed synthetic root.
 //! Isolated writes flush immediately. No interval timer — see `docs/design/session/persistence.md`.
 
 use std::sync::Arc;
@@ -40,6 +41,9 @@ pub(super) enum SessionCmd {
         title: String,
         ack: oneshot::Sender<Outcome>,
     },
+    /// Bare `/archive`, sent just before the roll that finalizes the session. Ends its batch, and
+    /// its ack carries every write failure, since the driver rolls only once the entry is on disk.
+    Archive { ack: oneshot::Sender<Outcome> },
     Finish {
         /// Drained tracker snapshots; written as one `FileSnapshot` entry each plus a `Summary`.
         snapshots: Vec<FileSnapshot>,
@@ -70,6 +74,7 @@ enum PendingAck {
         ai_title_seed: Option<String>,
     },
     Outcome(oneshot::Sender<Outcome>),
+    Archive(oneshot::Sender<Outcome>),
     Compact {
         ack: oneshot::Sender<CompactOutcome>,
         pre_count: u32,
@@ -103,7 +108,8 @@ pub(super) async fn run(
             &shared,
             &mut should_exit,
         );
-        // Compact is a batch barrier: following records must see the committed synthetic root.
+        // Compact and archive are batch barriers. If either fails, its entries stay at the queue
+        // tail for `settle_barriers` to drop. Records after a compact see its synthetic root.
         while matches!(flow, BatchFlow::Continue)
             && let Ok(next) = rx.try_recv()
         {
@@ -125,7 +131,7 @@ pub(super) async fn run(
             }
             Ok(()) => None,
         };
-        settle_compact(&acks, &mut state, failure.is_none());
+        settle_barriers(&acks, &mut state, failure.is_none());
         deliver_acks(
             acks,
             failure.as_deref(),
@@ -162,25 +168,7 @@ fn absorb(
             BatchFlow::Continue
         }
         SessionCmd::ToolMetadata { items, ack } => {
-            // Default metadata adds no display fields; skip to avoid bloating the transcript.
-            let mut wrote_any = false;
-            for (tool_use_id, metadata) in items {
-                if metadata == ToolMetadata::default() {
-                    continue;
-                }
-                entries.push(Entry::ToolResultMetadata {
-                    tool_use_id,
-                    metadata,
-                    timestamp: now,
-                });
-                wrote_any = true;
-            }
-            if wrote_any {
-                acks.push(PendingAck::Outcome(ack));
-            } else {
-                // Empty / all-default batch — nothing to flush.
-                _ = ack.send(Outcome { failure: None });
-            }
+            absorb_tool_metadata(items, ack, now, entries, acks);
             BatchFlow::Continue
         }
         SessionCmd::AppendAiTitle { title, ack } => {
@@ -211,6 +199,14 @@ fn absorb(
                 }
             }
             BatchFlow::Continue
+        }
+        SessionCmd::Archive { ack } => {
+            entries.push(Entry::Archive {
+                archived: true,
+                at: now,
+            });
+            acks.push(PendingAck::Archive(ack));
+            BatchFlow::FlushNow
         }
         SessionCmd::Finish { snapshots, ack } => {
             entries.extend(state.finish_entries(snapshots, now));
@@ -244,15 +240,44 @@ fn absorb(
     }
 }
 
-/// Commits a flushed compact or abandons a failed one, matching what its ack tells the agent.
-fn settle_compact(acks: &[PendingAck], state: &mut SessionState, flushed: bool) {
+/// Queues one sidecar per item, skipping default metadata since it adds no display fields. Acks at
+/// once when nothing needs a flush.
+fn absorb_tool_metadata(
+    items: Vec<(String, ToolMetadata)>,
+    ack: oneshot::Sender<Outcome>,
+    now: OffsetDateTime,
+    entries: &mut Vec<Entry>,
+    acks: &mut Vec<PendingAck>,
+) {
+    let queued = entries.len();
+    entries.extend(
+        items
+            .into_iter()
+            .filter(|(_, metadata)| *metadata != ToolMetadata::default())
+            .map(|(tool_use_id, metadata)| Entry::ToolResultMetadata {
+                tool_use_id,
+                metadata,
+                timestamp: now,
+            }),
+    );
+    if entries.len() > queued {
+        acks.push(PendingAck::Outcome(ack));
+    } else {
+        _ = ack.send(Outcome { failure: None });
+    }
+}
+
+/// Commits a flushed compact, or abandons a failed compact or archive, matching what its ack tells
+/// the caller.
+fn settle_barriers(acks: &[PendingAck], state: &mut SessionState, flushed: bool) {
     for pending in acks {
-        if let PendingAck::Compact { synthetic_uuid, .. } = pending {
-            if flushed {
+        match pending {
+            PendingAck::Compact { synthetic_uuid, .. } if flushed => {
                 state.commit_compact(*synthetic_uuid);
-            } else {
-                state.abandon_compact();
             }
+            PendingAck::Compact { .. } => state.abandon_compact(),
+            PendingAck::Archive(_) if !flushed => state.abandon_archive(),
+            _ => {}
         }
     }
 }
@@ -269,6 +294,11 @@ fn deliver_acks(acks: Vec<PendingAck>, failure: Option<&str>, stopped: bool, sha
             PendingAck::Outcome(ack) => {
                 _ = ack.send(Outcome {
                     failure: surface_failure(failure, stopped, shared),
+                });
+            }
+            PendingAck::Archive(ack) => {
+                _ = ack.send(Outcome {
+                    failure: failure.map(str::to_owned),
                 });
             }
             PendingAck::Compact {
@@ -310,6 +340,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::super::handle::SharedState;
+    use super::super::store::SessionWriter;
     use super::super::store::testing::test_store;
     use super::*;
     use crate::message::Message;
@@ -848,6 +879,74 @@ mod tests {
                 Message::user("before compact"),
                 Message::user("after compact")
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn run_failed_archive_is_dropped_while_later_records_land() {
+        let dir = tempdir().unwrap();
+        let store = test_store(dir.path());
+        let original = SessionState::fresh(store.clone(), "m");
+        let session_id = original.session_id.to_string();
+        let (rec, _) = record_cmd("before archive");
+        drive(original, vec![rec]).await;
+        let path = super::super::store::testing::test_session_file(dir.path(), &session_id);
+        let last_uuid = store.load_session_data(&session_id).unwrap().last_uuid;
+        let state = SessionState::resumed(
+            store.clone(),
+            session_id.clone(),
+            SessionWriter::failing_once(&path),
+            last_uuid,
+            1,
+            true,
+        );
+        let (tx, rx) = mpsc::channel(4);
+        let actor = tokio::spawn(run(state, rx, Arc::new(SharedState::default())));
+
+        let (archive_ack, archive_rx) = oneshot::channel();
+        tx.send(SessionCmd::Archive { ack: archive_ack })
+            .await
+            .unwrap();
+        assert!(archive_rx.await.unwrap().failure.is_some());
+        let (rec, rec_rx) = record_cmd("after archive");
+        tx.send(rec).await.unwrap();
+        assert!(rec_rx.await.unwrap().failure.is_none());
+        drop(tx);
+        actor.await.unwrap();
+
+        let data = store.load_session_data(&session_id).unwrap();
+        assert!(!data.archived, "failed archive must not reach disk");
+        assert_eq!(
+            data.messages,
+            [
+                Message::user("before archive"),
+                Message::user("after archive")
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn run_failed_archive_reports_the_failure_after_an_earlier_one_surfaced() {
+        let dir = tempdir().unwrap();
+        let state = SessionState::fresh(test_store(dir.path()), "m");
+        let (tx, rx) = mpsc::channel(4);
+        let actor = tokio::spawn(run(state, rx, Arc::new(SharedState::default())));
+        std::fs::remove_dir_all(super::super::store::testing::test_project_dir(dir.path()))
+            .unwrap();
+
+        let (rec, rec_rx) = record_cmd("unsaved");
+        tx.send(rec).await.unwrap();
+        assert!(rec_rx.await.unwrap().failure.is_some());
+        let (archive_ack, archive_rx) = oneshot::channel();
+        tx.send(SessionCmd::Archive { ack: archive_ack })
+            .await
+            .unwrap();
+        drop(tx);
+        actor.await.unwrap();
+
+        assert!(
+            archive_rx.await.unwrap().failure.is_some(),
+            "the driver must see every archive failure, even after one was already surfaced",
         );
     }
 

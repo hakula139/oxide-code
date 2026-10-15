@@ -4,7 +4,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 ## Implementation
 
-13 built-ins: `/clear`, `/compact`, `/config`, `/delete`, `/diff`, `/effort`, `/help`, `/init`, `/model`, `/rename`, `/resume`, `/status`, `/theme`. Each lives in its own `slash/<name>.rs` file implementing `SlashCommand`. Adding one is a new file plus an entry in `BUILT_INS` (alphabetical).
+15 built-ins: `/archive`, `/clear`, `/compact`, `/config`, `/delete`, `/diff`, `/effort`, `/help`, `/init`, `/model`, `/rename`, `/resume`, `/status`, `/theme`, `/unarchive`. Each lives in its own `slash/<name>.rs` file implementing `SlashCommand`. Adding one is a new file plus an entry in `BUILT_INS` (alphabetical).
 
 - `/clear` rolls the session UUID and clears chat + file tracker.
 - `/compact` compresses the visible transcript into a summary and resets the continuation chain.
@@ -15,6 +15,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 - `/rename` sets the session title manually and locks out the AI title generator. Bare opens a single-line editor pre-filled with the current title.
 - `/resume` swaps to a different session in place. Bare opens a searchable picker, while typed-arg jumps directly. Full design: [resume.md](resume.md).
 - `/delete <id-prefix>` unlinks a saved session's JSONL after a Y/N confirm. The `/resume` picker offers the same gesture via Ctrl+D on the cursor row.
+- `/archive` and `/unarchive` set whether a session shows in default listings and bare `ox -c`. Bare `/archive` archives the live session and rolls like `/clear`.
 - `/config`, `/help`, and `/status` open a read-only [`KvOverview`](modals.md) modal. `/diff` is the lone printer because its output can run to hundreds of lines, where scrollback value beats modal cropping.
 
 ## Design Decisions
@@ -75,18 +76,22 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 - **`/delete`**: Typed-arg only, while bare returns a friendly redirect. Picker entry is Ctrl+D inside `/resume`. Both push `ConfirmDeleteSessionModal` ([modals.md](modals.md)), which runs `delete_at` on the session's file on Y / Enter and emits a `Deleted session {id}: {title}` line in chat. Live-session refusal is layered across the picker filter, the resolver, and the store-layer bail.
 
+- **`/archive`** / **`/unarchive`**: Bare `/archive` forwards `UserAction::Archive`. The engine appends an `Archive` entry to the live session, then rolls like `/clear` and emits `SessionRolled { archived: true }`, which the chat answers with a note naming the archived session. A session without messages has no file, so archiving one reports an error and stays put. The typed forms resolve a saved session other than the live one and call `set_archived_at` on its file synchronously, printing a confirmation, or a note when the session already has that state. `/archive <prefix>` refuses a prefix that matches only the live session and points at bare `/archive`, while `/unarchive` on the live session prints a no-op note. Both are `Mutating`. `/unarchive` is typed-arg only, and its bare form points at the picker's Ctrl+A view.
+
 ## Sources
 
-- `crates/oxide-code/src/agent.rs`: `agent_turn` `Clear` and `SwapConfig` arms.
-- `crates/oxide-code/src/session/display.rs`: shared `id_prefix`, `display_title`, and `format_metadata_line` used by the picker row and the delete confirm modal.
-- `crates/oxide-code/src/session/resolver.rs`: `resolve_prefix_to_info` (current-project-first, widen on miss, scoped error messages).
-- `crates/oxide-code/src/session/store.rs`: `delete_at` (live-session refusal at the FS boundary).
-- `crates/oxide-code/src/slash.rs`: dispatch, `SlashOutcome`, shared test fixtures (`stamped_id`, `with_isolated_xdg`).
-- `crates/oxide-code/src/slash/clear.rs`: `ClearCmd`, send-first ordering.
+- `crates/oxide-code/src/agent.rs`: `agent_turn` arms for `Clear` and `SwapConfig`.
+- `crates/oxide-code/src/engine.rs`: `Engine::archive`, which waits for the archive entry to reach disk before rolling the session.
+- `crates/oxide-code/src/session/display.rs`: shared `id_prefix`, `display_title`, and `format_metadata_line` for the picker row and delete confirm modal, plus `archive_notice`.
+- `crates/oxide-code/src/session/resolver.rs`: `resolve_prefix_to_info` checks the current project first, widens the search on a miss, and returns scoped error messages. `resolve_saved_prefix` distinguishes live-only matches for `/archive`, `/unarchive`, and `/delete`.
+- `crates/oxide-code/src/session/store.rs`: `delete_at`, which refuses to delete the live session at the filesystem boundary, and `set_archived_at`.
+- `crates/oxide-code/src/slash.rs`: dispatch, `SlashOutcome`, and shared test fixtures (`stamped_id`, `with_isolated_xdg`).
+- `crates/oxide-code/src/slash/archive.rs`: `ArchiveCmd` and `UnarchiveCmd`.
+- `crates/oxide-code/src/slash/clear.rs`: `ClearCmd` sends first.
 - `crates/oxide-code/src/slash/config.rs`: `/config` row builder plus sectioned `KvOverview` constructor.
 - `crates/oxide-code/src/slash/confirm.rs`: `ConfirmDeleteSessionModal` (destructive-action gate, sticky inline error cleared only on deliberate Y / N).
 - `crates/oxide-code/src/slash/context.rs`: `SlashContext` (`LiveSessionInfo` plus the live title).
-- `crates/oxide-code/src/slash/delete.rs`: `DeleteCmd` plus live-id-aware resolver wrapper.
+- `crates/oxide-code/src/slash/delete.rs`: `DeleteCmd` refuses prefixes that match only the live session.
 - `crates/oxide-code/src/slash/diff.rs`: `/diff` printer with 64 KB UTF-8-boundary cap.
 - `crates/oxide-code/src/slash/effort.rs`: `EffortCmd`, level parser.
 - `crates/oxide-code/src/slash/effort_slider.rs`: bare `/effort` Speed ↔ Intelligence slider modal.

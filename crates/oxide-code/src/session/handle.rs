@@ -15,7 +15,7 @@ use super::entry::CompactInfo;
 use super::sanitize::{retain_visible_file_snapshots, sanitize_resumed_messages};
 use super::state::{SessionState, extract_user_text};
 use super::store::{
-    SessionData, SessionStore, load_session_data_from_path, open_append_at,
+    SessionData, SessionStore, SessionWriter, load_session_data_from_path, open_append_at,
     read_session_id_from_path,
 };
 use crate::file_tracker::{FileSnapshot, FileTracker};
@@ -226,6 +226,24 @@ impl SessionHandle {
         })
     }
 
+    /// Marks the session archived, reporting every failure since the caller rolls away only once
+    /// the entry is on disk. Call it only after a message is recorded, since the entry would
+    /// otherwise create a file holding nothing else.
+    pub(crate) async fn archive(&self) -> Outcome {
+        let (ack, rx) = oneshot::channel();
+        if self.cmd_tx.send(SessionCmd::Archive { ack }).await.is_ok()
+            && let Ok(outcome) = rx.await
+        {
+            return outcome;
+        }
+        let failure = self
+            .actor_gone_failure()
+            .unwrap_or_else(|| "Session writer task has stopped.".to_owned());
+        Outcome {
+            failure: Some(failure),
+        }
+    }
+
     /// Write the session summary and finalize. Idempotent no-op on fresh sessions that never
     /// recorded anything. `snapshots` are written as `Entry::FileSnapshot` ahead of the summary.
     pub(crate) async fn finish(&self, snapshots: Vec<FileSnapshot>) -> Outcome {
@@ -315,6 +333,8 @@ pub(crate) struct ResumedSession {
     pub(crate) context: Option<SessionContext>,
     pub(crate) compact: Option<CompactInfo>,
     pub(crate) title: Option<String>,
+    /// The session was archived, so resuming it appended an entry unarchiving it.
+    pub(crate) unarchived: bool,
     pub(crate) tool_result_metadata: HashMap<String, ToolMetadata>,
     /// Persisted tracker snapshots passed to `FileTracker::restore_verified` so the
     /// Read-before-Edit gate clears for files that still match disk.
@@ -363,6 +383,7 @@ pub(crate) struct RollIntoOutcome {
     pub(crate) context: Option<SessionContext>,
     pub(crate) compact: Option<CompactInfo>,
     pub(crate) title: Option<String>,
+    pub(crate) unarchived: bool,
     pub(crate) tool_result_metadata: HashMap<String, ToolMetadata>,
     pub(crate) finalize_failure: Option<String>,
     /// Tracker snapshots that drifted on disk between save and resume — caller surfaces these so
@@ -375,7 +396,8 @@ pub(crate) struct RollIntoOutcome {
 ///
 /// Bails _without swapping_ when the target id matches the live session (would race the
 /// in-flight append-writer) or can't be loaded (missing file, parse error, empty after sanitize,
-/// open-append failure) — caller stays on the old session and surfaces the error.
+/// open-append failure, failed unarchive write). The caller stays on the old session and surfaces
+/// the error.
 pub(crate) async fn roll_into(
     session: &mut SessionHandle,
     store: &SessionStore,
@@ -392,6 +414,7 @@ pub(crate) async fn roll_into(
         context,
         compact,
         title,
+        unarchived,
         tool_result_metadata,
         file_snapshots,
     } = resume_from_path(store, target)?;
@@ -407,13 +430,15 @@ pub(crate) async fn roll_into(
         context,
         compact,
         title,
+        unarchived,
         tool_result_metadata,
         finalize_failure,
         drifted_paths,
     })
 }
 
-/// Resumes the session file at `path`: loads, sanitizes, opens it for append, and spawns the actor.
+/// Resumes the session file at `path`: loads, sanitizes, opens it for append, unarchives it, and
+/// spawns the actor.
 pub(crate) fn resume_from_path(store: &SessionStore, path: &Path) -> Result<ResumedSession> {
     let session_id = read_session_id_from_path(path)?;
     let data = load_session_data_from_path(path)?;
@@ -425,7 +450,7 @@ fn from_resumed_data(
     store: &SessionStore,
     session_id: String,
     mut data: SessionData,
-    writer: super::store::SessionWriter,
+    mut writer: SessionWriter,
 ) -> Result<ResumedSession> {
     let pre_sanitize_len = data.messages.len();
     sanitize_resumed_messages(&mut data.messages);
@@ -435,6 +460,9 @@ fn from_resumed_data(
         bail!("session {session_id}: sanitize dropped all messages");
     }
     retain_visible_file_snapshots(&mut data.file_snapshots, &data.messages);
+    if data.archived {
+        writer.set_archived(false)?;
+    }
 
     let first_user_prompt_seen =
         data.messages.iter().any(|m| extract_user_text(m).is_some()) || data.title.is_some();
@@ -456,6 +484,7 @@ fn from_resumed_data(
         context: data.context,
         compact: data.compact,
         title,
+        unarchived: data.archived,
         tool_result_metadata: data.tool_result_metadata,
         file_snapshots: data.file_snapshots,
     })
@@ -952,6 +981,53 @@ mod tests {
             outcome.failure.is_none(),
             "acked path must report no failure"
         );
+    }
+
+    // ── archive ──
+
+    #[tokio::test]
+    async fn archive_holds_until_the_next_resume_unarchives_the_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let original = start(&store, "m");
+        let session_id = original.session_id().to_owned();
+        original.record_message(Message::user("hello")).await;
+
+        let outcome = original.archive().await;
+        assert!(outcome.failure.is_none());
+        original.shutdown().await;
+        assert!(store.load_session_data(&session_id).unwrap().archived);
+
+        let resumed = resume_id(&store, &session_id).unwrap();
+        assert!(resumed.unarchived);
+        assert_eq!(resumed.messages, [Message::user("hello")]);
+        resumed.handle.shutdown().await;
+        assert!(!store.load_session_data(&session_id).unwrap().archived);
+
+        let again = resume_id(&store, &session_id).unwrap();
+        assert!(!again.unarchived);
+        again.handle.shutdown().await;
+        let jsonl = std::fs::read_to_string(test_session_file(dir.path(), &session_id)).unwrap();
+        assert_eq!(
+            jsonl.matches(r#"{"type":"archive""#).count(),
+            2,
+            "resuming an active session appends no archive entry",
+        );
+    }
+
+    #[tokio::test]
+    async fn archive_reports_every_failure_to_reach_the_actor() {
+        let dead = testing::dead("dead");
+        assert!(dead.archive().await.failure.is_some());
+        assert!(
+            dead.archive().await.failure.is_some(),
+            "a second failure must not read as success once actor-gone was surfaced",
+        );
+
+        let stalled = testing::acks_then_drops("stalled", 1);
+        assert!(stalled.archive().await.failure.is_none());
+        assert!(stalled.archive().await.failure.is_some());
+        stalled.shutdown().await;
     }
 
     // ── finish ──
