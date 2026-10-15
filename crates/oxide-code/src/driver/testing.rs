@@ -1,6 +1,7 @@
 //! Test-only [`Conversation`] fixtures. Child of `driver` so it can build the private fields.
 
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use wiremock::matchers::{method, path};
@@ -47,10 +48,15 @@ pub(super) async fn conversation(
 }
 
 /// Runs `test` with `HOME` pinned to an empty directory, so context loads find no user
-/// instructions even while parallel tests swap `HOME`.
-pub(super) async fn with_pinned_home(test: impl Future<Output = ()>) {
-    let home = tempfile::tempdir().unwrap();
-    temp_env::async_with_vars([("HOME", Some(home.path()))], test).await;
+/// instructions even while parallel tests swap `HOME`. Boxed, since a whole test body is too large
+/// a future to hold on the stack.
+pub(super) fn with_pinned_home<'a>(
+    test: impl Future<Output = ()> + 'a,
+) -> Pin<Box<dyn Future<Output = ()> + 'a>> {
+    Box::pin(async {
+        let home = tempfile::tempdir().unwrap();
+        temp_env::async_with_vars([("HOME", Some(home.path()))], test).await;
+    })
 }
 
 /// Answers every Messages request with a streamed reply of `text`.
