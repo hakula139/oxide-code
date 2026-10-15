@@ -4,8 +4,8 @@ How to install `ox` on macOS, Linux, and Windows. For first-run setup once insta
 
 ## System requirements
 
-- **OS**: macOS 12+, a recent glibc-based Linux, or Windows 10+. Alpine / musl-based Linux needs the source-build path.
-- **Architecture**: `x86_64` everywhere, plus `aarch64` on macOS (Apple Silicon)
+- **OS**: macOS 12+, Linux with glibc 2.39 or later (such as Ubuntu 24.04, Debian 13, Fedora 40, or RHEL 10), or Windows 10+. Older glibc and musl-based Linux, such as Alpine, need a source build.
+- **Architecture**: prebuilt binaries cover `aarch64` macOS (Apple Silicon) and `x86_64` Linux and Windows. Other platforms, including Intel Macs, need a source build.
 - **Network**: outbound HTTPS to `api.anthropic.com`
 - **Windows only**: [Git for Windows](https://git-scm.com/downloads/win) with `git.exe` on `PATH`, since the bash tool runs the `bash.exe` it ships
 - **From-source builds only**: [Rust](https://www.rust-lang.org/tools/install) 1.91+
@@ -25,10 +25,6 @@ VERSION=v0.1.0-alpha.2
 curl -fsSL "https://github.com/hakula139/oxide-code/releases/download/$VERSION/oxide-code-aarch64-apple-darwin.tar.gz" | tar -xz
 sudo mv ox /usr/local/bin/
 
-# macOS x86_64 (Intel)
-curl -fsSL "https://github.com/hakula139/oxide-code/releases/download/$VERSION/oxide-code-x86_64-apple-darwin.tar.gz" | tar -xz
-sudo mv ox /usr/local/bin/
-
 # Linux x86_64
 curl -fsSL "https://github.com/hakula139/oxide-code/releases/download/$VERSION/oxide-code-x86_64-unknown-linux-gnu.tar.gz" | tar -xz
 sudo mv ox /usr/local/bin/
@@ -38,9 +34,15 @@ curl -fsSLO "https://github.com/hakula139/oxide-code/releases/download/$VERSION/
 unzip oxide-code-x86_64-pc-windows-msvc.zip
 ```
 
-Each archive ships a single `ox` executable, and each release publishes an `oxide-code-<target>.sha256` checksum beside it.
+Each archive ships a single `ox` executable, and each release publishes an `oxide-code-<target>.sha256` checksum beside it. Releases after `v0.1.0-alpha.2` also carry a build provenance attestation, which ties each archive to the release workflow run that built it. To verify one with the GitHub CLI before extracting it, download the archive to disk first:
 
-### Homebrew (macOS, Linux)
+```bash
+curl -fsSLO "https://github.com/hakula139/oxide-code/releases/download/$VERSION/oxide-code-aarch64-apple-darwin.tar.gz"
+gh attestation verify oxide-code-aarch64-apple-darwin.tar.gz --repo hakula139/oxide-code
+tar -xzf oxide-code-aarch64-apple-darwin.tar.gz
+```
+
+### Homebrew (Apple Silicon macOS, x86_64 Linux)
 
 Tap this repo, then install:
 
