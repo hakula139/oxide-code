@@ -119,8 +119,11 @@ impl Client {
 
         // No whole-request timeout because responses can run for minutes. The 60 s read timeout
         // catches slowloris dribble. Anthropic sends keepalives every ~15 s on healthy streams.
+        // reqwest strips only `Authorization` and `Cookie` on a cross-host redirect, so following
+        // one would carry `x-api-key` and the custom headers to another host.
         let builder = reqwest::Client::builder()
             .default_headers(headers)
+            .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(15))
             .read_timeout(Duration::from_mins(1));
         let builder = apply_extra_ca_certs(builder, config.extra_ca_certs.as_deref())?;
@@ -1318,6 +1321,43 @@ mod tests {
             .expect("error event must be delivered");
         assert_eq!(err.error_type, "invalid_request_error");
         assert_eq!(err.message, "Bad block");
+    }
+
+    #[tokio::test]
+    async fn stream_message_redirect_is_not_followed() {
+        let elsewhere = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&elsewhere)
+            .await;
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(307)
+                    .insert_header("location", format!("{}/v1/messages", elsewhere.uri())),
+            )
+            .mount(&server)
+            .await;
+
+        let client = Client::new(
+            test_config(server.uri(), api_key(), TEST_MODEL),
+            Some("sid".to_owned()),
+        )
+        .unwrap();
+        let rx = client
+            .stream_message(&[Message::user("hi")], &[], None, &[])
+            .unwrap();
+        let err = collect_events(rx).await.expect_err("redirect must fail");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.starts_with(
+                "Anthropic API endpoint redirected (HTTP 307 Temporary Redirect) to 127.0.0.1."
+            ),
+            "{msg}"
+        );
+        elsewhere.verify().await;
     }
 
     #[tokio::test]

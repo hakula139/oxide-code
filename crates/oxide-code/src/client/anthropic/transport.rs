@@ -204,9 +204,10 @@ async fn error_for_status(
             .map(str::to_owned)
     };
     let retry_after = header("retry-after").as_deref().and_then(parse_retry_after);
+    let location = header("location");
     let should_retry = header("x-should-retry");
     let body = response.text().await.unwrap_or_default();
-    let diagnostic = format_api_error(auth, status, retry_after, &body);
+    let diagnostic = format_api_error(auth, status, retry_after, location.as_deref(), &body);
     let error = if status == StatusCode::BAD_REQUEST
         && let Some(message) = prompt_too_long_message(&body)
     {
@@ -284,9 +285,20 @@ fn format_api_error(
     auth: AuthSource,
     status: StatusCode,
     retry_after: Option<Duration>,
+    location: Option<&str>,
     body: &str,
 ) -> String {
     let prefix = match status.as_u16() {
+        300..=399 => {
+            let target = location
+                .and_then(|location| reqwest::Url::parse(location).ok())
+                .and_then(|url| url.host_str().map(|host| format!(" to {host}")))
+                .unwrap_or_default();
+            format!(
+                "Anthropic API endpoint redirected (HTTP {status}){target}. Redirects are not \
+                 followed, so point the base URL at the final endpoint."
+            )
+        }
         401 => format!(
             "Anthropic API rejected credentials (HTTP 401). {}",
             auth.rejection_hint(),
@@ -544,6 +556,7 @@ mod tests {
             (500, true),
             (502, true),
             (529, true),
+            (307, false),
             (400, false),
             (401, false),
             (404, false),
@@ -750,8 +763,34 @@ mod tests {
         ] {
             let status = StatusCode::from_u16(status).unwrap();
             assert_eq!(
-                format_api_error(AuthSource::OAuthTokenEnv, status, retry_after, "body"),
+                format_api_error(AuthSource::OAuthTokenEnv, status, retry_after, None, "body"),
                 format!("{prefix} Details: body"),
+            );
+        }
+    }
+
+    #[test]
+    fn format_api_error_3xx_names_the_redirect_host() {
+        let redirected = "Anthropic API endpoint redirected (HTTP 307 Temporary Redirect)";
+        let advice = "Redirects are not followed, so point the base URL at the final endpoint.";
+        for (location, target) in [
+            (
+                Some("https://other.example.com/v1/messages"),
+                " to other.example.com",
+            ),
+            (Some("/v2/messages"), ""),
+            (None, ""),
+        ] {
+            assert_eq!(
+                format_api_error(
+                    AuthSource::ApiKeyEnv,
+                    StatusCode::TEMPORARY_REDIRECT,
+                    None,
+                    location,
+                    "moved",
+                ),
+                format!("{redirected}{target}. {advice} Details: moved"),
+                "{location:?}",
             );
         }
     }
