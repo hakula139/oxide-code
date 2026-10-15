@@ -72,6 +72,7 @@ pub(crate) fn acks_then_drops(session_id: &str, succeed: usize) -> SessionHandle
                     });
                 }
                 SessionCmd::ToolMetadata { ack, .. }
+                | SessionCmd::Usage { ack, .. }
                 | SessionCmd::AppendAiTitle { ack, .. }
                 | SessionCmd::SetManualTitle { ack, .. }
                 | SessionCmd::Archive { ack }

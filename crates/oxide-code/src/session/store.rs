@@ -15,7 +15,7 @@ use tracing::{debug, warn};
 use uuid::Uuid;
 
 use super::chain::{Chain, ChainBuilder};
-use super::entry::{CURRENT_VERSION, CompactInfo, Entry, TitleInfo};
+use super::entry::{CURRENT_VERSION, CompactInfo, Entry, TitleInfo, UsageRecord};
 use super::path::{UNKNOWN_PROJECT_DIR, sanitize_cwd};
 use crate::file_tracker::FileSnapshot;
 use crate::message::Message;
@@ -137,6 +137,8 @@ struct SessionDataBuilder {
     compact_tail_uuids: Option<HashSet<Uuid>>,
     compact_tail_accepts_sidecars: bool,
     tool_result_metadata: HashMap<String, ToolMetadata>,
+    usage: Vec<UsageRecord>,
+    usage_uuids: HashSet<Uuid>,
     file_snapshots: Vec<FileSnapshot>,
 }
 
@@ -152,6 +154,8 @@ impl SessionDataBuilder {
             compact_tail_uuids: None,
             compact_tail_accepts_sidecars: true,
             tool_result_metadata: HashMap::new(),
+            usage: Vec::new(),
+            usage_uuids: HashSet::new(),
             file_snapshots: Vec::new(),
         }
     }
@@ -188,6 +192,9 @@ impl SessionDataBuilder {
                 ..
             } if self.accepts_sidecar() => {
                 self.tool_result_metadata.insert(tool_use_id, metadata);
+            }
+            Entry::Usage { uuid, usage, .. } if self.usage_uuids.insert(uuid) => {
+                self.usage.push(usage);
             }
             Entry::FileSnapshot { snapshot } if self.accepts_sidecar() => {
                 self.file_snapshots.push(snapshot);
@@ -290,6 +297,7 @@ impl SessionDataBuilder {
             title: self.latest_title,
             archived: self.archived,
             tool_result_metadata: self.tool_result_metadata,
+            usage: self.usage,
             file_snapshots: self.file_snapshots,
         }
     }
@@ -411,6 +419,8 @@ pub(crate) struct SessionData {
     pub(crate) title: Option<TitleInfo>,
     pub(crate) archived: bool,
     pub(crate) tool_result_metadata: HashMap<String, ToolMetadata>,
+    /// Every billed request in the file, on any branch and across compactions.
+    pub(crate) usage: Vec<UsageRecord>,
     pub(crate) file_snapshots: Vec<FileSnapshot>,
 }
 
@@ -612,6 +622,7 @@ mod tests {
         sample_title_entry, test_session_file, test_store,
     };
     use super::*;
+    use crate::config::PromptCacheTtl;
     use crate::message::ContentBlock;
     use crate::prompt::PromptParts;
     use crate::util::path::testing::HOME_VAR;
@@ -1391,6 +1402,52 @@ mod tests {
         );
         assert_eq!(data.file_snapshots.len(), 1);
         assert!(data.file_snapshots[0].path.ends_with("valid.txt"));
+    }
+
+    #[test]
+    fn load_session_data_collects_usage_once_on_every_branch_and_across_compactions() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let created_at = datetime!(2026-01-01 00:00:00 UTC);
+        let path = test_project_path(dir.path(), &session_filename("billed", created_at));
+        fs::write(
+            &path,
+            indoc! {r#"
+                {"type":"header","session_id":"billed","cwd":"/","model":"m","created_at":"2026-01-01T00:00:00Z","version":1}
+                {"type":"message","uuid":"00000000-0000-4000-8000-000000000001","message":{"role":"user","content":[{"type":"text","text":"prompt"}]},"timestamp":"2026-01-01T00:00:01Z"}
+                {"type":"message","uuid":"00000000-0000-4000-8000-000000000002","parent_uuid":"00000000-0000-4000-8000-000000000001","message":{"role":"assistant","content":[{"type":"text","text":"abandoned"}]},"timestamp":"2026-01-01T00:00:02Z"}
+                {"type":"usage","uuid":"00000000-0000-4000-8000-0000000000a1","model":"claude-opus-5-5","cache_ttl":"5m","input_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":10,"timestamp":"2026-01-01T00:00:02Z"}
+                {"type":"message","uuid":"00000000-0000-4000-8000-000000000003","parent_uuid":"00000000-0000-4000-8000-000000000001","message":{"role":"assistant","content":[{"type":"text","text":"kept"}]},"timestamp":"2026-01-01T00:00:03Z"}
+                {"type":"usage","uuid":"00000000-0000-4000-8000-0000000000a2","model":"claude-sonnet-5-5","cache_ttl":"1h","input_tokens":2,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":20,"timestamp":"2026-01-01T00:00:03Z"}
+                {"type":"compact","summary":"summary","pre_message_count":2,"timestamp":"2026-01-01T00:00:04Z"}
+                {"type":"message","uuid":"00000000-0000-4000-8000-000000000004","message":{"role":"user","content":[{"type":"text","text":"summary"}]},"timestamp":"2026-01-01T00:00:04Z"}
+                {"type":"usage","uuid":"00000000-0000-4000-8000-0000000000a3","model":"claude-opus-5-5","cache_ttl":"5m","input_tokens":3,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":30,"timestamp":"2026-01-01T00:00:05Z"}
+                {"type":"usage","uuid":"00000000-0000-4000-8000-0000000000a3","model":"claude-opus-5-5","cache_ttl":"5m","input_tokens":3,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":30,"timestamp":"2026-01-01T00:00:05Z"}
+            "#},
+        )
+        .unwrap();
+
+        let data = store.load_session_data("billed").unwrap();
+        assert_eq!(data.messages, [Message::user("summary")]);
+        let usage: Vec<_> = data
+            .usage
+            .iter()
+            .map(|record| {
+                (
+                    record.model.as_str(),
+                    record.cache_ttl,
+                    record.tokens.input_tokens(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            usage,
+            [
+                ("claude-opus-5-5", PromptCacheTtl::FiveMin, 1),
+                ("claude-sonnet-5-5", PromptCacheTtl::OneHour, 2),
+                ("claude-opus-5-5", PromptCacheTtl::FiveMin, 3),
+            ]
+        );
     }
 
     #[test]

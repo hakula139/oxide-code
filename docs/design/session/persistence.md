@@ -15,6 +15,7 @@ Every session is a single append-only `.jsonl` file with one JSON object per lin
 | `title`                | Re-appended    | Session title + source. Latest wins                                 |
 | `tool_result_metadata` | Sidecar        | Display metadata for replaying tool results                         |
 | `file_snapshot`        | Sidecar        | File-tracker state restored on resume when disk state still matches |
+| `usage`                | After request  | One billed request's token usage, model, and prompt-cache TTL       |
 | `context`              | Before message | Prompt context of that message. Latest on the resolved chain wins   |
 | `compact`              | Boundary       | Summary boundary plus pre-compact count and optional instructions   |
 | `archive`              | Re-appended    | Archive state: `archived` + `at`. Latest wins                       |
@@ -52,7 +53,7 @@ Writer recovery follows these rules:
 - A failed append drops the writer's file handle, and the next append reopens the same path, including for sessions resumed from an explicit path.
 - A failed flush with more than 8 MiB to write drops the queue and stops persistence for the rest of the session.
 
-Every append first terminates a torn last line, so a crash mid-write loses only the batch it interrupted, none of which was acknowledged. A failed append truncates the bytes it wrote unless another process has appended since, so a retry never duplicates a line. A compact whose write fails is unqueued and never committed, matching the agent, which keeps its pre-compact transcript. The loader applies a compact boundary only once its post-compact root follows, so a boundary whose root never landed leaves the old chain in place.
+Every append first terminates a torn last line, so a crash mid-write loses only the batch it interrupted, none of which was acknowledged. A failed append truncates the bytes it wrote unless another process has appended since. When it cannot truncate, the retry repeats the lines that landed, and the loader keeps one copy of each message and `usage` entry by its `uuid`. A compact whose write fails is unqueued and never committed, matching the agent, which keeps its pre-compact transcript. The loader applies a compact boundary only once its post-compact root follows, so a boundary whose root never landed leaves the old chain in place.
 
 ### Lazy materialization
 
@@ -82,6 +83,12 @@ There is no file-level lock: two processes resuming the same session both append
 ### AI-generated titles
 
 In the TUI, the first user prompt of a fresh session spawns a detached tokio task that asks Haiku through `Client::complete` for a 3-7 word sentence-case title, constrained by a structured-outputs JSON schema. Failures only log a warning.
+
+### Session cost
+
+Each request behind a turn, a `/compact` summary, or an auto-compaction summary appends a `usage` entry, while the background title request goes unrecorded. The entry holds a `uuid`, the request's `model` id and `cache_ttl` (`"5m"` or `"1h"`), the four provider counts `input_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`, and `output_tokens`, and a `timestamp`. The model and TTL let the engine price the request at the rates it ran with, even after a `/model` swap or a TTL change.
+
+On resume, the loader collects every `usage` entry in the file, including those on abandoned branches and before compact boundaries, since the session paid for each. The engine sums their estimated cost into the session total, which `/clear` resets with the fresh session. A file without `usage` entries resumes with a cost of zero. Older binaries skip `usage` lines as unknown entries and still resume the transcript.
 
 ### Write-error surfacing
 

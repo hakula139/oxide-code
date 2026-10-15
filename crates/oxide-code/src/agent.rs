@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::future::Future;
 
 use anyhow::{Context, Result, anyhow, bail};
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
@@ -91,49 +92,53 @@ impl AgentClient for Client {
 
 // ── Agent Turn ──
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[expect(
+    clippy::struct_field_names,
+    reason = "field names mirror Anthropic's usage payload, which session `usage` entries reuse"
+)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct TokenUsage {
-    input: u32,
-    cache_creation_input: u32,
-    cache_read_input: u32,
-    output: u32,
+    input_tokens: u32,
+    cache_creation_input_tokens: u32,
+    cache_read_input_tokens: u32,
+    output_tokens: u32,
 }
 
 impl TokenUsage {
     #[cfg(test)]
     pub(crate) const fn new(input_tokens: u32, output_tokens: u32) -> Self {
         Self {
-            input: input_tokens,
-            cache_creation_input: 0,
-            cache_read_input: 0,
-            output: output_tokens,
+            input_tokens,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+            output_tokens,
         }
     }
 
     pub(crate) const fn context_tokens(self) -> u32 {
-        self.input
-            .saturating_add(self.cache_creation_input)
-            .saturating_add(self.cache_read_input)
+        self.input_tokens
+            .saturating_add(self.cache_creation_input_tokens)
+            .saturating_add(self.cache_read_input_tokens)
     }
 
     pub(crate) const fn total_tokens(self) -> u32 {
-        self.context_tokens().saturating_add(self.output)
+        self.context_tokens().saturating_add(self.output_tokens)
     }
 
     pub(crate) const fn input_tokens(self) -> u32 {
-        self.input
+        self.input_tokens
     }
 
     pub(crate) const fn cache_creation_input_tokens(self) -> u32 {
-        self.cache_creation_input
+        self.cache_creation_input_tokens
     }
 
     pub(crate) const fn cache_read_input_tokens(self) -> u32 {
-        self.cache_read_input
+        self.cache_read_input_tokens
     }
 
     pub(crate) const fn output_tokens(self) -> u32 {
-        self.output
+        self.output_tokens
     }
 
     fn observe(&mut self, usage: &Usage) {
@@ -142,16 +147,16 @@ impl TokenUsage {
         // reports `output_tokens` with the input fields zeroed. Treat zero as "not reported here"
         // so successive observations layer correctly into one snapshot.
         if usage.input_tokens > 0 {
-            self.input = usage.input_tokens;
+            self.input_tokens = usage.input_tokens;
         }
         if usage.cache_creation_input_tokens > 0 {
-            self.cache_creation_input = usage.cache_creation_input_tokens;
+            self.cache_creation_input_tokens = usage.cache_creation_input_tokens;
         }
         if usage.cache_read_input_tokens > 0 {
-            self.cache_read_input = usage.cache_read_input_tokens;
+            self.cache_read_input_tokens = usage.cache_read_input_tokens;
         }
         if usage.output_tokens > 0 {
-            self.output = usage.output_tokens;
+            self.output_tokens = usage.output_tokens;
         }
     }
 }
@@ -1911,10 +1916,10 @@ mod tests {
     #[test]
     fn token_usage_context_and_total_include_cache_tokens() {
         let usage = TokenUsage {
-            input: 10,
-            cache_creation_input: 20,
-            cache_read_input: 30,
-            output: 5,
+            input_tokens: 10,
+            cache_creation_input_tokens: 20,
+            cache_read_input_tokens: 30,
+            output_tokens: 5,
         };
 
         assert_eq!(usage.context_tokens(), 60);
@@ -1948,10 +1953,10 @@ mod tests {
             &mut pending,
             None,
             Some(TokenUsage {
-                input: 20,
-                cache_creation_input: 0,
-                cache_read_input: 0,
-                output: 1,
+                input_tokens: 20,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+                output_tokens: 1,
             }),
         )
         .await
@@ -2001,10 +2006,10 @@ mod tests {
                 spent: &mut Vec::new(),
             }),
             Some(TokenUsage {
-                input: 20,
-                cache_creation_input: 0,
-                cache_read_input: 0,
-                output: 1,
+                input_tokens: 20,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+                output_tokens: 1,
             }),
         )
         .await
@@ -2048,10 +2053,10 @@ mod tests {
                 spent: &mut Vec::new(),
             }),
             Some(TokenUsage {
-                input: 20,
-                cache_creation_input: 0,
-                cache_read_input: 0,
-                output: 1,
+                input_tokens: 20,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+                output_tokens: 1,
             }),
         )
         .await
@@ -2102,10 +2107,10 @@ mod tests {
                 spent: &mut Vec::new(),
             }),
             Some(TokenUsage {
-                input: 20,
-                cache_creation_input: 0,
-                cache_read_input: 0,
-                output: 1,
+                input_tokens: 20,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+                output_tokens: 1,
             }),
         )
         .await
@@ -2155,10 +2160,10 @@ mod tests {
                 spent: &mut Vec::new(),
             }),
             Some(TokenUsage {
-                input: 20,
-                cache_creation_input: 0,
-                cache_read_input: 0,
-                output: 1,
+                input_tokens: 20,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+                output_tokens: 1,
             }),
         )
         .await
@@ -2190,10 +2195,10 @@ mod tests {
         let mut pending = Vec::new();
         let mut failures = MAX_AUTO_COMPACT_FAILURES - 1;
         let usage = Some(TokenUsage {
-            input: 50_000,
-            cache_creation_input: 0,
-            cache_read_input: 0,
-            output: 1,
+            input_tokens: 50_000,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+            output_tokens: 1,
         });
 
         let first = auto_compact_if_needed(
@@ -2289,10 +2294,10 @@ mod tests {
             &mut pending,
             Some(&mut auto),
             Some(TokenUsage {
-                input: 20,
-                cache_creation_input: 0,
-                cache_read_input: 0,
-                output: 1,
+                input_tokens: 20,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+                output_tokens: 1,
             }),
         );
         let queue_prompt = async {
@@ -2369,10 +2374,10 @@ mod tests {
                 spent: &mut Vec::new(),
             }),
             Some(TokenUsage {
-                input: 20,
-                cache_creation_input: 0,
-                cache_read_input: 0,
-                output: 1,
+                input_tokens: 20,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+                output_tokens: 1,
             }),
         )
         .await

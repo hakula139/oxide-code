@@ -21,7 +21,7 @@ use crate::message::{ContentBlock, Message};
 use crate::model::{ModelSpec, ResolvedModelId};
 use crate::prompt::{self, PromptParts, SessionContext, UserContext};
 use crate::protocol::{Event, EventSink, Interaction, Op, UsageSnapshot};
-use crate::session::entry::CompactInfo;
+use crate::session::entry::{CompactInfo, UsageRecord};
 use crate::session::handle::{self, LoadedTranscript, SessionHandle};
 use crate::session::history;
 use crate::session::store::SessionStore;
@@ -127,6 +127,7 @@ impl Engine {
             context,
             compact,
             tool_metadata,
+            usage,
         } = transcript;
         let prompt_unrecorded = context.is_none();
         let prompt = session_prompt(context, client.model(), &cwd).await;
@@ -146,7 +147,7 @@ impl Engine {
             auto_compaction_failures: 0,
             last_usage: None,
             displayed_usage: None,
-            total_estimated_cost_usd: 0.0,
+            total_estimated_cost_usd: estimate_cost_usd(&usage),
         }
     }
 
@@ -178,6 +179,7 @@ impl Engine {
         let (ops, op_rx) = mpsc::channel(OP_CHANNEL_CAP);
         let (event_tx, events) = mpsc::unbounded_channel();
         let sink = ChannelSink(event_tx);
+        self.emit_usage_update(&sink);
         report_drift(&sink, drifted);
         agent::notify_if_interrupted(&self.messages, &sink);
         let task = EngineTask(tokio::spawn(self.run(sink, op_rx)));
@@ -274,7 +276,7 @@ impl Engine {
             &gate,
         )
         .await;
-        self.account_usage(sink, &report);
+        self.account_usage(sink, &report).await;
         match result {
             Ok(()) => {
                 sink.emit(Event::TurnComplete, "turn-complete");
@@ -310,7 +312,7 @@ impl Engine {
             self.last_usage,
         )
         .await;
-        self.bill(&spent);
+        self.bill(sink, &spent).await;
         if matches!(compacted, Ok(true)) {
             self.refresh_prompt().await;
             self.reset_context_usage();
@@ -344,7 +346,7 @@ impl Engine {
             &mut pending,
         )
         .await;
-        self.bill(&spent);
+        self.bill(sink, &spent).await;
         let summary = match summary {
             Ok(Ok(summary)) => summary,
             Ok(Err(e)) => {
@@ -459,6 +461,7 @@ impl Engine {
             },
             "session-resumed",
         );
+        self.emit_usage_update(sink);
         // `SessionResumed` clears the chat, so anything about the old session must follow it.
         if let Some(failure) = outcome.finalize_failure {
             sink.emit(
@@ -478,6 +481,7 @@ impl Engine {
             context,
             compact,
             tool_metadata,
+            usage,
         } = transcript;
         self.client
             .set_session_id(self.session.session_id().to_owned());
@@ -486,7 +490,8 @@ impl Engine {
         self.tool_metadata = tool_metadata;
         self.prompt_unrecorded = context.is_none();
         self.prompt = session_prompt(context, self.client.model(), &self.cwd).await;
-        self.reset_usage();
+        self.reset_context_usage();
+        self.total_estimated_cost_usd = estimate_cost_usd(&usage);
     }
 
     async fn rename(&self, sink: &dyn EventSink, title: String) {
@@ -531,23 +536,33 @@ impl Engine {
         self.emit_usage_update(sink);
     }
 
-    fn account_usage(&mut self, sink: &dyn EventSink, report: &TurnReport) {
+    async fn account_usage(&mut self, sink: &dyn EventSink, report: &TurnReport) {
         self.last_usage = report.usage;
         if let Some(usage) = report.usage {
             self.displayed_usage = Some(usage);
         }
-        self.bill(&report.billable_rounds);
+        self.bill(sink, &report.billable_rounds).await;
         if report.usage.is_some() || !report.billable_rounds.is_empty() {
             self.emit_usage_update(sink);
         }
     }
 
-    /// Adds the estimated cost of each request in `requests` to the session total.
-    fn bill(&mut self, requests: &[TokenUsage]) {
-        self.total_estimated_cost_usd += requests
+    /// Records each request in `requests` and adds its estimated cost to the session total.
+    async fn bill(&mut self, sink: &dyn EventSink, requests: &[TokenUsage]) {
+        if requests.is_empty() {
+            return;
+        }
+        let records: Vec<_> = requests
             .iter()
-            .filter_map(|&usage| estimate_usage_cost_usd(&self.client, usage))
-            .sum::<f64>();
+            .map(|&tokens| UsageRecord {
+                model: self.client.model().id().to_owned(),
+                cache_ttl: self.client.prompt_cache_ttl(),
+                tokens,
+            })
+            .collect();
+        self.total_estimated_cost_usd += estimate_cost_usd(&records);
+        let outcome = self.session.record_usage(records).await;
+        sink.session_write_error(outcome.failure.as_deref());
     }
 
     /// Forgets the context usage of a transcript the session no longer sends.
@@ -555,11 +570,6 @@ impl Engine {
         self.auto_compaction_failures = 0;
         self.last_usage = None;
         self.displayed_usage = None;
-    }
-
-    fn reset_usage(&mut self) {
-        self.reset_context_usage();
-        self.total_estimated_cost_usd = 0.0;
     }
 
     fn emit_usage_update(&self, sink: &dyn EventSink) {
@@ -598,16 +608,22 @@ async fn session_prompt(
     }
 }
 
-fn estimate_usage_cost_usd(client: &Client, usage: TokenUsage) -> Option<f64> {
-    client.model().cost_rates().map(|rates| {
-        rates.estimate_usd(
-            usage.input_tokens(),
-            usage.cache_creation_input_tokens(),
-            usage.cache_read_input_tokens(),
-            usage.output_tokens(),
-            client.prompt_cache_ttl(),
-        )
-    })
+/// Estimated USD cost of `requests`, each priced by the model and cache TTL it ran with.
+fn estimate_cost_usd(requests: &[UsageRecord]) -> f64 {
+    requests
+        .iter()
+        .filter_map(|request| {
+            let rates = ModelSpec::resolve(request.model.clone()).cost_rates()?;
+            let tokens = request.tokens;
+            Some(rates.estimate_usd(
+                tokens.input_tokens(),
+                tokens.cache_creation_input_tokens(),
+                tokens.cache_read_input_tokens(),
+                tokens.output_tokens(),
+                request.cache_ttl,
+            ))
+        })
+        .sum()
 }
 
 // ── Reporting ──
@@ -695,7 +711,7 @@ mod tests {
     use crate::client::anthropic::testing::{
         api_key, completion_body, sse_response, test_client, test_config, text_stream_body,
     };
-    use crate::config::{AutoCompactionConfig, CompactionConfig};
+    use crate::config::{AutoCompactionConfig, CompactionConfig, PromptCacheTtl};
     use crate::file_tracker::testing::seed_full_read;
     use crate::message::Role;
     use crate::protocol::CapturingSink;
@@ -807,7 +823,7 @@ mod tests {
     // ── new ──
 
     #[tokio::test]
-    async fn new_replays_a_recorded_context_or_builds_one_for_the_client_model() {
+    async fn new_prices_recorded_usage_and_replays_a_recorded_context_or_builds_one() {
         with_pinned_home(async {
             let server = MockServer::start().await;
             let dir = tempfile::tempdir().unwrap();
@@ -816,6 +832,11 @@ mod tests {
                 .await
                 .prompt
                 .session_context();
+            let usage = [UsageRecord {
+                model: MODEL.to_owned(),
+                cache_ttl: PromptCacheTtl::FiveMin,
+                tokens: TokenUsage::new(1_000, 100),
+            }];
 
             for (context, replayed) in [(Some(recorded), true), (None, false)] {
                 let engine = Engine::new(
@@ -825,6 +846,7 @@ mod tests {
                     handle::start(&store, "claude-sonnet-5-5"),
                     LoadedTranscript {
                         context,
+                        usage: usage.to_vec(),
                         ..LoadedTranscript::default()
                     },
                     Arc::new(FileTracker::default()),
@@ -833,6 +855,11 @@ mod tests {
                 )
                 .await;
 
+                assert!(
+                    (engine.total_estimated_cost_usd - 0.006).abs() < 1e-12,
+                    "priced at the recorded model's rates: {}",
+                    engine.total_estimated_cost_usd,
+                );
                 assert_eq!(engine.prompt.user_context == SESSION_CONTEXT, replayed);
                 assert_eq!(engine.prompt_unrecorded, !replayed);
                 let model = if replayed { MODEL } else { "claude-sonnet-5-5" };
@@ -852,7 +879,7 @@ mod tests {
     // ── spawn ──
 
     #[tokio::test]
-    async fn spawn_warns_about_drift_and_an_interrupted_transcript_first() {
+    async fn spawn_reports_the_resumed_cost_drift_and_an_interrupted_transcript_first() {
         with_pinned_home(async {
             let server = MockServer::start().await;
             let dir = tempfile::tempdir().unwrap();
@@ -867,12 +894,25 @@ mod tests {
                     }],
                 },
             ];
+            engine.total_estimated_cost_usd = 1.23;
 
             let mut handle = engine.spawn(&[PathBuf::from("a.rs")]);
+            let cost = handle.events.recv().await.unwrap();
             let drift = handle.events.recv().await.unwrap();
             let interrupted = handle.events.recv().await.unwrap();
             let failure = handle.shutdown().await;
 
+            assert!(
+                matches!(
+                    &cost,
+                    Event::UsageUpdated(UsageSnapshot {
+                        context_tokens: None,
+                        estimated_cost_usd: Some(cost),
+                        ..
+                    }) if (cost - 1.23).abs() < f64::EPSILON
+                ),
+                "{cost:?}"
+            );
             assert!(
                 matches!(&drift, Event::Error(msg) if msg.ends_with("Read before Edit: a.rs")),
                 "{drift:?}"
@@ -1110,6 +1150,73 @@ mod tests {
                     Message::user("again"),
                     Message::assistant("reply"),
                 ]
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn run_records_every_request_so_a_resume_restores_the_session_cost() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            mount_reply(&server, "reply").await;
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let engine = engine(server.uri(), &store, dir.path()).await;
+            let session_id = engine.session_id().to_owned();
+            let mut handle = engine.spawn(&[]);
+
+            submit(&mut handle, "one").await;
+            submit(&mut handle, "two").await;
+            handle
+                .ops
+                .send(Op::Compact { instructions: None })
+                .await
+                .unwrap();
+            next_matching(&mut handle.events, |event| {
+                matches!(event, Event::SessionCompacted { .. }).then_some(())
+            })
+            .await;
+            submit(&mut handle, "after").await;
+            handle.ops.send(Op::Clear).await.unwrap();
+            next_matching(&mut handle.events, |event| {
+                matches!(event, Event::SessionRolled { .. }).then_some(())
+            })
+            .await;
+            let fresh = submit(&mut handle, "fresh").await;
+            let path = store.find_session_path(&session_id).unwrap();
+            handle.ops.send(Op::Resume { path }).await.unwrap();
+            next_matching(&mut handle.events, |event| {
+                matches!(event, Event::SessionResumed { .. }).then_some(())
+            })
+            .await;
+            let restored = handle.events.recv().await.unwrap();
+            handle.shutdown().await;
+
+            assert!(
+                matches!(
+                    fresh.as_slice(),
+                    [
+                        Event::StreamToken(_),
+                        Event::UsageUpdated(UsageSnapshot {
+                            estimated_cost_usd: Some(cost),
+                            ..
+                        }),
+                        Event::TurnComplete,
+                    ] if (cost - 0.006).abs() < 1e-12
+                ),
+                "a cleared session starts its own cost: {fresh:?}"
+            );
+            assert!(
+                matches!(
+                    &restored,
+                    Event::UsageUpdated(UsageSnapshot {
+                        context_tokens: None,
+                        estimated_cost_usd: Some(cost),
+                        ..
+                    }) if (cost - 4.0 * 0.006).abs() < 1e-12
+                ),
+                "three turns and the summary: {restored:?}"
             );
         })
         .await;
@@ -1644,7 +1751,8 @@ mod tests {
                     [
                         Event::TurnFailed(short),
                         Event::Cancelled,
-                        Event::Error(write),
+                        Event::Error(usage_write),
+                        Event::Error(boundary_write),
                         Event::UsageUpdated(UsageSnapshot {
                             context_tokens: None,
                             estimated_cost_usd: Some(cost),
@@ -1652,7 +1760,8 @@ mod tests {
                         }),
                         Event::TurnFailed(unsaved),
                     ] if short.starts_with("Compaction failed: session is too short")
-                        && write.starts_with("Session write failed")
+                        && usage_write.starts_with("Session write failed")
+                        && boundary_write == "Session write failed: Session writer task has stopped."
                         && (cost - 0.006).abs() < 1e-12
                         && unsaved.starts_with("Compaction was not saved")
                 ),
@@ -1726,12 +1835,17 @@ mod tests {
             assert_eq!(engine.client.session_id(), engine.session.session_id());
 
             SESSION_CONTEXT.clone_into(&mut engine.prompt.user_context);
+            engine.total_estimated_cost_usd = 1.23;
             let target_path = store.find_session_path(&target_id).unwrap();
             engine.resume(&sink, &target_path).await;
             assert_eq!(engine.session.session_id(), target_id);
             assert_eq!(engine.client.session_id(), target_id);
             assert_eq!(engine.messages.len(), 2);
             assert_ne!(engine.prompt.user_context, SESSION_CONTEXT);
+            assert!(
+                engine.total_estimated_cost_usd.abs() < f64::EPSILON,
+                "a session that recorded no usage resumes at zero"
+            );
         })
         .await;
     }
@@ -1962,6 +2076,34 @@ mod tests {
             ));
         })
         .await;
+    }
+
+    // ── estimate_cost_usd ──
+
+    #[test]
+    fn estimate_cost_usd_prices_each_request_by_its_own_model_and_cache_ttl() {
+        let request = |model: &str, cache_ttl: &str| -> UsageRecord {
+            serde_json::from_value(serde_json::json!({
+                "model": model,
+                "cache_ttl": cache_ttl,
+                "input_tokens": 0,
+                "cache_creation_input_tokens": 1_000_000,
+                "cache_read_input_tokens": 0,
+                "output_tokens": 0,
+            }))
+            .unwrap()
+        };
+
+        let cost = estimate_cost_usd(&[
+            request("claude-opus-5-5", "1h"),
+            request("claude-sonnet-5-5", "5m"),
+            request("unpriced-model", "5m"),
+        ]);
+
+        assert!(
+            (cost - (8.0 + 2.5)).abs() < 1e-9,
+            "a 1h write on Opus, a 5m write on Sonnet, and nothing for an unknown model: {cost}"
+        );
     }
 
     // ── TurnEnd::of_prompt ──
