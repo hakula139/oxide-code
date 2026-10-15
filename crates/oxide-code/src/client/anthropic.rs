@@ -180,17 +180,14 @@ impl Client {
 
     /// Swaps the active model and re-resolves effort and the compaction threshold. Thinking,
     /// betas, context management, and the default `max_tokens` derive from the model per request.
-    pub(crate) fn set_model(&mut self, id: String) -> Result<Option<Effort>> {
+    pub(crate) fn set_model(&mut self, id: String) {
         let model = ModelSpec::resolve(id);
-        let effort = model.resolve_effort(self.config.effort);
-        let compaction = self
+        self.config.compaction = self
             .config
             .compaction
-            .for_model(&model, model.resolve_max_tokens(self.config.max_tokens))?;
-        self.config.effort = effort;
-        self.config.compaction = compaction;
+            .for_model(&model, model.resolve_max_tokens(self.config.max_tokens));
+        self.config.effort = model.resolve_effort(self.config.effort);
         self.config.model = model;
-        Ok(effort)
     }
 
     /// Swaps the active effort. Stays `None` on unknown models.
@@ -720,7 +717,6 @@ mod tests {
 
     #[test]
     fn set_model_resolves_effort_and_persists_full_state() {
-        // Checking both returned and stored effort catches a "returned but not persisted" mutation.
         for (from_model, from_effort, swap_to, expect) in [
             (
                 "claude-opus-5-5",
@@ -737,8 +733,7 @@ mod tests {
             ("claude-opus-5-5", Some(Effort::High), "custom-model", None),
         ] {
             let mut client = client_with(from_model, from_effort);
-            let returned = client.set_model(swap_to.to_owned()).unwrap();
-            assert_eq!(returned, expect, "{from_model} → {swap_to}: returned");
+            client.set_model(swap_to.to_owned());
             assert_eq!(
                 client.config.effort, expect,
                 "{from_model} → {swap_to}: stored effort",
@@ -763,7 +758,7 @@ mod tests {
             assert!(!unknown_betas.contains(beta), "{beta}: {unknown_betas}");
         }
 
-        client.set_model("claude-opus-5-5".to_owned()).unwrap();
+        client.set_model("claude-opus-5-5".to_owned());
         let (known, known_betas) = capture_stream_turn(client).await;
         assert_eq!(known["model"], "claude-opus-5-5");
         assert_eq!(known["max_tokens"], 64_000);
@@ -794,7 +789,7 @@ mod tests {
         assert!(!config.compaction.auto.enabled, "precondition: no window");
         let mut client = Client::new(config, Some("sid".to_owned())).unwrap();
 
-        client.set_model("claude-sonnet-5-5".to_owned()).unwrap();
+        client.set_model("claude-sonnet-5-5".to_owned());
 
         assert_eq!(
             client.compaction().auto.threshold_tokens,
@@ -812,7 +807,7 @@ mod tests {
         });
         let mut client = Client::new(config, Some("sid".to_owned())).unwrap();
 
-        client.set_model("claude-sonnet-5-5".to_owned()).unwrap();
+        client.set_model("claude-sonnet-5-5".to_owned());
         assert_eq!(
             client.compaction().auto.threshold_tokens,
             Some(test_thresholds::WINDOW_1M),

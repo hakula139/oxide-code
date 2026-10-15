@@ -468,14 +468,8 @@ impl Engine {
         model: Option<ResolvedModelId>,
         effort: Option<Effort>,
     ) {
-        if let Some(id) = model
-            && let Err(e) = self.client.set_model(id.into_inner())
-        {
-            sink.emit(
-                AgentEvent::Error(format!("Config change failed: {e:#}")),
-                "config-change-failed",
-            );
-            return;
+        if let Some(id) = model {
+            self.client.set_model(id.into_inner());
         }
         let resolved = match effort {
             Some(pick) => self.client.set_effort(pick),
