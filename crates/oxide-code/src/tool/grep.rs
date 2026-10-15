@@ -634,6 +634,7 @@ mod tests {
 
     use super::*;
     use crate::tool::testing::canonical_tempdir;
+    use crate::util::path::slash_separated;
 
     /// Content-mode params searching all of `cwd`, so result paths render relative to it.
     fn params<'a>(pattern: &'a str, cwd: &'a Path) -> GrepParams<'a> {
@@ -655,7 +656,7 @@ mod tests {
     fn gate_target_defaults_the_search_root_to_cwd() {
         // With no `path`, the search root is cwd, so a deny scoped to the project root still applies.
         let dir = tempfile::tempdir().unwrap();
-        let cwd = std::fs::canonicalize(dir.path()).unwrap();
+        let cwd = dunce::canonicalize(dir.path()).unwrap();
 
         let target = GrepTool.gate_target(&serde_json::json!({"pattern": "x"}), &cwd);
         let crate::permission::GateTarget::Path { relative, .. } = target else {
@@ -988,7 +989,7 @@ mod tests {
         p.search_path = Some("../outside.txt");
         assert_eq!(
             grep_files(&p).unwrap(),
-            format!("{}:1:hit", outside.display()),
+            format!("{}:1:hit", slash_separated(&outside)),
             "hits outside cwd fall back to an absolute path",
         );
     }

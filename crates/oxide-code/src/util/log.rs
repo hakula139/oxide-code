@@ -57,7 +57,7 @@ fn build_log_target(tui_mode: bool) -> Result<Option<(NonBlocking, WorkerGuard)>
 fn resolve_log_dir() -> Option<PathBuf> {
     log_dir_from(
         std::env::var_os("XDG_STATE_HOME").map(PathBuf::from),
-        dirs::home_dir(),
+        std::env::home_dir(),
     )
 }
 
@@ -154,6 +154,7 @@ mod tests {
     use std::io::Write;
 
     use super::*;
+    use crate::util::path::testing::{HOME_VAR, abs};
 
     // ── make_filter ──
 
@@ -202,7 +203,7 @@ mod tests {
         temp_env::with_vars(
             [
                 ("XDG_STATE_HOME", Some(xdg.as_str())),
-                ("HOME", Some("/home/u")),
+                (HOME_VAR, Some("/home/u")),
             ],
             || {
                 let (mut writer, guard) =
@@ -224,10 +225,13 @@ mod tests {
     #[test]
     fn log_dir_from_uses_xdg_state_home_when_set_and_absolute() {
         let resolved = log_dir_from(
-            Some(PathBuf::from("/run/user/1000/state")),
+            Some(PathBuf::from(abs("/run/user/1000/state"))),
             Some(PathBuf::from("/home/u")),
         );
-        assert_eq!(resolved, Some(PathBuf::from("/run/user/1000/state/ox/log")));
+        assert_eq!(
+            resolved,
+            Some(PathBuf::from(abs("/run/user/1000/state/ox/log")))
+        );
     }
 
     #[test]

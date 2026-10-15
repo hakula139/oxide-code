@@ -8,16 +8,16 @@ Every session is a single append-only `.jsonl` file with one JSON object per lin
 
 ### Entry Types
 
-| Type                   | Position     | Purpose                                                             |
-| ---------------------- | ------------ | ------------------------------------------------------------------- |
-| `header`               | First line   | Session metadata: ID, CWD, model, created timestamp, format version |
-| `message`              | Middle lines | Conversation message with `uuid`, optional `parent_uuid`, timestamp |
-| `title`                | Re-appended  | Session title + source. Latest wins                                 |
-| `tool_result_metadata` | Sidecar      | Display metadata for replaying tool results                         |
-| `file_snapshot`        | Sidecar      | File-tracker state restored on resume when disk state still matches |
-| `context`              | Sidecar      | Prompt context a resume replays. Latest since the last compact wins |
-| `compact`              | Boundary     | Summary boundary plus pre-compact count and optional instructions   |
-| `summary`              | Last line    | Exit marker: `message_count` + `updated_at`. Latest wins            |
+| Type                   | Position       | Purpose                                                             |
+| ---------------------- | -------------- | ------------------------------------------------------------------- |
+| `header`               | First line     | Session metadata: ID, CWD, model, created timestamp, format version |
+| `message`              | Middle lines   | Conversation message with `uuid`, optional `parent_uuid`, timestamp |
+| `title`                | Re-appended    | Session title + source. Latest wins                                 |
+| `tool_result_metadata` | Sidecar        | Display metadata for replaying tool results                         |
+| `file_snapshot`        | Sidecar        | File-tracker state restored on resume when disk state still matches |
+| `context`              | Before message | Prompt context of that message. Latest on the resolved chain wins   |
+| `compact`              | Boundary       | Summary boundary plus pre-compact count and optional instructions   |
+| `summary`              | Last line      | Exit marker: `message_count` + `updated_at`. Latest wins            |
 
 ### Schema Invariants
 
@@ -57,11 +57,11 @@ Starting a session stages the header in memory. The on-disk file is created by t
 
 ### Prompt context
 
-A session records its prompt context (the environment section, the first message's rendered instructions, date, and model identity, and what the model has seen of them) in a `context` entry placed ahead of the user message that first carries it. Resuming replays this entry verbatim, sending the same cached system prompt and first message. If the session resumes in another directory, the environment section is redetected. Any later instruction, date, or model change, including a `/model` swap, is attached to the next user message as a `<system-reminder>` block, which transcript displays omit, so the system prompt stays byte-identical across a swap. A transcript lacking a `context` entry, or one where no user message followed the last compaction, rebuilds the context and records it with the next message.
+A session records its prompt context (the environment section, the first message's rendered instructions, date, and model identity, and what the model has seen of them) Write it in a `context` entry in the same batch as the first user message that carries it, immediately before that message and with the same timestamp. The loader binds the entry to the next message with a matching timestamp, so a context entry stranded by a torn write cannot attach to another writer's message. When resuming, the latest such entry on the resolved chain is replayed verbatim, so the request sends the same cached system prompt and first message. A forked session therefore replays the context recorded on its own branch. If the session resumes in another directory, the environment section is redetected. Any later instruction, date, or model change, including a `/model` swap, is attached to the next user message as a `<system-reminder>` block, which transcript displays omit, so the system prompt stays byte-identical across a swap. A transcript lacking a `context` entry, or one where no user message followed the last compaction, rebuilds the context and records it with the next message.
 
 ### Fork-on-conflict concurrency
 
-There is no file-level lock: two processes resuming the same session both append, and the newest-leaf rule resolves forks deterministically. Each batch lands in one `O_APPEND` write, so concurrent appends interleave only between batches.
+There is no file-level lock: two processes resuming the same session both append, and the newest-leaf rule resolves forks deterministically. Each batch lands in one append write (`O_APPEND` on Unix, an end-of-file-offset write on Windows), so concurrent appends interleave only between batches.
 
 ### AI-generated titles
 

@@ -111,6 +111,13 @@ jobs:
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
 
+      - name: Test
+        # crossterm writes ANSI sequences to its writer only on a VT console or with `TERM` set, and
+        # the runner has no console.
+        env:
+          TERM: xterm-256color
+        run: cargo test --locked
+
   coverage:
     name: Coverage
     runs-on: ubuntu-latest

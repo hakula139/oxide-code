@@ -7,6 +7,7 @@ How to install `ox` on macOS, Linux, and Windows. For first-run setup once insta
 - **OS**: macOS 12+, a recent glibc-based Linux, or Windows 10+. Alpine / musl-based Linux needs the source-build path.
 - **Architecture**: `x86_64` everywhere, plus `aarch64` on macOS (Apple Silicon)
 - **Network**: outbound HTTPS to `api.anthropic.com`
+- **Windows only**: [Git for Windows](https://git-scm.com/downloads/win) with `git.exe` on `PATH`, since the bash tool runs the `bash.exe` it ships
 - **From-source builds only**: [Rust](https://www.rust-lang.org/tools/install) 1.91+
 
 ## Install `ox`

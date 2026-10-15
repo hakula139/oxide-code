@@ -52,7 +52,7 @@ fn try_load_or_create_at(path: &Path) -> Result<String> {
 fn device_id_path() -> Option<PathBuf> {
     xdg_dir(
         std::env::var_os("XDG_DATA_HOME").map(PathBuf::from),
-        dirs::home_dir(),
+        std::env::home_dir(),
         Path::new(".local/share"),
         &Path::new(DATA_DIR).join(FILE_NAME),
     )
@@ -153,12 +153,14 @@ mod tests {
 
     #[test]
     fn try_load_or_create_at_propagates_unwritable_parent_as_error() {
-        // Parent is a regular file (`/dev/null`), so `mkdir` fails.
-        let path = Path::new("/dev/null/ox/user-id");
-        let err = try_load_or_create_at(path).unwrap_err();
+        // The parent is a regular file, so `mkdir` fails.
+        let dir = tempdir().unwrap();
+        let blocker = dir.path().join("blocker");
+        fs::write(&blocker, "").unwrap();
+        let err = try_load_or_create_at(&blocker.join("ox/user-id")).unwrap_err();
         let chain = format!("{err:#}");
         assert!(
-            chain.contains("/dev/null"),
+            chain.contains(&*blocker.to_string_lossy()),
             "actionable path in error: {chain}"
         );
     }

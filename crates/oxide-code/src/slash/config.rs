@@ -132,6 +132,7 @@ mod tests {
     use crate::slash::test_session_info;
     use crate::tui::modal::Modal;
     use crate::tui::theme::Theme;
+    use crate::util::path::testing::HOME_VAR;
 
     fn render_modal(modal: &KvOverview, width: u16) -> String {
         use ratatui::Terminal;
@@ -197,7 +198,7 @@ mod tests {
     #[test]
     fn build_modal_tildifies_extra_ca_certs_path() {
         // Pin HOME so the test is deterministic regardless of the runner env.
-        temp_env::with_var("HOME", Some("/tmp/oxide-fake-home"), || {
+        temp_env::with_var(HOME_VAR, Some("/tmp/oxide-fake-home"), || {
             let mut info = test_session_info();
             info.config.extra_ca_certs = Some(PathBuf::from("/tmp/oxide-fake-home/certs/corp.pem"));
             let m = build_modal(&info, None, None);

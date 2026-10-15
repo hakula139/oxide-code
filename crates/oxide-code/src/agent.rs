@@ -3960,7 +3960,7 @@ mod tests {
         // A dangling `notes.md -> ../escape.txt` must resolve to its outside target, so the write
         // never passes as a new in-cwd file and a headless session denies it.
         let dir = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
         let cwd = root.join("repo");
         std::fs::create_dir(&cwd).unwrap();
         std::os::unix::fs::symlink("../escape.txt", cwd.join("notes.md")).unwrap();
@@ -4347,7 +4347,7 @@ mod tests {
         // The tool must act on the file the gate checked, so a relative or symlinked `file_path` is
         // rewritten to the resolved location before the preview and the run see it.
         let dir = tempfile::tempdir().unwrap();
-        let cwd = std::fs::canonicalize(dir.path()).unwrap();
+        let cwd = dunce::canonicalize(dir.path()).unwrap();
         std::fs::write(cwd.join("real.txt"), "x").unwrap();
         std::os::unix::fs::symlink("real.txt", cwd.join("link.txt")).unwrap();
         let tools = ToolRegistry::new(vec![Box::new(crate::tool::read::ReadTool::new(Arc::new(

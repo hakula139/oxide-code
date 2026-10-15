@@ -2,13 +2,16 @@
 
 use std::collections::VecDeque;
 use std::future::Future;
+use std::io;
+use std::path::Path;
 use std::pin::Pin;
-use std::process::ExitStatus;
+use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
+use process_wrap::tokio::{ChildWrapper, CommandWrap};
 use serde::Deserialize;
 use tokio::io::{AsyncRead, AsyncReadExt};
-use tokio::process::Command;
+use tokio::process::{ChildStderr, ChildStdout};
 
 use super::{Tool, ToolOutput, extract_input_field, title_case};
 use crate::permission::PermissionClass;
@@ -130,30 +133,14 @@ fn resolve_timeout(millis: Option<u64>) -> Duration {
 }
 
 async fn execute(command: &str, timeout: Duration) -> ToolOutput {
-    let mut cmd = Command::new("bash");
-    cmd.arg("-c")
-        .arg(command)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
-
-    // Put the child in its own process group so a timeout or cancel can `killpg` the whole tree,
-    // including any `cmd &`-style detached descendants the shell launched.
-    #[cfg(unix)]
-    cmd.process_group(0);
-
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
+    let mut shell = match ShellTree::spawn(command) {
+        Ok(shell) => shell,
         Err(e) => {
             return ToolOutput::error(format!("Failed to execute command: {e}"));
         }
     };
 
-    let group = ProcessGroupGuard(child.id());
-
-    let mut stdout = child.stdout.take().expect("stdout configured as piped");
-    let mut stderr = child.stderr.take().expect("stderr configured as piped");
+    let (mut stdout, mut stderr) = shell.take_pipes();
     let mut stdout_capture = PipeCapture::default();
     let mut stderr_capture = PipeCapture::default();
 
@@ -161,7 +148,7 @@ async fn execute(command: &str, timeout: Duration) -> ToolOutput {
     // pipes open cannot stretch the call past the timeout.
     let finished = tokio::time::timeout(timeout, async {
         tokio::join!(
-            child.wait(),
+            shell.wait(),
             stdout_capture.drain(&mut stdout),
             stderr_capture.drain(&mut stderr),
         )
@@ -169,9 +156,9 @@ async fn execute(command: &str, timeout: Duration) -> ToolOutput {
     .await;
 
     let Ok((status, stdout_read, stderr_read)) = finished else {
-        // Killing the group closes its pipe ends, so the grace drain only waits on a holder that
-        // escaped the group.
-        drop(group);
+        // Killing the tree closes its pipe ends, so the grace drain only waits on a holder that
+        // escaped it.
+        shell.kill();
         _ = tokio::time::timeout(KILL_DRAIN_GRACE, async {
             tokio::join!(
                 stdout_capture.drain(&mut stdout),
@@ -195,7 +182,7 @@ async fn execute(command: &str, timeout: Duration) -> ToolOutput {
         return ToolOutput::error(format!("Failed to read command stderr: {e}"));
     }
     // Descendants that released the pipes, such as a redirected background server, keep running.
-    group.disarm();
+    shell.disarm();
 
     let mut content = render_streams(&stdout_capture, &stderr_capture);
     if !status.success() {
@@ -227,6 +214,46 @@ fn exit_footer(status: ExitStatus) -> String {
     }
     // Without a signal, `wait` always reports an exit code, so the fallback never renders.
     format!("(exit code {})", status.code().unwrap_or(-1))
+}
+
+// ── Shell Resolution ──
+
+#[cfg(not(windows))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "shares the Windows signature, where Git Bash can be missing"
+)]
+fn bash() -> io::Result<&'static Path> {
+    Ok(Path::new("bash"))
+}
+
+/// Git for Windows' bash, looked up once. `Command::new("bash")` searches System32 before `PATH`
+/// there and finds the WSL launcher, so a missing Git Bash is an error.
+#[cfg(windows)]
+fn bash() -> io::Result<&'static Path> {
+    static GIT_BASH: std::sync::LazyLock<Option<std::path::PathBuf>> =
+        std::sync::LazyLock::new(|| git_bash_on(&std::env::var_os("PATH")?));
+    GIT_BASH.as_deref().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "Git Bash not found. Install Git for Windows and put git.exe on PATH",
+        )
+    })
+}
+
+/// Finds `bin\bash.exe` under the Git for Windows root of a `git.exe` on `path`, which sits in the
+/// root's `cmd\` or `bin\`, or in `mingw64\bin\` inside a Git Bash session.
+#[cfg(windows)]
+fn git_bash_on(path: &std::ffi::OsStr) -> Option<std::path::PathBuf> {
+    std::env::split_paths(path)
+        .filter(|dir| dir.join("git.exe").is_file())
+        .find_map(|dir| {
+            dir.ancestors()
+                .skip(1)
+                .take(2)
+                .map(|root| root.join(r"bin\bash.exe"))
+                .find(|bash| bash.is_file())
+        })
 }
 
 // ── Output Rendering ──
@@ -307,7 +334,7 @@ struct PipeCapture {
 impl PipeCapture {
     /// Reads `reader` to EOF. Cancel-safe: each chunk is recorded as soon as it is read, so a drain
     /// cut short by the timeout keeps everything that arrived, and a later call resumes it.
-    async fn drain<R>(&mut self, reader: &mut R) -> std::io::Result<()>
+    async fn drain<R>(&mut self, reader: &mut R) -> io::Result<()>
     where
         R: AsyncRead + Unpin,
     {
@@ -337,55 +364,81 @@ impl PipeCapture {
     }
 }
 
-// ── Process Group Cleanup ──
+// ── Shell Process Tree ──
 
-/// Kills the command's process group on drop, so a timeout, failure, or cancelled call leaves no
-/// descendant running. `kill_on_drop` alone reaches only `bash` itself.
-struct ProcessGroupGuard(Option<u32>);
-
-impl ProcessGroupGuard {
-    fn disarm(mut self) {
-        self.0 = None;
-    }
+/// The shell and every descendant it starts, held in a process group on Unix and a Job Object on
+/// Windows. Dropping it while armed kills the whole tree, so a timeout, failure, or cancelled call
+/// leaves no descendant running. A finished call disarms it.
+struct ShellTree {
+    child: Box<dyn ChildWrapper>,
+    armed: bool,
 }
 
-impl Drop for ProcessGroupGuard {
-    fn drop(&mut self) {
-        kill_process_group(self.0);
+impl ShellTree {
+    fn spawn(command: &str) -> io::Result<Self> {
+        let mut cmd = CommandWrap::with_new(bash()?, |cmd| {
+            cmd.arg("-c")
+                .arg(command)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+        });
+        #[cfg(unix)]
+        cmd.wrap(process_wrap::tokio::ProcessGroup::leader());
+        #[cfg(windows)]
+        cmd.wrap(process_wrap::tokio::JobObject);
+        Ok(Self {
+            child: cmd.spawn()?,
+            armed: true,
+        })
     }
-}
 
-/// Signals the group until no live member is left (`ESRCH`). XNU can miss a child forked during a
-/// `killpg`, so one signal is not enough. The attempts are bounded because Linux counts the
-/// unreaped `bash` zombie as a member.
-#[cfg(unix)]
-fn kill_process_group(pgid: Option<u32>) {
-    use nix::sys::signal::{Signal, killpg};
-    use nix::unistd::Pid;
+    fn take_pipes(&mut self) -> (ChildStdout, ChildStderr) {
+        let stdout = self.child.stdout().take();
+        let stderr = self.child.stderr().take();
+        (
+            stdout.expect("stdout configured as piped"),
+            stderr.expect("stderr configured as piped"),
+        )
+    }
 
-    const ATTEMPTS: usize = 5;
-    const RETRY_DELAY: Duration = Duration::from_millis(1);
+    /// Waits for the shell alone, since the tree wrapper's own wait also outlasts detached
+    /// descendants on Windows.
+    async fn wait(&mut self) -> io::Result<ExitStatus> {
+        self.child.inner_mut().wait().await
+    }
 
-    let Some(pgid) = pgid else { return };
-    let Ok(pgid_signed) = i32::try_from(pgid) else {
-        return;
-    };
-    let pgid = Pid::from_raw(pgid_signed);
-    for _ in 0..ATTEMPTS {
-        if killpg(pgid, Signal::SIGKILL).is_err() {
-            return;
+    /// Unix signals the group until no live member is left (`ESRCH`), since XNU can miss a child
+    /// forked during a `killpg`. The attempts are bounded because Linux counts the unreaped `bash`
+    /// zombie as a member. Terminating a Job Object takes one call.
+    fn kill(&mut self) {
+        const ATTEMPTS: usize = if cfg!(unix) { 5 } else { 1 };
+        const RETRY_DELAY: Duration = Duration::from_millis(1);
+
+        self.armed = false;
+        for _ in 0..ATTEMPTS {
+            if self.child.start_kill().is_err() {
+                return;
+            }
+            std::thread::sleep(RETRY_DELAY);
         }
-        std::thread::sleep(RETRY_DELAY);
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
     }
 }
 
-#[cfg(not(unix))]
-fn kill_process_group(_pgid: Option<u32>) {}
+impl Drop for ShellTree {
+    fn drop(&mut self) {
+        if self.armed {
+            self.kill();
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
     use tokio::io::AsyncWriteExt as _;
 
     use super::*;
@@ -503,14 +556,6 @@ mod tests {
         assert_eq!(output.content, "partial\n\n(exit code 1)");
     }
 
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn execute_signal_death_names_the_signal() {
-        let output = run_default("echo before; kill -9 $$").await;
-        assert!(!output.is_error);
-        assert_eq!(output.content, "before\n\n(killed by signal 9)");
-    }
-
     #[tokio::test]
     async fn execute_no_output() {
         let output = run_default("true").await;
@@ -537,16 +582,15 @@ mod tests {
         assert!(output.content.len() <= PIPE_HEAD_BYTES + PIPE_TAIL_BYTES + 64);
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn execute_timeout_kills_backgrounded_children() {
-        // Without the process-group kill, a detached descendant outlives the timeout and touches
-        // the marker file. The marker's absence proves the whole group was killed.
+        // Without the tree kill, a detached descendant outlives the timeout and touches the marker
+        // file. The marker's absence proves the whole tree was killed.
         let dir = tempfile::tempdir().unwrap();
         let marker = dir.path().join("leaked");
         let marker_str = marker.to_str().unwrap();
 
-        let command = format!("(sleep 1 && touch {marker_str}) & sleep 5");
+        let command = format!("(sleep 1 && touch '{marker_str}') & sleep 5");
         let start = std::time::Instant::now();
         let output = execute(&command, Duration::from_millis(100)).await;
         assert!(output.is_error, "expected timeout");
@@ -564,39 +608,57 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn execute_cancelled_mid_run_kills_backgrounded_children() {
-        let dir = tempfile::tempdir().unwrap();
-        let started = dir.path().join("started");
-        let leaked = dir.path().join("leaked");
-        let command = format!(
-            "(touch {started}; sleep 1 && touch {leaked}) & sleep 5",
-            started = started.display(),
-            leaked = leaked.display(),
-        );
+        // The shell either still runs or has exited while a descendant holds its pipes.
+        for tail in ["sleep 5", "echo done"] {
+            let dir = tempfile::tempdir().unwrap();
+            let started = dir.path().join("started");
+            let leaked = dir.path().join("leaked");
+            let command = format!(
+                "(touch '{started}'; sleep 1 && touch '{leaked}') & {tail}",
+                started = started.display(),
+                leaked = leaked.display(),
+            );
 
-        let mut call = Box::pin(execute(&command, DEFAULT_TIMEOUT));
-        for _ in 0..100 {
-            if started.exists() {
-                break;
+            let mut call = Box::pin(execute(&command, DEFAULT_TIMEOUT));
+            for _ in 0..100 {
+                if started.exists() {
+                    break;
+                }
+                let still_running = tokio::time::timeout(Duration::from_millis(20), call.as_mut())
+                    .await
+                    .is_err();
+                assert!(still_running, "{tail}: command finished before the cancel");
             }
-            let still_running = tokio::time::timeout(Duration::from_millis(20), call.as_mut())
-                .await
-                .is_err();
-            assert!(still_running, "command finished before the cancel");
-        }
-        assert!(started.exists(), "command never started");
-        drop(call);
+            assert!(started.exists(), "{tail}: command never started");
+            drop(call);
 
-        tokio::time::sleep(Duration::from_millis(1_500)).await;
-        assert!(
-            !leaked.exists(),
-            "backgrounded descendant outlived the cancel"
-        );
+            tokio::time::sleep(Duration::from_millis(1_500)).await;
+            assert!(
+                !leaked.exists(),
+                "{tail}: backgrounded descendant outlived the cancel",
+            );
+        }
     }
 
-    #[cfg(unix)]
+    #[tokio::test]
+    async fn execute_finished_call_keeps_descendants_detached_from_its_pipes() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("kept");
+        let marker_str = marker.to_str().unwrap();
+
+        let command = format!("(sleep 1 && touch '{marker_str}') >/dev/null 2>&1 & echo started");
+        let output = run_default(&command).await;
+        assert_eq!(output.content, "started");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !marker.exists() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(marker.exists(), "detached descendant was killed");
+    }
+
     #[tokio::test]
     async fn execute_timeout_covers_background_pipe_holders() {
         // The backgrounded `sleep` holds the pipes open past bash's exit. The timeout leaves bash
@@ -610,6 +672,41 @@ mod tests {
             start.elapsed() < Duration::from_secs(3),
             "timeout did not cover pipe collection",
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn execute_signal_death_names_the_signal() {
+        let output = run_default("echo before; kill -9 $$").await;
+        assert!(!output.is_error);
+        assert_eq!(output.content, "before\n\n(killed by signal 9)");
+    }
+
+    // ── git_bash_on ──
+
+    #[cfg(windows)]
+    #[test]
+    fn git_bash_on_finds_bash_under_the_git_root_of_any_git_on_path() {
+        let dir = tempfile::tempdir().unwrap();
+        // A shim outside any Git root, then the `mingw64\bin` and `cmd` copies a Git Bash session
+        // puts on `PATH`.
+        let [shims, mingw, cmd, bin] =
+            [r"shims", r"Git\mingw64\bin", r"Git\cmd", r"Git\bin"].map(|d| dir.path().join(d));
+        for d in [&shims, &mingw, &cmd, &bin] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        for d in [&shims, &mingw, &cmd] {
+            std::fs::write(d.join("git.exe"), "").unwrap();
+        }
+        let path = |entries: &[&std::path::PathBuf]| std::env::join_paths(entries).unwrap();
+        assert_eq!(git_bash_on(&path(&[&shims, &cmd])), None, "no bash.exe yet");
+
+        let bash = bin.join("bash.exe");
+        std::fs::write(&bash, "").unwrap();
+        for git_dir in [&mingw, &cmd] {
+            assert_eq!(git_bash_on(&path(&[&shims, git_dir])).as_ref(), Some(&bash));
+        }
+        assert_eq!(git_bash_on(&path(&[&shims])), None);
     }
 
     // ── render_streams ──

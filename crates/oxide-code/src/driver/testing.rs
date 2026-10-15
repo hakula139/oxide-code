@@ -15,6 +15,7 @@ use crate::prompt;
 use crate::session::handle;
 use crate::session::store::SessionStore;
 use crate::tool::ToolRegistry;
+use crate::util::path::testing::HOME_VAR;
 
 pub(super) const MODEL: &str = "claude-opus-5-5";
 pub(super) const SESSION_CONTEXT: &str = "<system-reminder>session context</system-reminder>";
@@ -47,15 +48,15 @@ pub(super) async fn conversation(
     }
 }
 
-/// Runs `test` with `HOME` pinned to an empty directory, so context loads find no user
-/// instructions even while parallel tests swap `HOME`. Boxed, since a whole test body is too large
-/// a future to hold on the stack.
+/// Runs `test` with the home directory pinned to an empty one, so context loads find no user
+/// instructions even while parallel tests swap it. Boxed, since a whole test body is too large a
+/// future to hold on the stack.
 pub(super) fn with_pinned_home<'a>(
     test: impl Future<Output = ()> + 'a,
 ) -> Pin<Box<dyn Future<Output = ()> + 'a>> {
     Box::pin(async {
         let home = tempfile::tempdir().unwrap();
-        temp_env::async_with_vars([("HOME", Some(home.path()))], test).await;
+        temp_env::async_with_vars([(HOME_VAR, Some(home.path()))], test).await;
     })
 }
 

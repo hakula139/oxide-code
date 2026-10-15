@@ -14,7 +14,7 @@ use time::OffsetDateTime;
 use tracing::{debug, warn};
 use uuid::Uuid;
 
-use super::chain::ChainBuilder;
+use super::chain::{Chain, ChainBuilder};
 use super::entry::{CURRENT_VERSION, CompactInfo, Entry, TitleInfo};
 use super::path::{UNKNOWN_PROJECT_DIR, sanitize_cwd};
 use crate::file_tracker::FileSnapshot;
@@ -40,7 +40,7 @@ impl SessionStore {
     pub(crate) fn open() -> Result<Self> {
         let sessions_dir = xdg_dir(
             std::env::var_os("XDG_DATA_HOME").map(PathBuf::from),
-            dirs::home_dir(),
+            std::env::home_dir(),
             Path::new(".local/share"),
             &Path::new(DATA_DIR).join(SESSIONS_DIR),
         )
@@ -86,7 +86,7 @@ impl SessionStore {
         let path = self
             .project_dir
             .join(session_filename(session_id, *created_at));
-        let file = create_written(&path, |mut file| file.write_all(&buf))?;
+        let file = create_written(&path, |file| Appender(file).write_all(&buf))?;
         Ok(SessionWriter {
             path,
             file: Some(file),
@@ -127,7 +127,8 @@ pub(crate) fn load_session_data_from_path(path: &Path) -> Result<SessionData> {
 
 struct SessionDataBuilder {
     chain: ChainBuilder,
-    context: Option<SessionContext>,
+    /// The last context entry and its timestamp, awaiting the message entry it belongs to.
+    pending_context: Option<(OffsetDateTime, Box<SessionContext>)>,
     compact: Option<CompactInfo>,
     /// A compact boundary that takes effect only once its post-compact root follows it.
     pending_compact: Option<CompactInfo>,
@@ -142,7 +143,7 @@ impl SessionDataBuilder {
     fn new() -> Self {
         Self {
             chain: ChainBuilder::new(),
-            context: None,
+            pending_context: None,
             compact: None,
             pending_compact: None,
             latest_title: None,
@@ -160,7 +161,9 @@ impl SessionDataBuilder {
                     "session format version {version} is newer than supported ({CURRENT_VERSION}); please upgrade oxide-code"
                 );
             }
-            Entry::Context { context, .. } => self.context = Some(*context),
+            Entry::Context { context, timestamp } => {
+                self.pending_context = Some((timestamp, context));
+            }
             Entry::Message {
                 uuid,
                 parent_uuid,
@@ -211,6 +214,12 @@ impl SessionDataBuilder {
         timestamp: OffsetDateTime,
         line_no: u32,
     ) {
+        // A context shares its message's timestamp, so a context stranded by a torn batch never
+        // binds to the next writer's message.
+        let context = self
+            .pending_context
+            .take()
+            .and_then(|(at, context)| (at == timestamp).then_some(context));
         if let Some(compact) = self.pending_compact.take() {
             if parent_uuid.is_none() {
                 self.reset_at_compact(compact);
@@ -229,7 +238,8 @@ impl SessionDataBuilder {
         if parent_uuid.is_none() {
             self.clear_sidecars();
         }
-        self.chain.insert(uuid, parent_uuid, message, timestamp);
+        self.chain
+            .insert(uuid, parent_uuid, message, timestamp, context);
     }
 
     fn accepts_compact_tail_message(&mut self, uuid: Uuid, parent_uuid: Option<Uuid>) -> bool {
@@ -252,7 +262,6 @@ impl SessionDataBuilder {
 
     fn reset_at_compact(&mut self, compact: CompactInfo) {
         self.chain = ChainBuilder::new();
-        self.context = None;
         self.compact = Some(compact);
         self.compact_tail_uuids = Some(HashSet::new());
         self.compact_tail_accepts_sidecars = false;
@@ -265,11 +274,15 @@ impl SessionDataBuilder {
     }
 
     fn finish(self) -> SessionData {
-        let (messages, last_uuid) = self.chain.resolve();
+        let Chain {
+            messages,
+            tip,
+            context,
+        } = self.chain.resolve();
         SessionData {
             messages,
-            last_uuid,
-            context: self.context,
+            last_uuid: tip,
+            context: context.map(|context| *context),
             compact: self.compact,
             title: self.latest_title,
             tool_result_metadata: self.tool_result_metadata,
@@ -335,7 +348,7 @@ impl SessionWriter {
             Some(file) => file,
             None => open_append_file(&self.path)?,
         };
-        append_whole(&file, &mut &file, lines)
+        append_whole(&file, &mut Appender(&file), lines)
             .with_context(|| format!("failed to write {}", self.path.display()))?;
         self.file = Some(file);
         Ok(())
@@ -359,8 +372,8 @@ pub(super) fn encode_lines<'a>(entries: impl IntoIterator<Item = &'a Entry>) -> 
 pub(crate) struct SessionData {
     pub(crate) messages: Vec<Message>,
     pub(crate) last_uuid: Option<Uuid>,
-    /// Recorded prompt state, `None` for a transcript that predates recording or whose last
-    /// compaction no user message followed.
+    /// Prompt state recorded on the resolved chain, `None` for a transcript that predates
+    /// recording or whose last compaction no user message followed.
     pub(crate) context: Option<SessionContext>,
     pub(crate) compact: Option<CompactInfo>,
     pub(crate) title: Option<TitleInfo>,
@@ -370,9 +383,22 @@ pub(crate) struct SessionData {
 
 // ── File Opening ──
 
-fn open_create_exclusive(path: &Path) -> io::Result<File> {
+/// Options for a readable handle that [`Appender`] writes through. On Windows, `append(true)` strips
+/// the `FILE_WRITE_DATA` access that `set_len` needs to roll back a partial write, so the handle
+/// opens for plain writing there and each write targets the end of the file.
+fn append_options() -> OpenOptions {
     let mut options = OpenOptions::new();
-    options.read(true).append(true).create_new(true);
+    options.read(true);
+    #[cfg(windows)]
+    options.write(true);
+    #[cfg(not(windows))]
+    options.append(true);
+    options
+}
+
+fn open_create_exclusive(path: &Path) -> io::Result<File> {
+    let mut options = append_options();
+    options.create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -393,11 +419,31 @@ fn create_written(path: &Path, write: impl FnOnce(&File) -> io::Result<()>) -> R
 }
 
 fn open_append_file(path: &Path) -> Result<File> {
-    OpenOptions::new()
-        .read(true)
-        .append(true)
+    append_options()
         .open(path)
         .with_context(|| format!("session not found: {}", path.display()))
+}
+
+/// Writes at the end of a file opened by [`append_options`], atomically with other appenders.
+struct Appender<'a>(&'a File);
+
+impl Write for Appender<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        // An offset of `u64::MAX` is `FILE_WRITE_TO_END_OF_FILE`, the per-write form of append.
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::FileExt::seek_write(self.0, buf, u64::MAX)
+        }
+        #[cfg(not(windows))]
+        {
+            let mut file = self.0;
+            file.write(buf)
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Writes `lines` through `out`, a handle on `file`, after terminating a torn last line. A failed
@@ -535,6 +581,7 @@ mod tests {
     use super::*;
     use crate::message::ContentBlock;
     use crate::prompt::PromptParts;
+    use crate::util::path::testing::HOME_VAR;
 
     fn test_project_path(dir: &Path, filename: &str) -> PathBuf {
         dir.join(TEST_PROJECT).join(filename)
@@ -546,11 +593,25 @@ mod tests {
         prompt.session_context()
     }
 
-    fn sample_context(date: &str) -> Entry {
+    fn sample_context(date: &str, timestamp: OffsetDateTime) -> Entry {
         Entry::Context {
             context: Box::new(session_context(date)),
-            timestamp: datetime!(2026-04-16 12:00:00 UTC),
+            timestamp,
         }
+    }
+
+    /// A user message recorded with the context dated `date`, as the actor writes one.
+    fn message_with_context(
+        date: &str,
+        uuid: Uuid,
+        parent_uuid: Option<Uuid>,
+        timestamp: OffsetDateTime,
+        text: &str,
+    ) -> [Entry; 2] {
+        [
+            sample_context(date, timestamp),
+            sample_message_at(uuid, parent_uuid, timestamp, text),
+        ]
     }
 
     fn sample_snapshot(path: &str) -> Entry {
@@ -572,7 +633,7 @@ mod tests {
         temp_env::async_with_vars(
             [
                 ("XDG_DATA_HOME", Some(xdg.to_string_lossy().into_owned())),
-                ("HOME", Some(home.path().to_string_lossy().into_owned())),
+                (HOME_VAR, Some(home.path().to_string_lossy().into_owned())),
             ],
             async { SessionStore::open() },
         )
@@ -613,7 +674,7 @@ mod tests {
         let store = temp_env::async_with_vars(
             [
                 ("XDG_DATA_HOME", None),
-                ("HOME", Some(home.path().to_string_lossy().into_owned())),
+                (HOME_VAR, Some(home.path().to_string_lossy().into_owned())),
             ],
             async { SessionStore::open() },
         )
@@ -906,11 +967,25 @@ mod tests {
             .unwrap();
         let load = || store.load_session_data("compact-context").unwrap().context;
 
-        writer.append(&[sample_context("2026-04-16")]).unwrap();
+        let first = Uuid::new_v4();
         writer
-            .append(&[sample_message_entry(Uuid::new_v4(), "first")])
+            .append(&message_with_context(
+                "2026-04-16",
+                first,
+                None,
+                datetime!(2026-04-16 12:00:01 UTC),
+                "first",
+            ))
             .unwrap();
-        writer.append(&[sample_context("2026-04-17")]).unwrap();
+        writer
+            .append(&message_with_context(
+                "2026-04-17",
+                Uuid::new_v4(),
+                Some(first),
+                datetime!(2026-04-17 12:00:00 UTC),
+                "second",
+            ))
+            .unwrap();
         assert_eq!(load(), Some(session_context("2026-04-17")));
 
         writer
@@ -927,9 +1002,10 @@ mod tests {
             "a compact without its post-compact root keeps the old context",
         );
 
+        let summary = Uuid::new_v4();
         writer
             .append(&[sample_message_at(
-                Uuid::new_v4(),
+                summary,
                 None,
                 datetime!(2026-04-17 12:00:01 UTC),
                 "summary",
@@ -937,8 +1013,161 @@ mod tests {
             .unwrap();
         assert_eq!(load(), None, "a compacted transcript no longer carries it");
 
-        writer.append(&[sample_context("2026-04-18")]).unwrap();
+        writer
+            .append(&message_with_context(
+                "2026-04-18",
+                Uuid::new_v4(),
+                Some(summary),
+                datetime!(2026-04-18 12:00:00 UTC),
+                "after compact",
+            ))
+            .unwrap();
         assert_eq!(load(), Some(session_context("2026-04-18")));
+    }
+
+    #[test]
+    fn load_session_data_drops_a_context_whose_message_was_torn_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut writer = store.create(&sample_header("torn-context"), &[]).unwrap();
+        let root = Uuid::new_v4();
+        writer
+            .append(&message_with_context(
+                "2026-04-16",
+                root,
+                None,
+                datetime!(2026-04-16 12:00:00 UTC),
+                "root",
+            ))
+            .unwrap();
+        let mut torn = encode_lines(&[sample_context(
+            "2026-04-17",
+            datetime!(2026-04-17 12:00:00 UTC),
+        )])
+        .unwrap();
+        torn.extend_from_slice(br#"{"type":"message","uuid":"#);
+        writer.append_lines(&torn).unwrap();
+
+        writer
+            .append(&[sample_message_at(
+                Uuid::new_v4(),
+                Some(root),
+                datetime!(2026-04-17 12:00:01 UTC),
+                "another writer's message",
+            )])
+            .unwrap();
+
+        let data = store.load_session_data("torn-context").unwrap();
+        assert_eq!(data.messages.len(), 2);
+        assert_eq!(data.context, Some(session_context("2026-04-16")));
+    }
+
+    #[test]
+    fn load_session_data_drops_the_context_of_a_rejected_pre_compact_append() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut writer = store
+            .create(&sample_header("rejected-context"), &[])
+            .unwrap();
+        let pre = Uuid::new_v4();
+        let synthetic = Uuid::new_v4();
+        writer
+            .append(&[
+                sample_message_at(pre, None, datetime!(2026-04-16 12:00:01 UTC), "pre"),
+                Entry::Compact {
+                    summary: "summary".to_owned(),
+                    pre_message_count: 1,
+                    instructions: None,
+                    timestamp: datetime!(2026-04-16 12:00:02 UTC),
+                },
+                sample_message_at(
+                    synthetic,
+                    None,
+                    datetime!(2026-04-16 12:00:02 UTC),
+                    "summary",
+                ),
+            ])
+            .unwrap();
+
+        let at = datetime!(2026-04-16 12:00:05 UTC);
+        writer
+            .append(&message_with_context(
+                "2026-04-16",
+                Uuid::new_v4(),
+                Some(pre),
+                at,
+                "stale old-chain append",
+            ))
+            .unwrap();
+        writer
+            .append(&[sample_message_at(
+                Uuid::new_v4(),
+                Some(synthetic),
+                at,
+                "post-compact",
+            )])
+            .unwrap();
+
+        let data = store.load_session_data("rejected-context").unwrap();
+        assert_eq!(data.messages.len(), 2);
+        assert_eq!(
+            data.context, None,
+            "the stale append's context must not bind to the next message",
+        );
+    }
+
+    #[test]
+    fn load_session_data_replays_the_context_recorded_on_the_resolved_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut writer = store.create(&sample_header("fork-context"), &[]).unwrap();
+        let load = || store.load_session_data("fork-context").unwrap().context;
+
+        let root = Uuid::new_v4();
+        let branch_a = Uuid::new_v4();
+        writer
+            .append(
+                &[
+                    message_with_context(
+                        "2026-04-16",
+                        root,
+                        None,
+                        datetime!(2026-04-16 12:00:01 UTC),
+                        "root",
+                    ),
+                    message_with_context(
+                        "2026-04-17",
+                        branch_a,
+                        Some(root),
+                        datetime!(2026-04-17 12:00:00 UTC),
+                        "branch A",
+                    ),
+                    message_with_context(
+                        "2026-04-18",
+                        Uuid::new_v4(),
+                        Some(root),
+                        datetime!(2026-04-18 12:00:00 UTC),
+                        "branch B",
+                    ),
+                ]
+                .concat(),
+            )
+            .unwrap();
+        assert_eq!(load(), Some(session_context("2026-04-18")));
+
+        writer
+            .append(&[sample_message_at(
+                Uuid::new_v4(),
+                Some(branch_a),
+                datetime!(2026-04-19 12:00:00 UTC),
+                "branch A follow-up",
+            )])
+            .unwrap();
+        assert_eq!(
+            load(),
+            Some(session_context("2026-04-17")),
+            "the tip on branch A replays the context branch A recorded",
+        );
     }
 
     #[test]
@@ -1589,6 +1818,23 @@ mod tests {
         create_written(&path, |_| Ok(())).unwrap();
     }
 
+    // ── Appender ──
+
+    #[test]
+    fn appender_writes_after_lines_another_handle_appended() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shared.jsonl");
+        let first = create_written(&path, |file| Appender(file).write_all(b"1\n")).unwrap();
+        let second = open_append_file(&path).unwrap();
+
+        Appender(&second).write_all(b"2\n").unwrap();
+        let mut appender = Appender(&first);
+        appender.write_all(b"3\n").unwrap();
+        appender.flush().unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "1\n2\n3\n");
+    }
+
     // ── append_whole ──
 
     /// Writes through to `file` until `budget` bytes are spent, then returns what `exhausted` does.
@@ -1605,8 +1851,7 @@ mod tests {
             }
             let n = buf.len().min(self.budget);
             self.budget -= n;
-            let mut file = self.file;
-            file.write(&buf[..n])
+            Appender(self.file).write(&buf[..n])
         }
 
         fn flush(&mut self) -> io::Result<()> {
@@ -1693,8 +1938,8 @@ mod tests {
         let mut out = ShortWriter {
             file: &file,
             budget: 5,
-            exhausted: |mut file| {
-                file.write_all(b"\nother appender\n").unwrap();
+            exhausted: |file| {
+                Appender(file).write_all(b"\nother appender\n").unwrap();
                 Ok(0)
             },
         };
