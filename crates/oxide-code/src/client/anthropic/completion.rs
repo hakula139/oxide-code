@@ -1,11 +1,11 @@
 //! Non-streaming `/v1/messages` one-shot path. Returns flattened assistant text.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use serde::Deserialize;
 use tracing::debug;
 
 use super::betas::compute_betas;
-use super::sse::format_api_error;
+use super::transport::{post_messages, with_retry};
 use super::wire::{CreateMessageRequest, OutputConfig, OutputFormat, RequestMessages};
 use super::{CLAUDE_CLI_VERSION, Client, billing, build_metadata, build_system_blocks};
 use crate::config::{Auth, Effort};
@@ -42,7 +42,6 @@ impl Client {
             output_format,
         )?;
 
-        let url = format!("{}/v1/messages?beta=true", self.config.base_url);
         debug!(
             model = model.id(),
             body_len = body.len(),
@@ -50,32 +49,18 @@ impl Client {
         );
 
         let betas = compute_betas(model, None, &self.config.auth, false).join(",");
-        let response = self
-            .http
-            .post(&url)
-            .header("anthropic-beta", betas)
-            .header("x-claude-code-session-id", &self.session_id)
-            .body(body)
-            .send()
-            .await?;
-        let status = response.status();
-        if !status.is_success() {
-            let retry_after = response
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_owned);
-            let body = response.text().await.unwrap_or_default();
-            bail!(
-                "{}",
-                format_api_error(status, retry_after.as_deref(), &body)
-            );
-        }
-
-        let CompletionResponse { content } = response
-            .json()
-            .await
-            .context("failed to parse completion response")?;
+        let request = &self.messages_request(betas, body);
+        let CompletionResponse { content } = with_retry(
+            |retry| async move {
+                let response = post_messages(&self.http, request, retry).await?;
+                Ok(response
+                    .json()
+                    .await
+                    .context("failed to parse completion response")?)
+            },
+            |_| {},
+        )
+        .await?;
         Ok(join_text_blocks(content))
     }
 }
@@ -247,7 +232,7 @@ mod tests {
             .and(path("/v1/messages"))
             .respond_with(
                 ResponseTemplate::new(429)
-                    .insert_header("retry-after", "42")
+                    .insert_header("retry-after", "120")
                     .set_body_string(r#"{"error":{"type":"rate_limit_error"}}"#),
             )
             .mount(&server)
@@ -264,7 +249,7 @@ mod tests {
             .expect_err("expected 429 error");
         let msg = format!("{err:#}");
         assert!(
-            msg.contains("retry after 42"),
+            msg.contains("Retry after 120 s."),
             "retry-after threaded: {msg}"
         );
     }

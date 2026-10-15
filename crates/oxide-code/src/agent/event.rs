@@ -45,6 +45,9 @@ pub(crate) enum AgentEvent {
     /// streaming. Sinks drop it when thinking display is on, since the same text already streamed
     /// as a [`Self::ThinkingToken`].
     ProgressUpdate(String),
+    /// A request failed before any content and will be sent again after a delay. Leaves the turn
+    /// running and renders as a dim notice.
+    Retrying(String),
     /// Tool call emitted by the model, used to render the call row and prepare the result slot.
     ToolCallStart {
         id: String,
@@ -63,6 +66,9 @@ pub(crate) enum AgentEvent {
     PromptDrained(String),
     /// Turn ended cleanly with a final assistant reply (no further tool rounds).
     TurnComplete,
+    /// The in-flight prompt, `/compact`, or `/resume` failed. Like [`Self::TurnComplete`] and
+    /// [`Self::Cancelled`], it ends the operation.
+    TurnFailed(String),
     /// Live usage and estimated cost snapshot for the current process.
     UsageUpdated(UsageSnapshot),
     /// User cancelled mid-turn ([`UserAction::Cancel`]). The in-flight reply is truncated and the
@@ -102,8 +108,8 @@ pub(crate) enum AgentEvent {
         compaction: CompactionConfig,
         requested_effort: Option<Effort>,
     },
-    /// User-visible error from the agent loop, session writer, or tool dispatch. Renders as a
-    /// dedicated chat block.
+    /// User-visible error that leaves any in-flight turn running, such as a session write failure.
+    /// Renders as a dedicated chat block.
     Error(String),
     /// A gated tool call needs the user's approval before it runs. Carries the tool-use id so a
     /// stale decision for a dropped call is ignored, plus a small preview for the modal to render.
@@ -316,7 +322,10 @@ impl StdioSink {
                 writeln!(stdout)?;
                 writeln!(stderr, "{INTERRUPTED_MARKER}")?;
             }
-            AgentEvent::Error(msg) => {
+            AgentEvent::Retrying(msg) => {
+                writeln!(stderr, "{msg}")?;
+            }
+            AgentEvent::Error(msg) | AgentEvent::TurnFailed(msg) => {
                 writeln!(stderr, "Error: {msg}")?;
             }
         }
@@ -549,8 +558,19 @@ mod tests {
     }
 
     #[test]
-    fn render_error_prefixes_with_error_label() {
+    fn render_retrying_writes_the_notice_to_stderr() {
+        let notice = "HTTP 529 overloaded_error. Retrying in 1s (retry 1 of 5).";
+        let (stdout, stderr) =
+            render_one(&test_sink(false), AgentEvent::Retrying(notice.to_owned()));
+        assert!(stdout.is_empty(), "{stdout:?}");
+        assert_eq!(stderr, format!("{notice}\n"));
+    }
+
+    #[test]
+    fn render_error_and_turn_failure_prefix_with_error_label() {
         let (_, stderr) = render_one(&test_sink(false), AgentEvent::Error("boom".to_owned()));
         assert_eq!(stderr, "Error: boom\n");
+        let (_, stderr) = render_one(&test_sink(false), AgentEvent::TurnFailed("bust".to_owned()));
+        assert_eq!(stderr, "Error: bust\n");
     }
 }

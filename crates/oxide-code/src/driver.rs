@@ -287,6 +287,12 @@ impl Conversation {
         )
         .await;
         if !compacted {
+            sink.emit(
+                AgentEvent::TurnFailed(
+                    "Compaction was not saved, so the transcript is unchanged.".to_owned(),
+                ),
+                "compact-failed",
+            );
             return TurnEnd::Failed;
         }
         self.refresh_prompt().await;
@@ -325,7 +331,7 @@ impl Conversation {
                 Ok(outcome) => outcome,
                 Err(e) => {
                     sink.emit(
-                        AgentEvent::Error(format!(
+                        AgentEvent::TurnFailed(format!(
                             "Resume failed (still on session {}): {e:#}",
                             self.session.session_id(),
                         )),
@@ -496,7 +502,8 @@ enum TurnEnd {
     Quit,
 }
 
-/// Shows `abort` on `sink`, logging `label` if a failure event is dropped. `Quit` stays silent.
+/// Shows `abort` on `sink` as the operation's one terminal event, logging `label` if a failure
+/// event is dropped. `Quit` stays silent. See `docs/design/tui/cancellation.md` for the set.
 fn report_abort(sink: &dyn AgentSink, abort: TurnAbort, label: &'static str) -> TurnEnd {
     match abort {
         TurnAbort::Cancelled => {
@@ -505,7 +512,7 @@ fn report_abort(sink: &dyn AgentSink, abort: TurnAbort, label: &'static str) -> 
         }
         TurnAbort::Quit => TurnEnd::Quit,
         TurnAbort::Failed(e) => {
-            sink.emit(AgentEvent::Error(format!("{e:#}")), label);
+            sink.emit(AgentEvent::TurnFailed(format!("{e:#}")), label);
             TurnEnd::Failed
         }
     }
@@ -843,9 +850,14 @@ mod tests {
         assert!(
             matches!(
                 events.as_slice(),
-                [AgentEvent::Error(short), AgentEvent::Cancelled, AgentEvent::Error(write)]
-                    if short.starts_with("Compaction failed: session is too short")
-                        && write.starts_with("Session write failed")
+                [
+                    AgentEvent::TurnFailed(short),
+                    AgentEvent::Cancelled,
+                    AgentEvent::Error(write),
+                    AgentEvent::TurnFailed(unsaved),
+                ] if short.starts_with("Compaction failed: session is too short")
+                    && write.starts_with("Session write failed")
+                    && unsaved.starts_with("Compaction was not saved")
             ),
             "{events:?}",
         );
@@ -947,7 +959,7 @@ mod tests {
         assert!((conversation.total_estimated_cost_usd - 1.23).abs() < f64::EPSILON);
         assert!(matches!(
             sink.events().as_slice(),
-            [AgentEvent::Error(msg)] if msg.contains("still on session")
+            [AgentEvent::TurnFailed(msg)] if msg.contains("still on session")
         ));
     }
 
@@ -1067,7 +1079,7 @@ mod tests {
 
         let events = sink.events();
         assert!(
-            matches!(events.as_slice(), [AgentEvent::Cancelled, AgentEvent::Error(msg)] if msg == "boom"),
+            matches!(events.as_slice(), [AgentEvent::Cancelled, AgentEvent::TurnFailed(msg)] if msg == "boom"),
             "{events:?}",
         );
     }

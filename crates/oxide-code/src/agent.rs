@@ -14,7 +14,9 @@ use tracing::{debug, warn};
 
 use crate::agent::event::{AgentEvent, AgentSink, ApprovalDecision, UserAction};
 use crate::client::anthropic::Client;
-use crate::client::anthropic::wire::{ContentBlockInfo, Delta, StreamEvent, Usage};
+use crate::client::anthropic::wire::{
+    ContentBlockInfo, Delta, StopDetails, StopReason, StreamEvent, Usage,
+};
 use crate::config::AutoCompactionConfig;
 use crate::file_tracker::FileTracker;
 use crate::message::{ContentBlock, Message, Role, progress_note};
@@ -232,10 +234,11 @@ pub(crate) struct GateContext<'a> {
 }
 
 /// Drives one user prompt to a final assistant text reply. The loop returns as soon as a round
-/// produces no tool calls. Mid-turn `SubmitPrompt` actions queue and splice in as user messages
-/// at round boundaries. Long-running awaits race `user_rx` so `Cancel` / `Quit` abort promptly
-/// without leaving partial round writes. `max_tool_rounds = None` runs unbounded. `Some(n)`
-/// bails after `n` rounds without a final response.
+/// produces no tool calls, and a `pause_turn` stop re-requests without a new user message.
+/// Mid-turn `SubmitPrompt` actions queue and splice in as user messages at round boundaries.
+/// Long-running awaits race `user_rx` so `Cancel` / `Quit` abort promptly without leaving partial
+/// round writes. `max_tool_rounds = None` runs unbounded. `Some(n)` bails after `n` rounds without
+/// a final response.
 #[expect(
     clippy::too_many_arguments,
     reason = "agent_turn owns the full per-turn dependency set; bundling them obscures lifetimes"
@@ -271,14 +274,10 @@ pub(crate) async fn agent_turn(
             blocks,
             parse_errors,
             usage,
-        } = match stream {
-            Ok(Ok(outcome)) => outcome,
-            Ok(Err(error)) => {
-                return TurnOutcome::aborted(
-                    report(latest_usage, billable_rounds),
-                    TurnAbort::Failed(error),
-                );
-            }
+            stop_reason,
+            stop_details,
+        } = match stream.and_then(|result| result.map_err(TurnAbort::Failed)) {
+            Ok(outcome) => outcome,
             Err(abort) => {
                 return TurnOutcome::aborted(report(latest_usage, billable_rounds), abort);
             }
@@ -288,19 +287,37 @@ pub(crate) async fn agent_turn(
             billable_rounds.push(usage);
         }
 
+        let blocks = match settle_stop_reason(
+            stop_reason,
+            stop_details.as_ref(),
+            blocks,
+            session,
+            sink,
+            messages,
+        )
+        .await
+        {
+            StopAction::Proceed(blocks) => blocks,
+            StopAction::Resume => continue,
+            StopAction::Finish(result) => {
+                return TurnOutcome {
+                    report: report(latest_usage, billable_rounds),
+                    result,
+                };
+            }
+        };
+
         let tool_uses = collect_tool_uses(&blocks);
+        if tool_uses.is_empty() {
+            // Queued prompts drain on the TUI side at idle.
+            commit_assistant_message(session, sink, messages, blocks).await;
+            notify_if_interrupted(messages, sink);
+            return TurnOutcome::completed(report(latest_usage, billable_rounds));
+        }
         let assistant_msg = Message {
             role: Role::Assistant,
             content: blocks,
         };
-
-        if tool_uses.is_empty() {
-            // Queued prompts drain on the TUI side at idle.
-            record_message(session, assistant_msg.clone(), sink).await;
-            messages.push(assistant_msg);
-            notify_if_interrupted(messages, sink);
-            return TurnOutcome::completed(report(latest_usage, billable_rounds));
-        }
 
         let round = run_tool_round(
             tools,
@@ -335,10 +352,118 @@ pub(crate) async fn agent_turn(
     TurnOutcome::aborted(
         report(latest_usage, billable_rounds),
         TurnAbort::Failed(anyhow!(
-            "agent stopped after {cap} tool rounds without a final response \
-             — this is a safety cap against runaway loops. Ask again with a narrower request."
+            "agent stopped after {cap} tool rounds without a final response. This safety cap \
+             guards against runaway loops, so ask again with a narrower request."
         )),
     )
+}
+
+/// How the round loop continues after [`settle_stop_reason`].
+enum StopAction {
+    /// The stop needs no special handling. Dispatch any tool calls in these blocks.
+    Proceed(Vec<ContentBlock>),
+    /// `pause_turn`: the reply is committed and the next request resumes it.
+    Resume,
+    /// The turn ends here.
+    Finish(AbortResult<()>),
+}
+
+/// Handles the stop reasons that end or pause a round before any tool runs.
+async fn settle_stop_reason(
+    stop_reason: Option<StopReason>,
+    stop_details: Option<&StopDetails>,
+    blocks: Vec<ContentBlock>,
+    session: &SessionHandle,
+    sink: &dyn AgentSink,
+    messages: &mut Vec<Message>,
+) -> StopAction {
+    match stop_reason {
+        // The API asks clients to drop refused output without running it.
+        Some(StopReason::Refusal) => {
+            sink.emit(AgentEvent::Error(refusal_message(stop_details)), "refusal");
+            StopAction::Finish(Ok(()))
+        }
+        // Running a cut-off call, or asking the model to retry it, would repeat the same
+        // oversized output, so the round stops and keeps only the finished prose.
+        Some(reason @ (StopReason::MaxTokens | StopReason::ModelContextWindowExceeded)) => {
+            let error = truncation_error(reason, &blocks);
+            let prose = blocks
+                .into_iter()
+                .filter(|b| !matches!(b, ContentBlock::ToolUse { .. }))
+                .collect();
+            commit_assistant_message(session, sink, messages, prose).await;
+            StopAction::Finish(Err(TurnAbort::Failed(error)))
+        }
+        Some(StopReason::PauseTurn) => {
+            commit_assistant_message(session, sink, messages, blocks).await;
+            StopAction::Resume
+        }
+        _ => StopAction::Proceed(blocks),
+    }
+}
+
+/// Records and appends a final assistant reply. An empty reply is skipped because the API rejects
+/// an assistant message with no content on every later request.
+async fn commit_assistant_message(
+    session: &SessionHandle,
+    sink: &dyn AgentSink,
+    messages: &mut Vec<Message>,
+    content: Vec<ContentBlock>,
+) {
+    if content.is_empty() {
+        return;
+    }
+    let message = Message {
+        role: Role::Assistant,
+        content,
+    };
+    record_message(session, message.clone(), sink).await;
+    messages.push(message);
+}
+
+/// User-facing notice for a `refusal` stop, naming the policy category and explanation when the
+/// API supplied them.
+fn refusal_message(details: Option<&StopDetails>) -> String {
+    let category = details
+        .and_then(|d| d.category.as_deref())
+        .map(|c| format!(" (category: {c})"))
+        .unwrap_or_default();
+    let explanation = details.and_then(|d| d.explanation.as_deref()).map_or_else(
+        || ".".to_owned(),
+        |e| format!(": {}.", e.trim().trim_end_matches('.')),
+    );
+    format!(
+        "The model declined this request{category}{explanation} Rephrase it, or run /clear to \
+         start over."
+    )
+}
+
+/// Error for a reply cut off by the output cap or the context window, naming the tool call it cut.
+fn truncation_error(reason: StopReason, blocks: &[ContentBlock]) -> anyhow::Error {
+    let (cause, remedy) = if reason == StopReason::ModelContextWindowExceeded {
+        (
+            "The conversation filled the model's context window",
+            "Run /compact, then continue.",
+        )
+    } else {
+        (
+            "The response hit the max_tokens output limit",
+            "Ask for smaller steps, or raise `max_tokens`.",
+        )
+    };
+    let effect = match blocks.last() {
+        Some(ContentBlock::ToolUse { name, .. }) => {
+            format!("while writing the `{name}` call, so no tools ran")
+        }
+        _ if blocks
+            .iter()
+            .any(|b| matches!(b, ContentBlock::ToolUse { .. })) =>
+        {
+            "before it finished, so no tools ran".to_owned()
+        }
+        _ => "before it finished".to_owned(),
+    };
+    anyhow!("{cause} {effect}. {remedy}")
 }
 
 /// Decides whether to compact and drives it when the threshold and breaker allow. Returns
@@ -787,8 +912,12 @@ impl BlockAccumulator {
     }
 }
 
-/// Returns empty object + error string on failure.
+/// Returns empty object + error string on failure. An empty buffer is a call that streamed no
+/// input, which reads as `{}`.
 fn parse_tool_json(json_buf: &str) -> (serde_json::Value, Option<String>) {
+    if json_buf.is_empty() {
+        return (serde_json::Value::Object(serde_json::Map::new()), None);
+    }
     match serde_json::from_str(json_buf) {
         Ok(value) => (value, None),
         Err(e) => {
@@ -806,6 +935,9 @@ struct StreamOutcome {
     blocks: Vec<ContentBlock>,
     parse_errors: HashMap<String, String>,
     usage: Option<TokenUsage>,
+    /// `None` when the stream omitted it, in which case the content alone decides the next step.
+    stop_reason: Option<StopReason>,
+    stop_details: Option<StopDetails>,
 }
 
 async fn stream_response(
@@ -822,15 +954,21 @@ async fn stream_response(
     let mut blocks: Vec<Option<BlockAccumulator>> = Vec::new();
     let mut usage = TokenUsage::default();
     let mut saw_usage = false;
+    let mut stop_reason = None;
+    let mut stop_details = None;
+    let mut finished = false;
 
     while let Some(event) = rx.recv().await {
         let event = event.context("stream error")?;
 
         match event {
             StreamEvent::MessageStart { message } => {
+                // A retried request starts over with its own `message_start`, so the usage of the
+                // failed attempt is discarded.
+                usage = TokenUsage::default();
+                saw_usage = message.usage.is_some();
                 if let Some(observed) = message.usage {
                     usage.observe(&observed);
-                    saw_usage = true;
                 }
             }
             StreamEvent::ContentBlockStart {
@@ -860,19 +998,36 @@ async fn stream_response(
             StreamEvent::Error { error } => {
                 bail!("API error ({}): {}", error.error_type, error.message);
             }
+            StreamEvent::Retrying { notice } => {
+                sink.emit(AgentEvent::Retrying(notice.to_string()), "retry-notice");
+            }
             StreamEvent::MessageDelta {
-                usage: Some(observed),
-                ..
+                delta,
+                usage: observed,
             } => {
-                usage.observe(&observed);
-                saw_usage = true;
+                if let Some(observed) = observed {
+                    usage.observe(&observed);
+                    saw_usage = true;
+                }
+                stop_reason = delta.stop_reason;
+                stop_details = delta.stop_details;
+            }
+            StreamEvent::MessageStop => {
+                finished = true;
+                break;
             }
             _ => {}
         }
     }
+    // A stream cut before `message_stop` may hold a partial block, so it never becomes a reply.
+    if !finished {
+        bail!("response stream ended before message_stop");
+    }
 
     let mut outcome = StreamOutcome {
         usage: saw_usage.then_some(usage),
+        stop_reason,
+        stop_details,
         ..StreamOutcome::default()
     };
     for acc in blocks.into_iter().flatten() {
@@ -975,7 +1130,8 @@ mod tests {
     use crate::agent::event::CapturingSink;
     use crate::client::anthropic::testing::test_client;
     use crate::client::anthropic::wire::{
-        ApiError, ContentBlockInfo, MessageDeltaBody, MessageResponse, StreamEvent, Usage,
+        ApiError, ContentBlockInfo, MessageDeltaBody, MessageResponse, StopDetails, StopReason,
+        StreamEvent, Usage,
     };
     use crate::config::{Auth, AutoCompactionConfig, Effort};
     use crate::file_tracker::FileTracker;
@@ -1013,16 +1169,23 @@ mod tests {
 
     // ── Fixtures ──
 
-    /// In-process fake that scripts a [`StreamEvent`] sequence per turn.
+    /// In-process fake that scripts a [`StreamEvent`] sequence per turn and records each request's
+    /// transcript.
     struct FakeClient {
         turns: StdMutex<VecDeque<Vec<StreamEvent>>>,
+        requests: StdMutex<Vec<Vec<Message>>>,
     }
 
     impl FakeClient {
         fn new(turns: Vec<Vec<StreamEvent>>) -> Self {
             Self {
                 turns: StdMutex::new(turns.into()),
+                requests: StdMutex::default(),
             }
+        }
+
+        fn requests(&self) -> Vec<Vec<Message>> {
+            self.requests.lock().unwrap().clone()
         }
     }
 
@@ -1099,11 +1262,12 @@ mod tests {
     impl AgentClient for FakeClient {
         fn stream_message(
             &self,
-            _messages: &[Message],
+            messages: &[Message],
             _system_sections: &[&str],
             _user_context: Option<&str>,
             _tools: &[ToolDefinition],
         ) -> Result<mpsc::Receiver<Result<StreamEvent>>> {
+            self.requests.lock().unwrap().push(messages.to_vec());
             let events = self.turns.lock().unwrap().pop_front().unwrap_or_default();
             let (tx, rx) = mpsc::channel(events.len().max(1));
             for event in events {
@@ -1191,7 +1355,8 @@ mod tests {
             },
             StreamEvent::MessageDelta {
                 delta: MessageDeltaBody {
-                    stop_reason: Some("end_turn".into()),
+                    stop_reason: Some(StopReason::EndTurn),
+                    stop_details: None,
                 },
                 usage: Some(Usage {
                     input_tokens: 0,
@@ -1236,7 +1401,8 @@ mod tests {
             },
             StreamEvent::MessageDelta {
                 delta: MessageDeltaBody {
-                    stop_reason: Some("end_turn".into()),
+                    stop_reason: Some(StopReason::EndTurn),
+                    stop_details: None,
                 },
                 usage: Some(Usage {
                     input_tokens: 0,
@@ -1359,6 +1525,52 @@ mod tests {
             events.push(StreamEvent::ContentBlockStop { index });
         }
         events.push(StreamEvent::MessageStop);
+        events
+    }
+
+    /// Adds a `message_delta` carrying `stop_reason` just before the turn's `message_stop`.
+    fn with_stop(
+        mut events: Vec<StreamEvent>,
+        stop_reason: StopReason,
+        stop_details: Option<StopDetails>,
+    ) -> Vec<StreamEvent> {
+        let stop = events.pop();
+        assert!(matches!(stop, Some(StreamEvent::MessageStop)), "{stop:?}");
+        events.push(StreamEvent::MessageDelta {
+            delta: MessageDeltaBody {
+                stop_reason: Some(stop_reason),
+                stop_details,
+            },
+            usage: None,
+        });
+        events.push(StreamEvent::MessageStop);
+        events
+    }
+
+    /// Text block followed by a `tool_use` block, as one turn.
+    fn text_then_tool_use_turn(
+        text: &str,
+        id: &str,
+        name: &str,
+        input_json: &str,
+    ) -> Vec<StreamEvent> {
+        let mut events = text_turn(text);
+        events.pop();
+        for event in tool_use_turn(id, name, input_json) {
+            events.push(match event {
+                StreamEvent::ContentBlockStart { content_block, .. } => {
+                    StreamEvent::ContentBlockStart {
+                        index: 1,
+                        content_block,
+                    }
+                }
+                StreamEvent::ContentBlockDelta { delta, .. } => {
+                    StreamEvent::ContentBlockDelta { index: 1, delta }
+                }
+                StreamEvent::ContentBlockStop { .. } => StreamEvent::ContentBlockStop { index: 1 },
+                other => other,
+            });
+        }
         events
     }
 
@@ -3030,44 +3242,105 @@ mod tests {
         assert!(ends_on_interrupted_work(&messages[1].content));
     }
 
-    /// Covers the real `<Client as AgentClient>` path. `FakeClient` tests above stub the trait.
     #[tokio::test]
-    async fn agent_turn_drives_real_client_over_wiremock() {
-        let server = MockServer::start().await;
-        let body = indoc::indoc! {r#"event: message_start
-data: {"type":"message_start","message":{"id":"msg_1","model":"claude-sonnet-5-5","usage":{"input_tokens":5,"output_tokens":0}}}
-
-event: content_block_start
-data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
-
-event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}
-
-event: content_block_stop
-data: {"type":"content_block_stop","index":0}
-
-event: message_stop
-data: {"type":"message_stop"}
-
-"#};
-        Mock::given(method("POST"))
-            .and(wm_path("/v1/messages"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("content-type", "text/event-stream")
-                    .set_body_string(body),
-            )
-            .mount(&server)
-            .await;
-
-        let client = test_client(
-            server.uri(),
-            Auth::ApiKey("sk".to_owned()),
-            "claude-sonnet-5-5",
-        );
-
+    async fn agent_turn_pause_turn_resends_the_paused_reply_and_continues() {
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
+        let client = FakeClient::new(vec![
+            with_stop(text_turn("searching"), StopReason::PauseTurn, None),
+            text_turn("found it"),
+        ]);
+        let tools = ToolRegistry::new(vec![]);
+        let sink = CapturingSink::new();
+        let mut messages = vec![Message::user("look it up")];
+
+        agent_turn(
+            &client,
+            &tools,
+            &mut messages,
+            &empty_prompt(),
+            &sink,
+            &session,
+            &mut inert_user_rx(),
+            None,
+            &yolo_gate(),
+        )
+        .await
+        .unwrap();
+
+        let requests = client.requests();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            matches!(
+                &requests[1][..],
+                [user, paused]
+                    if user.role == Role::User
+                        && paused.role == Role::Assistant
+                        && matches!(&paused.content[..], [ContentBlock::Text { text }] if text == "searching"),
+            ),
+            "resume must end on the paused reply: {:?}",
+            requests[1],
+        );
+        assert!(
+            matches!(&messages[2].content[..], [ContentBlock::Text { text }] if text == "found it"),
+            "{messages:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_turn_max_tokens_keeps_prose_and_runs_no_cut_tool_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let client = FakeClient::new(vec![with_stop(
+            text_then_tool_use_turn("Writing it now.", "tool_1", "echo", r#"{"content": "#),
+            StopReason::MaxTokens,
+            None,
+        )]);
+        let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
+        let sink = CapturingSink::new();
+        let mut messages = vec![Message::user("write the file")];
+
+        let abort = agent_turn(
+            &client,
+            &tools,
+            &mut messages,
+            &empty_prompt(),
+            &sink,
+            &session,
+            &mut inert_user_rx(),
+            None,
+            &yolo_gate(),
+        )
+        .await
+        .expect_err("a truncated reply fails the turn");
+
+        assert_eq!(
+            abort.to_string(),
+            "The response hit the max_tokens output limit while writing the `echo` call, so no \
+             tools ran. Ask for smaller steps, or raise `max_tokens`.",
+        );
+        assert!(
+            matches!(&messages[1..], [reply] if matches!(&reply.content[..], [ContentBlock::Text { text }] if text == "Writing it now.")),
+            "only the finished prose is kept: {messages:?}",
+        );
+        assert_eq!(client.requests().len(), 1, "the cut call is never retried");
+        assert!(
+            !sink
+                .events()
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ToolCallStart { .. })),
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_turn_empty_reply_completes_without_committing_a_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let client = FakeClient::new(vec![with_stop(
+            vec![StreamEvent::MessageStop],
+            StopReason::EndTurn,
+            None,
+        )]);
         let tools = ToolRegistry::new(vec![]);
         let sink = CapturingSink::new();
         let mut messages = vec![Message::user("hi")];
@@ -3086,8 +3359,263 @@ data: {"type":"message_stop"}
         .await
         .unwrap();
 
+        assert_eq!(messages.len(), 1, "{messages:?}");
+    }
+
+    #[tokio::test]
+    async fn agent_turn_stream_cut_before_message_stop_fails_without_committing() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let mut events = text_turn("half a sent");
+        events.pop();
+        let client = FakeClient::new(vec![events]);
+        let tools = ToolRegistry::new(vec![]);
+        let sink = CapturingSink::new();
+        let mut messages = vec![Message::user("hi")];
+
+        let abort = agent_turn(
+            &client,
+            &tools,
+            &mut messages,
+            &empty_prompt(),
+            &sink,
+            &session,
+            &mut inert_user_rx(),
+            None,
+            &yolo_gate(),
+        )
+        .await
+        .expect_err("a cut stream fails the turn");
+
+        assert!(
+            format!("{abort:#}").contains("ended before message_stop"),
+            "{abort:#}",
+        );
+        assert_eq!(messages.len(), 1, "{messages:?}");
+    }
+
+    const HELLO_SSE: &str = indoc::indoc! {r#"
+        event: message_start
+        data: {"type":"message_start","message":{"id":"msg_1","model":"claude-sonnet-5-5","usage":{"input_tokens":5,"output_tokens":0}}}
+
+        event: content_block_start
+        data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+        event: content_block_delta
+        data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}
+
+        event: content_block_stop
+        data: {"type":"content_block_stop","index":0}
+
+        event: message_stop
+        data: {"type":"message_stop"}
+
+    "#};
+
+    fn sse(body: &'static str) -> ResponseTemplate {
+        ResponseTemplate::new(200)
+            .insert_header("content-type", "text/event-stream")
+            .set_body_string(body)
+    }
+
+    /// Drives one turn through the real `<Client as AgentClient>` path. The server answers with
+    /// `responses` in order, one request each, and repeats the last one.
+    async fn real_client_turn(
+        responses: Vec<ResponseTemplate>,
+        tools: &ToolRegistry,
+    ) -> (TurnOutcome, Vec<Message>, CapturingSink) {
+        let server = MockServer::start().await;
+        let last = responses.len() - 1;
+        for (i, response) in responses.into_iter().enumerate() {
+            let mock = Mock::given(method("POST"))
+                .and(wm_path("/v1/messages"))
+                .respond_with(response);
+            let mock = if i == last {
+                mock
+            } else {
+                mock.up_to_n_times(1)
+            };
+            mock.mount(&server).await;
+        }
+        let client = test_client(
+            server.uri(),
+            Auth::ApiKey("sk".to_owned()),
+            "claude-sonnet-5-5",
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let sink = CapturingSink::new();
+        let mut messages = vec![Message::user("hi")];
+
+        let outcome = agent_turn(
+            &client,
+            tools,
+            &mut messages,
+            &empty_prompt(),
+            &sink,
+            &session,
+            &mut inert_user_rx(),
+            None,
+            &yolo_gate(),
+        )
+        .await;
+        (outcome, messages, sink)
+    }
+
+    #[tokio::test]
+    async fn agent_turn_drives_real_client_over_wiremock() {
+        let (outcome, messages, _) =
+            real_client_turn(vec![sse(HELLO_SSE)], &ToolRegistry::new(vec![])).await;
+
+        outcome.unwrap();
         assert_eq!(messages.len(), 2);
         assert!(matches!(&messages[1].content[0], ContentBlock::Text { text } if text == "hello"),);
+    }
+
+    #[tokio::test]
+    async fn agent_turn_real_client_announces_each_retry_before_the_reply() {
+        let (outcome, messages, sink) = real_client_turn(
+            vec![
+                ResponseTemplate::new(529),
+                ResponseTemplate::new(503),
+                sse(HELLO_SSE),
+            ],
+            &ToolRegistry::new(vec![]),
+        )
+        .await;
+
+        outcome.expect("the third attempt succeeds");
+        assert_eq!(messages.len(), 2, "{messages:?}");
+        let events = sink.events();
+        let notices: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::Retrying(message) => Some(message.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            notices,
+            [
+                "HTTP 529. Retrying in 1s (retry 1 of 5).",
+                "HTTP 503 Service Unavailable. Retrying in 1s (retry 2 of 5).",
+            ],
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, AgentEvent::Error(_))),
+            "a recovered retry shows no error: {events:?}",
+        );
+        let last_notice = events
+            .iter()
+            .rposition(|e| matches!(e, AgentEvent::Retrying(_)))
+            .unwrap();
+        let first_token = events
+            .iter()
+            .position(|e| matches!(e, AgentEvent::StreamToken(_)))
+            .unwrap();
+        assert!(last_notice < first_token, "{events:?}");
+    }
+
+    #[tokio::test]
+    async fn agent_turn_real_client_bills_only_the_attempt_that_answered() {
+        let failed = indoc::indoc! {r#"
+            event: message_start
+            data: {"type":"message_start","message":{"id":"msg_1","model":"claude-sonnet-5-5","usage":{"input_tokens":5,"cache_creation_input_tokens":900,"output_tokens":0}}}
+
+            event: error
+            data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}
+
+        "#};
+        let answered = indoc::indoc! {r#"
+            event: message_start
+            data: {"type":"message_start","message":{"id":"msg_2","model":"claude-sonnet-5-5","usage":{"input_tokens":5,"cache_read_input_tokens":900,"output_tokens":0}}}
+
+            event: content_block_start
+            data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":"hello"}}
+
+            event: content_block_stop
+            data: {"type":"content_block_stop","index":0}
+
+            event: message_delta
+            data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":7}}
+
+            event: message_stop
+            data: {"type":"message_stop"}
+
+        "#};
+
+        let (outcome, _, _) =
+            real_client_turn(vec![sse(failed), sse(answered)], &ToolRegistry::new(vec![])).await;
+
+        let usage = outcome.report.usage.expect("the answer reports usage");
+        assert_eq!(
+            (
+                usage.input_tokens(),
+                usage.cache_creation_input_tokens(),
+                usage.cache_read_input_tokens(),
+                usage.output_tokens(),
+            ),
+            (5, 0, 900, 7),
+            "the failed attempt's cache write is not billed again",
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_turn_real_client_refusal_discards_the_reply_and_names_the_policy() {
+        let body = indoc::indoc! {r#"
+            event: message_start
+            data: {"type":"message_start","message":{"id":"msg_1","model":"claude-sonnet-5-5","usage":{"input_tokens":5,"output_tokens":0}}}
+
+            event: content_block_start
+            data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tool_1","name":"echo","input":{}}}
+
+            event: content_block_delta
+            data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{}"}}
+
+            event: content_block_stop
+            data: {"type":"content_block_stop","index":0}
+
+            event: message_delta
+            data: {"type":"message_delta","delta":{"stop_reason":"refusal","stop_sequence":null,"stop_details":{"type":"refusal","category":"cyber","explanation":"Exploit development."}},"usage":{"output_tokens":3}}
+
+            event: message_stop
+            data: {"type":"message_stop"}
+
+        "#};
+
+        let (outcome, messages, sink) = real_client_turn(
+            vec![sse(body)],
+            &ToolRegistry::new(vec![Box::new(EchoTool)]),
+        )
+        .await;
+
+        outcome.expect("a refusal ends the turn cleanly");
+        assert_eq!(
+            messages.len(),
+            1,
+            "the refused reply is dropped: {messages:?}"
+        );
+        let events = sink.events();
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ToolCallStart { .. })),
+            "refused tool calls never run",
+        );
+        let notices: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::Error(message) => Some(message.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            notices,
+            [
+                "The model declined this request (category: cyber): Exploit development. Rephrase \
+              it, or run /clear to start over."
+            ],
+        );
     }
 
     #[tokio::test]
@@ -3262,6 +3790,50 @@ data: {"type":"message_stop"}
         assert!(
             content.contains("denied by the permission policy"),
             "{content}"
+        );
+    }
+
+    // ── refusal_message ──
+
+    #[test]
+    fn refusal_message_without_details_still_offers_a_way_forward() {
+        assert_eq!(
+            refusal_message(None),
+            "The model declined this request. Rephrase it, or run /clear to start over.",
+        );
+        let explanation_only = StopDetails {
+            category: None,
+            explanation: Some(" Unsafe request ".to_owned()),
+        };
+        assert_eq!(
+            refusal_message(Some(&explanation_only)),
+            "The model declined this request: Unsafe request. Rephrase it, or run /clear to start \
+             over.",
+        );
+    }
+
+    // ── truncation_error ──
+
+    #[test]
+    fn truncation_error_names_the_cause_and_whether_tools_were_skipped() {
+        let text = || ContentBlock::Text {
+            text: "prose".to_owned(),
+        };
+        let tool_use = ContentBlock::ToolUse {
+            id: "tool_1".to_owned(),
+            name: "echo".to_owned(),
+            input: json!({}),
+        };
+
+        assert_eq!(
+            truncation_error(StopReason::ModelContextWindowExceeded, &[text()]).to_string(),
+            "The conversation filled the model's context window before it finished. Run \
+             /compact, then continue.",
+        );
+        assert_eq!(
+            truncation_error(StopReason::MaxTokens, &[tool_use, text()]).to_string(),
+            "The response hit the max_tokens output limit before it finished, so no tools ran. \
+             Ask for smaller steps, or raise `max_tokens`.",
         );
     }
 
@@ -3741,6 +4313,11 @@ data: {"type":"message_stop"}
         let (value, err) = parse_tool_json(r#"{"command": "ls", "n": 3}"#);
         assert_eq!(value, json!({"command": "ls", "n": 3}));
         assert!(err.is_none());
+    }
+
+    #[test]
+    fn parse_tool_json_empty_buffer_is_an_empty_object() {
+        assert_eq!(parse_tool_json(""), (json!({}), None));
     }
 
     #[test]

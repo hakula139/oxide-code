@@ -48,8 +48,9 @@ ox                                          # Start an interactive session
 │       ├── billing.rs                      # Anthropic billing attestation (fingerprint, cch hash, x-anthropic-billing-header)
 │       ├── completion.rs                   # Non-streaming `Client::complete` + body builder for one-shots
 │       ├── identity.rs                     # Per-machine `device_id` for `metadata.user_id`: lazy mint + persist at $XDG_DATA_HOME/ox/user-id
-│       ├── sse.rs                          # SSE pump, frame parsing, API-error formatting
+│       ├── sse.rs                          # SSE pump and frame decoding, retrying an overload before any content streams
 │       ├── testing.rs                      # Cfg-test fixtures shared by client, agent, and title_generator tests
+│       ├── transport.rs                    # Shared `POST /v1/messages`: per-request headers, API-error classification, bounded retry with backoff
 │       └── wire.rs                         # Request / response wire types (CreateMessageRequest, StreamEvent, etc.)
 ├── config.rs                               # Configuration loading and layered merging
 ├── config/
@@ -140,6 +141,7 @@ ox                                          # Start an interactive session
 │   │   │   │   ├── error.rs                # ErrorBlock
 │   │   │   │   ├── git_diff.rs             # GitDiffBlock: unified-diff render reusing the Edit-tool `+` / `-` row-bg + line-number gutter
 │   │   │   │   ├── interrupted.rs          # InterruptedMarker: dim italic `(interrupted)` line on cancel
+│   │   │   │   ├── notice.rs               # NoticeBlock: dim wrapped status line, such as a scheduled API retry
 │   │   │   │   ├── streaming.rs            # StreamingAssistant (in-flight buffer + complete-block render cache)
 │   │   │   │   ├── system.rs               # SystemMessageBlock: left-bar accent + body text for slash-command output
 │   │   │   │   ├── tool.rs                 # ToolCallBlock + ToolResultBlock (left-bar border machinery + per-variant dispatch)

@@ -68,7 +68,7 @@ The picker wraps [`SearchableList`](modals.md) and adds a footer line. Each row 
 
 - **`AgentEvent::SessionResumed`**: Carries id + title + messages + compact boundary + tool_metadata. App-only reaction. `StdioSink` ignores it (TUI-only event, like `SessionRolled`).
 
-- **`Conversation::resume` (`driver.rs`)**: Drives `roll_into`, rebinds `Client::set_session_id`, emits `SessionResumed`, then surfaces `finalize_failure` and `drifted_paths` as distinct `AgentEvent::Error`s. Channel-closed on the resume event logs a desync warning, since the TUI is then stuck on the old chat.
+- **`Conversation::resume` (`driver.rs`)**: Drives `roll_into`, rebinds `Client::set_session_id`, emits `SessionResumed`, then surfaces `finalize_failure` and `drifted_paths` as distinct `AgentEvent::Error`s. A `roll_into` failure ends the resume with `AgentEvent::TurnFailed` and keeps the live session. Channel-closed on the resume event logs a desync warning, since the TUI is then stuck on the old chat.
 
 - **`apply_session_resumed` (TUI)**: Swaps the session id, repaints the title, clears and replays chat history, drops queued prompts (with a system-message surface), clears the modal stack, and resumes idle.
 
