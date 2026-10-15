@@ -1,4 +1,5 @@
-//! Tool dispatch.
+//! The [`Tool`] trait, the [`ToolRegistry`] that dispatches calls and caps their output, the result
+//! views the TUI renders, and helpers shared by the built-in tools.
 
 pub(crate) mod bash;
 pub(crate) mod edit;

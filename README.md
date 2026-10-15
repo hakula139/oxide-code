@@ -84,18 +84,7 @@ See the [user guide](docs/guide/) for installation, configuration, slash command
 
 ## Development
 
-```bash
-cargo fmt --all --check                            # Check formatting
-cargo build                                        # Build
-cargo clippy --all-targets -- -D warnings          # Lint (pedantic, zero warnings)
-cargo test                                         # Run tests
-cargo llvm-cov                                     # Check test coverage
-pnpm format                                        # Check Markdown, TOML, JSON, and YAML formatting
-pnpm lint                                          # Lint Markdown
-pnpm spellcheck                                    # Spell check
-```
-
-CI runs on pushes to `main`, pull requests, and manual dispatch. It runs every check above except `cargo build`, along with an MSRV check, Windows clippy and tests, `nix flake check`, and Nix builds on Linux and macOS. Run `cargo build` locally as a quick compile check.
+[`AGENTS.md`](AGENTS.md) is the contributor entry point for people and coding agents alike. It covers the verification checks and links the [conventions](docs/conventions/) for Rust, testing, writing, GitHub, and the development environment.
 
 ## License
 

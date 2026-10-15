@@ -1,4 +1,5 @@
-//! Shared utilities (env var lookup, path display, tracing init, text helpers).
+//! Shared utilities: env var lookup, private file writes, git probes, tracing init, path display,
+//! text width, the local-offset cache, and extra TLS trust anchors.
 
 pub(crate) mod env;
 pub(crate) mod fs;
