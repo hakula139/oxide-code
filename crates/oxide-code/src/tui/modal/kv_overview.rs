@@ -23,14 +23,37 @@ const SCROLL_FOOTER: &str = "↑ ↓ to scroll · Esc to close";
 
 pub(crate) struct KvSection {
     heading: Option<String>,
-    rows: Vec<(String, String)>,
+    rows: Vec<KvRow>,
+}
+
+struct KvRow {
+    label: String,
+    value: String,
+    note: Option<String>,
 }
 
 impl KvSection {
     pub(crate) fn new(rows: Vec<(String, String)>) -> Self {
+        Self::from_rows(rows.into_iter().map(|(label, value)| KvRow {
+            label,
+            value,
+            note: None,
+        }))
+    }
+
+    /// Rows with a dim third column, such as where each value came from.
+    pub(crate) fn annotated(rows: Vec<(String, String, String)>) -> Self {
+        Self::from_rows(rows.into_iter().map(|(label, value, note)| KvRow {
+            label,
+            value,
+            note: Some(note),
+        }))
+    }
+
+    fn from_rows(rows: impl IntoIterator<Item = KvRow>) -> Self {
         Self {
             heading: None,
-            rows,
+            rows: rows.into_iter().collect(),
         }
     }
 
@@ -63,7 +86,7 @@ impl KvOverview {
         self.sections
             .iter()
             .flat_map(|s| s.rows.iter())
-            .map(|(k, _)| k.chars().count())
+            .map(|row| row.label.chars().count())
             .max()
             .unwrap_or(0)
     }
@@ -82,7 +105,7 @@ impl KvOverview {
         total
     }
 
-    fn body_lines(&self, theme: &Theme) -> Vec<Line<'static>> {
+    fn body_lines(&self, theme: &Theme, width: usize) -> Vec<Line<'static>> {
         let label_width = self.label_width();
         let mut lines: Vec<Line<'static>> = Vec::with_capacity(self.body_len());
         for (i, section) in self.sections.iter().enumerate() {
@@ -96,12 +119,19 @@ impl KvOverview {
                 )));
                 lines.push(Line::default());
             }
-            for (label, value) in &section.rows {
-                lines.push(Line::from(vec![
-                    Span::styled(format!("{label:<label_width$}"), theme.dim()),
+            let value_width = note_column(section, label_width, width);
+            for row in &section.rows {
+                let mut spans = vec![
+                    Span::styled(format!("{:<label_width$}", row.label), theme.dim()),
                     Span::styled(" ".repeat(COLUMN_GAP), theme.surface()),
-                    Span::styled(value.clone(), theme.text()),
-                ]));
+                    Span::styled(row.value.clone(), theme.text()),
+                ];
+                if let Some(note) = &row.note {
+                    let pad = value_width.saturating_sub(row.value.chars().count());
+                    spans.push(Span::styled(" ".repeat(pad + COLUMN_GAP), theme.surface()));
+                    spans.push(Span::styled(note.clone(), theme.dim()));
+                }
+                lines.push(Line::from(spans));
             }
         }
         lines
@@ -116,6 +146,23 @@ impl KvOverview {
     }
 }
 
+/// Width of the value column that aligns a section's notes, or 0 to put each note right after its
+/// value when the aligned notes would overflow `width`.
+fn note_column(section: &KvSection, label_width: usize, width: usize) -> usize {
+    let (value_width, note_width) = section
+        .rows
+        .iter()
+        .filter_map(|row| {
+            let note = row.note.as_ref()?;
+            Some((row.value.chars().count(), note.chars().count()))
+        })
+        .fold((0, 0), |(values, notes), (value, note)| {
+            (values.max(value), notes.max(note))
+        });
+    let aligned = label_width + COLUMN_GAP + value_width + COLUMN_GAP + note_width;
+    if aligned <= width { value_width } else { 0 }
+}
+
 impl Modal for KvOverview {
     fn height(&self, _width: u16, max_height: u16) -> u16 {
         let body = u16::try_from(self.body_len()).unwrap_or(u16::MAX);
@@ -128,7 +175,7 @@ impl Modal for KvOverview {
         let rows = area
             .height
             .saturating_sub(self.header.height() + FOOTER_HEIGHT);
-        let body = self.body_lines(theme);
+        let body = self.body_lines(theme, usize::from(area.width));
         let window = self.viewport.window(body.len(), usize::from(rows), None);
         let scrollable = window.len() < body.len();
 
@@ -277,6 +324,49 @@ mod tests {
         assert_eq!(
             rows,
             ["Long", "", "k0  v0", "k1  v1", "k2  v2", "", SCROLL_FOOTER]
+        );
+    }
+
+    fn annotated_overview() -> KvOverview {
+        let note_row = |k: &str, v: &str, n: &str| (k.to_owned(), v.to_owned(), n.to_owned());
+        KvOverview::new(
+            "Config",
+            vec![
+                KvSection::annotated(vec![
+                    note_row("Model", "Opus", "$ANTHROPIC_MODEL"),
+                    note_row("Base URL", "https://x.test", "default"),
+                ]),
+                KvSection::new(vec![row("user", "~/.config/ox/config.toml")]),
+            ],
+        )
+    }
+
+    #[test]
+    fn render_aligns_notes_in_a_column_when_they_fit() {
+        // 42 columns is exactly label + gap + value + gap + note for this fixture.
+        let m = annotated_overview();
+        let rows = render_rows(&m, 42, m.height(42, 40));
+        assert_eq!(
+            rows[2..6],
+            [
+                "Model     Opus            $ANTHROPIC_MODEL",
+                "Base URL  https://x.test  default",
+                "",
+                "user      ~/.config/ox/config.toml",
+            ],
+        );
+    }
+
+    #[test]
+    fn render_puts_notes_after_their_values_when_the_column_would_overflow() {
+        let m = annotated_overview();
+        let rows = render_rows(&m, 41, m.height(41, 40));
+        assert_eq!(
+            rows[2..4],
+            [
+                "Model     Opus  $ANTHROPIC_MODEL",
+                "Base URL  https://x.test  default",
+            ],
         );
     }
 

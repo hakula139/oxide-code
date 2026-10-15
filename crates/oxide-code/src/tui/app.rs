@@ -666,9 +666,9 @@ impl App {
                 .set_model(model.short_display_name().to_owned());
         }
         self.status_bar.set_effort(effort);
-        self.session_info.config.model = model;
-        self.session_info.config.effort = effort;
-        self.session_info.config.compaction.auto = auto_compaction;
+        self.session_info
+            .config
+            .apply_swap(model, effort, requested_effort, auto_compaction);
         self.chat.push_system_message(confirmation);
     }
 
@@ -1036,7 +1036,7 @@ mod tests {
                 },
                 model: ModelSpec::resolve("test-model".to_owned()),
                 effort: Some(Effort::High),
-                max_tokens: 32_000,
+                max_tokens: None,
                 max_tool_rounds: None,
                 prompt_cache_ttl: PromptCacheTtl::OneHour,
                 compaction: CompactionConfig::resolved_for_test(AutoCompactionConfig {
@@ -1048,6 +1048,7 @@ mod tests {
                 show_welcome: true,
                 status_line: crate::config::StatusLineSegment::DEFAULT.to_vec(),
                 theme_name: "mocha".to_owned(),
+                provenance: crate::config::provenance::Provenance::default(),
             },
         }
     }

@@ -16,7 +16,7 @@ Pushing a tag that matches `v[0-9]+.*` starts `.github/workflows/release.yml`, w
 Within a minor version, stable releases keep these compatible:
 
 - CLI flags, subcommands, and exit codes
-- Config keys in `config.toml` and `ox.toml`, plus environment variables
+- Config keys and file locations, plus environment variables
 - Persisted formats: session JSONL, versioned by its header entry, and theme TOML
 - Headless (`-p`) output
 - Release asset names, which install scripts and the Homebrew formula depend on

@@ -37,7 +37,7 @@ A path tool's target is resolved before any rules run. `GateTarget::for_path` jo
 Each resolved target belongs to one zone:
 
 - **Protected**: edit-class calls ask at step 6. A target is protected when the resolved path or the path as the call names it contains a protected name, or when it sits where a protected name directly inside cwd resolves, so `.vscode -> tools/vscode` protects `tools/vscode` as well. Names compare after dropping default-ignorable code points, Unicode compatibility case folding, and trimming trailing dots and spaces. A case-insensitive file system such as APFS opens `.VSCODE` and `.vſcode` as `.vscode`, HFS+ ignores the zero-width `\u{200c}` in `.g\u{200c}it`, and Windows opens `.git.` as `.git`. On Windows the existing part of the resolved path is spelled as the file system opens it, with each 8.3 short name in full and NTFS stream suffixes dropped, so `GIT~1` and `.git::$INDEX_ALLOCATION` count as `.git`. Each protected path runs or configures code outside the task at hand:
-  - `.git`, `.githooks`, `.husky`, `.vscode`, `.idea`, `.devcontainer`, and `.codex` as any path segment.
+  - `.git`, `.githooks`, `.husky`, `.vscode`, `.idea`, `.devcontainer`, `.codex`, and `.ox` as any path segment.
   - The file names `.gitconfig`, `.gitmodules`, `.envrc`, `ox.toml`, `rust-toolchain`, `rust-toolchain.toml`, and the bash / zsh / POSIX shell startup files anywhere.
   - `.cargo/config`, `.cargo/config.toml`, `.claude/settings.json`, `.claude/settings.local.json`, and everything under `.claude/hooks`. The rest of `.claude`, including `worktrees` and `plans`, stays editable.
   - Everything under oxide-code's own config, data, and state directories.
@@ -82,11 +82,11 @@ allow = ["bash(cargo test:*)", "edit(src/**)"]
 deny = ["bash(rm -rf:*)", "read(**/.env)"]
 ```
 
-`OX_PERMISSION_MODE` overrides the mode, following `effort`'s behavior: an empty environment value falls through, while a parse error propagates so a typo fails loudly. The `[permission]` table parses into a `PermissionFileConfig` on `FileConfig` with `deny_unknown_fields`, merges through `merge_section`, and resolves in `Config::load` after the compaction block, which is also where each deny rule's literal prefix resolves against the launch directory.
+`OX_PERMISSION_MODE` overrides the mode, following `effort`'s behavior: an empty environment value falls through, while a parse error propagates so a typo fails loudly. The `[permission]` table parses into a `PermissionTable` on `FileConfig` with `deny_unknown_fields`, concatenates its rule lists across config layers, and resolves in `Config::load` after the compaction block, which is also where each deny rule's literal prefix resolves against the launch directory.
 
 The shipped defaults cover catastrophic commands (`rm -rf`, disk writes, `mkfs`, fork bombs, `curl | sh`) and `edit(.git/**)`, preventing step 7's workspace allow from touching the project's own git metadata.
 
-A checked-in `ox.toml` is untrusted, like the project credentials `reject_project_secrets` blocks, so a project file may set only `deny`. Setting `mode` or `allow` there is rejected with a message pointing to user config. The merge appends project `deny` onto the user deny set, so a repo can restrict itself but never widen what the user allowed.
+A checked-in `.ox/config.toml` is untrusted, like the project credentials `reject_project_secrets` blocks, so a project file may set only `deny`. Setting `mode` or `allow` there is rejected with a message pointing to user config. The merge appends project `deny` onto the user deny set, so a repo can restrict itself but never widen what the user allowed.
 
 ## Headless Behavior
 
@@ -120,7 +120,8 @@ In `-p` / `--no-tui` runs there is no human to prompt, so a would-ask call denie
 
 - `crates/oxide-code/src/agent.rs`: `check_permission` (resolve, pin, decide), `dispatch_tool_call`, `await_unless_aborted`, `run_tool_round`.
 - `crates/oxide-code/src/config.rs`: `Config::load`, `OX_PERMISSION_MODE`, `Effort` enum template.
-- `crates/oxide-code/src/config/file.rs`: `FileConfig::merge`, `merge_section`, `reject_project_secrets`, `reject_project_permissions`.
+- `crates/oxide-code/src/config/load.rs`: `reject_project_secrets`, `reject_project_permissions`.
+- `crates/oxide-code/src/config/merge.rs`: `APPENDED` rule lists, `merge`.
 - `crates/oxide-code/src/permission.rs`: `Mode`, `PermissionClass`, `GateTarget::for_path`, protected paths, `Policy::decide`, `ReadDeny`.
 - `crates/oxide-code/src/permission/rule.rs`: `class(specifier)` parsing and path-glob matching.
 - `crates/oxide-code/src/protocol.rs`: `Event::ApprovalRequested`, `Op::Resolve`, `Decision`.

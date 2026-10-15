@@ -132,7 +132,7 @@ const DANGEROUS_DEFAULTS: &[&str] = &[
 // ── Protected Paths ──
 
 /// Directories protected at any depth: VCS metadata and hook managers, editor and dev-container
-/// config that can run tasks when the project opens, and Codex's agent config.
+/// config that can run tasks when the project opens, and Codex's and ox's own project config.
 const PROTECTED_DIRS: &[&str] = &[
     ".codex",
     ".devcontainer",
@@ -140,10 +140,11 @@ const PROTECTED_DIRS: &[&str] = &[
     ".githooks",
     ".husky",
     ".idea",
+    ".ox",
     ".vscode",
 ];
 
-/// File names protected wherever they sit: git and direnv config, shell startup files, the project
+/// File names protected wherever they sit: git and direnv config, shell startup files, the legacy
 /// `ox.toml`, and the rustup toolchain pin. Each runs or configures code outside the task at hand.
 const PROTECTED_FILES: &[&str] = &[
     ".bash_login",
@@ -1292,6 +1293,7 @@ mod tests {
             "/repo/.githooks/pre-push",
             "/repo/.devcontainer/devcontainer.json",
             "/repo/.codex/config.toml",
+            "/repo/sub/.OX/config.toml",
             "/repo/.claude/settings.json",
             "/repo/.claude/settings.local.json",
             "/repo/.claude/hooks/format.sh",
@@ -1317,6 +1319,7 @@ mod tests {
             "/repo/.cargo/registry/x.rs",
             "/repo/docs/.zshrc.md",
             "/repo/ox.toml.bak",
+            "/repo/box/config.toml",
             "/repo/.claude/worktrees/feat/src/main.rs",
             "/repo/.claude/plans/next.md",
             "/repo/.claude/settings.json/notes.md",

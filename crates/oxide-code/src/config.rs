@@ -1,15 +1,19 @@
 //! Configuration loading.
 //!
-//! Precedence (highest wins): env > project `ox.toml` > user `~/.config/ox/config.toml` > defaults.
-//! Auth stops at the first source that resolves, in [`auth::AuthSource`] order.
+//! Precedence (highest wins): env > project `.ox/config.toml` > user `config.d/*.toml` drop-ins >
+//! user `~/.config/ox/config.toml` > defaults. Auth stops at the first source that resolves, in
+//! [`auth::AuthSource`] order.
 
 pub(crate) mod auth;
-pub(crate) mod file;
 pub(crate) mod gateway;
+pub(crate) mod load;
+mod merge;
 mod oauth;
+pub(crate) mod provenance;
+mod schema;
 
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use anyhow::{Context, Result, bail};
@@ -18,10 +22,13 @@ use tracing::warn;
 
 use self::auth::{Auth, AuthSource};
 use self::gateway::{GatewayCompat, GatewaySnapshot};
+use self::load::Loaded;
+use self::merge::Origins;
+use self::provenance::{Provenance, Source, Sourced};
+use self::schema::{CompactionTable, FileConfig, PermissionTable};
 use crate::model::ModelSpec;
-use crate::tui::theme::{self, Theme};
 use crate::util::env;
-use crate::util::path::expand_user;
+use crate::util::path::{expand_user, tildify};
 use crate::util::tls::load_extra_ca_certs;
 
 const DEFAULT_MODEL: &str = "claude-opus-5-5";
@@ -29,7 +36,6 @@ const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const AUTO_COMPACTION_OUTPUT_RESERVE_CAP: u32 = 20_000;
 const AUTO_COMPACTION_BUFFER_TOKENS: u32 = 13_000;
 const MIN_AUTO_COMPACTION_THRESHOLD_TOKENS: u32 = 50_000;
-/// Mirrors the fallback `loader::resolve_theme` applies when no `[tui.theme] base` is set.
 pub(crate) const DEFAULT_THEME: &str = "mocha";
 
 // ── ConfigSnapshot ──
@@ -44,7 +50,8 @@ pub(crate) struct ConfigSnapshot {
     /// PEM bundle appended to reqwest's trust anchors.
     pub(crate) extra_ca_certs: Option<PathBuf>,
     pub(crate) gateway: GatewaySnapshot,
-    pub(crate) max_tokens: u32,
+    /// User-set output cap. `None` defers to [`ModelSpec::resolve_max_tokens`].
+    pub(crate) max_tokens: Option<u32>,
     /// `None` means the agent loop runs without a per-turn round cap.
     pub(crate) max_tool_rounds: Option<u32>,
     pub(crate) prompt_cache_ttl: PromptCacheTtl,
@@ -56,6 +63,41 @@ pub(crate) struct ConfigSnapshot {
     /// Resolved theme base name — built-in catalogue key or filesystem path. `/theme` reads this
     /// to mark the active row in the picker.
     pub(crate) theme_name: String,
+    pub(crate) provenance: Provenance,
+}
+
+impl ConfigSnapshot {
+    /// Startup notices: config files in superseded locations, then an unsupported model.
+    pub(crate) fn notices(&self) -> Vec<String> {
+        self.provenance
+            .layers
+            .iter()
+            .filter_map(provenance::Layer::notice)
+            .chain(self.model.unsupported_notice())
+            .collect()
+    }
+
+    /// Applies a `/model` or `/effort` swap. A changed model and an honored effort pick become
+    /// session-set, while an effort the new model derived on its own reverts to the default source.
+    pub(crate) fn apply_swap(
+        &mut self,
+        model: ModelSpec,
+        effort: Option<Effort>,
+        requested_effort: Option<Effort>,
+        auto_compaction: AutoCompactionConfig,
+    ) {
+        if model.id() != self.model.id() {
+            self.provenance.model = Source::Session;
+        }
+        if requested_effort.is_some() && effort == requested_effort {
+            self.provenance.effort = Source::Session;
+        } else if effort != self.effort {
+            self.provenance.effort = Source::Default;
+        }
+        self.model = model;
+        self.effort = effort;
+        self.compaction.auto = auto_compaction;
+    }
 }
 
 // ── ThinkingConfig ──
@@ -340,12 +382,20 @@ enum AutoCompactionPolicy {
 struct ThresholdPercent(u8);
 
 impl ThresholdPercent {
-    fn new(percent: u8) -> Result<Self> {
-        if !(1..=100).contains(&percent) {
-            bail!("auto compaction threshold percent must be between 1 and 100, got {percent}");
-        }
-        Ok(Self(percent))
+    fn new(percent: u8) -> Option<Self> {
+        (1..=100).contains(&percent).then_some(Self(percent))
     }
+}
+
+// ── ThemeConfig ──
+
+/// `[tui.theme]` as configured. The TUI resolves it into a palette.
+#[derive(Debug, Clone)]
+pub(crate) struct ThemeConfig {
+    /// Built-in catalogue key (e.g. `"mocha"`) or filesystem path, [`DEFAULT_THEME`] when unset.
+    pub(crate) base: String,
+    /// `[tui.theme.overrides]` slot patches, still raw TOML.
+    pub(crate) overrides: toml::Table,
 }
 
 // ── Config ──
@@ -374,128 +424,124 @@ pub(crate) struct Config {
     pub(crate) show_thinking: bool,
     pub(crate) show_welcome: bool,
     pub(crate) status_line: Vec<StatusLineSegment>,
-    pub(crate) theme: Theme,
-    /// Built-in catalogue key (e.g. `"mocha"`) or filesystem path. Mirrors `[tui.theme] base`,
-    /// falling back to [`DEFAULT_THEME`] when unset.
-    pub(crate) theme_name: String,
+    pub(crate) theme: ThemeConfig,
+    pub(crate) provenance: Provenance,
 }
 
 impl Config {
-    /// Resolves config from layered sources. Per-field precedence is env > project `ox.toml` >
-    /// user `~/.config/ox/config.toml` > built-in default. See the module docs for the auth
-    /// chain. Parse errors (TOML, env, theme) propagate so a typo doesn't degrade silently into
-    /// "no credentials".
-    pub(crate) async fn load() -> Result<Self> {
-        let fc = file::load()?;
-        let client = fc.client.unwrap_or_default();
-        let tui = fc.tui.unwrap_or_default();
-        let theme_config = tui.theme.unwrap_or_default();
+    /// Resolves config from layered sources, finding the project file from `cwd`. Per-field
+    /// precedence is env > config files (see [`load::load`]) > built-in default. See the module
+    /// docs for the auth chain. Parse errors (TOML, env) propagate so a typo doesn't degrade
+    /// silently into "no credentials".
+    pub(crate) async fn load(cwd: &Path) -> Result<Self> {
+        let Loaded { config, origins } = load::load(cwd)?;
+        let FileConfig {
+            client,
+            permission,
+            tui,
+        } = config;
 
-        let base_url = env::string("ANTHROPIC_BASE_URL")
-            .or(client.base_url)
-            .unwrap_or_else(|| DEFAULT_BASE_URL.to_owned());
-        validate_base_url(&base_url)?;
+        let base_url = env_string("ANTHROPIC_BASE_URL")
+            .or_else(|| origins.sourced("client.base_url", client.base_url))
+            .unwrap_or_else(|| Sourced::fallback(DEFAULT_BASE_URL.to_owned()));
+        validate_base_url(&base_url.value)?;
 
         // Resolve before `auth` so the OAuth refresh can also thread the extra trust anchors
         // through reqwest (relevant under SSL-inspecting corporate proxies).
-        let extra_ca_certs = resolve_extra_ca_certs(client.extra_ca_certs)?;
+        let extra_ca_certs = resolve_extra_ca_certs(
+            origins.sourced("client.extra_ca_certs", client.extra_ca_certs),
+        )?;
 
         let gateway = GatewayCompat::load()?;
 
-        let auth = auth::resolve(
-            auth::explicit_credentials(client.api_key),
-            &base_url,
-            oauth::load_token(extra_ca_certs.as_deref()),
+        let (auth, auth_source) = resolve_auth(
+            client.api_key,
+            &origins,
+            &base_url.value,
+            extra_ca_certs.value.as_deref(),
+            &gateway,
         )
         .await?;
-        gateway.check_credential_header(auth.source())?;
 
-        let model = ModelSpec::resolve(
-            env::string("ANTHROPIC_MODEL")
-                .or(client.model)
-                .unwrap_or_else(|| DEFAULT_MODEL.to_owned()),
+        let model_id = env_string("ANTHROPIC_MODEL")
+            .or_else(|| origins.sourced("client.model", client.model))
+            .unwrap_or_else(|| Sourced::fallback(DEFAULT_MODEL.to_owned()));
+        let model = ModelSpec::resolve(model_id.value);
+
+        let effort = resolve_effort(&model, client.effort, &origins)?;
+
+        let max_tokens = Sourced::from_option(
+            env_parse::<u32>("ANTHROPIC_MAX_TOKENS")?
+                .or_else(|| origins.sourced("client.max_tokens", client.max_tokens)),
+        );
+        let max_tool_rounds = Sourced::from_option(
+            env_parse::<u32>("OX_MAX_TOOL_ROUNDS")?
+                .or_else(|| origins.sourced("client.max_tool_rounds", client.max_tool_rounds)),
         );
 
-        let effort_pick = match env::string("ANTHROPIC_EFFORT") {
-            Some(raw) => Some(raw.parse::<Effort>().context("ANTHROPIC_EFFORT")?),
-            None => client.effort,
-        };
-        let effort = model.resolve_effort(effort_pick);
-
-        let max_tokens = match env::string("ANTHROPIC_MAX_TOKENS") {
-            Some(raw) => Some(
-                raw.parse::<u32>()
-                    .with_context(|| format!("ANTHROPIC_MAX_TOKENS={raw:?}"))?,
-            ),
-            None => client.max_tokens,
-        };
-
-        let max_tool_rounds = match env::string("OX_MAX_TOOL_ROUNDS") {
-            Some(raw) => Some(
-                raw.parse::<u32>()
-                    .with_context(|| format!("OX_MAX_TOOL_ROUNDS={raw:?}"))?,
-            ),
-            None => client.max_tool_rounds,
-        };
-
-        let show_thinking = env::bool("OX_SHOW_THINKING")?
-            .or(tui.show_thinking)
-            .unwrap_or(false);
+        let show_thinking = env_bool("OX_SHOW_THINKING")?
+            .or_else(|| origins.sourced("tui.show_thinking", tui.show_thinking))
+            .unwrap_or_else(|| Sourced::fallback(false));
 
         let show_welcome = env::bool("OX_SHOW_WELCOME")?
             .or(tui.show_welcome)
             .unwrap_or(true);
 
-        let status_line = match env::string("OX_STATUS_LINE") {
-            Some(raw) => parse_status_line_segments(&raw).context("OX_STATUS_LINE")?,
-            None => validate_status_line(
-                tui.status_line
-                    .unwrap_or_else(|| StatusLineSegment::DEFAULT.to_vec()),
-            )
-            .context("tui.status_line")?,
-        };
+        let status_line = resolve_status_line(tui.status_line)?;
 
-        let prompt_cache_ttl = match env::string("OX_PROMPT_CACHE_TTL") {
-            Some(raw) => raw
-                .parse::<PromptCacheTtl>()
-                .context("OX_PROMPT_CACHE_TTL")?,
-            None => client.prompt_cache_ttl.unwrap_or(PromptCacheTtl::OneHour),
-        };
+        let prompt_cache_ttl = env_parse::<PromptCacheTtl>("OX_PROMPT_CACHE_TTL")?
+            .or_else(|| origins.sourced("client.prompt_cache_ttl", client.prompt_cache_ttl))
+            .unwrap_or_else(|| Sourced::fallback(PromptCacheTtl::OneHour));
 
         let compaction = resolve_compaction(
-            client.compaction,
+            &client.compaction,
+            &origins,
             &model,
-            model.resolve_max_tokens(max_tokens),
+            model.resolve_max_tokens(max_tokens.value),
         )?;
 
-        let permission = resolve_permission(fc.permission)?;
+        let (permission, permission_mode) = resolve_permission(permission, &origins, cwd)?;
 
-        let theme_name = theme_config
-            .base
-            .clone()
-            .unwrap_or_else(|| DEFAULT_THEME.to_owned());
-        let theme = theme::resolve_theme(
-            theme_config.base.as_deref(),
-            &theme_config.overrides.unwrap_or_default(),
-        )?;
+        let theme = ThemeConfig {
+            base: tui.theme.base.unwrap_or_else(|| DEFAULT_THEME.to_owned()),
+            overrides: tui.theme.overrides,
+        };
+
+        let provenance = Provenance {
+            layers: origins.into_layers(),
+            model: model_id.source,
+            effort: effort.source,
+            auth: auth_source,
+            base_url: base_url.source,
+            extra_ca_certs: extra_ca_certs.source,
+            custom_headers: Source::env_if_set("ANTHROPIC_CUSTOM_HEADERS"),
+            attribution: Source::env_if_set("CLAUDE_CODE_ATTRIBUTION_HEADER"),
+            structured_outputs: Source::env_if_set("CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS"),
+            max_tokens: max_tokens.source,
+            max_tool_rounds: max_tool_rounds.source,
+            prompt_cache_ttl: prompt_cache_ttl.source,
+            compaction: compaction.source,
+            permission_mode,
+            show_thinking: show_thinking.source,
+        };
 
         Ok(Self {
             model,
-            effort,
+            effort: effort.value,
             auth,
-            base_url,
-            extra_ca_certs,
+            base_url: base_url.value,
+            extra_ca_certs: extra_ca_certs.value,
             gateway,
-            max_tokens,
-            max_tool_rounds,
-            prompt_cache_ttl,
-            compaction,
+            max_tokens: max_tokens.value,
+            max_tool_rounds: max_tool_rounds.value,
+            prompt_cache_ttl: prompt_cache_ttl.value,
+            compaction: compaction.value,
             permission,
-            show_thinking,
+            show_thinking: show_thinking.value,
             show_welcome,
             status_line,
             theme,
-            theme_name,
+            provenance,
         })
     }
 
@@ -508,7 +554,7 @@ impl Config {
             base_url: self.base_url.clone(),
             extra_ca_certs: self.extra_ca_certs.clone(),
             gateway: self.gateway.snapshot(),
-            max_tokens: self.model.resolve_max_tokens(self.max_tokens),
+            max_tokens: self.max_tokens,
             max_tool_rounds: self.max_tool_rounds,
             prompt_cache_ttl: self.prompt_cache_ttl,
             compaction: self.compaction,
@@ -516,12 +562,22 @@ impl Config {
             show_thinking: self.show_thinking,
             show_welcome: self.show_welcome,
             status_line: self.status_line.clone(),
-            theme_name: self.theme_name.clone(),
+            theme_name: self.theme.base.clone(),
+            provenance: self.provenance.clone(),
         }
     }
 }
 
 // ── Helpers ──
+
+/// `OX_STATUS_LINE` > `tui.status_line` > the default roster.
+fn resolve_status_line(file: Option<Vec<StatusLineSegment>>) -> Result<Vec<StatusLineSegment>> {
+    match env::string("OX_STATUS_LINE") {
+        Some(raw) => parse_status_line_segments(&raw).context("OX_STATUS_LINE"),
+        None => validate_status_line(file.unwrap_or_else(|| StatusLineSegment::DEFAULT.to_vec()))
+            .context("tui.status_line"),
+    }
+}
 
 fn parse_status_line_segments(raw: &str) -> Result<Vec<StatusLineSegment>> {
     let parts: Vec<&str> = raw.split(',').map(str::trim).collect();
@@ -579,42 +635,83 @@ pub(crate) fn display_auto_compaction(auto: AutoCompactionConfig) -> String {
     }
 }
 
+/// Resolves the credential and its source, rejecting a custom header that would replace the
+/// credential. A stored login is the fallback when nothing configures one, so its source is the
+/// default.
+async fn resolve_auth(
+    file_api_key: Option<String>,
+    origins: &Origins,
+    base_url: &str,
+    extra_ca_certs: Option<&Path>,
+    gateway: &GatewayCompat,
+) -> Result<(Auth, Source)> {
+    let auth = auth::resolve(
+        auth::explicit_credentials(file_api_key),
+        base_url,
+        oauth::load_token(extra_ca_certs),
+    )
+    .await?;
+    gateway.check_credential_header(auth.source())?;
+
+    let source = match auth.source() {
+        AuthSource::ApiKeyFile => origins.source("client.api_key"),
+        source => source.env_var().map_or(Source::Default, Source::Env),
+    };
+    Ok((auth, source))
+}
+
+/// The effort the model takes. A pick the model ignores leaves the source at the default.
+fn resolve_effort(
+    model: &ModelSpec,
+    file: Option<Effort>,
+    origins: &Origins,
+) -> Result<Sourced<Option<Effort>>> {
+    let pick =
+        env_parse::<Effort>("ANTHROPIC_EFFORT")?.or_else(|| origins.sourced("client.effort", file));
+    let effort = model.resolve_effort(pick.as_ref().map(|pick| pick.value));
+    Ok(match pick {
+        Some(pick) if effort.is_some() => Sourced::new(effort, pick.source),
+        _ => Sourced::fallback(effort),
+    })
+}
+
+/// Sourced from the threshold when one applies, otherwise from `auto_enabled`.
 fn resolve_compaction(
-    file: Option<file::CompactionConfig>,
+    file: &CompactionTable,
+    origins: &Origins,
     model: &ModelSpec,
     max_tokens: u32,
-) -> Result<CompactionConfig> {
-    let auto_requested = env::bool("OX_COMPACTION_AUTO_ENABLED")?
-        .or_else(|| file.as_ref().and_then(|c| c.enabled))
-        .unwrap_or(true);
+) -> Result<Sourced<CompactionConfig>> {
+    let auto_requested = env_bool("OX_COMPACTION_AUTO_ENABLED")?
+        .or_else(|| origins.sourced("client.compaction.auto_enabled", file.enabled))
+        .unwrap_or_else(|| Sourced::fallback(true));
 
-    let policy = if auto_requested {
-        resolve_auto_policy(file.as_ref())?
+    let policy = if auto_requested.value {
+        resolve_auto_threshold(file, origins)?
+            .unwrap_or_else(|| auto_requested.map(|_| AutoCompactionPolicy::Default))
     } else {
-        AutoCompactionPolicy::Disabled
+        auto_requested.map(|_| AutoCompactionPolicy::Disabled)
     };
-    Ok(resolve_compaction_policy(policy, model, max_tokens))
+    Ok(policy.map(|policy| resolve_compaction_policy(policy, model, max_tokens)))
 }
 
 /// Resolves the permission policy from the merged file config plus the `OX_PERMISSION_MODE`
-/// override. The env mode wins over the file mode with the empty-is-absent and parse-error-
-/// propagates behavior `effort` uses, so a typo fails loudly rather than defaulting permissive.
-/// Allow / deny rule strings are parsed here so a malformed rule surfaces at load. Deny prefixes
-/// resolve against the process cwd, which the gate also resolves paths against.
+/// override, along with the source of its mode. The env mode wins over the file mode with the
+/// empty-is-absent and parse-error-propagates behavior `effort` uses, so a typo fails loudly.
+/// Deny prefixes resolve against `cwd`, which the gate also resolves paths against.
 fn resolve_permission(
-    file: Option<file::PermissionFileConfig>,
-) -> Result<crate::permission::Policy> {
-    let file = file.unwrap_or_default();
-
-    let mode = match env::string("OX_PERMISSION_MODE") {
-        Some(raw) => raw.parse().context("OX_PERMISSION_MODE")?,
-        None => file.mode.unwrap_or_default(),
-    };
+    file: PermissionTable,
+    origins: &Origins,
+    cwd: &Path,
+) -> Result<(crate::permission::Policy, Source)> {
+    let mode = env_parse::<crate::permission::Mode>("OX_PERMISSION_MODE")?
+        .or_else(|| origins.sourced("permission.mode", file.mode))
+        .unwrap_or_else(|| Sourced::fallback(crate::permission::Mode::default()));
 
     let allow = file.allow.unwrap_or_default();
     let deny = file.deny.unwrap_or_default();
-    let cwd = std::env::current_dir().unwrap_or_default();
-    crate::permission::Policy::resolve(mode, &allow, &deny, &cwd)
+    let policy = crate::permission::Policy::resolve(mode.value, &allow, &deny, cwd)?;
+    Ok((policy, mode.source))
 }
 
 fn resolve_compaction_policy(
@@ -647,25 +744,60 @@ fn resolve_auto_compaction(
     }
 }
 
-fn resolve_auto_policy(file: Option<&file::CompactionConfig>) -> Result<AutoCompactionPolicy> {
-    let env_tokens = env_u32("OX_COMPACTION_AUTO_THRESHOLD_TOKENS")?;
-    let env_percent = env_u8("OX_COMPACTION_AUTO_THRESHOLD_PERCENT")?;
-    let env_threshold_set = env_tokens.is_some() || env_percent.is_some();
-    let file_tokens = file.and_then(|c| c.threshold_tokens);
-    let file_percent = file.and_then(|c| c.threshold_percent);
-    let (tokens, percent) = if env_threshold_set {
+/// The configured threshold policy, `None` when neither threshold is set. Env thresholds replace
+/// the file thresholds as a pair.
+fn resolve_auto_threshold(
+    file: &CompactionTable,
+    origins: &Origins,
+) -> Result<Option<Sourced<AutoCompactionPolicy>>> {
+    let env_tokens = env_parse::<u32>("OX_COMPACTION_AUTO_THRESHOLD_TOKENS")?;
+    let env_percent = env_parse::<u8>("OX_COMPACTION_AUTO_THRESHOLD_PERCENT")?;
+    let (tokens, percent) = if env_tokens.is_some() || env_percent.is_some() {
         (env_tokens, env_percent)
     } else {
-        (file_tokens, file_percent)
+        (
+            origins.sourced(
+                "client.compaction.auto_threshold_tokens",
+                file.threshold_tokens,
+            ),
+            origins.sourced(
+                "client.compaction.auto_threshold_percent",
+                file.threshold_percent,
+            ),
+        )
     };
 
     match (tokens, percent) {
-        (Some(_), Some(_)) => {
-            bail!("set only one of auto_threshold_tokens or auto_threshold_percent for compaction")
+        (Some(tokens), Some(_)) => {
+            // Both come from one place: the env pair, or one file since layers clear the pair.
+            let both = match &tokens.source {
+                Source::File(layer) => format!(
+                    "{} sets both auto_threshold_tokens and auto_threshold_percent",
+                    tildify(layer.path())
+                ),
+                _ => "both OX_COMPACTION_AUTO_THRESHOLD_TOKENS and \
+                      OX_COMPACTION_AUTO_THRESHOLD_PERCENT are set"
+                    .to_owned(),
+            };
+            bail!("{both}. Set only one compaction threshold.")
         }
-        (Some(tokens), None) => Ok(AutoCompactionPolicy::Tokens(tokens)),
-        (None, Some(percent)) => ThresholdPercent::new(percent).map(AutoCompactionPolicy::Percent),
-        (None, None) => Ok(AutoCompactionPolicy::Default),
+        (Some(tokens), None) => Ok(Some(tokens.map(AutoCompactionPolicy::Tokens))),
+        (None, Some(percent)) => {
+            let threshold = ThresholdPercent::new(percent.value).with_context(|| {
+                format!(
+                    "{}: expected a whole number from 1 to 100",
+                    invalid_setting(
+                        "client.compaction.auto_threshold_percent",
+                        &percent.source,
+                        percent.value,
+                    ),
+                )
+            })?;
+            Ok(Some(
+                percent.map(|_| AutoCompactionPolicy::Percent(threshold)),
+            ))
+        }
+        (None, None) => Ok(None),
     }
 }
 
@@ -708,38 +840,60 @@ fn default_auto_threshold_for_window(context_window: u32, max_tokens: u32) -> Op
         .checked_sub(AUTO_COMPACTION_BUFFER_TOKENS)
 }
 
-fn env_u32(key: &'static str) -> Result<Option<u32>> {
-    env::string(key)
-        .map(|raw| raw.parse::<u32>().with_context(|| format!("{key}={raw:?}")))
+fn env_string(var: &'static str) -> Option<Sourced<String>> {
+    env::string(var).map(|value| Sourced::new(value, Source::Env(var)))
+}
+
+fn env_bool(var: &'static str) -> Result<Option<Sourced<bool>>> {
+    Ok(env::bool(var)?.map(|value| Sourced::new(value, Source::Env(var))))
+}
+
+fn env_parse<T>(var: &'static str) -> Result<Option<Sourced<T>>>
+where
+    T: FromStr,
+    T::Err: Into<anyhow::Error>,
+{
+    env_string(var)
+        .map(|raw| {
+            let value = raw
+                .value
+                .parse::<T>()
+                .map_err(Into::into)
+                .with_context(|| format!("{var}={:?}", raw.value))?;
+            Ok(Sourced::new(value, raw.source))
+        })
         .transpose()
 }
 
-fn env_u8(key: &'static str) -> Result<Option<u8>> {
-    env::string(key)
-        .map(|raw| raw.parse::<u8>().with_context(|| format!("{key}={raw:?}")))
-        .transpose()
+/// `invalid {setting} {value}`, naming where the value was set: the env var, or the key and its
+/// file.
+fn invalid_setting(key: &str, source: &Source, value: impl fmt::Display) -> String {
+    match source {
+        Source::Env(var) => format!("invalid {var} {value}"),
+        Source::File(layer) => format!("invalid {key} {value} in {}", tildify(layer.path())),
+        Source::Default | Source::Session => format!("invalid {key} {value}"),
+    }
 }
 
 /// `OX_EXTRA_CA_CERTS` > `client.extra_ca_certs` > `NODE_EXTRA_CA_CERTS`. Node is often exported
 /// shell-wide for npm, so like Node itself, an unreadable bundle there warns and is skipped.
-fn resolve_extra_ca_certs(file_path: Option<String>) -> Result<Option<PathBuf>> {
-    let explicit = env::string("OX_EXTRA_CA_CERTS")
+fn resolve_extra_ca_certs(file: Option<Sourced<String>>) -> Result<Sourced<Option<PathBuf>>> {
+    let explicit = env_string("OX_EXTRA_CA_CERTS")
         .map(|raw| ("OX_EXTRA_CA_CERTS", raw))
-        .or(file_path.map(|raw| ("client.extra_ca_certs", raw)));
-    if let Some((source, raw)) = explicit {
-        return expand_user(&raw)
-            .map(Some)
-            .with_context(|| format!("invalid {source}"));
+        .or(file.map(|raw| ("client.extra_ca_certs", raw)));
+    if let Some((key, raw)) = explicit {
+        let path = expand_user(&raw.value).with_context(|| format!("invalid {key}"))?;
+        return Ok(Sourced::new(Some(path), raw.source));
     }
 
-    let Some(raw) = env::string("NODE_EXTRA_CA_CERTS") else {
-        return Ok(None);
+    let Some(raw) = env_string("NODE_EXTRA_CA_CERTS") else {
+        return Ok(Sourced::fallback(None));
     };
-    match expand_user(&raw).and_then(|path| load_extra_ca_certs(&path).map(|_| path)) {
-        Ok(path) => Ok(Some(path)),
+    match expand_user(&raw.value).and_then(|path| load_extra_ca_certs(&path).map(|_| path)) {
+        Ok(path) => Ok(Sourced::new(Some(path), raw.source)),
         Err(e) => {
             warn!("ignoring NODE_EXTRA_CA_CERTS: {e:#}");
-            Ok(None)
+            Ok(Sourced::fallback(None))
         }
     }
 }
@@ -788,7 +942,125 @@ mod tests {
 
     use tempfile::TempDir;
 
+    use super::provenance::Layer;
     use super::*;
+
+    // ── ConfigSnapshot::notices ──
+
+    fn sample_config() -> Config {
+        Config {
+            auth: Auth::new(AuthSource::ClaudeCodeLogin, "token-must-not-leak"),
+            base_url: "https://api.example.test".to_owned(),
+            extra_ca_certs: Some(PathBuf::from("/etc/ssl/corp-ca.pem")),
+            gateway: GatewayCompat {
+                custom_headers: gateway::parse_headers("x-team: secret-team").unwrap(),
+                attribution: false,
+                structured_outputs: true,
+            },
+            model: ModelSpec::resolve("claude-test-1-0".to_owned()),
+            effort: Some(Effort::Xhigh),
+            max_tokens: None,
+            max_tool_rounds: Some(100),
+            prompt_cache_ttl: PromptCacheTtl::FiveMin,
+            compaction: CompactionConfig::resolved_for_test(AutoCompactionConfig {
+                enabled: true,
+                threshold_tokens: Some(42),
+            }),
+            permission: crate::permission::Policy::resolve(
+                crate::permission::Mode::Plan,
+                &[],
+                &[],
+                Path::new(""),
+            )
+            .unwrap(),
+            show_thinking: true,
+            show_welcome: false,
+            status_line: vec![
+                StatusLineSegment::CurrentDir,
+                StatusLineSegment::ModelWithEffort,
+            ],
+            theme: ThemeConfig {
+                base: "macchiato".to_owned(),
+                overrides: toml::Table::new(),
+            },
+            provenance: Provenance {
+                model: Source::Env("ANTHROPIC_MODEL"),
+                effort: Source::Env("ANTHROPIC_EFFORT"),
+                ..Provenance::default()
+            },
+        }
+    }
+
+    #[test]
+    fn notices_list_legacy_files_then_an_unsupported_model() {
+        let mut cfg = sample_config();
+        cfg.provenance.layers = vec![
+            Layer::User(PathBuf::from("/cfg/ox/config.toml")),
+            Layer::LegacyProject(PathBuf::from("/repo/ox.toml")),
+            Layer::Project(PathBuf::from("/repo/.ox/config.toml")),
+        ];
+
+        let notices = cfg.snapshot().notices();
+
+        assert_eq!(notices.len(), 2, "{notices:?}");
+        assert!(
+            notices[0].starts_with("/repo/ox.toml is in the legacy"),
+            "{notices:?}"
+        );
+        assert!(
+            notices[1].starts_with("`claude-test-1-0` is not a supported model"),
+            "{notices:?}"
+        );
+    }
+
+    #[test]
+    fn notices_are_empty_for_a_current_setup() {
+        let mut cfg = sample_config();
+        cfg.model = ModelSpec::resolve("claude-opus-5-5".to_owned());
+        cfg.provenance.layers = vec![Layer::Project(PathBuf::from("/repo/.ox/config.toml"))];
+        assert_eq!(cfg.snapshot().notices(), [] as [String; 0]);
+    }
+
+    // ── ConfigSnapshot::apply_swap ──
+
+    #[test]
+    fn apply_swap_marks_the_model_and_an_honored_effort_pick_as_session_set() {
+        let mut snap = sample_config().snapshot();
+        let model = snap.model.clone();
+        let auto = AutoCompactionConfig::disabled();
+
+        snap.apply_swap(model.clone(), Some(Effort::Xhigh), None, auto);
+        assert_eq!(snap.provenance.model, Source::Env("ANTHROPIC_MODEL"));
+        assert_eq!(snap.provenance.effort, Source::Env("ANTHROPIC_EFFORT"));
+        assert_eq!(snap.compaction.auto, auto);
+
+        snap.apply_swap(model, Some(Effort::Low), Some(Effort::Low), auto);
+        assert_eq!(snap.provenance.model, Source::Env("ANTHROPIC_MODEL"));
+        assert_eq!(snap.provenance.effort, Source::Session);
+        assert_eq!(snap.effort, Some(Effort::Low));
+
+        let opus = ModelSpec::resolve("claude-opus-5-5".to_owned());
+        snap.apply_swap(opus, Some(Effort::Low), None, auto);
+        assert_eq!(snap.provenance.model, Source::Session);
+        assert_eq!(snap.provenance.effort, Source::Session);
+        assert_eq!(snap.model.id(), "claude-opus-5-5");
+    }
+
+    #[test]
+    fn apply_swap_reverts_an_effort_the_model_derived_to_the_default_source() {
+        let mut snap = sample_config().snapshot();
+        let custom = ModelSpec::resolve("gateway-alias".to_owned());
+        let auto = AutoCompactionConfig::disabled();
+
+        snap.apply_swap(custom, None, Some(Effort::High), auto);
+        assert_eq!(snap.provenance.effort, Source::Default);
+        assert_eq!(snap.effort, None);
+
+        let opus = ModelSpec::resolve("claude-opus-5-5".to_owned());
+        snap.apply_swap(opus, Some(Effort::Medium), None, auto);
+        assert_eq!(snap.provenance.effort, Source::Default);
+        assert_eq!(snap.effort, Some(Effort::Medium));
+    }
 
     // ── ThinkingConfig ──
 
@@ -927,10 +1199,21 @@ mod tests {
         "XDG_CONFIG_HOME",
     ];
 
-    fn write_user_config(xdg_dir: &Path, body: &str) {
-        let config_dir = xdg_dir.join("ox");
-        std::fs::create_dir_all(&config_dir).unwrap();
-        std::fs::write(config_dir.join("config.toml"), body).unwrap();
+    fn write_user_config(xdg_dir: &Path, body: &str) -> Layer {
+        let path = xdg_dir.join("ox").join("config.toml");
+        write_config(path.clone(), body);
+        Layer::User(path)
+    }
+
+    fn write_drop_in(xdg_dir: &Path, name: &str, body: &str) -> Layer {
+        let path = xdg_dir.join("ox").join("config.d").join(name);
+        write_config(path.clone(), body);
+        Layer::DropIn(path)
+    }
+
+    fn write_config(path: PathBuf, body: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
     }
 
     /// Baseline env (all unset, `ANTHROPIC_API_KEY` = `"sk-default"`) plus overrides.
@@ -976,7 +1259,7 @@ mod tests {
     #[tokio::test]
     async fn load_defaults_apply_when_no_config_and_no_env() {
         let dir = tempfile::tempdir().unwrap();
-        let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
+        let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load(dir.path()))
             .await
             .unwrap();
         assert_eq!(config.model.id(), "claude-opus-5-5");
@@ -999,24 +1282,45 @@ mod tests {
         assert!(config.gateway.custom_headers.is_empty());
         assert!(config.gateway.attribution);
         assert!(config.gateway.structured_outputs);
-        assert_eq!(config.theme_name, DEFAULT_THEME);
+        assert_eq!(config.theme.base, DEFAULT_THEME);
+        assert!(config.theme.overrides.is_empty());
         assert_eq!(config.permission.mode(), crate::permission::Mode::Auto);
+        assert_eq!(
+            config.provenance,
+            Provenance {
+                auth: Source::Env("ANTHROPIC_API_KEY"),
+                ..Provenance::default()
+            },
+        );
     }
 
     #[tokio::test]
-    async fn load_theme_name_reflects_user_picked_base() {
+    async fn load_theme_passes_base_and_raw_overrides_through() {
         let dir = tempfile::tempdir().unwrap();
         write_user_config(
             dir.path(),
-            indoc::indoc! {r#"
+            indoc::indoc! {r##"
                 [tui.theme]
                 base = "latte"
-            "#},
+
+                [tui.theme.overrides]
+                error = "#ff0000"
+                accent = { bold = false }
+            "##},
         );
-        let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
+        let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load(dir.path()))
             .await
             .unwrap();
-        assert_eq!(config.theme_name, "latte");
+        assert_eq!(config.theme.base, "latte");
+        assert_eq!(
+            config.theme.overrides,
+            indoc::indoc! {r##"
+                error = "#ff0000"
+                accent = { bold = false }
+            "##}
+            .parse::<toml::Table>()
+            .unwrap(),
+        );
     }
 
     #[tokio::test]
@@ -1032,7 +1336,7 @@ mod tests {
             env("OX_SHOW_WELCOME", "0"),
             env("OX_STATUS_LINE", "run-state,model,current-dir"),
         ]);
-        let config = temp_env::async_with_vars(vars, Config::load())
+        let config = temp_env::async_with_vars(vars, Config::load(dir.path()))
             .await
             .unwrap();
         assert_eq!(config.model.id(), "claude-sonnet-5-5");
@@ -1058,14 +1362,18 @@ mod tests {
     #[tokio::test]
     async fn load_user_config_supplies_values_without_env_overrides() {
         let dir = tempfile::tempdir().unwrap();
-        write_user_config(
+        let user = write_user_config(
             dir.path(),
             indoc::indoc! {r#"
                 [client]
                 model = "claude-haiku-5-5"
                 base_url = "https://config-file.invalid"
+                extra_ca_certs = "/etc/ssl/corp-ca.pem"
                 max_tokens = 128
                 max_tool_rounds = 75
+
+                [client.compaction]
+                auto_threshold_percent = 40
 
                 [tui]
                 show_thinking = true
@@ -1073,14 +1381,34 @@ mod tests {
                 status_line = ["current-dir", "git-branch", "model-with-effort"]
             "#},
         );
-        let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
+        let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load(dir.path()))
             .await
             .unwrap();
         assert_eq!(config.model.id(), "claude-haiku-5-5");
         assert_eq!(config.base_url, "https://config-file.invalid");
+        assert_eq!(
+            config.extra_ca_certs.as_deref(),
+            Some(Path::new("/etc/ssl/corp-ca.pem"))
+        );
         assert_eq!(config.max_tokens, Some(128));
         assert_eq!(config.max_tool_rounds, Some(75));
         assert!(config.compaction.auto.enabled);
+        let file = Source::File(user.clone());
+        assert_eq!(
+            config.provenance,
+            Provenance {
+                layers: vec![user],
+                model: file.clone(),
+                auth: Source::Env("ANTHROPIC_API_KEY"),
+                base_url: file.clone(),
+                extra_ca_certs: file.clone(),
+                max_tokens: file.clone(),
+                max_tool_rounds: file.clone(),
+                compaction: file.clone(),
+                show_thinking: file,
+                ..Provenance::default()
+            },
+        );
         assert!(config.show_thinking);
         assert!(
             !config.show_welcome,
@@ -1100,7 +1428,7 @@ mod tests {
     async fn load_status_line_invalid_segment_surfaces_parse_error() {
         let dir = tempfile::tempdir().unwrap();
         let vars = env_vars(vec![xdg(&dir), env("OX_STATUS_LINE", "model,nope")]);
-        let err = temp_env::async_with_vars(vars, Config::load())
+        let err = temp_env::async_with_vars(vars, Config::load(dir.path()))
             .await
             .expect_err("invalid segment must propagate");
         let msg = format!("{err:#}");
@@ -1113,7 +1441,7 @@ mod tests {
     async fn load_status_line_stray_comma_in_env_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let vars = env_vars(vec![xdg(&dir), env("OX_STATUS_LINE", "model,,run-state")]);
-        let err = temp_env::async_with_vars(vars, Config::load())
+        let err = temp_env::async_with_vars(vars, Config::load(dir.path()))
             .await
             .expect_err("stray comma must surface as a typo");
         let msg = format!("{err:#}");
@@ -1132,7 +1460,7 @@ mod tests {
                 status_line = ["model", "nope"]
             "#},
         );
-        let err = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
+        let err = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load(dir.path()))
             .await
             .expect_err("invalid TOML segment must propagate");
         let msg = format!("{err:#}");
@@ -1146,7 +1474,7 @@ mod tests {
     async fn load_status_line_empty_env_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let vars = env_vars(vec![xdg(&dir), env("OX_STATUS_LINE", ",")]);
-        let err = temp_env::async_with_vars(vars, Config::load())
+        let err = temp_env::async_with_vars(vars, Config::load(dir.path()))
             .await
             .expect_err("empty status line must not launch without run-state");
         let msg = format!("{err:#}");
@@ -1166,7 +1494,7 @@ mod tests {
                 status_line = []
             "},
         );
-        let err = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
+        let err = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load(dir.path()))
             .await
             .expect_err("empty status line must not launch without run-state");
         let msg = format!("{err:#}");
@@ -1196,7 +1524,7 @@ mod tests {
             // `max_tokens` env is unset — the file value must win.
             env("OX_SHOW_THINKING", "0"),
         ]);
-        let config = temp_env::async_with_vars(vars, Config::load())
+        let config = temp_env::async_with_vars(vars, Config::load(dir.path()))
             .await
             .unwrap();
         assert_eq!(config.model.id(), "claude-sonnet-5-5");
@@ -1215,7 +1543,7 @@ mod tests {
             "#},
         );
         let vars = env_vars(vec![xdg(&dir), env("ANTHROPIC_API_KEY", "sk-from-env")]);
-        let config = temp_env::async_with_vars(vars, Config::load())
+        let config = temp_env::async_with_vars(vars, Config::load(dir.path()))
             .await
             .unwrap();
         assert_auth(&config, AuthSource::ApiKeyEnv, "sk-from-env");
@@ -1224,7 +1552,7 @@ mod tests {
     #[tokio::test]
     async fn load_file_api_key_used_when_env_is_empty() {
         let dir = tempfile::tempdir().unwrap();
-        write_user_config(
+        let user = write_user_config(
             dir.path(),
             indoc::indoc! {r#"
                 [client]
@@ -1232,13 +1560,108 @@ mod tests {
             "#},
         );
         let vars = env_vars(vec![xdg(&dir), env("ANTHROPIC_API_KEY", "")]);
-        let config = temp_env::async_with_vars(vars, Config::load())
+        let config = temp_env::async_with_vars(vars, Config::load(dir.path()))
             .await
             .unwrap();
         assert_auth(&config, AuthSource::ApiKeyFile, "sk-from-file");
+        assert_eq!(config.provenance.auth, Source::File(user));
     }
 
-    // ── Config::load / auth ──
+    // ── Config::load: provenance ──
+
+    #[tokio::test]
+    async fn load_records_the_layer_behind_each_setting() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = write_user_config(
+            dir.path(),
+            indoc::indoc! {r#"
+                [client]
+                model = "claude-haiku-5-5"
+                effort = "high"
+                max_tool_rounds = 50
+
+                [client.compaction]
+                auto_threshold_tokens = 400000
+            "#},
+        );
+        let drop_in = write_drop_in(
+            dir.path(),
+            "10-team.toml",
+            indoc::indoc! {r#"
+                [client]
+                effort = "low"
+                prompt_cache_ttl = "5m"
+
+                [permission]
+                mode = "plan"
+            "#},
+        );
+        let vars = env_vars(vec![
+            xdg(&dir),
+            env("ANTHROPIC_MODEL", "claude-sonnet-5-5"),
+            env("ANTHROPIC_CUSTOM_HEADERS", "x-team: platform"),
+            env("CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS", "1"),
+            env("OX_SHOW_THINKING", "1"),
+        ]);
+        let config = temp_env::async_with_vars(vars, Config::load(dir.path()))
+            .await
+            .unwrap();
+
+        assert_eq!(config.effort, Some(Effort::Low));
+        assert_eq!(
+            config.provenance,
+            Provenance {
+                layers: vec![user.clone(), drop_in.clone()],
+                model: Source::Env("ANTHROPIC_MODEL"),
+                effort: Source::File(drop_in.clone()),
+                auth: Source::Env("ANTHROPIC_API_KEY"),
+                custom_headers: Source::Env("ANTHROPIC_CUSTOM_HEADERS"),
+                structured_outputs: Source::Env("CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS"),
+                max_tool_rounds: Source::File(user.clone()),
+                prompt_cache_ttl: Source::File(drop_in.clone()),
+                compaction: Source::File(user),
+                permission_mode: Source::File(drop_in),
+                show_thinking: Source::Env("OX_SHOW_THINKING"),
+                ..Provenance::default()
+            },
+        );
+    }
+
+    #[tokio::test]
+    async fn load_env_sources_the_settings_it_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        let vars = env_vars(vec![
+            xdg(&dir),
+            env("ANTHROPIC_BASE_URL", "https://gateway.example.com"),
+            env("ANTHROPIC_AUTH_TOKEN", "gateway-token"),
+            env("ANTHROPIC_MAX_TOKENS", "64"),
+            env("CLAUDE_CODE_ATTRIBUTION_HEADER", "0"),
+            env("OX_COMPACTION_AUTO_THRESHOLD_PERCENT", "40"),
+            env("OX_EXTRA_CA_CERTS", "/etc/ssl/ca.pem"),
+            env("OX_PERMISSION_MODE", "yolo"),
+            env("OX_PROMPT_CACHE_TTL", "5m"),
+        ]);
+        let config = temp_env::async_with_vars(vars, Config::load(dir.path()))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            config.provenance,
+            Provenance {
+                auth: Source::Env("ANTHROPIC_AUTH_TOKEN"),
+                base_url: Source::Env("ANTHROPIC_BASE_URL"),
+                extra_ca_certs: Source::Env("OX_EXTRA_CA_CERTS"),
+                attribution: Source::Env("CLAUDE_CODE_ATTRIBUTION_HEADER"),
+                max_tokens: Source::Env("ANTHROPIC_MAX_TOKENS"),
+                prompt_cache_ttl: Source::Env("OX_PROMPT_CACHE_TTL"),
+                compaction: Source::Env("OX_COMPACTION_AUTO_THRESHOLD_PERCENT"),
+                permission_mode: Source::Env("OX_PERMISSION_MODE"),
+                ..Provenance::default()
+            },
+        );
+    }
+
+    // ── Config::load: auth ──
 
     #[tokio::test]
     async fn load_resolves_credentials_in_precedence_order() {
@@ -1269,7 +1692,7 @@ mod tests {
                 ("ANTHROPIC_AUTH_TOKEN", auth_token.map(str::to_owned)),
                 env("CLAUDE_CODE_OAUTH_TOKEN", "oauth-token"),
             ]);
-            let config = temp_env::async_with_vars(vars, Config::load())
+            let config = temp_env::async_with_vars(vars, Config::load(dir.path()))
                 .await
                 .unwrap();
             assert_auth(&config, winner, secret);
@@ -1286,7 +1709,7 @@ mod tests {
             env("ANTHROPIC_BASE_URL", "https://gateway.example.com"),
             env("ANTHROPIC_CUSTOM_HEADERS", "missing colon"),
         ]);
-        let err = temp_env::async_with_vars(vars, Config::load())
+        let err = temp_env::async_with_vars(vars, Config::load(dir.path()))
             .await
             .expect_err("malformed header must fail startup");
         assert_eq!(
@@ -1303,7 +1726,7 @@ mod tests {
             env("ANTHROPIC_CUSTOM_HEADERS", "Authorization: Bearer other"),
             env("ANTHROPIC_AUTH_TOKEN", "gateway-token"),
         ]);
-        let err = temp_env::async_with_vars(vars, Config::load())
+        let err = temp_env::async_with_vars(vars, Config::load(dir.path()))
             .await
             .expect_err("custom header must not replace the credential");
         assert_eq!(
@@ -1321,7 +1744,7 @@ mod tests {
             ("ANTHROPIC_API_KEY", None),
             env("ANTHROPIC_BASE_URL", "https://gateway.example.com"),
         ]);
-        let err = temp_env::async_with_vars(vars, Config::load())
+        let err = temp_env::async_with_vars(vars, Config::load(dir.path()))
             .await
             .expect_err("stored login must not go to a gateway");
         let msg = format!("{err:#}");
@@ -1332,17 +1755,27 @@ mod tests {
     #[tokio::test]
     async fn load_compaction_file_can_disable_default_on_auto_behavior() {
         let dir = tempfile::tempdir().unwrap();
-        write_user_config(
+        let user = write_user_config(
             dir.path(),
             indoc::indoc! {r"
                 [client.compaction]
                 auto_enabled = false
             "},
         );
-        let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
+        write_drop_in(
+            dir.path(),
+            "10-threshold.toml",
+            "client.compaction.auto_threshold_percent = 0",
+        );
+        let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load(dir.path()))
             .await
             .unwrap();
         assert!(!config.compaction.auto.enabled);
+        assert_eq!(
+            config.provenance.compaction,
+            Source::File(user),
+            "a disabled trigger ignores the threshold, even an invalid one"
+        );
     }
 
     #[tokio::test]
@@ -1356,7 +1789,7 @@ mod tests {
             "},
         );
         let vars = env_vars(vec![xdg(&dir), env("OX_COMPACTION_AUTO_ENABLED", "TRUE")]);
-        let config = temp_env::async_with_vars(vars, Config::load())
+        let config = temp_env::async_with_vars(vars, Config::load(dir.path()))
             .await
             .unwrap();
         assert!(config.compaction.auto.enabled);
@@ -1372,7 +1805,7 @@ mod tests {
                 auto_threshold_tokens = 400000
             "},
         );
-        let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
+        let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load(dir.path()))
             .await
             .unwrap();
         assert_eq!(config.compaction.auto.threshold_tokens, Some(400_000));
@@ -1386,7 +1819,7 @@ mod tests {
             env("ANTHROPIC_MODEL", "claude-opus-5-5"),
             env("OX_COMPACTION_AUTO_THRESHOLD_PERCENT", "40"),
         ]);
-        let config = temp_env::async_with_vars(vars, Config::load())
+        let config = temp_env::async_with_vars(vars, Config::load(dir.path()))
             .await
             .unwrap();
         assert_eq!(config.compaction.auto.threshold_tokens, Some(400_000));
@@ -1395,7 +1828,7 @@ mod tests {
     #[tokio::test]
     async fn load_compaction_rejects_ambiguous_auto_thresholds() {
         let dir = tempfile::tempdir().unwrap();
-        write_user_config(
+        let user = write_user_config(
             dir.path(),
             indoc::indoc! {r"
                 [client.compaction]
@@ -1403,11 +1836,31 @@ mod tests {
                 auto_threshold_percent = 40
             "},
         );
-        let err = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
+        let err = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load(dir.path()))
             .await
-            .expect_err("ambiguous thresholds must fail config load");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("only one"), "{msg}");
+            .expect_err("ambiguous file thresholds must fail config load");
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "{} sets both auto_threshold_tokens and auto_threshold_percent. \
+                 Set only one compaction threshold.",
+                tildify(user.path()),
+            ),
+        );
+
+        let vars = env_vars(vec![
+            xdg(&dir),
+            env("OX_COMPACTION_AUTO_THRESHOLD_TOKENS", "400000"),
+            env("OX_COMPACTION_AUTO_THRESHOLD_PERCENT", "40"),
+        ]);
+        let err = temp_env::async_with_vars(vars, Config::load(dir.path()))
+            .await
+            .expect_err("ambiguous env thresholds must fail config load");
+        assert_eq!(
+            format!("{err:#}"),
+            "both OX_COMPACTION_AUTO_THRESHOLD_TOKENS and OX_COMPACTION_AUTO_THRESHOLD_PERCENT \
+             are set. Set only one compaction threshold.",
+        );
     }
 
     #[tokio::test]
@@ -1417,7 +1870,7 @@ mod tests {
             xdg(&dir),
             env("OX_COMPACTION_AUTO_THRESHOLD_TOKENS", "0"),
         ]);
-        let config = temp_env::async_with_vars(vars, Config::load())
+        let config = temp_env::async_with_vars(vars, Config::load(dir.path()))
             .await
             .unwrap();
         assert_eq!(config.compaction.auto.threshold_tokens, Some(50_000));
@@ -1433,7 +1886,7 @@ mod tests {
                 auto_threshold_tokens = 49999
             "},
         );
-        let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
+        let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load(dir.path()))
             .await
             .unwrap();
         assert_eq!(config.compaction.auto.threshold_tokens, Some(50_000));
@@ -1447,7 +1900,7 @@ mod tests {
             env("ANTHROPIC_MODEL", "claude-opus-5-5"),
             env("OX_COMPACTION_AUTO_THRESHOLD_PERCENT", "4"),
         ]);
-        let config = temp_env::async_with_vars(vars, Config::load())
+        let config = temp_env::async_with_vars(vars, Config::load(dir.path()))
             .await
             .unwrap();
         assert_eq!(config.compaction.auto.threshold_tokens, Some(50_000));
@@ -1466,7 +1919,7 @@ mod tests {
                 auto_threshold_tokens = 990000
             "#},
         );
-        let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
+        let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load(dir.path()))
             .await
             .unwrap();
         assert_eq!(
@@ -1483,15 +1936,37 @@ mod tests {
                 xdg(&dir),
                 env("OX_COMPACTION_AUTO_THRESHOLD_PERCENT", percent),
             ]);
-            let err = temp_env::async_with_vars(vars, Config::load())
+            let err = temp_env::async_with_vars(vars, Config::load(dir.path()))
                 .await
                 .expect_err("out-of-range threshold percent must fail config load");
-            let msg = format!("{err:#}");
-            assert!(
-                msg.contains(&format!("between 1 and 100, got {percent}")),
-                "{msg}"
+            assert_eq!(
+                format!("{err:#}"),
+                format!(
+                    "invalid OX_COMPACTION_AUTO_THRESHOLD_PERCENT {percent}: \
+                     expected a whole number from 1 to 100"
+                ),
             );
         }
+
+        let dir = tempfile::tempdir().unwrap();
+        let user = write_user_config(
+            dir.path(),
+            indoc::indoc! {r"
+                [client.compaction]
+                auto_threshold_percent = 150
+            "},
+        );
+        let err = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load(dir.path()))
+            .await
+            .expect_err("out-of-range file threshold percent must fail config load");
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "invalid client.compaction.auto_threshold_percent 150 in {}: \
+                 expected a whole number from 1 to 100",
+                tildify(user.path()),
+            ),
+        );
     }
 
     #[tokio::test]
@@ -1502,7 +1977,7 @@ mod tests {
             env("ANTHROPIC_MODEL", "custom-model"),
             env("OX_COMPACTION_AUTO_THRESHOLD_PERCENT", "40"),
         ]);
-        let config = temp_env::async_with_vars(vars, Config::load())
+        let config = temp_env::async_with_vars(vars, Config::load(dir.path()))
             .await
             .unwrap();
         assert!(!config.compaction.auto.enabled);
@@ -1522,7 +1997,7 @@ mod tests {
             "#},
         );
         let vars = env_vars(vec![xdg(&dir), env("OX_PERMISSION_MODE", "yolo")]);
-        let config = temp_env::async_with_vars(vars, Config::load())
+        let config = temp_env::async_with_vars(vars, Config::load(dir.path()))
             .await
             .unwrap();
         assert_eq!(config.permission.mode(), crate::permission::Mode::Yolo);
@@ -1532,7 +2007,7 @@ mod tests {
     async fn load_permission_invalid_mode_env_errors() {
         let dir = tempfile::tempdir().unwrap();
         let vars = env_vars(vec![xdg(&dir), env("OX_PERMISSION_MODE", "bypass")]);
-        let err = temp_env::async_with_vars(vars, Config::load())
+        let err = temp_env::async_with_vars(vars, Config::load(dir.path()))
             .await
             .expect_err("invalid mode must propagate");
         let msg = format!("{err:#}");
@@ -1551,7 +2026,7 @@ mod tests {
             "#},
         );
         let vars = env_vars(vec![xdg(&dir)]);
-        let err = temp_env::async_with_vars(vars, Config::load())
+        let err = temp_env::async_with_vars(vars, Config::load(dir.path()))
             .await
             .expect_err("malformed rule must propagate");
         assert!(format!("{err:#}").contains("invalid path glob"));
@@ -1568,7 +2043,7 @@ mod tests {
             "},
         );
         let vars = env_vars(vec![xdg(&dir), env("ANTHROPIC_MAX_TOKENS", "not-a-number")]);
-        let err = temp_env::async_with_vars(vars, Config::load())
+        let err = temp_env::async_with_vars(vars, Config::load(dir.path()))
             .await
             .expect_err("invalid max-token env should fail");
         let msg = format!("{err:#}");
@@ -1588,7 +2063,7 @@ mod tests {
             "#},
         );
         let vars = env_vars(vec![xdg(&dir), env("ANTHROPIC_API_KEY", "")]);
-        let err = temp_env::async_with_vars(vars, Config::load())
+        let err = temp_env::async_with_vars(vars, Config::load(dir.path()))
             .await
             .expect_err("misplaced field must surface as an error");
         let msg = format!("{err:#}");
@@ -1596,33 +2071,22 @@ mod tests {
         assert!(msg.contains("unknown field `show_thinking`"), "{msg}");
     }
 
-    #[tokio::test]
-    async fn load_propagates_theme_resolution_error() {
-        let dir = tempfile::tempdir().unwrap();
-        write_user_config(
-            dir.path(),
-            indoc::indoc! {r#"
-                [tui.theme]
-                base = "no-such-theme"
-            "#},
-        );
-        let err = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
-            .await
-            .expect_err("unknown theme name must propagate");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("no-such-theme"), "{msg}");
-        assert!(
-            msg.contains("not a built-in name") || msg.contains("failed to read"),
-            "{msg}",
+    // ── invalid_setting ──
+
+    #[test]
+    fn invalid_setting_without_an_env_var_or_file_names_the_key() {
+        assert_eq!(
+            invalid_setting("client.max_tokens", &Source::Session, 0),
+            "invalid client.max_tokens 0",
         );
     }
 
-    // ── Config::load / extra_ca_certs ──
+    // ── Config::load: extra_ca_certs ──
 
     #[tokio::test]
     async fn load_extra_ca_certs_default_is_none() {
         let dir = tempfile::tempdir().unwrap();
-        let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
+        let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load(dir.path()))
             .await
             .unwrap();
         assert!(config.extra_ca_certs.is_none());
@@ -1640,7 +2104,7 @@ mod tests {
         );
         // Env supplies a `~`-prefixed path so the expansion branch is also covered.
         let vars = env_vars(vec![xdg(&dir), env("OX_EXTRA_CA_CERTS", "~/certs/env.pem")]);
-        let config = temp_env::async_with_vars(vars, Config::load())
+        let config = temp_env::async_with_vars(vars, Config::load(dir.path()))
             .await
             .unwrap();
         let home = std::env::home_dir().expect("home directory");
@@ -1655,7 +2119,7 @@ mod tests {
         let node = env("NODE_EXTRA_CA_CERTS", bundle.to_str().unwrap());
 
         let vars = env_vars(vec![xdg(&dir), node.clone()]);
-        let config = temp_env::async_with_vars(vars, Config::load())
+        let config = temp_env::async_with_vars(vars, Config::load(dir.path()))
             .await
             .unwrap();
         assert_eq!(config.extra_ca_certs, Some(bundle));
@@ -1668,7 +2132,7 @@ mod tests {
             "#},
         );
         let vars = env_vars(vec![xdg(&dir), node]);
-        let config = temp_env::async_with_vars(vars, Config::load())
+        let config = temp_env::async_with_vars(vars, Config::load(dir.path()))
             .await
             .unwrap();
         assert_eq!(
@@ -1685,7 +2149,7 @@ mod tests {
             xdg(&dir),
             env("NODE_EXTRA_CA_CERTS", missing.to_str().unwrap()),
         ]);
-        let config = temp_env::async_with_vars(vars, Config::load())
+        let config = temp_env::async_with_vars(vars, Config::load(dir.path()))
             .await
             .unwrap();
         assert!(config.extra_ca_certs.is_none());
@@ -1701,7 +2165,7 @@ mod tests {
                 extra_ca_certs = "/etc/ssl/from-file.pem"
             "#},
         );
-        let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
+        let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load(dir.path()))
             .await
             .unwrap();
         assert_eq!(
@@ -1723,7 +2187,7 @@ mod tests {
             "#},
         );
         let vars = env_vars(vec![xdg(&dir), env("OX_EXTRA_CA_CERTS", "")]);
-        let config = temp_env::async_with_vars(vars, Config::load())
+        let config = temp_env::async_with_vars(vars, Config::load(dir.path()))
             .await
             .unwrap();
         assert_eq!(
@@ -1732,7 +2196,7 @@ mod tests {
         );
     }
 
-    // ── Config::load / base URL validation ──
+    // ── Config::load: base URL validation ──
 
     #[tokio::test]
     async fn load_rejects_plain_http_base_url_unless_loopback() {
@@ -1741,7 +2205,7 @@ mod tests {
             xdg(&dir),
             env("ANTHROPIC_BASE_URL", "http://example.com"),
         ]);
-        let err = temp_env::async_with_vars(vars, Config::load())
+        let err = temp_env::async_with_vars(vars, Config::load(dir.path()))
             .await
             .expect_err("non-loopback http must be rejected");
         let msg = format!("{err:#}");
@@ -1756,7 +2220,7 @@ mod tests {
             xdg(&dir),
             env("ANTHROPIC_BASE_URL", "ftp://example.com"),
         ]);
-        let err = temp_env::async_with_vars(vars, Config::load())
+        let err = temp_env::async_with_vars(vars, Config::load(dir.path()))
             .await
             .expect_err("non-http schemes must be rejected");
         let msg = format!("{err:#}");
@@ -1771,13 +2235,13 @@ mod tests {
             xdg(&dir),
             env("ANTHROPIC_BASE_URL", "http://127.0.0.1:8080"),
         ]);
-        let config = temp_env::async_with_vars(vars, Config::load())
+        let config = temp_env::async_with_vars(vars, Config::load(dir.path()))
             .await
             .unwrap();
         assert_eq!(config.base_url, "http://127.0.0.1:8080");
     }
 
-    // ── Config::load / effort resolution ──
+    // ── Config::load: effort resolution ──
 
     #[tokio::test]
     async fn load_effort_defaults_to_per_model_value() {
@@ -1788,7 +2252,7 @@ mod tests {
         ] {
             let dir = tempfile::tempdir().unwrap();
             let vars = env_vars(vec![xdg(&dir), env("ANTHROPIC_MODEL", model)]);
-            let config = temp_env::async_with_vars(vars, Config::load())
+            let config = temp_env::async_with_vars(vars, Config::load(dir.path()))
                 .await
                 .unwrap();
             assert_eq!(config.effort, expected, "model={model}");
@@ -1803,7 +2267,7 @@ mod tests {
             env("ANTHROPIC_MODEL", "claude-opus-5-5"),
             env("ANTHROPIC_EFFORT", "low"),
         ]);
-        let config = temp_env::async_with_vars(vars, Config::load())
+        let config = temp_env::async_with_vars(vars, Config::load(dir.path()))
             .await
             .unwrap();
         assert_eq!(config.effort, Some(Effort::Low));
@@ -1817,10 +2281,11 @@ mod tests {
             env("ANTHROPIC_MODEL", "custom-model"),
             env("ANTHROPIC_EFFORT", "max"),
         ]);
-        let config = temp_env::async_with_vars(vars, Config::load())
+        let config = temp_env::async_with_vars(vars, Config::load(dir.path()))
             .await
             .unwrap();
         assert_eq!(config.effort, None);
+        assert_eq!(config.provenance.effort, Source::Default);
     }
 
     #[tokio::test]
@@ -1834,7 +2299,7 @@ mod tests {
                 effort = "medium"
             "#},
         );
-        let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
+        let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load(dir.path()))
             .await
             .unwrap();
         assert_eq!(config.effort, Some(Effort::Medium));
@@ -1852,7 +2317,7 @@ mod tests {
             "#},
         );
         let vars = env_vars(vec![xdg(&dir), env("ANTHROPIC_EFFORT", "max")]);
-        let config = temp_env::async_with_vars(vars, Config::load())
+        let config = temp_env::async_with_vars(vars, Config::load(dir.path()))
             .await
             .unwrap();
         assert_eq!(config.effort, Some(Effort::Max));
@@ -1862,7 +2327,7 @@ mod tests {
     async fn load_effort_invalid_env_surfaces_parse_error() {
         let dir = tempfile::tempdir().unwrap();
         let vars = env_vars(vec![xdg(&dir), env("ANTHROPIC_EFFORT", "insane")]);
-        let err = temp_env::async_with_vars(vars, Config::load())
+        let err = temp_env::async_with_vars(vars, Config::load(dir.path()))
             .await
             .expect_err("invalid effort must propagate");
         let msg = format!("{err:#}");
@@ -1870,13 +2335,13 @@ mod tests {
         assert!(msg.contains("insane"), "{msg}");
     }
 
-    // ── Config::load / prompt_cache_ttl ──
+    // ── Config::load: prompt_cache_ttl ──
 
     #[tokio::test]
     async fn load_prompt_cache_ttl_env_overrides_default() {
         let dir = tempfile::tempdir().unwrap();
         let vars = env_vars(vec![xdg(&dir), env("OX_PROMPT_CACHE_TTL", "5m")]);
-        let config = temp_env::async_with_vars(vars, Config::load())
+        let config = temp_env::async_with_vars(vars, Config::load(dir.path()))
             .await
             .unwrap();
         assert_eq!(config.prompt_cache_ttl, PromptCacheTtl::FiveMin);
@@ -1892,7 +2357,7 @@ mod tests {
                 prompt_cache_ttl = "5m"
             "#},
         );
-        let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
+        let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load(dir.path()))
             .await
             .unwrap();
         assert_eq!(config.prompt_cache_ttl, PromptCacheTtl::FiveMin);
@@ -1909,7 +2374,7 @@ mod tests {
             "#},
         );
         let vars = env_vars(vec![xdg(&dir), env("OX_PROMPT_CACHE_TTL", "1h")]);
-        let config = temp_env::async_with_vars(vars, Config::load())
+        let config = temp_env::async_with_vars(vars, Config::load(dir.path()))
             .await
             .unwrap();
         assert_eq!(config.prompt_cache_ttl, PromptCacheTtl::OneHour);
@@ -1919,7 +2384,7 @@ mod tests {
     async fn load_prompt_cache_ttl_invalid_env_surfaces_parse_error() {
         let dir = tempfile::tempdir().unwrap();
         let vars = env_vars(vec![xdg(&dir), env("OX_PROMPT_CACHE_TTL", "forever")]);
-        let err = temp_env::async_with_vars(vars, Config::load())
+        let err = temp_env::async_with_vars(vars, Config::load(dir.path()))
             .await
             .expect_err("invalid ttl must propagate");
         let msg = format!("{err:#}");
@@ -1932,40 +2397,7 @@ mod tests {
     #[test]
     fn snapshot_copies_every_user_facing_field_and_drops_secret() {
         // `/config` prints from the snapshot, so secrets must reduce to their source and names.
-        let cfg = Config {
-            auth: Auth::new(AuthSource::ClaudeCodeLogin, "token-must-not-leak"),
-            base_url: "https://api.example.test".to_owned(),
-            extra_ca_certs: Some(PathBuf::from("/etc/ssl/corp-ca.pem")),
-            gateway: GatewayCompat {
-                custom_headers: gateway::parse_headers("x-team: secret-team").unwrap(),
-                attribution: false,
-                structured_outputs: true,
-            },
-            model: ModelSpec::resolve("claude-test-1-0".to_owned()),
-            effort: Some(Effort::Xhigh),
-            max_tokens: None,
-            max_tool_rounds: Some(100),
-            prompt_cache_ttl: PromptCacheTtl::FiveMin,
-            compaction: CompactionConfig::resolved_for_test(AutoCompactionConfig {
-                enabled: true,
-                threshold_tokens: Some(42),
-            }),
-            permission: crate::permission::Policy::resolve(
-                crate::permission::Mode::Plan,
-                &[],
-                &[],
-                Path::new(""),
-            )
-            .unwrap(),
-            show_thinking: true,
-            show_welcome: false,
-            status_line: vec![
-                StatusLineSegment::CurrentDir,
-                StatusLineSegment::ModelWithEffort,
-            ],
-            theme: Theme::default(),
-            theme_name: "macchiato".to_owned(),
-        };
+        let cfg = sample_config();
         let snap = cfg.snapshot();
         assert_eq!(snap.auth, AuthSource::ClaudeCodeLogin);
         assert_eq!(snap.gateway.custom_header_names, ["x-team"]);
@@ -1981,10 +2413,7 @@ mod tests {
         );
         assert_eq!(snap.model.id(), "claude-test-1-0");
         assert_eq!(snap.effort, Some(Effort::Xhigh));
-        assert_eq!(
-            snap.max_tokens, 16_000,
-            "unknown ids resolve to the smaller cap"
-        );
+        assert_eq!(snap.max_tokens, None);
         assert_eq!(snap.max_tool_rounds, Some(100));
         assert_eq!(snap.prompt_cache_ttl, PromptCacheTtl::FiveMin);
         assert_eq!(snap.compaction.auto.threshold_tokens, Some(42));
@@ -1999,6 +2428,7 @@ mod tests {
             ],
         );
         assert_eq!(snap.theme_name, "macchiato");
+        assert_eq!(snap.provenance, cfg.provenance);
     }
 
     // ── display_effort ──

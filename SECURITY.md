@@ -23,7 +23,7 @@ In scope:
 
 - Tool calls that bypass a check required by their permission mode, such as approval, a matching `deny` rule (including in `yolo` mode), a protected path, or the built-in deny list
 - Approval prompts that misrepresent a call, or allow rules that match commands or paths excluded by their documented grammar
-- Repository content, such as a project `ox.toml`, that widens permissions, redirects credentials, extends the TLS trust store, or reads files outside the permission gate
+- Repository content, such as a project `.ox/config.toml`, that widens permissions, redirects credentials, extends the TLS trust store, or reads files outside the permission gate
 - `ox` writing your API key or OAuth token to logs, session files, or files accessible to other users, or sending it anywhere other than the configured endpoint or Anthropic's OAuth token endpoint
 - Flaws in the release workflow, the Homebrew formula, the Nix flake, or the `cargo install --git` path that let someone other than the maintainer change what you install
 

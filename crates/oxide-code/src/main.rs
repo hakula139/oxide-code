@@ -131,14 +131,16 @@ async fn async_main() -> Result<Exit> {
         return Ok(Exit::Success);
     }
 
-    let config = Config::load().await?;
-    if let Some(notice) = config.model.unsupported_notice() {
+    let cwd = std::env::current_dir().context("failed to read the current working directory")?;
+    let config = Config::load(&cwd).await?;
+    let show_thinking = config.show_thinking;
+    let theme = tui_mode
+        .then(|| tui::theme::resolve_theme(&config.theme))
+        .transpose()?;
+    let snapshot = config.snapshot();
+    for notice in snapshot.notices() {
         warn!("{notice}");
     }
-    let show_thinking = config.show_thinking;
-    let theme = config.theme.clone();
-    let snapshot = config.snapshot();
-    let cwd = std::env::current_dir().context("failed to read the current working directory")?;
 
     let store = SessionStore::open()?;
     let file_tracker = Arc::new(FileTracker::default());
@@ -176,9 +178,9 @@ async fn async_main() -> Result<Exit> {
         return Ok(driver::headless::run(engine, show_thinking, &prompt).await);
     }
 
-    if !tui_mode {
+    let Some(theme) = theme else {
         return driver::repl::run(engine, show_thinking, &drifted).await;
-    }
+    };
 
     let startup = Startup {
         picker,

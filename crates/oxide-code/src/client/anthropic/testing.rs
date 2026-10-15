@@ -8,9 +8,10 @@ use wiremock::ResponseTemplate;
 use super::Client;
 use crate::config::auth::{Auth, AuthSource};
 use crate::config::gateway::GatewayCompat;
-use crate::config::{CompactionConfig, Config, PromptCacheTtl, StatusLineSegment};
+use crate::config::{
+    CompactionConfig, Config, DEFAULT_THEME, PromptCacheTtl, StatusLineSegment, ThemeConfig,
+};
 use crate::model::ModelSpec;
-use crate::tui::theme::Theme;
 
 /// Minimal [`Config`] for unit / wiremock tests.
 pub(crate) fn test_config(base_url: impl Into<String>, auth: Auth, model: &str) -> Config {
@@ -33,8 +34,11 @@ pub(crate) fn test_config(base_url: impl Into<String>, auth: Auth, model: &str) 
         show_thinking: false,
         show_welcome: true,
         status_line: StatusLineSegment::DEFAULT.to_vec(),
-        theme: Theme::default(),
-        theme_name: "mocha".to_owned(),
+        theme: ThemeConfig {
+            base: DEFAULT_THEME.to_owned(),
+            overrides: toml::Table::new(),
+        },
+        provenance: crate::config::provenance::Provenance::default(),
     }
 }
 

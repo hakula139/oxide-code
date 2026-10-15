@@ -10,7 +10,7 @@ pub(crate) mod builtin;
 mod color;
 mod loader;
 
-pub(crate) use loader::{SlotPatch, resolve_theme};
+pub(crate) use loader::resolve_theme;
 
 /// Resolve a built-in theme name (mocha / latte / ...) to a parsed [`Theme`]. `None` for unknown
 /// names. Vendored TOML must parse: a parse failure is a build-time bug surfaced at startup.
