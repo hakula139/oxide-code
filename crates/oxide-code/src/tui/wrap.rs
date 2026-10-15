@@ -117,7 +117,8 @@ fn take_one_line(
         }
 
         if width + g_width > max_width {
-            if let Some(end) = last_break {
+            let space_break = (is_whitespace(g) && width >= lead_width).then_some(i);
+            if let Some(end) = space_break.or(last_break) {
                 let mut next = end;
                 while next < graphemes.len() && is_whitespace(graphemes[next].0) {
                     next += 1;
@@ -376,8 +377,10 @@ mod tests {
 
     #[test]
     fn wrap_line_drops_whitespace_left_over_at_a_break() {
-        let result = wrap_line(Line::from("ab   cd"), 3, 0, None);
-        assert_eq!(texts(&result), ["ab ", "cd"]);
+        let wrap = |s| texts(&wrap_line(Line::from(s), 3, 0, None));
+        assert_eq!(wrap("ab   cd"), ["ab ", "cd"]);
+        assert_eq!(wrap("abc de"), ["abc", "de"]);
+        assert_eq!(wrap("abc   de"), ["abc", "de"]);
     }
 
     // ── wrap_line_keeping_lead ──

@@ -1295,7 +1295,7 @@ mod tests {
             "},
             12,
         );
-        assert_eq!(lines, ["> alpha ", "> beta gamma"]);
+        assert_eq!(lines, ["> alpha beta", "> gamma"]);
     }
 
     // ── Tables ──
