@@ -15,7 +15,7 @@ use ratatui::widgets::Paragraph;
 
 use self::blocks::{
     AssistantText, AssistantThinking, BlockKind, ChatBlock, CompactedBlock, ErrorBlock,
-    GitDiffBlock, InterruptedMarker, ProgressUpdate, RenderCtx, StreamingAssistant,
+    GitDiffBlock, InterruptedMarker, NoticeBlock, ProgressUpdate, RenderCtx, StreamingAssistant,
     SystemMessageBlock, ToolCallBlock, ToolResultBlock, UserMessage,
 };
 use self::stack::{CachedBlock, Stack};
@@ -258,6 +258,12 @@ impl ChatView {
     pub(crate) fn push_error(&mut self, msg: &str) {
         self.bump_paused_counter();
         self.push_block(ErrorBlock::new(msg));
+    }
+
+    /// Appends a transient status line, such as a scheduled API retry.
+    pub(crate) fn push_notice(&mut self, text: impl Into<String>) {
+        self.bump_paused_counter();
+        self.push_block(NoticeBlock::new(text));
     }
 
     /// Appends informational output from a slash command.

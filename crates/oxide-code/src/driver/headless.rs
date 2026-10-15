@@ -54,7 +54,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/messages"))
-            .respond_with(ResponseTemplate::new(500))
+            .respond_with(ResponseTemplate::new(400))
             .up_to_n_times(1)
             .mount(&server)
             .await;
@@ -65,7 +65,10 @@ mod tests {
         let failed = CapturingSink::new();
         let exit = drive(conversation(server.uri(), &store).await, &failed, "first").await;
         assert_eq!(exit, Exit::Failure);
-        assert!(matches!(failed.events().last(), Some(AgentEvent::Error(_))));
+        assert!(matches!(
+            failed.events().last(),
+            Some(AgentEvent::TurnFailed(_))
+        ));
 
         let completed = CapturingSink::new();
         let exit = drive(

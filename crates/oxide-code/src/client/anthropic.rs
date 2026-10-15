@@ -1,5 +1,5 @@
 //! Anthropic Messages API client. [`Client::stream_message`] drives the agent loop.
-//! [`Client::complete`] handles one-shots (title generation, structured-output probes).
+//! [`Client::complete`] handles one-shots such as title generation.
 //!
 //! The wire shape mirrors the official `claude-code` CLI: pinned User-Agent and Stainless SDK
 //! header set, billing attestation in `system[0]`, and per-request beta headers gated on model /
@@ -10,6 +10,7 @@ mod billing;
 mod completion;
 mod identity;
 mod sse;
+mod transport;
 pub(crate) mod wire;
 
 #[cfg(test)]
@@ -122,7 +123,6 @@ impl Client {
             "x-stainless-timeout",
             HeaderValue::from_static(STAINLESS_TIMEOUT_SECS),
         );
-        headers.insert("x-stainless-retry-count", HeaderValue::from_static("0"));
 
         // No whole-request timeout because responses can run for minutes. The 60 s read timeout
         // catches slowloris dribble. Anthropic sends keepalives every ~15 s on healthy streams.
@@ -282,7 +282,6 @@ impl Client {
 
         let model = &self.config.model;
         let thinking = model.thinking(self.config.show_thinking);
-        let url = format!("{}/v1/messages?beta=true", self.config.base_url);
         let mut body = serde_json::to_string(&CreateMessageRequest {
             model: model.id(),
             max_tokens: model.resolve_max_tokens(self.config.max_tokens),
@@ -310,12 +309,17 @@ impl Client {
         let (tx, rx) = mpsc::channel(64);
         let http = self.http.clone();
         let betas = compute_betas(model, thinking.as_ref(), &self.config.auth, true).join(",");
-        let session_id = self.session_id.clone();
+        let request = self.messages_request(betas, body);
 
+        // Racing `closed` stops an in-flight request or retry backoff once the consumer is gone.
         tokio::spawn(async move {
-            let result = stream_sse(&http, &url, betas, session_id, body, &tx).await;
-            if let Err(e) = result {
-                _ = tx.send(Err(e)).await;
+            tokio::select! {
+                result = stream_sse(&http, &request, &tx) => {
+                    if let Err(e) = result {
+                        _ = tx.send(Err(e)).await;
+                    }
+                }
+                () = tx.closed() => {}
             }
         });
 
@@ -1190,12 +1194,12 @@ mod tests {
 
     #[tokio::test]
     async fn stream_message_mid_stream_error_event_is_delivered_with_api_payload() {
-        // `StreamEvent::Error` flows as `Ok(Error { .. })`. `agent.rs` still owns conversion to
-        // `bail!`.
+        // A non-transient `StreamEvent::Error` flows as `Ok(Error { .. })`. `agent.rs` still owns
+        // conversion to `bail!`.
         let server = MockServer::start().await;
         let body = sse_body(&[(
             "error",
-            r#"{"type":"error","error":{"type":"overloaded_error","message":"Servers overloaded"}}"#,
+            r#"{"type":"error","error":{"type":"invalid_request_error","message":"Bad block"}}"#,
         )]);
         Mock::given(method("POST"))
             .and(path("/v1/messages"))
@@ -1226,8 +1230,8 @@ mod tests {
                 _ => None,
             })
             .expect("error event must be delivered");
-        assert_eq!(err.error_type, "overloaded_error");
-        assert_eq!(err.message, "Servers overloaded");
+        assert_eq!(err.error_type, "invalid_request_error");
+        assert_eq!(err.message, "Bad block");
     }
 
     #[tokio::test]
@@ -1263,14 +1267,13 @@ mod tests {
 
     #[tokio::test]
     async fn stream_message_429_threads_retry_after_header_into_error() {
-        // Retry-after extraction lives in stream_sse rather than format_api_error. This pins that
-        // the header is read before the body is consumed.
+        // A hint past the retry cap fails fast with the hint in the message.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/messages"))
             .respond_with(
                 ResponseTemplate::new(429)
-                    .insert_header("retry-after", "60")
+                    .insert_header("retry-after", "120")
                     .set_body_string(r#"{"error":{"type":"rate_limit_error"}}"#),
             )
             .mount(&server)
@@ -1286,9 +1289,10 @@ mod tests {
             .unwrap();
         let err = collect_events(rx).await.expect_err("expected 429");
         assert!(
-            format!("{err:#}").contains("retry after 60"),
+            format!("{err:#}").contains("Retry after 120 s."),
             "retry-after threaded through stream_sse: {err:#}",
         );
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }
 
     #[tokio::test]

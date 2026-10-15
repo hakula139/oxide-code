@@ -119,7 +119,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/messages"))
-            .respond_with(ResponseTemplate::new(500))
+            .respond_with(ResponseTemplate::new(400))
             .up_to_n_times(1)
             .mount(&server)
             .await;
@@ -138,20 +138,25 @@ mod tests {
         assert_eq!(requests.len(), 2, "/clear must not reach the model");
         let last = requests[1]["messages"].as_array().unwrap().last().unwrap();
         assert_eq!(last["content"][0]["text"], "/literal");
-        let errors: Vec<String> = sink
+        let reports: Vec<String> = sink
             .events()
             .into_iter()
             .filter_map(|event| match event {
-                AgentEvent::Error(msg) => Some(msg),
+                AgentEvent::Error(msg) | AgentEvent::TurnFailed(msg) => Some(msg),
                 _ => None,
             })
             .collect();
-        assert_eq!(errors.len(), 3, "{errors:?}");
-        assert!(errors[0].ends_with(": drifted.rs"), "{errors:?}");
-        assert!(errors[1].contains("HTTP 500"), "{errors:?}");
+        assert_eq!(reports.len(), 3, "{reports:?}");
+        assert!(reports[0].ends_with(": drifted.rs"), "{reports:?}");
+        assert!(reports[1].contains("HTTP 400"), "{reports:?}");
         assert!(
-            errors[2].contains("only in the TUI. Use //clear"),
-            "{errors:?}"
+            reports[2].contains("only in the TUI. Use //clear"),
+            "{reports:?}"
+        );
+        assert!(
+            sink.events().iter().any(
+                |event| matches!(event, AgentEvent::TurnFailed(msg) if msg.contains("HTTP 400"))
+            )
         );
         assert!(
             sink.events()

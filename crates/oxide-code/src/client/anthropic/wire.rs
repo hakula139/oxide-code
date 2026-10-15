@@ -4,6 +4,7 @@
 use serde::ser::SerializeSeq;
 use serde::{Deserialize, Serialize, Serializer};
 
+use super::transport::RetryNotice;
 use crate::config::{Effort, ThinkingConfig};
 use crate::message::{ContentBlock, Message, Role};
 use crate::tool::ToolDefinition;
@@ -225,6 +226,11 @@ pub(crate) enum StreamEvent {
     Error {
         error: ApiError,
     },
+    /// Synthesized by the client before it retries a failed attempt. The API never sends it.
+    #[serde(skip)]
+    Retrying {
+        notice: RetryNotice,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -291,16 +297,36 @@ pub(crate) enum Delta {
     Unknown,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "fields populated by serde, defined for full SSE protocol coverage"
-    )
-)]
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct MessageDeltaBody {
-    pub(crate) stop_reason: Option<String>,
+    pub(crate) stop_reason: Option<StopReason>,
+    /// Populated only on `refusal`.
+    #[serde(default)]
+    pub(crate) stop_details: Option<StopDetails>,
+}
+
+/// Why the model stopped. `Unknown` keeps a future value from failing the whole `message_delta`
+/// frame, which would also drop its usage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum StopReason {
+    EndTurn,
+    MaxTokens,
+    StopSequence,
+    ToolUse,
+    /// A long server-side turn paused. Re-send the transcript with this reply appended to resume it.
+    PauseTurn,
+    Refusal,
+    ModelContextWindowExceeded,
+    #[serde(other)]
+    Unknown,
+}
+
+/// Structured refusal detail. Both fields are informational and may be absent.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub(crate) struct StopDetails {
+    pub(crate) category: Option<String>,
+    pub(crate) explanation: Option<String>,
 }
 
 #[expect(
@@ -324,6 +350,12 @@ pub(crate) struct ApiError {
     #[serde(rename = "type")]
     pub(crate) error_type: String,
     pub(crate) message: String,
+}
+
+/// Body of a non-2xx response.
+#[derive(Debug, Deserialize)]
+pub(super) struct ErrorResponse {
+    pub(super) error: ApiError,
 }
 
 #[cfg(test)]
@@ -488,15 +520,45 @@ mod tests {
         assert!(matches!(
             event,
             StreamEvent::MessageDelta {
-                delta: MessageDeltaBody { stop_reason: Some(ref reason) },
+                delta: MessageDeltaBody {
+                    stop_reason: Some(StopReason::EndTurn),
+                    stop_details: None,
+                },
                 usage: Some(Usage {
                     input_tokens: 0,
                     cache_creation_input_tokens: 0,
                     cache_read_input_tokens: 0,
                     output_tokens: 42,
                 }),
-            } if reason == "end_turn",
+            },
         ));
+    }
+
+    #[test]
+    fn stream_event_message_delta_refusal_carries_stop_details() {
+        let json = r#"{"type":"message_delta","delta":{"stop_reason":"refusal","stop_details":{"type":"refusal","category":"cyber","explanation":"Exploit development"}},"usage":{"output_tokens":3}}"#;
+        let StreamEvent::MessageDelta { delta, .. } = serde_json::from_str(json).unwrap() else {
+            panic!("expected MessageDelta");
+        };
+        assert_eq!(delta.stop_reason, Some(StopReason::Refusal));
+        assert_eq!(
+            delta.stop_details,
+            Some(StopDetails {
+                category: Some("cyber".to_owned()),
+                explanation: Some("Exploit development".to_owned()),
+            }),
+        );
+    }
+
+    #[test]
+    fn stream_event_message_delta_unknown_stop_reason_keeps_usage() {
+        let json = r#"{"type":"message_delta","delta":{"stop_reason":"some_future_reason","stop_details":null},"usage":{"output_tokens":7}}"#;
+        let StreamEvent::MessageDelta { delta, usage } = serde_json::from_str(json).unwrap() else {
+            panic!("expected MessageDelta");
+        };
+        assert_eq!(delta.stop_reason, Some(StopReason::Unknown));
+        assert!(delta.stop_details.is_none());
+        assert_eq!(usage.map(|u| u.output_tokens), Some(7));
     }
 
     #[test]

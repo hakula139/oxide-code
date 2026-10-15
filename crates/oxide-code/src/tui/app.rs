@@ -480,6 +480,7 @@ impl App {
                 self.set_active_status(Status::Streaming);
             }
             AgentEvent::ProgressUpdate(text) => self.chat.push_progress_update(text),
+            AgentEvent::Retrying(notice) => self.chat.push_notice(notice),
             AgentEvent::ToolCallStart { id, name, input } => {
                 let icon = self.tools.icon(&name);
                 let label = self.tools.label(&name, &input);
@@ -493,20 +494,7 @@ impl App {
                 content,
                 is_error,
                 metadata,
-            } => {
-                let pending = self.pending_calls.remove(&id);
-                let view = pending.as_ref().map_or_else(
-                    || ToolResultView::Text {
-                        content: content.clone(),
-                    },
-                    |p| {
-                        self.tools
-                            .result_view(&p.name, &p.input, &content, &metadata, is_error)
-                    },
-                );
-                let header = result_header(&metadata, pending.as_ref().map(|p| p.label.as_str()));
-                self.chat.push_tool_result_view(&header, view, is_error);
-            }
+            } => self.apply_tool_call_end(&id, &content, is_error, &metadata),
             AgentEvent::PromptDrained(text) => {
                 self.pending_prompts.pop_front();
                 self.chat.push_user_message(text);
@@ -562,13 +550,36 @@ impl App {
                 compaction,
                 requested_effort,
             } => self.apply_config_changed(model, effort, compaction, requested_effort),
-            AgentEvent::Error(msg) => {
+            AgentEvent::TurnFailed(msg) => {
                 self.chat.push_error(&msg);
                 self.finish_turn();
             }
+            AgentEvent::Error(msg) => self.chat.push_error(&msg),
             AgentEvent::ApprovalRequested { id, preview } => self.push_approval_modal(id, preview),
         }
         self.dirty = true;
+    }
+
+    /// Renders a tool result into the slot its [`AgentEvent::ToolCallStart`] opened.
+    fn apply_tool_call_end(
+        &mut self,
+        id: &str,
+        content: &str,
+        is_error: bool,
+        metadata: &ToolMetadata,
+    ) {
+        let pending = self.pending_calls.remove(id);
+        let view = pending.as_ref().map_or_else(
+            || ToolResultView::Text {
+                content: content.to_owned(),
+            },
+            |p| {
+                self.tools
+                    .result_view(&p.name, &p.input, content, metadata, is_error)
+            },
+        );
+        let header = result_header(metadata, pending.as_ref().map(|p| p.label.as_str()));
+        self.chat.push_tool_result_view(&header, view, is_error);
     }
 
     /// Opens the approve-or-deny overlay for a gated tool call. Pushing onto the stack lets it nest
@@ -3303,11 +3314,36 @@ mod tests {
         assert!(matches!(forwarded, UserAction::SubmitPrompt(s) if s == "queued"));
     }
 
+    #[tokio::test]
+    async fn handle_retrying_and_error_notices_keep_the_turn_running() {
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
+        rx.recv().await.expect("active submit forwarded");
+        app.pending_prompts.push_back("queued".into());
+
+        app.handle_agent_event(AgentEvent::Retrying(
+            "HTTP 529 overloaded_error. Retrying in 1s (retry 1 of 5).".to_owned(),
+        ));
+        assert!(!app.chat.last_is_error(), "a retry is not an error block");
+        app.handle_agent_event(AgentEvent::Error(
+            "Session write failed: disk full".to_owned(),
+        ));
+        assert!(app.chat.last_is_error(), "error entry appended");
+
+        assert_ne!(app.status_bar.status(), &Status::Idle);
+        assert!(!app.input.is_enabled());
+        assert!(
+            rx.try_recv().is_err(),
+            "the queue head waits for the turn to end"
+        );
+        assert_eq!(app.pending_prompts.len(), 1);
+    }
+
     #[test]
-    fn handle_error_pushes_error_entry_and_finishes_turn() {
+    fn handle_turn_failed_shows_the_error_and_finishes_the_turn() {
         let (mut app, _rx, _agent_tx) = test_app(None);
         app.dispatch_user_action(UserAction::SubmitPrompt("boom".to_owned()));
-        app.handle_agent_event(AgentEvent::Error("API blew up".to_owned()));
+        app.handle_agent_event(AgentEvent::TurnFailed("API blew up".to_owned()));
 
         assert!(app.chat.last_is_error(), "error entry appended");
         assert_eq!(app.status_bar.status(), &Status::Idle);
@@ -3315,18 +3351,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_error_drains_queue_head_only_once() {
-        // Single-drain contract: `Error` is the only teardown event
-        // a failed turn fires (no paired `TurnComplete`), so
-        // `finalize_idle` → `drain_pending_prompt` runs exactly once
-        // and pops one head — not two — when the queue is non-empty.
+    async fn handle_turn_failed_drains_queue_head_only_once() {
         let (mut app, mut rx, _agent_tx) = test_app(None);
         app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
         rx.recv().await.expect("active submit forwarded");
         app.pending_prompts.push_back("first".into());
         app.pending_prompts.push_back("second".into());
 
-        app.handle_agent_event(AgentEvent::Error("API failed".to_owned()));
+        app.handle_agent_event(AgentEvent::TurnFailed("API failed".to_owned()));
 
         let forwarded = rx.recv().await.expect("queue head forwarded");
         assert!(matches!(forwarded, UserAction::SubmitPrompt(s) if s == "first"));
@@ -3352,8 +3384,8 @@ mod tests {
         app.pending_prompts.push_back("b".into());
         app.pending_prompts.push_back("c".into());
 
-        // First turn dies (cap-bail surfaces as Error); head drains.
-        app.handle_agent_event(AgentEvent::Error(
+        // First turn dies (cap-bail surfaces as TurnFailed), and the head drains.
+        app.handle_agent_event(AgentEvent::TurnFailed(
             "agent stopped after MAX_TOOL_ROUNDS".to_owned(),
         ));
         let first = rx.recv().await.expect("a re-fired as fresh turn");
