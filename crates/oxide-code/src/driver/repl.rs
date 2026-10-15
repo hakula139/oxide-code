@@ -107,7 +107,7 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    use super::super::testing::{conversation, mount_reply, request_bodies};
+    use super::super::testing::{conversation, mount_reply, request_bodies, with_pinned_home};
     use super::*;
     use crate::agent::event::CapturingSink;
     use crate::session::store::testing::test_store;
@@ -116,52 +116,59 @@ mod tests {
 
     #[tokio::test]
     async fn drive_keeps_reading_after_a_failed_turn_and_exits_with_failure() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .respond_with(ResponseTemplate::new(400))
-            .up_to_n_times(1)
-            .mount(&server)
-            .await;
-        mount_reply(&server, "reply").await;
-        let dir = tempfile::tempdir().unwrap();
-        let conversation = conversation(server.uri(), &test_store(dir.path())).await;
-        let sink = CapturingSink::new();
-        let input: &[u8] = b"first\n/clear\n//literal\n";
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/messages"))
+                .respond_with(ResponseTemplate::new(400))
+                .up_to_n_times(1)
+                .mount(&server)
+                .await;
+            mount_reply(&server, "reply").await;
+            let dir = tempfile::tempdir().unwrap();
+            let conversation =
+                conversation(server.uri(), &test_store(dir.path()), dir.path()).await;
+            let sink = CapturingSink::new();
+            let input: &[u8] = b"first\n/clear\n//literal\n";
 
-        let exit = drive(conversation, &sink, input, &[PathBuf::from("drifted.rs")])
+            let exit = Box::pin(drive(
+                conversation,
+                &sink,
+                input,
+                &[PathBuf::from("drifted.rs")],
+            ))
             .await
             .unwrap();
 
-        assert_eq!(exit, Exit::Failure);
-        let requests = request_bodies(&server).await;
-        assert_eq!(requests.len(), 2, "/clear must not reach the model");
-        let last = requests[1]["messages"].as_array().unwrap().last().unwrap();
-        assert_eq!(last["content"][0]["text"], "/literal");
-        let reports: Vec<String> = sink
-            .events()
-            .into_iter()
-            .filter_map(|event| match event {
-                AgentEvent::Error(msg) | AgentEvent::TurnFailed(msg) => Some(msg),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(reports.len(), 3, "{reports:?}");
-        assert!(reports[0].ends_with(": drifted.rs"), "{reports:?}");
-        assert!(reports[1].contains("HTTP 400"), "{reports:?}");
-        assert!(
-            reports[2].contains("only in the TUI. Use //clear"),
-            "{reports:?}"
-        );
-        assert!(
-            sink.events().iter().any(
+            assert_eq!(exit, Exit::Failure);
+            let requests = request_bodies(&server).await;
+            assert_eq!(requests.len(), 2, "/clear must not reach the model");
+            let last = requests[1]["messages"].as_array().unwrap().last().unwrap();
+            assert_eq!(last["content"][0]["text"], "/literal");
+            let reports: Vec<String> = sink
+                .events()
+                .into_iter()
+                .filter_map(|event| match event {
+                    AgentEvent::Error(msg) | AgentEvent::TurnFailed(msg) => Some(msg),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(reports.len(), 3, "{reports:?}");
+            assert!(reports[0].ends_with(": drifted.rs"), "{reports:?}");
+            assert!(reports[1].contains("HTTP 400"), "{reports:?}");
+            assert!(
+                reports[2].contains("only in the TUI. Use //clear"),
+                "{reports:?}"
+            );
+            assert!(sink.events().iter().any(
                 |event| matches!(event, AgentEvent::TurnFailed(msg) if msg.contains("HTTP 400"))
-            )
-        );
-        assert!(
-            sink.events()
-                .iter()
-                .any(|event| matches!(event, AgentEvent::TurnComplete))
-        );
+            ));
+            assert!(
+                sink.events()
+                    .iter()
+                    .any(|event| matches!(event, AgentEvent::TurnComplete))
+            );
+        })
+        .await;
     }
 }

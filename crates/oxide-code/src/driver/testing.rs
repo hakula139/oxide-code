@@ -1,5 +1,6 @@
 //! Test-only [`Conversation`] fixtures. Child of `driver` so it can build the private fields.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use wiremock::matchers::{method, path};
@@ -17,12 +18,16 @@ use crate::tool::ToolRegistry;
 pub(super) const MODEL: &str = "claude-opus-5-5";
 pub(super) const SESSION_CONTEXT: &str = "<system-reminder>session context</system-reminder>";
 
-/// Non-interactive conversation on a fresh session in `store`. Its prompt carries
+/// Non-interactive conversation on a fresh session in `store`, working in `cwd`. Its prompt carries
 /// [`SESSION_CONTEXT`] in place of the rendered user context, so tests can tell it apart from a
-/// rebuilt one.
-pub(super) async fn conversation(base_url: String, store: &SessionStore) -> Conversation {
-    let cwd = std::env::current_dir().unwrap();
-    let mut prompt = prompt::build_prompt(&ModelSpec::resolve(MODEL.to_owned()), &cwd).await;
+/// rebuilt one. Pass an empty directory, and run under [`with_pinned_home`], so the context never
+/// reads the developer's instruction files or git state.
+pub(super) async fn conversation(
+    base_url: String,
+    store: &SessionStore,
+    cwd: &Path,
+) -> Conversation {
+    let mut prompt = prompt::build_prompt(&ModelSpec::resolve(MODEL.to_owned()), cwd).await;
     SESSION_CONTEXT.clone_into(&mut prompt.user_context);
     Conversation {
         client: test_client(base_url, api_key(), MODEL),
@@ -32,7 +37,7 @@ pub(super) async fn conversation(base_url: String, store: &SessionStore) -> Conv
         prompt,
         prompt_unrecorded: true,
         file_tracker: Arc::new(FileTracker::default()),
-        cwd,
+        cwd: cwd.to_owned(),
         interactive: false,
         auto_compaction_failures: 0,
         last_usage: None,
@@ -41,8 +46,8 @@ pub(super) async fn conversation(base_url: String, store: &SessionStore) -> Conv
     }
 }
 
-/// Runs `test` with `HOME` pinned to an empty directory. Parallel tests swap `HOME`, which would
-/// otherwise change the user instructions between two context loads of one test.
+/// Runs `test` with `HOME` pinned to an empty directory, so context loads find no user
+/// instructions even while parallel tests swap `HOME`.
 pub(super) async fn with_pinned_home(test: impl Future<Output = ()>) {
     let home = tempfile::tempdir().unwrap();
     temp_env::async_with_vars([("HOME", Some(home.path()))], test).await;

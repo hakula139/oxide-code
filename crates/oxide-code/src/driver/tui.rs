@@ -151,7 +151,7 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    use super::super::testing::{conversation, mount_reply};
+    use super::super::testing::{conversation, mount_reply, with_pinned_home};
     use super::*;
     use crate::agent::event::AgentEvent;
     use crate::client::anthropic::testing::text_stream_body;
@@ -174,146 +174,158 @@ mod tests {
 
     #[tokio::test]
     async fn serve_actions_finalizes_the_session_live_when_the_channel_closes() {
-        let server = MockServer::start().await;
-        mount_reply(&server, "reply").await;
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let conversation = conversation(server.uri(), &store).await;
-        let tracker = Arc::clone(&conversation.file_tracker);
-        let read_path = dir.path().join("read.txt");
-        std::fs::write(&read_path, "contents").unwrap();
-        let (sink, mut event_rx) = crate::tui::event::channel();
-        let (user_tx, user_rx) = mpsc::channel(8);
-        let agent = tokio::spawn(serve_actions(conversation, sink, user_rx, store.clone()));
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            mount_reply(&server, "reply").await;
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let conversation = conversation(server.uri(), &store, dir.path()).await;
+            let tracker = Arc::clone(&conversation.file_tracker);
+            let read_path = dir.path().join("read.txt");
+            std::fs::write(&read_path, "contents").unwrap();
+            let (sink, mut event_rx) = crate::tui::event::channel();
+            let (user_tx, user_rx) = mpsc::channel(8);
+            let agent = tokio::spawn(serve_actions(conversation, sink, user_rx, store.clone()));
 
-        user_tx.send(UserAction::Clear).await.unwrap();
-        let live_id = next_matching(&mut event_rx, |event| match event {
-            AgentEvent::SessionRolled { id } => Some(id),
-            _ => None,
+            user_tx.send(UserAction::Clear).await.unwrap();
+            let live_id = next_matching(&mut event_rx, |event| match event {
+                AgentEvent::SessionRolled { id } => Some(id),
+                _ => None,
+            })
+            .await;
+            seed_full_read(&tracker, &read_path);
+            user_tx
+                .send(UserAction::SubmitPrompt("after clear".to_owned()))
+                .await
+                .unwrap();
+            next_matching(&mut event_rx, |event| {
+                matches!(event, AgentEvent::TurnComplete).then_some(())
+            })
+            .await;
+            drop(user_tx);
+            agent.await.unwrap();
+
+            let snapshots = store.load_session_data(&live_id).unwrap().file_snapshots;
+            let paths: Vec<_> = snapshots.iter().map(|snapshot| &snapshot.path).collect();
+            assert_eq!(paths, [&read_path]);
         })
         .await;
-        seed_full_read(&tracker, &read_path);
-        user_tx
-            .send(UserAction::SubmitPrompt("after clear".to_owned()))
-            .await
-            .unwrap();
-        next_matching(&mut event_rx, |event| {
-            matches!(event, AgentEvent::TurnComplete).then_some(())
-        })
-        .await;
-        drop(user_tx);
-        agent.await.unwrap();
-
-        let snapshots = store.load_session_data(&live_id).unwrap().file_snapshots;
-        let paths: Vec<_> = snapshots.iter().map(|snapshot| &snapshot.path).collect();
-        assert_eq!(paths, [&read_path]);
     }
 
     #[tokio::test]
     async fn serve_actions_resumes_the_session_at_the_given_path() {
-        let server = MockServer::start().await;
-        mount_reply(&server, "reply").await;
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let conversation = conversation(server.uri(), &store).await;
-        let recorded_id = conversation.session.session_id().to_owned();
-        let (sink, mut event_rx) = crate::tui::event::channel();
-        let (user_tx, user_rx) = mpsc::channel(8);
-        let agent = tokio::spawn(serve_actions(conversation, sink, user_rx, store.clone()));
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            mount_reply(&server, "reply").await;
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let conversation = conversation(server.uri(), &store, dir.path()).await;
+            let recorded_id = conversation.session.session_id().to_owned();
+            let (sink, mut event_rx) = crate::tui::event::channel();
+            let (user_tx, user_rx) = mpsc::channel(8);
+            let agent = tokio::spawn(serve_actions(conversation, sink, user_rx, store.clone()));
 
-        user_tx
-            .send(UserAction::SubmitPrompt("first".to_owned()))
-            .await
-            .unwrap();
-        next_matching(&mut event_rx, |event| {
-            matches!(event, AgentEvent::TurnComplete).then_some(())
-        })
-        .await;
-        user_tx.send(UserAction::Clear).await.unwrap();
-        next_matching(&mut event_rx, |event| {
-            matches!(event, AgentEvent::SessionRolled { .. }).then_some(())
-        })
-        .await;
-        let path = store.find_session_path(&recorded_id).unwrap();
-        user_tx.send(UserAction::Resume { path }).await.unwrap();
-        let resumed_id = next_matching(&mut event_rx, |event| match event {
-            AgentEvent::SessionResumed { id, .. } => Some(id),
-            _ => None,
-        })
-        .await;
-        drop(user_tx);
-        agent.await.unwrap();
+            user_tx
+                .send(UserAction::SubmitPrompt("first".to_owned()))
+                .await
+                .unwrap();
+            next_matching(&mut event_rx, |event| {
+                matches!(event, AgentEvent::TurnComplete).then_some(())
+            })
+            .await;
+            user_tx.send(UserAction::Clear).await.unwrap();
+            next_matching(&mut event_rx, |event| {
+                matches!(event, AgentEvent::SessionRolled { .. }).then_some(())
+            })
+            .await;
+            let path = store.find_session_path(&recorded_id).unwrap();
+            user_tx.send(UserAction::Resume { path }).await.unwrap();
+            let resumed_id = next_matching(&mut event_rx, |event| match event {
+                AgentEvent::SessionResumed { id, .. } => Some(id),
+                _ => None,
+            })
+            .await;
+            drop(user_tx);
+            agent.await.unwrap();
 
-        assert_eq!(resumed_id, recorded_id);
+            assert_eq!(resumed_id, recorded_id);
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn serve_actions_late_queue_prompt_starts_no_turn() {
-        let server = MockServer::start().await;
-        mount_reply(&server, "reply").await;
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let conversation = conversation(server.uri(), &store).await;
-        let (sink, mut event_rx) = crate::tui::event::channel();
-        let (user_tx, user_rx) = mpsc::channel(8);
-        let agent = tokio::spawn(serve_actions(conversation, sink, user_rx, store));
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            mount_reply(&server, "reply").await;
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let conversation = conversation(server.uri(), &store, dir.path()).await;
+            let (sink, mut event_rx) = crate::tui::event::channel();
+            let (user_tx, user_rx) = mpsc::channel(8);
+            let agent = tokio::spawn(serve_actions(conversation, sink, user_rx, store));
 
-        user_tx
-            .send(UserAction::QueuePrompt("late".to_owned()))
-            .await
-            .unwrap();
-        drop(user_tx);
-        agent.await.unwrap();
+            user_tx
+                .send(UserAction::QueuePrompt("late".to_owned()))
+                .await
+                .unwrap();
+            drop(user_tx);
+            agent.await.unwrap();
 
-        assert!(server.received_requests().await.unwrap().is_empty());
-        assert!(event_rx.try_recv().is_err());
+            assert!(server.received_requests().await.unwrap().is_empty());
+            assert!(event_rx.try_recv().is_err());
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn serve_actions_finalizes_when_the_channel_closes_mid_stream() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_string(text_stream_body("", "too late"))
-                    .insert_header("content-type", "text/event-stream")
-                    .set_delay(Duration::from_secs(60)),
-            )
-            .mount(&server)
-            .await;
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let conversation = conversation(server.uri(), &store).await;
-        let live_id = conversation.session.session_id().to_owned();
-        let tracker = Arc::clone(&conversation.file_tracker);
-        let read_path = dir.path().join("read.txt");
-        std::fs::write(&read_path, "contents").unwrap();
-        seed_full_read(&tracker, &read_path);
-        let (sink, _event_rx) = crate::tui::event::channel();
-        let (user_tx, user_rx) = mpsc::channel(8);
-        let agent = tokio::spawn(serve_actions(conversation, sink, user_rx, store.clone()));
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/messages"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_string(text_stream_body("", "too late"))
+                        .insert_header("content-type", "text/event-stream")
+                        .set_delay(Duration::from_secs(60)),
+                )
+                .mount(&server)
+                .await;
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let conversation = conversation(server.uri(), &store, dir.path()).await;
+            let live_id = conversation.session.session_id().to_owned();
+            let tracker = Arc::clone(&conversation.file_tracker);
+            let read_path = dir.path().join("read.txt");
+            std::fs::write(&read_path, "contents").unwrap();
+            seed_full_read(&tracker, &read_path);
+            let (sink, _event_rx) = crate::tui::event::channel();
+            let (user_tx, user_rx) = mpsc::channel(8);
+            let agent = tokio::spawn(serve_actions(conversation, sink, user_rx, store.clone()));
 
-        user_tx
-            .send(UserAction::SubmitPrompt("mid stream".to_owned()))
-            .await
-            .unwrap();
-        while server.received_requests().await.unwrap().is_empty() {
-            tokio::task::yield_now().await;
-        }
-        drop(user_tx);
-        tokio::time::timeout(Duration::from_secs(5), agent)
-            .await
-            .expect("the agent task must stop waiting on the stream")
-            .unwrap();
+            user_tx
+                .send(UserAction::SubmitPrompt("mid stream".to_owned()))
+                .await
+                .unwrap();
+            while server.received_requests().await.unwrap().is_empty() {
+                tokio::task::yield_now().await;
+            }
+            drop(user_tx);
+            tokio::time::timeout(Duration::from_secs(5), agent)
+                .await
+                .expect("the agent task must stop waiting on the stream")
+                .unwrap();
 
-        let data = store.load_session_data(&live_id).unwrap();
-        assert_eq!(data.messages.len(), 1);
-        let paths: Vec<_> = data
-            .file_snapshots
-            .iter()
-            .map(|snapshot| &snapshot.path)
-            .collect();
-        assert_eq!(paths, [&read_path]);
+            let data = store.load_session_data(&live_id).unwrap();
+            assert_eq!(data.messages.len(), 1);
+            let paths: Vec<_> = data
+                .file_snapshots
+                .iter()
+                .map(|snapshot| &snapshot.path)
+                .collect();
+            assert_eq!(paths, [&read_path]);
+        })
+        .await;
     }
 }

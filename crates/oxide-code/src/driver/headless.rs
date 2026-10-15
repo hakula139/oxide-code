@@ -42,7 +42,7 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    use super::super::testing::{conversation, mount_reply};
+    use super::super::testing::{conversation, mount_reply, with_pinned_home};
     use super::*;
     use crate::agent::event::{AgentEvent, CapturingSink};
     use crate::session::store::testing::test_store;
@@ -51,36 +51,44 @@ mod tests {
 
     #[tokio::test]
     async fn drive_exit_reflects_whether_the_turn_completed() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .respond_with(ResponseTemplate::new(400))
-            .up_to_n_times(1)
-            .mount(&server)
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/messages"))
+                .respond_with(ResponseTemplate::new(400))
+                .up_to_n_times(1)
+                .mount(&server)
+                .await;
+            mount_reply(&server, "reply").await;
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+
+            let failed = CapturingSink::new();
+            let exit = Box::pin(drive(
+                conversation(server.uri(), &store, dir.path()).await,
+                &failed,
+                "first",
+            ))
             .await;
-        mount_reply(&server, "reply").await;
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
+            assert_eq!(exit, Exit::Failure);
+            assert!(matches!(
+                failed.events().last(),
+                Some(AgentEvent::TurnFailed(_))
+            ));
 
-        let failed = CapturingSink::new();
-        let exit = drive(conversation(server.uri(), &store).await, &failed, "first").await;
-        assert_eq!(exit, Exit::Failure);
-        assert!(matches!(
-            failed.events().last(),
-            Some(AgentEvent::TurnFailed(_))
-        ));
-
-        let completed = CapturingSink::new();
-        let exit = drive(
-            conversation(server.uri(), &store).await,
-            &completed,
-            "second",
-        )
+            let completed = CapturingSink::new();
+            let exit = Box::pin(drive(
+                conversation(server.uri(), &store, dir.path()).await,
+                &completed,
+                "second",
+            ))
+            .await;
+            assert_eq!(exit, Exit::Success);
+            assert!(matches!(
+                completed.events().last(),
+                Some(AgentEvent::TurnComplete)
+            ));
+        })
         .await;
-        assert_eq!(exit, Exit::Success);
-        assert!(matches!(
-            completed.events().last(),
-            Some(AgentEvent::TurnComplete)
-        ));
     }
 }
