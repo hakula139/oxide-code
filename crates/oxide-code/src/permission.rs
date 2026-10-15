@@ -542,17 +542,23 @@ fn is_workspace(cwd: &Path) -> bool {
 }
 
 /// Whether `path` is a regular file with more than one hard link, one of which may sit outside the
-/// workspace. Always `false` on Windows, where std exposes no link count.
+/// workspace.
 fn is_hard_linked(path: &Path) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt as _;
         std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_file() && meta.nlink() > 1)
     }
-    #[cfg(not(unix))]
+    // std's link count is unstable on Windows, and a zero access mode is enough to query a handle.
+    #[cfg(windows)]
     {
-        _ = path;
-        false
+        use std::os::windows::fs::OpenOptionsExt as _;
+        std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_file())
+            && std::fs::OpenOptions::new()
+                .access_mode(0)
+                .open(path)
+                .and_then(winapi_util::file::information)
+                .is_ok_and(|info| info.number_of_links() > 1)
     }
 }
 
@@ -914,6 +920,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn for_path_hard_linked_file_is_not_a_workspace_target() {
+        // The second link sits outside cwd, so an edit through `a.rs` would change it too.
+        let (_dir, cwd) = temp_cwd();
+        let (_outside_dir, outside) = temp_cwd();
+        std::fs::write(outside.join("a.rs"), "x").unwrap();
+        std::fs::hard_link(outside.join("a.rs"), cwd.join("a.rs")).unwrap();
+        std::fs::write(cwd.join("b.rs"), "x").unwrap();
+
+        assert_eq!(
+            resolved(&GateTarget::for_path("a.rs", &cwd)),
+            (
+                cwd.join("a.rs").as_path(),
+                Some(Path::new("a.rs")),
+                Zone::Outside
+            ),
+        );
+        assert_eq!(
+            resolved(&GateTarget::for_path("b.rs", &cwd)).2,
+            Zone::Workspace
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn for_path_new_file_under_a_symlinked_parent_resolves_through_the_link() {
@@ -1031,30 +1060,6 @@ mod tests {
         }
         let sibling = GateTarget::for_path("tools/other.rs", &cwd);
         assert_eq!(resolved(&sibling).2, Zone::Workspace);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn for_path_hard_linked_file_is_not_a_workspace_target() {
-        // The second link sits outside cwd, so an edit through `a.rs` would change it too.
-        let (_dir, cwd) = temp_cwd();
-        let (_outside_dir, outside) = temp_cwd();
-        std::fs::write(outside.join("a.rs"), "x").unwrap();
-        std::fs::hard_link(outside.join("a.rs"), cwd.join("a.rs")).unwrap();
-        std::fs::write(cwd.join("b.rs"), "x").unwrap();
-
-        assert_eq!(
-            resolved(&GateTarget::for_path("a.rs", &cwd)),
-            (
-                cwd.join("a.rs").as_path(),
-                Some(Path::new("a.rs")),
-                Zone::Outside
-            ),
-        );
-        assert_eq!(
-            resolved(&GateTarget::for_path("b.rs", &cwd)).2,
-            Zone::Workspace
-        );
     }
 
     #[cfg(unix)]

@@ -1735,6 +1735,7 @@ dependencies = [
  "unicode-segmentation",
  "unicode-width",
  "uuid",
+ "winapi-util",
  "wiremock",
  "xxhash-rust",
 ]
