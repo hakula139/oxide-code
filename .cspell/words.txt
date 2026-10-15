@@ -114,7 +114,6 @@ untap
 urandom
 URXVT
 usize
-venv
 vtable
 writeln
 xhigh

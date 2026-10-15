@@ -1,6 +1,8 @@
 # Build output
 /target/
-/node_modules/
+
+# Dependencies
+node_modules/
 
 # Nix
 .direnv/
@@ -8,11 +10,8 @@
 result
 result-*
 
-# cargo insta pending-review files
+# Snapshot review
 *.snap.new
-
-# Python
-/.venv/
 
 # OS files
 .DS_Store
@@ -21,8 +20,9 @@ result-*
 .env
 .env.local
 
-# Claude Code
-.claude/agent-memory-local/
-.claude/plans/
+# Editor / assistant local settings
+.agents/plans
+.claude/agent-memory-local
+.claude/plans
 .claude/settings.local.json
-.claude/worktrees/
+.claude/worktrees
