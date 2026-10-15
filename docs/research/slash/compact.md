@@ -95,9 +95,9 @@ Dedicated `compaction` agent, anchored re-summarization via `<previous-summary>`
 
 3. **Distinct boundary entry.** Claude Code's `compact_boundary` and Codex's `RolloutItem::Compacted` both let resume loaders find the cut point in O(line). Record `pre_message_count` (and later `pre_tokens`) for the post-compact UI line, free at write time.
 
-4. **Strip tool calls / results / thinking from the summarizer input.** Codex's pattern is the strictest and the simplest. Only user texts plus the new summary survive.
+4. **Send the summarizer the conversation's own request prefix.** Codex's local path streams the full cloned history with the compact prompt as the last input item, and Claude Code's fork path sends the parent's system prompt, tools, and messages for cache hits. Tool calls, tool results, and reasoning drop out only of the rebuilt history.
 
-5. **Hard-ban tool calls during the compaction turn.** Passing an empty tool registry at the API layer is cleaner than `NO_TOOLS_PREAMBLE`-style prompt enforcement.
+5. **Forbid tool calls in the prompt.** Claude Code's fork keeps the parent's tools because they are part of the cached prefix, and its `NO_TOOLS_PREAMBLE` asks for text only.
 
 6. **`summary_prefix` framing on the synthesized message.** Without a prefix the next turn often redundantly asks "what would you like me to do?". Codex and Claude Code both prep the model to _use_ the summary directly.
 

@@ -28,6 +28,17 @@ const MAX_JITTER: f64 = 0.25;
 /// quota, fails fast so the user sees the error promptly.
 const MAX_RETRY_AFTER: Duration = Duration::from_mins(1);
 
+// ── Errors ──
+
+/// HTTP 400 saying the prompt exceeds the context window. Displays as the usual API diagnostic.
+#[derive(Debug, thiserror::Error)]
+#[error("{diagnostic}")]
+pub(crate) struct PromptTooLong {
+    /// Tokens over the limit, when the message names both counts.
+    pub(crate) overflow: Option<u32>,
+    diagnostic: String,
+}
+
 // ── Request ──
 
 /// One `/v1/messages` call, replayable across retry attempts.
@@ -189,7 +200,17 @@ async fn error_for_status(response: reqwest::Response) -> Result<reqwest::Respon
     let retry_after = header("retry-after").as_deref().and_then(parse_retry_after);
     let should_retry = header("x-should-retry");
     let body = response.text().await.unwrap_or_default();
-    let error = anyhow!("{}", format_api_error(status, retry_after, &body));
+    let diagnostic = format_api_error(status, retry_after, &body);
+    let error = if status == StatusCode::BAD_REQUEST
+        && let Some(message) = prompt_too_long_message(&body)
+    {
+        anyhow::Error::new(PromptTooLong {
+            overflow: prompt_overflow(&message),
+            diagnostic,
+        })
+    } else {
+        anyhow!(diagnostic)
+    };
 
     let retryable = match should_retry.as_deref() {
         Some("true") => true,
@@ -204,6 +225,34 @@ async fn error_for_status(response: reqwest::Response) -> Result<reqwest::Respon
         cause: status_cause(status, &body),
         retry_after,
     })
+}
+
+/// The message of an `invalid_request_error` that says the prompt is too long.
+fn prompt_too_long_message(body: &str) -> Option<String> {
+    let error = serde_json::from_str::<ErrorResponse>(body).ok()?.error;
+    (error.error_type == "invalid_request_error"
+        && error
+            .message
+            .to_ascii_lowercase()
+            .starts_with("prompt is too long"))
+    .then_some(error.message)
+}
+
+/// Reads the overflow from `prompt is too long: N tokens > M maximum`.
+fn prompt_overflow(message: &str) -> Option<u32> {
+    let non_digit = |c: char| !c.is_ascii_digit();
+    let (actual, limit) = message.split_once('>')?;
+    let actual: u32 = actual
+        .split(non_digit)
+        .rfind(|run| !run.is_empty())?
+        .parse()
+        .ok()?;
+    let limit: u32 = limit
+        .split(non_digit)
+        .find(|run| !run.is_empty())?
+        .parse()
+        .ok()?;
+    actual.checked_sub(limit).filter(|&overflow| overflow > 0)
 }
 
 /// Names a failed status in a few words, such as `HTTP 529 overloaded_error`, preferring the API's
@@ -499,6 +548,46 @@ mod tests {
             let msg = format!("{error:#}");
             assert!(msg.contains(&status.to_string()), "{msg}");
             assert!(msg.contains("Details: boom"), "{msg}");
+        }
+    }
+
+    #[tokio::test]
+    async fn post_messages_types_a_prompt_too_long_rejection() {
+        let body = |kind: &str, message: &str| {
+            format!(r#"{{"type":"error","error":{{"type":"{kind}","message":"{message}"}}}}"#)
+        };
+        for (body, expected) in [
+            (
+                body(
+                    "invalid_request_error",
+                    "prompt is too long: 215000 tokens > 200000 maximum",
+                ),
+                Some(Some(15_000)),
+            ),
+            (
+                body("invalid_request_error", "Prompt is too long"),
+                Some(None),
+            ),
+            (body("invalid_request_error", "max_tokens: too large"), None),
+            (
+                body("api_error", "prompt is too long: 3 tokens > 2 maximum"),
+                None,
+            ),
+        ] {
+            let server = MockServer::start().await;
+            mount(&server, ResponseTemplate::new(400).set_body_string(&body)).await;
+
+            let Err(AttemptError::Fatal(error)) = post_once(&server).await else {
+                panic!("HTTP 400 is fatal");
+            };
+            let too_long = error.downcast_ref::<PromptTooLong>();
+            assert_eq!(too_long.map(|e| e.overflow), expected, "{body}");
+            assert!(
+                error
+                    .to_string()
+                    .starts_with("API error (HTTP 400 Bad Request)."),
+                "{error}",
+            );
         }
     }
 

@@ -39,11 +39,11 @@ Segment render rules:
 
 Anthropic `Usage` carries `cache_creation_input_tokens` and `cache_read_input_tokens`. `TokenUsage::context_tokens()` returns input + cache creation + cache read. `TokenUsage::total_tokens()` returns context + output and is the auto-compaction trigger input.
 
-A successful `agent_turn` returns the latest provider usage. `Conversation` keeps that usage for the next auto-compaction check, updates the displayed usage snapshot, adds the turn's estimated cost when rates are known, then emits `AgentEvent::UsageUpdated(UsageSnapshot)` before `TurnComplete`.
+Each `agent_turn` reports the latest provider usage and the total across its requests, including a request the user cancelled or that failed partway. `Conversation` keeps the latest usage for the next auto-compaction check, updates the displayed usage snapshot, adds the turn's estimated cost when rates are known, then emits `AgentEvent::UsageUpdated(UsageSnapshot)` before the turn's terminal event. The summarization requests behind `/compact` and auto-compaction add their estimated cost the same way.
 
 Known first-party Claude API rates live in `model/pricing.rs`, and the `model.rs` catalogue attaches them to each model. Unknown models render context without session cost. The estimate excludes account discounts, marketplace billing, data-residency multipliers, fast mode, and server-side tool surcharges.
 
-On model swap, recompute the snapshot with the new model's context window if display usage exists. The session cost remains the accumulated estimate from turns that actually reported usage. On `/clear`, `/resume`, manual compaction, and automatic compaction, clear displayed usage because the visible transcript basis changed.
+On model swap, recompute the snapshot with the new model's context window. The session cost remains the accumulated estimate from requests that reported usage. Manual and automatic compaction clear the context usage because the visible transcript basis changed, and keep the session cost, which now includes the summary. Each compaction emits `UsageUpdated` once its summary requests end, so the summary's cost shows before the next turn, and the context segment stays hidden until the next request reports usage. `/clear` and `/resume` reset both.
 
 ## Default Order
 

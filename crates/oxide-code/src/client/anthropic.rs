@@ -10,7 +10,7 @@ mod billing;
 mod completion;
 mod identity;
 mod sse;
-mod transport;
+pub(crate) mod transport;
 pub(crate) mod wire;
 
 #[cfg(test)]
@@ -237,9 +237,10 @@ impl Client {
         &self,
         messages: &[Message],
         system_sections: &[&str],
+        user_context: Option<&str>,
         tools: &[ToolDefinition],
     ) -> Result<mpsc::Receiver<Result<StreamEvent>>> {
-        self.stream(messages, system_sections, None, tools, None)
+        self.stream(messages, system_sections, user_context, tools, None)
     }
 
     fn stream(

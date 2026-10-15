@@ -584,7 +584,7 @@ mod tests {
     fn render_usage_shows_context_and_session_cost() {
         let mut bar = bar_idle(None, "~/projects/demo");
         bar.set_usage(Some(UsageSnapshot {
-            context_tokens: 124_000,
+            context_tokens: Some(124_000),
             context_window: Some(1_000_000),
             estimated_cost_usd: Some(0.4321),
         }));

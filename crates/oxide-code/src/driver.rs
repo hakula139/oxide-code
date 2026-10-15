@@ -228,6 +228,8 @@ impl Conversation {
         user_rx: &mut mpsc::Receiver<UserAction>,
         pending: &mut Vec<String>,
     ) -> Result<(), TurnAbort> {
+        let tools = self.tools.definitions();
+        let mut spent = Vec::new();
         let compacted = agent::auto_compact_if_needed(
             &self.client,
             &self.session,
@@ -239,15 +241,22 @@ impl Conversation {
                 config: self.client.compaction().auto,
                 failures: &mut self.auto_compaction_failures,
                 file_tracker: &self.file_tracker,
+                prompt: &self.prompt,
+                tools: &tools,
+                spent: &mut spent,
             }),
             self.last_usage,
         )
-        .await?;
-        if compacted {
+        .await;
+        self.bill(&spent);
+        if matches!(compacted, Ok(true)) {
             self.refresh_prompt().await;
-            self.reset_usage();
+            self.reset_context_usage();
         }
-        Ok(())
+        if !spent.is_empty() {
+            self.emit_usage_update(sink);
+        }
+        compacted.map(|_| ())
     }
 
     /// Replaces the transcript with a summary steered by `instructions`. Failures leave it intact.
@@ -257,24 +266,30 @@ impl Conversation {
         user_rx: &mut mpsc::Receiver<UserAction>,
         instructions: Option<String>,
     ) -> TurnEnd {
+        let tools = self.tools.definitions();
+        let mut spent = Vec::new();
         let mut pending = Vec::new();
         let summary = agent::await_unless_aborted(
             agent::compaction::compact_session(
                 &self.client,
+                &self.prompt,
+                &tools,
                 &self.messages,
                 instructions.as_deref(),
+                &mut spent,
             ),
             user_rx,
             &mut pending,
         )
         .await;
+        self.bill(&spent);
         let summary = match summary {
             Ok(Ok(summary)) => summary,
             Ok(Err(e)) => {
                 let abort = TurnAbort::Failed(anyhow!("Compaction failed: {e:#}"));
-                return report_abort(sink, abort, "compact-failed");
+                return self.fail_compact(sink, abort);
             }
-            Err(abort) => return report_abort(sink, abort, "compact-failed"),
+            Err(abort) => return self.fail_compact(sink, abort),
         };
         let compacted = agent::compact_boundary::replace_session_with_summary(
             &self.session,
@@ -287,17 +302,21 @@ impl Conversation {
         )
         .await;
         if !compacted {
-            sink.emit(
-                AgentEvent::TurnFailed(
-                    "Compaction was not saved, so the transcript is unchanged.".to_owned(),
-                ),
-                "compact-failed",
-            );
-            return TurnEnd::Failed;
+            let abort = TurnAbort::Failed(anyhow!(
+                "Compaction was not saved, so the transcript is unchanged."
+            ));
+            return self.fail_compact(sink, abort);
         }
         self.refresh_prompt().await;
-        self.reset_usage();
+        self.reset_context_usage();
+        self.emit_usage_update(sink);
         TurnEnd::Completed
+    }
+
+    /// Ends a compaction that left the transcript unchanged, showing the summary's cost first.
+    fn fail_compact(&self, sink: &dyn AgentSink, abort: TurnAbort) -> TurnEnd {
+        self.emit_usage_update(sink);
+        report_abort(sink, abort, "compact-failed")
     }
 
     /// Starts the compacted transcript from the current instructions and date.
@@ -427,33 +446,43 @@ impl Conversation {
         if let Some(usage) = report.usage {
             self.displayed_usage = Some(usage);
         }
-        self.total_estimated_cost_usd += report
-            .billable_rounds
-            .iter()
-            .filter_map(|&usage| estimate_usage_cost_usd(&self.client, usage))
-            .sum::<f64>();
+        self.bill(&report.billable_rounds);
         if report.usage.is_some() || !report.billable_rounds.is_empty() {
             self.emit_usage_update(sink);
         }
     }
 
-    fn reset_usage(&mut self) {
+    /// Adds the estimated cost of each request in `requests` to the session total.
+    fn bill(&mut self, requests: &[TokenUsage]) {
+        self.total_estimated_cost_usd += requests
+            .iter()
+            .filter_map(|&usage| estimate_usage_cost_usd(&self.client, usage))
+            .sum::<f64>();
+    }
+
+    /// Forgets the context usage of a transcript the session no longer sends.
+    fn reset_context_usage(&mut self) {
         self.auto_compaction_failures = 0;
         self.last_usage = None;
         self.displayed_usage = None;
+    }
+
+    fn reset_usage(&mut self) {
+        self.reset_context_usage();
         self.total_estimated_cost_usd = 0.0;
     }
 
     fn emit_usage_update(&self, sink: &dyn AgentSink) {
-        let Some(usage) = self.displayed_usage else {
+        let estimated_cost_usd =
+            (self.total_estimated_cost_usd > 0.0).then_some(self.total_estimated_cost_usd);
+        if self.displayed_usage.is_none() && estimated_cost_usd.is_none() {
             return;
-        };
+        }
         sink.emit(
             AgentEvent::UsageUpdated(UsageSnapshot {
-                context_tokens: usage.context_tokens(),
+                context_tokens: self.displayed_usage.map(TokenUsage::context_tokens),
                 context_window: self.client.model().context_window(),
-                estimated_cost_usd: (self.total_estimated_cost_usd > 0.0)
-                    .then_some(self.total_estimated_cost_usd),
+                estimated_cost_usd,
             }),
             "usage-updated",
         );
@@ -551,7 +580,8 @@ fn format_drift_warning(drifted: &[PathBuf]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use wiremock::MockServer;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::testing::{
         MODEL, SESSION_CONTEXT, conversation, mount_reply, request_bodies, system_prompt,
@@ -559,7 +589,7 @@ mod tests {
     };
     use super::*;
     use crate::agent::event::CapturingSink;
-    use crate::client::anthropic::testing::{api_key, test_client, test_config};
+    use crate::client::anthropic::testing::{api_key, test_client, test_config, text_stream_body};
     use crate::config::{AutoCompactionConfig, CompactionConfig};
     use crate::session::store::testing::test_store;
 
@@ -695,7 +725,7 @@ mod tests {
                 _ => None,
             });
         let usage = usage.expect("each turn reports usage");
-        assert_eq!(usage.context_tokens, 1_000);
+        assert_eq!(usage.context_tokens, Some(1_000));
         assert_eq!(usage.context_window, Some(1_000_000));
         let cost = usage.estimated_cost_usd.unwrap();
         assert!(
@@ -735,6 +765,10 @@ mod tests {
         assert_eq!(end, TurnEnd::Completed);
         let requests = request_bodies(&server).await;
         assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[0]["messages"][0]["content"][0]["text"], SESSION_CONTEXT,
+            "the summary forks the conversation's own prompt",
+        );
         let turn = requests[1]["messages"].as_array().unwrap();
         assert!(
             turn[1]["content"][0]["text"]
@@ -750,24 +784,32 @@ mod tests {
         assert_eq!(conversation.messages.len(), 3);
         assert_eq!(conversation.last_usage, Some(TokenUsage::new(1_000, 100)));
         assert!(
-            (conversation.total_estimated_cost_usd - 0.006).abs() < 1e-12,
-            "compaction must reset the session cost before the turn bills: {}",
+            (conversation.total_estimated_cost_usd - (1.23 + 0.006 + 0.006)).abs() < 1e-12,
+            "the session cost keeps earlier turns and adds the summary and the turn: {}",
             conversation.total_estimated_cost_usd,
         );
         let events = sink.events();
-        let compacted = events.iter().position(|event| {
-            matches!(
-                event,
-                AgentEvent::SessionCompacted {
-                    automatic: true,
-                    ..
-                }
-            )
-        });
+        let compacted = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    AgentEvent::SessionCompacted {
+                        automatic: true,
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        let AgentEvent::UsageUpdated(usage) = &events[compacted + 1] else {
+            panic!("the summary's cost shows right after the compaction: {events:?}");
+        };
+        assert_eq!(usage.context_tokens, None);
+        assert!((usage.estimated_cost_usd.unwrap() - (1.23 + 0.006)).abs() < 1e-12);
         let completed = events
             .iter()
             .position(|event| matches!(event, AgentEvent::TurnComplete));
-        assert!(compacted.unwrap() < completed.unwrap());
+        assert!(compacted < completed.unwrap());
     }
 
     // ── compact ──
@@ -782,7 +824,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compact_replaces_the_transcript_and_resets_usage() {
+    async fn compact_replaces_the_transcript_and_bills_the_summary() {
         let server = MockServer::start().await;
         mount_reply(&server, "manual summary").await;
         let dir = tempfile::tempdir().unwrap();
@@ -804,17 +846,31 @@ mod tests {
                 if matches!(&content[0], ContentBlock::Text { text } if text.contains("manual summary"))
         ));
         assert_eq!(conversation.displayed_usage, None);
-        assert!(conversation.total_estimated_cost_usd.abs() < f64::EPSILON);
+        assert!(
+            (conversation.total_estimated_cost_usd - (1.23 + 0.006)).abs() < 1e-12,
+            "the session cost keeps earlier turns and adds the summary: {}",
+            conversation.total_estimated_cost_usd,
+        );
         assert_ne!(
             conversation.prompt.user_context, SESSION_CONTEXT,
             "the compacted transcript starts from a fresh user context"
         );
         assert!(conversation.prompt_unrecorded);
-        assert!(matches!(
-            sink.events().as_slice(),
-            [AgentEvent::SessionCompacted { automatic: false, instructions: Some(focus), .. }]
-                if focus == "focus"
-        ));
+        let events = sink.events();
+        let [
+            AgentEvent::SessionCompacted {
+                automatic: false,
+                instructions: Some(focus),
+                ..
+            },
+            AgentEvent::UsageUpdated(usage),
+        ] = events.as_slice()
+        else {
+            panic!("expected the compaction, then its cost: {events:?}");
+        };
+        assert_eq!(focus, "focus");
+        assert_eq!(usage.context_tokens, None);
+        assert!((usage.estimated_cost_usd.unwrap() - (1.23 + 0.006)).abs() < 1e-12);
     }
 
     #[tokio::test]
@@ -854,12 +910,67 @@ mod tests {
                     AgentEvent::TurnFailed(short),
                     AgentEvent::Cancelled,
                     AgentEvent::Error(write),
+                    AgentEvent::UsageUpdated(UsageSnapshot {
+                        context_tokens: None,
+                        estimated_cost_usd: Some(cost),
+                        ..
+                    }),
                     AgentEvent::TurnFailed(unsaved),
                 ] if short.starts_with("Compaction failed: session is too short")
                     && write.starts_with("Session write failed")
+                    && (cost - 0.006).abs() < 1e-12
                     && unsaved.starts_with("Compaction was not saved")
             ),
             "{events:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_failure_bills_and_shows_the_summary_cost() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(
+                        text_stream_body("", "partial").replace("end_turn", "max_tokens"),
+                    )
+                    .insert_header("content-type", "text/event-stream"),
+            )
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let mut conversation = conversation(server.uri(), &test_store(dir.path())).await;
+        conversation.messages = transcript();
+        conversation.displayed_usage = Some(TokenUsage::new(50_000, 1));
+        conversation.total_estimated_cost_usd = 1.23;
+        let sink = CapturingSink::new();
+        let (_user_tx, mut user_rx) = agent::event::inert_user_action_channel();
+
+        let end = conversation.compact(&sink, &mut user_rx, None).await;
+
+        assert_eq!(end, TurnEnd::Failed);
+        assert_eq!(conversation.messages.len(), 4);
+        assert_eq!(
+            conversation.displayed_usage,
+            Some(TokenUsage::new(50_000, 1))
+        );
+        let expected = 1.23 + 0.006;
+        assert!(
+            (conversation.total_estimated_cost_usd - expected).abs() < 1e-12,
+            "a rejected summary is still billed: {}",
+            conversation.total_estimated_cost_usd,
+        );
+        let events = sink.events();
+        let [AgentEvent::UsageUpdated(usage), AgentEvent::TurnFailed(msg)] = events.as_slice()
+        else {
+            panic!("expected the cost update before the failure: {events:?}");
+        };
+        assert_eq!(usage.context_tokens, Some(50_000));
+        assert!((usage.estimated_cost_usd.unwrap() - expected).abs() < 1e-12);
+        assert!(
+            msg.starts_with("Compaction failed") && msg.contains("max_tokens"),
+            "{msg}"
         );
     }
 
