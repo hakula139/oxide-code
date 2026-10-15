@@ -33,6 +33,7 @@ pub(crate) use context::{LiveSessionInfo, SlashContext};
 pub(crate) use matcher::MatchedCommand;
 pub(crate) use parser::{Parsed, PopupState, parse_slash, popup_state, unescape_literal};
 pub(crate) use registry::{ArgCompletion, SlashKind, SlashOutcome};
+pub(crate) use resume::ResumePicker;
 
 /// Filter the built-in registry against a popup query (leading `/` stripped).
 pub(crate) fn filter_built_ins(query: &str) -> Vec<MatchedCommand> {

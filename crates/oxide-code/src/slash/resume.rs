@@ -1,6 +1,6 @@
 //! `/resume` (alias `/continue`) — open the session picker, or resume directly with
-//! `/resume <id-prefix>`. The picker uses [`SearchableList`] so the same chrome powers any
-//! future searchable modal.
+//! `/resume <id-prefix>`. `ox --resume` opens the same picker at startup. The picker uses
+//! [`SearchableList`] so the same chrome powers any future searchable modal.
 
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
@@ -126,13 +126,23 @@ impl SearchableItem for SessionRow {
 
 // ── ResumePicker ──
 
-pub(super) struct ResumePicker {
+/// What Esc does to the picker.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Dismissal {
+    /// Closes the picker and keeps the live session.
+    Cancel,
+    /// Quits `ox`, since the picker stands in for the session at startup.
+    Quit,
+}
+
+pub(crate) struct ResumePicker {
     store: SessionStore,
     list: SearchableList<SessionRow>,
     /// `false` = current project, `true` = every project.
     all: bool,
     /// `false` = active sessions, `true` = archived ones.
     archived: bool,
+    dismissal: Dismissal,
     local_offset: UtcOffset,
     /// Filtered out of every reload so the user can't self-resume onto the open append-writer.
     live_session_id: String,
@@ -147,13 +157,23 @@ pub(super) struct ResumePicker {
 
 impl ResumePicker {
     pub(super) fn new(store: SessionStore, live_session_id: String) -> Self {
+        Self::open(store, live_session_id, false, Dismissal::Cancel)
+    }
+
+    /// The `ox --resume` picker, scoped to every project when `all` is set.
+    pub(crate) fn at_startup(store: SessionStore, live_session_id: String, all: bool) -> Self {
+        Self::open(store, live_session_id, all, Dismissal::Quit)
+    }
+
+    fn open(store: SessionStore, live_session_id: String, all: bool, dismissal: Dismissal) -> Self {
         let local_offset = crate::util::time::local_offset();
         let mut picker = Self {
             store,
             list: SearchableList::new(PICKER_TITLE, Vec::new(), VIEWPORT_HEIGHT)
                 .with_description(PICKER_DESCRIPTION),
-            all: false,
+            all,
             archived: false,
+            dismissal,
             local_offset,
             live_session_id,
             loaded: 0,
@@ -257,9 +277,13 @@ impl ResumePicker {
                 )
             }
         };
+        let dismiss = match self.dismissal {
+            Dismissal::Cancel => "cancel",
+            Dismissal::Quit => "quit",
+        };
         format!(
             "{count} · scope: {scope} · Tab to toggle · Ctrl+A for {other_view} · Enter to resume · \
-             Ctrl+D to delete · Esc to cancel"
+             Ctrl+D to delete · Esc to {dismiss}"
         )
     }
 }
@@ -339,6 +363,10 @@ impl Modal for ResumePicker {
         if let Some(id) = prev_id {
             self.list.cursor_to(|row| row.session_id == id);
         }
+    }
+
+    fn on_cancel(&mut self) -> Option<ModalAction> {
+        (self.dismissal == Dismissal::Quit).then_some(ModalAction::User(UserAction::Quit))
     }
 }
 
@@ -718,6 +746,35 @@ mod tests {
             .session_id
             .clone();
         assert_ne!(visible_id, live_id);
+    }
+
+    // ── ResumePicker::at_startup ──
+
+    #[test]
+    fn at_startup_with_all_lists_every_project_and_names_quit_as_the_dismissal() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let other = SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
+        seed_session(
+            &other,
+            &stamped_id(0x22),
+            Some("foreign"),
+            1,
+            datetime!(2026-04-18 09:00:00 UTC),
+        );
+
+        let scoped = ResumePicker::at_startup(store.clone(), "live-session-id".to_owned(), false);
+        assert_eq!(scoped.loaded, 0);
+        let picker = ResumePicker::at_startup(store, "live-session-id".to_owned(), true);
+        assert_eq!(
+            picker.list.selected().map(|row| row.session_id.as_str()),
+            Some(stamped_id(0x22).as_str()),
+        );
+        assert_eq!(
+            picker.footer_text(),
+            "1 session · scope: all projects · Tab to toggle · Ctrl+A for archived · \
+             Enter to resume · Ctrl+D to delete · Esc to quit",
+        );
     }
 
     // ── ResumePicker::reload ──
@@ -1380,6 +1437,28 @@ mod tests {
             1,
             "one row was actually deleted from disk",
         );
+    }
+
+    // ── Modal::on_cancel ──
+
+    #[test]
+    fn on_cancel_quits_from_the_startup_picker_only() {
+        let (_dir, store) = isolated_store();
+        let mut stack = crate::tui::modal::ModalStack::new();
+        stack.push(Box::new(ResumePicker::at_startup(
+            store.clone(),
+            "live-session-id".to_owned(),
+            false,
+        )));
+        let outcome = stack.handle_key(&key(KeyCode::Esc));
+        assert!(
+            matches!(outcome, Some(ModalAction::User(UserAction::Quit))),
+            "{outcome:?}",
+        );
+        assert!(!stack.is_active());
+
+        let mut slash_picker = ResumePicker::new(store, "live-session-id".to_owned());
+        assert!(slash_picker.on_cancel().is_none());
     }
 
     // ── ResumeCmd ──

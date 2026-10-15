@@ -23,7 +23,7 @@ use super::components::status::{Status, StatusBar};
 use super::components::welcome::{self, WelcomeSnapshot};
 use super::git_probes::{GitProbes, GitUpdate};
 use super::glyphs::{NEWLINE_GLYPH, USER_PROMPT_PREFIX, USER_PROMPT_PREFIX_WIDTH};
-use super::modal::{ModalAction, ModalStack};
+use super::modal::{Modal, ModalAction, ModalStack};
 use super::pending_calls::{PendingCall, PendingCalls, result_header};
 use super::terminal::{Tui, synchronized_update, write_status_hyperlinks};
 use super::theme::Theme;
@@ -142,6 +142,12 @@ impl App {
     /// Appends a system message ahead of the first frame, for warnings raised at startup.
     pub(crate) fn push_system_message(&mut self, body: String) {
         self.chat.push_system_message(body);
+    }
+
+    /// Opens a modal ahead of the first frame, for overlays raised at startup.
+    pub(crate) fn push_modal(&mut self, modal: Box<dyn Modal>) {
+        self.modals.push(modal);
+        self.dirty = true;
     }
 
     /// Runs until the user quits or the agent channel closes.
@@ -284,12 +290,6 @@ impl App {
         self.chat.set_theme(theme);
         self.status_bar.set_theme(theme);
         self.input.set_theme(theme);
-        self.dirty = true;
-    }
-
-    #[cfg(test)]
-    pub(crate) fn push_modal(&mut self, modal: Box<dyn super::modal::Modal>) {
-        self.modals.push(modal);
         self.dirty = true;
     }
 
@@ -671,6 +671,9 @@ impl App {
         if unarchived {
             self.chat
                 .push_system_message(archive_notice(&self.session_info.session_id, false));
+        }
+        if let Some(notice) = self.session_info.config.model.unsupported_notice() {
+            self.chat.push_system_message(notice);
         }
         self.pending_calls.clear();
         self.active_prompt = None;
@@ -2963,6 +2966,7 @@ mod tests {
     #[test]
     fn handle_session_resumed_replays_transcript_and_clears_pending() {
         let (mut app, _rx, _agent_tx) = test_app(Some("Old"));
+        app.session_info.config.model = spec("claude-opus-5-5");
         app.chat.push_user_message("live prompt".to_owned());
         app.status_bar.set_usage(Some(usage_snapshot()));
         app.pending_prompts.push_back("queued".to_owned());
@@ -3018,6 +3022,7 @@ mod tests {
     #[test]
     fn handle_session_resumed_with_no_queued_prompts_is_silent() {
         let (mut app, _rx, _agent_tx) = test_app(None);
+        app.session_info.config.model = spec("claude-opus-5-5");
         app.handle_agent_event(AgentEvent::SessionResumed {
             id: "resumed".to_owned(),
             title: None,
@@ -3036,6 +3041,7 @@ mod tests {
     #[test]
     fn handle_session_resumed_after_unarchiving_appends_a_notice() {
         let (mut app, _rx, _agent_tx) = test_app(None);
+        app.session_info.config.model = spec("claude-opus-5-5");
         app.handle_agent_event(AgentEvent::SessionResumed {
             id: "bbbb2222-resumed".to_owned(),
             title: None,
@@ -3053,6 +3059,7 @@ mod tests {
     #[test]
     fn handle_session_resumed_with_compact_replays_boundary_block() {
         let (mut app, _rx, _agent_tx) = test_app(None);
+        app.session_info.config.model = spec("claude-opus-5-5");
         app.handle_agent_event(AgentEvent::SessionResumed {
             id: "resumed".to_owned(),
             title: None,
@@ -3080,6 +3087,7 @@ mod tests {
     #[test]
     fn handle_session_resumed_with_no_title_clears_stale_chrome() {
         let (mut app, _rx, _agent_tx) = test_app(Some("Stale"));
+        app.session_info.config.model = spec("claude-opus-5-5");
         app.handle_agent_event(AgentEvent::SessionResumed {
             id: "resumed".to_owned(),
             title: None,
@@ -3093,6 +3101,25 @@ mod tests {
             "Some(None) title must clear the chrome",
         );
         assert!(app.chat.is_empty());
+    }
+
+    #[test]
+    fn handle_session_resumed_with_an_unsupported_model_repeats_its_notice() {
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.handle_agent_event(AgentEvent::SessionResumed {
+            id: "resumed".to_owned(),
+            title: None,
+            unarchived: false,
+            messages: vec![Message::user("only msg")],
+            compact: None,
+            tool_metadata: HashMap::new(),
+        });
+
+        assert_eq!(app.chat.entry_count(), 2);
+        let text = rendered_text(&mut app, 120, 16);
+        let prompt_at = text.find("only msg").unwrap();
+        let notice_at = text.find("`test-model` is not a supported model").unwrap();
+        assert!(prompt_at < notice_at, "{text}");
     }
 
     #[test]
