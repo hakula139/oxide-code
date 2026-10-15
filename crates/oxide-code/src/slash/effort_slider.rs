@@ -138,7 +138,7 @@ impl EffortSlider {
 }
 
 impl Modal for EffortSlider {
-    fn height(&self, _width: u16) -> u16 {
+    fn height(&self, _width: u16, _max_height: u16) -> u16 {
         BODY_HEIGHT
     }
 
@@ -318,7 +318,7 @@ mod tests {
         ] {
             let s = slider_for(model, effort);
             for width in [40_u16, 80, 120] {
-                let h = s.height(width);
+                let h = s.height(width, u16::MAX);
                 let mut terminal = Terminal::new(TestBackend::new(width, h)).unwrap();
                 terminal
                     .draw(|frame| s.render(frame, Rect::new(0, 0, width, h), &theme))
@@ -343,7 +343,7 @@ mod tests {
         let theme = Theme::default();
         let width: u16 = 80;
         let mut s = slider_for("claude-opus-4-7", Some(Effort::Low));
-        let height = s.height(width);
+        let height = s.height(width, u16::MAX);
 
         let active_x = |s: &EffortSlider| -> u16 {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();

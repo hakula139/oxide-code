@@ -7,20 +7,47 @@ pub(super) const FRAPPE: &str = include_str!("../../../themes/frappe.toml");
 pub(super) const LATTE: &str = include_str!("../../../themes/latte.toml");
 pub(super) const MATERIAL: &str = include_str!("../../../themes/material.toml");
 
-/// Name → embedded body. Catppuccin variants listed dark → light, then non-Catppuccin palettes.
-pub(super) const BUILT_IN: &[(&str, &str)] = &[
-    ("mocha", MOCHA),
-    ("macchiato", MACCHIATO),
-    ("frappe", FRAPPE),
-    ("latte", LATTE),
-    ("material", MATERIAL),
+pub(crate) struct BuiltinTheme {
+    pub(crate) name: &'static str,
+    pub(crate) description: &'static str,
+    pub(super) body: &'static str,
+}
+
+/// Catppuccin variants listed dark → light, then non-Catppuccin palettes. `/theme` lists them in
+/// this order.
+pub(crate) const BUILT_IN: &[BuiltinTheme] = &[
+    BuiltinTheme {
+        name: "mocha",
+        description: "Catppuccin dark (default)",
+        body: MOCHA,
+    },
+    BuiltinTheme {
+        name: "macchiato",
+        description: "Catppuccin dark (medium)",
+        body: MACCHIATO,
+    },
+    BuiltinTheme {
+        name: "frappe",
+        description: "Catppuccin dark (soft)",
+        body: FRAPPE,
+    },
+    BuiltinTheme {
+        name: "latte",
+        description: "Catppuccin light",
+        body: LATTE,
+    },
+    BuiltinTheme {
+        name: "material",
+        description: "Material dark",
+        body: MATERIAL,
+    },
 ];
 
 pub(super) fn lookup(name: &str) -> Option<&'static str> {
     BUILT_IN
         .iter()
-        .find(|(n, _)| *n == name)
-        .map(|(_, body)| *body)
+        .find(|theme| theme.name == name)
+        .map(|theme| theme.body)
 }
 
 #[cfg(test)]
@@ -29,7 +56,7 @@ mod tests {
 
     #[test]
     fn lookup_finds_each_builtin_by_name() {
-        for (name, body) in BUILT_IN {
+        for BuiltinTheme { name, body, .. } in BUILT_IN {
             let resolved = lookup(name).unwrap_or_else(|| panic!("lookup({name:?}) returned None"));
             assert_eq!(resolved, *body, "wrong body for {name:?}");
         }

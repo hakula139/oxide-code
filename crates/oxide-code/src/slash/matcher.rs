@@ -132,8 +132,8 @@ mod tests {
         fn description(&self) -> &'static str {
             self.description
         }
-        fn execute(&self, _: &str, _: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
-            Ok(SlashOutcome::Done)
+        fn execute(&self, _: &str, _: &SlashContext<'_>) -> Result<SlashOutcome, String> {
+            Err("fake".to_owned())
         }
     }
 
@@ -299,14 +299,10 @@ mod tests {
     // ── Fake fixture ──
 
     #[test]
-    fn fake_execute_is_a_no_op_ok() {
+    fn fake_execute_errors_without_panicking() {
         // Stub so registries containing Fake don't panic during dispatch.
-        let mut chat = crate::tui::components::chat::ChatView::new(
-            &crate::tui::theme::Theme::default(),
-            false,
-        );
         let info = crate::slash::test_session_info();
-        let mut ctx = SlashContext::new(&mut chat, &info);
-        assert!(HELP.execute("anything", &mut ctx).is_ok());
+        let outcome = HELP.execute("anything", &SlashContext::new(&info, None));
+        assert_eq!(outcome.unwrap_err(), "fake");
     }
 }

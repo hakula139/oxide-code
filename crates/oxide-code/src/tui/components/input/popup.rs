@@ -20,6 +20,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::slash::{PopupState, complete_arg_for, filter_built_ins};
 use crate::tui::theme::Theme;
+use crate::tui::viewport::{wrap_next, wrap_prev};
 use crate::util::text::truncate_to_width;
 
 const MAX_VISIBLE_ROWS: usize = 8;
@@ -138,18 +139,14 @@ impl SlashPopup {
         if self.rows.is_empty() {
             return;
         }
-        self.selected = (self.selected + 1) % self.rows.len();
+        self.selected = wrap_next(self.selected, self.rows.len());
     }
 
     pub(crate) fn select_prev(&mut self) {
         if self.rows.is_empty() {
             return;
         }
-        self.selected = if self.selected == 0 {
-            self.rows.len() - 1
-        } else {
-            self.selected - 1
-        };
+        self.selected = wrap_prev(self.selected, self.rows.len());
     }
 
     /// Row count needed in layout; zero when hidden, capped at [`MAX_VISIBLE_ROWS`] plus chrome.

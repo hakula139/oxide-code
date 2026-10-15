@@ -17,12 +17,47 @@ use super::resume::ResumeCmd;
 use super::status::StatusCmd;
 use super::theme::ThemeCmd;
 use crate::agent::event::UserAction;
+use crate::tui::modal::Modal;
 
-/// `Done` for client-side work via `ctx`; `Forward` for state-mutating commands.
-#[derive(Debug, PartialEq, Eq)]
+/// What a command hands back for the App to apply.
 pub(crate) enum SlashOutcome {
-    Done,
+    /// Forward a state-mutating action to the agent loop.
     Forward(UserAction),
+    /// Open a modal over the input. The modal is the command's whole response.
+    Modal(Box<dyn Modal>),
+    /// Print a system message into chat.
+    SystemMessage(String),
+    /// Print a unified git diff into chat.
+    GitDiff(String),
+}
+
+/// Hand-rolled because `Box<dyn Modal>` can't derive `Debug` without forcing every impl to.
+impl std::fmt::Debug for SlashOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Forward(action) => f.debug_tuple("Forward").field(action).finish(),
+            Self::Modal(_) => f.write_str("Modal(<modal>)"),
+            Self::SystemMessage(text) => f.debug_tuple("SystemMessage").field(text).finish(),
+            Self::GitDiff(diff) => f.debug_tuple("GitDiff").field(diff).finish(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl SlashOutcome {
+    pub(crate) fn into_forward(self) -> UserAction {
+        match self {
+            Self::Forward(action) => action,
+            other => panic!("expected Forward, got {other:?}"),
+        }
+    }
+
+    pub(crate) fn into_modal(self) -> Box<dyn Modal> {
+        match self {
+            Self::Modal(modal) => modal,
+            other => panic!("expected Modal, got {other:?}"),
+        }
+    }
 }
 
 /// Drives busy-gating: only `ReadOnly` may dispatch mid-turn; the App refuses `Mutating` and
@@ -77,7 +112,7 @@ pub(crate) trait SlashCommand: Sync {
     }
 
     /// `Err(msg)` renders as an `ErrorBlock`.
-    fn execute(&self, args: &str, ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String>;
+    fn execute(&self, args: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String>;
 }
 
 /// Alphabetical for stable `/help` and empty-query popup ordering.
@@ -114,14 +149,51 @@ mod tests {
 
     use super::*;
     use crate::slash::context::SlashContext;
-    use crate::tui::components::chat::ChatView;
-    use crate::tui::theme::Theme;
+    use crate::tui::modal::ModalAction;
+    use crate::tui::modal::testing::ScriptedModal;
 
     fn run_execute(cmd: &dyn SlashCommand, args: &str) -> Result<SlashOutcome, String> {
-        let mut chat = ChatView::new(&Theme::default(), false);
         let info = crate::slash::test_session_info();
-        let mut ctx = SlashContext::new(&mut chat, &info);
-        cmd.execute(args, &mut ctx)
+        cmd.execute(args, &SlashContext::new(&info, None))
+    }
+
+    fn done() -> SlashOutcome {
+        SlashOutcome::SystemMessage("done".to_owned())
+    }
+
+    fn is_done(outcome: &Result<SlashOutcome, String>) -> bool {
+        matches!(outcome, Ok(SlashOutcome::SystemMessage(text)) if text == "done")
+    }
+
+    // ── SlashOutcome::fmt ──
+
+    #[test]
+    fn slash_outcome_debug_names_each_variant() {
+        let modal = SlashOutcome::Modal(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
+        assert_eq!(
+            format!("{:?}", SlashOutcome::Forward(UserAction::Clear)),
+            "Forward(Clear)"
+        );
+        assert_eq!(format!("{modal:?}"), "Modal(<modal>)");
+        assert_eq!(format!("{:?}", done()), r#"SystemMessage("done")"#);
+        assert_eq!(
+            format!("{:?}", SlashOutcome::GitDiff("+x".to_owned())),
+            r#"GitDiff("+x")"#
+        );
+    }
+
+    // ── SlashOutcome::into_forward / into_modal ──
+
+    #[test]
+    #[should_panic(expected = r#"expected Forward, got SystemMessage("done")"#)]
+    fn into_forward_names_the_variant_it_got() {
+        done().into_forward();
+    }
+
+    #[test]
+    #[should_panic(expected = r#"expected Modal, got GitDiff("+x")"#)]
+    fn into_modal_names_the_variant_it_got() {
+        SlashOutcome::GitDiff("+x".to_owned()).into_modal();
     }
 
     // ── BUILT_INS contract ──
@@ -176,15 +248,15 @@ mod tests {
             fn description(&self) -> &'static str {
                 "collide"
             }
-            fn execute(&self, _: &str, _: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
-                Ok(SlashOutcome::Done)
+            fn execute(&self, _: &str, _: &SlashContext<'_>) -> Result<SlashOutcome, String> {
+                Ok(done())
             }
         }
         let registry: &[&dyn SlashCommand] = &[&HelpCmd, &ColliderCmd];
         assert_eq!(alias_collisions(registry), vec![("collider", "help")]);
 
         assert_eq!(ColliderCmd.description(), "collide");
-        assert_eq!(run_execute(&ColliderCmd, ""), Ok(SlashOutcome::Done));
+        assert!(is_done(&run_execute(&ColliderCmd, "")));
     }
 
     #[test]
@@ -206,13 +278,13 @@ mod tests {
             fn description(&self) -> &'static str {
                 ""
             }
-            fn execute(&self, _: &str, _: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
-                Ok(SlashOutcome::Done)
+            fn execute(&self, _: &str, _: &SlashContext<'_>) -> Result<SlashOutcome, String> {
+                Ok(done())
             }
         }
         assert_eq!(empty_metadata_offenders(&[&EmptyDescCmd]), vec!["no-desc"]);
 
-        assert_eq!(run_execute(&EmptyDescCmd, ""), Ok(SlashOutcome::Done));
+        assert!(is_done(&run_execute(&EmptyDescCmd, "")));
     }
 
     // ── lookup_in ──
@@ -228,8 +300,8 @@ mod tests {
         fn description(&self) -> &'static str {
             "fake"
         }
-        fn execute(&self, _: &str, _: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
-            Ok(SlashOutcome::Done)
+        fn execute(&self, _: &str, _: &SlashContext<'_>) -> Result<SlashOutcome, String> {
+            Ok(done())
         }
     }
 
@@ -240,7 +312,7 @@ mod tests {
         assert_eq!(AliasedCmd.description(), "fake");
         assert_eq!(AliasedCmd.classify(""), SlashKind::ReadOnly);
         assert_eq!(AliasedCmd.classify("anything"), SlashKind::ReadOnly);
-        assert_eq!(run_execute(&AliasedCmd, ""), Ok(SlashOutcome::Done));
+        assert!(is_done(&run_execute(&AliasedCmd, "")));
     }
 
     #[test]

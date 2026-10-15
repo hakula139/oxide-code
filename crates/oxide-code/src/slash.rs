@@ -30,8 +30,8 @@ mod theme;
 
 pub(crate) use context::{LiveSessionInfo, SlashContext};
 pub(crate) use matcher::MatchedCommand;
-pub(crate) use parser::{Parsed, PopupState, parse_slash, popup_state};
-pub(crate) use registry::{ArgCompletion, SlashKind};
+pub(crate) use parser::{Parsed, PopupState, parse_slash, popup_state, unescape_literal};
+pub(crate) use registry::{ArgCompletion, SlashKind, SlashOutcome};
 
 /// Filter the built-in registry against a popup query (leading `/` stripped).
 pub(crate) fn filter_built_ins(query: &str) -> Vec<MatchedCommand> {
@@ -58,38 +58,27 @@ pub(crate) fn echoes_input(parsed: &Parsed) -> bool {
         .is_none_or(|cmd| cmd.echoes_input(&parsed.args))
 }
 
-/// Resolves and runs `parsed` against the built-in registry.
-pub(crate) fn dispatch(
-    parsed: &Parsed,
-    ctx: &mut SlashContext<'_>,
-) -> Option<crate::agent::event::UserAction> {
+/// Resolves and runs `parsed` against the built-in registry. `Err` carries the chat-ready
+/// message for an unknown or failed command.
+pub(crate) fn dispatch(parsed: &Parsed, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
     dispatch_with(registry::BUILT_INS, parsed, ctx)
 }
 
-/// `Some(action)` for state-mutating commands; `None` when the command handled its own output.
-/// Extracted so tests can drive a synthetic registry.
 fn dispatch_with(
     commands: &[&dyn registry::SlashCommand],
     parsed: &Parsed,
-    ctx: &mut SlashContext<'_>,
-) -> Option<crate::agent::event::UserAction> {
+    ctx: &SlashContext<'_>,
+) -> Result<SlashOutcome, String> {
     let Some(cmd) = registry::lookup_in(commands, &parsed.name) else {
-        ctx.chat.push_error(&format!(
+        return Err(format!(
             "unknown command: /{name}. Available: {available}. \
              Use //{name} to send the literal text.",
             name = parsed.name,
             available = format_available(commands),
         ));
-        return None;
     };
-    match cmd.execute(&parsed.args, ctx) {
-        Ok(registry::SlashOutcome::Done) => None,
-        Ok(registry::SlashOutcome::Forward(action)) => Some(action),
-        Err(msg) => {
-            ctx.chat.push_error(&format!("/{}: {msg}", parsed.name));
-            None
-        }
-    }
+    cmd.execute(&parsed.args, ctx)
+        .map_err(|msg| format!("/{}: {msg}", parsed.name))
 }
 
 fn format_available(commands: &[&dyn registry::SlashCommand]) -> String {
@@ -177,47 +166,26 @@ pub(crate) fn with_isolated_xdg<R>(f: impl FnOnce(&std::path::Path) -> R) -> R {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::slash::registry::{SlashCommand, SlashOutcome};
-    use crate::tui::components::chat::ChatView;
-    use crate::tui::theme::Theme;
+    use crate::slash::registry::SlashCommand;
 
-    fn fresh_chat() -> ChatView {
-        ChatView::new(&Theme::default(), false)
+    fn run_dispatch(name: &str) -> Result<SlashOutcome, String> {
+        let parsed = Parsed {
+            name: name.to_owned(),
+            args: String::new(),
+        };
+        dispatch(&parsed, &SlashContext::new(&test_session_info(), None))
     }
 
     // ── dispatch ──
 
     #[test]
-    fn dispatch_known_command_runs_and_does_not_push_error() {
-        let mut chat = fresh_chat();
-        let info = test_session_info();
-        let parsed = Parsed {
-            name: "help".to_owned(),
-            args: String::new(),
-        };
-        let mut ctx = SlashContext::new(&mut chat, &info);
-        let outcome = dispatch(&parsed, &mut ctx);
-        assert!(outcome.is_none(), "/help is Done, not Forward");
-        assert!(ctx.take_modal().is_some(), "/help opens a modal");
-        assert!(!chat.last_is_error());
-        assert_eq!(
-            chat.entry_count(),
-            0,
-            "modal-only commands push no chat blocks"
-        );
-        assert_eq!(chat.last_error_text(), None);
+    fn dispatch_known_command_returns_its_outcome() {
+        run_dispatch("help").unwrap().into_modal();
     }
 
     #[test]
     fn dispatch_prompt_submit_command_produces_synthesized_body() {
-        let mut chat = fresh_chat();
-        let info = test_session_info();
-        let parsed = Parsed {
-            name: "init".to_owned(),
-            args: String::new(),
-        };
-        let action = dispatch(&parsed, &mut SlashContext::new(&mut chat, &info))
-            .expect("/init must return Some(action)");
+        let action = run_dispatch("init").unwrap().into_forward();
         assert!(
             matches!(
                 &action,
@@ -226,34 +194,12 @@ mod tests {
             ),
             "expected SubmitPrompt with AGENTS.md body, got {action:?}",
         );
-        assert_eq!(chat.entry_count(), 0, "the typed line is pushed by the App");
-    }
-
-    #[test]
-    fn dispatch_unknown_command_pushes_error_block() {
-        let mut chat = fresh_chat();
-        let info = test_session_info();
-        let parsed = Parsed {
-            name: "no-such-command".to_owned(),
-            args: String::new(),
-        };
-        dispatch(&parsed, &mut SlashContext::new(&mut chat, &info));
-        assert!(
-            chat.last_is_error(),
-            "unknown command should land as an ErrorBlock",
-        );
     }
 
     #[test]
     fn dispatch_unknown_command_message_lists_available_and_escape_hint() {
-        let mut chat = fresh_chat();
-        let info = test_session_info();
-        let parsed = Parsed {
-            name: "etc".to_owned(),
-            args: String::new(),
-        };
-        dispatch(&parsed, &mut SlashContext::new(&mut chat, &info));
-        let msg = chat.last_error_text().expect("error block present");
+        let msg = run_dispatch("etc").expect_err("unknown command must error");
+        assert!(msg.starts_with("unknown command: /etc."), "{msg}");
         assert!(msg.contains("/help"), "should list /help: {msg}");
         for cmd in registry::BUILT_INS {
             let needle = format!("/{}", cmd.name());
@@ -279,7 +225,7 @@ mod tests {
         fn description(&self) -> &'static str {
             "test"
         }
-        fn execute(&self, _: &str, _: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
+        fn execute(&self, _: &str, _: &SlashContext<'_>) -> Result<SlashOutcome, String> {
             Err("explicit failure".to_owned())
         }
     }
@@ -291,31 +237,24 @@ mod tests {
         assert_eq!(Failing.description(), "test");
     }
 
-    #[test]
-    fn dispatch_with_command_failure_renders_error_block_prefixed_with_name() {
-        let mut chat = fresh_chat();
-        let info = test_session_info();
+    fn run_failing(name: &str) -> String {
         let parsed = Parsed {
-            name: "failing".to_owned(),
+            name: name.to_owned(),
             args: String::new(),
         };
-        let registry: &[&dyn registry::SlashCommand] = &[&Failing];
-        dispatch_with(registry, &parsed, &mut SlashContext::new(&mut chat, &info));
-        assert_eq!(chat.last_error_text(), Some("/failing: explicit failure"),);
+        let info = test_session_info();
+        dispatch_with(&[&Failing], &parsed, &SlashContext::new(&info, None)).unwrap_err()
+    }
+
+    #[test]
+    fn dispatch_with_command_failure_prefixes_the_command_name() {
+        assert_eq!(run_failing("failing"), "/failing: explicit failure");
     }
 
     #[test]
     fn dispatch_with_alias_routes_to_canonical_impl() {
-        // Error must echo the typed alias, not the canonical name.
-        let mut chat = fresh_chat();
-        let info = test_session_info();
-        let parsed = Parsed {
-            name: "boom".to_owned(),
-            args: String::new(),
-        };
-        let registry: &[&dyn registry::SlashCommand] = &[&Failing];
-        dispatch_with(registry, &parsed, &mut SlashContext::new(&mut chat, &info));
-        assert_eq!(chat.last_error_text(), Some("/boom: explicit failure"));
+        // Error must echo the alias the user typed.
+        assert_eq!(run_failing("boom"), "/boom: explicit failure");
     }
 
     // ── echoes_input ──

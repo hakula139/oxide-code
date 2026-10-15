@@ -21,9 +21,8 @@ impl SlashCommand for StatusCmd {
         false
     }
 
-    fn execute(&self, _args: &str, ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
-        ctx.open_modal(Box::new(build_modal(ctx.info)));
-        Ok(SlashOutcome::Done)
+    fn execute(&self, _args: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
+        Ok(SlashOutcome::Modal(Box::new(build_modal(ctx.info))))
     }
 }
 
@@ -60,7 +59,6 @@ fn build_modal(info: &LiveSessionInfo) -> KvOverview {
 mod tests {
     use super::*;
     use crate::slash::test_session_info;
-    use crate::tui::components::chat::ChatView;
     use crate::tui::modal::Modal;
     use crate::tui::theme::Theme;
 
@@ -69,7 +67,7 @@ mod tests {
         use ratatui::backend::TestBackend;
         use ratatui::layout::Rect;
 
-        let height = modal.height(width);
+        let height = modal.height(width, u16::MAX);
         let theme = Theme::default();
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
@@ -98,17 +96,10 @@ mod tests {
     // ── StatusCmd::execute ──
 
     #[test]
-    fn execute_opens_a_modal_via_ctx_and_pushes_no_chat_block() {
-        let mut chat = ChatView::new(&Theme::default(), false);
+    fn execute_opens_the_overview_modal() {
         let info = test_session_info();
-        let mut ctx = SlashContext::new(&mut chat, &info);
-        let outcome = StatusCmd.execute("", &mut ctx);
-        assert_eq!(outcome, Ok(SlashOutcome::Done));
-        assert!(
-            ctx.take_modal().is_some(),
-            "/status must populate the modal slot",
-        );
-        assert_eq!(chat.entry_count(), 0, "chat must stay clean on open");
+        let outcome = StatusCmd.execute("", &SlashContext::new(&info, None));
+        outcome.unwrap().into_modal();
     }
 
     // ── build_modal ──
@@ -118,7 +109,7 @@ mod tests {
         let info = test_session_info();
         let m = build_modal(&info);
         // Title + blank + 10 rows + blank + footer = 14.
-        assert_eq!(m.height(80), 14);
+        assert_eq!(m.height(80, u16::MAX), 14);
     }
 
     #[test]

@@ -9,7 +9,6 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
 use time::UtcOffset;
 
 use super::confirm::ConfirmDeleteSessionModal;
@@ -20,6 +19,7 @@ use crate::session::display::{display_title, format_metadata_line};
 use crate::session::entry::SessionInfo;
 use crate::session::resolver::resolve_prefix_to_info;
 use crate::session::store::{DEFAULT_SESSION_LIST_LIMIT, SessionStore};
+use crate::tui::modal::chrome::{FOOTER_HEIGHT, render_footer};
 use crate::tui::modal::searchable_list::{SearchableItem, SearchableList};
 use crate::tui::modal::{Modal, ModalAction, ModalKey};
 use crate::tui::theme::Theme;
@@ -129,6 +129,9 @@ pub(super) struct ResumePicker {
     local_offset: UtcOffset,
     /// Filtered out of every reload so the user can't self-resume onto the open append-writer.
     live_session_id: String,
+    /// Rows loaded into the list, at most [`DEFAULT_SESSION_LIST_LIMIT`].
+    loaded: usize,
+    /// Resumable sessions in scope, including those past the load cap.
     total: usize,
     /// Last reload's failure, surfaced inline so failures don't disguise themselves as "no
     /// sessions found". Cleared on the next successful reload.
@@ -145,6 +148,7 @@ impl ResumePicker {
             all: false,
             local_offset,
             live_session_id,
+            loaded: 0,
             total: 0,
             load_error: None,
         };
@@ -170,13 +174,16 @@ impl ResumePicker {
         let local_offset = self.local_offset;
         let live_id = self.live_session_id.as_str();
         let show_project = self.all;
-        let rows: Vec<SessionRow> = page
-            .into_sessions()
+        let total = page.total();
+        let sessions = page.into_sessions();
+        let fetched = sessions.len();
+        let rows: Vec<SessionRow> = sessions
             .into_iter()
             .filter(|info| info.session_id != live_id)
             .map(|info| SessionRow::from_info(info, local_offset, show_project))
             .collect();
-        self.total = rows.len();
+        self.loaded = rows.len();
+        self.total = total - (fetched - rows.len());
         self.list.replace_items(rows);
     }
 
@@ -192,8 +199,8 @@ impl ResumePicker {
     }
 
     /// Builds and pushes the [`ConfirmDeleteSessionModal`] for the cursor row. No-op (key
-    /// consumed silently) when the list is empty, so an accidental Ctrl+D / Delete with no
-    /// row selected doesn't surface anything misleading.
+    /// consumed silently) when the list is empty, so an accidental Ctrl+D with no row selected
+    /// doesn't surface anything misleading.
     fn start_delete_confirm(&self) -> ModalKey {
         let Some(row) = self.list.selected() else {
             return ModalKey::Consumed;
@@ -213,18 +220,13 @@ impl ResumePicker {
         } else {
             "current project"
         };
-        let count = if self.list.is_filtered() {
-            format!(
-                "{matched} / {total} matching",
-                matched = self.list.visible_len(),
-                total = self.total,
-            )
-        } else {
-            format!(
-                "{total} session{plural}",
-                total = self.total,
-                plural = if self.total == 1 { "" } else { "s" },
-            )
+        let (loaded, total) = (self.loaded, self.total);
+        let matched = self.list.visible_len();
+        let count = match (self.list.is_filtered(), total > loaded) {
+            (true, true) => format!("{matched} matching in the {loaded} most recent of {total}"),
+            (true, false) => format!("{matched} / {loaded} matching"),
+            (false, true) => format!("{loaded} most recent of {total} sessions"),
+            (false, false) => format!("{loaded} session{}", if loaded == 1 { "" } else { "s" }),
         };
         format!(
             "{count} · scope: {scope} · Tab to toggle · Enter to resume · Ctrl+D to delete · \
@@ -234,35 +236,25 @@ impl ResumePicker {
 }
 
 impl Modal for ResumePicker {
-    fn height(&self, width: u16) -> u16 {
-        self.list.height(width).saturating_add(2)
+    fn height(&self, width: u16, max_height: u16) -> u16 {
+        let list_max = max_height.saturating_sub(FOOTER_HEIGHT);
+        self.list.height(width, list_max) + FOOTER_HEIGHT
     }
 
     fn render(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
-        let list_h = self.list.height(area.width);
         let list_area = Rect {
-            height: list_h.min(area.height),
+            height: area.height.saturating_sub(FOOTER_HEIGHT),
             ..area
         };
         self.list.render(frame, list_area, theme);
 
-        let remaining = area.height.saturating_sub(list_h);
-        if remaining < 2 {
-            return;
-        }
-        let footer_area = Rect {
-            x: area.x,
-            y: area.y.saturating_add(list_h).saturating_add(1),
-            width: area.width,
-            height: 1,
-        };
         // Load error owns the footer when set, so failure doesn't look like "0 sessions".
         let footer = if let Some(err) = &self.load_error {
             Line::from(Span::styled(format!("! {err}"), theme.error()))
         } else {
             Line::from(Span::styled(self.footer_text(), theme.dim()))
         };
-        frame.render_widget(Paragraph::new(footer).style(theme.surface()), footer_area);
+        render_footer(frame, area, footer, theme);
     }
 
     fn handle_key(&mut self, event: &KeyEvent) -> ModalKey {
@@ -289,28 +281,22 @@ impl Modal for ResumePicker {
                 self.reload();
                 ModalKey::Consumed
             }
-            KeyCode::Backspace => {
-                self.list.pop_char();
-                ModalKey::Consumed
-            }
-            // Both gestures open the same confirm. The footer hint advertises Ctrl+D, but the
-            // dedicated Delete key (when the keyboard has one) is convenient muscle memory.
-            KeyCode::Delete => self.start_delete_confirm(),
             KeyCode::Char('d') if event.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.start_delete_confirm()
             }
-            KeyCode::Char(c) if event.modifiers.contains(KeyModifiers::CONTROL) => {
-                if c == 'u' {
-                    self.list.set_query(String::new());
-                }
+            KeyCode::Char('u') if event.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.list.set_query("");
                 ModalKey::Consumed
             }
-            KeyCode::Char(c) => {
-                self.list.push_char(c);
+            _ => {
+                self.list.edit_query(event);
                 ModalKey::Consumed
             }
-            _ => ModalKey::Consumed,
         }
+    }
+
+    fn handle_paste(&mut self, text: &str) {
+        self.list.paste_query(text);
     }
 
     fn on_focus_regained(&mut self) {
@@ -355,16 +341,15 @@ impl SlashCommand for ResumeCmd {
         Some("[<id-prefix>]")
     }
 
-    fn execute(&self, args: &str, ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
+    fn execute(&self, args: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
         let arg = args.trim();
         let store =
             SessionStore::open().map_err(|e| format!("session store unavailable: {e:#}"))?;
         if arg.is_empty() {
-            ctx.open_modal(Box::new(ResumePicker::new(
+            return Ok(SlashOutcome::Modal(Box::new(ResumePicker::new(
                 store,
                 ctx.info.session_id.clone(),
-            )));
-            return Ok(SlashOutcome::Done);
+            ))));
         }
         let session_id = resolve_prefix(&store, arg, ctx.info.session_id.as_str())?;
         Ok(SlashOutcome::Forward(UserAction::Resume { session_id }))
@@ -391,7 +376,6 @@ mod tests {
     use crate::session::entry::TitleInfo;
     use crate::session::store::{seed_test_session, test_store};
     use crate::slash::{stamped_id, test_session_info, with_isolated_xdg};
-    use crate::tui::components::chat::ChatView;
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::from(code)
@@ -716,8 +700,13 @@ mod tests {
 
         let picker = ResumePicker::new(store, "live-session-id".to_owned());
 
-        assert_eq!(picker.total, DEFAULT_SESSION_LIST_LIMIT);
         assert_eq!(picker.list.visible_len(), DEFAULT_SESSION_LIST_LIMIT);
+        assert_eq!(picker.total, DEFAULT_SESSION_LIST_LIMIT + 1);
+        let footer = picker.footer_text();
+        assert!(
+            footer.starts_with("30 most recent of 31 sessions · scope:"),
+            "{footer}"
+        );
     }
 
     #[test]
@@ -843,6 +832,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn footer_text_names_the_load_cap_when_sessions_exceed_it() {
+        let (_dir, store) = isolated_store();
+        for i in 0..=DEFAULT_SESSION_LIST_LIMIT {
+            let title = if i == 0 { "oldest" } else { "session" };
+            seed_session(
+                &store,
+                &stamped_id(u8::try_from(i + 1).unwrap()),
+                Some(title),
+                1,
+                datetime!(2026-04-18 09:00:00 UTC)
+                    + time::Duration::seconds(i64::try_from(i).unwrap()),
+            );
+        }
+        let live_id = stamped_id(u8::try_from(DEFAULT_SESSION_LIST_LIMIT + 1).unwrap());
+        let mut picker = ResumePicker::new(store, live_id);
+        let footer = picker.footer_text();
+        assert!(
+            footer.starts_with("29 most recent of 30 sessions · scope:"),
+            "the live session counts toward neither side: {footer}",
+        );
+
+        for c in "oldest".chars() {
+            picker.handle_key(&key(KeyCode::Char(c)));
+        }
+        let footer = picker.footer_text();
+        assert!(
+            footer.starts_with("0 matching in the 29 most recent of 30 · scope:"),
+            "the filter only searches loaded rows: {footer}",
+        );
+    }
+
     // ── Modal::render ──
 
     #[test]
@@ -858,7 +879,7 @@ mod tests {
         let picker = ResumePicker::new(store, "live-session-id".to_owned());
         let theme = Theme::default();
         for width in [60_u16, 100, 140] {
-            let h = picker.height(width).min(40);
+            let h = picker.height(width, 40);
             let mut terminal = Terminal::new(TestBackend::new(width, h)).unwrap();
             terminal
                 .draw(|frame| picker.render(frame, Rect::new(0, 0, width, h), &theme))
@@ -867,9 +888,7 @@ mod tests {
     }
 
     #[test]
-    fn render_skips_footer_when_area_too_short_for_two_rows_below_list() {
-        // Defensive guard: if the parent allocates less than `list_h + 2` rows the picker drops
-        // the footer rather than spilling into the list area or panicking.
+    fn render_survives_an_area_too_short_for_the_footer() {
         let (_dir, store) = isolated_store();
         let picker = ResumePicker::new(store, "live-session-id".to_owned());
         let theme = Theme::default();
@@ -886,7 +905,7 @@ mod tests {
         picker.load_error = Some("permission denied".to_owned());
 
         let theme = Theme::default();
-        let h = picker.height(60);
+        let h = picker.height(60, 40);
         let mut terminal = Terminal::new(TestBackend::new(60, h)).unwrap();
         terminal
             .draw(|frame| picker.render(frame, Rect::new(0, 0, 60, h), &theme))
@@ -905,7 +924,7 @@ mod tests {
     // ── Modal::handle_key ──
 
     #[test]
-    fn typing_filters_rows_via_searchable_list() {
+    fn typing_or_pasting_filters_rows_via_searchable_list() {
         let (_dir, store) = isolated_store();
         seed_session(
             &store,
@@ -926,6 +945,15 @@ mod tests {
             picker.handle_key(&key(KeyCode::Char(c)));
         }
         assert_eq!(picker.list.visible_len(), 1, "only `Auth fix` should match");
+
+        picker.list.set_query("");
+        picker.handle_paste("refactor\n");
+        assert_eq!(picker.list.query(), "refactor");
+        assert_eq!(
+            picker.list.visible_len(),
+            1,
+            "only `Refactor pass` should match"
+        );
     }
 
     #[test]
@@ -981,6 +1009,10 @@ mod tests {
             );
         }
         let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
+        let mut terminal = Terminal::new(TestBackend::new(60, 30)).unwrap();
+        terminal
+            .draw(|frame| picker.render(frame, Rect::new(0, 0, 60, 30), &Theme::default()))
+            .unwrap();
         assert_eq!(picker.list.cursor_index(), 0);
         picker.handle_key(&key(KeyCode::Down));
         assert_eq!(picker.list.cursor_index(), 1);
@@ -1088,7 +1120,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_d_or_delete_pushes_confirm_modal_for_cursor_row() {
+    fn ctrl_d_pushes_confirm_modal_for_cursor_row_while_delete_edits_the_query() {
         let (_dir, store) = isolated_store();
         seed_session(
             &store,
@@ -1098,6 +1130,18 @@ mod tests {
             datetime!(2026-04-18 09:00:00 UTC),
         );
         let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
+        for c in "auths".chars() {
+            picker.handle_key(&key(KeyCode::Char(c)));
+        }
+        picker.handle_key(&key(KeyCode::Left));
+
+        let outcome = picker.handle_key(&key(KeyCode::Delete));
+        assert!(matches!(outcome, ModalKey::Consumed), "{outcome:?}");
+        assert_eq!(
+            picker.list.query(),
+            "auth",
+            "Delete removes the char after the cursor"
+        );
 
         let mut ctrl_d = KeyEvent::from(KeyCode::Char('d'));
         ctrl_d.modifiers = KeyModifiers::CONTROL;
@@ -1105,12 +1149,6 @@ mod tests {
         assert!(
             matches!(outcome, ModalKey::Push(_)),
             "Ctrl+D must push the confirm modal; got {outcome:?}",
-        );
-
-        let outcome = picker.handle_key(&key(KeyCode::Delete));
-        assert!(
-            matches!(outcome, ModalKey::Push(_)),
-            "Delete key must push the confirm modal; got {outcome:?}",
         );
     }
 
@@ -1279,28 +1317,21 @@ mod tests {
     }
 
     #[test]
-    fn execute_bare_opens_picker_with_no_chat_writes() {
+    fn execute_bare_opens_the_picker() {
         with_isolated_xdg(|_| {
-            let mut chat = ChatView::new(&Theme::default(), false);
             let info = test_session_info();
-            let (outcome, modal) = {
-                let mut ctx = SlashContext::new(&mut chat, &info);
-                let outcome = ResumeCmd.execute("", &mut ctx).unwrap();
-                (outcome, ctx.take_modal())
-            };
-            assert_eq!(outcome, SlashOutcome::Done);
-            assert!(modal.is_some(), "bare /resume must open a modal");
-            assert_eq!(chat.entry_count(), 0);
+            let outcome = ResumeCmd.execute("", &SlashContext::new(&info, None));
+            outcome.unwrap().into_modal();
         });
     }
 
     #[test]
     fn execute_with_unknown_prefix_returns_friendly_error() {
         with_isolated_xdg(|_| {
-            let mut chat = ChatView::new(&Theme::default(), false);
             let info = test_session_info();
-            let mut ctx = SlashContext::new(&mut chat, &info);
-            let err = ResumeCmd.execute("zzz1234", &mut ctx).unwrap_err();
+            let err = ResumeCmd
+                .execute("zzz1234", &SlashContext::new(&info, None))
+                .unwrap_err();
             assert!(err.contains("no session matching"), "{err}");
         });
     }
@@ -1317,11 +1348,11 @@ mod tests {
                 1,
                 datetime!(2026-04-18 09:00:00 UTC),
             );
-            let mut chat = ChatView::new(&Theme::default(), false);
             let info = test_session_info();
-            let mut ctx = SlashContext::new(&mut chat, &info);
             // 4-char prefix is enough to pin a single session in the seeded store.
-            let outcome = ResumeCmd.execute(&target_id[..4], &mut ctx).unwrap();
+            let outcome = ResumeCmd
+                .execute(&target_id[..4], &SlashContext::new(&info, None))
+                .unwrap();
             let SlashOutcome::Forward(UserAction::Resume { session_id }) = outcome else {
                 panic!("expected Forward(Resume), got {outcome:?}");
             };

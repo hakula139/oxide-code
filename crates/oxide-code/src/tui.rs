@@ -15,4 +15,5 @@ pub(crate) mod modal;
 pub(crate) mod pending_calls;
 pub(crate) mod terminal;
 pub(crate) mod theme;
+pub(crate) mod viewport;
 pub(crate) mod wrap;

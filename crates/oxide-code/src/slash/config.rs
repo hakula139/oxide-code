@@ -27,15 +27,14 @@ impl SlashCommand for ConfigCmd {
         false
     }
 
-    fn execute(&self, _args: &str, ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
+    fn execute(&self, _args: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
         let user = file::user_config_path();
         let project = file::find_project_config();
-        ctx.open_modal(Box::new(build_modal(
+        Ok(SlashOutcome::Modal(Box::new(build_modal(
             ctx.info,
             user.as_deref(),
             project.as_deref(),
-        )));
-        Ok(SlashOutcome::Done)
+        ))))
     }
 }
 
@@ -111,7 +110,6 @@ mod tests {
 
     use super::*;
     use crate::slash::test_session_info;
-    use crate::tui::components::chat::ChatView;
     use crate::tui::modal::Modal;
     use crate::tui::theme::Theme;
 
@@ -120,7 +118,7 @@ mod tests {
         use ratatui::backend::TestBackend;
         use ratatui::layout::Rect;
 
-        let height = modal.height(width);
+        let height = modal.height(width, u16::MAX);
         let theme = Theme::default();
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
@@ -149,16 +147,10 @@ mod tests {
     // ── ConfigCmd::execute ──
 
     #[test]
-    fn execute_opens_a_modal_via_ctx_and_pushes_no_chat_block() {
-        let mut chat = ChatView::new(&Theme::default(), false);
+    fn execute_opens_the_overview_modal() {
         let info = test_session_info();
-        let mut ctx = SlashContext::new(&mut chat, &info);
-        ConfigCmd.execute("", &mut ctx).unwrap();
-        assert!(
-            ctx.take_modal().is_some(),
-            "/config must populate the modal slot",
-        );
-        assert_eq!(chat.entry_count(), 0, "chat must stay clean on open");
+        let outcome = ConfigCmd.execute("", &SlashContext::new(&info, None));
+        outcome.unwrap().into_modal();
     }
 
     // ── build_modal ──
@@ -169,7 +161,7 @@ mod tests {
         //   + blank + footer = 2 + 14 + 1 + 4 + 2 = 23.
         let info = test_session_info();
         let m = build_modal(&info, None, None);
-        assert_eq!(m.height(80), 23);
+        assert_eq!(m.height(80, u16::MAX), 23);
     }
 
     #[test]

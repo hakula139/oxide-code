@@ -23,7 +23,7 @@ impl SlashCommand for ClearCmd {
         SlashKind::Mutating
     }
 
-    fn execute(&self, _args: &str, _ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
+    fn execute(&self, _args: &str, _ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
         Ok(SlashOutcome::Forward(UserAction::Clear))
     }
 }
@@ -32,8 +32,6 @@ impl SlashCommand for ClearCmd {
 mod tests {
     use super::*;
     use crate::slash::test_session_info;
-    use crate::tui::components::chat::ChatView;
-    use crate::tui::theme::Theme;
 
     // ── ClearCmd metadata ──
 
@@ -52,16 +50,11 @@ mod tests {
     // ── ClearCmd::execute ──
 
     #[test]
-    fn execute_produces_clear_action_without_local_side_effects() {
-        let mut chat = ChatView::new(&Theme::default(), false);
-        chat.push_user_message("prompt".to_owned());
+    fn execute_forwards_the_clear_action() {
         let info = test_session_info();
-
         let outcome = ClearCmd
-            .execute("", &mut SlashContext::new(&mut chat, &info))
+            .execute("", &SlashContext::new(&info, None))
             .expect("/clear must succeed");
-
-        assert_eq!(outcome, SlashOutcome::Forward(UserAction::Clear));
-        assert_eq!(chat.entry_count(), 1, "execute must not touch the chat");
+        assert_eq!(outcome.into_forward(), UserAction::Clear);
     }
 }

@@ -55,11 +55,12 @@ impl SlashCommand for ModelCmd {
             .collect()
     }
 
-    fn execute(&self, args: &str, ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
+    fn execute(&self, args: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
         let arg = args.trim();
         if arg.is_empty() {
-            ctx.open_modal(Box::new(super::picker::ModelEffortPicker::new(ctx.info)));
-            return Ok(SlashOutcome::Done);
+            return Ok(SlashOutcome::Modal(Box::new(
+                super::picker::ModelEffortPicker::new(ctx.info),
+            )));
         }
         let id = resolve_model_arg(arg)?;
         Ok(SlashOutcome::Forward(UserAction::SwapConfig {
@@ -183,18 +184,16 @@ fn format_supported_models(ids: &[&'static str]) -> String {
 mod tests {
     use super::*;
     use crate::slash::test_session_info;
-    use crate::tui::components::chat::ChatView;
-    use crate::tui::theme::Theme;
 
     fn resolved(id: &str) -> ResolvedModelId {
         ResolvedModelId::new(id.to_owned())
     }
 
-    fn swap_model(id: &str) -> SlashOutcome {
-        SlashOutcome::Forward(UserAction::SwapConfig {
+    fn swap_model(id: &str) -> UserAction {
+        UserAction::SwapConfig {
             model: Some(resolved(id)),
             effort: None,
-        })
+        }
     }
 
     // ── ModelCmd metadata ──
@@ -272,25 +271,17 @@ mod tests {
 
     // ── ModelCmd::execute ──
 
-    fn run_execute(args: &str) -> (ChatView, Result<SlashOutcome, String>) {
-        let mut chat = ChatView::new(&Theme::default(), false);
-        let info = test_session_info();
-        let outcome = ModelCmd.execute(args, &mut SlashContext::new(&mut chat, &info));
-        (chat, outcome)
+    fn run_execute(args: &str) -> Result<SlashOutcome, String> {
+        ModelCmd.execute(args, &SlashContext::new(&test_session_info(), None))
+    }
+
+    fn run_forward(args: &str) -> UserAction {
+        run_execute(args).unwrap().into_forward()
     }
 
     #[test]
-    fn execute_no_args_opens_picker_via_ctx_and_pushes_no_chat_block() {
-        let mut chat = ChatView::new(&Theme::default(), false);
-        let info = test_session_info();
-        let mut ctx = SlashContext::new(&mut chat, &info);
-        let outcome = ModelCmd.execute("", &mut ctx);
-        assert_eq!(outcome, Ok(SlashOutcome::Done));
-        assert!(
-            ctx.take_modal().is_some(),
-            "bare /model must populate the modal slot",
-        );
-        assert_eq!(chat.entry_count(), 0, "chat must stay clean on open");
+    fn execute_no_args_opens_the_picker() {
+        run_execute("").unwrap().into_modal();
     }
 
     #[test]
@@ -302,10 +293,9 @@ mod tests {
             ("sonnet[1m]", "claude-sonnet-4-6[1m]"),
             ("haiku", "claude-haiku-4-5"),
         ] {
-            let (_, outcome) = run_execute(alias);
             assert_eq!(
-                outcome,
-                Ok(swap_model(expected)),
+                run_forward(alias),
+                swap_model(expected),
                 "alias `{alias}` should route to `{expected}`",
             );
         }
@@ -321,10 +311,9 @@ mod tests {
             "claude-sonnet-4-6[1m]",
             "claude-haiku-4-5",
         ] {
-            let (_, outcome) = run_execute(id);
             assert_eq!(
-                outcome,
-                Ok(swap_model(id)),
+                run_forward(id),
+                swap_model(id),
                 "canonical `{id}` must round-trip",
             );
         }
@@ -338,10 +327,9 @@ mod tests {
             ("sonnet-4-6", "claude-sonnet-4-6"),
             ("opus-4-6[1m]", "claude-opus-4-6[1m]"),
         ] {
-            let (_, outcome) = run_execute(arg);
             assert_eq!(
-                outcome,
-                Ok(swap_model(expected)),
+                run_forward(arg),
+                swap_model(expected),
                 "`{arg}` should resolve to `{expected}`",
             );
         }
@@ -349,28 +337,27 @@ mod tests {
 
     #[test]
     fn execute_unique_substring_resolves_after_suffix_tier_misses() {
-        let (_, outcome) = run_execute("haiku-4-");
-        assert_eq!(outcome, Ok(swap_model("claude-haiku-4-5")));
+        assert_eq!(run_forward("haiku-4-"), swap_model("claude-haiku-4-5"));
     }
 
     #[test]
     fn execute_haiku_4_resolves_to_only_extant_descendant() {
         // `claude-haiku-4` substring-matches only `claude-haiku-4-5` (Haiku 4 was never released).
-        let (_, outcome) = run_execute("claude-haiku-4");
-        assert_eq!(outcome, Ok(swap_model("claude-haiku-4-5")));
+        assert_eq!(
+            run_forward("claude-haiku-4"),
+            swap_model("claude-haiku-4-5")
+        );
     }
 
     #[test]
     fn execute_trims_whitespace_around_arg() {
-        let (_, outcome) = run_execute("  haiku-4-5  ");
-        assert_eq!(outcome, Ok(swap_model("claude-haiku-4-5")));
+        assert_eq!(run_forward("  haiku-4-5  "), swap_model("claude-haiku-4-5"));
     }
 
     #[test]
     fn execute_1m_on_incompatible_model_is_rejected_with_display_name() {
         for arg in ["haiku[1m]", "claude-haiku-4-5[1m]"] {
-            let (_, outcome) = run_execute(arg);
-            let msg = outcome.expect_err("must error");
+            let msg = run_execute(arg).expect_err("must error");
             assert_eq!(
                 msg, "Claude Haiku 4.5: 1M context not supported. Drop the `[1m]` tag.",
                 "arg `{arg}`",
@@ -380,8 +367,7 @@ mod tests {
 
     #[test]
     fn execute_unknown_arg_errors_with_curated_listing() {
-        let (chat, outcome) = run_execute("gpt-4");
-        let msg = outcome.expect_err("unknown arg must error");
+        let msg = run_execute("gpt-4").expect_err("unknown arg must error");
         assert!(msg.starts_with("Unknown model: `gpt-4`."), "{msg}");
         assert!(msg.contains("Supported models:"), "{msg}");
         for id in LISTED_MODELS {
@@ -394,22 +380,19 @@ mod tests {
             msg.contains("Claude Opus 4.8 (1M context)"),
             "1M variant renders the (1M context) suffix: {msg}",
         );
-        assert_eq!(chat.entry_count(), 0);
     }
 
     #[test]
     fn execute_family_prefix_falls_through_to_ambiguity() {
         for arg in ["opus-4", "claude-opus-4", "claude-sonnet-4"] {
-            let (_, outcome) = run_execute(arg);
-            let msg = outcome.expect_err(&format!("`{arg}` must error"));
+            let msg = run_execute(arg).expect_err(&format!("`{arg}` must error"));
             assert!(msg.contains("is ambiguous"), "ambiguity for `{arg}`: {msg}");
         }
     }
 
     #[test]
     fn execute_ambiguous_substring_filters_curated_listing_by_arg() {
-        let (_, outcome) = run_execute("4-6");
-        let msg = outcome.expect_err("ambiguous arg must error");
+        let msg = run_execute("4-6").expect_err("ambiguous arg must error");
         assert!(msg.starts_with("`4-6` is ambiguous."), "{msg}");
         // `LISTED_MODELS` filtered by `4-6` — only Sonnet entries are curated, so non-listed
         // `claude-opus-4-6` doesn't surface here even though the resolver counted it as a match.
@@ -425,8 +408,7 @@ mod tests {
 
     #[test]
     fn execute_ambiguous_listing_falls_back_to_full_curated_set_when_filter_empty() {
-        let (_, outcome) = run_execute("claude-opus");
-        let msg = outcome.expect_err("ambiguous arg must error");
+        let msg = run_execute("claude-opus").expect_err("ambiguous arg must error");
         // `claude-opus` matches the listed Opus 4.8 entries, so the listing surfaces those.
         for id in ["claude-opus-4-8", "claude-opus-4-8[1m]"] {
             assert!(msg.contains(id), "{id} should be listed: {msg}");

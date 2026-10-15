@@ -4,13 +4,13 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use tracing::warn;
 
 use crate::session::display::id_prefix;
 use crate::session::store::SessionStore;
+use crate::tui::modal::chrome::{FOOTER_HEIGHT, Header, render_footer};
 use crate::tui::modal::{Modal, ModalAction, ModalKey};
 use crate::tui::theme::Theme;
 use crate::util::text::truncate_to_width;
@@ -19,6 +19,8 @@ use crate::util::text::truncate_to_width;
 
 const TITLE: &str = "Delete this session?";
 const FOOTER_HINT: &str = "[Y] delete   [N] cancel";
+/// The identity and metadata rows.
+const BODY_HEIGHT: u16 = 2;
 /// Width floor so narrow terminals still paint the full body without panicking.
 const MIN_BUDGET: usize = 8;
 
@@ -27,6 +29,7 @@ const MIN_BUDGET: usize = 8;
 /// Confirm-and-delete overlay. Owns the `SessionStore` clone so the unlink fires synchronously on
 /// Y without a roundtrip through the agent loop.
 pub(super) struct ConfirmDeleteSessionModal {
+    header: Header,
     store: SessionStore,
     session_id: String,
     display_title: String,
@@ -47,6 +50,7 @@ impl ConfirmDeleteSessionModal {
         live_session_id: String,
     ) -> Self {
         Self {
+            header: Header::new(TITLE),
             store,
             session_id,
             display_title,
@@ -75,20 +79,14 @@ impl ConfirmDeleteSessionModal {
 }
 
 impl Modal for ConfirmDeleteSessionModal {
-    fn height(&self, _width: u16) -> u16 {
-        if self.error.is_some() { 7 } else { 6 }
+    fn height(&self, _width: u16, _max_height: u16) -> u16 {
+        self.header.height() + BODY_HEIGHT + u16::from(self.error.is_some()) + FOOTER_HEIGHT
     }
 
     fn render(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
         let budget = usize::from(area.width).max(MIN_BUDGET);
-        let mut lines: Vec<Line<'static>> =
-            Vec::with_capacity(usize::from(self.height(area.width)));
-
-        lines.push(Line::from(Span::styled(
-            TITLE,
-            theme.accent().add_modifier(Modifier::BOLD),
-        )));
-        lines.push(Line::default());
+        let mut lines: Vec<Line<'static>> = Vec::with_capacity(usize::from(area.height));
+        self.header.push_lines(&mut lines, area.width, theme);
 
         let identity = format!("{} — {}", id_prefix(&self.session_id), self.display_title);
         lines.push(Line::from(Span::styled(
@@ -99,19 +97,16 @@ impl Modal for ConfirmDeleteSessionModal {
             truncate_to_width(&self.metadata, budget),
             theme.dim(),
         )));
-        lines.push(Line::default());
-        lines.push(Line::from(Span::styled(
-            truncate_to_width(FOOTER_HINT, budget),
-            theme.dim(),
-        )));
         if let Some(err) = &self.error {
             lines.push(Line::from(Span::styled(
                 truncate_to_width(&format!("! {err}"), budget),
                 theme.error(),
             )));
         }
-
         frame.render_widget(Paragraph::new(lines).style(theme.surface()), area);
+
+        let hint = Span::styled(truncate_to_width(FOOTER_HINT, budget), theme.dim());
+        render_footer(frame, area, Line::from(hint), theme);
     }
 
     fn handle_key(&mut self, event: &KeyEvent) -> ModalKey {
@@ -200,7 +195,7 @@ mod tests {
     fn render_paints_title_identity_metadata_and_footer() {
         let (_dir, store) = isolated_store();
         let modal = seed_modal(&store, "abcd1234", "Fix auth flow");
-        let dump = render_to_string(&modal, 60, modal.height(60));
+        let dump = render_to_string(&modal, 60, modal.height(60, u16::MAX));
         assert!(dump.contains(TITLE), "title appears: {dump}");
         assert!(dump.contains("abcd1234"), "id prefix appears: {dump}");
         assert!(dump.contains("Fix auth flow"), "title appears: {dump}");
@@ -212,14 +207,18 @@ mod tests {
     }
 
     #[test]
-    fn render_appends_error_row_when_previous_attempt_failed() {
+    fn render_places_the_error_row_above_the_footer() {
         let (_dir, store) = isolated_store();
         let mut modal = seed_modal(&store, "abcd1234", "Fix auth flow");
+        assert_eq!(modal.height(60, u16::MAX), 6);
         modal.error = Some("permission denied".to_owned());
-        // Height grows by one to accommodate the error row.
-        assert_eq!(modal.height(60), 7, "error row claims an extra line");
-        let dump = render_to_string(&modal, 60, modal.height(60));
-        assert!(dump.contains("permission denied"), "error visible: {dump}");
+        assert_eq!(modal.height(60, u16::MAX), 7, "the error row claims a line");
+
+        let dump = render_to_string(&modal, 60, modal.height(60, u16::MAX));
+        let rows: Vec<&str> = dump.lines().map(str::trim_end).collect();
+        assert_eq!(rows[4], "! permission denied", "{dump}");
+        assert_eq!(rows[5], "");
+        assert_eq!(rows[6], FOOTER_HINT);
     }
 
     #[test]
@@ -227,7 +226,7 @@ mod tests {
         let (_dir, store) = isolated_store();
         let modal = seed_modal(&store, "abcd1234", "T");
         for w in [4_u16, 8, 20] {
-            render_to_string(&modal, w, modal.height(w));
+            render_to_string(&modal, w, modal.height(w, u16::MAX));
         }
     }
 

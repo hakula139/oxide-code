@@ -1,13 +1,11 @@
-//! Inputs to [`SlashCommand::execute`]: [`SlashContext`] borrows App-owned mutable state;
-//! [`LiveSessionInfo`] is the session-level snapshot.
+//! Inputs to [`SlashCommand::execute`](super::registry::SlashCommand::execute): [`SlashContext`]
+//! borrows App-owned state, and [`LiveSessionInfo`] is the session-level snapshot.
 
 use std::borrow::Cow;
 use std::path::PathBuf;
 
 use crate::config::ConfigSnapshot;
 use crate::model::{display_name, short_display_name};
-use crate::tui::components::chat::ChatView;
-use crate::tui::modal::Modal;
 
 /// Live snapshot of the running session handed to every slash command. Built at TUI startup and
 /// rebound by `SessionRolled` / `ConfigChanged` so commands always see the current model, effort,
@@ -15,8 +13,7 @@ use crate::tui::modal::Modal;
 /// persisted JSONL record consumed by `--list`.
 pub(crate) struct LiveSessionInfo {
     pub(crate) cwd: String,
-    /// Original cwd as a path. Held alongside `cwd` so the status bar can re-probe git without
-    /// re-resolving the tilde expansion.
+    /// The real path behind the display `cwd`, for the status bar's git probes and `/diff`.
     pub(crate) git_cwd: Option<PathBuf>,
     pub(crate) git_branch: Option<String>,
     pub(crate) version: &'static str,
@@ -34,41 +31,16 @@ impl LiveSessionInfo {
     }
 }
 
-/// Borrowed App-owned state for one [`super::registry::SlashCommand::execute`] call. Open modals
-/// via [`SlashContext::open_modal`]; the dispatcher harvests the slot after `execute`.
+/// Read-only App state for one [`super::registry::SlashCommand::execute`] call. Commands report
+/// their effects through the returned [`super::registry::SlashOutcome`].
 pub(crate) struct SlashContext<'a> {
-    pub(crate) chat: &'a mut ChatView,
     pub(crate) info: &'a LiveSessionInfo,
-    /// Live session title — `/rename` pre-fills its modal from here. `None` until seeded.
+    /// Live session title, which `/rename` pre-fills its modal from. `None` until seeded.
     pub(crate) title: Option<&'a str>,
-    modal: Option<Box<dyn Modal>>,
 }
 
 impl<'a> SlashContext<'a> {
-    pub(crate) fn new(chat: &'a mut ChatView, info: &'a LiveSessionInfo) -> Self {
-        Self::with_title(chat, info, None)
-    }
-
-    pub(crate) fn with_title(
-        chat: &'a mut ChatView,
-        info: &'a LiveSessionInfo,
-        title: Option<&'a str>,
-    ) -> Self {
-        Self {
-            chat,
-            info,
-            title,
-            modal: None,
-        }
-    }
-
-    /// Open `modal` after this command finishes. One modal per dispatch.
-    pub(crate) fn open_modal(&mut self, modal: Box<dyn Modal>) {
-        debug_assert!(self.modal.is_none(), "modal slot set twice in one dispatch");
-        self.modal = Some(modal);
-    }
-
-    pub(crate) fn take_modal(&mut self) -> Option<Box<dyn Modal>> {
-        self.modal.take()
+    pub(crate) fn new(info: &'a LiveSessionInfo, title: Option<&'a str>) -> Self {
+        Self { info, title }
     }
 }

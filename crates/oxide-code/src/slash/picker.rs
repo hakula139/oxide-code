@@ -13,9 +13,11 @@ use super::effort_slider::tier_color;
 use crate::agent::event::UserAction;
 use crate::config::Effort;
 use crate::model::{ResolvedModelId, capabilities_for, display_name};
-use crate::tui::modal::list_picker::{ListPicker, PickerItem};
+use crate::tui::modal::chrome::{CONFIRM_HINT, FOOTER_HEIGHT, render_footer};
+use crate::tui::modal::list_picker::{ListPicker, PickerItem, numeric_hint};
 use crate::tui::modal::{Modal, ModalAction, ModalKey};
 use crate::tui::theme::Theme;
+use crate::tui::viewport::{wrap_next, wrap_prev};
 
 // ── Constants ──
 
@@ -50,16 +52,6 @@ impl ModelRow {
                 hint: numeric_hint(idx),
             })
             .collect()
-    }
-}
-
-/// `'1'`–`'9'` for the first nine rows; `None` after that.
-fn numeric_hint(idx: usize) -> Option<char> {
-    let digit = u32::try_from(idx).ok()?.checked_add(1)?;
-    if (1..=9).contains(&digit) {
-        char::from_digit(digit, 10)
-    } else {
-        None
     }
 }
 
@@ -104,7 +96,7 @@ impl ModelEffortPicker {
         let rows = ModelRow::build(&active_model);
 
         let mut list = ListPicker::new("Select model", rows).with_description(
-            "Switch the active model. Applies to this session only — restart returns to your config.",
+            "Switch the active model for this session. Restarting returns to your config.",
         );
         list.select_initial(|row| row.is_active);
 
@@ -151,14 +143,8 @@ impl ModelEffortPicker {
             .and_then(|e| supported.iter().position(|s| *s == e))
             .unwrap_or(0);
         let next_idx = match direction {
-            Direction::Forward => (current_idx + 1) % supported.len(),
-            Direction::Backward => {
-                if current_idx == 0 {
-                    supported.len() - 1
-                } else {
-                    current_idx - 1
-                }
-            }
+            Direction::Forward => wrap_next(current_idx, supported.len()),
+            Direction::Backward => wrap_prev(current_idx, supported.len()),
         };
         self.effort = Some(supported[next_idx]);
         self.effort_dirty = true;
@@ -203,57 +189,53 @@ impl ModelEffortPicker {
             Span::styled("  ← →  to adjust", theme.dim()),
         ]))
     }
+
+    /// Rows pinned below the list: a spacer and the effort row when the highlighted model has a
+    /// tier, then the footer.
+    fn below_list_height(&self) -> u16 {
+        let effort_rows = if self.list.selected().is_some_and(has_effort_tier) {
+            2
+        } else {
+            0
+        };
+        effort_rows + FOOTER_HEIGHT
+    }
 }
 
 impl Modal for ModelEffortPicker {
-    fn height(&self, width: u16) -> u16 {
-        // List height + (effort row + spacer)? + footer + spacer
-        let list_height = self.list.height(width);
-        let mut h = list_height + 1; // spacer before footer
-        if self.list.selected().is_some_and(has_effort_tier) {
-            h += 2; // spacer + effort row
-        }
-        h + 1 // footer line
+    fn height(&self, width: u16, max_height: u16) -> u16 {
+        let below = self.below_list_height();
+        self.list.height(width, max_height.saturating_sub(below)) + below
     }
 
     fn render(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
-        let list_h = self.list.height(area.width);
-        let list_area = Rect {
-            height: list_h.min(area.height),
-            ..area
-        };
-        self.list.render(frame, list_area, theme);
+        let list_h = area.height.saturating_sub(self.below_list_height());
+        self.list.render(
+            frame,
+            Rect {
+                height: list_h,
+                ..area
+            },
+            theme,
+        );
 
-        let mut cursor_y = area.y.saturating_add(list_h);
-        let mut remaining = area.height.saturating_sub(list_h);
-
-        if let Some(line) = self.render_effort_row(theme) {
-            cursor_y = cursor_y.saturating_add(1);
-            remaining = remaining.saturating_sub(1);
-            let row_area = Rect {
-                x: area.x,
-                y: cursor_y,
-                width: area.width,
-                height: 1.min(remaining),
-            };
-            frame.render_widget(Paragraph::new(line).style(theme.surface()), row_area);
-            cursor_y = cursor_y.saturating_add(1);
-            remaining = remaining.saturating_sub(1);
-        }
-
-        if remaining >= 2 {
-            let footer_area = Rect {
-                x: area.x,
-                y: cursor_y.saturating_add(1),
-                width: area.width,
+        let effort_y = area.y + list_h + 1;
+        if let Some(line) = self.render_effort_row(theme)
+            && effort_y < area.bottom()
+        {
+            let row = Rect {
+                y: effort_y,
                 height: 1,
+                ..area
             };
-            let footer = Line::from(Span::styled(
-                "Enter to confirm  ·  Esc to cancel",
-                theme.dim(),
-            ));
-            frame.render_widget(Paragraph::new(footer).style(theme.surface()), footer_area);
+            frame.render_widget(Paragraph::new(line).style(theme.surface()), row);
         }
+        render_footer(
+            frame,
+            area,
+            Line::from(Span::styled(CONFIRM_HINT, theme.dim())),
+            theme,
+        );
     }
 
     fn handle_key(&mut self, event: &KeyEvent) -> ModalKey {
@@ -476,9 +458,9 @@ mod tests {
         // effort tier. Pin the no-tier path so a regression that always reserves the row
         // fails here.
         let mut p = picker();
-        let with_tier = p.height(80);
+        let with_tier = p.height(80, u16::MAX);
         p.handle_key(&key(KeyCode::Char('5'))); // jump to Haiku 4.5
-        let no_tier = p.height(80);
+        let no_tier = p.height(80, u16::MAX);
         assert_eq!(
             with_tier.saturating_sub(no_tier),
             2,
@@ -502,7 +484,7 @@ mod tests {
                 p.handle_key(&key(jump));
             }
             for width in [40_u16, 80, 120] {
-                let h = p.height(width).min(20);
+                let h = p.height(width, 20);
                 let mut terminal = Terminal::new(TestBackend::new(width, h)).unwrap();
                 terminal
                     .draw(|frame| {
@@ -511,5 +493,39 @@ mod tests {
                     .expect("render must not panic");
             }
         }
+    }
+
+    #[test]
+    fn render_pins_the_effort_row_and_footer_below_a_scrolled_list() {
+        let theme = Theme::default();
+        let last_tiered = LISTED_MODELS
+            .iter()
+            .rposition(|id| capabilities_for(id).has_effort())
+            .unwrap();
+        let mut p = picker();
+        for _ in 0..last_tiered {
+            p.handle_key(&key(KeyCode::Down));
+        }
+        let (width, height) = (60, 8);
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| p.render(frame, Rect::new(0, 0, width, height), &theme))
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        let row = |y: u16| -> String {
+            (0..width)
+                .map(|x| buf[(x, y)].symbol())
+                .collect::<String>()
+                .trim_end()
+                .to_owned()
+        };
+        let cursor_row = row(3);
+        assert!(
+            cursor_row.contains(LISTED_MODELS[last_tiered]),
+            "cursor row: {cursor_row:?}"
+        );
+        assert!(row(5).contains("effort"), "effort row: {:?}", row(5));
+        assert_eq!(row(7), CONFIRM_HINT);
     }
 }
