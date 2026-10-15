@@ -1063,8 +1063,8 @@ mod tests {
             Box::new(crate::tool::read::ReadTool::new(Arc::clone(&tracker))),
             Box::new(crate::tool::write::WriteTool::new(Arc::clone(&tracker))),
             Box::new(crate::tool::edit::EditTool::new(tracker)),
-            Box::new(crate::tool::glob::GlobTool),
-            Box::new(crate::tool::grep::GrepTool),
+            Box::new(crate::tool::glob::GlobTool::default()),
+            Box::new(crate::tool::grep::GrepTool::default()),
         ]);
         test_app_with_registry(None, Arc::new(tools))
     }

@@ -655,6 +655,26 @@ pub(crate) fn truncate_line(line: &str, max_chars: usize) -> Cow<'_, str> {
     ))
 }
 
+const WITHHELD_NOTE_END: &str = "withheld by read deny rules)";
+
+/// Appends the note a search tool adds when read deny rules withheld `count` of the files it found.
+/// The note counts them without naming any.
+pub(crate) fn push_withheld_note(content: &mut String, count: usize) {
+    if count == 0 {
+        return;
+    }
+    let word = if count == 1 { "file" } else { "files" };
+    _ = write!(content, "\n\n({count} {word} {WITHHELD_NOTE_END}");
+}
+
+/// `content` without the note [`push_withheld_note`] appended, for parsing the rest.
+pub(crate) fn strip_withheld_note(content: &str) -> &str {
+    match content.rsplit_once("\n\n") {
+        Some((rest, note)) if note.starts_with('(') && note.ends_with(WITHHELD_NOTE_END) => rest,
+        _ => content,
+    }
+}
+
 // ── Testing ──
 
 #[cfg(test)]
@@ -703,8 +723,8 @@ mod tests {
         vec![
             Box::new(BashTool),
             Box::new(EditTool::new(Arc::clone(&tracker))),
-            Box::new(GlobTool),
-            Box::new(GrepTool),
+            Box::new(GlobTool::default()),
+            Box::new(GrepTool::default()),
             Box::new(ReadTool::new(Arc::clone(&tracker))),
             Box::new(WriteTool::new(tracker)),
         ]
@@ -967,7 +987,7 @@ mod tests {
             zone: Zone::Workspace,
         };
         let mut input = serde_json::json!({"pattern": "x", "path": "."});
-        GrepTool.pin_target(&mut input, &resolved);
+        GrepTool::default().pin_target(&mut input, &resolved);
         assert_eq!(input, serde_json::json!({"pattern": "x", "path": "."}));
     }
 
@@ -1038,7 +1058,7 @@ mod tests {
 
     #[test]
     fn label_delegates_to_registered_tool() {
-        let registry = ToolRegistry::new(vec![Box::new(BashTool), Box::new(GrepTool)]);
+        let registry = ToolRegistry::new(vec![Box::new(BashTool), Box::new(GrepTool::default())]);
         assert_eq!(
             registry.label("bash", &serde_json::json!({"command": "echo hi"})),
             "echo hi",
@@ -1070,7 +1090,7 @@ mod tests {
     #[tokio::test]
     async fn run_dispatches_and_caps_byte_overflow() {
         let (_dir, input) = oversize_grep_input();
-        let registry = ToolRegistry::new(vec![Box::new(GrepTool)]);
+        let registry = ToolRegistry::new(vec![Box::new(GrepTool::default())]);
         let output = registry.run("grep", input).await;
 
         assert!(!output.is_error);
@@ -1102,7 +1122,7 @@ mod tests {
     #[tokio::test]
     async fn run_byte_cap_on_grep_falls_through_to_text_view() {
         let (_dir, input) = oversize_grep_input();
-        let registry = ToolRegistry::new(vec![Box::new(GrepTool)]);
+        let registry = ToolRegistry::new(vec![Box::new(GrepTool::default())]);
         let output = registry.run("grep", input.clone()).await;
         assert!(output.metadata.truncated_bytes.is_some());
 
@@ -1164,7 +1184,7 @@ mod tests {
 
     #[test]
     fn result_view_delegates_grep_matches() {
-        let registry = ToolRegistry::new(vec![Box::new(GrepTool)]);
+        let registry = ToolRegistry::new(vec![Box::new(GrepTool::default())]);
         let input = serde_json::json!({"pattern": "fn"});
         let metadata = ToolMetadata::default();
         let view =
@@ -1206,7 +1226,7 @@ mod tests {
 
     #[test]
     fn result_view_delegates_glob_files() {
-        let registry = ToolRegistry::new(vec![Box::new(GlobTool)]);
+        let registry = ToolRegistry::new(vec![Box::new(GlobTool::default())]);
         let input = serde_json::json!({"pattern": "*.rs"});
         let metadata = ToolMetadata::default();
         let view =
@@ -1606,5 +1626,36 @@ mod tests {
         let result = truncate_line(&line, MAX_CHARS);
         assert!(matches!(result, Cow::Borrowed(_)));
         assert_eq!(result.as_ref(), line);
+    }
+
+    // ── push_withheld_note ──
+
+    #[test]
+    fn push_withheld_note_counts_files_and_strips_back_off() {
+        for (count, note) in [
+            (1, "(1 file withheld by read deny rules)"),
+            (3, "(3 files withheld by read deny rules)"),
+        ] {
+            let mut content = "a.rs".to_owned();
+            push_withheld_note(&mut content, count);
+            assert_eq!(content, format!("a.rs\n\n{note}"));
+            assert_eq!(strip_withheld_note(&content), "a.rs");
+        }
+
+        let mut content = "a.rs".to_owned();
+        push_withheld_note(&mut content, 0);
+        assert_eq!(content, "a.rs");
+    }
+
+    // ── strip_withheld_note ──
+
+    #[test]
+    fn strip_withheld_note_keeps_content_without_one() {
+        for content in [
+            "a.rs",
+            "a.rs\n\n(Showing 100 of 120 matches. Use a more specific pattern.)",
+        ] {
+            assert_eq!(strip_withheld_note(content), content);
+        }
     }
 }

@@ -11,13 +11,23 @@ use super::{
     GrepFileGroup, GrepMatchLine, Tool, ToolMetadata, ToolOutput, ToolResultView,
     extract_input_field,
 };
-use crate::permission::PermissionClass;
+use crate::permission::{PermissionClass, ReadDeny, WalkDeny};
 
 const DEFAULT_HEAD_LIMIT: usize = 250;
 const MAX_LINE_CHARS: usize = 500;
 const MAX_GREP_FILE_SIZE: u64 = 1024 * 1024;
 
-pub(crate) struct GrepTool;
+/// Withholds each file a `read` deny rule matches from the results.
+#[cfg_attr(test, derive(Default))]
+pub(crate) struct GrepTool {
+    read_deny: ReadDeny,
+}
+
+impl GrepTool {
+    pub(crate) fn new(read_deny: ReadDeny) -> Self {
+        Self { read_deny }
+    }
+}
 
 impl Tool for GrepTool {
     fn name(&self) -> &'static str {
@@ -111,7 +121,7 @@ impl Tool for GrepTool {
         &self,
         input: serde_json::Value,
     ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + '_>> {
-        Box::pin(run(input))
+        Box::pin(run(input, self.read_deny.clone()))
     }
 }
 
@@ -145,7 +155,7 @@ struct Input {
 
 // ── Execution ──
 
-async fn run(raw: serde_json::Value) -> ToolOutput {
+async fn run(raw: serde_json::Value, read_deny: ReadDeny) -> ToolOutput {
     let input: Input = match super::parse_input(raw) {
         Ok(v) => v,
         Err(e) => return e,
@@ -172,12 +182,13 @@ async fn run(raw: serde_json::Value) -> ToolOutput {
             context: context.unwrap_or(0),
             case_insensitive,
             head_limit,
+            read_deny,
         })
     })
     .await
     {
         Ok(Ok(content)) => {
-            let title = grep_title(&content);
+            let title = grep_title(super::strip_withheld_note(&content));
             ToolOutput::success(content).with_title(title)
         }
         Ok(Err(msg)) => ToolOutput::error(msg),
@@ -215,6 +226,7 @@ struct GrepParams<'a> {
     context: usize,
     case_insensitive: bool,
     head_limit: Option<usize>,
+    read_deny: ReadDeny,
 }
 
 fn grep_files(params: &GrepParams<'_>) -> Result<String, String> {
@@ -242,7 +254,12 @@ fn grep_files(params: &GrepParams<'_>) -> Result<String, String> {
         None => DEFAULT_HEAD_LIMIT,
     };
 
-    let collected = collect_files(&base, include_matcher.as_ref());
+    let read_deny = params.read_deny.walk(
+        &base,
+        Path::new(params.search_path.unwrap_or(".")),
+        params.cwd,
+    );
+    let collected = collect_files(&base, include_matcher.as_ref(), &read_deny);
 
     let cwd = params.cwd;
     let mut result = match params.output_mode {
@@ -256,6 +273,7 @@ fn grep_files(params: &GrepParams<'_>) -> Result<String, String> {
     };
 
     append_skipped_warnings(&mut result, &collected.skipped_large, cwd);
+    super::push_withheld_note(&mut result, collected.withheld);
 
     Ok(result)
 }
@@ -263,9 +281,17 @@ fn grep_files(params: &GrepParams<'_>) -> Result<String, String> {
 struct CollectedFiles {
     files: Vec<PathBuf>,
     skipped_large: Vec<(PathBuf, u64)>,
+    /// Files a `read` deny rule withheld.
+    withheld: usize,
 }
 
-fn collect_files(base: &Path, include_matcher: Option<&globset::GlobMatcher>) -> CollectedFiles {
+/// The files to search under `base`. A file `base` itself passed the gate, so only the files a walk
+/// finds face `read_deny`.
+fn collect_files(
+    base: &Path,
+    include_matcher: Option<&globset::GlobMatcher>,
+    read_deny: &WalkDeny<'_>,
+) -> CollectedFiles {
     if base.is_file() {
         let mut files = Vec::new();
         let mut skipped_large = Vec::new();
@@ -279,16 +305,23 @@ fn collect_files(base: &Path, include_matcher: Option<&globset::GlobMatcher>) ->
         return CollectedFiles {
             files,
             skipped_large,
+            withheld: 0,
         };
     }
 
     let mut skipped_large = Vec::new();
+    let mut withheld = 0;
     let mut files_with_mtime: Vec<(PathBuf, std::time::SystemTime)> = super::walk_files(base)
         .filter(|entry| {
             include_matcher.is_none_or(|m| {
                 let name = entry.file_name().to_string_lossy();
                 m.is_match(name.as_ref())
             })
+        })
+        .filter(|entry| {
+            let denied = read_deny.denies(entry.path());
+            withheld += usize::from(denied);
+            !denied
         })
         .filter(|entry| {
             if let Ok(meta) = entry.metadata()
@@ -310,6 +343,7 @@ fn collect_files(base: &Path, include_matcher: Option<&globset::GlobMatcher>) ->
     CollectedFiles {
         files: files_with_mtime.into_iter().map(|(p, _)| p).collect(),
         skipped_large,
+        withheld,
     }
 }
 
@@ -633,6 +667,7 @@ mod tests {
     use indoc::indoc;
 
     use super::*;
+    use crate::permission::{Mode, Policy};
     use crate::tool::testing::canonical_tempdir;
     use crate::util::path::slash_separated;
 
@@ -647,6 +682,7 @@ mod tests {
             context: 0,
             case_insensitive: false,
             head_limit: None,
+            read_deny: ReadDeny::default(),
         }
     }
 
@@ -658,7 +694,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cwd = dunce::canonicalize(dir.path()).unwrap();
 
-        let target = GrepTool.gate_target(&serde_json::json!({"pattern": "x"}), &cwd);
+        let target = GrepTool::default().gate_target(&serde_json::json!({"pattern": "x"}), &cwd);
         let crate::permission::GateTarget::Path { relative, .. } = target else {
             panic!("expected a path target");
         };
@@ -679,11 +715,12 @@ mod tests {
         )
         .unwrap();
 
-        let output = run(serde_json::json!({
-            "pattern": "fn main",
-            "path": dir.path().to_str().unwrap()
-        }))
-        .await;
+        let output = GrepTool::default()
+            .run(serde_json::json!({
+                "pattern": "fn main",
+                "path": dir.path().to_str().unwrap()
+            }))
+            .await;
 
         assert!(!output.is_error);
         assert!(output.content.contains("test.rs:1:fn main()"));
@@ -691,14 +728,16 @@ mod tests {
 
     #[tokio::test]
     async fn run_missing_pattern() {
-        let output = run(serde_json::json!({})).await;
+        let output = GrepTool::default().run(serde_json::json!({})).await;
         assert!(output.is_error);
         assert!(output.content.contains("Invalid input"));
     }
 
     #[tokio::test]
     async fn run_invalid_regex_omits_title() {
-        let output = run(serde_json::json!({"pattern": "(unclosed"})).await;
+        let output = GrepTool::default()
+            .run(serde_json::json!({"pattern": "(unclosed"}))
+            .await;
         assert!(output.is_error);
         assert!(
             output.content.contains("Invalid regex"),
@@ -1045,6 +1084,61 @@ mod tests {
     }
 
     #[test]
+    fn grep_files_withholds_files_a_read_deny_rule_matches() {
+        let dir = canonical_tempdir();
+        std::fs::write(dir.path().join("a.rs"), "TOKEN=public\n").unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub/.env"), "TOKEN=secret\n").unwrap();
+        let deny = ["read(**/.env)".to_owned()];
+        let policy = Policy::resolve(Mode::Auto, &[], &deny, dir.path()).unwrap();
+
+        let mut p = params("TOKEN", dir.path());
+        p.read_deny = policy.read_deny();
+        assert_eq!(
+            grep_files(&p).unwrap(),
+            "a.rs:1:TOKEN=public\n\n(1 file withheld by read deny rules)"
+        );
+
+        p.pattern = "secret";
+        let result = grep_files(&p).unwrap();
+        assert_eq!(
+            result,
+            "No matches found\n\n(1 file withheld by read deny rules)"
+        );
+        let title = grep_title(crate::tool::strip_withheld_note(&result));
+        assert_eq!(title, "No matches found");
+        // The structured view would drop the note, so the text view shows it.
+        let input = serde_json::json!({"pattern": "secret"});
+        let view = GrepTool::default().result_view(&input, &result, &ToolMetadata::default());
+        assert_eq!(view, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn grep_files_withholds_a_denied_file_below_a_symlinked_root() {
+        let dir = canonical_tempdir();
+        let (cwd, outside) = (dir.path().join("cwd"), dir.path().join("outside"));
+        std::fs::create_dir(&cwd).unwrap();
+        std::fs::create_dir_all(outside.join("secrets")).unwrap();
+        std::fs::write(outside.join("secrets/db.key"), "TOKEN=secret\n").unwrap();
+        std::fs::write(outside.join("app.toml"), "TOKEN=public\n").unwrap();
+        std::os::unix::fs::symlink(&outside, cwd.join("config")).unwrap();
+        let deny = ["read(**/secrets/**)".to_owned()];
+        let policy = Policy::resolve(Mode::Auto, &[], &deny, &cwd).unwrap();
+
+        let mut p = params("TOKEN", &cwd);
+        p.search_path = Some("config");
+        p.read_deny = policy.read_deny();
+        assert_eq!(
+            grep_files(&p).unwrap(),
+            format!(
+                "{}:1:TOKEN=public\n\n(1 file withheld by read deny rules)",
+                outside.join("app.toml").display()
+            )
+        );
+    }
+
+    #[test]
     fn grep_files_no_matches() {
         let dir = canonical_tempdir();
         std::fs::write(dir.path().join("test.txt"), "hello world\n").unwrap();
@@ -1295,7 +1389,7 @@ mod tests {
     #[test]
     fn result_view_content_mode_groups_by_file() {
         let input = serde_json::json!({"pattern": "fn"});
-        let view = GrepTool
+        let view = GrepTool::default()
             .result_view(&input, "src/main.rs:10:fn main()", &ToolMetadata::default())
             .unwrap();
         assert_eq!(
@@ -1320,7 +1414,8 @@ mod tests {
         // text fallback keeps the "Found N ..." line visible.
         for mode in ["files_with_matches", "count"] {
             let input = serde_json::json!({"pattern": "fn", "output_mode": mode});
-            let view = GrepTool.result_view(&input, "irrelevant", &ToolMetadata::default());
+            let view =
+                GrepTool::default().result_view(&input, "irrelevant", &ToolMetadata::default());
             assert!(view.is_none(), "mode {mode}: expected None to fall back");
         }
     }
