@@ -41,7 +41,7 @@ Each resolved target belongs to one zone:
   - The file names `.gitconfig`, `.gitmodules`, `.envrc`, `ox.toml`, `rust-toolchain`, `rust-toolchain.toml`, and the bash / zsh / POSIX shell startup files anywhere.
   - `.cargo/config`, `.cargo/config.toml`, `.claude/settings.json`, `.claude/settings.local.json`, and everything under `.claude/hooks`. The rest of `.claude`, including `worktrees` and `plans`, stays editable.
   - Everything under oxide-code's own config, data, and state directories.
-- **Workspace**: the target sits inside cwd, so edit-class calls allow at step 7. A cwd of `/`, `$HOME`, or any ancestor of `$HOME` is never a workspace, so launching there leaves every edit to the allow rules. On Unix, an existing regular file with more than one hard link is never a workspace target either, since another link can sit outside cwd. Rust's standard library exposes no hard-link count on Windows, so a hard-linked file there still counts as a workspace target ([#205](https://github.com/hakula139/oxide-code/issues/205)).
+- **Workspace**: the target sits inside cwd, so edit-class calls allow at step 7. A cwd of `/`, `$HOME`, or any ancestor of `$HOME` is never a workspace, so launching there leaves every edit to the allow rules. An existing regular file with more than one hard link is never a workspace target either, since another link can sit outside cwd.
 - **Outside**: everything else, which needs an allow rule or an approval.
 
 ## Rule Grammar
