@@ -43,7 +43,7 @@ pub(crate) struct ToolOutput {
     pub(crate) metadata: ToolMetadata,
 }
 
-/// Structured data for UI display and logging; not sent to the model.
+/// Structured data for UI display and logging. The model never sees it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ToolMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -309,7 +309,7 @@ impl ToolRegistry {
 
     /// Dispatches to the named tool and enforces the `MAX_OUTPUT_BYTES` byte safety net on the
     /// returned content, recording the pre-cap length on `metadata.truncated_bytes` if trimming
-    /// fired. Per-tool row caps run inside the tool itself; this is the last-line defense against
+    /// fired. Per-tool row caps run inside each tool, so this is the last-line defense against
     /// pathological output sizes.
     pub(crate) async fn run(&self, name: &str, input: serde_json::Value) -> ToolOutput {
         let Some(tool) = self.get(name) else {
@@ -458,9 +458,9 @@ pub(crate) fn summarize_path_call(
 
 /// Renders `path` for chat display.
 ///
-/// Strips `base` if it's a prefix; when `path == base` (relative path is empty) returns the file
-/// name so the chat row says `foo.rs` rather than `.`. Paths outside `base` render as their full
-/// string. Lossy UTF-8 conversion is acceptable here because the result is for display only.
+/// Strips `base` if it's a prefix. When `path == base` the relative path is empty, so this returns
+/// the file name (`foo.rs`). Paths outside `base` render as their full string. Lossy UTF-8
+/// conversion is acceptable here because the result is for display only.
 pub(crate) fn display_path(path: &Path, base: &Path) -> String {
     if let Ok(rel) = path.strip_prefix(base) {
         if rel.as_os_str().is_empty() {
@@ -516,8 +516,8 @@ pub(crate) fn validate_file_target(
 
 const BINARY_CHECK_SIZE: usize = 8192;
 
-/// Heuristic: a NUL byte in the first 8 KiB marks the file as binary. Same rule git uses; cheap
-/// enough to run before every text-mode read.
+/// Heuristic: a NUL byte in the first 8 KiB marks the file as binary. Git uses the same rule, and
+/// it is cheap enough to run before every text-mode read.
 pub(crate) fn is_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(BINARY_CHECK_SIZE).any(|&b| b == 0)
 }

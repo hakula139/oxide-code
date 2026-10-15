@@ -95,8 +95,8 @@ impl Tool for GrepTool {
         content: &str,
         _metadata: &ToolMetadata,
     ) -> Option<ToolResultView> {
-        // Only content mode produces line-numbered rows; other modes fall through so their
-        // summary header stays visible.
+        // Only content mode produces line-numbered rows, so the other modes fall through and keep
+        // their summary header visible.
         let mode = input
             .get("output_mode")
             .and_then(serde_json::Value::as_str)
@@ -850,7 +850,7 @@ mod tests {
         let mut p = params("MATCH", dir.path());
         p.context = 1;
         let result = grep_files(&p).unwrap();
-        // MATCH1 ctx → 2-4, MATCH2 ctx → 5-7; lines 4-5 bridge the gap so ranges merge.
+        // MATCH1 ctx → 2-4 and MATCH2 ctx → 5-7, so lines 4-5 bridge the gap and the ranges merge.
         assert!(!result.contains("--"));
         assert!(result.contains("test.txt:2-b"));
         assert!(result.contains("test.txt:3:MATCH1"));
@@ -881,7 +881,7 @@ mod tests {
         let mut p = params("MATCH", dir.path());
         p.context = 1;
         let result = grep_files(&p).unwrap();
-        // MATCH1 ctx → 1-2, MATCH2 ctx → 7-8; the gap forces a "--" separator.
+        // MATCH1 ctx → 1-2 and MATCH2 ctx → 7-8, so the gap forces a "--" separator.
         assert!(result.contains("--"));
         assert!(result.contains("test.txt:1:MATCH1"));
         assert!(result.contains("test.txt:2-a"));
@@ -1315,8 +1315,8 @@ mod tests {
 
     #[test]
     fn result_view_non_content_mode_falls_back_to_text() {
-        // files_with_matches / count have a summary header that GrepMatches doesn't model;
-        // the text fallback keeps the "Found N ..." line visible.
+        // files_with_matches / count have a summary header that GrepMatches doesn't model, so the
+        // text fallback keeps the "Found N ..." line visible.
         for mode in ["files_with_matches", "count"] {
             let input = serde_json::json!({"pattern": "fn", "output_mode": mode});
             let view = GrepTool.result_view(&input, "irrelevant", &ToolMetadata::default());
@@ -1410,7 +1410,7 @@ mod tests {
 
     #[test]
     fn parse_content_view_falls_back_when_skipped_warnings_present() {
-        // Skipped-warning text isn't in GrepMatches; fall back so it stays visible.
+        // GrepMatches can't hold the skipped-file warning, so the view falls back to show it.
         let content = indoc! {"
             src/main.rs:1:hit
 
@@ -1422,7 +1422,7 @@ mod tests {
 
     #[test]
     fn parse_content_view_falls_back_on_invalid_line() {
-        // Any unrecognised row triggers full fallback rather than silently dropping it.
+        // Any unrecognised row makes the whole view fall back to text, so none is silently dropped.
         assert!(parse_content_view("src/main.rs:1:hit\nunexpected line").is_none());
     }
 

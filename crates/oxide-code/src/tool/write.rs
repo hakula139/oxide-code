@@ -307,7 +307,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_overwrites_existing_file_uses_updated_verb() {
-        // Pins the `Updated` arm; `Created` is covered by `run_creates_file`.
+        // Pins the `Updated` arm. `run_creates_file` covers `Created`.
         let dir = canonical_tempdir();
         let path = dir.path().join("existing.txt");
         std::fs::write(&path, "old").unwrap();
@@ -435,7 +435,7 @@ mod tests {
 
     #[tokio::test]
     async fn write_file_after_external_modification_is_rejected() {
-        // Read, then overwrite to simulate an external editor; drift rehash surfaces the error.
+        // Read, then overwrite to simulate an external editor. The drift rehash surfaces the error.
         let dir = canonical_tempdir();
         let path = dir.path().join("existing.txt");
         std::fs::write(&path, "old content").unwrap();
