@@ -25,6 +25,7 @@ globset.workspace = true
 ignore.workspace = true
 indoc.workspace = true
 platform-info.workspace = true
+process-wrap.workspace = true
 pulldown-cmark.workspace = true
 ratatui.workspace = true
 ratatui-textarea.workspace = true

@@ -246,7 +246,7 @@ pub(crate) trait Tool: Send + Sync {
     }
 
     /// Executes the call. A user cancel can drop the future at any await, so work it started must
-    /// either stop with the drop, as a bash process group does, or finish together with its
+    /// either stop with the drop, as a bash process tree does, or finish together with its
     /// bookkeeping, as a file write and its tracker record do.
     fn run(
         &self,

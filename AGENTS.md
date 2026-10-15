@@ -123,7 +123,7 @@ ox                                          # Start an interactive session
 │   └── theme.rs                            # /theme: bare opens the picker (live preview). `/theme <name>` validates against the curated roster and swaps
 ├── tool.rs                                 # Tool trait, registry, definitions
 ├── tool/
-│   ├── bash.rs                             # Shell command execution with timeout
+│   ├── bash.rs                             # Shell command execution with timeout, killing the shell's process tree (process group / Job Object), Git Bash on Windows
 │   ├── edit.rs                             # Exact string replacement in files
 │   ├── glob.rs                             # File pattern matching (glob)
 │   ├── grep.rs                             # Content search via regex

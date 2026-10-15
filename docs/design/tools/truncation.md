@@ -13,7 +13,7 @@ Two-layer truncation: per-tool view-shape caps + centralized byte-budget safety 
 
 ### Per-tool view-shape caps
 
-- **bash**: Drains stdout / stderr while keeping the head and tail of each pipe, so large streams cannot block on a full OS pipe and a trailing error summary survives. Rendering splits one budget just under `MAX_OUTPUT_BYTES` across both pipes, so each `[N bytes omitted]` marker counts everything its pipe dropped and the dispatcher cap never fires on bash output. A timeout kills the process group and returns the output captured so far.
+- **bash**: Drains stdout / stderr while keeping the head and tail of each pipe, so large streams cannot block on a full OS pipe and a trailing error summary survives. Rendering splits one budget just under `MAX_OUTPUT_BYTES` across both pipes, so each `[N bytes omitted]` marker counts everything its pipe dropped and the dispatcher cap never fires on bash output. A timeout kills the shell's process tree and returns the output captured so far.
 - **edit / write**: No output truncation because success messages are tiny.
 - **glob**: `MAX_RESULTS = 100` matches. Footer: `(Showing N of TOTAL matches.)`.
 - **grep**: Per-line cap at `MAX_LINE_CHARS = 500`, per-mode row cap at `DEFAULT_HEAD_LIMIT = 250`, user-overridable. File-size pre-gate at `MAX_GREP_FILE_SIZE = 1 MB`.
