@@ -28,7 +28,7 @@ ox                                          # Start an interactive session
 ├── crates/oxide-code/                      # Main binary crate
 ├── docs/                                   # User guides, design specs, and research notes
 ├── Formula/                                # Homebrew formula, served from this repo as a tap
-└── scripts/                                # Release helpers that prepare the release PR and refresh the Homebrew formula
+└── scripts/                                # Release helpers and pre-commit checks
 ```
 
 ### Crate Structure (`crates/oxide-code/src/`)
