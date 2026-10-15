@@ -16,7 +16,7 @@ The picks lean toward the Codex precedent on most surfaces, since it is the one 
 
 3. **Mid-turn drain at round boundary, raw consecutive User messages on the wire.** Each queued prompt becomes its own `User` message with one `Text` block. Anthropic accepts consecutive same-role messages. oxide-code deliberately drops the `<system-reminder>` envelope that Claude Code and opencode wrap with, which keeps persistence trivial. May flip if the model ignores mid-turn instructions.
 
-4. **The TUI owns the queue.** A queued prompt leaves `App::pending_prompts` only when a matching `PromptDrained` arrives or when it starts a turn of its own. `App::forwarded_prompts` counts the leading entries the in-flight turn holds, and a drain pops the head only when it names that head. While `Status::Compacting` or `Status::Cancelling`, no turn may be left to splice prompts in, so the TUI holds new submits and forwards them in order once a turn resumes streaming. The idle agent loop discards a late `QueuePrompt`, since the TUI submits it again.
+4. **The TUI owns the queue.** A queued prompt leaves `App::pending_prompts` only when a matching `PromptDrained` arrives or when it starts a turn of its own. `App::forwarded_prompts` counts the leading entries the in-flight turn holds, and a drain pops the head only when it names that head. While `Status::Compacting` or `Status::Cancelling`, no turn may be left to splice prompts in, so the TUI holds new submits and forwards them in order once a turn resumes streaming. The idle engine discards a late `QueuePrompt`, since the TUI submits it again.
 
 5. **A cancel leaves the queue to the user.** After a cancel the TUI goes idle without submitting the queue head, even when the turn completed before the cancel landed. Esc on idle pops the most recent queued prompt into the textarea for editing, gated on the buffer being empty so a draft is never silently overwritten. The next submit joins the back of the queue and starts a turn with its head, so prompts keep the order they were typed in.
 
@@ -30,8 +30,7 @@ The picks lean toward the Codex precedent on most surfaces, since it is the one 
 
 - `crates/oxide-code/src/agent.rs`: `agent_turn` round loop, `run_tool_round` / `ToolRound`, `dispatch_tool_call`, `await_unless_aborted`, `record_drained_prompts`, `TurnAbort` enum.
 - `crates/oxide-code/src/agent/event.rs`: `AgentEvent::{Cancelled, PromptDrained, TurnFailed}`, `UserAction::{Cancel, ConfirmExit, QueuePrompt, Quit}`, `INTERRUPTED_MARKER`, `StdioSink::render`.
-- `crates/oxide-code/src/driver.rs`: `Conversation::submit_prompt` and `report_abort`, shared by the TUI, REPL, and headless drivers.
-- `crates/oxide-code/src/driver/tui.rs`: `serve_actions`, which ignores a `QueuePrompt` that arrives between turns.
+- `crates/oxide-code/src/engine.rs`: `Engine::run`, which ignores a `QueuePrompt` that arrives between turns, plus `Engine::submit_prompt` and `report_abort`, shared by the TUI, REPL, and headless drivers.
 - `crates/oxide-code/src/file_tracker.rs`: `FileTracker::write_and_record`.
 - `crates/oxide-code/src/tool.rs`: `Tool::run` drop contract, `write_tracked`.
 - `crates/oxide-code/src/tool/bash.rs`: `ShellTree`, which kills the shell's process group (Unix) or Job Object (Windows) when a call times out or drops before finishing.

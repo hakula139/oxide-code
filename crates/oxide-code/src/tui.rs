@@ -7,7 +7,6 @@
 pub(crate) mod app;
 pub(crate) mod components;
 pub(crate) mod cursor;
-pub(crate) mod event;
 pub(crate) mod git_probes;
 pub(crate) mod glyphs;
 pub(crate) mod markdown;

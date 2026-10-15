@@ -4,7 +4,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
-use tokio::sync::mpsc;
 
 use crate::config::{CompactionConfig, Effort};
 use crate::model::{ModelSpec, ResolvedModelId};
@@ -32,8 +31,8 @@ pub(crate) struct UsageSnapshot {
     pub(crate) estimated_cost_usd: Option<f64>,
 }
 
-/// One-way notifications from the agent loop to whichever UI is rendering it
-/// (TUI [`ChannelSink`](crate::tui::event::ChannelSink) or stdio [`StdioSink`]).
+/// One-way notifications from the engine to the frontend reading its
+/// [`EngineHandle`](crate::engine::EngineHandle).
 #[derive(Debug, Clone)]
 pub(crate) enum AgentEvent {
     /// Assistant text chunk to append to the in-flight reply.
@@ -202,17 +201,7 @@ pub(crate) enum UserAction {
     Quit,
 }
 
-/// Channel pair whose `recv()` stays pending forever.
-pub(crate) fn inert_user_action_channel() -> (mpsc::Sender<UserAction>, mpsc::Receiver<UserAction>)
-{
-    mpsc::channel(1)
-}
-
 // ── Agent Sink ──
-
-/// Sized to absorb a full streaming-token burst without blocking the agent loop. The TUI drains
-/// per frame, so dropping events here would visibly stutter the rendered response.
-pub(crate) const AGENT_EVENT_CHANNEL_CAP: usize = 4096;
 
 /// Transport from the agent loop to a UI. Implementations must be cheap to clone-by-`&` (the
 /// loop calls `send` on a hot path) and tolerate dropped events without panicking. Call sites use
@@ -246,7 +235,6 @@ pub(crate) trait AgentSink: Send + Sync {
 /// [`AgentSink`] for the `--no-tui` REPL and `--prompt` headless modes: assistant tokens stream
 /// to stdout, everything else (tool calls, errors, the interrupted marker) to stderr so piped
 /// output stays clean.
-#[derive(Clone)]
 pub(crate) struct StdioSink {
     show_thinking: bool,
     tools: Arc<ToolRegistry>,
@@ -347,6 +335,15 @@ impl AgentSink for StdioSink {
 }
 
 // ── Test Fixtures ──
+
+/// Channel pair whose `recv()` stays pending forever.
+#[cfg(test)]
+pub(crate) fn inert_user_action_channel() -> (
+    tokio::sync::mpsc::Sender<UserAction>,
+    tokio::sync::mpsc::Receiver<UserAction>,
+) {
+    tokio::sync::mpsc::channel(1)
+}
 
 #[cfg(test)]
 #[derive(Clone, Default)]

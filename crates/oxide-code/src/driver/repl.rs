@@ -4,45 +4,33 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, BufReader};
 
-use super::{Conversation, Exit, TurnEnd, report_drift, shutdown_signal};
-use crate::agent;
-use crate::agent::event::{AgentEvent, AgentSink, StdioSink, inert_user_action_channel};
+use super::{Exit, render_queued, render_turn, shutdown_signal};
+use crate::agent::event::{AgentEvent, AgentSink, StdioSink, UserAction};
+use crate::engine::{Engine, EngineHandle, TurnEnd};
 use crate::slash;
 
 /// Reads prompts until EOF or a signal, then finalizes the session. EOF after a failed turn exits
 /// with failure.
-pub(crate) async fn run(
-    conversation: Conversation,
-    show_thinking: bool,
-    drifted: &[PathBuf],
-) -> Result<Exit> {
-    let sink = StdioSink::new(show_thinking, Arc::clone(&conversation.tools));
+pub(crate) async fn run(engine: Engine, show_thinking: bool, drifted: &[PathBuf]) -> Result<Exit> {
+    let sink = StdioSink::new(show_thinking, Arc::clone(engine.tools()));
     let stdin = BufReader::new(tokio::io::stdin());
-    drive(conversation, &sink, stdin, drifted).await
+    drive(engine.spawn(drifted), &sink, stdin).await
 }
 
-async fn drive<S, R>(
-    mut conversation: Conversation,
-    sink: &S,
-    input: R,
-    drifted: &[PathBuf],
-) -> Result<Exit>
+async fn drive<R>(mut handle: EngineHandle, sink: &dyn AgentSink, input: R) -> Result<Exit>
 where
-    S: AgentSink + Clone + 'static,
     R: AsyncBufRead + Unpin,
 {
-    report_drift(sink, drifted);
-    agent::notify_if_interrupted(&conversation.messages, sink);
     let mut lines = input.lines();
-    let (_user_tx, mut user_rx) = inert_user_action_channel();
     let mut signal = None;
     let mut failed = false;
 
     let result: Result<()> = async {
         loop {
+            render_queued(&mut handle.events, sink);
             eprint!("> ");
             std::io::stderr().flush()?;
 
@@ -74,13 +62,18 @@ where
                 continue;
             }
 
+            let prompt = slash::unescape_literal(input).to_owned();
+            // A send fails only once the engine has stopped, which `render_turn` then reports.
+            _ = handle.ops.send(UserAction::SubmitPrompt(prompt)).await;
             tokio::select! {
-                end = conversation.submit_prompt(slash::unescape_literal(input), sink, &mut user_rx) => {
-                    if end == TurnEnd::Failed {
+                end = render_turn(&mut handle.events, sink) => match end {
+                    Some(TurnEnd::Failed) => {
                         println!();
                         failed = true;
                     }
-                }
+                    Some(_) => {}
+                    None => bail!("the engine stopped"),
+                },
                 caught = shutdown_signal() => {
                     eprintln!();
                     signal = Some(caught);
@@ -92,7 +85,7 @@ where
     }
     .await;
 
-    let failure = conversation.finalize().await;
+    let failure = handle.shutdown().await;
     sink.session_write_error(failure.as_deref());
     result?;
     Ok(match signal {
@@ -107,12 +100,37 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    use super::super::testing::{conversation, mount_reply, request_bodies, with_pinned_home};
     use super::*;
     use crate::agent::event::CapturingSink;
+    use crate::engine::testing::{
+        engine, mount_reply, request_bodies, stopped_engine, with_pinned_home,
+    };
     use crate::session::store::testing::test_store;
 
     // ── drive ──
+
+    #[tokio::test]
+    async fn drive_skips_blank_lines_and_exits_cleanly_at_eof() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            mount_reply(&server, "reply").await;
+            let dir = tempfile::tempdir().unwrap();
+            let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+            let sink = CapturingSink::new();
+            let input: &[u8] = b"\n   \nhello\n";
+
+            let exit = Box::pin(drive(engine.spawn(&[]), &sink, input))
+                .await
+                .unwrap();
+
+            assert_eq!(exit, Exit::Success);
+            let requests = request_bodies(&server).await;
+            assert_eq!(requests.len(), 1, "blank lines never reach the model");
+            let last = requests[0]["messages"].as_array().unwrap().last().unwrap();
+            assert_eq!(last["content"][0]["text"], "hello");
+        })
+        .await;
+    }
 
     #[tokio::test]
     async fn drive_keeps_reading_after_a_failed_turn_and_exits_with_failure() {
@@ -126,16 +144,16 @@ mod tests {
                 .await;
             mount_reply(&server, "reply").await;
             let dir = tempfile::tempdir().unwrap();
-            let conversation =
-                conversation(server.uri(), &test_store(dir.path()), dir.path()).await;
+            let store = test_store(dir.path());
+            let engine = engine(server.uri(), &store, dir.path()).await;
+            let session_id = engine.session_id().to_owned();
             let sink = CapturingSink::new();
             let input: &[u8] = b"first\n/clear\n//literal\n";
 
             let exit = Box::pin(drive(
-                conversation,
+                engine.spawn(&[PathBuf::from("drifted.rs")]),
                 &sink,
                 input,
-                &[PathBuf::from("drifted.rs")],
             ))
             .await
             .unwrap();
@@ -160,15 +178,26 @@ mod tests {
                 reports[2].contains("only in the TUI. Use //clear"),
                 "{reports:?}"
             );
-            assert!(sink.events().iter().any(
-                |event| matches!(event, AgentEvent::TurnFailed(msg) if msg.contains("HTTP 400"))
+            assert!(matches!(
+                sink.events().last(),
+                Some(AgentEvent::TurnComplete)
             ));
-            assert!(
-                sink.events()
-                    .iter()
-                    .any(|event| matches!(event, AgentEvent::TurnComplete))
+            let data = store.load_session_data(&session_id).unwrap();
+            assert_eq!(
+                data.messages.len(),
+                3,
+                "the failed prompt, the literal, and its reply are saved",
             );
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn drive_fails_once_the_engine_stops() {
+        let input: &[u8] = b"hello\n";
+
+        let result = Box::pin(drive(stopped_engine(), &CapturingSink::new(), input)).await;
+
+        assert_eq!(result.unwrap_err().to_string(), "the engine stopped");
     }
 }
