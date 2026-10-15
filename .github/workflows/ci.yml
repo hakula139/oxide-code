@@ -4,11 +4,13 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
 
 env:
@@ -21,110 +23,133 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
-      - name: Setup Nix
+      - name: Set up Nix
         uses: ./.github/actions/setup-nix
-        with:
-          cachix_name: ${{ env.CACHIX_NAME }}
-          cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
-          cachix_skip_push: ${{ !(github.ref == 'refs/heads/main' || github.actor == 'hakula139') }}
 
       - name: Run flake check
         run: nix flake check
-
-  rust-check:
-    name: Rust Check
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Setup Nix
-        uses: ./.github/actions/setup-nix
-        with:
-          cachix_name: ${{ env.CACHIX_NAME }}
-          cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
-          cachix_skip_push: ${{ !(github.ref == 'refs/heads/main' || github.actor == 'hakula139') }}
-
-      - name: Cache cargo target
-        uses: Swatinem/rust-cache@v2
-
-      - name: Format
-        run: nix develop -c cargo fmt --all --check
-
-      - name: Clippy
-        run: nix develop -c cargo clippy --all-targets -- -D warnings
-
-      - name: Test
-        run: nix develop -c cargo test
-
-  coverage:
-    name: Coverage
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Setup Nix
-        uses: ./.github/actions/setup-nix
-        with:
-          cachix_name: ${{ env.CACHIX_NAME }}
-          cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
-          cachix_skip_push: ${{ !(github.ref == 'refs/heads/main' || github.actor == 'hakula139') }}
-
-      - name: Cache cargo target
-        uses: Swatinem/rust-cache@v2
-
-      - name: Generate coverage
-        run: nix develop -c cargo llvm-cov --ignore-filename-regex 'main\.rs' --lcov --output-path lcov.info
-
-      - name: Upload to Codecov
-        uses: codecov/codecov-action@v6
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          files: lcov.info
 
   node-check:
     name: Node Check
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
-      - name: Setup Nix
+      - name: Set up Nix
         uses: ./.github/actions/setup-nix
         with:
-          cachix_name: ${{ env.CACHIX_NAME }}
           cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
-          cachix_skip_push: ${{ !(github.ref == 'refs/heads/main' || github.actor == 'hakula139') }}
 
       - name: Install dependencies
         run: nix develop -c pnpm install --frozen-lockfile
 
-      - name: Lint Markdown
+      - name: Format
+        run: nix develop -c pnpm format
+
+      - name: Lint
         run: nix develop -c pnpm lint
 
       - name: Spell check
         run: nix develop -c pnpm spellcheck
 
+  rust-check:
+    name: Rust Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Nix
+        uses: ./.github/actions/setup-nix
+        with:
+          cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: nix develop -c cargo fmt --all --check
+
+      - name: Clippy
+        run: nix develop -c cargo clippy --locked --all-targets -- -D warnings
+
+  msrv-check:
+    name: MSRV Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Rust
+        run: rustup toolchain install
+
+      - name: Install cargo-hack
+        uses: taiki-e/install-action@cargo-hack
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check
+        run: cargo hack check --rust-version --workspace --all-targets --locked
+
+  windows-check:
+    name: Windows Check
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Rust
+        run: rustup toolchain install
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Nix
+        uses: ./.github/actions/setup-nix
+        with:
+          cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Generate coverage
+        run: nix develop -c cargo llvm-cov --locked --ignore-filename-regex 'main\.rs' --lcov --output-path lcov.info
+
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: lcov.info
+
   nix-build:
-    name: Nix Build (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    name: Nix Build (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        runner: [ubuntu-latest, macos-latest]
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
-      - name: Setup Nix
+      - name: Set up Nix
         uses: ./.github/actions/setup-nix
         with:
-          cachix_name: ${{ env.CACHIX_NAME }}
           cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
-          cachix_skip_push: ${{ !(github.ref == 'refs/heads/main' || github.actor == 'hakula139') }}
 
-      - name: Build oxide-code
-        run: nix build .#oxide-code --print-build-logs
+      - name: Build package
+        run: nix build .#oxide-code --no-link --print-build-logs

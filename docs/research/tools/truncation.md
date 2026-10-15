@@ -6,11 +6,11 @@ Research on tool output bounding across reference codebases. Based on [Claude Co
 
 Tiered caps applied at the dispatcher (after `Tool::run`, before message build):
 
-| Constant                             | Value   | Scope                    |
-| ------------------------------------ | ------- | ------------------------ |
-| `DEFAULT_MAX_RESULT_SIZE_CHARS`      | 50,000  | Per-tool default         |
-| `MAX_TOOL_RESULT_TOKENS`             | 100,000 | System-wide soft cap     |
-| `MAX_TOOL_RESULTS_PER_MESSAGE_CHARS` | 200,000 | Per-turn message budget  |
+| Constant                             | Value   | Scope                   |
+| ------------------------------------ | ------- | ----------------------- |
+| `DEFAULT_MAX_RESULT_SIZE_CHARS`      | 50,000  | Per-tool default        |
+| `MAX_TOOL_RESULT_TOKENS`             | 100,000 | System-wide soft cap    |
+| `MAX_TOOL_RESULTS_PER_MESSAGE_CHARS` | 200,000 | Per-turn message budget |
 
 When the per-message budget trips, the largest blocks are spilled to disk, replaced with a path preview the model can re-read. Feature-flagged (`tengu_hawthorn_window` in GrowthBook).
 
@@ -32,9 +32,9 @@ When either limit trips: take head or tail slice, write full output to temp file
 
 ## Comparison
 
-| Repo        | Cap location | Per-tool cap | System cap | Strategy          | Spillover          | Per-tool override |
-| ----------- | ------------ | ------------ | ---------- | ----------------- | ------------------ | ----------------- |
-| Claude Code | dispatcher   | 50 KB chars  | 100 K toks | tail-cut + spill  | yes (file path)    | yes               |
-| Codex       | tool output  | none         | per model  | head-tail         | no                 | exec, lower only  |
-| opencode    | dispatcher   | 50 KB        | none       | head/tail + spill | yes (file + hint)  | no                |
-| oxide-code  | dispatcher   | per-tool     | 128 KB     | head-tail         | no                 | yes               |
+| Repo        | Cap location | Per-tool cap | System cap | Strategy          | Spillover         | Per-tool override |
+| ----------- | ------------ | ------------ | ---------- | ----------------- | ----------------- | ----------------- |
+| Claude Code | dispatcher   | 50 KB chars  | 100 K toks | tail-cut + spill  | yes (file path)   | yes               |
+| Codex       | tool output  | none         | per model  | head-tail         | no                | exec, lower only  |
+| opencode    | dispatcher   | 50 KB        | none       | head/tail + spill | yes (file + hint) | no                |
+| oxide-code  | dispatcher   | per-tool     | 128 KB     | head-tail         | no                | yes               |

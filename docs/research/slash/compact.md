@@ -66,7 +66,7 @@ Dedicated `compaction` agent, anchored re-summarization via `<previous-summary>`
 
 - **Prune pre-stage**: `SessionCompaction.prune` stamps `part.state.time.compacted` on old tool outputs to wipe their bodies before any compaction LLM call. Analogous to Claude Code's microcompact.
 
-- **UX**: Top-bordered box captioned ` Compaction ` (or ` Auto Compaction `) above the user row, with the summary markdown inside. Still-too-large after stripping surfaces `ContextOverflowError` _"Session too large to compact - context exceeds model limit even after stripping media"_.
+- **UX**: Top-bordered box captioned `Compaction` (or `Auto Compaction`) above the user row, with the summary markdown inside. Still-too-large after stripping surfaces `ContextOverflowError` _"Session too large to compact - context exceeds model limit even after stripping media"_.
 
 ## Comparison
 

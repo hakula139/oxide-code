@@ -62,20 +62,20 @@ Three aliases for one overlay, plus a CLI-only listing subcommand.
 
 ## Comparison
 
-| Aspect            | Claude Code                              | Codex (Rust)                            | opencode                              |
-| ----------------- | ---------------------------------------- | --------------------------------------- | ------------------------------------- |
-| CLI surface       | `--continue` direct + `--resume` picker  | `resume` subcommand + `--last`          | `session list` (script-only)          |
-| Mid-session entry | `/resume` (alias `/continue`)            | `/resume` (idle only)                   | `/sessions`, `/resume`, `/continue`   |
-| Picker layer      | inline modal in chat                     | full-screen alt-screen, pre-chat        | overlay (`DialogSelect`)              |
-| Row shape         | title + metadata sub-line                | column row (Cre / Upd / Br / CWD / msg) | grouped by date, single-line          |
-| Search            | substring + agentic AI                   | substring (case-insensitive, instant)   | substring via SDK call                |
-| Page size         | 50 initial + `visibleCount * 3` more     | 25 + cursor-based, near-bottom prefetch | 30 when filtering, all otherwise      |
-| Project scope     | Ctrl+A toggle + Ctrl+W worktrees         | cwd default, `--all` widens             | workspace-global (root sessions only) |
-| Sort key          | mtime desc, grouped by repo              | mtime desc, Tab toggles Created vs Upd  | `time.updated` desc + ID tiebreak     |
-| Preview pane      | Ctrl+V (last messages)                   | none                                    | hover preview (web only)              |
-| Cross-project     | gated, copy-to-clipboard hint            | direct                                  | not surfaced (workspace-global)       |
-| Empty / single    | always show picker                       | always show picker                      | blank list                            |
-| Selection         | in-process re-init                       | in-process, returns to main loop        | URL navigation                        |
+| Aspect            | Claude Code                             | Codex (Rust)                            | opencode                              |
+| ----------------- | --------------------------------------- | --------------------------------------- | ------------------------------------- |
+| CLI surface       | `--continue` direct + `--resume` picker | `resume` subcommand + `--last`          | `session list` (script-only)          |
+| Mid-session entry | `/resume` (alias `/continue`)           | `/resume` (idle only)                   | `/sessions`, `/resume`, `/continue`   |
+| Picker layer      | inline modal in chat                    | full-screen alt-screen, pre-chat        | overlay (`DialogSelect`)              |
+| Row shape         | title + metadata sub-line               | column row (Cre / Upd / Br / CWD / msg) | grouped by date, single-line          |
+| Search            | substring + agentic AI                  | substring (case-insensitive, instant)   | substring via SDK call                |
+| Page size         | 50 initial + `visibleCount * 3` more    | 25 + cursor-based, near-bottom prefetch | 30 when filtering, all otherwise      |
+| Project scope     | Ctrl+A toggle + Ctrl+W worktrees        | cwd default, `--all` widens             | workspace-global (root sessions only) |
+| Sort key          | mtime desc, grouped by repo             | mtime desc, Tab toggles Created vs Upd  | `time.updated` desc + ID tiebreak     |
+| Preview pane      | Ctrl+V (last messages)                  | none                                    | hover preview (web only)              |
+| Cross-project     | gated, copy-to-clipboard hint           | direct                                  | not surfaced (workspace-global)       |
+| Empty / single    | always show picker                      | always show picker                      | blank list                            |
+| Selection         | in-process re-init                      | in-process, returns to main loop        | URL navigation                        |
 
 ## Patterns Worth Borrowing for oxide-code
 

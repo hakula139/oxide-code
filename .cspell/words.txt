@@ -33,6 +33,7 @@ EISDIR
 ENOENT
 ENOSPC
 ENOTDIR
+envrc
 ESRCH
 feff
 frappe
@@ -45,6 +46,7 @@ impls
 indoc
 insta
 isatty
+katex
 killpg
 Kobalte
 Konsole
@@ -90,10 +92,14 @@ rustls
 serde
 serie
 sess
+smol
+statix
+substituters
 swatinem
 syntect
 sysname
 SYSPROMPT
+taplo
 tengu
 Tera
 termio

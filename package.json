@@ -1,11 +1,18 @@
 {
   "private": true,
   "scripts": {
+    "format": "pnpm format:prettier && pnpm format:markdown && pnpm format:toml",
+    "format:prettier": "prettier --check \"**/*.{cjs,js,json,mjs,yaml,yml}\"",
+    "format:markdown": "dprint check",
+    "format:toml": "taplo format --check",
     "lint": "markdownlint-cli2 \"**/*.md\"",
     "spellcheck": "cspell --no-progress \"**/*\""
   },
   "devDependencies": {
-    "cspell": "^10.0.1",
-    "markdownlint-cli2": "^0.22.1"
+    "@taplo/cli": "^0.7.0",
+    "cspell": "^10.3.6",
+    "dprint": "^0.61.0",
+    "markdownlint-cli2": "^0.23.3",
+    "prettier": "^3.9.9"
   }
 }

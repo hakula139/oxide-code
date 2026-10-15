@@ -2,7 +2,7 @@
 
 Releases are produced by `.github/workflows/release.yml`, triggered when a tag matching `v[0-9]+.*` is pushed.
 
-`CHANGELOG.md` is fully auto-generated from Conventional Commits via [`git-cliff`](https://git-cliff.org). Do not hand-edit it. The `cliff.toml` config groups commits into Keep a Changelog sections (`Breaking changes`, `Added`, `Fixed`, `Changed`, `Removed`, `Dependencies`) and is the single source of truth for both the in-repo changelog and GitHub Release notes (the `taiki-e/create-gh-release-action` step extracts the matching version section).
+`CHANGELOG.md` is fully auto-generated from Conventional Commits via [`git-cliff`](https://git-cliff.org). Do not hand-edit it. The `cliff.toml` config groups commits into Keep a Changelog sections (`Breaking changes`, `Added`, `Fixed`, `Changed`, `Removed`, `Dependencies`) and is the single source of truth for both the in-repo changelog and GitHub Release notes (the release workflow extracts the matching version section with [`parse-changelog`](https://github.com/taiki-e/parse-changelog)).
 
 Any prose that should land in the changelog must come from a commit message: use `feat!:` / `fix!:` (or `feat(scope)!:` etc.) on PRs that introduce breaking changes so they surface in the `Breaking changes` section. Inline HTML in commit subjects is auto-backticked by a `commit_preprocessors` rule, so a subject like `feat(tui)!: render <pre> with syntax tint` renders correctly in the changelog without manual escaping.
 
@@ -26,14 +26,15 @@ The release lands through a PR, never a direct push to `main`. The order is: ope
 
    Inspect the diff to confirm the new section reads well. If it does not, fix the underlying commits (rebase, amend, reword the squash commit subject) and regenerate. Never edit the body sections of `CHANGELOG.md` directly.
 
-5. Add the compare-link footer line manually. `--prepend` does not touch the footer block, so insert this line above the previous-version line: `[X.Y.Z]: https://github.com/hakula139/oxide-code/compare/<prev-tag>..vX.Y.Z`. For the very first tag, use `https://github.com/hakula139/oxide-code/releases/tag/vX.Y.Z` instead (no compare base).
+5. Add the compare-link footer line manually. `--prepend` does not touch the footer links, which run newest first, so insert this line above the previous version's link: `[X.Y.Z]: https://github.com/hakula139/oxide-code/compare/<prev-tag>..vX.Y.Z`. For the very first tag, use `https://github.com/hakula139/oxide-code/releases/tag/vX.Y.Z` instead (no compare base).
 
-6. Run the full local check suite before pushing, so CI does not surface anything avoidable. This is the same set CI gates:
+6. Run the local check suite before pushing, so CI does not surface anything avoidable. It is the locally runnable subset of the CI checks:
 
    ```bash
    cargo fmt --all --check
    cargo clippy --all-targets -- -D warnings
    cargo test
+   pnpm format
    pnpm lint
    pnpm spellcheck
    ```
@@ -52,7 +53,7 @@ The release lands through a PR, never a direct push to `main`. The order is: ope
    git push origin vX.Y.Z
    ```
 
-10. The workflow creates the GitHub Release, extracting the matching `[X.Y.Z]` section from `CHANGELOG.md` as release notes, and uploads:
+10. The workflow builds every archive, checks that `ox --version` reports the tag's version, and then publishes the GitHub Release with the matching `[X.Y.Z]` section of `CHANGELOG.md` as its notes. A tag with a prerelease suffix, such as `v0.2.0-rc.1`, publishes a prerelease. The release carries:
 
     - `oxide-code-x86_64-unknown-linux-gnu.tar.gz` (+ `.sha256`)
     - `oxide-code-aarch64-apple-darwin.tar.gz` (+ `.sha256`)
@@ -61,7 +62,7 @@ The release lands through a PR, never a direct push to `main`. The order is: ope
 
     Each archive contains the `ox` binary.
 
-11. Refresh the Homebrew formula and the pinned install snippets against the published artifacts. Run this after the workflow finishes uploading assets, otherwise the sidecar URLs return 404. The script regenerates `Formula/oxide-code.rb` by fetching each `.sha256` sidecar from the release. Also set `VERSION=vX.Y.Z` in the install blocks of `README.md` and `docs/guide/install.md`. Both changes go through one PR of their own:
+11. Refresh the Homebrew formula and the pinned install snippets against the published artifacts. Run this after the workflow publishes the release, since the sidecar URLs return 404 until then. The script regenerates `Formula/oxide-code.rb` by fetching each `.sha256` sidecar from the release. Also set `VERSION=vX.Y.Z` in the install blocks of `README.md` and `docs/guide/install.md`. Both changes go through one PR of their own:
 
     ```bash
     git switch -c chore/homebrew-vX.Y.Z
@@ -81,16 +82,14 @@ cargo install git-cliff      # any platform with cargo
 
 ## Re-cutting an existing tag
 
-The PR-based flow tags only reviewed, CI-green commits, so re-cutting should be rare. If a release still needs to be redone (e.g., bad assets), let any in-flight release run finish first so deletion does not race its uploads, then:
+The PR-based flow tags only reviewed, CI-green commits, so re-cutting should be rare. If a release still needs to be redone (e.g., bad assets), let any in-flight release run finish first. To rebuild the same commit, delete only the release with `gh release delete vX.Y.Z --yes` and run the release workflow from the Actions tab against the tag. To release a different commit, delete the release and its tag, then move and push the tag:
 
 ```bash
 gh release delete vX.Y.Z --cleanup-tag --yes
-git tag vX.Y.Z               # re-tag locally on the desired commit
+git tag -f vX.Y.Z <commit>
 git push origin vX.Y.Z
 ```
 
-Or trigger `workflow_dispatch` from the Actions tab against the existing tag.
-
 ## Targets
 
-The matrix in `release.yml` covers `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin`, `x86_64-apple-darwin`, and `x86_64-pc-windows-msvc`. Add new targets by extending that matrix. The archive name template (`oxide-code-$target`) and `bin: ox` apply uniformly.
+The matrix in `release.yml` covers `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin`, `x86_64-apple-darwin`, and `x86_64-pc-windows-msvc`. Add new targets by extending that matrix. The archive name template (`oxide-code-$target`) and `bin: ox` apply uniformly. Pull requests that change `release.yml`, the Cargo manifests, `Cargo.lock`, or `rust-toolchain.toml` build every target without publishing.

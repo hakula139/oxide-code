@@ -5,7 +5,6 @@ use std::io::Write;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use tracing::debug;
 use uuid::Uuid;
 
 /// Creates `path` (and parents) with `0o700` perms on Unix.
@@ -25,7 +24,7 @@ pub(crate) fn create_private_dir_all(path: &Path) -> Result<()> {
     {
         use std::os::unix::fs::PermissionsExt;
         if let Err(e) = fs::set_permissions(path, fs::Permissions::from_mode(0o700)) {
-            debug!("failed to tighten {} to 0o700: {e}", path.display());
+            tracing::debug!("failed to tighten {} to 0o700: {e}", path.display());
         }
     }
     Ok(())
@@ -126,6 +125,21 @@ mod tests {
         create_private_dir_all(&target).unwrap();
         let mode = fs::metadata(&target).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o700, "existing dir tightened: {mode:o}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_private_dir_all_tolerates_existing_directory_it_cannot_chmod() {
+        use std::os::unix::fs::MetadataExt;
+
+        let root = Path::new("/");
+        let own_uid = fs::metadata(tempdir().unwrap().path()).unwrap().uid();
+        let before = fs::metadata(root).unwrap();
+        if before.uid() == own_uid {
+            return;
+        }
+        create_private_dir_all(root).unwrap();
+        assert_eq!(fs::metadata(root).unwrap().mode(), before.mode());
     }
 
     #[test]

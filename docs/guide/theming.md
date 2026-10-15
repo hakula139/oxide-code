@@ -120,12 +120,12 @@ Each slot maps to one role in the TUI. Override a slot by name to restyle that r
 
 ### Status indicators
 
-| Slot      | Role                                               |
-| --------- | -------------------------------------------------- |
-| `info`    | In-progress / neutral signals (e.g., streaming)    |
-| `success` | Successful tool results, ready status              |
-| `warning` | Caution status (e.g., the Ctrl+C exit hint)        |
-| `error`   | Errors, failed tools, critical status              |
+| Slot      | Role                                            |
+| --------- | ----------------------------------------------- |
+| `info`    | In-progress / neutral signals (e.g., streaming) |
+| `success` | Successful tool results, ready status           |
+| `warning` | Caution status (e.g., the Ctrl+C exit hint)     |
+| `error`   | Errors, failed tools, critical status           |
 
 ### Code
 

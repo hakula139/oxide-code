@@ -55,7 +55,8 @@ trim = true
 postprocessors = [
   { pattern = '\n{3,}', replace = "\n\n" },
   # Trim Dependabot / Renovate verbose phrasing for `chore(deps)` commits.
-  { pattern = ' in the [a-z]+ group(?: across \d+ director(?:y|ies))?', replace = "" },
+  { pattern = ' in the [a-z_-]+ group(?: across \d+ director(?:y|ies))?', replace = "" },
+  { pattern = 'Bump the ([a-z_-]+) group(?: across \d+ director(?:y|ies))? with (\d+ updates?)', replace = "Bump $1 dependencies ($2)" },
 ]
 
 [git]
