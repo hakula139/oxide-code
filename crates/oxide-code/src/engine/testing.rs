@@ -52,6 +52,13 @@ pub(crate) async fn engine(base_url: String, store: &SessionStore, cwd: &Path) -
     }
 }
 
+impl Engine {
+    pub(crate) fn with_tools(mut self, tools: ToolRegistry) -> Self {
+        self.tools = Arc::new(tools);
+        self
+    }
+}
+
 /// Handle to an engine that has already stopped, as after a panic.
 pub(crate) fn stopped_engine() -> EngineHandle {
     let (ops, _) = mpsc::channel(1);
@@ -84,12 +91,17 @@ pub(crate) async fn mount_reply(server: &MockServer, text: &str) {
         .await;
 }
 
-/// Answers the next Messages request with a call to the tool `name`. Mount it before the reply that
-/// should follow.
-pub(super) async fn mount_tool_call_once(server: &MockServer, name: &str) {
+/// Answers the next Messages request with the tool call `id` to `name` with `input_json`. Mount it
+/// before the reply that should follow.
+pub(crate) async fn mount_tool_call_once(
+    server: &MockServer,
+    id: &str,
+    name: &str,
+    input_json: &str,
+) {
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
-        .respond_with(sse_response(tool_use_stream_body("call-1", name, "{}")))
+        .respond_with(sse_response(tool_use_stream_body(id, name, input_json)))
         .up_to_n_times(1)
         .mount(server)
         .await;

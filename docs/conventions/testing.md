@@ -26,7 +26,7 @@ Conventions for tests, coverage, and mutation testing.
 
 ## Snapshots
 
-`insta` snapshot tests compare TUI renders and session JSONL against baselines in the module's `snapshots/` directory. When output changes, the test fails and writes a `.snap.new` file beside the baseline. Review the difference, then accept it with `INSTA_UPDATE=always cargo test <filter>` or `cargo insta review` if cargo-insta is installed, and commit the updated `.snap`. Delete baselines left behind by renamed or removed tests.
+`insta` snapshot tests compare TUI renders, session JSONL, and headless output against baselines in the module's `snapshots/` directory. When output changes, the test fails and writes a `.snap.new` file beside the baseline. Review the difference, then accept it with `INSTA_UPDATE=always cargo test <filter>` or `cargo insta review` if cargo-insta is installed, and commit the updated `.snap`. Delete baselines left behind by renamed or removed tests.
 
 ## Coverage
 

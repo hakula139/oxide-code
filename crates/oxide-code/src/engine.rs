@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
+use serde::Serialize;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::warn;
@@ -628,8 +629,10 @@ fn estimate_cost_usd(requests: &[UsageRecord]) -> f64 {
 
 // ── Reporting ──
 
-/// How a prompt or compaction ended, after the sink has already shown it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// How a prompt or compaction ended, after the sink has already shown it. A headless run reports
+/// it as its stop reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum TurnEnd {
     Completed,
     Cancelled,
@@ -1009,7 +1012,7 @@ mod tests {
     async fn run_splices_a_queued_prompt_in_at_the_next_round_boundary() {
         with_pinned_home(async {
             let server = MockServer::start().await;
-            mount_tool_call_once(&server, "missing").await;
+            mount_tool_call_once(&server, "call-1", "missing", "{}").await;
             mount_reply(&server, "done").await;
             let dir = tempfile::tempdir().unwrap();
             let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;

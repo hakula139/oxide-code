@@ -30,7 +30,7 @@ The picks lean toward the Codex precedent on most surfaces, since it is the one 
 
 7. **Cancellation rides the existing `Event` channel.** `Event::Cancelled` covers both the TUI and `StdioSink`. No new event channel.
 
-8. **One terminal event per operation.** A prompt ends with exactly one of `TurnComplete`, `TurnFailed`, or `Cancelled`. `/compact` ends with `SessionCompacted`, `TurnFailed`, or `Cancelled`, and `/resume` with `SessionResumed` or `TurnFailed`. Only these run the TUI teardown that submits the queue head. `Error` is a notice for failures that leave the operation running, such as a session write failure, a failed automatic compaction, or a refusal before its `TurnComplete`, and `Retrying` is a dim notice for a request the client sends again.
+8. **One terminal event per operation.** A prompt ends with exactly one of `TurnComplete`, `TurnFailed`, or `Cancelled`. `/compact` ends with `SessionCompacted`, `TurnFailed`, or `Cancelled`, and `/resume` with `SessionResumed` or `TurnFailed`. Only these run the TUI teardown that submits the queue head. `Error` is a notice for failures that leave the operation running, such as a failed session write or automatic compaction, and `Retrying` is a dim notice for a request the client sends again.
 
 ## Sources
 
