@@ -113,6 +113,22 @@
               };
             };
 
+            module-docs = {
+              enable = true;
+              name = "Rust module docs";
+              entry = "${pkgs.bash}/bin/bash scripts/check-module-docs.sh";
+              files = "^crates/.*\\.rs$";
+              extraPackages = [ pkgs.gnugrep ];
+            };
+
+            ascii-ellipsis = {
+              enable = true;
+              name = "ASCII ellipsis";
+              entry = "${pkgs.bash}/bin/bash scripts/check-ellipsis.sh";
+              types = [ "text" ];
+              extraPackages = [ pkgs.gnugrep ];
+            };
+
             prettier-write = {
               enable = true;
               name = "prettier";

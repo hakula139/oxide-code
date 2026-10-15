@@ -134,7 +134,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Generate coverage
-        run: nix develop -c cargo llvm-cov --locked --ignore-filename-regex 'main\.rs' --lcov --output-path lcov.info
+        run: nix develop -c cargo llvm-cov --locked --lcov --output-path lcov.info
 
       - name: Upload to Codecov
         uses: codecov/codecov-action@v7
