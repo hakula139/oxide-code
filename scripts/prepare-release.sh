@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Prepare the release PR for a tag: prepend the changelog section with its compare link, bump the
-# version, and pin the install snippets to the tag.
+# version, pin the install snippets to the tag, and add the tag's session resume fixture.
 #
 #   ./scripts/prepare-release.sh vX.Y.Z [highlights.md]
 #
@@ -27,11 +27,21 @@ if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
 fi
 
 cd "$(git rev-parse --show-toplevel)"
-files=(CHANGELOG.md Cargo.toml Cargo.lock README.md docs/guide/install.md)
+snapshots=crates/oxide-code/src/session/snapshots
+written="$snapshots/ox__session__handle__tests__session_writes_every_entry_type_as_byte_compatible_jsonl.snap"
+fixture="crates/oxide-code/src/session/fixtures/$tag.jsonl"
+resumed="$snapshots/ox__session__handle__tests__session_resumes_from_every_release_fixture@$tag.jsonl.snap"
+files=(CHANGELOG.md Cargo.toml Cargo.lock README.md docs/guide/install.md "$written")
 if ! git diff --quiet HEAD -- "${files[@]}"; then
   echo "Error: discard the changes to ${files[*]} before preparing a release" >&2
   exit 1
 fi
+for path in "$fixture" "$resumed"; do
+  if [[ -e "$path" ]]; then
+    echo "Error: remove $path before preparing a release" >&2
+    exit 1
+  fi
+done
 
 version="${tag#v}"
 repo="https://github.com/hakula139/oxide-code"
@@ -72,5 +82,10 @@ fi
 cargo update --workspace --quiet
 
 perl -pi -e "s/^VERSION=v.*/VERSION=$tag/" README.md docs/guide/install.md
+
+# The fixture is the byte-compat snapshot without its insta header. `unseen` records the new
+# fixture's resume snapshot and still fails when an earlier fixture resumes differently.
+awk 'header == 2 { print } /^---$/ { header++ }' "$written" >"$fixture"
+INSTA_UPDATE=unseen cargo test --quiet --bin ox session_resumes_from_every_release_fixture
 
 printf 'Prepared %s. Review the diff, then commit it as chore(release): %s.\n' "$tag" "$tag"

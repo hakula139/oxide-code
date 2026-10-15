@@ -1281,9 +1281,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b67d3d2e287e4b86c10b3f3b641033d1f89b74bdb39d05f34952e2b9a6fe21cd"
 dependencies = [
  "console",
+ "globset",
  "once_cell",
  "similar",
  "tempfile",
+ "walkdir",
 ]
 
 [[package]]
