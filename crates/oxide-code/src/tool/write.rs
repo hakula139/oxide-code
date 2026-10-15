@@ -154,7 +154,7 @@ async fn write_file(
     if let Some(parent) = file_path.parent() {
         tokio::fs::create_dir_all(parent)
             .await
-            .map_err(|e| format!("Failed to create directory: {e}"))?;
+            .map_err(|e| format!("Failed to create directory {}: {e}", parent.display()))?;
     }
 
     super::write_tracked(tracker, path, content.as_bytes().to_vec(), is_new)
@@ -487,20 +487,21 @@ mod tests {
 
     #[tokio::test]
     async fn write_file_fails_when_parent_is_a_file() {
-        // Regular-file parent → ENOTDIR, surfaced via the same shape as edit.rs.
+        // Unix fails the stat with ENOTDIR, and Windows, which reports the path as missing, fails
+        // creating the parent. Either error names the blocking path.
         let dir = canonical_tempdir();
         let blocker = dir.path().join("blocker");
         std::fs::write(&blocker, "I am a file").unwrap();
 
         let path = blocker.join("child.txt");
-        let path_str = path.to_str().unwrap();
-        let err = write_file(path_str, "content", &tracker())
+        let err = write_file(path.to_str().unwrap(), "content", &tracker())
             .await
             .unwrap_err();
         assert!(
-            err.starts_with("Error reading ") && err.contains(path_str),
-            "expected stat error to mention the path, got: {err}",
+            err.contains(blocker.to_str().unwrap()),
+            "expected the error to name the blocking file, got: {err}",
         );
+        assert_eq!(std::fs::read_to_string(&blocker).unwrap(), "I am a file");
     }
 
     #[tokio::test]
@@ -604,9 +605,13 @@ mod tests {
         let err = write_file(path.to_str().unwrap(), "content", &tracker())
             .await
             .unwrap_err();
+        let expected = format!(
+            "Failed to create directory {}: ",
+            readonly.join("nested").display()
+        );
         assert!(
-            err.starts_with("Failed to create directory:"),
-            "expected mkdir denial, got: {err}",
+            err.starts_with(&expected),
+            "expected mkdir denial, got: {err}"
         );
     }
 }

@@ -61,7 +61,7 @@ A session records its prompt context (the environment section, the first message
 
 ### Fork-on-conflict concurrency
 
-There is no file-level lock: two processes resuming the same session both append, and the newest-leaf rule resolves forks deterministically. Each batch lands in one `O_APPEND` write, so concurrent appends interleave only between batches.
+There is no file-level lock: two processes resuming the same session both append, and the newest-leaf rule resolves forks deterministically. Each batch lands in one append write (`O_APPEND` on Unix, an end-of-file-offset write on Windows), so concurrent appends interleave only between batches.
 
 ### AI-generated titles
 

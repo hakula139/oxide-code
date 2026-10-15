@@ -347,7 +347,7 @@ fn now_millis() -> Option<u64> {
 }
 
 fn credentials_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".claude").join(".credentials.json"))
+    std::env::home_dir().map(|h| h.join(".claude").join(".credentials.json"))
 }
 
 // ── File Locking ──
@@ -404,7 +404,7 @@ fn is_stale_lock(path: &Path) -> bool {
 }
 
 fn lock_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".claude.lock"))
+    std::env::home_dir().map(|h| h.join(".claude.lock"))
 }
 
 #[cfg(test)]
@@ -454,7 +454,10 @@ mod tests {
         );
 
         let token = temp_env::async_with_vars(
-            [("HOME", Some(home.path().to_string_lossy().into_owned()))],
+            [(
+                crate::util::path::testing::HOME_VAR,
+                Some(home.path().to_string_lossy().into_owned()),
+            )],
             async { load_token(None).await.unwrap() },
         )
         .await;
@@ -1157,13 +1160,28 @@ mod tests {
         std::fs::create_dir(&lock_path).unwrap();
         let abandoned_at =
             std::time::SystemTime::now() - LOCK_STALE_THRESHOLD - Duration::from_secs(1);
-        std::fs::File::open(&lock_path)
-            .unwrap()
-            .set_modified(abandoned_at)
-            .unwrap();
+        open_dir(&lock_path).set_modified(abandoned_at).unwrap();
 
         let _guard = acquire_lock(&lock_path).await.unwrap();
         assert!(!is_stale_lock(&lock_path));
+    }
+
+    /// Opens a directory with enough access to set its mtime.
+    fn open_dir(path: &Path) -> std::fs::File {
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt as _;
+
+            // `FILE_WRITE_ATTRIBUTES` access, and `FILE_FLAG_BACKUP_SEMANTICS`, without which
+            // Windows refuses to open a directory.
+            std::fs::OpenOptions::new()
+                .access_mode(0x0100)
+                .custom_flags(0x0200_0000)
+                .open(path)
+                .unwrap()
+        }
+        #[cfg(not(windows))]
+        std::fs::File::open(path).unwrap()
     }
 
     #[tokio::test]

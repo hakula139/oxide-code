@@ -479,7 +479,7 @@ fn protected_roots(cwd: &Path) -> Vec<PathBuf> {
 /// oxide-code's own config, data, and state directories, resolved like a target so a symlinked
 /// XDG base still compares equal. An edit there could rewrite its config or session history.
 fn app_dirs() -> Vec<PathBuf> {
-    let home = dirs::home_dir();
+    let home = std::env::home_dir();
     [
         ("XDG_CONFIG_HOME", ".config"),
         ("XDG_DATA_HOME", ".local/share"),
@@ -501,7 +501,7 @@ fn app_dirs() -> Vec<PathBuf> {
 /// Whether the resolved `cwd` is a project directory whose contents may auto-allow edits. `/`,
 /// `$HOME`, and its ancestors are not, since "inside cwd" there spans every dotfile and project.
 fn is_workspace(cwd: &Path) -> bool {
-    let home = dirs::home_dir().map(|home| resolve(&home).unwrap_or(home));
+    let home = std::env::home_dir().map(|home| resolve(&home).unwrap_or(home));
     cwd.parent().is_some() && !home.is_some_and(|home| home.starts_with(cwd))
 }
 
@@ -653,6 +653,7 @@ fn with_resolved_prefixes(mut rules: Vec<Rule>, cwd: &Path) -> Result<Vec<Rule>>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::path::testing::{HOME_VAR, abs};
 
     fn policy(mode: Mode, allow: &[&str], deny: &[&str]) -> Policy {
         Policy::new(
@@ -688,11 +689,12 @@ mod tests {
     /// tempdirs behind the `/var` → `/private/var` symlink).
     fn temp_cwd() -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
-        let cwd = std::fs::canonicalize(dir.path()).unwrap();
+        let cwd = dunce::canonicalize(dir.path()).unwrap();
         (dir, cwd)
     }
 
-    fn resolved(target: &GateTarget) -> (&str, Option<&str>, Zone) {
+    /// The canonical and relative spellings as paths, which compare equal across separators.
+    fn resolved(target: &GateTarget) -> (&Path, Option<&Path>, Zone) {
         let GateTarget::Path {
             canonical,
             relative,
@@ -702,7 +704,11 @@ mod tests {
         else {
             panic!("expected a path target, got {target:?}");
         };
-        (canonical, relative.as_deref(), *zone)
+        (
+            Path::new(canonical),
+            relative.as_deref().map(Path::new),
+            *zone,
+        )
     }
 
     // ── Mode::from_str ──
@@ -745,8 +751,8 @@ mod tests {
 
         let target = GateTarget::for_path("a.rs", &cwd);
         let (canonical, relative, zone) = resolved(&target);
-        assert_eq!(canonical, cwd.join("a.rs").to_str().unwrap());
-        assert_eq!(relative, Some("a.rs"));
+        assert_eq!(canonical, cwd.join("a.rs"));
+        assert_eq!(relative, Some(Path::new("a.rs")));
         assert_eq!(zone, Zone::Workspace);
     }
 
@@ -758,8 +764,8 @@ mod tests {
         assert_eq!(
             resolved(&target),
             (
-                cwd.join("new/file.rs").to_str().unwrap(),
-                Some("new/file.rs"),
+                cwd.join("new/file.rs").as_path(),
+                Some(Path::new("new/file.rs")),
                 Zone::Workspace,
             ),
         );
@@ -785,11 +791,7 @@ mod tests {
             let target = GateTarget::for_path(raw, &cwd);
             assert_eq!(
                 resolved(&target),
-                (
-                    root.join("escape.rs").to_str().unwrap(),
-                    None,
-                    Zone::Outside
-                ),
+                (root.join("escape.rs").as_path(), None, Zone::Outside),
                 "{raw}",
             );
         }
@@ -800,7 +802,7 @@ mod tests {
         let (_dir, cwd) = temp_cwd();
         let target = GateTarget::for_path(".vscode/tasks.json", &cwd);
         let (_, relative, zone) = resolved(&target);
-        assert_eq!(relative, Some(".vscode/tasks.json"));
+        assert_eq!(relative, Some(Path::new(".vscode/tasks.json")));
         assert_eq!(zone, Zone::Protected);
     }
 
@@ -830,17 +832,18 @@ mod tests {
 
     #[test]
     fn for_path_cwd_containing_home_is_not_a_workspace() {
-        // Launched from `$HOME` (or any ancestor of it, `/` included), "inside cwd" spans every
-        // dotfile, so edits there must not auto-allow. Relative rule globs still see the path.
+        // Launched from `$HOME` (or any ancestor of it, the root included), "inside cwd" spans
+        // every dotfile, so edits there must not auto-allow. Relative rule globs still see the path.
         let (_dir, root) = temp_cwd();
         let home = root.join("home");
         std::fs::create_dir(&home).unwrap();
+        let fs_root = root.ancestors().last().unwrap();
 
-        temp_env::with_var("HOME", Some(&home), || {
-            for cwd in [home.as_path(), root.as_path(), Path::new("/")] {
+        temp_env::with_var(HOME_VAR, Some(&home), || {
+            for cwd in [home.as_path(), root.as_path(), fs_root] {
                 let target = GateTarget::for_path("notes.md", cwd);
                 let (_, relative, zone) = resolved(&target);
-                assert_eq!(relative, Some("notes.md"), "{cwd:?}");
+                assert_eq!(relative, Some(Path::new("notes.md")), "{cwd:?}");
                 assert_eq!(zone, Zone::Outside, "{cwd:?}");
             }
 
@@ -870,11 +873,7 @@ mod tests {
         let target = GateTarget::for_path("link/new.rs", &cwd);
         assert_eq!(
             resolved(&target),
-            (
-                outside.join("new.rs").to_str().unwrap(),
-                None,
-                Zone::Outside
-            ),
+            (outside.join("new.rs").as_path(), None, Zone::Outside),
         );
     }
 
@@ -891,11 +890,7 @@ mod tests {
         let target = GateTarget::for_path("notes.md", &cwd);
         assert_eq!(
             resolved(&target),
-            (
-                root.join("escape.txt").to_str().unwrap(),
-                None,
-                Zone::Outside
-            ),
+            (root.join("escape.txt").as_path(), None, Zone::Outside),
         );
     }
 
@@ -915,7 +910,7 @@ mod tests {
         assert_eq!(
             resolved(&target),
             (
-                root.join("elsewhere/dir/new.rs").to_str().unwrap(),
+                root.join("elsewhere/dir/new.rs").as_path(),
                 None,
                 Zone::Outside,
             ),
@@ -936,7 +931,7 @@ mod tests {
         let target = GateTarget::for_path("missing/../link/x", &cwd);
         assert_eq!(
             resolved(&target),
-            (outside.join("x").to_str().unwrap(), None, Zone::Outside),
+            (outside.join("x").as_path(), None, Zone::Outside),
         );
 
         let target = GateTarget::for_path("x/../tools/pre-commit", &cwd);
@@ -959,7 +954,7 @@ mod tests {
         let target = GateTarget::for_path("notes.md", &cwd);
         assert_eq!(
             resolved(&target),
-            (outside.join("new").to_str().unwrap(), None, Zone::Outside),
+            (outside.join("new").as_path(), None, Zone::Outside),
         );
     }
 
@@ -1000,8 +995,8 @@ mod tests {
         assert_eq!(
             resolved(&GateTarget::for_path("a.rs", &cwd)),
             (
-                cwd.join("a.rs").to_str().unwrap(),
-                Some("a.rs"),
+                cwd.join("a.rs").as_path(),
+                Some(Path::new("a.rs")),
                 Zone::Outside
             ),
         );
@@ -1046,7 +1041,7 @@ mod tests {
         assert_eq!(
             resolved(&target),
             (
-                cwd.join("locked/sub/../../link/x").to_str().unwrap(),
+                cwd.join("locked/sub/../../link/x").as_path(),
                 None,
                 Zone::Outside
             ),
@@ -1354,13 +1349,17 @@ mod tests {
 
     #[test]
     fn decide_outside_edit_asks_unless_an_allow_rule_matches() {
-        let p = policy(Mode::Auto, &["edit(/tmp/**)"], &[]);
+        let p = policy(
+            Mode::Auto,
+            &[format!("edit({})", abs("/tmp/**")).as_str()],
+            &[],
+        );
         assert_eq!(
-            p.decide(PermissionClass::Edit, &outside("/etc/passwd")),
+            p.decide(PermissionClass::Edit, &outside(&abs("/etc/passwd"))),
             Decision::Ask,
         );
         assert_eq!(
-            p.decide(PermissionClass::Edit, &outside("/tmp/scratch.txt")),
+            p.decide(PermissionClass::Edit, &outside(&abs("/tmp/scratch.txt"))),
             Decision::Allow,
         );
     }
@@ -1380,9 +1379,13 @@ mod tests {
 
     #[test]
     fn decide_allow_rule_matches_only_the_spelling_it_names() {
-        let p = policy(Mode::Auto, &["edit(/tmp/notes/**)"], &[]);
+        let p = policy(
+            Mode::Auto,
+            &[format!("edit({})", abs("/tmp/notes/**")).as_str()],
+            &[],
+        );
         assert_eq!(
-            p.decide(PermissionClass::Edit, &outside("/tmp/notes/a.md")),
+            p.decide(PermissionClass::Edit, &outside(&abs("/tmp/notes/a.md"))),
             Decision::Allow
         );
         for raw in [
@@ -1391,7 +1394,7 @@ mod tests {
             "/tmp/no\u{200b}tes/a.md",
         ] {
             assert_eq!(
-                p.decide(PermissionClass::Edit, &outside(raw)),
+                p.decide(PermissionClass::Edit, &outside(&abs(raw))),
                 Decision::Ask,
                 "{raw}"
             );

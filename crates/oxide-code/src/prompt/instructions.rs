@@ -39,7 +39,7 @@ pub(super) async fn load(cwd: &Path, git_root: Option<&Path>) -> String {
 fn candidate_slots(cwd: &Path, project_root: &Path) -> Vec<Slot> {
     let mut slots = Vec::new();
 
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = std::env::home_dir() {
         for subdir in INSTRUCTION_DIRS {
             slots.push(Slot {
                 candidates: INSTRUCTION_FILENAMES
@@ -226,7 +226,7 @@ mod tests {
         let root = PathBuf::from("/repo");
         let slots = candidate_slots(&root, &root);
 
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = std::env::home_dir() {
             assert_eq!(slots.len(), 3);
             assert_eq!(slots[0].label, "user's global instructions");
             assert_eq!(

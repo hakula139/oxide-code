@@ -23,32 +23,32 @@ pub(crate) fn xdg_dir(
 
 /// Replaces a `$HOME` prefix with `~/`, falling back to the full path.
 pub(crate) fn tildify(path: &Path) -> String {
-    dirs::home_dir()
+    std::env::home_dir()
         .and_then(|home| path.strip_prefix(&home).ok().map(Path::to_path_buf))
         .map_or_else(
             || path.display().to_string(),
-            |rel| format!("~/{}", rel.display()),
+            |rel| format!("~/{}", slash_separated(&rel)),
         )
 }
 
-/// Expands a leading `~` or `~/` to the user's home directory. Bare `~` resolves to `$HOME`, and
-/// `~/foo/bar` resolves to `$HOME/foo/bar`. Per-user forms like `~alice/...` pass through
-/// unchanged (no passwd lookup) and non-tilde paths pass through as well. Errors when the input
-/// starts with `~` but `dirs::home_dir()` yields no value, since a literal `~`-prefixed path
-/// would otherwise fail far downstream with a misleading filesystem error.
+/// Expands a leading `~` or `~/` (or `~\` on Windows) to the user's home directory. Bare `~`
+/// resolves to `$HOME`, and `~/foo/bar` resolves to `$HOME/foo/bar`. Per-user forms like
+/// `~alice/...` pass through unchanged (no passwd lookup) and non-tilde paths pass through as well.
+/// Errors when the input starts with `~` but [`std::env::home_dir`] yields no value, since a
+/// literal `~`-prefixed path would otherwise fail downstream with a misleading filesystem error.
 pub(crate) fn expand_user(raw: &str) -> Result<PathBuf> {
     let Some(tail) = raw.strip_prefix('~') else {
         return Ok(PathBuf::from(raw));
     };
-    if !(tail.is_empty() || tail.starts_with('/')) {
+    if !(tail.is_empty() || tail.starts_with(std::path::is_separator)) {
         return Ok(PathBuf::from(raw));
     }
-    let home = dirs::home_dir()
-        .ok_or_else(|| anyhow!("cannot expand `~` in {raw:?}: no home directory (set $HOME)"))?;
+    let home = std::env::home_dir()
+        .ok_or_else(|| anyhow!("cannot expand `~` in {raw:?}: no home directory"))?;
     if tail.is_empty() {
         return Ok(home);
     }
-    Ok(home.join(tail.trim_start_matches('/')))
+    Ok(home.join(tail.trim_start_matches(std::path::is_separator)))
 }
 
 /// Resolves `.` and `..` components without touching the filesystem, so two spellings of one path
@@ -72,10 +72,30 @@ pub(crate) fn lexical_normalize(path: &Path) -> PathBuf {
     out
 }
 
+/// `path` as lossy UTF-8 with every platform separator written as `/`. Paths the model reads use
+/// this form, since its shell is bash, where `\` escapes the next character.
+pub(crate) fn slash_separated(path: &Path) -> String {
+    path.to_string_lossy().replace(std::path::is_separator, "/")
+}
+
+#[cfg(test)]
+pub(crate) mod testing {
+    /// The variable [`std::env::home_dir`] reads first, so tests can point it at a fixture.
+    pub(crate) const HOME_VAR: &str = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+
+    /// A rooted Unix fixture path made absolute for the host. Windows needs a drive, so the path
+    /// moves onto `C:` there.
+    pub(crate) fn abs(path: &str) -> String {
+        let drive = if cfg!(windows) { "C:" } else { "" };
+        format!("{drive}{path}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
+    use super::testing::{HOME_VAR, abs};
     use super::*;
 
     // ── xdg_dir ──
@@ -83,12 +103,12 @@ mod tests {
     #[test]
     fn xdg_dir_prefers_absolute_xdg_over_home_fallback() {
         let result = xdg_dir(
-            Some(PathBuf::from("/custom/data")),
+            Some(PathBuf::from(abs("/custom/data"))),
             Some(PathBuf::from("/home/u")),
             Path::new(".local/share"),
             Path::new("ox/sessions"),
         );
-        assert_eq!(result, Some(PathBuf::from("/custom/data/ox/sessions")));
+        assert_eq!(result, Some(PathBuf::from(abs("/custom/data/ox/sessions"))));
     }
 
     #[test]
@@ -136,7 +156,7 @@ mod tests {
 
     #[test]
     fn tildify_rewrites_home_prefix_to_tilde() {
-        temp_env::with_var("HOME", Some("/tmp/oxide-home"), || {
+        temp_env::with_var(HOME_VAR, Some("/tmp/oxide-home"), || {
             assert_eq!(
                 tildify(&PathBuf::from("/tmp/oxide-home/work/project")),
                 "~/work/project",
@@ -146,7 +166,7 @@ mod tests {
 
     #[test]
     fn tildify_preserves_paths_outside_home() {
-        temp_env::with_var("HOME", Some("/tmp/oxide-home"), || {
+        temp_env::with_var(HOME_VAR, Some("/tmp/oxide-home"), || {
             assert_eq!(
                 tildify(&PathBuf::from("/tmp/not-home/session")),
                 "/tmp/not-home/session",
@@ -156,7 +176,7 @@ mod tests {
 
     #[test]
     fn tildify_leaves_home_itself_as_tilde() {
-        temp_env::with_var("HOME", Some("/tmp/oxide-home"), || {
+        temp_env::with_var(HOME_VAR, Some("/tmp/oxide-home"), || {
             assert_eq!(tildify(&PathBuf::from("/tmp/oxide-home")), "~/");
         });
     }
@@ -165,7 +185,7 @@ mod tests {
 
     #[test]
     fn expand_user_rewrites_leading_tilde_slash_to_home() {
-        temp_env::with_var("HOME", Some("/tmp/oxide-fake-home"), || {
+        temp_env::with_var(HOME_VAR, Some("/tmp/oxide-fake-home"), || {
             assert_eq!(
                 expand_user("~/work/project").unwrap(),
                 PathBuf::from("/tmp/oxide-fake-home/work/project")
@@ -177,7 +197,7 @@ mod tests {
     fn expand_user_collapses_redundant_slashes_after_tilde() {
         // `~//foo` and `~///foo` should land at $HOME/foo, not at /foo. PathBuf::join replaces
         // the receiver when the argument is absolute, so the tail must be trimmed first.
-        temp_env::with_var("HOME", Some("/tmp/oxide-fake-home"), || {
+        temp_env::with_var(HOME_VAR, Some("/tmp/oxide-fake-home"), || {
             for raw in ["~//foo", "~///foo/bar"] {
                 let got = expand_user(raw).unwrap();
                 assert!(
@@ -190,7 +210,7 @@ mod tests {
 
     #[test]
     fn expand_user_bare_tilde_resolves_to_home() {
-        temp_env::with_var("HOME", Some("/tmp/oxide-fake-home"), || {
+        temp_env::with_var(HOME_VAR, Some("/tmp/oxide-fake-home"), || {
             assert_eq!(
                 expand_user("~").unwrap(),
                 PathBuf::from("/tmp/oxide-fake-home")
@@ -215,8 +235,8 @@ mod tests {
     }
 
     // The `expand_user` home-unset error branch is unreachable from a Linux unit test:
-    // `dirs::home_dir()` falls back to `getpwuid_r` when `$HOME` is empty, so the `None`
-    // arm only fires in exotic environments (no passwd entry, Windows without profile).
+    // `std::env::home_dir()` falls back to `getpwuid_r` when `$HOME` is empty, so the `None`
+    // arm only fires in exotic environments (no passwd entry, Windows without a profile).
     // The `Result` signature is still the right contract for those cases.
 
     // ── lexical_normalize ──

@@ -362,8 +362,10 @@ mod tests {
         let err =
             resolve_theme(Some(&path_str), &HashMap::new()).expect_err("bad slot color must error");
         let msg = format!("{err:#}");
-        assert!(msg.contains("parsing base theme"), "{msg}");
-        assert!(msg.contains(&path_str), "{msg}");
+        assert!(
+            msg.contains(&format!("parsing base theme {path_str:?}")),
+            "{msg}"
+        );
         assert!(msg.contains("orange"), "{msg}");
     }
 

@@ -294,7 +294,7 @@ fn load_file(path: &Path) -> Result<Option<FileConfig>> {
 pub(crate) fn user_config_path() -> Option<PathBuf> {
     xdg_dir(
         std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
-        dirs::home_dir(),
+        std::env::home_dir(),
         Path::new(".config"),
         &Path::new(USER_CONFIG_DIR).join(USER_CONFIG_FILENAME),
     )

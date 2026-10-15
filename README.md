@@ -95,7 +95,7 @@ pnpm lint                                          # Lint Markdown
 pnpm spellcheck                                    # Spell check
 ```
 
-CI runs on pushes to `main`, pull requests, and manual dispatch. It runs every check above except `cargo build`, along with an MSRV check, Windows clippy, `nix flake check`, and Nix builds on Linux and macOS. Run `cargo build` locally as a quick compile check.
+CI runs on pushes to `main`, pull requests, and manual dispatch. It runs every check above except `cargo build`, along with an MSRV check, Windows clippy and tests, `nix flake check`, and Nix builds on Linux and macOS. Run `cargo build` locally as a quick compile check.
 
 ## License
 

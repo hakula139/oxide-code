@@ -13,7 +13,7 @@ The cleanest way to deliver both is to let the terminal do the work. The TUI doe
 
 ## Decision
 
-`enter_tui_mode` enables raw mode, the alternate screen, bracketed paste, Kitty keyboard disambiguation, and DECSET 1007 (alternate-scroll). It does **not** enable `EnableMouseCapture`. Pairs unwind on `leave_tui_mode`.
+`enter_tui_mode` enables raw mode, the alternate screen, bracketed paste, Kitty keyboard disambiguation (outside Windows, where crossterm cannot send it), and DECSET 1007 (alternate-scroll). It does **not** enable `EnableMouseCapture`. Pairs unwind on `leave_tui_mode`.
 
 `App::handle_crossterm_event` still forwards any mouse event it receives to `ChatView::handle_event`, but real sessions rely on DECSET 1007 for wheel scroll because the TUI does not claim mouse capture.
 

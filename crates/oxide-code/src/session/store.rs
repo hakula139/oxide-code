@@ -40,7 +40,7 @@ impl SessionStore {
     pub(crate) fn open() -> Result<Self> {
         let sessions_dir = xdg_dir(
             std::env::var_os("XDG_DATA_HOME").map(PathBuf::from),
-            dirs::home_dir(),
+            std::env::home_dir(),
             Path::new(".local/share"),
             &Path::new(DATA_DIR).join(SESSIONS_DIR),
         )
@@ -86,7 +86,7 @@ impl SessionStore {
         let path = self
             .project_dir
             .join(session_filename(session_id, *created_at));
-        let file = create_written(&path, |mut file| file.write_all(&buf))?;
+        let file = create_written(&path, |file| Appender(file).write_all(&buf))?;
         Ok(SessionWriter {
             path,
             file: Some(file),
@@ -348,7 +348,7 @@ impl SessionWriter {
             Some(file) => file,
             None => open_append_file(&self.path)?,
         };
-        append_whole(&file, &mut &file, lines)
+        append_whole(&file, &mut Appender(&file), lines)
             .with_context(|| format!("failed to write {}", self.path.display()))?;
         self.file = Some(file);
         Ok(())
@@ -383,9 +383,22 @@ pub(crate) struct SessionData {
 
 // ── File Opening ──
 
-fn open_create_exclusive(path: &Path) -> io::Result<File> {
+/// Options for a readable handle that [`Appender`] writes through. On Windows, `append(true)` strips
+/// the `FILE_WRITE_DATA` access that `set_len` needs to roll back a partial write, so the handle
+/// opens for plain writing there and each write targets the end of the file.
+fn append_options() -> OpenOptions {
     let mut options = OpenOptions::new();
-    options.read(true).append(true).create_new(true);
+    options.read(true);
+    #[cfg(windows)]
+    options.write(true);
+    #[cfg(not(windows))]
+    options.append(true);
+    options
+}
+
+fn open_create_exclusive(path: &Path) -> io::Result<File> {
+    let mut options = append_options();
+    options.create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -406,11 +419,31 @@ fn create_written(path: &Path, write: impl FnOnce(&File) -> io::Result<()>) -> R
 }
 
 fn open_append_file(path: &Path) -> Result<File> {
-    OpenOptions::new()
-        .read(true)
-        .append(true)
+    append_options()
         .open(path)
         .with_context(|| format!("session not found: {}", path.display()))
+}
+
+/// Writes at the end of a file opened by [`append_options`], atomically with other appenders.
+struct Appender<'a>(&'a File);
+
+impl Write for Appender<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        // An offset of `u64::MAX` is `FILE_WRITE_TO_END_OF_FILE`, the per-write form of append.
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::FileExt::seek_write(self.0, buf, u64::MAX)
+        }
+        #[cfg(not(windows))]
+        {
+            let mut file = self.0;
+            file.write(buf)
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Writes `lines` through `out`, a handle on `file`, after terminating a torn last line. A failed
@@ -548,6 +581,7 @@ mod tests {
     use super::*;
     use crate::message::ContentBlock;
     use crate::prompt::PromptParts;
+    use crate::util::path::testing::HOME_VAR;
 
     fn test_project_path(dir: &Path, filename: &str) -> PathBuf {
         dir.join(TEST_PROJECT).join(filename)
@@ -599,7 +633,7 @@ mod tests {
         temp_env::async_with_vars(
             [
                 ("XDG_DATA_HOME", Some(xdg.to_string_lossy().into_owned())),
-                ("HOME", Some(home.path().to_string_lossy().into_owned())),
+                (HOME_VAR, Some(home.path().to_string_lossy().into_owned())),
             ],
             async { SessionStore::open() },
         )
@@ -640,7 +674,7 @@ mod tests {
         let store = temp_env::async_with_vars(
             [
                 ("XDG_DATA_HOME", None),
-                ("HOME", Some(home.path().to_string_lossy().into_owned())),
+                (HOME_VAR, Some(home.path().to_string_lossy().into_owned())),
             ],
             async { SessionStore::open() },
         )
@@ -1784,6 +1818,23 @@ mod tests {
         create_written(&path, |_| Ok(())).unwrap();
     }
 
+    // ── Appender ──
+
+    #[test]
+    fn appender_writes_after_lines_another_handle_appended() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shared.jsonl");
+        let first = create_written(&path, |file| Appender(file).write_all(b"1\n")).unwrap();
+        let second = open_append_file(&path).unwrap();
+
+        Appender(&second).write_all(b"2\n").unwrap();
+        let mut appender = Appender(&first);
+        appender.write_all(b"3\n").unwrap();
+        appender.flush().unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "1\n2\n3\n");
+    }
+
     // ── append_whole ──
 
     /// Writes through to `file` until `budget` bytes are spent, then returns what `exhausted` does.
@@ -1800,8 +1851,7 @@ mod tests {
             }
             let n = buf.len().min(self.budget);
             self.budget -= n;
-            let mut file = self.file;
-            file.write(&buf[..n])
+            Appender(self.file).write(&buf[..n])
         }
 
         fn flush(&mut self) -> io::Result<()> {
@@ -1888,8 +1938,8 @@ mod tests {
         let mut out = ShortWriter {
             file: &file,
             budget: 5,
-            exhausted: |mut file| {
-                file.write_all(b"\nother appender\n").unwrap();
+            exhausted: |file| {
+                Appender(file).write_all(b"\nother appender\n").unwrap();
                 Ok(0)
             },
         };
