@@ -98,7 +98,8 @@ fn greedy_word_wrap<'a>(
 }
 
 /// Measures one visual line starting at `start`, returning its end and the next line's start.
-/// Whitespace inside the first `lead_width` columns is not a break point.
+/// Rows break after whitespace and around wide characters, never inside the first `lead_width`
+/// columns.
 fn take_one_line(
     graphemes: &[(&str, Style)],
     start: usize,
@@ -111,21 +112,25 @@ fn take_one_line(
     for (i, &(g, _)) in graphemes.iter().enumerate().skip(start) {
         let g_width = g.width();
 
+        if i > start && width >= lead_width && breaks_around_wide(graphemes[i - 1].0, g) {
+            last_break = Some(i);
+        }
+
         if width + g_width > max_width {
-            if let Some(bp) = last_break {
-                let mut next = bp + 1;
+            if let Some(end) = last_break {
+                let mut next = end;
                 while next < graphemes.len() && is_whitespace(graphemes[next].0) {
                     next += 1;
                 }
-                return (bp + 1, next);
+                return (end, next);
             }
-            // No whitespace to break at, so split before the overflowing grapheme.
+            // No break opportunity, so split before the overflowing grapheme.
             let end = if i == start { i + 1 } else { i };
             return (end, end);
         }
 
         if is_whitespace(g) && width >= lead_width {
-            last_break = Some(i);
+            last_break = Some(i + 1);
         }
         width += g_width;
     }
@@ -135,6 +140,12 @@ fn take_one_line(
 
 fn is_whitespace(grapheme: &str) -> bool {
     grapheme.chars().all(char::is_whitespace)
+}
+
+/// Whether a row may end between `before` and `after` with no whitespace there. CJK text has no
+/// spaces, so a wide grapheme can break from either neighbor.
+fn breaks_around_wide(before: &str, after: &str) -> bool {
+    !is_whitespace(before) && !is_whitespace(after) && (before.width() > 1 || after.width() > 1)
 }
 
 // ── Span Reconstruction ──
@@ -350,6 +361,23 @@ mod tests {
         let family = "👨‍👩‍👧";
         let result = wrap_line(Line::from(format!("ab{family}{family}")), 3, 0, None);
         assert_eq!(texts(&result), ["ab", family, family]);
+    }
+
+    #[test]
+    fn wrap_line_breaks_between_wide_characters_and_their_neighbors() {
+        let wrap = |s, width| texts(&wrap_line(Line::from(s), width, 0, None));
+        assert_eq!(
+            wrap("中文 Rust 代码很长", 8),
+            ["中文 ", "Rust 代", "码很长"]
+        );
+        assert_eq!(wrap("中 文abcd", 5), ["中 文", "abcd"]);
+        assert_eq!(wrap("中 ab文字", 5), ["中 ab", "文字"]);
+    }
+
+    #[test]
+    fn wrap_line_drops_whitespace_left_over_at_a_break() {
+        let result = wrap_line(Line::from("ab   cd"), 3, 0, None);
+        assert_eq!(texts(&result), ["ab ", "cd"]);
     }
 
     // ── wrap_line_keeping_lead ──
