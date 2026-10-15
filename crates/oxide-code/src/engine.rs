@@ -1184,6 +1184,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_quit_before_any_prompt_leaves_no_session_file() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let handle = engine(server.uri(), &store, dir.path()).await.spawn(&[]);
+
+            handle.ops.send(UserAction::Quit).await.unwrap();
+            assert_eq!(handle.task.join().await, None);
+
+            assert!(store.list().unwrap().is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn run_finalizes_the_live_session_after_a_clear() {
         with_pinned_home(async {
             let server = MockServer::start().await;
