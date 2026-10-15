@@ -90,7 +90,7 @@ pub(crate) const MODELS: &[ModelInfo] = &[
     },
 ];
 
-pub(crate) fn lookup(id: &str) -> Option<&'static ModelInfo> {
+fn lookup(id: &str) -> Option<&'static ModelInfo> {
     MODELS.iter().find(|info| info.id == id)
 }
 

@@ -20,7 +20,7 @@ use crate::client::anthropic::Client;
 use crate::config::Effort;
 use crate::file_tracker::FileTracker;
 use crate::message::{ContentBlock, Message};
-use crate::model::ResolvedModelId;
+use crate::model::{ModelSpec, ResolvedModelId};
 use crate::prompt::{self, PromptParts, SessionContext, UserContext};
 use crate::session::handle::{self, SessionHandle};
 use crate::session::store::SessionStore;
@@ -133,7 +133,7 @@ impl Conversation {
         interactive: bool,
     ) -> Self {
         let prompt_unrecorded = context.is_none();
-        let prompt = session_prompt(context, client.model().id(), &cwd).await;
+        let prompt = session_prompt(context, client.model(), &cwd).await;
         Self {
             client,
             tools,
@@ -167,7 +167,10 @@ impl Conversation {
         }
 
         let mut user_msg = Message::user(text);
-        if let Some(reminder) = self.prompt.catch_up(UserContext::load(&self.cwd).await) {
+        if let Some(reminder) = self
+            .prompt
+            .catch_up(UserContext::load(&self.cwd, self.client.model()).await)
+        {
             user_msg.content.push(ContentBlock::Text { text: reminder });
             self.prompt_unrecorded = true;
         }
@@ -293,7 +296,8 @@ impl Conversation {
 
     /// Starts the compacted transcript from the current instructions and date.
     async fn refresh_prompt(&mut self) {
-        self.prompt.refresh(UserContext::load(&self.cwd).await);
+        self.prompt
+            .refresh(UserContext::load(&self.cwd, self.client.model()).await);
         self.prompt_unrecorded = true;
     }
 
@@ -360,7 +364,7 @@ impl Conversation {
             .set_session_id(self.session.session_id().to_owned());
         self.messages = messages;
         self.prompt_unrecorded = context.is_none();
-        self.prompt = session_prompt(context, self.client.model().id(), &self.cwd).await;
+        self.prompt = session_prompt(context, self.client.model(), &self.cwd).await;
         self.reset_usage();
     }
 
@@ -386,15 +390,14 @@ impl Conversation {
         model: Option<ResolvedModelId>,
         effort: Option<Effort>,
     ) {
-        if let Some(id) = model {
-            if let Err(e) = self.client.set_model(id.into_inner()) {
-                sink.emit(
-                    AgentEvent::Error(format!("Config change failed: {e:#}")),
-                    "config-change-failed",
-                );
-                return;
-            }
-            self.prompt.set_model(self.client.model().id());
+        if let Some(id) = model
+            && let Err(e) = self.client.set_model(id.into_inner())
+        {
+            sink.emit(
+                AgentEvent::Error(format!("Config change failed: {e:#}")),
+                "config-change-failed",
+            );
+            return;
         }
         let resolved = match effort {
             Some(pick) => self.client.set_effort(pick),
@@ -459,9 +462,13 @@ impl Conversation {
 }
 
 /// Replays the prompt a session recorded, or builds a fresh one for a session without one.
-async fn session_prompt(context: Option<SessionContext>, model: &str, cwd: &Path) -> PromptParts {
+async fn session_prompt(
+    context: Option<SessionContext>,
+    model: &ModelSpec,
+    cwd: &Path,
+) -> PromptParts {
     match context {
-        Some(context) => prompt::restore_prompt(context, model, cwd).await,
+        Some(context) => prompt::restore_prompt(context, cwd).await,
         None => prompt::build_prompt(model, cwd).await,
     }
 }
@@ -563,7 +570,7 @@ mod tests {
     // ── new ──
 
     #[tokio::test]
-    async fn new_replays_a_recorded_context_under_the_client_model() {
+    async fn new_replays_a_recorded_context_or_builds_one_for_the_client_model() {
         let server = MockServer::start().await;
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
@@ -590,12 +597,13 @@ mod tests {
                 replayed
             );
             assert_eq!(conversation.prompt_unrecorded, !replayed);
+            let model = if replayed { MODEL } else { "claude-sonnet-5-5" };
             assert!(
                 conversation
                     .prompt
-                    .system_sections
-                    .iter()
-                    .any(|section| section.contains("The exact model ID is claude-sonnet-5-5.")),
+                    .seen
+                    .model
+                    .contains(&format!("The exact model ID is {model}.")),
                 "replayed: {replayed}",
             );
         }
@@ -975,25 +983,45 @@ mod tests {
     // ── swap_config ──
 
     #[tokio::test]
-    async fn swap_config_model_rerenders_system_and_keeps_user_context() {
-        let server = MockServer::start().await;
-        let dir = tempfile::tempdir().unwrap();
-        let mut conversation = conversation(server.uri(), &test_store(dir.path())).await;
+    async fn swap_config_model_keeps_the_system_prompt_and_names_the_model_next_turn() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            mount_reply(&server, "reply").await;
+            let dir = tempfile::tempdir().unwrap();
+            let mut conversation = conversation(server.uri(), &test_store(dir.path())).await;
+            let sink = CapturingSink::new();
+            let (_user_tx, mut user_rx) = agent::event::inert_user_action_channel();
 
-        conversation.swap_config(
-            &CapturingSink::new(),
-            Some(ResolvedModelId::new("claude-sonnet-5-5".to_owned())),
-            None,
-        );
-
-        assert!(
             conversation
-                .prompt
-                .system_sections
-                .iter()
-                .any(|section| section.contains("The exact model ID is claude-sonnet-5-5.")),
-        );
-        assert_eq!(conversation.prompt.user_context, SESSION_CONTEXT);
+                .submit_prompt("first", &sink, &mut user_rx)
+                .await;
+            conversation.swap_config(
+                &sink,
+                Some(ResolvedModelId::new("claude-sonnet-5-5".to_owned())),
+                None,
+            );
+            conversation
+                .submit_prompt("second", &sink, &mut user_rx)
+                .await;
+
+            let turns = request_bodies(&server).await;
+            assert_eq!(turns[1]["model"], "claude-sonnet-5-5");
+            assert_eq!(system_prompt(&turns[1]), system_prompt(&turns[0]));
+            let (first, second) = (&turns[0]["messages"], &turns[1]["messages"]);
+            assert_eq!(second[0], first[0], "the first message must not change");
+            let prompt = second[3]["content"].as_array().unwrap();
+            assert_eq!(prompt[0]["text"], "second");
+            let reminder = prompt[1]["text"].as_str().unwrap();
+            assert!(
+                reminder.contains(
+                    "# Model\n\nYou are powered by the model named Claude Sonnet 5.5. The exact model \
+                     ID is claude-sonnet-5-5."
+                ),
+                "{reminder}"
+            );
+            assert!(!reminder.contains("# CLAUDE.md"), "{reminder}");
+        })
+        .await;
     }
 
     #[tokio::test]

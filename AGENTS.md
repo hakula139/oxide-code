@@ -72,7 +72,7 @@ ox                                          # Start an interactive session
 │   └── rule.rs                             # Rule grammar: `class(specifier)` parse + match (bash exact / prefix / wildcard, cwd-relative or absolute path globs)
 ├── prompt.rs                               # System prompt builder (section assembly), session prompt context replay, change reminders
 ├── prompt/
-│   ├── environment.rs                      # Runtime environment detection (platform, git, date, knowledge cutoff)
+│   ├── environment.rs                      # Runtime environment detection (platform, git, date) and the model identity line
 │   ├── instructions.rs                     # Instruction file discovery and loading (CLAUDE.md, AGENTS.md)
 │   └── sections.rs                         # Static prompt section constants (intro, guidance, style)
 ├── session.rs                              # Session module root
