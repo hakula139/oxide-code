@@ -355,8 +355,8 @@ pub(crate) async fn agent_turn(
     TurnOutcome::aborted(
         report,
         TurnAbort::Failed(anyhow!(
-            "agent stopped after {cap} tool rounds without a final response. This safety cap \
-             guards against runaway loops, so ask again with a narrower request."
+            "Agent stopped after {cap} tool rounds without a final response. Raise or unset \
+             client.max_tool_rounds (OX_MAX_TOOL_ROUNDS) to allow longer turns."
         )),
     )
 }
@@ -3307,7 +3307,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_turn_with_some_cap_bails_with_safety_cap_message() {
+    async fn agent_turn_with_some_cap_bails_naming_the_setting() {
         const CAP: u32 = 3;
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
@@ -3332,9 +3332,11 @@ mod tests {
         )
         .await
         .expect_err("cap must trip");
-        let msg = format!("{err:#}");
-        assert!(msg.contains(&CAP.to_string()), "cap in error: {msg}");
-        assert!(msg.contains("safety cap"), "explains intent: {msg}");
+        assert_eq!(
+            format!("{err:#}"),
+            "Agent stopped after 3 tool rounds without a final response. Raise or unset \
+             client.max_tool_rounds (OX_MAX_TOOL_ROUNDS) to allow longer turns.",
+        );
     }
 
     #[tokio::test]

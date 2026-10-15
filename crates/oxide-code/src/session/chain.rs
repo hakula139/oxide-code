@@ -98,7 +98,7 @@ impl ChainBuilder {
         let mut cursor = Some(tip_uuid);
         while let Some(uuid) = cursor {
             if !seen.insert(uuid) {
-                warn!("session chain walk hit a cycle at {uuid}; truncating");
+                warn!("session chain walk hit a cycle at {uuid}, truncating");
                 break;
             }
             let Some(node) = self.nodes.remove(&uuid) else {

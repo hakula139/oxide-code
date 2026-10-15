@@ -103,7 +103,7 @@ Tier guide for the 5.5 models (from Anthropic's [effort documentation](https://p
 
 #### `max_tokens`: response ceiling
 
-When unset, `max_tokens` is `64000` on the supported models, half their 128K output ceiling. `effort` controls how much the model thinks, so this cap only bounds runaway output. Other ids get `16000`, which fits the lower output ceilings of older or smaller models, and the default follows a `/model` swap. Set `max_tokens` (via TOML or `ANTHROPIC_MAX_TOKENS`) to change it.
+When unset, `max_tokens` is `64000` on the supported models, half their 128K output ceiling. `effort` controls how much the model thinks, so this cap only bounds runaway output. Other ids get `16000`, which fits the lower output ceilings of older or smaller models, and the default follows a `/model` swap. Set `max_tokens` (via TOML or `OX_MAX_TOKENS`) to change it.
 
 #### `max_tool_rounds`: agent-loop safety cap
 
@@ -276,8 +276,8 @@ Environment variables override all config file values.
 | `CLAUDE_CODE_OAUTH_TOKEN`                | -                                          | -                           | Long-lived OAuth token       |
 | `ANTHROPIC_BASE_URL`                     | `client.base_url`                          | `https://api.anthropic.com` | API base URL                 |
 | `ANTHROPIC_MODEL`                        | `client.model`                             | `claude-opus-5-5`           | Model to use                 |
-| `ANTHROPIC_EFFORT`                       | `client.effort`                            | per-model                   | Intelligence-vs-latency tier |
-| `ANTHROPIC_MAX_TOKENS`                   | `client.max_tokens`                        | per-model                   | Max tokens per response      |
+| `OX_EFFORT`                              | `client.effort`                            | per-model                   | Intelligence-vs-latency tier |
+| `OX_MAX_TOKENS`                          | `client.max_tokens`                        | per-model                   | Max tokens per response      |
 | `OX_EXTRA_CA_CERTS`                      | `client.extra_ca_certs`                    | -                           | Path to a PEM trust bundle   |
 | `NODE_EXTRA_CA_CERTS`                    | -                                          | -                           | Fallback PEM trust bundle    |
 | `ANTHROPIC_CUSTOM_HEADERS`               | -                                          | -                           | Extra request headers        |
@@ -293,4 +293,6 @@ Environment variables override all config file values.
 | `OX_SHOW_WELCOME`                        | `tui.show_welcome`                         | `true`                      | Paint the welcome splash     |
 | `OX_STATUS_LINE`                         | `tui.status_line`                          | see `[tui]`                 | Comma-separated segments     |
 
-Every variable treats an empty value as unset. Boolean variables accept `1`, `true`, `yes`, or `on` to enable and `0`, `false`, `no`, or `off` to disable, in any letter case. Any other value makes `ox` exit at startup with an error naming the variable.
+`ANTHROPIC_EFFORT` and `ANTHROPIC_MAX_TOKENS` still work as aliases for `OX_EFFORT` and `OX_MAX_TOKENS`, which win when both are set.
+
+Every variable treats an empty value as unset. Boolean variables accept `1`, `true`, `yes`, or `on` to enable and `0`, `false`, `no`, or `off` to disable, in any letter case. Numeric variables take a whole number: at least `1` for `OX_MAX_TOKENS` and `OX_MAX_TOOL_ROUNDS`, at least `0` for `OX_COMPACTION_AUTO_THRESHOLD_TOKENS`, and `1` to `100` for `OX_COMPACTION_AUTO_THRESHOLD_PERCENT`. Any other value makes `ox` exit at startup with an error naming the variable and the values it accepts. The matching config keys accept the same ranges, and an out-of-range value there names its file and line.

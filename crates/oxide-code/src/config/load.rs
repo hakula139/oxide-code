@@ -630,6 +630,42 @@ mod tests {
     }
 
     #[test]
+    fn read_layer_rejects_out_of_range_numbers_naming_the_range() {
+        let dir = tempfile::tempdir().unwrap();
+        let counts = format!("1 to {}", u32::MAX);
+        let tokens = format!("0 to {}", u32::MAX);
+        for (body, range) in [
+            ("client.max_tokens = 0", counts.as_str()),
+            (r#"client.max_tokens = "32k""#, counts.as_str()),
+            ("client.max_tool_rounds = -1", counts.as_str()),
+            ("client.max_tokens = 4294967296", counts.as_str()),
+            (
+                "client.compaction.auto_threshold_tokens = -1",
+                tokens.as_str(),
+            ),
+            ("client.compaction.auto_threshold_percent = 0", "1 to 100"),
+            (
+                r#"client.compaction.auto_threshold_percent = "40""#,
+                "1 to 100",
+            ),
+            ("client.compaction.auto_threshold_percent = 300", "1 to 100"),
+        ] {
+            let path = write(&dir.path().join("config.toml"), body);
+            let err = read_layer(&Layer::User(path.clone())).expect_err(body);
+            let msg = format!("{err:#}");
+            assert!(
+                msg.starts_with(&format!("invalid config at {}: ", path.display())),
+                "{msg}"
+            );
+            assert!(
+                msg.trim_end()
+                    .ends_with(&format!("expected a whole number from {range}")),
+                "{msg}"
+            );
+        }
+    }
+
+    #[test]
     fn read_layer_rejects_trust_establishing_client_fields_in_a_project() {
         // `api_key`, `base_url`, and `extra_ca_certs` all influence who receives or is trusted to
         // be the server, so a checked-in project file cannot set them.

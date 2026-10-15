@@ -40,7 +40,7 @@ pub(crate) fn resolve_theme(config: &ThemeConfig) -> Result<Theme> {
             warn!(
                 slot = slot_name.as_str(),
                 error = format!("{e:#}"),
-                "ignoring theme override; falling back to base value",
+                "ignoring theme override, keeping the base value",
             );
         }
     }

@@ -31,6 +31,17 @@ Conventions for Rust code under `crates/`. Tooling enforces some style rules, so
 - Errors from tools and slash commands that are intended for the model or user use `Result<T, String>` and contain a complete message.
 - Reserve `expect()` for calls that cannot fail, and state the invariant in the message, as in `.expect("vendored mocha.toml must parse")`.
 
+### Error Messages
+
+`anyhow` formats a chain as `headline: cause` with `{:#}` and puts the outermost headline first in a startup error, so each message in the chain should read as one clause of that sentence.
+
+- Start with a lowercase headline that says what failed and identifies the variable, key, file, or value involved, as in `invalid OX_MAX_TOKENS "32k": expected a whole number from 1 to 4294967295`. Keep identifiers and proper nouns in their original case, and quote user-supplied text with `{:?}`.
+- Explain what is accepted or what went wrong in the user's terms. A raw library message such as `invalid digit found in string` does not explain the accepted range.
+- If the user can fix the problem, follow the headline with a separate sentence giving the recovery step, as in ``Claude Code login has expired. Run `claude` to sign in again.`` Otherwise, end the headline without a period. When such an error wraps a cause, format the cause into the headline so the recovery step stays last.
+- Include units with numbers, as in `Retry after 12 s.`
+- Name the variable or store that holds a secret, never its value.
+- Messages shown on their own, such as chat notices or slash-command `Err(String)` values, should be complete sentences that start with a capital letter.
+
 ## Visibility
 
 - Use the narrowest visibility that works: private first, then `pub(super)` within the parent module, then `pub(crate)`. Because the crate is a binary, it has no `pub` items.
