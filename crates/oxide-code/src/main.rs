@@ -30,6 +30,7 @@ use driver::Exit;
 use driver::tui::Startup;
 use engine::Engine;
 use file_tracker::FileTracker;
+use permission::ReadDeny;
 use session::display::archive_notice;
 use session::handle::ResumedSession;
 use session::list_view::render_list;
@@ -158,8 +159,9 @@ async fn async_main() -> Result<Exit> {
         .resume
         .then(|| ResumePicker::at_startup(store.clone(), handle.session_id().to_owned(), cli.all));
 
+    let read_deny = config.permission.read_deny();
     let client = Client::new(config, Some(handle.session_id().to_owned()))?;
-    let tools = Arc::new(create_tool_registry(&file_tracker));
+    let tools = Arc::new(create_tool_registry(&file_tracker, &read_deny));
     let engine = Engine::new(
         client,
         tools,
@@ -215,14 +217,14 @@ fn detect_terminal_width() -> Option<usize> {
         .map(|(cols, _)| usize::from(cols))
 }
 
-fn create_tool_registry(tracker: &Arc<FileTracker>) -> ToolRegistry {
+fn create_tool_registry(tracker: &Arc<FileTracker>, read_deny: &ReadDeny) -> ToolRegistry {
     ToolRegistry::new(vec![
         Box::new(BashTool),
         Box::new(ReadTool::new(Arc::clone(tracker))),
         Box::new(WriteTool::new(Arc::clone(tracker))),
         Box::new(EditTool::new(Arc::clone(tracker))),
-        Box::new(GlobTool),
-        Box::new(GrepTool),
+        Box::new(GlobTool::new(read_deny.clone())),
+        Box::new(GrepTool::new(read_deny.clone())),
     ])
 }
 
@@ -232,8 +234,11 @@ mod tests {
     use time::macros::datetime;
 
     use super::*;
+    use crate::permission::{Mode, Policy};
     use crate::session::store::set_archived_at;
     use crate::session::store::testing::seed_test_session;
+    use crate::tool::testing::canonical_tempdir;
+    use crate::util::path::slash_separated;
 
     // ── Cli ──
 
@@ -323,7 +328,7 @@ mod tests {
     #[tokio::test]
     async fn create_tool_registry_shares_file_tracking() {
         let tracker = Arc::new(FileTracker::default());
-        let tools = create_tool_registry(&tracker);
+        let tools = create_tool_registry(&tracker, &ReadDeny::default());
         let names: Vec<_> = tools.definitions().iter().map(|tool| tool.name).collect();
         assert_eq!(names, ["bash", "read", "write", "edit", "glob", "grep"]);
 
@@ -358,5 +363,41 @@ mod tests {
             .await;
         assert!(!written.is_error, "{}", written.content);
         assert_eq!(std::fs::read_to_string(path).unwrap(), "rewritten");
+    }
+
+    #[tokio::test]
+    async fn create_tool_registry_hands_read_deny_to_the_search_tools() {
+        let dir = canonical_tempdir();
+        std::fs::write(dir.path().join("notes.txt"), "token").unwrap();
+        std::fs::write(dir.path().join("secret.txt"), "token").unwrap();
+        // An absolute rule, since the tools search from the process cwd, which the dir sits outside.
+        let deny = [format!("read({}/secret.txt)", slash_separated(dir.path()))];
+        let read_deny = Policy::resolve(Mode::Auto, &[], &deny, dir.path())
+            .unwrap()
+            .read_deny();
+        let tools = create_tool_registry(&Arc::new(FileTracker::default()), &read_deny);
+
+        for (tool, pattern) in [("glob", "*.txt"), ("grep", "token")] {
+            let input = serde_json::json!({"pattern": pattern, "path": dir.path()});
+            let output = tools.run(tool, input).await;
+            assert!(!output.is_error, "{tool}: {}", output.content);
+            assert!(
+                output.content.contains("notes.txt"),
+                "{tool}: {}",
+                output.content
+            );
+            assert!(
+                !output.content.contains("secret"),
+                "{tool}: {}",
+                output.content
+            );
+            assert!(
+                output
+                    .content
+                    .ends_with("(1 file withheld by read deny rules)"),
+                "{tool}: {}",
+                output.content
+            );
+        }
     }
 }
