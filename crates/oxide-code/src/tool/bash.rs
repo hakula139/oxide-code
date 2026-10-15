@@ -138,8 +138,8 @@ async fn execute(command: &str, timeout: Duration) -> ToolOutput {
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
 
-    // Put the child in its own process group so a timeout can `killpg` the whole tree, including
-    // any `cmd &`-style detached descendants the shell launched.
+    // Put the child in its own process group so a timeout or cancel can `killpg` the whole tree,
+    // including any `cmd &`-style detached descendants the shell launched.
     #[cfg(unix)]
     cmd.process_group(0);
 
@@ -150,7 +150,7 @@ async fn execute(command: &str, timeout: Duration) -> ToolOutput {
         }
     };
 
-    let pgid = child.id();
+    let group = ProcessGroupGuard(child.id());
 
     let mut stdout = child.stdout.take().expect("stdout configured as piped");
     let mut stderr = child.stderr.take().expect("stderr configured as piped");
@@ -169,10 +169,9 @@ async fn execute(command: &str, timeout: Duration) -> ToolOutput {
     .await;
 
     let Ok((status, stdout_read, stderr_read)) = finished else {
-        // kill_on_drop handles bash, and kill_process_group catches detached grandchildren on
-        // Unix. Killing the group closes its pipe ends, so the grace drain only waits on a holder
-        // that escaped the group.
-        kill_process_group(pgid);
+        // Killing the group closes its pipe ends, so the grace drain only waits on a holder that
+        // escaped the group.
+        drop(group);
         _ = tokio::time::timeout(KILL_DRAIN_GRACE, async {
             tokio::join!(
                 stdout_capture.drain(&mut stdout),
@@ -195,6 +194,8 @@ async fn execute(command: &str, timeout: Duration) -> ToolOutput {
     if let Err(e) = stderr_read {
         return ToolOutput::error(format!("Failed to read command stderr: {e}"));
     }
+    // Descendants that released the pipes, such as a redirected background server, keep running.
+    group.disarm();
 
     let mut content = render_streams(&stdout_capture, &stderr_capture);
     if !status.success() {
@@ -338,16 +339,44 @@ impl PipeCapture {
 
 // ── Process Group Cleanup ──
 
+/// Kills the command's process group on drop, so a timeout, failure, or cancelled call leaves no
+/// descendant running. `kill_on_drop` alone reaches only `bash` itself.
+struct ProcessGroupGuard(Option<u32>);
+
+impl ProcessGroupGuard {
+    fn disarm(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for ProcessGroupGuard {
+    fn drop(&mut self) {
+        kill_process_group(self.0);
+    }
+}
+
+/// Signals the group until no live member is left (`ESRCH`). XNU can miss a child forked during a
+/// `killpg`, so one signal is not enough. The attempts are bounded because Linux counts the
+/// unreaped `bash` zombie as a member.
 #[cfg(unix)]
 fn kill_process_group(pgid: Option<u32>) {
     use nix::sys::signal::{Signal, killpg};
     use nix::unistd::Pid;
 
+    const ATTEMPTS: usize = 5;
+    const RETRY_DELAY: Duration = Duration::from_millis(1);
+
     let Some(pgid) = pgid else { return };
     let Ok(pgid_signed) = i32::try_from(pgid) else {
         return;
     };
-    _ = killpg(Pid::from_raw(pgid_signed), Signal::SIGKILL);
+    let pgid = Pid::from_raw(pgid_signed);
+    for _ in 0..ATTEMPTS {
+        if killpg(pgid, Signal::SIGKILL).is_err() {
+            return;
+        }
+        std::thread::sleep(RETRY_DELAY);
+    }
 }
 
 #[cfg(not(unix))]
@@ -532,6 +561,38 @@ mod tests {
         assert!(
             !marker.exists(),
             "backgrounded descendant was not killed: marker file was created",
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn execute_cancelled_mid_run_kills_backgrounded_children() {
+        let dir = tempfile::tempdir().unwrap();
+        let started = dir.path().join("started");
+        let leaked = dir.path().join("leaked");
+        let command = format!(
+            "(touch {started}; sleep 1 && touch {leaked}) & sleep 5",
+            started = started.display(),
+            leaked = leaked.display(),
+        );
+
+        let mut call = Box::pin(execute(&command, DEFAULT_TIMEOUT));
+        for _ in 0..100 {
+            if started.exists() {
+                break;
+            }
+            let still_running = tokio::time::timeout(Duration::from_millis(20), call.as_mut())
+                .await
+                .is_err();
+            assert!(still_running, "command finished before the cancel");
+        }
+        assert!(started.exists(), "command never started");
+        drop(call);
+
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+        assert!(
+            !leaked.exists(),
+            "backgrounded descendant outlived the cancel"
         );
     }
 

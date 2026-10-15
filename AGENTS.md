@@ -62,7 +62,7 @@ ox                                          # Start an interactive session
 │   ├── repl.rs                             # `--no-tui` driver: stdin prompt loop, rejects slash commands, keeps reading after a failed turn and exits with failure at EOF
 │   ├── testing.rs                          # Cfg-test Conversation fixtures shared by the driver tests (conversation, mount_reply, request_bodies)
 │   └── tui.rs                              # TUI driver: App event loop beside the agent task, which serves UserActions and finalizes the live session
-├── file_tracker.rs                         # Per-session FileTracker: Read-before-Edit gate, mtime+xxh64 staleness check, persist-on-finish + verify-on-resume
+├── file_tracker.rs                         # Per-session FileTracker: Read-before-Edit gate, xxh64 staleness check, persist-on-finish + verify-on-resume
 ├── main.rs                                 # CLI entry point: config + session resolution, mode dispatch to a driver, process exit code
 ├── message.rs                              # Conversation message types + progress-update lookup
 ├── model.rs                                # Supported-model catalogue + ModelSpec (resolved id → effort, thinking, context window, display)

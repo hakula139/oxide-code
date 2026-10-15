@@ -2,7 +2,6 @@
 
 use std::borrow::Cow;
 use std::future::Future;
-use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -184,7 +183,7 @@ async fn edit_file(
     old_string: &str,
     new_string: &str,
     replace_all: bool,
-    tracker: &FileTracker,
+    tracker: &Arc<FileTracker>,
 ) -> Result<(String, usize, Vec<DiffChunk>), String> {
     if old_string.is_empty() {
         return Err("old_string must not be empty.".into());
@@ -194,7 +193,6 @@ async fn edit_file(
         return Err("old_string and new_string are identical. No changes to make.".into());
     }
 
-    let file_path = Path::new(path);
     let (_, content_bytes) = super::read_validated(path, |metadata| {
         super::validate_file_target(path, metadata, "edit")
     })
@@ -242,13 +240,9 @@ async fn edit_file(
     };
     let updated = apply_eol(updated, eol);
 
-    super::write_no_follow(file_path, updated.as_bytes(), false)
+    super::write_tracked(tracker, path, updated.into_bytes(), false)
         .await
         .map_err(|e| format!("Failed to write {path}: {e}"))?;
-
-    tracker
-        .record_modify_after_write(&key, file_path, updated.as_bytes())
-        .await;
 
     let message = if replace_all && match_count > 1 {
         format!("Replaced {match_count} occurrences in {path}.")
@@ -632,7 +626,7 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello world").unwrap();
 
-        let output = EditTool::new(Arc::new(tracker_seeded(&path)))
+        let output = EditTool::new(tracker_seeded(&path))
             .run(serde_json::json!({
                 "file_path": path.to_str().unwrap(),
                 "old_string": "hello",
@@ -675,7 +669,7 @@ mod tests {
                 "old_string": "not present",
                 "new_string": "x",
             }),
-            Arc::new(tracker_seeded(&path)),
+            tracker_seeded(&path),
         )
         .await;
 
@@ -857,15 +851,9 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello").unwrap();
 
-        let err = edit_file(
-            path.to_str().unwrap(),
-            "",
-            "x",
-            false,
-            &FileTracker::default(),
-        )
-        .await
-        .unwrap_err();
+        let err = edit_file(path.to_str().unwrap(), "", "x", false, &tracker())
+            .await
+            .unwrap_err();
         assert!(err.contains("must not be empty"));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
     }
@@ -876,15 +864,9 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello").unwrap();
 
-        let err = edit_file(
-            path.to_str().unwrap(),
-            "hello",
-            "hello",
-            false,
-            &FileTracker::default(),
-        )
-        .await
-        .unwrap_err();
+        let err = edit_file(path.to_str().unwrap(), "hello", "hello", false, &tracker())
+            .await
+            .unwrap_err();
         assert!(err.contains("identical"));
     }
 
@@ -917,7 +899,7 @@ mod tests {
             "hello",
             "goodbye",
             false,
-            &FileTracker::default(),
+            &tracker(),
         )
         .await
         .unwrap_err();
@@ -943,30 +925,6 @@ mod tests {
             err.contains("modified externally"),
             "drift error expected, got: {err}",
         );
-    }
-
-    #[tokio::test]
-    async fn edit_file_phantom_drift_passes_via_hash_match() {
-        let dir = canonical_tempdir();
-        let path = dir.path().join("f.rs");
-        std::fs::write(&path, "old content").unwrap();
-        let bytes = std::fs::read(&path).unwrap();
-        let meta = std::fs::metadata(&path).unwrap();
-        let stale_mtime = meta.modified().unwrap() - std::time::Duration::from_mins(1);
-
-        let tracker = FileTracker::default();
-        tracker.record_read(&path, &bytes, stale_mtime, meta.len(), LastView::Full);
-
-        let result = edit_file(
-            path.to_str().unwrap(),
-            "old content",
-            "new content",
-            false,
-            &tracker,
-        )
-        .await;
-        result.expect("phantom drift must not block edit");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new content");
     }
 
     #[tokio::test]
@@ -1023,15 +981,8 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello world\nsecond line\n").unwrap();
         let bytes = std::fs::read(&path).unwrap();
-        let meta = std::fs::metadata(&path).unwrap();
-        let tracker = FileTracker::default();
-        tracker.record_read(
-            &path,
-            &bytes,
-            meta.modified().unwrap(),
-            meta.len(),
-            LastView::lines(1, 1, 2),
-        );
+        let tracker = tracker();
+        tracker.record_read(&path, &bytes, LastView::lines(1, 1, 2));
 
         edit_file(path.to_str().unwrap(), "hello", "goodbye", false, &tracker)
             .await
@@ -1044,15 +995,9 @@ mod tests {
 
     #[tokio::test]
     async fn edit_file_rejects_nonexistent_file() {
-        let err = edit_file(
-            "/nonexistent/file.txt",
-            "a",
-            "b",
-            false,
-            &FileTracker::default(),
-        )
-        .await
-        .unwrap_err();
+        let err = edit_file("/nonexistent/file.txt", "a", "b", false, &tracker())
+            .await
+            .unwrap_err();
         assert!(err.contains("Error reading"));
     }
 
@@ -1062,15 +1007,8 @@ mod tests {
         let path = dir.path().join("blob.bin");
         let bytes = [0xff_u8, 0xfe, 0xfd];
         std::fs::write(&path, bytes).unwrap();
-        let meta = std::fs::metadata(&path).unwrap();
-        let tracker = FileTracker::default();
-        tracker.record_read(
-            &path,
-            &bytes,
-            meta.modified().unwrap(),
-            meta.len(),
-            LastView::Full,
-        );
+        let tracker = tracker();
+        tracker.record_read(&path, &bytes, LastView::Full);
 
         let err = edit_file(path.to_str().unwrap(), "a", "b", false, &tracker)
             .await
@@ -1103,15 +1041,9 @@ mod tests {
     async fn edit_file_rejects_directory() {
         let dir = canonical_tempdir();
 
-        let err = edit_file(
-            dir.path().to_str().unwrap(),
-            "a",
-            "b",
-            false,
-            &FileTracker::default(),
-        )
-        .await
-        .unwrap_err();
+        let err = edit_file(dir.path().to_str().unwrap(), "a", "b", false, &tracker())
+            .await
+            .unwrap_err();
 
         assert!(
             err.contains("is a directory"),
@@ -1126,15 +1058,9 @@ mod tests {
         let path = dir.path().join("socket");
         let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
 
-        let err = edit_file(
-            path.to_str().unwrap(),
-            "a",
-            "b",
-            false,
-            &FileTracker::default(),
-        )
-        .await
-        .unwrap_err();
+        let err = edit_file(path.to_str().unwrap(), "a", "b", false, &tracker())
+            .await
+            .unwrap_err();
 
         assert!(
             err.contains("not a regular file"),
@@ -1149,15 +1075,9 @@ mod tests {
         let f = std::fs::File::create(&path).unwrap();
         f.set_len(MAX_TRACKED_FILE_SIZE + 1).unwrap();
 
-        let err = edit_file(
-            path.to_str().unwrap(),
-            "a",
-            "b",
-            false,
-            &FileTracker::default(),
-        )
-        .await
-        .unwrap_err();
+        let err = edit_file(path.to_str().unwrap(), "a", "b", false, &tracker())
+            .await
+            .unwrap_err();
         assert!(err.contains("too large"));
     }
 

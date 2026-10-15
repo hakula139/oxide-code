@@ -126,9 +126,11 @@ async fn serve_actions(
             UserAction::SwapConfig { model, effort } => {
                 conversation.swap_config(&sink, model, effort);
             }
-            // The App applies theme actions itself, and an approval only matters mid-turn, where
+            // A `QueuePrompt` here arrived after its turn ended, and the TUI still submits it. The
+            // App applies theme actions itself, and an approval only matters mid-turn, where
             // `agent_turn` consumes it.
-            UserAction::Cancel
+            UserAction::QueuePrompt(_)
+            | UserAction::Cancel
             | UserAction::ConfirmExit
             | UserAction::PreviewTheme { .. }
             | UserAction::SwapTheme { .. }
@@ -243,6 +245,28 @@ mod tests {
         agent.await.unwrap();
 
         assert_eq!(resumed_id, recorded_id);
+    }
+
+    #[tokio::test]
+    async fn serve_actions_late_queue_prompt_starts_no_turn() {
+        let server = MockServer::start().await;
+        mount_reply(&server, "reply").await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let conversation = conversation(server.uri(), &store).await;
+        let (sink, mut event_rx) = crate::tui::event::channel();
+        let (user_tx, user_rx) = mpsc::channel(8);
+        let agent = tokio::spawn(serve_actions(conversation, sink, user_rx, store));
+
+        user_tx
+            .send(UserAction::QueuePrompt("late".to_owned()))
+            .await
+            .unwrap();
+        drop(user_tx);
+        agent.await.unwrap();
+
+        assert!(server.received_requests().await.unwrap().is_empty());
+        assert!(event_rx.try_recv().is_err());
     }
 
     #[tokio::test]

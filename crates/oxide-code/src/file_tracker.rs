@@ -2,9 +2,9 @@
 
 use std::collections::HashMap;
 use std::fs::Metadata;
+use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
-use std::time::SystemTime;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -13,6 +13,21 @@ use xxhash_rust::xxh64::xxh64;
 
 const HASH_SEED: u64 = 0;
 pub(crate) const MAX_TRACKED_FILE_SIZE: u64 = 10 * 1024 * 1024;
+
+// ── Attribution ──
+
+tokio::task_local! {
+    static TOOL_USE_ID: String;
+}
+
+/// Runs `fut` with every tracker record it makes attributed to the tool call `tool_use_id`.
+pub(crate) async fn attribute_to<F: Future>(tool_use_id: &str, fut: F) -> F::Output {
+    TOOL_USE_ID.scope(tool_use_id.to_owned(), fut).await
+}
+
+fn current_tool_use_id() -> Option<String> {
+    TOOL_USE_ID.try_with(Clone::clone).ok()
+}
 
 // ── FileTracker ──
 
@@ -37,10 +52,9 @@ pub(crate) struct FileTracker {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FileState {
     content_hash: u64,
-    mtime: SystemTime,
-    size: u64,
     last_view: LastView,
     recorded_at: OffsetDateTime,
+    tool_use_id: Option<String>,
 }
 
 /// Lines Read has shown of the tracked content, accumulated across Reads of that content.
@@ -154,14 +168,8 @@ pub(crate) fn validate_trackable_file(metadata: &Metadata) -> Result<(), Trackab
 impl FileTracker {
     /// Returns `CacheHit` when a file already tracked as `Full` is read in full again unchanged.
     /// Reads of unchanged content accumulate their line windows, and changed content starts over.
-    pub(crate) fn record_read(
-        &self,
-        path: &Path,
-        bytes: &[u8],
-        mtime: SystemTime,
-        size: u64,
-        view: LastView,
-    ) -> RecordRead {
+    /// A read that returns content attributes the state to its tool call.
+    pub(crate) fn record_read(&self, path: &Path, bytes: &[u8], view: LastView) -> RecordRead {
         let content_hash = xxh64(bytes, HASH_SEED);
         let mut by_path = self.lock();
 
@@ -175,8 +183,9 @@ impl FileTracker {
             };
             let seen = std::mem::replace(&mut state.last_view, LastView::Full);
             state.last_view = seen.union(view);
-            state.mtime = mtime;
-            state.size = size;
+            if outcome == RecordRead::Inserted {
+                state.tool_use_id = current_tool_use_id();
+            }
             return outcome;
         }
 
@@ -184,10 +193,9 @@ impl FileTracker {
             path.to_path_buf(),
             FileState {
                 content_hash,
-                mtime,
-                size,
                 last_view: view,
                 recorded_at: OffsetDateTime::now_utc(),
+                tool_use_id: current_tool_use_id(),
             },
         );
         RecordRead::Inserted
@@ -223,36 +231,37 @@ impl FileTracker {
         Ok(())
     }
 
+    /// Drives `write` in a task of its own, then records the bytes it wrote under the tracker key
+    /// it returns, so the record lands with the write even when the caller is dropped mid-write.
+    pub(crate) async fn write_and_record<W>(self: &Arc<Self>, write: W) -> std::io::Result<()>
+    where
+        W: Future<Output = std::io::Result<(PathBuf, Vec<u8>)>> + Send + 'static,
+    {
+        let tracker = Arc::clone(self);
+        let tool_use_id = current_tool_use_id();
+        tokio::spawn(async move {
+            let (key, bytes) = write.await?;
+            tracker.record_modify(key, &bytes, tool_use_id);
+            Ok(())
+        })
+        .await
+        .unwrap_or_else(|e| Err(std::io::Error::other(e)))
+    }
+
     /// Records bytes the agent just wrote. Always lands as [`LastView::Full`] so a subsequent Edit
     /// passes the gate without requiring a fresh Read.
-    pub(crate) fn record_modify(&self, path: &Path, bytes: &[u8], mtime: SystemTime, size: u64) {
+    fn record_modify(&self, path: PathBuf, bytes: &[u8], tool_use_id: Option<String>) {
         let content_hash = xxh64(bytes, HASH_SEED);
         let now = OffsetDateTime::now_utc();
         self.lock().insert(
-            path.to_path_buf(),
+            path,
             FileState {
                 content_hash,
-                mtime,
-                size,
                 last_view: LastView::Full,
                 recorded_at: now,
+                tool_use_id,
             },
         );
-    }
-
-    /// Best-effort post-write stat of `path` and record under `key`. A stat failure is warn-logged
-    /// and leaves the old entry, so the next Edit fails the hash check and asks for a fresh Read.
-    pub(crate) async fn record_modify_after_write(&self, key: &Path, path: &Path, bytes: &[u8]) {
-        match tokio::fs::metadata(path).await.and_then(|m| {
-            let modified = m.modified()?;
-            Ok((m.len(), modified))
-        }) {
-            Ok((size, mtime)) => self.record_modify(key, bytes, mtime, size),
-            Err(e) => warn!(
-                "skip post-write tracker update for {} (stat failed): {e}",
-                path.display()
-            ),
-        }
     }
 
     pub(crate) fn snapshot_all(&self) -> Vec<FileSnapshot> {
@@ -261,10 +270,9 @@ impl FileTracker {
             .map(|(path, state)| FileSnapshot {
                 path: path.clone(),
                 content_hash: state.content_hash,
-                mtime: OffsetDateTime::from(state.mtime),
-                size: state.size,
                 last_view: state.last_view.clone(),
                 recorded_at: state.recorded_at,
+                tool_use_id: state.tool_use_id.clone(),
             })
             .collect()
     }
@@ -302,7 +310,6 @@ impl FileTracker {
                     continue;
                 }
             };
-            let current_size = metadata.len();
             if let Err(err) = validate_trackable_file(&metadata) {
                 warn!(
                     "dropping tracked file {} ({err}, will require fresh Read)",
@@ -311,17 +318,6 @@ impl FileTracker {
                 dropped.push(snap.path);
                 continue;
             }
-            let current_mtime = match metadata.modified() {
-                Ok(mtime) => mtime,
-                Err(e) => {
-                    warn!(
-                        "dropping tracked file {} (mtime failed, will require fresh Read): {e}",
-                        snap.path.display()
-                    );
-                    dropped.push(snap.path);
-                    continue;
-                }
-            };
             let current_bytes = match std::fs::read(&snap.path) {
                 Ok(bytes) => bytes,
                 Err(e) => {
@@ -335,10 +331,8 @@ impl FileTracker {
             };
             if xxh64(&current_bytes, HASH_SEED) != snap.content_hash {
                 warn!(
-                    "dropping tracked file {} (content drift: stored {}b vs current {}b)",
-                    snap.path.display(),
-                    snap.size,
-                    current_size,
+                    "dropping tracked file {} (content drift, will require fresh Read)",
+                    snap.path.display()
                 );
                 dropped.push(snap.path);
                 continue;
@@ -351,10 +345,9 @@ impl FileTracker {
                     snap.path,
                     FileState {
                         content_hash: snap.content_hash,
-                        mtime: current_mtime,
-                        size: current_size,
                         last_view: snap.last_view,
                         recorded_at: snap.recorded_at,
+                        tool_use_id: snap.tool_use_id,
                     },
                 );
             }
@@ -383,12 +376,13 @@ impl FileTracker {
 pub(crate) struct FileSnapshot {
     pub(crate) path: PathBuf,
     pub(crate) content_hash: u64,
-    #[serde(with = "time::serde::rfc3339")]
-    pub(crate) mtime: OffsetDateTime,
-    pub(crate) size: u64,
     pub(crate) last_view: LastView,
     #[serde(with = "time::serde::rfc3339")]
     pub(crate) recorded_at: OffsetDateTime,
+    /// The tool call that recorded this state. Resume keeps the snapshot only while the
+    /// transcript still holds that call's result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) tool_use_id: Option<String>,
 }
 
 // ── Outcomes ──
@@ -426,7 +420,6 @@ pub(crate) const CACHE_HIT_STUB: &str =
 pub(crate) mod testing {
     use std::path::Path;
     use std::sync::Arc;
-    use std::time::SystemTime;
 
     use super::{FileTracker, LastView};
 
@@ -436,45 +429,90 @@ pub(crate) mod testing {
 
     pub(crate) fn seed_full_read(tracker: &FileTracker, path: &Path) {
         let bytes = std::fs::read(path).unwrap();
-        let meta = std::fs::metadata(path).unwrap();
-        tracker.record_read(
-            path,
-            &bytes,
-            meta.modified().unwrap(),
-            meta.len(),
-            LastView::Full,
-        );
+        tracker.record_read(path, &bytes, LastView::Full);
     }
 
-    pub(crate) fn tracker_seeded(path: &Path) -> FileTracker {
-        let tracker = FileTracker::default();
+    pub(crate) fn tracker_seeded(path: &Path) -> Arc<FileTracker> {
+        let tracker = tracker();
         seed_full_read(&tracker, path);
         tracker
     }
 
-    pub(crate) fn record_tracked_file(
-        tracker: &FileTracker,
-        path: &Path,
-        bytes: &[u8],
-    ) -> (SystemTime, u64) {
+    pub(crate) fn record_tracked_file(tracker: &FileTracker, path: &Path, bytes: &[u8]) {
         std::fs::write(path, bytes).unwrap();
-        let meta = std::fs::metadata(path).unwrap();
-        let mtime = meta.modified().unwrap();
-        let size = meta.len();
-        tracker.record_modify(path, bytes, mtime, size);
-        (mtime, size)
+        tracker.record_modify(path.to_path_buf(), bytes, super::current_tool_use_id());
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt as _;
     use std::sync::Arc;
     use std::thread;
-    use std::time::{Duration, UNIX_EPOCH};
+    use std::time::Duration;
 
     use super::*;
+
+    // ── attribute_to ──
+
+    #[tokio::test]
+    async fn attribute_to_stamps_records_with_the_calling_tool_use() {
+        let dir = tempfile::tempdir().unwrap();
+        let tracker = Arc::new(FileTracker::default());
+        let read = Path::new("/tmp/read.rs");
+        let paged = Path::new("/tmp/paged.rs");
+        let written = dir.path().join("written.rs");
+        let outside = Path::new("/tmp/outside.rs");
+
+        attribute_to("toolu_read", async {
+            tracker.record_read(read, b"r", LastView::Full)
+        })
+        .await;
+        attribute_to("toolu_page_1", async {
+            tracker.record_read(paged, b"p", LastView::lines(1, 1, 2))
+        })
+        .await;
+        attribute_to("toolu_page_2", async {
+            tracker.record_read(paged, b"p", LastView::lines(2, 2, 2))
+        })
+        .await;
+        attribute_to(
+            "toolu_write",
+            tracker.write_and_record(write_file(written.clone(), b"w")),
+        )
+        .await
+        .unwrap();
+        let reread = attribute_to("toolu_reread", async {
+            tracker.record_read(read, b"r", LastView::Full)
+        })
+        .await;
+        tracker.record_read(outside, b"o", LastView::Full);
+
+        assert_eq!(reread, RecordRead::CacheHit);
+        let origins: BTreeMap<PathBuf, Option<String>> = tracker
+            .snapshot_all()
+            .into_iter()
+            .map(|snap| (snap.path, snap.tool_use_id))
+            .collect();
+        assert_eq!(
+            origins,
+            BTreeMap::from([
+                (outside.to_path_buf(), None),
+                (paged.to_path_buf(), Some("toolu_page_2".to_owned())),
+                (read.to_path_buf(), Some("toolu_read".to_owned())),
+                (written, Some("toolu_write".to_owned())),
+            ]),
+            "the newest read that returned content owns the state, and a cache hit keeps it",
+        );
+    }
+
+    /// Writes `bytes` to `path` and returns them under `path` as the tracker key.
+    async fn write_file(path: PathBuf, bytes: &[u8]) -> std::io::Result<(PathBuf, Vec<u8>)> {
+        tokio::fs::write(&path, bytes).await?;
+        Ok((path, bytes.to_vec()))
+    }
 
     // ── LastView::lines ──
 
@@ -606,11 +644,10 @@ mod tests {
     fn record_read_first_full_read_inserts() {
         let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
-        let outcome = tracker.record_read(path, b"hello", UNIX_EPOCH, 5, LastView::Full);
+        let outcome = tracker.record_read(path, b"hello", LastView::Full);
         assert_eq!(outcome, RecordRead::Inserted);
         let stored = tracker.lock().get(path).cloned().unwrap();
         assert_eq!(stored.content_hash, xxh64(b"hello", HASH_SEED));
-        assert_eq!(stored.size, 5);
         assert_eq!(stored.last_view, LastView::Full);
     }
 
@@ -618,8 +655,8 @@ mod tests {
     fn record_read_redundant_full_read_is_cache_hit() {
         let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
-        _ = tracker.record_read(path, b"hello", UNIX_EPOCH, 5, LastView::Full);
-        let outcome = tracker.record_read(path, b"hello", UNIX_EPOCH, 5, LastView::Full);
+        _ = tracker.record_read(path, b"hello", LastView::Full);
+        let outcome = tracker.record_read(path, b"hello", LastView::Full);
         assert_eq!(
             outcome,
             RecordRead::CacheHit,
@@ -628,26 +665,23 @@ mod tests {
     }
 
     #[test]
-    fn record_read_cache_hit_preserves_recorded_at_refreshes_mtime() {
+    fn record_read_cache_hit_preserves_recorded_at() {
         let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
-        let t0 = UNIX_EPOCH + std::time::Duration::from_secs(1);
-        let t1 = UNIX_EPOCH + std::time::Duration::from_secs(2);
-        _ = tracker.record_read(path, b"hello", t0, 5, LastView::Full);
+        _ = tracker.record_read(path, b"hello", LastView::Full);
         let first = tracker.lock().get(path).cloned().unwrap();
-        let outcome = tracker.record_read(path, b"hello", t1, 5, LastView::Full);
+        let outcome = tracker.record_read(path, b"hello", LastView::Full);
         let second = tracker.lock().get(path).cloned().unwrap();
         assert_eq!(outcome, RecordRead::CacheHit);
         assert_eq!(first.recorded_at, second.recorded_at);
-        assert_eq!(second.mtime, t1);
     }
 
     #[test]
     fn record_read_changed_content_inserts_not_cache_hit() {
         let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
-        _ = tracker.record_read(path, b"hello", UNIX_EPOCH, 5, LastView::Full);
-        let outcome = tracker.record_read(path, b"world", UNIX_EPOCH, 5, LastView::Full);
+        _ = tracker.record_read(path, b"hello", LastView::Full);
+        let outcome = tracker.record_read(path, b"world", LastView::Full);
         assert_eq!(outcome, RecordRead::Inserted);
     }
 
@@ -656,8 +690,8 @@ mod tests {
         let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
         let view = LastView::lines(1, 1, 5);
-        _ = tracker.record_read(path, b"hello", UNIX_EPOCH, 5, view.clone());
-        let outcome = tracker.record_read(path, b"hello", UNIX_EPOCH, 5, view);
+        _ = tracker.record_read(path, b"hello", view.clone());
+        let outcome = tracker.record_read(path, b"hello", view);
         assert_eq!(outcome, RecordRead::Inserted);
     }
 
@@ -665,10 +699,10 @@ mod tests {
     fn record_read_full_after_partial_does_not_cache_hit() {
         let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
-        _ = tracker.record_read(path, b"hello", UNIX_EPOCH, 5, LastView::lines(1, 1, 5));
-        let outcome = tracker.record_read(path, b"hello", UNIX_EPOCH, 5, LastView::Full);
+        _ = tracker.record_read(path, b"hello", LastView::lines(1, 1, 5));
+        let outcome = tracker.record_read(path, b"hello", LastView::Full);
         assert_eq!(outcome, RecordRead::Inserted);
-        let next = tracker.record_read(path, b"hello", UNIX_EPOCH, 5, LastView::Full);
+        let next = tracker.record_read(path, b"hello", LastView::Full);
         assert_eq!(next, RecordRead::CacheHit);
     }
 
@@ -676,9 +710,9 @@ mod tests {
     fn record_read_partial_after_full_keeps_full_for_unchanged_content() {
         let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
-        _ = tracker.record_read(path, b"hello", UNIX_EPOCH, 5, LastView::Full);
+        _ = tracker.record_read(path, b"hello", LastView::Full);
 
-        let outcome = tracker.record_read(path, b"hello", UNIX_EPOCH, 5, LastView::lines(2, 2, 5));
+        let outcome = tracker.record_read(path, b"hello", LastView::lines(2, 2, 5));
         assert_eq!(
             outcome,
             RecordRead::Inserted,
@@ -691,10 +725,10 @@ mod tests {
     fn record_read_paging_unchanged_content_accumulates_to_full() {
         let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
-        _ = tracker.record_read(path, b"hello", UNIX_EPOCH, 5, LastView::lines(1, 2, 4));
+        _ = tracker.record_read(path, b"hello", LastView::lines(1, 2, 4));
         let first = tracker.lock()[path].clone();
 
-        let outcome = tracker.record_read(path, b"hello", UNIX_EPOCH, 5, LastView::lines(3, 4, 4));
+        let outcome = tracker.record_read(path, b"hello", LastView::lines(3, 4, 4));
         assert_eq!(
             outcome,
             RecordRead::Inserted,
@@ -704,7 +738,7 @@ mod tests {
         assert_eq!(paged.last_view, LastView::Full);
         assert_eq!(paged.recorded_at, first.recorded_at);
 
-        _ = tracker.record_read(path, b"world", UNIX_EPOCH, 5, LastView::lines(3, 4, 4));
+        _ = tracker.record_read(path, b"world", LastView::lines(3, 4, 4));
         assert_eq!(
             tracker.lock()[path].last_view,
             LastView::lines(3, 4, 4),
@@ -718,8 +752,7 @@ mod tests {
     fn verify_current_content_full_match_passes() {
         let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
-        let mtime = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
-        _ = tracker.record_read(path, b"hello", mtime, 5, LastView::Full);
+        _ = tracker.record_read(path, b"hello", LastView::Full);
 
         let result = tracker.verify_current_content(path, b"hello", GatePurpose::Edit);
 
@@ -758,7 +791,7 @@ mod tests {
     fn verify_current_content_partial_view_blocks_write_but_not_edit() {
         let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
-        _ = tracker.record_read(path, b"hello", UNIX_EPOCH, 5, LastView::lines(1, 1, 2));
+        _ = tracker.record_read(path, b"hello", LastView::lines(1, 1, 2));
 
         let edit = tracker.verify_current_content(path, b"hello", GatePurpose::Edit);
         assert_eq!(edit, Ok(()));
@@ -780,27 +813,10 @@ mod tests {
     }
 
     #[test]
-    fn verify_current_content_matching_bytes_ignore_stat_drift() {
-        let tracker = FileTracker::default();
-        let path = Path::new("/tmp/a.rs");
-        let mtime = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
-        _ = tracker.record_read(path, b"hello", mtime, 5, LastView::Full);
-
-        let result = tracker.verify_current_content(path, b"hello", GatePurpose::Edit);
-
-        assert_eq!(
-            result,
-            Ok(()),
-            "matching content stays safe even when metadata would drift",
-        );
-    }
-
-    #[test]
     fn verify_current_content_divergent_bytes_rejects_content_drift() {
         let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
-        let mtime = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
-        _ = tracker.record_read(path, b"hello", mtime, 5, LastView::Full);
+        _ = tracker.record_read(path, b"hello", LastView::Full);
 
         let result = tracker.verify_current_content(path, b"world", GatePurpose::Edit);
 
@@ -863,64 +879,75 @@ mod tests {
         assert!(msg.contains("Re-read"));
     }
 
-    // ── record_modify ──
-
-    #[test]
-    fn record_modify_updates_existing_entry_with_new_hash() {
-        let tracker = FileTracker::default();
-        let path = Path::new("/tmp/a.rs");
-        _ = tracker.record_read(path, b"hello", UNIX_EPOCH, 5, LastView::Full);
-        let new_mtime = UNIX_EPOCH + Duration::from_secs(1);
-        tracker.record_modify(path, b"world", new_mtime, 5);
-
-        let stored = tracker.lock().get(path).cloned().unwrap();
-        assert_eq!(stored.content_hash, xxh64(b"world", HASH_SEED));
-        assert_eq!(stored.mtime, new_mtime);
-        assert_eq!(
-            stored.last_view,
-            LastView::Full,
-            "modify always lands as Full"
-        );
-    }
-
-    #[test]
-    fn record_modify_promotes_partial_view_to_full() {
-        let tracker = FileTracker::default();
-        let path = Path::new("/tmp/a.rs");
-        _ = tracker.record_read(path, b"hello", UNIX_EPOCH, 5, LastView::lines(1, 1, 5));
-        tracker.record_modify(path, b"world", UNIX_EPOCH, 5);
-        assert_eq!(tracker.lock().get(path).unwrap().last_view, LastView::Full);
-    }
-
-    // ── record_modify_after_write ──
+    // ── write_and_record ──
 
     #[tokio::test]
-    async fn record_modify_after_write_stats_the_path_and_records_under_the_key() {
-        let tracker = FileTracker::default();
+    async fn write_and_record_lands_the_bytes_as_a_full_view() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a.rs");
-        std::fs::write(&path, b"updated").unwrap();
         let key = Path::new("/key/a.rs");
-        tracker
-            .record_modify_after_write(key, &path, b"updated")
-            .await;
+        let tracker = Arc::new(FileTracker::default());
+        _ = tracker.record_read(key, b"hello", LastView::lines(1, 1, 2));
 
-        let result = tracker.verify_current_content(key, b"updated", GatePurpose::Write);
-        assert_eq!(result, Ok(()));
-        assert_eq!(tracker.lock()[key].size, 7);
+        tracker
+            .write_and_record({
+                let path = path.clone();
+                async move {
+                    tokio::fs::write(&path, b"world").await?;
+                    Ok((key.to_path_buf(), b"world".to_vec()))
+                }
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"world");
+        let stored = tracker.lock().get(key).cloned().unwrap();
+        assert_eq!(stored.content_hash, xxh64(b"world", HASH_SEED));
+        assert_eq!(stored.last_view, LastView::Full);
     }
 
     #[tokio::test]
-    async fn record_modify_after_write_swallows_stat_failure_silently() {
-        let tracker = FileTracker::default();
-        let path = Path::new("/nonexistent/never-here.rs");
-        tracker
-            .record_modify_after_write(path, path, b"bytes")
-            .await;
-        assert!(
-            tracker.lock().get(path).is_none(),
-            "stat failure must not insert anything",
+    async fn write_and_record_records_a_write_its_dropped_caller_started() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.rs");
+        let tracker = Arc::new(FileTracker::default());
+
+        let write = attribute_to(
+            "toolu_write",
+            tracker.write_and_record(write_file(path.clone(), b"w")),
         );
+        _ = tokio::time::timeout(Duration::ZERO, write).await;
+        for _ in 0..200 {
+            if tracker.lock().contains_key(&path) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"w");
+        let stored = tracker.lock().get(&path).cloned().unwrap();
+        assert_eq!(stored.content_hash, xxh64(b"w", HASH_SEED));
+        assert_eq!(stored.tool_use_id.as_deref(), Some("toolu_write"));
+    }
+
+    #[tokio::test]
+    async fn write_and_record_failed_write_keeps_the_previous_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing").join("a.rs");
+        let tracker = Arc::new(FileTracker::default());
+        _ = tracker.record_read(&path, b"hello", LastView::Full);
+
+        let result = tracker
+            .write_and_record(write_file(path.clone(), b"world"))
+            .await;
+
+        assert_eq!(
+            result.unwrap_err().kind(),
+            std::io::ErrorKind::NotFound,
+            "the parent directory is missing",
+        );
+        let stored = tracker.lock().get(&path).cloned().unwrap();
+        assert_eq!(stored.content_hash, xxh64(b"hello", HASH_SEED));
     }
 
     // ── snapshot_all ──
@@ -928,25 +955,18 @@ mod tests {
     #[test]
     fn snapshot_all_collects_every_tracked_file() {
         let tracker = FileTracker::default();
-        let mtime = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
-        _ = tracker.record_read(Path::new("/tmp/a"), b"a", mtime, 1, LastView::Full);
-        _ = tracker.record_read(
-            Path::new("/tmp/b"),
-            b"bbb",
-            mtime,
-            3,
-            LastView::lines(1, 2, 3),
-        );
+        _ = tracker.record_read(Path::new("/tmp/a"), b"a", LastView::Full);
+        _ = tracker.record_read(Path::new("/tmp/b"), b"bbb", LastView::lines(1, 2, 3));
 
         let mut snaps = tracker.snapshot_all();
         snaps.sort_by(|a, b| a.path.cmp(&b.path));
 
         assert_eq!(snaps.len(), 2);
         assert_eq!(snaps[0].path, Path::new("/tmp/a"));
-        assert_eq!(snaps[0].size, 1);
+        assert_eq!(snaps[0].content_hash, xxh64(b"a", HASH_SEED));
         assert_eq!(snaps[0].last_view, LastView::Full);
         assert_eq!(snaps[1].path, Path::new("/tmp/b"));
-        assert_eq!(snaps[1].size, 3);
+        assert_eq!(snaps[1].content_hash, xxh64(b"bbb", HASH_SEED));
         assert_eq!(snaps[1].last_view, LastView::lines(1, 2, 3));
     }
 
@@ -961,9 +981,8 @@ mod tests {
     #[test]
     fn clear_drops_recorded_reads_so_subsequent_snapshot_is_empty() {
         let tracker = FileTracker::default();
-        let mtime = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
-        _ = tracker.record_read(Path::new("/tmp/a"), b"a", mtime, 1, LastView::Full);
-        _ = tracker.record_read(Path::new("/tmp/b"), b"b", mtime, 1, LastView::Full);
+        _ = tracker.record_read(Path::new("/tmp/a"), b"a", LastView::Full);
+        _ = tracker.record_read(Path::new("/tmp/b"), b"b", LastView::Full);
         assert_eq!(tracker.snapshot_all().len(), 2);
 
         tracker.clear();
@@ -974,44 +993,40 @@ mod tests {
     // ── restore_verified ──
 
     #[test]
-    fn restore_verified_matching_stat_repopulates_entry() {
+    fn restore_verified_matching_content_repopulates_entry() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a.rs");
         std::fs::write(&path, b"persisted bytes").unwrap();
 
-        let meta = std::fs::metadata(&path).unwrap();
         let snap = FileSnapshot {
             path: path.clone(),
             content_hash: xxh64(b"persisted bytes", HASH_SEED),
-            mtime: OffsetDateTime::from(meta.modified().unwrap()),
-            size: meta.len(),
             last_view: LastView::Full,
             recorded_at: OffsetDateTime::now_utc(),
+            tool_use_id: None,
         };
 
         let tracker = FileTracker::default();
         tracker.restore_verified(vec![snap.clone()]);
 
         let stored = tracker.lock().get(&path).cloned();
-        let stored = stored.expect("matching stat restores the entry");
+        let stored = stored.expect("matching content restores the entry");
         assert_eq!(stored.content_hash, snap.content_hash);
-        assert_eq!(stored.size, snap.size);
         assert_eq!(stored.last_view, LastView::Full);
     }
 
     #[test]
-    fn restore_verified_size_drift_drops_snapshot() {
+    fn restore_verified_content_drift_drops_snapshot() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a.rs");
-        std::fs::write(&path, b"now this is longer").unwrap();
+        std::fs::write(&path, b"new").unwrap();
 
         let snap = FileSnapshot {
             path: path.clone(),
             content_hash: xxh64(b"old", HASH_SEED),
-            mtime: OffsetDateTime::from(std::fs::metadata(&path).unwrap().modified().unwrap()),
-            size: 3,
             last_view: LastView::Full,
             recorded_at: OffsetDateTime::now_utc(),
+            tool_use_id: None,
         };
 
         let tracker = FileTracker::default();
@@ -1021,64 +1036,13 @@ mod tests {
     }
 
     #[test]
-    fn restore_verified_same_size_content_drift_drops_snapshot() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("a.rs");
-        std::fs::write(&path, b"new").unwrap();
-
-        let meta = std::fs::metadata(&path).unwrap();
-        let snap = FileSnapshot {
-            path: path.clone(),
-            content_hash: xxh64(b"old", HASH_SEED),
-            mtime: OffsetDateTime::from(meta.modified().unwrap()),
-            size: meta.len(),
-            last_view: LastView::Full,
-            recorded_at: OffsetDateTime::now_utc(),
-        };
-
-        let tracker = FileTracker::default();
-        let dropped = tracker.restore_verified(vec![snap]);
-        assert_eq!(
-            dropped,
-            vec![path.clone()],
-            "same-size writes must still be detected by content hash",
-        );
-        assert!(tracker.lock().get(&path).is_none());
-    }
-
-    #[test]
-    fn restore_verified_mtime_drift_keeps_matching_content_hash() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("a.rs");
-        std::fs::write(&path, b"alpha").unwrap();
-        let meta = std::fs::metadata(&path).unwrap();
-
-        let snap = FileSnapshot {
-            path: path.clone(),
-            content_hash: xxh64(b"alpha", HASH_SEED),
-            mtime: OffsetDateTime::from(meta.modified().unwrap()) - Duration::from_mins(1),
-            size: meta.len(),
-            last_view: LastView::Full,
-            recorded_at: OffsetDateTime::now_utc(),
-        };
-
-        let tracker = FileTracker::default();
-        tracker.restore_verified(vec![snap]);
-        assert!(
-            tracker.lock().get(&path).is_some(),
-            "mtime mismatch alone must not drop a content-matching snapshot",
-        );
-    }
-
-    #[test]
     fn restore_verified_missing_file_drops_snapshot() {
         let snap = FileSnapshot {
             path: PathBuf::from("/nonexistent/path/a.rs"),
             content_hash: 0,
-            mtime: OffsetDateTime::UNIX_EPOCH,
-            size: 0,
             last_view: LastView::Full,
             recorded_at: OffsetDateTime::now_utc(),
+            tool_use_id: None,
         };
 
         let tracker = FileTracker::default();
@@ -1092,14 +1056,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a.rs");
         std::fs::write(&path, b"content").unwrap();
-        let meta = std::fs::metadata(&path).unwrap();
         let snap = FileSnapshot {
             path: path.clone(),
             content_hash: xxh64(b"content", HASH_SEED),
-            mtime: OffsetDateTime::from(meta.modified().unwrap()),
-            size: meta.len(),
             last_view: LastView::Full,
             recorded_at: OffsetDateTime::now_utc(),
+            tool_use_id: None,
         };
 
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
@@ -1119,10 +1081,9 @@ mod tests {
         let snap = FileSnapshot {
             path: path.clone(),
             content_hash: 0,
-            mtime: OffsetDateTime::UNIX_EPOCH,
-            size: 0,
             last_view: LastView::Full,
             recorded_at: OffsetDateTime::now_utc(),
+            tool_use_id: None,
         };
 
         let tracker = FileTracker::default();
@@ -1141,10 +1102,9 @@ mod tests {
         let snap = FileSnapshot {
             path: path.clone(),
             content_hash: 0,
-            mtime: OffsetDateTime::UNIX_EPOCH,
-            size: MAX_TRACKED_FILE_SIZE + 1,
             last_view: LastView::Full,
             recorded_at: OffsetDateTime::now_utc(),
+            tool_use_id: None,
         };
 
         let tracker = FileTracker::default();
@@ -1161,34 +1121,29 @@ mod tests {
         let drifted_path = dir.path().join("drifted.rs");
         std::fs::write(&kept_path, b"alpha").unwrap();
         std::fs::write(&drifted_path, b"now larger").unwrap();
-        let kept_meta = std::fs::metadata(&kept_path).unwrap();
-        let drifted_meta = std::fs::metadata(&drifted_path).unwrap();
         let missing_path = PathBuf::from("/nonexistent/x.rs");
 
         let snaps = vec![
             FileSnapshot {
                 path: kept_path.clone(),
                 content_hash: xxh64(b"alpha", HASH_SEED),
-                mtime: OffsetDateTime::from(kept_meta.modified().unwrap()),
-                size: kept_meta.len(),
                 last_view: LastView::Full,
                 recorded_at: OffsetDateTime::now_utc(),
+                tool_use_id: None,
             },
             FileSnapshot {
                 path: drifted_path.clone(),
                 content_hash: 0,
-                mtime: OffsetDateTime::from(drifted_meta.modified().unwrap()),
-                size: 3,
                 last_view: LastView::Full,
                 recorded_at: OffsetDateTime::now_utc(),
+                tool_use_id: None,
             },
             FileSnapshot {
                 path: missing_path.clone(),
                 content_hash: 0,
-                mtime: OffsetDateTime::UNIX_EPOCH,
-                size: 0,
                 last_view: LastView::Full,
                 recorded_at: OffsetDateTime::now_utc(),
+                tool_use_id: None,
             },
         ];
 
@@ -1199,7 +1154,7 @@ mod tests {
         expected.sort();
         assert_eq!(
             dropped, expected,
-            "both the size-drifted and the missing snapshots must be reported",
+            "both the drifted and the missing snapshots must be reported",
         );
         assert!(tracker.lock().contains_key(&kept_path));
     }
@@ -1209,25 +1164,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a.rs");
         std::fs::write(&path, b"x").unwrap();
-        let meta = std::fs::metadata(&path).unwrap();
-        let mtime_dt = OffsetDateTime::from(meta.modified().unwrap());
         let content_hash = xxh64(b"x", HASH_SEED);
 
         let older = FileSnapshot {
             path: path.clone(),
             content_hash: xxh64(b"stale", HASH_SEED),
-            mtime: mtime_dt,
-            size: meta.len(),
             last_view: LastView::lines(1, 1, 2),
             recorded_at: OffsetDateTime::UNIX_EPOCH,
+            tool_use_id: None,
         };
         let newer = FileSnapshot {
             path: path.clone(),
             content_hash,
-            mtime: mtime_dt,
-            size: meta.len(),
             last_view: LastView::Full,
             recorded_at: OffsetDateTime::UNIX_EPOCH + Duration::from_mins(1),
+            tool_use_id: None,
         };
 
         let tracker = FileTracker::default();
@@ -1258,13 +1209,7 @@ mod tests {
                 s.spawn(move || {
                     for i in 0..100u32 {
                         let path = PathBuf::from(format!("/tmp/t{t}/p{i}"));
-                        _ = tracker.record_read(
-                            &path,
-                            &t.to_le_bytes(),
-                            UNIX_EPOCH,
-                            4,
-                            LastView::Full,
-                        );
+                        _ = tracker.record_read(&path, &t.to_le_bytes(), LastView::Full);
                     }
                 });
             }
@@ -1282,13 +1227,7 @@ mod tests {
         })
         .join();
         // Mutex is now poisoned. record_read must recover via lock().
-        let result = tracker.record_read(
-            Path::new("/tmp/poison_test"),
-            b"hello",
-            UNIX_EPOCH,
-            5,
-            LastView::Full,
-        );
+        let result = tracker.record_read(Path::new("/tmp/poison_test"), b"hello", LastView::Full);
         assert_eq!(result, RecordRead::Inserted);
         assert_eq!(tracker.lock().len(), 1);
     }
@@ -1300,24 +1239,22 @@ mod tests {
         let snap = FileSnapshot {
             path: PathBuf::from("/tmp/a.rs"),
             content_hash: 0xDEAD_BEEF,
-            mtime: time::macros::datetime!(2026-04-29 12:00:00 UTC),
-            size: 42,
             last_view: LastView::Partial {
                 ranges: vec![(1, 2), (4, 5)],
                 total_lines: 9,
             },
             recorded_at: time::macros::datetime!(2026-04-29 12:34:56 UTC),
+            tool_use_id: Some("toolu_1".to_owned()),
         };
         let json = serde_json::to_value(&snap).unwrap();
         assert_eq!(json["path"], "/tmp/a.rs");
         assert_eq!(json["content_hash"], 0xDEAD_BEEF_u64);
-        assert_eq!(json["mtime"], "2026-04-29T12:00:00Z");
-        assert_eq!(json["size"], 42);
         assert_eq!(
             json["last_view"],
             serde_json::json!({"kind": "partial", "ranges": [[1, 2], [4, 5]], "total_lines": 9}),
         );
         assert_eq!(json["recorded_at"], "2026-04-29T12:34:56Z");
+        assert_eq!(json["tool_use_id"], "toolu_1");
 
         let parsed: FileSnapshot = serde_json::from_value(json).unwrap();
         assert_eq!(parsed, snap);

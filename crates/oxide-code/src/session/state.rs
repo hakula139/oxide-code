@@ -346,7 +346,7 @@ mod tests {
     use super::super::store::load_session_data_from_path;
     use super::super::store::testing::{test_project_dir, test_session_file, test_store};
     use super::*;
-    use crate::file_tracker::FileTracker;
+    use crate::file_tracker::{FileTracker, LastView};
 
     // ── try_defer_title ──
 
@@ -638,12 +638,7 @@ mod tests {
         state.flush_entries(msgs).unwrap();
 
         for name in ["/tmp/a", "/tmp/b", "/tmp/c"] {
-            tracker.record_modify(
-                std::path::Path::new(name),
-                name.as_bytes(),
-                std::time::UNIX_EPOCH,
-                3,
-            );
+            _ = tracker.record_read(std::path::Path::new(name), name.as_bytes(), LastView::Full);
         }
 
         let entries = state.finish_entries(tracker.snapshot_all(), now);

@@ -558,10 +558,9 @@ mod tests {
             snapshot: FileSnapshot {
                 path: PathBuf::from(path),
                 content_hash: 42,
-                mtime: datetime!(2026-04-16 12:00:00 UTC),
-                size: 10,
                 last_view: crate::file_tracker::LastView::Full,
                 recorded_at: datetime!(2026-04-16 12:00:01 UTC),
+                tool_use_id: None,
             },
         }
     }

@@ -59,8 +59,11 @@ pub(crate) struct App {
     pending_calls: PendingCalls,
     /// Prompt already painted for the in-flight turn. Replayed if auto-compaction clears chat.
     active_prompt: Option<String>,
-    /// FIFO of prompts submitted mid-turn. Drained at turn boundaries.
+    /// FIFO of prompts submitted mid-turn, kept as typed so Esc restores a `//` escape. The TUI owns
+    /// each one until the agent confirms it with `PromptDrained` or it starts a turn of its own.
     pending_prompts: VecDeque<String>,
+    /// How many leading `pending_prompts` the in-flight turn already holds.
+    forwarded_prompts: usize,
     modals: ModalStack,
     /// Theme saved when a `/theme` picker opens. Restored if the modal cancels.
     preview_theme_snapshot: Option<Theme>,
@@ -122,6 +125,7 @@ impl App {
             pending_calls: PendingCalls::new(),
             active_prompt: None,
             pending_prompts: VecDeque::new(),
+            forwarded_prompts: 0,
             modals: ModalStack::new(),
             preview_theme_snapshot: None,
             should_quit: false,
@@ -296,16 +300,11 @@ impl App {
 
     /// Applies UI side-effects then forwards to the agent channel.
     ///
-    /// `apply_action_locally` returns `false` when the action was fully handled in the UI (slash
-    /// command synthesized its own forward, prompt was queued mid-turn, exit-arm was set, etc.),
-    /// gating the forward so the agent loop never sees actions that were never meant for it. A
-    /// `//` escape reaches the agent as its literal text.
-    fn dispatch_user_action(&mut self, mut action: UserAction) {
+    /// `apply_action_locally` returns `false` when the UI already handled the action, such as a
+    /// prompt that forwards itself or an armed exit, so the agent loop never sees it.
+    fn dispatch_user_action(&mut self, action: UserAction) {
         if !self.apply_action_locally(&action) {
             return;
-        }
-        if let UserAction::SubmitPrompt(text) = &mut action {
-            *text = slash::unescape_literal(text).to_owned();
         }
         self.forward_to_agent(action);
     }
@@ -339,7 +338,10 @@ impl App {
     /// Applies UI-state changes and returns whether to forward to the agent.
     fn apply_action_locally(&mut self, action: &UserAction) -> bool {
         match action {
-            UserAction::SubmitPrompt(text) => self.handle_submit_prompt(text),
+            UserAction::SubmitPrompt(text) => {
+                self.handle_submit_prompt(text);
+                false
+            }
             UserAction::Cancel => {
                 self.status_bar.set_status(Status::Cancelling);
                 true
@@ -359,7 +361,8 @@ impl App {
                 self.should_quit = true;
                 true
             }
-            UserAction::Clear
+            UserAction::QueuePrompt(_)
+            | UserAction::Clear
             | UserAction::Rename { .. }
             | UserAction::SwapConfig { .. }
             | UserAction::ApprovalDecision { .. } => true,
@@ -398,9 +401,9 @@ impl App {
         }
     }
 
-    /// Returns whether submitted text should also forward to the agent. Slash commands emit their
-    /// own synthesized actions, so plain prompts are the only forwarded submissions.
-    fn handle_submit_prompt(&mut self, text: &str) -> bool {
+    /// Queues the prompt, then starts a turn with the queue head when idle. Slash commands forward
+    /// their own synthesized actions.
+    fn handle_submit_prompt(&mut self, text: &str) {
         if self.input.is_enabled() {
             if let Some(parsed) = slash::parse_slash(text) {
                 if slash::echoes_input(&parsed) {
@@ -411,21 +414,17 @@ impl App {
                         if slash::echoes_input(&parsed) {
                             self.active_prompt = Some(text.to_owned());
                         }
-                        self.input.set_enabled(false);
-                        self.status_bar.set_status(Status::Streaming);
-                        self.forward_to_agent(action);
+                        self.start_turn(action);
                     } else {
                         self.dispatch_user_action(action);
                     }
                 }
-                return false;
+                return;
             }
-            let prompt = slash::unescape_literal(text).to_owned();
-            self.chat.push_user_message(prompt.clone());
-            self.active_prompt = Some(prompt);
-            self.input.set_enabled(false);
-            self.status_bar.set_status(Status::Streaming);
-            return true;
+            // Prompts a cancel left queued run before this one.
+            self.pending_prompts.push_back(text.to_owned());
+            self.drain_pending_prompt();
+            return;
         }
         if let Some(parsed) = slash::parse_slash(text) {
             if slash::echoes_input(&parsed) {
@@ -440,13 +439,34 @@ impl App {
                     ));
                 }
             }
-            return false;
+            return;
         }
         self.pending_prompts.push_back(text.to_owned());
-        !matches!(
+        self.forward_queued_prompts();
+    }
+
+    /// Starts a turn, then hands it the queued prompts so they splice in at its round boundaries.
+    fn start_turn(&mut self, submit: UserAction) {
+        self.input.set_enabled(false);
+        self.status_bar.set_status(Status::Streaming);
+        self.forward_to_agent(submit);
+        self.forward_queued_prompts();
+    }
+
+    /// Forwards the queued prompts the in-flight turn lacks. Holds them while compacting or
+    /// cancelling, when no turn may be left to splice them in.
+    fn forward_queued_prompts(&mut self) {
+        if matches!(
             self.status_bar.status(),
             Status::Compacting | Status::Cancelling,
-        )
+        ) {
+            return;
+        }
+        while let Some(queued) = self.pending_prompts.get(self.forwarded_prompts) {
+            let prompt = slash::unescape_literal(queued).to_owned();
+            self.forward_to_agent(UserAction::QueuePrompt(prompt));
+            self.forwarded_prompts += 1;
+        }
     }
 
     /// Runs `parsed` and applies its outcome, returning the action it asks the caller to route.
@@ -495,10 +515,7 @@ impl App {
                 is_error,
                 metadata,
             } => self.apply_tool_call_end(&id, &content, is_error, &metadata),
-            AgentEvent::PromptDrained(text) => {
-                self.pending_prompts.pop_front();
-                self.chat.push_user_message(text);
-            }
+            AgentEvent::PromptDrained(text) => self.apply_prompt_drained(text),
             AgentEvent::UsageUpdated(usage) => {
                 self.status_bar.set_usage(Some(usage));
             }
@@ -508,7 +525,7 @@ impl App {
             AgentEvent::Cancelled => {
                 self.chat.push_interrupted_marker();
                 self.active_prompt = None;
-                self.finalize_idle();
+                self.enter_idle();
             }
             AgentEvent::AutoCompactionStarted => {
                 self.set_active_status(Status::Compacting);
@@ -582,6 +599,21 @@ impl App {
         self.chat.push_tool_result_view(&header, view, is_error);
     }
 
+    fn apply_prompt_drained(&mut self, text: String) {
+        if self.forwarded_prompts > 0
+            && self
+                .pending_prompts
+                .front()
+                .is_some_and(|queued| slash::unescape_literal(queued) == text)
+        {
+            self.pending_prompts.pop_front();
+            self.forwarded_prompts -= 1;
+        } else {
+            tracing::warn!("drained prompt {text:?} does not lead the forwarded queue");
+        }
+        self.chat.push_user_message(text);
+    }
+
     /// Opens the approve-or-deny overlay for a gated tool call. Pushing onto the stack lets it nest
     /// over any open picker, and the modal's cancel hook resolves the blocked agent on dismissal.
     fn push_approval_modal(&mut self, id: String, preview: crate::agent::event::ApprovalPreview) {
@@ -594,7 +626,12 @@ impl App {
     fn finish_turn(&mut self) {
         self.chat.commit_streaming();
         self.active_prompt = None;
-        self.finalize_idle();
+        // A cancel that lost the race to the turn's end still leaves the next step to the user.
+        if matches!(self.status_bar.status(), Status::Cancelling) {
+            self.enter_idle();
+        } else {
+            self.finalize_idle();
+        }
     }
 
     /// Mid-session resume: rebinds the session and rebuilds chat from the target transcript.
@@ -681,27 +718,41 @@ impl App {
         self.chat.push_system_message(confirmation);
     }
 
-    /// Resets to idle, clears orphan calls, re-enables input, and drains queued prompts.
+    /// Goes idle, then submits the next queued prompt.
     fn finalize_idle(&mut self) {
-        self.pending_calls.clear();
-        self.status_bar.set_status(Status::Idle);
-        self.input.set_enabled(true);
+        self.enter_idle();
         self.drain_pending_prompt();
     }
 
+    /// Resets to idle, clears orphan calls, and re-enables input. Queued prompts stay queued, and
+    /// the ended turn no longer holds any of them.
+    fn enter_idle(&mut self) {
+        self.pending_calls.clear();
+        self.forwarded_prompts = 0;
+        self.status_bar.set_status(Status::Idle);
+        self.input.set_enabled(true);
+    }
+
+    /// Starts a turn with the oldest queued prompt.
     fn drain_pending_prompt(&mut self) {
-        if let Some(prompt) = self.pending_prompts.pop_front() {
-            self.dispatch_user_action(UserAction::SubmitPrompt(prompt));
+        if let Some(queued) = self.pending_prompts.pop_front() {
+            let prompt = slash::unescape_literal(&queued).to_owned();
+            self.chat.push_user_message(prompt.clone());
+            self.active_prompt = Some(prompt.clone());
+            self.start_turn(UserAction::SubmitPrompt(prompt));
         }
     }
 
-    /// Sets busy status unless a user-acknowledgement status is showing.
+    /// Sets busy status unless a user-acknowledgement status is showing. Leaving `Compacting`
+    /// releases the prompts held during an automatic compaction.
     fn set_active_status(&mut self, status: Status) {
-        if !matches!(
-            self.status_bar.status(),
-            Status::Cancelling | Status::ExitArmed { .. },
-        ) {
-            self.status_bar.set_status(status);
+        match self.status_bar.status() {
+            Status::Cancelling | Status::ExitArmed { .. } => {}
+            Status::Compacting => {
+                self.status_bar.set_status(status);
+                self.forward_queued_prompts();
+            }
+            _ => self.status_bar.set_status(status),
         }
     }
 
@@ -1938,7 +1989,7 @@ mod tests {
         );
         assert_eq!(app.status_bar.status(), &Status::Streaming);
         let forwarded = rx.recv().await.expect("queued submit forwarded");
-        assert!(matches!(forwarded, UserAction::SubmitPrompt(s) if s == "queued"));
+        assert_eq!(forwarded, UserAction::QueuePrompt("queued".to_owned()));
     }
 
     #[tokio::test]
@@ -2007,8 +2058,6 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_submit_during_cancelling_holds_locally_without_forwarding() {
-        // Cancel-window FIFO authority: forwarding a submit during cancel could let it
-        // slip ahead of `pending_prompts`. Hold locally until `Cancelled`, then drain.
         let (mut app, mut rx, _agent_tx) = test_app(None);
         app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
         rx.recv().await.expect("active submit forwarded");
@@ -2025,7 +2074,6 @@ mod tests {
         assert_eq!(
             app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
             vec!["typed-during-cancel".to_owned()],
-            "held locally; finalize_idle re-fires after Cancelled lands",
         );
     }
 
@@ -2412,6 +2460,66 @@ mod tests {
             }
             other => panic!("expected SwapConfig, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn submit_after_a_cancel_runs_the_held_queue_before_the_new_prompt() {
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
+        app.dispatch_user_action(UserAction::SubmitPrompt("held".to_owned()));
+        app.handle_esc();
+        app.handle_agent_event(AgentEvent::Cancelled);
+        let mut forwarded = || std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+        assert_eq!(forwarded().len(), 3, "submit, queue, and cancel");
+
+        app.dispatch_user_action(UserAction::SubmitPrompt("new".to_owned()));
+
+        assert_eq!(
+            forwarded(),
+            [
+                UserAction::SubmitPrompt("held".to_owned()),
+                UserAction::QueuePrompt("new".to_owned()),
+            ],
+        );
+        assert_eq!(
+            app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
+            ["new".to_owned()],
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_busy_double_slash_queues_the_literal_and_keeps_the_escape() {
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
+        app.dispatch_user_action(UserAction::SubmitPrompt("//etc/hosts".to_owned()));
+        app.dispatch_user_action(UserAction::SubmitPrompt("//tmp".to_owned()));
+        let mut forwarded = || std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+        assert_eq!(
+            forwarded(),
+            [
+                UserAction::SubmitPrompt("active".to_owned()),
+                UserAction::QueuePrompt("/etc/hosts".to_owned()),
+                UserAction::QueuePrompt("/tmp".to_owned()),
+            ],
+        );
+
+        app.handle_agent_event(AgentEvent::PromptDrained("/etc/hosts".to_owned()));
+        assert_eq!(
+            app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
+            ["//tmp".to_owned()],
+            "the queue keeps the typed escape so Esc restores it",
+        );
+
+        app.handle_agent_event(AgentEvent::Cancelled);
+        app.dispatch_user_action(UserAction::SubmitPrompt("new".to_owned()));
+        assert_eq!(
+            forwarded(),
+            [
+                UserAction::SubmitPrompt("/tmp".to_owned()),
+                UserAction::QueuePrompt("new".to_owned()),
+            ],
+        );
+        assert_eq!(app.active_prompt.as_deref(), Some("/tmp"));
     }
 
     // ── apply_slash_outcome ──
@@ -3218,8 +3326,6 @@ mod tests {
         let chat_before = app.chat.entry_count();
         app.handle_agent_event(AgentEvent::PromptDrained("queued-a".to_owned()));
 
-        // Head pops in dispatch order regardless of the event payload —
-        // the `text` is for display and never reorders the FIFO.
         assert_eq!(
             app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
             vec!["queued-b".to_owned()],
@@ -3232,18 +3338,46 @@ mod tests {
     }
 
     #[test]
-    fn prompt_drained_with_empty_queue_still_pushes_chat_entry() {
-        // Defensive: post-cancel-window-fix the agent never emits
-        // `PromptDrained` for items the TUI's mirror lacks, but if it
-        // ever did (agent / TUI desync), the handler must still
-        // surface the text instead of swallowing the event silently.
+    fn prompt_drained_outside_the_forwarded_queue_keeps_the_queue_and_shows_the_text() {
+        // The agent only drains prompts it was handed, but a desync must still show the text.
         let (mut app, _rx, _agent_tx) = test_app(None);
+        app.pending_prompts.push_back("held".into());
         let chat_before = app.chat.entry_count();
 
-        app.handle_agent_event(AgentEvent::PromptDrained("orphan".to_owned()));
+        app.handle_agent_event(AgentEvent::PromptDrained("held".to_owned()));
 
-        assert!(app.pending_prompts.is_empty());
+        assert_eq!(
+            app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
+            ["held".to_owned()],
+        );
         assert_eq!(app.chat.entry_count(), chat_before + 1);
+    }
+
+    #[tokio::test]
+    async fn prompt_held_during_auto_compaction_forwards_ahead_of_later_submits() {
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("first".to_owned()));
+        rx.recv().await.expect("first submit forwarded");
+        app.handle_agent_event(AgentEvent::AutoCompactionStarted);
+        app.dispatch_user_action(UserAction::SubmitPrompt("held".to_owned()));
+        assert!(rx.try_recv().is_err(), "held while compacting");
+
+        app.handle_agent_event(AgentEvent::StreamToken("x".to_owned()));
+        app.dispatch_user_action(UserAction::SubmitPrompt("later".to_owned()));
+        app.handle_agent_event(AgentEvent::PromptDrained("held".to_owned()));
+
+        let forwarded: Vec<UserAction> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert_eq!(
+            forwarded,
+            [
+                UserAction::QueuePrompt("held".to_owned()),
+                UserAction::QueuePrompt("later".to_owned()),
+            ],
+        );
+        assert_eq!(
+            app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
+            ["later".to_owned()],
+        );
     }
 
     #[test]
@@ -3260,9 +3394,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn turn_complete_drains_queue_head_and_dispatches() {
-        // FIFO: oldest queued prompt fires first; the rest stay queued
-        // for subsequent turn boundaries.
+    async fn turn_complete_starts_a_turn_with_the_queue_head_and_hands_it_the_rest() {
         let (mut app, mut rx, _agent_tx) = test_app(None);
         app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
         rx.recv().await.expect("active submit forwarded");
@@ -3271,12 +3403,38 @@ mod tests {
 
         app.handle_agent_event(AgentEvent::TurnComplete);
 
-        let forwarded = rx.recv().await.expect("queued head forwarded");
-        assert!(matches!(forwarded, UserAction::SubmitPrompt(s) if s == "a"));
+        let forwarded: Vec<UserAction> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert_eq!(
+            forwarded,
+            [
+                UserAction::SubmitPrompt("a".to_owned()),
+                UserAction::QueuePrompt("b".to_owned()),
+            ],
+        );
         assert_eq!(app.status_bar.status(), &Status::Streaming);
         assert_eq!(
             app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
             vec!["b".to_owned()],
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_complete_after_a_cancel_request_leaves_the_queue_to_the_user() {
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
+        rx.recv().await.expect("active submit forwarded");
+        app.dispatch_user_action(UserAction::SubmitPrompt("queued".to_owned()));
+        rx.recv().await.expect("queued submit forwarded");
+        app.handle_esc();
+        assert_eq!(rx.recv().await, Some(UserAction::Cancel));
+
+        app.handle_agent_event(AgentEvent::TurnComplete);
+
+        assert!(rx.try_recv().is_err(), "nothing resubmits after a cancel");
+        assert_eq!(app.status_bar.status(), &Status::Idle);
+        assert_eq!(
+            app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
+            ["queued".to_owned()],
         );
     }
 
@@ -3300,18 +3458,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancelled_drains_queue_head_to_match_completed_path() {
-        // Cancellation does not auto-clear the queue — a user who
-        // interrupts a stuck turn typically still wants their planned follow-up to fire.
+    async fn cancelled_goes_idle_and_esc_recalls_the_queued_prompt() {
         let (mut app, mut rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
-        rx.recv().await.expect("active submit forwarded");
-        app.pending_prompts.push_back("queued".into());
+        app.dispatch_user_action(UserAction::SubmitPrompt("first".to_owned()));
+        rx.recv().await.expect("first submit forwarded");
+        app.handle_agent_event(AgentEvent::StreamToken("x".to_owned()));
+        app.dispatch_user_action(UserAction::SubmitPrompt("second".to_owned()));
+        rx.recv().await.expect("second submit forwarded");
+        app.handle_esc();
+        assert_eq!(rx.recv().await, Some(UserAction::Cancel));
 
         app.handle_agent_event(AgentEvent::Cancelled);
 
-        let forwarded = rx.recv().await.expect("queued prompt forwarded");
-        assert!(matches!(forwarded, UserAction::SubmitPrompt(s) if s == "queued"));
+        assert!(rx.try_recv().is_err(), "nothing resubmits after a cancel");
+        assert_eq!(app.status_bar.status(), &Status::Idle);
+        app.handle_esc();
+        assert_eq!(app.input.lines(), ["second".to_owned()]);
+        assert!(app.pending_prompts.is_empty());
     }
 
     #[tokio::test]
@@ -3319,7 +3482,8 @@ mod tests {
         let (mut app, mut rx, _agent_tx) = test_app(None);
         app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
         rx.recv().await.expect("active submit forwarded");
-        app.pending_prompts.push_back("queued".into());
+        app.dispatch_user_action(UserAction::SubmitPrompt("queued".to_owned()));
+        rx.recv().await.expect("queued submit forwarded");
 
         app.handle_agent_event(AgentEvent::Retrying(
             "HTTP 529 overloaded_error. Retrying in 1s (retry 1 of 5).".to_owned(),
@@ -3328,15 +3492,15 @@ mod tests {
         app.handle_agent_event(AgentEvent::Error(
             "Session write failed: disk full".to_owned(),
         ));
-        assert!(app.chat.last_is_error(), "error entry appended");
 
-        assert_ne!(app.status_bar.status(), &Status::Idle);
+        assert!(app.chat.last_is_error(), "error entry appended");
+        assert_eq!(app.status_bar.status(), &Status::Streaming);
         assert!(!app.input.is_enabled());
-        assert!(
-            rx.try_recv().is_err(),
-            "the queue head waits for the turn to end"
+        assert!(rx.try_recv().is_err(), "nothing resubmits mid-turn");
+        assert_eq!(
+            app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
+            ["queued".to_owned()],
         );
-        assert_eq!(app.pending_prompts.len(), 1);
     }
 
     #[test]
@@ -3351,55 +3515,71 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_turn_failed_drains_queue_head_only_once() {
+    async fn handle_turn_failed_shows_the_error_and_starts_the_queue_head_once() {
         let (mut app, mut rx, _agent_tx) = test_app(None);
         app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
         rx.recv().await.expect("active submit forwarded");
         app.pending_prompts.push_back("first".into());
         app.pending_prompts.push_back("second".into());
+        let chat_before = app.chat.entry_count();
 
         app.handle_agent_event(AgentEvent::TurnFailed("API failed".to_owned()));
 
-        let forwarded = rx.recv().await.expect("queue head forwarded");
-        assert!(matches!(forwarded, UserAction::SubmitPrompt(s) if s == "first"));
+        assert_eq!(
+            app.chat.entry_count(),
+            chat_before + 2,
+            "error block, then the next prompt"
+        );
+        let forwarded: Vec<UserAction> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert_eq!(
+            forwarded,
+            [
+                UserAction::SubmitPrompt("first".to_owned()),
+                UserAction::QueuePrompt("second".to_owned()),
+            ],
+        );
         assert_eq!(
             app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
             vec!["second".to_owned()],
-            "only the head fires; the tail stays queued for the next turn",
         );
     }
 
     #[tokio::test]
-    async fn pending_queue_survives_max_tool_rounds_bail_and_drains_serially() {
-        // When agent_turn hits MAX_TOOL_ROUNDS its per-turn pending
-        // buffer drops with the future, but the TUI mirror is the
-        // source of truth — every queued item must surface across
-        // subsequent turn boundaries via finalize_idle's drain. Pin
-        // it here so a future refactor that "fixes" the agent-side
-        // drop without re-firing PromptDrained gets caught.
+    async fn pending_queue_resubmits_prompts_each_ended_turn_dropped() {
+        // A turn that ends before its next round boundary drops the queued prompts it held, so
+        // each one must come back as a later turn.
         let (mut app, mut rx, _agent_tx) = test_app(None);
         app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
         rx.recv().await.expect("active submit forwarded");
-        app.pending_prompts.push_back("a".into());
-        app.pending_prompts.push_back("b".into());
-        app.pending_prompts.push_back("c".into());
+        for prompt in ["a", "b", "c"] {
+            app.dispatch_user_action(UserAction::SubmitPrompt(prompt.to_owned()));
+        }
+        let mut forwarded = || std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+        assert_eq!(forwarded().len(), 3);
 
-        // First turn dies (cap-bail surfaces as TurnFailed), and the head drains.
         app.handle_agent_event(AgentEvent::TurnFailed(
-            "agent stopped after MAX_TOOL_ROUNDS".to_owned(),
+            "agent stopped after 3 tool rounds".to_owned(),
         ));
-        let first = rx.recv().await.expect("a re-fired as fresh turn");
-        assert!(matches!(first, UserAction::SubmitPrompt(s) if s == "a"));
+        assert_eq!(
+            forwarded(),
+            [
+                UserAction::SubmitPrompt("a".to_owned()),
+                UserAction::QueuePrompt("b".to_owned()),
+                UserAction::QueuePrompt("c".to_owned()),
+            ],
+        );
 
-        // Subsequent terminal events keep peeling the queue.
         app.handle_agent_event(AgentEvent::TurnComplete);
-        let second = rx.recv().await.expect("b re-fired");
-        assert!(matches!(second, UserAction::SubmitPrompt(s) if s == "b"));
+        assert_eq!(
+            forwarded(),
+            [
+                UserAction::SubmitPrompt("b".to_owned()),
+                UserAction::QueuePrompt("c".to_owned()),
+            ],
+        );
 
         app.handle_agent_event(AgentEvent::TurnComplete);
-        let third = rx.recv().await.expect("c re-fired");
-        assert!(matches!(third, UserAction::SubmitPrompt(s) if s == "c"));
-
+        assert_eq!(forwarded(), [UserAction::SubmitPrompt("c".to_owned())]);
         assert!(app.pending_prompts.is_empty());
     }
 

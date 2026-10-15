@@ -136,7 +136,7 @@ async fn run(raw: serde_json::Value, tracker: Arc<FileTracker>) -> ToolOutput {
 async fn write_file(
     path: &str,
     content: &str,
-    tracker: &FileTracker,
+    tracker: &Arc<FileTracker>,
 ) -> Result<(String, bool), String> {
     let file_path = Path::new(path);
     let pre_meta = match tokio::fs::symlink_metadata(path).await {
@@ -157,14 +157,9 @@ async fn write_file(
             .map_err(|e| format!("Failed to create directory: {e}"))?;
     }
 
-    super::write_no_follow(file_path, content.as_bytes(), is_new)
+    super::write_tracked(tracker, path, content.as_bytes().to_vec(), is_new)
         .await
         .map_err(|e| format!("Failed to write file: {e}"))?;
-
-    let key = super::tracker_key(path).await;
-    tracker
-        .record_modify_after_write(&key, file_path, content.as_bytes())
-        .await;
 
     let msg = if is_new {
         format!("Successfully created {path}.")
@@ -200,7 +195,7 @@ mod tests {
     use super::*;
     use crate::agent::event::ApprovalBody;
     use crate::file_tracker::{
-        LastView, MAX_TRACKED_FILE_SIZE,
+        MAX_TRACKED_FILE_SIZE,
         testing::{seed_full_read, tracker},
     };
     use crate::tool::read::ReadTool;
@@ -361,7 +356,7 @@ mod tests {
         let dir = canonical_tempdir();
         let path = dir.path().join("new.txt");
 
-        let (msg, is_new) = write_file(path.to_str().unwrap(), "content", &FileTracker::default())
+        let (msg, is_new) = write_file(path.to_str().unwrap(), "content", &tracker())
             .await
             .unwrap();
         assert!(msg.contains("created"));
@@ -375,13 +370,9 @@ mod tests {
         let path = dir.path().join("existing.txt");
         std::fs::write(&path, "old content").unwrap();
 
-        let err = write_file(
-            path.to_str().unwrap(),
-            "new content",
-            &FileTracker::default(),
-        )
-        .await
-        .unwrap_err();
+        let err = write_file(path.to_str().unwrap(), "new content", &tracker())
+            .await
+            .unwrap_err();
         assert!(
             err.contains("has not been read"),
             "expected must-read-first error, got: {err}",
@@ -395,7 +386,7 @@ mod tests {
         let path = dir.path().join("existing.txt");
         std::fs::write(&path, "old content").unwrap();
 
-        let tracker = FileTracker::default();
+        let tracker = tracker();
         seed_full_read(&tracker, &path);
 
         let (msg, is_new) = write_file(path.to_str().unwrap(), "new content", &tracker)
@@ -440,7 +431,7 @@ mod tests {
         let path = dir.path().join("existing.txt");
         std::fs::write(&path, "old content").unwrap();
 
-        let tracker = FileTracker::default();
+        let tracker = tracker();
         seed_full_read(&tracker, &path);
         std::fs::write(&path, "external edit").unwrap();
 
@@ -454,33 +445,13 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "external edit");
     }
 
-    #[tokio::test]
-    async fn write_file_phantom_drift_passes_via_hash_match() {
-        // Cloud sync can bump the mtime without changing the bytes, which the hash gate accepts.
-        let dir = canonical_tempdir();
-        let path = dir.path().join("existing.txt");
-        std::fs::write(&path, "stable content").unwrap();
-        let bytes = std::fs::read(&path).unwrap();
-        let meta = std::fs::metadata(&path).unwrap();
-        let stale_mtime = meta.modified().unwrap() - std::time::Duration::from_mins(1);
-
-        let tracker = FileTracker::default();
-        tracker.record_read(&path, &bytes, stale_mtime, meta.len(), LastView::Full);
-
-        let (_, is_new) = write_file(path.to_str().unwrap(), "fresh content", &tracker)
-            .await
-            .expect("phantom drift must not block write");
-        assert!(!is_new);
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "fresh content");
-    }
-
     #[cfg(unix)]
     #[tokio::test]
     async fn write_file_records_a_new_file_under_its_canonical_key() {
         let dir = canonical_tempdir();
         std::fs::create_dir(dir.path().join("real")).unwrap();
         std::os::unix::fs::symlink(dir.path().join("real"), dir.path().join("link")).unwrap();
-        let tracker = FileTracker::default();
+        let tracker = tracker();
 
         let via_link = dir.path().join("link/new.txt");
         write_file(via_link.to_str().unwrap(), "fresh", &tracker)
@@ -497,7 +468,7 @@ mod tests {
         let dir = canonical_tempdir();
         let path = dir.path().join("a").join("b").join("c.txt");
 
-        write_file(path.to_str().unwrap(), "deep", &FileTracker::default())
+        write_file(path.to_str().unwrap(), "deep", &tracker())
             .await
             .unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "deep");
@@ -508,7 +479,7 @@ mod tests {
         let dir = canonical_tempdir();
         let path = dir.path().join("empty.txt");
 
-        write_file(path.to_str().unwrap(), "", &FileTracker::default())
+        write_file(path.to_str().unwrap(), "", &tracker())
             .await
             .unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
@@ -523,7 +494,7 @@ mod tests {
 
         let path = blocker.join("child.txt");
         let path_str = path.to_str().unwrap();
-        let err = write_file(path_str, "content", &FileTracker::default())
+        let err = write_file(path_str, "content", &tracker())
             .await
             .unwrap_err();
         assert!(
@@ -535,13 +506,9 @@ mod tests {
     #[tokio::test]
     async fn write_file_rejects_directory_before_gate() {
         let dir = canonical_tempdir();
-        let err = write_file(
-            dir.path().to_str().unwrap(),
-            "content",
-            &FileTracker::default(),
-        )
-        .await
-        .unwrap_err();
+        let err = write_file(dir.path().to_str().unwrap(), "content", &tracker())
+            .await
+            .unwrap_err();
         assert!(
             err.contains("is a directory"),
             "expected directory rejection, got: {err}",
@@ -555,7 +522,7 @@ mod tests {
         let f = std::fs::File::create(&path).unwrap();
         f.set_len(MAX_TRACKED_FILE_SIZE + 1).unwrap();
 
-        let err = write_file(path.to_str().unwrap(), "content", &FileTracker::default())
+        let err = write_file(path.to_str().unwrap(), "content", &tracker())
             .await
             .unwrap_err();
         assert!(
@@ -571,7 +538,7 @@ mod tests {
         let path = dir.path().join("socket");
         let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
 
-        let err = write_file(path.to_str().unwrap(), "content", &FileTracker::default())
+        let err = write_file(path.to_str().unwrap(), "content", &tracker())
             .await
             .unwrap_err();
         assert!(
@@ -589,7 +556,7 @@ mod tests {
         let link = dir.path().join("notes.md");
         std::os::unix::fs::symlink(&target, &link).unwrap();
 
-        let err = write_file(link.to_str().unwrap(), "payload", &FileTracker::default())
+        let err = write_file(link.to_str().unwrap(), "payload", &tracker())
             .await
             .unwrap_err();
         assert!(
@@ -607,7 +574,7 @@ mod tests {
         let dir = canonical_tempdir();
         let path = dir.path().join("locked.txt");
         std::fs::write(&path, "original").unwrap();
-        let tracker = FileTracker::default();
+        let tracker = tracker();
         seed_full_read(&tracker, &path);
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
 
@@ -634,7 +601,7 @@ mod tests {
         let path = readonly.join("nested").join("file.txt");
         std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o555)).unwrap();
 
-        let err = write_file(path.to_str().unwrap(), "content", &FileTracker::default())
+        let err = write_file(path.to_str().unwrap(), "content", &tracker())
             .await
             .unwrap_err();
         assert!(
