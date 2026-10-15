@@ -196,14 +196,18 @@ mod tests {
     use super::*;
     use crate::agent::event::CapturingSink;
     use crate::client::anthropic::testing::{completion_body, test_client};
-    use crate::config::Auth;
+    use crate::config::auth::{Auth, AuthSource};
     use crate::message::Message;
     use crate::session::store::testing::test_store;
 
     // ── Fixtures ──
 
     fn title_client(base_url: String) -> Client {
-        test_client(base_url, Auth::ApiKey("sk".to_owned()), HAIKU_MODEL)
+        test_client(
+            base_url,
+            Auth::new(AuthSource::ApiKeyEnv, "sk"),
+            HAIKU_MODEL,
+        )
     }
 
     /// Sink backed by an mpsc channel so tests can wait on `recv()`

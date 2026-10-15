@@ -54,7 +54,9 @@ ox                                          # Start an interactive session
 │       └── wire.rs                         # Request / response wire types (CreateMessageRequest, StreamEvent, etc.)
 ├── config.rs                               # Configuration loading and layered merging
 ├── config/
+│   ├── auth.rs                             # Credential resolution: AuthSource precedence (gateway token > API key > OAuth token > stored login), first-party gate on the stored login
 │   ├── file.rs                             # TOML config file discovery, parsing, and merge (user + project)
+│   ├── gateway.rs                          # GatewayCompat from Claude Code's gateway env vars: ANTHROPIC_CUSTOM_HEADERS parsing, attribution and structured-output toggles
 │   └── oauth.rs                            # Claude Code OAuth credentials (macOS Keychain + file), token refresh, directory-based advisory lock
 ├── driver.rs                               # Conversation: per-session core every driver feeds prompts through (auto-compact, turn, session ops, usage), exit status, shutdown signals
 ├── driver/

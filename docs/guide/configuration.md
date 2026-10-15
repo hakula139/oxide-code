@@ -98,7 +98,7 @@ base_url = "https://gw.llm.corp.example/anthropic"
 extra_ca_certs = "~/.config/ox/corp-cachain.pem"
 ```
 
-Use an absolute or `~`-rooted path. Relative paths resolve from the launch cwd. The field is user-config only because a checked-in trust-anchor path could widen TLS trust for the process. Equivalent env var: `OX_EXTRA_CA_CERTS`.
+Use an absolute or `~`-rooted path. Relative paths resolve from the launch cwd. The field is user-config only because a checked-in trust-anchor path could widen TLS trust for the process. Equivalent env var: `OX_EXTRA_CA_CERTS`, which wins over this field. `NODE_EXTRA_CA_CERTS` applies only when neither is set (see [LLM gateways](#llm-gateways)).
 
 #### `prompt_cache_ttl`: cache duration
 
@@ -197,38 +197,68 @@ Launching from `/` or your home directory turns off the auto-allow for edits ins
 
 ## Authentication
 
-oxide-code checks three credential sources in order:
+Each request carries one credential. oxide-code uses the first source that is set, in the same order as Claude Code:
 
-1. `ANTHROPIC_API_KEY` environment variable.
-2. `api_key` under `[client]` in the user config file.
-3. Claude Code OAuth credentials, if [Claude Code](https://code.claude.com/docs) is installed and signed in:
-   - **macOS**: the `"Claude Code-credentials"` Keychain entry (preferred), falling back to `~/.claude/.credentials.json`.
-   - **Linux**: `~/.claude/.credentials.json`.
+| Source                                               | Sent as                         | Typical use                                           |
+| ---------------------------------------------------- | ------------------------------- | ----------------------------------------------------- |
+| 1. `ANTHROPIC_AUTH_TOKEN`                            | `Authorization: Bearer`         | [LLM gateways](#llm-gateways) that take bearer tokens |
+| 2. `ANTHROPIC_API_KEY`                               | `x-api-key`                     | Anthropic Console API key                             |
+| 3. `api_key` under `[client]`                        | `x-api-key`                     | The same key, stored in the user config file          |
+| 4. `CLAUDE_CODE_OAUTH_TOKEN`                         | `Authorization: Bearer` + OAuth | Long-lived token from `claude setup-token`            |
+| 5. [Claude Code](https://code.claude.com/docs) login | `Authorization: Bearer` + OAuth | Claude Code installed and signed in                   |
 
-   Expired tokens are refreshed automatically. No configuration needed.
+- **`CLAUDE_CODE_OAUTH_TOKEN`** is sent as is, so it suits CI, headless machines, and secret managers. oxide-code never refreshes it and does not read the Keychain or credentials file while it is set. When the API rejects it as expired or revoked, the error names the variable, and `claude setup-token` issues a new one.
+- **The Claude Code login** comes from the `"Claude Code-credentials"` Keychain entry on macOS, falling back to `~/.claude/.credentials.json`, which is the only store on Linux. oxide-code refreshes it automatically near expiry. It is sent only to the Anthropic API: with a custom `base_url` and no other credential, startup fails and names `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_API_KEY`, so a personal subscription token never reaches a third-party host.
+- **`/status` and `/config`** show the active source, such as `OAuth (CLAUDE_CODE_OAUTH_TOKEN)`, without its value.
 
-The environment variable and OAuth keep credentials out of config files. An `api_key` in `~/.config/ox/config.toml` works but sits on disk in plaintext, and a project `ox.toml` cannot set it.
+The environment variables and the Claude Code login keep credentials out of config files. An `api_key` in `~/.config/ox/config.toml` works but sits on disk in plaintext, and a project `ox.toml` cannot set it.
+
+## LLM gateways
+
+oxide-code reads the gateway variables Claude Code uses:
+
+```bash
+export ANTHROPIC_BASE_URL=https://gateway.example.com/anthropic
+export ANTHROPIC_AUTH_TOKEN=...
+export ANTHROPIC_CUSTOM_HEADERS='X-Team: platform
+X-Route: blue'
+export NODE_EXTRA_CA_CERTS=~/.config/ox/corp-cachain.pem
+```
+
+- **`ANTHROPIC_AUTH_TOKEN`** authenticates with `Authorization: Bearer` and otherwise keeps the API-key request shape, without the OAuth beta.
+- **`ANTHROPIC_CUSTOM_HEADERS`** takes one `Name: value` per line and skips blank lines. The headers go on every API request after the built-in ones, so they can replace defaults such as `User-Agent`. oxide-code owns `anthropic-beta`, `anthropic-version`, `content-type`, `x-claude-code-session-id`, and the header that carries the active credential (`x-api-key` for an API key, `Authorization` otherwise), so naming any of them is an error. The other credential header stays free, so a gateway can take its own `Authorization` alongside an API key. A line without a colon, an invalid name or value, a reserved name, or a repeated name stops startup with an error that gives the line number and never prints the value. `/config` lists the header names only.
+- **`NODE_EXTRA_CA_CERTS`** works like [`extra_ca_certs`](#extra_ca_certs-corporate-trust-anchors) and ranks last, after `OX_EXTRA_CA_CERTS` and `client.extra_ca_certs`. Shells often export it for npm, so like Node, oxide-code logs a warning and skips the bundle when it cannot read it.
+- **`CLAUDE_CODE_ATTRIBUTION_HEADER=0`** drops the `x-anthropic-billing-header` attribution block from the system prompt. By default, agent turns and `/compact` summaries carry it under every credential, because strict gateways reject requests that lack it. Session titles carry it only under OAuth. As in Claude Code, the block on a custom base URL omits the per-request `cch` hash, so it stays the same from request to request.
+- **`CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS=1`** drops `output_config.format` from session-title requests, for gateways whose upstream rejects it. Titles then rely on the prompt alone to return JSON.
+
+oxide-code is stricter than Claude Code in three ways. It never sends the Claude Code login to a custom base URL, it sends one credential even when several are set, and it rejects malformed `ANTHROPIC_CUSTOM_HEADERS` lines where Claude Code skips them.
 
 ## Environment variables
 
 Environment variables override all config file values.
 
-| Variable                               | Config key                                 | Default                     | Description                  |
-| -------------------------------------- | ------------------------------------------ | --------------------------- | ---------------------------- |
-| `ANTHROPIC_API_KEY`                    | `client.api_key`                           | -                           | Anthropic API key            |
-| `ANTHROPIC_BASE_URL`                   | `client.base_url`                          | `https://api.anthropic.com` | API base URL                 |
-| `ANTHROPIC_MODEL`                      | `client.model`                             | `claude-opus-5-5`           | Model to use                 |
-| `ANTHROPIC_EFFORT`                     | `client.effort`                            | per-model                   | Intelligence-vs-latency tier |
-| `ANTHROPIC_MAX_TOKENS`                 | `client.max_tokens`                        | per-model                   | Max tokens per response      |
-| `OX_EXTRA_CA_CERTS`                    | `client.extra_ca_certs`                    | -                           | Path to a PEM trust bundle   |
-| `OX_MAX_TOOL_ROUNDS`                   | `client.max_tool_rounds`                   | unset (unbounded)           | Per-turn tool-round cap      |
-| `OX_PROMPT_CACHE_TTL`                  | `client.prompt_cache_ttl`                  | `1h`                        | Prompt-cache TTL             |
-| `OX_COMPACTION_AUTO_ENABLED`           | `client.compaction.auto_enabled`           | `true`                      | Enable auto-compaction       |
-| `OX_COMPACTION_AUTO_THRESHOLD_TOKENS`  | `client.compaction.auto_threshold_tokens`  | model-derived               | Absolute compaction trigger  |
-| `OX_COMPACTION_AUTO_THRESHOLD_PERCENT` | `client.compaction.auto_threshold_percent` | model-derived               | Percent compaction trigger   |
-| `OX_PERMISSION_MODE`                   | `permission.mode`                          | `auto`                      | Tool permission mode         |
-| `OX_SHOW_THINKING`                     | `tui.show_thinking`                        | `false`                     | Show extended thinking       |
-| `OX_SHOW_WELCOME`                      | `tui.show_welcome`                         | `true`                      | Paint the welcome splash     |
-| `OX_STATUS_LINE`                       | `tui.status_line`                          | see `[tui]`                 | Comma-separated segments     |
+| Variable                                 | Config key                                 | Default                     | Description                  |
+| ---------------------------------------- | ------------------------------------------ | --------------------------- | ---------------------------- |
+| `ANTHROPIC_AUTH_TOKEN`                   | -                                          | -                           | Gateway bearer token         |
+| `ANTHROPIC_API_KEY`                      | `client.api_key`                           | -                           | Anthropic API key            |
+| `CLAUDE_CODE_OAUTH_TOKEN`                | -                                          | -                           | Long-lived OAuth token       |
+| `ANTHROPIC_BASE_URL`                     | `client.base_url`                          | `https://api.anthropic.com` | API base URL                 |
+| `ANTHROPIC_MODEL`                        | `client.model`                             | `claude-opus-5-5`           | Model to use                 |
+| `ANTHROPIC_EFFORT`                       | `client.effort`                            | per-model                   | Intelligence-vs-latency tier |
+| `ANTHROPIC_MAX_TOKENS`                   | `client.max_tokens`                        | per-model                   | Max tokens per response      |
+| `OX_EXTRA_CA_CERTS`                      | `client.extra_ca_certs`                    | -                           | Path to a PEM trust bundle   |
+| `NODE_EXTRA_CA_CERTS`                    | -                                          | -                           | Fallback PEM trust bundle    |
+| `ANTHROPIC_CUSTOM_HEADERS`               | -                                          | -                           | Extra request headers        |
+| `CLAUDE_CODE_ATTRIBUTION_HEADER`         | -                                          | `true`                      | Send the attribution block   |
+| `CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS` | -                                          | `false`                     | Drop title JSON schemas      |
+| `OX_MAX_TOOL_ROUNDS`                     | `client.max_tool_rounds`                   | unset (unbounded)           | Per-turn tool-round cap      |
+| `OX_PROMPT_CACHE_TTL`                    | `client.prompt_cache_ttl`                  | `1h`                        | Prompt-cache TTL             |
+| `OX_COMPACTION_AUTO_ENABLED`             | `client.compaction.auto_enabled`           | `true`                      | Enable auto-compaction       |
+| `OX_COMPACTION_AUTO_THRESHOLD_TOKENS`    | `client.compaction.auto_threshold_tokens`  | model-derived               | Absolute compaction trigger  |
+| `OX_COMPACTION_AUTO_THRESHOLD_PERCENT`   | `client.compaction.auto_threshold_percent` | model-derived               | Percent compaction trigger   |
+| `OX_PERMISSION_MODE`                     | `permission.mode`                          | `auto`                      | Tool permission mode         |
+| `OX_SHOW_THINKING`                       | `tui.show_thinking`                        | `false`                     | Show extended thinking       |
+| `OX_SHOW_WELCOME`                        | `tui.show_welcome`                         | `true`                      | Paint the welcome splash     |
+| `OX_STATUS_LINE`                         | `tui.status_line`                          | see `[tui]`                 | Comma-separated segments     |
 
 Every variable treats an empty value as unset. Boolean variables accept `1`, `true`, `yes`, or `on` to enable and `0`, `false`, `no`, or `off` to disable, in any letter case. Any other value makes `ox` exit at startup with an error naming the variable.

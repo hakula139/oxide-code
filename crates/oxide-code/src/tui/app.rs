@@ -1075,9 +1075,14 @@ mod tests {
             version: "0.0.0-test",
             session_id: "test-session".to_owned(),
             config: ConfigSnapshot {
-                auth_label: "API key",
+                auth: crate::config::auth::AuthSource::ApiKeyEnv,
                 base_url: "https://api.test.invalid".to_owned(),
                 extra_ca_certs: None,
+                gateway: crate::config::gateway::GatewaySnapshot {
+                    custom_header_names: Vec::new(),
+                    attribution: true,
+                    structured_outputs: true,
+                },
                 model: ModelSpec::resolve("test-model".to_owned()),
                 effort: Some(Effort::High),
                 max_tokens: 32_000,

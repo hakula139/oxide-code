@@ -19,12 +19,13 @@ pub(crate) mod testing;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue, USER_AGENT};
+use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue, USER_AGENT};
 use tokio::sync::mpsc;
 use tracing::debug;
 use uuid::Uuid;
 
-use crate::config::{Auth, CompactionConfig, Config, Effort};
+use crate::config::auth::AuthKind;
+use crate::config::{CompactionConfig, Config, Effort, is_first_party_base_url};
 use crate::message::{ContentBlock, Message, Role};
 use crate::model::ModelSpec;
 use crate::prompt::SYSTEM_PROMPT_DYNAMIC_BOUNDARY;
@@ -71,21 +72,11 @@ impl Client {
     pub(crate) fn new(config: Config, session_id: Option<String>) -> Result<Self> {
         let session_id = session_id.unwrap_or_else(|| Uuid::new_v4().to_string());
         let device_id = identity::load_or_create_device_id();
-        let is_first_party = betas::is_first_party_base_url(&config.base_url);
+        let is_first_party = is_first_party_base_url(&config.base_url);
         let mut headers = HeaderMap::new();
 
-        match &config.auth {
-            Auth::ApiKey(key) => {
-                let mut value = HeaderValue::from_str(key)?;
-                value.set_sensitive(true);
-                headers.insert("x-api-key", value);
-            }
-            Auth::OAuth(token) => {
-                let mut value = HeaderValue::from_str(&format!("Bearer {token}"))?;
-                value.set_sensitive(true);
-                headers.insert(AUTHORIZATION, value);
-            }
-        }
+        let (name, value) = config.auth.header()?;
+        headers.insert(name, value);
 
         headers.insert("anthropic-version", HeaderValue::from_static(API_VERSION));
         headers.insert(
@@ -123,6 +114,8 @@ impl Client {
             "x-stainless-timeout",
             HeaderValue::from_static(STAINLESS_TIMEOUT_SECS),
         );
+
+        headers.extend(config.gateway.custom_headers.clone());
 
         // No whole-request timeout because responses can run for minutes. The 60 s read timeout
         // catches slowloris dribble. Anthropic sends keepalives every ~15 s on healthy streams.
@@ -212,8 +205,7 @@ impl Client {
     /// [`SYSTEM_PROMPT_DYNAMIC_BOUNDARY`], shared across sessions, and one on the last content
     /// block of the final message, so the next request in the conversation reads the whole
     /// transcript from cache. `user_context` rides as a synthetic leading user message to keep
-    /// dynamic content (CLAUDE.md and friends) out of the `system` parameter. The billing
-    /// attestation block is always injected because 3P gateways reject API-key traffic without it.
+    /// dynamic content (CLAUDE.md and friends) out of the `system` parameter.
     pub(crate) fn stream_message(
         &self,
         messages: &[Message],
@@ -258,14 +250,9 @@ impl Client {
             None => messages.to_vec(),
         };
 
-        // 3P gateways reject API-key traffic without the cch attestation.
-        let billing_header = {
-            let fingerprint = billing::compute_fingerprint(
-                first_user_text(&effective_messages),
-                CLAUDE_CLI_VERSION,
-            );
-            billing::build_billing_header(CLAUDE_CLI_VERSION, &fingerprint)
-        };
+        let attribution = self
+            .attributes(true)
+            .then(|| attribution_text(first_user_text(&effective_messages), self.is_first_party));
 
         let (static_sections, dynamic_sections) = split_at_boundary(system_sections);
         let static_joined = static_sections.join("\n\n");
@@ -274,7 +261,7 @@ impl Client {
         let static_cache_control =
             static_prefix_cache_control(self.is_first_party, self.config.prompt_cache_ttl);
         let system_blocks = build_system_blocks(
-            Some(&billing_header),
+            attribution.as_deref(),
             [
                 (static_joined.as_str(), Some(static_cache_control)),
                 (dynamic_joined.as_str(), None),
@@ -303,13 +290,16 @@ impl Client {
         })
         .context("failed to serialize request")?;
 
-        body = billing::inject_cch(&body)?;
+        if attribution.as_deref().is_some_and(billing::is_hashed) {
+            body = billing::inject_cch(&body)?;
+        }
 
         debug!(body_len = body.len(), "sending API request");
 
         let (tx, rx) = mpsc::channel(64);
         let http = self.http.clone();
-        let betas = compute_betas(model, thinking.as_ref(), &self.config.auth, true).join(",");
+        let betas =
+            compute_betas(model, thinking.as_ref(), self.config.auth.kind(), true).join(",");
         let request = self.messages_request(betas, body);
 
         // Racing `closed` stops an in-flight request or retry backoff once the consumer is gone.
@@ -326,9 +316,25 @@ impl Client {
 
         Ok(rx)
     }
+
+    /// Whether a request carries the billing attribution block. Strict gateways that verify the
+    /// Claude Code wire shape reject streaming requests (agent turns, `/compact` summaries)
+    /// without it under every credential kind. Non-streaming one-shots attribute only OAuth
+    /// traffic, because gateways don't gate them on the block.
+    fn attributes(&self, streaming: bool) -> bool {
+        self.config.gateway.attribution && (streaming || self.config.auth.kind() == AuthKind::OAuth)
+    }
 }
 
 // ── Request Building ──
+
+/// The `system[0]` attribution text. First-party requests carry a `cch` placeholder that
+/// [`billing::inject_cch`] fills once the body is serialized. Like Claude Code since 2.1.181,
+/// other base URLs get a stable block without it, so gateways that cache on the body still hit.
+fn attribution_text(first_user_text: &str, is_first_party: bool) -> String {
+    let fingerprint = billing::compute_fingerprint(first_user_text, CLAUDE_CLI_VERSION);
+    billing::build_billing_header(CLAUDE_CLI_VERSION, &fingerprint, is_first_party)
+}
 
 /// Field order is load-bearing because gateways validate the JSON shape of `metadata.user_id`.
 fn build_metadata(device_id: &str, session_id: &str) -> RequestMetadata {
@@ -350,11 +356,11 @@ fn build_metadata(device_id: &str, session_id: &str) -> RequestMetadata {
 
 /// Wire order is load-bearing for billing injection.
 fn build_system_blocks<'a, const N: usize>(
-    billing_header: Option<&'a str>,
+    attribution: Option<&'a str>,
     extras: [(&'a str, Option<CacheControl>); N],
 ) -> Vec<SystemBlock<'a>> {
     let mut blocks = Vec::with_capacity(2 + N);
-    if let Some(text) = billing_header {
+    if let Some(text) = attribution {
         blocks.push(SystemBlock {
             r#type: "text",
             text,
@@ -446,13 +452,16 @@ fn first_user_text(messages: &[Message]) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use wiremock::matchers::{header, header_regex, method, path, query_param};
+    use wiremock::matchers::{header, method, path, query_param};
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
     use super::billing::build_billing_header;
-    use super::testing::{Captured, api_key, captured, oauth, test_config, text_stream_body};
+    use super::testing::{
+        Captured, api_key, auth_token, captured, oauth, test_config, text_stream_body,
+    };
     use super::wire::{ContentBlockInfo, Delta};
     use super::*;
+    use crate::config::auth::{Auth, AuthSource};
     use crate::config::{
         AutoCompactionConfig, CompactionConfig, Effort, PromptCacheTtl, test_thresholds,
     };
@@ -483,12 +492,47 @@ mod tests {
         Ok(out)
     }
 
+    /// Streams one `hi` turn against a mock server and returns the request it received.
+    async fn capture_stream_request(mut client: Client) -> Request {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(text_stream_body("", "Hi")),
+            )
+            .mount(&server)
+            .await;
+
+        client.config.base_url = server.uri();
+        collect_events(
+            client
+                .stream_message(&[Message::user("hi")], &[], None, &[])
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let mut received = server.received_requests().await.expect("recorded requests");
+        assert_eq!(received.len(), 1, "exactly one streamed call");
+        received.remove(0)
+    }
+
+    fn request_header<'a>(request: &'a Request, name: &str) -> Option<&'a str> {
+        request.headers.get(name).map(|v| v.to_str().unwrap())
+    }
+
     // ── Client::new / Client::model ──
 
     #[test]
     fn new_with_api_key_exposes_model() {
         let client = Client::new(
-            test_config(OFFLINE_URL, Auth::ApiKey("sk-test".to_owned()), TEST_MODEL),
+            test_config(
+                OFFLINE_URL,
+                Auth::new(AuthSource::ApiKeyEnv, "sk-test"),
+                TEST_MODEL,
+            ),
             None,
         )
         .unwrap();
@@ -500,7 +544,7 @@ mod tests {
         let client = Client::new(
             test_config(
                 OFFLINE_URL,
-                Auth::OAuth("oauth-token".to_owned()),
+                Auth::new(AuthSource::ClaudeCodeLogin, "oauth-token"),
                 TEST_MODEL,
             ),
             None,
@@ -511,7 +555,11 @@ mod tests {
 
     #[test]
     fn new_exposes_compaction_config() {
-        let mut config = test_config(OFFLINE_URL, Auth::ApiKey("sk-test".to_owned()), TEST_MODEL);
+        let mut config = test_config(
+            OFFLINE_URL,
+            Auth::new(AuthSource::ApiKeyEnv, "sk-test"),
+            TEST_MODEL,
+        );
         config.prompt_cache_ttl = PromptCacheTtl::FiveMin;
         config.compaction = CompactionConfig::resolved_for_test(AutoCompactionConfig {
             enabled: true,
@@ -526,7 +574,11 @@ mod tests {
     #[test]
     fn new_none_session_id_generates_uuid_v4() {
         let client = Client::new(
-            test_config(OFFLINE_URL, Auth::ApiKey("k".to_owned()), TEST_MODEL),
+            test_config(
+                OFFLINE_URL,
+                Auth::new(AuthSource::ApiKeyEnv, "k"),
+                TEST_MODEL,
+            ),
             None,
         )
         .unwrap();
@@ -540,7 +592,11 @@ mod tests {
     fn new_preserves_explicit_session_id() {
         let sid = "11111111-2222-4333-8444-555555555555".to_owned();
         let client = Client::new(
-            test_config(OFFLINE_URL, Auth::ApiKey("k".to_owned()), TEST_MODEL),
+            test_config(
+                OFFLINE_URL,
+                Auth::new(AuthSource::ApiKeyEnv, "k"),
+                TEST_MODEL,
+            ),
             Some(sid.clone()),
         )
         .unwrap();
@@ -563,9 +619,10 @@ mod tests {
     fn new_rejects_auth_values_containing_invalid_header_bytes() {
         // `HeaderValue::from_str` rejects control chars (\n, \r). Both auth arms must propagate.
         for auth in [
-            Auth::ApiKey("bad\nkey".to_owned()),
-            Auth::OAuth("bad\rtoken".to_owned()),
+            Auth::new(AuthSource::ApiKeyEnv, "bad\nkey"),
+            Auth::new(AuthSource::OAuthTokenEnv, "bad\rtoken"),
         ] {
+            let source = auth.source();
             // `Client` has no Debug, so `.unwrap_err()` does not compile.
             let err = Client::new(
                 test_config(OFFLINE_URL, auth, TEST_MODEL),
@@ -573,9 +630,14 @@ mod tests {
             )
             .err()
             .unwrap();
+            let msg = format!("{err:#}");
             assert!(
-                format!("{err:#}").to_ascii_lowercase().contains("header"),
-                "error should mention header: {err:#}",
+                msg.starts_with(&format!("{source} is not a valid HTTP header value")),
+                "error names the credential source: {msg}",
+            );
+            assert!(
+                !msg.contains("bad"),
+                "error must not echo the secret: {msg}"
             );
         }
     }
@@ -611,7 +673,11 @@ mod tests {
             .await;
 
         let mut client = Client::new(
-            test_config(server.uri(), Auth::ApiKey("k".to_owned()), TEST_MODEL),
+            test_config(
+                server.uri(),
+                Auth::new(AuthSource::ApiKeyEnv, "k"),
+                TEST_MODEL,
+            ),
             Some("sid-original".to_owned()),
         )
         .unwrap();
@@ -685,7 +751,7 @@ mod tests {
         cfg.show_thinking = true;
         let mut client = Client::new(cfg, Some("sid".to_owned())).unwrap();
 
-        let (unknown, unknown_betas) = capture_stream_request(client.clone()).await;
+        let (unknown, unknown_betas) = capture_stream_turn(client.clone()).await;
         for field in ["thinking", "output_config", "context_management"] {
             assert!(unknown.get(field).is_none(), "{field} absent: {unknown}");
         }
@@ -695,7 +761,7 @@ mod tests {
         }
 
         client.set_model("claude-opus-5-5".to_owned()).unwrap();
-        let (known, known_betas) = capture_stream_request(client).await;
+        let (known, known_betas) = capture_stream_turn(client).await;
         assert_eq!(known["model"], "claude-opus-5-5");
         assert_eq!(known["max_tokens"], 64_000);
         assert_eq!(
@@ -868,104 +934,123 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_message_api_key_sends_x_api_key_and_session_id() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .and(header("x-api-key", "sk-test"))
-            .and(header("x-claude-code-session-id", "sid-abc"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("content-type", "text/event-stream")
-                    .set_body_string(text_stream_body("", "Hi")),
-            )
-            .mount(&server)
-            .await;
-
-        let client = Client::new(
-            test_config(server.uri(), Auth::ApiKey("sk-test".to_owned()), TEST_MODEL),
-            Some("sid-abc".to_owned()),
-        )
-        .unwrap();
-        collect_events(
-            client
-                .stream_message(&[Message::user("hi")], &[], None, &[])
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    }
-
-    #[tokio::test]
-    async fn stream_message_oauth_sends_bearer_plus_oauth_and_gateway_beta_tags() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .and(header("authorization", "Bearer tok"))
-            .and(header_regex("anthropic-beta", r"oauth-2025-04-20"))
-            .and(header_regex("anthropic-beta", r"claude-code-20250219"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("content-type", "text/event-stream")
-                    .set_body_string(text_stream_body("", "Hi")),
-            )
-            .mount(&server)
-            .await;
-
-        let client = Client::new(
-            test_config(server.uri(), Auth::OAuth("tok".to_owned()), TEST_MODEL),
-            Some("sid".to_owned()),
-        )
-        .unwrap();
-        collect_events(
-            client
-                .stream_message(&[Message::user("hi")], &[], None, &[])
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    }
-
-    #[tokio::test]
-    async fn stream_message_billing_block_ships_under_both_auth_modes() {
-        // 3P gateways reject API-key requests without the cch attestation, so the billing block
-        // must ship under both auth modes with the placeholder replaced by xxHash64.
-        for auth in [api_key(), oauth()] {
-            let server = MockServer::start().await;
-            let body_sink: Captured<String> = captured();
-            let sink_clone = std::sync::Arc::clone(&body_sink);
-            Mock::given(method("POST"))
-                .and(path("/v1/messages"))
-                .respond_with(move |req: &Request| {
-                    *sink_clone.lock().unwrap() =
-                        Some(String::from_utf8_lossy(&req.body).into_owned());
-                    ResponseTemplate::new(200)
-                        .insert_header("content-type", "text/event-stream")
-                        .set_body_string(text_stream_body("", "Hi"))
-                })
-                .mount(&server)
-                .await;
-
+    async fn stream_message_sends_one_credential_header_and_betas_per_auth_kind() {
+        let mut betas = Vec::new();
+        for (auth, api_key, bearer) in [
+            (
+                Auth::new(AuthSource::ApiKeyEnv, "sk-env"),
+                Some("sk-env"),
+                None,
+            ),
+            (
+                Auth::new(AuthSource::AuthTokenEnv, "gw-token"),
+                None,
+                Some("Bearer gw-token"),
+            ),
+            (
+                Auth::new(AuthSource::OAuthTokenEnv, "oat-env"),
+                None,
+                Some("Bearer oat-env"),
+            ),
+        ] {
+            let source = auth.source();
             let client = Client::new(
-                test_config(server.uri(), auth, TEST_MODEL),
+                test_config(OFFLINE_URL, auth, TEST_MODEL),
                 Some("sid".to_owned()),
             )
             .unwrap();
-            collect_events(
-                client
-                    .stream_message(&[Message::user("hi")], &[], None, &[])
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-            let body = body_sink.lock().unwrap().clone().expect("body captured");
-            assert!(
-                body.contains("x-anthropic-billing-header:"),
-                "billing block must ship under both auth modes: {body}",
+            let request = capture_stream_request(client).await;
+            assert_eq!(request_header(&request, "x-api-key"), api_key, "{source:?}");
+            assert_eq!(
+                request_header(&request, "authorization"),
+                bearer,
+                "{source:?}"
             );
-            assert!(!body.contains("cch=00000"), "cch populated: {body}");
+            assert_eq!(
+                request_header(&request, "x-claude-code-session-id"),
+                Some("sid")
+            );
+            betas.push(
+                request_header(&request, "anthropic-beta")
+                    .unwrap()
+                    .to_owned(),
+            );
         }
+
+        // The auth token keeps the API-key betas. OAuth adds its beta after the claude-code tag.
+        let [api_key, auth_token, oauth]: [String; 3] = betas.try_into().unwrap();
+        let tail = api_key.strip_prefix("claude-code-20250219,").unwrap();
+        assert!(!tail.contains("oauth"), "{api_key}");
+        assert_eq!(auth_token, api_key);
+        assert_eq!(
+            oauth,
+            format!("claude-code-20250219,oauth-2025-04-20,{tail}")
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_message_custom_headers_ride_along_and_override_built_ins() {
+        // An API key travels in `x-api-key`, so a gateway may take its own `Authorization`.
+        let mut config = test_config(OFFLINE_URL, api_key(), TEST_MODEL);
+        for (name, value) in [
+            ("x-team", "platform"),
+            ("user-agent", "custom/1.0"),
+            ("authorization", "Bearer gateway-jwt"),
+        ] {
+            config
+                .gateway
+                .custom_headers
+                .insert(name, HeaderValue::from_static(value));
+        }
+        let request =
+            capture_stream_request(Client::new(config, Some("sid".to_owned())).unwrap()).await;
+        assert_eq!(request_header(&request, "x-team"), Some("platform"));
+        assert_eq!(
+            request
+                .headers
+                .get_all("user-agent")
+                .iter()
+                .collect::<Vec<_>>(),
+            ["custom/1.0"],
+        );
+        assert_eq!(
+            request_header(&request, "authorization"),
+            Some("Bearer gateway-jwt")
+        );
+        assert_eq!(request_header(&request, "x-api-key"), Some("k"));
+    }
+
+    #[tokio::test]
+    async fn stream_message_billing_block_hashes_only_first_party_requests() {
+        for is_first_party in [true, false] {
+            let mut client = Client::new(
+                test_config(OFFLINE_URL, api_key(), TEST_MODEL),
+                Some("sid".to_owned()),
+            )
+            .unwrap();
+            client.is_first_party = is_first_party;
+            let (body, _) = capture_stream_turn(client).await;
+            let block = body["system"][0]["text"].as_str().unwrap();
+            let (prefix, cch) = block.split_once(" cch=").unwrap_or((block, ""));
+            assert!(prefix.ends_with("; cc_entrypoint=cli;"), "{block}");
+            let hash = cch.strip_suffix(';').unwrap_or(cch);
+            let hashed =
+                hash.len() == 5 && hash != "00000" && u32::from_str_radix(hash, 16).is_ok();
+            assert_eq!(hashed, is_first_party, "{block}");
+            assert_eq!(cch.is_empty(), !is_first_party, "{block}");
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_message_attribution_off_drops_billing_block() {
+        let mut config = test_config(OFFLINE_URL, oauth(), TEST_MODEL);
+        config.gateway.attribution = false;
+        let body = capture_stream_body(config).await;
+        assert_eq!(body["system"][0]["text"], SYSTEM_PROMPT_PREFIX);
+        assert!(
+            !body.to_string().contains("x-anthropic-billing-header"),
+            "{body}"
+        );
     }
 
     #[tokio::test]
@@ -1267,6 +1352,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stream_message_401_names_the_oauth_token_variable() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(401).set_body_string("token revoked"))
+            .mount(&server)
+            .await;
+
+        let client = Client::new(
+            test_config(
+                server.uri(),
+                Auth::new(AuthSource::OAuthTokenEnv, "oat-env"),
+                TEST_MODEL,
+            ),
+            Some("sid".to_owned()),
+        )
+        .unwrap();
+        let rx = client
+            .stream_message(&[Message::user("hi")], &[], None, &[])
+            .unwrap();
+        let err = collect_events(rx).await.expect_err("expected 401");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("CLAUDE_CODE_OAUTH_TOKEN may be expired or revoked"),
+            "{msg}"
+        );
+        assert!(msg.contains("claude setup-token"), "{msg}");
+    }
+
+    #[tokio::test]
     async fn stream_message_429_threads_retry_after_header_into_error() {
         // A hint past the retry cap fails fast with the hint in the message.
         let server = MockServer::start().await;
@@ -1327,42 +1442,18 @@ mod tests {
     // ── Client::stream_message / agentic body fields ──
 
     /// Body and `anthropic-beta` header of one streamed turn sent through `client`.
-    async fn capture_stream_request(mut client: Client) -> (serde_json::Value, String) {
-        let server = MockServer::start().await;
-        let sink: Captured<(String, String)> = captured();
-        let sink_clone = std::sync::Arc::clone(&sink);
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .respond_with(move |req: &Request| {
-                let body = String::from_utf8_lossy(&req.body).into_owned();
-                let beta = req
-                    .headers
-                    .get("anthropic-beta")
-                    .map(|v| v.to_str().unwrap().to_owned())
-                    .unwrap_or_default();
-                *sink_clone.lock().unwrap() = Some((body, beta));
-                ResponseTemplate::new(200)
-                    .insert_header("content-type", "text/event-stream")
-                    .set_body_string(text_stream_body("", "Hi"))
-            })
-            .mount(&server)
-            .await;
-
-        client.config.base_url = server.uri();
-        collect_events(
-            client
-                .stream_message(&[Message::user("hi")], &[], None, &[])
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-        let (body, beta) = sink.lock().unwrap().clone().expect("request captured");
-        (serde_json::from_str(&body).unwrap(), beta)
+    async fn capture_stream_turn(client: Client) -> (serde_json::Value, String) {
+        let request = capture_stream_request(client).await;
+        let betas = request_header(&request, "anthropic-beta")
+            .unwrap_or_default()
+            .to_owned();
+        (serde_json::from_slice(&request.body).unwrap(), betas)
     }
 
     async fn capture_stream_body(config: Config) -> serde_json::Value {
-        let client = Client::new(config, Some("sid".to_owned())).unwrap();
-        capture_stream_request(client).await.0
+        capture_stream_turn(Client::new(config, Some("sid".to_owned())).unwrap())
+            .await
+            .0
     }
 
     #[tokio::test]
@@ -1411,7 +1502,7 @@ mod tests {
                 Some("sid".to_owned()),
             )
             .unwrap();
-            let (body, betas) = capture_stream_request(client).await;
+            let (body, betas) = capture_stream_turn(client).await;
             assert_eq!(
                 body["thinking"].get("display"),
                 display.map(Into::into).as_ref(),
@@ -1433,7 +1524,7 @@ mod tests {
                 Some("sid".to_owned()),
             )
             .unwrap();
-            let (body, betas) = capture_stream_request(client).await;
+            let (body, betas) = capture_stream_turn(client).await;
             assert_eq!(
                 body["thinking"]["block_binding"],
                 serde_json::json!({"prefix_mismatch_behavior": "drop_block"}),
@@ -1446,6 +1537,32 @@ mod tests {
                     .any(|beta| beta == "thinking-binding-controls-2026-08-01"),
                 "{}: {betas}",
                 info.id,
+            );
+        }
+    }
+
+    // ── Client::attributes ──
+
+    #[test]
+    fn attributes_streaming_requests_and_oauth_one_shots_unless_disabled() {
+        for (auth, enabled, streaming, expected) in [
+            (api_key(), true, true, true),
+            (auth_token(), true, true, true),
+            (oauth(), true, true, true),
+            (api_key(), true, false, false),
+            (auth_token(), true, false, false),
+            (oauth(), true, false, true),
+            (oauth(), false, true, false),
+            (oauth(), false, false, false),
+        ] {
+            let kind = auth.kind();
+            let mut config = test_config(OFFLINE_URL, auth, TEST_MODEL);
+            config.gateway.attribution = enabled;
+            let client = Client::new(config, None).unwrap();
+            assert_eq!(
+                client.attributes(streaming),
+                expected,
+                "{kind:?} enabled={enabled} streaming={streaming}",
             );
         }
     }
@@ -1467,7 +1584,7 @@ mod tests {
 
     #[test]
     fn build_system_blocks_orders_billing_then_identity_then_extras() {
-        let billing = build_billing_header(CLAUDE_CLI_VERSION, "abc");
+        let billing = build_billing_header(CLAUDE_CLI_VERSION, "abc", true);
         let cache = CacheControl {
             r#type: "ephemeral",
             scope: Some("global"),

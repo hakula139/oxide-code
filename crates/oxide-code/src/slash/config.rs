@@ -48,13 +48,25 @@ fn build_modal(
         ("Model".to_owned(), cfg.model.display_name().to_owned()),
         ("Model ID".to_owned(), cfg.model.id().to_owned()),
         ("Effort".to_owned(), display_effort(cfg.effort)),
-        ("Auth".to_owned(), cfg.auth_label.to_owned()),
+        ("Auth".to_owned(), cfg.auth.to_string()),
         ("Base URL".to_owned(), cfg.base_url.clone()),
         (
             "Extra CA Certs".to_owned(),
             cfg.extra_ca_certs
                 .as_deref()
                 .map_or_else(|| "(none)".to_owned(), tildify),
+        ),
+        (
+            "Custom Headers".to_owned(),
+            display_names(&cfg.gateway.custom_header_names),
+        ),
+        (
+            "Attribution Header".to_owned(),
+            display_bool(cfg.gateway.attribution).to_owned(),
+        ),
+        (
+            "Structured Outputs".to_owned(),
+            display_bool(cfg.gateway.structured_outputs).to_owned(),
         ),
         ("Max Tokens".to_owned(), cfg.max_tokens.to_string()),
         (
@@ -89,6 +101,14 @@ fn build_modal(
             KvSection::new(files).with_heading("Source Files"),
         ],
     )
+}
+
+fn display_names(names: &[String]) -> String {
+    if names.is_empty() {
+        "(none)".to_owned()
+    } else {
+        names.join(", ")
+    }
 }
 
 /// `(not configured)` when unresolved; `~/...` plus ` (not found)` when missing.
@@ -157,11 +177,11 @@ mod tests {
 
     #[test]
     fn build_modal_height_accounts_for_both_sections() {
-        // title + blank + (heading + blank + 12 rows) + blank + (heading + blank + 2 rows)
-        //   + blank + footer = 2 + 14 + 1 + 4 + 2 = 23.
+        // title + blank + (heading + blank + 15 rows) + blank + (heading + blank + 2 rows)
+        //   + blank + footer = 2 + 17 + 1 + 4 + 2 = 26.
         let info = test_session_info();
         let m = build_modal(&info, None, None);
-        assert_eq!(m.height(80, u16::MAX), 23);
+        assert_eq!(m.height(80, u16::MAX), 26);
     }
 
     #[test]
@@ -195,8 +215,46 @@ mod tests {
         let m = build_modal(&info, None, None);
         let rendered = render_modal(&m, 80);
 
-        assert!(rendered.contains("Extra CA Certs"), "{rendered}");
-        assert!(rendered.contains("(none)"), "{rendered}");
+        assert!(
+            row(&rendered, "Extra CA Certs").contains("(none)"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn build_modal_shows_gateway_settings() {
+        let mut info = test_session_info();
+        let rendered = render_modal(&build_modal(&info, None, None), 80);
+        assert!(
+            row(&rendered, "Custom Headers").contains("(none)"),
+            "{rendered}"
+        );
+
+        info.config.gateway.custom_header_names =
+            vec!["x-team".to_owned(), "x-gateway-key".to_owned()];
+        let rendered = render_modal(&build_modal(&info, None, None), 80);
+        assert!(
+            row(&rendered, "Custom Headers").contains("x-team, x-gateway-key"),
+            "{rendered}"
+        );
+
+        info.config.gateway.attribution = false;
+        let rendered = render_modal(&build_modal(&info, None, None), 80);
+        assert!(
+            row(&rendered, "Attribution Header").contains(display_bool(false)),
+            "{rendered}"
+        );
+        assert!(
+            row(&rendered, "Structured Outputs").contains(display_bool(true)),
+            "{rendered}"
+        );
+    }
+
+    fn row<'a>(rendered: &'a str, key: &str) -> &'a str {
+        rendered
+            .lines()
+            .find(|line| line.contains(key))
+            .unwrap_or_else(|| panic!("no {key} row: {rendered}"))
     }
 
     // ── display_path ──
