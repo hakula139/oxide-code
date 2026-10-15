@@ -541,6 +541,7 @@ mod tests {
 
     use super::testing::{
         MODEL, SESSION_CONTEXT, conversation, mount_reply, request_bodies, system_prompt,
+        with_pinned_home,
     };
     use super::*;
     use crate::agent::event::CapturingSink;
@@ -604,54 +605,57 @@ mod tests {
 
     #[tokio::test]
     async fn submit_prompt_keeps_the_prefix_and_sends_a_date_change_as_a_reminder() {
-        let server = MockServer::start().await;
-        mount_reply(&server, "reply").await;
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let mut conversation = conversation(server.uri(), &store).await;
-        let today = conversation.prompt.seen.date.clone();
-        let sink = CapturingSink::new();
-        let (_user_tx, mut user_rx) = agent::event::inert_user_action_channel();
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            mount_reply(&server, "reply").await;
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let mut conversation = conversation(server.uri(), &store).await;
+            let today = conversation.prompt.seen.date.clone();
+            let sink = CapturingSink::new();
+            let (_user_tx, mut user_rx) = agent::event::inert_user_action_channel();
 
-        let end = conversation
-            .submit_prompt("first", &sink, &mut user_rx)
-            .await;
-        assert_eq!(end, TurnEnd::Completed);
-        "2000-01-01".clone_into(&mut conversation.prompt.seen.date);
-        let end = conversation
-            .submit_prompt("second", &sink, &mut user_rx)
-            .await;
-        assert_eq!(end, TurnEnd::Completed);
+            let end = conversation
+                .submit_prompt("first", &sink, &mut user_rx)
+                .await;
+            assert_eq!(end, TurnEnd::Completed);
+            "2000-01-01".clone_into(&mut conversation.prompt.seen.date);
+            let end = conversation
+                .submit_prompt("second", &sink, &mut user_rx)
+                .await;
+            assert_eq!(end, TurnEnd::Completed);
 
-        let turns = request_bodies(&server).await;
-        assert_eq!(
-            turns.len(),
-            2,
-            "non-interactive turns must not request a title"
-        );
-        assert_eq!(system_prompt(&turns[1]), system_prompt(&turns[0]));
-        let (first, second) = (&turns[0]["messages"], &turns[1]["messages"]);
-        assert_eq!(first[0]["content"][0]["text"], SESSION_CONTEXT);
-        assert_eq!(second[0], first[0], "the first message must not change");
-        assert_eq!(second[1]["content"][0]["text"], "first");
-        assert_eq!(second[2]["content"][0]["text"], "reply");
-        let prompt = second[3]["content"].as_array().unwrap();
-        assert_eq!(prompt[0]["text"], "second");
-        let reminder = prompt[1]["text"].as_str().unwrap();
-        assert!(
-            reminder.contains(&format!("Today's date is {today}.")),
-            "{reminder}"
-        );
-        assert!(!reminder.contains("# CLAUDE.md"), "{reminder}");
+            let turns = request_bodies(&server).await;
+            assert_eq!(
+                turns.len(),
+                2,
+                "non-interactive turns must not request a title"
+            );
+            assert_eq!(system_prompt(&turns[1]), system_prompt(&turns[0]));
+            let (first, second) = (&turns[0]["messages"], &turns[1]["messages"]);
+            assert_eq!(first[0]["content"][0]["text"], SESSION_CONTEXT);
+            assert_eq!(second[0], first[0], "the first message must not change");
+            assert_eq!(second[1]["content"][0]["text"], "first");
+            assert_eq!(second[2]["content"][0]["text"], "reply");
+            let prompt = second[3]["content"].as_array().unwrap();
+            assert_eq!(prompt[0]["text"], "second");
+            let reminder = prompt[1]["text"].as_str().unwrap();
+            assert!(
+                reminder.contains(&format!("Today's date is {today}.")),
+                "{reminder}"
+            );
+            assert!(!reminder.contains("# CLAUDE.md"), "{reminder}");
 
-        let id = conversation.session.session_id().to_owned();
-        let expected = conversation.prompt.session_context();
-        conversation.finalize().await;
-        let data = store.load_session_data(&id).unwrap();
-        assert_eq!(data.context, Some(expected));
-        assert!(
-            matches!(&data.messages[2].content[..], [_, ContentBlock::Text { text }] if text == reminder)
-        );
+            let id = conversation.session.session_id().to_owned();
+            let expected = conversation.prompt.session_context();
+            conversation.finalize().await;
+            let data = store.load_session_data(&id).unwrap();
+            assert_eq!(data.context, Some(expected));
+            assert!(
+                matches!(&data.messages[2].content[..], [_, ContentBlock::Text { text }] if text == reminder)
+            );
+        })
+        .await;
     }
 
     #[tokio::test]

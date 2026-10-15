@@ -40,6 +40,13 @@ pub(super) async fn conversation(base_url: String, store: &SessionStore) -> Conv
     }
 }
 
+/// Runs `test` with `HOME` pinned to an empty directory. Parallel tests swap `HOME`, which would
+/// otherwise change the user instructions between two context loads of one test.
+pub(super) async fn with_pinned_home(test: impl Future<Output = ()>) {
+    let home = tempfile::tempdir().unwrap();
+    temp_env::async_with_vars([("HOME", Some(home.path()))], test).await;
+}
+
 /// Answers every Messages request with a streamed reply of `text`.
 pub(super) async fn mount_reply(server: &MockServer, text: &str) {
     Mock::given(method("POST"))
