@@ -76,3 +76,22 @@ fn continue_in_the_repl_unarchives_the_session_with_a_note() {
         "{transcript}"
     );
 }
+
+#[test]
+fn resume_without_a_terminal_fails_before_writing_anything() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_ox"))
+        .arg("--resume")
+        .current_dir(dir.path())
+        .env("XDG_DATA_HOME", dir.path())
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("--resume opens the session picker in the TUI"),
+        "{stderr}"
+    );
+    assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
+}

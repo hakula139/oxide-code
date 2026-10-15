@@ -1,6 +1,6 @@
 # Session Resume
 
-`/resume` (alias `/continue`) opens a searchable session picker when bare, or jumps directly when given a session id. Shares listing budget with `ox --list`.
+`/resume` (alias `/continue`) opens a searchable session picker when bare, or jumps directly when given a session id. Shares its listing budget with `ox --list`. At startup, `ox --resume` opens the same picker.
 
 Companions: [commands.md](commands.md), [modals.md](modals.md). Underlying research: [research/slash/resume.md](../../research/slash/resume.md).
 
@@ -9,6 +9,8 @@ Companions: [commands.md](commands.md), [modals.md](modals.md). Underlying resea
 `slash/resume` hosts both `ResumeCmd` and `ResumePicker`. Bare returns the picker as `SlashOutcome::Modal`, while typed-arg resolves through `resolve_prefix_to_info` (current project first, widening to all projects on miss) and forwards `UserAction::Resume { path }` carrying the matched session file.
 
 The picker wraps [`SearchableList`](modals.md) and adds a footer line. Each row paints a two-line title plus dim metadata block (id prefix · relative time · message count · branch · project) followed by a trailing blank. Tab toggles current-project ↔ all-projects, and Ctrl+A toggles the active ↔ archived view, retitling the header to `Resume archived session`. Both reload rows from `SessionStore::list_paged` while preserving the typed query. Enter on a focused row submits, while Enter with no selection keeps the picker open so the user can Tab the scope or Esc out. Esc / Ctrl+C cancel via the universal stack gate. The footer counts the loaded rows. If more sessions follow the 30-row cap, it says so (`30 most recent sessions · more not loaded`), since queries search only loaded rows. Ctrl+D on the cursor row pushes [`ConfirmDeleteSessionModal`](modals.md). On focus regain the picker reloads and re-seeks the cursor to the previously selected row, so cancel-delete keeps the user in place.
+
+`ox --resume` starts the TUI in a fresh session with no file yet, then opens the picker on the first frame. `main.rs` builds it with `ResumePicker::at_startup`, and `driver::tui::run` pushes `Startup::picker` onto the modal stack before the event loop starts. The startup picker carries `Dismissal::Quit`, so Esc / Ctrl+C call `on_cancel`, which resolves to `UserAction::Quit`, and the footer reads `Esc to quit`. Pressing Enter resumes through the same `roll_into` path as `/resume`. A session file is created only with the first message, so neither path leaves an empty session on disk.
 
 `session/handle` provides `roll_into(...)`, which mirrors `roll(...)`. It loads and sanitizes the target first, so a load failure leaves the live session untouched. Loading an archived target appends an entry unarchiving it, which `RollIntoOutcome::unarchived` reports. It then snapshots and clears the file tracker, restores the target's tracker state through `restore_verified`, swaps the handle in place, and finalizes the old session. The flat `RollIntoOutcome` carries the resumed transcript (messages, compact boundary, title, tool-result metadata, and recorded prompt context) plus a diagnostic pair (finalize failure of the prior session, drift list from the file tracker).
 
@@ -48,15 +50,17 @@ The picker wraps [`SearchableList`](modals.md) and adds a footer line. Each row 
 
 15. **Bare suppresses echo, typed-arg echoes.** Mirrors the universal rule: the modal IS the response, so the typed `> /resume` line stays out of history. Typed `> /resume <id>` echoes because the swap-confirmation system message anchors the pair.
 
-16. **Always show the picker, even with one or zero matches.** Auto-resuming on a single match would surprise users who typed `/resume` just to peek the list, and an empty list with a clear message beats silently doing nothing.
+16. **Always show the picker, even with one or zero matches.** Auto-resuming on a single match would surprise users who typed `/resume` just to peek the list, and an empty list with a clear message is better than silently doing nothing.
 
 17. **Ctrl+A switches to the archived view.** Archived sessions stay out of the default rows but remain one key away, and resuming one from that view unarchives it, matching `ox -c <prefix>`. The view composes with Tab, so archived sessions can be listed across every project.
+
+18. **`ox --resume` reuses the in-TUI picker, and dismissing it quits.** Opening the picker over a fresh session lets startup share `/resume`'s modal and its in-process swap, avoiding a separate pre-TUI selection screen. Claude Code's `--resume` and Codex's `resume` subcommand both open a picker at startup. Codex starts a fresh session when you press Esc, but plain `ox` already does that, so Esc quits. Esc always keeps its universal modal meaning, even when you've typed a query, and Ctrl+U clears the query. The picker holds focus until it closes, so resume or compaction can't clear the stack and trigger its quitting `on_cancel` while it's open.
 
 ## Per-Component Notes
 
 - **`ResumeCmd`**: Canonical `resume`, alias `continue`. `classify` is always `Mutating`. `echoes_input` returns false for bare (modal IS the response) and true for typed-arg (echo anchors the swap-confirmation message). Typed-arg path validates non-empty / non-whitespace, then calls `resolve_prefix_to_info`, which checks the current project first and widens on miss.
 
-- **`ResumePicker`**: Wraps `SearchableList<SessionRow>` plus a footer row. Loads rows from `SessionStore::list_paged`. Tab toggles `all` and Ctrl+A toggles `archived`, each rebuilding while preserving the query. Ctrl+U clears the query, and other unbound keys edit it through the shared `LineEditor`. Enter on a focused row dispatches `UserAction::Resume`. Enter with no selection keeps the picker open so the user can Tab the scope or Esc out.
+- **`ResumePicker`**: Wraps `SearchableList<SessionRow>` plus a footer row. Loads rows from `SessionStore::list_paged`. Tab toggles `all` and Ctrl+A toggles `archived`, each rebuilding while preserving the query. Ctrl+U clears the query, and other unbound keys edit it through the shared `LineEditor`. Enter on a focused row dispatches `UserAction::Resume`. Enter with no selection keeps the picker open so the user can Tab the scope or Esc out. `at_startup` builds the `ox --resume` variant, whose `Dismissal::Quit` turns a dismissal into `UserAction::Quit`.
 
 - **`SearchableList<T>`**: Owns the query editor, items, filtered visible index, cursor, and viewport. The substring filter recomputes whenever the query changes, through `set_query` or an `edit_query` keystroke, and resets the cursor to the top. The viewport sizes itself from the height each render grants, and paging steps by the rows last shown. `SearchableItem::haystack` returns the composite filter source. `render(width, is_cursor, theme)` paints one or more `Line`s per row.
 
@@ -87,15 +91,12 @@ The picker wraps [`SearchableList`](modals.md) and adds a footer line. Each row 
 - **Auto-resume on single match.** Users who type `/resume` to peek the list deserve to see it.
 - **`/sessions` listing variant.** One slash command per intent. `ox --list` already covers script-friendly listing.
 
-## Related Issues
-
-Opening the picker from the shell with `ox --resume` is tracked in [#187](https://github.com/hakula139/oxide-code/issues/187).
-
 ## Sources
 
 - `crates/oxide-code/src/agent/event.rs`: `UserAction::Resume`, `AgentEvent::SessionResumed`.
+- `crates/oxide-code/src/driver/tui.rs`: `Startup::picker`, pushed over the first frame.
 - `crates/oxide-code/src/engine.rs`: `Engine::resume`, `format_drift_warning`.
-- `crates/oxide-code/src/main.rs`: `Cli::archived`, `Cli::limit`.
+- `crates/oxide-code/src/main.rs`: `Cli::archived`, `Cli::limit`, `Cli::resume`.
 - `crates/oxide-code/src/session/display.rs`: shared `format_metadata_line` used by the picker row.
 - `crates/oxide-code/src/session/handle.rs`: `roll_into`, `RollIntoOutcome`.
 - `crates/oxide-code/src/session/list_view.rs`: `render_list` over `list_paged`.
@@ -103,6 +104,6 @@ Opening the picker from the shell with `ox --resume` is tracked in [#187](https:
 - `crates/oxide-code/src/session/store/listing.rs`: `list_paged`, `latest`, `list_matching`, `ListPage`.
 - `crates/oxide-code/src/slash/confirm.rs`: `ConfirmDeleteSessionModal` pushed by Ctrl+D.
 - `crates/oxide-code/src/slash/registry.rs`: `BUILT_INS` entry `&ResumeCmd`.
-- `crates/oxide-code/src/slash/resume.rs`: `ResumeCmd`, `ResumePicker`, `SessionRow`, `resolve_prefix`.
-- `crates/oxide-code/src/tui/app.rs`: `apply_session_resumed`.
+- `crates/oxide-code/src/slash/resume.rs`: `ResumeCmd`, `ResumePicker` and its `at_startup` variant, `SessionRow`, and `resolve_prefix`.
+- `crates/oxide-code/src/tui/app.rs`: `apply_session_resumed` and `push_modal`.
 - `crates/oxide-code/src/tui/modal/searchable_list.rs`: `SearchableList<T>` plus `SearchableItem` plus `cursor_to` for cursor preservation across reload.
