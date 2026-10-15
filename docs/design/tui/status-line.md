@@ -82,8 +82,8 @@ Planned segments, including account usage limits and task progress, are tracked 
 
 - [Status line research](../../research/tui/status-line.md)
 - [Auto-compaction design](../agent/auto-compaction.md)
-- `crates/oxide-code/src/engine.rs`
-- `crates/oxide-code/src/tui/components/status.rs`
-- `crates/oxide-code/src/tui/components/status/line.rs`
-- `crates/oxide-code/src/tui/git_probes.rs`
-- `crates/oxide-code/src/util/git.rs`
+- `crates/oxide-code/src/engine.rs`: `Engine` usage accounting and `UsageUpdated` emission.
+- `crates/oxide-code/src/tui/components/status.rs`: `StatusBar` state and the run-state `Status`.
+- `crates/oxide-code/src/tui/components/status/line.rs`: `StatusLine` segment rendering and width fitting.
+- `crates/oxide-code/src/tui/git_probes.rs`: `GitProbes` background branch and pull-request polling.
+- `crates/oxide-code/src/util/git.rs`: `current_branch_async` and `current_pull_request` probes.

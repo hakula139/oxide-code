@@ -1,4 +1,4 @@
-//! Text rendering for `ox --list`. Split out of `main.rs` so the table layout is unit-testable.
+//! Text rendering for `ox --list`, of either active or archived sessions.
 
 use std::io::Write;
 use std::path::Path;
