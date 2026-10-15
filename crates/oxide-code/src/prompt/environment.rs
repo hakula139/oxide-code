@@ -1,12 +1,13 @@
 //! Runtime environment detection for system prompt context.
 
+use std::fmt::Write as _;
 use std::path::Path;
 
 use indoc::formatdoc;
 use platform_info::{PlatformInfo, PlatformInfoAPI, UNameAPI};
 use serde::{Deserialize, Serialize};
 
-use crate::model::lookup;
+use crate::model::ModelSpec;
 use crate::util::env;
 use crate::util::time::local_offset;
 
@@ -18,12 +19,11 @@ pub(super) struct Environment {
     platform: String,
     shell: String,
     os_version: String,
-    model: String,
 }
 
 impl Environment {
     /// Best-effort detection; failures produce fallback values.
-    pub(super) fn detect(model: &str, cwd: &Path, git_root: Option<&Path>) -> Self {
+    pub(super) fn detect(cwd: &Path, git_root: Option<&Path>) -> Self {
         let is_git = git_root.is_some();
         let platform = normalize_node_platform(std::env::consts::OS).to_owned();
         let shell = detect_shell();
@@ -35,12 +35,7 @@ impl Environment {
             platform,
             shell,
             os_version,
-            model: model.to_owned(),
         }
-    }
-
-    pub(super) fn set_model(&mut self, model: &str) {
-        model.clone_into(&mut self.model);
     }
 
     pub(super) fn describes(&self, cwd: &Path) -> bool {
@@ -48,21 +43,6 @@ impl Environment {
     }
 
     pub(super) fn render(&self) -> String {
-        let info = lookup(&self.model);
-        let model_bullet = match info {
-            Some(info) => format!(
-                "- You are powered by the model named {}. \
-                The exact model ID is {}.",
-                info.display_name, self.model,
-            ),
-            None => format!("- You are powered by the model {}.", self.model),
-        };
-        let cutoff_bullet = info
-            .and_then(|info| info.cutoff)
-            .map_or(String::new(), |c| {
-                format!("- Assistant knowledge cutoff is {c}.")
-            });
-
         formatdoc! {"
             # Environment
 
@@ -72,9 +52,7 @@ impl Environment {
               - Is a git repository: {is_git}
             - Platform: {platform}
             - Shell: {shell}
-            - OS Version: {os_version}
-            {model_bullet}
-            {cutoff_bullet}",
+            - OS Version: {os_version}",
             cwd = self.cwd,
             is_git = self.is_git,
             platform = self.platform,
@@ -138,34 +116,41 @@ fn format_local_date(now: time::OffsetDateTime, offset: time::UtcOffset) -> Stri
     )
 }
 
+// ── Model Identity ──
+
+/// Names `model`, its exact id, and its knowledge cutoff when the catalogue knows them.
+pub(super) fn model_identity(model: &ModelSpec) -> String {
+    let id = model.id();
+    let Some(info) = model.info() else {
+        return format!("You are powered by the model {id}.");
+    };
+    let mut identity = format!(
+        "You are powered by the model named {}. The exact model ID is {id}.",
+        info.display_name,
+    );
+    if let Some(cutoff) = info.cutoff {
+        _ = write!(identity, " Assistant knowledge cutoff is {cutoff}.");
+    }
+    identity
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn env_with_model(model: &str) -> Environment {
-        Environment {
-            cwd: "/tmp".to_owned(),
-            is_git: false,
-            platform: "darwin".to_owned(),
-            shell: "zsh".to_owned(),
-            os_version: "Darwin 25.3.0".to_owned(),
-            model: model.to_owned(),
-        }
-    }
 
     // ── Environment::detect ──
 
     #[test]
     fn detect_inside_repo_sets_is_git_true() {
         let cwd = std::env::current_dir().expect("cwd should be available");
-        let env = Environment::detect("test-model", &cwd, Some(&cwd));
+        let env = Environment::detect(&cwd, Some(&cwd));
         assert!(env.is_git);
     }
 
     #[test]
     fn detect_with_cwd_but_no_git_root_sets_is_git_false() {
         let tmp = tempfile::tempdir().expect("failed to create tempdir");
-        let env = Environment::detect("test-model", tmp.path(), None);
+        let env = Environment::detect(tmp.path(), None);
         assert!(!env.is_git);
         assert!(
             env.cwd
@@ -176,49 +161,29 @@ mod tests {
     // ── Environment::render ──
 
     #[test]
-    fn render_with_known_model_shows_all_fields() {
+    fn render_lists_every_field() {
         let env = Environment {
             cwd: "/home/user/project".to_owned(),
             is_git: true,
             platform: "linux".to_owned(),
             shell: "bash".to_owned(),
             os_version: "Linux 6.1.0".to_owned(),
-            model: "claude-opus-5-5".to_owned(),
         };
-        let rendered = env.render();
 
-        assert!(rendered.starts_with("# Environment"));
-        assert!(rendered.contains("You have been invoked in the following environment:"));
-        assert!(rendered.contains("- Primary working directory: /home/user/project"));
-        assert!(rendered.contains("  - Is a git repository: true"));
-        assert!(rendered.contains("- Platform: linux"));
-        assert!(rendered.contains("- Shell: bash"));
-        assert!(rendered.contains("- OS Version: Linux 6.1.0"));
-        assert!(rendered.contains(
-            "- You are powered by the model named Claude Opus 5.5. \
-             The exact model ID is claude-opus-5-5."
-        ));
-        assert!(rendered.contains("- Assistant knowledge cutoff is June 2026."));
-    }
+        assert_eq!(
+            env.render(),
+            indoc::indoc! {"
+                # Environment
 
-    #[test]
-    fn render_without_git_shows_false() {
-        let rendered = env_with_model("test-model").render();
-        assert!(rendered.contains("  - Is a git repository: false"));
-    }
+                You have been invoked in the following environment:
 
-    #[test]
-    fn render_known_model_without_cutoff_omits_cutoff_bullet() {
-        let rendered = env_with_model("claude-sonnet-5-5").render();
-        assert!(rendered.contains("- You are powered by the model named Claude Sonnet 5.5."));
-        assert!(!rendered.contains("knowledge cutoff"));
-    }
-
-    #[test]
-    fn render_unknown_model_uses_fallback_description() {
-        let rendered = env_with_model("custom-model-v1").render();
-        assert!(rendered.contains("- You are powered by the model custom-model-v1."));
-        assert!(!rendered.contains("knowledge cutoff"));
+                - Primary working directory: /home/user/project
+                  - Is a git repository: true
+                - Platform: linux
+                - Shell: bash
+                - OS Version: Linux 6.1.0"
+            },
+        );
     }
 
     // ── normalize_node_platform ──
@@ -286,5 +251,39 @@ mod tests {
             "2026-04-12"
         );
         assert_eq!(format_local_date(now, time::UtcOffset::UTC), "2026-04-12");
+    }
+
+    // ── model_identity ──
+
+    #[test]
+    fn model_identity_names_a_catalogue_model_with_its_cutoff() {
+        assert_eq!(
+            model_identity(&spec("claude-opus-5-5")),
+            "You are powered by the model named Claude Opus 5.5. The exact model ID is \
+             claude-opus-5-5. Assistant knowledge cutoff is June 2026.",
+        );
+    }
+
+    #[test]
+    fn model_identity_omits_an_unknown_cutoff() {
+        assert_eq!(
+            model_identity(&spec("claude-sonnet-5-5")),
+            "You are powered by the model named Claude Sonnet 5.5. The exact model ID is \
+             claude-sonnet-5-5.",
+        );
+    }
+
+    #[test]
+    fn model_identity_names_an_unknown_model_by_its_id() {
+        assert_eq!(
+            model_identity(&spec("custom-model-v1")),
+            "You are powered by the model custom-model-v1.",
+        );
+    }
+
+    // ── helpers ──
+
+    fn spec(id: &str) -> ModelSpec {
+        ModelSpec::resolve(id.to_owned())
     }
 }

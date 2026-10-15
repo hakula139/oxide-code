@@ -8,6 +8,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 use super::Conversation;
 use crate::client::anthropic::testing::{api_key, test_client, text_stream_body};
 use crate::file_tracker::FileTracker;
+use crate::model::ModelSpec;
 use crate::prompt;
 use crate::session::handle;
 use crate::session::store::SessionStore;
@@ -21,7 +22,7 @@ pub(super) const SESSION_CONTEXT: &str = "<system-reminder>session context</syst
 /// rebuilt one.
 pub(super) async fn conversation(base_url: String, store: &SessionStore) -> Conversation {
     let cwd = std::env::current_dir().unwrap();
-    let mut prompt = prompt::build_prompt(MODEL, &cwd).await;
+    let mut prompt = prompt::build_prompt(&ModelSpec::resolve(MODEL.to_owned()), &cwd).await;
     SESSION_CONTEXT.clone_into(&mut prompt.user_context);
     Conversation {
         client: test_client(base_url, api_key(), MODEL),
