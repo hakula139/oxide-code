@@ -114,9 +114,9 @@ impl FromStr for PermissionClass {
 
 // ── Dangerous Defaults ──
 
-/// Deny rules for the catastrophic command shapes a future classifier verdict must never wave
-/// through, plus edits to the project's `.git`, which could escalate through hook injection. They
-/// apply in `auto` and `plan` after the user's own deny rules, and `yolo` skips them.
+/// Deny rules for the catastrophic command shapes that no later allow step may wave through, plus
+/// edits to the project's `.git`, which could escalate through hook injection. They apply in
+/// `auto` and `plan` after the user's own deny rules, and `yolo` skips them.
 const DANGEROUS_DEFAULTS: &[&str] = &[
     "bash(rm -rf:*)",
     "bash(rm -fr:*)",
@@ -579,7 +579,7 @@ impl Policy {
     }
 
     /// Resolves a call to a [`Decision`]. Pure and synchronous: no I/O, no async, no classifier.
-    /// The classifier (Phase 2) slots in where this returns [`Decision::Ask`] from the last step.
+    /// A classifier slots in where this returns [`Decision::Ask`] from the last step.
     ///
     /// Order, stopping at the first match:
     /// 1. A user or project deny rule denies, in every mode.

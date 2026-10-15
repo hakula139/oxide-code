@@ -55,4 +55,4 @@ An open code block stays in the tail until the next block starts. Its highlighte
 6. **Custom pulldown-cmark + syntect renderer.** Uses Codex's `pending_marker` pattern for correct list handling.
 7. **Catppuccin Mocha dark theme by default** with named color slots covering text, surfaces, accents, status, code, diff, headings, body, and chrome. Transparent background.
 8. **Two-tier tool display.** Inline summary with per-tool icons, plus truncated output body.
-9. **Per-block render cache with visible-slice paint.** A resize or theme swap still re-renders every block.
+9. **Per-block render cache with visible-slice paint.** A resize or theme swap still re-renders every block, and rendering only the blocks near the viewport is tracked in [#190](https://github.com/hakula139/oxide-code/issues/190).

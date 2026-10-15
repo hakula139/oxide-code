@@ -117,7 +117,7 @@ Dedicated `compaction` agent, anchored re-summarization via `<previous-summary>`
 
 5. **Partial / range compaction (Claude Code).** Adds a message-selector UI, a dual-direction summarizer, and a transcript splice. Land full-transcript compaction first.
 
-6. **Hooks (PreCompact / PostCompact).** oxide-code doesn't have a hook surface yet, and introducing one for compaction would commit the project to that abstraction. Defer with "user-extensible workflow skills" on the roadmap.
+6. **Hooks (PreCompact / PostCompact).** oxide-code has no hook surface yet, so compaction should not introduce one of its own. The general hook surface is planned under [#157](https://github.com/hakula139/oxide-code/issues/157), with command hooks in [#159](https://github.com/hakula139/oxide-code/issues/159), and the `pre_compact` event is part of [#168](https://github.com/hakula139/oxide-code/issues/168).
 
 7. **Synthetic auto-continue (opencode).** Quietly inserts a fake "Continue if you have next steps..." after auto-compact. oxide-code should land the summary and wait for the user. Surprises beat conveniences here.
 

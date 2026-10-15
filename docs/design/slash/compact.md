@@ -40,7 +40,7 @@ The TUI's `App::apply_session_compacted` clears the chat, pushes a single `Compa
 
 11. **Keep queued prompts.** Unlike `/resume` (queued prompts belong to the source thread and get dropped), `/compact` _preserves_ the user's intent. Queued prompts continue to make sense after compaction, and dropping them would surprise the user. This mirrors `/clear`'s "same identity, fresh slate" behavior, even though the underlying mechanic is different.
 
-12. **No live token streaming.** Show the spinner during compaction, then emit `AgentEvent::SessionCompacted` once with the full summary at the end. Live-streaming the summary into a `StreamingCompactionBlock` is not worth it for the typical 5-15 second wait, as it would require an extra block variant, finalize-on-completion plumbing, and mid-stream cancel handling.
+12. **Render the summary once it completes.** The spinner runs during compaction, then `AgentEvent::SessionCompacted` arrives once with the full summary. Streaming the summary live needs an extra block variant, finalize-on-completion plumbing, and mid-stream cancel handling, and is tracked in [#186](https://github.com/hakula139/oxide-code/issues/186).
 
 13. **Refuse mid-turn (`classify = Mutating`).** All three reference CLIs treat manual compaction as a between-turns operation. `Mutating` is the existing oxide-code lever for that. The slash registry refuses if a turn is in flight, and the user retries after the in-flight reply finishes.
 
@@ -52,7 +52,7 @@ The TUI's `App::apply_session_compacted` clears the chat, pushes a single `Compa
 
 17. **Custom instructions appended verbatim under an "Additional instructions" section in the user message.** Matches Claude Code's pattern: the rubric runs first, then custom instructions follow as steering for the same task.
 
-18. **`CompactedBlock` is one chat block.** The accent-bar surface gives compaction a visual identity while keeping the header and summary one conceptual unit. The block can later grow a "view full pre-compact transcript" footer or a token-saved indicator without coordinating two block types.
+18. **`CompactedBlock` is one chat block.** The accent-bar surface gives compaction a visual identity while keeping the header and summary one conceptual unit.
 
 19. **`echoes_input` keeps the trait default of `true`.** The `> /compact` line shows while the summarization runs. The compact event then clears chat down to the `CompactedBlock`, whose `(focus: ...)` suffix keeps any instructions visible.
 
@@ -84,23 +84,15 @@ The TUI's `App::apply_session_compacted` clears the chat, pushes a single `Compa
 
 - **`session::sanitize`**: Treats the synthetic continuation as a normal `role: user` text message without dropping anything.
 
-## Out of Scope / Deferred
+## Out of Scope
 
-- **Live-streamed summary.** Tokenwise rendering via a `StreamingCompactionBlock` that handles mid-stream cancellation and finalizes into a `CompactedBlock`.
+- **Anchored re-compaction (`<previous-summary>` block).** Updating a previous summary in place pays off only when one session is compacted many times. Each compaction summarizes the transcript since the last boundary, which already starts from the previous summary.
 
-- **Compaction count in `--list`.** A "compacted N times" column beside `Msgs`, derivable from existing `Entry::Compact` lines.
+- **Microcompact / prune (in-place tool-result body deletion).** Claude Code ships this because its auto-compaction is more aggressive. Whole-transcript summaries at turn boundaries cover the same need with one mechanism.
 
-- **Anchored re-compaction (`<previous-summary>` block).** opencode's signature pattern. Genuinely useful for ultra-long sessions, but defer until a user has compacted the same session twice.
+## Related Issues
 
-- **Microcompact / prune (in-place tool-result body deletion).** Both Claude Code and opencode ship this because their auto-compact is more aggressive.
-
-- **Partial / range compaction.** Claude Code's "summarize from here" / "summarize up to here" via the message selector. Adds a UI surface, a dual-direction summarizer, and a transcript splice. Its own feature.
-
-- **PreCompact / PostCompact hooks.** All three CLIs ship hooks, whereas oxide-code has no hook surface.
-
-- **`agent.compaction.model` config knob.** Letting users pin compaction to a cheap model (Haiku) while the main session runs Opus. Useful, but defer until users ask.
-
-- **`/cost` companion.** The status line exposes local context and session-cost estimates. A command can later show detailed per-turn or account-level billing.
+A `pre_compact` hook is tracked in [#168](https://github.com/hakula139/oxide-code/issues/168).
 
 ## Sources
 

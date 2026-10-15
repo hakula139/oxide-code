@@ -90,17 +90,12 @@ During TUI auto-compaction, the status bar uses the existing `Compacting` state.
 
 4. **Same summarizer as `/compact`.** Auto-compaction has no model setting of its own. The summarization request goes through `Client::stream_one_shot`, which shares the agent loop's request path and so already handles auth, model, effort, betas, prompt caching, and first-party gateway constraints.
 
-5. **Same persistence boundary as `/compact`.** Auto-compaction should not create a second session format. `Entry::Compact` can later gain a trigger field if the UI needs to distinguish manual from automatic in history.
+5. **Same persistence boundary as `/compact`.** Auto-compaction should not create a second session format.
 
 6. **Failure circuit breaker.** A too-large or malformed compact request can be unrecoverable. After 3 consecutive automatic failures, the loop stops trying until the session changes through manual compaction, `/clear`, or `/resume`.
 
 7. **No automatic continue prompt.** If the user queued input, it drains after compaction. Otherwise the assistant waits. Synthetic "continue" prompts make the agent act without fresh user intent.
 
-## Deferred
+## Related Issues
 
-- Mid-turn compaction while a model response still needs tool follow-up.
-- Microcompact / prune for old tool-result bodies.
-- Anchored re-compaction that updates a previous summary in place.
-- Separate compaction model.
-- Persisted cost restore after resume.
-- Hook integration.
+Mid-turn compaction is tracked in [#184](https://github.com/hakula139/oxide-code/issues/184), and a `pre_compact` hook in [#168](https://github.com/hakula139/oxide-code/issues/168).
