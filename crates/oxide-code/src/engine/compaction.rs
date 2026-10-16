@@ -412,15 +412,16 @@ fn rough_tokens(message: &Message) -> u32 {
     u32::try_from(bytes / 4).unwrap_or(u32::MAX)
 }
 
-/// Appends the rubric to a retry transcript, closing a tool-use turn it leaves open first.
+/// Appends the rubric to a retry transcript, closing a tool-use turn it leaves open first. The API
+/// merges consecutive user messages, so a tool result anywhere in the final user run leaves the
+/// turn open, even when an interruption marker follows it.
 fn retry_request(kept: &[Message], rubric: &Message) -> Vec<Message> {
-    let open_turn = kept.last().is_some_and(|message| {
-        message.role == Role::User
-            && message
-                .content
-                .iter()
-                .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
-    });
+    let open_turn = kept
+        .iter()
+        .rev()
+        .take_while(|message| message.role == Role::User)
+        .flat_map(|message| &message.content)
+        .any(|b| matches!(b, ContentBlock::ToolResult { .. }));
     kept.iter()
         .cloned()
         .chain(open_turn.then(|| Message::assistant(RETRY_TURN_CLOSE_MARKER)))
@@ -1482,9 +1483,6 @@ mod tests {
 
     #[tokio::test]
     async fn compact_session_retry_closes_a_tool_turn_the_kept_rounds_leave_open() {
-        let server = MockServer::start().await;
-        mount_overflow_then(&server, streamed_summary_body("trimmed summary")).await;
-        let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
         let tool_call = ContentBlock::ToolUse {
             id: "t1".to_owned(),
             name: "read".to_owned(),
@@ -1498,47 +1496,60 @@ mod tests {
                 is_error: false,
             }],
         };
-        let transcript = vec![
-            Message::user("a".repeat(100_000)),
-            Message::assistant("reply 0"),
-            Message::user("check the file"),
-            Message {
-                role: Role::Assistant,
-                content: vec![
-                    ContentBlock::Thinking {
-                        thinking: "read it first".to_owned(),
-                        signature: "sig".to_owned(),
-                    },
-                    ContentBlock::Text {
-                        text: "reading".to_owned(),
-                    },
-                    tool_call.clone(),
-                ],
-            },
-            tool_result.clone(),
-        ];
+        for interrupted in [false, true] {
+            let server = MockServer::start().await;
+            mount_overflow_then(&server, streamed_summary_body("trimmed summary")).await;
+            let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
+            let mut transcript = vec![
+                Message::user("a".repeat(100_000)),
+                Message::assistant("reply 0"),
+                Message::user("check the file"),
+                Message {
+                    role: Role::Assistant,
+                    content: vec![
+                        ContentBlock::Thinking {
+                            thinking: "read it first".to_owned(),
+                            signature: "sig".to_owned(),
+                        },
+                        ContentBlock::Text {
+                            text: "reading".to_owned(),
+                        },
+                        tool_call.clone(),
+                    ],
+                },
+                tool_result.clone(),
+            ];
+            transcript.extend(interrupted.then(Message::interruption));
 
-        summarize(&client, &transcript).await.unwrap();
+            summarize(&client, &transcript).await.unwrap();
 
-        let requests = server.received_requests().await.unwrap();
-        let expected = [
-            Message::user(RETRY_TRUNCATION_MARKER),
-            Message::assistant("reply 0"),
-            Message::user("check the file"),
-            Message {
-                role: Role::Assistant,
-                content: vec![
-                    ContentBlock::Text {
-                        text: "reading".to_owned(),
-                    },
-                    tool_call,
-                ],
-            },
-            tool_result,
-            Message::assistant(RETRY_TURN_CLOSE_MARKER),
-            Message::user(build_user_message(None)),
-        ];
-        assert_eq!(sent_messages(&requests[1]), to_json(&expected));
+            let requests = server.received_requests().await.unwrap();
+            let mut expected = vec![
+                Message::user(RETRY_TRUNCATION_MARKER),
+                Message::assistant("reply 0"),
+                Message::user("check the file"),
+                Message {
+                    role: Role::Assistant,
+                    content: vec![
+                        ContentBlock::Text {
+                            text: "reading".to_owned(),
+                        },
+                        tool_call.clone(),
+                    ],
+                },
+                tool_result.clone(),
+            ];
+            expected.extend(interrupted.then(Message::interruption));
+            expected.extend([
+                Message::assistant(RETRY_TURN_CLOSE_MARKER),
+                Message::user(build_user_message(None)),
+            ]);
+            assert_eq!(
+                sent_messages(&requests[1]),
+                to_json(&expected),
+                "interrupted: {interrupted}",
+            );
+        }
     }
 
     #[tokio::test]

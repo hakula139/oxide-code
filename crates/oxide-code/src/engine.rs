@@ -1582,7 +1582,8 @@ mod tests {
             let server = MockServer::start().await;
             mount_stalled_reply_once(&server).await;
             let dir = tempfile::tempdir().unwrap();
-            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+            let store = test_store(dir.path());
+            let mut engine = engine(server.uri(), &store, dir.path()).await;
             engine.client = auto_compacting_client(server.uri());
             engine.messages = transcript();
             engine.last_usage = Some(TokenUsage::new(50_000, 1));
@@ -1609,6 +1610,10 @@ mod tests {
                 request_bodies(&server).await.len(),
                 1,
                 "the prompt never reaches the model"
+            );
+            assert!(
+                store.list().unwrap().is_empty(),
+                "neither the prompt nor an interruption marker is recorded",
             );
         })
         .await;

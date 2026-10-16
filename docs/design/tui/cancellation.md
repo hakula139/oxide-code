@@ -20,7 +20,7 @@ The picks lean toward the Codex precedent on most surfaces, since it is the one 
 
 2. **Commit only settled state on cancel.** A cancel mid-stream discards the partial assistant message, as Codex does. The TUI keeps the streamed prefix with an `(interrupted)` suffix. A cancel during a tool round commits the assistant message with a result for every call, because the finished calls already changed the workspace and the model must see them. Each unfinished call gets an `is_error` result saying the user interrupted it, so the transcript never holds an orphan `tool_use`. The result for a call stopped mid-run says it may have run partially, and the one for a call that never started, including one awaiting approval, says it did not run.
 
-   The turn then ends on a `[Request interrupted by user]` user message, the marker Claude Code records, after whatever it committed. This applies to a shutdown mid-turn too. Without the marker, the cancelled prompt and the next one reach the model as two unanswered prompts, and it answers both. The prompt itself stays in the transcript, since a tool round may already have acted on it and the chat still shows it. The marker is an ordinary message, so the session file and `--continue` replay it unchanged, and a resumed chat shows it as the `(interrupted)` line.
+   The turn then ends on a `[Request interrupted by user]` user message after whatever it committed, and a shutdown mid-turn ends the same way. Without the marker, the cancelled prompt and the next one reach the model as two unanswered prompts, and it answers both. Claude Code records the same text for a cancel mid-stream and a `for tool use` variant after a tool round. oxide-code uses one text for both, since the round's results already mark each interrupted call. The prompt itself stays in the transcript, since a tool round may already have acted on it and the chat still shows it. The marker is an ordinary message, so the session file and `--continue` replay it unchanged, and a resumed chat shows it as the `(interrupted)` line.
 
 3. **Mid-turn drain at round boundary, raw consecutive User messages on the wire.** Each queued prompt becomes its own `User` message with one `Text` block. Anthropic accepts consecutive same-role messages. oxide-code deliberately drops the `<system-reminder>` envelope that Claude Code and opencode wrap with, which keeps persistence trivial.
 
@@ -51,7 +51,7 @@ The picks lean toward the Codex precedent on most surfaces, since it is the one 
 - `crates/oxide-code/src/tui/app.rs`: `App::pending_prompts` / `forwarded_prompts`.
 - `crates/oxide-code/src/tui/app/dispatch.rs`: `dispatch_op` / `start_turn` / `forward_queued_prompts`, `expire_armed_exit`.
 - `crates/oxide-code/src/tui/app/events.rs`: `finish_turn`, `finalize_idle` / `enter_idle` / `drain_pending_prompt`, `set_active_status`.
-- `crates/oxide-code/src/tui/components/chat.rs`: `ChatView::clear_pending_calls`, which evicts orphan tool calls at turn boundaries.
+- `crates/oxide-code/src/tui/components/chat.rs`: `ChatView::clear_pending_calls`, which evicts orphan tool calls at turn boundaries, and `ChatView::load_history`, which shows a resumed interruption as the `(interrupted)` line.
 - `crates/oxide-code/src/tui/components/chat/blocks/interrupted.rs`: `InterruptedMarker` block.
 - `crates/oxide-code/src/tui/components/input.rs`: Ctrl+D POSIX gate, Esc-pop, `set_text`.
 - `crates/oxide-code/src/tui/components/status.rs`: `Status` variants, busy hints, spinner.

@@ -1347,11 +1347,19 @@ mod tests {
 
         let abort = turn_result.expect_err("cancel must surface as Err(Cancelled)");
         assert!(matches!(abort, TurnAbort::Cancelled), "got {abort:?}");
-        let [_, assistant, results, interruption] = &messages[..] else {
+        let [prompt, assistant, results, interruption] = &messages[..] else {
             panic!("the round commits, then the interruption: {messages:#?}");
         };
+        assert_eq!(prompt, &Message::user("kick off"));
+        assert_eq!(
+            assistant.content,
+            [
+                tool_use_block("tool_1", "echo", r#"{"v":1}"#),
+                tool_use_block("tool_2", "gate", "{}"),
+                tool_use_block("tool_3", "echo", "{}"),
+            ]
+        );
         assert_eq!(interruption, &Message::interruption());
-        assert_eq!(assistant.content.len(), 3, "{assistant:?}");
         let results: Vec<(&str, &str, bool)> = results
             .content
             .iter()

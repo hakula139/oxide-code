@@ -82,7 +82,8 @@ impl Message {
     }
 }
 
-/// Text of [`Message::interruption`], matching the marker Claude Code records.
+/// Text of [`Message::interruption`], the one Claude Code records for a cancel mid-stream. Session
+/// files store it and resume matches it verbatim, so new text would show older markers as prompts.
 pub(crate) const INTERRUPTION_MARKER: &str = "[Request interrupted by user]";
 
 // ── Progress updates ──
