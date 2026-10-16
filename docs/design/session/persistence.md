@@ -27,6 +27,26 @@ Every session is a single append-only `.jsonl` file with one JSON object per lin
 2. **`parent_uuid` chain.** Each message links to its predecessor. Concurrent resumes can fork, and the newest-leaf rule resolves the active branch without rewriting history.
 3. **`version` field.** Bump on incompatible changes so older binaries fail fast on session state they cannot read.
 
+## Compatibility
+
+Every release resumes the session files that every earlier release wrote, prereleases included. This is stricter than the [stability surface](../../../RELEASING.md#stability-surface), which promises session JSONL compatibility only between stable releases within a minor version, and it lets users keep their sessions across any upgrade.
+
+A newer binary reads an older file as long as every change to the format is one of these:
+
+- **Additions.** A new entry type, or a new field that deserializes to a default when absent.
+- **Removals.** A removed field, since the loader ignores fields it does not know. The data the field held is lost on resume.
+- **Changed shapes with a loader.** Renaming a field or changing its type or meaning requires a loader that still reads the old shape.
+
+An older binary reading a newer file skips entry types it does not know as malformed lines and ignores unknown fields. Bump the header's `version` only when an older binary would misread a newer file, since an older binary refuses any file whose `version` is newer than it supports.
+
+Tests in `session/handle.rs` hold every release to this guarantee, using one fixture per release in `crates/oxide-code/src/session/fixtures/`, named after its tag:
+
+- **Fixture source.** One test writes a session holding every entry type and content block, with messages, prompt contexts, and sidecars after its compaction so that a resume reads them. It snapshots the file with its per-run UUIDs, timestamps, and working directory masked. `scripts/prepare-release.sh` copies that snapshot as the new release's fixture.
+- **Resume check.** Another test fills each fixture's masks with fixed values, then lists and resumes it. It snapshots what the listing and the resume recovered: the title, branch, archive state, compaction, prompt context, transcript, sidecars, and recorded usage. It then appends a message and checks that the message continues the resumed chain. The same check runs on the session this build writes, so a pull request that changes the format also shows how its files will resume.
+- **Changed behavior.** A change to how an old file resumes fails that fixture's snapshot. Fixtures are frozen release output, so never edit one, and accept a changed fixture snapshot only for a change this section allows.
+
+The `v0.1.0-alpha` releases predate the release step, so their fixtures come from running the same session against each tag's writer, limited to the entry types that tag wrote. Their file snapshots predate the `tool_use_id` that resume matches against the transcript, so those sessions resume without file snapshots and the agent re-reads a file before editing it.
+
 ## Storage Layout
 
 Sessions live in `$XDG_DATA_HOME/ox/sessions/{project}/`. `{project}` is a filesystem-safe subdirectory name derived from the working directory (path separators become `-`, long paths truncated with xxh64 hash suffix).
