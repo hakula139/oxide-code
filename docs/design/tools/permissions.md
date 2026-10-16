@@ -46,7 +46,9 @@ Each resolved target belongs to one zone:
 
 ## Command Targets
 
-A `bash` call's target is its command as tree-sitter-bash parses it. `GateTarget::for_command` splits the command into simple commands across `;`, `&&`, `||`, `&`, pipes, line breaks, subshells, and compound statements. Each simple command drops its leading variable assignments and the transparent wrappers `env`, `nice`, `nohup`, `time`, and `timeout` with their options, so `RUST_LOG=debug nice -n 5 cargo test 2>&1` runs the simple command `cargo test`. Its words are unquoted, and a leading unquoted `~` or `~/` expands to the home directory. Each output redirection to a file (`>`, `>>`, `>|`, `&>`, `&>>`) becomes an edit-class path target resolved and zoned like a path tool's, except for `/dev/null` and the other standard streams.
+A `bash` call's target is its command as tree-sitter-bash parses it. `GateTarget::for_command` splits the command into simple commands across `;`, `&&`, `||`, `&`, pipes, line breaks, subshells, and compound statements. Each simple command drops the transparent wrappers `builtin`, `command`, `env`, `exec`, `nice`, `nohup`, `time`, and `timeout` with their options, so `nice -n 5 cargo test 2>&1` runs the simple command `cargo test`. Its words are unquoted, and a leading unquoted `~` or `~/` expands to the home directory. Each output redirection to a file (`>`, `>>`, `>|`, `>&`, `&>`, `&>>`) becomes an edit-class path target resolved and zoned like a path tool's, except for `/dev/null` and the other standard streams.
+
+A leading assignment, either before the command or as an `env` argument, drops out of the text a rule matches only when it sets one of a short list of variables that change output and nothing else, such as `RUST_LOG`, `LANG`, `TZ`, or `NO_COLOR`. Any other variable can change which program runs or what it loads, as `PATH`, `LD_PRELOAD`, and `GIT_PAGER` do, so the text keeps it. `GIT_PAGER=sh git log` then needs a rule that names the assignment, and it is never a known-safe read. Deny rules still see the program that runs.
 
 A command is opaque when the parse cannot show everything it runs or writes:
 
@@ -55,15 +57,18 @@ A command is opaque when the parse cannot show everything it runs or writes:
 - It runs a shell such as `sh`, `bash`, or `zsh`, or a builtin that runs code (`eval`, `source`, `.`, `trap`, `let`), so both `sh -c '...'` and `curl ... | sh` are opaque.
 - A wrapper takes an option the parser does not know, such as `env -S`.
 - A redirection target is not a literal path, holds a glob, or names more than one file.
-- A `cd`, `pushd`, or `popd` runs alongside a redirection to a relative path, which may then land elsewhere.
+- It assigns a variable the shell itself reads, such as `PATH`, `HOME`, `IFS`, or `BASH_ENV`, by a plain assignment or a `for` loop, or it declares or exports a variable outside the short list above, since later commands see it.
+- A `cd`, `pushd`, `popd`, or `env -C` runs alongside a redirection or a known-safe read of a relative path, which may then name another file.
 
 The literal script of `sh -c` and the joined arguments of `eval` are parsed as well, so a deny rule still sees the simple commands inside them.
 
 A few read-only commands run without an allow rule. `echo`, `false`, `pwd`, and `true` are always safe. `cat`, `head`, `ls`, `tail`, `wc`, `find`, `grep`, and `sed` are safe when every argument is a literal word without globs and the command runs by its bare name, with guards for the ones that can do more:
 
 - `find` without an action that runs a command, deletes, or writes a file (`-exec`, `-execdir`, `-ok`, `-okdir`, `-delete`, `-fls`, `-fprint`, `-fprint0`, `-fprintf`).
-- `grep` without a recursive option.
-- `sed` without `-i` or a script file, and with scripts that only print, delete, substitute, or move text between buffers.
+- `grep` without a recursive option or `-d`.
+- `sed` without `-i`, `-I`, or a script file, and with scripts that only print, delete, substitute, or move text between buffers.
+
+Long options count by any prefix GNU tools accept for them, so `sed --in` is refused as `--in-place`.
 
 Every argument that may name a file, such as each word past the options and a value attached to an option, counts as a read of that path. A read that a `read` deny rule matches makes the command ask, since the arguments over-approximate the files it reads.
 

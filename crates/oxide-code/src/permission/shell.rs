@@ -27,14 +27,85 @@ const CODE_BUILTINS: &[&str] = &[".", "eval", "let", "source", "trap"];
 /// names the file the gate resolved.
 const DIRECTORY_CHANGERS: &[&str] = &["cd", "popd", "pushd"];
 
+/// Variables a leading assignment may set without changing what a rule names, since none of them
+/// changes which program runs, what it loads, or where it writes.
+const SAFE_VARIABLES: &[&str] = &[
+    "BLOCKSIZE",
+    "BLOCK_SIZE",
+    "CARGO_TERM_COLOR",
+    "CGO_ENABLED",
+    "CHARSET",
+    "COLORTERM",
+    "FORCE_COLOR",
+    "GCC_COLORS",
+    "GO111MODULE",
+    "GOARCH",
+    "GOEXPERIMENT",
+    "GOOS",
+    "GREP_COLOR",
+    "GREP_COLORS",
+    "LANG",
+    "LANGUAGE",
+    "LC_ALL",
+    "LC_CTYPE",
+    "LC_TIME",
+    "LSCOLORS",
+    "LS_COLORS",
+    "NODE_ENV",
+    "NO_COLOR",
+    "PYTHONDONTWRITEBYTECODE",
+    "PYTHONUNBUFFERED",
+    "RUST_BACKTRACE",
+    "RUST_LOG",
+    "TERM",
+    "TIME_STYLE",
+    "TZ",
+];
+
+/// Variables the shell itself reads to find programs, expand words, or run startup code, so
+/// assigning one changes what later commands run.
+const SHELL_VARIABLES: &[&str] = &[
+    "BASHOPTS",
+    "BASH_ENV",
+    "CDPATH",
+    "ENV",
+    "EXECIGNORE",
+    "GLOBIGNORE",
+    "HOME",
+    "IFS",
+    "OLDPWD",
+    "PATH",
+    "PS4",
+    "PWD",
+    "SHELLOPTS",
+];
+
 /// Redirection operators that write their target.
 const WRITE_OPERATORS: &[&str] = &[">", ">>", ">|", "&>", "&>>", ">&"];
 
 /// Redirection targets that are devices, so writing them edits no file.
 const DEVICES: &[&str] = &["/dev/null", "/dev/stderr", "/dev/stdout", "/dev/tty"];
 
-/// Wrappers that run the command after their own options unchanged, so rules see through them.
+/// Wrappers that run the command after their own options, so rules see through them.
 const WRAPPERS: &[Wrapper] = &[
+    Wrapper {
+        name: "builtin",
+        flags: &[],
+        valued: &[],
+        directory: &[],
+        numeric: false,
+        positionals: 0,
+        assignments: false,
+    },
+    Wrapper {
+        name: "command",
+        flags: &["-V", "-p", "-v"],
+        valued: &[],
+        directory: &[],
+        numeric: false,
+        positionals: 0,
+        assignments: false,
+    },
     Wrapper {
         name: "env",
         flags: &[
@@ -47,14 +118,25 @@ const WRAPPERS: &[Wrapper] = &[
             "--null",
         ],
         valued: &["-C", "-u", "--chdir", "--unset"],
+        directory: &["-C", "--chdir"],
         numeric: false,
         positionals: 0,
         assignments: true,
     },
     Wrapper {
+        name: "exec",
+        flags: &["-c", "-l"],
+        valued: &["-a"],
+        directory: &[],
+        numeric: false,
+        positionals: 0,
+        assignments: false,
+    },
+    Wrapper {
         name: "nice",
         flags: &[],
         valued: &["-n", "--adjustment"],
+        directory: &[],
         numeric: true,
         positionals: 0,
         assignments: false,
@@ -63,6 +145,7 @@ const WRAPPERS: &[Wrapper] = &[
         name: "nohup",
         flags: &[],
         valued: &[],
+        directory: &[],
         numeric: false,
         positionals: 0,
         assignments: false,
@@ -71,6 +154,7 @@ const WRAPPERS: &[Wrapper] = &[
         name: "time",
         flags: &["-p"],
         valued: &[],
+        directory: &[],
         numeric: false,
         positionals: 0,
         assignments: false,
@@ -79,6 +163,7 @@ const WRAPPERS: &[Wrapper] = &[
         name: "timeout",
         flags: &["-v", "--foreground", "--preserve-status", "--verbose"],
         valued: &["-k", "-s", "--kill-after", "--signal"],
+        directory: &[],
         numeric: false,
         positionals: 1,
         assignments: false,
@@ -130,14 +215,14 @@ impl CommandTarget {
             writes: Vec::new(),
             opaque: false,
             changes_dir: false,
-            relative_write: false,
+            relative_path: false,
         };
         walk.script(command);
         Self {
             command: command.to_owned(),
             segments: walk.segments,
             writes: walk.writes,
-            opaque: walk.opaque || (walk.changes_dir && walk.relative_write),
+            opaque: walk.opaque || (walk.changes_dir && walk.relative_path),
         }
     }
 
@@ -158,12 +243,15 @@ impl CommandTarget {
     }
 }
 
-/// One simple command, from its name on, after its leading assignments and transparent wrappers.
+/// One simple command.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct Segment {
-    /// The command as written.
+    /// The command as written, from where a rule must name it. Leading assignments of
+    /// [`SAFE_VARIABLES`] and transparent wrappers are left out, up to the first assignment of
+    /// another variable.
     text: String,
-    /// The words the shell passes, unquoted, or as written where a word expands.
+    /// The words of the program that runs, past every assignment and wrapper, unquoted, or as
+    /// written where a word expands.
     words: Vec<String>,
     /// The files a shipped known-safe read-only command reads, resolved like a read's path, or
     /// `None` for any other command.
@@ -194,8 +282,8 @@ struct Walk<'a> {
     opaque: bool,
     /// Whether some segment changes the working directory.
     changes_dir: bool,
-    /// Whether some write names a relative path.
-    relative_write: bool,
+    /// Whether some write or known-safe read names a relative path.
+    relative_path: bool,
 }
 
 impl Walk<'_> {
@@ -216,6 +304,28 @@ impl Walk<'_> {
         match node.kind() {
             "command" => self.command(node, src),
             "file_redirect" => self.redirect(node, src),
+            "variable_assignment" => {
+                self.opaque |= SHELL_VARIABLES.contains(&assigned(&src[node.byte_range()]));
+                self.visit_children(node, src);
+            }
+            "declaration_command" => {
+                let mut cursor = node.walk();
+                self.opaque |= node.named_children(&mut cursor).any(|child| {
+                    let name = match child.kind() {
+                        "variable_assignment" => assigned(&src[child.byte_range()]),
+                        "variable_name" => &src[child.byte_range()],
+                        _ => return false,
+                    };
+                    !SAFE_VARIABLES.contains(&name)
+                });
+                self.visit_children(node, src);
+            }
+            "for_statement" => {
+                self.opaque |= node
+                    .child_by_field_name("variable")
+                    .is_some_and(|name| SHELL_VARIABLES.contains(&&src[name.byte_range()]));
+                self.visit_children(node, src);
+            }
             _ => {
                 self.opaque |= runs_hidden_code(node);
                 self.visit_children(node, src);
@@ -244,9 +354,19 @@ impl Walk<'_> {
             })
             .map(|word| Word::new(word, src))
             .collect();
-        self.visit_children(node, src);
+        let mut unsafe_assignment = None;
+        for child in node.named_children(&mut cursor) {
+            if child.kind() == "variable_assignment" {
+                if !SAFE_VARIABLES.contains(&assigned(&src[child.byte_range()])) {
+                    unsafe_assignment.get_or_insert(child);
+                }
+                self.visit_children(child, src);
+            } else {
+                self.visit(child, src);
+            }
+        }
 
-        let words = self.strip_wrappers(&words);
+        let (words, named) = self.strip_wrappers(&words);
         let Some((first, args)) = words.split_first() else {
             return;
         };
@@ -262,30 +382,53 @@ impl Walk<'_> {
                 self.changes_dir |= DIRECTORY_CHANGERS.contains(&name);
             }
         }
+        let pinned = unsafe_assignment.is_some() || named.len() > words.len();
         let safe_reads = name
+            .filter(|_| !pinned)
             .and_then(|name| safe_operands(name, args))
             .map(|operands| {
+                self.relative_path |= operands.iter().any(|path| Path::new(path).is_relative());
                 operands
                     .iter()
                     .map(|operand| GateTarget::for_path(operand, self.cwd))
                     .collect()
             });
+        let start = unsafe_assignment.unwrap_or(named[0].node).start_byte();
         self.segments.push(Segment {
-            text: src[first.node.start_byte()..node.end_byte()].to_owned(),
+            text: src[start..node.end_byte()].to_owned(),
             words: words.iter().map(|word| word.shell_value(src)).collect(),
             safe_reads,
         });
     }
 
-    /// `words` past the transparent wrappers that lead them. A wrapper option the analysis does
-    /// not know leaves the command where it cannot be found, so it turns the command opaque.
-    fn strip_wrappers<'w, 't>(&mut self, mut words: &'w [Word<'t>]) -> &'w [Word<'t>] {
-        while let Some((name, args)) = words.split_first()
+    /// Strips the transparent wrappers that lead `words`, returning the words of the command that
+    /// runs and the words a rule must name. The latter keep every wrapper from the first one that
+    /// sets a variable outside [`SAFE_VARIABLES`]. A wrapper option the analysis does not know
+    /// leaves the command where it cannot be found, so it turns the command opaque.
+    fn strip_wrappers<'w, 't>(
+        &mut self,
+        words: &'w [Word<'t>],
+    ) -> (&'w [Word<'t>], &'w [Word<'t>]) {
+        let (mut runs, mut named, mut pinned) = (words, words, false);
+        while let Some((name, args)) = runs.split_first()
             && let Some(name) = name.value.as_deref()
             && let Some(wrapper) = WRAPPERS.iter().find(|w| w.name == basename(name))
         {
             match wrapper.command_start(args) {
-                Start::At(start) => words = &args[start..],
+                Start::At(start) => {
+                    let options = &args[..start];
+                    self.changes_dir |= wrapper.changes_dir(options);
+                    let sets_unsafe = options.iter().any(|word| {
+                        word.value.as_deref().is_some_and(|arg| {
+                            is_assignment(arg) && !SAFE_VARIABLES.contains(&assigned(arg))
+                        })
+                    });
+                    runs = &args[start..];
+                    pinned |= sets_unsafe;
+                    if !pinned {
+                        named = runs;
+                    }
+                }
                 Start::Alone => break,
                 Start::Unknown => {
                     self.opaque = true;
@@ -293,7 +436,7 @@ impl Walk<'_> {
                 }
             }
         }
-        words
+        (runs, named)
     }
 
     /// Walks the literal script a shell's `-c` option or `eval` runs, so deny rules see the
@@ -347,7 +490,7 @@ impl Walk<'_> {
         if DEVICES.contains(&path.as_str()) {
             return;
         }
-        self.relative_write |= Path::new(&path).is_relative();
+        self.relative_path |= Path::new(&path).is_relative();
         self.writes.push(GateTarget::for_path(&path, self.cwd));
     }
 }
@@ -384,6 +527,8 @@ struct Wrapper {
     flags: &'static [&'static str],
     /// Options that take a value, either as the next word or attached (`-n5`, `--signal=KILL`).
     valued: &'static [&'static str],
+    /// Valued options that run the command in another directory.
+    directory: &'static [&'static str],
     /// Whether `-N` sets a number, as `nice -10` does.
     numeric: bool,
     /// Words after the options that precede the command, such as `timeout`'s duration.
@@ -402,6 +547,18 @@ enum Start {
 }
 
 impl Wrapper {
+    /// Whether `options` run the command in another directory.
+    fn changes_dir(&self, options: &[Word<'_>]) -> bool {
+        options
+            .iter()
+            .filter_map(|word| word.value.as_deref())
+            .any(|arg| {
+                self.directory
+                    .iter()
+                    .any(|option| arg == *option || is_attached(arg, option))
+            })
+    }
+
     fn command_start(&self, args: &[Word<'_>]) -> Start {
         let mut i = 0;
         while let Some(arg) = args.get(i) {
@@ -454,6 +611,13 @@ fn is_attached(arg: &str, option: &str) -> bool {
             !value.is_empty()
         }
     })
+}
+
+/// The variable a `NAME=VALUE`, `NAME+=VALUE`, or `NAME[i]=VALUE` assignment sets.
+fn assigned(assignment: &str) -> &str {
+    assignment
+        .find(['=', '+', '['])
+        .map_or(assignment, |end| &assignment[..end])
 }
 
 /// Whether `arg` is a `NAME=VALUE` environment assignment.
@@ -581,14 +745,15 @@ fn safe_operands(name: &str, args: &[Word<'_>]) -> Option<Vec<String>> {
         .iter()
         .map(|word| word.value.as_deref().filter(|_| !word.glob))
         .collect::<Option<Vec<_>>>()?;
-    let safe = match name {
-        "cat" | "head" | "ls" | "tail" | "wc" => true,
-        "find" => !values.iter().any(|value| FIND_ACTIONS.contains(value)),
-        "grep" => !values.iter().any(|value| is_recursive_grep(value)),
-        "sed" => is_safe_sed(&values),
-        _ => false,
-    };
-    safe.then(|| operands(&values))
+    match name {
+        "cat" | "head" | "ls" | "tail" | "wc" => Some(operands(&values)),
+        "find" if !values.iter().any(|value| FIND_ACTIONS.contains(value)) => {
+            Some(operands(&values))
+        }
+        "grep" if !values.iter().any(|value| is_recursive_grep(value)) => Some(operands(&values)),
+        "sed" => sed_files(&values),
+        _ => None,
+    }
 }
 
 /// Every argument that may name a file: each word past the options, the value of a long option
@@ -618,61 +783,70 @@ fn operands(values: &[&str]) -> Vec<String> {
 }
 
 /// Whether a `grep` argument makes it read every file under a directory.
+/// `--directories` and `-d` count whatever their value, since grep accepts `rec` for `recurse`.
 fn is_recursive_grep(arg: &str) -> bool {
-    matches!(arg, "--dereference-recursive" | "--recursive" | "recurse")
-        || arg.ends_with("=recurse")
-        || (arg.starts_with('-') && !arg.starts_with("--") && arg.contains(['r', 'R']))
+    match long_option(arg) {
+        Some(name) => ["dereference-recursive", "directories", "recursive"]
+            .iter()
+            .any(|option| option.starts_with(name)),
+        None => arg.starts_with('-') && arg.contains(['d', 'r', 'R']),
+    }
 }
 
-/// Whether a `sed` call edits no file and runs no command: no in-place edit, no script file, and
-/// only scripts [`SAFE_SED_SCRIPT`] accepts.
-fn is_safe_sed(values: &[&str]) -> bool {
+/// The files a `sed` call reads, or `None` when it may edit a file in place, read a script file, or
+/// run a script [`SAFE_SED_SCRIPT`] does not accept.
+fn sed_files(values: &[&str]) -> Option<Vec<String>> {
     let mut scripts = Vec::new();
-    let mut operands = Vec::new();
+    let mut files = Vec::new();
     let mut args = values.iter().copied();
     while let Some(arg) = args.next() {
         if arg == "--" {
-            operands.extend(args.by_ref());
-        } else if let Some(long) = arg.strip_prefix("--") {
-            if long.starts_with("file") || long.starts_with("in-place") {
-                return false;
+            files.extend(args.by_ref());
+        } else if let Some(name) = long_option(arg) {
+            if ["file", "in-place"]
+                .iter()
+                .any(|option| option.starts_with(name))
+            {
+                return None;
             }
-            if let Some(script) = long.strip_prefix("expression=") {
-                scripts.push(script);
-            } else if long == "expression" {
-                let Some(script) = args.next() else {
-                    return false;
-                };
-                scripts.push(script);
+            if "expression".starts_with(name) {
+                match arg.split_once('=') {
+                    Some((_, script)) => scripts.push(script),
+                    None => scripts.push(args.next()?),
+                }
             }
         } else if let Some(cluster) = arg.strip_prefix('-').filter(|c| !c.is_empty()) {
-            if cluster.contains(['f', 'i']) {
-                return false;
+            if cluster.contains(['I', 'f', 'i']) {
+                return None;
             }
             if let Some(at) = cluster.find('e') {
                 let attached = &cluster[at + 1..];
-                let Some(script) = (if attached.is_empty() {
-                    args.next()
+                scripts.push(if attached.is_empty() {
+                    args.next()?
                 } else {
-                    Some(attached)
-                }) else {
-                    return false;
-                };
-                scripts.push(script);
+                    attached
+                });
             }
         } else {
-            operands.push(arg);
+            files.push(arg);
         }
     }
-    if scripts.is_empty() {
-        let Some(&script) = operands.first() else {
-            return false;
-        };
-        scripts.push(script);
+    if scripts.is_empty() && !files.is_empty() {
+        scripts.push(files.remove(0));
     }
-    scripts
-        .iter()
-        .all(|script| SAFE_SED_SCRIPT.is_match(script))
+    let safe = !scripts.is_empty()
+        && scripts
+            .iter()
+            .all(|script| SAFE_SED_SCRIPT.is_match(script));
+    safe.then(|| files.into_iter().map(str::to_owned).collect())
+}
+
+/// The name of a long option such as `--name` or `--name=value`, which GNU tools accept
+/// abbreviated to any prefix that names one option.
+fn long_option(arg: &str) -> Option<&str> {
+    let option = arg.strip_prefix("--")?;
+    let name = option.split_once('=').map_or(option, |(name, _)| name);
+    (!name.is_empty()).then_some(name)
 }
 
 #[cfg(test)]
@@ -749,7 +923,7 @@ mod tests {
 
     #[test]
     fn parse_strips_leading_assignments_and_keeps_words_unquoted() {
-        assert_eq!(texts(r#"FOO=1 BAR="x y" cargo test"#), ["cargo test"]);
+        assert_eq!(texts(r#"LANG=C TZ="x y" cargo test"#), ["cargo test"]);
         assert_eq!(
             words(indoc! {r#"
                 "rm" -rf 'a b' c\ d "e\"f\
@@ -758,6 +932,51 @@ mod tests {
             ["rm", "-rf", "a b", "c d", "e\"fg\\h", "\"$HOME\""]
         );
         assert!(texts("FOO=1").is_empty(), "an assignment runs no command");
+    }
+
+    #[test]
+    fn parse_keeps_an_assignment_that_may_change_the_program_in_the_text_a_rule_names() {
+        for (command, text, name) in [
+            (
+                "RUST_LOG=debug LD_PRELOAD=./x.so cat a",
+                "LD_PRELOAD=./x.so cat a",
+                "cat",
+            ),
+            ("GIT_PAGER=sh git log", "GIT_PAGER=sh git log", "git"),
+            (
+                "nice env PATH=. nohup cat a",
+                "env PATH=. nohup cat a",
+                "cat",
+            ),
+        ] {
+            let command = parse(command);
+            let segment = &command.segments[0];
+            assert_eq!(segment.text, text, "{command:?}");
+            assert_eq!(segment.words[0], name, "{command:?}");
+            assert!(segment.safe_reads.is_none(), "{command:?}");
+            assert!(!command.is_opaque(), "{command:?}");
+        }
+        assert!(is_safe("LANG=C TZ=UTC env NO_COLOR=1 cat a"));
+    }
+
+    #[test]
+    fn parse_turns_a_variable_the_shell_or_a_later_program_reads_opaque() {
+        for command in [
+            "PATH=.; ls",
+            "HOME=/; cat ~/x",
+            "export GIT_PAGER=sh; git log",
+            "declare -x PATH",
+            "for PATH in .; do ls; done",
+        ] {
+            assert!(parse(command).is_opaque(), "{command:?}");
+        }
+        for command in [
+            "X=1; echo hi",
+            "export RUST_LOG=debug; cargo test",
+            "for f in a b; do cat \"$f\"; done",
+        ] {
+            assert!(!parse(command).is_opaque(), "{command:?}");
+        }
     }
 
     #[test]
@@ -782,7 +1001,7 @@ mod tests {
     #[test]
     fn parse_strips_transparent_wrappers_and_their_options() {
         for command in [
-            "env -i -u HOME FOO=1 rm -rf x",
+            "env -i -u HOME TZ=UTC rm -rf x",
             "env --chdir=/tmp rm -rf x",
             "nice -n 5 rm -rf x",
             "nice -10 rm -rf x",
@@ -791,6 +1010,9 @@ mod tests {
             "time -p rm -rf x",
             "timeout -s KILL --preserve-status 5m rm -rf x",
             "/usr/bin/nice nohup -- timeout 5 rm -rf x",
+            "builtin rm -rf x",
+            "command -p rm -rf x",
+            "exec -a name rm -rf x",
         ] {
             let command = parse(command);
             assert_eq!(command.segments[0].text, "rm -rf x", "{command:?}");
@@ -838,6 +1060,12 @@ mod tests {
             "[[ -f x ]]",
             "ls 'unterminated",
             "cd /etc && echo > passwd",
+            "env -C /etc echo > hosts",
+            "env --chdir=/etc echo > hosts",
+            "cd / && cat etc/shadow",
+            "exec sh -c 'ls'",
+            "command eval ls",
+            "builtin . env.sh",
         ] {
             assert!(parse(command).is_opaque(), "{command:?}");
         }
@@ -845,6 +1073,8 @@ mod tests {
             "cat <<'EOF'\n$(id)\nEOF",
             "echo '$(id)'",
             "cd x && echo > /dev/null",
+            "cd x && ls",
+            "cd x && cat /etc/hosts",
             "ls $HOME",
         ] {
             assert!(!parse(command).is_opaque(), "{command:?}");
@@ -858,6 +1088,7 @@ mod tests {
             "sh -c 'rm -rf /'",
             "bash -lc \"rm -rf /\"",
             "eval rm -rf /",
+            "exec sh -c 'rm -rf /'",
         ] {
             assert!(
                 texts(command).contains(&"rm -rf /".to_owned()),
@@ -972,15 +1203,18 @@ mod tests {
             "grep --recursive TODO .",
             "grep -d recurse TODO .",
             "grep --directories=recurse TODO .",
+            "grep --rec TODO .",
+            "grep --dir=rec TODO .",
+            "grep -d rec TODO .",
         ] {
             assert!(!is_safe(command), "{command:?}");
         }
     }
 
-    // ── is_safe_sed ──
+    // ── sed_files ──
 
     #[test]
-    fn is_safe_sed_admits_scripts_that_only_print_or_rewrite_text() {
+    fn sed_files_admits_scripts_that_only_print_or_rewrite_text() {
         for command in [
             "sed -n '1,20p' a.rs",
             "sed 's/foo/bar/g' a.rs",
@@ -989,6 +1223,7 @@ mod tests {
             "sed --expression '$p' a.rs",
             "sed --quiet 1p a.rs",
             "sed -es/a/b/ a.rs",
+            "sed --exp=1p a.rs",
             "sed -ne '3p;5q' a.rs",
             "sed -n -- '1!G;h;$p' a.rs",
         ] {
@@ -997,9 +1232,13 @@ mod tests {
     }
 
     #[test]
-    fn is_safe_sed_refuses_in_place_edits_script_files_and_writing_or_running_commands() {
+    fn sed_files_refuses_in_place_edits_script_files_and_writing_or_running_commands() {
         for command in [
             "sed -i 's/a/b/' a.rs",
+            "sed -I '' 's/a/b/' a.rs",
+            "sed --in 's/a/b/' a.rs",
+            "sed --fi=script.sed a.rs",
+            "sed --exp='w out' p a.rs",
             "sed -ni 'p' a.rs",
             "sed --in-place=.bak 's/a/b/' a.rs",
             "sed -f script.sed a.rs",
@@ -1014,6 +1253,18 @@ mod tests {
             "sed",
         ] {
             assert!(!is_safe(command), "{command:?}");
+        }
+    }
+
+    #[test]
+    fn sed_files_reads_the_files_past_the_script() {
+        for command in ["sed -n 1p a.rs", "sed -e 1p -- a.rs"] {
+            let reads = parse(command).segments[0].safe_reads.clone().unwrap();
+            assert_eq!(
+                reads,
+                [GateTarget::for_path("a.rs", Path::new("/repo"))],
+                "{command:?}"
+            );
         }
     }
 }

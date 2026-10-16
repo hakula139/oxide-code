@@ -3,12 +3,12 @@
 //! The form mirrors Claude Code's for transferable muscle memory. A rule names a
 //! [`PermissionClass`] (`read`, `edit`, or `bash`, case-insensitive) and an optional specifier.
 //! `bash` specifiers match each simple command [`CommandTarget`] parses out of a command, in exact,
-//! prefix (`cargo test:*`), or wildcard (`git *`) shapes. `read` and `edit` specifiers are path globs where `*` and `?` stay within one
-//! path segment and `**` spans segments. A relative glob matches the cwd-relative path of a target
-//! inside the working directory, and an absolute or `~/` glob matches the resolved absolute path. A
-//! deny rule also matches the path as the call spells it and where the rule's literal prefix
-//! resolved when the policy loaded ([`Rule::resolved_prefix`]), comparing names by [`fold_name`]. A
-//! bare class name, `class()`, or `class(*)` covers the whole class.
+//! prefix (`cargo test:*`), or wildcard (`git *`) shapes. `read` and `edit` specifiers are path
+//! globs where `*` and `?` stay within one path segment and `**` spans segments. A relative glob
+//! matches the cwd-relative path of a target inside the working directory, and an absolute or `~/`
+//! glob matches the resolved absolute path. A deny rule also matches the path as the call spells it
+//! and where the rule's literal prefix resolved when the policy loaded ([`Rule::resolved_prefix`]),
+//! comparing names by [`fold_name`]. A rule with no specifier, `()`, or `(*)` covers the class.
 //!
 //! Matching a `bash` command narrows the ways a rule can be fooled, but it is not a security
 //! boundary (see `docs/design/tools/permissions.md`). The asymmetry is deliberate: an allow rule
@@ -72,9 +72,9 @@ enum BashSpec {
     Wildcard(Regex),
 }
 
-/// Which rule set a match is being evaluated for, selecting how `bash` commands, symlinked paths, and
-/// name spellings match. Allow widens, so it matches conservatively. Deny revokes, so it matches
-/// aggressively. This keeps the security-critical asymmetry legible at the call sites in
+/// Which rule set a match is being evaluated for, selecting how `bash` commands, symlinked paths,
+/// and name spellings match. Allow widens, so it matches conservatively. Deny revokes, so it
+/// matches aggressively. This keeps the security-critical asymmetry legible at the call sites in
 /// [`crate::permission::Policy::decide`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum MatchDiscipline {

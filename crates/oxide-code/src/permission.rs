@@ -1948,6 +1948,7 @@ mod tests {
         for (case, expected) in [
             ("cargo test && cat Cargo.toml | wc -l", Decision::Allow),
             ("RUST_LOG=debug nice -n 5 cargo test --all", Decision::Allow),
+            ("CARGO_TARGET_DIR=/tmp cargo test", Decision::Ask),
             ("cargo test && rm -rf target", Decision::Ask),
             ("git status", Decision::Ask),
             ("FOO=1", Decision::Ask),
@@ -1971,7 +1972,13 @@ mod tests {
             p.decide(PermissionClass::Bash, &command("eval ls").as_target()),
             Decision::Ask
         );
-        for case in ["echo $(rm -rf /)", "sh -c 'rm -rf /'", "\"/bin/rm\" -rf /"] {
+        for case in [
+            "echo $(rm -rf /)",
+            "sh -c 'rm -rf /'",
+            "\"/bin/rm\" -rf /",
+            "exec rm -rf /",
+            "command rm -rf /",
+        ] {
             assert_eq!(
                 p.decide(PermissionClass::Bash, &command(case).as_target()),
                 Decision::Deny,
@@ -1995,6 +2002,7 @@ mod tests {
         };
         assert_eq!(decide("echo hi > out.txt 2>&1"), Decision::Allow);
         assert_eq!(decide("echo hi > .envrc"), Decision::Ask);
+        assert_eq!(decide("env -C /etc echo hi > hosts"), Decision::Ask);
         assert_eq!(decide(&format!("echo hi >> {outside}")), Decision::Ask);
         assert_eq!(decide("echo hi > secret.txt"), Decision::Deny);
         assert_eq!(decide("echo hi > .git/hooks/pre-commit"), Decision::Deny);
