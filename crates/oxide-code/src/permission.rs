@@ -68,10 +68,7 @@ impl FromStr for Mode {
             "auto" => Ok(Self::Auto),
             "plan" => Ok(Self::Plan),
             "yolo" => Ok(Self::Yolo),
-            _ => bail!(
-                "invalid permission mode {s:?}. Expected one of: {}",
-                Self::VALID_VALUES
-            ),
+            _ => bail!("expected one of {}", Self::VALID_VALUES),
         }
     }
 }
@@ -119,7 +116,7 @@ impl FromStr for PermissionClass {
             "edit" => Ok(Self::Edit),
             "bash" => Ok(Self::Bash),
             _ => bail!(
-                "unknown permission class {s:?}. Expected one of: {} (`read` covers the read, \
+                "unknown permission class {s:?}: expected one of {} (`read` covers the read, \
                  grep, and glob tools, and `edit` covers edit and write)",
                 Self::VALID_VALUES
             ),
@@ -936,7 +933,7 @@ mod tests {
     #[test]
     fn mode_rejects_unknown_value() {
         let err = "bypass".parse::<Mode>().unwrap_err().to_string();
-        assert!(err.contains("invalid permission mode"), "got: {err}");
+        assert_eq!(err, "expected one of auto, plan, yolo");
     }
 
     // ── PermissionClass::from_str ──

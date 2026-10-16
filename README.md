@@ -18,7 +18,7 @@ oxide-code (`ox`) is a terminal agent for software engineering tasks. It runs Cl
 Early development. What works today:
 
 - Terminal UI: streaming output, markdown rendering, syntax-highlighted code blocks, [configurable status line](docs/guide/configuration.md#tui-terminal-ui), and 5 built-in themes with custom-TOML overrides
-- Bare REPL (`--no-tui`) and headless one-shot mode (`-p`) for scripts and pipelines
+- Bare REPL (`--no-tui`) and [headless one-shot mode](docs/guide/headless.md) (`-p`) for scripts and pipelines, with output as text, a JSON result, or a JSON event stream
 - Agent loop with extended thinking and tool-use round-trip
 - Claude Opus 5.5, Sonnet 5.5, and Haiku 5.5, each with a 1M-token context window and adjustable effort
 - File and search tools: `read`, `write`, `edit`, `glob`, `grep`, `bash`

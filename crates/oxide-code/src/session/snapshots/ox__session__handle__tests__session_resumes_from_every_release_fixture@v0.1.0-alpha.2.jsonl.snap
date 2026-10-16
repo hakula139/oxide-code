@@ -1,0 +1,166 @@
+---
+source: crates/oxide-code/src/session/handle.rs
+expression: recovered
+input_file: crates/oxide-code/src/session/fixtures/v0.1.0-alpha.2.jsonl
+---
+{
+  "compact": {
+    "instructions": "focus on f.rs",
+    "pre_message_count": 2,
+    "summary": "Asked to edit f.rs."
+  },
+  "context": null,
+  "file_snapshots": [],
+  "listed": {
+    "archived": false,
+    "git_branch": "main",
+    "message_count": 7,
+    "title": "Fix f.rs"
+  },
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "Summary: asked to edit f.rs.",
+          "type": "text"
+        },
+        {
+          "text": "Rename main in f.rs",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "signature": "signature",
+          "thinking": "Rename main.",
+          "type": "thinking"
+        },
+        {
+          "data": "redacted",
+          "type": "redacted_thinking"
+        },
+        {
+          "text": "Renaming main.",
+          "type": "text"
+        },
+        {
+          "id": "t1",
+          "input": {
+            "file_path": "f.rs"
+          },
+          "name": "edit",
+          "type": "tool_use"
+        }
+      ],
+      "role": "assistant"
+    },
+    {
+      "content": [
+        {
+          "content": "Edited f.rs.",
+          "tool_use_id": "t1",
+          "type": "tool_result"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "id": "t2",
+          "input": {
+            "file_path": "g.rs",
+            "limit": 20
+          },
+          "name": "read",
+          "type": "tool_use"
+        },
+        {
+          "id": "t3",
+          "input": {
+            "pattern": "fn "
+          },
+          "name": "grep",
+          "type": "tool_use"
+        },
+        {
+          "id": "t4",
+          "input": {
+            "command": "cargo test"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ],
+      "role": "assistant"
+    },
+    {
+      "content": [
+        {
+          "content": "fn main() {}",
+          "tool_use_id": "t2",
+          "type": "tool_result"
+        },
+        {
+          "content": "g.rs:1: fn main() {}",
+          "tool_use_id": "t3",
+          "type": "tool_result"
+        },
+        {
+          "content": "test result: FAILED",
+          "is_error": true,
+          "tool_use_id": "t4",
+          "type": "tool_result"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "text": "Done.",
+          "type": "text"
+        }
+      ],
+      "role": "assistant"
+    }
+  ],
+  "title": "Fix f.rs",
+  "tool_metadata": {
+    "t1": {
+      "diff_chunks": [
+        {
+          "new": [
+            {
+              "number": 1,
+              "text": "fn run() {}"
+            }
+          ],
+          "old": [
+            {
+              "number": 1,
+              "text": "fn main() {}"
+            }
+          ]
+        }
+      ],
+      "replacements": 1,
+      "title": "Edited f.rs"
+    },
+    "t2": {
+      "title": "Read g.rs"
+    },
+    "t3": {
+      "title": "Found 250 matches",
+      "truncated_total": 250
+    },
+    "t4": {
+      "truncated_bytes": 4096
+    }
+  },
+  "unarchived": false,
+  "usage": []
+}

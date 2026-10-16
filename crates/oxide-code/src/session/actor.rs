@@ -965,35 +965,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_full_turn_produces_byte_compatible_jsonl() {
-        // Pins literal JSONL bytes (UUIDs / timestamps / cwd masked) so a field rename would fail.
-        let dir = tempdir().unwrap();
-        let store = test_store(dir.path());
-        let state = SessionState::fresh(store.clone(), "m");
-        let session_id = state.session_id.to_string();
-        let (rec, _rec_rx) = record_cmd("Edit something");
-        let (meta_ack, _meta_rx) = oneshot::channel();
-        let meta_cmd = SessionCmd::ToolMetadata {
-            items: vec![(
-                "t1".to_owned(),
-                ToolMetadata {
-                    title: Some("Edited f.rs".to_owned()),
-                    replacements: Some(2),
-                    ..ToolMetadata::default()
-                },
-            )],
-            ack: meta_ack,
-        };
-        let (fin, _fin_rx) = finish_cmd();
-
-        drive(state, vec![rec, meta_cmd, fin]).await;
-
-        let path = super::super::store::testing::test_session_file(dir.path(), &session_id);
-        let content = std::fs::read_to_string(path).unwrap();
-        insta::assert_snapshot!(mask_volatile(&content));
-    }
-
-    #[tokio::test]
     async fn run_flush_error_records_failure_in_ack() {
         // Force store.create() to fail by removing its parent dir.
         let dir = tempdir().unwrap();
@@ -1068,21 +1039,5 @@ mod tests {
     fn surface_failure_no_failure_is_none() {
         let shared = SharedState::default();
         assert!(surface_failure(None, false, &shared).is_none());
-    }
-
-    // ── Helpers ──
-
-    /// Replaces UUIDs, timestamps, and the cwd value with placeholders
-    /// so the snapshot stays stable across runs.
-    fn mask_volatile(content: &str) -> String {
-        let uuid_re =
-            regex::Regex::new(r#""[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}""#)
-                .unwrap();
-        let ts_re =
-            regex::Regex::new(r#""\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z""#).unwrap();
-        let cwd_re = regex::Regex::new(r#""cwd":"[^"]*""#).unwrap();
-        let masked = uuid_re.replace_all(content, r#""<UUID>""#);
-        let masked = ts_re.replace_all(&masked, r#""<TS>""#);
-        cwd_re.replace_all(&masked, r#""cwd":"<CWD>""#).into_owned()
     }
 }

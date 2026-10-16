@@ -43,9 +43,9 @@ fn render(sink: &dyn EventSink, event: Event) {
 
 // ── StdioSink ──
 
-/// [`EventSink`] for the `--no-tui` REPL and `--prompt` headless modes: assistant tokens stream
-/// to stdout, everything else (tool calls, errors, the interrupted marker) to stderr so piped
-/// output stays clean.
+/// [`EventSink`] for the `--no-tui` REPL: assistant tokens stream to stdout, everything else (tool
+/// calls, errors, the interrupted marker) to stderr so piped output stays clean. Headless runs
+/// reuse [`Self::render`] for their text output.
 pub(super) struct StdioSink {
     show_thinking: bool,
 }
@@ -55,7 +55,7 @@ impl StdioSink {
         Self { show_thinking }
     }
 
-    fn render<W1: Write, W2: Write>(
+    pub(super) fn render<W1: Write, W2: Write>(
         &self,
         event: Event,
         stdout: &mut W1,

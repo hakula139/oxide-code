@@ -358,8 +358,8 @@ pub(crate) async fn agent_turn(
     TurnOutcome::aborted(
         report,
         TurnAbort::Failed(anyhow!(
-            "agent stopped after {cap} tool rounds without a final response. This safety cap \
-             guards against runaway loops, so ask again with a narrower request."
+            "Agent stopped after {cap} tool rounds without a final response. Raise or unset \
+             client.max_tool_rounds (OX_MAX_TOOL_ROUNDS) to allow longer turns."
         )),
     )
 }
@@ -385,10 +385,9 @@ async fn settle_stop_reason(
 ) -> StopAction {
     match stop_reason {
         // The API asks clients to drop refused output without running it.
-        Some(StopReason::Refusal) => {
-            sink.emit(Event::Error(refusal_message(stop_details)), "refusal");
-            StopAction::Finish(Ok(()))
-        }
+        Some(StopReason::Refusal) => StopAction::Finish(Err(TurnAbort::Failed(anyhow!(
+            refusal_message(stop_details)
+        )))),
         // Running a cut-off call, or asking the model to retry it, would repeat the same
         // oversized output, so the round stops and keeps only the finished prose.
         Some(reason @ (StopReason::MaxTokens | StopReason::ModelContextWindowExceeded)) => {
@@ -3348,7 +3347,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_turn_with_some_cap_bails_with_safety_cap_message() {
+    async fn agent_turn_with_some_cap_bails_naming_the_setting() {
         const CAP: u32 = 3;
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
@@ -3373,9 +3372,11 @@ mod tests {
         )
         .await
         .expect_err("cap must trip");
-        let msg = format!("{err:#}");
-        assert!(msg.contains(&CAP.to_string()), "cap in error: {msg}");
-        assert!(msg.contains("safety cap"), "explains intent: {msg}");
+        assert_eq!(
+            format!("{err:#}"),
+            "Agent stopped after 3 tool rounds without a final response. Raise or unset \
+             client.max_tool_rounds (OX_MAX_TOOL_ROUNDS) to allow longer turns.",
+        );
     }
 
     #[tokio::test]
@@ -4017,30 +4018,23 @@ mod tests {
         )
         .await;
 
-        outcome.expect("a refusal ends the turn cleanly");
+        let abort = outcome.expect_err("a refusal fails the turn");
+        assert_eq!(
+            abort.to_string(),
+            "The model declined this request (category: cyber): Exploit development. Rephrase it, \
+             or run /clear to start over.",
+        );
         assert_eq!(
             messages.len(),
             1,
             "the refused reply is dropped: {messages:?}"
         );
-        let events = sink.events();
         assert!(
-            !events.iter().any(|e| matches!(e, Event::ToolCallStart(_))),
-            "refused tool calls never run",
-        );
-        let notices: Vec<&str> = events
-            .iter()
-            .filter_map(|e| match e {
-                Event::Error(message) => Some(message.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            notices,
-            [
-                "The model declined this request (category: cyber): Exploit development. Rephrase \
-              it, or run /clear to start over."
-            ],
+            !sink
+                .events()
+                .iter()
+                .any(|e| matches!(e, Event::ToolCallStart(_) | Event::Error(_))),
+            "refused tool calls never run, and the failure is the only notice",
         );
     }
 

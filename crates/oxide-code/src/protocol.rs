@@ -1,7 +1,8 @@
 //! The protocol between the engine and its frontends: the [`Op`]s a frontend sends, the [`Event`]s
 //! the engine emits, and the [`EventSink`] that delivers them. Ops, events, and their payloads
 //! serialize to JSON, with each enum tagged by `type` and its payload under `data`, so they can
-//! cross a process boundary.
+//! cross a process boundary. Headless `stream-json` output prints events in this form, so renaming
+//! a tag or field breaks the release stability surface.
 
 use std::path::PathBuf;
 

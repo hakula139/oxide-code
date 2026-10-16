@@ -330,7 +330,7 @@ impl App {
             match e {
                 mpsc::error::TrySendError::Closed(_) => {
                     self.chat
-                        .push_error("the engine stopped unexpectedly; restart `ox` to recover");
+                        .push_error("The engine stopped unexpectedly. Restart `ox` to recover.");
                     self.input.set_enabled(false);
                     self.should_quit = true;
                 }
@@ -338,12 +338,12 @@ impl App {
                 // dropped one leaves the turn blocked until the user cancels it.
                 mpsc::error::TrySendError::Full(Op::Resolve { .. }) => {
                     self.chat.push_error(
-                        "approval could not be delivered; press Esc to cancel the blocked turn",
+                        "Approval could not be delivered. Press Esc to cancel the blocked turn.",
                     );
                 }
                 mpsc::error::TrySendError::Full(_) => {
                     self.chat
-                        .push_error("op channel full, so the request was dropped (this is a bug)");
+                        .push_error("Op channel is full, so the request was dropped.");
                 }
             }
         }
@@ -368,7 +368,10 @@ impl App {
             }
             self.apply_theme(&preview);
         } else {
-            tracing::warn!(name, "PreviewTheme: unknown built-in; picker roster drift");
+            tracing::warn!(
+                name,
+                "PreviewTheme: unknown built-in, so the picker roster drifted"
+            );
         }
     }
 
@@ -380,7 +383,10 @@ impl App {
             self.chat
                 .push_system_message(format!("Theme set to {name}."));
         } else {
-            tracing::warn!(name, "SwapTheme: unknown built-in; picker roster drift");
+            tracing::warn!(
+                name,
+                "SwapTheme: unknown built-in, so the picker roster drifted"
+            );
         }
     }
 

@@ -514,13 +514,20 @@ fn spawn_actor(state: SessionState) -> SessionHandle {
 
 #[cfg(test)]
 mod tests {
-    use super::super::store::testing::{test_session_file, test_store};
+    use time::OffsetDateTime;
+    use time::format_description::well_known::Rfc3339;
+    use time::macros::datetime;
+
+    use super::super::entry::{SessionInfo, UsageRecord};
+    use super::super::store::testing::{test_project_dir, test_session_file, test_store};
     use super::*;
     use crate::file_tracker::{
-        self, FileTracker, GateError, GatePurpose,
+        self, FileTracker, GateError, GatePurpose, LastView,
         testing::{record_tracked_file, seed_full_read},
     };
     use crate::message::{ContentBlock, Role};
+    use crate::prompt::PromptParts;
+    use crate::tool::{DiffChunk, DiffLine};
 
     /// Resumes the session whose file name carries `session_id`.
     fn resume_id(store: &SessionStore, session_id: &str) -> Result<ResumedSession> {
@@ -1786,5 +1793,335 @@ mod tests {
                 purpose: GatePurpose::Edit,
             }),
         );
+    }
+
+    // ── Session format ──
+
+    #[tokio::test]
+    async fn session_writes_every_entry_type_as_byte_compatible_jsonl() {
+        let dir = tempfile::tempdir().unwrap();
+        insta::assert_snapshot!(write_every_entry(dir.path()).await);
+    }
+
+    #[test]
+    fn session_resumes_from_every_release_fixture() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        insta::glob!("fixtures/*.jsonl", |fixture| {
+            let fixture = std::fs::read_to_string(fixture).unwrap();
+            let recovered = runtime.block_on(resume_and_continue(&fixture));
+            insta::assert_snapshot!(recovered);
+        });
+    }
+
+    #[tokio::test]
+    async fn session_resumes_from_the_jsonl_this_build_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = write_every_entry(dir.path()).await;
+        let recovered = resume_and_continue(&fixture).await;
+        insta::assert_snapshot!(recovered);
+    }
+
+    /// Writes a session holding every entry type and content block, with messages, contexts, and
+    /// sidecars after its compaction, since a resume drops those from before it. Returns the file
+    /// masked, which a release copies as its fixture.
+    async fn write_every_entry(dir: &Path) -> String {
+        let session = spawn_actor(SessionState::fresh(test_store(dir), "m").on_branch("main"));
+        let session_id = session.session_id().to_owned();
+        let mut prompt = PromptParts::default();
+        "2026-01-01".clone_into(&mut prompt.seen.date);
+
+        session
+            .record_message_with_context(Message::user("Edit f.rs"), Some(prompt.session_context()))
+            .await;
+        session
+            .record_message(Message::assistant("Which change?"))
+            .await;
+        session.record_usage(vec![usage("5m", 1)]).await;
+        session.append_ai_title("Edit f.rs".to_owned()).await;
+        session.set_manual_title("Fix f.rs".to_owned()).await;
+        session.record_usage(vec![usage("1h", 2)]).await;
+        session
+            .compact(
+                "Asked to edit f.rs.".to_owned(),
+                Some("focus on f.rs".to_owned()),
+                Message::user("Summary: asked to edit f.rs."),
+            )
+            .await;
+
+        "2026-01-02".clone_into(&mut prompt.seen.date);
+        session
+            .record_message_with_context(
+                Message::user("Rename main in f.rs"),
+                Some(prompt.session_context()),
+            )
+            .await;
+        record_tool_turns(&session).await;
+        session.record_message(Message::assistant("Done.")).await;
+        session
+            .record_usage(vec![usage("1h", 3), usage("1h", 4)])
+            .await;
+        session.archive().await;
+        session
+            .finish(vec![
+                FileSnapshot {
+                    path: PathBuf::from("/repo/f.rs"),
+                    content_hash: 42,
+                    last_view: LastView::Full,
+                    recorded_at: datetime!(2026-01-01 00:00:01 UTC),
+                    tool_use_id: Some("t1".to_owned()),
+                },
+                FileSnapshot {
+                    path: PathBuf::from("/repo/g.rs"),
+                    content_hash: 43,
+                    last_view: LastView::Partial {
+                        ranges: vec![(1, 20)],
+                        total_lines: 40,
+                    },
+                    recorded_at: datetime!(2026-01-01 00:00:02 UTC),
+                    tool_use_id: Some("t2".to_owned()),
+                },
+            ])
+            .await;
+        session.shutdown().await;
+
+        mask_volatile(&std::fs::read_to_string(test_session_file(dir, &session_id)).unwrap())
+    }
+
+    /// A billed request whose token counts all differ, so a swapped field changes the snapshot.
+    fn usage(cache_ttl: &str, scale: u32) -> UsageRecord {
+        serde_json::from_value(serde_json::json!({
+            "model": "claude-sonnet-5-5",
+            "cache_ttl": cache_ttl,
+            "input_tokens": scale,
+            "cache_creation_input_tokens": scale * 10,
+            "cache_read_input_tokens": scale * 100,
+            "output_tokens": scale * 1000,
+        }))
+        .unwrap()
+    }
+
+    async fn record_tool_turns(session: &SessionHandle) {
+        session.record_message(assistant_with_every_block()).await;
+        session
+            .record_message(Message {
+                role: Role::User,
+                content: vec![tool_result("t1", "Edited f.rs.", false)],
+            })
+            .await;
+        session
+            .record_tool_metadata_batch(vec![(
+                "t1".to_owned(),
+                ToolMetadata {
+                    title: Some("Edited f.rs".to_owned()),
+                    replacements: Some(1),
+                    diff_chunks: Some(vec![DiffChunk {
+                        old: vec![DiffLine {
+                            number: 1,
+                            text: "fn main() {}".to_owned(),
+                        }],
+                        new: vec![DiffLine {
+                            number: 1,
+                            text: "fn run() {}".to_owned(),
+                        }],
+                    }]),
+                    ..ToolMetadata::default()
+                },
+            )])
+            .await;
+        session
+            .record_message(Message {
+                role: Role::Assistant,
+                content: vec![
+                    tool_use(
+                        "t2",
+                        "read",
+                        serde_json::json!({ "file_path": "g.rs", "limit": 20 }),
+                    ),
+                    tool_use("t3", "grep", serde_json::json!({ "pattern": "fn " })),
+                    tool_use("t4", "bash", serde_json::json!({ "command": "cargo test" })),
+                ],
+            })
+            .await;
+        session
+            .record_message(Message {
+                role: Role::User,
+                content: vec![
+                    tool_result("t2", "fn main() {}", false),
+                    tool_result("t3", "g.rs:1: fn main() {}", false),
+                    tool_result("t4", "test result: FAILED", true),
+                ],
+            })
+            .await;
+        session
+            .record_tool_metadata_batch(vec![
+                (
+                    "t2".to_owned(),
+                    ToolMetadata {
+                        title: Some("Read g.rs".to_owned()),
+                        ..ToolMetadata::default()
+                    },
+                ),
+                (
+                    "t3".to_owned(),
+                    ToolMetadata {
+                        title: Some("Found 250 matches".to_owned()),
+                        truncated_total: Some(250),
+                        ..ToolMetadata::default()
+                    },
+                ),
+                (
+                    "t4".to_owned(),
+                    ToolMetadata {
+                        truncated_bytes: Some(4096),
+                        ..ToolMetadata::default()
+                    },
+                ),
+            ])
+            .await;
+    }
+
+    fn assistant_with_every_block() -> Message {
+        Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Thinking {
+                    thinking: "Rename main.".to_owned(),
+                    signature: "signature".to_owned(),
+                },
+                ContentBlock::RedactedThinking {
+                    data: "redacted".to_owned(),
+                },
+                ContentBlock::ServerToolUse {
+                    id: "s1".to_owned(),
+                    name: "advisor".to_owned(),
+                    input: serde_json::json!({}),
+                },
+                ContentBlock::Text {
+                    text: "Renaming main.".to_owned(),
+                },
+                tool_use("t1", "edit", serde_json::json!({ "file_path": "f.rs" })),
+            ],
+        }
+    }
+
+    fn tool_use(id: &str, name: &str, input: serde_json::Value) -> ContentBlock {
+        ContentBlock::ToolUse {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            input,
+        }
+    }
+
+    fn tool_result(tool_use_id: &str, content: &str, is_error: bool) -> ContentBlock {
+        ContentBlock::ToolResult {
+            tool_use_id: tool_use_id.to_owned(),
+            content: content.to_owned(),
+            is_error,
+        }
+    }
+
+    /// Replaces the per-run UUIDs, timestamps, and cwd with placeholders. UUIDs are numbered in
+    /// order of appearance and timestamps in time order, so a fixture keeps which lines share a
+    /// value and which came later.
+    fn mask_volatile(content: &str) -> String {
+        let uuid_re =
+            regex::Regex::new(r#""[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}""#)
+                .unwrap();
+        let ts_re =
+            regex::Regex::new(r#""\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z""#).unwrap();
+        let cwd_re = regex::Regex::new(r#""cwd":"[^"]*""#).unwrap();
+        let parse =
+            |quoted: &str| OffsetDateTime::parse(quoted.trim_matches('"'), &Rfc3339).unwrap();
+
+        let mut uuids: Vec<&str> = Vec::new();
+        for found in uuid_re.find_iter(content) {
+            if !uuids.contains(&found.as_str()) {
+                uuids.push(found.as_str());
+            }
+        }
+        let mut timestamps: Vec<_> = ts_re
+            .find_iter(content)
+            .map(|found| parse(found.as_str()))
+            .collect();
+        timestamps.sort_unstable();
+        timestamps.dedup();
+
+        let masked = uuid_re.replace_all(content, |caps: &regex::Captures<'_>| {
+            let n = uuids.iter().position(|uuid| *uuid == &caps[0]).unwrap() + 1;
+            format!(r#""<UUID-{n}>""#)
+        });
+        let masked = ts_re.replace_all(&masked, |caps: &regex::Captures<'_>| {
+            let n = timestamps.binary_search(&parse(&caps[0])).unwrap() + 1;
+            format!(r#""<TS-{n}>""#)
+        });
+        cwd_re.replace_all(&masked, r#""cwd":"<CWD>""#).into_owned()
+    }
+
+    /// Lists and resumes the unmasked `fixture`, checks that a new message continues the resumed
+    /// chain, and renders what the listing and the resume recovered.
+    async fn resume_and_continue(fixture: &str) -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let path = test_project_dir(dir.path()).join("0-fixture.jsonl");
+        std::fs::write(&path, unmask(fixture)).unwrap();
+
+        let [listed]: [SessionInfo; 1] =
+            store.list_matching("", false).unwrap().try_into().unwrap();
+        let resumed = resume_from_path(&store, &path).unwrap();
+        let transcript = &resumed.transcript;
+        let recovered = serde_json::json!({
+            "listed": {
+                "title": listed.title.map(|title| title.title),
+                "git_branch": listed.git_branch,
+                "message_count": listed.exit.map(|exit| exit.message_count),
+                "archived": listed.archived,
+            },
+            "title": resumed.title,
+            "unarchived": resumed.unarchived,
+            "compact": transcript.compact.as_ref().map(|compact| serde_json::json!({
+                "summary": compact.summary,
+                "pre_message_count": compact.pre_message_count,
+                "instructions": compact.instructions,
+            })),
+            "context": transcript.context,
+            "messages": transcript.messages,
+            "tool_metadata": transcript.tool_metadata,
+            "usage": transcript.usage,
+            "file_snapshots": resumed.file_snapshots,
+        });
+
+        let before = load_session_data_from_path(&path).unwrap().messages;
+        resumed
+            .handle
+            .record_message(Message::user("after resume"))
+            .await;
+        resumed.handle.shutdown().await;
+        let after = load_session_data_from_path(&path).unwrap().messages;
+        assert_eq!(
+            after,
+            [before, vec![Message::user("after resume")]].concat(),
+            "the next message continues the resumed chain",
+        );
+
+        serde_json::to_string_pretty(&recovered).unwrap()
+    }
+
+    /// Fills each placeholder [`mask_volatile`] writes with one fixed value, giving a higher
+    /// `<TS-n>` a later time.
+    fn unmask(fixture: &str) -> String {
+        let placeholder = regex::Regex::new(r"<(UUID|TS|CWD)(?:-(\d+))?>").unwrap();
+        placeholder
+            .replace_all(fixture, |caps: &regex::Captures<'_>| {
+                let n: u64 = caps.get(2).map_or(0, |n| n.as_str().parse().unwrap());
+                match &caps[1] {
+                    "UUID" => format!("00000000-0000-4000-8000-{n:012x}"),
+                    "TS" => format!("2026-01-01T00:{:02}:{:02}Z", n / 60, n % 60),
+                    _ => "/repo".to_owned(),
+                }
+            })
+            .into_owned()
     }
 }

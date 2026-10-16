@@ -72,6 +72,18 @@ impl SessionState {
         }
     }
 
+    #[cfg(test)]
+    pub(super) fn on_branch(mut self, branch: &str) -> Self {
+        if let WriterStatus::Pending {
+            header: Entry::Header { git_branch, .. },
+            ..
+        } = &mut self.writer_status
+        {
+            *git_branch = Some(branch.to_owned());
+        }
+        self
+    }
+
     /// Resumed sessions land directly in `Active`. Set `first_user_prompt_seen` when disk already
     /// holds a title or user message.
     pub(super) fn resumed(
@@ -287,7 +299,8 @@ fn new_header(model: &str) -> (String, Entry) {
     let session_id = Uuid::new_v4().to_string();
     let cwd = current_dir_string();
     // Skipped under `cfg(test)` so byte-compatible JSONL snapshots and seeded fixtures don't
-    // depend on the working tree's branch. Tests that need a branch supply it in the fixture.
+    // depend on the working tree's branch. Tests that need a branch supply it in the fixture or
+    // through `SessionState::on_branch`.
     let git_branch = if cfg!(test) {
         None
     } else {
