@@ -6,6 +6,7 @@ use reqwest::header::HeaderMap;
 use wiremock::ResponseTemplate;
 
 use super::Client;
+use super::transport::MessagesRequest;
 use crate::config::auth::{Auth, AuthSource};
 use crate::config::gateway::GatewayCompat;
 use crate::config::{
@@ -16,7 +17,8 @@ use crate::model::ModelSpec;
 /// Minimal [`Config`] for unit / wiremock tests.
 pub(crate) fn test_config(base_url: impl Into<String>, auth: Auth, model: &str) -> Config {
     Config {
-        auth,
+        auth: Some(auth),
+        signed_out_notice: None,
         base_url: base_url.into(),
         extra_ca_certs: None,
         gateway: GatewayCompat {
@@ -45,6 +47,19 @@ pub(crate) fn test_config(base_url: impl Into<String>, auth: Auth, model: &str) 
 /// Fixed session id so wire headers carry a deterministic `x-claude-code-session-id`.
 pub(crate) fn test_client(base_url: impl Into<String>, auth: Auth, model: &str) -> Client {
     Client::new(test_config(base_url, auth, model), Some("sid".to_owned())).unwrap()
+}
+
+/// A `/v1/messages` call to `url` with an empty body and an API key.
+pub(super) fn messages_request(url: impl Into<String>) -> MessagesRequest {
+    let auth = Auth::new(AuthSource::ApiKeyEnv, "k");
+    MessagesRequest {
+        url: url.into(),
+        betas: String::new(),
+        session_id: "sid".to_owned(),
+        body: "{}".to_owned(),
+        auth: auth.source(),
+        credential: auth.header().unwrap(),
+    }
 }
 
 /// Non-streaming response body with the given text. Model is hardcoded; tests assert request side.

@@ -30,8 +30,9 @@ impl Client {
         effort: Option<Effort>,
         output_format: Option<&OutputFormat>,
     ) -> Result<String> {
+        let auth = self.auth()?;
         let attribution = self
-            .attributes(false)
+            .attributes(false, auth.kind())
             .then(|| attribution_text(user, self.is_first_party));
         let body = build_completion_body(
             model.id(),
@@ -51,8 +52,8 @@ impl Client {
             "sending completion request"
         );
 
-        let betas = compute_betas(model, None, self.config.auth.kind(), false).join(",");
-        let request = &self.messages_request(betas, body);
+        let betas = compute_betas(model, None, auth.kind(), false).join(",");
+        let request = &self.messages_request(betas, body, auth)?;
         let CompletionResponse { content } = with_retry(
             |retry| async move {
                 let response = post_messages(&self.http, request, retry).await?;
@@ -196,6 +197,20 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(text, "Fix login bug");
+    }
+
+    #[tokio::test]
+    async fn complete_while_signed_out_fails_without_a_request() {
+        let mut config = test_config("https://example.invalid", api_key(), "claude-haiku-5-5");
+        config.auth = None;
+        let client = Client::new(config, None).unwrap();
+
+        let err = client
+            .complete(&haiku(), "", "u", 40, None, None)
+            .await
+            .expect_err("a signed-out client must not send");
+
+        assert_eq!(err.to_string(), "Not signed in. Run /login to sign in.");
     }
 
     #[tokio::test]

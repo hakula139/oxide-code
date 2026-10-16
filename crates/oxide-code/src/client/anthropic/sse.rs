@@ -193,8 +193,8 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
+    use crate::client::anthropic::testing::messages_request;
     use crate::client::anthropic::wire::Delta;
-    use crate::config::auth::AuthSource;
 
     // ── Fixtures ──
 
@@ -251,13 +251,7 @@ mod tests {
 
     /// Streams one request, returning its result and every forwarded event.
     async fn run_stream(server: &MockServer) -> (Result<()>, Vec<StreamEvent>) {
-        let request = MessagesRequest {
-            url: format!("{}/v1/messages", server.uri()),
-            betas: String::new(),
-            session_id: "sid".to_owned(),
-            body: "{}".to_owned(),
-            auth: AuthSource::ApiKeyEnv,
-        };
+        let request = messages_request(format!("{}/v1/messages", server.uri()));
         let (tx, mut rx) = mpsc::channel(64);
         let result = stream_sse(&reqwest::Client::new(), &request, &tx).await;
         drop(tx);
@@ -442,13 +436,7 @@ mod tests {
     async fn stream_sse_succeeds_when_receiver_drops_before_send() {
         // Consumer cancellation must surface as graceful Ok(()), not an Err on the stream.
         let server = serve(vec![sse_response(MESSAGE_START.repeat(8))]).await;
-        let request = MessagesRequest {
-            url: format!("{}/v1/messages", server.uri()),
-            betas: String::new(),
-            session_id: "sid".to_owned(),
-            body: "{}".to_owned(),
-            auth: AuthSource::ApiKeyEnv,
-        };
+        let request = messages_request(format!("{}/v1/messages", server.uri()));
         let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(1);
         drop(rx);
 

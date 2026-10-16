@@ -3,7 +3,7 @@
 
 use super::context::{LiveSessionInfo, SlashContext};
 use super::registry::{SlashCommand, SlashOutcome};
-use crate::config::{display_auto_compaction, display_bool, display_effort};
+use crate::config::{display_auth, display_auto_compaction, display_bool, display_effort};
 use crate::tui::modal::kv_overview::{KvOverview, KvSection};
 
 pub(super) struct StatusCmd;
@@ -34,7 +34,7 @@ fn build_modal(info: &LiveSessionInfo) -> KvOverview {
         ("Effort".to_owned(), display_effort(info.config.effort)),
         ("Working Directory".to_owned(), info.cwd.clone()),
         ("Session".to_owned(), info.session_id.clone()),
-        ("Auth".to_owned(), info.config.auth.to_string()),
+        ("Auth".to_owned(), display_auth(info.config.auth)),
         ("Version".to_owned(), info.version.to_owned()),
         (
             "Prompt Cache TTL".to_owned(),

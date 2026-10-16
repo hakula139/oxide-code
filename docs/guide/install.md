@@ -113,7 +113,7 @@ The Cargo and Nix commands follow `main`. An install pinned to a tag stays on th
 To also remove session data and config:
 
 ```bash
-rm -rf ${XDG_DATA_HOME:-$HOME/.local/share}/ox        # sessions and device ID
+rm -rf ${XDG_DATA_HOME:-$HOME/.local/share}/ox        # sessions, device ID, and the oxide-code login
 rm -rf ${XDG_STATE_HOME:-$HOME/.local/state}/ox       # log files
 rm -rf ${XDG_CONFIG_HOME:-$HOME/.config}/ox           # user config (if you wrote one)
 ```

@@ -24,6 +24,7 @@ const STARTER_POOL: &[Starter] = &[
     ("/effort", "tune Speed ↔ Intelligence"),
     ("/help", "list commands"),
     ("/init", "author or update AGENTS.md"),
+    ("/login", "sign in to a Claude account"),
     ("/model", "switch model"),
     ("/rename", "set session title"),
     ("/resume", "switch to another session"),
@@ -91,7 +92,10 @@ impl WelcomeSnapshot {
             version: info.version,
             model_label: info.config.model.display_name().to_owned(),
             effort_label: display_effort(info.config.effort),
-            auth_label: info.config.auth.kind().label(),
+            auth_label: info
+                .config
+                .auth
+                .map_or("Not signed in", |source| source.kind().label()),
             cwd: info.cwd.clone(),
             starters: pick_starters(seed),
             tip: pick_tip(seed),
@@ -351,7 +355,8 @@ mod tests {
             session_id: "test-session".to_owned(),
             session_allow: Vec::new(),
             config: ConfigSnapshot {
-                auth: crate::config::auth::AuthSource::ClaudeCodeLogin,
+                auth: Some(crate::config::auth::AuthSource::ClaudeCodeLogin),
+                signed_out_notice: None,
                 base_url: "https://api.test.invalid".to_owned(),
                 extra_ca_certs: None,
                 gateway: crate::config::gateway::GatewaySnapshot {
@@ -397,11 +402,14 @@ mod tests {
 
     #[test]
     fn starter_pool_lists_every_built_in_that_runs_bare_on_an_empty_session() {
-        // `/delete` and `/unarchive` need an id, and `/archive` has nothing to archive yet.
+        // `/delete` and `/unarchive` need an id, `/archive` has nothing to archive yet, and
+        // `/logout` only undoes a `/login`.
         let mut built_ins: Vec<String> = crate::slash::filter_built_ins("")
             .into_iter()
             .map(|cmd| format!("/{}", cmd.name))
-            .filter(|name| !["/archive", "/delete", "/unarchive"].contains(&name.as_str()))
+            .filter(|name| {
+                !["/archive", "/delete", "/logout", "/unarchive"].contains(&name.as_str())
+            })
             .collect();
         built_ins.sort_unstable();
         let starters: Vec<&str> = STARTER_POOL.iter().map(|(name, _)| *name).collect();
@@ -419,6 +427,13 @@ mod tests {
         assert_eq!(snap.effort_label, "xhigh");
         assert_eq!(snap.auth_label, "OAuth");
         assert_eq!(snap.cwd, "~/github/oxide-code");
+    }
+
+    #[test]
+    fn from_live_labels_a_signed_out_session() {
+        let mut info = fixture();
+        info.config.auth = None;
+        assert_eq!(snap_for(&info).auth_label, "Not signed in");
     }
 
     #[test]

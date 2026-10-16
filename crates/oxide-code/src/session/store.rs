@@ -22,9 +22,8 @@ use crate::message::Message;
 use crate::prompt::SessionContext;
 use crate::tool::ToolMetadata;
 use crate::util::fs::create_private_dir_all;
-use crate::util::path::xdg_dir;
+use crate::util::path::data_dir;
 
-const DATA_DIR: &str = "ox";
 const SESSIONS_DIR: &str = "sessions";
 
 // ── SessionStore ──
@@ -38,13 +37,9 @@ pub(crate) struct SessionStore {
 
 impl SessionStore {
     pub(crate) fn open() -> Result<Self> {
-        let sessions_dir = xdg_dir(
-            std::env::var_os("XDG_DATA_HOME").map(PathBuf::from),
-            std::env::home_dir(),
-            Path::new(".local/share"),
-            &Path::new(DATA_DIR).join(SESSIONS_DIR),
-        )
-        .context("cannot determine session storage directory")?;
+        let sessions_dir = data_dir()
+            .map(|dir| dir.join(SESSIONS_DIR))
+            .context("cannot determine session storage directory")?;
 
         create_private_dir_all(&sessions_dir)?;
 
@@ -690,7 +685,7 @@ mod tests {
     async fn open_uses_xdg_data_home_when_set() {
         let xdg = tempfile::tempdir().unwrap();
         let store = open_in_isolated_env(xdg.path()).await;
-        let sessions = xdg.path().join(DATA_DIR).join(SESSIONS_DIR);
+        let sessions = xdg.path().join("ox").join(SESSIONS_DIR);
         assert_eq!(store.sessions_dir, sessions);
         assert!(sessions.is_dir(), "sessions root created: {sessions:?}");
         assert!(store.project_dir.is_dir(), "project dir created");
@@ -728,7 +723,7 @@ mod tests {
         let expected = home
             .path()
             .join(".local/share")
-            .join(DATA_DIR)
+            .join("ox")
             .join(SESSIONS_DIR);
         assert_eq!(store.sessions_dir, expected);
     }

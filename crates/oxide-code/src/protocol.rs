@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+use crate::config::auth::AuthSource;
 use crate::config::{AutoCompactionConfig, Effort};
 use crate::model::{ModelSpec, ResolvedModelId};
 use crate::permission::SessionGrant;
@@ -28,7 +29,7 @@ pub(crate) enum Op {
     /// confirms with [`Event::PromptDrained`]. The frontend keeps every unconfirmed prompt and
     /// submits it later, so the engine drops one that arrives after its turn ended.
     Queue(String),
-    /// Cancels the running turn or compaction, which ends with [`Event::Cancelled`].
+    /// Cancels the running turn, compaction, or sign-in, which ends with [`Event::Cancelled`].
     Interrupt,
     /// Answers the outstanding [`Event::ApprovalRequested`]. The `id` is matched against the
     /// blocked call so a decision for an already-dropped call is ignored.
@@ -50,6 +51,13 @@ pub(crate) enum Op {
     Resume { path: PathBuf },
     /// Sets the session title by hand, which stops AI title generation for this session.
     Rename { title: String },
+    /// Starts a browser sign-in for the oxide-code login, announced with [`Event::LoginStarted`].
+    /// It ends with [`Event::SignedIn`], or with [`Event::TurnFailed`] or [`Event::Cancelled`]
+    /// like a turn, and [`Self::Interrupt`] cancels it.
+    Login,
+    /// Removes the oxide-code login and confirms with [`Event::SignedOut`], or reports a login it
+    /// cannot remove with [`Event::Error`].
+    Logout,
     /// Ends any running operation without a terminal event, finalizes the live session, and stops
     /// the engine. Closing the op channel does the same.
     Shutdown,
@@ -116,13 +124,13 @@ pub(crate) enum Event {
     PromptDrained(String),
     /// Turn ended cleanly with a final assistant reply (no further tool rounds).
     TurnComplete,
-    /// The in-flight prompt, compaction, or resume failed. Like [`Self::TurnComplete`] and
-    /// [`Self::Cancelled`], it ends the operation.
+    /// The in-flight prompt, compaction, resume, or sign-in failed. Like [`Self::TurnComplete`]
+    /// and [`Self::Cancelled`], it ends the operation.
     TurnFailed(String),
     /// Live usage and estimated cost snapshot for the current process.
     UsageUpdated(UsageSnapshot),
-    /// The user cancelled mid-turn with [`Op::Interrupt`]. The in-flight reply is truncated, and
-    /// frontends mark where it stopped.
+    /// The user cancelled a turn, compaction, or sign-in with [`Op::Interrupt`]. The in-flight
+    /// reply is truncated, and frontends mark where it stopped.
     Cancelled,
     /// Automatic compaction started before the submitted prompt runs. The frontend shows compacting
     /// status while the summarizer request streams.
@@ -158,6 +166,20 @@ pub(crate) enum Event {
         effort: Option<Effort>,
         requested_effort: Option<Effort>,
         auto_compaction: AutoCompactionConfig,
+    },
+    /// An [`Op::Login`] is waiting for the user to sign in at `url`, which the frontend opens in a
+    /// browser.
+    LoginStarted { url: String },
+    /// An [`Op::Login`] stored a new oxide-code login. `auth` is the credential requests now use,
+    /// which stays an env var or `client.api_key` when one outranks the login.
+    SignedIn { auth: AuthSource },
+    /// An [`Op::Logout`] finished. `removed` reports whether an oxide-code login was stored, and
+    /// `auth` is the credential requests now use, `None` when none is left. `fallback_error` says
+    /// why a stored Claude Code login could not take over.
+    SignedOut {
+        removed: bool,
+        auth: Option<AuthSource>,
+        fallback_error: Option<String>,
     },
     /// User-visible error that leaves any in-flight turn running, such as a session write failure.
     /// Renders as a dedicated chat block.
@@ -415,6 +437,8 @@ mod tests {
             Op::Archive => "archive",
             Op::Resume { .. } => "resume",
             Op::Rename { .. } => "rename",
+            Op::Login => "login",
+            Op::Logout => "logout",
             Op::Shutdown => "shutdown",
         }
     }
@@ -463,6 +487,8 @@ mod tests {
             Op::Rename {
                 title: "Title".to_owned(),
             },
+            Op::Login,
+            Op::Logout,
             Op::Shutdown,
         ]
     }
@@ -488,6 +514,9 @@ mod tests {
             Event::SessionResumed { .. } => "session_resumed",
             Event::SessionCompacted { .. } => "session_compacted",
             Event::ConfigChanged { .. } => "config_changed",
+            Event::LoginStarted { .. } => "login_started",
+            Event::SignedIn { .. } => "signed_in",
+            Event::SignedOut { .. } => "signed_out",
             Event::Error(_) => "error",
             Event::ApprovalRequested { .. } => "approval_requested",
             Event::SessionRulesUpdated(_) => "session_rules_updated",
@@ -547,6 +576,22 @@ mod tests {
                     enabled: true,
                     threshold_tokens: Some(400_000),
                 },
+            },
+            Event::LoginStarted {
+                url: "https://claude.ai/oauth/authorize?state=s".to_owned(),
+            },
+            Event::SignedIn {
+                auth: AuthSource::OxLogin,
+            },
+            Event::SignedOut {
+                removed: true,
+                auth: Some(AuthSource::ClaudeCodeLogin),
+                fallback_error: None,
+            },
+            Event::SignedOut {
+                removed: false,
+                auth: None,
+                fallback_error: Some("Claude Code login has expired.".to_owned()),
             },
             Event::Error("Session write failed.".to_owned()),
             Event::ApprovalRequested {
@@ -685,5 +730,25 @@ mod tests {
             panic!("config_changed must round-trip to ConfigChanged");
         };
         assert_eq!(model.short_display_name(), "Opus 5.5");
+    }
+
+    #[test]
+    fn event_tags_an_auth_source_like_its_own_variants() {
+        let event = Event::SignedOut {
+            removed: true,
+            auth: Some(AuthSource::ClaudeCodeLogin),
+            fallback_error: None,
+        };
+        assert_eq!(
+            serde_json::to_value(event).unwrap(),
+            json!({
+                "type": "signed_out",
+                "data": {
+                    "removed": true,
+                    "auth": {"type": "claude_code_login"},
+                    "fallback_error": null,
+                },
+            }),
+        );
     }
 }

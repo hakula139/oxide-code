@@ -7,11 +7,12 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use reqwest::StatusCode;
+use reqwest::header::{HeaderName, HeaderValue};
 use tracing::warn;
 
 use super::Client;
 use super::wire::ErrorResponse;
-use crate::config::auth::AuthSource;
+use crate::config::auth::{Auth, AuthSource};
 
 // ── Retry Policy ──
 
@@ -49,17 +50,25 @@ pub(super) struct MessagesRequest {
     pub(super) session_id: String,
     pub(super) body: String,
     pub(super) auth: AuthSource,
+    pub(super) credential: (HeaderName, HeaderValue),
 }
 
 impl Client {
-    pub(super) fn messages_request(&self, betas: String, body: String) -> MessagesRequest {
-        MessagesRequest {
+    /// Fails when the credential cannot travel in a header.
+    pub(super) fn messages_request(
+        &self,
+        betas: String,
+        body: String,
+        auth: &Auth,
+    ) -> Result<MessagesRequest> {
+        Ok(MessagesRequest {
             url: format!("{}/v1/messages?beta=true", self.config.base_url),
             betas,
             session_id: self.session_id.clone(),
             body,
-            auth: self.config.auth.source(),
-        }
+            auth: auth.source(),
+            credential: auth.header()?,
+        })
     }
 }
 
@@ -171,6 +180,7 @@ pub(super) async fn post_messages(
         .header("anthropic-beta", &request.betas)
         .header("x-claude-code-session-id", &request.session_id)
         .header("x-stainless-retry-count", retry)
+        .header(&request.credential.0, &request.credential.1)
         .body(request.body.clone())
         .send()
         .await
@@ -327,15 +337,10 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
+    use crate::client::anthropic::testing::messages_request;
 
     fn request(server: &MockServer) -> MessagesRequest {
-        MessagesRequest {
-            url: format!("{}/v1/messages", server.uri()),
-            betas: String::new(),
-            session_id: "sid".to_owned(),
-            body: "{}".to_owned(),
-            auth: AuthSource::ApiKeyEnv,
-        }
+        messages_request(format!("{}/v1/messages", server.uri()))
     }
 
     async fn post_once(server: &MockServer) -> Result<reqwest::Response, AttemptError> {
@@ -514,18 +519,13 @@ mod tests {
         assert_eq!(headers["anthropic-beta"], "beta-a,beta-b");
         assert_eq!(headers["x-claude-code-session-id"], "sid");
         assert_eq!(headers["x-stainless-retry-count"], "3");
+        assert_eq!(headers["x-api-key"], "k");
     }
 
     #[tokio::test]
     async fn post_messages_connection_failure_is_retryable() {
         // Port 9 (discard) is closed on test hosts, so the connect fails fast.
-        let req = MessagesRequest {
-            url: "http://127.0.0.1:9/v1/messages".to_owned(),
-            betas: String::new(),
-            session_id: "sid".to_owned(),
-            body: "{}".to_owned(),
-            auth: AuthSource::ApiKeyEnv,
-        };
+        let req = messages_request("http://127.0.0.1:9/v1/messages");
         let err = post_messages(&reqwest::Client::new(), &req, 0)
             .await
             .expect_err("nothing listens on the discard port");
@@ -534,13 +534,7 @@ mod tests {
 
     #[tokio::test]
     async fn post_messages_malformed_url_is_fatal() {
-        let req = MessagesRequest {
-            url: "not a url".to_owned(),
-            betas: String::new(),
-            session_id: "sid".to_owned(),
-            body: "{}".to_owned(),
-            auth: AuthSource::ApiKeyEnv,
-        };
+        let req = messages_request("not a url");
         let err = post_messages(&reqwest::Client::new(), &req, 0)
             .await
             .expect_err("the request cannot be built");

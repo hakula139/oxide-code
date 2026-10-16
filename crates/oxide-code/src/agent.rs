@@ -930,6 +930,8 @@ where
                     | Op::Compact { .. }
                     | Op::Rename { .. }
                     | Op::SetModel { .. }
+                    | Op::Login
+                    | Op::Logout
                     | Op::Resolve { .. }),
                 ) => warn!("dropped mid-turn op: {op:?}"),
             },

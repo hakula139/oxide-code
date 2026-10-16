@@ -19,6 +19,7 @@ mod effort;
 mod effort_slider;
 mod help;
 mod init;
+mod login;
 mod matcher;
 mod model;
 mod parser;
@@ -124,7 +125,8 @@ pub(crate) fn test_session_info() -> LiveSessionInfo {
         session_id: "test-session".to_owned(),
         session_allow: Vec::new(),
         config: ConfigSnapshot {
-            auth: crate::config::auth::AuthSource::ApiKeyEnv,
+            auth: Some(crate::config::auth::AuthSource::ApiKeyEnv),
+            signed_out_notice: None,
             base_url: "https://api.test.invalid".to_owned(),
             extra_ca_certs: None,
             gateway: crate::config::gateway::GatewaySnapshot {
