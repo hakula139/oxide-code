@@ -245,13 +245,10 @@ pub(crate) struct AutoCompact<'a> {
 }
 
 /// Inputs the permission gate needs at each tool call: the policy, which gains the session allow
-/// rules the user grants, the working directory to resolve path targets against, and whether the
-/// session can prompt a human. In a non-interactive session an `ask` resolves to deny, since no
-/// modal can surface.
+/// rules the user grants, and the working directory to resolve path targets against.
 pub(crate) struct GateContext<'a> {
     pub(crate) policy: &'a mut crate::permission::Policy,
     pub(crate) cwd: &'a std::path::Path,
-    pub(crate) interactive: bool,
 }
 
 /// Drives one user prompt to a final assistant text reply. The loop returns as soon as a round
@@ -759,11 +756,11 @@ async fn dispatch_tool_call(
 
 /// Runs the permission gate for one call, first pinning a path tool's `input` to the path the gate
 /// resolves so the preview and the run act on what was checked. Returns `Ok(None)` to proceed,
-/// `Ok(Some(output))` with a synthetic denial, or an abort on an interrupt or shutdown during an
-/// outstanding approval. An `ask` emits [`Event::ApprovalRequested`] and blocks on the matching
-/// [`Op::Resolve`], and an allow-for-session answer adds its rule to the policy once the call's own
-/// grant admits it. It denies at once when the session is non-interactive or no modal can receive
-/// the request.
+/// `Ok(Some(output))` with a synthetic denial, or an abort on an interrupt, a shutdown, or an
+/// [`Decision::Abort`] during an outstanding approval. An `ask` emits [`Event::ApprovalRequested`]
+/// and blocks on the matching [`Op::Resolve`], which every frontend answers in its own way. An
+/// allow-for-session answer adds its rule to the policy once the call's own grant admits it. It
+/// denies at once when no frontend can receive the request.
 #[expect(
     clippy::too_many_arguments,
     reason = "the gate threads the same per-call inputs dispatch already carries"
@@ -791,11 +788,10 @@ async fn check_permission(
     match decision {
         crate::permission::Decision::Allow => Ok(None),
         crate::permission::Decision::Deny => Ok(Some(denied_output(name))),
-        crate::permission::Decision::Ask if !gate.interactive => Ok(Some(denied_output(name))),
         crate::permission::Decision::Ask => {
-            // The approval request is a control-plane event: if it can't be delivered, no modal will
-            // exist to answer it and `await_approval` would block forever. Fail closed on a send
-            // error rather than stranding the turn.
+            // The approval request is a control-plane event: if it can't be delivered, no frontend
+            // can answer it and `await_approval` would block forever. Fail closed on a send
+            // error, so the turn is not stranded.
             let grant = gate.policy.session_grant(class, &gate_target);
             if sink
                 .send(Event::ApprovalRequested {
@@ -813,6 +809,10 @@ async fn check_permission(
                     Ok(allow_for_session(gate, grant.as_ref(), *rule, name, sink))
                 }
                 Decision::Deny => Ok(Some(denied_output(name))),
+                Decision::DenyWithFeedback { feedback } => Ok(Some(ToolOutput::error(format!(
+                    "The {name} call was denied with this feedback: {feedback}"
+                )))),
+                Decision::Abort => Err(TurnAbort::Cancelled),
             }
         }
     }
@@ -1890,7 +1890,6 @@ mod tests {
                 vec![],
             ))),
             cwd: std::path::Path::new("."),
-            interactive: false,
         }
     }
 
@@ -1900,7 +1899,6 @@ mod tests {
         mode: crate::permission::Mode,
         allow: &[&str],
         deny: &[&str],
-        interactive: bool,
     ) -> GateContext<'static> {
         let owned = |rules: &[&str]| rules.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
         let policy = Box::leak(Box::new(
@@ -1915,7 +1913,6 @@ mod tests {
         GateContext {
             policy,
             cwd: std::path::Path::new("."),
-            interactive,
         }
     }
 
@@ -4061,7 +4058,7 @@ mod tests {
             &session,
             &mut inert_ops(),
             None,
-            &mut gate_with(crate::permission::Mode::Auto, &[], &["bash"], true),
+            &mut gate_with(crate::permission::Mode::Auto, &[], &["bash"]),
         )
         .await
         .unwrap();
@@ -4092,8 +4089,24 @@ mod tests {
     #[tokio::test]
     async fn agent_turn_approval_decision_arriving_mid_turn_settles_the_call() {
         // An `ask` blocks the round on `ops` until the reply lands, and the reply alone decides
-        // whether the tool runs.
-        for (decision, runs) in [(Decision::Approve, true), (Decision::Deny, false)] {
+        // whether the tool runs, what the model reads in its place, or whether the turn ends.
+        let feedback = Decision::DenyWithFeedback {
+            feedback: "Use ls instead.".to_owned(),
+        };
+        for (decision, result, aborted) in [
+            (Decision::Approve, r#"{"v":42}"#, false),
+            (
+                Decision::Deny,
+                "The echo call was denied by the permission policy.",
+                false,
+            ),
+            (
+                feedback,
+                "The echo call was denied with this feedback: Use ls instead.",
+                false,
+            ),
+            (Decision::Abort, NOT_RUN, true),
+        ] {
             let dir = tempfile::tempdir().unwrap();
             let session = test_session(dir.path());
             let client = FakeClient::new(vec![
@@ -4109,7 +4122,7 @@ mod tests {
             };
             let mut messages = vec![Message::user("run echo")];
 
-            agent_turn(
+            let outcome = agent_turn(
                 &client,
                 &tools,
                 &mut messages,
@@ -4118,11 +4131,19 @@ mod tests {
                 &session,
                 &mut ops,
                 None,
-                &mut gate_with(crate::permission::Mode::Auto, &[], &[], true),
+                &mut gate_with(crate::permission::Mode::Auto, &[], &[]),
             )
-            .await
-            .unwrap();
+            .await;
 
+            if aborted {
+                assert!(
+                    matches!(outcome.result, Err(TurnAbort::Cancelled)),
+                    "{decision:?}: {:?}",
+                    outcome.result,
+                );
+            } else {
+                assert!(outcome.result.is_ok(), "{decision:?}: {:?}", outcome.result);
+            }
             let prompts = sink
                 .events
                 .events()
@@ -4139,16 +4160,8 @@ mod tests {
             else {
                 panic!("expected ToolResult, got {:?}", messages[2].content[0]);
             };
-            if runs {
-                assert_eq!(content, r#"{"v":42}"#);
-                assert!(!is_error);
-            } else {
-                assert!(
-                    content.contains("denied by the permission policy"),
-                    "{content}"
-                );
-                assert!(*is_error);
-            }
+            assert!(content.starts_with(result), "{decision:?}: {content}");
+            assert_eq!(*is_error, decision != Decision::Approve, "{decision:?}");
         }
     }
 
@@ -4156,7 +4169,7 @@ mod tests {
     #[tokio::test]
     async fn agent_turn_write_through_a_dangling_symlink_is_never_auto_allowed() {
         // A dangling `notes.md -> ../escape.txt` must resolve to its outside target, so the write
-        // never passes as a new in-cwd file and a headless session denies it.
+        // never passes as a new in-cwd file. The gate asks, and a denial keeps it from running.
         let dir = tempfile::tempdir().unwrap();
         let root = dunce::canonicalize(dir.path()).unwrap();
         let cwd = root.join("repo");
@@ -4175,23 +4188,37 @@ mod tests {
         ))]);
         let mut gate = GateContext {
             cwd: &cwd,
-            ..gate_with(crate::permission::Mode::Auto, &[], &[], false)
+            ..gate_with(crate::permission::Mode::Auto, &[], &[])
         };
         let mut messages = vec![Message::user("take notes")];
+        let (op_tx, mut ops) = mpsc::channel(4);
+        let sink = ReplyingSink {
+            events: CapturingSink::new(),
+            op_tx,
+            decision: Decision::Deny,
+        };
 
         agent_turn(
             &client,
             &tools,
             &mut messages,
             &empty_prompt(),
-            &CapturingSink::new(),
+            &sink,
             &session,
-            &mut inert_ops(),
+            &mut ops,
             None,
             &mut gate,
         )
         .await
         .unwrap();
+
+        assert!(
+            sink.events
+                .events()
+                .iter()
+                .any(|e| matches!(e, Event::ApprovalRequested { id, .. } if id == "tool_1")),
+            "the write must ask",
+        );
 
         assert!(
             !root.join("escape.txt").exists(),
@@ -4295,7 +4322,7 @@ mod tests {
     async fn dispatch_tool_call_interrupt_during_approval_reports_the_call_not_run() {
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
         let sink = CapturingSink::new();
-        let mut gate = gate_with(crate::permission::Mode::Auto, &[], &[], true);
+        let mut gate = gate_with(crate::permission::Mode::Auto, &[], &[]);
         let (tx, mut rx) = mpsc::channel::<Op>(1);
         tx.try_send(Op::Interrupt).unwrap();
 
@@ -4332,7 +4359,7 @@ mod tests {
         // `echo` is a bash-class tool, so `auto` asks by default, and a class-wide allow clears it.
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
         let sink = CapturingSink::new();
-        let mut gate = gate_with(crate::permission::Mode::Auto, &["bash"], &[], true);
+        let mut gate = gate_with(crate::permission::Mode::Auto, &["bash"], &[]);
 
         let denial = check_permission(
             &tools,
@@ -4361,7 +4388,7 @@ mod tests {
     async fn check_permission_deny_rule_short_circuits_to_a_synthetic_denial() {
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
         let sink = CapturingSink::new();
-        let mut gate = gate_with(crate::permission::Mode::Auto, &[], &["bash"], true);
+        let mut gate = gate_with(crate::permission::Mode::Auto, &[], &["bash"]);
 
         let denial = check_permission(
             &tools,
@@ -4392,41 +4419,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn check_permission_ask_in_non_interactive_session_denies_without_prompting() {
-        // The bare REPL and headless modes have no modal surface, so an `ask` resolves to deny.
-        let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
-        let sink = CapturingSink::new();
-        let mut gate = gate_with(crate::permission::Mode::Auto, &[], &[], false);
-
-        let denial = check_permission(
-            &tools,
-            "tool_1",
-            "echo",
-            &mut json!({}),
-            &sink,
-            &mut inert_ops(),
-            &mut Vec::new(),
-            &mut gate,
-        )
-        .await
-        .expect("non-interactive ask resolves without abort")
-        .expect("non-interactive ask denies");
-
-        assert!(denial.is_error);
-        assert!(
-            !sink
-                .events()
-                .iter()
-                .any(|e| matches!(e, Event::ApprovalRequested { .. })),
-            "non-interactive ask must not emit an approval event no UI can answer",
-        );
-    }
-
-    #[tokio::test]
     async fn check_permission_ask_emits_event_and_approve_proceeds() {
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
         let sink = CapturingSink::new();
-        let mut gate = gate_with(crate::permission::Mode::Auto, &[], &[], true);
+        let mut gate = gate_with(crate::permission::Mode::Auto, &[], &[]);
         let (tx, mut rx) = mpsc::channel::<Op>(1);
         tx.try_send(Op::Resolve {
             id: "tool_1".to_owned(),
@@ -4463,7 +4459,7 @@ mod tests {
     async fn check_permission_allow_for_session_runs_later_calls_the_rule_covers_unasked() {
         let tools = ToolRegistry::new(vec![Box::new(crate::tool::bash::BashTool)]);
         let sink = CapturingSink::new();
-        let mut gate = gate_with(crate::permission::Mode::Auto, &[], &[], true);
+        let mut gate = gate_with(crate::permission::Mode::Auto, &[], &[]);
         let rule = Rule::parse("bash(cargo test:*)").unwrap();
         let (tx, mut rx) = mpsc::channel::<Op>(1);
         tx.try_send(Op::Resolve {
@@ -4533,7 +4529,7 @@ mod tests {
             ("echo", json!({}), "bash"),
         ] {
             let sink = CapturingSink::new();
-            let mut gate = gate_with(crate::permission::Mode::Auto, &[], &[], true);
+            let mut gate = gate_with(crate::permission::Mode::Auto, &[], &[]);
             let (tx, mut rx) = mpsc::channel::<Op>(1);
             tx.try_send(Op::Resolve {
                 id: "tool_1".to_owned(),
@@ -4582,7 +4578,7 @@ mod tests {
         // rather than block in await_approval forever. An inert receiver would hang on a regression.
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
         let sink = crate::protocol::FailingSink;
-        let mut gate = gate_with(crate::permission::Mode::Auto, &[], &[], true);
+        let mut gate = gate_with(crate::permission::Mode::Auto, &[], &[]);
         let (_tx, mut rx) = mpsc::channel::<Op>(1);
 
         let denial = check_permission(
@@ -4607,7 +4603,7 @@ mod tests {
     async fn check_permission_ask_deny_decision_yields_a_synthetic_denial() {
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
         let sink = CapturingSink::new();
-        let mut gate = gate_with(crate::permission::Mode::Auto, &[], &[], true);
+        let mut gate = gate_with(crate::permission::Mode::Auto, &[], &[]);
         let (tx, mut rx) = mpsc::channel::<Op>(1);
         tx.try_send(Op::Resolve {
             id: "tool_1".to_owned(),
@@ -4639,7 +4635,7 @@ mod tests {
         // emit its own "unknown tool" error. A class-wide deny must not catch it.
         let tools = ToolRegistry::new(vec![]);
         let sink = CapturingSink::new();
-        let mut gate = gate_with(crate::permission::Mode::Auto, &[], &["bash"], true);
+        let mut gate = gate_with(crate::permission::Mode::Auto, &[], &["bash"]);
         let denial = check_permission(
             &tools,
             "tool_1",
@@ -4670,7 +4666,7 @@ mod tests {
         )))]);
         let mut gate = GateContext {
             cwd: &cwd,
-            ..gate_with(crate::permission::Mode::Auto, &[], &[], true)
+            ..gate_with(crate::permission::Mode::Auto, &[], &[])
         };
         let mut input = json!({"file_path": "link.txt"});
 

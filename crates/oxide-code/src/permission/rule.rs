@@ -22,10 +22,10 @@ use anyhow::{Context, Result, anyhow};
 use globset::{GlobBuilder, GlobMatcher};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use unicode_width::UnicodeWidthChar;
 
 use crate::permission::{PermissionClass, Target, fold_name, lexical_normalize, resolve};
 use crate::util::path::{expand_user, slash_separated};
+use crate::util::text::is_hidden;
 
 // ── Rule ──
 
@@ -264,7 +264,7 @@ impl From<Rule> for String {
 
 /// Whether `c` paints as one visible cell or more, or is a plain space.
 fn paints_as_itself(c: char) -> bool {
-    c == ' ' || !(c.is_whitespace() || c.is_control() || c.width().is_none_or(|w| w == 0))
+    c == ' ' || !(c.is_whitespace() || is_hidden(c))
 }
 
 /// Compiles a `read` / `edit` specifier. A leading `~/` expands to the home directory and a leading
