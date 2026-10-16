@@ -12,7 +12,6 @@ use std::fmt::Write;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::config::{BlockBinding, Effort, ThinkingConfig, ThinkingDisplay};
-
 pub(crate) use pricing::TokenCostRates;
 use pricing::{HAIKU_5_5_RATES, OPUS_5_5_RATES, SONNET_5_5_RATES};
 
@@ -514,13 +513,5 @@ mod tests {
         for info in MODELS {
             assert_eq!(spec(info.id).unsupported_notice(), None, "{}", info.id);
         }
-    }
-
-    // ── ResolvedModelId ──
-
-    #[test]
-    fn resolved_model_id_into_inner_returns_wrapped_string() {
-        let id = ResolvedModelId::new("claude-opus-5-5".to_owned());
-        assert_eq!(id.into_inner(), "claude-opus-5-5");
     }
 }

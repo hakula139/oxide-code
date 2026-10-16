@@ -78,7 +78,7 @@ fn normalize_node_platform(os: &str) -> &'static str {
 
 fn detect_shell() -> String {
     let shell = env::string("SHELL").unwrap_or_else(|| "unknown".to_owned());
-    std::path::Path::new(&shell)
+    Path::new(&shell)
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or(&shell)
@@ -107,13 +107,10 @@ pub(super) fn current_date() -> String {
 }
 
 fn format_local_date(now: time::OffsetDateTime, offset: time::UtcOffset) -> String {
-    let date = now.to_offset(offset).date();
-    format!(
-        "{}-{:02}-{:02}",
-        date.year(),
-        date.month() as u8,
-        date.day()
-    )
+    now.to_offset(offset)
+        .date()
+        .format(time::macros::format_description!("[year]-[month]-[day]"))
+        .expect("static `[year]-[month]-[day]` description never fails on a valid date")
 }
 
 // ── Model Identity ──
@@ -137,6 +134,10 @@ pub(super) fn model_identity(model: &ModelSpec) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn spec(id: &str) -> ModelSpec {
+        ModelSpec::resolve(id.to_owned())
+    }
 
     // ── Environment::detect ──
 
@@ -189,14 +190,14 @@ mod tests {
     // ── normalize_node_platform ──
 
     #[test]
-    fn normalize_node_platform_known_values() {
+    fn normalize_node_platform_maps_rust_names_to_node_names() {
         assert_eq!(normalize_node_platform("macos"), "darwin");
         assert_eq!(normalize_node_platform("linux"), "linux");
         assert_eq!(normalize_node_platform("windows"), "win32");
     }
 
     #[test]
-    fn normalize_node_platform_unknown_value() {
+    fn normalize_node_platform_unrecognized_name_is_unknown() {
         assert_eq!(normalize_node_platform("haiku"), "unknown");
     }
 
@@ -212,11 +213,13 @@ mod tests {
     // ── detect_os_version ──
 
     #[test]
-    fn detect_os_version_contains_platform_and_version() {
+    fn detect_os_version_joins_sysname_and_release() {
         let version = detect_os_version();
-        assert!(
-            version.contains(' '),
-            "expected 'Platform Version', got: {version:?}",
+        let info = PlatformInfo::new().unwrap();
+        let sysname = info.sysname().to_string_lossy();
+        assert_eq!(
+            version,
+            format!("{sysname} {}", info.release().to_string_lossy())
         );
     }
 
@@ -279,11 +282,5 @@ mod tests {
             model_identity(&spec("custom-model-v1")),
             "You are powered by the model custom-model-v1.",
         );
-    }
-
-    // ── helpers ──
-
-    fn spec(id: &str) -> ModelSpec {
-        ModelSpec::resolve(id.to_owned())
     }
 }
