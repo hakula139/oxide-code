@@ -110,7 +110,8 @@ impl StdioSink {
             | Event::SessionRolled { .. }
             | Event::SessionResumed { .. }
             | Event::ConfigChanged { .. }
-            | Event::ApprovalRequested { .. } => {}
+            | Event::ApprovalRequested { .. }
+            | Event::SessionRulesUpdated(_) => {}
             Event::TurnComplete => {
                 writeln!(stdout)?;
             }

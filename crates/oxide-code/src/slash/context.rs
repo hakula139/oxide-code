@@ -4,6 +4,7 @@
 use std::path::PathBuf;
 
 use crate::config::ConfigSnapshot;
+use crate::permission::rule::Rule;
 
 /// Live snapshot of the running session handed to every slash command. Built at TUI startup and
 /// rebound by `SessionRolled` / `ConfigChanged` so commands always see the current model, effort,
@@ -16,6 +17,8 @@ pub(crate) struct LiveSessionInfo {
     pub(crate) git_branch: Option<String>,
     pub(crate) version: &'static str,
     pub(crate) session_id: String,
+    /// Rules granted from approvals for the rest of this session.
+    pub(crate) session_allow: Vec<Rule>,
     pub(crate) config: ConfigSnapshot,
 }
 

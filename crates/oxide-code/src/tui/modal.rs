@@ -52,6 +52,12 @@ pub(crate) trait Modal: Send {
     fn on_cancel(&mut self) -> Option<ModalAction> {
         None
     }
+
+    /// Whether Esc reaches [`Self::handle_key`] in place of the universal cancel, for a modal whose
+    /// current step backs out on Esc. Ctrl+C still cancels. Default false.
+    fn captures_esc(&self) -> bool {
+        false
+    }
 }
 
 // ── Outcomes ──
@@ -174,15 +180,14 @@ impl ModalStack {
     /// Routes `event` to the top modal. Returns `None` when the key was consumed or the stack is
     /// empty, `Some(ModalAction::Cancelled)` for a silent close, and `Some(action)` for a Submit or
     /// Preview. Esc and Ctrl+C short-circuit before delegation as a universal cancel, so
-    /// individual modals don't reimplement the gesture.
+    /// individual modals don't reimplement the gesture, except that Esc reaches a modal whose
+    /// [`Modal::captures_esc`] is set.
     pub(crate) fn handle_key(&mut self, event: &KeyEvent) -> Option<ModalAction> {
-        if self.stack.is_empty() {
-            return None;
-        }
-        if is_universal_cancel(event) {
+        let top = self.stack.last_mut()?;
+        if is_universal_cancel(event) && !(event.code == KeyCode::Esc && top.captures_esc()) {
             return Some(self.pop_cancelled());
         }
-        let outcome = self.stack.last_mut()?.handle_key(event);
+        let outcome = top.handle_key(event);
         match outcome {
             ModalKey::Consumed => None,
             ModalKey::Cancelled => Some(self.pop_cancelled()),
@@ -256,6 +261,8 @@ pub(crate) mod testing {
         /// `Some` to make `on_push_key` emit `ModalKey::Push(<child>)`. Take-once: subsequent
         /// presses fall through to `Consumed` so a single test step can't redouble-push.
         pub(crate) push_child: Option<Box<dyn Modal>>,
+        /// Returned from [`Modal::captures_esc`].
+        pub(crate) captures_esc: bool,
         pub(crate) declared_height: u16,
         /// Shared so tests can read the counter through a sibling clone — the modal itself lives
         /// inside `Box<dyn Modal>` after pushing onto the stack and isn't directly inspectable.
@@ -273,6 +280,7 @@ pub(crate) mod testing {
                 preview_action: ModalAction::Cancelled,
                 cancel_action: None,
                 push_child: None,
+                captures_esc: false,
                 declared_height: 3,
                 focus_regained_count: Arc::new(AtomicU32::new(0)),
             }
@@ -314,6 +322,10 @@ pub(crate) mod testing {
 
         fn on_cancel(&mut self) -> Option<ModalAction> {
             self.cancel_action.take()
+        }
+
+        fn captures_esc(&self) -> bool {
+            self.captures_esc
         }
     }
 }
@@ -528,6 +540,28 @@ mod tests {
             );
             assert!(!stack.is_active());
         }
+    }
+
+    #[test]
+    fn handle_key_esc_reaches_a_modal_that_captures_it_while_ctrl_c_still_cancels() {
+        let mut stack = ModalStack::new();
+        let mut modal = ScriptedModal::new(ModalAction::Cancelled);
+        modal.cancel_action = Some(ModalAction::Dispatch(Action::Op(Op::Interrupt)));
+        modal.captures_esc = true;
+        stack.push(Box::new(modal));
+
+        assert!(
+            stack
+                .handle_key(&key_with_mods(KeyCode::Esc, KeyModifiers::NONE))
+                .is_none()
+        );
+        assert!(stack.is_active());
+        let outcome = stack.handle_key(&key_with_mods(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(matches!(
+            outcome,
+            Some(ModalAction::Dispatch(Action::Op(Op::Interrupt)))
+        ));
+        assert!(!stack.is_active());
     }
 
     #[test]

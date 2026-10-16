@@ -15,20 +15,26 @@
 //! allow rule refuses to match a compound command, while a deny rule matches the whole command or
 //! any chained segment of it, so widening stays conservative and revoking stays aggressive.
 
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
 use globset::{GlobBuilder, GlobMatcher};
 use regex::Regex;
+use serde::{Deserialize, Serialize};
+use unicode_width::UnicodeWidthChar;
 
 use crate::permission::{PermissionClass, Target, fold_name, lexical_normalize, resolve};
 use crate::util::path::{expand_user, slash_separated};
 
 // ── Rule ──
 
-/// One parsed permission rule.
-#[derive(Debug, Clone)]
+/// One parsed permission rule, which displays and serializes as the text it parsed from.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(try_from = "String", into = "String")]
 pub(crate) struct Rule {
+    /// The rule as written, such as `bash(cargo test:*)`.
+    source: String,
     class: PermissionClass,
     spec: Spec,
 }
@@ -69,7 +75,7 @@ enum BashSpec {
 /// matches aggressively. Carrying this as a type keeps the security-critical asymmetry legible at the two
 /// call sites in [`crate::permission::Policy::decide`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum MatchDiscipline {
+pub(super) enum MatchDiscipline {
     /// A single non-compound command must match the whole rule, and a path matches only where it
     /// resolves, with names exactly as the rule writes them. Neither a chained command, a symlink,
     /// nor a variant spelling widens.
@@ -112,7 +118,33 @@ impl Rule {
                 .with_context(|| format!("invalid path glob in permission rule {raw:?}"))?
         };
 
-        Ok(Self { class, spec })
+        Ok(Self {
+            source: raw.to_owned(),
+            class,
+            spec,
+        })
+    }
+
+    /// The narrowest rule that allows the call in `class` with `target`: its exact command, or the
+    /// path the tool resolved, relative inside cwd. `None` when no specifier names the call alone,
+    /// as for a command with a `*` that would parse as a wildcard, or when a character of it would
+    /// not paint as itself, so the user always sees the exact rule they grant.
+    pub(super) fn for_call(class: PermissionClass, target: &Target<'_>) -> Option<Self> {
+        let spec = match target {
+            Target::Command(command) if !command.contains('*') => command.trim().to_owned(),
+            Target::Path {
+                canonical,
+                relative,
+                ..
+            } => globset::escape(&slash_separated(Path::new(relative.unwrap_or(canonical)))),
+            _ => return None,
+        };
+        if spec.is_empty() || !spec.chars().all(paints_as_itself) {
+            return None;
+        }
+        let rule = Self::parse(&format!("{class}({spec})")).ok()?;
+        rule.matches(class, target, MatchDiscipline::Allow)
+            .then_some(rule)
     }
 
     pub(super) const fn class(&self) -> PermissionClass {
@@ -120,7 +152,7 @@ impl Rule {
     }
 
     /// Whether this rule matches a call in `class` with `target` under `discipline`.
-    pub(crate) fn matches(
+    pub(super) fn matches(
         &self,
         class: PermissionClass,
         target: &Target<'_>,
@@ -162,7 +194,7 @@ impl Rule {
     /// A copy of this path rule rooted where its literal prefix (the components before the first
     /// glob character) resolves, when that differs from the prefix as written. A relative rule
     /// resolves against `cwd` and yields `None` while `cwd` is relative.
-    pub(crate) fn resolved_prefix(&self, cwd: &Path) -> Result<Option<Self>> {
+    pub(super) fn resolved_prefix(&self, cwd: &Path) -> Result<Option<Self>> {
         let (glob, absolute) = match &self.spec {
             Spec::RelativePath(glob) => (glob, false),
             Spec::AbsolutePath(glob) => (glob, true),
@@ -194,10 +226,45 @@ impl Rule {
             format!("{}/{rest}", target.trim_end_matches('/'))
         };
         Ok(Some(Self {
+            source: format!("{}({pattern})", self.class),
             class: self.class,
             spec: Spec::AbsolutePath(PathGlob::new(&pattern)?),
         }))
     }
+}
+
+impl fmt::Display for Rule {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.source)
+    }
+}
+
+/// Rules compare by their text, which parses to the same matcher every time.
+impl PartialEq for Rule {
+    fn eq(&self, other: &Self) -> bool {
+        self.source == other.source
+    }
+}
+
+impl Eq for Rule {}
+
+impl TryFrom<String> for Rule {
+    type Error = anyhow::Error;
+
+    fn try_from(raw: String) -> Result<Self> {
+        Self::parse(&raw)
+    }
+}
+
+impl From<Rule> for String {
+    fn from(rule: Rule) -> Self {
+        rule.source
+    }
+}
+
+/// Whether `c` paints as one visible cell or more, or is a plain space.
+fn paints_as_itself(c: char) -> bool {
+    c == ' ' || !(c.is_whitespace() || c.is_control() || c.width().is_none_or(|w| w == 0))
 }
 
 /// Compiles a `read` / `edit` specifier. A leading `~/` expands to the home directory and a leading
@@ -408,6 +475,69 @@ mod tests {
     fn parse_rejects_malformed_path_glob() {
         let err = Rule::parse("edit(src/**/[)").unwrap_err().to_string();
         assert!(err.contains("invalid path glob"), "got: {err}");
+    }
+
+    // ── Rule::for_call ──
+
+    #[test]
+    fn for_call_names_the_exact_command() {
+        let rule = Rule::for_call(PermissionClass::Bash, &cmd(" cargo test ")).unwrap();
+        assert_eq!(rule.to_string(), "bash(cargo test)");
+        assert!(rule.matches(
+            PermissionClass::Bash,
+            &cmd("cargo test"),
+            MatchDiscipline::Allow
+        ));
+        assert!(!rule.matches(
+            PermissionClass::Bash,
+            &cmd("cargo test --all"),
+            MatchDiscipline::Allow
+        ));
+    }
+
+    #[test]
+    fn for_call_names_the_relative_path_inside_cwd_and_the_canonical_one_outside() {
+        let canonical = abs("/repo/src/a[1].rs");
+        let rule = Rule::for_call(
+            PermissionClass::Edit,
+            &path(&canonical, Some("src/a[1].rs")),
+        )
+        .unwrap();
+        assert_eq!(rule.to_string(), "edit(src/a[[]1[]].rs)");
+        assert!(!rule.matches(
+            PermissionClass::Edit,
+            &path(&abs("/repo/src/a1.rs"), Some("src/a1.rs")),
+            MatchDiscipline::Allow
+        ));
+
+        let outside = abs("/etc/hosts");
+        let rule = Rule::for_call(PermissionClass::Edit, &path(&outside, None)).unwrap();
+        assert_eq!(
+            rule.to_string(),
+            format!("edit({})", slash_separated(Path::new(&outside)))
+        );
+    }
+
+    #[test]
+    fn for_call_declines_a_call_no_exact_rule_can_name() {
+        for target in [
+            cmd("ls *.rs"),
+            cmd("cargo test; rm -rf /"),
+            cmd("  "),
+            cmd("cargo test\u{1b}[2K"),
+            cmd("cargo test\u{200b}x"),
+            cmd("cargo\ttest"),
+            cmd("cargo\u{a0}test"),
+            path(&abs("/repo"), Some("")),
+            path(&abs("/repo/a\u{200b}.rs"), Some("a\u{200b}.rs")),
+            Target::None,
+        ] {
+            assert!(
+                Rule::for_call(PermissionClass::Bash, &target).is_none()
+                    && Rule::for_call(PermissionClass::Edit, &target).is_none(),
+                "{target:?}"
+            );
+        }
     }
 
     // ── Rule::matches ──
@@ -621,16 +751,20 @@ mod tests {
                 .resolved_prefix(cwd)
                 .unwrap()
                 .unwrap();
-            let matches = |relative: &str| {
-                let canonical = format!("{}/{relative}", root.display());
-                resolved.matches(
-                    PermissionClass::Read,
-                    &path(&canonical, None),
-                    MatchDiscipline::Deny,
-                )
-            };
-            assert!(matches(inside), "{raw}");
-            assert!(!matches(outside), "{raw}");
+            // The copy displays as a rule that parses back to the same matcher.
+            let reparsed = Rule::parse(&resolved.to_string()).unwrap();
+            for rule in [&resolved, &reparsed] {
+                let matches = |relative: &str| {
+                    let canonical = format!("{}/{relative}", root.display());
+                    rule.matches(
+                        PermissionClass::Read,
+                        &path(&canonical, None),
+                        MatchDiscipline::Deny,
+                    )
+                };
+                assert!(matches(inside), "{raw} as {rule}");
+                assert!(!matches(outside), "{raw} as {rule}");
+            }
         }
 
         for (raw, cwd) in [
@@ -641,6 +775,29 @@ mod tests {
             let rule = Rule::parse(&raw).unwrap();
             assert!(rule.resolved_prefix(cwd).unwrap().is_none(), "{raw}");
         }
+    }
+
+    // ── Rule: Display / serde ──
+
+    #[test]
+    fn rule_serializes_as_the_text_it_parsed_from() {
+        let rule = Rule::parse("  bash(cargo test:*) ").unwrap();
+        assert_eq!(rule.to_string(), "bash(cargo test:*)");
+
+        let json = serde_json::to_string(&rule).unwrap();
+        assert_eq!(json, r#""bash(cargo test:*)""#);
+        let back: Rule = serde_json::from_str(&json).unwrap();
+        assert!(back.matches(
+            PermissionClass::Bash,
+            &cmd("cargo test --all"),
+            MatchDiscipline::Allow
+        ));
+
+        let err = serde_json::from_str::<Rule>(r#""write(x)""#).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown permission class"),
+            "{err}"
+        );
     }
 
     // ── parse_path_glob ──

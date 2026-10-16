@@ -194,7 +194,9 @@ See [Theming](theming.md) for the full slot reference, color value formats (hex,
 
 ### `[permission]`: Tool approval
 
-Every tool call passes a permission check before running. In the default `auto` mode, reads anywhere and edits inside the working directory run without asking, and other edits and `bash` calls open an approval prompt. Press `y` to approve or `n` / Esc to deny. Enter does nothing, and the prompt ignores keys until you pause typing for 300 ms, so keystrokes or a paste meant for the input box cannot approve a call. Headless runs (`-p`, `--no-tui`) deny anything that would prompt.
+Every tool call passes a permission check before running. In the default `auto` mode, reads anywhere and edits inside the working directory run without asking, and other edits and `bash` calls open an approval prompt. Press `y` to approve, `a` to approve and allow matching calls for the rest of the session, or `n` / Esc to deny. Enter does nothing, and the prompt ignores keys until you pause typing for 300 ms, so keystrokes or a paste meant for the input box cannot approve a call. Headless runs (`-p`, `--no-tui`) deny anything that would prompt.
+
+The `a` key opens the allow rule it will add, in the syntax below, so you can widen or narrow it before pressing Enter. The rule must still cover the call being approved. The prompt offers `a` only when such a rule would let the call run, so a protected path, a chained command such as `cargo test | tail`, or a command containing `*` or an invisible character offers none. The rule lives in memory until you exit, `/clear`, `/archive`, or `/resume` another session, `/status` lists it, and deny rules and protected paths still take precedence over it.
 
 | Key     | Type   | Default  | Description                                                    |
 | ------- | ------ | -------- | -------------------------------------------------------------- |

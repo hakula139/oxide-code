@@ -44,6 +44,7 @@ pub(crate) async fn run(
         git_branch: util::git::current_branch(cwd),
         version: env!("CARGO_PKG_VERSION"),
         session_id: engine.session_id().to_owned(),
+        session_allow: Vec::new(),
         config,
     };
     let interactions = engine.take_history();

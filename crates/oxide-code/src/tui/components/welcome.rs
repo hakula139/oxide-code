@@ -349,6 +349,7 @@ mod tests {
             git_branch: Some("main".to_owned()),
             version: "0.1.0",
             session_id: "test-session".to_owned(),
+            session_allow: Vec::new(),
             config: ConfigSnapshot {
                 auth: crate::config::auth::AuthSource::ClaudeCodeLogin,
                 base_url: "https://api.test.invalid".to_owned(),

@@ -1,6 +1,6 @@
 //! Tool-call approval overlay. Surfaces a gated call's preview and resolves the blocked agent to
-//! `Approve` or `Deny`. Built from the `ConfirmDeleteSessionModal` template. See
-//! `docs/design/tools/permissions.md`.
+//! `Approve`, `AllowForSession` with a rule the user can edit first, or `Deny`. Built from the
+//! `ConfirmDeleteSessionModal` template. See `docs/design/tools/permissions.md`.
 
 use std::cell::{Cell, RefCell};
 use std::time::{Duration, Instant};
@@ -13,9 +13,12 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthChar;
 
+use crate::permission::SessionGrant;
+use crate::permission::rule::Rule;
 use crate::protocol::{Decision, Op};
 use crate::tool::{ApprovalBody, ApprovalPreview, DiffChunk};
 use crate::tui::action::Action;
+use crate::tui::modal::line_editor::LineEditor;
 use crate::tui::modal::{Modal, ModalAction, ModalKey};
 use crate::tui::theme::Theme;
 use crate::tui::wrap::{expand_tabs, wrap_line};
@@ -24,6 +27,9 @@ use crate::util::text::truncate_to_width;
 // ── Constants ──
 
 const FOOTER_HINT: &str = "[Y] approve   [N] deny";
+const GRANT_FOOTER_HINT: &str = "[Y] approve   [A] allow for session   [N] deny";
+const EDIT_FOOTER_HINT: &str = "[Enter] allow for session   [Esc] back";
+const EDIT_LABEL: &str = "Allow for the rest of this session:";
 const SCROLL_HINT: &str = "   [↑↓] scroll";
 /// Width floor so narrow terminals still paint the body without panicking.
 const MIN_BUDGET: usize = 8;
@@ -31,6 +37,8 @@ const MIN_BUDGET: usize = 8;
 const MAX_BODY_ROWS: usize = 16;
 /// Blank row under the title, position row under the body, and the footer.
 const CHROME_ROWS: usize = 3;
+/// The label and the rule editor. A rejected rule's error wraps below them.
+const EDIT_ROWS: usize = 2;
 const CONTINUATION_INDENT: usize = 2;
 /// Stands in for each character of a whitespace run a plain space would misrepresent.
 const WHITESPACE_MARKER: char = '·';
@@ -47,6 +55,8 @@ pub(crate) struct ApprovalModal {
     id: String,
     title: String,
     body: Vec<BodyLine>,
+    /// The "allow for this session" offer, absent when no session rule could allow the call.
+    grant: Option<Grant>,
     /// First painted body row. Key handling clamps it to the last render's [`View`].
     scroll: usize,
     view: Cell<View>,
@@ -64,6 +74,51 @@ struct View {
     /// Whether the first body row fit the area. Approval waits for it, so a cramped layout can't
     /// approve a call the user never saw.
     body_shown: bool,
+    /// Whether the whole edit step, through the footer, fit the area. Enter waits for it, so a
+    /// cramped layout can't grant a rule the user never saw.
+    editor_shown: bool,
+}
+
+struct Grant {
+    offer: SessionGrant,
+    /// The rule being edited after `A`, until Enter accepts it or Esc returns to the choice.
+    edit: Option<RuleEdit>,
+}
+
+struct RuleEdit {
+    editor: LineEditor,
+    /// Why the last Enter rejected the rule.
+    error: Option<String>,
+}
+
+enum EditStep {
+    Stay,
+    Back,
+    Accept(Box<Rule>),
+}
+
+impl RuleEdit {
+    /// Applies `event` to the editor. Enter accepts the rule once `ready` and `offer` admits it,
+    /// and otherwise shows why it was rejected.
+    fn handle_key(&mut self, offer: &SessionGrant, event: &KeyEvent, ready: bool) -> EditStep {
+        match event.code {
+            KeyCode::Esc => EditStep::Back,
+            KeyCode::Enter if ready => match offer.accept(self.editor.text()) {
+                Ok(rule) => EditStep::Accept(Box::new(rule)),
+                Err(e) => {
+                    self.error = Some(format!("{e:#}"));
+                    EditStep::Stay
+                }
+            },
+            KeyCode::Enter => EditStep::Stay,
+            _ => {
+                if self.editor.handle_key(event) {
+                    self.error = None;
+                }
+                EditStep::Stay
+            }
+        }
+    }
 }
 
 struct Layout {
@@ -74,11 +129,12 @@ struct Layout {
 }
 
 impl ApprovalModal {
-    pub(crate) fn new(id: String, preview: ApprovalPreview) -> Self {
+    pub(crate) fn new(id: String, preview: ApprovalPreview, grant: Option<SessionGrant>) -> Self {
         Self {
             id,
             title: preview.title,
             body: flatten_body(&preview.body),
+            grant: grant.map(|offer| Grant { offer, edit: None }),
             scroll: 0,
             view: Cell::default(),
             layout: RefCell::default(),
@@ -141,6 +197,81 @@ impl ApprovalModal {
         ModalKey::Consumed
     }
 
+    /// Opens the rule editor, re-arming the type-ahead guard so an Enter typed right behind the `A`
+    /// can't grant the rule unseen.
+    fn start_edit(&mut self) -> ModalKey {
+        if let Some(grant) = &mut self.grant {
+            grant.edit = Some(RuleEdit {
+                editor: LineEditor::new(&grant.offer.suggested().to_string()),
+                error: None,
+            });
+            self.guard_until = Instant::now() + TYPE_AHEAD_GUARD;
+        }
+        ModalKey::Consumed
+    }
+
+    fn edit(&self) -> Option<&RuleEdit> {
+        self.grant.as_ref()?.edit.as_ref()
+    }
+
+    /// Routes `event` to the rule editor, or returns `None` when the editor is closed.
+    fn handle_edit_key(&mut self, event: &KeyEvent) -> Option<ModalKey> {
+        let scroll = self.line_scroll(event.code);
+        let ready = Instant::now() >= self.guard_until && self.view.get().editor_shown;
+        let Some(Grant {
+            offer,
+            edit: edit_slot @ Some(_),
+        }) = &mut self.grant
+        else {
+            return None;
+        };
+        if let Some(delta) = scroll {
+            return Some(self.scroll_by(delta));
+        }
+        let edit = edit_slot.as_mut()?;
+        Some(match edit.handle_key(offer, event, ready) {
+            EditStep::Stay => ModalKey::Consumed,
+            EditStep::Back => {
+                *edit_slot = None;
+                ModalKey::Consumed
+            }
+            EditStep::Accept(rule) => {
+                ModalKey::Submitted(self.decision(Decision::AllowForSession { rule }))
+            }
+        })
+    }
+
+    /// The scroll a line or page key asks for. Home and End are not among them, since the rule
+    /// editor moves its cursor with them.
+    fn line_scroll(&self, code: KeyCode) -> Option<isize> {
+        match code {
+            KeyCode::Up => Some(-1),
+            KeyCode::Down => Some(1),
+            KeyCode::PageUp => Some(-self.page()),
+            KeyCode::PageDown => Some(self.page()),
+            _ => None,
+        }
+    }
+
+    /// Rows the edit step adds below the body at `width`, with a rejected rule's error wrapped.
+    fn edit_rows(&self, width: u16) -> usize {
+        self.edit().map_or(0, |edit| {
+            EDIT_ROWS
+                + edit
+                    .error
+                    .as_ref()
+                    .map_or(0, |error| error_lines(error, width, Style::default()).len())
+        })
+    }
+
+    fn footer_hint(&self) -> &'static str {
+        match &self.grant {
+            Some(Grant { edit: Some(_), .. }) => EDIT_FOOTER_HINT,
+            Some(Grant { edit: None, .. }) => GRANT_FOOTER_HINT,
+            None => FOOTER_HINT,
+        }
+    }
+
     fn body_visible(&self) -> bool {
         self.body.is_empty() || self.view.get().body_shown
     }
@@ -154,17 +285,22 @@ impl ApprovalModal {
 impl Modal for ApprovalModal {
     fn height(&self, width: u16, max_height: u16) -> u16 {
         let rows = self.with_layout(width, None, |layout| {
-            layout.title.len() + CHROME_ROWS + layout.body.len().min(MAX_BODY_ROWS)
+            layout.title.len()
+                + CHROME_ROWS
+                + self.edit_rows(width)
+                + layout.body.len().min(MAX_BODY_ROWS)
         });
         u16::try_from(rows).unwrap_or(u16::MAX).min(max_height)
     }
 
     fn render(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+        let edit = self.edit();
         let (mut lines, total, rows, scroll, body_shown) =
             self.with_layout(area.width, Some(Palette::new(theme)), |layout| {
+                // The edit step claims its rows first, so the body yields to the rule being granted.
                 let room = usize::from(area.height)
-                    .saturating_sub(layout.title.len() + CHROME_ROWS)
-                    .max(1);
+                    .saturating_sub(layout.title.len() + CHROME_ROWS + self.edit_rows(area.width))
+                    .max(usize::from(edit.is_none()));
                 let total = layout.body.len();
                 let rows = total.min(MAX_BODY_ROWS).min(room);
                 let scroll = self.scroll.min(total - rows);
@@ -175,37 +311,60 @@ impl Modal for ApprovalModal {
                 (lines, total, rows, scroll, body_shown)
             });
         let max_scroll = total - rows;
-        self.view.set(View {
-            rows,
-            max_scroll,
-            body_shown,
-        });
 
-        let mut footer = FOOTER_HINT.to_owned();
-        if max_scroll > 0 {
+        let mut footer = self.footer_hint().to_owned();
+        if max_scroll > 0 && rows > 0 {
             let position = format!("rows {}-{} of {total}", scroll + 1, scroll + rows);
             lines.push(Line::from(Span::styled(position, theme.dim())));
             footer.push_str(SCROLL_HINT);
         } else {
             lines.push(Line::default());
         }
+        let mut editor_row = None;
+        if let Some(edit) = edit {
+            lines.push(Line::from(Span::styled(EDIT_LABEL, theme.text())));
+            editor_row = Some(lines.len());
+            lines.push(edit.editor.line(area.width, theme));
+            if let Some(error) = &edit.error {
+                lines.extend(error_lines(error, area.width, theme.error()));
+            }
+        }
         let budget = usize::from(area.width).max(MIN_BUDGET);
         lines.push(Line::from(Span::styled(
             truncate_to_width(&footer, budget),
             theme.dim(),
         )));
+        let editor_shown = edit.is_some() && lines.len() <= usize::from(area.height);
+        self.view.set(View {
+            rows,
+            max_scroll,
+            body_shown,
+            editor_shown,
+        });
 
         frame.render_widget(Paragraph::new(lines).style(theme.surface()), area);
+        if let (Some(edit), Some(row), true) = (edit, editor_row, editor_shown) {
+            let y = area
+                .y
+                .saturating_add(u16::try_from(row).unwrap_or(u16::MAX));
+            edit.editor.place_cursor(frame, area, y);
+        }
     }
 
     fn handle_key(&mut self, event: &KeyEvent) -> ModalKey {
         if event.kind != KeyEventKind::Press {
             return ModalKey::Consumed;
         }
+        if let Some(outcome) = self.handle_edit_key(event) {
+            return outcome;
+        }
         let now = Instant::now();
         if now < self.guard_until {
             self.guard_until = now + TYPE_AHEAD_GUARD;
             return ModalKey::Consumed;
+        }
+        if let Some(delta) = self.line_scroll(event.code) {
+            return self.scroll_by(delta);
         }
         // Esc and Ctrl+C are intercepted at the stack level and resolve through `on_cancel`. N
         // routes there too so the deny decision lives in exactly one place.
@@ -213,19 +372,32 @@ impl Modal for ApprovalModal {
             KeyCode::Char('y' | 'Y') if is_plain_char(event) && self.body_visible() => {
                 ModalKey::Submitted(self.decision(Decision::Approve))
             }
+            KeyCode::Char('a' | 'A') if is_plain_char(event) && self.body_visible() => {
+                self.start_edit()
+            }
             KeyCode::Char('n' | 'N') if is_plain_char(event) => ModalKey::Cancelled,
-            KeyCode::Up => self.scroll_by(-1),
-            KeyCode::Down => self.scroll_by(1),
-            KeyCode::PageUp => self.scroll_by(-self.page()),
-            KeyCode::PageDown => self.scroll_by(self.page()),
             KeyCode::Home => self.scroll_by(isize::MIN),
             KeyCode::End => self.scroll_by(isize::MAX),
             _ => ModalKey::Consumed,
         }
     }
 
+    fn handle_paste(&mut self, text: &str) {
+        if let Some(Grant {
+            edit: Some(edit), ..
+        }) = &mut self.grant
+            && edit.editor.paste(text)
+        {
+            edit.error = None;
+        }
+    }
+
     fn on_cancel(&mut self) -> Option<ModalAction> {
         Some(self.decision(Decision::Deny))
+    }
+
+    fn captures_esc(&self) -> bool {
+        self.edit().is_some()
     }
 }
 
@@ -351,6 +523,17 @@ fn reveal(text: &str, style: Style, marker: Style, mark_whitespace: bool) -> Vec
     spans
 }
 
+/// A rejected rule's error, wrapped to the modal's width.
+fn error_lines(error: &str, width: u16, style: Style) -> Vec<Line<'static>> {
+    let budget = usize::from(width).max(MIN_BUDGET);
+    wrap_line(
+        Line::from(Span::styled(error.to_owned(), style)),
+        budget,
+        0,
+        None,
+    )
+}
+
 /// Whitespace that renders as blank cells. Other control whitespace (`\r`, `\n`) is escaped.
 fn is_blank(c: char) -> bool {
     c == '\t' || (c.is_whitespace() && !c.is_control())
@@ -369,6 +552,7 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use super::*;
+    use crate::permission::{GateTarget, PermissionClass, Policy};
     use crate::tool::DiffLine;
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -386,6 +570,7 @@ mod tests {
                 title: "Bash".to_owned(),
                 body: ApprovalBody::Command(command.to_owned()),
             },
+            None,
         )
     }
 
@@ -401,6 +586,29 @@ mod tests {
         let modal = command_modal(command);
         render_to_string(&modal, 40, modal.height(40, 40));
         modal
+    }
+
+    /// A shown modal that offers the session rule [`Policy::session_grant`] suggests for `command`.
+    fn granted_modal(command: &str) -> ApprovalModal {
+        let target = GateTarget::Command(command.to_owned());
+        let grant = Policy::default().session_grant(PermissionClass::Bash, &target);
+        let mut modal = ApprovalModal::new(
+            "call-1".to_owned(),
+            ApprovalPreview {
+                title: "Bash".to_owned(),
+                body: ApprovalBody::Command(command.to_owned()),
+            },
+            Some(grant.expect("an asked command has a grant")),
+        );
+        modal.expire_guard();
+        render_to_string(&modal, 60, modal.height(60, 40));
+        modal
+    }
+
+    fn type_text(modal: &mut ApprovalModal, text: &str) {
+        for c in text.chars() {
+            modal.handle_key(&key(KeyCode::Char(c)));
+        }
     }
 
     fn numbered_command(lines: usize) -> String {
@@ -485,6 +693,7 @@ mod tests {
                     }],
                 }]),
             },
+            None,
         );
         let dump = render_to_string(&modal, 40, modal.height(40, 40));
         assert!(dump.contains("- old line"), "removed row appears: {dump}");
@@ -538,6 +747,7 @@ mod tests {
                 title: format!("Write(/{}/secret.txt)", "d".repeat(40)),
                 body: ApprovalBody::Command(String::new()),
             },
+            None,
         );
         let dump = render_to_string(&modal, 30, modal.height(30, 30));
         let expected = formatdoc! {"
@@ -756,6 +966,162 @@ mod tests {
         for code in [KeyCode::Char('z'), KeyCode::Tab] {
             assert!(matches!(modal.handle_key(&key(code)), ModalKey::Consumed));
         }
+    }
+
+    // ── handle_key: allow for session ──
+
+    #[test]
+    fn a_edits_the_suggested_rule_and_enter_allows_it_for_the_session() {
+        let mut modal = granted_modal("cargo test");
+        let choice = render_to_string(&modal, 60, modal.height(60, 40));
+        assert!(choice.contains("[A] allow for session"), "{choice}");
+
+        assert!(matches!(
+            modal.handle_key(&key(KeyCode::Char('a'))),
+            ModalKey::Consumed
+        ));
+        assert!(modal.captures_esc());
+        modal.expire_guard();
+        let editing = render_to_string(&modal, 60, modal.height(60, 40));
+        assert!(editing.contains(EDIT_LABEL), "{editing}");
+        assert!(editing.contains("bash(cargo test)"), "{editing}");
+        assert!(editing.contains("[Enter] allow for session"), "{editing}");
+
+        // `y` and `n` type into the rule while it is being edited.
+        type_text(&mut modal, "yn");
+        assert!(modal.captures_esc());
+        for _ in 0.."yn)".len() {
+            modal.handle_key(&key(KeyCode::Backspace));
+        }
+        type_text(&mut modal, ":*)");
+        let outcome = modal.handle_key(&key(KeyCode::Enter));
+        let ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::Resolve { id, decision }))) =
+            outcome
+        else {
+            panic!("Enter must submit the session rule; got {outcome:?}");
+        };
+        assert_eq!(id, "call-1");
+        let Decision::AllowForSession { rule } = decision else {
+            panic!("expected AllowForSession, got {decision:?}");
+        };
+        assert_eq!(rule.to_string(), "bash(cargo test:*)");
+    }
+
+    #[test]
+    fn enter_keeps_editing_and_says_why_when_the_rule_no_longer_covers_the_call() {
+        let mut modal = granted_modal("cargo test");
+        modal.handle_key(&key(KeyCode::Char('a')));
+        modal.expire_guard();
+        render_to_string(&modal, 60, modal.height(60, 40));
+        for _ in 0.."test)".len() {
+            modal.handle_key(&key(KeyCode::Backspace));
+        }
+        modal.handle_paste("build)");
+
+        assert!(matches!(
+            modal.handle_key(&key(KeyCode::Enter)),
+            ModalKey::Consumed
+        ));
+        let height = modal.height(60, 40);
+        let rejected = render_to_string(&modal, 60, height);
+        assert!(
+            rejected.contains("the rule no longer covers this call"),
+            "{rejected}"
+        );
+
+        // Editing again clears the error and gives its row back.
+        modal.handle_key(&key(KeyCode::Backspace));
+        assert_eq!(modal.height(60, 40), height - 1);
+    }
+
+    #[test]
+    fn enter_waits_for_the_guard_and_a_render_that_shows_the_whole_editor() {
+        let mut modal = granted_modal("cargo test");
+        modal.handle_key(&key(KeyCode::Char('a')));
+        render_to_string(&modal, 60, modal.height(60, 40));
+        assert!(
+            matches!(modal.handle_key(&key(KeyCode::Enter)), ModalKey::Consumed),
+            "an Enter typed right behind the `a` must not grant the rule"
+        );
+
+        modal.expire_guard();
+        let cramped = render_to_string(&modal, 60, 5);
+        assert!(!cramped.contains("[Enter]"), "{cramped}");
+        assert!(matches!(
+            modal.handle_key(&key(KeyCode::Enter)),
+            ModalKey::Consumed
+        ));
+
+        let full = render_to_string(&modal, 60, 6);
+        assert!(full.contains("bash(cargo test)"), "{full}");
+        assert!(
+            full.contains("[Enter]"),
+            "the body yields its rows to the editor: {full}"
+        );
+        assert!(matches!(
+            modal.handle_key(&key(KeyCode::Enter)),
+            ModalKey::Submitted(_)
+        ));
+    }
+
+    #[test]
+    fn rule_editor_wraps_a_long_error_and_scrolls_the_body_with_up_and_down() {
+        let command = format!("echo {}", "x".repeat(1_200));
+        let mut modal = granted_modal(&command);
+        modal.handle_key(&key(KeyCode::Char('a')));
+        modal.expire_guard();
+        render_to_string(&modal, 60, modal.height(60, 40));
+        modal.handle_key(&key(KeyCode::End));
+        modal.handle_key(&key(KeyCode::Backspace));
+        modal.handle_key(&key(KeyCode::Enter));
+
+        let rejected = render_to_string(&modal, 60, modal.height(60, 40));
+        let error = rejected.split(EDIT_LABEL).nth(1).unwrap_or_default();
+        assert!(
+            error.contains("unbalanced") && error.contains("parenthesis"),
+            "{rejected}"
+        );
+        assert!(rejected.contains("rows 1-"), "{rejected}");
+
+        modal.handle_key(&key(KeyCode::Down));
+        let scrolled = render_to_string(&modal, 60, modal.height(60, 40));
+        assert!(scrolled.contains("rows 2-"), "{scrolled}");
+        assert!(scrolled.contains("[Enter] allow for session"), "{scrolled}");
+    }
+
+    #[test]
+    fn esc_in_the_editor_returns_to_the_choice() {
+        let mut stack = crate::tui::modal::ModalStack::new();
+        let mut modal = granted_modal("cargo test");
+        modal.handle_key(&key(KeyCode::Char('a')));
+        stack.push(Box::new(modal));
+
+        assert!(stack.handle_key(&key(KeyCode::Esc)).is_none());
+        assert!(stack.is_active());
+        let outcome = stack.handle_key(&key(KeyCode::Esc));
+        assert!(
+            matches!(
+                outcome,
+                Some(ModalAction::Dispatch(Action::Op(Op::Resolve {
+                    decision: Decision::Deny,
+                    ..
+                })))
+            ),
+            "a second Esc denies from the choice: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn a_does_nothing_without_a_grant() {
+        let mut modal = shown_modal("cargo test");
+        let dump = render_to_string(&modal, 60, modal.height(60, 40));
+        assert!(!dump.contains("[A]"), "{dump}");
+
+        assert!(matches!(
+            modal.handle_key(&key(KeyCode::Char('a'))),
+            ModalKey::Consumed
+        ));
+        assert!(!modal.captures_esc());
     }
 
     // ── on_cancel ──

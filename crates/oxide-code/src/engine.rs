@@ -20,6 +20,7 @@ use crate::config::Effort;
 use crate::file_tracker::FileTracker;
 use crate::message::{ContentBlock, Message};
 use crate::model::{ModelSpec, ResolvedModelId};
+use crate::permission::Policy;
 use crate::prompt::{self, PromptParts, SessionContext, UserContext};
 use crate::protocol::{Event, EventSink, Interaction, Op, UsageSnapshot};
 use crate::session::entry::{CompactInfo, UsageRecord};
@@ -99,6 +100,8 @@ pub(crate) struct Engine {
     /// `prompt` changed since the session last recorded it, so the next user message records it.
     prompt_unrecorded: bool,
     file_tracker: Arc<FileTracker>,
+    /// The configured policy plus the session allow rules granted since the live session began.
+    policy: Policy,
     cwd: PathBuf,
     /// A TUI is attached, so the permission gate can ask and titles generate in the background.
     interactive: bool,
@@ -132,6 +135,7 @@ impl Engine {
         } = transcript;
         let prompt_unrecorded = context.is_none();
         let prompt = session_prompt(context, client.model(), &cwd).await;
+        let policy = client.permission().clone();
         Self {
             client,
             tools,
@@ -143,6 +147,7 @@ impl Engine {
             prompt,
             prompt_unrecorded,
             file_tracker,
+            policy,
             cwd,
             interactive,
             auto_compaction_failures: 0,
@@ -260,8 +265,8 @@ impl Engine {
             );
         }
 
-        let gate = agent::GateContext {
-            policy: self.client.permission(),
+        let mut gate = agent::GateContext {
+            policy: &mut self.policy,
             cwd: &self.cwd,
             interactive: self.interactive,
         };
@@ -274,7 +279,7 @@ impl Engine {
             &self.session,
             ops,
             self.client.max_tool_rounds(),
-            &gate,
+            &mut gate,
         )
         .await;
         self.account_usage(sink, &report).await;
@@ -491,6 +496,7 @@ impl Engine {
         self.tool_metadata = tool_metadata;
         self.prompt_unrecorded = context.is_none();
         self.prompt = session_prompt(context, self.client.model(), &self.cwd).await;
+        self.policy.clear_session_allow();
         self.reset_context_usage();
         self.total_estimated_cost_usd = estimate_cost_usd(&usage);
     }
@@ -717,6 +723,7 @@ mod tests {
     use crate::config::{AutoCompactionConfig, CompactionConfig, PromptCacheTtl};
     use crate::file_tracker::testing::seed_full_read;
     use crate::message::Role;
+    use crate::permission::rule::Rule;
     use crate::protocol::CapturingSink;
     use crate::session::store::testing::test_store;
 
@@ -1821,7 +1828,7 @@ mod tests {
     // ── clear ──
 
     #[tokio::test]
-    async fn clear_and_resume_rebuild_session_prompt() {
+    async fn clear_and_resume_rebuild_session_prompt_and_drop_session_rules() {
         with_pinned_home(async {
             let server = MockServer::start().await;
             let dir = tempfile::tempdir().unwrap();
@@ -1830,17 +1837,22 @@ mod tests {
             let sink = CapturingSink::new();
             let target_id = finished_session(&store).await;
             engine.messages = vec![Message::user("before clear")];
+            let rule = Rule::parse("bash(cargo test:*)").unwrap();
+            engine.policy.allow_for_session(rule.clone());
 
             engine.clear(&sink).await;
             assert_eq!(engine.messages, []);
+            assert_eq!(engine.policy.session_allow(), []);
             assert_ne!(engine.prompt.user_context, SESSION_CONTEXT);
             assert!(engine.prompt.user_context.contains("# Current date"));
             assert_eq!(engine.client.session_id(), engine.session.session_id());
 
             SESSION_CONTEXT.clone_into(&mut engine.prompt.user_context);
             engine.total_estimated_cost_usd = 1.23;
+            engine.policy.allow_for_session(rule);
             let target_path = store.find_session_path(&target_id).unwrap();
             engine.resume(&sink, &target_path).await;
+            assert_eq!(engine.policy.session_allow(), []);
             assert_eq!(engine.session.session_id(), target_id);
             assert_eq!(engine.client.session_id(), target_id);
             assert_eq!(engine.messages.len(), 2);
@@ -1947,7 +1959,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resume_failure_preserves_current_session_usage_state() {
+    async fn resume_failure_preserves_current_session_state() {
         with_pinned_home(async {
             let server = MockServer::start().await;
             let dir = tempfile::tempdir().unwrap();
@@ -1961,6 +1973,8 @@ mod tests {
             engine.last_usage = Some(last_usage);
             engine.displayed_usage = Some(displayed_usage);
             engine.total_estimated_cost_usd = 1.23;
+            let rule = Rule::parse("bash(cargo test:*)").unwrap();
+            engine.policy.allow_for_session(rule.clone());
             let sink = CapturingSink::new();
 
             engine
@@ -1973,6 +1987,7 @@ mod tests {
             assert_eq!(engine.last_usage, Some(last_usage));
             assert_eq!(engine.displayed_usage, Some(displayed_usage));
             assert!((engine.total_estimated_cost_usd - 1.23).abs() < f64::EPSILON);
+            assert_eq!(engine.policy.session_allow(), [rule]);
             assert!(matches!(
                 sink.events().as_slice(),
                 [Event::TurnFailed(msg)] if msg.contains("still on session")

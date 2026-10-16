@@ -22,7 +22,7 @@ Early development. What works today:
 - Agent loop with extended thinking and tool-use round-trip
 - Claude Opus 5.5, Sonnet 5.5, and Haiku 5.5, each with a 1M-token context window and adjustable effort
 - File and search tools: `read`, `write`, `edit`, `glob`, `grep`, `bash`
-- Tool permissions: `auto` (default), `plan`, and `yolo` modes, allow / deny rules, protected config paths whose edits need approval in `auto` mode even when an allow rule matches, and a TUI approval prompt for gated calls
+- Tool permissions: `auto` (default), `plan`, and `yolo` modes, allow / deny rules, protected config paths whose edits need approval in `auto` mode even when an allow rule matches, and a TUI approval prompt for gated calls that can also allow matching calls for the rest of the session
 - Turn interruption (Esc / Ctrl+C) plus mid-turn queued follow-up prompts that splice into the same turn between tool calls, with double-press Ctrl+C exit confirmation
 - Slash commands with `/`-triggered autocomplete (name and curated-arg modes): `/archive`, `/clear`, `/compact`, `/config`, `/delete`, `/diff`, `/effort`, `/help`, `/init`, `/model`, `/rename`, `/resume`, `/status`, `/theme`, `/unarchive`
 - Context compression with manual `/compact` and default-on auto-compaction

