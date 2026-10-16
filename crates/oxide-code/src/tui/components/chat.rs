@@ -31,6 +31,8 @@ pub(crate) struct ChatView {
 
     streaming: Option<StreamingAssistant>,
     thinking_buffer: String,
+    /// The compaction summary streaming in, which shows below the chat until compaction ends.
+    summary_buffer: String,
 
     /// Top row of the last paint.
     scroll_offset: usize,
@@ -64,10 +66,11 @@ impl RenderSettings {
     }
 }
 
-/// Thinking and streaming-tail lines, rendered every frame since their buffers keep growing.
+/// Thinking, streaming-tail, and summary rows, rendered every frame as their buffers grow.
 struct LiveLines {
     thinking: Vec<Line<'static>>,
     streaming_tail: Vec<Line<'static>>,
+    summary: Vec<Line<'static>>,
 }
 
 /// Where a frame paints the stack, and the rows that must be rendered at the current width and
@@ -92,6 +95,7 @@ impl ChatView {
             blocks: Vec::new(),
             streaming: None,
             thinking_buffer: String::new(),
+            summary_buffer: String::new(),
             scroll_offset: 0,
             pending_scroll: 0,
             viewport_height: 0,
@@ -164,6 +168,22 @@ impl ChatView {
             self.bump_paused_counter();
         }
         self.thinking_buffer.push_str(token);
+    }
+
+    /// Appends a token to the compaction summary in flight.
+    pub(crate) fn append_summary_token(&mut self, token: &str) {
+        if self.summary_buffer.is_empty() {
+            self.bump_paused_counter();
+        }
+        self.summary_buffer.push_str(token);
+    }
+
+    /// Drops the compaction summary in flight, which then no longer counts as new content.
+    pub(crate) fn discard_summary(&mut self) {
+        if !self.summary_buffer.is_empty() && !self.auto_scroll {
+            self.new_content_since_pause = self.new_content_since_pause.saturating_sub(1);
+        }
+        self.summary_buffer.clear();
     }
 
     /// Finalizes the streaming buffer into a committed block.
@@ -272,6 +292,7 @@ impl ChatView {
         self.blocks.clear();
         self.streaming = None;
         self.thinking_buffer.clear();
+        self.summary_buffer.clear();
         self.scroll_offset = 0;
         self.pending_scroll = 0;
         self.auto_scroll = true;
@@ -495,9 +516,15 @@ impl ChatView {
         let streaming_tail = self.streaming.as_ref().map_or_else(Vec::new, |s| {
             s.render_tail(&ctx, self.streaming_continues_turn())
         });
+        let summary = if self.summary_buffer.is_empty() {
+            Vec::new()
+        } else {
+            CompactedBlock::render_streaming(&self.summary_buffer, &ctx)
+        };
         LiveLines {
             thinking,
             streaming_tail,
+            summary,
         }
     }
 
@@ -508,12 +535,7 @@ impl ChatView {
             stack.push_block(cached);
         }
 
-        if !live.thinking.is_empty() {
-            if stack.last_has_width() {
-                stack.push_blank();
-            }
-            stack.push(&live.thinking);
-        }
+        stack.push_separated(&live.thinking);
 
         if let Some(streaming) = &self.streaming {
             if !self.streaming_continues_turn() && stack.last_has_width() {
@@ -523,6 +545,7 @@ impl ChatView {
             stack.push(&live.streaming_tail);
         }
 
+        stack.push_separated(&live.summary);
         stack
     }
 
@@ -540,9 +563,12 @@ impl ChatView {
             .is_some_and(|b| b.block().continues_assistant_turn())
     }
 
-    /// True when the chat has no content for the user to see (committed, streaming, or thinking).
+    /// True when the chat shows nothing: no committed block, reply, thinking, or summary.
     pub(crate) fn is_empty(&self) -> bool {
-        self.blocks.is_empty() && self.streaming.is_none() && self.thinking_buffer.is_empty()
+        self.blocks.is_empty()
+            && self.streaming.is_none()
+            && self.thinking_buffer.is_empty()
+            && self.summary_buffer.is_empty()
     }
 }
 
@@ -608,6 +634,14 @@ mod tests {
         let live = chat.render_live(width);
         let stack = chat.stack(&live);
         stack.slice(0, stack.height())
+    }
+
+    /// Stacks every row at `width` as plain text.
+    fn all_rows(chat: &mut ChatView, width: u16) -> Vec<String> {
+        all_lines(chat, width)
+            .iter()
+            .map(ToString::to_string)
+            .collect()
     }
 
     /// Stacks every row at width 80 and joins them for substring assertions.
@@ -1279,6 +1313,75 @@ mod tests {
         );
     }
 
+    // ── append_summary_token ──
+
+    #[test]
+    fn append_summary_token_streams_the_summary_a_blank_row_below_the_chat() {
+        let mut chat = test_chat();
+        chat.push_tool_call(call("$", "ls"));
+        let chat_rows = all_rows(&mut chat, 80);
+        chat.auto_scroll = false;
+
+        chat.append_summary_token("Fixed ");
+        chat.append_summary_token("the bug.");
+
+        let summary: Vec<String> =
+            CompactedBlock::render_streaming("Fixed the bug.", &chat.settings.ctx(80))
+                .iter()
+                .map(ToString::to_string)
+                .collect();
+        assert_eq!(
+            all_rows(&mut chat, 80),
+            [chat_rows, vec![String::new()], summary].concat(),
+        );
+        assert_eq!(
+            chat.new_content_since_pause(),
+            1,
+            "the summary counts as one new block while paused",
+        );
+    }
+
+    // ── discard_summary ──
+
+    #[test]
+    fn discard_summary_drops_the_streamed_summary_so_a_retry_starts_over() {
+        let mut chat = test_chat();
+        chat.push_tool_call(call("$", "ls"));
+        let chat_rows = all_rows(&mut chat, 80);
+        chat.append_summary_token("First attempt.");
+
+        chat.discard_summary();
+        assert_eq!(all_rows(&mut chat, 80), chat_rows);
+
+        chat.append_summary_token("Second attempt.");
+        let text = all_text(&mut chat);
+        assert!(
+            text.contains("Second attempt.") && !text.contains("First attempt."),
+            "{text}",
+        );
+    }
+
+    #[test]
+    fn discard_summary_stops_counting_the_summary_as_new_content_while_paused() {
+        let mut chat = test_chat();
+        chat.auto_scroll = false;
+        chat.push_tool_call(call("$", "ls"));
+        chat.append_summary_token("First attempt.");
+        assert_eq!(chat.new_content_since_pause(), 2);
+
+        chat.discard_summary();
+        assert_eq!(chat.new_content_since_pause(), 1);
+        chat.discard_summary();
+        assert_eq!(
+            chat.new_content_since_pause(),
+            1,
+            "a second discard has no summary left to stop counting",
+        );
+
+        chat.append_summary_token("Second attempt.");
+        assert_eq!(chat.new_content_since_pause(), 2);
+    }
+
     // ── commit_streaming ──
 
     #[test]
@@ -1940,6 +2043,7 @@ mod tests {
         chat.push_tool_call(call("$", "ls"));
         chat.append_stream_token("partial reply");
         chat.append_thinking_token("considering");
+        chat.append_summary_token("recap");
         render_chat(&mut chat, 80, 24);
         chat.scroll_offset = 25;
         chat.pending_scroll = -3;
@@ -1951,6 +2055,7 @@ mod tests {
         assert_eq!(chat.pending_call_count(), 0);
         assert!(chat.streaming.is_none());
         assert_eq!(chat.thinking_buffer, "");
+        assert_eq!(chat.summary_buffer, "");
         assert_eq!((chat.scroll_offset, chat.pending_scroll), (0, 0));
         assert_eq!(chat.painted, SlotTops::default());
         assert!(chat.auto_scroll);
@@ -2808,6 +2913,13 @@ mod tests {
     fn is_empty_false_with_pending_thinking_buffer() {
         let mut chat = test_chat();
         chat.append_thinking_token("musing");
+        assert!(!chat.is_empty());
+    }
+
+    #[test]
+    fn is_empty_false_with_a_streaming_summary() {
+        let mut chat = test_chat();
+        chat.append_summary_token("recap");
         assert!(!chat.is_empty());
     }
 

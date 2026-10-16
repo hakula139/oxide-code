@@ -14,7 +14,7 @@ The welcome answers three questions:
 
 `tui/components/welcome` is a stateless renderer (`paint`) plus a small data snapshot (`WelcomeSnapshot`) derived from `&LiveSessionInfo`. Painted by `App::draw_frame` into the chat region when:
 
-- `chat.is_empty()` (no blocks, no streaming, no thinking buffer), AND
+- `chat.is_empty()` (no blocks, no streaming, no thinking buffer, no compaction summary), AND
 - `session_info.config.show_welcome` resolves to true (default: true).
 
 `ChatView` keeps its own empty-state branch, which returns an empty `Text`, and `App` paints the welcome into that space. The "is the chat empty?" predicate stays where the data lives.

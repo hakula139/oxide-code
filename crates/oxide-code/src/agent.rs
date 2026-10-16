@@ -379,7 +379,15 @@ pub(crate) async fn auto_compact_if_needed(
 
     sink.emit(Event::AutoCompactionStarted, "auto-compaction-started");
     let summary = match await_unless_aborted(
-        compaction::compact_session(client, auto.prompt, auto.tools, messages, None, auto.spent),
+        compaction::compact_session(
+            client,
+            auto.prompt,
+            auto.tools,
+            messages,
+            None,
+            sink,
+            auto.spent,
+        ),
         ops,
         pending,
     )
@@ -1612,10 +1620,18 @@ mod tests {
         assert!(!compacted);
         assert_eq!(failures, 1);
         assert!(matches!(&messages[0].content[0], ContentBlock::Text { text } if text == "hi"));
+        let events = sink.events();
         assert!(
-            sink.events()
-                .iter()
-                .any(|event| matches!(event, Event::Error(message) if message.contains("Session write failed")))
+            matches!(
+                events.as_slice(),
+                [
+                    Event::AutoCompactionStarted,
+                    Event::SummaryToken(summary),
+                    Event::SummaryDiscarded,
+                    Event::Error(message),
+                ] if summary == "auto summary" && message.starts_with("Session write failed")
+            ),
+            "the unsaved summary is discarded before the write failure: {events:?}",
         );
     }
 
@@ -1786,6 +1802,7 @@ mod tests {
             ),
             text_turn("auto summary"),
         ]);
+        let sink = CapturingSink::new();
         let tracker = FileTracker::default();
         let mut messages = vec![
             Message::user("hi"),
@@ -1799,7 +1816,7 @@ mod tests {
             &client,
             &session,
             &mut messages,
-            &CapturingSink::new(),
+            &sink,
             &mut inert_ops(),
             &mut Vec::new(),
             Some(&mut AutoCompact {
@@ -1851,6 +1868,20 @@ mod tests {
         assert!(retry.iter().any(|text| text == "done"), "{retry:?}");
         assert!(
             matches!(&messages[0].content[0], ContentBlock::Text { text } if text.contains("auto summary"))
+        );
+        let events = sink.events();
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    Event::AutoCompactionStarted,
+                    Event::SummaryToken(overflowed),
+                    Event::SummaryDiscarded,
+                    Event::SummaryToken(retried),
+                    Event::SessionCompacted { automatic: true, .. },
+                ] if overflowed == "partial" && retried == "auto summary"
+            ),
+            "the overflowed summary is discarded before the retry streams: {events:?}",
         );
     }
 

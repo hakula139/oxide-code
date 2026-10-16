@@ -5,10 +5,11 @@
 //! so it reads the conversation's prompt cache and passes earlier thinking blocks back unchanged. A
 //! summary that overflows the context window, as an HTTP 400 `prompt is too long` or a
 //! `model_context_window_exceeded` stop, retries up to three times without the oldest rounds or
-//! any thinking block, which misses the cache. Session mutation happens in the driver after the
-//! summary succeeds.
+//! any thinking block, which misses the cache. The summary's text streams to the frontend as it
+//! generates. Session mutation happens in the driver after the summary succeeds.
 
 use std::iter;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Result, bail};
 use indoc::{formatdoc, indoc};
@@ -62,8 +63,12 @@ const SUMMARY_PREFIX: &str = indoc! {r"
 "};
 
 /// Drives the summarization request and returns the trimmed summary. `prompt` and `tools` must be
-/// the ones the conversation's own requests send. `spent` receives the usage of every request,
-/// even when the summary fails or the caller drops the future.
+/// the ones the conversation's own requests send. `spent` receives the usage of every request, even
+/// when the summary fails or the caller drops the future.
+///
+/// The summary streams to `sink` as [`Event::SummaryToken`]s. A retry, a failure, or a dropped
+/// future ends them with [`Event::SummaryDiscarded`]. On success the streamed text stays up, and
+/// the caller must end it with [`Event::SessionCompacted`] or [`Event::SummaryDiscarded`].
 ///
 /// Errors when the transcript is too short to compact, when a request fails, or when the reply is
 /// empty or stopped before the summary finished, including when the last retry still overflows.
@@ -73,6 +78,7 @@ pub(crate) async fn compact_session(
     tools: &[ToolDefinition],
     transcript: &[Message],
     instructions: Option<&str>,
+    sink: &dyn EventSink,
     spent: &mut Vec<TokenUsage>,
 ) -> Result<String> {
     if transcript.len() < MIN_MESSAGES_FOR_COMPACT {
@@ -99,11 +105,12 @@ pub(crate) async fn compact_session(
     let user_context = Some(prompt.user_context.as_str());
     let rubric = Message::user(build_user_message(instructions));
     let request: Vec<Message> = transcript.iter().chain([&rubric]).cloned().collect();
+    let stream = SummaryStream::new(sink);
     let mut rx = client.stream_message(&request, &sections, user_context, tools)?;
     let mut kept = transcript.to_vec();
     let mut retries = 0;
     let response = loop {
-        let result = collect_summary(rx, spent).await;
+        let result = collect_summary(rx, &stream, spent).await;
         let smaller = overflow_tokens(&result)
             .filter(|_| retries < MAX_OVERFLOW_RETRIES)
             .and_then(|overflow| {
@@ -117,6 +124,7 @@ pub(crate) async fn compact_session(
         };
         retries += 1;
         kept = smaller;
+        stream.discard();
         let request = retry_request(&kept, &rubric);
         rx = client.stream_one_shot(&request, &sections, user_context, tools)?;
     };
@@ -147,19 +155,69 @@ pub(crate) async fn compact_session(
     if trimmed.is_empty() {
         bail!("compaction returned empty summary");
     }
+    stream.keep();
     Ok(trimmed.to_owned())
 }
 
 /// Collects one summarization reply, adding its usage to `spent` even when it fails.
 async fn collect_summary(
     rx: mpsc::Receiver<Result<ResponseEvent>>,
+    stream: &SummaryStream<'_>,
     spent: &mut Vec<TokenUsage>,
 ) -> Result<Response> {
     let mut usage = RequestUsage {
         total: spent,
         request: None,
     };
-    super::collect_response(rx, &QuietSink, &mut usage.request).await
+    super::collect_response(rx, stream, &mut usage.request).await
+}
+
+/// Forwards the summary's text and retry notices to the frontend and drops the rest of the reply,
+/// which belongs to no visible turn. Dropping it discards the streamed text, so a cancelled
+/// compaction clears it.
+struct SummaryStream<'a> {
+    sink: &'a dyn EventSink,
+    streamed: AtomicBool,
+}
+
+impl<'a> SummaryStream<'a> {
+    fn new(sink: &'a dyn EventSink) -> Self {
+        Self {
+            sink,
+            streamed: AtomicBool::new(false),
+        }
+    }
+
+    /// Tells the frontend to drop the summary text streamed so far, if any.
+    fn discard(&self) {
+        if self.streamed.swap(false, Ordering::Relaxed) {
+            self.sink.emit(Event::SummaryDiscarded, "summary-discarded");
+        }
+    }
+
+    /// Leaves the streamed summary for the compact boundary to commit or discard.
+    fn keep(mut self) {
+        *self.streamed.get_mut() = false;
+    }
+}
+
+impl Drop for SummaryStream<'_> {
+    fn drop(&mut self) {
+        self.discard();
+    }
+}
+
+impl EventSink for SummaryStream<'_> {
+    fn send(&self, event: Event) -> Result<()> {
+        match event {
+            Event::StreamToken(text) => {
+                self.streamed.store(true, Ordering::Relaxed);
+                self.sink.send(Event::SummaryToken(text))
+            }
+            Event::Retrying(_) => self.sink.send(event),
+            _ => Ok(()),
+        }
+    }
 }
 
 /// Adds one request's usage to the running total on drop, so a failed or cancelled request still
@@ -263,15 +321,6 @@ fn retry_request(kept: &[Message], rubric: &Message) -> Vec<Message> {
         .collect()
 }
 
-/// Discards the summary's stream tokens, which belong to no visible turn.
-struct QuietSink;
-
-impl EventSink for QuietSink {
-    fn send(&self, _event: Event) -> Result<()> {
-        Ok(())
-    }
-}
-
 /// Composes the rubric plus optional user-supplied focus instructions.
 fn build_user_message(instructions: Option<&str>) -> String {
     match instructions.map(str::trim).filter(|s| !s.is_empty()) {
@@ -313,6 +362,7 @@ pub(crate) fn strip_synthetic_post_compact_prefix(message: &mut Message) -> bool
 
 #[cfg(test)]
 mod tests {
+    use std::pin::pin;
     use std::sync::{Arc, Mutex};
 
     use serde_json::json;
@@ -323,6 +373,7 @@ mod tests {
     use crate::client::anthropic::Client;
     use crate::client::anthropic::testing::{api_key, sse_body, test_client};
     use crate::message::Role;
+    use crate::protocol::CapturingSink;
 
     // ── compact_session ──
 
@@ -370,15 +421,30 @@ mod tests {
     }
 
     async fn summarize(client: &Client, transcript: &[Message]) -> Result<String> {
-        compact_session(
+        summarize_streaming(client, transcript).await.0
+    }
+
+    /// Summarizes `transcript` like [`summarize`], also returning the events the summary streamed.
+    async fn summarize_streaming(
+        client: &Client,
+        transcript: &[Message],
+    ) -> (Result<String>, Vec<Event>) {
+        let sink = CapturingSink::new();
+        let summary = compact_session(
             client,
             &parent_prompt(),
             &[],
             transcript,
             None,
+            &sink,
             &mut Vec::new(),
         )
-        .await
+        .await;
+        (summary, sink.events())
+    }
+
+    fn token(text: &str) -> Event {
+        Event::SummaryToken(text.to_owned())
     }
 
     fn fake_transcript() -> Vec<Message> {
@@ -445,8 +511,13 @@ mod tests {
         .await;
 
         let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
-        let summary = summarize(&client, &fake_transcript()).await.unwrap();
-        assert_eq!(summary, "fixed login bug");
+        let (summary, events) = summarize_streaming(&client, &fake_transcript()).await;
+        assert_eq!(summary.unwrap(), "fixed login bug");
+        assert_eq!(
+            events,
+            [token("  fixed"), token(" login bug  \n")],
+            "the kept summary streams untrimmed and is not discarded",
+        );
     }
 
     #[tokio::test]
@@ -470,8 +541,9 @@ mod tests {
         .await;
 
         let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
-        let summary = summarize(&client, &fake_transcript()).await.unwrap();
-        assert_eq!(summary, "fixed login bug");
+        let (summary, events) = summarize_streaming(&client, &fake_transcript()).await;
+        assert_eq!(summary.unwrap(), "fixed login bug");
+        assert_eq!(events, [token("fixed login bug")]);
     }
 
     #[tokio::test]
@@ -512,6 +584,7 @@ mod tests {
             &tools,
             &transcript,
             Some("focus on auth"),
+            &CapturingSink::new(),
             &mut Vec::new(),
         )
         .await
@@ -614,6 +687,7 @@ mod tests {
         let server = MockServer::start().await;
         mount_overflow_then(&server, streamed_summary_body("trimmed summary")).await;
         let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
+        let sink = CapturingSink::new();
         let mut spent = Vec::new();
 
         let summary = compact_session(
@@ -622,12 +696,22 @@ mod tests {
             &[],
             &overflowing_transcript(),
             None,
+            &sink,
             &mut spent,
         )
         .await
         .unwrap();
 
         assert_eq!(summary, "trimmed summary");
+        assert_eq!(
+            sink.events(),
+            [
+                token("partial"),
+                Event::SummaryDiscarded,
+                token("trimmed summary")
+            ],
+            "the retry starts the summary over",
+        );
         let requests = server.received_requests().await.unwrap();
         assert_eq!(requests.len(), 2);
         let mut retry: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
@@ -708,9 +792,14 @@ mod tests {
         let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
         let transcript = heavy_rounds(4);
 
-        let summary = summarize(&client, &transcript).await.unwrap();
+        let (summary, events) = summarize_streaming(&client, &transcript).await;
 
-        assert_eq!(summary, "trimmed summary");
+        assert_eq!(summary.unwrap(), "trimmed summary");
+        assert_eq!(
+            events,
+            [token("trimmed summary")],
+            "a rejection streams nothing to discard",
+        );
         let requests = server.received_requests().await.unwrap();
         assert_eq!(requests.len(), 2);
         // Freeing the 5,000-token overflow plus the summary reserve takes the first five messages.
@@ -791,6 +880,7 @@ mod tests {
         )
         .await;
         let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
+        let sink = CapturingSink::new();
         let mut spent = Vec::new();
 
         let err = compact_session(
@@ -799,6 +889,7 @@ mod tests {
             &[],
             &overflowing_transcript(),
             None,
+            &sink,
             &mut spent,
         )
         .await
@@ -822,6 +913,11 @@ mod tests {
             spent,
             [TokenUsage::new(100, 7); 3],
             "every request is billed"
+        );
+        assert_eq!(
+            sink.events(),
+            vec![vec![token("partial"), Event::SummaryDiscarded]; 3].concat(),
+            "each retry and the failure discard what streamed",
         );
     }
 
@@ -873,10 +969,10 @@ mod tests {
         mount_summary(&server, streamed_summary_body("   \n  ")).await;
 
         let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
-        let err = summarize(&client, &fake_transcript())
-            .await
-            .expect_err("empty summary must error");
+        let (summary, events) = summarize_streaming(&client, &fake_transcript()).await;
+        let err = summary.expect_err("empty summary must error");
         assert!(format!("{err:#}").contains("empty summary"));
+        assert_eq!(events, [token("   \n  "), Event::SummaryDiscarded]);
     }
 
     #[tokio::test]
@@ -896,6 +992,7 @@ mod tests {
             )
             .await;
             let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
+            let sink = CapturingSink::new();
             let mut spent = Vec::new();
 
             let err = compact_session(
@@ -904,6 +1001,7 @@ mod tests {
                 &[],
                 &fake_transcript(),
                 None,
+                &sink,
                 &mut spent,
             )
             .await
@@ -914,6 +1012,92 @@ mod tests {
                 "{stop_reason}: {err:#}"
             );
             assert_eq!(spent, [TokenUsage::new(100, 7)], "{stop_reason}");
+            assert_eq!(
+                sink.events(),
+                [token("partial"), Event::SummaryDiscarded],
+                "{stop_reason}",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn compact_session_dropped_mid_summary_discards_what_streamed() {
+        let (tx, rx) = mpsc::channel(1);
+        tx.send(Ok(ResponseEvent::Text("partial".to_owned())))
+            .await
+            .unwrap();
+        let client = HeldStreamClient(Mutex::new(Some(rx)));
+        let (prompt, transcript) = (parent_prompt(), fake_transcript());
+        let sink = CapturingSink::new();
+        let mut spent = Vec::new();
+
+        {
+            let mut compaction = pin!(compact_session(
+                &client,
+                &prompt,
+                &[],
+                &transcript,
+                None,
+                &sink,
+                &mut spent,
+            ));
+            assert!(futures::poll!(compaction.as_mut()).is_pending());
+            assert_eq!(sink.events(), [token("partial")]);
+        }
+
+        assert_eq!(sink.events(), [token("partial"), Event::SummaryDiscarded]);
+    }
+
+    #[tokio::test]
+    async fn compact_session_passes_retry_notices_through() {
+        let notice = "HTTP 529 overloaded_error. Retrying in 1s (retry 1 of 5).";
+        let (tx, rx) = mpsc::channel(3);
+        for event in [
+            ResponseEvent::Retrying(notice.to_owned()),
+            ResponseEvent::Text("Recap".to_owned()),
+            ResponseEvent::Completed(Response {
+                content: vec![ContentBlock::Text {
+                    text: "Recap".to_owned(),
+                }],
+                ..Response::default()
+            }),
+        ] {
+            tx.send(Ok(event)).await.unwrap();
+        }
+        let client = HeldStreamClient(Mutex::new(Some(rx)));
+        let sink = CapturingSink::new();
+
+        let summary = compact_session(
+            &client,
+            &parent_prompt(),
+            &[],
+            &fake_transcript(),
+            None,
+            &sink,
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(summary, "Recap");
+        assert_eq!(
+            sink.events(),
+            [Event::Retrying(notice.to_owned()), token("Recap")],
+        );
+    }
+
+    /// Replies with a stream the test feeds, which stays open while the test holds its sender.
+    struct HeldStreamClient(Mutex<Option<mpsc::Receiver<Result<ResponseEvent>>>>);
+
+    impl Wire for HeldStreamClient {
+        fn stream_message(
+            &self,
+            _messages: &[Message],
+            _system_sections: &[&str],
+            _user_context: Option<&str>,
+            _tools: &[ToolDefinition],
+        ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
+            Ok(self.0.lock().unwrap().take().expect("one request"))
         }
     }
 

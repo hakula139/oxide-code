@@ -135,6 +135,12 @@ pub(crate) enum Event {
     /// Automatic compaction started before the submitted prompt runs. The frontend shows compacting
     /// status while the summarizer request streams.
     AutoCompactionStarted,
+    /// Compaction summary chunk to append to the in-flight summary. [`Self::SessionCompacted`] or
+    /// [`Self::SummaryDiscarded`] ends that summary.
+    SummaryToken(String),
+    /// The summary streamed so far was dropped, because a retry starts it over or the compaction
+    /// failed or was cancelled. Precedes the event that reports the failure or cancellation.
+    SummaryDiscarded,
     /// The session title changed, from the background generator or an [`Op::Rename`].
     SessionTitleUpdated { session_id: String, title: String },
     /// An [`Op::Clear`] or [`Op::Archive`] rolled the session, making a new session UUID active.
@@ -509,6 +515,8 @@ mod tests {
             Event::UsageUpdated(_) => "usage_updated",
             Event::Cancelled => "cancelled",
             Event::AutoCompactionStarted => "auto_compaction_started",
+            Event::SummaryToken(_) => "summary_token",
+            Event::SummaryDiscarded => "summary_discarded",
             Event::SessionTitleUpdated { .. } => "session_title_updated",
             Event::SessionRolled { .. } => "session_rolled",
             Event::SessionResumed { .. } => "session_resumed",
@@ -548,6 +556,8 @@ mod tests {
             }),
             Event::Cancelled,
             Event::AutoCompactionStarted,
+            Event::SummaryToken("Recap".to_owned()),
+            Event::SummaryDiscarded,
             Event::SessionTitleUpdated {
                 session_id: "s1".to_owned(),
                 title: "Title".to_owned(),

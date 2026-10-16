@@ -1,4 +1,4 @@
-//! Post-`/compact` boundary block.
+//! Post-`/compact` boundary block, and the summary streaming in before it.
 
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
@@ -8,6 +8,9 @@ use super::{ChatBlock, RenderCtx, bar_continuation_prefix, prepend_markdown_pref
 use crate::tui::glyphs::TOOL_BORDER_PREFIX;
 use crate::tui::markdown::render_markdown;
 use crate::tui::wrap::wrap_line;
+
+/// Header over a summary still streaming in.
+const STREAMING_HEADER: &str = "Summarizing the conversation...";
 
 /// Boundary marker rendered after `/compact`.
 pub(crate) struct CompactedBlock {
@@ -33,49 +36,58 @@ impl CompactedBlock {
             summary: summary.into(),
         }
     }
+
+    /// Renders the summary of a compaction in flight, laid out like the boundary it becomes.
+    pub(crate) fn render_streaming(summary: &str, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
+        render_boundary(STREAMING_HEADER, summary, ctx)
+    }
 }
 
 impl ChatBlock for CompactedBlock {
     fn render(&self, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
-        let bar_style = ctx.theme.accent();
-        let header_style = bar_style.add_modifier(Modifier::BOLD);
-        let body_style = ctx.theme.text();
-        let width = usize::from(ctx.width);
-        let bar_width = TOOL_BORDER_PREFIX.width();
-        let md_width = width.saturating_sub(bar_width);
-        let cont_prefix = bar_continuation_prefix(TOOL_BORDER_PREFIX, bar_style);
-
-        let mut out: Vec<Line<'static>> = Vec::new();
-
-        let header_line = Line::from(vec![
-            Span::styled(TOOL_BORDER_PREFIX.to_owned(), bar_style),
-            Span::styled(self.header.clone(), header_style),
-        ]);
-        out.extend(wrap_line(header_line, width, bar_width, Some(&cont_prefix)));
-
-        if !self.summary.trim().is_empty() {
-            // Bar-only gutter row separates header from body, mirroring AssistantThinking's
-            // layout so the boundary reads as one visual unit.
-            out.push(Line::from(Span::styled(
-                TOOL_BORDER_PREFIX.to_owned(),
-                bar_style,
-            )));
-            let rendered = render_markdown(&self.summary, ctx.theme, md_width);
-            for line in rendered.lines {
-                let mut prefixed = prepend_markdown_prefix(line, TOOL_BORDER_PREFIX, bar_style);
-                // Markdown render may set Line::style for code blocks; preserve that and only
-                // patch the body spans to the chat text style when no fg is set.
-                for span in &mut prefixed.spans[1..] {
-                    if span.style.fg.is_none() {
-                        span.style = span.style.patch(body_style);
-                    }
-                }
-                out.push(prefixed);
-            }
-        }
-
-        out
+        render_boundary(&self.header, &self.summary, ctx)
     }
+}
+
+fn render_boundary(header: &str, summary: &str, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
+    let bar_style = ctx.theme.accent();
+    let header_style = bar_style.add_modifier(Modifier::BOLD);
+    let body_style = ctx.theme.text();
+    let width = usize::from(ctx.width);
+    let bar_width = TOOL_BORDER_PREFIX.width();
+    let md_width = width.saturating_sub(bar_width);
+    let cont_prefix = bar_continuation_prefix(TOOL_BORDER_PREFIX, bar_style);
+
+    let mut out: Vec<Line<'static>> = Vec::new();
+
+    let header_line = Line::from(vec![
+        Span::styled(TOOL_BORDER_PREFIX.to_owned(), bar_style),
+        Span::styled(header.to_owned(), header_style),
+    ]);
+    out.extend(wrap_line(header_line, width, bar_width, Some(&cont_prefix)));
+
+    if !summary.trim().is_empty() {
+        // Bar-only gutter row separates header from body, mirroring AssistantThinking's
+        // layout so the boundary reads as one visual unit.
+        out.push(Line::from(Span::styled(
+            TOOL_BORDER_PREFIX.to_owned(),
+            bar_style,
+        )));
+        let rendered = render_markdown(summary, ctx.theme, md_width);
+        for line in rendered.lines {
+            let mut prefixed = prepend_markdown_prefix(line, TOOL_BORDER_PREFIX, bar_style);
+            // Markdown render may set Line::style for code blocks; preserve that and only
+            // patch the body spans to the chat text style when no fg is set.
+            for span in &mut prefixed.spans[1..] {
+                if span.style.fg.is_none() {
+                    span.style = span.style.patch(body_style);
+                }
+            }
+            out.push(prefixed);
+        }
+    }
+
+    out
 }
 
 #[cfg(test)]

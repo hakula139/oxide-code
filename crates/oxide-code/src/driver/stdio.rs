@@ -156,6 +156,8 @@ impl StdioSink {
             Event::PromptDrained(_)
             | Event::UsageUpdated(_)
             | Event::AutoCompactionStarted
+            | Event::SummaryToken(_)
+            | Event::SummaryDiscarded
             | Event::SessionTitleUpdated { .. }
             | Event::SessionRolled { .. }
             | Event::SessionResumed { .. }
@@ -474,6 +476,8 @@ mod tests {
         for event in [
             Event::PromptDrained("queued".to_owned()),
             Event::AutoCompactionStarted,
+            Event::SummaryToken("Recap".to_owned()),
+            Event::SummaryDiscarded,
             Event::SessionTitleUpdated {
                 session_id: "sid".to_owned(),
                 title: "New title".to_owned(),
