@@ -4,10 +4,14 @@ use std::process::{Command, Stdio};
 
 use indoc::indoc;
 
+fn ox() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_ox"))
+}
+
 #[test]
-fn list_empty_project() {
+fn list_in_empty_project_reports_no_sessions() {
     let dir = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_ox"))
+    let output = ox()
         .arg("--list")
         .current_dir(dir.path())
         .env("XDG_DATA_HOME", dir.path())
@@ -22,7 +26,7 @@ fn list_empty_project() {
 #[test]
 fn list_with_unusable_storage_fails() {
     let file = tempfile::NamedTempFile::new().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_ox"))
+    let output = ox()
         .arg("--list")
         .env("XDG_DATA_HOME", file.path())
         .output()
@@ -32,6 +36,10 @@ fn list_with_unusable_storage_fails() {
     assert!(output.stdout.is_empty(), "{:?}", output.stdout);
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.starts_with("Error: "), "{stderr}");
+    assert!(
+        stderr.contains(&file.path().display().to_string()),
+        "{stderr}"
+    );
 }
 
 #[test]
@@ -48,7 +56,7 @@ fn continue_in_the_repl_unarchives_the_session_with_a_note() {
     )
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_ox"))
+    let output = ox()
         .arg("--no-tui")
         .arg("--continue")
         .arg(&session)
@@ -80,7 +88,7 @@ fn continue_in_the_repl_unarchives_the_session_with_a_note() {
 #[test]
 fn resume_without_a_terminal_fails_before_writing_anything() {
     let dir = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_ox"))
+    let output = ox()
         .arg("--resume")
         .current_dir(dir.path())
         .env("XDG_DATA_HOME", dir.path())
