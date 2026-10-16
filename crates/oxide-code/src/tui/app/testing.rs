@@ -1,6 +1,7 @@
 //! Test-only [`App`] fixtures shared by the app, dispatch, event, and render tests.
 
 use std::io::{self, Write};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers};
@@ -50,6 +51,7 @@ pub(super) fn test_session_info() -> LiveSessionInfo {
     LiveSessionInfo {
         cwd: "~/test".to_owned(),
         git_cwd: None,
+        project_root: PathBuf::from("/repo"),
         git_branch: Some("main".to_owned()),
         version: "0.0.0-test",
         session_id: "test-session".to_owned(),

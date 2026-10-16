@@ -6,10 +6,10 @@ use indoc::{formatdoc, indoc};
 use tokio::fs;
 
 /// First file found per location wins.
-const INSTRUCTION_FILENAMES: &[&str] = &["CLAUDE.md", "AGENTS.md"];
+pub(crate) const INSTRUCTION_FILENAMES: &[&str] = &["CLAUDE.md", "AGENTS.md"];
 
 /// Tool-agnostic subdirectories walked alongside each location (e.g. `<dir>/.claude/CLAUDE.md`).
-const INSTRUCTION_DIRS: &[&str] = &[".claude"];
+pub(crate) const INSTRUCTION_DIRS: &[&str] = &[".claude"];
 
 /// Candidates tried in order at a single location. The first hit wins.
 struct Slot {

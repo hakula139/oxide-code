@@ -1,10 +1,10 @@
-//! Git probes used by the session header and the status bar. Best-effort: every probe collapses
-//! to `None` on missing git, non-repo cwd, detached HEAD, or non-UTF-8 output. Failures log at
-//! `debug` so they're recoverable when the status bar misbehaves.
+//! Git probes for the session's repository: its root, current branch, and pull request.
+//! Best-effort: every probe collapses to `None` on missing git, non-repo cwd, detached HEAD, or
+//! non-UTF-8 output. Failures log at `debug` so they're recoverable when the status bar misbehaves.
 
 use std::collections::HashSet;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use serde::Deserialize;
@@ -17,7 +17,7 @@ use crate::util::text::truncate_to_width;
 pub(crate) fn current_branch(cwd: &Path) -> Option<String> {
     let cwd_str = cwd_to_str(cwd, "git branch")?;
     let output = check_output("git branch", cwd_str, branch_command(cwd_str).output())?;
-    parse_branch(&output.stdout)
+    stdout_line(&output.stdout)
 }
 
 /// [`current_branch`] for async callers. Dropping the future kills the child process.
@@ -28,7 +28,7 @@ pub(crate) async fn current_branch_async(cwd: &Path) -> Option<String> {
         cwd_str,
         output_async(branch_command(cwd_str)).await,
     )?;
-    parse_branch(&output.stdout)
+    stdout_line(&output.stdout)
 }
 
 fn branch_command(cwd: &str) -> Command {
@@ -37,12 +37,28 @@ fn branch_command(cwd: &str) -> Command {
     command
 }
 
-fn parse_branch(stdout: &[u8]) -> Option<String> {
-    let branch = std::str::from_utf8(stdout).ok()?.trim();
-    if branch.is_empty() {
+/// Probe the top-level directory of the repository containing `cwd` via
+/// `git rev-parse --show-toplevel`. Dropping the future kills the child process.
+pub(crate) async fn repo_root(cwd: &Path) -> Option<PathBuf> {
+    let mut command = Command::new("git");
+    command
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(cwd);
+    let output = check_output(
+        "git rev-parse",
+        &cwd.to_string_lossy(),
+        output_async(command).await,
+    )?;
+    stdout_line(&output.stdout).map(PathBuf::from)
+}
+
+/// The trimmed stdout of a one-line probe, or `None` when it is empty or not UTF-8.
+fn stdout_line(stdout: &[u8]) -> Option<String> {
+    let line = std::str::from_utf8(stdout).ok()?.trim();
+    if line.is_empty() {
         None
     } else {
-        Some(branch.to_owned())
+        Some(line.to_owned())
     }
 }
 
@@ -394,15 +410,46 @@ mod tests {
         );
     }
 
-    // ── parse_branch ──
+    // ── repo_root ──
+
+    #[tokio::test]
+    async fn repo_root_in_a_subdirectory_finds_the_top_level() {
+        let dir = tempfile::tempdir().unwrap();
+        if !init_fixture_repo(dir.path()) {
+            return;
+        }
+        let nested = dir.path().join("crates/app");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        let root = with_isolated_git_env_async(repo_root(&nested))
+            .await
+            .expect("inside a repository");
+
+        // macOS routes tempdirs through `/private`.
+        assert_eq!(
+            root.canonicalize().unwrap(),
+            dir.path().canonicalize().unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn repo_root_outside_a_repo_is_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            with_isolated_git_env_async(repo_root(dir.path())).await,
+            None
+        );
+    }
+
+    // ── stdout_line ──
 
     #[test]
-    fn parse_branch_keeps_branch_names_and_drops_everything_else() {
-        assert_eq!(parse_branch(b"feat/login\n"), Some("feat/login".to_owned()));
+    fn stdout_line_keeps_one_trimmed_line_and_drops_everything_else() {
+        assert_eq!(stdout_line(b"feat/login\n"), Some("feat/login".to_owned()));
         // `branch --show-current` prints empty on detached HEAD.
-        assert_eq!(parse_branch(b""), None);
-        assert_eq!(parse_branch(b"   \n"), None);
-        assert_eq!(parse_branch(&[0xff, 0xfe, b'\n']), None);
+        assert_eq!(stdout_line(b""), None);
+        assert_eq!(stdout_line(b"   \n"), None);
+        assert_eq!(stdout_line(&[0xff, 0xfe, b'\n']), None);
     }
 
     // ── current_pull_request ──

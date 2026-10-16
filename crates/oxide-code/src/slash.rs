@@ -132,9 +132,7 @@ pub(crate) fn with_isolated_xdg<R>(f: impl FnOnce(&std::path::Path) -> R) -> R {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::Op;
     use crate::slash::registry::testing::FakeCmd;
-    use crate::tui::action::Action;
 
     fn parsed(name: &str, args: &str) -> Parsed {
         Parsed {
@@ -179,19 +177,6 @@ mod tests {
     #[test]
     fn dispatch_known_command_returns_its_outcome() {
         run_dispatch("help").unwrap().into_modal();
-    }
-
-    #[test]
-    fn dispatch_prompt_submit_command_produces_synthesized_body() {
-        let action = run_dispatch("init").unwrap().into_forward();
-        assert!(
-            matches!(
-                &action,
-                Action::Op(Op::Prompt(body))
-                    if body.contains("AGENTS.md")
-            ),
-            "expected a prompt with the AGENTS.md body, got {action:?}",
-        );
     }
 
     #[test]

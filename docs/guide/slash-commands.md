@@ -16,7 +16,7 @@ For commands with curated arguments (`/model`, `/effort`, `/theme`), the popup s
 | `/diff`                                     | Show uncommitted git changes plus untracked files in chat, capped at 64 KB.                 |
 | `/effort [<level>]`                         | Open the slider, or set the tier directly (`low`, `medium`, `high`, `xhigh`, `max`).        |
 | `/help`                                     | Open a read-only modal listing available commands.                                          |
-| `/init`                                     | Generate or update the project's `AGENTS.md` / `CLAUDE.md`.                                 |
+| `/init`                                     | Create `AGENTS.md` / `CLAUDE.md`, or propose edits to an existing one as a diff to confirm. |
 | `/login`                                    | Sign in to a Claude account in the browser and store the login for oxide-code.              |
 | `/logout`                                   | Remove the oxide-code login. The Claude Code login stays in place.                          |
 | `/model [<id>]`                             | Open the model + effort picker, or swap directly (alias / substring / exact id).            |
