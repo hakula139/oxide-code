@@ -583,8 +583,8 @@ fn is_hard_linked(path: &Path) -> bool {
 
 // ── Decision ──
 
-/// The pipeline's verdict for one call. `Ask` resolves interactively or, in headless mode, to a
-/// deny at the call site (the gate itself stays UI-agnostic).
+/// The pipeline's verdict for one call. `Ask` goes to the frontend, which answers it (the gate
+/// itself stays UI-agnostic).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Decision {
     Allow,

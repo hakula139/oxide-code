@@ -1,26 +1,37 @@
 //! Bare REPL driver for `--no-tui`: prompts from stdin, replies streamed to stdout.
 
-use std::io::Write;
+use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 
 use anyhow::{Result, bail};
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, BufReader, Lines};
 
-use super::stdio::{StdioSink, render_queued, render_turn};
+use super::stdio::{Approver, StdioSink, Unattended, render_queued, render_turn};
 use super::{Exit, shutdown_signal};
 use crate::engine::{Engine, EngineHandle, TurnEnd};
-use crate::protocol::{Event, EventSink, Op};
+use crate::permission::SessionGrant;
+use crate::permission::rule::Rule;
+use crate::protocol::{Decision, Event, EventSink, Op};
 use crate::slash;
+use crate::tool::{ApprovalBody, ApprovalPreview};
+use crate::util::text::is_hidden;
 
 /// Reads prompts until EOF or a signal, then finalizes the session. EOF after a failed turn exits
-/// with failure.
+/// with failure. Approvals are asked only when stdin is a terminal, so a piped line is never taken
+/// as an answer.
 pub(crate) async fn run(engine: Engine, show_thinking: bool, drifted: &[PathBuf]) -> Result<Exit> {
     let sink = StdioSink::new(show_thinking);
+    let attended = io::stdin().is_terminal();
     let stdin = BufReader::new(tokio::io::stdin());
-    drive(engine.spawn(drifted), &sink, stdin).await
+    drive(engine.spawn(drifted), &sink, stdin, attended).await
 }
 
-async fn drive<R>(mut handle: EngineHandle, sink: &dyn EventSink, input: R) -> Result<Exit>
+async fn drive<R>(
+    mut handle: EngineHandle,
+    sink: &dyn EventSink,
+    input: R,
+    attended: bool,
+) -> Result<Exit>
 where
     R: AsyncBufRead + Unpin,
 {
@@ -65,8 +76,13 @@ where
             let prompt = slash::unescape_literal(input).to_owned();
             // A send fails only once the engine has stopped, which `render_turn` then reports.
             _ = handle.ops.send(Op::Prompt(prompt)).await;
+            let mut prompter = Prompter {
+                lines: &mut lines,
+                out: io::stderr(),
+                attended,
+            };
             tokio::select! {
-                end = render_turn(&mut handle.events, sink) => match end {
+                end = render_turn(&mut handle.events, sink, &handle.ops, &mut prompter) => match end {
                     Some(TurnEnd::Failed) => {
                         println!();
                         failed = true;
@@ -95,6 +111,133 @@ where
     })
 }
 
+// ── Prompter ──
+
+const CHOICES: &str = "[y] approve  [n] deny  [f] feedback  [x] abort: ";
+const GRANT_CHOICES: &str =
+    "[y] approve  [a] allow for session  [n] deny  [f] feedback  [x] abort: ";
+
+/// Answers approvals with lines read from the REPL's input, writing the call and its choices to
+/// `out`. The input ending aborts the turn. Unless `attended`, it denies as [`Unattended`] does.
+struct Prompter<'a, R, W> {
+    lines: &'a mut Lines<R>,
+    out: W,
+    attended: bool,
+}
+
+impl<R: AsyncBufRead + Unpin, W: Write> Approver for Prompter<'_, R, W> {
+    async fn decide(
+        &mut self,
+        preview: &ApprovalPreview,
+        grant: Option<&SessionGrant>,
+    ) -> Decision {
+        if !self.attended {
+            return Unattended.decide(preview, grant).await;
+        }
+        _ = write_preview(&mut self.out, preview);
+        let choices = if grant.is_some() {
+            GRANT_CHOICES
+        } else {
+            CHOICES
+        };
+        loop {
+            let Some(answer) = self.ask(choices).await else {
+                return Decision::Abort;
+            };
+            match (answer.to_ascii_lowercase().as_str(), grant) {
+                ("y" | "yes", _) => return Decision::Approve,
+                ("a", Some(grant)) => match self.rule(grant).await {
+                    Some(Ok(rule)) => {
+                        return Decision::AllowForSession {
+                            rule: Box::new(rule),
+                        };
+                    }
+                    Some(Err(e)) => _ = writeln!(self.out, "{e:#}"),
+                    None => return Decision::Abort,
+                },
+                ("n" | "no", _) => return Decision::Deny,
+                ("f", _) => match self.ask("Feedback for the model: ").await {
+                    Some(feedback) if !feedback.is_empty() => {
+                        return Decision::DenyWithFeedback { feedback };
+                    }
+                    Some(_) => {}
+                    None => return Decision::Abort,
+                },
+                ("x", _) => return Decision::Abort,
+                _ => _ = writeln!(self.out, "Answer with one of the letters in brackets."),
+            }
+        }
+    }
+}
+
+impl<R: AsyncBufRead + Unpin, W: Write> Prompter<'_, R, W> {
+    /// Writes `prompt` and reads the trimmed answer, or `None` once the input ends or fails.
+    async fn ask(&mut self, prompt: &str) -> Option<String> {
+        _ = write!(self.out, "{prompt}");
+        _ = self.out.flush();
+        match self.lines.next_line().await {
+            Ok(Some(line)) => Some(line.trim().to_owned()),
+            Ok(None) => {
+                _ = writeln!(self.out);
+                None
+            }
+            Err(e) => {
+                _ = writeln!(self.out, "\nCould not read the answer: {e}");
+                None
+            }
+        }
+    }
+
+    /// Reads the session rule to grant, where an empty answer takes the suggested one, or `None`
+    /// once the input ends. An error says why the grant does not admit the rule.
+    async fn rule(&mut self, grant: &SessionGrant) -> Option<Result<Rule>> {
+        let suggested = grant.suggested().to_string();
+        let answer = self.ask(&format!("Rule to allow [{suggested}]: ")).await?;
+        let text = if answer.is_empty() {
+            &suggested
+        } else {
+            &answer
+        };
+        Some(grant.accept(text))
+    }
+}
+
+/// Writes the call `preview` shows, one line per command line or diff row.
+fn write_preview(out: &mut impl Write, preview: &ApprovalPreview) -> io::Result<()> {
+    writeln!(out, "{} needs approval:", shown(&preview.title))?;
+    match &preview.body {
+        ApprovalBody::Command(command) => {
+            for line in command.lines() {
+                writeln!(out, "  {}", shown(line))?;
+            }
+        }
+        ApprovalBody::Diff(chunks) => {
+            for chunk in chunks {
+                for line in &chunk.old {
+                    writeln!(out, "  - {}", shown(&line.text))?;
+                }
+                for line in &chunk.new {
+                    writeln!(out, "  + {}", shown(&line.text))?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `text` with control and zero-width characters escaped, so no part of a call can hide itself.
+fn shown(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c != '\t' && is_hidden(c) {
+                c.escape_default().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use indoc::indoc;
@@ -103,10 +246,41 @@ mod tests {
 
     use super::*;
     use crate::engine::testing::{
-        engine, mount_reply, request_bodies, stopped_engine, with_pinned_home,
+        engine, mount_reply, mount_tool_call_once, request_bodies, stopped_engine, with_pinned_home,
     };
+    use crate::permission::{GateTarget, PermissionClass, Policy};
     use crate::protocol::CapturingSink;
     use crate::session::store::testing::test_store;
+    use crate::tool::bash::BashTool;
+    use crate::tool::{DiffChunk, DiffLine, ToolRegistry};
+
+    fn bash_preview(command: &str) -> ApprovalPreview {
+        ApprovalPreview {
+            title: "Bash".to_owned(),
+            body: ApprovalBody::Command(command.to_owned()),
+        }
+    }
+
+    fn bash_grant(command: &str) -> SessionGrant {
+        Policy::default()
+            .session_grant(
+                PermissionClass::Bash,
+                &GateTarget::Command(command.to_owned()),
+            )
+            .unwrap()
+    }
+
+    /// Runs one `decide` over `input`, returning the decision and what the prompter wrote.
+    async fn decide(input: &str, grant: Option<&SessionGrant>) -> (Decision, String) {
+        let mut lines = input.as_bytes().lines();
+        let mut prompter = Prompter {
+            lines: &mut lines,
+            out: Vec::new(),
+            attended: true,
+        };
+        let decision = prompter.decide(&bash_preview("cargo test"), grant).await;
+        (decision, String::from_utf8(prompter.out).unwrap())
+    }
 
     // ── drive ──
 
@@ -120,7 +294,7 @@ mod tests {
             let sink = CapturingSink::new();
             let input: &[u8] = b"\n   \nhello\n";
 
-            let exit = Box::pin(drive(engine.spawn(&[]), &sink, input))
+            let exit = Box::pin(drive(engine.spawn(&[]), &sink, input, true))
                 .await
                 .unwrap();
 
@@ -159,6 +333,7 @@ mod tests {
                 engine.spawn(&[PathBuf::from("drifted.rs")]),
                 &sink,
                 input,
+                true,
             ))
             .await
             .unwrap();
@@ -195,11 +370,222 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn drive_answers_an_approval_from_the_next_input_line() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            mount_tool_call_once(&server, "call-1", "bash", r#"{"command":"ls"}"#).await;
+            mount_reply(&server, "Done.").await;
+            let dir = tempfile::tempdir().unwrap();
+            let engine = engine(server.uri(), &test_store(dir.path()), dir.path())
+                .await
+                .with_tools(ToolRegistry::new(vec![Box::new(BashTool)]));
+            let input = indoc! {"
+                list files
+                f
+                Use git ls-files.
+            "};
+
+            let exit = Box::pin(drive(
+                engine.spawn(&[]),
+                &CapturingSink::new(),
+                input.as_bytes(),
+                true,
+            ))
+            .await
+            .unwrap();
+
+            assert_eq!(exit, Exit::Success);
+            let requests = request_bodies(&server).await;
+            let result = &requests[1]["messages"].as_array().unwrap().last().unwrap()["content"][0];
+            assert_eq!(result["type"], "tool_result");
+            assert_eq!(
+                result["content"],
+                "The bash call was denied with this feedback: Use git ls-files.",
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn drive_without_a_terminal_denies_approvals_and_keeps_every_line_a_prompt() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            mount_tool_call_once(&server, "call-1", "bash", r#"{"command":"ls"}"#).await;
+            mount_reply(&server, "Done.").await;
+            let dir = tempfile::tempdir().unwrap();
+            let engine = engine(server.uri(), &test_store(dir.path()), dir.path())
+                .await
+                .with_tools(ToolRegistry::new(vec![Box::new(BashTool)]));
+            let input = indoc! {"
+                list files
+                y
+            "};
+
+            let exit = Box::pin(drive(
+                engine.spawn(&[]),
+                &CapturingSink::new(),
+                input.as_bytes(),
+                false,
+            ))
+            .await
+            .unwrap();
+
+            assert_eq!(exit, Exit::Success);
+            let requests = request_bodies(&server).await;
+            assert_eq!(requests.len(), 3, "the `y` line is the second prompt");
+            let result = &requests[1]["messages"].as_array().unwrap().last().unwrap()["content"][0];
+            let content = result["content"].as_str().unwrap();
+            assert!(
+                content.contains("This run cannot ask for approval."),
+                "{content}"
+            );
+            let last = requests[2]["messages"].as_array().unwrap().last().unwrap();
+            assert_eq!(last["content"][0]["text"], "y");
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn drive_fails_once_the_engine_stops() {
         let input: &[u8] = b"hello\n";
 
-        let result = Box::pin(drive(stopped_engine(), &CapturingSink::new(), input)).await;
+        let result = Box::pin(drive(stopped_engine(), &CapturingSink::new(), input, true)).await;
 
         assert_eq!(result.unwrap_err().to_string(), "the engine stopped");
+    }
+
+    // ── Prompter::decide ──
+
+    #[tokio::test]
+    async fn decide_maps_each_answer_to_its_decision() {
+        for (input, decision) in [
+            ("y\n", Decision::Approve),
+            (" YES \n", Decision::Approve),
+            ("n\n", Decision::Deny),
+            (
+                "f\nRun the unit tests only.\n",
+                Decision::DenyWithFeedback {
+                    feedback: "Run the unit tests only.".to_owned(),
+                },
+            ),
+            ("x\n", Decision::Abort),
+            ("f\n", Decision::Abort),
+            ("", Decision::Abort),
+        ] {
+            let (got, out) = decide(input, None).await;
+            assert_eq!(got, decision, "{input:?}");
+            assert!(
+                out.starts_with("Bash needs approval:\n  cargo test\n"),
+                "{out}"
+            );
+            assert!(out.contains(CHOICES), "{out}");
+        }
+    }
+
+    #[tokio::test]
+    async fn decide_asks_again_after_an_unknown_answer_or_empty_feedback() {
+        let input = indoc! {"
+            a
+            f
+
+            maybe
+            n
+        "};
+        let (decision, out) = decide(input, None).await;
+
+        assert_eq!(decision, Decision::Deny);
+        assert_eq!(out.matches(CHOICES).count(), 4, "{out}");
+        assert_eq!(
+            out.matches("Answer with one of the letters").count(),
+            2,
+            "{out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn decide_allows_the_suggested_or_an_edited_rule_for_the_session() {
+        let grant = bash_grant("cargo test");
+        let allowed = |rule: &str| Decision::AllowForSession {
+            rule: Box::new(Rule::parse(rule).unwrap()),
+        };
+
+        let (decision, out) = decide("a\n\n", Some(&grant)).await;
+        assert_eq!(decision, allowed("bash(cargo test)"));
+        assert!(out.contains(GRANT_CHOICES), "{out}");
+        assert!(out.contains("Rule to allow [bash(cargo test)]: "), "{out}");
+
+        let input = indoc! {"
+            a
+            bash(cargo build)
+            a
+            bash(cargo test:*)
+        "};
+        let (decision, out) = decide(input, Some(&grant)).await;
+        assert_eq!(decision, allowed("bash(cargo test:*)"));
+        let (rejected, retried) = out
+            .split_once("the rule no longer covers this call")
+            .unwrap();
+        assert_eq!(rejected.matches(GRANT_CHOICES).count(), 1, "{out}");
+        assert_eq!(
+            retried.matches(GRANT_CHOICES).count(),
+            1,
+            "a rejected rule returns to the choices: {out}"
+        );
+
+        let (decision, _) = decide("a\n", Some(&grant)).await;
+        assert_eq!(
+            decision,
+            Decision::Abort,
+            "the input ending mid-rule aborts"
+        );
+    }
+
+    #[tokio::test]
+    async fn decide_aborts_saying_why_when_the_input_cannot_be_read() {
+        let mut lines = (&b"\xff\n"[..]).lines();
+        let mut prompter = Prompter {
+            lines: &mut lines,
+            out: Vec::new(),
+            attended: true,
+        };
+
+        let decision = prompter.decide(&bash_preview("ls"), None).await;
+
+        assert_eq!(decision, Decision::Abort);
+        let out = String::from_utf8(prompter.out).unwrap();
+        assert!(out.contains("Could not read the answer: "), "{out}");
+    }
+
+    // ── write_preview ──
+
+    #[test]
+    fn write_preview_lists_diff_rows_and_escapes_hidden_characters() {
+        let mut out = Vec::new();
+        write_preview(
+            &mut out,
+            &ApprovalPreview {
+                title: "Edit(src/a.rs)".to_owned(),
+                body: ApprovalBody::Diff(vec![DiffChunk {
+                    old: vec![DiffLine {
+                        number: 3,
+                        text: "let a = 1;".to_owned(),
+                    }],
+                    new: vec![DiffLine {
+                        number: 3,
+                        text: "let a = 2;\u{1b}[2K\u{200b}".to_owned(),
+                    }],
+                }]),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            indoc! {r"
+                Edit(src/a.rs) needs approval:
+                  - let a = 1;
+                  + let a = 2;\u{1b}[2K\u{200b}
+            "},
+        );
     }
 }
