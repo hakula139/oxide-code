@@ -183,6 +183,17 @@ impl<'a> Stack<'a> {
         self.push(&BLANK);
     }
 
+    /// Stacks live rows a blank row below any content above them.
+    pub(super) fn push_separated(&mut self, lines: &'a [Line<'static>]) {
+        if lines.is_empty() {
+            return;
+        }
+        if self.last_has_width() {
+            self.push_blank();
+        }
+        self.push(lines);
+    }
+
     /// Whether the bottom row has visible width, so the next block needs a separator.
     pub(super) fn last_has_width(&self) -> bool {
         self.runs.last().is_some_and(|run| last_has_width(run))

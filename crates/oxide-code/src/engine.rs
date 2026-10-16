@@ -361,6 +361,7 @@ impl Engine {
                 &tools,
                 &self.messages,
                 instructions.as_deref(),
+                sink,
                 &mut spent,
             ),
             ops,
@@ -803,7 +804,7 @@ fn format_drift_warning(drifted: &[PathBuf]) -> String {
 mod tests {
     use std::time::Duration;
 
-    use indoc::indoc;
+    use indoc::{formatdoc, indoc};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use wiremock::matchers::{body_partial_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -814,7 +815,8 @@ mod tests {
     };
     use super::*;
     use crate::client::anthropic::testing::{
-        api_key, completion_body, sse_response, test_client, test_config, text_stream_body,
+        api_key, completion_body, sse_body, sse_response, test_client, test_config,
+        text_stream_body,
     };
     use crate::config::{AutoCompactionConfig, CompactionConfig, PromptCacheTtl};
     use crate::file_tracker::testing::seed_full_read;
@@ -1929,6 +1931,7 @@ mod tests {
             assert!(engine.prompt_unrecorded);
             let events = sink.events();
             let [
+                Event::SummaryToken(streamed),
                 Event::SessionCompacted {
                     automatic: false,
                     instructions: Some(focus),
@@ -1937,8 +1940,9 @@ mod tests {
                 Event::UsageUpdated(usage),
             ] = events.as_slice()
             else {
-                panic!("expected the compaction, then its cost: {events:?}");
+                panic!("expected the streamed summary, the compaction, then its cost: {events:?}");
             };
+            assert_eq!(streamed, "manual summary");
             assert_eq!(focus, "focus");
             assert_eq!(usage.context_tokens, None);
             assert!((usage.estimated_cost_usd.unwrap() - (1.23 + 0.006)).abs() < 1e-12);
@@ -1983,7 +1987,9 @@ mod tests {
                     [
                         Event::TurnFailed(short),
                         Event::Cancelled,
+                        Event::SummaryToken(_),
                         Event::Error(usage_write),
+                        Event::SummaryDiscarded,
                         Event::Error(boundary_write),
                         Event::UsageUpdated(UsageSnapshot {
                             context_tokens: None,
@@ -2001,6 +2007,73 @@ mod tests {
             );
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn compact_cancelled_mid_summary_discards_it_before_the_cancel() {
+        with_pinned_home(async {
+            let base_url = serve_stalled_summary("partial").await;
+            let dir = tempfile::tempdir().unwrap();
+            let mut engine = engine(base_url, &test_store(dir.path()), dir.path()).await;
+            engine.messages = transcript();
+            let sink = CapturingSink::new();
+            let (ops_tx, mut ops) = mpsc::channel(1);
+            let interrupt_once_streaming = async {
+                while sink.events().is_empty() {
+                    tokio::task::yield_now().await;
+                }
+                ops_tx.send(Op::Interrupt).await.unwrap();
+            };
+
+            let (end, ()) = tokio::join!(
+                engine.compact(&sink, &mut ops, None),
+                interrupt_once_streaming,
+            );
+
+            assert_eq!(end, TurnEnd::Cancelled);
+            assert_eq!(engine.messages.len(), 4);
+            let events = sink.events();
+            assert!(
+                matches!(
+                    events.as_slice(),
+                    [
+                        Event::SummaryToken(partial),
+                        Event::SummaryDiscarded,
+                        Event::UsageUpdated(_),
+                        Event::Cancelled,
+                    ] if partial == "partial"
+                ),
+                "{events:?}",
+            );
+        })
+        .await;
+    }
+
+    /// Serves one summary that streams `text` and then stalls with the connection open. Returns
+    /// the base URL.
+    async fn serve_stalled_summary(text: &str) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let body = sse_body(&[
+            serde_json::json!({"type": "message_start", "message": {"id": "msg_1", "model": MODEL, "usage": {"input_tokens": 1_000, "output_tokens": 0}}}),
+            serde_json::json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+            serde_json::json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": text}}),
+        ]);
+        let response = formatdoc! {"
+            HTTP/1.1 200 OK\r
+            content-type: text/event-stream\r
+            content-length: {declared}\r
+            \r
+            {body}",
+            declared = body.len() + 1,
+        };
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            _ = socket.read(&mut [0; 1024]).await.unwrap();
+            socket.write_all(response.as_bytes()).await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        base_url
     }
 
     #[tokio::test]
@@ -2034,9 +2107,18 @@ mod tests {
                 engine.total_estimated_cost_usd,
             );
             let events = sink.events();
-            let [Event::UsageUpdated(usage), Event::TurnFailed(msg)] = events.as_slice() else {
-                panic!("expected the cost update before the failure: {events:?}");
+            let [
+                Event::SummaryToken(partial),
+                Event::SummaryDiscarded,
+                Event::UsageUpdated(usage),
+                Event::TurnFailed(msg),
+            ] = events.as_slice()
+            else {
+                panic!(
+                    "expected the discarded summary and its cost before the failure: {events:?}"
+                );
             };
+            assert_eq!(partial, "partial");
             assert_eq!(usage.context_tokens, Some(50_000));
             assert!((usage.estimated_cost_usd.unwrap() - expected).abs() < 1e-12);
             assert!(

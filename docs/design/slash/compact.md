@@ -10,7 +10,8 @@ Companions: [commands.md](commands.md), [session/persistence.md](../session/pers
 
 `agent/compaction` owns the summarization request:
 
-- `compact_session` forks the live conversation. It sends the conversation's own system prompt, user context, tools, and transcript, appends the rubric as the last user message, and reads the reply through the agent loop's `collect_response` with a sink that discards the tokens.
+- `compact_session` forks the live conversation. It sends the conversation's own system prompt, user context, tools, and transcript, appends the rubric as the last user message, and reads the reply through the agent loop's `collect_response`.
+- Its `SummaryStream` sink forwards the reply's text as `Event::SummaryToken`, passes retry notices through, and drops its thinking. A retry, a failure, or a dropped future emits `Event::SummaryDiscarded` when any text has streamed.
 - A request the API rejects with HTTP 400 `prompt is too long`, or a reply that stops on `model_context_window_exceeded`, gets up to three retries. Each retry copies the transcript without thinking blocks and drops its oldest API rounds until it frees the overflow the error reports plus about 20k tokens of output room for the summary.
 - It rejects a reply cut short by `max_tokens`, a refusal, a tool call, a truncated stream, or an overflow that outlasts the retries or leaves only the newest round, and otherwise returns the trimmed summary.
 - The driver is its own module so the request shape is testable in isolation.
@@ -26,11 +27,11 @@ Companions: [commands.md](commands.md), [session/persistence.md](../session/pers
 `Engine::compact` in `engine.rs` coordinates compaction:
 
 - On success, it hands the summary to `agent/compact_boundary`'s `replace_session_with_summary`, which calls `session.compact(...)`, clears the file tracker, replaces the in-memory `Vec<Message>` with the synthetic continuation, and emits `Event::SessionCompacted { summary, pre_count, instructions, automatic }` with `automatic: false`.
-- Failure paths (stream error, unfinished or empty summary, too-few-messages guard) emit `Event::TurnFailed` and leave the transcript unchanged.
-- Cancellation routes through the existing cancel infrastructure and emits `Event::Cancelled` like a regular turn, and a quit ends the compaction without a terminal event.
+- Failure paths (stream error, unfinished or empty summary, too-few-messages guard) emit `Event::TurnFailed` and leave the transcript unchanged. A summary whose boundary write fails is discarded before the failure is reported.
+- Cancellation routes through the existing cancel infrastructure and emits `Event::Cancelled` like a regular turn, and a quit ends the compaction without a terminal event. Dropping the summarization future discards the streamed summary first.
 - Each summary request is recorded as a `usage` entry, and its estimated cost joins the session total whether the summary succeeds, fails, or is cancelled. An `Event::UsageUpdated` then shows the new total, after `SessionCompacted` on success and before the terminal event otherwise.
 
-The TUI's `App::apply_session_compacted` clears the chat, pushes a single `CompactedBlock` with a count header and markdown summary body, keeps queued prompts for the normal idle drain, clears the modal stack, and resumes idle after a manual compact. Resume renders the same boundary block and skips the synthetic root in visible chat.
+While the summary streams, the TUI shows it below the chat under a `Summarizing the conversation...` header, laid out like the `CompactedBlock` it becomes, and `Event::SummaryDiscarded` removes it. `App::apply_session_compacted` clears the chat, pushes a single `CompactedBlock` with a count header and markdown summary body, keeps queued prompts for the normal idle drain, clears the modal stack, and resumes idle after a manual compact. Resume renders the same boundary block and skips the synthetic root in visible chat.
 
 ## Design Decisions
 
@@ -61,7 +62,7 @@ The TUI's `App::apply_session_compacted` clears the chat, pushes a single `Compa
 
 11. **Keep queued prompts.** Unlike `/resume` (queued prompts belong to the source thread and get dropped), `/compact` _preserves_ the user's intent. Queued prompts continue to make sense after compaction, and dropping them would surprise the user. `/clear` also keeps queued prompts, though it starts a new session.
 
-12. **Render the summary once it completes.** The spinner runs during compaction, then `Event::SessionCompacted` arrives once with the full summary. Streaming the summary is tracked in [#186](https://github.com/hakula139/oxide-code/issues/186).
+12. **Stream the summary as it generates.** A long session's summary can take tens of seconds, and streaming it shows progress and lets the user judge it early. The engine streams the text and decides its fate, so every frontend sees one protocol: `SummaryToken` chunks end in `SessionCompacted` or `SummaryDiscarded`. A discard precedes the event that reports a failure or cancellation, and a retry discards before streaming again, so a frontend never shows two attempts at once. The stdio frontends skip the stream and keep their one-line boundary notice.
 
 13. **Refuse mid-turn (`classify = Mutating`).** All three reference CLIs treat manual compaction as a between-turns operation. `Mutating` is the existing oxide-code lever for that. The slash registry refuses if a turn is in flight, and the user retries after the in-flight reply finishes.
 
@@ -83,9 +84,11 @@ The TUI's `App::apply_session_compacted` clears the chat, pushes a single `Compa
 
 - **`Op::Compact { instructions }`**: `Option<String>`. Empty or whitespace input becomes `None` at the slash boundary so `Engine::compact` doesn't repeat the trim.
 
+- **`Event::SummaryToken(text)`**, **`Event::SummaryDiscarded`**: The summary in flight and its discard. Manual and automatic compaction emit both, and the TUI renders the stream below the chat with `CompactedBlock::render_streaming`.
+
 - **`Event::SessionCompacted { summary, pre_count, instructions, automatic }`**: Emitted post-success. `summary` is the rendered body, `pre_count` is for the count header, `instructions` becomes the header's `(focus: ...)` suffix, and `automatic` is false for `/compact` and true for auto-compaction. The TUI repaints from it, and `StdioSink` prints a `Compacted N messages into summary` line to stderr (`Auto-compacted` when automatic).
 
-- **`agent::compaction::compact_session`**: Async fn taking the client, the conversation's `PromptParts` and tool definitions, the transcript, optional instructions, and a `&mut Vec<TokenUsage>` that receives the usage of every request it sends, even when the summary fails or the caller drops the future. Returns the trimmed summary or an error.
+- **`agent::compaction::compact_session`**: Async fn taking the client, the conversation's `PromptParts` and tool definitions, the transcript, optional instructions, the event sink the summary streams to, and a `&mut Vec<TokenUsage>` that receives the usage of every request it sends, even when the summary fails or the caller drops the future. Returns the trimmed summary or an error.
 
 - **`SUMMARIZATION_USER_RUBRIC`**, **`SUMMARY_PREFIX`**: Two `&'static str` constants. The rubric is the terse list (intent, decisions, code paths touched, current state, next step) and ends by asking for text only. The prefix is the next-turn framing prepended to the synthetic message.
 
@@ -97,7 +100,7 @@ The TUI's `App::apply_session_compacted` clears the chat, pushes a single `Compa
 
 - **`session::handle::compact`**: Async API. Sends `SessionCmd::Compact`, awaits the ack, and returns `CompactOutcome { pre_count, failure }`. Like `archive`, it reports a failure whenever the command or its ack cannot reach the writer task. The caller clears the file tracker only after the boundary flush succeeds.
 
-- **`CompactedBlock`**: Chat block with an accent-bar surface, a `Compacted N messages → 1 summary.` header (with a `(focus: ...)` suffix when instructions were given), and the rendered summary markdown body. No footer. Reuses the existing markdown renderer.
+- **`CompactedBlock`**: Chat block with an accent-bar surface, a `Compacted N messages → 1 summary.` header (with a `(focus: ...)` suffix when instructions were given), and the rendered summary markdown body. No footer. Reuses the existing markdown renderer. `CompactedBlock::render_streaming` renders the summary in flight under a `Summarizing the conversation...` header.
 
 - **`apply_session_compacted` (TUI)**: Clears the chat, pushes a single `CompactedBlock`, keeps queued prompts for the normal idle drain, clears the modal stack, and resumes idle unless the compaction was automatic.
 
@@ -119,11 +122,11 @@ A `pre_compact` hook is tracked in [#168](https://github.com/hakula139/oxide-cod
 
 - `crates/oxide-code/src/agent.rs`: `await_unless_aborted` races the summarization against cancel and quit, and `collect_response` reads its reply the way it reads a turn's.
 - `crates/oxide-code/src/agent/compact_boundary.rs`: `replace_session_with_summary`, shared by manual and automatic compaction.
-- `crates/oxide-code/src/agent/compaction.rs`: `compact_session` driver, the context-window retries (`drop_oldest_rounds`, `retry_request`), and the `SUMMARIZATION_USER_RUBRIC` / `SUMMARY_PREFIX` constants.
+- `crates/oxide-code/src/agent/compaction.rs`: `compact_session` driver, the `SummaryStream` sink, the context-window retries (`drop_oldest_rounds`, `retry_request`), and the `SUMMARIZATION_USER_RUBRIC` / `SUMMARY_PREFIX` constants.
 - `crates/oxide-code/src/client.rs`: `PromptTooLong`, the wire-neutral rejection that carries the reported overflow.
 - `crates/oxide-code/src/client/anthropic/transport.rs`: `prompt_too_long_message`, which types an HTTP 400 `prompt is too long` as `PromptTooLong`.
 - `crates/oxide-code/src/engine.rs`: `Engine::compact` beside `Engine::resume`, and session-cost accounting.
-- `crates/oxide-code/src/protocol.rs`: `Op::Compact`, `Event::SessionCompacted`.
+- `crates/oxide-code/src/protocol.rs`: `Op::Compact`, `Event::SummaryToken`, `Event::SummaryDiscarded`, `Event::SessionCompacted`.
 - `crates/oxide-code/src/session/actor.rs`: `SessionCmd::Compact` handler.
 - `crates/oxide-code/src/session/entry.rs`: `Entry::Compact` variant.
 - `crates/oxide-code/src/session/handle.rs`: `SessionHandle::compact`, `CompactOutcome`.
@@ -132,4 +135,5 @@ A `pre_compact` hook is tracked in [#168](https://github.com/hakula139/oxide-cod
 - `crates/oxide-code/src/slash/compact.rs`: `CompactCmd`.
 - `crates/oxide-code/src/slash/registry.rs`: `BUILT_INS` entry `&CompactCmd`.
 - `crates/oxide-code/src/tui/app.rs`: `apply_session_compacted`.
+- `crates/oxide-code/src/tui/components/chat.rs`: `ChatView::append_summary_token` and `ChatView::discard_summary`.
 - `crates/oxide-code/src/tui/components/chat/blocks/compacted.rs`: `CompactedBlock`.

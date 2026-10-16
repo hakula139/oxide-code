@@ -6,7 +6,8 @@ use crate::message::Message;
 use crate::protocol::{Event, EventSink};
 use crate::session::handle::SessionHandle;
 
-/// Persists a compact boundary and swaps the live transcript to the synthetic summary root.
+/// Persists a compact boundary and swaps the live transcript to the synthetic summary root. A
+/// failed write discards the streamed summary and leaves the transcript unchanged.
 pub(crate) async fn replace_session_with_summary(
     session: &SessionHandle,
     file_tracker: &FileTracker,
@@ -20,8 +21,9 @@ pub(crate) async fn replace_session_with_summary(
     let outcome = session
         .compact(summary.clone(), instructions.clone(), synthetic.clone())
         .await;
-    sink.session_write_error(outcome.failure.as_deref());
-    if outcome.failure.is_some() {
+    if let Some(failure) = outcome.failure.as_deref() {
+        sink.emit(Event::SummaryDiscarded, "summary-discarded");
+        sink.session_write_error(Some(failure));
         return false;
     }
 
@@ -120,10 +122,14 @@ mod tests {
             matches!(&messages[3].content[0], ContentBlock::Text { text } if text == "found it")
         );
         assert_eq!(tracker.snapshot_all().len(), 1);
+        let events = sink.events();
         assert!(
-            sink.events()
-                .iter()
-                .any(|event| matches!(event, Event::Error(message) if message.contains("Session write failed")))
+            matches!(
+                events.as_slice(),
+                [Event::SummaryDiscarded, Event::Error(message)]
+                    if message.contains("Session write failed")
+            ),
+            "the unsaved summary is discarded before the write error: {events:?}",
         );
     }
 

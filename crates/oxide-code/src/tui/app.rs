@@ -519,6 +519,8 @@ impl App {
                 self.set_active_status(Status::Compacting);
                 self.input.set_enabled(false);
             }
+            Event::SummaryToken(token) => self.chat.append_summary_token(&token),
+            Event::SummaryDiscarded => self.chat.discard_summary(),
             Event::SessionTitleUpdated { session_id, title } => {
                 if session_id == self.session_info.session_id {
                     self.status_bar.set_title(Some(title));
@@ -4009,6 +4011,71 @@ mod tests {
         app.dispatch_action(Action::Submit("working...".into()));
         app.handle_engine_event(Event::StreamToken("part".into()));
         insta::assert_snapshot!(render_app(&mut app, 60, 8));
+    }
+
+    const COMPACT_SUMMARY: &str = indoc::indoc! {"
+        ## Recap
+
+        - Fixed the token refresh in the login flow.
+        - Next: add a regression test.
+    "};
+
+    /// An app running `/compact` after a short exchange, with the summary streamed up to its last
+    /// bullet.
+    fn app_streaming_a_summary() -> (App, mpsc::Receiver<Op>, mpsc::UnboundedSender<Event>) {
+        let (mut app, rx, event_tx) = test_app(None);
+        app.chat.push_user_message("Fix the login bug.".to_owned());
+        app.chat.append_stream_token("Fixed the token refresh.");
+        app.chat.commit_streaming();
+        app.dispatch_action(Action::Submit("/compact".to_owned()));
+        let streamed = &COMPACT_SUMMARY[..COMPACT_SUMMARY.find("- Next").unwrap()];
+        app.handle_engine_event(Event::SummaryToken(streamed.to_owned()));
+        (app, rx, event_tx)
+    }
+
+    #[test]
+    fn draw_frame_compaction_streams_the_summary_below_the_chat() {
+        let (mut app, _rx, _event_tx) = app_streaming_a_summary();
+        insta::assert_snapshot!(render_app(&mut app, 60, 16));
+    }
+
+    #[test]
+    fn draw_frame_compaction_success_leaves_only_the_compacted_summary() {
+        let (mut app, _rx, _event_tx) = app_streaming_a_summary();
+        app.handle_engine_event(Event::SessionCompacted {
+            summary: COMPACT_SUMMARY.trim().to_owned(),
+            pre_count: 3,
+            instructions: None,
+            automatic: false,
+        });
+        insta::assert_snapshot!(render_app(&mut app, 60, 16));
+    }
+
+    #[test]
+    fn draw_frame_compaction_cancel_drops_the_partial_summary() {
+        let (mut app, _rx, _event_tx) = app_streaming_a_summary();
+        app.handle_engine_event(Event::SummaryDiscarded);
+        app.handle_engine_event(Event::Cancelled);
+        insta::assert_snapshot!(render_app(&mut app, 60, 16));
+    }
+
+    #[test]
+    fn draw_frame_compaction_failure_drops_the_partial_summary_and_shows_the_error() {
+        let (mut app, _rx, _event_tx) = app_streaming_a_summary();
+        app.handle_engine_event(Event::SummaryDiscarded);
+        app.handle_engine_event(Event::TurnFailed(
+            "Compaction failed: the summary hit the max_tokens output limit before it finished"
+                .to_owned(),
+        ));
+
+        let text = rendered_text(&mut app, 60, 16);
+        assert!(
+            text.contains("Compaction failed: the summary hit the max_tokens"),
+            "{text}"
+        );
+        assert!(!text.contains("Summarizing"), "{text}");
+        assert!(!text.contains("Recap"), "{text}");
+        assert!(text.contains("Fixed the token refresh."), "{text}");
     }
 
     #[test]
