@@ -352,8 +352,19 @@ mod tests {
 
     #[test]
     fn format_diff_tracked_only_renders_verbatim() {
-        let body = format_diff("diff --git a/x b/x\n+foo\n", "");
-        assert_eq!(body, "diff --git a/x b/x\n+foo");
+        let body = format_diff(
+            indoc! {"
+                diff --git a/x b/x
+                +foo
+            "},
+            "",
+        );
+        assert_eq!(
+            body,
+            indoc! {"
+                diff --git a/x b/x
+                +foo"}
+        );
     }
 
     #[test]
@@ -377,7 +388,13 @@ mod tests {
 
     #[test]
     fn format_diff_combined_separates_with_blank_line() {
-        let body = format_diff("diff --git a/x b/x\n+foo\n", "new.rs\n");
+        let body = format_diff(
+            indoc! {"
+                diff --git a/x b/x
+                +foo
+            "},
+            "new.rs\n",
+        );
         assert_eq!(
             body,
             indoc! {"
@@ -448,7 +465,14 @@ mod tests {
 
         let body = run_git_diff_in(&repo, &["HEAD"]).unwrap();
         assert!(body.starts_with("diff --git a/a.txt b/a.txt\n"), "{body}");
-        assert!(body.contains("\n--- a/a.txt\n+++ b/a.txt\n"), "{body}");
+        assert!(
+            body.contains(indoc! {"
+
+                --- a/a.txt
+                +++ b/a.txt
+            "}),
+            "{body}"
+        );
         assert!(!body.contains('\x1b'), "{body:?}");
     }
 

@@ -175,6 +175,8 @@ fn flush_text(out: &mut Vec<Interaction>, text_buf: &mut String, role: Role) {
 
 #[cfg(test)]
 mod tests {
+    use indoc::indoc;
+
     use super::*;
     use crate::agent::compaction::synthesize_post_compact_message;
     use crate::file_tracker::testing::tracker;
@@ -362,7 +364,10 @@ mod tests {
 
     #[test]
     fn walk_transcript_drops_context_reminders_from_user_prompts() {
-        let reminder = "<system-reminder>\nToday's date is 2026-04-13.\n</system-reminder>";
+        let reminder = indoc! {"
+            <system-reminder>
+            Today's date is 2026-04-13.
+            </system-reminder>"};
         let messages = [
             Message {
                 role: Role::User,

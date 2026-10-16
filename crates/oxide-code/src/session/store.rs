@@ -1668,11 +1668,9 @@ mod tests {
         let store = test_store(dir.path());
         let created_at = datetime!(2026-01-01 00:00:00 UTC);
         let path = test_project_path(dir.path(), &session_filename("nonewline", created_at));
-        let content = concat!(
-            r#"{"type":"header","session_id":"nonewline","cwd":"/","model":"m","created_at":"2026-01-01T00:00:00Z","version":1}"#,
-            "\n",
-            r#"{"type":"message","uuid":"a1b2c3d4-e5f6-7890-abcd-1234567890ef","message":{"role":"user","content":[{"type":"text","text":"ok"}]},"timestamp":"2026-01-01T00:00:01Z"}"#,
-        );
+        let content = indoc! {r#"
+            {"type":"header","session_id":"nonewline","cwd":"/","model":"m","created_at":"2026-01-01T00:00:00Z","version":1}
+            {"type":"message","uuid":"a1b2c3d4-e5f6-7890-abcd-1234567890ef","message":{"role":"user","content":[{"type":"text","text":"ok"}]},"timestamp":"2026-01-01T00:00:01Z"}"#};
         fs::write(&path, content).unwrap();
 
         let data = store.load_session_data("nonewline").unwrap();

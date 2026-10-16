@@ -398,7 +398,13 @@ mod tests {
         let result = read_file(path.to_str().unwrap(), None, None, &FileTracker::default())
             .await
             .unwrap();
-        assert_eq!(result, "1\talpha\n2\tbeta\n3\tgamma");
+        assert_eq!(
+            result,
+            indoc! {"
+                1\talpha
+                2\tbeta
+                3\tgamma"}
+        );
     }
 
     #[tokio::test]
@@ -425,7 +431,14 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(result, "2\tb\n3\tc\n\n(Showing lines 2–3 of 5 total)");
+        assert_eq!(
+            result,
+            indoc! {"
+                2\tb
+                3\tc
+
+                (Showing lines 2–3 of 5 total)"}
+        );
     }
 
     #[tokio::test]

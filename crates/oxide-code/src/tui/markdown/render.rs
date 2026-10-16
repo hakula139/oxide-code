@@ -1211,7 +1211,13 @@ mod tests {
 
     #[test]
     fn fenced_code_block_expands_tabs_to_stops() {
-        let lines = rendered_text("```go\nfunc f() {\n\treturn\n}\n```\n");
+        let lines = rendered_text(indoc! {"
+            ```go
+            func f() {
+            \treturn
+            }
+            ```
+        "});
         assert_eq!(lines, ["func f() {", "    return", "}"]);
     }
 

@@ -5,6 +5,7 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
+use indoc::formatdoc;
 use serde::Deserialize;
 
 use super::{
@@ -528,8 +529,11 @@ fn format_files_with_matches(
     let num_files = matching_files.len();
     let file_word = if num_files == 1 { "file" } else { "files" };
 
-    let mut output = format!("Found {num_files} {file_word}\n");
-    output.push_str(&matching_files.join("\n"));
+    let mut output = formatdoc! {"
+        Found {num_files} {file_word}
+        {files}",
+        files = matching_files.join("\n"),
+    };
 
     if truncated {
         _ = write!(output, "\n\n(Results limited to {head_limit} files)");
@@ -774,7 +778,10 @@ mod tests {
 
     #[test]
     fn grep_title_summary_modes_reuse_the_found_line() {
-        let count = "Found 3 total occurrences across 2 files\na.rs:2\nb.rs:1";
+        let count = indoc! {"
+            Found 3 total occurrences across 2 files
+            a.rs:2
+            b.rs:1"};
         assert_eq!(
             grep_title(count),
             "Found 3 total occurrences across 2 files"
@@ -1096,14 +1103,20 @@ mod tests {
         p.read_deny = policy.read_deny();
         assert_eq!(
             grep_files(&p).unwrap(),
-            "a.rs:1:TOKEN=public\n\n(1 file withheld by read deny rules)"
+            indoc! {"
+                a.rs:1:TOKEN=public
+
+                (1 file withheld by read deny rules)"}
         );
 
         p.pattern = "secret";
         let result = grep_files(&p).unwrap();
         assert_eq!(
             result,
-            "No matches found\n\n(1 file withheld by read deny rules)"
+            indoc! {"
+                No matches found
+
+                (1 file withheld by read deny rules)"}
         );
         let title = grep_title(crate::tool::strip_withheld_note(&result));
         assert_eq!(title, "No matches found");
@@ -1131,10 +1144,12 @@ mod tests {
         p.read_deny = policy.read_deny();
         assert_eq!(
             grep_files(&p).unwrap(),
-            format!(
-                "{}:1:TOKEN=public\n\n(1 file withheld by read deny rules)",
+            formatdoc! {"
+                {}:1:TOKEN=public
+
+                (1 file withheld by read deny rules)",
                 outside.join("app.toml").display()
-            )
+            }
         );
     }
 
@@ -1214,7 +1229,11 @@ mod tests {
         p.head_limit = Some(3);
         let result = grep_files(&p).unwrap();
         assert_eq!(
-            result, "test.txt:1:match\ntest.txt:2:match\ntest.txt:3:match",
+            result,
+            indoc! {"
+                test.txt:1:match
+                test.txt:2:match
+                test.txt:3:match"},
             "no further match was dropped, so no limit footer",
         );
     }

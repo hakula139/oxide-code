@@ -140,6 +140,8 @@ impl EventSink for StdioSink {
 
 #[cfg(test)]
 mod tests {
+    use indoc::indoc;
+
     use super::*;
     use crate::config::{AutoCompactionConfig, Effort};
     use crate::model::ModelSpec;
@@ -265,7 +267,15 @@ mod tests {
             &test_sink(false),
             Event::ToolCallEnd(text_result("t1", "file1\nfile2\n", false, Some("Listed"))),
         );
-        assert_eq!(stderr, "  Listed\nfile1\nfile2\n\n");
+        assert_eq!(
+            stderr,
+            indoc! {"
+                  Listed
+                file1
+                file2
+
+            "}
+        );
     }
 
     #[test]

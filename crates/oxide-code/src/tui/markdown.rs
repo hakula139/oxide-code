@@ -90,7 +90,12 @@ mod tests {
 
     #[test]
     fn complete_blocks_len_ends_at_last_block_start() {
-        let input = "para one\n\npara two\n\n- tail";
+        let input = indoc! {"
+            para one
+
+            para two
+
+            - tail"};
         assert_eq!(complete_blocks_len(input), "para one\n\npara two\n\n".len());
     }
 
@@ -116,12 +121,23 @@ mod tests {
 
     #[test]
     fn complete_blocks_len_keeps_loose_list_items_together() {
-        assert_eq!(complete_blocks_len("- a\n\n- b\n\n  more"), 0);
+        assert_eq!(
+            complete_blocks_len(indoc! {"
+                - a
+
+                - b
+
+                  more"}),
+            0
+        );
     }
 
     #[test]
     fn complete_blocks_len_snaps_indented_block_to_line_start() {
-        let input = "para\n\n    indented code";
+        let input = indoc! {"
+            para
+
+                indented code"};
         assert_eq!(complete_blocks_len(input), "para\n\n".len());
     }
 
