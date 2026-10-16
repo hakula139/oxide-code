@@ -5,20 +5,16 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
-use super::super::actor::SessionCmd;
 use super::{CompactOutcome, Outcome, RecordOutcome, SessionHandle, SharedState};
+use crate::session::actor::SessionCmd;
 
 /// Handle whose actor channel is already closed — every write surfaces actor-gone immediately,
 /// so failure surfacing can be asserted without a real actor.
 pub(crate) fn dead(session_id: &str) -> SessionHandle {
     let (cmd_tx, _) = mpsc::channel(1);
-    SessionHandle {
-        cmd_tx,
-        session_id: Arc::from(session_id),
-        shared: Arc::new(SharedState::default()),
-        actor_join: Arc::new(std::sync::Mutex::new(None)),
-    }
+    handle(session_id, cmd_tx, None)
 }
 
 /// Stand-in actor that fails every `AppendAiTitle` ack with `message` — exercises the
@@ -38,12 +34,7 @@ pub(crate) fn acks_append_ai_title_with_failure(
         }
     });
 
-    SessionHandle {
-        cmd_tx,
-        session_id: Arc::from(session_id),
-        shared: Arc::new(SharedState::default()),
-        actor_join: Arc::new(std::sync::Mutex::new(Some(join))),
-    }
+    handle(session_id, cmd_tx, Some(join))
 }
 
 /// Stand-in actor that acks the first `succeed` non-Shutdown cmds, then drops cmds without
@@ -91,10 +82,18 @@ pub(crate) fn acks_then_drops(session_id: &str, succeed: usize) -> SessionHandle
         }
     });
 
+    handle(session_id, cmd_tx, Some(join))
+}
+
+fn handle(
+    session_id: &str,
+    cmd_tx: mpsc::Sender<SessionCmd>,
+    join: Option<JoinHandle<()>>,
+) -> SessionHandle {
     SessionHandle {
         cmd_tx,
         session_id: Arc::from(session_id),
         shared: Arc::new(SharedState::default()),
-        actor_join: Arc::new(std::sync::Mutex::new(Some(join))),
+        actor_join: Arc::new(std::sync::Mutex::new(join)),
     }
 }

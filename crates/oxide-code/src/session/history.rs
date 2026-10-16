@@ -5,11 +5,11 @@
 
 use std::collections::HashMap;
 
+use super::entry::CompactInfo;
 use crate::agent::compaction::strip_synthetic_post_compact_prefix;
 use crate::message::{ContentBlock, Message, Role, progress_update_before};
 use crate::prompt::is_system_reminder;
 use crate::protocol::{Interaction, ToolCall, ToolResult};
-use crate::session::entry::CompactInfo;
 use crate::tool::{ToolMetadata, ToolRegistry, ToolResultView};
 
 /// Projects a resumed transcript for display, opening with its compaction boundary when `compact`
@@ -55,7 +55,7 @@ fn walk_transcript(
     tool_metadata: &HashMap<String, ToolMetadata>,
     tools: &ToolRegistry,
 ) -> Vec<Interaction> {
-    let mut pairs: HashMap<&str, (&str, bool)> = messages
+    let pairs: HashMap<&str, (&str, bool)> = messages
         .iter()
         .flat_map(|m| m.content.iter())
         .filter_map(|b| match b {
@@ -68,8 +68,27 @@ fn walk_transcript(
         })
         .collect();
 
-    let mut out = Vec::new();
-    for msg in messages {
+    let mut walker = TranscriptWalker {
+        tools,
+        tool_metadata,
+        pairs,
+        out: Vec::new(),
+    };
+    for message in messages {
+        walker.push_message(message);
+    }
+    walker.out
+}
+
+struct TranscriptWalker<'a> {
+    tools: &'a ToolRegistry,
+    tool_metadata: &'a HashMap<String, ToolMetadata>,
+    pairs: HashMap<&'a str, (&'a str, bool)>,
+    out: Vec<Interaction>,
+}
+
+impl TranscriptWalker<'_> {
+    fn push_message(&mut self, msg: &Message) {
         let mut text_buf = String::new();
         for (index, block) in msg.content.iter().enumerate() {
             match block {
@@ -83,27 +102,20 @@ fn walk_transcript(
                 }
                 ContentBlock::ToolUse { id, name, input }
                 | ContentBlock::ServerToolUse { id, name, input } => {
-                    flush_text(&mut out, &mut text_buf, msg.role);
+                    self.flush_text(&mut text_buf, msg.role);
                     if let Some(text) = progress_update_before(&msg.content, index) {
-                        out.push(Interaction::ProgressUpdate(text.to_owned()));
+                        self.out.push(Interaction::ProgressUpdate(text.to_owned()));
                     }
-                    out.push(Interaction::ToolCall(ToolCall {
+                    self.out.push(Interaction::ToolCall(ToolCall {
                         id: id.clone(),
                         name: name.clone(),
                         input: input.clone(),
-                        icon: tools.icon(name).to_owned(),
-                        label: tools.label(name, input),
+                        icon: self.tools.icon(name).to_owned(),
+                        label: self.tools.label(name, input),
                     }));
-                    if let Some((content, is_error)) = pairs.remove(id.as_str()) {
+                    if let Some((content, is_error)) = self.pairs.remove(id.as_str()) {
                         let call = Some((name.as_str(), input));
-                        out.push(tool_result(
-                            tools,
-                            tool_metadata,
-                            id,
-                            call,
-                            content,
-                            is_error,
-                        ));
+                        self.push_tool_result(id, call, content, is_error);
                     }
                 }
                 // Paired results were already emitted inline, so only orphans reach here.
@@ -111,66 +123,60 @@ fn walk_transcript(
                     tool_use_id,
                     content,
                     is_error,
-                } if pairs.remove(tool_use_id.as_str()).is_some() => {
-                    flush_text(&mut out, &mut text_buf, msg.role);
-                    out.push(tool_result(
-                        tools,
-                        tool_metadata,
-                        tool_use_id,
-                        None,
-                        content,
-                        *is_error,
-                    ));
+                } if self.pairs.remove(tool_use_id.as_str()).is_some() => {
+                    self.flush_text(&mut text_buf, msg.role);
+                    self.push_tool_result(tool_use_id, None, content, *is_error);
                 }
                 ContentBlock::Thinking { thinking, .. } if !thinking.trim().is_empty() => {
-                    flush_text(&mut out, &mut text_buf, msg.role);
-                    out.push(Interaction::AssistantThinking(thinking.clone()));
+                    self.flush_text(&mut text_buf, msg.role);
+                    self.out
+                        .push(Interaction::AssistantThinking(thinking.clone()));
                 }
                 _ => {}
             }
         }
-        flush_text(&mut out, &mut text_buf, msg.role);
+        self.flush_text(&mut text_buf, msg.role);
     }
-    out
-}
 
-/// Resolves a result's view through the tool its `call` names, or as plain text when the
-/// transcript lost the call.
-fn tool_result(
-    tools: &ToolRegistry,
-    tool_metadata: &HashMap<String, ToolMetadata>,
-    id: &str,
-    call: Option<(&str, &serde_json::Value)>,
-    content: &str,
-    is_error: bool,
-) -> Interaction {
-    let default = ToolMetadata::default();
-    let metadata = tool_metadata.get(id).unwrap_or(&default);
-    let view = match call {
-        Some((name, input)) => tools.result_view(name, input, content, metadata, is_error),
-        None => ToolResultView::Text {
+    /// Resolves a result's view through the tool its `call` names, or as plain text when the
+    /// transcript lost the call.
+    fn push_tool_result(
+        &mut self,
+        id: &str,
+        call: Option<(&str, &serde_json::Value)>,
+        content: &str,
+        is_error: bool,
+    ) {
+        let default = ToolMetadata::default();
+        let metadata = self.tool_metadata.get(id).unwrap_or(&default);
+        let view = match call {
+            Some((name, input)) => self
+                .tools
+                .result_view(name, input, content, metadata, is_error),
+            None => ToolResultView::Text {
+                content: content.to_owned(),
+            },
+        };
+        self.out.push(Interaction::ToolResult(ToolResult {
+            id: id.to_owned(),
             content: content.to_owned(),
-        },
-    };
-    Interaction::ToolResult(ToolResult {
-        id: id.to_owned(),
-        content: content.to_owned(),
-        is_error,
-        title: metadata.title.clone(),
-        view,
-    })
-}
-
-/// Flushes `text_buf` as a role-tagged text interaction. No-op on empty.
-fn flush_text(out: &mut Vec<Interaction>, text_buf: &mut String, role: Role) {
-    if text_buf.is_empty() {
-        return;
+            is_error,
+            title: metadata.title.clone(),
+            view,
+        }));
     }
-    let text = std::mem::take(text_buf);
-    out.push(match role {
-        Role::User => Interaction::UserText(text),
-        Role::Assistant => Interaction::AssistantText(text),
-    });
+
+    /// Flushes `text_buf` as a role-tagged text interaction. No-op on empty.
+    fn flush_text(&mut self, text_buf: &mut String, role: Role) {
+        if text_buf.is_empty() {
+            return;
+        }
+        let text = std::mem::take(text_buf);
+        self.out.push(match role {
+            Role::User => Interaction::UserText(text),
+            Role::Assistant => Interaction::AssistantText(text),
+        });
+    }
 }
 
 #[cfg(test)]

@@ -6,13 +6,15 @@ use anyhow::{Context, Result, bail};
 use indoc::indoc;
 use serde::Deserialize;
 use tracing::warn;
+use unicode_width::UnicodeWidthStr;
 
+use super::handle::SessionHandle;
 use crate::client::anthropic::Client;
 use crate::client::anthropic::wire::OutputFormat;
 use crate::config::Effort;
 use crate::model::ModelSpec;
 use crate::protocol::{Event, EventSink};
-use crate::session::handle::SessionHandle;
+use crate::util::text::{ELLIPSIS, ELLIPSIS_WIDTH, truncate_to_width};
 
 // ── Constants ──
 
@@ -154,11 +156,11 @@ fn parse_title(response: &str) -> Result<String> {
 /// Cap a string for log / error messages so long Haiku refusals stay readable.
 fn truncate_for_log(s: &str) -> String {
     const LOG_CAP: usize = 120;
-    if s.chars().count() <= LOG_CAP {
-        return s.to_owned();
+    let prefix: String = s.chars().take(LOG_CAP).collect();
+    if prefix.len() == s.len() && s.width() <= LOG_CAP {
+        return prefix;
     }
-    let head: String = s.chars().take(LOG_CAP).collect();
-    format!("{head}...")
+    truncate_to_width(&format!("{prefix}{ELLIPSIS}"), LOG_CAP + ELLIPSIS_WIDTH)
 }
 
 /// Strips a surrounding triple-backtick code fence (with optional language tag). Leaves
@@ -198,6 +200,7 @@ mod tests {
     use crate::config::auth::{Auth, AuthSource};
     use crate::message::Message;
     use crate::protocol::CapturingSink;
+    use crate::session::handle::testing::{acks_append_ai_title_with_failure, dead};
     use crate::session::store::testing::test_store;
 
     // ── Fixtures ──
@@ -436,10 +439,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let session = super::super::handle::testing::acks_append_ai_title_with_failure(
-            "live-session",
-            "disk full",
-        );
+        let session = acks_append_ai_title_with_failure("live-session", "disk full");
         let client = title_client(server.uri());
         let sink = CapturingSink::new();
 
@@ -472,7 +472,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let session = super::super::handle::testing::dead("dead-session");
+        let session = dead("dead-session");
         let client = title_client(server.uri());
         let sink = CapturingSink::new();
 
@@ -603,10 +603,19 @@ mod tests {
 
     #[test]
     fn truncate_for_log_caps_long_strings_with_ellipsis() {
-        let long = "a".repeat(500);
-        let out = truncate_for_log(&long);
-        assert!(out.ends_with("..."), "got: {out:?}");
-        assert_eq!(out.chars().count(), 123, "got: {out:?}");
+        let cap = "a".repeat(120);
+        assert_eq!(truncate_for_log(&cap), cap);
+        for len in [121, 123, 500] {
+            assert_eq!(truncate_for_log(&"a".repeat(len)), format!("{cap}..."));
+        }
+    }
+
+    #[test]
+    fn truncate_for_log_caps_multiline_and_zero_width_responses() {
+        for text in [format!("x{}y", "\n".repeat(500)), "\u{200b}".repeat(500)] {
+            let expected = format!("{}{ELLIPSIS}", text.chars().take(120).collect::<String>());
+            assert_eq!(truncate_for_log(&text), expected);
+        }
     }
 
     // ── strip_code_fence ──

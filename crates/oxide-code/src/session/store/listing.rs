@@ -8,10 +8,19 @@ use anyhow::{Context, Result};
 use time::OffsetDateTime;
 use tracing::warn;
 
-use super::super::entry::{Entry, ExitInfo, SessionInfo, TitleInfo};
 use super::{HeaderInfo, JsonlLines, SessionStore, file_session_id, read_header};
+use crate::session::entry::{Entry, ExitInfo, SessionInfo, TitleInfo};
 
 pub(crate) const DEFAULT_SESSION_LIST_LIMIT: usize = 30;
+
+// ── ListScope ──
+
+/// Which sessions a listing walks: every project or only the home project, and archived or active ones.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ListScope {
+    pub(crate) all: bool,
+    pub(crate) archived: bool,
+}
 
 // ── ListPage ──
 
@@ -46,21 +55,16 @@ impl SessionStore {
     /// Every readable unarchived session in the home project, most recently active first.
     #[cfg(test)]
     pub(crate) fn list(&self) -> Result<Vec<SessionInfo>> {
-        Ok(self.list_paged(None, false, false)?.into_sessions())
+        Ok(self.list_paged(None, ListScope::default())?.into_sessions())
     }
 
-    /// Up to `limit` most recently active readable sessions whose archive state is `archived`,
-    /// unbounded for `None`. `all` widens the walk from the home project to every project. Archive
+    /// Up to `limit` most recently active readable sessions matching `scope`,
+    /// unbounded for `None`. `scope.all` widens the walk from the home project to every project. Archive
     /// state lives in each file, so the walk parses sessions until it finds one past the page.
-    pub(crate) fn list_paged(
-        &self,
-        limit: Option<usize>,
-        all: bool,
-        archived: bool,
-    ) -> Result<ListPage> {
+    pub(crate) fn list_paged(&self, limit: Option<usize>, scope: ListScope) -> Result<ListPage> {
         let limit = limit.unwrap_or(usize::MAX);
-        let mut sessions: Vec<_> = read_session_infos(self.session_paths(all)?.into_iter())
-            .filter(|info| info.archived == archived)
+        let mut sessions: Vec<_> = read_session_infos(self.session_paths(scope.all)?.into_iter())
+            .filter(|info| info.archived == scope.archived)
             .take(limit.saturating_add(1))
             .collect();
         let more = sessions.len() > limit;
@@ -225,14 +229,14 @@ mod tests {
     use time::macros::datetime;
     use uuid::Uuid;
 
-    use super::super::set_archived_at;
-    use super::super::testing::{
+    use super::*;
+    use crate::session::entry::{CURRENT_VERSION, TitleSource};
+    use crate::session::store::set_archived_at;
+    use crate::session::store::testing::{
         sample_header, sample_message_entry, sample_summary_entry, sample_title_entry,
         seed_test_session, test_project_dir, test_session_file, test_store,
         write_newest_corrupt_session,
     };
-    use super::*;
-    use crate::session::entry::{CURRENT_VERSION, TitleSource};
 
     // ── list ──
 
@@ -446,6 +450,24 @@ mod tests {
         assert_eq!(sessions[0].session_id, "own");
     }
 
+    #[test]
+    fn list_missing_project_reports_directory_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let project_dir = test_project_dir(dir.path());
+        fs::remove_dir(&project_dir).unwrap();
+
+        let error = store.list().unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("cannot read {}", project_dir.display())
+        );
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::NotFound,
+        );
+    }
+
     // ── list_paged ──
 
     /// Builds `count` sessions whose mtimes and file names both ascend in seed order.
@@ -479,7 +501,7 @@ mod tests {
         let store = test_store(dir.path());
         seed_n_sessions(&store, 10);
 
-        let page = store.list_paged(Some(3), false, false).unwrap();
+        let page = store.list_paged(Some(3), ListScope::default()).unwrap();
         assert_eq!(page.sessions().len(), 3, "cap honored");
         assert!(page.has_more(), "seven sessions follow the page");
         assert_eq!(page.sessions()[0].session_id, "session-0009");
@@ -487,12 +509,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_paged_unbounded_returns_every_session_with_none_more() {
+    async fn list_paged_unbounded_includes_every_session_without_more() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         seed_n_sessions(&store, 4);
 
-        let page = store.list_paged(None, false, false).unwrap();
+        let page = store.list_paged(None, ListScope::default()).unwrap();
         assert_eq!(page.sessions().len(), 4);
         assert!(!page.has_more());
     }
@@ -510,7 +532,16 @@ mod tests {
             .unwrap();
         drop(foreign_store);
 
-        let all = store.list_paged(None, true, false).unwrap().into_sessions();
+        let all = store
+            .list_paged(
+                None,
+                ListScope {
+                    all: true,
+                    ..ListScope::default()
+                },
+            )
+            .unwrap()
+            .into_sessions();
         let mut ids: Vec<_> = all.iter().map(|s| s.session_id.as_str()).collect();
         ids.sort_unstable();
         assert_eq!(ids, vec!["foreign", "own"]);
@@ -528,7 +559,13 @@ mod tests {
         set_archived_at(&path("session-0003"), false).unwrap();
         let ids = |archived: bool| -> Vec<String> {
             let mut ids: Vec<_> = store
-                .list_paged(None, false, archived)
+                .list_paged(
+                    None,
+                    ListScope {
+                        archived,
+                        ..ListScope::default()
+                    },
+                )
                 .unwrap()
                 .into_sessions()
                 .into_iter()
@@ -540,9 +577,29 @@ mod tests {
 
         assert_eq!(ids(false), ["session-0000", "session-0003"]);
         assert_eq!(ids(true), ["session-0001", "session-0002"]);
-        assert!(store.list_paged(Some(1), false, true).unwrap().has_more());
         assert!(
-            !store.list_paged(Some(2), false, true).unwrap().has_more(),
+            store
+                .list_paged(
+                    Some(1),
+                    ListScope {
+                        archived: true,
+                        ..ListScope::default()
+                    }
+                )
+                .unwrap()
+                .has_more()
+        );
+        assert!(
+            !store
+                .list_paged(
+                    Some(2),
+                    ListScope {
+                        archived: true,
+                        ..ListScope::default()
+                    }
+                )
+                .unwrap()
+                .has_more(),
             "active sessions past the page are not more archived ones",
         );
     }
@@ -554,7 +611,7 @@ mod tests {
         seed_n_sessions(&store, 3);
         write_newest_corrupt_session(dir.path());
 
-        let page = store.list_paged(Some(2), false, false).unwrap();
+        let page = store.list_paged(Some(2), ListScope::default()).unwrap();
         let ids: Vec<_> = page
             .sessions()
             .iter()
@@ -563,7 +620,7 @@ mod tests {
         assert_eq!(ids, ["session-0002", "session-0001"]);
         assert!(page.has_more());
 
-        let full = store.list_paged(Some(3), false, false).unwrap();
+        let full = store.list_paged(Some(3), ListScope::default()).unwrap();
         assert_eq!(full.sessions().len(), 3);
         assert!(
             !full.has_more(),
@@ -578,7 +635,7 @@ mod tests {
         let store = test_store(dir.path());
         seed_n_sessions(&store, 3);
 
-        let page = store.list_paged(Some(0), false, false).unwrap();
+        let page = store.list_paged(Some(0), ListScope::default()).unwrap();
         assert!(page.sessions().is_empty());
         assert!(page.has_more());
     }
@@ -596,7 +653,13 @@ mod tests {
         fs::create_dir(&locked).unwrap();
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
 
-        let page = store.list_paged(None, true, false);
+        let page = store.list_paged(
+            None,
+            ListScope {
+                all: true,
+                ..ListScope::default()
+            },
+        );
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
 
         let ids: Vec<_> = page

@@ -1,5 +1,6 @@
 //! Text rendering for `ox --list`, of either active or archived sessions.
 
+use std::fmt::Write as _;
 use std::io::Write;
 use std::path::Path;
 
@@ -9,13 +10,14 @@ use unicode_width::UnicodeWidthStr;
 
 use super::display::{UNTITLED_MARKER, id_prefix};
 use super::store::SessionStore;
-use super::store::listing::ListPage;
+use super::store::listing::{ListPage, ListScope};
 use crate::util::path::tildify;
 use crate::util::text::truncate_to_width;
 
-/// `ID(10) + ' ' + LastActive(19) + ' ' + Msgs(6) + ' '` — fixed prefix before any optional
-/// `Project` column and the final `Title`.
-const FIXED_PREFIX_WIDTH: usize = 10 + 1 + 19 + 1 + 6 + 1;
+const ID_COL: usize = 10;
+const LAST_ACTIVE_COL: usize = 19;
+const MSGS_COL: usize = 6;
+const FIXED_PREFIX_WIDTH: usize = ID_COL + 1 + LAST_ACTIVE_COL + 1 + MSGS_COL + 1;
 
 /// Skip title truncation under this width — wrap rather than chop everything to `F...`.
 const MIN_TITLE_BUDGET: usize = 12;
@@ -27,33 +29,31 @@ const PROJECT_COL_MIN: usize = 8;
 /// title column for every row in the listing.
 const PROJECT_COL_MAX: usize = 40;
 
-/// Renders `--list` output to `out`. `all` spans every project, and `archived` lists archived
-/// sessions in place of active ones. A `term_width` of `None` skips title truncation for piped
-/// output. `limit` caps the rows printed, unbounded for `None`.
+/// Renders `--list` output to `out`. `scope.all` spans every project, and `scope.archived`
+/// selects archived sessions. A `term_width` of `None` skips title truncation for piped output.
+/// `limit` caps the rows printed, unbounded for `None`.
 pub(crate) fn render_list(
     out: &mut dyn Write,
     store: &SessionStore,
-    all: bool,
-    archived: bool,
+    scope: ListScope,
     local_offset: UtcOffset,
     term_width: Option<usize>,
     limit: Option<usize>,
 ) -> Result<()> {
-    let page = store.list_paged(limit, all, archived)?;
-    render_sessions(out, &page, all, archived, local_offset, term_width)
+    let page = store.list_paged(limit, scope)?;
+    render_sessions(out, &page, scope, local_offset, term_width)
 }
 
-/// Pure formatter, split from [`render_list`] so tests can skip building a real store. `all`
-/// inserts a `Project` column to disambiguate cross-project rows. Appends a `... more` footer
-/// when sessions follow the page.
+/// `scope.all` inserts a `Project` column to disambiguate cross-project rows.
+/// Appends a `... more` footer when sessions follow the page.
 fn render_sessions(
     out: &mut dyn Write,
     page: &ListPage,
-    all: bool,
-    archived: bool,
+    scope: ListScope,
     local_offset: UtcOffset,
     term_width: Option<usize>,
 ) -> Result<()> {
+    let ListScope { all, archived } = scope;
     let sessions = page.sessions();
     if sessions.is_empty() {
         let kind = if archived { "archived " } else { "" };
@@ -80,25 +80,14 @@ fn render_sessions(
         (budget >= MIN_TITLE_BUDGET).then_some(budget)
     });
 
+    let mut header = format!(
+        "{:<ID_COL$} {:<LAST_ACTIVE_COL$} {:<MSGS_COL$} ",
+        "ID", "Last Active", "Msgs"
+    );
     if all {
-        writeln!(
-            out,
-            "{:<10} {:<19} {:<6} {:<project$} Title",
-            "ID",
-            "Last Active",
-            "Msgs",
-            "Project",
-            project = project_col_width,
-        )
-        .context("write list header")?;
-    } else {
-        writeln!(
-            out,
-            "{:<10} {:<19} {:<6} Title",
-            "ID", "Last Active", "Msgs",
-        )
-        .context("write list header")?;
+        _ = write!(header, "{:<project_col_width$} ", "Project");
     }
+    writeln!(out, "{header}Title").context("write list header")?;
 
     for s in sessions {
         let id = id_prefix(&s.session_id);
@@ -121,17 +110,12 @@ fn render_sessions(
             Some(budget) => truncate_to_width(raw_title, budget),
             None => raw_title.to_owned(),
         };
+        let mut row = format!("{id:<ID_COL$} {last_active:<LAST_ACTIVE_COL$} {msgs:<MSGS_COL$} ");
         if all {
             let project = tildify(Path::new(&s.cwd));
-            writeln!(
-                out,
-                "{id:<10} {last_active:<19} {msgs:<6} {project:<project_col_width$} {title}",
-            )
-            .context("write list row")?;
-        } else {
-            writeln!(out, "{id:<10} {last_active:<19} {msgs:<6} {title}")
-                .context("write list row")?;
+            _ = write!(row, "{project:<project_col_width$} ");
         }
+        writeln!(out, "{row}{title}").context("write list row")?;
     }
     if page.has_more() {
         writeln!(
@@ -147,8 +131,10 @@ fn render_sessions(
 mod tests {
     use time::macros::datetime;
 
-    use super::super::entry::{ExitInfo, SessionInfo, TitleInfo};
     use super::*;
+    use crate::session::entry::{ExitInfo, SessionInfo, TitleInfo};
+    use crate::session::store::set_archived_at;
+    use crate::session::store::testing::{seed_test_session, test_store};
 
     fn session(session_id: &str, last_active_at: time::OffsetDateTime) -> SessionInfo {
         SessionInfo {
@@ -172,8 +158,10 @@ mod tests {
         render_sessions(
             &mut buf,
             &ListPage::new(sessions.to_vec(), false),
-            all,
-            false,
+            ListScope {
+                all,
+                ..ListScope::default()
+            },
             UtcOffset::UTC,
             term_width,
         )
@@ -187,20 +175,50 @@ mod tests {
     fn render_list_empty_store_shows_no_sessions_notice() {
         // Covers the `render_list → render_sessions` glue.
         let dir = tempfile::tempdir().unwrap();
-        let store = super::super::store::testing::test_store(dir.path());
+        let store = test_store(dir.path());
         let mut buf = Vec::new();
-        render_list(&mut buf, &store, false, false, UtcOffset::UTC, None, None).unwrap();
+        render_list(
+            &mut buf,
+            &store,
+            ListScope::default(),
+            UtcOffset::UTC,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(
             String::from_utf8(buf).unwrap(),
             "No sessions found in this project.\n",
         );
 
         let mut buf = Vec::new();
-        render_list(&mut buf, &store, true, false, UtcOffset::UTC, None, None).unwrap();
+        render_list(
+            &mut buf,
+            &store,
+            ListScope {
+                all: true,
+                ..ListScope::default()
+            },
+            UtcOffset::UTC,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(String::from_utf8(buf).unwrap(), "No sessions found.\n",);
 
         let mut buf = Vec::new();
-        render_list(&mut buf, &store, false, true, UtcOffset::UTC, None, None).unwrap();
+        render_list(
+            &mut buf,
+            &store,
+            ListScope {
+                archived: true,
+                ..ListScope::default()
+            },
+            UtcOffset::UTC,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(
             String::from_utf8(buf).unwrap(),
             "No archived sessions found in this project.\n",
@@ -210,9 +228,9 @@ mod tests {
     #[test]
     fn render_list_archived_lists_only_archived_sessions() {
         let dir = tempfile::tempdir().unwrap();
-        let store = super::super::store::testing::test_store(dir.path());
+        let store = test_store(dir.path());
         for id in ["aaaa1111", "bbbb2222"] {
-            super::super::store::testing::seed_test_session(
+            seed_test_session(
                 &store,
                 id,
                 Some(id),
@@ -221,14 +239,16 @@ mod tests {
             );
         }
         let archived = store.find_session_path("bbbb2222").unwrap();
-        super::super::store::set_archived_at(&archived, true).unwrap();
+        set_archived_at(&archived, true).unwrap();
         let render = |archived: bool| {
             let mut buf = Vec::new();
             render_list(
                 &mut buf,
                 &store,
-                false,
-                archived,
+                ListScope {
+                    archived,
+                    ..ListScope::default()
+                },
                 UtcOffset::UTC,
                 None,
                 None,
@@ -248,9 +268,9 @@ mod tests {
     #[test]
     fn render_list_appends_more_footer_only_when_capped() {
         let dir = tempfile::tempdir().unwrap();
-        let store = super::super::store::testing::test_store(dir.path());
+        let store = test_store(dir.path());
         for id in ["aaaa1111", "bbbb2222"] {
-            super::super::store::testing::seed_test_session(
+            seed_test_session(
                 &store,
                 id,
                 Some(id),
@@ -263,8 +283,7 @@ mod tests {
             render_list(
                 &mut buf,
                 &store,
-                false,
-                false,
+                ListScope::default(),
                 UtcOffset::UTC,
                 None,
                 Some(limit),

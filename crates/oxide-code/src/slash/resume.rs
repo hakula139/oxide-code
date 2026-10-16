@@ -19,7 +19,7 @@ use crate::session::display::{display_title, format_metadata_line};
 use crate::session::entry::SessionInfo;
 use crate::session::resolver::resolve_prefix_to_info;
 use crate::session::store::SessionStore;
-use crate::session::store::listing::{DEFAULT_SESSION_LIST_LIMIT, ListPage};
+use crate::session::store::listing::{DEFAULT_SESSION_LIST_LIMIT, ListPage, ListScope};
 use crate::tui::action::Action;
 use crate::tui::modal::chrome::{FOOTER_HEIGHT, render_footer};
 use crate::tui::modal::searchable_list::{SearchableItem, SearchableList};
@@ -186,9 +186,13 @@ impl ResumePicker {
     }
 
     fn reload(&mut self) {
-        let result =
-            self.store
-                .list_paged(Some(DEFAULT_SESSION_LIST_LIMIT), self.all, self.archived);
+        let result = self.store.list_paged(
+            Some(DEFAULT_SESSION_LIST_LIMIT),
+            ListScope {
+                all: self.all,
+                archived: self.archived,
+            },
+        );
         let page = match result {
             Ok(p) => {
                 self.load_error = None;

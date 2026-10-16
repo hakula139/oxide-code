@@ -37,14 +37,7 @@ pub(super) fn retain_visible_file_snapshots(
     snapshots: &mut Vec<FileSnapshot>,
     messages: &[Message],
 ) {
-    let visible: HashSet<&str> = messages
-        .iter()
-        .flat_map(|m| m.content.iter())
-        .filter_map(|b| match b {
-            ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
-            _ => None,
-        })
-        .collect();
+    let visible = tool_result_ids(messages);
     snapshots.retain(|snap| {
         snap.tool_use_id
             .as_deref()
@@ -57,14 +50,7 @@ pub(super) fn retain_visible_file_snapshots(
 /// Drops assistant `tool_use` blocks whose id has no matching `tool_result`. Ids are owned
 /// because the `HashSet` is built from a shared borrow before mutating below.
 fn drop_unresolved_tool_uses(messages: &mut [Message]) {
-    let resolved: HashSet<String> = messages
-        .iter()
-        .flat_map(|m| m.content.iter())
-        .filter_map(|b| match b {
-            ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.clone()),
-            _ => None,
-        })
-        .collect();
+    let resolved = tool_result_ids(messages);
 
     for msg in messages {
         if msg.role != Role::Assistant {
@@ -82,16 +68,7 @@ fn drop_unresolved_tool_uses(messages: &mut [Message]) {
 /// Drops user `tool_result` blocks with no surviving assistant `tool_use`, then strips
 /// messages that prior passes emptied so role-collapse sees no stubs.
 fn drop_orphan_tool_results(messages: &mut Vec<Message>) {
-    let surviving: HashSet<String> = messages
-        .iter()
-        .flat_map(|m| m.content.iter())
-        .filter_map(|b| match b {
-            ContentBlock::ToolUse { id, .. } | ContentBlock::ServerToolUse { id, .. } => {
-                Some(id.clone())
-            }
-            _ => None,
-        })
-        .collect();
+    let surviving = tool_use_ids(messages);
 
     for msg in &mut *messages {
         if msg.role != Role::User {
@@ -139,6 +116,30 @@ fn insert_resume_sentinels(messages: &mut Vec<Message>) {
     }
 }
 
+fn tool_result_ids(messages: &[Message]) -> HashSet<String> {
+    messages
+        .iter()
+        .flat_map(|m| &m.content)
+        .filter_map(|block| match block {
+            ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn tool_use_ids(messages: &[Message]) -> HashSet<String> {
+    messages
+        .iter()
+        .flat_map(|m| &m.content)
+        .filter_map(|block| match block {
+            ContentBlock::ToolUse { id, .. } | ContentBlock::ServerToolUse { id, .. } => {
+                Some(id.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -181,7 +182,7 @@ mod tests {
     // ── sanitize_resumed_messages ──
 
     #[test]
-    fn sanitize_noop_for_clean_transcript() {
+    fn sanitize_resumed_messages_noop_for_clean_transcript() {
         let mut messages = vec![
             Message::user("hello"),
             Message::assistant("hi"),
@@ -197,7 +198,7 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_pairs_tool_use_with_result_and_appends_continuation_sentinel() {
+    fn sanitize_resumed_messages_pairs_tool_use_with_result_and_appends_continuation_sentinel() {
         let mut messages = vec![
             Message::user("do X"),
             Message {
@@ -229,7 +230,7 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_drops_orphan_tool_result_block_and_keeps_siblings() {
+    fn sanitize_resumed_messages_drops_orphan_tool_result_block_and_keeps_siblings() {
         let mut messages = vec![
             Message::user("do X"),
             Message::assistant("done, no tool needed"),
@@ -248,7 +249,7 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_drops_user_message_with_only_orphan_tool_result() {
+    fn sanitize_resumed_messages_drops_user_message_with_only_orphan_tool_result() {
         let mut messages = vec![
             Message::user("do X"),
             Message::assistant("all clear"),
@@ -265,7 +266,7 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_collapses_adjacent_users_after_empty_assistant_drop() {
+    fn sanitize_resumed_messages_collapses_adjacent_users_after_empty_assistant_drop() {
         let mut messages = vec![
             Message::user("do X"),
             Message {
@@ -286,7 +287,7 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_collapses_adjacent_assistants_after_orphan_user_drop() {
+    fn sanitize_resumed_messages_collapses_adjacent_assistants_after_orphan_user_drop() {
         let mut messages = vec![
             Message::user("do X"),
             Message::assistant("first answer"),
@@ -308,7 +309,7 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_drops_orphan_when_assistant_tool_use_was_dropped() {
+    fn sanitize_resumed_messages_drops_orphan_when_assistant_tool_use_was_dropped() {
         // Mismatched ids: pass 1 strips the assistant's unresolved t1,
         // leaving no surviving ids, so pass 2 drops the user's t2.
         let mut messages = vec![
@@ -333,7 +334,7 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_prepends_head_sentinel_when_leading_user_is_dropped() {
+    fn sanitize_resumed_messages_prepends_head_sentinel_when_leading_user_is_dropped() {
         let mut messages = vec![
             Message {
                 role: Role::User,

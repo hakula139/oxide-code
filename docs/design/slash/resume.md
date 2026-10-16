@@ -51,7 +51,7 @@ The picker wraps [`SearchableList`](modals.md) and adds these controls and displ
 
 12. **Default to a 30-row page with no background load-more.** Codex's near-bottom prefetch is genuinely nice but adds a non-trivial state machine for marginal gain at typical session counts. More than 30 sessions in a project is search territory anyway.
 
-13. **Listing API centralizes pagination in `list_paged(limit, all, archived)`.** The page, the archive filter, and whether more sessions follow come from one walk that stops one session past the page, so a listing's cost scales with the page. Listings report no exact total, since counting the sessions in one archive state would parse every file in scope. Bare `ox -c` stops at the first unarchived session through `latest`, and a prefix lookup parses only matching files.
+13. **Listing API centralizes pagination in `list_paged(limit, scope)`.** The page, the archive filter, and whether more sessions follow come from one walk that stops one session past the page, so a listing's cost scales with the page. Listings report no exact total, since counting the sessions in one archive state would parse every file in scope. Bare `ox -c` stops at the first unarchived session through `latest`, and a prefix lookup parses only matching files.
 
 14. **`--list --limit 0` opts back into unbounded listing.** Scripts piping output need the full set, so `0` is the explicit unbounded value and no magic large default is needed.
 
@@ -73,7 +73,7 @@ The picker wraps [`SearchableList`](modals.md) and adds these controls and displ
 
 - **`SessionRow`**: Carries the 8-char id prefix, full id, session file path, title-or-`(untitled)`, `last_active_at`, message count, optional git branch, and (in all-projects mode) the tildified project path. `haystack` joins id + title plus project when visible. `render` paints a two-line title plus dim metadata block under a fixed width budget. The metadata line is built via the shared `session::display::format_metadata_line` helper so the confirm-delete modal can reuse the same shape.
 
-- **`SessionStore::list_paged`**: Stats every candidate, sorts by mtime desc, then parses files in order, keeping readable sessions in the requested archive state until it holds one past the page. `ListPage::has_more()` reports whether a matching session follows the page, for the `--list` footer and the picker's `more not loaded` note.
+- **`SessionStore::list_paged`**: Takes a `ListScope` with project and archive flags. Stats every candidate, sorts by mtime desc, then parses files in order, keeping readable sessions in the requested archive state until it holds one past the page. `ListPage::has_more()` reports whether a matching session follows the page, for the `--list` footer and the picker's `more not loaded` note.
 
 - **`/resume <id>` resolver**: `resolve_prefix_to_info` runs the prefix lookup against the current project, then retries across all projects on miss. Returns the matched session or a user-readable error.
 
@@ -109,7 +109,7 @@ The picker wraps [`SearchableList`](modals.md) and adds these controls and displ
 - `crates/oxide-code/src/session/history.rs`: `interactions`, the display projection `SessionResumed` carries.
 - `crates/oxide-code/src/session/list_view.rs`: `render_list` over `list_paged`.
 - `crates/oxide-code/src/session/resolver.rs`: `resolve_prefix_to_info` and its `match_in_scope` helper, shared with `/delete`.
-- `crates/oxide-code/src/session/store/listing.rs`: `list_paged`, `latest`, `list_matching`, `ListPage`.
+- `crates/oxide-code/src/session/store/listing.rs`: `list_paged`, `latest`, `list_matching`, `ListPage`, `ListScope`.
 - `crates/oxide-code/src/slash/confirm.rs`: `ConfirmDeleteSessionModal` pushed by Ctrl+D.
 - `crates/oxide-code/src/slash/registry.rs`: `BUILT_INS` entry `&ResumeCmd`.
 - `crates/oxide-code/src/slash/resume.rs`: `ResumeCmd`, `ResumePicker` and its `at_startup` variant, `SessionRow`, and `resolve_prefix`.
