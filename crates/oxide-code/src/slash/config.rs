@@ -8,7 +8,7 @@ use super::registry::{SlashCommand, SlashOutcome};
 use crate::config::load::user_config_path;
 use crate::config::provenance::{Layer, Source};
 use crate::config::{
-    display_auto_compaction, display_bool, display_effort, display_max_tool_rounds,
+    display_auth, display_auto_compaction, display_bool, display_effort, display_max_tool_rounds,
 };
 use crate::tui::modal::kv_overview::{KvOverview, KvSection};
 use crate::util::path::tildify;
@@ -46,7 +46,7 @@ fn build_modal(info: &LiveSessionInfo, user_path: Option<&Path>) -> KvOverview {
         row("Model", cfg.model.display_name().to_owned(), &sources.model),
         row("Model ID", cfg.model.id().to_owned(), &sources.model),
         row("Effort", display_effort(cfg.effort), &sources.effort),
-        row("Auth", cfg.auth.to_string(), &sources.auth),
+        row("Auth", display_auth(cfg.auth), &sources.auth),
         row("Base URL", cfg.base_url.clone(), &sources.base_url),
         row(
             "Extra CA Certs",

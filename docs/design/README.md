@@ -29,6 +29,7 @@ Organized by topic. Each subdirectory mirrors the corresponding directory in [`d
 | ----------------------------- | -------------------------------------------------------------------------------- |
 | [Commands](slash/commands.md) | Registry, dispatch, autocomplete, per-command behavior                           |
 | [Compact](slash/compact.md)   | `/compact`, summarization, overflow retries, persistence boundary                |
+| [Login](slash/login.md)       | `/login` and `/logout`, browser sign-in, credential stores, signed-out sessions  |
 | [Modal UI](slash/modals.md)   | Modal trait and stack, shared primitives, pickers, editors, approvals, overviews |
 | [Resume](slash/resume.md)     | Session picker, search, archive view, listing, in-process resume                 |
 

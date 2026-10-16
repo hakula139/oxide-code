@@ -143,7 +143,7 @@ async fn async_main() -> Result<Exit> {
     }
 
     let cwd = std::env::current_dir().context("failed to read the current working directory")?;
-    let config = Config::load(&cwd).await?;
+    let config = Config::load(&cwd, tui_mode).await?;
     let show_thinking = config.show_thinking;
     let theme = tui_mode
         .then(|| tui::theme::resolve_theme(&config.theme))

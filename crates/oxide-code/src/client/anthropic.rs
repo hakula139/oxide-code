@@ -16,6 +16,7 @@ pub(crate) mod wire;
 #[cfg(test)]
 pub(crate) mod testing;
 
+use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -24,7 +25,7 @@ use tokio::sync::mpsc;
 use tracing::debug;
 use uuid::Uuid;
 
-use crate::config::auth::AuthKind;
+use crate::config::auth::{Auth, AuthKind, AuthSource};
 use crate::config::{CompactionConfig, Config, Effort, is_first_party_base_url};
 use crate::message::{ContentBlock, Message, Role};
 use crate::model::ModelSpec;
@@ -57,7 +58,7 @@ const SYSTEM_PROMPT_PREFIX: &str = "You are Claude Code, Anthropic's official CL
 
 /// Shareable HTTP client for the Anthropic Messages API. `Clone` is cheap because
 /// `reqwest::Client` shares its connection pool. Callers can keep one per session and update
-/// `session_id` / `model` / `effort` via the `set_*` methods.
+/// `session_id` / `model` / `effort` / `auth` via the `set_*` methods.
 #[derive(Clone)]
 pub(crate) struct Client {
     http: reqwest::Client,
@@ -73,62 +74,7 @@ impl Client {
         let session_id = session_id.unwrap_or_else(|| Uuid::new_v4().to_string());
         let device_id = identity::load_or_create_device_id();
         let is_first_party = is_first_party_base_url(&config.base_url);
-        let mut headers = HeaderMap::new();
-
-        let (name, value) = config.auth.header()?;
-        headers.insert(name, value);
-
-        headers.insert("anthropic-version", HeaderValue::from_static(API_VERSION));
-        headers.insert(
-            "anthropic-dangerous-direct-browser-access",
-            HeaderValue::from_static("true"),
-        );
-
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        headers.insert(
-            USER_AGENT,
-            HeaderValue::from_str(&format!("claude-cli/{CLAUDE_CLI_VERSION} (external, cli)"))?,
-        );
-
-        // 3P gateways fingerprint the Stainless header set.
-        headers.insert("x-app", HeaderValue::from_static("cli"));
-        headers.insert("x-stainless-lang", HeaderValue::from_static("js"));
-        headers.insert(
-            "x-stainless-package-version",
-            HeaderValue::from_static(STAINLESS_PACKAGE_VERSION),
-        );
-        headers.insert("x-stainless-runtime", HeaderValue::from_static("node"));
-        headers.insert(
-            "x-stainless-runtime-version",
-            HeaderValue::from_static(STAINLESS_RUNTIME_VERSION),
-        );
-        headers.insert(
-            "x-stainless-os",
-            HeaderValue::from_static(normalize_platform(std::env::consts::OS)),
-        );
-        headers.insert(
-            "x-stainless-arch",
-            HeaderValue::from_static(normalize_arch(std::env::consts::ARCH)),
-        );
-        headers.insert(
-            "x-stainless-timeout",
-            HeaderValue::from_static(STAINLESS_TIMEOUT_SECS),
-        );
-
-        headers.extend(config.gateway.custom_headers.clone());
-
-        // No whole-request timeout because responses can run for minutes. The 60 s read timeout
-        // catches slowloris dribble. Anthropic sends keepalives every ~15 s on healthy streams.
-        // reqwest strips only `Authorization` and `Cookie` on a cross-host redirect, so following
-        // one would carry `x-api-key` and the custom headers to another host.
-        let builder = reqwest::Client::builder()
-            .default_headers(headers)
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(Duration::from_secs(15))
-            .read_timeout(Duration::from_mins(1));
-        let builder = apply_extra_ca_certs(builder, config.extra_ca_certs.as_deref())?;
-        let http = builder.build().context("failed to build HTTP client")?;
-
+        let http = build_http(&config)?;
         Ok(Self {
             http,
             config,
@@ -164,6 +110,24 @@ impl Client {
         &self.config.permission
     }
 
+    /// Where the credential came from, `None` while signed out.
+    pub(crate) fn auth_source(&self) -> Option<AuthSource> {
+        self.config.auth.as_ref().map(Auth::source)
+    }
+
+    /// PEM bundle appended to the platform trust roots, which stored-login refreshes also trust.
+    pub(crate) fn extra_ca_certs(&self) -> Option<&Path> {
+        self.config.extra_ca_certs.as_deref()
+    }
+
+    /// The credential used by requests, or an error while signed out.
+    pub(crate) fn auth(&self) -> Result<&Auth> {
+        self.config
+            .auth
+            .as_ref()
+            .context("Not signed in. Run /login to sign in.")
+    }
+
     #[cfg(test)]
     pub(crate) fn session_id(&self) -> &str {
         &self.session_id
@@ -195,6 +159,13 @@ impl Client {
         let effort = self.config.model.resolve_effort(Some(pick));
         self.config.effort = effort;
         effort
+    }
+
+    /// Swaps the credential for later requests, `None` to sign out. Callers install a stored login
+    /// only in place of another stored login or none, which `Config::load` allows only for a
+    /// first-party base URL.
+    pub(crate) fn set_auth(&mut self, auth: Option<Auth>) {
+        self.config.auth = auth;
     }
 
     /// Streams an agentic turn. The receiver delivers parsed [`StreamEvent`]s and closes when the
@@ -243,6 +214,7 @@ impl Client {
         tools: &[ToolDefinition],
         breakpoint: Option<CacheControl>,
     ) -> Result<mpsc::Receiver<Result<StreamEvent>>> {
+        let auth = self.auth()?;
         let effective_messages: Vec<Message> = match user_context {
             Some(ctx) => std::iter::once(Message::user(ctx))
                 .chain(messages.iter().cloned())
@@ -251,7 +223,7 @@ impl Client {
         };
 
         let attribution = self
-            .attributes(true)
+            .attributes(true, auth.kind())
             .then(|| attribution_text(first_user_text(&effective_messages), self.is_first_party));
 
         let (static_sections, dynamic_sections) = split_at_boundary(system_sections);
@@ -298,9 +270,8 @@ impl Client {
 
         let (tx, rx) = mpsc::channel(64);
         let http = self.http.clone();
-        let betas =
-            compute_betas(model, thinking.as_ref(), self.config.auth.kind(), true).join(",");
-        let request = self.messages_request(betas, body);
+        let betas = compute_betas(model, thinking.as_ref(), auth.kind(), true).join(",");
+        let request = self.messages_request(betas, body, auth)?;
 
         // Racing `closed` stops an in-flight request or retry backoff once the consumer is gone.
         tokio::spawn(async move {
@@ -321,9 +292,66 @@ impl Client {
     /// Claude Code wire shape reject streaming requests (agent turns, `/compact` summaries)
     /// without it under every credential kind. Non-streaming one-shots attribute only OAuth
     /// traffic, because gateways don't gate them on the block.
-    fn attributes(&self, streaming: bool) -> bool {
-        self.config.gateway.attribution && (streaming || self.config.auth.kind() == AuthKind::OAuth)
+    fn attributes(&self, streaming: bool, auth: AuthKind) -> bool {
+        self.config.gateway.attribution && (streaming || auth == AuthKind::OAuth)
     }
+}
+
+// ── HTTP Client ──
+
+/// The HTTP client with every header requests share. Each request adds its own credential.
+fn build_http(config: &Config) -> Result<reqwest::Client> {
+    let mut headers = HeaderMap::new();
+    headers.insert("anthropic-version", HeaderValue::from_static(API_VERSION));
+    headers.insert(
+        "anthropic-dangerous-direct-browser-access",
+        HeaderValue::from_static("true"),
+    );
+
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    headers.insert(
+        USER_AGENT,
+        HeaderValue::from_str(&format!("claude-cli/{CLAUDE_CLI_VERSION} (external, cli)"))?,
+    );
+
+    // 3P gateways fingerprint the Stainless header set.
+    headers.insert("x-app", HeaderValue::from_static("cli"));
+    headers.insert("x-stainless-lang", HeaderValue::from_static("js"));
+    headers.insert(
+        "x-stainless-package-version",
+        HeaderValue::from_static(STAINLESS_PACKAGE_VERSION),
+    );
+    headers.insert("x-stainless-runtime", HeaderValue::from_static("node"));
+    headers.insert(
+        "x-stainless-runtime-version",
+        HeaderValue::from_static(STAINLESS_RUNTIME_VERSION),
+    );
+    headers.insert(
+        "x-stainless-os",
+        HeaderValue::from_static(normalize_platform(std::env::consts::OS)),
+    );
+    headers.insert(
+        "x-stainless-arch",
+        HeaderValue::from_static(normalize_arch(std::env::consts::ARCH)),
+    );
+    headers.insert(
+        "x-stainless-timeout",
+        HeaderValue::from_static(STAINLESS_TIMEOUT_SECS),
+    );
+
+    headers.extend(config.gateway.custom_headers.clone());
+
+    // No whole-request timeout because responses can run for minutes. The 60 s read timeout
+    // catches slowloris dribble. Anthropic sends keepalives every ~15 s on healthy streams.
+    // reqwest strips only `Authorization` and `Cookie` on a cross-host redirect, so following
+    // one would carry `x-api-key` and the custom headers to another host.
+    let builder = reqwest::Client::builder()
+        .default_headers(headers)
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(15))
+        .read_timeout(Duration::from_mins(1));
+    let builder = apply_extra_ca_certs(builder, config.extra_ca_certs.as_deref())?;
+    builder.build().context("failed to build HTTP client")
 }
 
 // ── Request Building ──
@@ -457,7 +485,7 @@ mod tests {
 
     use super::billing::build_billing_header;
     use super::testing::{
-        Captured, api_key, auth_token, captured, oauth, test_config, text_stream_body,
+        Captured, api_key, auth_token, captured, oauth, test_client, test_config, text_stream_body,
     };
     use super::wire::{ContentBlockInfo, Delta};
     use super::*;
@@ -613,33 +641,6 @@ mod tests {
         let mut cfg = test_config(OFFLINE_URL, api_key(), TEST_MODEL);
         cfg.extra_ca_certs = Some(pem.path().to_path_buf());
         Client::new(cfg, None).expect("valid CA bundle must build a client");
-    }
-
-    #[test]
-    fn new_rejects_auth_values_containing_invalid_header_bytes() {
-        // `HeaderValue::from_str` rejects control chars (\n, \r). Both auth arms must propagate.
-        for auth in [
-            Auth::new(AuthSource::ApiKeyEnv, "bad\nkey"),
-            Auth::new(AuthSource::OAuthTokenEnv, "bad\rtoken"),
-        ] {
-            let source = auth.source();
-            // `Client` has no Debug, so `.unwrap_err()` does not compile.
-            let err = Client::new(
-                test_config(OFFLINE_URL, auth, TEST_MODEL),
-                Some("sid".to_owned()),
-            )
-            .err()
-            .unwrap();
-            let msg = format!("{err:#}");
-            assert!(
-                msg.starts_with(&format!("{source} is not a valid HTTP header value")),
-                "error names the credential source: {msg}",
-            );
-            assert!(
-                !msg.contains("bad"),
-                "error must not echo the secret: {msg}"
-            );
-        }
     }
 
     #[test]
@@ -834,6 +835,32 @@ mod tests {
                 "{model} pick={pick:?}: stored effort",
             );
         }
+    }
+
+    // ── Client::set_auth ──
+
+    #[tokio::test]
+    async fn set_auth_sends_the_new_credential_and_signing_out_stops_requests() {
+        let mut client =
+            Client::new(test_config(OFFLINE_URL, api_key(), TEST_MODEL), None).unwrap();
+
+        client.set_auth(Some(Auth::new(AuthSource::OxLogin, "ox-token")));
+        let request = capture_stream_request(client.clone()).await;
+        client.set_auth(None);
+        let signed_out = client
+            .stream_message(&[Message::user("hi")], &[], None, &[])
+            .expect_err("a signed-out client must not send");
+
+        assert_eq!(
+            request_header(&request, "authorization"),
+            Some("Bearer ox-token")
+        );
+        assert_eq!(request_header(&request, "x-api-key"), None);
+        assert_eq!(client.auth_source(), None);
+        assert_eq!(
+            signed_out.to_string(),
+            "Not signed in. Run /login to sign in."
+        );
     }
 
     // ── Client::stream_message ──
@@ -1474,6 +1501,32 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(80)).await;
     }
 
+    #[test]
+    fn stream_message_rejects_a_credential_no_header_can_carry() {
+        // `HeaderValue::from_str` rejects control chars (\n, \r). Both auth arms must propagate.
+        for auth in [
+            Auth::new(AuthSource::ApiKeyEnv, "bad\nkey"),
+            Auth::new(AuthSource::OAuthTokenEnv, "bad\rtoken"),
+        ] {
+            let source = auth.source();
+            let client = test_client(OFFLINE_URL, auth, TEST_MODEL);
+
+            let err = client
+                .stream_message(&[Message::user("hi")], &[], None, &[])
+                .unwrap_err();
+
+            let msg = format!("{err:#}");
+            assert!(
+                msg.starts_with(&format!("{source} is not a valid HTTP header value")),
+                "error names the credential source: {msg}",
+            );
+            assert!(
+                !msg.contains("bad"),
+                "error must not echo the secret: {msg}"
+            );
+        }
+    }
+
     // ── Client::stream_message / agentic body fields ──
 
     /// Body and `anthropic-beta` header of one streamed turn sent through `client`.
@@ -1595,7 +1648,7 @@ mod tests {
             config.gateway.attribution = enabled;
             let client = Client::new(config, None).unwrap();
             assert_eq!(
-                client.attributes(streaming),
+                client.attributes(streaming, kind),
                 expected,
                 "{kind:?} enabled={enabled} streaming={streaming}",
             );

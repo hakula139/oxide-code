@@ -17,6 +17,9 @@ use tracing::warn;
 use crate::agent::{self, AutoCompact, TokenUsage, TurnAbort, TurnOutcome, TurnReport};
 use crate::client::anthropic::Client;
 use crate::config::Effort;
+use crate::config::auth::{self, Auth, AuthSource};
+use crate::config::login::PendingLogin;
+use crate::config::oauth;
 use crate::file_tracker::FileTracker;
 use crate::message::{ContentBlock, Message};
 use crate::model::{ModelSpec, ResolvedModelId};
@@ -87,6 +90,8 @@ impl EventSink for ChannelSink {
 /// The live session with its transcript, prompt, and usage accounting.
 pub(crate) struct Engine {
     client: Client,
+    /// Where `/login` exchanges its authorization code, a mock server in tests.
+    oauth_token_url: String,
     tools: Arc<ToolRegistry>,
     store: SessionStore,
     session: SessionHandle,
@@ -138,6 +143,7 @@ impl Engine {
         let policy = client.permission().clone();
         Self {
             client,
+            oauth_token_url: oauth::OAUTH_TOKEN_URL.to_owned(),
             tools,
             store,
             session,
@@ -211,6 +217,12 @@ impl Engine {
                 Op::Resume { path } => self.resume(&sink, &path).await,
                 Op::Rename { title } => self.rename(&sink, title).await,
                 Op::SetModel { model, effort } => self.set_model(&sink, model, effort),
+                Op::Login => {
+                    if self.login(&sink, &mut ops).await == TurnEnd::Shutdown {
+                        break;
+                    }
+                }
+                Op::Logout => self.logout(&sink).await,
                 // A `Queue` here arrived after its turn ended, and the frontend still submits it.
                 // An interrupt or approval only matters mid-turn, where `agent_turn` consumes it.
                 Op::Queue(_) | Op::Interrupt | Op::Resolve { .. } => {}
@@ -231,6 +243,9 @@ impl Engine {
     where
         S: EventSink + Clone + 'static,
     {
+        if let Err(e) = self.client.auth() {
+            return report_abort(sink, TurnAbort::Failed(e), "turn-failed");
+        }
         let mut pending = Vec::new();
         if let Err(abort) = self.auto_compact(sink, ops, &mut pending).await {
             return report_abort(sink, abort, "auto-compact-failed");
@@ -542,6 +557,81 @@ impl Engine {
         self.emit_usage_update(sink);
     }
 
+    /// Signs in through the browser and stores the new oxide-code login.
+    async fn login(&mut self, sink: &dyn EventSink, ops: &mut mpsc::Receiver<Op>) -> TurnEnd {
+        let pending = match PendingLogin::start().await {
+            Ok(pending) => pending,
+            Err(e) => return report_abort(sink, sign_in_failed(&e), "login-failed"),
+        };
+        sink.emit(
+            Event::LoginStarted {
+                url: pending.url().to_owned(),
+            },
+            "login-started",
+        );
+
+        let mut queued = Vec::new();
+        let finish = pending.finish(&self.oauth_token_url, self.client.extra_ca_certs());
+        match agent::await_unless_aborted(finish, ops, &mut queued).await {
+            Ok(Ok(auth)) => {
+                self.adopt_login(sink, auth);
+                TurnEnd::Completed
+            }
+            Ok(Err(e)) => report_abort(sink, sign_in_failed(&e), "login-failed"),
+            Err(abort) => report_abort(sink, abort, "login-failed"),
+        }
+    }
+
+    /// Sends requests with a new oxide-code login unless an env var or `client.api_key` outranks
+    /// it.
+    fn adopt_login(&mut self, sink: &dyn EventSink, auth: Auth) {
+        let active = match self.client.auth_source() {
+            Some(source) if !source.is_stored_login() => source,
+            _ => {
+                self.client.set_auth(Some(auth));
+                AuthSource::OxLogin
+            }
+        };
+        sink.emit(Event::SignedIn { auth: active }, "signed-in");
+    }
+
+    /// Removes the oxide-code login. A session using it, or one signed out, falls back to the
+    /// Claude Code login, and stays signed out without a usable one.
+    async fn logout(&mut self, sink: &dyn EventSink) {
+        let removed = match oauth::delete_login().await {
+            Ok(removed) => removed,
+            Err(e) => {
+                sink.emit(
+                    Event::Error(format!("Sign-out failed: {e:#}")),
+                    "logout-failed",
+                );
+                return;
+            }
+        };
+        let mut fallback_error = None;
+        if self
+            .client
+            .auth_source()
+            .is_none_or(|source| source == AuthSource::OxLogin)
+        {
+            let fallback = auth::claude_code_login(self.client.extra_ca_certs())
+                .await
+                .unwrap_or_else(|e| {
+                    fallback_error = Some(format!("{e:#}"));
+                    None
+                });
+            self.client.set_auth(fallback);
+        }
+        sink.emit(
+            Event::SignedOut {
+                removed,
+                auth: self.client.auth_source(),
+                fallback_error,
+            },
+            "signed-out",
+        );
+    }
+
     async fn account_usage(&mut self, sink: &dyn EventSink, report: &TurnReport) {
         self.last_usage = report.usage;
         if let Some(usage) = report.usage {
@@ -673,6 +763,10 @@ fn report_abort(sink: &dyn EventSink, abort: TurnAbort, label: &'static str) -> 
     }
 }
 
+fn sign_in_failed(e: &anyhow::Error) -> TurnAbort {
+    TurnAbort::Failed(anyhow!("Sign-in failed: {e:#}. Run /login to try again."))
+}
+
 /// Warns that the tracked files in `drifted` changed on disk since the resumed session read them.
 fn report_drift(sink: &dyn EventSink, drifted: &[PathBuf]) {
     if drifted.is_empty() {
@@ -708,6 +802,7 @@ fn format_drift_warning(drifted: &[PathBuf]) -> String {
 mod tests {
     use std::time::Duration;
 
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use wiremock::matchers::{body_partial_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -784,6 +879,54 @@ mod tests {
             threshold_tokens: Some(50_000),
         });
         Client::new(config, Some("sid".to_owned())).unwrap()
+    }
+
+    /// Stores an oxide-code login under `data`, standing in for `$XDG_DATA_HOME`.
+    fn store_ox_login(data: &Path) -> PathBuf {
+        let file = data.join("ox").join("credentials.json");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, credentials_json("ox-token")).unwrap();
+        file
+    }
+
+    fn credentials_json(access_token: &str) -> String {
+        serde_json::json!({
+            "claudeAiOauth": { "accessToken": access_token, "expiresAt": 9_999_999_999_999_u64 },
+        })
+        .to_string()
+    }
+
+    /// The URL `/login` announced, once the engine emits it.
+    async fn login_url(events: &mut mpsc::UnboundedReceiver<Event>) -> String {
+        next_matching(events, |event| match event {
+            Event::LoginStarted { url } => Some(url),
+            _ => None,
+        })
+        .await
+    }
+
+    /// Returns to the sign-in listener behind `url` with `query` and its `state`, as the browser
+    /// does, and reads the reply.
+    async fn return_from_browser(url: &str, query: &str) -> String {
+        let url = reqwest::Url::parse(url).unwrap();
+        let param = |name: &str| {
+            url.query_pairs()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.into_owned())
+                .unwrap()
+        };
+        let redirect = reqwest::Url::parse(&param("redirect_uri")).unwrap();
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", redirect.port().unwrap()))
+            .await
+            .unwrap();
+        let request = format!(
+            "GET /callback?{query}&state={} HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            param("state"),
+        );
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut reply = String::new();
+        stream.read_to_string(&mut reply).await.unwrap();
+        reply
     }
 
     /// Records one exchange in a new session in `store` and finishes it, returning its id.
@@ -1508,6 +1651,56 @@ mod tests {
         .await;
     }
 
+    #[tokio::test]
+    async fn run_serves_login_and_logout_and_ends_a_sign_in_on_interrupt_or_shutdown() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            let dir = tempfile::tempdir().unwrap();
+            let data = tempfile::tempdir().unwrap();
+            temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
+                let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                let EngineHandle {
+                    ops,
+                    mut events,
+                    task,
+                } = engine.spawn(&[]);
+
+                ops.send(Op::Login).await.unwrap();
+                let url = login_url(&mut events).await;
+                ops.send(Op::Interrupt).await.unwrap();
+                let cancelled = events.recv().await;
+                ops.send(Op::Logout).await.unwrap();
+                let signed_out = events.recv().await;
+                ops.send(Op::Login).await.unwrap();
+                login_url(&mut events).await;
+                ops.send(Op::Shutdown).await.unwrap();
+                let failure = tokio::time::timeout(Duration::from_secs(5), task.join())
+                    .await
+                    .expect("Shutdown stops the engine mid sign-in");
+
+                assert!(
+                    url.starts_with("https://claude.ai/oauth/authorize?"),
+                    "{url}"
+                );
+                assert!(matches!(cancelled, Some(Event::Cancelled)), "{cancelled:?}");
+                assert!(
+                    matches!(
+                        signed_out,
+                        Some(Event::SignedOut {
+                            removed: false,
+                            auth: Some(AuthSource::ApiKeyEnv),
+                            fallback_error: None,
+                        })
+                    ),
+                    "{signed_out:?}"
+                );
+                assert_eq!(failure, None);
+            })
+            .await;
+        })
+        .await;
+    }
+
     // ── submit_prompt ──
 
     #[tokio::test]
@@ -1662,6 +1855,34 @@ mod tests {
                 .iter()
                 .position(|event| matches!(event, Event::TurnComplete));
             assert!(compacted < completed.unwrap());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn submit_prompt_fails_while_signed_out_without_sending_a_request() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            mount_reply(&server, "reply").await;
+            let dir = tempfile::tempdir().unwrap();
+            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+            engine.client.set_auth(None);
+            let sink = CapturingSink::new();
+            let (_ops_tx, mut ops) = crate::protocol::inert_op_channel();
+
+            let end = engine.submit_prompt("hello", &sink, &mut ops).await;
+
+            assert_eq!(end, TurnEnd::Failed);
+            assert_eq!(engine.messages, [] as [Message; 0]);
+            assert_eq!(request_bodies(&server).await, [] as [serde_json::Value; 0]);
+            let events = sink.events();
+            assert!(
+                matches!(
+                    events.as_slice(),
+                    [Event::TurnFailed(msg)] if msg == "Not signed in. Run /login to sign in."
+                ),
+                "{events:?}"
+            );
         })
         .await;
     }
@@ -2091,6 +2312,257 @@ mod tests {
                 sink.events().first(),
                 Some(Event::ConfigChanged { .. })
             ));
+        })
+        .await;
+    }
+
+    // ── login ──
+
+    #[tokio::test]
+    async fn login_stores_the_browser_s_login_and_sends_it_with_the_next_prompt() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/token"))
+                .and(body_partial_json(
+                    serde_json::json!({ "code": "auth-code" }),
+                ))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "access_token": "fresh-access",
+                    "refresh_token": "fresh-refresh",
+                    "expires_in": 3600,
+                    "scope": "user:inference",
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            mount_reply(&server, "reply").await;
+            let dir = tempfile::tempdir().unwrap();
+            let data = tempfile::tempdir().unwrap();
+            temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
+                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                engine.client.set_auth(None);
+                engine.oauth_token_url = format!("{}/token", server.uri());
+                let mut handle = engine.spawn(&[]);
+
+                handle.ops.send(Op::Login).await.unwrap();
+                let url = login_url(&mut handle.events).await;
+                let reply = return_from_browser(&url, "code=auth-code").await;
+                let signed_in = handle.events.recv().await;
+                let turn = submit(&mut handle, "hi").await;
+                handle.shutdown().await;
+
+                assert!(reply.starts_with("HTTP/1.1 302 Found\r\n"), "{reply}");
+                assert!(
+                    matches!(
+                        signed_in,
+                        Some(Event::SignedIn {
+                            auth: AuthSource::OxLogin
+                        })
+                    ),
+                    "{signed_in:?}"
+                );
+                assert!(matches!(turn.last(), Some(Event::TurnComplete)), "{turn:?}");
+                let requests = server.received_requests().await.unwrap();
+                let prompt = requests
+                    .iter()
+                    .find(|request| request.url.path() == "/v1/messages")
+                    .expect("the prompt reaches the API");
+                assert_eq!(prompt.headers["authorization"], "Bearer fresh-access");
+                assert!(data.path().join("ox").join("credentials.json").exists());
+            })
+            .await;
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn login_fails_the_sign_in_when_the_browser_returns_a_refusal() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            let dir = tempfile::tempdir().unwrap();
+            let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+            let mut handle = engine.spawn(&[]);
+
+            handle.ops.send(Op::Login).await.unwrap();
+            let url = login_url(&mut handle.events).await;
+            let reply = return_from_browser(&url, "error=access_denied").await;
+            let failed = handle.events.recv().await;
+            handle.shutdown().await;
+
+            assert!(reply.starts_with("HTTP/1.1 400 Bad Request\r\n"), "{reply}");
+            assert!(
+                matches!(
+                    &failed,
+                    Some(Event::TurnFailed(msg))
+                        if msg == "Sign-in failed: authorization was refused (access_denied). Run /login to try again."
+                ),
+                "{failed:?}"
+            );
+        })
+        .await;
+    }
+
+    // ── adopt_login ──
+
+    #[tokio::test]
+    async fn adopt_login_replaces_a_stored_login_or_none_but_not_an_explicit_credential() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            let dir = tempfile::tempdir().unwrap();
+            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+            let sink = CapturingSink::new();
+            let ox_login = || Auth::new(AuthSource::OxLogin, "ox-token");
+
+            engine.adopt_login(&sink, ox_login());
+            assert_eq!(engine.client.auth_source(), Some(AuthSource::ApiKeyEnv));
+            for before in [
+                None,
+                Some(Auth::new(AuthSource::ClaudeCodeLogin, "claude-code-token")),
+            ] {
+                engine.client.set_auth(before);
+                engine.adopt_login(&sink, ox_login());
+                assert_eq!(engine.client.auth().unwrap().secret(), "ox-token");
+            }
+
+            let events = sink.events();
+            assert!(
+                matches!(
+                    events.as_slice(),
+                    [
+                        Event::SignedIn {
+                            auth: AuthSource::ApiKeyEnv
+                        },
+                        Event::SignedIn {
+                            auth: AuthSource::OxLogin
+                        },
+                        Event::SignedIn {
+                            auth: AuthSource::OxLogin
+                        },
+                    ]
+                ),
+                "{events:?}"
+            );
+        })
+        .await;
+    }
+
+    // ── logout ──
+
+    #[tokio::test]
+    async fn logout_removes_the_oxide_code_login_and_keeps_an_explicit_credential() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            let dir = tempfile::tempdir().unwrap();
+            let data = tempfile::tempdir().unwrap();
+            let file = store_ox_login(data.path());
+            temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
+                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                let sink = CapturingSink::new();
+
+                engine.logout(&sink).await;
+
+                assert!(!file.exists());
+                assert_eq!(engine.client.auth_source(), Some(AuthSource::ApiKeyEnv));
+                let events = sink.events();
+                assert!(
+                    matches!(
+                        events.as_slice(),
+                        [Event::SignedOut {
+                            removed: true,
+                            auth: Some(AuthSource::ApiKeyEnv),
+                            fallback_error: None,
+                        }]
+                    ),
+                    "{events:?}"
+                );
+            })
+            .await;
+        })
+        .await;
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[tokio::test]
+    async fn logout_falls_back_to_the_claude_code_login_or_stays_signed_out() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            let dir = tempfile::tempdir().unwrap();
+            let data = tempfile::tempdir().unwrap();
+            store_ox_login(data.path());
+            temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
+                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                engine
+                    .client
+                    .set_auth(Some(Auth::new(AuthSource::OxLogin, "ox-token")));
+                let sink = CapturingSink::new();
+                let claude_code_file = std::env::home_dir()
+                    .unwrap()
+                    .join(".claude")
+                    .join(".credentials.json");
+
+                engine.logout(&sink).await;
+                std::fs::create_dir(claude_code_file.parent().unwrap()).unwrap();
+                std::fs::write(&claude_code_file, "not json").unwrap();
+                engine.logout(&sink).await;
+                std::fs::write(&claude_code_file, credentials_json("claude-code-token")).unwrap();
+                engine.logout(&sink).await;
+
+                assert_eq!(engine.client.auth().unwrap().secret(), "claude-code-token");
+                let events = sink.events();
+                assert!(
+                    matches!(
+                        events.as_slice(),
+                        [
+                            Event::SignedOut {
+                                removed: true,
+                                auth: None,
+                                fallback_error: None,
+                            },
+                            Event::SignedOut {
+                                removed: false,
+                                auth: None,
+                                fallback_error: Some(unreadable),
+                            },
+                            Event::SignedOut {
+                                removed: false,
+                                auth: Some(AuthSource::ClaudeCodeLogin),
+                                fallback_error: None,
+                            },
+                        ] if unreadable.ends_with("Run `claude` to sign in again.")
+                    ),
+                    "{events:?}"
+                );
+            })
+            .await;
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn logout_reports_a_login_it_cannot_remove() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            let dir = tempfile::tempdir().unwrap();
+            let data = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(data.path().join("ox").join("credentials.json")).unwrap();
+            temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
+                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                let sink = CapturingSink::new();
+
+                engine.logout(&sink).await;
+
+                assert_eq!(engine.client.auth_source(), Some(AuthSource::ApiKeyEnv));
+                let events = sink.events();
+                assert!(
+                    matches!(
+                        events.as_slice(),
+                        [Event::Error(msg)] if msg.starts_with("Sign-out failed: failed to remove ")
+                    ),
+                    "{events:?}"
+                );
+            })
+            .await;
         })
         .await;
     }

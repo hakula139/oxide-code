@@ -160,6 +160,9 @@ impl StdioSink {
             | Event::SessionRolled { .. }
             | Event::SessionResumed { .. }
             | Event::ConfigChanged { .. }
+            | Event::LoginStarted { .. }
+            | Event::SignedIn { .. }
+            | Event::SignedOut { .. }
             | Event::ApprovalRequested { .. }
             | Event::SessionRulesUpdated(_) => {}
             Event::TurnComplete => {

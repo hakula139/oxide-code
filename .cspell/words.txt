@@ -79,6 +79,7 @@ numtide
 oxalica
 onig
 pgid
+PKCE
 pkgs
 pname
 println

@@ -2,11 +2,13 @@
 //! travels on the wire.
 
 use std::fmt;
+use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use reqwest::header::{AUTHORIZATION, HeaderName, HeaderValue};
+use serde::{Deserialize, Serialize};
 
-use super::oauth::{LOGIN_STORES, LoginError};
+use super::oauth::{self, LOGIN_STORES, Login, LoginError};
 use crate::util::env;
 
 // ── AuthKind ──
@@ -43,12 +45,16 @@ impl AuthKind {
 // ── AuthSource ──
 
 /// Where the active credential came from, listed in resolution order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub(crate) enum AuthSource {
     AuthTokenEnv,
     ApiKeyEnv,
     ApiKeyFile,
     OAuthTokenEnv,
+    /// oxide-code's stored login from `/login` (`$XDG_DATA_HOME/ox/credentials.json`), refreshed
+    /// near expiry.
+    OxLogin,
     /// Claude Code's stored login (macOS Keychain or `~/.claude/.credentials.json`), refreshed
     /// near expiry.
     ClaudeCodeLogin,
@@ -59,26 +65,39 @@ impl AuthSource {
         match self {
             Self::AuthTokenEnv => AuthKind::AuthToken,
             Self::ApiKeyEnv | Self::ApiKeyFile => AuthKind::ApiKey,
-            Self::OAuthTokenEnv | Self::ClaudeCodeLogin => AuthKind::OAuth,
+            Self::OAuthTokenEnv | Self::OxLogin | Self::ClaudeCodeLogin => AuthKind::OAuth,
         }
     }
 
-    /// The env var the credential was read from, `None` for the config file or stored login.
+    /// Whether the credential is a stored login, which `/login` and `/logout` can replace. Env
+    /// vars and `client.api_key` outrank both stored logins.
+    pub(crate) const fn is_stored_login(self) -> bool {
+        self.login().is_some()
+    }
+
+    const fn login(self) -> Option<Login> {
+        match self {
+            Self::OxLogin => Some(Login::Ox),
+            Self::ClaudeCodeLogin => Some(Login::ClaudeCode),
+            Self::AuthTokenEnv | Self::ApiKeyEnv | Self::ApiKeyFile | Self::OAuthTokenEnv => None,
+        }
+    }
+
+    /// The env var the credential was read from, `None` for the config file or a stored login.
     pub(super) const fn env_var(self) -> Option<&'static str> {
         match self {
             Self::AuthTokenEnv => Some("ANTHROPIC_AUTH_TOKEN"),
             Self::ApiKeyEnv => Some("ANTHROPIC_API_KEY"),
             Self::OAuthTokenEnv => Some("CLAUDE_CODE_OAUTH_TOKEN"),
-            Self::ApiKeyFile | Self::ClaudeCodeLogin => None,
+            Self::ApiKeyFile | Self::OxLogin | Self::ClaudeCodeLogin => None,
         }
     }
 
     /// The env var, config key, or store the credential was read from.
     fn origin(self) -> &'static str {
-        self.env_var().unwrap_or(match self {
-            Self::ApiKeyFile => "client.api_key",
-            _ => "Claude Code login",
-        })
+        self.env_var()
+            .or(self.login().map(Login::name))
+            .unwrap_or("client.api_key")
     }
 
     /// Recovery step shown when the API rejects the credential with HTTP 401.
@@ -93,7 +112,8 @@ impl AuthSource {
                 "CLAUDE_CODE_OAUTH_TOKEN may be expired or revoked. Generate a new one with \
                  `claude setup-token`."
             }
-            Self::ClaudeCodeLogin => "Run `claude` to sign in again.",
+            Self::OxLogin => Login::Ox.sign_in_step(),
+            Self::ClaudeCodeLogin => Login::ClaudeCode.sign_in_step(),
         }
     }
 }
@@ -159,7 +179,43 @@ impl fmt::Debug for Auth {
 
 // ── Resolution ──
 
-/// Explicit credentials in precedence order: env and config values, before the stored login.
+/// Why no credential resolved.
+#[derive(Debug, thiserror::Error)]
+pub(super) enum ResolveError {
+    /// `base_url` is a gateway, which never receives a stored login.
+    #[error(
+        "no credentials for {0}. Set ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY, or \
+         CLAUDE_CODE_OAUTH_TOKEN, or add `api_key` to ~/.config/ox/config.toml. Stored logins are \
+         sent only to the Anthropic API."
+    )]
+    Gateway(String),
+    /// No stored login supplied a token. A TUI session starts signed out, since `/login` can sign
+    /// it in.
+    #[error("{}", signed_out_error(.0))]
+    SignedOut(LoginError),
+}
+
+fn signed_out_error(e: &LoginError) -> String {
+    match e {
+        LoginError::Missing => format!(
+            "no credentials found: no API key or token is set, no oxide-code login is stored, and \
+             no Claude Code login is in {LOGIN_STORES}. Set ANTHROPIC_API_KEY or \
+             CLAUDE_CODE_OAUTH_TOKEN, add `api_key` to ~/.config/ox/config.toml, or sign in with \
+             /login in the `ox` TUI."
+        ),
+        e => e.to_string(),
+    }
+}
+
+/// The startup notice for a TUI session that starts signed out because of `e`.
+pub(super) fn signed_out_notice(e: &LoginError) -> String {
+    match e {
+        LoginError::Missing => "Not signed in. Run /login to sign in.".to_owned(),
+        e => format!("Not signed in: {e}"),
+    }
+}
+
+/// Explicit credentials in precedence order: env and config values, before the stored logins.
 pub(super) fn explicit_credentials(
     file_api_key: Option<String>,
 ) -> [(AuthSource, Option<String>); 4] {
@@ -172,14 +228,14 @@ pub(super) fn explicit_credentials(
     ]
 }
 
-/// Picks the first explicit credential, falling back to the stored Claude Code login. `stored`
-/// is awaited only on fallback, and only when `base_url` is first-party, so a personal
-/// subscription token never reaches a gateway the user did not hand it to.
+/// Picks the first explicit credential, falling back to a stored login. `stored` is awaited only
+/// on fallback, and only when `base_url` is first-party, so a personal subscription token never
+/// reaches a gateway the user did not hand it to.
 pub(super) async fn resolve(
     explicit: impl IntoIterator<Item = (AuthSource, Option<String>)>,
     base_url: &str,
-    stored: impl Future<Output = Result<String, LoginError>>,
-) -> Result<Auth> {
+    stored: impl Future<Output = Result<Auth, LoginError>>,
+) -> Result<Auth, ResolveError> {
     if let Some((source, secret)) = explicit
         .into_iter()
         .find_map(|(source, value)| value.map(|secret| (source, secret)))
@@ -188,19 +244,41 @@ pub(super) async fn resolve(
     }
 
     if !super::is_first_party_base_url(base_url) {
-        bail!(
-            "no credentials for {base_url}. Set ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY, or \
-             CLAUDE_CODE_OAUTH_TOKEN, or add `api_key` to ~/.config/ox/config.toml. The Claude \
-             Code login is sent only to the Anthropic API."
-        );
+        return Err(ResolveError::Gateway(base_url.to_owned()));
     }
-    match stored.await {
-        Ok(token) => Ok(Auth::new(AuthSource::ClaudeCodeLogin, token)),
-        Err(LoginError::Missing) => bail!(
-            "no credentials found: no API key or token is set, and no Claude Code login is in \
-             {LOGIN_STORES}. Set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN, add `api_key` to \
-             ~/.config/ox/config.toml, or run `claude` to sign in."
-        ),
+    stored.await.map_err(ResolveError::SignedOut)
+}
+
+/// The stored login to fall back on: oxide-code's own, then Claude Code's. A login that exists but
+/// fails ends the search, so a broken oxide-code login never quietly yields to another account.
+pub(super) async fn stored_login(extra_ca_certs: Option<&Path>) -> Result<Auth, LoginError> {
+    first_stored_login(|login| oauth::load_token(login, extra_ca_certs)).await
+}
+
+async fn first_stored_login<F, Fut>(load: F) -> Result<Auth, LoginError>
+where
+    F: Fn(Login) -> Fut,
+    Fut: Future<Output = Result<String, LoginError>>,
+{
+    for (source, login) in [
+        (AuthSource::OxLogin, Login::Ox),
+        (AuthSource::ClaudeCodeLogin, Login::ClaudeCode),
+    ] {
+        match load(login).await {
+            Ok(token) => return Ok(Auth::new(source, token)),
+            Err(LoginError::Missing) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Err(LoginError::Missing)
+}
+
+/// The Claude Code login, which takes over once `/logout` removes the oxide-code login. `None`
+/// when Claude Code stores no login, and an error when its login exists but fails.
+pub(crate) async fn claude_code_login(extra_ca_certs: Option<&Path>) -> Result<Option<Auth>> {
+    match oauth::load_token(Login::ClaudeCode, extra_ca_certs).await {
+        Ok(token) => Ok(Some(Auth::new(AuthSource::ClaudeCodeLogin, token))),
+        Err(LoginError::Missing) => Ok(None),
         Err(e) => Err(e.into()),
     }
 }
@@ -209,23 +287,24 @@ pub(super) async fn resolve(
 mod tests {
     use super::*;
 
-    const ALL_SOURCES: [AuthSource; 5] = [
+    const ALL_SOURCES: [AuthSource; 6] = [
         AuthSource::AuthTokenEnv,
         AuthSource::ApiKeyEnv,
         AuthSource::ApiKeyFile,
         AuthSource::OAuthTokenEnv,
+        AuthSource::OxLogin,
         AuthSource::ClaudeCodeLogin,
     ];
 
     const FIRST_PARTY: &str = "https://api.anthropic.com";
     const GATEWAY: &str = "https://gateway.example.com/anthropic";
 
-    fn unreachable_store() -> impl Future<Output = Result<String, LoginError>> {
+    fn unreachable_store() -> impl Future<Output = Result<Auth, LoginError>> {
         std::future::poll_fn(|_| panic!("stored credentials must not be read"))
     }
 
-    fn stored_token() -> std::future::Ready<Result<String, LoginError>> {
-        std::future::ready(Ok("stored-token".to_owned()))
+    fn stored_ox_login() -> std::future::Ready<Result<Auth, LoginError>> {
+        std::future::ready(Ok(Auth::new(AuthSource::OxLogin, "stored-token")))
     }
 
     fn explicit(present: &[AuthSource]) -> Vec<(AuthSource, Option<String>)> {
@@ -238,6 +317,13 @@ mod tests {
                 (source, value)
             })
             .collect()
+    }
+
+    fn credentials_json(access_token: &str) -> String {
+        serde_json::json!({
+            "claudeAiOauth": { "accessToken": access_token, "expiresAt": 9_999_999_999_999_u64 },
+        })
+        .to_string()
     }
 
     // ── AuthSource::kind ──
@@ -253,7 +339,18 @@ mod tests {
                 AuthKind::ApiKey,
                 AuthKind::OAuth,
                 AuthKind::OAuth,
+                AuthKind::OAuth,
             ],
+        );
+    }
+
+    // ── AuthSource::is_stored_login ──
+
+    #[test]
+    fn is_stored_login_holds_only_for_the_two_logins() {
+        assert_eq!(
+            ALL_SOURCES.map(AuthSource::is_stored_login),
+            [false, false, false, false, true, true],
         );
     }
 
@@ -269,6 +366,7 @@ mod tests {
                 None,
                 Some("CLAUDE_CODE_OAUTH_TOKEN"),
                 None,
+                None,
             ],
         );
     }
@@ -282,6 +380,7 @@ mod tests {
             (AuthSource::ApiKeyEnv, "ANTHROPIC_API_KEY"),
             (AuthSource::ApiKeyFile, "client.api_key in your user config"),
             (AuthSource::OAuthTokenEnv, "claude setup-token"),
+            (AuthSource::OxLogin, "Run /login"),
             (AuthSource::ClaudeCodeLogin, "Run `claude`"),
         ] {
             let hint = source.rejection_hint();
@@ -306,6 +405,7 @@ mod tests {
                 "API key (ANTHROPIC_API_KEY)",
                 "API key (client.api_key)",
                 "OAuth (CLAUDE_CODE_OAUTH_TOKEN)",
+                "OAuth (oxide-code login)",
                 "OAuth (Claude Code login)",
             ],
         );
@@ -342,6 +442,20 @@ mod tests {
         let debug = format!("{:?}", Auth::new(AuthSource::ApiKeyEnv, "sk-must-not-leak"));
         assert!(!debug.contains("sk-must-not-leak"), "{debug}");
         assert!(debug.contains("ApiKeyEnv"), "{debug}");
+    }
+
+    // ── signed_out_notice ──
+
+    #[test]
+    fn signed_out_notice_names_the_step_that_signs_in() {
+        assert_eq!(
+            signed_out_notice(&LoginError::Missing),
+            "Not signed in. Run /login to sign in.",
+        );
+        assert_eq!(
+            signed_out_notice(&LoginError::Expired(Login::Ox)),
+            "Not signed in: oxide-code login has expired. Run /login to sign in again.",
+        );
     }
 
     // ── explicit_credentials ──
@@ -386,10 +500,10 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_falls_back_to_stored_login_on_first_party_host() {
-        let auth = resolve(explicit(&[]), FIRST_PARTY, stored_token())
+        let auth = resolve(explicit(&[]), FIRST_PARTY, stored_ox_login())
             .await
             .unwrap();
-        assert_eq!(auth.source(), AuthSource::ClaudeCodeLogin);
+        assert_eq!(auth.source(), AuthSource::OxLogin);
         assert_eq!(auth.secret(), "stored-token");
     }
 
@@ -398,6 +512,7 @@ mod tests {
         let err = resolve(explicit(&[]), GATEWAY, unreachable_store())
             .await
             .expect_err("stored login must not go to a gateway");
+        assert!(matches!(err, ResolveError::Gateway(_)), "{err:?}");
         let msg = format!("{err:#}");
         for needle in [
             GATEWAY,
@@ -417,12 +532,17 @@ mod tests {
         })
         .await
         .expect_err("no credential anywhere");
+        assert!(
+            matches!(err, ResolveError::SignedOut(LoginError::Missing)),
+            "{err:?}"
+        );
         assert_eq!(
             format!("{err:#}"),
             format!(
-                "no credentials found: no API key or token is set, and no Claude Code login is \
-                 in {LOGIN_STORES}. Set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN, add \
-                 `api_key` to ~/.config/ox/config.toml, or run `claude` to sign in."
+                "no credentials found: no API key or token is set, no oxide-code login is stored, \
+                 and no Claude Code login is in {LOGIN_STORES}. Set ANTHROPIC_API_KEY or \
+                 CLAUDE_CODE_OAUTH_TOKEN, add `api_key` to ~/.config/ox/config.toml, or sign in \
+                 with /login in the `ox` TUI."
             ),
         );
     }
@@ -430,7 +550,7 @@ mod tests {
     #[tokio::test]
     async fn resolve_other_login_failures_keep_their_own_recovery_step() {
         let err = resolve(explicit(&[]), FIRST_PARTY, async {
-            Err(LoginError::Expired)
+            Err(LoginError::Expired(Login::ClaudeCode))
         })
         .await
         .expect_err("an expired login must fail");
@@ -438,5 +558,108 @@ mod tests {
             format!("{err:#}"),
             "Claude Code login has expired. Run `claude` to sign in again.",
         );
+    }
+
+    // ── stored_login ──
+
+    #[tokio::test]
+    async fn stored_login_reads_the_oxide_code_login_from_the_data_dir() {
+        let data = tempfile::tempdir().unwrap();
+        std::fs::create_dir(data.path().join("ox")).unwrap();
+        std::fs::write(
+            data.path().join("ox").join("credentials.json"),
+            credentials_json("ox-token"),
+        )
+        .unwrap();
+
+        let auth =
+            temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], stored_login(None))
+                .await
+                .unwrap();
+        assert_eq!(auth.source(), AuthSource::OxLogin);
+        assert_eq!(auth.secret(), "ox-token");
+    }
+
+    // ── first_stored_login ──
+
+    #[tokio::test]
+    async fn first_stored_login_prefers_the_oxide_code_login() {
+        let auth = first_stored_login(|login| async move {
+            match login {
+                Login::Ox => Ok("ox-token".to_owned()),
+                Login::ClaudeCode => panic!("the Claude Code login must not be read"),
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(auth.source(), AuthSource::OxLogin);
+        assert_eq!(auth.secret(), "ox-token");
+    }
+
+    #[tokio::test]
+    async fn first_stored_login_falls_back_to_claude_code_without_an_oxide_code_login() {
+        let auth = first_stored_login(|login| async move {
+            match login {
+                Login::Ox => Err(LoginError::Missing),
+                Login::ClaudeCode => Ok("claude-code-token".to_owned()),
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(auth.source(), AuthSource::ClaudeCodeLogin);
+        assert_eq!(auth.secret(), "claude-code-token");
+    }
+
+    #[tokio::test]
+    async fn first_stored_login_stops_at_a_failing_oxide_code_login() {
+        let err = first_stored_login(|login| async move {
+            match login {
+                Login::Ox => Err(LoginError::Expired(Login::Ox)),
+                Login::ClaudeCode => panic!("a failing oxide-code login must not yield"),
+            }
+        })
+        .await
+        .unwrap_err();
+        assert!(matches!(err, LoginError::Expired(Login::Ox)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn first_stored_login_is_missing_without_either_login() {
+        let err = first_stored_login(|_| async { Err(LoginError::Missing) })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, LoginError::Missing), "{err:?}");
+    }
+
+    // ── claude_code_login ──
+
+    #[cfg(not(target_os = "macos"))]
+    #[tokio::test]
+    async fn claude_code_login_reads_the_claude_code_credentials_file() {
+        let home = tempfile::tempdir().unwrap();
+        let file = home.path().join(".claude").join(".credentials.json");
+
+        let (missing, unreadable, auth) = temp_env::async_with_vars(
+            [(crate::util::path::testing::HOME_VAR, Some(home.path()))],
+            async {
+                let missing = claude_code_login(None).await;
+                std::fs::create_dir(file.parent().unwrap()).unwrap();
+                std::fs::write(&file, "not json").unwrap();
+                let unreadable = claude_code_login(None).await;
+                std::fs::write(&file, credentials_json("claude-code-token")).unwrap();
+                (missing, unreadable, claude_code_login(None).await)
+            },
+        )
+        .await;
+
+        assert!(missing.unwrap().is_none());
+        let unreadable = unreadable.unwrap_err().to_string();
+        assert!(
+            unreadable.ends_with("Run `claude` to sign in again."),
+            "{unreadable}"
+        );
+        let auth = auth.unwrap().unwrap();
+        assert_eq!(auth.source(), AuthSource::ClaudeCodeLogin);
+        assert_eq!(auth.secret(), "claude-code-token");
     }
 }

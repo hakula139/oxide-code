@@ -56,6 +56,8 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 - **`/init`**: Returns `Forward(Action::Op(Op::Prompt(PROMPT)))` with a static body asking the model to author / update AGENTS.md. The expanded body is invisible in the live session but recorded in JSONL for resume.
 
+- **`/login`** / **`/logout`**: Forward `Op::Login` and `Op::Logout`. The engine runs the browser sign-in and swaps the client's credential, and the TUI opens the browser and reports the credential requests use afterward. Both are `Mutating`. Full design: [login.md](login.md).
+
 - **`/model`**: Bare opens the combined picker ([modals.md](modals.md)). `/model <arg>` resolves an exact catalogue id first, then a unique substring, so `opus`, `sonnet`, and `haiku` act as aliases. Both forms are mutating and idle-gated because they can emit `Op::SetModel`, which re-resolves the current effort against the new model.
 
 - **`/effort`**: Bare opens the Speed ↔ Intelligence slider ([modals.md](modals.md)), since a two-axis picker would force users through models they didn't mean to change. `/effort <level>` accepts the five concrete tiers, with no `auto` state. Both forms are mutating and idle-gated because they can emit `Op::SetModel`.
@@ -96,6 +98,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 - `crates/oxide-code/src/slash/effort_slider.rs`: bare `/effort` Speed ↔ Intelligence slider modal.
 - `crates/oxide-code/src/slash/help.rs`: `/help` row builder plus `KvOverview` constructor.
 - `crates/oxide-code/src/slash/init.rs`: `InitCmd`, `PROMPT`.
+- `crates/oxide-code/src/slash/login.rs`: `LoginCmd` and `LogoutCmd`.
 - `crates/oxide-code/src/slash/model.rs`: `ModelCmd`, resolver.
 - `crates/oxide-code/src/slash/picker.rs`: combined model + effort picker modal.
 - `crates/oxide-code/src/slash/registry.rs`: `SlashCommand` trait, `BUILT_INS`, `SlashOutcome`.

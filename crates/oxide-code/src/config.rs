@@ -7,8 +7,9 @@
 pub(crate) mod auth;
 pub(crate) mod gateway;
 pub(crate) mod load;
+pub(crate) mod login;
 mod merge;
-mod oauth;
+pub(crate) mod oauth;
 pub(crate) mod provenance;
 mod schema;
 
@@ -21,7 +22,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use self::auth::{Auth, AuthSource};
+use self::auth::{Auth, AuthSource, ResolveError};
 use self::gateway::{GatewayCompat, GatewaySnapshot};
 use self::load::Loaded;
 use self::merge::Origins;
@@ -46,7 +47,10 @@ pub(crate) const DEFAULT_THEME: &str = "mocha";
 pub(crate) struct ConfigSnapshot {
     pub(crate) model: ModelSpec,
     pub(crate) effort: Option<Effort>,
-    pub(crate) auth: AuthSource,
+    /// `None` while signed out.
+    pub(crate) auth: Option<AuthSource>,
+    /// Why the session started signed out, shown among the startup [`Self::notices`].
+    pub(crate) signed_out_notice: Option<String>,
     pub(crate) base_url: String,
     /// PEM bundle appended to reqwest's trust anchors.
     pub(crate) extra_ca_certs: Option<PathBuf>,
@@ -68,13 +72,15 @@ pub(crate) struct ConfigSnapshot {
 }
 
 impl ConfigSnapshot {
-    /// Startup notices: config files in superseded locations, then an unsupported model.
+    /// Startup notices: config files in superseded locations, an unsupported model, then why the
+    /// session is signed out.
     pub(crate) fn notices(&self) -> Vec<String> {
         self.provenance
             .layers
             .iter()
             .filter_map(provenance::Layer::notice)
             .chain(self.model.unsupported_notice())
+            .chain(self.signed_out_notice.clone())
             .collect()
     }
 
@@ -403,7 +409,11 @@ pub(crate) struct Config {
     pub(crate) model: ModelSpec,
     /// `None` for models outside the catalogue.
     pub(crate) effort: Option<Effort>,
-    pub(crate) auth: Auth,
+    /// `None` while signed out, which only an interactive session starts in, since `/login` can
+    /// sign it in.
+    pub(crate) auth: Option<Auth>,
+    /// Why the session started signed out.
+    pub(crate) signed_out_notice: Option<String>,
     pub(crate) base_url: String,
     /// Resolved path to a PEM bundle appended to reqwest's trust anchors. `None` means the
     /// client trusts only the platform roots.
@@ -429,8 +439,9 @@ impl Config {
     /// Resolves config from layered sources, finding the project file from `cwd`. Per-field
     /// precedence is env > config files (see [`load::load`]) > built-in default. See the module
     /// docs for the auth chain. Parse errors (TOML, env) propagate so a typo doesn't degrade
-    /// silently into "no credentials".
-    pub(crate) async fn load(cwd: &Path) -> Result<Self> {
+    /// silently into "no credentials". An `interactive` session starts signed out when no stored
+    /// login works. Other sessions return an error.
+    pub(crate) async fn load(cwd: &Path, interactive: bool) -> Result<Self> {
         let Loaded { config, origins } = load::load(cwd)?;
         let FileConfig {
             client,
@@ -451,12 +462,13 @@ impl Config {
 
         let gateway = GatewayCompat::load()?;
 
-        let (auth, auth_source) = resolve_auth(
+        let credential = resolve_auth(
             client.api_key,
             &origins,
             &base_url.value,
             extra_ca_certs.value.as_deref(),
             &gateway,
+            interactive,
         )
         .await?;
 
@@ -511,7 +523,7 @@ impl Config {
             layers: origins.into_layers(),
             model: model_id.source,
             effort: effort.source,
-            auth: auth_source,
+            auth: credential.source,
             base_url: base_url.source,
             extra_ca_certs: extra_ca_certs.source,
             custom_headers: Source::env_if_set("ANTHROPIC_CUSTOM_HEADERS"),
@@ -528,7 +540,8 @@ impl Config {
         Ok(Self {
             model,
             effort: effort.value,
-            auth,
+            auth: credential.auth,
+            signed_out_notice: credential.signed_out_notice,
             base_url: base_url.value,
             extra_ca_certs: extra_ca_certs.value,
             gateway,
@@ -550,7 +563,8 @@ impl Config {
         ConfigSnapshot {
             model: self.model.clone(),
             effort: self.effort,
-            auth: self.auth.source(),
+            auth: self.auth.as_ref().map(Auth::source),
+            signed_out_notice: self.signed_out_notice.clone(),
             base_url: self.base_url.clone(),
             extra_ca_certs: self.extra_ca_certs.clone(),
             gateway: self.gateway.snapshot(),
@@ -608,6 +622,10 @@ fn validate_status_line(segments: Vec<StatusLineSegment>) -> Result<Vec<StatusLi
     Ok(segments)
 }
 
+pub(crate) fn display_auth(auth: Option<AuthSource>) -> String {
+    auth.map_or_else(|| "Not signed in".to_owned(), |source| source.to_string())
+}
+
 pub(crate) fn display_effort(effort: Option<Effort>) -> String {
     effort.map_or_else(|| "(no effort tier)".to_owned(), |e| e.to_string())
 }
@@ -628,29 +646,47 @@ pub(crate) fn display_auto_compaction(auto: AutoCompactionConfig) -> String {
     }
 }
 
+/// The session credential, where it came from, and why the session is signed out without one.
+struct ResolvedAuth {
+    auth: Option<Auth>,
+    source: Source,
+    signed_out_notice: Option<String>,
+}
+
 /// Resolves the credential and its source, rejecting a custom header that would replace the
 /// credential. A stored login is the fallback when nothing configures one, so its source is the
-/// default.
+/// default. A signed-out session checks the credential header used by `/login`.
 async fn resolve_auth(
     file_api_key: Option<String>,
     origins: &Origins,
     base_url: &str,
     extra_ca_certs: Option<&Path>,
     gateway: &GatewayCompat,
-) -> Result<(Auth, Source)> {
-    let auth = auth::resolve(
+    interactive: bool,
+) -> Result<ResolvedAuth> {
+    let resolved = auth::resolve(
         auth::explicit_credentials(file_api_key),
         base_url,
-        oauth::load_token(extra_ca_certs),
+        auth::stored_login(extra_ca_certs),
     )
-    .await?;
-    gateway.check_credential_header(auth.source())?;
+    .await;
+    let (auth, signed_out_notice) = match resolved {
+        Ok(auth) => (Some(auth), None),
+        Err(ResolveError::SignedOut(e)) if interactive => (None, Some(auth::signed_out_notice(&e))),
+        Err(e) => return Err(e.into()),
+    };
+    let source = auth.as_ref().map_or(AuthSource::OxLogin, Auth::source);
+    gateway.check_credential_header(source)?;
 
-    let source = match auth.source() {
+    let source = match source {
         AuthSource::ApiKeyFile => origins.source("client.api_key"),
         source => source.env_var().map_or(Source::Default, Source::Env),
     };
-    Ok((auth, source))
+    Ok(ResolvedAuth {
+        auth,
+        source,
+        signed_out_notice,
+    })
 }
 
 /// The effort the model takes. A pick the model ignores leaves the source at the default.
@@ -940,7 +976,11 @@ mod tests {
 
     fn sample_config() -> Config {
         Config {
-            auth: Auth::new(AuthSource::ClaudeCodeLogin, "token-must-not-leak"),
+            auth: Some(Auth::new(
+                AuthSource::ClaudeCodeLogin,
+                "token-must-not-leak",
+            )),
+            signed_out_notice: None,
             base_url: "https://api.example.test".to_owned(),
             extra_ca_certs: Some(PathBuf::from("/etc/ssl/corp-ca.pem")),
             gateway: GatewayCompat {
@@ -1002,6 +1042,18 @@ mod tests {
             notices[1].starts_with("`claude-test-1-0` is not a supported model"),
             "{notices:?}"
         );
+    }
+
+    #[test]
+    fn notices_end_with_why_the_session_is_signed_out() {
+        let mut cfg = sample_config();
+        cfg.auth = None;
+        cfg.signed_out_notice = Some("Not signed in. Run /login to sign in.".to_owned());
+
+        let notices = cfg.snapshot().notices();
+
+        assert_eq!(notices.len(), 2, "{notices:?}");
+        assert_eq!(notices[1], "Not signed in. Run /login to sign in.");
     }
 
     #[test]
@@ -1186,6 +1238,7 @@ mod tests {
         "OX_PROMPT_CACHE_TTL",
         "OX_PERMISSION_MODE",
         "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
     ];
 
     fn write_user_config(xdg_dir: &Path, body: &str) -> Layer {
@@ -1241,16 +1294,18 @@ mod tests {
     }
 
     fn assert_auth(config: &Config, source: AuthSource, secret: &str) {
-        assert_eq!(config.auth.source(), source);
-        assert_eq!(config.auth.secret(), secret);
+        let auth = config.auth.as_ref().expect("the session must be signed in");
+        assert_eq!(auth.source(), source);
+        assert_eq!(auth.secret(), secret);
     }
 
     #[tokio::test]
     async fn load_defaults_apply_when_no_config_and_no_env() {
         let dir = tempfile::tempdir().unwrap();
-        let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load(dir.path()))
-            .await
-            .unwrap();
+        let config =
+            temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load(dir.path(), false))
+                .await
+                .unwrap();
         assert_eq!(config.model.id(), "claude-opus-5-5");
         assert_eq!(config.base_url, DEFAULT_BASE_URL);
         assert_eq!(config.max_tokens, None);
@@ -1297,9 +1352,10 @@ mod tests {
                 accent = { bold = false }
             "##},
         );
-        let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load(dir.path()))
-            .await
-            .unwrap();
+        let config =
+            temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load(dir.path(), false))
+                .await
+                .unwrap();
         assert_eq!(config.theme.base, "latte");
         assert_eq!(
             config.theme.overrides,
@@ -1325,7 +1381,7 @@ mod tests {
             env("OX_SHOW_WELCOME", "0"),
             env("OX_STATUS_LINE", "run-state,model,current-dir"),
         ]);
-        let config = temp_env::async_with_vars(vars, Config::load(dir.path()))
+        let config = temp_env::async_with_vars(vars, Config::load(dir.path(), false))
             .await
             .unwrap();
         assert_eq!(config.model.id(), "claude-sonnet-5-5");
@@ -1370,9 +1426,10 @@ mod tests {
                 status_line = ["current-dir", "git-branch", "model-with-effort"]
             "#},
         );
-        let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load(dir.path()))
-            .await
-            .unwrap();
+        let config =
+            temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load(dir.path(), false))
+                .await
+                .unwrap();
         assert_eq!(config.model.id(), "claude-haiku-5-5");
         assert_eq!(config.base_url, "https://config-file.invalid");
         assert_eq!(
@@ -1417,7 +1474,7 @@ mod tests {
     async fn load_status_line_invalid_segment_surfaces_parse_error() {
         let dir = tempfile::tempdir().unwrap();
         let vars = env_vars(vec![xdg(&dir), env("OX_STATUS_LINE", "model,nope")]);
-        let err = temp_env::async_with_vars(vars, Config::load(dir.path()))
+        let err = temp_env::async_with_vars(vars, Config::load(dir.path(), false))
             .await
             .expect_err("invalid segment must propagate");
         let msg = format!("{err:#}");
@@ -1430,7 +1487,7 @@ mod tests {
     async fn load_status_line_stray_comma_in_env_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let vars = env_vars(vec![xdg(&dir), env("OX_STATUS_LINE", "model,,run-state")]);
-        let err = temp_env::async_with_vars(vars, Config::load(dir.path()))
+        let err = temp_env::async_with_vars(vars, Config::load(dir.path(), false))
             .await
             .expect_err("stray comma must surface as a typo");
         let msg = format!("{err:#}");
@@ -1449,9 +1506,10 @@ mod tests {
                 status_line = ["model", "nope"]
             "#},
         );
-        let err = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load(dir.path()))
-            .await
-            .expect_err("invalid TOML segment must propagate");
+        let err =
+            temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load(dir.path(), false))
+                .await
+                .expect_err("invalid TOML segment must propagate");
         let msg = format!("{err:#}");
         assert!(msg.contains("status_line"), "{msg}");
         assert!(msg.contains("unknown variant `nope`"), "{msg}");
@@ -1463,7 +1521,7 @@ mod tests {
     async fn load_status_line_empty_env_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let vars = env_vars(vec![xdg(&dir), env("OX_STATUS_LINE", ",")]);
-        let err = temp_env::async_with_vars(vars, Config::load(dir.path()))
+        let err = temp_env::async_with_vars(vars, Config::load(dir.path(), false))
             .await
             .expect_err("empty status line must not launch without run-state");
         let msg = format!("{err:#}");
@@ -1485,9 +1543,10 @@ mod tests {
                 status_line = []
             "},
         );
-        let err = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load(dir.path()))
-            .await
-            .expect_err("empty status line must not launch without run-state");
+        let err =
+            temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load(dir.path(), false))
+                .await
+                .expect_err("empty status line must not launch without run-state");
         let msg = format!("{err:#}");
         assert!(
             msg.starts_with("invalid tui.status_line: no segments. List at least one of"),
@@ -1516,7 +1575,7 @@ mod tests {
             // `max_tokens` env is unset — the file value must win.
             env("OX_SHOW_THINKING", "0"),
         ]);
-        let config = temp_env::async_with_vars(vars, Config::load(dir.path()))
+        let config = temp_env::async_with_vars(vars, Config::load(dir.path(), false))
             .await
             .unwrap();
         assert_eq!(config.model.id(), "claude-sonnet-5-5");
@@ -1535,7 +1594,7 @@ mod tests {
             "#},
         );
         let vars = env_vars(vec![xdg(&dir), env("ANTHROPIC_API_KEY", "sk-from-env")]);
-        let config = temp_env::async_with_vars(vars, Config::load(dir.path()))
+        let config = temp_env::async_with_vars(vars, Config::load(dir.path(), false))
             .await
             .unwrap();
         assert_auth(&config, AuthSource::ApiKeyEnv, "sk-from-env");
@@ -1552,7 +1611,7 @@ mod tests {
             "#},
         );
         let vars = env_vars(vec![xdg(&dir), env("ANTHROPIC_API_KEY", "")]);
-        let config = temp_env::async_with_vars(vars, Config::load(dir.path()))
+        let config = temp_env::async_with_vars(vars, Config::load(dir.path(), false))
             .await
             .unwrap();
         assert_auth(&config, AuthSource::ApiKeyFile, "sk-from-file");
@@ -1589,7 +1648,7 @@ mod tests {
                 env("OX_COMPACTION_AUTO_ENABLED", "0"),
                 env(var, raw),
             ]);
-            let err = temp_env::async_with_vars(vars, Config::load(dir.path()))
+            let err = temp_env::async_with_vars(vars, Config::load(dir.path(), false))
                 .await
                 .expect_err("an invalid number must fail config load");
             assert_eq!(
@@ -1611,7 +1670,7 @@ mod tests {
             "#},
         );
         let vars = env_vars(vec![xdg(&dir), env("ANTHROPIC_API_KEY", "")]);
-        let err = temp_env::async_with_vars(vars, Config::load(dir.path()))
+        let err = temp_env::async_with_vars(vars, Config::load(dir.path(), false))
             .await
             .expect_err("misplaced field must surface as an error");
         let msg = format!("{err:#}");
@@ -1655,7 +1714,7 @@ mod tests {
             env("CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS", "1"),
             env("OX_SHOW_THINKING", "1"),
         ]);
-        let config = temp_env::async_with_vars(vars, Config::load(dir.path()))
+        let config = temp_env::async_with_vars(vars, Config::load(dir.path(), false))
             .await
             .unwrap();
 
@@ -1693,7 +1752,7 @@ mod tests {
             env("OX_PERMISSION_MODE", "yolo"),
             env("OX_PROMPT_CACHE_TTL", "5m"),
         ]);
-        let config = temp_env::async_with_vars(vars, Config::load(dir.path()))
+        let config = temp_env::async_with_vars(vars, Config::load(dir.path(), false))
             .await
             .unwrap();
 
@@ -1744,11 +1803,74 @@ mod tests {
                 ("ANTHROPIC_AUTH_TOKEN", auth_token.map(str::to_owned)),
                 env("CLAUDE_CODE_OAUTH_TOKEN", "oauth-token"),
             ]);
-            let config = temp_env::async_with_vars(vars, Config::load(dir.path()))
+            let config = temp_env::async_with_vars(vars, Config::load(dir.path(), false))
                 .await
                 .unwrap();
             assert_auth(&config, winner, secret);
         }
+    }
+
+    /// Env with no explicit credential and an oxide-code login under `data` that expires at
+    /// `expires_at`, so the stored-login search stops before Claude Code's store.
+    fn ox_login_env(
+        config: &TempDir,
+        data: &TempDir,
+        expires_at: u64,
+    ) -> Vec<(&'static str, Option<String>)> {
+        write_config(
+            data.path().join("ox").join("credentials.json"),
+            &serde_json::json!({
+                "claudeAiOauth": { "accessToken": "ox-token", "expiresAt": expires_at },
+            })
+            .to_string(),
+        );
+        env_vars(vec![
+            xdg(config),
+            ("ANTHROPIC_API_KEY", None),
+            (
+                "XDG_DATA_HOME",
+                Some(data.path().to_string_lossy().into_owned()),
+            ),
+        ])
+    }
+
+    #[tokio::test]
+    async fn load_falls_back_to_the_oxide_code_login() {
+        let (dir, data) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let vars = ox_login_env(&dir, &data, 9_999_999_999_999);
+        let config = temp_env::async_with_vars(vars, Config::load(dir.path(), false))
+            .await
+            .unwrap();
+        assert_auth(&config, AuthSource::OxLogin, "ox-token");
+        assert_eq!(config.provenance.auth, Source::Default);
+        assert_eq!(config.signed_out_notice, None);
+    }
+
+    #[tokio::test]
+    async fn load_starts_an_interactive_session_signed_out_when_the_stored_login_fails() {
+        let (dir, data) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let vars = ox_login_env(&dir, &data, 1);
+        let (interactive, other) = temp_env::async_with_vars(vars, async {
+            (
+                Config::load(dir.path(), true).await,
+                Config::load(dir.path(), false).await,
+            )
+        })
+        .await;
+
+        let interactive = interactive.unwrap();
+        assert!(interactive.auth.is_none());
+        assert_eq!(
+            interactive.signed_out_notice.as_deref(),
+            Some("Not signed in: oxide-code login has expired. Run /login to sign in again."),
+        );
+        assert_eq!(
+            format!(
+                "{:#}",
+                other.expect_err("only an interactive session starts signed out")
+            ),
+            "oxide-code login has expired. Run /login to sign in again.",
+        );
     }
 
     #[tokio::test]
@@ -1761,7 +1883,7 @@ mod tests {
             env("ANTHROPIC_BASE_URL", "https://gateway.example.com"),
             env("ANTHROPIC_CUSTOM_HEADERS", "missing colon"),
         ]);
-        let err = temp_env::async_with_vars(vars, Config::load(dir.path()))
+        let err = temp_env::async_with_vars(vars, Config::load(dir.path(), false))
             .await
             .expect_err("malformed header must fail startup");
         assert_eq!(
@@ -1778,7 +1900,7 @@ mod tests {
             env("ANTHROPIC_CUSTOM_HEADERS", "Authorization: Bearer other"),
             env("ANTHROPIC_AUTH_TOKEN", "gateway-token"),
         ]);
-        let err = temp_env::async_with_vars(vars, Config::load(dir.path()))
+        let err = temp_env::async_with_vars(vars, Config::load(dir.path(), false))
             .await
             .expect_err("custom header must not replace the credential");
         assert_eq!(
@@ -1796,7 +1918,7 @@ mod tests {
             ("ANTHROPIC_API_KEY", None),
             env("ANTHROPIC_BASE_URL", "https://gateway.example.com"),
         ]);
-        let err = temp_env::async_with_vars(vars, Config::load(dir.path()))
+        let err = temp_env::async_with_vars(vars, Config::load(dir.path(), false))
             .await
             .expect_err("stored login must not go to a gateway");
         let msg = format!("{err:#}");
@@ -1819,9 +1941,10 @@ mod tests {
             "10-threshold.toml",
             "client.compaction.auto_threshold_percent = 40",
         );
-        let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load(dir.path()))
-            .await
-            .unwrap();
+        let config =
+            temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load(dir.path(), false))
+                .await
+                .unwrap();
         assert!(!config.compaction.auto.enabled);
         assert_eq!(
             config.provenance.compaction,
@@ -1841,7 +1964,7 @@ mod tests {
             "},
         );
         let vars = env_vars(vec![xdg(&dir), env("OX_COMPACTION_AUTO_ENABLED", "TRUE")]);
-        let config = temp_env::async_with_vars(vars, Config::load(dir.path()))
+        let config = temp_env::async_with_vars(vars, Config::load(dir.path(), false))
             .await
             .unwrap();
         assert!(config.compaction.auto.enabled);
@@ -1857,9 +1980,10 @@ mod tests {
                 auto_threshold_tokens = 400000
             "},
         );
-        let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load(dir.path()))
-            .await
-            .unwrap();
+        let config =
+            temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load(dir.path(), false))
+                .await
+                .unwrap();
         assert_eq!(config.compaction.auto.threshold_tokens, Some(400_000));
     }
 
@@ -1871,7 +1995,7 @@ mod tests {
             env("ANTHROPIC_MODEL", "claude-opus-5-5"),
             env("OX_COMPACTION_AUTO_THRESHOLD_PERCENT", "40"),
         ]);
-        let config = temp_env::async_with_vars(vars, Config::load(dir.path()))
+        let config = temp_env::async_with_vars(vars, Config::load(dir.path(), false))
             .await
             .unwrap();
         assert_eq!(config.compaction.auto.threshold_tokens, Some(400_000));
@@ -1888,9 +2012,10 @@ mod tests {
                 auto_threshold_percent = 40
             "},
         );
-        let err = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load(dir.path()))
-            .await
-            .expect_err("ambiguous file thresholds must fail config load");
+        let err =
+            temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load(dir.path(), false))
+                .await
+                .expect_err("ambiguous file thresholds must fail config load");
         assert_eq!(
             format!("{err:#}"),
             format!(
@@ -1905,7 +2030,7 @@ mod tests {
             env("OX_COMPACTION_AUTO_THRESHOLD_TOKENS", "400000"),
             env("OX_COMPACTION_AUTO_THRESHOLD_PERCENT", "40"),
         ]);
-        let err = temp_env::async_with_vars(vars, Config::load(dir.path()))
+        let err = temp_env::async_with_vars(vars, Config::load(dir.path(), false))
             .await
             .expect_err("ambiguous env thresholds must fail config load");
         assert_eq!(
@@ -1922,7 +2047,7 @@ mod tests {
             xdg(&dir),
             env("OX_COMPACTION_AUTO_THRESHOLD_TOKENS", "0"),
         ]);
-        let config = temp_env::async_with_vars(vars, Config::load(dir.path()))
+        let config = temp_env::async_with_vars(vars, Config::load(dir.path(), false))
             .await
             .unwrap();
         assert_eq!(config.compaction.auto.threshold_tokens, Some(50_000));
@@ -1938,9 +2063,10 @@ mod tests {
                 auto_threshold_tokens = 49999
             "},
         );
-        let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load(dir.path()))
-            .await
-            .unwrap();
+        let config =
+            temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load(dir.path(), false))
+                .await
+                .unwrap();
         assert_eq!(config.compaction.auto.threshold_tokens, Some(50_000));
     }
 
@@ -1952,7 +2078,7 @@ mod tests {
             env("ANTHROPIC_MODEL", "claude-opus-5-5"),
             env("OX_COMPACTION_AUTO_THRESHOLD_PERCENT", "4"),
         ]);
-        let config = temp_env::async_with_vars(vars, Config::load(dir.path()))
+        let config = temp_env::async_with_vars(vars, Config::load(dir.path(), false))
             .await
             .unwrap();
         assert_eq!(config.compaction.auto.threshold_tokens, Some(50_000));
@@ -1971,9 +2097,10 @@ mod tests {
                 auto_threshold_tokens = 990000
             "#},
         );
-        let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load(dir.path()))
-            .await
-            .unwrap();
+        let config =
+            temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load(dir.path(), false))
+                .await
+                .unwrap();
         assert_eq!(
             config.compaction.auto.threshold_tokens,
             Some(test_thresholds::WINDOW_1M),
@@ -1988,7 +2115,7 @@ mod tests {
             env("ANTHROPIC_MODEL", "custom-model"),
             env("OX_COMPACTION_AUTO_THRESHOLD_PERCENT", "40"),
         ]);
-        let config = temp_env::async_with_vars(vars, Config::load(dir.path()))
+        let config = temp_env::async_with_vars(vars, Config::load(dir.path(), false))
             .await
             .unwrap();
         assert!(!config.compaction.auto.enabled);
@@ -2008,7 +2135,7 @@ mod tests {
             "#},
         );
         let vars = env_vars(vec![xdg(&dir), env("OX_PERMISSION_MODE", "yolo")]);
-        let config = temp_env::async_with_vars(vars, Config::load(dir.path()))
+        let config = temp_env::async_with_vars(vars, Config::load(dir.path(), false))
             .await
             .unwrap();
         assert_eq!(config.permission.mode(), crate::permission::Mode::Yolo);
@@ -2018,7 +2145,7 @@ mod tests {
     async fn load_permission_invalid_mode_env_errors() {
         let dir = tempfile::tempdir().unwrap();
         let vars = env_vars(vec![xdg(&dir), env("OX_PERMISSION_MODE", "bypass")]);
-        let err = temp_env::async_with_vars(vars, Config::load(dir.path()))
+        let err = temp_env::async_with_vars(vars, Config::load(dir.path(), false))
             .await
             .expect_err("invalid mode must propagate");
         assert_eq!(
@@ -2038,7 +2165,7 @@ mod tests {
             "#},
         );
         let vars = env_vars(vec![xdg(&dir)]);
-        let err = temp_env::async_with_vars(vars, Config::load(dir.path()))
+        let err = temp_env::async_with_vars(vars, Config::load(dir.path(), false))
             .await
             .expect_err("malformed rule must propagate");
         assert!(format!("{err:#}").contains("invalid path glob"));
@@ -2049,9 +2176,10 @@ mod tests {
     #[tokio::test]
     async fn load_extra_ca_certs_default_is_none() {
         let dir = tempfile::tempdir().unwrap();
-        let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load(dir.path()))
-            .await
-            .unwrap();
+        let config =
+            temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load(dir.path(), false))
+                .await
+                .unwrap();
         assert!(config.extra_ca_certs.is_none());
     }
 
@@ -2067,7 +2195,7 @@ mod tests {
         );
         // Env supplies a `~`-prefixed path so the expansion branch is also covered.
         let vars = env_vars(vec![xdg(&dir), env("OX_EXTRA_CA_CERTS", "~/certs/env.pem")]);
-        let config = temp_env::async_with_vars(vars, Config::load(dir.path()))
+        let config = temp_env::async_with_vars(vars, Config::load(dir.path(), false))
             .await
             .unwrap();
         let home = std::env::home_dir().expect("home directory");
@@ -2082,7 +2210,7 @@ mod tests {
         let node = env("NODE_EXTRA_CA_CERTS", bundle.to_str().unwrap());
 
         let vars = env_vars(vec![xdg(&dir), node.clone()]);
-        let config = temp_env::async_with_vars(vars, Config::load(dir.path()))
+        let config = temp_env::async_with_vars(vars, Config::load(dir.path(), false))
             .await
             .unwrap();
         assert_eq!(config.extra_ca_certs, Some(bundle));
@@ -2095,7 +2223,7 @@ mod tests {
             "#},
         );
         let vars = env_vars(vec![xdg(&dir), node]);
-        let config = temp_env::async_with_vars(vars, Config::load(dir.path()))
+        let config = temp_env::async_with_vars(vars, Config::load(dir.path(), false))
             .await
             .unwrap();
         assert_eq!(
@@ -2112,7 +2240,7 @@ mod tests {
             xdg(&dir),
             env("NODE_EXTRA_CA_CERTS", missing.to_str().unwrap()),
         ]);
-        let config = temp_env::async_with_vars(vars, Config::load(dir.path()))
+        let config = temp_env::async_with_vars(vars, Config::load(dir.path(), false))
             .await
             .unwrap();
         assert!(config.extra_ca_certs.is_none());
@@ -2128,9 +2256,10 @@ mod tests {
                 extra_ca_certs = "/etc/ssl/from-file.pem"
             "#},
         );
-        let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load(dir.path()))
-            .await
-            .unwrap();
+        let config =
+            temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load(dir.path(), false))
+                .await
+                .unwrap();
         assert_eq!(
             config.extra_ca_certs,
             Some(PathBuf::from("/etc/ssl/from-file.pem")),
@@ -2150,7 +2279,7 @@ mod tests {
             "#},
         );
         let vars = env_vars(vec![xdg(&dir), env("OX_EXTRA_CA_CERTS", "")]);
-        let config = temp_env::async_with_vars(vars, Config::load(dir.path()))
+        let config = temp_env::async_with_vars(vars, Config::load(dir.path(), false))
             .await
             .unwrap();
         assert_eq!(
@@ -2168,7 +2297,7 @@ mod tests {
             xdg(&dir),
             env("ANTHROPIC_BASE_URL", "http://example.com"),
         ]);
-        let err = temp_env::async_with_vars(vars, Config::load(dir.path()))
+        let err = temp_env::async_with_vars(vars, Config::load(dir.path(), false))
             .await
             .expect_err("non-loopback http must be rejected");
         let msg = format!("{err:#}");
@@ -2183,7 +2312,7 @@ mod tests {
             xdg(&dir),
             env("ANTHROPIC_BASE_URL", "ftp://example.com"),
         ]);
-        let err = temp_env::async_with_vars(vars, Config::load(dir.path()))
+        let err = temp_env::async_with_vars(vars, Config::load(dir.path(), false))
             .await
             .expect_err("non-http schemes must be rejected");
         let msg = format!("{err:#}");
@@ -2198,7 +2327,7 @@ mod tests {
             xdg(&dir),
             env("ANTHROPIC_BASE_URL", "http://127.0.0.1:8080"),
         ]);
-        let config = temp_env::async_with_vars(vars, Config::load(dir.path()))
+        let config = temp_env::async_with_vars(vars, Config::load(dir.path(), false))
             .await
             .unwrap();
         assert_eq!(config.base_url, "http://127.0.0.1:8080");
@@ -2215,7 +2344,7 @@ mod tests {
         ] {
             let dir = tempfile::tempdir().unwrap();
             let vars = env_vars(vec![xdg(&dir), env("ANTHROPIC_MODEL", model)]);
-            let config = temp_env::async_with_vars(vars, Config::load(dir.path()))
+            let config = temp_env::async_with_vars(vars, Config::load(dir.path(), false))
                 .await
                 .unwrap();
             assert_eq!(config.effort, expected, "model={model}");
@@ -2230,7 +2359,7 @@ mod tests {
             env("ANTHROPIC_MODEL", "claude-opus-5-5"),
             env("ANTHROPIC_EFFORT", "low"),
         ]);
-        let config = temp_env::async_with_vars(vars, Config::load(dir.path()))
+        let config = temp_env::async_with_vars(vars, Config::load(dir.path(), false))
             .await
             .unwrap();
         assert_eq!(config.effort, Some(Effort::Low));
@@ -2244,7 +2373,7 @@ mod tests {
             env("ANTHROPIC_MODEL", "custom-model"),
             env("ANTHROPIC_EFFORT", "max"),
         ]);
-        let config = temp_env::async_with_vars(vars, Config::load(dir.path()))
+        let config = temp_env::async_with_vars(vars, Config::load(dir.path(), false))
             .await
             .unwrap();
         assert_eq!(config.effort, None);
@@ -2262,9 +2391,10 @@ mod tests {
                 effort = "medium"
             "#},
         );
-        let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load(dir.path()))
-            .await
-            .unwrap();
+        let config =
+            temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load(dir.path(), false))
+                .await
+                .unwrap();
         assert_eq!(config.effort, Some(Effort::Medium));
     }
 
@@ -2280,7 +2410,7 @@ mod tests {
             "#},
         );
         let vars = env_vars(vec![xdg(&dir), env("OX_EFFORT", "max")]);
-        let config = temp_env::async_with_vars(vars, Config::load(dir.path()))
+        let config = temp_env::async_with_vars(vars, Config::load(dir.path(), false))
             .await
             .unwrap();
         assert_eq!(config.effort, Some(Effort::Max));
@@ -2290,7 +2420,7 @@ mod tests {
     async fn load_effort_invalid_env_lists_the_accepted_tiers() {
         let dir = tempfile::tempdir().unwrap();
         let vars = env_vars(vec![xdg(&dir), env("OX_EFFORT", "insane")]);
-        let err = temp_env::async_with_vars(vars, Config::load(dir.path()))
+        let err = temp_env::async_with_vars(vars, Config::load(dir.path(), false))
             .await
             .expect_err("invalid effort must propagate");
         assert_eq!(
@@ -2308,9 +2438,10 @@ mod tests {
             env("ANTHROPIC_MAX_TOKENS", "200"),
         ];
 
-        let config = temp_env::async_with_vars(env_vars(aliases.clone()), Config::load(dir.path()))
-            .await
-            .unwrap();
+        let config =
+            temp_env::async_with_vars(env_vars(aliases.clone()), Config::load(dir.path(), false))
+                .await
+                .unwrap();
         assert_eq!(config.effort, Some(Effort::Low));
         assert_eq!(config.max_tokens, Some(200));
         assert_eq!(config.provenance.effort, Source::Env("ANTHROPIC_EFFORT"));
@@ -2322,7 +2453,7 @@ mod tests {
         let both = aliases
             .into_iter()
             .chain([env("OX_EFFORT", "high"), env("OX_MAX_TOKENS", "100")]);
-        let config = temp_env::async_with_vars(env_vars(both), Config::load(dir.path()))
+        let config = temp_env::async_with_vars(env_vars(both), Config::load(dir.path(), false))
             .await
             .unwrap();
         assert_eq!(config.effort, Some(Effort::High));
@@ -2337,7 +2468,7 @@ mod tests {
     async fn load_prompt_cache_ttl_env_overrides_default() {
         let dir = tempfile::tempdir().unwrap();
         let vars = env_vars(vec![xdg(&dir), env("OX_PROMPT_CACHE_TTL", "5m")]);
-        let config = temp_env::async_with_vars(vars, Config::load(dir.path()))
+        let config = temp_env::async_with_vars(vars, Config::load(dir.path(), false))
             .await
             .unwrap();
         assert_eq!(config.prompt_cache_ttl, PromptCacheTtl::FiveMin);
@@ -2353,9 +2484,10 @@ mod tests {
                 prompt_cache_ttl = "5m"
             "#},
         );
-        let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load(dir.path()))
-            .await
-            .unwrap();
+        let config =
+            temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load(dir.path(), false))
+                .await
+                .unwrap();
         assert_eq!(config.prompt_cache_ttl, PromptCacheTtl::FiveMin);
     }
 
@@ -2370,7 +2502,7 @@ mod tests {
             "#},
         );
         let vars = env_vars(vec![xdg(&dir), env("OX_PROMPT_CACHE_TTL", "1h")]);
-        let config = temp_env::async_with_vars(vars, Config::load(dir.path()))
+        let config = temp_env::async_with_vars(vars, Config::load(dir.path(), false))
             .await
             .unwrap();
         assert_eq!(config.prompt_cache_ttl, PromptCacheTtl::OneHour);
@@ -2380,7 +2512,7 @@ mod tests {
     async fn load_prompt_cache_ttl_invalid_env_surfaces_parse_error() {
         let dir = tempfile::tempdir().unwrap();
         let vars = env_vars(vec![xdg(&dir), env("OX_PROMPT_CACHE_TTL", "forever")]);
-        let err = temp_env::async_with_vars(vars, Config::load(dir.path()))
+        let err = temp_env::async_with_vars(vars, Config::load(dir.path(), false))
             .await
             .expect_err("invalid ttl must propagate");
         assert_eq!(
@@ -2396,7 +2528,7 @@ mod tests {
         // `/config` prints from the snapshot, so secrets must reduce to their source and names.
         let cfg = sample_config();
         let snap = cfg.snapshot();
-        assert_eq!(snap.auth, AuthSource::ClaudeCodeLogin);
+        assert_eq!(snap.auth, Some(AuthSource::ClaudeCodeLogin));
         assert_eq!(snap.gateway.custom_header_names, ["x-team"]);
         assert!(!snap.gateway.attribution);
         assert!(snap.gateway.structured_outputs);
@@ -2426,6 +2558,17 @@ mod tests {
         );
         assert_eq!(snap.theme_name, "macchiato");
         assert_eq!(snap.provenance, cfg.provenance);
+    }
+
+    // ── display_auth ──
+
+    #[test]
+    fn display_auth_names_the_source_or_the_signed_out_state() {
+        assert_eq!(
+            display_auth(Some(AuthSource::OxLogin)),
+            "OAuth (oxide-code login)"
+        );
+        assert_eq!(display_auth(None), "Not signed in");
     }
 
     // ── display_effort ──
