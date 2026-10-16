@@ -1,5 +1,5 @@
 ---
-source: crates/oxide-code/src/tui/app.rs
+source: crates/oxide-code/src/tui/app/render.rs
 expression: "render_app(&mut app, 60, 8)"
 ---
 "  test-model (high) │ ⣷ Streaming · Esc to interrupt        "

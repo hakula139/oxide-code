@@ -136,6 +136,6 @@ A `pre_compact` hook is tracked in [#168](https://github.com/hakula139/oxide-cod
 - `crates/oxide-code/src/session/store.rs`: resume loader compact boundary reset, tail filtering, and `CompactInfo`.
 - `crates/oxide-code/src/slash/compact.rs`: `CompactCmd`.
 - `crates/oxide-code/src/slash/registry.rs`: `BUILT_INS` entry `&CompactCmd`.
-- `crates/oxide-code/src/tui/app.rs`: `apply_session_compacted`.
+- `crates/oxide-code/src/tui/app/events.rs`: `apply_session_compacted`.
 - `crates/oxide-code/src/tui/components/chat.rs`: `ChatView::append_summary_token` and `ChatView::discard_summary`.
 - `crates/oxide-code/src/tui/components/chat/blocks/compacted.rs`: `CompactedBlock`.

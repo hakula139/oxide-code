@@ -113,6 +113,7 @@ The picker wraps [`SearchableList`](modals.md) and adds these controls and displ
 - `crates/oxide-code/src/slash/confirm.rs`: `ConfirmDeleteSessionModal` pushed by Ctrl+D.
 - `crates/oxide-code/src/slash/registry.rs`: `BUILT_INS` entry `&ResumeCmd`.
 - `crates/oxide-code/src/slash/resume.rs`: `ResumeCmd`, `ResumePicker` and its `at_startup` variant, `SessionRow`, and `resolve_prefix`.
-- `crates/oxide-code/src/tui/app.rs`: `apply_session_resumed` and `push_modal`.
+- `crates/oxide-code/src/tui/app.rs`: `push_modal`.
+- `crates/oxide-code/src/tui/app/events.rs`: `apply_session_resumed`.
 - `crates/oxide-code/src/tui/components/chat.rs`: `ChatView::load_history`.
 - `crates/oxide-code/src/tui/modal/searchable_list.rs`: `SearchableList<T>` plus `SearchableItem` plus `cursor_to` for cursor preservation across reload.
