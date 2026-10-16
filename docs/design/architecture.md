@@ -14,7 +14,7 @@ Layers run from the foundation to the frontends.
 | ---------- | -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Foundation | `file_tracker` | Per-session Read-before-Edit gate with xxh64 staleness detection                                                                                    |
 | Foundation | `message`      | Conversation message and content-block types shared by the client, the session transcript, and the TUI                                              |
-| Foundation | `util`         | Shared helpers for environment variables, the filesystem, git probes, logging, paths, text width, local time, and TLS                               |
+| Foundation | `util`         | Shared helpers for environment variables, the filesystem, git probes, logging, paths, mutex recovery, text width, local time, and TLS               |
 | Domain     | `config`       | Layered configuration with per-value provenance, credentials, gateway settings, and stored OAuth logins with browser sign-in                        |
 | Domain     | `model`        | Supported-model catalogue, per-model request capabilities, and pricing                                                                              |
 | Domain     | `permission`   | Tool permission gate: modes, allow / ask / deny rules, and path resolution                                                                          |
