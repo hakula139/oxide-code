@@ -1,6 +1,10 @@
 //! Env-var readers with empty-is-absent semantics, so a stray empty shell value never shadows a
 //! config-file default.
 
+use std::fmt::Display;
+use std::ops::RangeInclusive;
+use std::str::FromStr;
+
 use anyhow::{Result, bail};
 
 // ── Readers ──
@@ -21,6 +25,29 @@ pub(crate) fn bool(key: &str) -> Result<Option<bool>> {
         "0" | "false" | "no" | "off" => Ok(Some(false)),
         _ => bail!("invalid {key} {raw:?}: expected one of 1, true, yes, on, 0, false, no, off"),
     }
+}
+
+/// Reads a whole-number env var within `range`. Unset or empty is `None`, and any other value,
+/// including one that overflows `T`, is an error naming the range.
+pub(crate) fn number<T>(key: &str, range: RangeInclusive<T>) -> Result<Option<T>>
+where
+    T: Display + FromStr + PartialOrd,
+{
+    let Some(raw) = string(key) else {
+        return Ok(None);
+    };
+    match raw.parse::<T>() {
+        Ok(value) if range.contains(&value) => Ok(Some(value)),
+        _ => bail!(
+            "invalid {key} {raw:?}: expected {}",
+            whole_number_in(&range)
+        ),
+    }
+}
+
+/// The accepted values of a whole-number setting, phrased the same for env vars and config files.
+pub(crate) fn whole_number_in<T: Display>(range: &RangeInclusive<T>) -> String {
+    format!("a whole number from {} to {}", range.start(), range.end())
 }
 
 #[cfg(test)]
@@ -86,6 +113,40 @@ mod tests {
                 assert!(msg.contains(KEY), "msg={msg}");
                 assert!(msg.contains(&format!("{bad:?}")), "msg={msg}");
                 assert!(msg.contains("expected one of"), "msg={msg}");
+            });
+        }
+    }
+
+    // ── number ──
+
+    #[test]
+    fn number_reads_a_value_within_range() {
+        for (raw, expected) in [("1", 1), ("42", 42), ("100", 100)] {
+            temp_env::with_var(KEY, Some(raw), || {
+                assert_eq!(number::<u8>(KEY, 1..=100).unwrap(), Some(expected));
+            });
+        }
+    }
+
+    #[test]
+    fn number_unset_or_empty_is_absent() {
+        temp_env::with_var_unset(KEY, || {
+            assert_eq!(number::<u32>(KEY, 1..=10).unwrap(), None);
+        });
+        temp_env::with_var(KEY, Some(""), || {
+            assert_eq!(number::<u32>(KEY, 1..=10).unwrap(), None);
+        });
+    }
+
+    #[test]
+    fn number_rejects_text_overflow_and_out_of_range_values_with_the_range() {
+        for bad in ["32k", "-1", "0", "101", "256", " 5"] {
+            temp_env::with_var(KEY, Some(bad), || {
+                let msg = number::<u8>(KEY, 1..=100).unwrap_err().to_string();
+                assert_eq!(
+                    msg,
+                    format!("invalid {KEY} {bad:?}: expected a whole number from 1 to 100"),
+                );
             });
         }
     }

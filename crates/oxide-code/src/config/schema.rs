@@ -1,9 +1,14 @@
 //! The TOML schema every config file shares: the `[client]`, `[permission]`, and `[tui]` tables.
 
-use serde::Deserialize;
+use std::fmt;
+use std::ops::RangeInclusive;
 
-use super::{Effort, PromptCacheTtl, StatusLineSegment};
+use serde::de::{self, Unexpected};
+use serde::{Deserialize, Deserializer};
+
+use super::{Effort, PromptCacheTtl, StatusLineSegment, ThresholdPercent};
 use crate::permission::Mode;
+use crate::util::env::whole_number_in;
 
 /// One config file, or several merged. Every key is optional.
 #[derive(Debug, Default, Deserialize)]
@@ -24,7 +29,9 @@ pub(super) struct ClientTable {
     pub(super) extra_ca_certs: Option<String>,
     pub(super) model: Option<String>,
     pub(super) effort: Option<Effort>,
+    #[serde(deserialize_with = "count")]
     pub(super) max_tokens: Option<u32>,
+    #[serde(deserialize_with = "count")]
     pub(super) max_tool_rounds: Option<u32>,
     pub(super) prompt_cache_ttl: Option<PromptCacheTtl>,
     pub(super) compaction: CompactionTable,
@@ -35,9 +42,9 @@ pub(super) struct ClientTable {
 pub(super) struct CompactionTable {
     #[serde(rename = "auto_enabled")]
     pub(super) enabled: Option<bool>,
-    #[serde(rename = "auto_threshold_tokens")]
+    #[serde(rename = "auto_threshold_tokens", deserialize_with = "tokens")]
     pub(super) threshold_tokens: Option<u32>,
-    #[serde(rename = "auto_threshold_percent")]
+    #[serde(rename = "auto_threshold_percent", deserialize_with = "percent")]
     pub(super) threshold_percent: Option<u8>,
 }
 
@@ -66,4 +73,52 @@ pub(super) struct TuiTable {
 pub(super) struct ThemeTable {
     pub(super) base: Option<String>,
     pub(super) overrides: toml::Table,
+}
+
+// ── Whole Numbers ──
+
+// Each range matches the env var that overrides the key, so both report the same accepted values.
+
+fn count<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<u32>, D::Error> {
+    whole_number(deserializer, 1..=u32::MAX)
+}
+
+fn tokens<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<u32>, D::Error> {
+    whole_number(deserializer, 0..=u32::MAX)
+}
+
+fn percent<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<u8>, D::Error> {
+    whole_number(deserializer, ThresholdPercent::RANGE)
+}
+
+fn whole_number<'de, D, T>(deserializer: D, range: RangeInclusive<T>) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: fmt::Display + PartialOrd + TryFrom<i64>,
+{
+    deserializer.deserialize_option(WholeNumber(range))
+}
+
+struct WholeNumber<T>(RangeInclusive<T>);
+
+impl<'de, T> de::Visitor<'de> for WholeNumber<T>
+where
+    T: fmt::Display + PartialOrd + TryFrom<i64>,
+{
+    type Value = Option<T>;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&whole_number_in(&self.0))
+    }
+
+    fn visit_some<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_i64(self)
+    }
+
+    fn visit_i64<E: de::Error>(self, raw: i64) -> Result<Self::Value, E> {
+        match T::try_from(raw) {
+            Ok(value) if self.0.contains(&value) => Ok(Some(value)),
+            _ => Err(E::invalid_value(Unexpected::Signed(raw), &self)),
+        }
+    }
 }

@@ -42,11 +42,11 @@ The TUI layout, prompt text, slash-command output wording, and log format are ou
    ./scripts/prepare-release.sh vX.Y.Z [highlights.md]
    ```
 
-   The script sets `workspace.package.version`, refreshes `Cargo.lock`, prepends the changelog section with its compare link, and points the `VERSION=` install snippets in `README.md` and `docs/guide/install.md` at the tag. For a notable release, pass a Markdown file of highlights and keep it for tagging.
+   The script sets `workspace.package.version`, refreshes `Cargo.lock`, prepends the changelog section with its compare link, and points the `VERSION=` install snippets in `README.md` and `docs/guide/install.md` at the tag. It also adds the release's [session resume fixture](docs/design/session/persistence.md#compatibility) and records how it resumes, failing if an earlier release's fixture now resumes differently. For a notable release, pass a Markdown file of highlights and keep it for tagging.
 
-3. Review the new section. Merged PR titles cannot change on `main`, so reword a misleading entry with a `commit_preprocessors` rule in `cliff.toml`, discard the script's changes, and run it again. The script refuses to run over uncommitted changes to the files it edits.
+3. Review the new section. Merged PR titles cannot change on `main`, so reword a misleading entry with a `commit_preprocessors` rule in `cliff.toml`, discard the script's changes, and run it again. The script refuses to run over uncommitted changes to the files it edits, or when the tag's fixture or its snapshot already exists, so delete both when discarding.
 4. Run the [verification block](AGENTS.md#verification). `cspell` scans `CHANGELOG.md`, so add any unknown word from a title to `.cspell/words.txt`.
-5. Commit, then open a PR titled `chore(release): vX.Y.Z`, which becomes the squash commit on `main`, and record the checks in its Test plan. The diff touches only `Cargo.toml`, `Cargo.lock`, `CHANGELOG.md`, `README.md`, `docs/guide/install.md`, and possibly `cliff.toml` or `.cspell/words.txt`.
+5. Commit, then open a PR titled `chore(release): vX.Y.Z`, which becomes the squash commit on `main`, and record the checks in its Test plan. The diff touches only `Cargo.toml`, `Cargo.lock`, `CHANGELOG.md`, `README.md`, `docs/guide/install.md`, the new fixture under `crates/oxide-code/src/session/fixtures/` with its snapshot, and possibly `cliff.toml` or `.cspell/words.txt`.
 6. Merge it after CI passes and review approves. If another PR merges first, recreate the branch from `main` and run the script again, since updating the branch keeps a section that misses the new commit.
 
 ## Tag
@@ -93,7 +93,7 @@ Before tagging `v0.1.0-rc.1`:
 - The [`v0.1.0` milestone](https://github.com/hakula139/oxide-code/milestone/1) holds no open issue except the release work for these gates.
 - CI on `main` passes the full test suite on Linux, macOS, and Windows ([#127](https://github.com/hakula139/oxide-code/issues/127)).
 - Each auth mode works live in a TUI turn that calls a tool, a `-p` run, and a `--no-tui` run: Claude Code OAuth login, a long-lived OAuth token ([#121](https://github.com/hakula139/oxide-code/issues/121)), an API key, and a gateway with a bearer token and custom headers ([#122](https://github.com/hakula139/oxide-code/issues/122)). Every Claude 5.5 model answers at least one turn. Record the matrix in the rc PR's Test plan.
-- The persisted formats are documented: session JSONL in [`docs/design/session/persistence.md`](docs/design/session/persistence.md), config keys in [`docs/guide/configuration.md`](docs/guide/configuration.md), and theme TOML in [`docs/guide/theming.md`](docs/guide/theming.md). Tests resume a transcript written by every earlier prerelease ([#208](https://github.com/hakula139/oxide-code/issues/208)).
+- The persisted formats are documented: session JSONL in [`docs/design/session/persistence.md`](docs/design/session/persistence.md), config keys in [`docs/guide/configuration.md`](docs/guide/configuration.md), and theme TOML in [`docs/guide/theming.md`](docs/guide/theming.md). Tests resume a transcript written by every earlier prerelease, as [Compatibility](docs/design/session/persistence.md#compatibility) describes.
 - `SECURITY.md` exists ([#200](https://github.com/hakula139/oxide-code/issues/200)), and every archive ships `THIRD-PARTY-NOTICES` ([#207](https://github.com/hakula139/oxide-code/issues/207)).
 
 Before tagging `v0.1.0`:

@@ -13,10 +13,11 @@ pub(crate) mod provenance;
 mod schema;
 
 use std::fmt;
+use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
@@ -187,10 +188,7 @@ impl FromStr for Effort {
             "high" => Ok(Self::High),
             "xhigh" => Ok(Self::Xhigh),
             "max" => Ok(Self::Max),
-            _ => bail!(
-                "invalid effort {s:?}; expected one of: {}",
-                Self::VALID_VALUES
-            ),
+            _ => bail!("expected one of {}", Self::VALID_VALUES),
         }
     }
 }
@@ -236,7 +234,7 @@ impl FromStr for PromptCacheTtl {
         match s {
             "5m" => Ok(Self::FiveMin),
             "1h" => Ok(Self::OneHour),
-            _ => bail!("invalid prompt_cache_ttl {s:?}; expected one of: 5m, 1h"),
+            _ => bail!("expected one of 5m, 1h"),
         }
     }
 }
@@ -260,9 +258,9 @@ pub(crate) enum StatusLineSegment {
 }
 
 impl StatusLineSegment {
-    /// Canonical name table consumed by `OX_STATUS_LINE` parsing and the empty-roster error
-    /// formatter. TOML config goes through serde, so the strings here must match the kebab-case
-    /// form `serde(rename_all = "kebab-case")` would produce.
+    /// Canonical name table for `OX_STATUS_LINE` parsing and error messages. TOML config goes
+    /// through serde, so the strings here must match the kebab-case form
+    /// `serde(rename_all = "kebab-case")` would produce.
     const ALL: &'static [(Self, &'static str)] = &[
         (Self::CurrentDir, "current-dir"),
         (Self::GitBranch, "git-branch"),
@@ -287,6 +285,14 @@ impl StatusLineSegment {
         Self::RunState,
         Self::ThreadTitle,
     ];
+
+    fn names() -> String {
+        Self::ALL
+            .iter()
+            .map(|(_, name)| *name)
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
 }
 
 impl FromStr for StatusLineSegment {
@@ -296,14 +302,7 @@ impl FromStr for StatusLineSegment {
         if let Some((segment, _)) = Self::ALL.iter().find(|(_, name)| *name == s) {
             return Ok(*segment);
         }
-        bail!(
-            "invalid status line segment {s:?}; expected one of: {}",
-            Self::ALL
-                .iter()
-                .map(|(_, name)| *name)
-                .collect::<Vec<_>>()
-                .join(", "),
-        )
+        bail!("unknown segment {s:?}: expected one of {}", Self::names())
     }
 }
 
@@ -377,14 +376,12 @@ enum AutoCompactionPolicy {
     Percent(ThresholdPercent),
 }
 
-/// A share of the context window, validated to 1 through 100 when the config loads.
+/// A share of the context window, validated to [`Self::RANGE`] when the config loads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ThresholdPercent(u8);
 
 impl ThresholdPercent {
-    fn new(percent: u8) -> Option<Self> {
-        (1..=100).contains(&percent).then_some(Self(percent))
-    }
+    const RANGE: RangeInclusive<u8> = 1..=100;
 }
 
 // ── ThemeConfig ──
@@ -471,11 +468,14 @@ impl Config {
         let effort = resolve_effort(&model, client.effort, &origins)?;
 
         let max_tokens = Sourced::from_option(
-            env_parse::<u32>("ANTHROPIC_MAX_TOKENS")?
-                .or_else(|| origins.sourced("client.max_tokens", client.max_tokens)),
+            env_number(
+                aliased("OX_MAX_TOKENS", "ANTHROPIC_MAX_TOKENS"),
+                1..=u32::MAX,
+            )?
+            .or_else(|| origins.sourced("client.max_tokens", client.max_tokens)),
         );
         let max_tool_rounds = Sourced::from_option(
-            env_parse::<u32>("OX_MAX_TOOL_ROUNDS")?
+            env_number("OX_MAX_TOOL_ROUNDS", 1..=u32::MAX)?
                 .or_else(|| origins.sourced("client.max_tool_rounds", client.max_tool_rounds)),
         );
 
@@ -573,9 +573,10 @@ impl Config {
 /// `OX_STATUS_LINE` > `tui.status_line` > the default roster.
 fn resolve_status_line(file: Option<Vec<StatusLineSegment>>) -> Result<Vec<StatusLineSegment>> {
     match env::string("OX_STATUS_LINE") {
-        Some(raw) => parse_status_line_segments(&raw).context("OX_STATUS_LINE"),
+        Some(raw) => parse_status_line_segments(&raw)
+            .with_context(|| format!("invalid OX_STATUS_LINE {raw:?}")),
         None => validate_status_line(file.unwrap_or_else(|| StatusLineSegment::DEFAULT.to_vec()))
-            .context("tui.status_line"),
+            .context("invalid tui.status_line"),
     }
 }
 
@@ -589,10 +590,7 @@ fn parse_status_line_segments(raw: &str) -> Result<Vec<StatusLineSegment>> {
         .into_iter()
         .map(|part| {
             if part.is_empty() {
-                bail!(
-                    "OX_STATUS_LINE has an empty segment. Remove the stray comma or unset the \
-                     variable to use the default"
-                );
+                bail!("empty segment between commas. Remove the stray comma.");
             }
             part.parse::<StatusLineSegment>()
         })
@@ -603,13 +601,8 @@ fn parse_status_line_segments(raw: &str) -> Result<Vec<StatusLineSegment>> {
 fn validate_status_line(segments: Vec<StatusLineSegment>) -> Result<Vec<StatusLineSegment>> {
     if segments.is_empty() {
         bail!(
-            "status_line must list at least one segment. Remove the key (or unset \
-             OX_STATUS_LINE) to use the default. Valid segments: {}",
-            StatusLineSegment::ALL
-                .iter()
-                .map(|(_, name)| *name)
-                .collect::<Vec<_>>()
-                .join(", "),
+            "no segments. List at least one of {}, or remove it to use the default.",
+            StatusLineSegment::names()
         );
     }
     Ok(segments)
@@ -666,8 +659,8 @@ fn resolve_effort(
     file: Option<Effort>,
     origins: &Origins,
 ) -> Result<Sourced<Option<Effort>>> {
-    let pick =
-        env_parse::<Effort>("ANTHROPIC_EFFORT")?.or_else(|| origins.sourced("client.effort", file));
+    let pick = env_parse::<Effort>(aliased("OX_EFFORT", "ANTHROPIC_EFFORT"))?
+        .or_else(|| origins.sourced("client.effort", file));
     let effort = model.resolve_effort(pick.as_ref().map(|pick| pick.value));
     Ok(match pick {
         Some(pick) if effort.is_some() => Sourced::new(effort, pick.source),
@@ -685,9 +678,18 @@ fn resolve_compaction(
     let auto_requested = env_bool("OX_COMPACTION_AUTO_ENABLED")?
         .or_else(|| origins.sourced("client.compaction.auto_enabled", file.enabled))
         .unwrap_or_else(|| Sourced::fallback(true));
+    // Parsed even when disabled, so a bad value fails the load as it does in a config file.
+    let env_thresholds = (
+        env_number("OX_COMPACTION_AUTO_THRESHOLD_TOKENS", 0..=u32::MAX)?,
+        env_number(
+            "OX_COMPACTION_AUTO_THRESHOLD_PERCENT",
+            ThresholdPercent::RANGE,
+        )?
+        .map(|percent| percent.map(ThresholdPercent)),
+    );
 
     let policy = if auto_requested.value {
-        resolve_auto_threshold(file, origins)?
+        resolve_auto_threshold(env_thresholds, file, origins)?
             .unwrap_or_else(|| auto_requested.map(|_| AutoCompactionPolicy::Default))
     } else {
         auto_requested.map(|_| AutoCompactionPolicy::Disabled)
@@ -747,13 +749,12 @@ fn resolve_auto_compaction(
 /// The configured threshold policy, `None` when neither threshold is set. Env thresholds replace
 /// the file thresholds as a pair.
 fn resolve_auto_threshold(
+    env: (Option<Sourced<u32>>, Option<Sourced<ThresholdPercent>>),
     file: &CompactionTable,
     origins: &Origins,
 ) -> Result<Option<Sourced<AutoCompactionPolicy>>> {
-    let env_tokens = env_parse::<u32>("OX_COMPACTION_AUTO_THRESHOLD_TOKENS")?;
-    let env_percent = env_parse::<u8>("OX_COMPACTION_AUTO_THRESHOLD_PERCENT")?;
-    let (tokens, percent) = if env_tokens.is_some() || env_percent.is_some() {
-        (env_tokens, env_percent)
+    let (tokens, percent) = if env.0.is_some() || env.1.is_some() {
+        env
     } else {
         (
             origins.sourced(
@@ -762,7 +763,7 @@ fn resolve_auto_threshold(
             ),
             origins.sourced(
                 "client.compaction.auto_threshold_percent",
-                file.threshold_percent,
+                file.threshold_percent.map(ThresholdPercent),
             ),
         )
     };
@@ -782,21 +783,7 @@ fn resolve_auto_threshold(
             bail!("{both}. Set only one compaction threshold.")
         }
         (Some(tokens), None) => Ok(Some(tokens.map(AutoCompactionPolicy::Tokens))),
-        (None, Some(percent)) => {
-            let threshold = ThresholdPercent::new(percent.value).with_context(|| {
-                format!(
-                    "{}: expected a whole number from 1 to 100",
-                    invalid_setting(
-                        "client.compaction.auto_threshold_percent",
-                        &percent.source,
-                        percent.value,
-                    ),
-                )
-            })?;
-            Ok(Some(
-                percent.map(|_| AutoCompactionPolicy::Percent(threshold)),
-            ))
-        }
+        (None, Some(percent)) => Ok(Some(percent.map(AutoCompactionPolicy::Percent))),
         (None, None) => Ok(None),
     }
 }
@@ -850,28 +837,32 @@ fn env_bool(var: &'static str) -> Result<Option<Sourced<bool>>> {
 
 fn env_parse<T>(var: &'static str) -> Result<Option<Sourced<T>>>
 where
-    T: FromStr,
-    T::Err: Into<anyhow::Error>,
+    T: FromStr<Err = anyhow::Error>,
 {
     env_string(var)
         .map(|raw| {
             let value = raw
                 .value
                 .parse::<T>()
-                .map_err(Into::into)
-                .with_context(|| format!("{var}={:?}", raw.value))?;
+                .map_err(|e| anyhow!("invalid {var} {:?}: {e:#}", raw.value))?;
             Ok(Sourced::new(value, raw.source))
         })
         .transpose()
 }
 
-/// `invalid {setting} {value}`, naming where the value was set: the env var, or the key and its
-/// file.
-fn invalid_setting(key: &str, source: &Source, value: impl fmt::Display) -> String {
-    match source {
-        Source::Env(var) => format!("invalid {var} {value}"),
-        Source::File(layer) => format!("invalid {key} {value} in {}", tildify(layer.path())),
-        Source::Default | Source::Session => format!("invalid {key} {value}"),
+fn env_number<T>(var: &'static str, range: RangeInclusive<T>) -> Result<Option<Sourced<T>>>
+where
+    T: fmt::Display + FromStr + PartialOrd,
+{
+    Ok(env::number(var, range)?.map(|value| Sourced::new(value, Source::Env(var))))
+}
+
+/// `var`, or its older `alias` when only the alias is set.
+fn aliased(var: &'static str, alias: &'static str) -> &'static str {
+    if env::string(var).is_none() && env::string(alias).is_some() {
+        alias
+    } else {
+        var
     }
 }
 
@@ -1100,13 +1091,12 @@ mod tests {
     }
 
     #[test]
-    fn effort_rejects_unknown_tokens_with_actionable_error() {
+    fn effort_rejects_unknown_tokens_listing_the_accepted_ones() {
         let err = "extra-high".parse::<Effort>().expect_err("unknown token");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("extra-high"), "{msg}");
-        for token in ["low", "medium", "high", "xhigh", "max"] {
-            assert!(msg.contains(token), "{token}: {msg}");
-        }
+        assert_eq!(
+            format!("{err:#}"),
+            "expected one of low, medium, high, xhigh, max"
+        );
     }
 
     #[test]
@@ -1140,19 +1130,16 @@ mod tests {
     }
 
     #[test]
-    fn prompt_cache_ttl_rejects_unknown_tokens_with_actionable_error() {
+    fn prompt_cache_ttl_rejects_unknown_tokens_listing_the_accepted_ones() {
         let err = "30m".parse::<PromptCacheTtl>().expect_err("unknown token");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("30m"), "{msg}");
-        assert!(msg.contains("5m"), "{msg}");
-        assert!(msg.contains("1h"), "{msg}");
+        assert_eq!(format!("{err:#}"), "expected one of 5m, 1h");
     }
 
     // ── CompactionConfig::for_model ──
 
     #[test]
     fn for_model_re_resolves_a_percent_threshold_against_the_new_window() {
-        let policy = AutoCompactionPolicy::Percent(ThresholdPercent::new(40).unwrap());
+        let policy = AutoCompactionPolicy::Percent(ThresholdPercent(40));
         let unknown = ModelSpec::resolve("custom-model".to_owned());
         let compaction = resolve_compaction_policy(policy, &unknown, 16_000);
         assert!(!compaction.auto.enabled, "precondition: no window");
@@ -1185,6 +1172,8 @@ mod tests {
         "ANTHROPIC_BASE_URL",
         "ANTHROPIC_MAX_TOKENS",
         "ANTHROPIC_EFFORT",
+        "OX_EFFORT",
+        "OX_MAX_TOKENS",
         "OX_EXTRA_CA_CERTS",
         "NODE_EXTRA_CA_CERTS",
         "OX_MAX_TOOL_ROUNDS",
@@ -1330,7 +1319,7 @@ mod tests {
             xdg(&dir),
             env("ANTHROPIC_MODEL", "claude-sonnet-5-5"),
             env("ANTHROPIC_BASE_URL", "https://example.invalid"),
-            env("ANTHROPIC_MAX_TOKENS", "64"),
+            env("OX_MAX_TOKENS", "64"),
             env("OX_MAX_TOOL_ROUNDS", "200"),
             env("OX_SHOW_THINKING", "1"),
             env("OX_SHOW_WELCOME", "0"),
@@ -1478,10 +1467,12 @@ mod tests {
             .await
             .expect_err("empty status line must not launch without run-state");
         let msg = format!("{err:#}");
-        assert!(msg.contains("OX_STATUS_LINE"), "{msg}");
-        assert!(msg.contains("at least one segment"), "{msg}");
-        assert!(msg.contains("unset OX_STATUS_LINE"), "{msg}");
+        assert!(
+            msg.starts_with(r#"invalid OX_STATUS_LINE ",": no segments. List at least one of"#),
+            "{msg}"
+        );
         assert!(msg.contains("run-state"), "{msg}");
+        assert!(msg.ends_with("or remove it to use the default."), "{msg}");
     }
 
     #[tokio::test]
@@ -1498,9 +1489,10 @@ mod tests {
             .await
             .expect_err("empty status line must not launch without run-state");
         let msg = format!("{err:#}");
-        assert!(msg.contains("tui.status_line"), "{msg}");
-        assert!(msg.contains("at least one segment"), "{msg}");
-        assert!(msg.contains("Remove the key"), "{msg}");
+        assert!(
+            msg.starts_with("invalid tui.status_line: no segments. List at least one of"),
+            "{msg}"
+        );
         assert!(msg.contains("run-state"), "{msg}");
     }
 
@@ -1565,6 +1557,66 @@ mod tests {
             .unwrap();
         assert_auth(&config, AuthSource::ApiKeyFile, "sk-from-file");
         assert_eq!(config.provenance.auth, Source::File(user));
+    }
+
+    #[tokio::test]
+    async fn load_numeric_env_errors_name_the_variable_and_range() {
+        let whole = format!("1 to {}", u32::MAX);
+        for (var, raw, range) in [
+            ("OX_MAX_TOKENS", "32k", whole.clone()),
+            ("ANTHROPIC_MAX_TOKENS", "0", whole.clone()),
+            ("OX_MAX_TOOL_ROUNDS", "-3", whole),
+            (
+                "OX_COMPACTION_AUTO_THRESHOLD_TOKENS",
+                "4294967296",
+                format!("0 to {}", u32::MAX),
+            ),
+            (
+                "OX_COMPACTION_AUTO_THRESHOLD_PERCENT",
+                "300",
+                "1 to 100".to_owned(),
+            ),
+            (
+                "OX_COMPACTION_AUTO_THRESHOLD_PERCENT",
+                "0",
+                "1 to 100".to_owned(),
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            // A bad threshold must fail the load even with auto compaction off.
+            let vars = env_vars(vec![
+                xdg(&dir),
+                env("OX_COMPACTION_AUTO_ENABLED", "0"),
+                env(var, raw),
+            ]);
+            let err = temp_env::async_with_vars(vars, Config::load(dir.path()))
+                .await
+                .expect_err("an invalid number must fail config load");
+            assert_eq!(
+                format!("{err:#}"),
+                format!("invalid {var} {raw:?}: expected a whole number from {range}"),
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn load_propagates_invalid_config_file() {
+        let dir = tempfile::tempdir().unwrap();
+        write_user_config(
+            dir.path(),
+            indoc::indoc! {r#"
+                [client]
+                api_key = "sk-from-file"
+                show_thinking = true
+            "#},
+        );
+        let vars = env_vars(vec![xdg(&dir), env("ANTHROPIC_API_KEY", "")]);
+        let err = temp_env::async_with_vars(vars, Config::load(dir.path()))
+            .await
+            .expect_err("misplaced field must surface as an error");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("invalid config at"), "{msg}");
+        assert!(msg.contains("unknown field `show_thinking`"), "{msg}");
     }
 
     // ── Config::load: provenance ──
@@ -1765,7 +1817,7 @@ mod tests {
         write_drop_in(
             dir.path(),
             "10-threshold.toml",
-            "client.compaction.auto_threshold_percent = 0",
+            "client.compaction.auto_threshold_percent = 40",
         );
         let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load(dir.path()))
             .await
@@ -1774,7 +1826,7 @@ mod tests {
         assert_eq!(
             config.provenance.compaction,
             Source::File(user),
-            "a disabled trigger ignores the threshold, even an invalid one"
+            "a disabled trigger ignores the threshold"
         );
     }
 
@@ -1929,47 +1981,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_compaction_rejects_out_of_range_auto_threshold_percent() {
-        for percent in ["0", "101"] {
-            let dir = tempfile::tempdir().unwrap();
-            let vars = env_vars(vec![
-                xdg(&dir),
-                env("OX_COMPACTION_AUTO_THRESHOLD_PERCENT", percent),
-            ]);
-            let err = temp_env::async_with_vars(vars, Config::load(dir.path()))
-                .await
-                .expect_err("out-of-range threshold percent must fail config load");
-            assert_eq!(
-                format!("{err:#}"),
-                format!(
-                    "invalid OX_COMPACTION_AUTO_THRESHOLD_PERCENT {percent}: \
-                     expected a whole number from 1 to 100"
-                ),
-            );
-        }
-
-        let dir = tempfile::tempdir().unwrap();
-        let user = write_user_config(
-            dir.path(),
-            indoc::indoc! {r"
-                [client.compaction]
-                auto_threshold_percent = 150
-            "},
-        );
-        let err = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load(dir.path()))
-            .await
-            .expect_err("out-of-range file threshold percent must fail config load");
-        assert_eq!(
-            format!("{err:#}"),
-            format!(
-                "invalid client.compaction.auto_threshold_percent 150 in {}: \
-                 expected a whole number from 1 to 100",
-                tildify(user.path()),
-            ),
-        );
-    }
-
-    #[tokio::test]
     async fn load_compaction_percent_for_unknown_model_disables_auto_trigger() {
         let dir = tempfile::tempdir().unwrap();
         let vars = env_vars(vec![
@@ -2010,9 +2021,10 @@ mod tests {
         let err = temp_env::async_with_vars(vars, Config::load(dir.path()))
             .await
             .expect_err("invalid mode must propagate");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("OX_PERMISSION_MODE"), "{msg}");
-        assert!(msg.contains("invalid permission mode"), "{msg}");
+        assert_eq!(
+            format!("{err:#}"),
+            r#"invalid OX_PERMISSION_MODE "bypass": expected one of auto, plan, yolo"#,
+        );
     }
 
     #[tokio::test]
@@ -2030,55 +2042,6 @@ mod tests {
             .await
             .expect_err("malformed rule must propagate");
         assert!(format!("{err:#}").contains("invalid path glob"));
-    }
-
-    #[tokio::test]
-    async fn load_invalid_max_tokens_env_errors() {
-        let dir = tempfile::tempdir().unwrap();
-        write_user_config(
-            dir.path(),
-            indoc::indoc! {"
-                [client]
-                max_tokens = 128
-            "},
-        );
-        let vars = env_vars(vec![xdg(&dir), env("ANTHROPIC_MAX_TOKENS", "not-a-number")]);
-        let err = temp_env::async_with_vars(vars, Config::load(dir.path()))
-            .await
-            .expect_err("invalid max-token env should fail");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("ANTHROPIC_MAX_TOKENS"), "{msg}");
-        assert!(msg.contains("not-a-number"), "{msg}");
-    }
-
-    #[tokio::test]
-    async fn load_propagates_invalid_config_file() {
-        let dir = tempfile::tempdir().unwrap();
-        write_user_config(
-            dir.path(),
-            indoc::indoc! {r#"
-                [client]
-                api_key = "sk-from-file"
-                show_thinking = true
-            "#},
-        );
-        let vars = env_vars(vec![xdg(&dir), env("ANTHROPIC_API_KEY", "")]);
-        let err = temp_env::async_with_vars(vars, Config::load(dir.path()))
-            .await
-            .expect_err("misplaced field must surface as an error");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("invalid config at"), "{msg}");
-        assert!(msg.contains("unknown field `show_thinking`"), "{msg}");
-    }
-
-    // ── invalid_setting ──
-
-    #[test]
-    fn invalid_setting_without_an_env_var_or_file_names_the_key() {
-        assert_eq!(
-            invalid_setting("client.max_tokens", &Source::Session, 0),
-            "invalid client.max_tokens 0",
-        );
     }
 
     // ── Config::load: extra_ca_certs ──
@@ -2316,7 +2279,7 @@ mod tests {
                 effort = "low"
             "#},
         );
-        let vars = env_vars(vec![xdg(&dir), env("ANTHROPIC_EFFORT", "max")]);
+        let vars = env_vars(vec![xdg(&dir), env("OX_EFFORT", "max")]);
         let config = temp_env::async_with_vars(vars, Config::load(dir.path()))
             .await
             .unwrap();
@@ -2324,15 +2287,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_effort_invalid_env_surfaces_parse_error() {
+    async fn load_effort_invalid_env_lists_the_accepted_tiers() {
         let dir = tempfile::tempdir().unwrap();
-        let vars = env_vars(vec![xdg(&dir), env("ANTHROPIC_EFFORT", "insane")]);
+        let vars = env_vars(vec![xdg(&dir), env("OX_EFFORT", "insane")]);
         let err = temp_env::async_with_vars(vars, Config::load(dir.path()))
             .await
             .expect_err("invalid effort must propagate");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("ANTHROPIC_EFFORT"), "{msg}");
-        assert!(msg.contains("insane"), "{msg}");
+        assert_eq!(
+            format!("{err:#}"),
+            r#"invalid OX_EFFORT "insane": expected one of low, medium, high, xhigh, max"#,
+        );
+    }
+
+    #[tokio::test]
+    async fn load_ox_names_beat_their_anthropic_aliases() {
+        let dir = tempfile::tempdir().unwrap();
+        let aliases = [
+            xdg(&dir),
+            env("ANTHROPIC_EFFORT", "low"),
+            env("ANTHROPIC_MAX_TOKENS", "200"),
+        ];
+
+        let config = temp_env::async_with_vars(env_vars(aliases.clone()), Config::load(dir.path()))
+            .await
+            .unwrap();
+        assert_eq!(config.effort, Some(Effort::Low));
+        assert_eq!(config.max_tokens, Some(200));
+        assert_eq!(config.provenance.effort, Source::Env("ANTHROPIC_EFFORT"));
+        assert_eq!(
+            config.provenance.max_tokens,
+            Source::Env("ANTHROPIC_MAX_TOKENS")
+        );
+
+        let both = aliases
+            .into_iter()
+            .chain([env("OX_EFFORT", "high"), env("OX_MAX_TOKENS", "100")]);
+        let config = temp_env::async_with_vars(env_vars(both), Config::load(dir.path()))
+            .await
+            .unwrap();
+        assert_eq!(config.effort, Some(Effort::High));
+        assert_eq!(config.max_tokens, Some(100));
+        assert_eq!(config.provenance.effort, Source::Env("OX_EFFORT"));
+        assert_eq!(config.provenance.max_tokens, Source::Env("OX_MAX_TOKENS"));
     }
 
     // ── Config::load: prompt_cache_ttl ──
@@ -2387,9 +2383,10 @@ mod tests {
         let err = temp_env::async_with_vars(vars, Config::load(dir.path()))
             .await
             .expect_err("invalid ttl must propagate");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("OX_PROMPT_CACHE_TTL"), "{msg}");
-        assert!(msg.contains("forever"), "{msg}");
+        assert_eq!(
+            format!("{err:#}"),
+            r#"invalid OX_PROMPT_CACHE_TTL "forever": expected one of 5m, 1h"#,
+        );
     }
 
     // ── Config::snapshot ──
