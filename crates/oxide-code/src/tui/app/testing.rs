@@ -12,6 +12,7 @@ use ratatui::{Terminal, TerminalOptions, Viewport};
 use tokio::sync::mpsc;
 
 use super::{App, AppHistory};
+use crate::client::{RateLimitWindow, RateLimits};
 use crate::model::ModelSpec;
 use crate::protocol::{Event, Op};
 use crate::slash::LiveSessionInfo;
@@ -76,6 +77,17 @@ pub(super) fn test_session_info() -> LiveSessionInfo {
             theme_name: "mocha".to_owned(),
             provenance: crate::config::provenance::Provenance::default(),
         },
+    }
+}
+
+/// A five-hour window 42% spent that resets in 2100.
+pub(super) fn five_hour_limit() -> RateLimits {
+    RateLimits {
+        five_hour: Some(RateLimitWindow {
+            utilization: 0.42,
+            resets_at: 4_102_444_800,
+        }),
+        seven_day: None,
     }
 }
 

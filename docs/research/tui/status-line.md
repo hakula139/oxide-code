@@ -57,10 +57,10 @@ Cost display should stay best-effort because account discounts, marketplace bill
 3. **Cache-aware accounting.** Context and cost should include cache creation and cache read tokens because prompt caching is part of the real request shape.
 4. **Graceful omission.** Segments with no data should disappear entirely.
 5. **Theme-owned colors.** Status-line colors should come from the active theme.
+6. **Header-borne account limits.** Claude Code reads a subscription's five-hour and weekly utilization from the `anthropic-ratelimit-unified-{5h,7d}-{utilization,reset}` headers on every response. That keeps the limits current without the extra `/api/oauth/usage` request its `/usage` screen makes.
 
 ## Additional Patterns
 
 1. **ccusage integration.** Block and daily billing are useful, but shelling out to an external npm package adds installation, trust, cache, and schema concerns.
-2. **Account-limit telemetry.** Five-hour and weekly limits need provider-specific state that is separate from per-turn token usage. Tracked in [#140](https://github.com/hakula139/oxide-code/issues/140).
-3. **Task-progress segments.** Those need task state that oxide-code does not own yet. Tracked in [#140](https://github.com/hakula139/oxide-code/issues/140).
-4. **Command-based status lines.** Claude Code's command hook moves rendering, errors, and latency outside the Rust UI loop. Tracked in [#166](https://github.com/hakula139/oxide-code/issues/166).
+2. **Task-progress segments.** Those need task state that oxide-code does not own yet. The task list is tracked in [#135](https://github.com/hakula139/oxide-code/issues/135).
+3. **Command-based status lines.** Claude Code's command hook moves rendering, errors, and latency outside the Rust UI loop. Tracked in [#166](https://github.com/hakula139/oxide-code/issues/166).

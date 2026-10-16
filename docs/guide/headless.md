@@ -61,18 +61,21 @@ A turn reports usage when it ends, so after a signal, `usage` omits requests fro
 
 Each `stream-json` line is an object with a `type` and, for most types, a `data` payload. Headless runs emit the following types:
 
-| `type`            | `data`                                                                                             |
-| ----------------- | -------------------------------------------------------------------------------------------------- |
-| `stream_token`    | The next chunk of reply text                                                                       |
-| `thinking_token`  | The next chunk of the model's thinking, when the model streams it                                  |
-| `progress_update` | A note the model wrote before a tool call, which also appears in its thinking                      |
-| `retrying`        | Notice that a request failed and will be sent again                                                |
-| `tool_call_start` | A tool call: `id`, `name`, the model's `input`, and its display `icon` and `label`                 |
-| `tool_call_end`   | The call's result: `id`, the `content` the model sees, `is_error`, a `title` or `null`, and `view` |
-| `usage_updated`   | The usage object described under [Result](#result)                                                 |
-| `error`           | A problem that does not end the turn, such as a session write failure                              |
-| `turn_complete`   | No `data`. The turn finished with a reply                                                          |
-| `turn_failed`     | Why the turn failed, including a refused request                                                   |
+| `type`                | `data`                                                                                             |
+| --------------------- | -------------------------------------------------------------------------------------------------- |
+| `stream_token`        | The next chunk of reply text                                                                       |
+| `thinking_token`      | The next chunk of the model's thinking, when the model streams it                                  |
+| `progress_update`     | A note the model wrote before a tool call, which also appears in its thinking                      |
+| `retrying`            | Notice that a request failed and will be sent again                                                |
+| `tool_call_start`     | A tool call: `id`, `name`, the model's `input`, and its display `icon` and `label`                 |
+| `tool_call_end`       | The call's result: `id`, the `content` the model sees, `is_error`, a `title` or `null`, and `view` |
+| `usage_updated`       | The usage object described under [Result](#result)                                                 |
+| `rate_limits_updated` | A subscription's usage limits, described below                                                     |
+| `error`               | A problem that does not end the turn, such as a session write failure                              |
+| `turn_complete`       | No `data`. The turn finished with a reply                                                          |
+| `turn_failed`         | Why the turn failed, including a refused request                                                   |
+
+`rate_limits_updated` arrives with each response under a Claude subscription sign-in. Its `five_hour` and `seven_day` windows are each `null` when the response omits them, or an object with the spent share as `utilization`, from 0 to 1, and the reset time as `resets_at`, in Unix seconds.
 
 A denied call ends with a `tool_call_end` event whose `is_error` is `true` and whose `content` tells the model the call was denied, naming the allow rule that would permit it when one can.
 

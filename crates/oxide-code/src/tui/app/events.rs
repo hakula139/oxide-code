@@ -42,6 +42,7 @@ impl App {
             Event::UsageUpdated(usage) => {
                 self.status_bar.set_usage(Some(usage));
             }
+            Event::RateLimitsUpdated(limits) => self.status_bar.set_rate_limits(Some(limits)),
             Event::TurnComplete => {
                 self.finish_turn();
             }
@@ -261,6 +262,7 @@ impl App {
 
     fn apply_signed_in(&mut self, auth: AuthSource) {
         self.session_info.config.auth = Some(auth);
+        self.status_bar.set_rate_limits(None);
         let message = if auth == AuthSource::OxLogin {
             format!("Signed in. Requests now use {auth}.")
         } else {
@@ -277,6 +279,7 @@ impl App {
         fallback_error: Option<String>,
     ) {
         self.session_info.config.auth = auth;
+        self.status_bar.set_rate_limits(None);
         let outcome = if removed {
             "Signed out of oxide-code."
         } else {
@@ -401,7 +404,7 @@ mod tests {
     use crate::protocol::{ToolCall, ToolResult, UsageSnapshot};
     use crate::tool::{ApprovalBody, ToolResultView};
     use crate::tui::action::Action;
-    use crate::tui::app::testing::{rendered_text, test_app};
+    use crate::tui::app::testing::{five_hour_limit, rendered_text, test_app};
     use crate::tui::glyphs::INTERRUPTED_MARKER;
 
     fn bash_call_start(id: &str, command: &str) -> Event {
@@ -655,6 +658,28 @@ mod tests {
 
             assert_eq!(app.session_info.config.auth, auth);
             assert_eq!(app.chat.last_system_text(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn handle_signed_in_or_out_drops_the_previous_accounts_usage_limits() {
+        for event in [
+            Event::SignedIn {
+                auth: AuthSource::OxLogin,
+            },
+            Event::SignedOut {
+                removed: true,
+                auth: Some(AuthSource::ApiKeyEnv),
+                fallback_error: None,
+            },
+        ] {
+            let (mut app, _rx, _event_tx) = test_app(None);
+            app.handle_engine_event(Event::RateLimitsUpdated(five_hour_limit()));
+            let label = format!("{event:?}");
+
+            app.handle_engine_event(event);
+
+            assert_eq!(app.status_bar.rate_limits(), None, "{label}");
         }
     }
 
@@ -1476,6 +1501,8 @@ mod tests {
             crate::util::git::PullRequest {
                 number: 7,
                 url: "https://github.com/o/r/pull/7".to_owned(),
+                checks: None,
+                review: None,
             },
         )));
         assert!(app.dirty, "new pull request repaints");

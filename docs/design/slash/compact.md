@@ -11,7 +11,7 @@ Companions: [commands.md](commands.md), [session/persistence.md](../session/pers
 `engine/compaction` owns the summarization request:
 
 - `compact_session` forks the live conversation. It sends the conversation's own system prompt, user context, tools, and transcript, appends the rubric as the last user message, and reads the reply through the agent loop's `collect_response`.
-- Its `SummaryStream` sink forwards the reply's text as `Event::SummaryToken`, passes retry notices through, and drops its thinking. A retry, a failure, or a dropped future emits `Event::SummaryDiscarded` when any text has streamed.
+- Its `SummaryStream` sink forwards the reply's text as `Event::SummaryToken`, passes retry notices and usage limits through, and drops its thinking. A retry, a failure, or a dropped future emits `Event::SummaryDiscarded` when any text has streamed.
 - A request the API rejects with HTTP 400 `prompt is too long`, or a reply that stops on `model_context_window_exceeded`, gets up to three retries. Each retry copies the transcript without thinking blocks and drops its oldest API rounds until it frees the overflow the error reports plus about 20k tokens of output room for the summary.
 - It rejects a reply cut short by `max_tokens`, a refusal, a tool call, a truncated stream, or an overflow that outlasts the retries or leaves only the newest round, and otherwise returns the trimmed summary.
 - The driver is its own module so the request shape is testable in isolation.

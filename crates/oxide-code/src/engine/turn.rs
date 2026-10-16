@@ -405,6 +405,9 @@ pub(super) async fn collect_response(
             ResponseEvent::Thinking(text) => _ = sink.send(Event::ThinkingToken(text)),
             ResponseEvent::Progress(note) => _ = sink.send(Event::ProgressUpdate(note)),
             ResponseEvent::Usage(reported) => *usage = Some(reported),
+            ResponseEvent::RateLimits(limits) => {
+                sink.emit(Event::RateLimitsUpdated(limits), "rate-limits");
+            }
             ResponseEvent::Retrying(notice) => sink.emit(Event::Retrying(notice), "retry-notice"),
             ResponseEvent::Completed(response) => return Ok(response),
         }
@@ -426,6 +429,7 @@ mod tests {
 
     use super::*;
     use crate::client::anthropic::testing::test_client;
+    use crate::client::{RateLimitWindow, RateLimits};
     use crate::config::Effort;
     use crate::config::auth::{Auth, AuthSource};
     use crate::engine::dispatch::NOT_RUN;
@@ -2364,7 +2368,15 @@ mod tests {
             stop_reason: Some(StopReason::EndTurn),
             ..Response::default()
         };
+        let limits = RateLimits {
+            five_hour: Some(RateLimitWindow {
+                utilization: 0.42,
+                resets_at: 1_760_000_000,
+            }),
+            seven_day: None,
+        };
         let events = [
+            ResponseEvent::RateLimits(limits),
             ResponseEvent::Usage(TokenUsage::new(5, 0)),
             ResponseEvent::Retrying("HTTP 529. Retrying in 1s (retry 1 of 5).".to_owned()),
             ResponseEvent::Thinking("plan".to_owned()),
@@ -2387,6 +2399,7 @@ mod tests {
         assert_eq!(
             sink.events(),
             [
+                Event::RateLimitsUpdated(limits),
                 Event::Retrying("HTTP 529. Retrying in 1s (retry 1 of 5).".to_owned()),
                 Event::ThinkingToken("plan".to_owned()),
                 Event::ProgressUpdate("Searching.".to_owned()),

@@ -70,6 +70,12 @@ impl App {
         ])
         .split(frame.area());
 
+        self.status_bar
+            .set_queued_prompts(self.pending_prompts.len());
+        self.status_bar
+            .set_session_id(&self.session_info.session_id);
+        self.status_bar
+            .set_theme_name(&self.session_info.config.theme_name);
         self.status_bar.render(frame, chunks[0]);
         if self.chat.is_empty() && self.session_info.config.show_welcome {
             let snap = WelcomeSnapshot::from_live(&self.session_info);
@@ -196,13 +202,15 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
+    use crate::config::StatusLineSegment;
     use crate::protocol::{Decision, Event, Op, ToolCall, ToolResult};
     use crate::tool::{ApprovalBody, ApprovalPreview, ToolResultView};
     use crate::tui::action::Action;
     use crate::tui::app::testing::{
-        FakeModal, crossterm_test_terminal, key_event, long_chat_block, push_answerable_approval,
-        render_app, rendered_text, test_app,
+        FakeModal, crossterm_test_terminal, five_hour_limit, key_event, long_chat_block,
+        push_answerable_approval, render_app, rendered_text, test_app,
     };
+    use crate::tui::components::status::StatusBar;
     use crate::tui::git_probes::GitUpdate;
 
     // ── render ──
@@ -234,6 +242,8 @@ mod tests {
             crate::util::git::PullRequest {
                 number: 7,
                 url: "https://example.com/pull/7".to_owned(),
+                checks: None,
+                review: None,
             },
         )));
         let (mut terminal, buf) = crossterm_test_terminal(120, 8);
@@ -283,6 +293,34 @@ mod tests {
     fn draw_frame_lays_out_status_chat_and_input_in_order() {
         let (mut app, _rx, _event_tx) = test_app(Some("Session title"));
         insta::assert_snapshot!(render_app(&mut app, 80, 10));
+    }
+
+    #[test]
+    fn draw_frame_shows_rate_limits_and_app_state_in_opt_in_segments() {
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.status_bar = StatusBar::new(
+            &app.theme,
+            vec![
+                StatusLineSegment::QueuedPrompts,
+                StatusLineSegment::FiveHourLimit,
+                StatusLineSegment::SessionId,
+                StatusLineSegment::Theme,
+            ],
+            "test-model".to_owned(),
+            None,
+            "~/test".to_owned(),
+            None,
+        );
+        app.pending_prompts.push_back("next".to_owned());
+
+        app.handle_engine_event(Event::RateLimitsUpdated(five_hour_limit()));
+
+        let text = rendered_text(&mut app, 100, 12);
+        let status = text.lines().next().unwrap();
+        assert_eq!(
+            status.trim_end(),
+            "  Queued: 1 │ 5h: 42% │ ID: test-ses │ Theme: mocha"
+        );
     }
 
     #[test]

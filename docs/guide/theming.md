@@ -200,11 +200,18 @@ Each status-line segment routes to one of the slots above so re-skinning the slo
 | `model-with-effort` | `text`    |
 | `context-used`      | `dim`     |
 | `session-cost`      | `dim`     |
+| `five-hour-limit`   | `dim`     |
+| `weekly-limit`      | `dim`     |
 | `run-state` (idle)  | `success` |
 | `run-state` (busy)  | `info`    |
 | `run-state` (warn)  | `warning` |
+| `queued-prompts`    | `dim`     |
 | `thread-title`      | `muted`   |
+| `session-id`        | `muted`   |
+| `theme`             | `muted`   |
 | `current-time`      | `dim`     |
+
+`pull-request-checks` and `pull-request-review` take their slot from the state they show: `success` for passing checks or an approval, `warning` for pending checks or a required review, `error` for failing checks or requested changes, and `muted` for cancelled checks.
 
 The separator glyph itself (`│`) is fixed, and the `separator` slot controls only its color and modifiers.
 
