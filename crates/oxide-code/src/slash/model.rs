@@ -3,6 +3,8 @@
 
 use std::borrow::Cow;
 
+use indoc::formatdoc;
+
 use super::context::SlashContext;
 use super::matcher::rank_by_prefix;
 use super::registry::{ArgCompletion, SlashCommand, SlashKind, SlashOutcome};
@@ -73,17 +75,21 @@ fn resolve_model_arg(arg: &str) -> Result<ResolvedModelId, String> {
     };
     match hits.as_slice() {
         [info] => Ok(ResolvedModelId::new(info.id.to_owned())),
-        [_, ..] => Err(format!(
-            "`{arg}` is ambiguous. Pick one or use a short alias (`opus`, `sonnet`, `haiku`):\n\n{}",
+        [_, ..] => Err(formatdoc! {"
+            `{arg}` is ambiguous. Pick one or use a short alias (`opus`, `sonnet`, `haiku`):
+
+            {}",
             format_models(hits),
-        )),
+        }),
         [] => {
             let hint = replacement_for(&arg)
                 .map_or_else(String::new, |info| format!(" Did you mean `{}`?", info.id));
-            Err(format!(
-                "Unknown model: `{arg}`.{hint} Supported models:\n\n{}",
+            Err(formatdoc! {"
+                Unknown model: `{arg}`.{hint} Supported models:
+
+                {}",
                 format_models(MODELS),
-            ))
+            })
         }
     }
 }
@@ -99,6 +105,8 @@ fn format_models<'a>(models: impl IntoIterator<Item = &'a ModelInfo>) -> String 
 
 #[cfg(test)]
 mod tests {
+    use indoc::indoc;
+
     use super::*;
     use crate::slash::test_session_info;
 
@@ -239,9 +247,11 @@ mod tests {
         let msg = resolve_model_arg("o").expect_err("ambiguous arg must error");
         assert_eq!(
             msg,
-            "`o` is ambiguous. Pick one or use a short alias (`opus`, `sonnet`, `haiku`):\n\n\
-             - `claude-opus-5-5` — Claude Opus 5.5\n\
-             - `claude-sonnet-5-5` — Claude Sonnet 5.5",
+            indoc! {"
+                `o` is ambiguous. Pick one or use a short alias (`opus`, `sonnet`, `haiku`):
+
+                - `claude-opus-5-5` — Claude Opus 5.5
+                - `claude-sonnet-5-5` — Claude Sonnet 5.5"},
         );
     }
 }

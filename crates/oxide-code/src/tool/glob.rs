@@ -593,7 +593,10 @@ mod tests {
         let result = glob_files("*.toml", None, dir.path(), &read_deny).unwrap();
         assert_eq!(
             result.content,
-            "config.toml\n\n(1 file withheld by read deny rules)"
+            indoc! {"
+                config.toml
+
+                (1 file withheld by read deny rules)"}
         );
         assert_eq!(result.truncated_total, None);
         assert_eq!(
@@ -611,7 +614,10 @@ mod tests {
         let result = glob_files("secrets/*", None, dir.path(), &read_deny).unwrap();
         assert_eq!(
             result.content,
-            "No files found\n\n(1 file withheld by read deny rules)"
+            indoc! {"
+                No files found
+
+                (1 file withheld by read deny rules)"}
         );
     }
 
@@ -633,10 +639,12 @@ mod tests {
         let result = glob_files("*", Some("config"), &cwd, &read_deny).unwrap();
         assert_eq!(
             result.content,
-            format!(
-                "{}\n\n(1 file withheld by read deny rules)",
+            formatdoc! {"
+                {}
+
+                (1 file withheld by read deny rules)",
                 outside.join("app.toml").display()
-            )
+            }
         );
     }
 

@@ -66,7 +66,8 @@ Conventions for Rust code under `crates/`. Tooling enforces some style rules, so
 ## Strings
 
 - Prefer raw strings (`r"..."`) when a literal contains characters that would otherwise need escaping.
-- Write multiline content with `indoc!` or `formatdoc!` so the literal is indented with the surrounding code, in tests and production alike. Inline it at the call site when used once, and name a constant only when the content is shared or very large. Avoid `\n` escapes and `\x20` workarounds for multiline content.
+- Use `indoc!` for literals and `formatdoc!` for formatted text whenever prose or a structured document, such as a prompt, message, Markdown, diff, or file fixture, spans a paragraph break or three or more lines. This applies to production code and tests. Use `writedoc!` with a writer. Indent content with the surrounding code, inline it when used once, and name a constant only when shared or very large.
+- Keep `\n` escapes for separators, separators around a single line, a single trailing newline, tiny non-prose fixtures, and tests or operations concerned with the newlines themselves. One- or two-line fixtures without paragraph breaks may stay inline when clear. Keep content whose meaning depends on trailing spaces or whitespace-only lines in an escaped literal, since the trailing-whitespace hook strips them.
 
 ## Dependencies
 

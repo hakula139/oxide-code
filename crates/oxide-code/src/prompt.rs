@@ -263,6 +263,8 @@ async fn find_git_root(cwd: &Path) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use indoc::indoc;
+
     use super::*;
     use crate::util::git::testing::{isolated_git, with_isolated_git_env_async};
 
@@ -279,11 +281,17 @@ mod tests {
 
         let reminder = parts.catch_up(context("Old rules.", "2026-04-13")).unwrap();
         assert!(reminder.starts_with("<system-reminder>"));
-        assert!(reminder.contains("# Current date\n\nToday's date is 2026-04-13."));
+        assert!(reminder.contains(indoc! {"
+            # Current date
+
+            Today's date is 2026-04-13."}));
         assert!(!reminder.contains("# CLAUDE.md"), "{reminder}");
 
         let reminder = parts.catch_up(context("New rules.", "2026-04-13")).unwrap();
-        assert!(reminder.contains("# CLAUDE.md\n\nNew rules."));
+        assert!(reminder.contains(indoc! {"
+            # CLAUDE.md
+
+            New rules."}));
         assert!(!reminder.contains("# Current date"), "{reminder}");
 
         let swapped = UserContext {
@@ -291,7 +299,10 @@ mod tests {
             ..context("New rules.", "2026-04-13")
         };
         let reminder = parts.catch_up(swapped).unwrap();
-        assert!(reminder.contains("# Model\n\nYou are powered by the model other-model."));
+        assert!(reminder.contains(indoc! {"
+            # Model
+
+            You are powered by the model other-model."}));
         assert!(!reminder.contains("# CLAUDE.md"), "{reminder}");
 
         let reminder = parts.catch_up(context("", "2026-04-13")).unwrap();
@@ -353,9 +364,10 @@ mod tests {
         let parts = build_prompt(&model, &cwd()).await;
         let identity = environment::model_identity(&model);
         assert!(
-            parts
-                .user_context
-                .contains(&format!("# Model\n\n{identity}")),
+            parts.user_context.contains(&formatdoc! {"
+                # Model
+
+                {identity}"}),
             "{}",
             parts.user_context,
         );
@@ -511,9 +523,18 @@ mod tests {
         let ctx = render_user_context(&context("Project rules.", "2026-04-12"));
         assert!(ctx.starts_with("<system-reminder>"));
         assert!(ctx.ends_with("</system-reminder>"));
-        assert!(ctx.contains("# CLAUDE.md\n\nProject rules."));
-        assert!(ctx.contains("# Current date\n\nToday's date is 2026-04-12."));
-        assert!(ctx.contains(&format!("# Model\n\n{IDENTITY}")));
+        assert!(ctx.contains(indoc! {"
+            # CLAUDE.md
+
+            Project rules."}));
+        assert!(ctx.contains(indoc! {"
+            # Current date
+
+            Today's date is 2026-04-12."}));
+        assert!(ctx.contains(&formatdoc! {"
+            # Model
+
+            {IDENTITY}"}));
         assert!(ctx.contains("IMPORTANT: this context may or may not be relevant"));
     }
 

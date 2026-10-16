@@ -808,6 +808,8 @@ mod tests {
     use std::collections::HashSet;
     use std::sync::Arc;
 
+    use indoc::{formatdoc, indoc};
+
     use super::bash::BashTool;
     use super::edit::EditTool;
     use super::glob::GlobTool;
@@ -1788,7 +1790,13 @@ mod tests {
         ] {
             let mut content = "a.rs".to_owned();
             push_withheld_note(&mut content, count);
-            assert_eq!(content, format!("a.rs\n\n{note}"));
+            assert_eq!(
+                content,
+                formatdoc! {"
+                    a.rs
+
+                    {note}"}
+            );
             assert_eq!(strip_withheld_note(&content), "a.rs");
         }
 
@@ -1803,7 +1811,10 @@ mod tests {
     fn strip_withheld_note_keeps_content_without_one() {
         for content in [
             "a.rs",
-            "a.rs\n\n(Showing 100 of 120 matches. Use a more specific pattern.)",
+            indoc! {"
+                a.rs
+
+                (Showing 100 of 120 matches. Use a more specific pattern.)"},
         ] {
             assert_eq!(strip_withheld_note(content), content);
         }

@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use indoc::indoc;
+use indoc::{formatdoc, indoc};
 use tokio::fs;
 
 /// First file found per location wins.
@@ -111,26 +111,27 @@ async fn load_files(slots: Vec<Slot>) -> Vec<MemoryFile> {
 }
 
 fn render(files: &[MemoryFile]) -> String {
-    use std::fmt::Write;
-
-    let mut out = String::from(indoc! {"
+    let header = indoc! {"
         # User instructions
 
         Codebase and user instructions are shown below.
         Be sure to adhere to these instructions."
-    });
+    };
+    let sections = files.iter().map(|file| {
+        formatdoc! {"
+            Contents of {} ({}):
 
-    for file in files {
-        _ = write!(
-            out,
-            "\n\nContents of {} ({}):\n\n{}",
+            {}",
             file.path.display(),
             file.label,
             file.content,
-        );
-    }
+        }
+    });
 
-    out
+    std::iter::once(header.to_owned())
+        .chain(sections)
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 #[cfg(test)]

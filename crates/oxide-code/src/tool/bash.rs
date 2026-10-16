@@ -8,6 +8,7 @@ use std::pin::Pin;
 use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
+use indoc::formatdoc;
 use process_wrap::tokio::{ChildWrapper, CommandWrap};
 use serde::Deserialize;
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -304,11 +305,13 @@ fn render_pipe(pipe: &PipeCapture, budget: usize, trim_start_newlines: bool) -> 
         head = &head[..head.len() - split_char];
         tail = &tail[continuations..];
         omitted += split_char + continuations;
-        format!(
-            "{}\n... [{omitted} bytes omitted] ...\n{}",
+        formatdoc! {"
+            {}
+            ... [{omitted} bytes omitted] ...
+            {}",
             String::from_utf8_lossy(head),
             String::from_utf8_lossy(tail),
-        )
+        }
     };
 
     let text = text.trim_end();
@@ -439,6 +442,7 @@ impl Drop for ShellTree {
 
 #[cfg(test)]
 mod tests {
+    use indoc::indoc;
     use tokio::io::AsyncWriteExt as _;
 
     use super::*;
@@ -509,7 +513,13 @@ mod tests {
         }))
         .await;
         assert!(output.is_error);
-        assert_eq!(output.content, "started\n\nCommand timed out after 1000ms");
+        assert_eq!(
+            output.content,
+            indoc! {"
+                started
+
+                Command timed out after 1000ms"}
+        );
     }
 
     // ── resolve_timeout ──
@@ -553,7 +563,13 @@ mod tests {
     async fn execute_output_with_nonzero_exit() {
         let output = run_default("echo partial; false").await;
         assert!(!output.is_error);
-        assert_eq!(output.content, "partial\n\n(exit code 1)");
+        assert_eq!(
+            output.content,
+            indoc! {"
+                partial
+
+                (exit code 1)"}
+        );
     }
 
     #[tokio::test]
@@ -667,7 +683,13 @@ mod tests {
         let output = execute("sleep 5 & echo done", Duration::from_millis(1_000)).await;
 
         assert!(output.is_error, "expected timeout");
-        assert_eq!(output.content, "done\n\nCommand timed out after 1000ms");
+        assert_eq!(
+            output.content,
+            indoc! {"
+                done
+
+                Command timed out after 1000ms"}
+        );
         assert!(
             start.elapsed() < Duration::from_secs(3),
             "timeout did not cover pipe collection",
@@ -679,7 +701,13 @@ mod tests {
     async fn execute_signal_death_names_the_signal() {
         let output = run_default("echo before; kill -9 $$").await;
         assert!(!output.is_error);
-        assert_eq!(output.content, "before\n\n(killed by signal 9)");
+        assert_eq!(
+            output.content,
+            indoc! {"
+                before
+
+                (killed by signal 9)"}
+        );
     }
 
     // ── git_bash_on ──
@@ -775,7 +803,11 @@ mod tests {
         let pipe = capture(b"\nhello\n", b"world\n", 7);
         assert_eq!(
             render_pipe(&pipe, OUTPUT_BUDGET, true),
-            "hello\n\n... [7 bytes omitted] ...\nworld",
+            indoc! {"
+                hello
+
+                ... [7 bytes omitted] ...
+                world"},
         );
     }
 
@@ -789,7 +821,10 @@ mod tests {
         );
         assert_eq!(
             render_pipe(&pipe, OUTPUT_BUDGET, true),
-            "ab\n... [10 bytes omitted] ...\ncd",
+            indoc! {"
+                ab
+                ... [10 bytes omitted] ...
+                cd"},
         );
     }
 
@@ -798,7 +833,10 @@ mod tests {
         let pipe = capture(b"0123456789", b"abcdef4321", 0);
         assert_eq!(
             render_pipe(&pipe, 8, true),
-            "0123\n... [12 bytes omitted] ...\n4321",
+            indoc! {"
+                0123
+                ... [12 bytes omitted] ...
+                4321"},
         );
     }
 

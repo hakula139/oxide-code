@@ -323,7 +323,11 @@ mod tests {
             let engine = engine(server.uri(), &store, dir.path()).await;
             let session_id = engine.session_id().to_owned();
             let sink = CapturingSink::new();
-            let input: &[u8] = b"first\n/clear\n//literal\n";
+            let input: &[u8] = indoc! {b"
+                first
+                /clear
+                //literal
+            "};
 
             let exit = Box::pin(drive(
                 engine.spawn(&[PathBuf::from("drifted.rs")]),
