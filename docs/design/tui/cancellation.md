@@ -34,9 +34,11 @@ The picks lean toward the Codex precedent on most surfaces, since it is the one 
 
 ## Sources
 
-- `crates/oxide-code/src/agent.rs`: `agent_turn` round loop, `run_tool_round` / `ToolRound`, `dispatch_tool_call`, `await_unless_aborted`, `record_drained_prompts`, `TurnAbort` enum.
 - `crates/oxide-code/src/driver/stdio.rs`: `StdioSink::render`.
 - `crates/oxide-code/src/engine.rs`: `Engine::run`, which ignores an `Op::Queue` that arrives between turns, plus `Engine::submit_prompt` and `report_abort`, shared by the TUI, REPL, and headless drivers.
+- `crates/oxide-code/src/engine/abort.rs`: `TurnAbort` enum, `await_unless_aborted`.
+- `crates/oxide-code/src/engine/dispatch.rs`: `run_tool_round` / `ToolRound`, `dispatch_tool_call`.
+- `crates/oxide-code/src/engine/turn.rs`: `agent_turn` round loop, `record_drained_prompts`.
 - `crates/oxide-code/src/file_tracker.rs`: `FileTracker::write_and_record`.
 - `crates/oxide-code/src/protocol.rs`: `Event::{Cancelled, PromptDrained, TurnFailed}`, `Op::{Interrupt, Queue, Shutdown}`.
 - `crates/oxide-code/src/tool.rs`: `Tool::run` drop contract, `write_tracked`.

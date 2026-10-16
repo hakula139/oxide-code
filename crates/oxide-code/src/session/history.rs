@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use super::entry::CompactInfo;
-use crate::agent::compaction::strip_synthetic_post_compact_prefix;
+use super::post_compact::strip_synthetic_post_compact_prefix;
 use crate::message::{ContentBlock, Message, Role, progress_update_before};
 use crate::prompt::is_system_reminder;
 use crate::protocol::{Interaction, ToolCall, ToolResult};
@@ -184,8 +184,8 @@ mod tests {
     use indoc::indoc;
 
     use super::*;
-    use crate::agent::compaction::synthesize_post_compact_message;
     use crate::file_tracker::testing::tracker;
+    use crate::session::post_compact::synthesize_post_compact_message;
     use crate::tool::bash::BashTool;
     use crate::tool::edit::EditTool;
     use crate::tool::{DEFAULT_TOOL_ICON, DiffChunk, DiffLine};

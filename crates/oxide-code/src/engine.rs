@@ -1,8 +1,13 @@
 //! The engine: one conversation running as a task that every frontend drives through an
 //! [`EngineHandle`], sending ops on a bounded channel and reading events from an unbounded one.
 
+mod abort;
+mod compact_boundary;
+mod compaction;
+mod dispatch;
 #[cfg(test)]
 pub(crate) mod testing;
+mod turn;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -14,7 +19,9 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::warn;
 
-use crate::agent::{self, AutoCompact, TurnAbort, TurnOutcome, TurnReport};
+use self::abort::TurnAbort;
+use self::compaction::AutoCompact;
+use self::turn::{TurnOutcome, TurnReport};
 use crate::client::TokenUsage;
 use crate::client::anthropic::Client;
 use crate::config::Effort;
@@ -194,7 +201,7 @@ impl Engine {
         let sink = ChannelSink(event_tx);
         self.emit_usage_update(&sink);
         report_drift(&sink, drifted);
-        agent::notify_if_interrupted(&self.messages, &sink);
+        turn::notify_if_interrupted(&self.messages, &sink);
         let task = EngineTask(tokio::spawn(self.run(sink, op_rx)));
         EngineHandle { ops, events, task }
     }
@@ -268,7 +275,7 @@ impl Engine {
             .await;
         sink.session_write_error(outcome.failure.as_deref());
         self.messages.push(user_msg);
-        agent::record_drained_prompts(pending, &mut self.messages, &self.session, sink).await;
+        turn::record_drained_prompts(pending, &mut self.messages, &self.session, sink).await;
 
         if self.interactive
             && let Some(seed) = outcome.ai_title_seed
@@ -281,11 +288,11 @@ impl Engine {
             );
         }
 
-        let mut gate = agent::GateContext {
+        let mut gate = dispatch::GateContext {
             policy: &mut self.policy,
             cwd: &self.cwd,
         };
-        let TurnOutcome { report, result } = agent::agent_turn(
+        let TurnOutcome { report, result } = turn::agent_turn(
             &self.client,
             &self.tools,
             &mut self.messages,
@@ -315,7 +322,7 @@ impl Engine {
     ) -> Result<(), TurnAbort> {
         let tools = self.tools.definitions();
         let mut spent = Vec::new();
-        let compacted = agent::auto_compact_if_needed(
+        let compacted = compaction::auto_compact_if_needed(
             &self.client,
             &self.session,
             &mut self.messages,
@@ -354,8 +361,8 @@ impl Engine {
         let tools = self.tools.definitions();
         let mut spent = Vec::new();
         let mut pending = Vec::new();
-        let summary = agent::await_unless_aborted(
-            agent::compaction::compact_session(
+        let summary = abort::await_unless_aborted(
+            compaction::compact_session(
                 &self.client,
                 &self.prompt,
                 &tools,
@@ -377,7 +384,7 @@ impl Engine {
             }
             Err(abort) => return self.fail_compact(sink, abort),
         };
-        let compacted = agent::compact_boundary::replace_session_with_summary(
+        let compacted = compact_boundary::replace_session_with_summary(
             &self.session,
             &self.file_tracker,
             &mut self.messages,
@@ -494,7 +501,7 @@ impl Engine {
             );
         }
         report_drift(sink, &outcome.drifted_paths);
-        agent::notify_if_interrupted(&self.messages, sink);
+        turn::notify_if_interrupted(&self.messages, sink);
     }
 
     async fn adopt_session(&mut self, transcript: LoadedTranscript) {
@@ -574,7 +581,7 @@ impl Engine {
 
         let mut queued = Vec::new();
         let finish = pending.finish(&self.oauth_token_url, self.client.extra_ca_certs());
-        match agent::await_unless_aborted(finish, ops, &mut queued).await {
+        match abort::await_unless_aborted(finish, ops, &mut queued).await {
             Ok(Ok(auth)) => {
                 self.adopt_login(sink, auth);
                 TurnEnd::Completed
@@ -1043,7 +1050,7 @@ mod tests {
                 Message {
                     role: Role::Assistant,
                     content: vec![ContentBlock::Thinking {
-                        thinking: agent::INTERRUPTED_WORK_SENTINEL.to_owned(),
+                        thinking: turn::INTERRUPTED_WORK_SENTINEL.to_owned(),
                         signature: String::new(),
                     }],
                 },

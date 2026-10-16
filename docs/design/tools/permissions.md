@@ -168,14 +168,14 @@ The stdio sink escapes control characters other than tabs and line breaks in mod
 
 ## Sources
 
-- `crates/oxide-code/src/agent.rs`: `check_permission` (resolve, pin, decide), `allow_for_session` (admit against the call's grant), `dispatch_tool_call`, `await_unless_aborted`, `run_tool_round`.
 - `crates/oxide-code/src/config.rs`: `Config::load`, `OX_PERMISSION_MODE`, `Effort` enum template.
 - `crates/oxide-code/src/config/load.rs`: `reject_project_secrets`, `reject_project_permissions`.
 - `crates/oxide-code/src/config/merge.rs`: `APPENDED` rule lists, `merge`.
 - `crates/oxide-code/src/driver/repl.rs`: `Prompter`, the stdin approval prompt.
 - `crates/oxide-code/src/driver/stdio.rs`: `render_turn`, the `Approver` trait, `Unattended`, the escaped `StdioSink` output.
-- `crates/oxide-code/src/util/text.rs`: `is_hidden` and `escape_controls`, shared by both frontends.
 - `crates/oxide-code/src/engine.rs`: the live policy, whose session allow rules reset when the session changes.
+- `crates/oxide-code/src/engine/abort.rs`: `await_unless_aborted`, which races an allowed call against cancel and quit.
+- `crates/oxide-code/src/engine/dispatch.rs`: `check_permission` (resolve, pin, decide), `allow_for_session` (admit against the call's grant), `await_approval`, `dispatch_tool_call`, `run_tool_round`.
 - `crates/oxide-code/src/permission.rs`: `Mode`, `PermissionClass`, `GateTarget::for_path`, `GateTarget::for_command`, protected paths, `Policy::decide`, `Policy::session_grant`, `SessionGrant`, `ReadDeny`.
 - `crates/oxide-code/src/permission/rule.rs`: `class(specifier)` parsing, path-glob matching, segment matching for `bash`, and `Rule::for_call`.
 - `crates/oxide-code/src/permission/shell.rs`: `CommandTarget::parse`, wrapper stripping, opaque forms, redirection writes, and the known-safe commands.
@@ -190,3 +190,4 @@ The stdio sink escapes control characters other than tabs and line breaks in mod
 - `crates/oxide-code/src/tool/write.rs`: new-file creation, symlink refusal, current-content preview.
 - `crates/oxide-code/src/tui/modal.rs`: `ModalStack`, the cancel hook, `captures_esc`.
 - `crates/oxide-code/src/tui/modal/approval.rs`: `ApprovalModal` wrapping, scrolling, character reveal, and the rule and feedback editors.
+- `crates/oxide-code/src/util/text.rs`: `is_hidden` and `escape_controls`, shared by both frontends.
