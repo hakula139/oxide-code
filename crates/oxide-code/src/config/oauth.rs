@@ -12,7 +12,7 @@ use tracing::{debug, warn};
 #[cfg(target_os = "macos")]
 use crate::util::env;
 use crate::util::fs::{atomic_write_private, create_private_dir_all};
-use crate::util::path::data_dir;
+use crate::util::path::{XdgBase, app_dir};
 use crate::util::tls::apply_extra_ca_certs;
 
 pub(crate) const OAUTH_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
@@ -129,30 +129,30 @@ impl OAuthCredential {
 
 /// Credentials parsed from one store, keeping the raw JSON so write-back preserves unknown fields.
 struct StoredCredentials<'a> {
-    source: Source<'a>,
+    backend: Backend<'a>,
     json: String,
     oauth: OAuthCredential,
 }
 
 impl<'a> StoredCredentials<'a> {
-    fn parse(login: Login, source: Source<'a>, json: String) -> Result<Self> {
+    fn parse(login: Login, backend: Backend<'a>, json: String) -> Result<Self> {
         let file: CredentialsFile = serde_json::from_str(&json)
-            .with_context(|| format!("failed to parse the {login} in {source}"))?;
+            .with_context(|| format!("failed to parse the {login} in {backend}"))?;
         Ok(Self {
-            source,
+            backend,
             json,
             oauth: file.claude_ai_oauth,
         })
     }
 }
 
-/// The store credentials were read from, and therefore the only one their refresh updates.
-enum Source<'a> {
+/// The backend credentials were read from, and therefore the only one their refresh updates.
+enum Backend<'a> {
     Keychain(&'a dyn Keychain),
     File(&'a Path),
 }
 
-impl fmt::Display for Source<'_> {
+impl fmt::Display for Backend<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Keychain(_) => f.write_str("the macOS Keychain"),
@@ -176,7 +176,7 @@ impl Store<'static> {
     fn locate(login: Login) -> Result<Self> {
         match login {
             Login::Ox => {
-                let dir = data_dir().context(
+                let dir = app_dir(XdgBase::Data).context(
                     "could not determine the data directory that holds the oxide-code login",
                 )?;
                 Ok(Self {
@@ -320,7 +320,7 @@ fn load_credentials<'a>(store: &'a Store<'a>) -> Result<StoredCredentials<'a>, L
     if let Some(keychain) = store.keychain {
         keychain_failure = match keychain.read() {
             Ok(Some(json)) => {
-                match StoredCredentials::parse(login, Source::Keychain(keychain), json) {
+                match StoredCredentials::parse(login, Backend::Keychain(keychain), json) {
                     Ok(creds) => return Ok(creds),
                     Err(e) => Some(LoginError::Unreadable(login, e)),
                 }
@@ -345,7 +345,7 @@ fn read_credentials(login: Login, path: &Path) -> Result<Option<StoredCredential
         Err(e) => return Err(e).with_context(|| format!("failed to read {}", path.display())),
     };
     enforce_private_mode(path);
-    StoredCredentials::parse(login, Source::File(path), json).map(Some)
+    StoredCredentials::parse(login, Backend::File(path), json).map(Some)
 }
 
 #[cfg(unix)]
@@ -551,9 +551,9 @@ fn write_refreshed_credentials(
     apply_tokens(oauth, response)?;
 
     let serialized = serde_json::to_string_pretty(&json)?;
-    match creds.source {
-        Source::Keychain(keychain) => keychain.write(&serialized),
-        Source::File(path) => atomic_write_private(path, serialized.as_bytes()),
+    match creds.backend {
+        Backend::Keychain(keychain) => keychain.write(&serialized),
+        Backend::File(path) => atomic_write_private(path, serialized.as_bytes()),
     }
 }
 
@@ -645,11 +645,12 @@ mod tests {
 
     use super::*;
     use crate::util::path::testing::{HOME_VAR, abs};
+    use crate::util::tls::TEST_CA_PEM;
 
     // ── OAuthCredential::expires_at_ms ──
 
     #[test]
-    fn expires_at_ms_positive_value() {
+    fn expires_at_ms_keeps_a_positive_value() {
         let cred = OAuthCredential {
             access_token: String::new(),
             refresh_token: None,
@@ -1261,23 +1262,10 @@ mod tests {
     // ── read_credentials ──
 
     #[test]
-    fn read_credentials_valid_with_refresh_token() {
+    fn read_credentials_parses_tokens_and_expiry() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("creds.json");
-
-        std::fs::write(
-            &path,
-            indoc::indoc! {r#"
-                {
-                    "claudeAiOauth": {
-                        "accessToken": "tok",
-                        "refreshToken": "ref",
-                        "expiresAt": 9999999999999
-                    }
-                }
-            "#},
-        )
-        .unwrap();
+        write_creds(&path, "tok", Some("ref"), 9_999_999_999_999);
 
         let creds = read_credentials(Login::ClaudeCode, &path).unwrap().unwrap();
         assert_eq!(creds.oauth.access_token, "tok");
@@ -1286,24 +1274,13 @@ mod tests {
     }
 
     #[test]
-    fn read_credentials_missing_refresh_token_field() {
+    fn read_credentials_without_refresh_token_keeps_access_token() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("creds.json");
-
-        std::fs::write(
-            &path,
-            indoc::indoc! {r#"
-                {
-                    "claudeAiOauth": {
-                        "accessToken": "tok",
-                        "expiresAt": 9999999999999
-                    }
-                }
-            "#},
-        )
-        .unwrap();
+        write_creds(&path, "tok", None, 9_999_999_999_999);
 
         let creds = read_credentials(Login::ClaudeCode, &path).unwrap().unwrap();
+        assert_eq!(creds.oauth.access_token, "tok");
         assert!(creds.oauth.refresh_token.is_none());
     }
 
@@ -1317,7 +1294,7 @@ mod tests {
     }
 
     #[test]
-    fn read_credentials_invalid_json() {
+    fn read_credentials_invalid_json_fails_naming_the_login_and_path() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("creds.json");
         std::fs::write(&path, "not json").unwrap();
@@ -1334,17 +1311,26 @@ mod tests {
     }
 
     #[test]
-    fn read_credentials_missing_oauth_key() {
+    fn read_credentials_without_oauth_key_fails_naming_the_missing_field() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("creds.json");
         std::fs::write(&path, r#"{"other": "data"}"#).unwrap();
-        assert!(read_credentials(Login::ClaudeCode, &path).is_err());
+        let err = read_credentials(Login::ClaudeCode, &path)
+            .err()
+            .expect("credentials without claudeAiOauth must fail");
+        assert!(
+            format!("{err:#}").starts_with(&format!(
+                "failed to parse the Claude Code login in {}: missing field `claudeAiOauth`",
+                path.display()
+            )),
+            "{err:#}"
+        );
     }
 
     // ── is_near_expiry ──
 
     #[test]
-    fn is_near_expiry_far_future() {
+    fn is_near_expiry_far_future_is_not_near() {
         assert!(!is_near_expiry(u64::MAX));
     }
 
@@ -1356,12 +1342,12 @@ mod tests {
     // ── is_expired ──
 
     #[test]
-    fn is_expired_far_future() {
+    fn is_expired_far_future_is_not_expired() {
         assert!(!is_expired(u64::MAX));
     }
 
     #[test]
-    fn is_expired_zero() {
+    fn is_expired_zero_is_expired() {
         assert!(is_expired(0));
     }
 
@@ -1462,8 +1448,7 @@ mod tests {
             .await;
 
         let pem = tempfile::NamedTempFile::new().unwrap();
-        std::io::Write::write_all(&mut pem.as_file(), crate::util::tls::TEST_CA_PEM.as_bytes())
-            .unwrap();
+        std::io::Write::write_all(&mut pem.as_file(), TEST_CA_PEM.as_bytes()).unwrap();
 
         let response = refresh_oauth_token(&server.uri(), "refresh", Some(pem.path()))
             .await

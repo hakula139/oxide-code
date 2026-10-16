@@ -1,8 +1,8 @@
 //! Per-request `anthropic-beta` header computation.
 
+use crate::config::PromptCacheTtl;
 use crate::config::auth::AuthKind;
-use crate::config::{PromptCacheTtl, ThinkingConfig, ThinkingDisplay};
-use crate::model::{Family, ModelSpec};
+use crate::model::{Family, ModelSpec, ThinkingConfig, ThinkingDisplay};
 
 use super::wire::CacheControl;
 

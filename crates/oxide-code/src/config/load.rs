@@ -11,9 +11,8 @@ use super::merge::{Origins, merge};
 use super::provenance::Layer;
 use super::schema::FileConfig;
 use crate::permission::parse_rules;
-use crate::util::path::xdg_dir;
+use crate::util::path::{XdgBase, app_dir};
 
-const USER_CONFIG_DIR: &str = "ox";
 const CONFIG_FILE: &str = "config.toml";
 const DROP_IN_DIR: &str = "config.d";
 const PROJECT_DIR: &str = ".ox";
@@ -31,7 +30,7 @@ pub(super) struct Loaded {
 /// layers win key by key, and a project file may not set credentials, endpoints, or permission
 /// grants.
 pub(super) fn load(cwd: &Path) -> Result<Loaded> {
-    let layers = discover(user_config_dir().as_deref(), Some(cwd))?;
+    let layers = discover(app_dir(XdgBase::Config).as_deref(), Some(cwd))?;
     load_layers(layers)
 }
 
@@ -122,16 +121,7 @@ pub(super) fn project_config_path(dir: &Path) -> PathBuf {
 }
 
 pub(crate) fn user_config_path() -> Option<PathBuf> {
-    user_config_dir().map(|dir| dir.join(CONFIG_FILE))
-}
-
-fn user_config_dir() -> Option<PathBuf> {
-    xdg_dir(
-        std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
-        std::env::home_dir(),
-        Path::new(".config"),
-        Path::new(USER_CONFIG_DIR),
-    )
+    app_dir(XdgBase::Config).map(|dir| dir.join(CONFIG_FILE))
 }
 
 // ── Reading ──
@@ -222,6 +212,7 @@ mod tests {
     use super::*;
     use crate::config::provenance::Source;
     use crate::config::{Effort, StatusLineSegment};
+    use crate::permission::Mode;
 
     fn write(path: &Path, body: &str) -> PathBuf {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -516,7 +507,7 @@ mod tests {
         assert_eq!(client.max_tokens, Some(4096));
         assert_eq!(client.max_tool_rounds, Some(100));
         assert_eq!(client.compaction.threshold_percent, Some(40));
-        assert_eq!(config.permission.mode, Some(crate::permission::Mode::Plan));
+        assert_eq!(config.permission.mode, Some(Mode::Plan));
         assert_eq!(
             config.permission.deny.as_deref(),
             Some(&["bash(rm:*)".to_owned()][..])

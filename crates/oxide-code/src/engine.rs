@@ -818,7 +818,8 @@ mod tests {
         api_key, completion_body, sse_body, sse_response, test_client, test_config,
         text_stream_body,
     };
-    use crate::config::{AutoCompactionConfig, CompactionConfig, PromptCacheTtl};
+    use crate::config::PromptCacheTtl;
+    use crate::config::compaction::CompactionConfig;
     use crate::file_tracker::testing::seed_full_read;
     use crate::message::Role;
     use crate::permission::rule::Rule;
@@ -878,10 +879,7 @@ mod tests {
 
     fn auto_compacting_client(base_url: String) -> Client {
         let mut config = test_config(base_url, api_key(), MODEL);
-        config.compaction = CompactionConfig::resolved_for_test(AutoCompactionConfig {
-            enabled: true,
-            threshold_tokens: Some(50_000),
-        });
+        config.compaction = CompactionConfig::with_threshold_for_test(50_000);
         Client::new(config, Some("sid".to_owned())).unwrap()
     }
 

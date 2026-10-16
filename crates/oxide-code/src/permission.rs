@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use unicode_normalization::UnicodeNormalization;
 
 use crate::permission::rule::{MatchDiscipline, Rule};
-use crate::util::path::{lexical_normalize, xdg_dir};
+use crate::util::path::{XdgBase, app_dir, lexical_normalize};
 
 // ── Mode ──
 
@@ -183,9 +183,6 @@ const PROTECTED_NESTED_FILES: &[(&str, &str)] = &[
     (".claude", "settings.json"),
     (".claude", "settings.local.json"),
 ];
-
-/// The subdirectory oxide-code keeps under each XDG base directory.
-const APP_DIR: &str = "ox";
 
 /// Symlinks followed while resolving one path before it counts as a loop, Linux's `MAXSYMLINKS`.
 const MAX_SYMLINK_HOPS: usize = 40;
@@ -514,23 +511,11 @@ fn protected_roots(cwd: &Path) -> Vec<PathBuf> {
 /// oxide-code's own config, data, and state directories, resolved like a target so a symlinked
 /// XDG base still compares equal. An edit there could rewrite its config or session history.
 fn app_dirs() -> Vec<PathBuf> {
-    let home = std::env::home_dir();
-    [
-        ("XDG_CONFIG_HOME", ".config"),
-        ("XDG_DATA_HOME", ".local/share"),
-        ("XDG_STATE_HOME", ".local/state"),
-    ]
-    .into_iter()
-    .filter_map(|(var, fallback)| {
-        xdg_dir(
-            std::env::var_os(var).map(PathBuf::from),
-            home.clone(),
-            Path::new(fallback),
-            Path::new(APP_DIR),
-        )
-    })
-    .map(|dir| resolve(&dir).unwrap_or(dir))
-    .collect()
+    XdgBase::ALL
+        .into_iter()
+        .filter_map(app_dir)
+        .map(|dir| resolve(&dir).unwrap_or(dir))
+        .collect()
 }
 
 /// Whether the resolved `cwd` is a project directory whose contents may auto-allow edits. `/`,

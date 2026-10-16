@@ -12,7 +12,7 @@ use tracing::warn;
 use uuid::Uuid;
 
 use crate::util::fs::{atomic_write_private, create_private_dir_all};
-use crate::util::path::data_dir;
+use crate::util::path::{XdgBase, app_dir};
 
 const FILE_NAME: &str = "user-id";
 const ID_LEN: usize = 64;
@@ -49,7 +49,7 @@ fn try_load_or_create_at(path: &Path) -> Result<String> {
 }
 
 fn device_id_path() -> Option<PathBuf> {
-    data_dir().map(|dir| dir.join(FILE_NAME))
+    app_dir(XdgBase::Data).map(|dir| dir.join(FILE_NAME))
 }
 
 fn read_existing(path: &Path) -> Result<Option<String>> {

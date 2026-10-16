@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use tracing::warn;
 
 use crate::client::{Response, ResponseEvent, StopDetails, StopReason, TokenUsage, Wire};
-use crate::config::AutoCompactionConfig;
+use crate::config::compaction::AutoCompactionConfig;
 use crate::file_tracker::{self, FileTracker};
 use crate::message::{ContentBlock, Message, Role};
 use crate::permission::SessionGrant;
@@ -887,8 +887,8 @@ mod tests {
 
     use super::*;
     use crate::client::anthropic::testing::test_client;
+    use crate::config::Effort;
     use crate::config::auth::{Auth, AuthSource};
-    use crate::config::{AutoCompactionConfig, Effort};
     use crate::file_tracker::FileTracker;
     use crate::message::Role;
     use crate::model::ResolvedModelId;

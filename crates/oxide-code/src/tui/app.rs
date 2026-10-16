@@ -28,7 +28,8 @@ use super::modal::{Modal, ModalAction, ModalStack};
 use super::terminal::{Tui, synchronized_update, write_status_hyperlinks};
 use super::theme::Theme;
 use crate::config::auth::AuthSource;
-use crate::config::{AutoCompactionConfig, Effort, StatusLineSegment, display_auto_compaction};
+use crate::config::compaction::AutoCompactionConfig;
+use crate::config::{Effort, StatusLineSegment, display_auto_compaction};
 use crate::model::ModelSpec;
 use crate::permission::SessionGrant;
 use crate::protocol::{Event, Interaction, Op};
@@ -1050,7 +1051,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
-    use crate::config::test_thresholds;
+    use crate::config::compaction::test_thresholds;
     use crate::permission::rule::Rule;
     use crate::protocol::{Decision, ToolCall, ToolResult, UsageSnapshot};
     use crate::tool::{ApprovalBody, ToolResultView};
@@ -1102,9 +1103,8 @@ mod tests {
     fn test_session_info() -> LiveSessionInfo {
         // `test-model` is intentionally unknown so `display_name` falls back to the literal
         // id, keeping insta snapshots stable.
-        use crate::config::{
-            AutoCompactionConfig, CompactionConfig, ConfigSnapshot, Effort, PromptCacheTtl,
-        };
+        use crate::config::compaction::CompactionConfig;
+        use crate::config::{ConfigSnapshot, Effort, PromptCacheTtl};
 
         LiveSessionInfo {
             cwd: "~/test".to_owned(),
@@ -1128,10 +1128,7 @@ mod tests {
                 max_tokens: None,
                 max_tool_rounds: None,
                 prompt_cache_ttl: PromptCacheTtl::OneHour,
-                compaction: CompactionConfig::resolved_for_test(AutoCompactionConfig {
-                    enabled: true,
-                    threshold_tokens: Some(155_000),
-                }),
+                compaction: CompactionConfig::with_threshold_for_test(155_000),
                 permission_mode: crate::permission::Mode::Auto,
                 show_thinking: false,
                 show_welcome: true,

@@ -9,8 +9,9 @@ use std::path::PathBuf;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+use crate::config::Effort;
 use crate::config::auth::AuthSource;
-use crate::config::{AutoCompactionConfig, Effort};
+use crate::config::compaction::AutoCompactionConfig;
 use crate::model::{ModelSpec, ResolvedModelId};
 use crate::permission::SessionGrant;
 use crate::permission::rule::Rule;
