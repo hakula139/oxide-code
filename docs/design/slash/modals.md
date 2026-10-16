@@ -28,9 +28,9 @@ A modal is `Send` (App lives on tokio) but not `Sync`, since modals own mutable 
 
 Dispatched actions flow through the same channel as keyboard input, so the modal never needs to know what handler will run on the other side.
 
-Bracketed pastes reach `Modal::handle_paste`, which defaults to a no-op. Text fields such as `/rename`, the picker search, and the approval prompt's rule editor accept them, and a paste never answers a confirm or approval prompt.
+Bracketed pastes reach `Modal::handle_paste`, which defaults to a no-op. Text fields such as `/rename`, the picker search, and the approval prompt's editors accept them, and a paste never answers a confirm or approval prompt.
 
-`Modal::on_cancel` fires whenever a modal leaves the stack without submitting: the stack-level Esc / Ctrl+C cancel, a `Cancelled` outcome, or `ModalStack::clear` on resume or compaction. A modal whose `Modal::captures_esc` returns true takes Esc itself, as the approval prompt's rule editor does to step back to the choice, while Ctrl+C still cancels. `on_cancel` returns an optional `ModalAction` that the App dispatches in place of the silent close. The default returns `None`. `ApprovalModal` overrides it to emit a deny decision so the blocked agent always gets an answer. The `ox --resume` picker overrides it to emit `Op::Shutdown` because dismissing the picker quits `ox`.
+`Modal::on_cancel` fires whenever a modal leaves the stack without submitting: the stack-level Esc / Ctrl+C cancel, a `Cancelled` outcome, or `ModalStack::clear` on resume or compaction. A modal whose `Modal::captures_esc` returns true takes Esc itself, as the approval prompt's rule and feedback editors do to step back to the choice, while Ctrl+C still cancels. `on_cancel` returns an optional `ModalAction` that the App dispatches in place of the silent close. The default returns `None`. `ApprovalModal` overrides it to emit an abort decision so the blocked agent always gets an answer. The `ox --resume` picker overrides it to emit `Op::Shutdown` because dismissing the picker quits `ox`.
 
 ## Implementation
 
@@ -38,7 +38,7 @@ The modal implementation uses these shared components:
 
 - `tui/modal` defines the trait, key outcome, and `ModalStack` manager.
 - Generic primitives sit alongside `tui/modal`: `list_picker` (cursor + render for selection lists), `kv_overview` (sectioned read-only kv table), and `searchable_list` (substring filter for the `/resume` picker).
-- `chrome` supplies the shared title header and hint footer, and `line_editor` is the single-line text field behind `/rename`, the picker search query, and the approval rule editor, built on `ratatui-textarea` so readline keys work and Ctrl chords never insert letters.
+- `chrome` supplies the shared title header and hint footer, and `line_editor` is the single-line text field behind `/rename`, the picker search query, and the approval rule and feedback editors, built on `ratatui-textarea` so readline keys work and Ctrl chords never insert letters.
 - Lists scroll through `tui::viewport`, whose window settles at render time from the height the modal was granted.
 
 Concrete modals embed these primitives.
@@ -96,7 +96,7 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 
 - **Confirm-delete modal**: `ConfirmDeleteSessionModal` runs `delete_at` on the session's file synchronously on Y / Enter and submits `ModalAction::SystemMessage("Deleted session {id}: {title}")` on success so the user has chat-stream evidence the action ran. Failures latch into a sticky inline error that clears only on a deliberate Y / N choice, so a stray key can't wipe the diagnostic. Pushed by `/delete <id-prefix>` and by `/resume`'s Ctrl+D.
 
-- **Approval modal**: `ApprovalModal` holds the tool-use id and renders the call summary as its title above the body: the command text for `bash`, or `-` / `+` diff rows for `edit` and `write`. The body shows at most 16 rows and scrolls when the call runs longer or the band is shorter. Y submits `Op::Resolve` with `Approve` once a render has shown the first body row, while Enter does nothing. [permissions.md](../tools/permissions.md) covers the type-ahead guard. When the call offers a session grant, A opens a rule editor prefilled with the suggested rule, and Enter submits `AllowForSession` with the edited rule once a render has shown the whole editor. N returns `Cancelled`, so N, Esc from the choice, Ctrl+C, and a `clear` on resume or compaction all resolve through `on_cancel` to `Deny`.
+- **Approval modal**: `ApprovalModal` holds the tool-use id and renders the call summary as its title above the body: the command text for `bash`, or `-` / `+` diff rows for `edit` and `write`. The body shows at most 16 rows and scrolls when the call runs longer or the band is shorter. Y submits `Op::Resolve` with `Approve` once a render has shown the first body row, while Enter does nothing. [permissions.md](../tools/permissions.md) covers the type-ahead guard. When the call offers a session grant, A opens a rule editor prefilled with the suggested rule, and Enter submits `AllowForSession` with the edited rule once a render has shown the whole editor. N submits `Deny`. F opens a feedback editor whose Enter submits `DenyWithFeedback` with the typed text. Esc from the choice, Ctrl+C, and a `clear` on resume or compaction all resolve through `on_cancel` to `Abort`, which ends the turn.
 
 - **`/status` overview**: `KvOverview` of session descriptors (model, effort, cwd, session id, auth, version, cache TTL, auto compaction, show-thinking, show-welcome), plus a Session Rules section listing the session allow rules once any is granted. Constructed in `slash/status`.
 
@@ -131,7 +131,7 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 - `crates/oxide-code/src/slash/theme.rs`: `/theme` live-preview picker (`ThemeCmd` plus `ThemePicker`).
 - `crates/oxide-code/src/tui/app.rs`: `App::handle_crossterm_event` modal gate, `run_slash`, `apply_slash_outcome`, `apply_modal_action`, `dispatch_action`, `clear_modals`, `push_approval_modal`, layout band.
 - `crates/oxide-code/src/tui/modal.rs`: `Modal` (including the `on_cancel` and `captures_esc` hooks), `ModalKey`, `ModalAction`, `ModalStack`.
-- `crates/oxide-code/src/tui/modal/approval.rs`: `ApprovalModal` approve-or-deny gate for agent tool calls, plus the session-rule editor.
+- `crates/oxide-code/src/tui/modal/approval.rs`: `ApprovalModal` approve-or-deny gate for agent tool calls, plus the rule and feedback editors.
 - `crates/oxide-code/src/tui/modal/chrome.rs`: shared `Header` and `render_footer`.
 - `crates/oxide-code/src/tui/modal/kv_overview.rs`: generic `KvOverview` plus `KvSection`.
 - `crates/oxide-code/src/tui/modal/line_editor.rs`: single-line `LineEditor` over `ratatui-textarea`.

@@ -1,7 +1,7 @@
 //! Display-width-aware text utilities.
 
 use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 pub(crate) const ELLIPSIS: &str = "...";
 
@@ -70,6 +70,27 @@ fn take_tail(s: &str, budget: usize) -> String {
         .map(str::len)
         .sum();
     s[s.len() - len..].to_owned()
+}
+
+/// Whether a terminal paints `c` as no visible cell: a control or zero-width character.
+pub(crate) fn is_hidden(c: char) -> bool {
+    c.is_control() || c.width().is_none_or(|w| w == 0)
+}
+
+/// `text` with each control character other than a tab or a line break escaped as `\u{..}`, so
+/// writing it to a terminal cannot move the cursor or change the terminal's state.
+pub(crate) fn escape_controls(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        let line_break = c == '\n' || (c == '\r' && chars.peek() == Some(&'\n'));
+        if c.is_control() && c != '\t' && !line_break {
+            out.extend(c.escape_default());
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -156,5 +177,27 @@ mod tests {
     #[test]
     fn center_truncate_to_width_keeps_zwj_emoji_whole_on_both_sides() {
         assert_eq!(center_truncate_to_width("👨‍👩‍👧 photos/2026 👨‍👩‍👧", 7), "👨‍👩‍👧...👨‍👩‍👧",);
+    }
+
+    // ── is_hidden ──
+
+    #[test]
+    fn is_hidden_flags_control_and_zero_width_characters_only() {
+        for c in ['\u{1b}', '\n', '\u{200b}', '\u{200d}'] {
+            assert!(is_hidden(c), "{c:?}");
+        }
+        for c in ['a', ' ', '中', '·'] {
+            assert!(!is_hidden(c), "{c:?}");
+        }
+    }
+
+    // ── escape_controls ──
+
+    #[test]
+    fn escape_controls_escapes_terminal_sequences_but_keeps_tabs_and_line_breaks() {
+        assert_eq!(
+            escape_controls("a\tb\r\nc\n\u{1b}[2K\rd\u{7}\u{200b}"),
+            "a\tb\r\nc\n\\u{1b}[2K\\rd\\u{7}\u{200b}",
+        );
     }
 }

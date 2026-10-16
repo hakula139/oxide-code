@@ -6,4 +6,4 @@ expression: "stderrs[0]"
 README.md
 
 $ ls
-The bash call was denied by the permission policy. Do not retry it. Choose a different approach or ask the user to adjust permissions.
+The bash call was denied with this feedback: This run cannot ask for approval. To allow this call, add `"bash(ls)"` to the `allow` list in the `[permission]` table of the user config.
