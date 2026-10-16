@@ -1,0 +1,9 @@
+---
+source: crates/oxide-code/src/driver/headless.rs
+expression: "stderrs[0]"
+---
+⟡ Look
+README.md
+
+$ ls
+The bash call was denied by the permission policy. Do not retry it. Choose a different approach or ask the user to adjust permissions.

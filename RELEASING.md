@@ -18,7 +18,7 @@ Within a minor version, stable releases keep these compatible:
 - CLI flags, subcommands, and exit codes
 - Config keys and file locations, plus environment variables
 - Persisted formats: session JSONL, versioned by its header entry, and theme TOML
-- Headless (`-p`) output
+- Output from headless mode (`-p`), as defined in the [compatibility notes](docs/guide/headless.md#compatibility)
 - Release asset names, which install scripts and the Homebrew formula depend on
 
 The TUI layout, prompt text, slash-command output wording, and log format are outside the surface.

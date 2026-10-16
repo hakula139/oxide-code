@@ -382,10 +382,9 @@ async fn settle_stop_reason(
 ) -> StopAction {
     match stop_reason {
         // The API asks clients to drop refused output without running it.
-        Some(StopReason::Refusal) => {
-            sink.emit(Event::Error(refusal_message(stop_details)), "refusal");
-            StopAction::Finish(Ok(()))
-        }
+        Some(StopReason::Refusal) => StopAction::Finish(Err(TurnAbort::Failed(anyhow!(
+            refusal_message(stop_details)
+        )))),
         // Running a cut-off call, or asking the model to retry it, would repeat the same
         // oversized output, so the round stops and keeps only the finished prose.
         Some(reason @ (StopReason::MaxTokens | StopReason::ModelContextWindowExceeded)) => {
@@ -3978,30 +3977,23 @@ mod tests {
         )
         .await;
 
-        outcome.expect("a refusal ends the turn cleanly");
+        let abort = outcome.expect_err("a refusal fails the turn");
+        assert_eq!(
+            abort.to_string(),
+            "The model declined this request (category: cyber): Exploit development. Rephrase it, \
+             or run /clear to start over.",
+        );
         assert_eq!(
             messages.len(),
             1,
             "the refused reply is dropped: {messages:?}"
         );
-        let events = sink.events();
         assert!(
-            !events.iter().any(|e| matches!(e, Event::ToolCallStart(_))),
-            "refused tool calls never run",
-        );
-        let notices: Vec<&str> = events
-            .iter()
-            .filter_map(|e| match e {
-                Event::Error(message) => Some(message.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            notices,
-            [
-                "The model declined this request (category: cyber): Exploit development. Rephrase \
-              it, or run /clear to start over."
-            ],
+            !sink
+                .events()
+                .iter()
+                .any(|e| matches!(e, Event::ToolCallStart(_) | Event::Error(_))),
+            "refused tool calls never run, and the failure is the only notice",
         );
     }
 

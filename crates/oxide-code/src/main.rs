@@ -28,6 +28,7 @@ use tracing::warn;
 use client::anthropic::Client;
 use config::Config;
 use driver::Exit;
+use driver::headless::OutputFormat;
 use driver::tui::Startup;
 use engine::Engine;
 use file_tracker::FileTracker;
@@ -88,6 +89,16 @@ struct Cli {
     /// Disable the TUI and use a bare REPL instead.
     #[arg(long)]
     no_tui: bool,
+
+    /// With `--prompt`, print the reply as text, one JSON result, or a JSON line per event.
+    #[arg(
+        long,
+        value_enum,
+        value_name = "FORMAT",
+        default_value_t,
+        requires = "prompt"
+    )]
+    output: OutputFormat,
 
     /// Run in headless mode: send a single prompt and print the response.
     #[arg(short, long, value_name = "PROMPT")]
@@ -175,7 +186,7 @@ async fn async_main() -> Result<Exit> {
     .await;
 
     if let Some(prompt) = cli.prompt {
-        return Ok(driver::headless::run(engine, show_thinking, &prompt).await);
+        return Ok(driver::headless::run(engine, show_thinking, &prompt, cli.output).await);
     }
 
     let Some(theme) = theme else {
@@ -238,6 +249,19 @@ mod tests {
     use crate::util::path::slash_separated;
 
     // ── Cli ──
+
+    #[test]
+    fn cli_output_picks_a_headless_format_and_defaults_to_text() {
+        let cli = Cli::try_parse_from(["ox", "-p", "hello", "--output", "stream-json"]).unwrap();
+        assert_eq!(cli.output, OutputFormat::StreamJson);
+        let cli = Cli::try_parse_from(["ox", "-p", "hello"]).unwrap();
+        assert_eq!(cli.output, OutputFormat::Text);
+        let missing = Cli::try_parse_from(["ox", "--output", "json"]).err();
+        assert_eq!(
+            missing.map(|error| error.kind()),
+            Some(ErrorKind::MissingRequiredArgument),
+        );
+    }
 
     #[test]
     fn cli_resume_takes_all_to_widen_the_picker() {
