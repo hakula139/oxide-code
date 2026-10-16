@@ -162,34 +162,23 @@ fn system_sections(environment: &Environment) -> Vec<String> {
 }
 
 fn render_user_context(context: &UserContext) -> String {
-    let claude_md_section = if context.instructions.is_empty() {
-        String::new()
-    } else {
-        formatdoc! {"
-            # CLAUDE.md
-
-            {instructions}
-
-        ", instructions = context.instructions}
-    };
+    let mut sections = Vec::new();
+    if !context.instructions.is_empty() {
+        sections.push(render_instructions(&context.instructions));
+    }
+    sections.push(render_date(&context.date));
+    sections.push(render_model(&context.model));
 
     formatdoc! {"
         <system-reminder>
         As you answer the user's questions, you can use the following context:
 
-        {claude_md_section}# Current date
-
-        Today's date is {date}.
-
-        # Model
-
-        {model}
+        {sections}
 
         IMPORTANT: this context may or may not be relevant to your tasks. You should
         not respond to this context unless it is highly relevant to your task.
         </system-reminder>",
-        date = context.date,
-        model = context.model,
+        sections = sections.join("\n\n"),
     }
 }
 
@@ -202,27 +191,13 @@ fn render_reminder(seen: &UserContext, fresh: &UserContext) -> String {
         } else {
             &fresh.instructions
         };
-        sections.push(formatdoc! {"
-            # CLAUDE.md
-
-            {body}"
-        });
+        sections.push(render_instructions(body));
     }
     if fresh.date != seen.date {
-        sections.push(formatdoc! {"
-            # Current date
-
-            Today's date is {date}.",
-            date = fresh.date,
-        });
+        sections.push(render_date(&fresh.date));
     }
     if fresh.model != seen.model {
-        sections.push(formatdoc! {"
-            # Model
-
-            {model}",
-            model = fresh.model,
-        });
+        sections.push(render_model(&fresh.model));
     }
 
     formatdoc! {"
@@ -232,6 +207,30 @@ fn render_reminder(seen: &UserContext, fresh: &UserContext) -> String {
         {sections}
         </system-reminder>",
         sections = sections.join("\n\n"),
+    }
+}
+
+fn render_instructions(instructions: &str) -> String {
+    formatdoc! {"
+        # CLAUDE.md
+
+        {instructions}"
+    }
+}
+
+fn render_date(date: &str) -> String {
+    formatdoc! {"
+        # Current date
+
+        Today's date is {date}."
+    }
+}
+
+fn render_model(model: &str) -> String {
+    formatdoc! {"
+        # Model
+
+        {model}"
     }
 }
 
@@ -267,6 +266,54 @@ mod tests {
 
     use super::*;
     use crate::util::git::testing::{isolated_git, with_isolated_git_env_async};
+
+    const IDENTITY: &str = "You are powered by the model test-model.";
+
+    fn cwd() -> PathBuf {
+        std::env::current_dir().expect("cwd should be available")
+    }
+
+    fn spec(id: &str) -> ModelSpec {
+        ModelSpec::resolve(id.to_owned())
+    }
+
+    fn context(instructions: &str, date: &str) -> UserContext {
+        UserContext {
+            instructions: instructions.to_owned(),
+            date: date.to_owned(),
+            model: IDENTITY.to_owned(),
+        }
+    }
+
+    /// A recording from a machine unlike this one, so a replayed environment is recognizable.
+    fn recorded_context(cwd: &Path) -> SessionContext {
+        serde_json::from_value(serde_json::json!({
+            "environment": {
+                "cwd": cwd,
+                "is_git": false,
+                "platform": "plan9",
+                "shell": "rc",
+                "os_version": "Plan 9 4e",
+            },
+            "user_context": "recorded context",
+            "seen": {
+                "instructions": "Recorded rules.",
+                "date": "2026-04-12",
+                "model": IDENTITY,
+            },
+        }))
+        .unwrap()
+    }
+
+    fn init_git_repo(path: &Path) {
+        let status = isolated_git(path)
+            .args(["init"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("failed to spawn git");
+        assert!(status.success(), "git init exited with non-zero status");
+    }
 
     // ── PromptParts::catch_up ──
 
@@ -335,30 +382,6 @@ mod tests {
     // ── build_prompt ──
 
     #[tokio::test]
-    async fn build_prompt_system_starts_with_intro() {
-        let parts = build_prompt(&spec("test-model"), &cwd()).await;
-        assert!(
-            parts
-                .system_joined()
-                .starts_with("You are an interactive agent"),
-            "system should start with intro section"
-        );
-    }
-
-    #[tokio::test]
-    async fn build_prompt_system_contains_all_static_sections() {
-        let parts = build_prompt(&spec("test-model"), &cwd()).await;
-        let joined = parts.system_joined();
-        assert!(joined.contains("# System"));
-        assert!(joined.contains("# Doing tasks"));
-        assert!(joined.contains("# Executing actions with care"));
-        assert!(joined.contains("# Using your tools"));
-        assert!(joined.contains("# Tone and style"));
-        assert!(joined.contains("# Output efficiency"));
-        assert!(joined.contains("# Environment"));
-    }
-
-    #[tokio::test]
     async fn build_prompt_names_the_model_in_user_context_only() {
         let model = spec("claude-opus-5-5");
         let parts = build_prompt(&model, &cwd()).await;
@@ -373,27 +396,6 @@ mod tests {
         );
         assert_eq!(parts.seen.model, identity);
         assert!(!parts.system_joined().contains("claude-opus-5-5"));
-    }
-
-    #[tokio::test]
-    async fn build_prompt_system_does_not_contain_user_instructions() {
-        let parts = build_prompt(&spec("test-model"), &cwd()).await;
-        assert!(
-            !parts.system_joined().contains("# User instructions"),
-            "CLAUDE.md should be in user_context, not system"
-        );
-    }
-
-    #[tokio::test]
-    async fn build_prompt_sections_joined_with_double_newline() {
-        let parts = build_prompt(&spec("test-model"), &cwd()).await;
-        let joined = parts.system_joined();
-        let system_start = joined.find("# System").expect("system section missing");
-        let before = &joined[..system_start];
-        assert!(
-            before.ends_with("\n\n"),
-            "sections should be joined with double newline"
-        );
     }
 
     // ── restore_prompt ──
@@ -447,6 +449,7 @@ mod tests {
             "# Environment",
         ];
         let joined = parts.system_joined();
+        assert!(joined.starts_with(INTRO));
         let mut prev_pos = 0;
         for header in &expected_system_sections {
             let pos = joined
@@ -474,21 +477,11 @@ mod tests {
             "system_sections should contain the boundary marker"
         );
 
+        assert!(!joined.contains("Test project rules."));
+
         let ctx = &parts.user_context;
         assert!(ctx.contains("Test project rules."));
         assert!(ctx.contains("<system-reminder>"));
-    }
-
-    #[tokio::test]
-    async fn assemble_without_project_claude_md_keeps_system_clean() {
-        let tmp = tempfile::tempdir().expect("failed to create tempdir");
-        init_git_repo(tmp.path());
-
-        let parts = assemble(&spec("test-model"), tmp.path(), Some(tmp.path())).await;
-        assert!(
-            !parts.system_joined().contains("# User instructions"),
-            "system should never contain user instructions"
-        );
     }
 
     #[tokio::test]
@@ -519,54 +512,110 @@ mod tests {
     // ── render_user_context ──
 
     #[test]
-    fn render_user_context_with_instructions() {
-        let ctx = render_user_context(&context("Project rules.", "2026-04-12"));
-        assert!(ctx.starts_with("<system-reminder>"));
-        assert!(ctx.ends_with("</system-reminder>"));
-        assert!(ctx.contains(indoc! {"
-            # CLAUDE.md
+    fn render_user_context_with_instructions_includes_every_section() {
+        assert_eq!(
+            render_user_context(&context("Project rules.", "2026-04-12")),
+            indoc! {"
+                <system-reminder>
+                As you answer the user's questions, you can use the following context:
 
-            Project rules."}));
-        assert!(ctx.contains(indoc! {"
-            # Current date
+                # CLAUDE.md
 
-            Today's date is 2026-04-12."}));
-        assert!(ctx.contains(&formatdoc! {"
-            # Model
+                Project rules.
 
-            {IDENTITY}"}));
-        assert!(ctx.contains("IMPORTANT: this context may or may not be relevant"));
+                # Current date
+
+                Today's date is 2026-04-12.
+
+                # Model
+
+                You are powered by the model test-model.
+
+                IMPORTANT: this context may or may not be relevant to your tasks. You should
+                not respond to this context unless it is highly relevant to your task.
+                </system-reminder>"},
+        );
     }
 
     #[test]
     fn render_user_context_without_instructions_still_carries_date() {
-        let ctx = render_user_context(&context("", "2026-04-12"));
-        assert!(ctx.starts_with("<system-reminder>"));
-        assert!(ctx.contains(indoc::indoc! {"
-            following context:
+        assert_eq!(
+            render_user_context(&context("", "2026-04-12")),
+            indoc! {"
+                <system-reminder>
+                As you answer the user's questions, you can use the following context:
 
-            # Current date
+                # Current date
 
-            Today's date is 2026-04-12.
+                Today's date is 2026-04-12.
 
-            # Model
+                # Model
 
-            You are powered by the model test-model.
-        "}));
-        assert!(!ctx.contains("# CLAUDE.md"));
+                You are powered by the model test-model.
+
+                IMPORTANT: this context may or may not be relevant to your tasks. You should
+                not respond to this context unless it is highly relevant to your task.
+                </system-reminder>"},
+        );
+    }
+
+    // ── render_reminder ──
+
+    #[test]
+    fn render_reminder_includes_every_changed_section_in_order() {
+        assert_eq!(
+            render_reminder(
+                &UserContext::default(),
+                &context("Project rules.", "2026-04-12")
+            ),
+            indoc! {"
+                <system-reminder>
+                The context from the start of this conversation has changed. Use these values from now on:
+
+                # CLAUDE.md
+
+                Project rules.
+
+                # Current date
+
+                Today's date is 2026-04-12.
+
+                # Model
+
+                You are powered by the model test-model.
+                </system-reminder>"},
+        );
+    }
+
+    #[test]
+    fn render_reminder_removed_instructions_revoke_earlier_rules() {
+        assert_eq!(
+            render_reminder(
+                &context("Project rules.", "2026-04-12"),
+                &context("", "2026-04-12")
+            ),
+            indoc! {"
+                <system-reminder>
+                The context from the start of this conversation has changed. Use these values from now on:
+
+                # CLAUDE.md
+
+                The instruction files were removed, so the earlier instructions no longer apply.
+                </system-reminder>"},
+        );
     }
 
     // ── find_git_root ──
 
     #[tokio::test]
-    async fn find_git_root_inside_repo() {
+    async fn find_git_root_inside_repo_finds_the_root() {
         let tmp = tempfile::tempdir().expect("failed to create tempdir");
         init_git_repo(tmp.path());
 
         let root = with_isolated_git_env_async(find_git_root(tmp.path()))
             .await
             .expect("expected git root");
-        // Compare via canonicalize — macOS routes tempdirs through `/private`.
+        // macOS routes tempdirs through `/private`.
         let expected = tmp.path().canonicalize().unwrap();
         let actual = root.canonicalize().unwrap();
         assert_eq!(actual, expected);
@@ -574,13 +623,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn find_git_root_outside_repo() {
+    async fn find_git_root_outside_repo_finds_no_root() {
         let tmp = tempfile::tempdir().expect("failed to create tempdir");
         let root = with_isolated_git_env_async(find_git_root(tmp.path())).await;
         assert!(root.is_none());
     }
 
-    // ── constant content ──
+    // ── sections ──
 
     #[test]
     fn prompt_constants_have_no_leading_whitespace() {
@@ -599,55 +648,5 @@ mod tests {
                 "{name} should not start with whitespace"
             );
         }
-    }
-
-    // ── helpers ──
-
-    fn cwd() -> PathBuf {
-        std::env::current_dir().expect("cwd should be available")
-    }
-
-    const IDENTITY: &str = "You are powered by the model test-model.";
-
-    fn spec(id: &str) -> ModelSpec {
-        ModelSpec::resolve(id.to_owned())
-    }
-
-    fn context(instructions: &str, date: &str) -> UserContext {
-        UserContext {
-            instructions: instructions.to_owned(),
-            date: date.to_owned(),
-            model: IDENTITY.to_owned(),
-        }
-    }
-
-    /// A recording from a machine unlike this one, so a replayed environment is recognizable.
-    fn recorded_context(cwd: &Path) -> SessionContext {
-        serde_json::from_value(serde_json::json!({
-            "environment": {
-                "cwd": cwd,
-                "is_git": false,
-                "platform": "plan9",
-                "shell": "rc",
-                "os_version": "Plan 9 4e",
-            },
-            "user_context": "recorded context",
-            "seen": {
-                "instructions": "Recorded rules.",
-                "date": "2026-04-12",
-                "model": IDENTITY,
-            },
-        }))
-        .unwrap()
-    }
-
-    fn init_git_repo(path: &Path) {
-        let status = isolated_git(path)
-            .args(["init"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .expect("failed to spawn git");
-        assert!(status.success(), "git init exited with non-zero status");
     }
 }

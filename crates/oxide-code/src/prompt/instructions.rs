@@ -17,7 +17,7 @@ struct Slot {
     label: &'static str,
 }
 
-struct MemoryFile {
+struct InstructionFile {
     path: PathBuf,
     content: String,
     label: &'static str,
@@ -76,8 +76,6 @@ fn walk_root_to_cwd(root: &Path, cwd: &Path) -> Vec<PathBuf> {
         return vec![root.to_path_buf()];
     };
 
-    // cwd == root yields an empty relative path, so the loop below is skipped and only [root] is
-    // returned.
     let mut dirs = vec![root.to_path_buf()];
     let mut current = root.to_path_buf();
     for component in relative.components() {
@@ -88,7 +86,7 @@ fn walk_root_to_cwd(root: &Path, cwd: &Path) -> Vec<PathBuf> {
     dirs
 }
 
-async fn load_files(slots: Vec<Slot>) -> Vec<MemoryFile> {
+async fn load_files(slots: Vec<Slot>) -> Vec<InstructionFile> {
     let mut files = Vec::new();
 
     for Slot { candidates, label } in slots {
@@ -96,7 +94,7 @@ async fn load_files(slots: Vec<Slot>) -> Vec<MemoryFile> {
             if let Ok(content) = fs::read_to_string(&path).await {
                 let content = content.trim().to_owned();
                 if !content.is_empty() {
-                    files.push(MemoryFile {
+                    files.push(InstructionFile {
                         path,
                         content,
                         label,
@@ -110,7 +108,7 @@ async fn load_files(slots: Vec<Slot>) -> Vec<MemoryFile> {
     files
 }
 
-fn render(files: &[MemoryFile]) -> String {
+fn render(files: &[InstructionFile]) -> String {
     let header = indoc! {"
         # User instructions
 
@@ -173,7 +171,7 @@ mod tests {
     // ── candidate_slots ──
 
     #[test]
-    fn candidate_slots_cwd_equals_root() {
+    fn candidate_slots_at_root_includes_project_and_companion_files() {
         let root = PathBuf::from("/home/user/project");
         let slots = candidate_slots(&root, &root);
 
@@ -187,7 +185,6 @@ mod tests {
             vec![root.join("CLAUDE.md"), root.join("AGENTS.md")]
         );
 
-        // Verify the .claude/ companion slot is also present.
         let claude_dir: Vec<_> = slots
             .iter()
             .filter(|s| s.label == "project instructions (.claude/)")
@@ -246,14 +243,14 @@ mod tests {
     // ── walk_root_to_cwd ──
 
     #[test]
-    fn walk_root_to_cwd_same_directory() {
+    fn walk_root_to_cwd_same_directory_includes_root_only() {
         let root = PathBuf::from("/repo");
         let dirs = walk_root_to_cwd(&root, &root);
         assert_eq!(dirs, vec![PathBuf::from("/repo")]);
     }
 
     #[test]
-    fn walk_root_to_cwd_nested() {
+    fn walk_root_to_cwd_nested_includes_each_directory_in_order() {
         let root = PathBuf::from("/repo");
         let cwd = PathBuf::from("/repo/a/b");
         let dirs = walk_root_to_cwd(&root, &cwd);
@@ -268,7 +265,7 @@ mod tests {
     }
 
     #[test]
-    fn walk_root_to_cwd_outside_root_yields_root_only() {
+    fn walk_root_to_cwd_outside_root_includes_root_only() {
         let root = PathBuf::from("/repo");
         let cwd = PathBuf::from("/other/dir");
         let dirs = walk_root_to_cwd(&root, &cwd);
@@ -370,12 +367,12 @@ mod tests {
     #[test]
     fn render_formats_files_with_header_and_preserves_order() {
         let files = vec![
-            MemoryFile {
+            InstructionFile {
                 path: PathBuf::from("/home/.claude/CLAUDE.md"),
                 content: "Global rules.".to_owned(),
                 label: "user's global instructions",
             },
-            MemoryFile {
+            InstructionFile {
                 path: PathBuf::from("/project/CLAUDE.md"),
                 content: "Project rules.".to_owned(),
                 label: "project instructions",
@@ -383,31 +380,21 @@ mod tests {
         ];
         let out = render(&files);
 
-        assert!(out.starts_with("# User instructions"));
-        assert!(out.contains("Be sure to adhere to these instructions."));
-        assert!(out.contains("Contents of /home/.claude/CLAUDE.md (user's global instructions):"));
-        assert!(out.contains("Contents of /project/CLAUDE.md (project instructions):"));
+        assert_eq!(
+            out,
+            indoc! {"
+                # User instructions
 
-        let global_pos = out.find("Global rules.").expect("global content missing");
-        let project_pos = out.find("Project rules.").expect("project content missing");
-        assert!(
-            global_pos < project_pos,
-            "global should come before project"
+                Codebase and user instructions are shown below.
+                Be sure to adhere to these instructions.
+
+                Contents of /home/.claude/CLAUDE.md (user's global instructions):
+
+                Global rules.
+
+                Contents of /project/CLAUDE.md (project instructions):
+
+                Project rules."},
         );
-    }
-
-    #[test]
-    fn render_single_file() {
-        let files = vec![MemoryFile {
-            path: PathBuf::from("/project/CLAUDE.md"),
-            content: "Only file.".to_owned(),
-            label: "project instructions",
-        }];
-        let out = render(&files);
-
-        assert!(out.starts_with("# User instructions"));
-        // Exactly one "Contents of" block.
-        assert_eq!(out.matches("Contents of").count(), 1);
-        assert!(out.contains("Only file."));
     }
 }
