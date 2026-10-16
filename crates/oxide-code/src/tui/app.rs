@@ -603,9 +603,7 @@ impl App {
     ) {
         self.modals
             .push(Box::new(super::modal::approval::ApprovalModal::new(
-                id,
-                preview,
-                grant.map(|grant| *grant),
+                id, preview, grant,
             )));
     }
 
@@ -1782,8 +1780,8 @@ mod tests {
     }
 
     #[test]
-    fn clear_modals_resolves_a_pending_approval_to_deny() {
-        // A session swap clears the stack while an approval is outstanding. The cancel hook's Deny
+    fn clear_modals_resolves_a_pending_approval_to_abort() {
+        // A session swap clears the stack while an approval is outstanding. The cancel hook's Abort
         // must reach the engine so the blocked turn is not stranded waiting for a decision.
         let (mut app, mut rx, _event_tx) = test_app(None);
         app.handle_engine_event(Event::ApprovalRequested {
@@ -1799,12 +1797,12 @@ mod tests {
 
         let forwarded = rx
             .try_recv()
-            .expect("clear must forward the cancel-hook deny");
+            .expect("clear must forward the cancel-hook abort");
         assert!(matches!(
             forwarded,
             Op::Resolve {
                 id,
-                decision: Decision::Deny,
+                decision: Decision::Abort,
             } if id == "call-1"
         ));
     }

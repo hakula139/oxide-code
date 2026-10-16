@@ -108,7 +108,7 @@ pub(crate) struct Engine {
     /// The configured policy plus the session allow rules granted since the live session began.
     policy: Policy,
     cwd: PathBuf,
-    /// A TUI is attached, so the permission gate can ask and titles generate in the background.
+    /// A TUI is attached, so titles generate in the background.
     interactive: bool,
     auto_compaction_failures: u8,
     last_usage: Option<TokenUsage>,
@@ -283,7 +283,6 @@ impl Engine {
         let mut gate = agent::GateContext {
             policy: &mut self.policy,
             cwd: &self.cwd,
-            interactive: self.interactive,
         };
         let TurnOutcome { report, result } = agent::agent_turn(
             &self.client,

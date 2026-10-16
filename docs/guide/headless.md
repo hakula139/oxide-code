@@ -8,7 +8,7 @@ ox -p "List the public functions" --output json     # Print one JSON result at t
 ox -p "Fix the failing test" --output stream-json   # Stream every event as a JSON line
 ```
 
-Each run starts a new session and saves it like any other session, so you can resume it later in the TUI with `ox -c <session_id>`. Because no one can respond to an approval prompt during a headless run, any tool call that requires approval is denied, and the model sees the denial. Add `allow` rules for the calls your script needs, as described in [Configuration](configuration.md#permission-tool-approval).
+Each run starts a new session and saves it like any other session, so you can resume it later in the TUI with `ox -c <session_id>`. Because no one can respond to an approval prompt during a headless run, any tool call that requires approval is denied, and the denial tells the model which allow rule would permit the call. Add `allow` rules for the calls your script needs, as described in [Configuration](configuration.md#permission-tool-approval).
 
 ## Output Formats
 
@@ -74,7 +74,7 @@ Each `stream-json` line is an object with a `type` and, for most types, a `data`
 | `turn_complete`   | No `data`. The turn finished with a reply                                                          |
 | `turn_failed`     | Why the turn failed, including a refused request                                                   |
 
-A denied call ends with a `tool_call_end` event whose `is_error` is `true` and whose `content` tells the model the call was denied.
+A denied call ends with a `tool_call_end` event whose `is_error` is `true` and whose `content` tells the model the call was denied, naming the allow rule that would permit it when one can.
 
 `view` is the structured form of the result: an object with its own `type` and `data`:
 
@@ -90,7 +90,7 @@ A run that lists files and then attempts a denied `bash` call streams lines like
 {"type":"tool_call_start","data":{"id":"call-1","name":"glob","input":{"pattern":"Cargo.toml"},"icon":"✱","label":"Glob(Cargo.toml)"}}
 {"type":"tool_call_end","data":{"id":"call-1","content":"Cargo.toml","is_error":false,"title":"Found 1 file","view":{"type":"glob_files","data":{"pattern":"Cargo.toml","files":["Cargo.toml"],"total":1}}}}
 {"type":"tool_call_start","data":{"id":"call-2","name":"bash","input":{"command":"ls"},"icon":"$","label":"ls"}}
-{"type":"tool_call_end","data":{"id":"call-2","content":"The bash call was denied by the permission policy. ...","is_error":true,"title":null,"view":{"type":"text","data":{"content":"The bash call was denied by the permission policy. ..."}}}}
+{"type":"tool_call_end","data":{"id":"call-2","content":"The bash call was denied with this feedback: This run cannot ask for approval. ...","is_error":true,"title":null,"view":{"type":"text","data":{"content":"The bash call was denied with this feedback: This run cannot ask for approval. ..."}}}}
 {"type":"stream_token","data":"Done."}
 {"type":"usage_updated","data":{"context_tokens":1000,"context_window":1000000,"estimated_cost_usd":0.018}}
 {"type":"turn_complete"}

@@ -74,6 +74,12 @@ pub(crate) enum Decision {
         rule: Box<Rule>,
     },
     Deny,
+    /// Deny, with `feedback` returned to the model as the call's result.
+    DenyWithFeedback {
+        feedback: String,
+    },
+    /// Deny, and end the turn as [`Op::Interrupt`] does.
+    Abort,
 }
 
 // ── Events ──
@@ -452,6 +458,20 @@ mod tests {
                     rule: Box::new(Rule::parse("bash(cargo test:*)").unwrap()),
                 },
             },
+            Op::Resolve {
+                id: "t1".to_owned(),
+                decision: Decision::Deny,
+            },
+            Op::Resolve {
+                id: "t1".to_owned(),
+                decision: Decision::DenyWithFeedback {
+                    feedback: "Use rg instead.".to_owned(),
+                },
+            },
+            Op::Resolve {
+                id: "t1".to_owned(),
+                decision: Decision::Abort,
+            },
             Op::SetModel {
                 model: Some(ResolvedModelId::new("claude-opus-5-5".to_owned())),
                 effort: Some(Effort::High),
@@ -632,6 +652,13 @@ mod tests {
             })
             .unwrap(),
             json!({"type": "allow_for_session", "data": {"rule": "bash(cargo test:*)"}}),
+        );
+        assert_eq!(
+            serde_json::to_value(Decision::DenyWithFeedback {
+                feedback: "Use rg instead.".to_owned(),
+            })
+            .unwrap(),
+            json!({"type": "deny_with_feedback", "data": {"feedback": "Use rg instead."}}),
         );
         assert_eq!(
             serde_json::to_value(Op::Interrupt).unwrap(),
