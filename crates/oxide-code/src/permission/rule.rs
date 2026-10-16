@@ -18,13 +18,13 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use globset::{GlobBuilder, GlobMatcher};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-use crate::permission::{PermissionClass, Target, fold_name, lexical_normalize, resolve};
-use crate::util::path::{expand_user, slash_separated};
+use crate::permission::{PermissionClass, Target, fold_name, resolve};
+use crate::util::path::{expand_user, lexical_normalize, slash_separated};
 use crate::util::text::is_hidden;
 
 // ── Rule ──
@@ -72,8 +72,8 @@ enum BashSpec {
 
 /// Which rule set a match is being evaluated for, selecting how compound `bash` commands, symlinked
 /// paths, and name spellings match. Allow widens, so it matches conservatively. Deny revokes, so it
-/// matches aggressively. Carrying this as a type keeps the security-critical asymmetry legible at the two
-/// call sites in [`crate::permission::Policy::decide`].
+/// matches aggressively. This keeps the security-critical asymmetry legible at the call sites in
+/// [`crate::permission::Policy::decide`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum MatchDiscipline {
     /// A single non-compound command must match the whole rule, and a path matches only where it
@@ -96,11 +96,11 @@ impl Rule {
         let (class, spec_str) = match (raw.find('('), raw.strip_suffix(')')) {
             (Some(open), Some(_)) => (&raw[..open], &raw[open + 1..raw.len() - 1]),
             (None, None) => (raw, ""),
-            _ => anyhow::bail!("permission rule {raw:?} has an unbalanced parenthesis"),
+            _ => bail!("permission rule {raw:?} has an unbalanced parenthesis"),
         };
 
         let class = class.trim().to_lowercase();
-        anyhow::ensure!(
+        ensure!(
             !class.is_empty(),
             "permission rule {raw:?} has no class name"
         );
@@ -276,7 +276,7 @@ fn parse_path_glob(spec: &str) -> Result<Spec> {
     let pattern = slash_separated(&expand_user(spec)?);
     let pattern = pattern.strip_prefix("./").unwrap_or(&pattern);
     let path = Path::new(pattern);
-    anyhow::ensure!(
+    ensure!(
         path.is_absolute() || !path.has_root(),
         "a rooted path glob needs a drive on Windows, as in `C:/...`"
     );
@@ -330,9 +330,8 @@ impl BashSpec {
 
     fn matches(&self, command: &str, discipline: MatchDiscipline) -> bool {
         if discipline == MatchDiscipline::Deny {
-            // Test the whole command before splitting so a deny pattern that itself contains a chain
-            // operator (the shipped `* | sh` and fork-bomb defaults) still fires, then each segment
-            // so a danger chained behind a safe head (`ls && rm -rf`) is caught too.
+            // Test the whole command so deny patterns containing chain operators still fire,
+            // then each segment so a danger behind a safe head (`ls && rm -rf`) is caught too.
             return self.matches_segment(command.trim())
                 || split_segments(command).any(|seg| self.matches_segment(seg));
         }
@@ -381,16 +380,13 @@ fn split_segments(command: &str) -> impl Iterator<Item = &str> {
 /// Converts a bash wildcard specifier to an anchored regex: literal text is escaped and `*` becomes
 /// `.*`, so `git *` matches `git status` but not `cargo git`.
 fn glob_to_regex(glob: &str) -> Regex {
-    let mut pattern = String::with_capacity(glob.len() + 4);
-    pattern.push('^');
-    for part in glob.split('*') {
-        pattern.push_str(&regex::escape(part));
-        pattern.push_str(".*");
-    }
-    // Each segment appended a trailing `.*`, so drop the final one so the regex ends at the last
-    // literal unless the glob itself ended in `*`.
-    pattern.truncate(pattern.len() - 2);
-    pattern.push('$');
+    let pattern = format!(
+        "^{}$",
+        glob.split('*')
+            .map(regex::escape)
+            .collect::<Vec<_>>()
+            .join(".*")
+    );
     Regex::new(&pattern).expect("escaped glob is always valid regex")
 }
 
@@ -860,7 +856,7 @@ mod tests {
     // ── BashSpec::matches ──
 
     #[test]
-    fn bash_exact_matches_only_identical_command() {
+    fn matches_exact_matches_only_identical_command() {
         let rule = Rule::parse("bash(cargo build)").unwrap();
         assert!(rule.matches(
             PermissionClass::Bash,
@@ -875,7 +871,7 @@ mod tests {
     }
 
     #[test]
-    fn bash_prefix_matches_command_and_its_arguments() {
+    fn matches_prefix_matches_command_and_its_arguments() {
         let rule = Rule::parse("bash(cargo test:*)").unwrap();
         assert!(rule.matches(
             PermissionClass::Bash,
@@ -896,7 +892,7 @@ mod tests {
     }
 
     #[test]
-    fn bash_wildcard_anchors_both_ends() {
+    fn matches_wildcard_anchors_both_ends() {
         let rule = Rule::parse("bash(git *)").unwrap();
         assert!(rule.matches(
             PermissionClass::Bash,
@@ -911,7 +907,7 @@ mod tests {
     }
 
     #[test]
-    fn allow_prefix_refuses_compound_command() {
+    fn matches_allow_prefix_refuses_compound_command() {
         // The load-bearing safety property: `cargo test:*` must not allow a chained `rm` or a
         // redirect that clobbers a file.
         let rule = Rule::parse("bash(cargo test:*)").unwrap();
@@ -930,7 +926,7 @@ mod tests {
     }
 
     #[test]
-    fn deny_prefix_matches_any_segment_of_compound_command() {
+    fn matches_deny_prefix_matches_any_segment_of_compound_command() {
         // The mirror property: a deny must fire even when the danger is chained behind a safe head.
         let rule = Rule::parse("bash(rm -rf:*)").unwrap();
         for command in ["rm -rf /", "ls && rm -rf /tmp/x", "echo hi; rm -rf ."] {
@@ -942,7 +938,7 @@ mod tests {
     }
 
     #[test]
-    fn deny_pattern_with_a_chain_operator_matches_the_whole_command() {
+    fn matches_deny_pattern_with_a_chain_operator_matches_the_whole_command() {
         // Segmenting first would split `curl x | sh` into `curl x` and `sh`, so neither piece holds
         // the `|` the rule targets. The shipped `* | sh` / `* | bash` defaults rely on the whole
         // command being tested before the split.
@@ -960,7 +956,7 @@ mod tests {
     }
 
     #[test]
-    fn deny_exact_fork_bomb_matches_the_whole_command() {
+    fn matches_deny_exact_fork_bomb_matches_the_whole_command() {
         // The fork-bomb default is an exact rule whose own text spans chain operators, so it only
         // matches when the unsplit command is tested.
         let rule = Rule::parse("bash(:(){ :|:& };:)").unwrap();
