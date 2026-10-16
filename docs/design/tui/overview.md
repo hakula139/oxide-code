@@ -37,7 +37,16 @@ tokio::select! {
 3. **Render throttling** at ~60 FPS. Batch streaming tokens between frames.
 4. **Overwrite, don't clear.** Never erase-then-redraw.
 5. **Hidden cursor during render**.
-6. **Cached block renders.** Each committed block renders once per width and theme, and each frame paints only the rows inside the viewport.
+6. **Cached block renders near the viewport.** Each committed block renders once per width and theme when it comes near the viewport, as [Chat Virtualization](#chat-virtualization) describes, and each frame paints only the rows inside the viewport.
+
+## Chat Virtualization
+
+A resize or theme swap invalidates every cached block, so the chat renders only the blocks it is about to paint:
+
+- **Render near the viewport.** A frame renders the stale blocks within a viewport height of the rows it paints, nearest the anchored row first, and places the paint again after each one. It paints once every block in that range is current at the frame's width and theme. Under auto-scroll, the range extends up from the tail.
+- **Estimate the rest.** A farther block keeps its last render as its height estimate until it comes into range, and a block that has never rendered counts as one blank row. An estimate above the range shifts every row in it equally, so the painted rows and the bottom clamp stay exact.
+- **Anchor on a block.** While scrolled up, a frame names the previous paint's top row by its block and its row within that block. When the block changes height, the row keeps its relative position, so the rows the user was reading stay in place as blocks above them render at a new width. Rows in a live reply are named by their distance from the last committed block, which keeps them in place when the reply commits.
+- **Apply scrolls at render.** Scroll keys and the wheel add to a pending delta that the next frame applies to the anchored row. The render range spans the anchored row and the new top, so a burst of `PageUp` presses between frames lands on the same row as presses one frame apart. `Ctrl+Home` jumps to row 0, and scrolling down to the bottom re-arms auto-scroll.
 
 ## Streaming Markdown
 
@@ -60,4 +69,4 @@ An open code block stays in the tail until the next block starts. Its highlighte
 6. **Custom pulldown-cmark + syntect renderer.** Uses Codex's `pending_marker` pattern for correct list handling.
 7. **Catppuccin Mocha dark theme by default** with named color slots covering text, surfaces, accents, status, code, diff, headings, body, and chrome. Transparent background.
 8. **Two-tier tool display.** Inline summary with per-tool icons, plus truncated output body.
-9. **Per-block render cache with visible-slice paint.** A resize or theme swap still re-renders every block. Viewport-only rendering is tracked in [#190](https://github.com/hakula139/oxide-code/issues/190).
+9. **Per-block render cache with viewport-scoped rendering.** Committed blocks render lazily near the viewport, and the scroll offset anchors on a block so blocks above it changing height leave the visible rows in place.
