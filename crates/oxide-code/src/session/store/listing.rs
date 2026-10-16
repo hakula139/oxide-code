@@ -15,7 +15,7 @@ pub(crate) const DEFAULT_SESSION_LIST_LIMIT: usize = 30;
 
 // ── ListScope ──
 
-/// Which sessions a listing walks: every project or only the home project, and archived or active ones.
+/// Which sessions a listing walks: the home project or every project, and active or archived ones.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct ListScope {
     pub(crate) all: bool,
@@ -58,9 +58,9 @@ impl SessionStore {
         Ok(self.list_paged(None, ListScope::default())?.into_sessions())
     }
 
-    /// Up to `limit` most recently active readable sessions matching `scope`,
-    /// unbounded for `None`. `scope.all` widens the walk from the home project to every project. Archive
-    /// state lives in each file, so the walk parses sessions until it finds one past the page.
+    /// Up to `limit` most recently active readable sessions matching `scope`, unbounded for `None`.
+    /// `scope.all` widens the walk from the home project to every project. Archive state lives in
+    /// each file, so the walk parses sessions until it finds one past the page.
     pub(crate) fn list_paged(&self, limit: Option<usize>, scope: ListScope) -> Result<ListPage> {
         let limit = limit.unwrap_or(usize::MAX);
         let mut sessions: Vec<_> = read_session_infos(self.session_paths(scope.all)?.into_iter())

@@ -412,7 +412,7 @@ mod tests {
         let dir = canonical_tempdir();
         std::fs::write(dir.path().join("notes.txt"), "token").unwrap();
         std::fs::write(dir.path().join("secret.txt"), "token").unwrap();
-        // An absolute rule, since the tools search from the process cwd, which the dir sits outside.
+        // An absolute rule, since the tools search from the process cwd, which is outside the dir.
         let deny = [format!("read({}/secret.txt)", slash_separated(dir.path()))];
         let read_deny = Policy::resolve(Mode::Auto, &[], &deny, dir.path())
             .unwrap()

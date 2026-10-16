@@ -245,8 +245,8 @@ impl Batch {
         }
     }
 
-    /// Queues one sidecar per item, skipping default metadata since it adds no display fields. Acks at
-    /// once when nothing needs a flush.
+    /// Queues one sidecar per item, skipping default metadata since it adds no display fields.
+    /// Acks at once when nothing needs a flush.
     fn absorb_tool_metadata(
         &mut self,
         items: Vec<(String, ToolMetadata)>,
