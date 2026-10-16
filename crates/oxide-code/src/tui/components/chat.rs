@@ -1,9 +1,11 @@
 //! Scrollable chat view. Each visible transcript unit is a [`blocks::ChatBlock`] impl.
 //! [`ChatView`] owns the streaming buffer, caches committed block renders, and stacks them with
-//! separator lines.
+//! separator lines, rendering only the blocks near the viewport.
 
 mod blocks;
 mod stack;
+
+use std::ops::Range;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::Frame;
@@ -12,11 +14,11 @@ use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 
 use self::blocks::{
-    AssistantText, AssistantThinking, BlockKind, ChatBlock, CompactedBlock, ErrorBlock,
-    GitDiffBlock, InterruptedMarker, NoticeBlock, ProgressUpdate, RenderCtx, StreamingAssistant,
+    AssistantText, AssistantThinking, ChatBlock, CompactedBlock, ErrorBlock, GitDiffBlock,
+    InterruptedMarker, NoticeBlock, ProgressUpdate, RenderCtx, StreamingAssistant,
     SystemMessageBlock, ToolCallBlock, ToolResultBlock, UserMessage,
 };
-use self::stack::{CachedBlock, Stack};
+use self::stack::{Anchor, CachedBlock, SlotTops, Stack};
 use crate::protocol::{Interaction, ToolCall, ToolResult};
 use crate::tool::ToolResultView;
 use crate::tui::pending_calls::{PendingCalls, result_header};
@@ -30,12 +32,16 @@ pub(crate) struct ChatView {
     streaming: Option<StreamingAssistant>,
     thinking_buffer: String,
 
+    /// Top row of the last paint.
     scroll_offset: usize,
-    content_height: usize,
+    /// Rows scrolled since the last paint, positive downward. The next frame applies them.
+    pending_scroll: isize,
     viewport_height: u16,
     viewport_width: u16,
     auto_scroll: bool,
     new_content_since_pause: u32,
+    /// Slot tops of the last paint, which the next frame anchors the scroll offset on.
+    painted: SlotTops,
 
     pending_calls: PendingCalls,
 }
@@ -64,6 +70,17 @@ struct LiveLines {
     streaming_tail: Vec<Line<'static>>,
 }
 
+/// Where a frame paints the stack, and the rows that must be rendered at the current width and
+/// theme for that paint to be exact.
+struct Placement {
+    offset: usize,
+    max_offset: usize,
+    /// The row rendering grows from: the last row under auto-scroll, else the anchored row.
+    pin: usize,
+    /// From the anchored row to the painted rows, plus a viewport height above and below.
+    reach: Range<usize>,
+}
+
 impl ChatView {
     pub(crate) fn new(theme: &Theme, show_thinking: bool) -> Self {
         Self {
@@ -76,11 +93,12 @@ impl ChatView {
             streaming: None,
             thinking_buffer: String::new(),
             scroll_offset: 0,
-            content_height: 0,
+            pending_scroll: 0,
             viewport_height: 0,
             viewport_width: 0,
             auto_scroll: true,
             new_content_since_pause: 0,
+            painted: SlotTops::default(),
             pending_calls: PendingCalls::new(),
         }
     }
@@ -255,9 +273,10 @@ impl ChatView {
         self.streaming = None;
         self.thinking_buffer.clear();
         self.scroll_offset = 0;
-        self.content_height = 0;
+        self.pending_scroll = 0;
         self.auto_scroll = true;
         self.new_content_since_pause = 0;
+        self.painted = SlotTops::default();
         self.pending_calls.clear();
     }
 
@@ -329,6 +348,7 @@ impl ChatView {
                 ..
             }) => {
                 self.scroll_offset = 0;
+                self.pending_scroll = 0;
                 self.auto_scroll = false;
             }
             Event::Key(KeyEvent {
@@ -342,26 +362,41 @@ impl ChatView {
 
     /// Lays out the chat for `area`, follows the tail while auto-scroll is on, and paints only
     /// the rows inside the viewport.
+    ///
+    /// Blocks render only once the paint can reach them. While scrolled up, the paint anchors on
+    /// the row the last frame showed on top, then moves by the pending scroll. Each pass renders
+    /// the stale block nearest the pinned row and places the paint again. Painting waits until
+    /// every block within reach is current, so estimated heights stay off the screen, and the
+    /// anchor keeps the visible rows in place while blocks above them change height.
     pub(crate) fn render(&mut self, frame: &mut Frame, area: Rect) {
         self.set_viewport(area);
-        self.refresh_block_renders(area.width);
         let live = self.render_live(area.width);
+        let anchor = (!self.auto_scroll).then(|| self.painted.anchor_at(self.scroll_offset));
 
-        let stack = self.stack(&live);
-        let content_height = stack.height();
-        let scroll_offset = self.synced_scroll_offset(content_height);
-        let lines = stack.slice(scroll_offset, usize::from(area.height));
-        self.content_height = content_height;
-        self.scroll_offset = scroll_offset;
+        loop {
+            let stack = self.stack(&live);
+            let placement = self.place(&stack, anchor);
+            if let Some(stale) = self.nearest_stale(stack.tops(), &placement) {
+                drop(stack);
+                let ctx = self.settings.ctx(area.width);
+                self.blocks[stale].refresh(&ctx, self.settings.theme_epoch);
+                continue;
+            }
 
-        let paragraph = Paragraph::new(lines).style(self.settings.theme.surface());
-        frame.render_widget(paragraph, area);
+            let lines = stack.slice(placement.offset, usize::from(area.height));
+            self.painted = stack.into_tops();
+            self.settle_scroll(&placement);
+            let paragraph = Paragraph::new(lines).style(self.settings.theme.surface());
+            frame.render_widget(paragraph, area);
+            return;
+        }
     }
 
-    /// Scrolls to the latest content and re-arms auto-scroll.
+    /// Re-arms auto-scroll, so the next frame shows the latest content.
     pub(crate) fn jump_to_bottom(&mut self) {
-        self.scroll_to_bottom();
         self.auto_scroll = true;
+        self.pending_scroll = 0;
+        self.new_content_since_pause = 0;
     }
 }
 
@@ -369,7 +404,8 @@ impl ChatView {
 
 impl ChatView {
     fn push_block(&mut self, block: impl ChatBlock + 'static) {
-        self.blocks.push(CachedBlock::new(Box::new(block)));
+        let ctx = self.settings.ctx(self.viewport_width);
+        self.blocks.push(CachedBlock::new(Box::new(block), &ctx));
     }
 
     /// Adopts the chat area, dropping the streaming prefix cache on a width change.
@@ -381,55 +417,69 @@ impl ChatView {
         }
     }
 
-    /// Offset for painting `content_height` rows: the tail under auto-scroll, else the current
-    /// offset clamped to the content.
-    fn synced_scroll_offset(&self, content_height: usize) -> usize {
-        let max = self.max_offset_for(content_height);
-        if self.auto_scroll {
-            max
-        } else {
-            self.scroll_offset.min(max)
+    /// Places the paint on `stack`: the tail under auto-scroll, else the anchored row moved by
+    /// the pending scroll and clamped to the content.
+    fn place(&self, stack: &Stack<'_>, anchor: Option<Anchor>) -> Placement {
+        let viewport = usize::from(self.viewport_height);
+        let max_offset = stack.height().saturating_sub(viewport);
+        let Some(anchor) = anchor else {
+            return Placement {
+                offset: max_offset,
+                max_offset,
+                pin: stack.height().saturating_sub(1),
+                reach: max_offset.saturating_sub(viewport)..stack.height() + viewport,
+            };
+        };
+
+        let anchored = stack.tops().offset_of(anchor);
+        let offset = anchored
+            .saturating_add_signed(self.pending_scroll)
+            .min(max_offset);
+        Placement {
+            offset,
+            max_offset,
+            pin: anchored,
+            reach: anchored.min(offset).saturating_sub(viewport)
+                ..anchored.max(offset) + 2 * viewport,
         }
     }
 
-    fn max_scroll_offset(&self) -> usize {
-        self.max_offset_for(self.content_height)
+    /// The block within the placement's reach whose render is stale, nearest the pinned row.
+    fn nearest_stale(&self, tops: &SlotTops, placement: &Placement) -> Option<usize> {
+        let (width, theme_epoch) = (self.viewport_width, self.settings.theme_epoch);
+        tops.blocks_within(placement.reach.clone())
+            .filter(|&block| !self.blocks[block].is_current(width, theme_epoch))
+            .min_by_key(|&block| {
+                tops.slot(block)
+                    .map_or(0, |slot| rows_between(&slot, placement.pin))
+            })
     }
 
-    fn max_offset_for(&self, content_height: usize) -> usize {
-        content_height.saturating_sub(usize::from(self.viewport_height))
+    /// Adopts the painted offset, re-arming auto-scroll when a scroll down reached the bottom.
+    fn settle_scroll(&mut self, placement: &Placement) {
+        if self.pending_scroll > 0 && placement.offset == placement.max_offset {
+            self.auto_scroll = true;
+            self.new_content_since_pause = 0;
+        }
+        self.pending_scroll = 0;
+        self.scroll_offset = placement.offset;
     }
 
-    fn scroll_to_bottom(&mut self) {
-        self.scroll_offset = self.max_scroll_offset();
-        self.new_content_since_pause = 0;
-    }
-
-    fn scroll_up(&mut self, lines: usize) {
-        self.scroll_offset = self.scroll_offset.saturating_sub(lines);
+    fn scroll_up(&mut self, rows: usize) {
+        self.pending_scroll = self.pending_scroll.saturating_sub_unsigned(rows);
         self.auto_scroll = false;
     }
 
-    fn scroll_down(&mut self, lines: usize) {
-        let max = self.max_scroll_offset();
-        self.scroll_offset = self.scroll_offset.saturating_add(lines).min(max);
-        if self.scroll_offset >= max {
-            self.auto_scroll = true;
-            self.new_content_since_pause = 0;
+    /// Scrolls toward the tail. The next frame re-arms auto-scroll once the paint reaches it.
+    fn scroll_down(&mut self, rows: usize) {
+        if !self.auto_scroll {
+            self.pending_scroll = self.pending_scroll.saturating_add_unsigned(rows);
         }
     }
 
     fn bump_paused_counter(&mut self) {
         if !self.auto_scroll {
             self.new_content_since_pause = self.new_content_since_pause.saturating_add(1);
-        }
-    }
-
-    /// Re-renders committed blocks whose cached lines predate the current width or theme.
-    fn refresh_block_renders(&mut self, width: u16) {
-        let ctx = self.settings.ctx(width);
-        for block in &mut self.blocks {
-            block.refresh(&ctx, self.settings.theme_epoch);
         }
     }
 
@@ -454,22 +504,8 @@ impl ChatView {
     /// Stacks visible block renders and the live lines with blank-line separators.
     fn stack<'a>(&'a self, live: &'a LiveLines) -> Stack<'a> {
         let mut stack = Stack::default();
-
-        let mut prev_kind: Option<BlockKind> = None;
-        for cached in self.blocks.iter().filter(|b| b.visible()) {
-            let block = cached.block();
-            // Standalone blocks always take a separator. A tool `Call` after a `Result` opens a
-            // new tool group, while a `Result` stays flush under its `Call`.
-            if stack.last_has_width()
-                && (block.standalone() || prev_kind == Some(BlockKind::Result))
-            {
-                stack.push_blank();
-            }
-            stack.push(cached.lines());
-            if block.standalone() {
-                stack.push_blank();
-            }
-            prev_kind = Some(block.block_kind());
+        for cached in &self.blocks {
+            stack.push_block(cached);
         }
 
         if !live.thinking.is_empty() {
@@ -510,13 +546,18 @@ impl ChatView {
     }
 }
 
+fn rows_between(slot: &Range<usize>, row: usize) -> usize {
+    slot.start.saturating_sub(row) + (row + 1).saturating_sub(slot.end)
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
     use std::rc::Rc;
+    use std::time::{Duration, Instant};
 
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
-    use indoc::indoc;
+    use indoc::{formatdoc, indoc};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use unicode_width::UnicodeWidthStr;
@@ -560,7 +601,10 @@ mod tests {
 
     /// Stacks every row at `width`, leaving the viewport and scroll state untouched.
     fn all_lines(chat: &mut ChatView, width: u16) -> Vec<Line<'static>> {
-        chat.refresh_block_renders(width);
+        let ctx = chat.settings.ctx(width);
+        for block in &mut chat.blocks {
+            block.refresh(&ctx, chat.settings.theme_epoch);
+        }
         let live = chat.render_live(width);
         let stack = chat.stack(&live);
         stack.slice(0, stack.height())
@@ -645,6 +689,130 @@ mod tests {
             renders: Rc::clone(&renders),
         });
         renders
+    }
+
+    /// Emits `60 / width` rows labeled `b{index} {i}`, so narrowing the chat makes it taller.
+    struct WrappingBlock {
+        index: usize,
+    }
+
+    impl ChatBlock for WrappingBlock {
+        fn render(&self, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
+            (0..60 / usize::from(ctx.width))
+                .map(|i| Line::raw(format!("b{} {i}", self.index)))
+                .collect()
+        }
+
+        fn standalone(&self) -> bool {
+            false
+        }
+    }
+
+    /// A resumed session whose replies each hold a 30-line Rust block. Every code row names its
+    /// turn, so each window of a few rows appears once in the chat.
+    fn long_transcript(turns: usize) -> Vec<Interaction> {
+        (0..turns)
+            .flat_map(|turn| {
+                let body = (0..28)
+                    .map(|i| format!("    let value_{i} = compute({turn}, {i});"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                [
+                    Interaction::UserText(format!("Question {turn}: how does this work?")),
+                    Interaction::AssistantText(formatdoc! {"
+                        Here is turn {turn}:
+
+                        ```rust
+                        fn turn_{turn}() {{
+                        {body}
+                        }}
+                        ```
+
+                        That covers it.
+                    "}),
+                ]
+            })
+            .collect()
+    }
+
+    /// Frame times over a resumed transcript of `rows` rows, with medians for the repeated frames.
+    #[derive(Debug)]
+    #[expect(
+        dead_code,
+        reason = "the timing harness reads the fields through Debug"
+    )]
+    struct FrameTimes {
+        rows: usize,
+        open: Duration,
+        steady: Duration,
+        resize: Duration,
+        theme_swap: Duration,
+    }
+
+    /// Paints the frames the timing harness measures over `turns` resumed turns: an open, then
+    /// `samples` frames each of steady state, resizes between `width` and 20 columns narrower, and
+    /// theme swaps. Checks that each frame paints the tail of a full render.
+    fn paint_timed_frames(turns: usize, width: u16, height: u16, samples: usize) -> FrameTimes {
+        let widths = [width, width - 20];
+        let full = widths.map(|width| {
+            let mut full = test_chat();
+            full.load_history(long_transcript(turns));
+            all_lines(&mut full, width)
+        });
+        let tails = full.each_ref().map(|lines| {
+            lines[lines.len() - usize::from(height)..]
+                .iter()
+                .map(|line| line.to_string().trim_end().to_owned())
+                .collect::<Vec<_>>()
+        });
+        let themes = [
+            Theme::default(),
+            crate::tui::theme::load_builtin("latte").unwrap(),
+        ];
+
+        let mut chat = test_chat();
+        chat.load_history(long_transcript(turns));
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let open = paint_timed(&mut terminal, &mut chat, &tails[0]);
+        let mut runs: [Vec<Duration>; 3] = Default::default();
+        for _ in 0..samples {
+            runs[0].push(paint_timed(&mut terminal, &mut chat, &tails[0]));
+        }
+        for i in 1..=samples {
+            terminal.backend_mut().resize(widths[i % 2], height);
+            runs[1].push(paint_timed(&mut terminal, &mut chat, &tails[i % 2]));
+        }
+        terminal.backend_mut().resize(width, height);
+        for i in 1..=samples {
+            chat.set_theme(&themes[i % 2]);
+            runs[2].push(paint_timed(&mut terminal, &mut chat, &tails[0]));
+        }
+
+        let [steady, resize, theme_swap] = runs.map(|mut run| {
+            run.sort();
+            run[run.len() / 2]
+        });
+        FrameTimes {
+            rows: full[0].len(),
+            open,
+            steady,
+            resize,
+            theme_swap,
+        }
+    }
+
+    fn paint_timed(
+        terminal: &mut Terminal<TestBackend>,
+        chat: &mut ChatView,
+        tail: &[String],
+    ) -> Duration {
+        let start = Instant::now();
+        terminal
+            .draw(|frame| chat.render(frame, frame.area()))
+            .unwrap();
+        let elapsed = start.elapsed();
+        assert_eq!(screen_rows(terminal.backend()), tail);
+        elapsed
     }
 
     // ── set_theme ──
@@ -1772,11 +1940,10 @@ mod tests {
         chat.push_tool_call(call("$", "ls"));
         chat.append_stream_token("partial reply");
         chat.append_thinking_token("considering");
+        render_chat(&mut chat, 80, 24);
         chat.scroll_offset = 25;
-        chat.content_height = 100;
+        chat.pending_scroll = -3;
         chat.auto_scroll = false;
-        chat.viewport_height = 24;
-        chat.viewport_width = 80;
 
         chat.clear_history();
 
@@ -1784,8 +1951,8 @@ mod tests {
         assert_eq!(chat.pending_call_count(), 0);
         assert!(chat.streaming.is_none());
         assert_eq!(chat.thinking_buffer, "");
-        assert_eq!(chat.scroll_offset, 0);
-        assert_eq!(chat.content_height, 0);
+        assert_eq!((chat.scroll_offset, chat.pending_scroll), (0, 0));
+        assert_eq!(chat.painted, SlotTops::default());
         assert!(chat.auto_scroll);
         assert_eq!(chat.viewport_height, 24);
         assert_eq!(chat.viewport_width, 80);
@@ -1891,98 +2058,44 @@ mod tests {
     // ── handle_event ──
 
     #[test]
-    fn handle_event_arrow_up_scrolls_up() {
+    fn handle_event_arrows_and_wheel_scroll_one_row() {
         let mut chat = test_chat();
-        chat.content_height = 100;
-        chat.viewport_height = 20;
-        chat.scroll_offset = 10;
-
         chat.handle_event(&key_event(KeyCode::Up));
-        assert_eq!(chat.scroll_offset, 9);
+        chat.handle_event(&mouse_scroll(MouseEventKind::ScrollUp));
+        assert_eq!(chat.pending_scroll, -2);
         assert!(!chat.auto_scroll);
-    }
-
-    #[test]
-    fn handle_event_arrow_down_scrolls_down() {
-        let mut chat = test_chat();
-        chat.content_height = 100;
-        chat.viewport_height = 20;
-        chat.scroll_offset = 10;
-        chat.auto_scroll = false;
 
         chat.handle_event(&key_event(KeyCode::Down));
-        assert_eq!(chat.scroll_offset, 11);
-    }
-
-    #[test]
-    fn handle_event_mouse_scroll_up() {
-        let mut chat = test_chat();
-        chat.content_height = 100;
-        chat.viewport_height = 20;
-        chat.scroll_offset = 10;
-
-        chat.handle_event(&mouse_scroll(MouseEventKind::ScrollUp));
-        assert_eq!(chat.scroll_offset, 9);
-    }
-
-    #[test]
-    fn handle_event_mouse_scroll_down() {
-        let mut chat = test_chat();
-        chat.content_height = 100;
-        chat.viewport_height = 20;
-        chat.scroll_offset = 10;
-        chat.auto_scroll = false;
-
         chat.handle_event(&mouse_scroll(MouseEventKind::ScrollDown));
-        assert_eq!(chat.scroll_offset, 11);
+        chat.handle_event(&key_event(KeyCode::Down));
+        assert_eq!(chat.pending_scroll, 1);
     }
 
     #[test]
-    fn handle_event_page_up() {
+    fn handle_event_pages_scroll_two_rows_short_of_the_viewport() {
         let mut chat = test_chat();
-        chat.content_height = 100;
         chat.viewport_height = 20;
-        chat.scroll_offset = 30;
-
         chat.handle_event(&key_event(KeyCode::PageUp));
-        assert_eq!(chat.scroll_offset, 12);
-    }
-
-    #[test]
-    fn handle_event_page_down() {
-        let mut chat = test_chat();
-        chat.content_height = 100;
-        chat.viewport_height = 20;
-        chat.scroll_offset = 30;
-        chat.auto_scroll = false;
+        assert_eq!(chat.pending_scroll, -18);
 
         chat.handle_event(&key_event(KeyCode::PageDown));
-        assert_eq!(chat.scroll_offset, 48);
+        chat.handle_event(&key_event(KeyCode::PageDown));
+        assert_eq!(chat.pending_scroll, 18);
     }
 
     #[test]
-    fn handle_event_ctrl_home_scrolls_to_top() {
+    fn handle_event_ctrl_home_jumps_to_the_top_and_ctrl_end_follows_the_tail() {
         let mut chat = test_chat();
-        chat.content_height = 100;
-        chat.viewport_height = 20;
         chat.scroll_offset = 50;
-
+        chat.handle_event(&key_event(KeyCode::Up));
         chat.handle_event(&ctrl_key_event(KeyCode::Home));
-        assert_eq!(chat.scroll_offset, 0);
+        assert_eq!((chat.scroll_offset, chat.pending_scroll), (0, 0));
         assert!(!chat.auto_scroll);
-    }
 
-    #[test]
-    fn handle_event_ctrl_end_scrolls_to_bottom() {
-        let mut chat = test_chat();
-        chat.content_height = 100;
-        chat.viewport_height = 20;
-        chat.scroll_offset = 10;
-        chat.auto_scroll = false;
         chat.new_content_since_pause = 3;
-
+        chat.handle_event(&key_event(KeyCode::Up));
         chat.handle_event(&ctrl_key_event(KeyCode::End));
-        assert_eq!(chat.scroll_offset, 80);
+        assert_eq!(chat.pending_scroll, 0);
         assert!(chat.auto_scroll);
         assert_eq!(chat.new_content_since_pause(), 0);
     }
@@ -1990,23 +2103,12 @@ mod tests {
     #[test]
     fn handle_event_unhandled_key_leaves_state_unchanged() {
         let mut chat = test_chat();
-        chat.content_height = 100;
-        chat.viewport_height = 20;
-        chat.scroll_offset = 10;
-
         chat.handle_event(&key_event(KeyCode::Char('a')));
-        assert_eq!(chat.scroll_offset, 10);
+        assert_eq!(chat.pending_scroll, 0);
+        assert!(chat.auto_scroll);
     }
 
     // ── render ──
-
-    #[test]
-    fn render_measures_content_height_from_layout() {
-        let mut chat = test_chat();
-        chat.push_user_message("hi".to_owned());
-        render_chat(&mut chat, 80, 24);
-        assert_eq!(chat.content_height, 2);
-    }
 
     #[test]
     fn render_auto_scroll_pins_tail_in_one_pass() {
@@ -2026,6 +2128,46 @@ mod tests {
         let screen = screen_rows(&render_chat(&mut chat, 20, 3));
         assert_eq!(chat.scroll_offset, 10);
         assert_eq!(screen, ["row 10", "row 11", "row 12"]);
+    }
+
+    #[test]
+    fn render_paused_past_the_end_clamps_to_the_last_page() {
+        let mut chat = test_chat();
+        push_counting_block(&mut chat, 30);
+        chat.auto_scroll = false;
+        chat.scroll_offset = 25;
+        let screen = screen_rows(&render_chat(&mut chat, 20, 20));
+        assert_eq!(screen[0], "row 10");
+        assert!(chat.is_scrolled_up(), "a clamp alone keeps the pause");
+    }
+
+    #[test]
+    fn render_applies_scrolls_and_rearms_auto_scroll_at_the_bottom() {
+        let mut chat = test_chat();
+        push_counting_block(&mut chat, 30);
+        render_chat(&mut chat, 20, 5);
+        for _ in 0..20 {
+            chat.handle_event(&key_event(KeyCode::PageUp));
+        }
+        let screen = screen_rows(&render_chat(&mut chat, 20, 5));
+        assert_eq!(screen[0], "row 0", "a burst past the top stops there");
+
+        chat.scroll_offset = 22;
+        chat.new_content_since_pause = 3;
+        chat.handle_event(&key_event(KeyCode::Down));
+        chat.handle_event(&key_event(KeyCode::Down));
+        let screen = screen_rows(&render_chat(&mut chat, 20, 5));
+        assert_eq!(screen[0], "row 24");
+        assert!(chat.is_scrolled_up());
+
+        chat.handle_event(&key_event(KeyCode::Down));
+        let screen = screen_rows(&render_chat(&mut chat, 20, 5));
+        assert_eq!(screen[0], "row 25");
+        assert!(
+            !chat.is_scrolled_up(),
+            "reaching the bottom follows the tail again"
+        );
+        assert_eq!(chat.new_content_since_pause(), 0);
     }
 
     #[test]
@@ -2081,13 +2223,163 @@ mod tests {
     }
 
     #[test]
+    fn render_refreshes_only_blocks_near_the_viewport() {
+        let mut chat = test_chat();
+        let renders: Vec<_> = (0..40).map(|_| push_counting_block(&mut chat, 5)).collect();
+        let counts = || renders.iter().map(|r| r.get()).collect::<Vec<_>>();
+
+        render_chat(&mut chat, 20, 10);
+        assert_eq!(counts(), [vec![0; 36], vec![1; 4]].concat(), "open");
+
+        render_chat(&mut chat, 30, 10);
+        chat.set_theme(&Theme::default());
+        render_chat(&mut chat, 30, 10);
+        assert_eq!(
+            counts(),
+            [vec![0; 36], vec![3; 4]].concat(),
+            "resize and theme swap"
+        );
+
+        chat.handle_event(&ctrl_key_event(KeyCode::Home));
+        render_chat(&mut chat, 30, 10);
+        assert_eq!(
+            counts(),
+            [vec![1; 4], vec![0; 32], vec![3; 4]].concat(),
+            "blocks render as they scroll into range",
+        );
+
+        for _ in 0..4 {
+            chat.handle_event(&key_event(KeyCode::PageDown));
+        }
+        render_chat(&mut chat, 30, 10);
+        render_chat(&mut chat, 40, 10);
+        assert_eq!(
+            counts(),
+            [vec![1; 4], vec![2; 7], vec![0; 25], vec![3; 4]].concat(),
+            "a paused resize re-renders a viewport height around the anchor in block 6",
+        );
+    }
+
+    #[test]
+    fn render_scrolls_unrendered_history_by_exact_rows() {
+        let (width, height) = (60, 8);
+        let mut reference = test_chat();
+        reference.load_history(long_transcript(6));
+        let rows: Vec<String> = all_lines(&mut reference, width)
+            .iter()
+            .map(|line| line.to_string().trim_end().to_owned())
+            .collect();
+        let top_row = |chat: &mut ChatView| {
+            let screen = screen_rows(&render_chat(chat, width, height));
+            rows.windows(usize::from(height))
+                .position(|window| window == screen)
+                .unwrap_or_else(|| panic!("not a window of the full render: {screen:?}"))
+        };
+
+        let page_up = |chat: &mut ChatView, pages| {
+            for _ in 0..pages {
+                chat.handle_event(&key_event(KeyCode::PageUp));
+            }
+        };
+
+        let mut chat = test_chat();
+        chat.load_history(long_transcript(6));
+        render_chat(&mut chat, 30, height);
+        page_up(&mut chat, 12);
+        render_chat(&mut chat, 30, height);
+        chat.handle_event(&ctrl_key_event(KeyCode::End));
+        let bottom = rows.len() - usize::from(height);
+        assert_eq!(top_row(&mut chat), bottom);
+
+        let page = usize::from(height) - 2;
+        page_up(&mut chat, 12);
+        assert_eq!(
+            top_row(&mut chat),
+            bottom - 12 * page,
+            "one frame applies the burst through blocks last rendered 30 columns wide",
+        );
+        page_up(&mut chat, 1);
+        assert_eq!(top_row(&mut chat), bottom - 13 * page);
+
+        chat.handle_event(&ctrl_key_event(KeyCode::Home));
+        assert_eq!(top_row(&mut chat), 0);
+        for _ in 0..3 {
+            chat.handle_event(&key_event(KeyCode::PageDown));
+        }
+        assert_eq!(top_row(&mut chat), 3 * page);
+
+        chat.handle_event(&ctrl_key_event(KeyCode::End));
+        assert_eq!(top_row(&mut chat), bottom);
+    }
+
+    #[test]
+    fn render_paused_inside_a_live_reply_stays_put_when_it_commits() {
+        let reply = (0..30)
+            .map(|i| format!("paragraph {i}"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        for thinking in [false, true] {
+            let mut chat = test_chat();
+            chat.push_user_message("go".to_owned());
+            render_chat(&mut chat, 40, 6);
+            if thinking {
+                chat.append_thinking_token(&reply);
+            } else {
+                chat.append_stream_token(&reply);
+            }
+            render_chat(&mut chat, 40, 6);
+            for _ in 0..3 {
+                chat.handle_event(&key_event(KeyCode::PageUp));
+            }
+            let before = screen_rows(&render_chat(&mut chat, 40, 6));
+
+            chat.push_tool_call(call("$", "ls"));
+            let after = screen_rows(&render_chat(&mut chat, 40, 6));
+            assert_eq!(after, before, "thinking={thinking}");
+        }
+    }
+
+    #[test]
+    fn render_paused_resize_keeps_the_top_block_in_place() {
+        let mut chat = test_chat();
+        for index in 0..10 {
+            chat.push_block(WrappingBlock { index });
+        }
+        render_chat(&mut chat, 20, 4);
+        chat.handle_event(&ctrl_key_event(KeyCode::Home));
+        render_chat(&mut chat, 20, 4);
+        for _ in 0..4 {
+            chat.handle_event(&key_event(KeyCode::Down));
+        }
+        let screen = screen_rows(&render_chat(&mut chat, 20, 4));
+        assert_eq!(screen, ["b1 1", "b1 2", "b2 0", "b2 1"]);
+
+        let screen = screen_rows(&render_chat(&mut chat, 10, 4));
+        assert_eq!(
+            screen,
+            ["b1 2", "b1 3", "b1 4", "b1 5"],
+            "b0 grew above the viewport, and row 1 of b1's 3 became row 2 of its 6",
+        );
+    }
+
+    #[test]
+    fn render_open_resize_and_theme_swap_paint_the_tail_of_the_full_render() {
+        paint_timed_frames(4, 60, 8, 2);
+    }
+
+    #[test]
+    #[ignore = "timing harness: run in release with --ignored --nocapture"]
+    fn render_long_transcript_frame_timings() {
+        eprintln!("{:?}", paint_timed_frames(200, 120, 40, 20));
+    }
+
+    #[test]
     fn render_reaches_rows_past_u16_max() {
         let rows = usize::from(u16::MAX) + 100;
         let mut chat = test_chat();
         push_counting_block(&mut chat, rows);
 
         let screen = screen_rows(&render_chat(&mut chat, 20, 2));
-        assert_eq!(chat.content_height, rows);
         assert_eq!(
             screen,
             [format!("row {}", rows - 2), format!("row {}", rows - 1)]
@@ -2307,100 +2599,14 @@ mod tests {
         assert_eq!(s.cached_width(), 0);
     }
 
-    // ── synced_scroll_offset ──
+    // ── scroll_down ──
 
     #[test]
-    fn synced_scroll_offset_auto_scroll_pins_to_tail() {
+    fn scroll_down_while_following_the_tail_is_ignored() {
         let mut chat = test_chat();
-        chat.viewport_height = 20;
-        chat.scroll_offset = 3;
-        assert_eq!(chat.synced_scroll_offset(100), 80);
-        assert_eq!(chat.synced_scroll_offset(10), 0);
-    }
-
-    #[test]
-    fn synced_scroll_offset_paused_clamps_to_shrunk_content() {
-        let mut chat = test_chat();
-        chat.viewport_height = 20;
-        chat.auto_scroll = false;
-        chat.scroll_offset = 25;
-        assert_eq!(
-            chat.synced_scroll_offset(100),
-            25,
-            "an in-range offset is kept"
-        );
-        assert_eq!(chat.synced_scroll_offset(30), 10);
-    }
-
-    // ── scroll_to_bottom / scroll_up / scroll_down ──
-
-    #[test]
-    fn scroll_to_bottom_aligns_last_row_with_viewport_bottom() {
-        let mut chat = test_chat();
-        chat.content_height = 100;
-        chat.viewport_height = 20;
-
-        chat.scroll_to_bottom();
-        assert_eq!(chat.scroll_offset, 80);
-    }
-
-    #[test]
-    fn scroll_to_bottom_zero_when_content_fits() {
-        let mut chat = test_chat();
-        chat.content_height = 10;
-        chat.viewport_height = 20;
-
-        chat.scroll_to_bottom();
-        assert_eq!(chat.scroll_offset, 0);
-    }
-
-    #[test]
-    fn scroll_up_decreases_offset_and_disables_auto_scroll() {
-        let mut chat = test_chat();
-        chat.content_height = 100;
-        chat.viewport_height = 20;
-        chat.scroll_offset = 50;
-        chat.auto_scroll = true;
-
-        chat.scroll_up(5);
-        assert_eq!(chat.scroll_offset, 45);
-        assert!(!chat.auto_scroll);
-    }
-
-    #[test]
-    fn scroll_up_saturates_at_zero() {
-        let mut chat = test_chat();
-        chat.scroll_offset = 3;
-
-        chat.scroll_up(10);
-        assert_eq!(chat.scroll_offset, 0);
-    }
-
-    #[test]
-    fn scroll_down_increases_offset() {
-        let mut chat = test_chat();
-        chat.content_height = 100;
-        chat.viewport_height = 20;
-        chat.scroll_offset = 50;
-        chat.auto_scroll = false;
-
         chat.scroll_down(5);
-        assert_eq!(chat.scroll_offset, 55);
-        assert!(!chat.auto_scroll);
-    }
-
-    #[test]
-    fn scroll_down_clamps_to_max_and_enables_auto_scroll() {
-        let mut chat = test_chat();
-        chat.content_height = 100;
-        chat.viewport_height = 20;
-        chat.scroll_offset = 75;
-        chat.new_content_since_pause = 3;
-
-        chat.scroll_down(10);
-        assert_eq!(chat.scroll_offset, 80);
+        assert_eq!(chat.pending_scroll, 0);
         assert!(chat.auto_scroll);
-        assert_eq!(chat.new_content_since_pause(), 0);
     }
 
     // ── stack ──
@@ -2603,5 +2809,15 @@ mod tests {
         let mut chat = test_chat();
         chat.append_thinking_token("musing");
         assert!(!chat.is_empty());
+    }
+
+    // ── rows_between ──
+
+    #[test]
+    fn rows_between_counts_rows_to_the_nearest_slot_edge() {
+        assert_eq!(rows_between(&(5..8), 2), 3);
+        assert_eq!(rows_between(&(5..8), 5), 0);
+        assert_eq!(rows_between(&(5..8), 7), 0);
+        assert_eq!(rows_between(&(5..8), 9), 2);
     }
 }

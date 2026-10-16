@@ -71,6 +71,7 @@ nixfmt
 nixos
 nixpkgs
 nlink
+nocapture
 nohup
 nonewline
 noprefix
