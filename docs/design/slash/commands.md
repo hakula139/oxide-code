@@ -107,7 +107,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 - `crates/oxide-code/src/slash/status.rs`: `/status` row builder plus `KvOverview` constructor.
 - `crates/oxide-code/src/slash/theme.rs`: `ThemeCmd`, picker open plus typed-arg validator.
 - `crates/oxide-code/src/tui/action.rs`: `Action`, which slash commands forward.
-- `crates/oxide-code/src/tui/app.rs`: `dispatch_action`, `dispatch_op`, `run_slash`, `apply_slash_outcome`, modal gate, echo gate.
+- `crates/oxide-code/src/tui/app/dispatch.rs`: `dispatch_action`, `dispatch_op`, `run_slash`, `apply_slash_outcome`, modal gate, echo gate.
 - `crates/oxide-code/src/tui/modal.rs`: `Modal` trait, `ModalStack`, key routing.
 - `crates/oxide-code/src/tui/modal/kv_overview.rs`: generic `KvOverview` / `KvSection` primitive.
 - `crates/oxide-code/src/tui/modal/list_picker.rs`: generic `ListPicker` primitive.

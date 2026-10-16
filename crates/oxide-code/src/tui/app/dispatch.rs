@@ -1,0 +1,1538 @@
+//! Terminal input and the actions it produces: modal and Esc routing, prompt submission, slash
+//! commands, and the ops sent to the engine.
+
+use std::time::Instant;
+
+use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEvent, KeyEventKind};
+use tokio::sync::mpsc;
+
+use super::{App, EXIT_WINDOW};
+use crate::protocol::Op;
+use crate::slash::{self, Parsed, SlashContext, SlashKind, SlashOutcome};
+use crate::tui::action::Action;
+use crate::tui::components::input::InputOutcome;
+use crate::tui::components::status::Status;
+use crate::tui::modal::ModalAction;
+use crate::tui::theme::{self, Theme};
+
+impl App {
+    pub(super) fn handle_crossterm_event(&mut self, event: &CrosstermEvent) {
+        // Windows also reports key releases, which would otherwise act as a second press.
+        if let CrosstermEvent::Key(key) = event
+            && key.kind == KeyEventKind::Release
+        {
+            return;
+        }
+        // The top overlay owns keyboard input, including pastes. Mouse and resize events still
+        // reach chat.
+        if self.modals.is_active() {
+            match event {
+                CrosstermEvent::Key(key) => {
+                    if let Some(action) = self.modals.handle_key(key) {
+                        self.apply_modal_action(action);
+                    }
+                    self.dirty = true;
+                    return;
+                }
+                CrosstermEvent::Paste(text) => {
+                    self.modals.handle_paste(text);
+                    self.dirty = true;
+                    return;
+                }
+                _ => {}
+            }
+        }
+        match event {
+            CrosstermEvent::Key(KeyEvent {
+                code: KeyCode::Esc, ..
+            }) => {
+                if self.input.popup_visible() {
+                    _ = self.input.handle_event(event);
+                } else {
+                    self.handle_esc();
+                }
+            }
+            CrosstermEvent::Key(..) | CrosstermEvent::Paste(..) => {
+                match self.input.handle_event(event) {
+                    InputOutcome::Action(action) => self.dispatch_action(action),
+                    InputOutcome::Consumed => {}
+                    InputOutcome::Ignored => self.chat.handle_event(event),
+                }
+            }
+            CrosstermEvent::Mouse(_) => {
+                self.chat.handle_event(event);
+            }
+            CrosstermEvent::Resize(..) => {}
+            _ => return,
+        }
+        self.dirty = true;
+    }
+
+    fn apply_modal_action(&mut self, action: ModalAction) {
+        match action {
+            ModalAction::Cancelled => self.cancel_theme_preview(),
+            ModalAction::Dispatch(action) => self.dispatch_action(action),
+            ModalAction::SystemMessage(msg) => self.chat.push_system_message(msg),
+        }
+    }
+
+    fn cancel_theme_preview(&mut self) {
+        if let Some(theme) = self.preview_theme_snapshot.take() {
+            self.apply_theme(&theme);
+        }
+    }
+
+    pub(super) fn clear_modals(&mut self) {
+        self.cancel_theme_preview();
+        for action in self.modals.clear() {
+            self.apply_modal_action(action);
+        }
+    }
+
+    /// Repaints every theme-styled component for a mid-session theme swap.
+    fn apply_theme(&mut self, theme: &Theme) {
+        self.theme = theme.clone();
+        self.chat.set_theme(theme);
+        self.status_bar.set_theme(theme);
+        self.input.set_theme(theme);
+        self.dirty = true;
+    }
+
+    /// Cancels if busy, restores one queued prompt if idle, or no-ops.
+    pub(super) fn handle_esc(&mut self) {
+        if !self.input.is_enabled() {
+            self.dispatch_op(Op::Interrupt);
+        } else if self.input.is_empty()
+            && let Some(prompt) = self.pending_prompts.pop_back()
+        {
+            self.input.set_text(&prompt);
+        }
+    }
+
+    /// Routes an input, slash-command, or modal action. TUI-only actions apply here, and an op goes
+    /// through [`Self::dispatch_op`].
+    pub(super) fn dispatch_action(&mut self, action: Action) {
+        match action {
+            Action::Submit(text) => self.handle_submit_prompt(&text),
+            Action::Op(op) => self.dispatch_op(op),
+            Action::ConfirmExit => self.confirm_exit(),
+            Action::PreviewTheme { name } => self.preview_theme(&name),
+            Action::SwapTheme { name } => self.swap_theme(&name),
+        }
+    }
+
+    /// Applies the op's local state change, then sends it to the engine. A prompt starts a turn.
+    pub(super) fn dispatch_op(&mut self, op: Op) {
+        match &op {
+            Op::Prompt(_) => return self.start_turn(op),
+            Op::Interrupt => self.status_bar.set_status(Status::Cancelling),
+            Op::Shutdown => self.should_quit = true,
+            Op::Resume { .. } => self.input.set_enabled(false),
+            Op::Compact { .. } => {
+                self.input.set_enabled(false);
+                self.status_bar.set_status(Status::Compacting);
+            }
+            Op::Login => {
+                self.input.set_enabled(false);
+                self.status_bar.set_status(Status::SigningIn);
+            }
+            Op::Queue(_)
+            | Op::Resolve { .. }
+            | Op::SetModel { .. }
+            | Op::Clear
+            | Op::Archive
+            | Op::Rename { .. }
+            | Op::Logout => {}
+        }
+        self.send_op(op);
+    }
+
+    /// Sends `op` to the engine. Channel errors surface as chat error blocks.
+    fn send_op(&mut self, op: Op) {
+        if let Err(e) = self.ops.try_send(op) {
+            match e {
+                mpsc::error::TrySendError::Closed(_) => {
+                    self.chat
+                        .push_error("The engine stopped unexpectedly. Restart `ox` to recover.");
+                    self.input.set_enabled(false);
+                    self.should_quit = true;
+                }
+                // An approval decision is a control-plane reply the engine is waiting for, so a
+                // dropped one leaves the turn blocked until the user cancels it.
+                mpsc::error::TrySendError::Full(Op::Resolve { .. }) => {
+                    self.chat.push_error(
+                        "Approval could not be delivered. Press Esc to cancel the blocked turn.",
+                    );
+                }
+                mpsc::error::TrySendError::Full(_) => {
+                    self.chat
+                        .push_error("Op channel is full, so the request was dropped.");
+                }
+            }
+        }
+    }
+
+    /// Quits on a second Ctrl+C inside the exit window, or arms the window.
+    fn confirm_exit(&mut self) {
+        if let Status::ExitArmed { until } = self.status_bar.status()
+            && Instant::now() < *until
+        {
+            self.should_quit = true;
+        } else {
+            let until = Instant::now() + EXIT_WINDOW;
+            self.status_bar.set_status(Status::ExitArmed { until });
+        }
+    }
+
+    /// Returns `true` when an [`Status::ExitArmed`] window has elapsed and the bar was reset.
+    pub(super) fn expire_armed_exit(&mut self) -> bool {
+        if let Status::ExitArmed { until } = self.status_bar.status()
+            && Instant::now() >= *until
+        {
+            self.status_bar.set_status(Status::Idle);
+            return true;
+        }
+        false
+    }
+
+    fn preview_theme(&mut self, name: &str) {
+        if let Some(preview) = theme::load_builtin(name) {
+            if self.preview_theme_snapshot.is_none() {
+                self.preview_theme_snapshot = Some(self.theme.clone());
+            }
+            self.apply_theme(&preview);
+        } else {
+            tracing::warn!(
+                name,
+                "PreviewTheme: unknown built-in, so the picker roster drifted"
+            );
+        }
+    }
+
+    fn swap_theme(&mut self, name: &str) {
+        self.preview_theme_snapshot = None;
+        if let Some(theme) = theme::load_builtin(name) {
+            name.clone_into(&mut self.session_info.config.theme_name);
+            self.apply_theme(&theme);
+            self.chat
+                .push_system_message(format!("Theme set to {name}."));
+        } else {
+            tracing::warn!(
+                name,
+                "SwapTheme: unknown built-in, so the picker roster drifted"
+            );
+        }
+    }
+
+    /// Queues the prompt, then starts a turn with the queue head when idle. Slash commands forward
+    /// their own synthesized actions.
+    fn handle_submit_prompt(&mut self, text: &str) {
+        if self.input.is_enabled() {
+            if let Some(parsed) = slash::parse_slash(text) {
+                if slash::echoes_input(&parsed) {
+                    self.chat.push_user_message(text.to_owned());
+                }
+                if let Some(action) = self.run_slash(&parsed) {
+                    if matches!(action, Action::Op(Op::Prompt(_))) && slash::echoes_input(&parsed) {
+                        self.active_prompt = Some(text.to_owned());
+                    }
+                    self.dispatch_action(action);
+                }
+                return;
+            }
+            // Prompts a cancel left queued run before this one.
+            self.pending_prompts.push_back(text.to_owned());
+            self.drain_pending_prompt();
+            return;
+        }
+        if let Some(parsed) = slash::parse_slash(text) {
+            if slash::echoes_input(&parsed) {
+                self.chat.push_user_message(text.to_owned());
+            }
+            match slash::classify(&parsed) {
+                SlashKind::ReadOnly | SlashKind::Unknown => _ = self.run_slash(&parsed),
+                SlashKind::Mutating => {
+                    self.chat.push_system_message(format!(
+                        "/{} runs only when idle. Try again after the turn finishes.",
+                        parsed.name,
+                    ));
+                }
+            }
+            return;
+        }
+        self.pending_prompts.push_back(text.to_owned());
+        self.forward_queued_prompts();
+    }
+
+    /// Starts a turn, then hands it the queued prompts so they splice in at its round boundaries.
+    pub(super) fn start_turn(&mut self, prompt: Op) {
+        self.input.set_enabled(false);
+        self.status_bar.set_status(Status::Streaming);
+        self.send_op(prompt);
+        self.forward_queued_prompts();
+    }
+
+    /// Forwards the queued prompts the in-flight turn lacks. Holds them while compacting, signing
+    /// in, or cancelling, when no turn may be left to splice them in.
+    pub(super) fn forward_queued_prompts(&mut self) {
+        if matches!(
+            self.status_bar.status(),
+            Status::Compacting | Status::SigningIn | Status::Cancelling,
+        ) {
+            return;
+        }
+        while let Some(queued) = self.pending_prompts.get(self.forwarded_prompts) {
+            let prompt = slash::unescape_literal(queued).to_owned();
+            self.send_op(Op::Queue(prompt));
+            self.forwarded_prompts += 1;
+        }
+    }
+
+    /// Runs `parsed` and applies its outcome, returning the action it asks the caller to route.
+    fn run_slash(&mut self, parsed: &Parsed) -> Option<Action> {
+        let ctx = SlashContext::new(&self.session_info, self.status_bar.title());
+        let outcome = slash::dispatch(parsed, &ctx);
+        self.apply_slash_outcome(outcome)
+    }
+
+    /// Shows a slash command's chat output or modal, returning a forwarded action unapplied.
+    fn apply_slash_outcome(&mut self, outcome: Result<SlashOutcome, String>) -> Option<Action> {
+        match outcome {
+            Ok(SlashOutcome::Forward(action)) => return Some(action),
+            Ok(SlashOutcome::Modal(modal)) => self.modals.push(modal),
+            Ok(SlashOutcome::SystemMessage(text)) => self.chat.push_system_message(text),
+            Ok(SlashOutcome::GitDiff(diff)) => self.chat.push_git_diff(diff),
+            Err(msg) => self.chat.push_error(&msg),
+        }
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crossterm::event::{KeyModifiers, MouseEvent, MouseEventKind};
+
+    use super::*;
+    use crate::config::Effort;
+    use crate::protocol::{Decision, Event};
+    use crate::tool::{ApprovalBody, ApprovalPreview};
+    use crate::tui::app::testing::{
+        FakeModal, key_event, long_chat_block, push_answerable_approval, render_app, rendered_text,
+        test_app,
+    };
+    use crate::tui::modal::testing::ScriptedModal;
+
+    // ── handle_crossterm_event ──
+
+    #[tokio::test]
+    async fn handle_crossterm_key_submit_forwards_through_input_to_dispatch() {
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        // Type "hi" then Enter. Input returns `Action::Submit`, which must reach `dispatch_action`.
+        app.handle_crossterm_event(&key_event(KeyCode::Char('h'), KeyModifiers::NONE));
+        app.handle_crossterm_event(&key_event(KeyCode::Char('i'), KeyModifiers::NONE));
+        app.handle_crossterm_event(&key_event(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(app.dirty);
+        assert_eq!(app.chat.entry_count(), 1);
+        assert_eq!(app.status_bar.status(), &Status::Streaming);
+        let forwarded = rx.recv().await.unwrap();
+        assert!(matches!(forwarded, Op::Prompt(s) if s == "hi"));
+    }
+
+    #[test]
+    fn handle_crossterm_key_ctrl_c_idle_arms_exit_then_confirms() {
+        // First press arms; second press inside the window confirms.
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(!app.should_quit, "first press only arms");
+        assert!(matches!(app.status_bar.status(), Status::ExitArmed { .. }));
+
+        app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(app.should_quit, "second press within window confirms");
+    }
+
+    #[tokio::test]
+    async fn handle_crossterm_key_ctrl_c_busy_forwards_interrupt_without_quitting() {
+        // Mid-turn Ctrl+C forwards `Interrupt` to the engine and leaves `should_quit` clear.
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.handle_engine_event(Event::StreamToken("partial".into()));
+        assert!(!app.input.is_enabled());
+
+        app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(!app.should_quit, "busy Ctrl+C must not exit");
+        let forwarded = rx.recv().await.expect("Interrupt forwarded to the engine");
+        assert!(matches!(forwarded, Op::Interrupt));
+    }
+
+    #[tokio::test]
+    async fn handle_crossterm_key_esc_busy_forwards_interrupt() {
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.handle_engine_event(Event::StreamToken("partial".into()));
+
+        app.handle_crossterm_event(&key_event(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.should_quit);
+        let forwarded = rx.recv().await.expect("Interrupt forwarded to the engine");
+        assert!(matches!(forwarded, Op::Interrupt));
+    }
+
+    #[test]
+    fn handle_crossterm_event_mouse_is_forwarded_to_chat() {
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.chat.push_system_message(long_chat_block());
+        _ = render_app(&mut app, 60, 10);
+
+        app.handle_crossterm_event(&CrosstermEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        }));
+        let text = rendered_text(&mut app, 60, 10);
+
+        assert!(text.contains("Jump to bottom"), "{text}");
+        assert!(app.dirty);
+    }
+
+    #[test]
+    fn handle_crossterm_resize_schedules_dirty_for_relayout() {
+        // Resize falls through to `dirty = true` so the next tick re-splits with the new area.
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.dirty = false;
+        app.handle_crossterm_event(&CrosstermEvent::Resize(80, 24));
+        assert!(app.dirty, "Resize must trigger a re-layout render");
+    }
+
+    #[test]
+    fn handle_crossterm_unknown_event_is_a_noop() {
+        // The `_ => return` arm prevents FocusGained / FocusLost from forcing re-renders.
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.dirty = false;
+        app.handle_crossterm_event(&CrosstermEvent::FocusGained);
+        assert!(!app.dirty);
+    }
+
+    #[test]
+    fn handle_crossterm_key_release_is_ignored() {
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.input.set_text("hi");
+        app.dirty = false;
+
+        app.handle_crossterm_event(&CrosstermEvent::Key(KeyEvent::new_with_kind(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+            KeyEventKind::Release,
+        )));
+
+        assert!(rx.try_recv().is_err(), "a release must not submit");
+        assert_eq!(app.input.lines(), vec!["hi".to_owned()]);
+        assert!(!app.dirty);
+    }
+
+    #[test]
+    fn handle_crossterm_page_up_scrolls_chat_while_idle_and_ctrl_end_jumps_back() {
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.chat.push_system_message(long_chat_block());
+        _ = render_app(&mut app, 80, 20);
+        app.input.set_text("draft");
+
+        app.handle_crossterm_event(&key_event(KeyCode::PageUp, KeyModifiers::NONE));
+        assert!(app.chat.is_scrolled_up(), "idle PageUp reaches chat");
+
+        app.handle_crossterm_event(&key_event(KeyCode::End, KeyModifiers::CONTROL));
+        assert!(
+            !app.chat.is_scrolled_up(),
+            "Ctrl+End jumps chat to the bottom"
+        );
+        assert_eq!(app.input.lines(), vec!["draft".to_owned()]);
+    }
+
+    #[test]
+    fn handle_crossterm_up_scrolls_chat_once_the_input_cursor_reaches_the_top() {
+        // Alternate-scroll turns wheel ticks into Up, so an idle prompt must still scroll chat.
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.chat.push_system_message(long_chat_block());
+        _ = render_app(&mut app, 80, 20);
+        app.input.set_text("one\ntwo");
+
+        app.handle_crossterm_event(&key_event(KeyCode::Up, KeyModifiers::NONE));
+        assert!(
+            !app.chat.is_scrolled_up(),
+            "first Up moves the input cursor"
+        );
+
+        app.handle_crossterm_event(&key_event(KeyCode::Up, KeyModifiers::NONE));
+        assert!(app.chat.is_scrolled_up(), "Up on the top row scrolls chat");
+    }
+
+    #[test]
+    fn handle_crossterm_popup_arrows_while_busy_leave_chat_scroll_alone() {
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.chat.push_system_message(long_chat_block());
+        _ = render_app(&mut app, 80, 20);
+        app.handle_engine_event(Event::StreamToken("partial".into()));
+        app.handle_crossterm_event(&key_event(KeyCode::Char('/'), KeyModifiers::NONE));
+        assert!(app.input.popup_visible());
+
+        app.handle_crossterm_event(&key_event(KeyCode::Up, KeyModifiers::NONE));
+
+        assert!(!app.chat.is_scrolled_up(), "the popup consumed Up");
+    }
+
+    #[test]
+    fn handle_crossterm_paste_fills_the_input_without_submitting() {
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dirty = false;
+
+        app.handle_crossterm_event(&CrosstermEvent::Paste(
+            "first line\r\nsecond line".to_owned(),
+        ));
+
+        assert_eq!(
+            app.input.lines(),
+            vec!["first line".to_owned(), "second line".to_owned()],
+        );
+        assert!(rx.try_recv().is_err(), "a paste never submits");
+        assert_eq!(app.chat.entry_count(), 0);
+        assert!(app.dirty);
+    }
+
+    #[tokio::test]
+    async fn handle_crossterm_popup_enter_dispatches_canonical_command() {
+        // `/h` filters to /help; Enter dispatches it. /help is read-only so chat
+        // lands a system message and the engine receives nothing.
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.handle_crossterm_event(&key_event(KeyCode::Char('/'), KeyModifiers::NONE));
+        app.handle_crossterm_event(&key_event(KeyCode::Char('h'), KeyModifiers::NONE));
+        assert!(app.input.popup_visible());
+
+        app.handle_crossterm_event(&key_event(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(!app.input.popup_visible(), "submit clears popup");
+        assert!(
+            !app.chat.last_is_error(),
+            "/help must produce a system message, not an error",
+        );
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "slash command stays client-side",
+        );
+    }
+
+    #[test]
+    fn handle_crossterm_popup_tab_completes_canonical_name_into_buffer() {
+        // Tab inserts `/{name} ` and hides the popup. Filter to /help so the test pins
+        // the completion shape independent of BUILT_INS ordering.
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.handle_crossterm_event(&key_event(KeyCode::Char('/'), KeyModifiers::NONE));
+        app.handle_crossterm_event(&key_event(KeyCode::Char('h'), KeyModifiers::NONE));
+
+        app.handle_crossterm_event(&key_event(KeyCode::Tab, KeyModifiers::NONE));
+
+        assert!(!app.input.popup_visible(), "Tab hides the popup");
+        assert_eq!(
+            app.input.lines(),
+            vec!["/help ".to_owned()],
+            "buffer reflects the completed canonical name + space",
+        );
+    }
+
+    // ── modal gate ──
+
+    #[tokio::test]
+    async fn modal_gate_intercepts_keys_before_input_sees_them() {
+        // Modal keys must not reach input.
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.push_modal(Box::new(ScriptedModal::new(ModalAction::Dispatch(
+            Action::Op(Op::Interrupt),
+        ))));
+
+        app.handle_crossterm_event(&key_event(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(
+            app.input.lines().iter().all(String::is_empty),
+            "input must stay empty while modal is active",
+        );
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "no Op must reach ops for a key the modal consumed",
+        );
+
+        // Modal submit flows through the normal dispatch path.
+        app.handle_crossterm_event(&key_event(KeyCode::Char('s'), KeyModifiers::NONE));
+        let forwarded = rx.recv().await.expect("modal-submitted action forwarded");
+        assert!(matches!(forwarded, Op::Interrupt));
+    }
+
+    #[tokio::test]
+    async fn modal_gate_routes_pastes_to_the_top_modal() {
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("/rename".to_owned()));
+
+        app.handle_crossterm_event(&CrosstermEvent::Paste("Fix auth\r\nflow".to_owned()));
+        app.handle_crossterm_event(&key_event(KeyCode::Enter, KeyModifiers::NONE));
+
+        let forwarded = rx.recv().await.expect("rename forwarded");
+        assert_eq!(
+            forwarded,
+            Op::Rename {
+                title: "Fix auth flow".to_owned(),
+            },
+        );
+        assert!(app.input.is_empty(), "the hidden input must stay empty");
+    }
+
+    #[test]
+    fn modal_gate_paste_never_answers_an_approval() {
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        push_answerable_approval(&mut app, "rm -rf build");
+        _ = render_app(&mut app, 60, 20);
+
+        app.handle_crossterm_event(&CrosstermEvent::Paste("y\n".to_owned()));
+
+        assert!(rx.try_recv().is_err(), "a paste must not decide the call");
+        assert!(app.modals.is_active());
+        assert!(app.input.is_empty());
+    }
+
+    #[test]
+    fn modal_gate_lets_mouse_scrolls_reach_chat() {
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.chat.push_system_message(long_chat_block());
+        app.push_modal(Box::new(FakeModal::new("Picker")));
+        _ = render_app(&mut app, 60, 20);
+
+        app.handle_crossterm_event(&CrosstermEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        }));
+
+        assert!(
+            app.chat.is_scrolled_up(),
+            "a scroll reaches chat under a modal"
+        );
+        assert!(app.modals.is_active());
+    }
+
+    #[test]
+    fn modal_gate_cancel_closes_modal_without_dispatching() {
+        // `ModalKey::Cancelled` pops the modal without dispatching; next key reaches input.
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.push_modal(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
+        app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::NONE));
+
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "Cancelled must not dispatch any Op",
+        );
+        // Modal closed; subsequent keys reach the input.
+        app.handle_crossterm_event(&key_event(KeyCode::Char('y'), KeyModifiers::NONE));
+        assert_eq!(app.input.lines(), vec!["y".to_owned()]);
+    }
+
+    #[test]
+    fn clear_modals_resolves_a_pending_approval_to_abort() {
+        // A session swap clears the stack while an approval is outstanding. The cancel hook's Abort
+        // must reach the engine so the blocked turn is not stranded waiting for a decision.
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.handle_engine_event(Event::ApprovalRequested {
+            id: "call-1".to_owned(),
+            preview: ApprovalPreview {
+                title: "Bash(rm -rf /)".to_owned(),
+                body: ApprovalBody::Command("rm -rf /".to_owned()),
+            },
+            grant: None,
+        });
+
+        app.clear_modals();
+
+        let forwarded = rx
+            .try_recv()
+            .expect("clear must forward the cancel-hook abort");
+        assert!(matches!(
+            forwarded,
+            Op::Resolve {
+                id,
+                decision: Decision::Abort,
+            } if id == "call-1"
+        ));
+    }
+
+    // ── handle_esc ──
+
+    #[tokio::test]
+    async fn handle_esc_busy_dispatches_interrupt() {
+        // Esc is routed by `App` because its meaning depends on queue state and run-state.
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.handle_engine_event(Event::StreamToken("partial".into()));
+        app.handle_crossterm_event(&key_event(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.status_bar.status(), &Status::Cancelling);
+        let forwarded = rx.recv().await.expect("Interrupt forwarded");
+        assert!(matches!(forwarded, Op::Interrupt));
+    }
+
+    #[test]
+    fn handle_esc_idle_with_empty_queue_is_silent() {
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.handle_crossterm_event(&key_event(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.status_bar.status(), &Status::Idle);
+        assert!(app.pending_prompts.is_empty());
+    }
+
+    #[test]
+    fn handle_esc_idle_with_queue_pops_most_recent_into_input() {
+        // The most-recent (back of FIFO) returns to input; the rest stay queued.
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.pending_prompts.push_back("first".into());
+        app.pending_prompts.push_back("second".into());
+
+        app.handle_crossterm_event(&key_event(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert_eq!(app.input.lines(), vec!["second".to_owned()]);
+        assert_eq!(
+            app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
+            vec!["first".to_owned()],
+        );
+    }
+
+    #[test]
+    fn handle_esc_idle_with_buffer_content_refuses_pop() {
+        // Esc must not clobber an in-progress draft.
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.pending_prompts.push_back("queued".into());
+        app.input.set_text("draft");
+
+        app.handle_crossterm_event(&key_event(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert_eq!(app.input.lines(), vec!["draft".to_owned()]);
+        assert_eq!(
+            app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
+            vec!["queued".to_owned()],
+        );
+    }
+
+    #[test]
+    fn handle_esc_with_popup_visible_dismisses_popup_and_leaves_queue_intact() {
+        // The popup gate sits in front of App's Esc routing — popup hides, queue stays put.
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.pending_prompts.push_back("queued".into());
+        app.handle_crossterm_event(&key_event(KeyCode::Char('/'), KeyModifiers::NONE));
+        assert!(app.input.popup_visible(), "/ opens the popup");
+
+        app.handle_crossterm_event(&key_event(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert!(!app.input.popup_visible(), "Esc dismisses the popup");
+        assert_eq!(
+            app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
+            vec!["queued".to_owned()],
+            "queue must not be peeled while popup owns Esc",
+        );
+    }
+
+    // ── dispatch_action ──
+
+    #[tokio::test]
+    async fn dispatch_submit_prompt_updates_chat_status_and_forwards_action() {
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("hello".to_owned()));
+
+        assert_eq!(app.chat.entry_count(), 1);
+        assert!(!app.input.is_enabled(), "streaming disables input");
+        assert_eq!(app.status_bar.status(), &Status::Streaming);
+        assert!(!app.should_quit);
+        let forwarded = rx.recv().await.expect("forwarded action");
+        assert!(matches!(forwarded, Op::Prompt(s) if s == "hello"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_slash_command_renders_locally_without_forwarding() {
+        // Slash commands stay client-side, so the engine never sees the prompt.
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("/help".to_owned()));
+
+        assert!(app.modals.is_active(), "/help opens a modal");
+        assert_eq!(
+            app.chat.entry_count(),
+            0,
+            "modal-only commands push no chat blocks and suppress their own echo",
+        );
+        assert!(
+            app.input.is_enabled(),
+            "slash command must not flip input to streaming",
+        );
+        assert_eq!(app.status_bar.status(), &Status::Idle);
+        assert!(
+            !app.chat.last_is_error(),
+            "/help must not produce an error block",
+        );
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn dispatch_unknown_slash_command_renders_error_without_forwarding() {
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("/no-such".to_owned()));
+
+        assert_eq!(app.chat.entry_count(), 2);
+        assert!(app.input.is_enabled());
+        assert!(app.chat.last_is_error());
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn dispatch_double_slash_escapes_command_and_forwards_literal() {
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("//etc/hosts".to_owned()));
+
+        assert_eq!(app.chat.entry_count(), 1, "only the user message");
+        assert!(!app.input.is_enabled(), "streaming disables input");
+        assert_eq!(app.status_bar.status(), &Status::Streaming);
+        assert!(!app.chat.last_is_error());
+        let forwarded = rx.recv().await.expect("forwarded action");
+        assert!(matches!(
+            forwarded,
+            Op::Prompt(s) if s == "/etc/hosts",
+        ));
+        assert_eq!(
+            app.active_prompt.as_deref(),
+            Some("/etc/hosts"),
+            "a post-compaction re-echo shows the literal text",
+        );
+        let text = rendered_text(&mut app, 60, 10);
+        assert!(
+            text.contains("/etc/hosts") && !text.contains("//etc"),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_op_interrupt_flips_status_to_cancelling_and_forwards() {
+        // An interrupt flips status immediately, and `Event::Cancelled` later returns to idle.
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("hi".to_owned()));
+        rx.recv().await.expect("submit forwarded");
+        let entries_before = app.chat.entry_count();
+
+        app.dispatch_action(Action::Op(Op::Interrupt));
+
+        assert_eq!(app.chat.entry_count(), entries_before, "no new chat entry");
+        assert_eq!(app.status_bar.status(), &Status::Cancelling);
+        assert!(!app.should_quit);
+        let forwarded = rx.recv().await.expect("Interrupt forwarded");
+        assert!(matches!(forwarded, Op::Interrupt));
+    }
+
+    #[test]
+    fn dispatch_op_shutdown_sets_should_quit_and_leaves_chat_untouched() {
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Op(Op::Shutdown));
+
+        assert!(app.should_quit);
+        assert_eq!(app.chat.entry_count(), 0);
+        // Shutdown skips streaming setup so tear-down doesn't have to un-spinner.
+        assert_eq!(app.status_bar.status(), &Status::Idle);
+    }
+
+    #[test]
+    fn dispatch_closed_channel_surfaces_error_and_quits() {
+        // Dropping `op_rx` simulates a stopped engine, which the UI announces before teardown.
+        let (mut app, rx, _event_tx) = test_app(None);
+        drop(rx);
+
+        app.dispatch_action(Action::Submit("hi".to_owned()));
+
+        assert!(app.should_quit, "closed channel must trigger teardown");
+        assert!(
+            !app.input.is_enabled(),
+            "input stays disabled during teardown"
+        );
+        // User message pushed before try_send, error block after.
+        assert_eq!(app.chat.entry_count(), 2);
+        assert!(
+            app.chat.last_is_error(),
+            "closed-channel error should be the final block"
+        );
+    }
+
+    #[test]
+    fn dispatch_full_channel_surfaces_error_but_keeps_app_alive() {
+        // `Interrupt` always goes through `try_send`, so it's the natural way to overflow
+        // (busy-turn submits buffer locally instead).
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("active".to_owned()));
+        for _ in 0..7 {
+            app.dispatch_action(Action::Op(Op::Interrupt));
+        }
+        let before_overflow = app.chat.entry_count();
+
+        app.dispatch_action(Action::Op(Op::Interrupt));
+
+        assert!(!app.should_quit, "Full is not fatal");
+        assert_eq!(
+            app.chat.entry_count(),
+            before_overflow + 1,
+            "exactly one error block on overflow",
+        );
+        assert!(app.chat.last_is_error());
+    }
+
+    #[test]
+    fn dispatch_full_channel_on_approval_points_to_the_cancel_recovery() {
+        // A dropped approval decision blocks the turn, unlike a dropped prompt, so the error must
+        // name the recovery path rather than the generic prompt-dropped message.
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("active".to_owned()));
+        for _ in 0..8 {
+            app.dispatch_action(Action::Op(Op::Interrupt));
+        }
+
+        app.dispatch_action(Action::Op(Op::Resolve {
+            id: "call-1".to_owned(),
+            decision: Decision::Approve,
+        }));
+
+        assert!(!app.should_quit, "Full is not fatal");
+        assert!(app.chat.last_is_error());
+        assert!(
+            app.chat
+                .last_error_text()
+                .is_some_and(|t| t.contains("Esc to cancel")),
+            "approval-drop error should name the cancel recovery",
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_submit_during_busy_queues_and_forwards_for_mid_turn_drain() {
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("first".to_owned()));
+        rx.recv().await.expect("first submit forwarded");
+
+        app.dispatch_action(Action::Submit("queued".to_owned()));
+
+        // Buffered for preview AND forwarded so `agent_turn` can splice it at the next
+        // round boundary. Chat stays untouched until `PromptDrained` lands.
+        assert_eq!(
+            app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
+            vec!["queued".to_owned()],
+        );
+        assert_eq!(app.status_bar.status(), &Status::Streaming);
+        let forwarded = rx.recv().await.expect("queued submit forwarded");
+        assert_eq!(forwarded, Op::Queue("queued".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn dispatch_op_forwards_engine_ops_unchanged() {
+        // A modal-emitted `SetModel` must reach the engine so it can emit `ConfigChanged`.
+        for op in [
+            Op::SetModel {
+                model: Some(crate::model::ResolvedModelId::new(
+                    "claude-opus-5-5".to_owned(),
+                )),
+                effort: None,
+            },
+            Op::SetModel {
+                model: None,
+                effort: Some(Effort::High),
+            },
+            Op::Clear,
+        ] {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            app.dispatch_op(op.clone());
+
+            let forwarded = rx.recv().await.expect("op forwarded to the engine");
+            assert_eq!(forwarded, op);
+            assert!(!app.should_quit);
+            assert_eq!(app.chat.entry_count(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_resume_forwards_to_the_engine_and_disables_input_until_event() {
+        // Pin: between forwarding `Resume` and the SessionResumed event landing, input must be
+        // gated so a typed prompt doesn't push into chat just before `apply_session_resumed`'s
+        // `clear_history` wipes it. `finalize_idle` inside the resumed handler re-enables input.
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        let action = Op::Resume {
+            path: "resume-target.jsonl".into(),
+        };
+        app.dispatch_op(action.clone());
+
+        let forwarded = rx.recv().await.expect("Resume must reach the engine");
+        assert_eq!(forwarded, action);
+        assert!(
+            !app.input.is_enabled(),
+            "input must be gated until the resume event lands",
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_compact_forwards_to_the_engine_and_disables_input_until_event() {
+        // Mirror of the Resume gate: the chat is about to be wiped by `apply_session_compacted`,
+        // so the user's input must be parked until SessionCompacted re-enables it.
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        let action = Op::Compact {
+            instructions: Some("focus".to_owned()),
+        };
+        app.dispatch_op(action.clone());
+
+        let forwarded = rx.recv().await.expect("Compact must reach the engine");
+        assert_eq!(forwarded, action);
+        assert!(
+            !app.input.is_enabled(),
+            "input must be gated until the compact event lands",
+        );
+        assert_eq!(app.status_bar.status(), &Status::Compacting);
+    }
+
+    #[tokio::test]
+    async fn dispatch_login_disables_input_and_holds_prompts_typed_while_signing_in() {
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_op(Op::Login);
+
+        assert_eq!(rx.recv().await, Some(Op::Login));
+        assert!(!app.input.is_enabled());
+        assert_eq!(app.status_bar.status(), &Status::SigningIn);
+
+        app.dispatch_action(Action::Submit("typed-while-signing-in".to_owned()));
+
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "no turn exists to splice a prompt into while signing in",
+        );
+        assert_eq!(
+            app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
+            vec!["typed-while-signing-in".to_owned()],
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_submit_during_cancelling_holds_locally_without_forwarding() {
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("active".to_owned()));
+        rx.recv().await.expect("active submit forwarded");
+        app.dispatch_action(Action::Op(Op::Interrupt));
+        rx.recv().await.expect("cancel forwarded");
+        assert_eq!(app.status_bar.status(), &Status::Cancelling);
+
+        app.dispatch_action(Action::Submit("typed-during-cancel".to_owned()));
+
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "submit during cancel must not reach the engine",
+        );
+        assert_eq!(
+            app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
+            vec!["typed-during-cancel".to_owned()],
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_submit_during_compacting_holds_locally_without_forwarding() {
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Op(Op::Compact { instructions: None }));
+        rx.recv().await.expect("compact forwarded");
+        assert_eq!(app.status_bar.status(), &Status::Compacting);
+
+        app.dispatch_action(Action::Submit("typed-during-compact".to_owned()));
+
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "submit during compact must wait for SessionCompacted to drain it",
+        );
+        assert_eq!(
+            app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
+            vec!["typed-during-compact".to_owned()],
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_read_only_slash_during_busy_runs_client_side_without_queueing() {
+        // Read-only slash commands during busy run client-side immediately; queueing them
+        // would make the LLM answer `/help` literally on drain.
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("active".to_owned()));
+        rx.recv().await.expect("active submit forwarded");
+        assert_eq!(app.status_bar.status(), &Status::Streaming);
+
+        app.dispatch_action(Action::Submit("/help".to_owned()));
+
+        assert!(
+            app.pending_prompts.is_empty(),
+            "slash command must not queue",
+        );
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "slash command must not forward to ops",
+        );
+        // Only the original "active" prompt: /help is modal-only and suppresses its own echo.
+        assert_eq!(app.chat.entry_count(), 1);
+        assert!(!app.chat.last_is_error());
+        assert!(app.modals.is_active(), "/help opens a modal");
+    }
+
+    #[tokio::test]
+    async fn dispatch_clear_during_busy_refuses_with_system_message_no_dispatch() {
+        // State-mutating commands refuse mid-turn — rolling while `messages` is still draining
+        // would race the in-flight turn into the wrong JSONL.
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("active".to_owned()));
+        rx.recv().await.expect("active submit forwarded");
+
+        app.dispatch_action(Action::Submit("/clear".to_owned()));
+
+        assert!(app.pending_prompts.is_empty());
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "neither a prompt nor Clear may reach the engine",
+        );
+        let body = app.chat.last_system_text().expect("refusal system message");
+        assert!(
+            body.contains("/clear runs only when idle"),
+            "refusal must name the command and gate: {body}",
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_init_forwards_synthesized_prompt_and_flips_to_streaming() {
+        // Chat shows only `/init`, while the engine must receive the synthesized body.
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("/init".to_owned()));
+
+        assert_eq!(app.chat.entry_count(), 1, "only the typed `/init` line");
+        assert!(!app.input.is_enabled(), "Streaming disables input");
+        assert_eq!(app.status_bar.status(), &Status::Streaming);
+        let forwarded = rx.recv().await.expect("synthesized prompt forwarded");
+        assert!(
+            matches!(
+                &forwarded,
+                Op::Prompt(body) if body.contains("AGENTS.md") && body != "/init"
+            ),
+            "expected a prompt with the expanded body, got {forwarded:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_init_during_busy_refuses_with_system_message_no_forward() {
+        // Mutating: refuse. Typed `/init` row still lands; only the synthesized body suppresses.
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("active".to_owned()));
+        rx.recv().await.expect("active submit forwarded");
+
+        app.dispatch_action(Action::Submit("/init".to_owned()));
+
+        assert!(app.pending_prompts.is_empty());
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "no synthesized prompt must reach ops mid-turn",
+        );
+        assert_eq!(
+            app.chat.entry_count(),
+            3,
+            "active prompt + typed /init + system refusal",
+        );
+        let body = app.chat.last_system_text().expect("refusal system message");
+        assert!(
+            body.contains("/init runs only when idle"),
+            "refusal must name the command and gate: {body}",
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_arg_bearing_slash_during_busy_refuses_locally() {
+        // `/model <id>` and `/effort <level>` both mutate Client; pin both so a regression
+        // that special-cases only one leaks the other.
+        for (cmd, gate_phrase) in [
+            ("/model opus", "/model runs only when idle"),
+            ("/effort xhigh", "/effort runs only when idle"),
+        ] {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            app.dispatch_action(Action::Submit("active".to_owned()));
+            rx.recv().await.expect("active submit forwarded");
+
+            app.dispatch_action(Action::Submit(cmd.to_owned()));
+
+            assert!(
+                matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+                "{cmd}: action must not reach ops mid-turn",
+            );
+            let body = app.chat.last_system_text().expect("refusal system message");
+            assert!(body.contains(gate_phrase), "{cmd}: refusal: {body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_config_modal_slash_during_busy_refuses_locally() {
+        for (cmd, gate_phrase) in [
+            ("/model", "/model runs only when idle"),
+            ("/effort", "/effort runs only when idle"),
+        ] {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            app.dispatch_action(Action::Submit("active".to_owned()));
+            rx.recv().await.expect("active submit forwarded");
+
+            app.dispatch_action(Action::Submit(cmd.to_owned()));
+
+            assert!(
+                !app.modals.is_active(),
+                "{cmd}: modal must not open mid-turn"
+            );
+            assert!(
+                matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+                "{cmd}: action must not reach ops mid-turn",
+            );
+            let body = app.chat.last_system_text().expect("refusal system message");
+            assert!(body.contains(gate_phrase), "{cmd}: refusal: {body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_unknown_slash_during_busy_renders_error_no_queue() {
+        // Unknown commands route through `dispatch` so the user sees
+        // the canonical "unknown command" error with recovery hints
+        // (alternatives + `//` escape) instead of the prompt being silently sent to the LLM.
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("active".to_owned()));
+        rx.recv().await.expect("active submit forwarded");
+
+        app.dispatch_action(Action::Submit("/nope".to_owned()));
+
+        assert!(app.pending_prompts.is_empty());
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty),
+        ));
+        assert!(app.chat.last_is_error());
+    }
+
+    // ── expire_armed_exit ──
+
+    #[test]
+    fn expire_armed_exit_becomes_idle_after_window() {
+        // After the 1 s window the armed state evaporates so the user
+        // isn't left staring at an exit hint they didn't act on.
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::ConfirmExit);
+        // Force an expired deadline so the test doesn't sleep.
+        let until = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(1))
+            .expect("monotonic clock has run for at least one second since boot");
+        app.status_bar.set_status(Status::ExitArmed { until });
+
+        assert!(app.expire_armed_exit(), "stale armed state must clear");
+        assert_eq!(app.status_bar.status(), &Status::Idle);
+    }
+
+    #[test]
+    fn expire_armed_exit_when_not_armed_is_a_noop() {
+        // Tick path calls `expire_armed_exit` every frame regardless of
+        // status; the false branch must leave the bar untouched and
+        // skip the dirty bump that would otherwise wake the renderer.
+        let (mut app, _rx, _event_tx) = test_app(None);
+        assert_eq!(app.status_bar.status(), &Status::Idle);
+
+        assert!(
+            !app.expire_armed_exit(),
+            "no-op when status isn't ExitArmed",
+        );
+        assert_eq!(app.status_bar.status(), &Status::Idle);
+    }
+
+    // ── dispatch_action: theme ──
+
+    #[test]
+    fn preview_theme_repaints_components_and_caches_original() {
+        let (mut app, _rx, _event_tx) = test_app(None);
+        let original = app.theme.clone();
+        app.dispatch_action(Action::PreviewTheme {
+            name: "latte".to_owned(),
+        });
+        assert!(
+            app.preview_theme_snapshot.is_some(),
+            "first PreviewTheme must cache the original",
+        );
+        assert_ne!(app.theme.text, original.text, "live theme must change");
+        // preview leaves session_info.config.theme_name as-is until commit.
+        assert_eq!(app.session_info.config.theme_name, "mocha");
+    }
+
+    #[test]
+    fn preview_theme_then_modal_cancel_restores_original() {
+        // Esc / Ctrl+C surface as ModalAction::Cancelled, so the snapshot must roll back.
+        let (mut app, _rx, _event_tx) = test_app(None);
+        let original = app.theme.clone();
+        app.dispatch_action(Action::PreviewTheme {
+            name: "latte".to_owned(),
+        });
+        app.apply_modal_action(ModalAction::Cancelled);
+        assert!(
+            app.preview_theme_snapshot.is_none(),
+            "snapshot consumed on cancel",
+        );
+        assert_eq!(app.theme.text, original.text, "theme rolled back to mocha");
+    }
+
+    #[test]
+    fn clearing_modal_stack_rolls_back_theme_preview() {
+        let (mut app, _rx, _event_tx) = test_app(None);
+        let original = app.theme.clone();
+        app.push_modal(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
+        app.dispatch_action(Action::PreviewTheme {
+            name: "latte".to_owned(),
+        });
+
+        app.clear_modals();
+
+        assert!(!app.modals.is_active());
+        assert!(app.preview_theme_snapshot.is_none());
+        assert_eq!(app.theme.text, original.text);
+    }
+
+    #[test]
+    fn modal_cancel_without_snapshot_is_a_noop() {
+        // Modals that never previewed (e.g. /model picker) cancel through the same
+        // ModalAction::Cancelled path, so the rollback arm must skip cleanly with no snapshot.
+        let (mut app, _rx, _event_tx) = test_app(None);
+        let original_text = app.theme.text;
+        app.apply_modal_action(ModalAction::Cancelled);
+        assert!(app.preview_theme_snapshot.is_none());
+        assert_eq!(app.theme.text, original_text);
+    }
+
+    #[test]
+    fn modal_system_message_action_pushes_into_chat() {
+        // Destructive-action modals (e.g. confirm-delete) report success via SystemMessage so
+        // the user has chat-stream evidence the action ran. Pin the body verbatim so a future
+        // routing change that drops the message or pushes an empty block fails here.
+        let (mut app, _rx, _event_tx) = test_app(None);
+        let entries_before = app.chat.entry_count();
+        let body = "Deleted session abc12345: Fix auth flow".to_owned();
+        app.apply_modal_action(ModalAction::SystemMessage(body.clone()));
+        assert_eq!(
+            app.chat.entry_count(),
+            entries_before + 1,
+            "SystemMessage must push exactly one block",
+        );
+        assert_eq!(app.chat.last_system_text(), Some(body.as_str()));
+    }
+
+    #[test]
+    fn preview_theme_with_unknown_name_does_nothing_and_keeps_active_theme() {
+        // Roster drift between slash + builtin tables logs via tracing only — user state stays put.
+        let (mut app, _rx, _event_tx) = test_app(None);
+        let original_text = app.theme.text;
+        let entries_before = app.chat.entry_count();
+
+        app.dispatch_action(Action::PreviewTheme {
+            name: "nonexistent".to_owned(),
+        });
+
+        assert!(
+            app.preview_theme_snapshot.is_none(),
+            "no snapshot when load_builtin returns None",
+        );
+        assert_eq!(app.theme.text, original_text, "theme stays put on drift");
+        assert_eq!(
+            app.chat.entry_count(),
+            entries_before,
+            "preview must never push a chat block",
+        );
+    }
+
+    #[test]
+    fn swap_theme_commits_and_clears_snapshot() {
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::PreviewTheme {
+            name: "latte".to_owned(),
+        });
+        let previewed = app.theme.clone();
+        app.dispatch_action(Action::SwapTheme {
+            name: "latte".to_owned(),
+        });
+        assert!(app.preview_theme_snapshot.is_none());
+        assert_eq!(app.session_info.config.theme_name, "latte");
+        assert_eq!(app.theme.text, previewed.text);
+
+        app.apply_modal_action(ModalAction::Cancelled);
+        assert_eq!(
+            app.session_info.config.theme_name, "latte",
+            "post-commit cancel must not restore the pre-preview theme",
+        );
+    }
+
+    #[tokio::test]
+    async fn swap_theme_with_unknown_name_is_a_silent_noop() {
+        // Only a dev bug can name an unknown built-in, so log via tracing and leave UI state
+        // untouched.
+        let (mut app, _rx, _event_tx) = test_app(None);
+        let original = app.session_info.config.theme_name.clone();
+        let entries_before = app.chat.entry_count();
+
+        app.dispatch_action(Action::SwapTheme {
+            name: "nonexistent".to_owned(),
+        });
+
+        assert_eq!(app.session_info.config.theme_name, original);
+        assert_eq!(
+            app.chat.entry_count(),
+            entries_before,
+            "no chat block — drift is dev-only",
+        );
+    }
+
+    // ── handle_submit_prompt ──
+
+    #[test]
+    fn submit_slash_theme_pushes_picker_onto_modal_stack() {
+        // Bare `/theme` is the ReadOnly modal-opening branch, so its `SlashOutcome::Modal` must
+        // land on `App::modals`.
+        let (mut app, _rx, _event_tx) = test_app(None);
+        assert!(!app.modals.is_active(), "stack starts empty");
+        app.dispatch_action(Action::Submit("/theme".to_owned()));
+        assert!(app.modals.is_active(), "bare `/theme` opens a picker modal");
+    }
+
+    #[test]
+    fn slash_typed_swap_theme_routes_through_local_handler() {
+        // A synthesized TUI-only action (e.g. `/theme latte`) must run the local theme arm in
+        // `dispatch_action`.
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("/theme latte".to_owned()));
+
+        assert_eq!(
+            app.session_info.config.theme_name, "latte",
+            "typed `/theme <name>` must mutate session theme",
+        );
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "TUI-only theme swap must not leak to the engine",
+        );
+    }
+
+    #[tokio::test]
+    async fn slash_typed_model_routes_synthesized_set_model_through_dispatch() {
+        // Mirrors the typed-`/theme` regression on the engine-bound side: `/model <id>` synthesizes
+        // a `SetModel` that must reach the engine via dispatch_action → dispatch_op.
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("/model haiku".to_owned()));
+
+        let forwarded = rx.recv().await.expect("SetModel forwarded to the engine");
+        match forwarded {
+            Op::SetModel { model, effort } => {
+                assert_eq!(
+                    model.as_ref().map(crate::model::ResolvedModelId::as_str),
+                    Some("claude-haiku-5-5")
+                );
+                assert_eq!(effort, None);
+            }
+            other => panic!("expected SetModel, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn submit_after_a_cancel_runs_the_held_queue_before_the_new_prompt() {
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("active".to_owned()));
+        app.dispatch_action(Action::Submit("held".to_owned()));
+        app.handle_esc();
+        app.handle_engine_event(Event::Cancelled);
+        let mut forwarded = || std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+        assert_eq!(forwarded().len(), 3, "submit, queue, and cancel");
+
+        app.dispatch_action(Action::Submit("new".to_owned()));
+
+        assert_eq!(
+            forwarded(),
+            [Op::Prompt("held".to_owned()), Op::Queue("new".to_owned())],
+        );
+        assert_eq!(
+            app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
+            ["new".to_owned()],
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_busy_double_slash_queues_the_literal_and_keeps_the_escape() {
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("active".to_owned()));
+        app.dispatch_action(Action::Submit("//etc/hosts".to_owned()));
+        app.dispatch_action(Action::Submit("//tmp".to_owned()));
+        let mut forwarded = || std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+        assert_eq!(
+            forwarded(),
+            [
+                Op::Prompt("active".to_owned()),
+                Op::Queue("/etc/hosts".to_owned()),
+                Op::Queue("/tmp".to_owned()),
+            ],
+        );
+
+        app.handle_engine_event(Event::PromptDrained("/etc/hosts".to_owned()));
+        assert_eq!(
+            app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
+            ["//tmp".to_owned()],
+            "the queue keeps the typed escape so Esc restores it",
+        );
+
+        app.handle_engine_event(Event::Cancelled);
+        app.dispatch_action(Action::Submit("new".to_owned()));
+        assert_eq!(
+            forwarded(),
+            [Op::Prompt("/tmp".to_owned()), Op::Queue("new".to_owned())],
+        );
+        assert_eq!(app.active_prompt.as_deref(), Some("/tmp"));
+    }
+
+    // ── apply_slash_outcome ──
+
+    #[test]
+    fn apply_slash_outcome_shows_output_and_hands_back_forwards_whether_idle_or_busy() {
+        let diff = indoc::indoc! {"
+            diff --git a/src/lib.rs b/src/lib.rs
+            --- a/src/lib.rs
+            +++ b/src/lib.rs
+            @@ -1 +1 @@
+            -old line
+            +new line
+        "};
+        for busy in [false, true] {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            if busy {
+                app.handle_engine_event(Event::StreamToken("partial".into()));
+            }
+
+            let clean = SlashOutcome::SystemMessage("Working tree clean.".to_owned());
+            assert_eq!(app.apply_slash_outcome(Ok(clean)), None);
+            assert_eq!(app.chat.last_system_text(), Some("Working tree clean."));
+
+            assert_eq!(
+                app.apply_slash_outcome(Ok(SlashOutcome::GitDiff(diff.to_owned()))),
+                None
+            );
+            let text = rendered_text(&mut app, 60, 24);
+            assert!(text.contains("new line"), "busy = {busy}: {text}");
+
+            assert_eq!(app.apply_slash_outcome(Err("/diff: boom".to_owned())), None);
+            assert_eq!(app.chat.last_error_text(), Some("/diff: boom"));
+
+            let modal = SlashOutcome::Modal(Box::new(FakeModal::new("picker")));
+            assert_eq!(app.apply_slash_outcome(Ok(modal)), None);
+            assert!(app.modals.is_active());
+
+            let forward = SlashOutcome::Forward(Action::Op(Op::Clear));
+            assert_eq!(
+                app.apply_slash_outcome(Ok(forward)),
+                Some(Action::Op(Op::Clear)),
+            );
+            assert!(
+                rx.try_recv().is_err(),
+                "the caller routes a forwarded action"
+            );
+        }
+    }
+}

@@ -10,6 +10,7 @@ pub(crate) mod handle;
 pub(crate) mod history;
 pub(crate) mod list_view;
 mod path;
+pub(crate) mod post_compact;
 pub(crate) mod resolver;
 mod sanitize;
 mod state;

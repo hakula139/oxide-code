@@ -1,13 +1,17 @@
 //! Ordered segment rendering for the status line.
 
+use std::path::Path;
+
 use ratatui::text::{Line, Span};
 use time::OffsetDateTime;
 use unicode_width::UnicodeWidthStr;
 
+use crate::client::{RateLimitWindow, RateLimits};
 use crate::config::{Effort, StatusLineSegment};
 use crate::protocol::UsageSnapshot;
+use crate::session::display::id_prefix;
 use crate::tui::theme::Theme;
-use crate::util::git::PullRequest;
+use crate::util::git::{Checks, PullRequest, ReviewDecision};
 use crate::util::text::truncate_to_width;
 use crate::util::time::local_offset;
 
@@ -113,6 +117,16 @@ impl StatusLine {
                     Self::segment_style(theme, SegmentStyle::Accent),
                 )
             }),
+            StatusLineSegment::PullRequestChecks => state.pull_request.and_then(|pr| {
+                let (label, style) = checks_label(pr.checks?);
+                hyperlink = Some(format!("{}/checks", pr.url));
+                Some(Span::styled(label, Self::segment_style(theme, style)))
+            }),
+            StatusLineSegment::PullRequestReview => state.pull_request.and_then(|pr| {
+                let (label, style) = review_label(pr.review?);
+                hyperlink = Some(format!("{}/files", pr.url));
+                Some(Span::styled(label, Self::segment_style(theme, style)))
+            }),
             StatusLineSegment::Model => Some(Span::styled(
                 state.model.to_owned(),
                 Self::segment_style(theme, SegmentStyle::Text),
@@ -129,13 +143,36 @@ impl StatusLine {
                 .usage
                 .and_then(session_cost_label)
                 .map(|label| Span::styled(label, Self::segment_style(theme, SegmentStyle::Dim))),
+            StatusLineSegment::FiveHourLimit => state
+                .rate_limits
+                .and_then(|limits| rate_limit_label("5h", limits.five_hour))
+                .map(|label| Span::styled(label, Self::segment_style(theme, SegmentStyle::Dim))),
+            StatusLineSegment::WeeklyLimit => state
+                .rate_limits
+                .and_then(|limits| rate_limit_label("7d", limits.seven_day))
+                .map(|label| Span::styled(label, Self::segment_style(theme, SegmentStyle::Dim))),
             StatusLineSegment::RunState => Some(state.status_span.clone()),
+            StatusLineSegment::QueuedPrompts => (state.queued_prompts > 0).then(|| {
+                Span::styled(
+                    format!("Queued: {}", state.queued_prompts),
+                    Self::segment_style(theme, SegmentStyle::Dim),
+                )
+            }),
+            StatusLineSegment::TaskProgress => None,
             StatusLineSegment::ThreadTitle => state.title.map(|title| {
                 Span::styled(
                     truncate_to_width(title, MAX_TITLE_WIDTH),
                     Self::segment_style(theme, SegmentStyle::Muted),
                 )
             }),
+            StatusLineSegment::SessionId => (!state.session_id.is_empty()).then(|| {
+                Span::styled(
+                    format!("ID: {}", id_prefix(state.session_id)),
+                    Self::segment_style(theme, SegmentStyle::Muted),
+                )
+            }),
+            StatusLineSegment::Theme => theme_label(state.theme_name)
+                .map(|label| Span::styled(label, Self::segment_style(theme, SegmentStyle::Muted))),
             StatusLineSegment::CurrentTime => Some(Span::styled(
                 current_time_label(),
                 Self::segment_style(theme, SegmentStyle::Dim),
@@ -150,6 +187,9 @@ impl StatusLine {
             SegmentStyle::Muted => theme.muted(),
             SegmentStyle::Dim => theme.dim(),
             SegmentStyle::Accent => theme.accent(),
+            SegmentStyle::Success => theme.success(),
+            SegmentStyle::Warning => theme.warning(),
+            SegmentStyle::Error => theme.error(),
         }
     }
 }
@@ -163,8 +203,13 @@ pub(super) struct StatusLineState<'a> {
     pub(super) cwd: &'a str,
     pub(super) git_branch: Option<&'a str>,
     pub(super) pull_request: Option<&'a PullRequest>,
+    pub(super) rate_limits: Option<RateLimits>,
     /// Pre-rendered run-state segment from the parent component.
     pub(super) status_span: Span<'static>,
+    pub(super) queued_prompts: usize,
+    pub(super) session_id: &'a str,
+    /// Built-in theme name or theme file path.
+    pub(super) theme_name: &'a str,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -173,6 +218,9 @@ enum SegmentStyle {
     Muted,
     Dim,
     Accent,
+    Success,
+    Warning,
+    Error,
 }
 
 #[derive(Debug, Clone)]
@@ -235,16 +283,24 @@ fn lowest_priority_index(segments: &[RenderedSegment]) -> Option<usize> {
 /// Per-segment narrow-width rank. Lower numbers drop earlier.
 fn segment_utility(segment: StatusLineSegment) -> u8 {
     match segment {
-        StatusLineSegment::ThreadTitle => 0,
-        StatusLineSegment::CurrentTime => 1,
-        StatusLineSegment::PullRequest => 2,
-        StatusLineSegment::GitBranch => 3,
-        StatusLineSegment::CurrentDir => 4,
-        StatusLineSegment::SessionCost => 5,
-        StatusLineSegment::ContextUsed => 6,
-        StatusLineSegment::Model => 7,
-        StatusLineSegment::ModelWithEffort => 8,
-        StatusLineSegment::RunState => 9,
+        StatusLineSegment::Theme => 0,
+        StatusLineSegment::SessionId => 1,
+        StatusLineSegment::ThreadTitle => 2,
+        StatusLineSegment::CurrentTime => 3,
+        StatusLineSegment::PullRequestReview => 4,
+        StatusLineSegment::PullRequestChecks => 5,
+        StatusLineSegment::PullRequest => 6,
+        StatusLineSegment::GitBranch => 7,
+        StatusLineSegment::CurrentDir => 8,
+        StatusLineSegment::TaskProgress => 9,
+        StatusLineSegment::QueuedPrompts => 10,
+        StatusLineSegment::SessionCost => 11,
+        StatusLineSegment::WeeklyLimit => 12,
+        StatusLineSegment::FiveHourLimit => 13,
+        StatusLineSegment::ContextUsed => 14,
+        StatusLineSegment::Model => 15,
+        StatusLineSegment::ModelWithEffort => 16,
+        StatusLineSegment::RunState => 17,
     }
 }
 
@@ -280,6 +336,34 @@ fn session_cost_label(usage: UsageSnapshot) -> Option<String> {
         .map(|cost| format!("Sess: {}", format_cost(cost)))
 }
 
+fn rate_limit_label(name: &str, window: Option<RateLimitWindow>) -> Option<String> {
+    // Rounds to basis points before flooring, since `0.29 * 100.0` is `28.999...` in binary64.
+    let percent = ((window?.utilization * 10_000.0).round() / 100.0).floor();
+    Some(format!("{name}: {percent:.0}%"))
+}
+
+fn checks_label(checks: Checks) -> (String, SegmentStyle) {
+    match checks {
+        Checks::Failing(count) => (format!("Checks: {count} failing"), SegmentStyle::Error),
+        Checks::Pending(count) => (format!("Checks: {count} pending"), SegmentStyle::Warning),
+        Checks::Cancelled(count) => (format!("Checks: {count} cancelled"), SegmentStyle::Muted),
+        Checks::Passing => ("Checks: passing".to_owned(), SegmentStyle::Success),
+    }
+}
+
+fn review_label(review: ReviewDecision) -> (&'static str, SegmentStyle) {
+    match review {
+        ReviewDecision::Approved => ("Review: approved", SegmentStyle::Success),
+        ReviewDecision::ChangesRequested => ("Review: changes requested", SegmentStyle::Error),
+        ReviewDecision::ReviewRequired => ("Review: required", SegmentStyle::Warning),
+    }
+}
+
+fn theme_label(theme_name: &str) -> Option<String> {
+    let name = Path::new(theme_name).file_stem()?.to_str()?;
+    Some(format!("Theme: {name}"))
+}
+
 fn current_time_label() -> String {
     let now = OffsetDateTime::now_utc().to_offset(local_offset());
     format!("{:02}:{:02}", now.hour(), now.minute())
@@ -309,15 +393,45 @@ fn format_cost(cost: f64) -> String {
 mod tests {
     use super::*;
 
+    /// Resets in 2100, so a window built with it stays current.
+    const FUTURE_RESET: i64 = 4_102_444_800;
+
+    /// No optional data, idle, with model `m`.
+    fn bare_state() -> StatusLineState<'static> {
+        StatusLineState {
+            model: "m",
+            effort: None,
+            title: None,
+            usage: None,
+            cwd: "~/repo",
+            git_branch: None,
+            pull_request: None,
+            rate_limits: None,
+            status_span: Span::raw("Ready"),
+            queued_prompts: 0,
+            session_id: "",
+            theme_name: "",
+        }
+    }
+
+    fn render(segments: Vec<StatusLineSegment>, state: &StatusLineState<'_>) -> RenderedStatusLine {
+        StatusLine::new(segments).render(&Theme::default(), state, 80)
+    }
+
+    fn text_of(rendered: &RenderedStatusLine) -> String {
+        rendered
+            .line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
     fn render_text(segments: Vec<StatusLineSegment>, width: u16) -> String {
-        let pr = PullRequest {
-            number: 86,
-            url: "https://github.com/o/r/pull/86".to_owned(),
-        };
+        let pr = pr_state(86);
         let rendered = StatusLine::new(segments).render(
             &Theme::default(),
             &StatusLineState {
-                model: "m",
                 effort: Some(Effort::High),
                 title: Some("title"),
                 usage: Some(UsageSnapshot {
@@ -325,19 +439,13 @@ mod tests {
                     context_window: Some(200_000),
                     estimated_cost_usd: Some(0.1234),
                 }),
-                cwd: "~/repo",
                 git_branch: Some("main"),
                 pull_request: Some(&pr),
-                status_span: Span::raw("Ready"),
+                ..bare_state()
             },
             width,
         );
-        rendered
-            .line
-            .spans
-            .into_iter()
-            .map(|span| span.content)
-            .collect::<String>()
+        text_of(&rendered)
     }
 
     fn is_hh_mm(label: &str) -> bool {
@@ -354,6 +462,8 @@ mod tests {
         PullRequest {
             number,
             url: format!("https://github.com/o/r/pull/{number}"),
+            checks: None,
+            review: None,
         }
     }
 
@@ -370,25 +480,14 @@ mod tests {
         let rendered = StatusLine::new(vec![StatusLineSegment::RunState]).render(
             &Theme::default(),
             &StatusLineState {
-                model: "m",
-                effort: None,
-                title: None,
-                usage: None,
                 cwd: "",
-                git_branch: None,
-                pull_request: None,
                 status_span: Span::raw("Running a very long command name"),
+                ..bare_state()
             },
             12,
         );
-        let text = rendered
-            .line
-            .spans
-            .into_iter()
-            .map(|span| span.content)
-            .collect::<String>();
 
-        assert_eq!(text, "  Running...");
+        assert_eq!(text_of(&rendered), "  Running...");
     }
 
     #[test]
@@ -444,19 +543,12 @@ mod tests {
     #[test]
     fn render_pull_request_reports_hyperlink_range() {
         let pr = pr_state(86);
-        let rendered = StatusLine::new(vec![StatusLineSegment::PullRequest]).render(
-            &Theme::default(),
+        let rendered = render(
+            vec![StatusLineSegment::PullRequest],
             &StatusLineState {
-                model: "m",
-                effort: None,
-                title: None,
-                usage: None,
-                cwd: "~/repo",
-                git_branch: None,
                 pull_request: Some(&pr),
-                status_span: Span::raw("Ready"),
+                ..bare_state()
             },
-            80,
         );
         assert_eq!(rendered.hyperlinks.len(), 1);
         assert_eq!(rendered.hyperlinks[0].col, 2);
@@ -466,28 +558,235 @@ mod tests {
 
     #[test]
     fn render_pull_request_reports_no_hyperlink_when_absent() {
-        let rendered = StatusLine::new(vec![StatusLineSegment::PullRequest]).render(
-            &Theme::default(),
-            &StatusLineState {
-                model: "m",
-                effort: None,
-                title: None,
-                usage: None,
-                cwd: "~/repo",
-                git_branch: None,
-                pull_request: None,
-                status_span: Span::raw("Ready"),
-            },
-            80,
-        );
-        let text: String = rendered
-            .line
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect();
+        let rendered = render(vec![StatusLineSegment::PullRequest], &bare_state());
         assert!(rendered.hyperlinks.is_empty(), "no PR → no hyperlink range");
-        assert!(!text.contains('#'), "no PR number rendered when absent");
+        assert!(
+            !text_of(&rendered).contains('#'),
+            "no PR number rendered when absent"
+        );
+    }
+
+    #[test]
+    fn render_pull_request_checks_label_their_worst_state_and_link_the_checks_page() {
+        let theme = Theme::default();
+        for (checks, label, style) in [
+            (Checks::Failing(2), "Checks: 2 failing", theme.error()),
+            (Checks::Pending(1), "Checks: 1 pending", theme.warning()),
+            (Checks::Cancelled(3), "Checks: 3 cancelled", theme.muted()),
+            (Checks::Passing, "Checks: passing", theme.success()),
+        ] {
+            let pr = PullRequest {
+                checks: Some(checks),
+                ..pr_state(86)
+            };
+            let rendered = render(
+                vec![StatusLineSegment::PullRequestChecks],
+                &StatusLineState {
+                    pull_request: Some(&pr),
+                    ..bare_state()
+                },
+            );
+
+            assert_eq!(text_of(&rendered), format!("  {label}"));
+            assert_eq!(rendered.line.spans[1].style, style, "{label}");
+            assert_eq!(
+                rendered.hyperlinks[0].url,
+                "https://github.com/o/r/pull/86/checks"
+            );
+        }
+    }
+
+    #[test]
+    fn render_pull_request_review_labels_the_decision_and_links_the_review_page() {
+        let theme = Theme::default();
+        for (review, label, style) in [
+            (
+                ReviewDecision::Approved,
+                "Review: approved",
+                theme.success(),
+            ),
+            (
+                ReviewDecision::ChangesRequested,
+                "Review: changes requested",
+                theme.error(),
+            ),
+            (
+                ReviewDecision::ReviewRequired,
+                "Review: required",
+                theme.warning(),
+            ),
+        ] {
+            let pr = PullRequest {
+                review: Some(review),
+                ..pr_state(86)
+            };
+            let rendered = render(
+                vec![StatusLineSegment::PullRequestReview],
+                &StatusLineState {
+                    pull_request: Some(&pr),
+                    ..bare_state()
+                },
+            );
+
+            assert_eq!(text_of(&rendered), format!("  {label}"));
+            assert_eq!(rendered.line.spans[1].style, style, "{label}");
+            assert_eq!(
+                rendered.hyperlinks[0].url,
+                "https://github.com/o/r/pull/86/files"
+            );
+        }
+    }
+
+    #[test]
+    fn render_pull_request_metadata_hides_without_checks_or_review() {
+        let pr = pr_state(86);
+        let rendered = render(
+            vec![
+                StatusLineSegment::PullRequestChecks,
+                StatusLineSegment::PullRequestReview,
+                StatusLineSegment::RunState,
+            ],
+            &StatusLineState {
+                pull_request: Some(&pr),
+                ..bare_state()
+            },
+        );
+
+        assert_eq!(text_of(&rendered), "  Ready");
+        assert!(rendered.hyperlinks.is_empty());
+    }
+
+    #[test]
+    fn render_rate_limits_floor_the_spent_share_to_a_whole_percent() {
+        let window = |utilization| {
+            Some(RateLimitWindow {
+                utilization,
+                resets_at: FUTURE_RESET,
+            })
+        };
+        let segments = vec![
+            StatusLineSegment::FiveHourLimit,
+            StatusLineSegment::WeeklyLimit,
+            StatusLineSegment::RunState,
+        ];
+        let text = |five_hour, seven_day| {
+            text_of(&render(
+                segments.clone(),
+                &StatusLineState {
+                    rate_limits: Some(RateLimits {
+                        five_hour,
+                        seven_day,
+                    }),
+                    ..bare_state()
+                },
+            ))
+        };
+
+        assert_eq!(
+            text(window(0.429), window(0.995)),
+            "  5h: 42% │ 7d: 99% │ Ready",
+        );
+        assert_eq!(
+            text(window(0.29), window(0.57)),
+            "  5h: 29% │ 7d: 57% │ Ready",
+            "a two-decimal share keeps its percent despite binary rounding",
+        );
+        assert_eq!(text(None, window(0.13)), "  7d: 13% │ Ready");
+        assert_eq!(text(None, None), "  Ready");
+        assert_eq!(
+            text_of(&render(segments, &bare_state())),
+            "  Ready",
+            "no limits before the first response reports them",
+        );
+    }
+
+    #[test]
+    fn render_queued_prompts_counts_the_queue_and_hides_an_empty_one() {
+        let text = |queued_prompts| {
+            text_of(&render(
+                vec![
+                    StatusLineSegment::QueuedPrompts,
+                    StatusLineSegment::RunState,
+                ],
+                &StatusLineState {
+                    queued_prompts,
+                    ..bare_state()
+                },
+            ))
+        };
+
+        assert_eq!(text(2), "  Queued: 2 │ Ready");
+        assert_eq!(text(0), "  Ready");
+    }
+
+    #[test]
+    fn render_session_id_shows_the_resumable_prefix() {
+        let text = |session_id| {
+            text_of(&render(
+                vec![StatusLineSegment::SessionId, StatusLineSegment::RunState],
+                &StatusLineState {
+                    session_id,
+                    ..bare_state()
+                },
+            ))
+        };
+
+        assert_eq!(
+            text("3f2a9c1e-5b7d-4e8f-9a0b-1c2d3e4f5a6b"),
+            "  ID: 3f2a9c1e │ Ready"
+        );
+        assert_eq!(text(""), "  Ready");
+    }
+
+    #[test]
+    fn render_theme_names_a_built_in_or_a_theme_file_by_its_stem() {
+        let text = |theme_name| {
+            text_of(&render(
+                vec![StatusLineSegment::Theme, StatusLineSegment::RunState],
+                &StatusLineState {
+                    theme_name,
+                    ..bare_state()
+                },
+            ))
+        };
+
+        assert_eq!(text("latte"), "  Theme: latte │ Ready");
+        assert_eq!(text("/home/me/themes/dusk.toml"), "  Theme: dusk │ Ready");
+        assert_eq!(text(""), "  Ready");
+    }
+
+    // ── segment_utility ──
+
+    /// The drop order the configuration guide documents, plus `task-progress`, which renders
+    /// nothing yet.
+    #[test]
+    fn segment_utility_follows_the_documented_drop_order() {
+        let drop_order = [
+            StatusLineSegment::Theme,
+            StatusLineSegment::SessionId,
+            StatusLineSegment::ThreadTitle,
+            StatusLineSegment::CurrentTime,
+            StatusLineSegment::PullRequestReview,
+            StatusLineSegment::PullRequestChecks,
+            StatusLineSegment::PullRequest,
+            StatusLineSegment::GitBranch,
+            StatusLineSegment::CurrentDir,
+            StatusLineSegment::TaskProgress,
+            StatusLineSegment::QueuedPrompts,
+            StatusLineSegment::SessionCost,
+            StatusLineSegment::WeeklyLimit,
+            StatusLineSegment::FiveHourLimit,
+            StatusLineSegment::ContextUsed,
+            StatusLineSegment::Model,
+            StatusLineSegment::ModelWithEffort,
+            StatusLineSegment::RunState,
+        ];
+        for (earlier, later) in drop_order.iter().zip(&drop_order[1..]) {
+            assert!(
+                segment_utility(*earlier) < segment_utility(*later),
+                "{earlier:?} must drop before {later:?}",
+            );
+        }
     }
 
     // ── context_label ──

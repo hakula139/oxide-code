@@ -11,6 +11,7 @@ use ratatui::text::Span;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use self::line::{RenderedStatusLine, StatusLine, StatusLineState};
+use crate::client::RateLimits;
 use crate::config::{Effort, StatusLineSegment};
 use crate::protocol::UsageSnapshot;
 use crate::tui::glyphs::SPINNER_FRAMES;
@@ -45,6 +46,10 @@ pub(crate) struct StatusBar {
     cwd: String,
     git_branch: Option<String>,
     pull_request: Option<git::PullRequest>,
+    rate_limits: Option<RateLimits>,
+    queued_prompts: usize,
+    session_id: String,
+    theme_name: String,
     status: Status,
     spinner_frame: usize,
     tick_counter: usize,
@@ -86,6 +91,10 @@ impl StatusBar {
             cwd,
             git_branch,
             pull_request: None,
+            rate_limits: None,
+            queued_prompts: 0,
+            session_id: String::new(),
+            theme_name: String::new(),
             status: Status::Idle,
             spinner_frame: 0,
             tick_counter: 0,
@@ -131,6 +140,22 @@ impl StatusBar {
         true
     }
 
+    pub(crate) fn set_rate_limits(&mut self, rate_limits: Option<RateLimits>) {
+        self.rate_limits = rate_limits;
+    }
+
+    pub(crate) fn set_queued_prompts(&mut self, count: usize) {
+        self.queued_prompts = count;
+    }
+
+    pub(crate) fn set_session_id(&mut self, session_id: &str) {
+        session_id.clone_into(&mut self.session_id);
+    }
+
+    pub(crate) fn set_theme_name(&mut self, theme_name: &str) {
+        theme_name.clone_into(&mut self.theme_name);
+    }
+
     /// Re-skin subsequent renders. The spinner / status state is unaffected.
     pub(crate) fn set_theme(&mut self, theme: &Theme) {
         self.theme = theme.clone();
@@ -167,9 +192,16 @@ impl StatusBar {
         self.git_branch.as_deref()
     }
 
-    /// Returns `true` when time or animation state changed and the caller should repaint.
+    #[cfg(test)]
+    pub(crate) fn rate_limits(&self) -> Option<RateLimits> {
+        self.rate_limits
+    }
+
+    /// Returns `true` when the time, the usage limits, or the animation changed and the caller
+    /// should repaint.
     pub(crate) fn tick(&mut self) -> bool {
         let mut dirty = self.refresh_current_time();
+        dirty |= self.expire_rate_limits();
         if is_animated(&self.status) {
             self.tick_counter += 1;
             if self.tick_counter >= TICKS_PER_FRAME {
@@ -191,6 +223,20 @@ impl StatusBar {
         }
         self.current_time_minute = Some(current);
         true
+    }
+
+    /// Drops each usage-limit window whose reset has passed, since its spent share no longer
+    /// applies until a response reports the new window.
+    fn expire_rate_limits(&mut self) -> bool {
+        let Some(limits) = &mut self.rate_limits else {
+            return false;
+        };
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        let mut expired = false;
+        for window in [&mut limits.five_hour, &mut limits.seven_day] {
+            expired |= window.take_if(|window| window.resets_at <= now).is_some();
+        }
+        expired
     }
 }
 
@@ -273,7 +319,11 @@ impl StatusBar {
                 cwd: &self.cwd,
                 git_branch: self.git_branch.as_deref(),
                 pull_request: self.pull_request.as_ref(),
+                rate_limits: self.rate_limits,
                 status_span: self.status_span(),
+                queued_prompts: self.queued_prompts,
+                session_id: &self.session_id,
+                theme_name: &self.theme_name,
             },
             width,
         )
@@ -302,6 +352,10 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use super::*;
+    use crate::client::RateLimitWindow;
+
+    /// 2100-01-01, a reset no test run reaches.
+    const FUTURE_RESET: i64 = 4_102_444_800;
 
     fn test_bar() -> StatusBar {
         StatusBar::new(
@@ -329,6 +383,8 @@ mod tests {
         git::PullRequest {
             number,
             url: format!("https://github.com/o/r/pull/{number}"),
+            checks: None,
+            review: None,
         }
     }
 
@@ -489,6 +545,31 @@ mod tests {
         assert_eq!(bar.current_time_minute, Some(current));
         assert!(!bar.tick());
         assert_eq!(bar.spinner_frame, 0);
+    }
+
+    #[test]
+    fn tick_drops_a_usage_limit_window_once_it_resets() {
+        let mut bar = test_bar();
+        let window = |resets_at| {
+            Some(RateLimitWindow {
+                utilization: 0.97,
+                resets_at,
+            })
+        };
+        bar.set_rate_limits(Some(RateLimits {
+            five_hour: window(0),
+            seven_day: window(FUTURE_RESET),
+        }));
+
+        assert!(bar.tick());
+        assert_eq!(
+            bar.rate_limits(),
+            Some(RateLimits {
+                five_hour: None,
+                seven_day: window(FUTURE_RESET),
+            }),
+        );
+        assert!(!bar.tick(), "the open window stays");
     }
 
     #[test]
@@ -753,6 +834,106 @@ mod tests {
             !output.contains('~'),
             "no tildified path should appear: {output:?}",
         );
+    }
+
+    // ── render: opt-in segments ──
+
+    /// Shows `segment` between the directory and the model.
+    fn segment_bar(segment: StatusLineSegment) -> StatusBar {
+        StatusBar::new(
+            &Theme::default(),
+            vec![
+                StatusLineSegment::CurrentDir,
+                segment,
+                StatusLineSegment::ModelWithEffort,
+                StatusLineSegment::RunState,
+            ],
+            "Opus 5.5".into(),
+            Some(Effort::Xhigh),
+            "~/projects/demo".into(),
+            None,
+        )
+    }
+
+    /// Renders the bar 100 columns wide, then 40.
+    fn render_wide_and_narrow(bar: &mut StatusBar) -> String {
+        [100, 40]
+            .map(|width| render_status(bar, width).to_string())
+            .join("\n")
+    }
+
+    fn rate_limits() -> RateLimits {
+        let window = |utilization| {
+            Some(RateLimitWindow {
+                utilization,
+                resets_at: FUTURE_RESET,
+            })
+        };
+        RateLimits {
+            five_hour: window(0.42),
+            seven_day: window(0.13),
+        }
+    }
+
+    #[test]
+    fn render_queued_prompts_at_wide_and_narrow_widths() {
+        let mut bar = segment_bar(StatusLineSegment::QueuedPrompts);
+        bar.set_queued_prompts(2);
+        insta::assert_snapshot!(render_wide_and_narrow(&mut bar));
+    }
+
+    #[test]
+    fn render_session_id_at_wide_and_narrow_widths() {
+        let mut bar = segment_bar(StatusLineSegment::SessionId);
+        bar.set_session_id("3f2a9c1e-5b7d-4e8f-9a0b-1c2d3e4f5a6b");
+        insta::assert_snapshot!(render_wide_and_narrow(&mut bar));
+    }
+
+    #[test]
+    fn render_theme_at_wide_and_narrow_widths() {
+        let mut bar = segment_bar(StatusLineSegment::Theme);
+        bar.set_theme_name("mocha");
+        insta::assert_snapshot!(render_wide_and_narrow(&mut bar));
+    }
+
+    #[test]
+    fn render_five_hour_limit_at_wide_and_narrow_widths() {
+        let mut bar = segment_bar(StatusLineSegment::FiveHourLimit);
+        bar.set_rate_limits(Some(rate_limits()));
+        insta::assert_snapshot!(render_wide_and_narrow(&mut bar));
+    }
+
+    #[test]
+    fn render_weekly_limit_at_wide_and_narrow_widths() {
+        let mut bar = segment_bar(StatusLineSegment::WeeklyLimit);
+        bar.set_rate_limits(Some(rate_limits()));
+        insta::assert_snapshot!(render_wide_and_narrow(&mut bar));
+    }
+
+    #[test]
+    fn render_pull_request_checks_at_wide_and_narrow_widths() {
+        let mut bar = segment_bar(StatusLineSegment::PullRequestChecks);
+        bar.set_pull_request(Some(git::PullRequest {
+            checks: Some(git::Checks::Failing(2)),
+            ..pr_state(86)
+        }));
+        insta::assert_snapshot!(render_wide_and_narrow(&mut bar));
+    }
+
+    #[test]
+    fn render_pull_request_review_at_wide_and_narrow_widths() {
+        let mut bar = segment_bar(StatusLineSegment::PullRequestReview);
+        bar.set_pull_request(Some(git::PullRequest {
+            review: Some(git::ReviewDecision::ChangesRequested),
+            ..pr_state(86)
+        }));
+        insta::assert_snapshot!(render_wide_and_narrow(&mut bar));
+    }
+
+    #[test]
+    fn render_task_progress_at_wide_and_narrow_widths() {
+        let mut bar = segment_bar(StatusLineSegment::TaskProgress);
+        insta::assert_snapshot!(render_wide_and_narrow(&mut bar));
     }
 
     #[test]

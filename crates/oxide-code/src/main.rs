@@ -1,6 +1,5 @@
 //! CLI entry point: config loading, session resolution, mode dispatch.
 
-mod agent;
 mod client;
 mod config;
 mod driver;

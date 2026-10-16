@@ -7,12 +7,13 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use reqwest::StatusCode;
-use reqwest::header::{HeaderName, HeaderValue};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use tracing::warn;
 
 use super::Client;
 use super::wire::ErrorResponse;
 use crate::client::PromptTooLong;
+use crate::client::{RateLimitWindow, RateLimits};
 use crate::config::auth::{Auth, AuthSource};
 
 // ── Retry Policy ──
@@ -231,6 +232,31 @@ async fn error_for_status(
         error,
         cause: status_cause(status, &body),
         retry_after,
+    })
+}
+
+/// Reads the unified rate-limit headers that subscription sign-ins receive. `None` when the
+/// response reports neither window, as for API keys.
+pub(super) fn rate_limits(headers: &HeaderMap) -> Option<RateLimits> {
+    let limits = RateLimits {
+        five_hour: rate_limit_window(headers, "5h"),
+        seven_day: rate_limit_window(headers, "7d"),
+    };
+    (limits.five_hour.is_some() || limits.seven_day.is_some()).then_some(limits)
+}
+
+fn rate_limit_window(headers: &HeaderMap, window: &str) -> Option<RateLimitWindow> {
+    let field = |name: &str| {
+        headers
+            .get(format!("anthropic-ratelimit-unified-{window}-{name}"))
+            .and_then(|value| value.to_str().ok())
+    };
+    Some(RateLimitWindow {
+        utilization: field("utilization")?
+            .parse::<f64>()
+            .ok()
+            .filter(|utilization| utilization.is_finite())?,
+        resets_at: field("reset")?.parse().ok()?,
     })
 }
 
@@ -702,6 +728,69 @@ mod tests {
             })
             .collect();
         assert_eq!(counts, ["0", "1"]);
+    }
+
+    // ── rate_limits ──
+
+    fn headers(pairs: &[(&'static str, &str)]) -> HeaderMap {
+        pairs
+            .iter()
+            .map(|&(name, value)| {
+                (
+                    HeaderName::from_static(name),
+                    HeaderValue::from_str(value).unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    fn window(utilization: f64, resets_at: i64) -> RateLimitWindow {
+        RateLimitWindow {
+            utilization,
+            resets_at,
+        }
+    }
+
+    #[test]
+    fn rate_limits_reads_each_window_the_response_reports() {
+        assert_eq!(
+            rate_limits(&headers(&[
+                ("anthropic-ratelimit-unified-5h-utilization", "0.42"),
+                ("anthropic-ratelimit-unified-5h-reset", "1760000000"),
+                ("anthropic-ratelimit-unified-7d-utilization", "0.13"),
+                ("anthropic-ratelimit-unified-7d-reset", "1760500000"),
+            ])),
+            Some(RateLimits {
+                five_hour: Some(window(0.42, 1_760_000_000)),
+                seven_day: Some(window(0.13, 1_760_500_000)),
+            }),
+        );
+        assert_eq!(
+            rate_limits(&headers(&[
+                ("anthropic-ratelimit-unified-7d-utilization", "1"),
+                ("anthropic-ratelimit-unified-7d-reset", "1760500000"),
+            ])),
+            Some(RateLimits {
+                five_hour: None,
+                seven_day: Some(window(1.0, 1_760_500_000)),
+            }),
+        );
+    }
+
+    #[test]
+    fn rate_limits_skips_an_incomplete_or_malformed_window() {
+        assert_eq!(rate_limits(&HeaderMap::new()), None, "API keys get none");
+        for (utilization, reset) in [("0.42", ""), ("NaN", "1760000000"), ("0.42", "soon")] {
+            let mut pairs = vec![("anthropic-ratelimit-unified-5h-utilization", utilization)];
+            if !reset.is_empty() {
+                pairs.push(("anthropic-ratelimit-unified-5h-reset", reset));
+            }
+            assert_eq!(
+                rate_limits(&headers(&pairs)),
+                None,
+                "{utilization:?} / {reset:?}",
+            );
+        }
     }
 
     // ── parse_retry_after ──

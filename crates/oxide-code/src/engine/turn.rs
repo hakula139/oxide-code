@@ -1,57 +1,30 @@
-//! Agent turn loop. Streams the model response, dispatches tool calls, records to the session,
-//! and stops on text-only response or the optional per-turn round cap.
-
-pub(crate) mod compact_boundary;
-pub(crate) mod compaction;
-
-use std::collections::HashMap;
-use std::future::Future;
+//! Agent turn loop. Streams the model response, runs each round's tool calls through
+//! [`super::dispatch`], records to the session, and stops on a text-only response or the optional
+//! per-turn round cap.
 
 use anyhow::{Context, Result, anyhow, bail};
 use tokio::sync::mpsc;
-use tracing::warn;
 
+use super::abort::{AbortResult, TurnAbort, await_unless_aborted};
+use super::dispatch::{self, GateContext};
 use crate::client::{Response, ResponseEvent, StopDetails, StopReason, TokenUsage, Wire};
-use crate::config::compaction::AutoCompactionConfig;
-use crate::file_tracker::{self, FileTracker};
 use crate::message::{ContentBlock, Message, Role};
-use crate::permission::SessionGrant;
-use crate::permission::rule::Rule;
 use crate::prompt::PromptParts;
-use crate::protocol::{Decision, Event, EventSink, Op, ToolCall, ToolResult};
+use crate::protocol::{Event, EventSink, Op};
 use crate::session::handle::{RecordOutcome, SessionHandle};
-use crate::tool::{ToolDefinition, ToolMetadata, ToolOutput, ToolRegistry};
-
-const MAX_AUTO_COMPACT_FAILURES: u8 = 3;
-
-// ── Turn Abort ──
-
-/// Why a turn ended without a clean assistant reply. `Cancelled` and `Shutdown` are user-driven
-/// and distinct, so the engine keeps serving after a cancel but stops on shutdown. `Failed` wraps
-/// any other error so the caller can render it via `{e:#}`.
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum TurnAbort {
-    #[error("turn cancelled")]
-    Cancelled,
-    #[error("engine shut down")]
-    Shutdown,
-    #[error(transparent)]
-    Failed(#[from] anyhow::Error),
-}
-
-type AbortResult<T> = std::result::Result<T, TurnAbort>;
+use crate::tool::{ToolDefinition, ToolMetadata, ToolRegistry};
 
 // ── Agent Turn ──
 
 /// Usage the API reported for one turn's requests.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct TurnReport {
+pub(super) struct TurnReport {
     /// Latest single round's usage, used by the auto-compaction threshold check, which compares
     /// against the most recent prompt size rather than the historical sum.
-    pub(crate) usage: Option<TokenUsage>,
+    pub(super) usage: Option<TokenUsage>,
     /// Every request's usage in order, including one that failed or was cancelled partway. Some
     /// models pick their price tier from a single request's prompt size, so cost is per entry.
-    pub(crate) billable_rounds: Vec<TokenUsage>,
+    pub(super) billable_rounds: Vec<TokenUsage>,
 }
 
 impl TurnReport {
@@ -65,9 +38,9 @@ impl TurnReport {
 /// Result of one [`agent_turn`] invocation. The report counts every request whose stream
 /// reported usage, including one the user cancelled or that failed partway.
 #[derive(Debug)]
-pub(crate) struct TurnOutcome {
-    pub(crate) report: TurnReport,
-    pub(crate) result: AbortResult<()>,
+pub(super) struct TurnOutcome {
+    pub(super) report: TurnReport,
+    pub(super) result: AbortResult<()>,
 }
 
 impl TurnOutcome {
@@ -87,7 +60,7 @@ impl TurnOutcome {
 
     /// Mirrors `Result::unwrap`: returns the report on success or panics with the abort.
     #[cfg(test)]
-    pub(crate) fn unwrap(self) -> TurnReport {
+    fn unwrap(self) -> TurnReport {
         match self.result {
             Ok(()) => self.report,
             Err(abort) => panic!("turn aborted: {abort:?}"),
@@ -96,7 +69,7 @@ impl TurnOutcome {
 
     /// Mirrors `Result::expect`: returns the report on success or panics with the abort and `msg`.
     #[cfg(test)]
-    pub(crate) fn expect(self, msg: &str) -> TurnReport {
+    fn expect(self, msg: &str) -> TurnReport {
         match self.result {
             Ok(()) => self.report,
             Err(abort) => panic!("{msg}: {abort:?}"),
@@ -105,30 +78,12 @@ impl TurnOutcome {
 
     /// Mirrors `Result::expect_err`: returns the abort on failure or panics.
     #[cfg(test)]
-    pub(crate) fn expect_err(self, msg: &str) -> TurnAbort {
+    fn expect_err(self, msg: &str) -> TurnAbort {
         match self.result {
             Ok(()) => panic!("{msg}: turn unexpectedly completed"),
             Err(abort) => abort,
         }
     }
-}
-
-pub(crate) struct AutoCompact<'a> {
-    pub(crate) config: AutoCompactionConfig,
-    pub(crate) failures: &'a mut u8,
-    pub(crate) file_tracker: &'a FileTracker,
-    /// The conversation's request prefix, which the summarizer reuses to read its prompt cache.
-    pub(crate) prompt: &'a PromptParts,
-    pub(crate) tools: &'a [ToolDefinition],
-    /// Each summary request's usage, recorded even when the summary fails or the user cancels it.
-    pub(crate) spent: &'a mut Vec<TokenUsage>,
-}
-
-/// Inputs the permission gate needs at each tool call: the policy, which gains the session allow
-/// rules the user grants, and the working directory to resolve path targets against.
-pub(crate) struct GateContext<'a> {
-    pub(crate) policy: &'a mut crate::permission::Policy,
-    pub(crate) cwd: &'a std::path::Path,
 }
 
 /// Drives one user prompt to a final assistant text reply. The loop returns as soon as a round
@@ -141,7 +96,7 @@ pub(crate) struct GateContext<'a> {
     clippy::too_many_arguments,
     reason = "agent_turn owns the full per-turn dependency set; bundling them obscures lifetimes"
 )]
-pub(crate) async fn agent_turn(
+pub(super) async fn agent_turn(
     client: &dyn Wire,
     tools: &ToolRegistry,
     messages: &mut Vec<Message>,
@@ -191,7 +146,7 @@ pub(crate) async fn agent_turn(
             StopAction::Finish(result) => return TurnOutcome { report, result },
         };
 
-        let tool_uses = collect_tool_uses(&blocks);
+        let tool_uses = dispatch::collect_tool_uses(&blocks);
         if tool_uses.is_empty() {
             // Queued prompts drain on the TUI side at idle.
             commit_assistant_message(session, sink, messages, blocks).await;
@@ -203,7 +158,7 @@ pub(crate) async fn agent_turn(
             content: blocks,
         };
 
-        let round = run_tool_round(
+        let round = dispatch::run_tool_round(
             tools,
             tool_uses,
             &parse_errors,
@@ -348,101 +303,9 @@ fn truncation_error(reason: StopReason, blocks: &[ContentBlock]) -> anyhow::Erro
     anyhow!("{cause} {effect}. {remedy}")
 }
 
-/// Decides whether to compact and drives it when the threshold and breaker allow. Returns
-/// `Ok(true)` when the transcript was replaced. Returns `Ok(false)` when skipped (breaker
-/// tripped, no usage, below threshold) or when summarization / boundary-write failed.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "auto-compaction needs the same live turn state as manual compaction"
-)]
-pub(crate) async fn auto_compact_if_needed(
-    client: &dyn Wire,
-    session: &SessionHandle,
-    messages: &mut Vec<Message>,
-    sink: &dyn EventSink,
-    ops: &mut mpsc::Receiver<Op>,
-    pending: &mut Vec<String>,
-    auto: Option<&mut AutoCompact<'_>>,
-    usage: Option<TokenUsage>,
-) -> AbortResult<bool> {
-    let Some(auto) = auto else {
-        return Ok(false);
-    };
-    let Some(usage) = usage else {
-        return Ok(false);
-    };
-    if *auto.failures >= MAX_AUTO_COMPACT_FAILURES
-        || !auto.config.should_trigger(usage.total_tokens())
-    {
-        return Ok(false);
-    }
-
-    sink.emit(Event::AutoCompactionStarted, "auto-compaction-started");
-    let summary = match await_unless_aborted(
-        compaction::compact_session(
-            client,
-            auto.prompt,
-            auto.tools,
-            messages,
-            None,
-            sink,
-            auto.spent,
-        ),
-        ops,
-        pending,
-    )
-    .await?
-    {
-        Ok(summary) => summary,
-        Err(e) => {
-            warn!("auto-compaction failed: {e:#}");
-            record_auto_compact_failure(auto, sink, Some(format!("Auto-compaction failed: {e:#}")));
-            return Ok(false);
-        }
-    };
-    let compacted = compact_boundary::replace_session_with_summary(
-        session,
-        auto.file_tracker,
-        messages,
-        sink,
-        summary,
-        None,
-        true,
-    )
-    .await;
-    if compacted {
-        *auto.failures = 0;
-    } else {
-        record_auto_compact_failure(auto, sink, None);
-    }
-    Ok(compacted)
-}
-
-/// Bumps the failure counter. If the bump trips the breaker, emits a one-time disablement
-/// notice. `detail` becomes a user-visible error event. Pass `None` when an earlier sink call
-/// already surfaced the failure (persist-fail goes through `session_write_error`).
-fn record_auto_compact_failure(
-    auto: &mut AutoCompact<'_>,
-    sink: &dyn EventSink,
-    detail: Option<String>,
-) {
-    *auto.failures += 1;
-    if let Some(detail) = detail {
-        sink.emit(Event::Error(detail), "auto-compaction-failed");
-    }
-    if *auto.failures == MAX_AUTO_COMPACT_FAILURES {
-        sink.emit(
-            Event::Error(format!(
-                "Auto-compaction disabled for this session after {MAX_AUTO_COMPACT_FAILURES} failures."
-            )),
-            "auto-compaction-disabled",
-        );
-    }
-}
-
 /// Tells the user to send a message when `messages` ends on a response that stopped early, which
 /// only a new prompt resumes.
-pub(crate) fn notify_if_interrupted(messages: &[Message], sink: &dyn EventSink) {
+pub(super) fn notify_if_interrupted(messages: &[Message], sink: &dyn EventSink) {
     if let Some(last) = messages.last()
         && last.role == Role::Assistant
         && ends_on_interrupted_work(&last.content)
@@ -458,7 +321,7 @@ pub(crate) fn notify_if_interrupted(messages: &[Message], sink: &dyn EventSink) 
 }
 
 /// Text of the progress block that stands in for unfinished work when a response stops early.
-pub(crate) const INTERRUPTED_WORK_SENTINEL: &str =
+pub(super) const INTERRUPTED_WORK_SENTINEL: &str =
     "This part of the response was interrupted before it finished.";
 
 fn ends_on_interrupted_work(blocks: &[ContentBlock]) -> bool {
@@ -467,106 +330,6 @@ fn ends_on_interrupted_work(blocks: &[ContentBlock]) -> bool {
         Some(ContentBlock::Thinking { thinking, .. }) if thinking == INTERRUPTED_WORK_SENTINEL
     )
 }
-
-fn collect_tool_uses(blocks: &[ContentBlock]) -> Vec<(String, String, serde_json::Value)> {
-    blocks
-        .iter()
-        .filter_map(|b| match b {
-            ContentBlock::ToolUse { id, name, input } => {
-                Some((id.clone(), name.clone(), input.clone()))
-            }
-            _ => None,
-        })
-        .collect()
-}
-
-/// One tool round's results, with a result for every call even when a user abort stopped dispatch.
-struct ToolRound {
-    results: Vec<ContentBlock>,
-    sidecars: Vec<(String, ToolMetadata)>,
-    abort: Option<TurnAbort>,
-}
-
-impl ToolRound {
-    fn push(&mut self, id: String, output: ToolOutput) {
-        self.sidecars.push((id.clone(), output.metadata));
-        self.results.push(ContentBlock::ToolResult {
-            tool_use_id: id,
-            content: output.content,
-            is_error: output.is_error,
-        });
-    }
-}
-
-async fn run_tool_round(
-    tools: &ToolRegistry,
-    tool_uses: Vec<(String, String, serde_json::Value)>,
-    parse_errors: &HashMap<String, String>,
-    sink: &dyn EventSink,
-    ops: &mut mpsc::Receiver<Op>,
-    pending: &mut Vec<String>,
-    gate: &mut GateContext<'_>,
-) -> ToolRound {
-    let mut round = ToolRound {
-        results: Vec::with_capacity(tool_uses.len()),
-        sidecars: Vec::with_capacity(tool_uses.len()),
-        abort: None,
-    };
-    let mut calls = tool_uses.into_iter();
-    for (id, name, input) in calls.by_ref() {
-        sink.emit(
-            Event::ToolCallStart(ToolCall {
-                id: id.clone(),
-                name: name.clone(),
-                input: input.clone(),
-                icon: tools.icon(&name).to_owned(),
-                label: tools.label(&name, &input),
-            }),
-            "tool-call-start",
-        );
-
-        let (output, abort) = dispatch_tool_call(
-            tools,
-            &id,
-            &name,
-            input.clone(),
-            parse_errors.get(&id),
-            sink,
-            ops,
-            pending,
-            gate,
-        )
-        .await;
-        sink.emit(
-            Event::ToolCallEnd(ToolResult {
-                id: id.clone(),
-                content: output.content.clone(),
-                is_error: output.is_error,
-                title: output.metadata.title.clone(),
-                view: tools.result_view(
-                    &name,
-                    &input,
-                    &output.content,
-                    &output.metadata,
-                    output.is_error,
-                ),
-            }),
-            "tool-call-end",
-        );
-        round.push(id, output);
-        if abort.is_some() {
-            round.abort = abort;
-            break;
-        }
-    }
-    for (id, ..) in calls {
-        round.push(id, ToolOutput::error(NOT_RUN));
-    }
-    round
-}
-
-/// Result of a call the user interrupted before its tool started.
-const NOT_RUN: &str = "Not run, because the user interrupted the turn.";
 
 /// Persists one tool round, then appends it to the live transcript.
 async fn commit_round(
@@ -593,189 +356,7 @@ async fn commit_round(
     messages.push(tool_result_msg);
 }
 
-/// Runs one call through the permission gate and its tool. A user abort still yields a result for
-/// the call, which says whether the tool had started.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "dispatch threads the per-call gate inputs (id, sink, gate) alongside the run state"
-)]
-async fn dispatch_tool_call(
-    tools: &ToolRegistry,
-    id: &str,
-    name: &str,
-    mut input: serde_json::Value,
-    parse_error: Option<&String>,
-    sink: &dyn EventSink,
-    ops: &mut mpsc::Receiver<Op>,
-    pending: &mut Vec<String>,
-    gate: &mut GateContext<'_>,
-) -> (ToolOutput, Option<TurnAbort>) {
-    if let Some(err) = parse_error {
-        return (
-            ToolOutput::error(format!(
-                "Tool input JSON failed to parse: {err}. Retry with a valid JSON object."
-            )),
-            None,
-        );
-    }
-
-    match check_permission(tools, id, name, &mut input, sink, ops, pending, gate).await {
-        Ok(None) => {}
-        Ok(Some(denial)) => return (denial, None),
-        Err(abort) => return (ToolOutput::error(NOT_RUN), Some(abort)),
-    }
-
-    match await_unless_aborted(
-        file_tracker::attribute_to(id, tools.run(name, input)),
-        ops,
-        pending,
-    )
-    .await
-    {
-        Ok(output) => (output, None),
-        Err(abort) => {
-            let output = ToolOutput::error(
-                "The user interrupted this call before it finished, so it may have run partially.",
-            );
-            (output, Some(abort))
-        }
-    }
-}
-
-/// Runs the permission gate for one call, first pinning a path tool's `input` to the path the gate
-/// resolves so the preview and the run act on what was checked. Returns `Ok(None)` to proceed,
-/// `Ok(Some(output))` with a synthetic denial, or an abort on an interrupt, a shutdown, or an
-/// [`Decision::Abort`] during an outstanding approval. An `ask` emits [`Event::ApprovalRequested`]
-/// and blocks on the matching [`Op::Resolve`], which every frontend answers in its own way. An
-/// allow-for-session answer adds its rule to the policy once the call's own grant admits it. It
-/// denies at once when no frontend can receive the request.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the gate threads the same per-call inputs dispatch already carries"
-)]
-async fn check_permission(
-    tools: &ToolRegistry,
-    id: &str,
-    name: &str,
-    input: &mut serde_json::Value,
-    sink: &dyn EventSink,
-    ops: &mut mpsc::Receiver<Op>,
-    pending: &mut Vec<String>,
-    gate: &mut GateContext<'_>,
-) -> AbortResult<Option<ToolOutput>> {
-    let Some(tool) = tools.get(name) else {
-        // Unknown tool: let `tools.run` produce its own "unknown tool" error rather than denying.
-        return Ok(None);
-    };
-
-    let class = tool.permission_class();
-    let gate_target = tool.gate_target(input, gate.cwd);
-    tool.pin_target(input, &gate_target);
-    let decision = gate.policy.decide(class, &gate_target.as_target());
-
-    match decision {
-        crate::permission::Decision::Allow => Ok(None),
-        crate::permission::Decision::Deny => Ok(Some(denied_output(name))),
-        crate::permission::Decision::Ask => {
-            // The approval request is a control-plane event: if it can't be delivered, no frontend
-            // can answer it and `await_approval` would block forever. Fail closed on a send
-            // error, so the turn is not stranded.
-            let grant = gate.policy.session_grant(class, &gate_target);
-            if sink
-                .send(Event::ApprovalRequested {
-                    id: id.to_owned(),
-                    preview: tool.approval_preview(input),
-                    grant: grant.clone().map(Box::new),
-                })
-                .is_err()
-            {
-                return Ok(Some(denied_output(name)));
-            }
-            match await_approval(id, ops, pending).await? {
-                Decision::Approve => Ok(None),
-                Decision::AllowForSession { rule } => {
-                    Ok(allow_for_session(gate, grant.as_ref(), *rule, name, sink))
-                }
-                Decision::Deny => Ok(Some(denied_output(name))),
-                Decision::DenyWithFeedback { feedback } => Ok(Some(ToolOutput::error(format!(
-                    "The {name} call was denied with this feedback: {feedback}"
-                )))),
-                Decision::Abort => Err(TurnAbort::Cancelled),
-            }
-        }
-    }
-}
-
-/// Adds the frontend's `rule` to the session allow rules once the call's own `grant` admits it,
-/// since the frontend's check is advisory. Returns a denial when it does not.
-fn allow_for_session(
-    gate: &mut GateContext<'_>,
-    grant: Option<&SessionGrant>,
-    rule: Rule,
-    name: &str,
-    sink: &dyn EventSink,
-) -> Option<ToolOutput> {
-    let admitted = grant
-        .context("this call offers no session rule")
-        .and_then(|grant| grant.admit(rule));
-    match admitted {
-        Ok(rule) => {
-            gate.policy.allow_for_session(rule);
-            sink.emit(
-                Event::SessionRulesUpdated(gate.policy.session_allow().to_vec()),
-                "session-rules-updated",
-            );
-            None
-        }
-        Err(e) => {
-            sink.emit(
-                Event::Error(format!(
-                    "Session rule refused, so the {name} call was denied: {e:#}"
-                )),
-                "session-rule-refused",
-            );
-            Some(denied_output(name))
-        }
-    }
-}
-
-/// The synthetic tool result returned for a denied call. Marked `is_error` so the model treats it
-/// as a failed call and can try another approach.
-fn denied_output(name: &str) -> ToolOutput {
-    ToolOutput::error(format!(
-        "The {name} call was denied by the permission policy. Do not retry it. \
-         Choose a different approach or ask the user to adjust permissions."
-    ))
-}
-
-/// Blocks on the `ops` channel for the [`Op::Resolve`] matching `id`, the same channel the turn
-/// loop races elsewhere so no second channel is introduced. An interrupt or shutdown aborts the
-/// turn, an [`Op::Queue`] buffers into `pending`, and a decision for a different id is ignored (a
-/// stale reply for an already-resolved call). Cancel-safe by drop: it holds no state.
-async fn await_approval(
-    id: &str,
-    ops: &mut mpsc::Receiver<Op>,
-    pending: &mut Vec<String>,
-) -> AbortResult<Decision> {
-    loop {
-        match ops.recv().await {
-            Some(Op::Interrupt) => return Err(TurnAbort::Cancelled),
-            Some(Op::Shutdown) | None => return Err(TurnAbort::Shutdown),
-            Some(Op::Queue(text)) => pending.push(text),
-            Some(Op::Resolve {
-                id: target,
-                decision,
-            }) if target == id => {
-                return Ok(decision);
-            }
-            // A decision for a different id is a stale reply, and any other op is unreachable
-            // while an approval is outstanding. Log and keep waiting so the gate can't be skipped.
-            Some(other) => warn!("ignored op while awaiting approval {id}: {other:?}"),
-        }
-    }
-}
-
-pub(crate) async fn record_drained_prompts(
+pub(super) async fn record_drained_prompts(
     texts: impl IntoIterator<Item = String>,
     messages: &mut Vec<Message>,
     session: &SessionHandle,
@@ -786,45 +367,6 @@ pub(crate) async fn record_drained_prompts(
         record_message(session, queued_msg.clone(), sink).await;
         messages.push(queued_msg);
         sink.emit(Event::PromptDrained(text), "prompt-drained");
-    }
-}
-
-/// Races `fut` against incoming ops. An interrupt or shutdown produces a `TurnAbort`, and a queued
-/// prompt buffers into `pending`. `fut` must be cancel-safe.
-pub(crate) async fn await_unless_aborted<F, T>(
-    fut: F,
-    ops: &mut mpsc::Receiver<Op>,
-    pending: &mut Vec<String>,
-) -> AbortResult<T>
-where
-    F: Future<Output = T>,
-{
-    tokio::pin!(fut);
-    loop {
-        tokio::select! {
-            // Biased: ops observed before same-poll-ready futures.
-            biased;
-            op = ops.recv() => match op {
-                Some(Op::Interrupt) => return Err(TurnAbort::Cancelled),
-                Some(Op::Shutdown) | None => return Err(TurnAbort::Shutdown),
-                Some(Op::Queue(text)) => pending.push(text),
-                // Unreachable under current wiring. Log so regressions surface. A `Resolve`
-                // here is a stale reply for an already-resolved call.
-                Some(
-                    op @ (Op::Prompt(_)
-                    | Op::Clear
-                    | Op::Archive
-                    | Op::Resume { .. }
-                    | Op::Compact { .. }
-                    | Op::Rename { .. }
-                    | Op::SetModel { .. }
-                    | Op::Login
-                    | Op::Logout
-                    | Op::Resolve { .. }),
-                ) => warn!("dropped mid-turn op: {op:?}"),
-            },
-            output = &mut fut => return Ok(output),
-        }
     }
 }
 
@@ -852,7 +394,7 @@ async fn stream_response(
 /// Forwards one response stream's deltas to `sink` and returns its completed reply. `usage`
 /// tracks what the wire has reported so far, so it stays accurate when the stream fails or the
 /// caller drops the future.
-async fn collect_response(
+pub(super) async fn collect_response(
     mut rx: mpsc::Receiver<Result<ResponseEvent>>,
     sink: &dyn EventSink,
     usage: &mut Option<TokenUsage>,
@@ -863,6 +405,9 @@ async fn collect_response(
             ResponseEvent::Thinking(text) => _ = sink.send(Event::ThinkingToken(text)),
             ResponseEvent::Progress(note) => _ = sink.send(Event::ProgressUpdate(note)),
             ResponseEvent::Usage(reported) => *usage = Some(reported),
+            ResponseEvent::RateLimits(limits) => {
+                sink.emit(Event::RateLimitsUpdated(limits), "rate-limits");
+            }
             ResponseEvent::Retrying(notice) => sink.emit(Event::Retrying(notice), "retry-notice"),
             ResponseEvent::Completed(response) => return Ok(response),
         }
@@ -872,13 +417,10 @@ async fn collect_response(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::VecDeque;
     use std::future::Future;
     use std::path::Path;
     use std::pin::Pin;
     use std::sync::Arc;
-    use std::sync::Mutex as StdMutex;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use serde_json::json;
     use tokio::sync::Notify;
@@ -887,181 +429,26 @@ mod tests {
 
     use super::*;
     use crate::client::anthropic::testing::test_client;
+    use crate::client::{RateLimitWindow, RateLimits};
     use crate::config::Effort;
     use crate::config::auth::{Auth, AuthSource};
+    use crate::engine::dispatch::NOT_RUN;
+    use crate::engine::testing::{
+        EchoTool, FakeClient, dead_test_session, empty_prompt, gate_with, inert_ops, reply_of,
+        reply_turn, test_session, text_block, text_turn, thinking_block, with_stop,
+    };
+    #[cfg(unix)]
     use crate::file_tracker::FileTracker;
     use crate::message::Role;
     use crate::model::ResolvedModelId;
     use crate::permission::GateTarget;
-    use crate::protocol::CapturingSink;
-    use crate::session::handle::{self, SessionHandle};
-    use crate::session::store::testing::test_store;
+    use crate::protocol::{CapturingSink, Decision, ToolCall, ToolResult};
     use crate::tool::{
-        DEFAULT_TOOL_ICON, ReadExcerptLine, Tool, ToolDefinition, ToolMetadata, ToolOutput,
-        ToolRegistry, ToolResultView,
+        DEFAULT_TOOL_ICON, ReadExcerptLine, Tool, ToolMetadata, ToolOutput, ToolRegistry,
+        ToolResultView,
     };
 
-    // ── TurnAbort ──
-
-    #[test]
-    fn turn_abort_display_alternate_propagates_anyhow_cause_chain() {
-        // {abort:#} must delegate to the inner anyhow Error's alternate form so the full cause
-        // chain reaches the user. Plain {abort} surfaces only the outermost context.
-        let inner = anyhow!("HTTP 503 from upstream");
-        let chained = inner.context("stream error");
-        let abort = TurnAbort::Failed(chained);
-
-        let plain = format!("{abort}");
-        let alternate = format!("{abort:#}");
-
-        assert_eq!(plain, "stream error");
-        assert!(
-            alternate.contains("stream error") && alternate.contains("HTTP 503 from upstream"),
-            "alternate must include both layers: {alternate:?}",
-        );
-    }
-
-    #[test]
-    fn turn_abort_display_cancelled_and_shutdown_use_static_labels() {
-        assert_eq!(format!("{}", TurnAbort::Cancelled), "turn cancelled");
-        assert_eq!(format!("{}", TurnAbort::Shutdown), "engine shut down");
-    }
-
     // ── Fixtures ──
-
-    /// In-process fake that scripts a [`ResponseEvent`] stream per turn and records each request's
-    /// transcript.
-    struct FakeClient {
-        turns: StdMutex<VecDeque<Vec<Result<ResponseEvent>>>>,
-        requests: StdMutex<Vec<Vec<Message>>>,
-    }
-
-    impl FakeClient {
-        fn new(turns: Vec<Vec<ResponseEvent>>) -> Self {
-            let turns = turns
-                .into_iter()
-                .map(|events| events.into_iter().map(Ok).collect())
-                .collect();
-            Self {
-                turns: StdMutex::new(turns),
-                requests: StdMutex::default(),
-            }
-        }
-
-        /// Appends a turn whose stream fails with `error`.
-        fn then_fail(self, error: &str) -> Self {
-            self.turns
-                .lock()
-                .unwrap()
-                .push_back(vec![Err(anyhow!("{error}"))]);
-            self
-        }
-
-        fn requests(&self) -> Vec<Vec<Message>> {
-            self.requests.lock().unwrap().clone()
-        }
-    }
-
-    struct FailingCompactClient;
-
-    impl Wire for FailingCompactClient {
-        fn stream_message(
-            &self,
-            _messages: &[Message],
-            _system_sections: &[&str],
-            _user_context: Option<&str>,
-            _tools: &[ToolDefinition],
-        ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
-            Err(anyhow!("summarizer unavailable"))
-        }
-    }
-
-    struct CountingFailingClient {
-        calls: AtomicUsize,
-    }
-
-    impl CountingFailingClient {
-        fn new() -> Self {
-            Self {
-                calls: AtomicUsize::new(0),
-            }
-        }
-
-        fn calls(&self) -> usize {
-            self.calls.load(Ordering::SeqCst)
-        }
-    }
-
-    impl Wire for CountingFailingClient {
-        fn stream_message(
-            &self,
-            _messages: &[Message],
-            _system_sections: &[&str],
-            _user_context: Option<&str>,
-            _tools: &[ToolDefinition],
-        ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            Err(anyhow!("summarizer unavailable"))
-        }
-    }
-
-    struct DelayedSummaryClient {
-        started: Arc<Notify>,
-        release: Arc<Notify>,
-    }
-
-    impl Wire for DelayedSummaryClient {
-        fn stream_message(
-            &self,
-            _messages: &[Message],
-            _system_sections: &[&str],
-            _user_context: Option<&str>,
-            _tools: &[ToolDefinition],
-        ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
-            let (tx, rx) = mpsc::channel(8);
-            let started = self.started.clone();
-            let release = self.release.clone();
-            tokio::spawn(async move {
-                started.notify_one();
-                release.notified().await;
-                for event in text_turn("auto summary") {
-                    tx.send(Ok(event)).await.expect("test receiver alive");
-                }
-            });
-            Ok(rx)
-        }
-    }
-
-    impl Wire for FakeClient {
-        fn stream_message(
-            &self,
-            messages: &[Message],
-            _system_sections: &[&str],
-            _user_context: Option<&str>,
-            _tools: &[ToolDefinition],
-        ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
-            self.requests.lock().unwrap().push(messages.to_vec());
-            let events = self.turns.lock().unwrap().pop_front().unwrap_or_default();
-            let (tx, rx) = mpsc::channel(events.len().max(1));
-            for event in events {
-                tx.try_send(event).expect("channel capacity");
-            }
-            Ok(rx)
-        }
-    }
-
-    fn text_block(text: &str) -> ContentBlock {
-        ContentBlock::Text {
-            text: text.to_owned(),
-        }
-    }
-
-    fn thinking_block(thinking: &str) -> ContentBlock {
-        ContentBlock::Thinking {
-            thinking: thinking.to_owned(),
-            signature: "sig".to_owned(),
-        }
-    }
 
     fn tool_use_block(id: &str, name: &str, input_json: &str) -> ContentBlock {
         ContentBlock::ToolUse {
@@ -1069,29 +456,6 @@ mod tests {
             name: name.to_owned(),
             input: serde_json::from_str(input_json).expect("fixture tool input is JSON"),
         }
-    }
-
-    /// One reply completing with `content`, streaming its text and thinking first.
-    fn reply_turn(content: Vec<ContentBlock>) -> Vec<ResponseEvent> {
-        let mut events: Vec<ResponseEvent> = content
-            .iter()
-            .filter_map(|block| match block {
-                ContentBlock::Text { text } => Some(ResponseEvent::Text(text.clone())),
-                ContentBlock::Thinking { thinking, .. } => {
-                    Some(ResponseEvent::Thinking(thinking.clone()))
-                }
-                _ => None,
-            })
-            .collect();
-        events.push(ResponseEvent::Completed(Response {
-            content,
-            ..Response::default()
-        }));
-        events
-    }
-
-    fn text_turn(text: &str) -> Vec<ResponseEvent> {
-        reply_turn(vec![text_block(text)])
     }
 
     fn tool_use_turn(id: &str, name: &str, input_json: &str) -> Vec<ResponseEvent> {
@@ -1108,14 +472,6 @@ mod tests {
         )
     }
 
-    /// The turn's completed reply.
-    fn reply_of(events: &mut [ResponseEvent]) -> &mut Response {
-        match events.last_mut() {
-            Some(ResponseEvent::Completed(response)) => response,
-            last => panic!("the turn ends in its reply: {last:?}"),
-        }
-    }
-
     /// Reports `input_tokens` and `output_tokens` just before the turn's reply completes.
     fn with_usage(
         mut events: Vec<ResponseEvent>,
@@ -1126,55 +482,6 @@ mod tests {
         let usage = TokenUsage::new(input_tokens, output_tokens);
         events.insert(events.len() - 1, ResponseEvent::Usage(usage));
         events
-    }
-
-    /// Ends the turn's reply on `stop_reason`.
-    fn with_stop(
-        mut events: Vec<ResponseEvent>,
-        stop_reason: StopReason,
-        stop_details: Option<StopDetails>,
-    ) -> Vec<ResponseEvent> {
-        let reply = reply_of(&mut events);
-        reply.stop_reason = Some(stop_reason);
-        reply.stop_details = stop_details;
-        events
-    }
-
-    /// Echoes its input. Exercises the tool-dispatch path without subprocess machinery.
-    struct EchoTool;
-
-    impl Tool for EchoTool {
-        fn name(&self) -> &'static str {
-            "echo"
-        }
-
-        fn description(&self) -> &'static str {
-            "echo the input"
-        }
-
-        fn permission_class(&self) -> crate::permission::PermissionClass {
-            crate::permission::PermissionClass::Bash
-        }
-
-        fn input_schema(&self) -> serde_json::Value {
-            json!({"type": "object"})
-        }
-
-        fn run(
-            &self,
-            input: serde_json::Value,
-        ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + '_>> {
-            Box::pin(async move {
-                ToolOutput {
-                    content: input.to_string(),
-                    is_error: false,
-                    metadata: ToolMetadata {
-                        title: Some("echoed".into()),
-                        ..Default::default()
-                    },
-                }
-            })
-        }
     }
 
     /// Path tool whose result view shows the input and metadata it was resolved from.
@@ -1272,14 +579,6 @@ mod tests {
         }
     }
 
-    /// Inert receiver whose `recv()` stays pending. The sender is leaked so call sites don't
-    /// need to bind it for the test's lifetime.
-    fn inert_ops() -> mpsc::Receiver<Op> {
-        let (tx, rx) = crate::protocol::inert_op_channel();
-        std::mem::forget(tx);
-        rx
-    }
-
     /// The tool calls and results among `events`, each in emission order.
     fn tool_events(events: &[Event]) -> (Vec<ToolCall>, Vec<ToolResult>) {
         let mut calls = Vec::new();
@@ -1294,10 +593,6 @@ mod tests {
         (calls, results)
     }
 
-    fn empty_prompt() -> PromptParts {
-        PromptParts::default()
-    }
-
     fn round_totals(report: &TurnReport) -> Vec<u32> {
         report
             .billable_rounds
@@ -1306,8 +601,8 @@ mod tests {
             .collect()
     }
 
-    /// Gate that bypasses every rule (`yolo`), so the dispatch tests exercise the turn loop without
-    /// the permission layer interceding. Permission-specific behavior is covered in `permission`.
+    /// Gate that bypasses every rule (`yolo`), so the turn tests exercise the loop without the
+    /// permission layer interceding. The `dispatch` and `permission` tests cover the gate itself.
     fn yolo_gate() -> GateContext<'static> {
         GateContext {
             policy: Box::leak(Box::new(crate::permission::Policy::new(
@@ -1315,29 +610,6 @@ mod tests {
                 vec![],
                 vec![],
             ))),
-            cwd: std::path::Path::new("."),
-        }
-    }
-
-    /// Gate over allow / deny rule sets, leaking the policy like [`yolo_gate`]. `echo` is a
-    /// `bash`-class tool with no gate target, so only a class-wide rule matches it.
-    fn gate_with(
-        mode: crate::permission::Mode,
-        allow: &[&str],
-        deny: &[&str],
-    ) -> GateContext<'static> {
-        let owned = |rules: &[&str]| rules.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
-        let policy = Box::leak(Box::new(
-            crate::permission::Policy::resolve(
-                mode,
-                &owned(allow),
-                &owned(deny),
-                std::path::Path::new("."),
-            )
-            .expect("rules parse"),
-        ));
-        GateContext {
-            policy,
             cwd: std::path::Path::new("."),
         }
     }
@@ -1362,527 +634,6 @@ mod tests {
             }
             self.events.send(event)
         }
-    }
-
-    fn test_session(dir: &std::path::Path) -> SessionHandle {
-        let store = test_store(dir);
-        handle::start(&store, "claude-sonnet-5-5")
-    }
-
-    /// Handle whose actor channel is closed. Every write returns actor-gone.
-    fn dead_test_session() -> SessionHandle {
-        crate::session::handle::testing::dead("dead-test-session")
-    }
-
-    // ── auto_compact_if_needed ──
-
-    #[tokio::test]
-    async fn auto_compact_if_needed_skips_without_auto_state_usage_or_threshold() {
-        let dir = tempfile::tempdir().unwrap();
-        let session = test_session(dir.path());
-        let client = FakeClient::new(Vec::new());
-        let sink = CapturingSink::new();
-        let tracker = FileTracker::default();
-        let mut messages = vec![
-            Message::user("hi"),
-            Message::assistant("there"),
-            Message::user("next"),
-            Message::assistant("done"),
-        ];
-        let mut pending = Vec::new();
-        let mut failures = 0;
-
-        let absent = auto_compact_if_needed(
-            &client,
-            &session,
-            &mut messages,
-            &sink,
-            &mut inert_ops(),
-            &mut pending,
-            None,
-            Some(TokenUsage {
-                input_tokens: 20,
-                cache_creation_input_tokens: 0,
-                cache_read_input_tokens: 0,
-                output_tokens: 1,
-            }),
-        )
-        .await
-        .unwrap();
-        assert!(!absent);
-
-        let missing_usage = auto_compact_if_needed(
-            &client,
-            &session,
-            &mut messages,
-            &sink,
-            &mut inert_ops(),
-            &mut pending,
-            Some(&mut AutoCompact {
-                config: AutoCompactionConfig {
-                    enabled: true,
-                    threshold_tokens: Some(10),
-                },
-                failures: &mut failures,
-                file_tracker: &tracker,
-                prompt: &empty_prompt(),
-                tools: &[],
-                spent: &mut Vec::new(),
-            }),
-            None,
-        )
-        .await
-        .unwrap();
-        assert!(!missing_usage);
-
-        let below_threshold = auto_compact_if_needed(
-            &client,
-            &session,
-            &mut messages,
-            &sink,
-            &mut inert_ops(),
-            &mut pending,
-            Some(&mut AutoCompact {
-                config: AutoCompactionConfig {
-                    enabled: true,
-                    threshold_tokens: Some(100),
-                },
-                failures: &mut failures,
-                file_tracker: &tracker,
-                prompt: &empty_prompt(),
-                tools: &[],
-                spent: &mut Vec::new(),
-            }),
-            Some(TokenUsage {
-                input_tokens: 20,
-                cache_creation_input_tokens: 0,
-                cache_read_input_tokens: 0,
-                output_tokens: 1,
-            }),
-        )
-        .await
-        .unwrap();
-        assert!(!below_threshold);
-        assert_eq!(messages.len(), 4);
-        assert_eq!(failures, 0);
-    }
-
-    #[tokio::test]
-    async fn auto_compact_if_needed_counts_summarizer_failure_without_replacing_messages() {
-        let dir = tempfile::tempdir().unwrap();
-        let session = test_session(dir.path());
-        let sink = CapturingSink::new();
-        let tracker = FileTracker::default();
-        let mut messages = vec![
-            Message::user("hi"),
-            Message::assistant("there"),
-            Message::user("next"),
-            Message::assistant("done"),
-        ];
-        let mut pending = Vec::new();
-        let mut failures = 0;
-
-        let compacted = auto_compact_if_needed(
-            &FailingCompactClient,
-            &session,
-            &mut messages,
-            &sink,
-            &mut inert_ops(),
-            &mut pending,
-            Some(&mut AutoCompact {
-                config: AutoCompactionConfig {
-                    enabled: true,
-                    threshold_tokens: Some(10),
-                },
-                failures: &mut failures,
-                file_tracker: &tracker,
-                prompt: &empty_prompt(),
-                tools: &[],
-                spent: &mut Vec::new(),
-            }),
-            Some(TokenUsage {
-                input_tokens: 20,
-                cache_creation_input_tokens: 0,
-                cache_read_input_tokens: 0,
-                output_tokens: 1,
-            }),
-        )
-        .await
-        .unwrap();
-
-        assert!(!compacted);
-        assert_eq!(failures, 1);
-        assert!(matches!(&messages[0].content[0], ContentBlock::Text { text } if text == "hi"));
-        assert!(
-            sink.events().iter().any(|event| {
-                matches!(event, Event::Error(message) if message.contains("Auto-compaction failed"))
-            }),
-            "summarizer failure must surface a user-visible Event::Error",
-        );
-    }
-
-    #[tokio::test]
-    async fn auto_compact_if_needed_emits_disabled_notice_on_third_failure() {
-        let dir = tempfile::tempdir().unwrap();
-        let session = test_session(dir.path());
-        let sink = CapturingSink::new();
-        let tracker = FileTracker::default();
-        let mut messages = vec![
-            Message::user("hi"),
-            Message::assistant("there"),
-            Message::user("next"),
-            Message::assistant("done"),
-        ];
-        let mut pending = Vec::new();
-        let mut failures = MAX_AUTO_COMPACT_FAILURES - 1;
-
-        let compacted = auto_compact_if_needed(
-            &FailingCompactClient,
-            &session,
-            &mut messages,
-            &sink,
-            &mut inert_ops(),
-            &mut pending,
-            Some(&mut AutoCompact {
-                config: AutoCompactionConfig {
-                    enabled: true,
-                    threshold_tokens: Some(10),
-                },
-                failures: &mut failures,
-                file_tracker: &tracker,
-                prompt: &empty_prompt(),
-                tools: &[],
-                spent: &mut Vec::new(),
-            }),
-            Some(TokenUsage {
-                input_tokens: 20,
-                cache_creation_input_tokens: 0,
-                cache_read_input_tokens: 0,
-                output_tokens: 1,
-            }),
-        )
-        .await
-        .unwrap();
-
-        assert!(!compacted);
-        assert_eq!(failures, MAX_AUTO_COMPACT_FAILURES);
-        assert!(
-            sink.events().iter().any(|event| {
-                matches!(event, Event::Error(message) if message.contains("Auto-compaction disabled"))
-            }),
-            "the breaker-tripping failure must surface a one-time disablement notice",
-        );
-    }
-
-    #[tokio::test]
-    async fn auto_compact_if_needed_counts_persist_failure_without_replacing_messages() {
-        let session = dead_test_session();
-        let client = FakeClient::new(vec![text_turn("auto summary")]);
-        let sink = CapturingSink::new();
-        let tracker = FileTracker::default();
-        let mut messages = vec![
-            Message::user("hi"),
-            Message::assistant("there"),
-            Message::user("next"),
-            Message::assistant("done"),
-        ];
-        let mut pending = Vec::new();
-        let mut failures = 0;
-
-        let compacted = auto_compact_if_needed(
-            &client,
-            &session,
-            &mut messages,
-            &sink,
-            &mut inert_ops(),
-            &mut pending,
-            Some(&mut AutoCompact {
-                config: AutoCompactionConfig {
-                    enabled: true,
-                    threshold_tokens: Some(10),
-                },
-                failures: &mut failures,
-                file_tracker: &tracker,
-                prompt: &empty_prompt(),
-                tools: &[],
-                spent: &mut Vec::new(),
-            }),
-            Some(TokenUsage {
-                input_tokens: 20,
-                cache_creation_input_tokens: 0,
-                cache_read_input_tokens: 0,
-                output_tokens: 1,
-            }),
-        )
-        .await
-        .unwrap();
-
-        assert!(!compacted);
-        assert_eq!(failures, 1);
-        assert!(matches!(&messages[0].content[0], ContentBlock::Text { text } if text == "hi"));
-        let events = sink.events();
-        assert!(
-            matches!(
-                events.as_slice(),
-                [
-                    Event::AutoCompactionStarted,
-                    Event::SummaryToken(summary),
-                    Event::SummaryDiscarded,
-                    Event::Error(message),
-                ] if summary == "auto summary" && message.starts_with("Session write failed")
-            ),
-            "the unsaved summary is discarded before the write failure: {events:?}",
-        );
-    }
-
-    #[tokio::test]
-    async fn auto_compact_if_needed_stops_after_failure_limit() {
-        let dir = tempfile::tempdir().unwrap();
-        let session = test_session(dir.path());
-        let client = CountingFailingClient::new();
-        let sink = CapturingSink::new();
-        let tracker = FileTracker::default();
-        let mut messages = vec![
-            Message::user("hi"),
-            Message::assistant("there"),
-            Message::user("next"),
-            Message::assistant("done"),
-        ];
-        let mut pending = Vec::new();
-        let mut failures = MAX_AUTO_COMPACT_FAILURES - 1;
-        let usage = Some(TokenUsage {
-            input_tokens: 50_000,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 0,
-            output_tokens: 1,
-        });
-
-        let first = auto_compact_if_needed(
-            &client,
-            &session,
-            &mut messages,
-            &sink,
-            &mut inert_ops(),
-            &mut pending,
-            Some(&mut AutoCompact {
-                config: AutoCompactionConfig {
-                    enabled: true,
-                    threshold_tokens: Some(50_000),
-                },
-                failures: &mut failures,
-                file_tracker: &tracker,
-                prompt: &empty_prompt(),
-                tools: &[],
-                spent: &mut Vec::new(),
-            }),
-            usage,
-        )
-        .await
-        .unwrap();
-        let second = auto_compact_if_needed(
-            &client,
-            &session,
-            &mut messages,
-            &sink,
-            &mut inert_ops(),
-            &mut pending,
-            Some(&mut AutoCompact {
-                config: AutoCompactionConfig {
-                    enabled: true,
-                    threshold_tokens: Some(50_000),
-                },
-                failures: &mut failures,
-                file_tracker: &tracker,
-                prompt: &empty_prompt(),
-                tools: &[],
-                spent: &mut Vec::new(),
-            }),
-            usage,
-        )
-        .await
-        .unwrap();
-
-        assert!(!first);
-        assert!(!second);
-        assert_eq!(failures, MAX_AUTO_COMPACT_FAILURES);
-        assert_eq!(client.calls(), 1);
-    }
-
-    #[tokio::test]
-    async fn auto_compact_if_needed_queues_submit_while_summarizing() {
-        let dir = tempfile::tempdir().unwrap();
-        let session = test_session(dir.path());
-        let started = Arc::new(Notify::new());
-        let release = Arc::new(Notify::new());
-        let client = DelayedSummaryClient {
-            started: started.clone(),
-            release: release.clone(),
-        };
-        let sink = CapturingSink::new();
-        let tracker = FileTracker::default();
-        let mut messages = vec![
-            Message::user("hi"),
-            Message::assistant("there"),
-            Message::user("next"),
-            Message::assistant("done"),
-        ];
-        let mut pending = Vec::new();
-        let mut failures = 0;
-        let (tx, mut rx) = mpsc::channel::<Op>(1);
-        let mut auto = AutoCompact {
-            config: AutoCompactionConfig {
-                enabled: true,
-                threshold_tokens: Some(10),
-            },
-            failures: &mut failures,
-            file_tracker: &tracker,
-            prompt: &empty_prompt(),
-            tools: &[],
-            spent: &mut Vec::new(),
-        };
-
-        let compact = auto_compact_if_needed(
-            &client,
-            &session,
-            &mut messages,
-            &sink,
-            &mut rx,
-            &mut pending,
-            Some(&mut auto),
-            Some(TokenUsage {
-                input_tokens: 20,
-                cache_creation_input_tokens: 0,
-                cache_read_input_tokens: 0,
-                output_tokens: 1,
-            }),
-        );
-        let queue_prompt = async {
-            started.notified().await;
-            tx.send(Op::Queue("queued after summary".into()))
-                .await
-                .unwrap();
-            tokio::task::yield_now().await;
-            release.notify_one();
-        };
-        let (compacted, ()) = tokio::join!(compact, queue_prompt);
-        let compacted = compacted.unwrap();
-
-        assert!(compacted);
-        assert_eq!(pending, vec!["queued after summary"]);
-        assert_eq!(*auto.failures, 0);
-        assert_eq!(
-            sink.events()
-                .iter()
-                .filter(|event| matches!(event, Event::PromptDrained(_)))
-                .count(),
-            0
-        );
-        assert!(sink.events().iter().any(|event| matches!(
-            event,
-            Event::SessionCompacted {
-                automatic: true,
-                ..
-            }
-        )));
-        assert_eq!(messages.len(), 1);
-        assert!(
-            matches!(&messages[0].content[0], ContentBlock::Text { text } if text.contains("auto summary"))
-        );
-    }
-
-    #[tokio::test]
-    async fn auto_compact_if_needed_retries_an_overflowing_summary_without_the_oldest_rounds() {
-        let dir = tempfile::tempdir().unwrap();
-        let session = test_session(dir.path());
-        let client = FakeClient::new(vec![
-            with_stop(
-                text_turn("partial"),
-                StopReason::ModelContextWindowExceeded,
-                None,
-            ),
-            text_turn("auto summary"),
-        ]);
-        let sink = CapturingSink::new();
-        let tracker = FileTracker::default();
-        let mut messages = vec![
-            Message::user("hi"),
-            Message::assistant("there"),
-            Message::user("next"),
-            Message::assistant("done"),
-        ];
-        let mut failures = 0;
-
-        let compacted = auto_compact_if_needed(
-            &client,
-            &session,
-            &mut messages,
-            &sink,
-            &mut inert_ops(),
-            &mut Vec::new(),
-            Some(&mut AutoCompact {
-                config: AutoCompactionConfig {
-                    enabled: true,
-                    threshold_tokens: Some(10),
-                },
-                failures: &mut failures,
-                file_tracker: &tracker,
-                prompt: &empty_prompt(),
-                tools: &[],
-                spent: &mut Vec::new(),
-            }),
-            Some(TokenUsage {
-                input_tokens: 20,
-                cache_creation_input_tokens: 0,
-                cache_read_input_tokens: 0,
-                output_tokens: 1,
-            }),
-        )
-        .await
-        .unwrap();
-
-        assert!(compacted);
-        let sent_texts: Vec<Vec<String>> = client
-            .requests()
-            .iter()
-            .map(|request| {
-                request
-                    .iter()
-                    .flat_map(|m| &m.content)
-                    .filter_map(|block| match block {
-                        ContentBlock::Text { text } => Some(text.clone()),
-                        _ => None,
-                    })
-                    .collect()
-            })
-            .collect();
-        let [first, retry] = &sent_texts[..] else {
-            panic!("expected the overflow and one retry: {sent_texts:?}");
-        };
-        assert_eq!(first[..4], ["hi", "there", "next", "done"]);
-        assert!(
-            !retry
-                .iter()
-                .any(|text| ["hi", "there", "next"].contains(&text.as_str())),
-            "the retry keeps only the newest round: {retry:?}",
-        );
-        assert!(retry.iter().any(|text| text == "done"), "{retry:?}");
-        assert!(
-            matches!(&messages[0].content[0], ContentBlock::Text { text } if text.contains("auto summary"))
-        );
-        let events = sink.events();
-        assert!(
-            matches!(
-                events.as_slice(),
-                [
-                    Event::AutoCompactionStarted,
-                    Event::SummaryToken(overflowed),
-                    Event::SummaryDiscarded,
-                    Event::SummaryToken(retried),
-                    Event::SessionCompacted { automatic: true, .. },
-                ] if overflowed == "partial" && retried == "auto summary"
-            ),
-            "the overflowed summary is discarded before the retry streams: {events:?}",
-        );
     }
 
     // ── agent_turn ──
@@ -3608,444 +2359,6 @@ mod tests {
         );
     }
 
-    // ── dispatch_tool_call ──
-
-    #[tokio::test]
-    async fn dispatch_tool_call_interrupt_during_approval_reports_the_call_not_run() {
-        let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
-        let sink = CapturingSink::new();
-        let mut gate = gate_with(crate::permission::Mode::Auto, &[], &[]);
-        let (tx, mut rx) = mpsc::channel::<Op>(1);
-        tx.try_send(Op::Interrupt).unwrap();
-
-        let (output, abort) = dispatch_tool_call(
-            &tools,
-            "tool_1",
-            "echo",
-            json!({"v": 1}),
-            None,
-            &sink,
-            &mut rx,
-            &mut Vec::new(),
-            &mut gate,
-        )
-        .await;
-
-        assert!(matches!(abort, Some(TurnAbort::Cancelled)), "got {abort:?}");
-        assert!(
-            sink.events()
-                .iter()
-                .any(|e| matches!(e, Event::ApprovalRequested { id, .. } if id == "tool_1")),
-            "the cancel lands while the approval is pending",
-        );
-        assert_eq!(
-            (output.content.as_str(), output.is_error),
-            ("Not run, because the user interrupted the turn.", true),
-        );
-    }
-
-    // ── check_permission ──
-
-    #[tokio::test]
-    async fn check_permission_allow_proceeds_without_an_approval_event() {
-        // `echo` is a bash-class tool, so `auto` asks by default, and a class-wide allow clears it.
-        let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
-        let sink = CapturingSink::new();
-        let mut gate = gate_with(crate::permission::Mode::Auto, &["bash"], &[]);
-
-        let denial = check_permission(
-            &tools,
-            "tool_1",
-            "echo",
-            &mut json!({}),
-            &sink,
-            &mut inert_ops(),
-            &mut Vec::new(),
-            &mut gate,
-        )
-        .await
-        .expect("allow must not abort");
-
-        assert!(denial.is_none(), "an allowed call proceeds");
-        assert!(
-            !sink
-                .events()
-                .iter()
-                .any(|e| matches!(e, Event::ApprovalRequested { .. })),
-            "allow must not surface an approval prompt",
-        );
-    }
-
-    #[tokio::test]
-    async fn check_permission_deny_rule_short_circuits_to_a_synthetic_denial() {
-        let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
-        let sink = CapturingSink::new();
-        let mut gate = gate_with(crate::permission::Mode::Auto, &[], &["bash"]);
-
-        let denial = check_permission(
-            &tools,
-            "tool_1",
-            "echo",
-            &mut json!({}),
-            &sink,
-            &mut inert_ops(),
-            &mut Vec::new(),
-            &mut gate,
-        )
-        .await
-        .expect("deny resolves without abort")
-        .expect("a deny rule must yield a synthetic denial");
-
-        assert!(
-            denial.is_error,
-            "denial is surfaced as a failed tool result"
-        );
-        assert!(denial.content.contains("denied by the permission policy"));
-        assert!(
-            !sink
-                .events()
-                .iter()
-                .any(|e| matches!(e, Event::ApprovalRequested { .. })),
-            "a deny rule never prompts",
-        );
-    }
-
-    #[tokio::test]
-    async fn check_permission_ask_emits_event_and_approve_proceeds() {
-        let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
-        let sink = CapturingSink::new();
-        let mut gate = gate_with(crate::permission::Mode::Auto, &[], &[]);
-        let (tx, mut rx) = mpsc::channel::<Op>(1);
-        tx.try_send(Op::Resolve {
-            id: "tool_1".to_owned(),
-            decision: Decision::Approve,
-        })
-        .unwrap();
-
-        let denial = check_permission(
-            &tools,
-            "tool_1",
-            "echo",
-            &mut json!({}),
-            &sink,
-            &mut rx,
-            &mut Vec::new(),
-            &mut gate,
-        )
-        .await
-        .expect("approve resolves without abort");
-
-        assert!(denial.is_none(), "an approved call proceeds");
-        let prompted = sink.events().into_iter().find_map(|e| match e {
-            Event::ApprovalRequested { id, .. } => Some(id),
-            _ => None,
-        });
-        assert_eq!(
-            prompted.as_deref(),
-            Some("tool_1"),
-            "ask must surface an approval event carrying the call id",
-        );
-    }
-
-    #[tokio::test]
-    async fn check_permission_allow_for_session_runs_later_calls_the_rule_covers_unasked() {
-        let tools = ToolRegistry::new(vec![Box::new(crate::tool::bash::BashTool)]);
-        let sink = CapturingSink::new();
-        let mut gate = gate_with(crate::permission::Mode::Auto, &[], &[]);
-        let rule = Rule::parse("bash(cargo test:*)").unwrap();
-        let (tx, mut rx) = mpsc::channel::<Op>(1);
-        tx.try_send(Op::Resolve {
-            id: "tool_1".to_owned(),
-            decision: Decision::AllowForSession {
-                rule: Box::new(rule.clone()),
-            },
-        })
-        .unwrap();
-        drop(tx);
-
-        for (id, command) in [("tool_1", "cargo test"), ("tool_2", "cargo test --release")] {
-            let denial = check_permission(
-                &tools,
-                id,
-                "bash",
-                &mut json!({ "command": command }),
-                &sink,
-                &mut rx,
-                &mut Vec::new(),
-                &mut gate,
-            )
-            .await
-            .expect("the granted rule settles the second call without waiting");
-            assert!(denial.is_none(), "{command} proceeds");
-        }
-
-        let events = sink.events();
-        let suggested: Vec<String> = events
-            .iter()
-            .filter_map(|e| match e {
-                Event::ApprovalRequested { grant, .. } => Some(
-                    grant
-                        .as_ref()
-                        .expect("a command offers a grant")
-                        .suggested()
-                        .to_string(),
-                ),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(suggested, ["bash(cargo test)"], "only the first call asks");
-        assert!(
-            events.iter().any(
-                |e| matches!(e, Event::SessionRulesUpdated(rules) if *rules == [rule.clone()])
-            ),
-            "{events:?}",
-        );
-        assert_eq!(gate.policy.session_allow(), [rule]);
-    }
-
-    #[tokio::test]
-    async fn check_permission_allow_for_session_denies_a_rule_the_call_grant_does_not_admit() {
-        // The engine re-checks the frontend's rule against its own grant: a rule that misses the
-        // call, one in another class, and any rule for a call that offered no grant all deny.
-        let tools = ToolRegistry::new(vec![
-            Box::new(crate::tool::bash::BashTool),
-            Box::new(EchoTool),
-        ]);
-        for (name, input, rule) in [
-            (
-                "bash",
-                json!({ "command": "cargo test" }),
-                "bash(cargo build:*)",
-            ),
-            ("bash", json!({ "command": "cargo test" }), "edit(**)"),
-            ("echo", json!({}), "bash"),
-        ] {
-            let sink = CapturingSink::new();
-            let mut gate = gate_with(crate::permission::Mode::Auto, &[], &[]);
-            let (tx, mut rx) = mpsc::channel::<Op>(1);
-            tx.try_send(Op::Resolve {
-                id: "tool_1".to_owned(),
-                decision: Decision::AllowForSession {
-                    rule: Box::new(Rule::parse(rule).unwrap()),
-                },
-            })
-            .unwrap();
-
-            let denial = check_permission(
-                &tools,
-                "tool_1",
-                name,
-                &mut input.clone(),
-                &sink,
-                &mut rx,
-                &mut Vec::new(),
-                &mut gate,
-            )
-            .await
-            .expect("a refused rule resolves without abort")
-            .unwrap_or_else(|| panic!("{rule} must not let the {name} call run"));
-
-            assert!(denial.content.contains("denied by the permission policy"));
-            assert_eq!(gate.policy.session_allow(), [], "{rule}");
-            let events = sink.events();
-            assert!(
-                events.iter().any(|e| matches!(
-                    e,
-                    Event::Error(msg) if msg.starts_with(&format!("Session rule refused, so the {name} call was denied: "))
-                )),
-                "{rule}: {events:?}",
-            );
-            assert!(
-                !events
-                    .iter()
-                    .any(|e| matches!(e, Event::SessionRulesUpdated(_))),
-                "{rule}: {events:?}",
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn check_permission_ask_undeliverable_event_fails_closed() {
-        // If the approval event can't be delivered, no modal can answer it, so the gate must deny
-        // rather than block in await_approval forever. An inert receiver would hang on a regression.
-        let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
-        let sink = crate::protocol::FailingSink;
-        let mut gate = gate_with(crate::permission::Mode::Auto, &[], &[]);
-        let (_tx, mut rx) = mpsc::channel::<Op>(1);
-
-        let denial = check_permission(
-            &tools,
-            "tool_1",
-            "echo",
-            &mut json!({}),
-            &sink,
-            &mut rx,
-            &mut Vec::new(),
-            &mut gate,
-        )
-        .await
-        .expect("an undeliverable approval resolves without abort")
-        .expect("an undeliverable approval yields a synthetic denial");
-
-        assert!(denial.is_error);
-        assert!(denial.content.contains("denied by the permission policy"));
-    }
-
-    #[tokio::test]
-    async fn check_permission_ask_deny_decision_yields_a_synthetic_denial() {
-        let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
-        let sink = CapturingSink::new();
-        let mut gate = gate_with(crate::permission::Mode::Auto, &[], &[]);
-        let (tx, mut rx) = mpsc::channel::<Op>(1);
-        tx.try_send(Op::Resolve {
-            id: "tool_1".to_owned(),
-            decision: Decision::Deny,
-        })
-        .unwrap();
-
-        let denial = check_permission(
-            &tools,
-            "tool_1",
-            "echo",
-            &mut json!({}),
-            &sink,
-            &mut rx,
-            &mut Vec::new(),
-            &mut gate,
-        )
-        .await
-        .expect("deny decision resolves without abort")
-        .expect("a deny decision yields a synthetic denial");
-
-        assert!(denial.is_error);
-        assert!(denial.content.contains("denied by the permission policy"));
-    }
-
-    #[tokio::test]
-    async fn check_permission_unknown_tool_proceeds_so_run_can_report_it() {
-        // An unknown tool has no permission class, so the gate steps aside and lets `tools.run`
-        // emit its own "unknown tool" error. A class-wide deny must not catch it.
-        let tools = ToolRegistry::new(vec![]);
-        let sink = CapturingSink::new();
-        let mut gate = gate_with(crate::permission::Mode::Auto, &[], &["bash"]);
-        let denial = check_permission(
-            &tools,
-            "tool_1",
-            "mystery",
-            &mut json!({}),
-            &sink,
-            &mut inert_ops(),
-            &mut Vec::new(),
-            &mut gate,
-        )
-        .await
-        .expect("unknown tool resolves without abort");
-
-        assert!(denial.is_none(), "unknown tool bypasses the gate");
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn check_permission_pins_a_path_input_to_the_resolved_target() {
-        // The tool must act on the file the gate checked, so a relative or symlinked `file_path` is
-        // rewritten to the resolved location before the preview and the run see it.
-        let dir = tempfile::tempdir().unwrap();
-        let cwd = dunce::canonicalize(dir.path()).unwrap();
-        std::fs::write(cwd.join("real.txt"), "x").unwrap();
-        std::os::unix::fs::symlink("real.txt", cwd.join("link.txt")).unwrap();
-        let tools = ToolRegistry::new(vec![Box::new(crate::tool::read::ReadTool::new(Arc::new(
-            FileTracker::default(),
-        )))]);
-        let mut gate = GateContext {
-            cwd: &cwd,
-            ..gate_with(crate::permission::Mode::Auto, &[], &[])
-        };
-        let mut input = json!({"file_path": "link.txt"});
-
-        let denial = check_permission(
-            &tools,
-            "tool_1",
-            "read",
-            &mut input,
-            &CapturingSink::new(),
-            &mut inert_ops(),
-            &mut Vec::new(),
-            &mut gate,
-        )
-        .await
-        .expect("a read resolves without abort");
-
-        assert!(denial.is_none(), "a read-class call proceeds");
-        assert_eq!(input["file_path"], json!(cwd.join("real.txt")));
-    }
-
-    // ── await_approval ──
-
-    #[tokio::test]
-    async fn await_approval_ignores_a_stale_decision_for_another_call() {
-        // A decision for an already-resolved call must not satisfy the wait, but the matching id does.
-        let (tx, mut rx) = mpsc::channel::<Op>(2);
-        tx.try_send(Op::Resolve {
-            id: "other".to_owned(),
-            decision: Decision::Approve,
-        })
-        .unwrap();
-        tx.try_send(Op::Resolve {
-            id: "tool_1".to_owned(),
-            decision: Decision::Deny,
-        })
-        .unwrap();
-
-        let decision = await_approval("tool_1", &mut rx, &mut Vec::new())
-            .await
-            .expect("matching decision resolves");
-        assert_eq!(decision, Decision::Deny);
-    }
-
-    #[tokio::test]
-    async fn await_approval_buffers_a_mid_approval_submit_into_pending() {
-        let (tx, mut rx) = mpsc::channel::<Op>(2);
-        tx.try_send(Op::Queue("queued".to_owned())).unwrap();
-        tx.try_send(Op::Resolve {
-            id: "tool_1".to_owned(),
-            decision: Decision::Approve,
-        })
-        .unwrap();
-        let mut pending = Vec::new();
-
-        let decision = await_approval("tool_1", &mut rx, &mut pending)
-            .await
-            .expect("approval resolves");
-        assert_eq!(decision, Decision::Approve);
-        assert_eq!(pending, vec!["queued".to_owned()], "the submit buffers");
-    }
-
-    #[tokio::test]
-    async fn await_approval_interrupt_and_shutdown_abort_the_turn() {
-        for (op, want_shutdown) in [(Op::Interrupt, false), (Op::Shutdown, true)] {
-            let (tx, mut rx) = mpsc::channel::<Op>(1);
-            tx.try_send(op.clone()).unwrap();
-            let abort = await_approval("tool_1", &mut rx, &mut Vec::new())
-                .await
-                .expect_err("interrupt / shutdown abort the wait");
-            if want_shutdown {
-                assert!(matches!(abort, TurnAbort::Shutdown), "{op:?}");
-            } else {
-                assert!(matches!(abort, TurnAbort::Cancelled), "{op:?}");
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn await_approval_dropped_channel_collapses_to_shutdown() {
-        let (tx, mut rx) = mpsc::channel::<Op>(1);
-        drop(tx);
-        let abort = await_approval("tool_1", &mut rx, &mut Vec::new())
-            .await
-            .expect_err("a closed channel aborts");
-        assert!(matches!(abort, TurnAbort::Shutdown));
-    }
-
     // ── collect_response ──
 
     #[tokio::test]
@@ -4055,7 +2368,15 @@ mod tests {
             stop_reason: Some(StopReason::EndTurn),
             ..Response::default()
         };
+        let limits = RateLimits {
+            five_hour: Some(RateLimitWindow {
+                utilization: 0.42,
+                resets_at: 1_760_000_000,
+            }),
+            seven_day: None,
+        };
         let events = [
+            ResponseEvent::RateLimits(limits),
             ResponseEvent::Usage(TokenUsage::new(5, 0)),
             ResponseEvent::Retrying("HTTP 529. Retrying in 1s (retry 1 of 5).".to_owned()),
             ResponseEvent::Thinking("plan".to_owned()),
@@ -4078,6 +2399,7 @@ mod tests {
         assert_eq!(
             sink.events(),
             [
+                Event::RateLimitsUpdated(limits),
                 Event::Retrying("HTTP 529. Retrying in 1s (retry 1 of 5).".to_owned()),
                 Event::ThinkingToken("plan".to_owned()),
                 Event::ProgressUpdate("Searching.".to_owned()),

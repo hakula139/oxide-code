@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 use tracing::debug;
 
 use super::accumulator::ResponseAccumulator;
-use super::transport::{AttemptError, MessagesRequest, post_messages, with_retry};
+use super::transport::{AttemptError, MessagesRequest, post_messages, rate_limits, with_retry};
 use super::wire::{ApiError, StreamEvent};
 use crate::client::ResponseEvent;
 
@@ -42,12 +42,21 @@ pub(super) async fn stream_sse(
     .await
 }
 
-/// Forwards one attempt's events. Failures before the first content block stay retryable
-/// because the consumer has seen nothing it would have to retract.
+/// Forwards one attempt's events, led by the account's rate limits when the response reports them.
+/// Failures before the first content block stay retryable because the consumer has seen nothing it
+/// would have to retract.
 async fn pump_events(
     response: reqwest::Response,
     tx: &mpsc::Sender<Result<ResponseEvent>>,
 ) -> Result<(), AttemptError> {
+    if let Some(limits) = rate_limits(response.headers())
+        && tx
+            .send(Ok(ResponseEvent::RateLimits(limits)))
+            .await
+            .is_err()
+    {
+        return Ok(());
+    }
     let mut stream = response.bytes_stream();
     let mut frames = FrameDecoder::default();
     let mut reply = ResponseAccumulator::default();
@@ -197,7 +206,7 @@ mod tests {
     use super::*;
     use crate::client::anthropic::testing::messages_request;
     use crate::client::anthropic::wire::Delta;
-    use crate::client::{Response, TokenUsage};
+    use crate::client::{RateLimitWindow, RateLimits, Response, TokenUsage};
     use crate::message::ContentBlock;
 
     // ── Fixtures ──
@@ -235,6 +244,13 @@ mod tests {
         ResponseTemplate::new(200)
             .insert_header("content-type", "text/event-stream")
             .set_body_bytes(body)
+    }
+
+    /// `response` with a subscription's five-hour usage window.
+    fn rate_limited(response: ResponseTemplate) -> ResponseTemplate {
+        response
+            .insert_header("anthropic-ratelimit-unified-5h-utilization", "0.42")
+            .insert_header("anthropic-ratelimit-unified-5h-reset", "1760000000")
     }
 
     /// Serves `responses` in order, one request each, repeating the last one after that.
@@ -518,16 +534,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stream_sse_leads_with_the_rate_limits_the_response_reports() {
+        let server = serve(vec![rate_limited(sse_response(
+            [MESSAGE_START, TEXT_DELTA, MESSAGE_STOP].concat(),
+        ))])
+        .await;
+
+        let (result, events) = run_stream(&server.uri()).await;
+
+        result.expect("stream completes");
+        assert_eq!(
+            events,
+            [
+                ResponseEvent::RateLimits(RateLimits {
+                    five_hour: Some(RateLimitWindow {
+                        utilization: 0.42,
+                        resets_at: 1_760_000_000,
+                    }),
+                    seven_day: None,
+                }),
+                START_USAGE,
+                ResponseEvent::Text("Hi".to_owned()),
+                hi_reply(),
+            ],
+        );
+    }
+
+    #[tokio::test]
     async fn stream_sse_succeeds_when_receiver_drops_before_send() {
         // Consumer cancellation must surface as graceful Ok(()), not an Err on the stream.
-        let server = serve(vec![sse_response(MESSAGE_START.repeat(8))]).await;
-        let request = messages_request(format!("{}/v1/messages", server.uri()));
-        let (tx, rx) = mpsc::channel::<Result<ResponseEvent>>(1);
-        drop(rx);
+        for response in [
+            sse_response(MESSAGE_START.repeat(8)),
+            rate_limited(sse_response(MESSAGE_START)),
+        ] {
+            let server = serve(vec![response]).await;
+            let request = messages_request(format!("{}/v1/messages", server.uri()));
+            let (tx, rx) = mpsc::channel::<Result<ResponseEvent>>(1);
+            drop(rx);
 
-        let result = stream_sse(&reqwest::Client::new(), &request, &tx).await;
+            let result = stream_sse(&reqwest::Client::new(), &request, &tx).await;
 
-        assert!(matches!(result, Ok(())), "graceful shutdown: {result:?}");
+            assert!(matches!(result, Ok(())), "graceful shutdown: {result:?}");
+        }
     }
 
     // ── FrameDecoder ──

@@ -1,14 +1,14 @@
 //! Compact-boundary persistence and live transcript replacement.
 
-use crate::agent::compaction::synthesize_post_compact_message;
 use crate::file_tracker::FileTracker;
 use crate::message::Message;
 use crate::protocol::{Event, EventSink};
 use crate::session::handle::SessionHandle;
+use crate::session::post_compact::synthesize_post_compact_message;
 
 /// Persists a compact boundary and swaps the live transcript to the synthetic summary root. A
 /// failed write discards the streamed summary and leaves the transcript unchanged.
-pub(crate) async fn replace_session_with_summary(
+pub(super) async fn replace_session_with_summary(
     session: &SessionHandle,
     file_tracker: &FileTracker,
     messages: &mut Vec<Message>,

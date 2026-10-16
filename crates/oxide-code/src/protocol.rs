@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+use crate::client::RateLimits;
 use crate::config::Effort;
 use crate::config::auth::AuthSource;
 use crate::config::compaction::AutoCompactionConfig;
@@ -130,6 +131,8 @@ pub(crate) enum Event {
     TurnFailed(String),
     /// Live usage and estimated cost snapshot for the current process.
     UsageUpdated(UsageSnapshot),
+    /// The account's subscription usage limits, which a request just reported.
+    RateLimitsUpdated(RateLimits),
     /// The user cancelled a turn, compaction, or sign-in with [`Op::Interrupt`]. The in-flight
     /// reply is truncated, and frontends mark where it stopped.
     Cancelled,
@@ -337,6 +340,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::client::RateLimitWindow;
     use crate::permission::{GateTarget, PermissionClass, Policy};
     use crate::tool::{
         ApprovalBody, DiffChunk, DiffLine, GrepFileGroup, GrepMatchLine, ReadExcerptLine,
@@ -516,6 +520,7 @@ mod tests {
             Event::TurnComplete => "turn_complete",
             Event::TurnFailed(_) => "turn_failed",
             Event::UsageUpdated(_) => "usage_updated",
+            Event::RateLimitsUpdated(_) => "rate_limits_updated",
             Event::Cancelled => "cancelled",
             Event::AutoCompactionStarted => "auto_compaction_started",
             Event::SummaryToken(_) => "summary_token",
@@ -531,6 +536,16 @@ mod tests {
             Event::Error(_) => "error",
             Event::ApprovalRequested { .. } => "approval_requested",
             Event::SessionRulesUpdated(_) => "session_rules_updated",
+        }
+    }
+
+    fn five_hour_limit() -> RateLimits {
+        RateLimits {
+            five_hour: Some(RateLimitWindow {
+                utilization: 0.42,
+                resets_at: 1_760_000_000,
+            }),
+            seven_day: None,
         }
     }
 
@@ -557,6 +572,7 @@ mod tests {
                 context_window: Some(200_000),
                 estimated_cost_usd: Some(0.25),
             }),
+            Event::RateLimitsUpdated(five_hour_limit()),
             Event::Cancelled,
             Event::AutoCompactionStarted,
             Event::SummaryToken("Recap".to_owned()),

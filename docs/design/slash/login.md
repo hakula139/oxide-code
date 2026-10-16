@@ -41,5 +41,5 @@ Credentials resolve in this order: `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, 
 - `crates/oxide-code/src/engine.rs`: `Engine::login` and `Engine::logout`, which swap the client's credential.
 - `crates/oxide-code/src/protocol.rs`: `Op::Login`, `Op::Logout`, `Event::LoginStarted`, `Event::SignedIn`, and `Event::SignedOut`.
 - `crates/oxide-code/src/slash/login.rs`: `LoginCmd` and `LogoutCmd`.
-- `crates/oxide-code/src/tui/app.rs`: browser launch and sign-in messages.
+- `crates/oxide-code/src/tui/app/events.rs`: browser launch and sign-in messages.
 - `crates/oxide-code/src/tui/components/status.rs`: `Status::SigningIn`, the status line while the browser is out.

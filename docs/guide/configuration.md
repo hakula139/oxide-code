@@ -155,22 +155,32 @@ For other model ids, the default and percent-based automatic triggers stay off. 
 
 `show_welcome = false` blanks the chat region until you submit a prompt, which is useful when piping or screen-recording.
 
-`status_line` accepts these segment names: `current-dir`, `git-branch`, `pull-request`, `model`, `model-with-effort`, `context-used`, `session-cost`, `run-state`, `thread-title`, `current-time`. The list must contain at least one segment. Segments with no data, such as a missing git branch, an unopened pull request, or context usage before the first completed turn, are omitted. The `pull-request` segment shells out to `gh pr view` so it requires the GitHub CLI on PATH. In supporting terminals, Ctrl-click or Cmd-click the segment to open the PR URL. The separator takes its style from the active theme's `separator` slot and has no setting of its own.
+`status_line` accepts these segment names: `current-dir`, `git-branch`, `pull-request`, `pull-request-checks`, `pull-request-review`, `model`, `model-with-effort`, `context-used`, `session-cost`, `five-hour-limit`, `weekly-limit`, `run-state`, `queued-prompts`, `task-progress`, `thread-title`, `session-id`, `theme`, `current-time`. The list must contain at least one segment. Segments with no data, such as a missing git branch, an unopened pull request, context usage before the first completed turn, or usage limits under an API key, are omitted. The three pull request segments shell out to `gh pr view` so they require the GitHub CLI on PATH. In supporting terminals, Ctrl-click or Cmd-click one of them to open the PR, its checks, or its changed files. `pull-request-review` shows only on repositories whose branch protection requires a review, since GitHub reports no review decision otherwise. The separator takes its style from the active theme's `separator` slot and has no setting of its own.
 
-| Segment             | Renders                                      | Refresh         |
-| ------------------- | -------------------------------------------- | --------------- |
-| `current-dir`       | Tildified working directory                  | At startup      |
-| `git-branch`        | Current branch (omitted on detached HEAD)    | Every 5 s       |
-| `pull-request`      | Open PR as clickable `#86` when OSC 8 works  | Every 60 s      |
-| `model`             | Compact model label (e.g., `Opus 5.5`)       | On `/model`     |
-| `model-with-effort` | Model label plus the effort tier in parens   | On `/model`     |
-| `context-used`      | `Ctx: 10% (100k/1M)` after the first turn    | Per turn        |
-| `session-cost`      | `Sess: $0.4321` running USD estimate         | Per turn        |
-| `run-state`         | `Ready` / spinner + label / Ctrl+C exit hint | On state change |
-| `thread-title`      | AI-generated session title                   | After turn 1    |
-| `current-time`      | `HH:MM` in the local timezone                | Per minute      |
+| Segment               | Renders                                                       | Refresh         |
+| --------------------- | ------------------------------------------------------------- | --------------- |
+| `current-dir`         | Tildified working directory                                   | At startup      |
+| `git-branch`          | Current branch (omitted on detached HEAD)                     | Every 5 s       |
+| `pull-request`        | Open PR as clickable `#86` when OSC 8 works                   | Every 60 s      |
+| `pull-request-checks` | `Checks: 2 failing`, `1 pending`, `1 cancelled`, or `passing` | Every 60 s      |
+| `pull-request-review` | `Review: approved`, `changes requested`, or `required`        | Every 60 s      |
+| `model`               | Compact model label (e.g., `Opus 5.5`)                        | On `/model`     |
+| `model-with-effort`   | Model label plus the effort tier in parens                    | On `/model`     |
+| `context-used`        | `Ctx: 10% (100k/1M)` after the first turn                     | Per turn        |
+| `session-cost`        | `Sess: $0.4321` running USD estimate                          | Per turn        |
+| `five-hour-limit`     | `5h: 42%` of a subscription's five-hour usage limit           | Per request     |
+| `weekly-limit`        | `7d: 13%` of a subscription's weekly usage limit              | Per request     |
+| `run-state`           | `Ready` / spinner + label / Ctrl+C exit hint                  | On state change |
+| `queued-prompts`      | `Queued: 2` while prompts wait for the running turn           | On change       |
+| `task-progress`       | Nothing, since oxide-code keeps no task list                  | Never           |
+| `thread-title`        | AI-generated session title                                    | After turn 1    |
+| `session-id`          | `ID: 3f2a9c1e`, the prefix `ox -c` resumes                    | On change       |
+| `theme`               | `Theme: mocha`, or a theme file's name                        | On `/theme`     |
+| `current-time`        | `HH:MM` in the local timezone                                 | Per minute      |
 
-When the row is too narrow to fit every configured segment, low-utility ones drop in this order before the remaining content gets truncated: `thread-title` → `current-time` → `pull-request` → `git-branch` → `current-dir` → `session-cost` → `context-used` → `model` → `model-with-effort` → `run-state`. Run state, the model labels, and the bar's last surviving segment are always preserved.
+The usage limits come from Claude subscription sign-ins, which report how much of each window is spent with every response. A window disappears once it resets, until the next response reports it again.
+
+When the row is too narrow to fit every configured segment, low-utility ones drop in this order before the remaining content gets truncated: `theme` → `session-id` → `thread-title` → `current-time` → `pull-request-review` → `pull-request-checks` → `pull-request` → `git-branch` → `current-dir` → `queued-prompts` → `session-cost` → `weekly-limit` → `five-hour-limit` → `context-used` → `model` → `model-with-effort` → `run-state`. Run state, the model labels, and the bar's last surviving segment are always preserved.
 
 `OX_STATUS_LINE` accepts the same segment names, comma-separated, with optional whitespace (`OX_STATUS_LINE="model, run-state"`). A value with no segments (`","`), an empty entry between commas (`"model,,run-state"`), or an unknown segment name fails startup with a parse error.
 

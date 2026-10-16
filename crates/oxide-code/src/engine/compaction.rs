@@ -1,4 +1,4 @@
-//! `/compact` summarization request and summary wrapping.
+//! Conversation compaction: the auto-compaction trigger and the summarization request.
 //!
 //! The summarization request forks the live conversation. It sends the conversation's own system
 //! prompt, user context, tools, and transcript, then appends the rubric as the last user message,
@@ -6,7 +6,8 @@
 //! summary that overflows the context window, as an HTTP 400 `prompt is too long` or a
 //! `model_context_window_exceeded` stop, retries up to three times without the oldest rounds or
 //! any thinking block, which misses the cache. The summary's text streams to the frontend as it
-//! generates. Session mutation happens in the driver after the summary succeeds.
+//! generates. `compact_session` leaves the session untouched, and its callers swap in the summary
+//! through `compact_boundary` once it succeeds.
 
 use std::iter;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,12 +15,21 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::{Result, bail};
 use indoc::{formatdoc, indoc};
 use tokio::sync::mpsc;
+use tracing::warn;
 
+use super::abort::{AbortResult, await_unless_aborted};
+use super::compact_boundary;
+use super::turn::collect_response;
 use crate::client::{PromptTooLong, Response, ResponseEvent, StopReason, TokenUsage, Wire};
+use crate::config::compaction::AutoCompactionConfig;
+use crate::file_tracker::FileTracker;
 use crate::message::{ContentBlock, Message, Role};
 use crate::prompt::PromptParts;
-use crate::protocol::{Event, EventSink};
+use crate::protocol::{Event, EventSink, Op};
+use crate::session::handle::SessionHandle;
 use crate::tool::ToolDefinition;
+
+const MAX_AUTO_COMPACT_FAILURES: u8 = 3;
 
 /// Minimum messages required for compaction to be worthwhile. Below this, the summary is
 /// usually longer than the transcript itself.
@@ -56,11 +66,108 @@ const SUMMARIZATION_USER_RUBRIC: &str = indoc! {r"
     questions. Do not call any tools while writing this summary. Respond with text only.
 "};
 
-/// Prefix for the synthetic post-compact user message.
-const SUMMARY_PREFIX: &str = indoc! {r"
-    This conversation has been compacted. The summary below covers the prior work. Continue from here
-    without re-asking the engineer what to do.
-"};
+pub(super) struct AutoCompact<'a> {
+    pub(super) config: AutoCompactionConfig,
+    pub(super) failures: &'a mut u8,
+    pub(super) file_tracker: &'a FileTracker,
+    /// The conversation's request prefix, which the summarizer reuses to read its prompt cache.
+    pub(super) prompt: &'a PromptParts,
+    pub(super) tools: &'a [ToolDefinition],
+    /// Each summary request's usage, recorded even when the summary fails or the user cancels it.
+    pub(super) spent: &'a mut Vec<TokenUsage>,
+}
+
+/// Decides whether to compact and drives it when the threshold and breaker allow. Returns
+/// `Ok(true)` when the transcript was replaced. Returns `Ok(false)` when skipped (breaker
+/// tripped, no usage, below threshold) or when summarization / boundary-write failed.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "auto-compaction needs the same live turn state as manual compaction"
+)]
+pub(super) async fn auto_compact_if_needed(
+    client: &dyn Wire,
+    session: &SessionHandle,
+    messages: &mut Vec<Message>,
+    sink: &dyn EventSink,
+    ops: &mut mpsc::Receiver<Op>,
+    pending: &mut Vec<String>,
+    auto: Option<&mut AutoCompact<'_>>,
+    usage: Option<TokenUsage>,
+) -> AbortResult<bool> {
+    let Some(auto) = auto else {
+        return Ok(false);
+    };
+    let Some(usage) = usage else {
+        return Ok(false);
+    };
+    if *auto.failures >= MAX_AUTO_COMPACT_FAILURES
+        || !auto.config.should_trigger(usage.total_tokens())
+    {
+        return Ok(false);
+    }
+
+    sink.emit(Event::AutoCompactionStarted, "auto-compaction-started");
+    let summary = match await_unless_aborted(
+        compact_session(
+            client,
+            auto.prompt,
+            auto.tools,
+            messages,
+            None,
+            sink,
+            auto.spent,
+        ),
+        ops,
+        pending,
+    )
+    .await?
+    {
+        Ok(summary) => summary,
+        Err(e) => {
+            warn!("auto-compaction failed: {e:#}");
+            record_auto_compact_failure(auto, sink, Some(format!("Auto-compaction failed: {e:#}")));
+            return Ok(false);
+        }
+    };
+    let compacted = compact_boundary::replace_session_with_summary(
+        session,
+        auto.file_tracker,
+        messages,
+        sink,
+        summary,
+        None,
+        true,
+    )
+    .await;
+    if compacted {
+        *auto.failures = 0;
+    } else {
+        record_auto_compact_failure(auto, sink, None);
+    }
+    Ok(compacted)
+}
+
+/// Bumps the failure counter. If the bump trips the breaker, emits a one-time disablement
+/// notice. `detail` becomes a user-visible error event. Pass `None` when an earlier sink call
+/// already surfaced the failure (persist-fail goes through `session_write_error`).
+fn record_auto_compact_failure(
+    auto: &mut AutoCompact<'_>,
+    sink: &dyn EventSink,
+    detail: Option<String>,
+) {
+    *auto.failures += 1;
+    if let Some(detail) = detail {
+        sink.emit(Event::Error(detail), "auto-compaction-failed");
+    }
+    if *auto.failures == MAX_AUTO_COMPACT_FAILURES {
+        sink.emit(
+            Event::Error(format!(
+                "Auto-compaction disabled for this session after {MAX_AUTO_COMPACT_FAILURES} failures."
+            )),
+            "auto-compaction-disabled",
+        );
+    }
+}
 
 /// Drives the summarization request and returns the trimmed summary. `prompt` and `tools` must be
 /// the ones the conversation's own requests send. `spent` receives the usage of every request, even
@@ -72,7 +179,7 @@ const SUMMARY_PREFIX: &str = indoc! {r"
 ///
 /// Errors when the transcript is too short to compact, when a request fails, or when the reply is
 /// empty or stopped before the summary finished, including when the last retry still overflows.
-pub(crate) async fn compact_session(
+pub(super) async fn compact_session(
     client: &dyn Wire,
     prompt: &PromptParts,
     tools: &[ToolDefinition],
@@ -169,11 +276,11 @@ async fn collect_summary(
         total: spent,
         request: None,
     };
-    super::collect_response(rx, stream, &mut usage.request).await
+    collect_response(rx, stream, &mut usage.request).await
 }
 
-/// Forwards the summary's text and retry notices to the frontend and drops the rest of the reply,
-/// which belongs to no visible turn. Dropping it discards the streamed text, so a cancelled
+/// Forwards the summary's text, retry notices, and usage limits to the frontend and drops the rest
+/// of the reply, which belongs to no visible turn. Dropping it discards the streamed text, so a cancelled
 /// compaction clears it.
 struct SummaryStream<'a> {
     sink: &'a dyn EventSink,
@@ -214,7 +321,7 @@ impl EventSink for SummaryStream<'_> {
                 self.streamed.store(true, Ordering::Relaxed);
                 self.sink.send(Event::SummaryToken(text))
             }
-            Event::Retrying(_) => self.sink.send(event),
+            Event::Retrying(_) | Event::RateLimitsUpdated(_) => self.sink.send(event),
             _ => Ok(()),
         }
     }
@@ -335,45 +442,608 @@ fn build_user_message(instructions: Option<&str>) -> String {
     }
 }
 
-/// Composes the synthetic post-compact root message for the next turn.
-pub(crate) fn synthesize_post_compact_message(summary: &str) -> Message {
-    Message::user(formatdoc! {"
-        {prefix}
-
-        {summary}
-    ", prefix = SUMMARY_PREFIX.trim(), summary = summary.trim()})
-}
-
-/// Removes the synthetic summary prefix from a resumed post-compact root message.
-pub(crate) fn strip_synthetic_post_compact_prefix(message: &mut Message) -> bool {
-    if message.role != Role::User {
-        return false;
-    }
-    let Some(ContentBlock::Text { text }) = message.content.first() else {
-        return false;
-    };
-    if !text.trim_start().starts_with(SUMMARY_PREFIX.trim()) {
-        return false;
-    }
-
-    message.content.remove(0);
-    true
-}
-
 #[cfg(test)]
 mod tests {
     use std::pin::pin;
+    use std::sync::atomic::AtomicUsize;
     use std::sync::{Arc, Mutex};
 
+    use anyhow::anyhow;
     use serde_json::json;
+    use tokio::sync::Notify;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
     use super::*;
     use crate::client::anthropic::Client;
     use crate::client::anthropic::testing::{api_key, sse_body, test_client};
+    use crate::client::{RateLimitWindow, RateLimits};
+    use crate::engine::testing::{
+        FakeClient, dead_test_session, empty_prompt, inert_ops, test_session, text_turn, with_stop,
+    };
     use crate::message::Role;
     use crate::protocol::CapturingSink;
+
+    // ── auto_compact_if_needed ──
+
+    struct FailingCompactClient;
+
+    impl Wire for FailingCompactClient {
+        fn stream_message(
+            &self,
+            _messages: &[Message],
+            _system_sections: &[&str],
+            _user_context: Option<&str>,
+            _tools: &[ToolDefinition],
+        ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
+            Err(anyhow!("summarizer unavailable"))
+        }
+    }
+
+    struct CountingFailingClient {
+        calls: AtomicUsize,
+    }
+
+    impl CountingFailingClient {
+        fn new() -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Wire for CountingFailingClient {
+        fn stream_message(
+            &self,
+            _messages: &[Message],
+            _system_sections: &[&str],
+            _user_context: Option<&str>,
+            _tools: &[ToolDefinition],
+        ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(anyhow!("summarizer unavailable"))
+        }
+    }
+
+    struct DelayedSummaryClient {
+        started: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    impl Wire for DelayedSummaryClient {
+        fn stream_message(
+            &self,
+            _messages: &[Message],
+            _system_sections: &[&str],
+            _user_context: Option<&str>,
+            _tools: &[ToolDefinition],
+        ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
+            let (tx, rx) = mpsc::channel(8);
+            let started = self.started.clone();
+            let release = self.release.clone();
+            tokio::spawn(async move {
+                started.notify_one();
+                release.notified().await;
+                for event in text_turn("auto summary") {
+                    tx.send(Ok(event)).await.expect("test receiver alive");
+                }
+            });
+            Ok(rx)
+        }
+    }
+
+    #[tokio::test]
+    async fn auto_compact_if_needed_skips_without_auto_state_usage_or_threshold() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let client = FakeClient::new(Vec::new());
+        let sink = CapturingSink::new();
+        let tracker = FileTracker::default();
+        let mut messages = vec![
+            Message::user("hi"),
+            Message::assistant("there"),
+            Message::user("next"),
+            Message::assistant("done"),
+        ];
+        let mut pending = Vec::new();
+        let mut failures = 0;
+
+        let absent = auto_compact_if_needed(
+            &client,
+            &session,
+            &mut messages,
+            &sink,
+            &mut inert_ops(),
+            &mut pending,
+            None,
+            Some(TokenUsage {
+                input_tokens: 20,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+                output_tokens: 1,
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(!absent);
+
+        let missing_usage = auto_compact_if_needed(
+            &client,
+            &session,
+            &mut messages,
+            &sink,
+            &mut inert_ops(),
+            &mut pending,
+            Some(&mut AutoCompact {
+                config: AutoCompactionConfig {
+                    enabled: true,
+                    threshold_tokens: Some(10),
+                },
+                failures: &mut failures,
+                file_tracker: &tracker,
+                prompt: &empty_prompt(),
+                tools: &[],
+                spent: &mut Vec::new(),
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(!missing_usage);
+
+        let below_threshold = auto_compact_if_needed(
+            &client,
+            &session,
+            &mut messages,
+            &sink,
+            &mut inert_ops(),
+            &mut pending,
+            Some(&mut AutoCompact {
+                config: AutoCompactionConfig {
+                    enabled: true,
+                    threshold_tokens: Some(100),
+                },
+                failures: &mut failures,
+                file_tracker: &tracker,
+                prompt: &empty_prompt(),
+                tools: &[],
+                spent: &mut Vec::new(),
+            }),
+            Some(TokenUsage {
+                input_tokens: 20,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+                output_tokens: 1,
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(!below_threshold);
+        assert_eq!(messages.len(), 4);
+        assert_eq!(failures, 0);
+    }
+
+    #[tokio::test]
+    async fn auto_compact_if_needed_counts_summarizer_failure_without_replacing_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let sink = CapturingSink::new();
+        let tracker = FileTracker::default();
+        let mut messages = vec![
+            Message::user("hi"),
+            Message::assistant("there"),
+            Message::user("next"),
+            Message::assistant("done"),
+        ];
+        let mut pending = Vec::new();
+        let mut failures = 0;
+
+        let compacted = auto_compact_if_needed(
+            &FailingCompactClient,
+            &session,
+            &mut messages,
+            &sink,
+            &mut inert_ops(),
+            &mut pending,
+            Some(&mut AutoCompact {
+                config: AutoCompactionConfig {
+                    enabled: true,
+                    threshold_tokens: Some(10),
+                },
+                failures: &mut failures,
+                file_tracker: &tracker,
+                prompt: &empty_prompt(),
+                tools: &[],
+                spent: &mut Vec::new(),
+            }),
+            Some(TokenUsage {
+                input_tokens: 20,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+                output_tokens: 1,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert!(!compacted);
+        assert_eq!(failures, 1);
+        assert!(matches!(&messages[0].content[0], ContentBlock::Text { text } if text == "hi"));
+        assert!(
+            sink.events().iter().any(|event| {
+                matches!(event, Event::Error(message) if message.contains("Auto-compaction failed"))
+            }),
+            "summarizer failure must surface a user-visible Event::Error",
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_compact_if_needed_emits_disabled_notice_on_third_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let sink = CapturingSink::new();
+        let tracker = FileTracker::default();
+        let mut messages = vec![
+            Message::user("hi"),
+            Message::assistant("there"),
+            Message::user("next"),
+            Message::assistant("done"),
+        ];
+        let mut pending = Vec::new();
+        let mut failures = MAX_AUTO_COMPACT_FAILURES - 1;
+
+        let compacted = auto_compact_if_needed(
+            &FailingCompactClient,
+            &session,
+            &mut messages,
+            &sink,
+            &mut inert_ops(),
+            &mut pending,
+            Some(&mut AutoCompact {
+                config: AutoCompactionConfig {
+                    enabled: true,
+                    threshold_tokens: Some(10),
+                },
+                failures: &mut failures,
+                file_tracker: &tracker,
+                prompt: &empty_prompt(),
+                tools: &[],
+                spent: &mut Vec::new(),
+            }),
+            Some(TokenUsage {
+                input_tokens: 20,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+                output_tokens: 1,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert!(!compacted);
+        assert_eq!(failures, MAX_AUTO_COMPACT_FAILURES);
+        assert!(
+            sink.events().iter().any(|event| {
+                matches!(event, Event::Error(message) if message.contains("Auto-compaction disabled"))
+            }),
+            "the breaker-tripping failure must surface a one-time disablement notice",
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_compact_if_needed_counts_persist_failure_without_replacing_messages() {
+        let session = dead_test_session();
+        let client = FakeClient::new(vec![text_turn("auto summary")]);
+        let sink = CapturingSink::new();
+        let tracker = FileTracker::default();
+        let mut messages = vec![
+            Message::user("hi"),
+            Message::assistant("there"),
+            Message::user("next"),
+            Message::assistant("done"),
+        ];
+        let mut pending = Vec::new();
+        let mut failures = 0;
+
+        let compacted = auto_compact_if_needed(
+            &client,
+            &session,
+            &mut messages,
+            &sink,
+            &mut inert_ops(),
+            &mut pending,
+            Some(&mut AutoCompact {
+                config: AutoCompactionConfig {
+                    enabled: true,
+                    threshold_tokens: Some(10),
+                },
+                failures: &mut failures,
+                file_tracker: &tracker,
+                prompt: &empty_prompt(),
+                tools: &[],
+                spent: &mut Vec::new(),
+            }),
+            Some(TokenUsage {
+                input_tokens: 20,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+                output_tokens: 1,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert!(!compacted);
+        assert_eq!(failures, 1);
+        assert!(matches!(&messages[0].content[0], ContentBlock::Text { text } if text == "hi"));
+        let events = sink.events();
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    Event::AutoCompactionStarted,
+                    Event::SummaryToken(summary),
+                    Event::SummaryDiscarded,
+                    Event::Error(message),
+                ] if summary == "auto summary" && message.starts_with("Session write failed")
+            ),
+            "the unsaved summary is discarded before the write failure: {events:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_compact_if_needed_stops_after_failure_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let client = CountingFailingClient::new();
+        let sink = CapturingSink::new();
+        let tracker = FileTracker::default();
+        let mut messages = vec![
+            Message::user("hi"),
+            Message::assistant("there"),
+            Message::user("next"),
+            Message::assistant("done"),
+        ];
+        let mut pending = Vec::new();
+        let mut failures = MAX_AUTO_COMPACT_FAILURES - 1;
+        let usage = Some(TokenUsage {
+            input_tokens: 50_000,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+            output_tokens: 1,
+        });
+
+        let first = auto_compact_if_needed(
+            &client,
+            &session,
+            &mut messages,
+            &sink,
+            &mut inert_ops(),
+            &mut pending,
+            Some(&mut AutoCompact {
+                config: AutoCompactionConfig {
+                    enabled: true,
+                    threshold_tokens: Some(50_000),
+                },
+                failures: &mut failures,
+                file_tracker: &tracker,
+                prompt: &empty_prompt(),
+                tools: &[],
+                spent: &mut Vec::new(),
+            }),
+            usage,
+        )
+        .await
+        .unwrap();
+        let second = auto_compact_if_needed(
+            &client,
+            &session,
+            &mut messages,
+            &sink,
+            &mut inert_ops(),
+            &mut pending,
+            Some(&mut AutoCompact {
+                config: AutoCompactionConfig {
+                    enabled: true,
+                    threshold_tokens: Some(50_000),
+                },
+                failures: &mut failures,
+                file_tracker: &tracker,
+                prompt: &empty_prompt(),
+                tools: &[],
+                spent: &mut Vec::new(),
+            }),
+            usage,
+        )
+        .await
+        .unwrap();
+
+        assert!(!first);
+        assert!(!second);
+        assert_eq!(failures, MAX_AUTO_COMPACT_FAILURES);
+        assert_eq!(client.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn auto_compact_if_needed_queues_submit_while_summarizing() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let client = DelayedSummaryClient {
+            started: started.clone(),
+            release: release.clone(),
+        };
+        let sink = CapturingSink::new();
+        let tracker = FileTracker::default();
+        let mut messages = vec![
+            Message::user("hi"),
+            Message::assistant("there"),
+            Message::user("next"),
+            Message::assistant("done"),
+        ];
+        let mut pending = Vec::new();
+        let mut failures = 0;
+        let (tx, mut rx) = mpsc::channel::<Op>(1);
+        let mut auto = AutoCompact {
+            config: AutoCompactionConfig {
+                enabled: true,
+                threshold_tokens: Some(10),
+            },
+            failures: &mut failures,
+            file_tracker: &tracker,
+            prompt: &empty_prompt(),
+            tools: &[],
+            spent: &mut Vec::new(),
+        };
+
+        let compact = auto_compact_if_needed(
+            &client,
+            &session,
+            &mut messages,
+            &sink,
+            &mut rx,
+            &mut pending,
+            Some(&mut auto),
+            Some(TokenUsage {
+                input_tokens: 20,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+                output_tokens: 1,
+            }),
+        );
+        let queue_prompt = async {
+            started.notified().await;
+            tx.send(Op::Queue("queued after summary".into()))
+                .await
+                .unwrap();
+            tokio::task::yield_now().await;
+            release.notify_one();
+        };
+        let (compacted, ()) = tokio::join!(compact, queue_prompt);
+        let compacted = compacted.unwrap();
+
+        assert!(compacted);
+        assert_eq!(pending, vec!["queued after summary"]);
+        assert_eq!(*auto.failures, 0);
+        assert_eq!(
+            sink.events()
+                .iter()
+                .filter(|event| matches!(event, Event::PromptDrained(_)))
+                .count(),
+            0
+        );
+        assert!(sink.events().iter().any(|event| matches!(
+            event,
+            Event::SessionCompacted {
+                automatic: true,
+                ..
+            }
+        )));
+        assert_eq!(messages.len(), 1);
+        assert!(
+            matches!(&messages[0].content[0], ContentBlock::Text { text } if text.contains("auto summary"))
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_compact_if_needed_retries_an_overflowing_summary_without_the_oldest_rounds() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let client = FakeClient::new(vec![
+            with_stop(
+                text_turn("partial"),
+                StopReason::ModelContextWindowExceeded,
+                None,
+            ),
+            text_turn("auto summary"),
+        ]);
+        let sink = CapturingSink::new();
+        let tracker = FileTracker::default();
+        let mut messages = vec![
+            Message::user("hi"),
+            Message::assistant("there"),
+            Message::user("next"),
+            Message::assistant("done"),
+        ];
+        let mut failures = 0;
+
+        let compacted = auto_compact_if_needed(
+            &client,
+            &session,
+            &mut messages,
+            &sink,
+            &mut inert_ops(),
+            &mut Vec::new(),
+            Some(&mut AutoCompact {
+                config: AutoCompactionConfig {
+                    enabled: true,
+                    threshold_tokens: Some(10),
+                },
+                failures: &mut failures,
+                file_tracker: &tracker,
+                prompt: &empty_prompt(),
+                tools: &[],
+                spent: &mut Vec::new(),
+            }),
+            Some(TokenUsage {
+                input_tokens: 20,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+                output_tokens: 1,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert!(compacted);
+        let sent_texts: Vec<Vec<String>> = client
+            .requests()
+            .iter()
+            .map(|request| {
+                request
+                    .iter()
+                    .flat_map(|m| &m.content)
+                    .filter_map(|block| match block {
+                        ContentBlock::Text { text } => Some(text.clone()),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .collect();
+        let [first, retry] = &sent_texts[..] else {
+            panic!("expected the overflow and one retry: {sent_texts:?}");
+        };
+        assert_eq!(first[..4], ["hi", "there", "next", "done"]);
+        assert!(
+            !retry
+                .iter()
+                .any(|text| ["hi", "there", "next"].contains(&text.as_str())),
+            "the retry keeps only the newest round: {retry:?}",
+        );
+        assert!(retry.iter().any(|text| text == "done"), "{retry:?}");
+        assert!(
+            matches!(&messages[0].content[0], ContentBlock::Text { text } if text.contains("auto summary"))
+        );
+        let events = sink.events();
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    Event::AutoCompactionStarted,
+                    Event::SummaryToken(overflowed),
+                    Event::SummaryDiscarded,
+                    Event::SummaryToken(retried),
+                    Event::SessionCompacted { automatic: true, .. },
+                ] if overflowed == "partial" && retried == "auto summary"
+            ),
+            "the overflowed summary is discarded before the retry streams: {events:?}",
+        );
+    }
 
     // ── compact_session ──
 
@@ -1049,11 +1719,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compact_session_passes_retry_notices_through() {
+    async fn compact_session_passes_retry_notices_and_usage_limits_through() {
         let notice = "HTTP 529 overloaded_error. Retrying in 1s (retry 1 of 5).";
-        let (tx, rx) = mpsc::channel(3);
+        let limits = RateLimits {
+            five_hour: Some(RateLimitWindow {
+                utilization: 0.42,
+                resets_at: 1_760_000_000,
+            }),
+            seven_day: None,
+        };
+        let (tx, rx) = mpsc::channel(4);
         for event in [
             ResponseEvent::Retrying(notice.to_owned()),
+            ResponseEvent::RateLimits(limits),
             ResponseEvent::Text("Recap".to_owned()),
             ResponseEvent::Completed(Response {
                 content: vec![ContentBlock::Text {
@@ -1082,7 +1760,11 @@ mod tests {
         assert_eq!(summary, "Recap");
         assert_eq!(
             sink.events(),
-            [Event::Retrying(notice.to_owned()), token("Recap")],
+            [
+                Event::Retrying(notice.to_owned()),
+                Event::RateLimitsUpdated(limits),
+                token("Recap"),
+            ],
         );
     }
 
@@ -1221,69 +1903,5 @@ mod tests {
     fn build_user_message_treats_whitespace_only_instructions_as_absent() {
         let s = build_user_message(Some("   \n\t  "));
         assert!(!s.contains("Additional instructions"));
-    }
-
-    // ── synthesize_post_compact_message ──
-
-    #[test]
-    fn synthesize_post_compact_prepends_summary_prefix() {
-        let m = synthesize_post_compact_message("did X, Y, Z");
-        assert_eq!(m.role, Role::User);
-        let ContentBlock::Text { text } = &m.content[0] else {
-            panic!("expected text block");
-        };
-        assert!(text.contains("This conversation has been compacted"));
-        assert!(text.contains("did X, Y, Z"));
-    }
-
-    // ── strip_synthetic_post_compact_prefix ──
-
-    #[test]
-    fn strip_synthetic_post_compact_prefix_removes_only_the_prefix_block() {
-        let mut m = synthesize_post_compact_message("internal summary");
-        m.content.push(ContentBlock::Text {
-            text: "real prompt".to_owned(),
-        });
-
-        assert!(strip_synthetic_post_compact_prefix(&mut m));
-        assert_eq!(m.content.len(), 1);
-        assert!(matches!(&m.content[0], ContentBlock::Text { text } if text == "real prompt"));
-    }
-
-    #[test]
-    fn strip_synthetic_post_compact_prefix_leaves_regular_user_text() {
-        let mut m = Message::user("This conversation should stay visible");
-
-        assert!(!strip_synthetic_post_compact_prefix(&mut m));
-        assert_eq!(m.content.len(), 1);
-    }
-
-    #[test]
-    fn strip_synthetic_post_compact_prefix_leaves_assistant_messages() {
-        let mut m = Message::assistant(formatdoc! {"
-            {}
-
-            not a synthetic user root",
-            SUMMARY_PREFIX.trim(),
-        });
-
-        assert!(!strip_synthetic_post_compact_prefix(&mut m));
-        assert_eq!(m.role, Role::Assistant);
-        assert_eq!(m.content.len(), 1);
-    }
-
-    #[test]
-    fn strip_synthetic_post_compact_prefix_leaves_non_text_first_block() {
-        let mut m = Message {
-            role: Role::User,
-            content: vec![ContentBlock::ToolResult {
-                tool_use_id: "toolu_1".to_owned(),
-                content: SUMMARY_PREFIX.trim().to_owned(),
-                is_error: false,
-            }],
-        };
-
-        assert!(!strip_synthetic_post_compact_prefix(&mut m));
-        assert!(matches!(m.content[0], ContentBlock::ToolResult { .. }));
     }
 }

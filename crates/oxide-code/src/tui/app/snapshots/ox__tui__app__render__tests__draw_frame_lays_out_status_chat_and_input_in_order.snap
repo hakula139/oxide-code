@@ -1,5 +1,5 @@
 ---
-source: crates/oxide-code/src/tui/app.rs
+source: crates/oxide-code/src/tui/app/render.rs
 expression: "render_app(&mut app, 80, 10)"
 ---
 "  ~/test │ main │ test-model (high) │ Ready │ Session title                     "
