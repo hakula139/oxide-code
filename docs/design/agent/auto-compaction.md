@@ -60,7 +60,7 @@ Explicit thresholds snap into a usable range. Token values below `50_000` rise t
 
 `Engine` owns the automatic trigger because it can compact before a new prompt is recorded. The agent turn reports the latest usage signal after each completed turn.
 
-1. `agent_turn` streams a complete turn, persists the transcript tail, and returns the latest token usage from `StreamOutcome`.
+1. `agent_turn` streams a complete turn, persists the transcript tail, and returns the latest token usage in its `TurnReport`.
 2. `Engine` stores that usage as the pending automatic trigger signal.
 3. When the next prompt arrives, `Engine::auto_compact` checks the stored usage before `submit_prompt` records the prompt.
 4. If the total crosses the threshold, it calls the same compact driver used by `/compact`.

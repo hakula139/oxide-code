@@ -1,7 +1,9 @@
 //! Shared test fixtures for the Anthropic client and its consumers.
 
+use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
 
+use indoc::writedoc;
 use reqwest::header::HeaderMap;
 use wiremock::ResponseTemplate;
 
@@ -108,15 +110,18 @@ pub(crate) fn sse_response(body: String) -> ResponseTemplate {
         .insert_header("content-type", "text/event-stream")
 }
 
-fn sse_body(frames: &[serde_json::Value]) -> String {
-    use std::fmt::Write as _;
-
+/// Server-sent events body carrying each frame under an event named for its `type`.
+pub(crate) fn sse_body(frames: &[serde_json::Value]) -> String {
     let mut body = String::new();
     for frame in frames {
-        _ = writeln!(
+        _ = writedoc!(
             body,
-            "event: {}\ndata: {frame}\n",
-            frame["type"].as_str().unwrap()
+            "
+            event: {event}
+            data: {frame}
+
+            ",
+            event = frame["type"].as_str().unwrap(),
         );
     }
     body

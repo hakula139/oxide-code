@@ -12,6 +12,7 @@ use tracing::warn;
 
 use super::Client;
 use super::wire::ErrorResponse;
+use crate::client::PromptTooLong;
 use crate::config::auth::{Auth, AuthSource};
 
 // ── Retry Policy ──
@@ -29,17 +30,6 @@ const MAX_JITTER: f64 = 0.25;
 /// Longest server-requested `retry-after` worth waiting out. A longer hint, such as an exhausted
 /// quota, fails fast so the user sees the error promptly.
 const MAX_RETRY_AFTER: Duration = Duration::from_mins(1);
-
-// ── Errors ──
-
-/// HTTP 400 saying the prompt exceeds the context window. Displays as the usual API diagnostic.
-#[derive(Debug, thiserror::Error)]
-#[error("{diagnostic}")]
-pub(crate) struct PromptTooLong {
-    /// Tokens over the limit, when the message names both counts.
-    pub(crate) overflow: Option<u32>,
-    diagnostic: String,
-}
 
 // ── Request ──
 
@@ -138,7 +128,7 @@ where
 /// A retry about to wait out its delay, surfaced so a slow recovery never looks like a hang. The
 /// full error, with its advice and response body, surfaces only if every retry fails.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RetryNotice {
+pub(super) struct RetryNotice {
     delay: Duration,
     /// One-based, out of [`MAX_RETRIES`].
     retry: u32,
