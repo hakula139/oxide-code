@@ -19,7 +19,7 @@ Layers run from the foundation to the frontends.
 | Domain     | `model`        | Supported-model catalogue, per-model request capabilities, and pricing                                                                              |
 | Domain     | `permission`   | Tool permission gate: modes, allow / ask / deny rules, and path resolution                                                                          |
 | Domain     | `prompt`       | System prompt assembly, environment detection, and instruction-file discovery                                                                       |
-| Services   | `client`       | Anthropic Messages API client: request bodies and headers, a retrying transport, SSE streaming, and one-shot completions                            |
+| Services   | `client`       | The `Wire` streaming contract and the Anthropic Messages API client: request bodies and headers, a retrying transport, SSE, and one-shots           |
 | Services   | `protocol`     | The serializable `Op` / `Event` contract between the engine and its frontends, its payloads, and the `EventSink` trait                              |
 | Services   | `session`      | JSONL session persistence behind an actor task, plus listing, archiving, resume, transcript repair, and AI titles                                   |
 | Services   | `tool`         | The `Tool` trait, the registry, and the built-in `bash`, `edit`, `glob`, `grep`, `read`, and `write` tools                                          |

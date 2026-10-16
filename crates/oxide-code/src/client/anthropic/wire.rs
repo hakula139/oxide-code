@@ -4,7 +4,7 @@
 use serde::ser::SerializeSeq;
 use serde::{Deserialize, Serialize, Serializer};
 
-use super::transport::RetryNotice;
+use crate::client::{StopDetails, StopReason};
 use crate::config::{Effort, ThinkingConfig};
 use crate::message::{ContentBlock, Message, Role};
 use crate::tool::ToolDefinition;
@@ -199,10 +199,10 @@ pub(super) struct CacheControl {
     )
 )]
 /// One frame in the streaming response. `Unknown` swallows future event types so an upstream
-/// addition does not break parsing — agent dispatch ignores `Unknown` rather than erroring.
+/// addition does not break parsing.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub(crate) enum StreamEvent {
+pub(super) enum StreamEvent {
     MessageStart {
         message: MessageResponse,
     },
@@ -226,11 +226,6 @@ pub(crate) enum StreamEvent {
     Error {
         error: ApiError,
     },
-    /// Synthesized by the client before it retries a failed attempt. The API never sends it.
-    #[serde(skip)]
-    Retrying {
-        notice: RetryNotice,
-    },
     #[serde(other)]
     Unknown,
 }
@@ -243,15 +238,15 @@ pub(crate) enum StreamEvent {
     )
 )]
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct MessageResponse {
-    pub(crate) id: String,
-    pub(crate) model: String,
-    pub(crate) usage: Option<Usage>,
+pub(super) struct MessageResponse {
+    pub(super) id: String,
+    pub(super) model: String,
+    pub(super) usage: Option<Usage>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub(crate) enum ContentBlockInfo {
+pub(super) enum ContentBlockInfo {
     Text {
         text: String,
     },
@@ -280,7 +275,7 @@ pub(crate) enum ContentBlockInfo {
 )]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub(crate) enum Delta {
+pub(super) enum Delta {
     TextDelta {
         text: String,
     },
@@ -298,35 +293,11 @@ pub(crate) enum Delta {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct MessageDeltaBody {
-    pub(crate) stop_reason: Option<StopReason>,
+pub(super) struct MessageDeltaBody {
+    pub(super) stop_reason: Option<StopReason>,
     /// Populated only on `refusal`.
     #[serde(default)]
-    pub(crate) stop_details: Option<StopDetails>,
-}
-
-/// Why the model stopped. `Unknown` keeps a future value from failing the whole `message_delta`
-/// frame, which would also drop its usage.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum StopReason {
-    EndTurn,
-    MaxTokens,
-    StopSequence,
-    ToolUse,
-    /// A long server-side turn paused. Re-send the transcript with this reply appended to resume it.
-    PauseTurn,
-    Refusal,
-    ModelContextWindowExceeded,
-    #[serde(other)]
-    Unknown,
-}
-
-/// Structured refusal detail. Both fields are informational and may be absent.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-pub(crate) struct StopDetails {
-    pub(crate) category: Option<String>,
-    pub(crate) explanation: Option<String>,
+    pub(super) stop_details: Option<StopDetails>,
 }
 
 #[expect(
@@ -334,22 +305,22 @@ pub(crate) struct StopDetails {
     reason = "field names mirror Anthropic's usage payload"
 )]
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct Usage {
+pub(super) struct Usage {
     #[serde(default)]
-    pub(crate) input_tokens: u32,
+    pub(super) input_tokens: u32,
     #[serde(default)]
-    pub(crate) cache_creation_input_tokens: u32,
+    pub(super) cache_creation_input_tokens: u32,
     #[serde(default)]
-    pub(crate) cache_read_input_tokens: u32,
+    pub(super) cache_read_input_tokens: u32,
     #[serde(default)]
-    pub(crate) output_tokens: u32,
+    pub(super) output_tokens: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct ApiError {
+pub(super) struct ApiError {
     #[serde(rename = "type")]
-    pub(crate) error_type: String,
-    pub(crate) message: String,
+    pub(super) error_type: String,
+    pub(super) message: String,
 }
 
 /// Body of a non-2xx response.

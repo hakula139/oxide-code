@@ -1,16 +1,17 @@
-//! Anthropic Messages API client. [`Client::stream_message`] drives the agent loop.
+//! Anthropic Messages API client, which implements the [`Wire`] the agent loop streams through.
 //! [`Client::complete`] handles one-shots such as title generation.
 //!
 //! The wire shape mirrors the official `claude-code` CLI: pinned User-Agent and Stainless SDK
 //! header set, billing attestation in `system[0]`, and per-request beta headers gated on model /
 //! auth-mode capabilities. Deviating from any of these trips 3P gateway fingerprinting.
 
+mod accumulator;
 mod betas;
 mod billing;
 mod completion;
 mod identity;
 mod sse;
-pub(crate) mod transport;
+mod transport;
 pub(crate) mod wire;
 
 #[cfg(test)]
@@ -25,6 +26,7 @@ use tokio::sync::mpsc;
 use tracing::debug;
 use uuid::Uuid;
 
+use crate::client::{ResponseEvent, Wire};
 use crate::config::auth::{Auth, AuthKind, AuthSource};
 use crate::config::{CompactionConfig, Config, Effort, is_first_party_base_url};
 use crate::message::{ContentBlock, Message, Role};
@@ -37,7 +39,7 @@ use betas::{compute_betas, conversation_cache_control, static_prefix_cache_contr
 use sse::stream_sse;
 use wire::{
     CacheControl, ContextManagement, CreateMessageRequest, OutputConfig, RequestMessages,
-    RequestMetadata, StreamEvent, SystemBlock,
+    RequestMetadata, SystemBlock,
 };
 
 // ── Constants ──
@@ -168,44 +170,13 @@ impl Client {
         self.config.auth = auth;
     }
 
-    /// Streams an agentic turn. The receiver delivers parsed [`StreamEvent`]s and closes when the
-    /// stream ends, the receiver is dropped, or an unrecoverable transport error is forwarded as
-    /// a final `Err`.
+    /// Streams one request. The receiver closes when the stream ends, the receiver is dropped, or
+    /// an unrecoverable error is forwarded as a final `Err`.
     ///
-    /// Two `cache_control` breakpoints ship: one on the static `system` prefix up to
-    /// [`SYSTEM_PROMPT_DYNAMIC_BOUNDARY`], shared across sessions, and one on the last content
-    /// block of the final message, so the next request in the conversation reads the whole
-    /// transcript from cache. `user_context` rides as a synthetic leading user message to keep
-    /// dynamic content (CLAUDE.md and friends) out of the `system` parameter.
-    pub(crate) fn stream_message(
-        &self,
-        messages: &[Message],
-        system_sections: &[&str],
-        user_context: Option<&str>,
-        tools: &[ToolDefinition],
-    ) -> Result<mpsc::Receiver<Result<StreamEvent>>> {
-        let breakpoint = conversation_cache_control(self.config.prompt_cache_ttl);
-        self.stream(
-            messages,
-            system_sections,
-            user_context,
-            tools,
-            Some(breakpoint),
-        )
-    }
-
-    /// [`Self::stream_message`] without the transcript-tail breakpoint, for a request no later
-    /// request extends.
-    pub(crate) fn stream_one_shot(
-        &self,
-        messages: &[Message],
-        system_sections: &[&str],
-        user_context: Option<&str>,
-        tools: &[ToolDefinition],
-    ) -> Result<mpsc::Receiver<Result<StreamEvent>>> {
-        self.stream(messages, system_sections, user_context, tools, None)
-    }
-
+    /// The static `system` prefix up to [`SYSTEM_PROMPT_DYNAMIC_BOUNDARY`] always carries a
+    /// `cache_control` breakpoint, shared across sessions. `breakpoint` marks the last content
+    /// block of the final message. `user_context` rides as a synthetic leading user message to
+    /// keep dynamic content (CLAUDE.md and friends) out of the `system` parameter.
     fn stream(
         &self,
         messages: &[Message],
@@ -213,7 +184,7 @@ impl Client {
         user_context: Option<&str>,
         tools: &[ToolDefinition],
         breakpoint: Option<CacheControl>,
-    ) -> Result<mpsc::Receiver<Result<StreamEvent>>> {
+    ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
         let auth = self.auth()?;
         let effective_messages: Vec<Message> = match user_context {
             Some(ctx) => std::iter::once(Message::user(ctx))
@@ -294,6 +265,37 @@ impl Client {
     /// traffic, because gateways don't gate them on the block.
     fn attributes(&self, streaming: bool, auth: AuthKind) -> bool {
         self.config.gateway.attribution && (streaming || auth == AuthKind::OAuth)
+    }
+}
+
+impl Wire for Client {
+    /// Marks the transcript tail with a `cache_control` breakpoint, so the next request in the
+    /// conversation reads the whole transcript from cache.
+    fn stream_message(
+        &self,
+        messages: &[Message],
+        system_sections: &[&str],
+        user_context: Option<&str>,
+        tools: &[ToolDefinition],
+    ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
+        let breakpoint = conversation_cache_control(self.config.prompt_cache_ttl);
+        self.stream(
+            messages,
+            system_sections,
+            user_context,
+            tools,
+            Some(breakpoint),
+        )
+    }
+
+    fn stream_one_shot(
+        &self,
+        messages: &[Message],
+        system_sections: &[&str],
+        user_context: Option<&str>,
+        tools: &[ToolDefinition],
+    ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
+        self.stream(messages, system_sections, user_context, tools, None)
     }
 }
 
@@ -487,8 +489,8 @@ mod tests {
     use super::testing::{
         Captured, api_key, auth_token, captured, oauth, test_client, test_config, text_stream_body,
     };
-    use super::wire::{ContentBlockInfo, Delta};
     use super::*;
+    use crate::client::{Response, StopReason, TokenUsage};
     use crate::config::auth::{Auth, AuthSource};
     use crate::config::{
         AutoCompactionConfig, CompactionConfig, Effort, PromptCacheTtl, test_thresholds,
@@ -511,8 +513,8 @@ mod tests {
     }
 
     async fn collect_events(
-        mut rx: mpsc::Receiver<Result<StreamEvent>>,
-    ) -> Result<Vec<StreamEvent>> {
+        mut rx: mpsc::Receiver<Result<ResponseEvent>>,
+    ) -> Result<Vec<ResponseEvent>> {
         let mut out = Vec::new();
         while let Some(event) = rx.recv().await {
             out.push(event?);
@@ -863,10 +865,36 @@ mod tests {
         );
     }
 
+    // ── Client::attributes ──
+
+    #[test]
+    fn attributes_streaming_requests_and_oauth_one_shots_unless_disabled() {
+        for (auth, enabled, streaming, expected) in [
+            (api_key(), true, true, true),
+            (auth_token(), true, true, true),
+            (oauth(), true, true, true),
+            (api_key(), true, false, false),
+            (auth_token(), true, false, false),
+            (oauth(), true, false, true),
+            (oauth(), false, true, false),
+            (oauth(), false, false, false),
+        ] {
+            let kind = auth.kind();
+            let mut config = test_config(OFFLINE_URL, auth, TEST_MODEL);
+            config.gateway.attribution = enabled;
+            let client = Client::new(config, None).unwrap();
+            assert_eq!(
+                client.attributes(streaming, kind),
+                expected,
+                "{kind:?} enabled={enabled} streaming={streaming}",
+            );
+        }
+    }
+
     // ── Client::stream_message ──
 
     #[tokio::test]
-    async fn stream_message_happy_text_emits_start_delta_stop_in_order() {
+    async fn stream_message_streams_usage_and_text_then_completes_the_reply() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/messages"))
@@ -889,25 +917,21 @@ mod tests {
             .unwrap();
         let events = collect_events(rx).await.unwrap();
 
-        assert!(
-            matches!(&events[0], StreamEvent::MessageStart { message } if message.id == "msg_1"),
+        assert_eq!(
+            events,
+            [
+                ResponseEvent::Usage(TokenUsage::new(1_000, 0)),
+                ResponseEvent::Text("Hi".to_owned()),
+                ResponseEvent::Usage(TokenUsage::new(1_000, 100)),
+                ResponseEvent::Completed(Response {
+                    content: vec![ContentBlock::Text {
+                        text: "Hi".to_owned(),
+                    }],
+                    stop_reason: Some(StopReason::EndTurn),
+                    ..Response::default()
+                }),
+            ],
         );
-        assert!(matches!(
-            &events[1],
-            StreamEvent::ContentBlockStart {
-                index: 0,
-                content_block: ContentBlockInfo::Text { .. }
-            },
-        ));
-        let StreamEvent::ContentBlockDelta {
-            index: 0,
-            delta: Delta::TextDelta { text },
-        } = &events[2]
-        else {
-            panic!("expected text delta, got {:?}", events[2]);
-        };
-        assert_eq!(text, "Hi");
-        assert!(matches!(events[5], StreamEvent::MessageStop));
     }
 
     #[tokio::test]
@@ -949,10 +973,7 @@ mod tests {
         .await
         .unwrap();
         let got = events.iter().find_map(|e| match e {
-            StreamEvent::ContentBlockDelta {
-                delta: Delta::TextDelta { text },
-                ..
-            } => Some(text.as_str()),
+            ResponseEvent::Text(text) => Some(text.as_str()),
             _ => None,
         });
         assert_eq!(got, Some("🦀rust"));
@@ -1294,19 +1315,14 @@ mod tests {
         .await
         .unwrap();
         let delta = events.iter().find_map(|e| match e {
-            StreamEvent::ContentBlockDelta {
-                delta: Delta::TextDelta { text },
-                ..
-            } => Some(text.as_str()),
+            ResponseEvent::Text(text) => Some(text.as_str()),
             _ => None,
         });
         assert_eq!(delta, Some("Hi"));
     }
 
     #[tokio::test]
-    async fn stream_message_mid_stream_error_event_is_delivered_with_api_payload() {
-        // A non-transient `StreamEvent::Error` flows as `Ok(Error { .. })`. `agent.rs` still owns
-        // conversion to `bail!`.
+    async fn stream_message_in_band_error_fails_the_stream_with_its_payload() {
         let server = MockServer::start().await;
         let body = sse_body(&[(
             "error",
@@ -1327,22 +1343,23 @@ mod tests {
             Some("sid".to_owned()),
         )
         .unwrap();
-        let events = collect_events(
+        let err = collect_events(
             client
                 .stream_message(&[Message::user("hi")], &[], None, &[])
                 .unwrap(),
         )
         .await
-        .unwrap();
-        let err = events
-            .iter()
-            .find_map(|e| match e {
-                StreamEvent::Error { error } => Some(error),
-                _ => None,
-            })
-            .expect("error event must be delivered");
-        assert_eq!(err.error_type, "invalid_request_error");
-        assert_eq!(err.message, "Bad block");
+        .expect_err("an in-band error fails the stream");
+
+        assert_eq!(
+            format!("{err:#}"),
+            "API error (invalid_request_error): Bad block"
+        );
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            1,
+            "a non-transient error is not retried",
+        );
     }
 
     #[tokio::test]
@@ -1625,32 +1642,6 @@ mod tests {
                     .any(|beta| beta == "thinking-binding-controls-2026-08-01"),
                 "{}: {betas}",
                 info.id,
-            );
-        }
-    }
-
-    // ── Client::attributes ──
-
-    #[test]
-    fn attributes_streaming_requests_and_oauth_one_shots_unless_disabled() {
-        for (auth, enabled, streaming, expected) in [
-            (api_key(), true, true, true),
-            (auth_token(), true, true, true),
-            (oauth(), true, true, true),
-            (api_key(), true, false, false),
-            (auth_token(), true, false, false),
-            (oauth(), true, false, true),
-            (oauth(), false, true, false),
-            (oauth(), false, false, false),
-        ] {
-            let kind = auth.kind();
-            let mut config = test_config(OFFLINE_URL, auth, TEST_MODEL);
-            config.gateway.attribution = enabled;
-            let client = Client::new(config, None).unwrap();
-            assert_eq!(
-                client.attributes(streaming, kind),
-                expected,
-                "{kind:?} enabled={enabled} streaming={streaming}",
             );
         }
     }
