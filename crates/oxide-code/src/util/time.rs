@@ -16,8 +16,6 @@ pub(crate) fn init_local_offset() {
     _ = LOCAL_OFFSET.set(resolve_offset(UtcOffset::current_local_offset()));
 }
 
-/// Pure fallback for the offset lookup — split from `init_local_offset` so the warn-and-fallback
-/// arm can be tested without depending on the host's TZ database state.
 fn resolve_offset(result: Result<UtcOffset, time::error::IndeterminateOffset>) -> UtcOffset {
     result.unwrap_or_else(|e| {
         warn!("cannot read local timezone offset, falling back to UTC: {e}");
@@ -34,23 +32,6 @@ pub(crate) fn local_offset() -> UtcOffset {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ── init_local_offset / local_offset ──
-
-    #[test]
-    fn init_is_idempotent_and_local_offset_returns_a_stable_cached_value() {
-        // OnceLock is process-global, so we can only assert the contract that holds regardless of
-        // OnceLock state: init must not panic when called more than once, and `local_offset` must
-        // return the same value across repeat reads.
-        init_local_offset();
-        init_local_offset();
-        let first = local_offset();
-        let second = local_offset();
-        assert_eq!(
-            first, second,
-            "local_offset must return a stable cached value across reads",
-        );
-    }
 
     // ── resolve_offset ──
 

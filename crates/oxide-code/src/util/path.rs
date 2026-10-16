@@ -103,8 +103,6 @@ pub(crate) mod testing {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use super::testing::{HOME_VAR, abs};
     use super::*;
 
@@ -208,11 +206,14 @@ mod tests {
         // `~//foo` and `~///foo` should land at $HOME/foo, not at /foo. PathBuf::join replaces
         // the receiver when the argument is absolute, so the tail must be trimmed first.
         temp_env::with_var(HOME_VAR, Some("/tmp/oxide-fake-home"), || {
-            for raw in ["~//foo", "~///foo/bar"] {
-                let got = expand_user(raw).unwrap();
-                assert!(
-                    got.starts_with("/tmp/oxide-fake-home"),
-                    "{raw:?} -> {got:?}",
+            for (raw, expected) in [
+                ("~//foo", "/tmp/oxide-fake-home/foo"),
+                ("~///foo/bar", "/tmp/oxide-fake-home/foo/bar"),
+            ] {
+                assert_eq!(
+                    expand_user(raw).unwrap(),
+                    PathBuf::from(expected),
+                    "{raw:?}"
                 );
             }
         });
@@ -243,11 +244,6 @@ mod tests {
             PathBuf::from("~alice/foo")
         );
     }
-
-    // The `expand_user` home-unset error branch is unreachable from a Linux unit test:
-    // `std::env::home_dir()` falls back to `getpwuid_r` when `$HOME` is empty, so the `None`
-    // arm only fires in exotic environments (no passwd entry, Windows without a profile).
-    // The `Result` signature is still the right contract for those cases.
 
     // ── lexical_normalize ──
 

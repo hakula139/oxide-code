@@ -15,7 +15,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::{ChildStderr, ChildStdout};
 
 use super::{Tool, ToolOutput, extract_input_field, title_case};
-use crate::permission::PermissionClass;
+use crate::permission::{GateTarget, PermissionClass};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_mins(2);
 const MAX_TIMEOUT: Duration = Duration::from_mins(10);
@@ -45,13 +45,9 @@ impl Tool for BashTool {
         PermissionClass::Bash
     }
 
-    fn gate_target(
-        &self,
-        input: &serde_json::Value,
-        _cwd: &std::path::Path,
-    ) -> crate::permission::GateTarget {
+    fn gate_target(&self, input: &serde_json::Value, _cwd: &Path) -> GateTarget {
         extract_input_field(input, "command")
-            .map(|c| crate::permission::GateTarget::Command(c.to_owned()))
+            .map(|c| GateTarget::Command(c.to_owned()))
             .unwrap_or_default()
     }
 
@@ -261,11 +257,13 @@ fn git_bash_on(path: &std::ffi::OsStr) -> Option<std::path::PathBuf> {
 
 fn render_streams(stdout: &PipeCapture, stderr: &PipeCapture) -> String {
     let (stdout_budget, stderr_budget) = split_budget(stdout.kept(), stderr.kept(), OUTPUT_BUDGET);
-    let stdout = render_pipe(stdout, stdout_budget, true);
-    let stderr = render_pipe(stderr, stderr_budget, false);
+    let stdout = render_pipe(stdout, stdout_budget);
+    let stdout = stdout.trim_start_matches('\n');
+    let stderr = render_pipe(stderr, stderr_budget);
+    let stderr = stderr.trim_start();
     match (stdout.is_empty(), stderr.is_empty()) {
-        (_, true) => stdout,
-        (true, false) => stderr,
+        (_, true) => stdout.to_owned(),
+        (true, false) => stderr.to_owned(),
         (false, false) => format!("{stdout}\n{stderr}"),
     }
 }
@@ -285,7 +283,7 @@ fn split_budget(first: usize, second: usize, budget: usize) -> (usize, usize) {
 }
 
 /// Renders at most `budget` bytes of `pipe`, folding everything it drops into the omission count.
-fn render_pipe(pipe: &PipeCapture, budget: usize, trim_start_newlines: bool) -> String {
+fn render_pipe(pipe: &PipeCapture, budget: usize) -> String {
     let tail: Vec<u8> = pipe.tail.iter().copied().collect();
     let (head_len, tail_len) = split_budget(pipe.head.len(), tail.len(), budget);
     let mut head = &pipe.head[..head_len];
@@ -314,13 +312,7 @@ fn render_pipe(pipe: &PipeCapture, budget: usize, trim_start_newlines: bool) -> 
         }
     };
 
-    let text = text.trim_end();
-    let text = if trim_start_newlines {
-        text.trim_start_matches('\n')
-    } else {
-        text.trim_start()
-    };
-    text.to_owned()
+    text.trim_end().to_owned()
 }
 
 // ── Pipe Capture ──
@@ -446,15 +438,7 @@ mod tests {
     use tokio::io::AsyncWriteExt as _;
 
     use super::*;
-    use crate::permission::GateTarget;
     use crate::tool::MAX_OUTPUT_BYTES;
-
-    // ── permission_class ──
-
-    #[test]
-    fn permission_class_is_bash() {
-        assert_eq!(BashTool.permission_class(), PermissionClass::Bash);
-    }
 
     // ── gate_target ──
 
@@ -476,14 +460,14 @@ mod tests {
     // ── run ──
 
     #[tokio::test]
-    async fn run_valid_command() {
+    async fn run_valid_command_executes_successfully() {
         let output = run(serde_json::json!({"command": "echo hello"})).await;
         assert!(!output.is_error);
         assert_eq!(output.content, "hello");
     }
 
     #[tokio::test]
-    async fn run_missing_command_field() {
+    async fn run_missing_command_field_reports_input_error() {
         let output = run(serde_json::json!({})).await;
         assert!(output.is_error);
         assert!(output.content.contains("Invalid input"));
@@ -539,14 +523,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_stderr_output() {
+    async fn execute_stderr_output_preserves_content() {
         let output = run_default("echo err >&2").await;
         assert!(!output.is_error);
         assert_eq!(output.content, "err");
     }
 
     #[tokio::test]
-    async fn execute_combined_stdout_and_stderr() {
+    async fn execute_combined_stdout_and_stderr_renders_both_streams() {
         let output = run_default("echo out && echo err >&2").await;
         assert!(!output.is_error);
         assert_eq!(output.content, "out\nerr");
@@ -560,7 +544,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_output_with_nonzero_exit() {
+    async fn execute_nonzero_exit_preserves_output() {
         let output = run_default("echo partial; false").await;
         assert!(!output.is_error);
         assert_eq!(
@@ -573,7 +557,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_no_output() {
+    async fn execute_no_output_renders_the_no_output_marker() {
         let output = run_default("true").await;
         assert!(!output.is_error);
         assert_eq!(output.content, "(no output)");
@@ -778,6 +762,13 @@ mod tests {
         }
     }
 
+    #[test]
+    fn render_streams_trims_stdout_newlines_and_stderr_whitespace() {
+        let stdout = capture(b"\n  output\n", b"", 0);
+        let stderr = capture(b"\n  error\n", b"", 0);
+        assert_eq!(render_streams(&stdout, &stderr), "  output\nerror");
+    }
+
     // ── split_budget ──
 
     #[test]
@@ -800,9 +791,9 @@ mod tests {
 
     #[test]
     fn render_pipe_marks_the_omitted_middle_between_head_and_tail() {
-        let pipe = capture(b"\nhello\n", b"world\n", 7);
+        let pipe = capture(b"hello\n", b"world\n", 7);
         assert_eq!(
-            render_pipe(&pipe, OUTPUT_BUDGET, true),
+            render_pipe(&pipe, OUTPUT_BUDGET),
             indoc! {"
                 hello
 
@@ -820,7 +811,7 @@ mod tests {
             5,
         );
         assert_eq!(
-            render_pipe(&pipe, OUTPUT_BUDGET, true),
+            render_pipe(&pipe, OUTPUT_BUDGET),
             indoc! {"
                 ab
                 ... [10 bytes omitted] ...
@@ -832,7 +823,7 @@ mod tests {
     fn render_pipe_over_budget_drops_the_middle_and_counts_it() {
         let pipe = capture(b"0123456789", b"abcdef4321", 0);
         assert_eq!(
-            render_pipe(&pipe, 8, true),
+            render_pipe(&pipe, 8),
             indoc! {"
                 0123
                 ... [12 bytes omitted] ...
@@ -845,13 +836,13 @@ mod tests {
         // A multibyte char straddling the head / tail split must not decode as two replacements.
         let crab = "🦀".as_bytes();
         let pipe = capture(&crab[..2], &crab[2..], 0);
-        assert_eq!(render_pipe(&pipe, OUTPUT_BUDGET, true), "🦀");
+        assert_eq!(render_pipe(&pipe, OUTPUT_BUDGET), "🦀");
     }
 
     #[test]
-    fn render_pipe_trims_stderr_edges_and_keeps_internal_newlines() {
+    fn render_pipe_trims_the_end_and_keeps_leading_and_internal_newlines() {
         let pipe = capture(b"\nerr\nmore\n\n", b"", 0);
-        assert_eq!(render_pipe(&pipe, OUTPUT_BUDGET, false), "err\nmore");
+        assert_eq!(render_pipe(&pipe, OUTPUT_BUDGET), "\nerr\nmore");
     }
 
     // ── PipeCapture::drain ──

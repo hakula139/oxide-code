@@ -77,13 +77,21 @@ pub(crate) fn atomic_write_private(path: &Path, bytes: &[u8]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::ffi::OsString;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     use tempfile::tempdir;
 
     use super::*;
+
+    fn tmp_leftovers(dir: &Path) -> Vec<OsString> {
+        fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| name.to_string_lossy().contains(".tmp."))
+            .collect()
+    }
 
     // ── create_private_dir_all ──
 
@@ -183,11 +191,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("file");
         atomic_write_private(&path, b"x").unwrap();
-        let leftovers: Vec<_> = fs::read_dir(dir.path())
-            .unwrap()
-            .map(|e| e.unwrap().file_name())
-            .filter(|n| n.to_string_lossy().contains(".tmp."))
-            .collect();
+        let leftovers = tmp_leftovers(dir.path());
         assert!(leftovers.is_empty(), "tmp leftovers: {leftovers:?}");
     }
 
@@ -227,11 +231,7 @@ mod tests {
             chain.contains("failed to install file"),
             "actionable error: {chain}"
         );
-        let leftovers: Vec<_> = fs::read_dir(dir.path())
-            .unwrap()
-            .map(|e| e.unwrap().file_name())
-            .filter(|n| n.to_string_lossy().contains(".tmp."))
-            .collect();
+        let leftovers = tmp_leftovers(dir.path());
         assert!(leftovers.is_empty(), "tmp cleaned up: {leftovers:?}");
     }
 }

@@ -9,12 +9,12 @@ use time::OffsetDateTime;
 use time::macros::datetime;
 use uuid::Uuid;
 
-use super::super::entry::{CURRENT_VERSION, Entry, TitleSource};
 use super::{
     SessionData, SessionStore, SessionWriter, encode_lines, file_session_id,
     load_session_data_from_path, open_append_at,
 };
 use crate::message::Message;
+use crate::session::entry::{CURRENT_VERSION, Entry, TitleSource};
 
 pub(crate) const TEST_PROJECT: &str = "test-project";
 

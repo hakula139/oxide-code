@@ -6,9 +6,10 @@ use std::fmt::Write as _;
 use time::{OffsetDateTime, UtcOffset};
 
 use super::entry::SessionInfo;
+use crate::util::text::plural;
 
 const SEPARATOR: &str = " · ";
-pub(crate) const ID_PREFIX_WIDTH: usize = 8;
+const ID_PREFIX_WIDTH: usize = 8;
 pub(crate) const UNTITLED_MARKER: &str = "(untitled)";
 
 /// First [`ID_PREFIX_WIDTH`] bytes of `session_id`, falling back to the full id when shorter.
@@ -26,7 +27,7 @@ pub(crate) fn display_title(info: &SessionInfo) -> String {
 
 /// Compact "N units ago" with an ISO-date fallback past 30 days. Negative deltas (clock skew or
 /// future stamps) collapse to 0 so the singular / plural axis stays sane.
-pub(crate) fn format_relative_time(ts: OffsetDateTime, now: OffsetDateTime) -> String {
+fn format_relative_time(ts: OffsetDateTime, now: OffsetDateTime) -> String {
     let secs = (now - ts).whole_seconds().max(0);
     let (n, unit) = if secs < 60 {
         (secs, "second")
@@ -41,8 +42,8 @@ pub(crate) fn format_relative_time(ts: OffsetDateTime, now: OffsetDateTime) -> S
             .format(time::macros::format_description!("[year]-[month]-[day]"))
             .expect("static `[year]-[month]-[day]` description never fails on a valid ts");
     };
-    let plural = if n == 1 { "" } else { "s" };
-    format!("{n} {unit}{plural} ago")
+    let suffix = plural(n, "", "s");
+    format!("{n} {unit}{suffix} ago")
 }
 
 /// `{id_prefix} · {when} · {N msgs} · {branch} · {project}`. Trailing components are omitted when
@@ -61,7 +62,7 @@ pub(crate) fn format_metadata_line(
     let prefix = id_prefix(session_id);
     let mut meta = format!("{prefix}{SEPARATOR}{when}");
     if message_count > 0 {
-        let unit = if message_count == 1 { "msg" } else { "msgs" };
+        let unit = plural(message_count, "msg", "msgs");
         _ = write!(meta, "{SEPARATOR}{message_count} {unit}");
     }
     if let Some(branch) = git_branch {
@@ -89,15 +90,15 @@ pub(crate) fn archive_notice(session_id: &str, archived: bool) -> String {
 
 #[cfg(test)]
 mod tests {
+    use time::macros::datetime;
+
     use super::*;
     use crate::session::entry::TitleInfo;
-
-    use time::macros::datetime;
 
     // ── id_prefix ──
 
     #[test]
-    fn id_prefix_returns_first_eight_bytes_or_full_id_when_shorter() {
+    fn id_prefix_uses_first_eight_bytes_or_full_short_id() {
         // Pin both the long-id slicing and the short-id fallback so a future change to direct
         // `&id[..8]` slicing would panic on short ids and break this test.
         assert_eq!(id_prefix("abcdefghij"), "abcdefgh");

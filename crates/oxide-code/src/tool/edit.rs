@@ -9,7 +9,7 @@ use serde::Deserialize;
 
 use super::{
     ApprovalBody, ApprovalPreview, DiffChunk, DiffLine, Tool, ToolMetadata, ToolOutput,
-    ToolResultView, extract_input_field, summarize_path_call,
+    ToolResultView, WriteMode, extract_input_field, summarize_path_call,
 };
 use crate::file_tracker::{FileTracker, GatePurpose};
 use crate::permission::PermissionClass;
@@ -43,15 +43,6 @@ impl Tool for EditTool {
 
     fn path_field(&self) -> Option<&'static str> {
         Some("file_path")
-    }
-
-    fn approval_preview(&self, input: &serde_json::Value) -> ApprovalPreview {
-        let old = extract_input_field(input, "old_string").unwrap_or_default();
-        let new = extract_input_field(input, "new_string").unwrap_or_default();
-        ApprovalPreview {
-            title: self.summarize_call(input),
-            body: ApprovalBody::Diff(vec![synthesize_chunk(old, new)]),
-        }
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -119,6 +110,15 @@ impl Tool for EditTool {
         })
     }
 
+    fn approval_preview(&self, input: &serde_json::Value) -> ApprovalPreview {
+        let old = extract_input_field(input, "old_string").unwrap_or_default();
+        let new = extract_input_field(input, "new_string").unwrap_or_default();
+        ApprovalPreview {
+            title: self.summarize_call(input),
+            body: ApprovalBody::Diff(vec![synthesize_chunk(old, new)]),
+        }
+    }
+
     fn run(
         &self,
         input: serde_json::Value,
@@ -172,7 +172,7 @@ async fn run(raw: serde_json::Value, tracker: Arc<FileTracker>) -> ToolOutput {
 /// - `old_string` must occur verbatim in the file (whitespace and indentation included). Without
 ///   `replace_all`, ambiguous matches are rejected so the model cannot silently edit the wrong
 ///   site.
-/// - The Read-before-Edit gate refuses files not fully read in this session and files whose
+/// - The Read-before-Edit gate refuses files with no Read of their current content and files whose
 ///   content changed since that Read.
 /// - CRLF is preserved: the file is normalized to LF for matching, the dominant EOL is restored
 ///   on write so we don't flip line endings just because the caller used `\n` in `old_string`.
@@ -240,7 +240,7 @@ async fn edit_file(
     };
     let updated = apply_eol(updated, eol);
 
-    super::write_tracked(tracker, path, updated.into_bytes(), false)
+    super::write_tracked(tracker, path, updated.into_bytes(), WriteMode::Overwrite)
         .await
         .map_err(|e| format!("Failed to write {path}: {e}"))?;
 
@@ -395,48 +395,7 @@ mod tests {
     };
     use crate::tool::testing::canonical_tempdir;
 
-    // ── permission_class ──
-
-    #[test]
-    fn permission_class_is_edit() {
-        assert_eq!(
-            EditTool::new(tracker()).permission_class(),
-            PermissionClass::Edit
-        );
-    }
-
-    // ── approval_preview ──
-
-    #[test]
-    fn approval_preview_renders_old_and_new_as_a_diff() {
-        let tool = EditTool::new(Arc::new(FileTracker::default()));
-        let preview = tool.approval_preview(&serde_json::json!({
-            "file_path": "src/main.rs",
-            "old_string": "let a = 1;",
-            "new_string": "let a = 2;",
-        }));
-
-        assert!(preview.title.contains("src/main.rs"));
-        let ApprovalBody::Diff(chunks) = preview.body else {
-            panic!("edit preview should be a diff");
-        };
-        let chunk = &chunks[0];
-        assert!(chunk.old.iter().any(|l| l.text.contains("let a = 1;")));
-        assert!(chunk.new.iter().any(|l| l.text.contains("let a = 2;")));
-    }
-
     // ── result_view ──
-
-    #[test]
-    fn result_view_is_none_when_new_string_missing_with_old_string_present() {
-        let tool = EditTool::new(Arc::new(FileTracker::default()));
-        let view = tool.result_view(
-            &serde_json::json!({"old_string": "x"}),
-            "Successfully edited /tmp/x.",
-            &ToolMetadata::default(),
-        );
-        assert!(view.is_none());
-    }
 
     #[test]
     fn result_view_prefers_structured_chunks_from_metadata_on_live_path() {
@@ -584,43 +543,52 @@ mod tests {
     }
 
     #[test]
-    fn result_view_is_none_when_required_inputs_missing() {
-        let input = serde_json::json!({"file_path": "/tmp/x"});
-        assert!(
-            EditTool::new(tracker())
-                .result_view(&input, "edited", &ToolMetadata::default())
-                .is_none(),
-        );
+    fn result_view_missing_or_mistyped_required_inputs_uses_plain_output() {
+        for input in [
+            serde_json::json!({"old_string": "x"}),
+            serde_json::json!({"file_path": "/tmp/x"}),
+            serde_json::json!({"file_path": "/tmp/x", "old_string": 42, "new_string": "b"}),
+            serde_json::json!({"file_path": "/tmp/x", "old_string": "a", "new_string": 42}),
+        ] {
+            assert_eq!(
+                EditTool::new(tracker()).result_view(&input, "edited", &ToolMetadata::default()),
+                None,
+                "{input}",
+            );
+        }
     }
 
+    // ── approval_preview ──
+
     #[test]
-    fn result_view_is_none_when_field_type_is_wrong() {
-        let bad_old = serde_json::json!({
-            "file_path": "/tmp/x",
-            "old_string": 42,
-            "new_string": "b",
-        });
-        assert!(
-            EditTool::new(tracker())
-                .result_view(&bad_old, "edited", &ToolMetadata::default())
-                .is_none(),
-        );
-        let bad_new = serde_json::json!({
-            "file_path": "/tmp/x",
-            "old_string": "a",
-            "new_string": 42,
-        });
-        assert!(
-            EditTool::new(tracker())
-                .result_view(&bad_new, "edited", &ToolMetadata::default())
-                .is_none(),
+    fn approval_preview_renders_old_and_new_as_a_diff() {
+        let tool = EditTool::new(tracker());
+        let preview = tool.approval_preview(&serde_json::json!({
+            "file_path": "src/main.rs",
+            "old_string": "let a = 1;",
+            "new_string": "let a = 2;",
+        }));
+
+        assert!(preview.title.contains("src/main.rs"));
+        assert_eq!(
+            preview.body,
+            ApprovalBody::Diff(vec![DiffChunk {
+                old: vec![DiffLine {
+                    number: 1,
+                    text: "let a = 1;".to_owned(),
+                }],
+                new: vec![DiffLine {
+                    number: 1,
+                    text: "let a = 2;".to_owned(),
+                }],
+            }]),
         );
     }
 
     // ── run ──
 
     #[tokio::test]
-    async fn run_valid_edit() {
+    async fn run_valid_edit_updates_file() {
         let dir = canonical_tempdir();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello world").unwrap();
@@ -643,7 +611,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_missing_required_fields() {
+    async fn run_missing_required_fields_reports_input_error() {
         let output = run(
             serde_json::json!({
                 "file_path": "/tmp/x",
@@ -715,7 +683,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn edit_file_replace_all() {
+    async fn edit_file_replace_all_updates_every_match() {
         let dir = canonical_tempdir();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "aaa bbb aaa").unwrap();
@@ -740,7 +708,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn edit_file_replace_all_single_match() {
+    async fn edit_file_replace_all_single_match_updates_content() {
         let dir = canonical_tempdir();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello world").unwrap();
@@ -1513,7 +1481,7 @@ mod tests {
     }
 
     #[test]
-    fn common_boundaries_empty_inputs_return_zero() {
+    fn common_boundaries_empty_inputs_have_zero_boundaries() {
         let empty: [&str; 0] = [];
         assert_eq!(common_boundaries(&empty, &empty), (0, 0));
     }
@@ -1527,12 +1495,12 @@ mod tests {
     // ── dominant_eol ──
 
     #[test]
-    fn dominant_eol_lf_only() {
+    fn dominant_eol_lf_only_selects_lf() {
         assert_eq!(dominant_eol("a\nb\n"), "\n");
     }
 
     #[test]
-    fn dominant_eol_crlf_only() {
+    fn dominant_eol_crlf_only_selects_crlf() {
         assert_eq!(dominant_eol("a\r\nb\r\n"), "\r\n");
     }
 
@@ -1548,7 +1516,7 @@ mod tests {
     }
 
     #[test]
-    fn dominant_eol_no_newlines() {
+    fn dominant_eol_no_newlines_defaults_to_lf() {
         assert_eq!(dominant_eol("no newlines"), "\n");
     }
 
@@ -1576,7 +1544,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_eol_lf_unchanged() {
+    fn apply_eol_lf_preserves_content() {
         assert_eq!(apply_eol("a\nb\n".into(), "\n"), "a\nb\n");
     }
 

@@ -159,7 +159,7 @@ async fn read_file(
     let total_lines = lines.len();
     if total_lines == 0 {
         let outcome = tracker.record_read(&key, &bytes, LastView::Full);
-        return Ok(stub_or(outcome, EMPTY_FILE_MARKER).into_owned());
+        return Ok(stub_or(outcome, EMPTY_FILE_MARKER).to_owned());
     }
 
     let offset_n = offset.unwrap_or(1).max(1);
@@ -201,13 +201,13 @@ async fn read_file(
 
     let view = LastView::lines(offset_n, last_shown, total_lines);
     let outcome = tracker.record_read(&key, &bytes, view);
-    Ok(stub_or(outcome, &output).into_owned())
+    Ok(stub_or(outcome, &output).to_owned())
 }
 
-fn stub_or(outcome: RecordRead, body: &str) -> std::borrow::Cow<'_, str> {
+fn stub_or(outcome: RecordRead, body: &str) -> &str {
     match outcome {
-        RecordRead::CacheHit => std::borrow::Cow::Borrowed(CACHE_HIT_STUB),
-        RecordRead::Inserted => std::borrow::Cow::Borrowed(body),
+        RecordRead::CacheHit => CACHE_HIT_STUB,
+        RecordRead::Inserted => body,
     }
 }
 
@@ -223,10 +223,10 @@ fn read_excerpt_view(path: String, content: &str) -> Option<ToolResultView> {
     }
 
     let (body, footer) = split_read_footer(content);
-    let mut lines = Vec::new();
-    for line in body.lines() {
-        lines.push(parse_read_line(line)?);
-    }
+    let lines = body
+        .lines()
+        .map(parse_read_line)
+        .collect::<Option<Vec<_>>>()?;
 
     let total_lines = footer
         .and_then(parse_total_lines_footer)
@@ -274,7 +274,7 @@ mod tests {
     // ── run ──
 
     #[tokio::test]
-    async fn run_reads_file() {
+    async fn run_existing_file_renders_content() {
         let dir = canonical_tempdir();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello\nworld\n").unwrap();
@@ -359,7 +359,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_missing_file_path() {
+    async fn run_missing_file_path_reports_input_error() {
         let output = run(serde_json::json!({}), tracker()).await;
         assert!(output.is_error);
         assert!(output.content.contains("Invalid input"));
@@ -382,7 +382,7 @@ mod tests {
     // ── read_file ──
 
     #[tokio::test]
-    async fn read_file_with_line_numbers() {
+    async fn read_file_existing_file_numbers_lines() {
         let dir = canonical_tempdir();
         let path = dir.path().join("test.txt");
         std::fs::write(
@@ -554,7 +554,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_file_empty() {
+    async fn read_file_empty_file_renders_marker() {
         let dir = canonical_tempdir();
         let path = dir.path().join("empty.txt");
         std::fs::write(&path, "").unwrap();
@@ -566,7 +566,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_file_not_found() {
+    async fn read_file_missing_file_reports_error() {
         let err = read_file("/nonexistent/path.txt", None, None, &FileTracker::default())
             .await
             .unwrap_err();
@@ -574,7 +574,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_file_directory() {
+    async fn read_file_directory_reports_error() {
         let dir = canonical_tempdir();
         let err = read_file(
             dir.path().to_str().unwrap(),
@@ -588,7 +588,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_file_too_large() {
+    async fn read_file_oversized_file_reports_error() {
         let dir = canonical_tempdir();
         let path = dir.path().join("huge.txt");
         let f = std::fs::File::create(&path).unwrap();
@@ -621,7 +621,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_file_binary_detected() {
+    async fn read_file_binary_content_reports_error() {
         let dir = canonical_tempdir();
         let path = dir.path().join("binary.bin");
         std::fs::write(&path, b"hello\x00world").unwrap();
@@ -633,7 +633,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_file_offset_beyond_end() {
+    async fn read_file_offset_beyond_end_reports_error() {
         let dir = canonical_tempdir();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "a\nb\n").unwrap();
@@ -665,7 +665,7 @@ mod tests {
         assert!(!err.contains("SECRET"), "{err}");
     }
 
-    // ── read_excerpt_view ──
+    // ── result_view ──
 
     #[test]
     fn result_view_builds_read_excerpt() {

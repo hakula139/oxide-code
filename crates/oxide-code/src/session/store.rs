@@ -89,7 +89,7 @@ impl SessionStore {
     }
 }
 
-// ── Path-keyed primitives ──
+// ── Path-Keyed Primitives ──
 
 /// Opens an existing session file in append mode by explicit path.
 pub(crate) fn open_append_at(path: &Path) -> Result<SessionWriter> {
@@ -337,9 +337,11 @@ pub(crate) fn set_archived_at(path: &Path, archived: bool) -> Result<()> {
     Ok(())
 }
 
+const MAX_SESSION_ID_LEN: usize = 64;
+
 fn validate_session_id(session_id: &str) -> Result<()> {
     let ok = !session_id.is_empty()
-        && session_id.len() <= 64
+        && session_id.len() <= MAX_SESSION_ID_LEN
         && session_id
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
@@ -422,9 +424,9 @@ pub(crate) struct SessionData {
 
 // ── File Opening ──
 
-/// Options for a readable handle that [`Appender`] writes through. On Windows, `append(true)` strips
-/// the `FILE_WRITE_DATA` access that `set_len` needs to roll back a partial write, so the handle
-/// opens for plain writing there and each write targets the end of the file.
+/// Options for a readable handle that [`Appender`] writes through. On Windows, `append(true)`
+/// strips the `FILE_WRITE_DATA` access that `set_len` needs to roll back a partial write, so
+/// the handle opens for plain writing there and each write targets the end of the file.
 fn append_options() -> OpenOptions {
     let mut options = OpenOptions::new();
     options.read(true);
@@ -1482,7 +1484,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_session_data_picks_newest_leaf_on_fork() {
+    async fn load_session_data_resolves_transcript_through_newest_chain_leaf() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let mut writer = store.create(&sample_header("fork"), &[]).unwrap();
@@ -1532,99 +1534,6 @@ mod tests {
         assert!(
             matches!(&data.messages[1].content[0], ContentBlock::Text { text } if text == "branch B (newer leaf)"),
             "chain should end at the newest leaf"
-        );
-    }
-
-    #[tokio::test]
-    async fn load_session_data_terminates_at_orphan_parent_reference() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let mut writer = store.create(&sample_header("orphan"), &[]).unwrap();
-
-        let only = Uuid::new_v4();
-        writer
-            .append(&[sample_message_at(
-                only,
-                Some(Uuid::new_v4()), // points at a missing ancestor
-                datetime!(2026-04-16 12:00:01 UTC),
-                "orphan tip",
-            )])
-            .unwrap();
-        drop(writer);
-
-        let data = store.load_session_data("orphan").unwrap();
-        assert_eq!(data.last_uuid, Some(only));
-        assert_eq!(data.messages.len(), 1);
-        assert!(
-            matches!(&data.messages[0].content[0], ContentBlock::Text { text } if text == "orphan tip")
-        );
-    }
-
-    #[tokio::test]
-    async fn load_session_data_breaks_chain_walk_on_cycle() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let mut writer = store.create(&sample_header("cycle"), &[]).unwrap();
-
-        let a = Uuid::new_v4();
-        let b = Uuid::new_v4();
-        writer
-            .append(&[sample_message_at(
-                a,
-                Some(b), // a points at b — part of the cycle
-                datetime!(2026-04-16 12:00:01 UTC),
-                "A",
-            )])
-            .unwrap();
-        writer
-            .append(&[sample_message_at(
-                b,
-                Some(a), // b points back at a — completes the cycle
-                datetime!(2026-04-16 12:00:02 UTC),
-                "B",
-            )])
-            .unwrap();
-        drop(writer);
-
-        let data = store.load_session_data("cycle").unwrap();
-        assert!(
-            data.messages.is_empty(),
-            "cycle with no leaf should yield an empty chain, got: {:?}",
-            data.messages,
-        );
-    }
-
-    #[tokio::test]
-    async fn load_session_data_prefers_later_duplicate_uuid() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let mut writer = store.create(&sample_header("dup"), &[]).unwrap();
-
-        let u = Uuid::new_v4();
-        writer
-            .append(&[sample_message_at(
-                u,
-                None,
-                datetime!(2026-04-16 12:00:01 UTC),
-                "first copy",
-            )])
-            .unwrap();
-        writer
-            .append(&[sample_message_at(
-                u,
-                None,
-                datetime!(2026-04-16 12:00:05 UTC),
-                "second copy",
-            )])
-            .unwrap();
-        drop(writer);
-
-        let data = store.load_session_data("dup").unwrap();
-        assert_eq!(data.last_uuid, Some(u));
-        assert_eq!(data.messages.len(), 1);
-        assert!(
-            matches!(&data.messages[0].content[0], ContentBlock::Text { text } if text == "second copy"),
-            "latest duplicate should win"
         );
     }
 

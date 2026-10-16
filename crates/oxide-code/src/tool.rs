@@ -23,7 +23,7 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use crate::file_tracker::{FileTracker, TrackableFileError, validate_trackable_file};
 use crate::permission::{GateTarget, PermissionClass};
 use crate::util::path::{lexical_normalize, slash_separated};
-use crate::util::text::ELLIPSIS;
+use crate::util::text::{ELLIPSIS, plural};
 
 // ── Tool Definition ──
 
@@ -236,8 +236,7 @@ pub(crate) trait Tool: Send + Sync {
 
     /// Pulls the tool's primary argument out of `input` for terse `Name(arg)` labels in the UI.
     /// Returning `None` falls back to the bare name.
-    fn summarize_input<'a>(&self, input: &'a serde_json::Value) -> Option<&'a str> {
-        _ = input;
+    fn summarize_input<'a>(&self, _input: &'a serde_json::Value) -> Option<&'a str> {
         None
     }
 
@@ -430,6 +429,11 @@ pub(crate) fn parse_input<T: DeserializeOwned>(raw: serde_json::Value) -> Result
 
 // ── Path Utilities ──
 
+fn search_root_target(input: &serde_json::Value, cwd: &Path) -> GateTarget {
+    let path = extract_input_field(input, "path").unwrap_or(".");
+    GateTarget::for_path(path, cwd)
+}
+
 /// The canonical working directory, so hits under a canonical search base render relative to it.
 pub(crate) fn working_dir() -> Result<PathBuf, String> {
     std::env::current_dir()
@@ -574,18 +578,22 @@ pub(crate) async fn read_validated(
 
 // ── File Writing ──
 
-/// Writes `bytes` to `path` through [`open_no_follow`]. `create_new` refuses any existing entry, a
-/// dangling symlink included, and otherwise the file is truncated only once the open succeeds.
-pub(crate) async fn write_no_follow(
-    path: &Path,
-    bytes: &[u8],
-    create_new: bool,
-) -> std::io::Result<()> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WriteMode {
+    CreateNew,
+    Overwrite,
+}
+
+/// Writes `bytes` through [`open_no_follow`], refusing existing entries in `CreateNew` mode and
+/// truncating only after a successful open in `Overwrite` mode.
+async fn write_no_follow(path: &Path, bytes: &[u8], mode: WriteMode) -> std::io::Result<()> {
     let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(create_new);
+    options
+        .write(true)
+        .create_new(matches!(mode, WriteMode::CreateNew));
     let mut file = open_no_follow(path, options).await?;
 
-    if !create_new {
+    if matches!(mode, WriteMode::Overwrite) {
         file.set_len(0).await?;
     }
     file.write_all(bytes).await?;
@@ -594,16 +602,16 @@ pub(crate) async fn write_no_follow(
 
 /// Writes `bytes` like [`write_no_follow`] and records them under the path's [`tracker_key`] as one
 /// unit, so a caller dropped mid-write cannot leave the file written but unrecorded.
-pub(crate) async fn write_tracked(
+async fn write_tracked(
     tracker: &Arc<FileTracker>,
     path: &str,
     bytes: Vec<u8>,
-    create_new: bool,
+    mode: WriteMode,
 ) -> std::io::Result<()> {
     let path = path.to_owned();
     tracker
         .write_and_record(async move {
-            write_no_follow(Path::new(&path), &bytes, create_new).await?;
+            write_no_follow(Path::new(&path), &bytes, mode).await?;
             Ok((tracker_key(&path).await, bytes))
         })
         .await
@@ -755,7 +763,7 @@ pub(crate) fn push_withheld_note(content: &mut String, count: usize) {
     if count == 0 {
         return;
     }
-    let word = if count == 1 { "file" } else { "files" };
+    let word = plural(count, "file", "files");
     _ = write!(content, "\n\n({count} {word} {WITHHELD_NOTE_END}");
 }
 
@@ -1124,7 +1132,7 @@ mod tests {
     }
 
     #[test]
-    fn get_unknown_tool() {
+    fn get_unknown_tool_has_no_entry() {
         let registry = ToolRegistry::new(vec![Box::new(BashTool)]);
         assert!(registry.get("nonexistent").is_none());
     }
@@ -1663,7 +1671,9 @@ mod tests {
         let path = dir.path().join("file.txt");
         std::fs::write(&path, "a much longer original").unwrap();
 
-        write_no_follow(&path, b"short", false).await.unwrap();
+        write_no_follow(&path, b"short", WriteMode::Overwrite)
+            .await
+            .unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "short");
     }
 
@@ -1676,9 +1686,17 @@ mod tests {
         let link = dir.path().join("link.txt");
         symlink_file(&target, &link);
 
-        assert!(write_no_follow(&existing, b"x", true).await.is_err());
+        assert!(
+            write_no_follow(&existing, b"x", WriteMode::CreateNew)
+                .await
+                .is_err()
+        );
         assert_eq!(std::fs::read_to_string(&existing).unwrap(), "original");
-        assert!(write_no_follow(&link, b"x", true).await.is_err());
+        assert!(
+            write_no_follow(&link, b"x", WriteMode::CreateNew)
+                .await
+                .is_err()
+        );
         assert!(!target.exists(), "the link target must not be created");
     }
 
@@ -1690,7 +1708,9 @@ mod tests {
         let link = dir.path().join("link.txt");
         symlink_file(&target, &link);
 
-        let err = write_no_follow(&link, b"x", false).await.unwrap_err();
+        let err = write_no_follow(&link, b"x", WriteMode::Overwrite)
+            .await
+            .unwrap_err();
         #[cfg(unix)]
         assert_eq!(err.raw_os_error(), Some(nix::errno::Errno::ELOOP as i32));
         #[cfg(windows)]
@@ -1705,7 +1725,7 @@ mod tests {
         let fifo = dir.path().join("pipe");
         nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRWXU).unwrap();
 
-        let write = write_no_follow(&fifo, b"x", false);
+        let write = write_no_follow(&fifo, b"x", WriteMode::Overwrite);
         let result = tokio::time::timeout(std::time::Duration::from_secs(5), write).await;
         assert!(result.expect("the open must not block").is_err());
     }
@@ -1735,7 +1755,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(bytes, content.as_bytes());
-        write_no_follow(&path, b"rewritten", false).await.unwrap();
+        write_no_follow(&path, b"rewritten", WriteMode::Overwrite)
+            .await
+            .unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"rewritten");
     }
 
@@ -1749,7 +1771,7 @@ mod tests {
     }
 
     #[test]
-    fn truncate_line_long_gets_truncated() {
+    fn truncate_line_long_text_ends_with_ellipsis() {
         let long_line = "x".repeat(MAX_CHARS + 100);
         let result = truncate_line(&long_line, MAX_CHARS);
         let suffix = format!("... [{} chars]", MAX_CHARS + 100);
@@ -1759,7 +1781,7 @@ mod tests {
     }
 
     #[test]
-    fn truncate_line_multibyte_safe() {
+    fn truncate_line_multibyte_text_preserves_character_boundaries() {
         let mut line = "a".repeat(MAX_CHARS - 2);
         line.push('🦀');
         line.push_str(&"b".repeat(100));

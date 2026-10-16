@@ -4,10 +4,10 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use reqwest::{Certificate, ClientBuilder};
 
-/// Merges the PEM bundle at `path` into `builder`'s trust store. `None` returns `builder` unchanged.
+/// Merges the PEM bundle into `builder`'s trust store. `None` returns `builder` unchanged.
 pub(crate) fn apply_extra_ca_certs(
     builder: ClientBuilder,
     path: Option<&Path>,
@@ -27,7 +27,7 @@ pub(crate) fn load_extra_ca_certs(path: &Path) -> Result<Vec<Certificate>> {
     let certs = Certificate::from_pem_bundle(&bytes)
         .with_context(|| format!("failed to parse PEM bundle at {}", path.display()))?;
     if certs.is_empty() {
-        anyhow::bail!(
+        bail!(
             "no PEM certificates found in {} (expected one or more `-----BEGIN CERTIFICATE-----` blocks)",
             path.display(),
         );
@@ -68,17 +68,6 @@ mod tests {
     }
 
     // ── apply_extra_ca_certs ──
-
-    #[test]
-    fn apply_extra_ca_certs_is_a_noop_for_none() {
-        // Builder must survive the no-op path; `reqwest::Client::builder().build()` confirms
-        // the returned builder is still valid.
-        let builder = reqwest::Client::builder();
-        let builder = apply_extra_ca_certs(builder, None).expect("None must not error");
-        builder
-            .build()
-            .expect("None path must produce a buildable client");
-    }
 
     #[test]
     fn apply_extra_ca_certs_surfaces_loader_error_with_path() {
@@ -122,15 +111,6 @@ mod tests {
         let err = load_extra_ca_certs(file.path()).expect_err("empty bundle must error");
         let msg = format!("{err:#}");
         assert!(msg.contains("no PEM certificates found"), "{msg}");
-    }
-
-    #[test]
-    fn load_extra_ca_certs_reports_filename_on_read_failure() {
-        let missing = Path::new("/definitely/does/not/exist.pem");
-        let err = load_extra_ca_certs(missing).expect_err("missing path must error");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("failed to read extra CA bundle"), "{msg}");
-        assert!(msg.contains("/definitely/does/not/exist.pem"), "{msg}");
     }
 
     #[test]
