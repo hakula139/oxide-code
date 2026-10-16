@@ -587,6 +587,8 @@ fn flush(spans: &mut Vec<Span<'static>>, plain: &mut String, style: Style) {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use indoc::formatdoc;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -630,7 +632,7 @@ mod tests {
 
     /// A shown modal that offers the session rule [`Policy::session_grant`] suggests for `command`.
     fn granted_modal(command: &str) -> ApprovalModal {
-        let target = GateTarget::Command(command.to_owned());
+        let target = GateTarget::for_command(command, Path::new("/repo"));
         let grant = Policy::default().session_grant(PermissionClass::Bash, &target);
         let mut modal = ApprovalModal::new(
             "call-1".to_owned(),

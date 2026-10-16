@@ -44,6 +44,34 @@ Each resolved target belongs to one zone:
 - **Workspace**: the target sits inside cwd, so edit-class calls allow at step 7. A cwd of `/`, `$HOME`, or any ancestor of `$HOME` is never a workspace, so launching there leaves every edit to the allow rules. An existing regular file with more than one hard link is never a workspace target either, since another link can sit outside cwd.
 - **Outside**: everything else, which needs an allow rule or an approval.
 
+## Command Targets
+
+A `bash` call's target is its command as tree-sitter-bash parses it. `GateTarget::for_command` splits the command into simple commands across `;`, `&&`, `||`, `&`, pipes, line breaks, subshells, and compound statements. Each simple command drops the transparent wrappers `builtin`, `command`, `env`, `exec`, `nice`, `nohup`, `time`, and `timeout` with their options, so `nice -n 5 cargo test 2>&1` runs the simple command `cargo test`. Its words are unquoted, and a leading unquoted `~` or `~/` expands to the home directory. Each output redirection to a file (`>`, `>>`, `>|`, `>&`, `&>`, `&>>`) becomes an edit-class path target resolved and zoned like a path tool's, except for `/dev/null` and the other standard streams.
+
+A leading assignment, either before the command or as an `env` argument, drops out of the text a rule matches only when it sets one of a short list of variables that change output and nothing else, such as `RUST_LOG`, `LANG`, `TZ`, or `NO_COLOR`. Any other variable can change which program runs or what it loads, as `PATH`, `LD_PRELOAD`, and `GIT_PAGER` do, so the text keeps it. `GIT_PAGER=sh git log` then needs a rule that names the assignment, and it is never a known-safe read. Deny rules still see the program that runs.
+
+A command is opaque when the parse cannot show everything it runs or writes:
+
+- It fails to parse, or it holds a command or process substitution, an arithmetic expansion, or a `[[` or `((` test, which can evaluate a substitution inside an array subscript.
+- A command name is not a literal word, as in `$CMD -rf x`.
+- It runs a shell such as `sh`, `bash`, or `zsh`, or a builtin that runs code (`eval`, `source`, `.`, `trap`, `let`), so both `sh -c '...'` and `curl ... | sh` are opaque.
+- A wrapper takes an option the parser does not know, such as `env -S`.
+- A redirection target is not a literal path, holds a glob, or names more than one file.
+- It assigns a variable the shell itself reads, such as `PATH`, `HOME`, `IFS`, or `BASH_ENV`, by a plain assignment or a `for` loop, or it declares or exports a variable outside the short list above, since later commands see it.
+- A `cd`, `pushd`, `popd`, or `env -C` runs alongside a redirection or a known-safe read of a relative path, which may then name another file.
+
+The literal script of `sh -c` and the joined arguments of `eval` are parsed as well, so a deny rule still sees the simple commands inside them.
+
+A few read-only commands run without an allow rule. `echo`, `false`, `pwd`, and `true` are always safe. `cat`, `head`, `ls`, `tail`, `wc`, `find`, `grep`, and `sed` are safe when every argument is a literal word without globs and the command runs by its bare name, with guards for the ones that can do more:
+
+- `find` without an action that runs a command, deletes, or writes a file (`-exec`, `-execdir`, `-ok`, `-okdir`, `-delete`, `-fls`, `-fprint`, `-fprint0`, `-fprintf`).
+- `grep` without a recursive option or `-d`.
+- `sed` without `-i`, `-I`, or a script file, and with scripts that only print, delete, substitute, or move text between buffers.
+
+Long options count by any prefix GNU tools accept for them, so `sed --in` is refused as `--in-place`.
+
+Every argument that may name a file, such as each word past the options and a value attached to an option, counts as a read of that path. A read that a `read` deny rule matches makes the command ask, since the arguments over-approximate the files it reads.
+
 ## Rule Grammar
 
 Rules use Claude Code's `name(specifier)` string form, where the name identifies a permission class: `read` (the `read`, `grep`, and `glob` tools), `edit` (`edit` and `write`), or `bash`. Class names are case-insensitive. An unknown name causes a load error, so `write(...)` fails loudly. `bash`, `bash()`, and `bash(*)` all become a class-wide rule.
@@ -59,7 +87,9 @@ Bash specifiers can be exact, prefix (`cargo test:*`), or wildcard (`git *`). Re
 - Allow rules match names exactly as written. Deny rules also compare names the way protected paths do, so `read(**/.env)` covers `.ENV`, `.env.`, and a path whose cwd prefix differs only in case.
 - A leading `./` is dropped.
 
-The `bash` command string is unparsed (`bash -c "..."`), so prefix and wildcard matching provides best-effort UX. Since `ls; rm -rf` and `$()` indirection defeat naive matching, allow rules match conservatively: a compound command (chained, substituted, or redirected with `>` / `<`) never matches an allow rule. Deny rules match the whole command or any chained segment.
+A `bash` specifier matches one simple command of the [command target](#command-targets). An allow rule matches a simple command as written after its assignments and wrappers are stripped, so `bash(cargo test:*)` covers `RUST_LOG=debug cargo test 2>&1`. A deny rule matches the whole command or any simple command, compared as written, unquoted, and with its command name reduced to the bare name, so `bash(rm -rf:*)` also stops `"rm" -rf x`, `/bin/rm -rf x`, and `cd src && rm -rf x`.
+
+A command is allowed at step 8 only when it is not opaque, each of its simple commands is allowed by a rule or is a known-safe read, and each file it writes sits in the workspace or is allowed by an `edit` rule. A write is also checked against the `edit` deny rules at steps 1 and 3 and asks at step 6 when its target is protected. An opaque command can still be denied, so `bash(rm -rf:*)` stops `rm -rf x; echo $(date)`, but no rule allows it.
 
 ## Approval Round-Trip
 
@@ -81,7 +111,7 @@ On the TUI side, an `ApprovalModal` joins the `ModalStack` and follows the `Conf
 
 `A` allows the call and every later call a session rule covers:
 
-- **Grant:** when the gate asks, `Policy::session_grant` derives the narrowest rule that names the call with `Rule::for_call`. That is the command as written for `bash`, or the escaped path for an edit, relative inside the launch directory and canonical outside it. The grant rides on `Event::ApprovalRequested` and is offered only if adding its rule would let the call through, so a protected path or a compound command offers none. A command containing `*`, which would parse as a wildcard, and a call with a character the editor cannot show as itself offer none either, so the user always sees the exact rule they grant.
+- **Grant:** when the gate asks, `Policy::session_grant` derives the narrowest rule that names the call with `Rule::for_call`. That is the command as written for `bash`, or the escaped path for an edit, relative inside the launch directory and canonical outside it. The grant rides on `Event::ApprovalRequested` and is offered only if adding its rule would let the call through, so a protected path, an opaque command, or one that runs more than one simple command offers none. For a single simple command, the rule names it without its assignments, wrappers, and redirections, so `RUST_LOG=debug cargo test 2>&1` offers `bash(cargo test)`. A command containing `*`, which would parse as a wildcard, and a call with a character the editor cannot show as itself offer none either, so the user always sees the exact rule they grant.
 - **Editor:** `A` opens a one-line editor prefilled with the rule, where the user can widen or narrow it, such as `bash(cargo test:*)`. Enter checks the edit with `SessionGrant::accept`, which keeps the class and requires the rule to still cover the call, and shows the reason inline when it does not. Esc returns to the choice through `Modal::captures_esc`, while Ctrl+C still aborts.
 - **Engine check:** the accepted rule answers `Decision::AllowForSession`. A frontend's check is advisory, so the gate keeps its own grant for the pending call, admits the answered rule against it with `SessionGrant::admit`, and denies the call with an error when the rule fails.
 - **Precedence and lifetime:** an admitted rule joins the engine's policy, where step 8 weighs it like a configured allow rule, so deny rules and protected paths still take precedence. The list lives only in the engine's memory and empties on `/clear`, `/archive`, and a successful `/resume`. `Event::SessionRulesUpdated` carries it to the frontend, and `/status` lists it under Session Rules.
@@ -108,7 +138,7 @@ A checked-in `.ox/config.toml` is untrusted, like the project credentials `rejec
 The `--no-tui` REPL and `-p` headless runs share `render_turn`, which hands each `Event::ApprovalRequested` to an `Approver` and sends its decision back as `Op::Resolve`. The request itself never reaches the event sink, so the `stream-json` output carries only the call's result.
 
 - **REPL:** when stdin is a terminal, the prompter writes the preview to stderr, escaping hidden characters, and reads the answer from the next stdin line: `y`, `a` with the rule to allow, `n`, `f` with the feedback line, or `x` to abort. An unknown answer, empty feedback, or a rule the grant does not admit returns to the choices, and the end of input aborts. Piped input answers as a headless run does, so a scripted prompt line is never read as an answer.
-- **Headless:** with no one to ask, the deny rules, zones, and allow rules settle every call, so a headless run assumes an already-trusted invocation. `Unattended` denies a would-ask call with feedback that names the rule to add to the `allow` list, quoted as a TOML string from the call's grant. A call that offers no grant, such as a protected path, a compound command, or a command containing `*`, is denied with feedback saying that no allow rule names it exactly, since a broader rule may still cover it.
+- **Headless:** with no one to ask, the deny rules, zones, and allow rules settle every call, so a headless run assumes an already-trusted invocation. `Unattended` denies a would-ask call with feedback that names the rule to add to the `allow` list, quoted as a TOML string from the call's grant. A call that offers no grant, such as a protected path, a command that runs more than one simple command, or a command containing `*`, is denied with feedback saying that no allow rule names it exactly, since a broader rule may still cover it.
 
 The stdio sink escapes control characters other than tabs and line breaks in model and tool text, so streamed text or a tool label cannot redraw the terminal to disguise the REPL's preview.
 
@@ -146,8 +176,9 @@ The stdio sink escapes control characters other than tabs and line breaks in mod
 - `crates/oxide-code/src/driver/stdio.rs`: `render_turn`, the `Approver` trait, `Unattended`, the escaped `StdioSink` output.
 - `crates/oxide-code/src/util/text.rs`: `is_hidden` and `escape_controls`, shared by both frontends.
 - `crates/oxide-code/src/engine.rs`: the live policy, whose session allow rules reset when the session changes.
-- `crates/oxide-code/src/permission.rs`: `Mode`, `PermissionClass`, `GateTarget::for_path`, protected paths, `Policy::decide`, `Policy::session_grant`, `SessionGrant`, `ReadDeny`.
-- `crates/oxide-code/src/permission/rule.rs`: `class(specifier)` parsing, path-glob matching, and `Rule::for_call`.
+- `crates/oxide-code/src/permission.rs`: `Mode`, `PermissionClass`, `GateTarget::for_path`, `GateTarget::for_command`, protected paths, `Policy::decide`, `Policy::session_grant`, `SessionGrant`, `ReadDeny`.
+- `crates/oxide-code/src/permission/rule.rs`: `class(specifier)` parsing, path-glob matching, segment matching for `bash`, and `Rule::for_call`.
+- `crates/oxide-code/src/permission/shell.rs`: `CommandTarget::parse`, wrapper stripping, opaque forms, redirection writes, and the known-safe commands.
 - `crates/oxide-code/src/protocol.rs`: `Event::ApprovalRequested`, `Event::SessionRulesUpdated`, `Op::Resolve`, `Decision`.
 - `crates/oxide-code/src/slash/confirm.rs`: `ConfirmDeleteSessionModal`, the approval-modal template.
 - `crates/oxide-code/src/slash/status.rs`: the Session Rules listing.

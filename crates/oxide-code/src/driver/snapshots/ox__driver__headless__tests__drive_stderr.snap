@@ -5,5 +5,5 @@ expression: "stderrs[0]"
 ⟡ Look
 README.md
 
-$ ls
-The bash call was denied with this feedback: This run cannot ask for approval. To allow this call, add `"bash(ls)"` to the `allow` list in the `[permission]` table of the user config.
+$ git push
+The bash call was denied with this feedback: This run cannot ask for approval. To allow this call, add `"bash(git push)"` to the `allow` list in the `[permission]` table of the user config.

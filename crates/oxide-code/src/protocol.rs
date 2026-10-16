@@ -332,6 +332,8 @@ impl EventSink for FailingSink {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use serde_json::json;
 
     use super::*;
@@ -623,7 +625,7 @@ mod tests {
                     Policy::default()
                         .session_grant(
                             PermissionClass::Bash,
-                            &GateTarget::Command("cargo test".to_owned()),
+                            &GateTarget::for_command("cargo test", Path::new("/repo")),
                         )
                         .unwrap(),
                 )),
