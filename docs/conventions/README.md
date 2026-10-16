@@ -5,7 +5,7 @@ How oxide-code's code, tests, docs, and GitHub work are written. [`AGENTS.md`](.
 | Document                      | Description                                                                                                        |
 | ----------------------------- | ------------------------------------------------------------------------------------------------------------------ |
 | [Rust](rust.md)               | Enforced lints, lint suppression, architecture, traits, errors, visibility, modules, layout, strings, dependencies |
-| [Testing](testing.md)         | Placement, grouping and naming, fixtures, assertions, snapshots, coverage, mutation testing                        |
+| [Testing](testing.md)         | Placement, grouping and naming, fixtures, assertions, snapshots, coverage, mutation testing, live tests            |
 | [Writing](writing.md)         | Comments, docstrings, prose style, Markdown, documentation maintenance                                             |
 | [GitHub](github.md)           | Commits, branches, PRs and their labels, issues, the release milestone                                             |
 | [Development](development.md) | Nix dev shell, pre-commit hooks, toolchain pin, CI jobs                                                            |
