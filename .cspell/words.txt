@@ -109,6 +109,7 @@ reqwest
 reserialized
 rfind
 riscv
+rollup
 rrggbb
 rsplit
 rustc

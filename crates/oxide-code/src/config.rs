@@ -222,12 +222,21 @@ pub(crate) enum StatusLineSegment {
     CurrentDir,
     GitBranch,
     PullRequest,
+    PullRequestChecks,
+    PullRequestReview,
     Model,
     ModelWithEffort,
     ContextUsed,
     SessionCost,
+    FiveHourLimit,
+    WeeklyLimit,
     RunState,
+    QueuedPrompts,
+    /// Hidden until oxide-code keeps a task list.
+    TaskProgress,
     ThreadTitle,
+    SessionId,
+    Theme,
     CurrentTime,
 }
 
@@ -239,12 +248,20 @@ impl StatusLineSegment {
         (Self::CurrentDir, "current-dir"),
         (Self::GitBranch, "git-branch"),
         (Self::PullRequest, "pull-request"),
+        (Self::PullRequestChecks, "pull-request-checks"),
+        (Self::PullRequestReview, "pull-request-review"),
         (Self::Model, "model"),
         (Self::ModelWithEffort, "model-with-effort"),
         (Self::ContextUsed, "context-used"),
         (Self::SessionCost, "session-cost"),
+        (Self::FiveHourLimit, "five-hour-limit"),
+        (Self::WeeklyLimit, "weekly-limit"),
         (Self::RunState, "run-state"),
+        (Self::QueuedPrompts, "queued-prompts"),
+        (Self::TaskProgress, "task-progress"),
         (Self::ThreadTitle, "thread-title"),
+        (Self::SessionId, "session-id"),
+        (Self::Theme, "theme"),
         (Self::CurrentTime, "current-time"),
     ];
 
@@ -906,6 +923,16 @@ mod tests {
     fn prompt_cache_ttl_rejects_unknown_tokens_listing_the_accepted_ones() {
         let err = "30m".parse::<PromptCacheTtl>().expect_err("unknown token");
         assert_eq!(format!("{err:#}"), "expected one of 5m, 1h");
+    }
+
+    // ── StatusLineSegment ──
+
+    #[test]
+    fn status_line_segment_names_round_trip_through_serde_and_fromstr() {
+        for &(segment, name) in StatusLineSegment::ALL {
+            assert_eq!(serde_json::to_value(segment).unwrap(), name);
+            assert_eq!(name.parse::<StatusLineSegment>().unwrap(), segment);
+        }
     }
 
     // ── Config::load ──

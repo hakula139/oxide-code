@@ -9,7 +9,7 @@ Two user-visible features:
 1. **Click `#NN` in the status bar to open the pull request in the browser**, even though no app code routes the click.
 2. **Drag-select chat content with the mouse and paste it elsewhere**, in any terminal the user runs `ox` in (iTerm2, WezTerm, kitty, Alacritty, Terminal.app, GNOME Terminal, Konsole, Ghostty, Windows Terminal, VS Code's integrated terminal, Cursor's integrated terminal).
 
-The cleanest way to deliver both is to let the terminal do the work. The TUI does not enable mouse capture, so the terminal's own selection layer is intact. The status-bar PR segment is wrapped in an OSC 8 hyperlink envelope that every modern terminal already knows how to make Ctrl-clickable.
+The cleanest way to deliver both is to let the terminal do the work. The TUI does not enable mouse capture, so the terminal's own selection layer is intact. The status-bar PR segments are wrapped in an OSC 8 hyperlink envelope that every modern terminal already knows how to make Ctrl-clickable.
 
 ## Decision
 
@@ -23,9 +23,9 @@ The cleanest way to deliver both is to let the terminal do the work. The TUI doe
 
 Modern emulators (iTerm2, WezTerm, kitty, Alacritty, foot, Ghostty, Windows Terminal, VS Code / Cursor's xterm.js, recent GNOME Terminal, Konsole, Terminal.app via vim-mode) implement 1007. Older emulators ignore it with no fallback, so users there scroll with the keyboard (`PageUp` / `PageDown` / `Ctrl+End`).
 
-## OSC 8 hyperlink on the PR status segment
+## OSC 8 hyperlinks on the PR status segments
 
-The `pull-request` status segment renders `#NN` as plain spans. After the frame buffer is painted, `StatusBar::render` records each hyperlink rect, URL, chars, and style. `App::render` drains that queue after `terminal.draw()` and replays OSC 8 directly to the crossterm backend inside the same synchronized update, so the linked cells present with the frame.
+The `pull-request` status segment renders `#NN` as plain spans and links the PR, while `pull-request-checks` and `pull-request-review` link its checks and changed-files pages. After the frame buffer is painted, `StatusBar::render` records each hyperlink rect, URL, chars, and style. `App::render` drains that queue after `terminal.draw()` and replays OSC 8 directly to the crossterm backend inside the same synchronized update, so the linked cells present with the frame.
 
 ```text
 \x1b[<row>;<col>H\x1b]8;;<URL>\x07<styled cells>\x1b]8;;\x07\x1b[0m
@@ -39,7 +39,7 @@ Three mechanics worth surfacing:
 - **BEL (`\x07`) terminator.** Some xterm.js-based terminals (VS Code's and Cursor's integrated terminals) misparse self-contained per-cell ST (`\x1b\\`) closers, leaking visible bytes into the next cells of the line. BEL is one byte and every modern emulator parses it identically.
 - **Plain OSC 8 inside tmux.** tmux 3.4 and later parse OSC 8, place the link in pane coordinates, and forward it to outer terminals that have the `hyperlinks` terminal feature. For an outer terminal tmux does not detect, add `set -as terminal-features ',<TERM>:hyperlinks'` to `tmux.conf`, where `<TERM>` matches the outer terminal's `$TERM`. Older tmux drops the OSC and keeps the visible text.
 
-Terminals with OSC 8 support make the segment Ctrl-clickable (Cmd-click on macOS in some terminals). Terminals that ignore OSC control strings leave the visible `#NN` intact. Terminals that print raw OSC bytes may show escape text, which is the legacy fallback.
+Terminals with OSC 8 support make these segments Ctrl-clickable (Cmd-click on macOS in some terminals). Terminals that ignore OSC control strings leave the visible text intact. Terminals that print raw OSC bytes may show escape text, which is the legacy fallback.
 
 URLs are sanitized: every control char is filtered out before the envelope is built, so a malformed value can't break out of the OSC 8 sequence.
 
@@ -63,7 +63,7 @@ Manual verification across terminals:
 2. Page up. Confirm the jump-to-bottom pill appears.
 3. Press Ctrl+End. Confirm chat snaps to bottom and re-arms auto-scroll.
 4. Drag-select a chat region. Confirm the highlight uses the terminal's native selection style. Mouse up. Paste somewhere external. Confirm bytes round-trip.
-5. With a `pull-request` status segment configured, Ctrl-click (Cmd-click on iTerm2 / Terminal.app) on `#NN`. Confirm the browser opens to the PR URL.
+5. With the `pull-request`, `pull-request-checks`, and `pull-request-review` status segments configured, Ctrl-click (Cmd-click on iTerm2 / Terminal.app) on each. Confirm the browser opens the PR, its checks page, and its changed-files page.
 6. Wheel scroll. Confirm chat scrolls (DECSET 1007 in a supporting terminal).
 7. Quit. Confirm alt-screen restored.
 

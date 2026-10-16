@@ -26,7 +26,6 @@ use super::git_probes::GitProbes;
 use super::modal::{Modal, ModalStack};
 use super::terminal::Tui;
 use super::theme::Theme;
-use crate::config::StatusLineSegment;
 use crate::protocol::{Event, Interaction, Op};
 use crate::session::display::archive_notice;
 use crate::slash::LiveSessionInfo;
@@ -94,10 +93,7 @@ impl App {
         status_bar.set_title(history.title);
         let git_probes = GitProbes::new(
             session_info.git_cwd.clone(),
-            session_info
-                .config
-                .status_line
-                .contains(&StatusLineSegment::PullRequest),
+            &session_info.config.status_line,
             Instant::now(),
         );
         Self {

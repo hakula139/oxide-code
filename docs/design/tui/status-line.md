@@ -4,28 +4,38 @@ Design for a configurable TUI status line.
 
 ## Scope
 
-The TUI status line renders a user-ordered roster of built-in segments. Most segments read in-process state, `git-branch` and `pull-request` probe `git` and the GitHub CLI, and the context and session-cost segments count prompt-cache tokens.
+The TUI status line renders a user-ordered roster of built-in segments. Most segments read in-process state, `git-branch` and the pull request segments probe `git` and the GitHub CLI, the context and session-cost segments count prompt-cache tokens, and the usage-limit segments read response headers.
 
 Implemented segments:
 
-| Segment                | Config value        |
-| ---------------------- | ------------------- |
-| current directory      | `current-dir`       |
-| git branch             | `git-branch`        |
-| pull request           | `pull-request`      |
-| model                  | `model`             |
-| model with effort      | `model-with-effort` |
-| context used           | `context-used`      |
-| estimated session cost | `session-cost`      |
-| run state              | `run-state`         |
-| thread title           | `thread-title`      |
-| current time           | `current-time`      |
+| Segment                | Config value          |
+| ---------------------- | --------------------- |
+| current directory      | `current-dir`         |
+| git branch             | `git-branch`          |
+| pull request           | `pull-request`        |
+| pull request checks    | `pull-request-checks` |
+| pull request review    | `pull-request-review` |
+| model                  | `model`               |
+| model with effort      | `model-with-effort`   |
+| context used           | `context-used`        |
+| estimated session cost | `session-cost`        |
+| five-hour usage limit  | `five-hour-limit`     |
+| weekly usage limit     | `weekly-limit`        |
+| run state              | `run-state`           |
+| queued prompt count    | `queued-prompts`      |
+| task progress          | `task-progress`       |
+| thread title           | `thread-title`        |
+| session ID prefix      | `session-id`          |
+| active theme           | `theme`               |
+| current time           | `current-time`        |
+
+Segments outside the [default order](#default-order) are opt-in.
 
 ## Implementation
 
 `StatusLineSegment` in `config.rs` defines the roster above. `[tui] status_line = [...]` controls the order. `OX_STATUS_LINE` accepts the same comma-separated names. Segment colors and the separator glyph come from the active theme.
 
-`StatusBar` keeps component state and delegates segment formatting to `tui/components/status/line.rs`.
+`StatusBar` keeps component state and delegates segment formatting to `tui/components/status/line.rs`. `App` copies the queued prompt count, the session ID, and the theme name into it before each frame, since it owns all three.
 
 Segment render rules:
 
@@ -34,6 +44,9 @@ Segment render rules:
 - Join only rendered segments, so omitted segments do not leave extra separators.
 - When the row is too narrow, omit lower-utility segments before truncating the last remaining segment. Run state and model have the highest utility.
 - The `model` and `model-with-effort` segments drop the `Claude` family prefix to save width (e.g., `Opus 5.5 (xhigh)`). Other surfaces (welcome screen, prompt environment, error blocks) keep the full `Claude Opus 5.5` label.
+- The pull request checks and review segments color their state with the theme's `success`, `warning`, `error`, and `muted` slots, and link the PR's checks and changed-files pages.
+- The review segment shows only where branch protection requires a review, since GitHub reports no review decision otherwise.
+- `task-progress` always renders nothing, because oxide-code keeps no task list. The task list is tracked in [#135](https://github.com/hakula139/oxide-code/issues/135).
 
 ## Usage Data
 
@@ -44,6 +57,14 @@ Each `agent_turn` reports the latest provider usage and the total across its req
 Known first-party Claude API rates live in `model/pricing.rs`, and the `model.rs` catalogue attaches them to each model. Unknown models render context without session cost. The estimate excludes the background title request, account discounts, marketplace billing, data-residency multipliers, fast mode, and server-side tool surcharges.
 
 On model swap, recompute the snapshot with the new model's context window. The session cost remains the accumulated estimate from requests that reported usage. Manual and automatic compaction clear the context usage because the visible transcript basis changed, and keep the session cost, which now includes the summary. Each compaction emits `UsageUpdated` once its summary requests end, so the summary's cost shows before the next turn, and the context segment stays hidden until the next request reports usage. `/clear` resets both. `/resume` and `ox -c` clear the context usage and restore the session cost from every `usage` entry in the resumed file, whichever branch or compaction it belongs to. A file without `usage` entries resumes at zero.
+
+## Usage Limits
+
+A Claude subscription sign-in's responses carry `anthropic-ratelimit-unified-5h-utilization` and `-5h-reset`, and the same pair for `7d`. Utilization is the spent share of the window, from 0 to 1, and reset is the window's end in Unix seconds. API keys receive neither pair, so the segments stay hidden for them.
+
+The SSE pump reads the headers of each attempt's response and forwards them as `ResponseEvent::RateLimits`, ahead of the stream's events. The agent loop emits `Event::RateLimitsUpdated`, and the status bar keeps the latest. The summarization requests behind a compaction report their limits the same way.
+
+A window renders its utilization floored to a whole percent, after rounding to basis points so a share like `0.29` keeps its exact percent. The status bar's tick drops a window once its reset time passes, since the spent share no longer applies until the next response reports the new window. A sign-in or sign-out drops both windows, which belonged to the previous credential.
 
 ## Default Order
 
@@ -69,22 +90,30 @@ The default order tracks reading flow: location and branch orient the user, mode
 ## Design Decisions
 
 1. **Typed segment roster.** A typed segment list is enough for first-party data and keeps rendering inside Ratatui, so the config needs no format DSL.
-2. **Implemented segments only.** Unsupported names fail config parsing, so the accepted vocabulary matches the shipped segments.
+2. **Implemented segments only.** Unsupported names fail config parsing, so the accepted vocabulary matches the shipped segments. `task-progress` is the one name accepted ahead of its data, so a roster that lists it starts showing the task list once [#135](https://github.com/hakula139/oxide-code/issues/135) lands.
 3. **Local usage first.** Context and session cost use provider usage that oxide-code observed, either in the current process or recorded in the session file.
 4. **Segment omission.** Missing usage, unknown pricing, absent branch, and blank titles disappear cleanly with no placeholder.
-5. **Background probes.** `git-branch` and `pull-request` re-probe as background child processes, 5 s and 60 s respectively after the previous probe finishes, with at most one run of each in flight. The bar stays current after `git checkout` or `gh pr create`, and a slow `gh` network round-trip never stalls input or rendering.
+5. **Background probes.** `git-branch` and the pull request segments re-probe as background child processes, 5 s and 60 s respectively after the previous probe finishes, with at most one run of each in flight. One `gh pr view` call serves all three PR segments. It reads the checks and review state only when the roster shows them, since those fields add every check on the head commit to the query. The bar stays current after `git checkout` or `gh pr create`, and a slow `gh` network round-trip never stalls input or rendering.
+6. **Checks like `gh pr checks`.** The checks segment buckets each check's state the way the GitHub CLI does and counts only the latest run of a re-run check, so a passing re-run clears an earlier failure. Cancelled checks get their own bucket, below failing and pending. A workflow that failed to start counts as failing, where `gh` leaves it pending even though it will never run.
+7. **Usage limits from response headers.** Every response already reports the account's utilization, so the segments cost no extra request and refresh with each turn.
 
 ## Related Issues
 
-Planned segments, including account usage limits and task progress, are tracked in [#140](https://github.com/hakula139/oxide-code/issues/140). A user-command segment is [#166](https://github.com/hakula139/oxide-code/issues/166), and pricing for other providers comes with the data-driven model catalog in [#152](https://github.com/hakula139/oxide-code/issues/152).
+A user-command segment is [#166](https://github.com/hakula139/oxide-code/issues/166), and pricing for other providers comes with the data-driven model catalog in [#152](https://github.com/hakula139/oxide-code/issues/152).
 
 ## Sources
 
 - [Status line research](../../research/tui/status-line.md)
 - [Auto-compaction design](../agent/auto-compaction.md)
+- `crates/oxide-code/src/client.rs`: `ResponseEvent::RateLimits` and the `RateLimits` windows.
+- `crates/oxide-code/src/client/anthropic/sse.rs`: `pump_events`, which forwards each response's limits.
+- `crates/oxide-code/src/client/anthropic/transport.rs`: `rate_limits`, the unified rate-limit header parser.
+- `crates/oxide-code/src/config.rs`: `StatusLineSegment`, the segment roster and its default order.
 - `crates/oxide-code/src/engine.rs`: `Engine` usage accounting, `UsageUpdated` emission, and restored-cost pricing.
+- `crates/oxide-code/src/engine/turn.rs`: `collect_response`, which emits `RateLimitsUpdated`.
 - `crates/oxide-code/src/session/entry.rs`: `Entry::Usage` and `UsageRecord`, the per-request record a resume prices.
+- `crates/oxide-code/src/tui/app/render.rs`: `App::draw_frame`, which copies App-owned state into the status bar.
 - `crates/oxide-code/src/tui/components/status.rs`: `StatusBar` state and the run-state `Status`.
 - `crates/oxide-code/src/tui/components/status/line.rs`: `StatusLine` segment rendering and width fitting.
-- `crates/oxide-code/src/tui/git_probes.rs`: `GitProbes` background branch and pull-request polling.
-- `crates/oxide-code/src/util/git.rs`: `current_branch_async` and `current_pull_request` probes.
+- `crates/oxide-code/src/tui/git_probes.rs`: `GitProbes` background branch and pull-request polling, at the detail the roster needs.
+- `crates/oxide-code/src/util/git.rs`: `current_branch_async` and `current_pull_request` probes, and the checks summary.

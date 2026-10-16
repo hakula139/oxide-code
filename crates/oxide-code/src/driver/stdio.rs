@@ -155,6 +155,7 @@ impl StdioSink {
             // TUI-only events have no stdio surface to update.
             Event::PromptDrained(_)
             | Event::UsageUpdated(_)
+            | Event::RateLimitsUpdated(_)
             | Event::AutoCompactionStarted
             | Event::SummaryToken(_)
             | Event::SummaryDiscarded
@@ -200,6 +201,7 @@ mod tests {
     use indoc::indoc;
 
     use super::*;
+    use crate::client::{RateLimitWindow, RateLimits};
     use crate::config::Effort;
     use crate::config::compaction::AutoCompactionConfig;
     use crate::model::ModelSpec;
@@ -478,6 +480,13 @@ mod tests {
     fn render_tui_only_events_emit_nothing_on_either_stream() {
         for event in [
             Event::PromptDrained("queued".to_owned()),
+            Event::RateLimitsUpdated(RateLimits {
+                five_hour: None,
+                seven_day: Some(RateLimitWindow {
+                    utilization: 0.5,
+                    resets_at: 1_760_000_000,
+                }),
+            }),
             Event::AutoCompactionStarted,
             Event::SummaryToken("Recap".to_owned()),
             Event::SummaryDiscarded,

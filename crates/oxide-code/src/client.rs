@@ -55,6 +55,8 @@ pub(crate) enum ResponseEvent {
     /// that was retried. Usage streams apart from the reply so a request that fails or is
     /// cancelled midway still bills.
     Usage(TokenUsage),
+    /// The account's usage limits as of this request, from a wire that meters subscription use.
+    RateLimits(RateLimits),
     /// A failed attempt about to be retried, as a user-facing notice.
     Retrying(String),
     /// The finished reply. No event follows it.
@@ -132,6 +134,24 @@ impl TokenUsage {
     pub(crate) const fn total_tokens(self) -> u32 {
         self.context_tokens().saturating_add(self.output_tokens)
     }
+}
+
+// ── Rate Limits ──
+
+/// An account's subscription usage limits. A window the provider did not report is `None`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub(crate) struct RateLimits {
+    pub(crate) five_hour: Option<RateLimitWindow>,
+    pub(crate) seven_day: Option<RateLimitWindow>,
+}
+
+/// One rolling usage window.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub(crate) struct RateLimitWindow {
+    /// Share of the window's allowance spent, where 1 is all of it.
+    pub(crate) utilization: f64,
+    /// When the window resets, in Unix seconds.
+    pub(crate) resets_at: i64,
 }
 
 // ── Errors ──

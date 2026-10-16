@@ -279,8 +279,8 @@ async fn collect_summary(
     collect_response(rx, stream, &mut usage.request).await
 }
 
-/// Forwards the summary's text and retry notices to the frontend and drops the rest of the reply,
-/// which belongs to no visible turn. Dropping it discards the streamed text, so a cancelled
+/// Forwards the summary's text, retry notices, and usage limits to the frontend and drops the rest
+/// of the reply, which belongs to no visible turn. Dropping it discards the streamed text, so a cancelled
 /// compaction clears it.
 struct SummaryStream<'a> {
     sink: &'a dyn EventSink,
@@ -321,7 +321,7 @@ impl EventSink for SummaryStream<'_> {
                 self.streamed.store(true, Ordering::Relaxed);
                 self.sink.send(Event::SummaryToken(text))
             }
-            Event::Retrying(_) => self.sink.send(event),
+            Event::Retrying(_) | Event::RateLimitsUpdated(_) => self.sink.send(event),
             _ => Ok(()),
         }
     }
@@ -457,6 +457,7 @@ mod tests {
     use super::*;
     use crate::client::anthropic::Client;
     use crate::client::anthropic::testing::{api_key, sse_body, test_client};
+    use crate::client::{RateLimitWindow, RateLimits};
     use crate::engine::testing::{
         FakeClient, dead_test_session, empty_prompt, inert_ops, test_session, text_turn, with_stop,
     };
@@ -1718,11 +1719,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compact_session_passes_retry_notices_through() {
+    async fn compact_session_passes_retry_notices_and_usage_limits_through() {
         let notice = "HTTP 529 overloaded_error. Retrying in 1s (retry 1 of 5).";
-        let (tx, rx) = mpsc::channel(3);
+        let limits = RateLimits {
+            five_hour: Some(RateLimitWindow {
+                utilization: 0.42,
+                resets_at: 1_760_000_000,
+            }),
+            seven_day: None,
+        };
+        let (tx, rx) = mpsc::channel(4);
         for event in [
             ResponseEvent::Retrying(notice.to_owned()),
+            ResponseEvent::RateLimits(limits),
             ResponseEvent::Text("Recap".to_owned()),
             ResponseEvent::Completed(Response {
                 content: vec![ContentBlock::Text {
@@ -1751,7 +1760,11 @@ mod tests {
         assert_eq!(summary, "Recap");
         assert_eq!(
             sink.events(),
-            [Event::Retrying(notice.to_owned()), token("Recap")],
+            [
+                Event::Retrying(notice.to_owned()),
+                Event::RateLimitsUpdated(limits),
+                token("Recap"),
+            ],
         );
     }
 
