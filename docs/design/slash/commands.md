@@ -4,7 +4,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 ## Implementation
 
-17 built-ins: `/archive`, `/clear`, `/compact`, `/config`, `/delete`, `/diff`, `/effort`, `/help`, `/init`, `/login`, `/logout`, `/model`, `/rename`, `/resume`, `/status`, `/theme`, `/unarchive`. Each lives in its own `slash/<name>.rs` file implementing `SlashCommand`. Adding one is a new file plus an entry in `BUILT_INS` (alphabetical).
+17 built-ins: `/archive`, `/clear`, `/compact`, `/config`, `/delete`, `/diff`, `/effort`, `/help`, `/init`, `/login`, `/logout`, `/model`, `/rename`, `/resume`, `/status`, `/theme`, `/unarchive`. Each implements `SlashCommand` in a `slash/<name>.rs` file, which a pair such as `/login` and `/logout` shares. Adding one is an impl plus an entry in `BUILT_INS` (alphabetical).
 
 - `/clear` rolls the session UUID and clears chat + file tracker.
 - `/compact` compresses the visible transcript into a summary and resets the continuation chain.
@@ -20,7 +20,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 ## Design Decisions
 
-1. **Trait registry.** `trait SlashCommand` mirrors `tool::Tool`, with one file per command. Adding `/foo` means creating its implementation and adding it to `BUILT_INS`.
+1. **Trait registry.** `trait SlashCommand` mirrors `tool::Tool`, with one file per command or command pair. Adding `/foo` means creating its implementation and adding it to `BUILT_INS`.
 
 2. **Parse at submit.** `App::dispatch_action` hands an `Action::Submit` to `handle_submit_prompt`, which runs `parse_slash` first, then dispatches locally or forwards.
 
@@ -48,6 +48,8 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 14. **Modal-only commands suppress their own echo.** `SlashCommand::echoes_input(args) -> bool` defaults to true. Modal-only forms (`/status`, `/config`, `/help`, plus bare `/effort`, `/model`, `/rename`, `/resume`, and `/theme`) override to false, since the modal IS the response and the typed `> /foo` line would orphan in history once the modal closes. Typed forms keep echoing because the swap-confirmation system message anchors the pair.
 
+15. **Typed forms parse in core, so the bare REPL runs them too.** `command::parse` turns the typed forms of `/clear`, `/compact`, `/effort`, `/model`, `/rename`, and `/resume` into the `Op` each one runs. The TUI commands call the same parsers and add what needs the TUI: the pickers and modals behind the bare forms, and a check that rejects `/effort` before sending it when the live model has no effort tier. `slash::typed_op` resolves aliases for the `--no-tui` REPL, which sends the op and renders until `TurnEnd::of` reads its terminal event, so an effort pick the model has no tier for fails there. The REPL rejects any other command with a message naming the commands it runs, and a bare form that needs an argument gets its usage.
+
 ## Per-Command Notes
 
 - **`/clear`**: Send-first ordering. Forward `Op::Clear` first, drop chat history only on success. `Event::SessionTitleUpdated` carries the originating session id so a slow Haiku title call straddling `/clear` doesn't repaint the cleared session.
@@ -74,7 +76,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 - **`/rename`**: Bare opens a single-line title editor pre-filled with the current title (cap 80 chars, mirroring the actor's first-prompt cap), and `/rename <title>` applies directly. Both forms forward `Op::Rename` and lock out AI title generation for the rest of the session so a slow Haiku call can't overwrite the user's pick. `classify` is always `Mutating`. Bare suppresses echo because the modal IS the response, while typed-arg echoes since the swap-confirmation system message anchors the pair. See [modals.md](modals.md).
 
-- **`/resume`** (alias `/continue`): Bare opens a searchable session picker ([modals.md](modals.md)), while `/resume <id-prefix>` resolves directly via a current-project-first lookup that widens to all projects on miss. Both forms refuse mid-turn and forward `Op::Resume`. Bare suppresses echo while typed-arg echoes. Full design: [resume.md](resume.md).
+- **`/resume`** (alias `/continue`): Bare opens a searchable session picker ([modals.md](modals.md)), which forwards `Op::Resume` with the chosen session file. `/resume <id-prefix>` forwards the prefix, which the engine resolves through a current-project-first lookup that widens to all projects on a miss. Both forms refuse mid-turn. Bare suppresses echo while typed-arg echoes. Full design: [resume.md](resume.md).
 
 - **`/delete`**: Typed-arg only, while bare returns a friendly redirect. Picker entry is Ctrl+D inside `/resume`. Both push `ConfirmDeleteSessionModal` ([modals.md](modals.md)), which runs `delete_at` on the session's file on Y / Enter and emits a `Deleted session {id}: {title}` line in chat. Live-session refusal is layered across the picker filter, the resolver, and the store-layer bail.
 
@@ -82,11 +84,14 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 ## Sources
 
-- `crates/oxide-code/src/engine.rs`: `Engine::run` arms for `Op::Clear` and `Op::SetModel`, and `Engine::archive`, which waits for the archive entry to reach disk before rolling the session.
+- `crates/oxide-code/src/command.rs`: `parse` and the typed forms of `/clear`, `/compact`, `/effort`, `/model`, `/rename`, and `/resume`, plus the model resolver.
+- `crates/oxide-code/src/driver/repl.rs`: `command_op`, which runs typed slash commands in the bare REPL.
+- `crates/oxide-code/src/driver/stdio.rs`: `render_op`, plus the `StdioSink` confirmations for the session and config events.
+- `crates/oxide-code/src/engine.rs`: `Engine::run` arms for `Op::Clear` and `Op::SetModel`, `Engine::archive`, which waits for the archive entry to reach disk before rolling the session, and `TurnEnd::of`.
 - `crates/oxide-code/src/session/display.rs`: shared `id_prefix`, `display_title`, and `format_metadata_line` for the picker row and delete confirm modal, plus `archive_notice`.
 - `crates/oxide-code/src/session/resolver.rs`: `resolve_prefix_to_info` checks the current project first, widens the search on a miss, and returns a typed `ResolveError` that the CLI prints as is and slash commands rephrase. `resolve_saved_prefix` distinguishes live-only matches for `/archive`, `/unarchive`, and `/delete`.
 - `crates/oxide-code/src/session/store.rs`: `delete_at`, which refuses to delete the live session at the filesystem boundary, and `set_archived_at`.
-- `crates/oxide-code/src/slash.rs`: dispatch, `SlashOutcome`, and shared test fixtures (`stamped_id`, `with_isolated_xdg`).
+- `crates/oxide-code/src/slash.rs`: dispatch, `typed_op`, `SlashOutcome`, and shared test fixtures (`stamped_id`, `with_isolated_xdg`).
 - `crates/oxide-code/src/slash/archive.rs`: `ArchiveCmd` and `UnarchiveCmd`.
 - `crates/oxide-code/src/slash/clear.rs`: `ClearCmd` sends first.
 - `crates/oxide-code/src/slash/config.rs`: `/config` row builder plus sectioned `KvOverview` constructor.
@@ -94,12 +99,12 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 - `crates/oxide-code/src/slash/context.rs`: `SlashContext` (`LiveSessionInfo` plus the live title).
 - `crates/oxide-code/src/slash/delete.rs`: `DeleteCmd` refuses prefixes that match only the live session.
 - `crates/oxide-code/src/slash/diff.rs`: `/diff` printer with 64 KB UTF-8-boundary cap.
-- `crates/oxide-code/src/slash/effort.rs`: `EffortCmd`, level parser.
+- `crates/oxide-code/src/slash/effort.rs`: `EffortCmd`.
 - `crates/oxide-code/src/slash/effort_slider.rs`: bare `/effort` Speed ↔ Intelligence slider modal.
 - `crates/oxide-code/src/slash/help.rs`: `/help` row builder plus `KvOverview` constructor.
 - `crates/oxide-code/src/slash/init.rs`: `InitCmd`, the file picker, and the create and update prompts.
 - `crates/oxide-code/src/slash/login.rs`: `LoginCmd` and `LogoutCmd`.
-- `crates/oxide-code/src/slash/model.rs`: `ModelCmd`, resolver.
+- `crates/oxide-code/src/slash/model.rs`: `ModelCmd`.
 - `crates/oxide-code/src/slash/picker.rs`: combined model + effort picker modal.
 - `crates/oxide-code/src/slash/registry.rs`: `SlashCommand` trait, `BUILT_INS`, `SlashOutcome`.
 - `crates/oxide-code/src/slash/rename.rs`: `RenameCmd` plus `RenameModal` editor.

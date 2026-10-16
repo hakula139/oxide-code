@@ -6,7 +6,7 @@ Companions: [commands.md](commands.md), [session/persistence.md](../session/pers
 
 ## Implementation
 
-`slash/compact` hosts `CompactCmd`. Bare or whitespace-only args become `None`, and non-empty args trim into a `Some(instructions)` that the agent loop forwards verbatim into the summarization request. Both shapes echo the input line and forward `Op::Compact { instructions }`. The classifier is always `Mutating`, so the input is refused mid-turn (the in-flight reply is allowed to finish first).
+`slash/compact` hosts `CompactCmd`, which forwards the op `command::compact` parses, the same typed form the bare REPL runs. Bare or whitespace-only args become `None`, and non-empty args trim into a `Some(instructions)` that the agent loop forwards verbatim into the summarization request. Both shapes echo the input line and forward `Op::Compact { instructions }`. The classifier is always `Mutating`, so the input is refused mid-turn (the in-flight reply is allowed to finish first).
 
 `engine/compaction` owns the summarization request:
 
@@ -80,9 +80,9 @@ While the summary streams, the TUI shows it below the chat under a `Summarizing 
 
 ## Per-Component Notes
 
-- **`CompactCmd`**: `name = "compact"`, no aliases. `description = "Compress conversation context into a summary"`. `usage() = Some("[<instructions>]")`. `classify` is always `Mutating`. `echoes_input` uses the trait default of `true`. `execute` parses args via `args.trim()` and returns `SlashOutcome::Forward(Action::Op(Op::Compact { instructions }))` with `instructions = (!s.is_empty()).then_some(s.to_owned())`.
+- **`CompactCmd`**: `name = "compact"`, no aliases. `description = "Compress conversation context into a summary"`. `usage() = Some("[<instructions>]")`. `classify` is always `Mutating`. `echoes_input` uses the trait default of `true`. `execute` returns `SlashOutcome::Forward(Action::Op(command::compact(args)))`, which trims the args into `instructions`, or `None` when nothing is left.
 
-- **`Op::Compact { instructions }`**: `Option<String>`. Empty or whitespace input becomes `None` at the slash boundary so `Engine::compact` doesn't repeat the trim.
+- **`Op::Compact { instructions }`**: `Option<String>`. Empty or whitespace input becomes `None` in `command::compact` so `Engine::compact` doesn't repeat the trim.
 
 - **`Event::SummaryToken(text)`**, **`Event::SummaryDiscarded`**: The summary in flight and its discard. Manual and automatic compaction emit both, and the TUI renders the stream below the chat with `CompactedBlock::render_streaming`.
 

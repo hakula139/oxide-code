@@ -30,6 +30,10 @@ For commands with curated arguments (`/model`, `/effort`, `/theme`), the popup s
 
 Double the leading slash. Typing `//etc` sends the literal `/etc`.
 
+## In the Bare REPL
+
+The `--no-tui` REPL runs the typed forms of `/clear`, `/compact`, `/effort <level>`, `/model <id>`, `/rename <title>`, and `/resume <id-prefix>`, including their aliases, and confirms each one on stderr. The forms that open a picker or modal in the TUI need their argument here. The REPL rejects other commands, and a rejected or failed command makes it exit with a failure status at the end of input.
+
 ## Mid-Turn Behavior
 
 State-mutating commands are refused while a turn is in flight, so retry them after the turn finishes. That includes `/archive`, `/clear`, `/compact`, `/delete`, `/init`, `/login`, `/logout`, `/rename`, `/resume`, typed `/theme <name>`, `/unarchive`, and both bare and typed forms of `/effort` and `/model`. Read-only commands (`/config`, `/diff`, `/help`, `/status`) and the bare `/theme` picker run immediately.

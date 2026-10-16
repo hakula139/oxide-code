@@ -144,6 +144,11 @@ impl Effort {
             Self::Max => "Maximum thinking",
         }
     }
+
+    /// Notes that the model has no effort tier, so this requested effort did not apply.
+    pub(crate) fn unapplied_notice(self) -> String {
+        format!("Effort unchanged: model has no effort tier (asked for {self}).")
+    }
 }
 
 impl fmt::Display for Effort {

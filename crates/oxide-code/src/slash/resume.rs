@@ -14,11 +14,11 @@ use time::UtcOffset;
 use super::confirm::ConfirmDeleteSessionModal;
 use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashKind, SlashOutcome};
-use super::sessions::{open_store, resolve_error_message};
-use crate::protocol::Op;
+use super::sessions::open_store;
+use crate::command;
+use crate::protocol::{Op, ResumeTarget};
 use crate::session::display::{display_title, format_metadata_line};
 use crate::session::entry::SessionInfo;
-use crate::session::resolver::{ResolveError, resolve_prefix_to_info};
 use crate::session::store::SessionStore;
 use crate::session::store::listing::{DEFAULT_SESSION_LIST_LIMIT, ListPage, ListScope};
 use crate::tui::action::Action;
@@ -74,30 +74,14 @@ impl SlashCommand for ResumeCmd {
     }
 
     fn execute(&self, args: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
-        let arg = args.trim();
-        let store = open_store()?;
-        if arg.is_empty() {
-            return Ok(SlashOutcome::Modal(Box::new(ResumePicker::new(
-                store,
-                ctx.info.session_id.clone(),
-            ))));
+        if !args.trim().is_empty() {
+            return Ok(SlashOutcome::Forward(Action::Op(command::resume(args)?)));
         }
-        let path = resolve_prefix(&store, arg, ctx.info.session_id.as_str())?;
-        Ok(SlashOutcome::Forward(Action::Op(Op::Resume { path })))
+        Ok(SlashOutcome::Modal(Box::new(ResumePicker::new(
+            open_store()?,
+            ctx.info.session_id.clone(),
+        ))))
     }
-}
-
-/// Projects the shared resolver onto a session file. `/resume` carries no live-id-specific error
-/// since the picker already filters the live session out of its rows.
-fn resolve_prefix(store: &SessionStore, prefix: &str, live_id: &str) -> Result<PathBuf, String> {
-    resolve_prefix_to_info(store, prefix, live_id)
-        .and_then(|info| {
-            info.ok_or_else(|| ResolveError::NoMatch {
-                prefix: prefix.to_owned(),
-            })
-        })
-        .map(|info| info.path)
-        .map_err(resolve_error_message)
 }
 
 // ── SessionRow ──
@@ -292,7 +276,7 @@ impl ResumePicker {
     fn submit(&self) -> ModalKey {
         match self.list.selected() {
             Some(row) => ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::Resume {
-                path: row.path.clone(),
+                target: ResumeTarget::Path(row.path.clone()),
             }))),
             // Stay open so the user can Tab the scope or Esc out. Silent dismissal hides why
             // nothing happened.
@@ -525,148 +509,18 @@ mod tests {
     }
 
     #[test]
-    fn execute_unknown_prefix_reports_no_match() {
-        with_isolated_xdg(|_| {
-            let info = test_session_info();
-            let err = ResumeCmd
-                .execute("zzz1234", &SlashContext::new(&info, None))
-                .unwrap_err();
-            assert_eq!(err, "No session matching `zzz1234`.");
-        });
-    }
+    fn execute_typed_arg_forwards_the_prefix_for_the_engine_to_resolve() {
+        let info = test_session_info();
 
-    #[test]
-    fn execute_typed_arg_unique_match_forwards_the_matched_session_file() {
-        with_isolated_xdg(|_dir| {
-            let store = SessionStore::open().unwrap();
-            let target_id = stamped_id(0xab);
-            seed_session(
-                &store,
-                &target_id,
-                Some("only"),
-                1,
-                datetime!(2026-04-18 09:00:00 UTC),
-            );
-            let info = test_session_info();
-            // 4-char prefix is enough to pin a single session in the seeded store.
-            let outcome = ResumeCmd
-                .execute(&target_id[..4], &SlashContext::new(&info, None))
-                .unwrap();
-            assert_eq!(
-                outcome.into_forward(),
-                Action::Op(Op::Resume {
-                    path: store.find_session_path(&target_id).unwrap(),
-                }),
-            );
-        });
-    }
+        let outcome = ResumeCmd
+            .execute(" ab12 ", &SlashContext::new(&info, None))
+            .unwrap();
 
-    // ── resolve_prefix ──
-
-    #[test]
-    fn resolve_prefix_excludes_live_session_id() {
-        let (_dir, store) = isolated_store();
-        let live = stamped_id(0x11);
-        seed_session(
-            &store,
-            &live,
-            Some("live"),
-            3,
-            datetime!(2026-04-18 09:00:00 UTC),
-        );
-        let err = resolve_prefix(&store, &live[..2], &live).unwrap_err();
-        assert_eq!(err, "No session matching `11`.");
-    }
-
-    #[test]
-    fn resolve_prefix_unique_match_returns_its_session_file() {
-        let (_dir, store) = isolated_store();
-        seed_session(
-            &store,
-            &stamped_id(0x11),
-            Some("a"),
-            3,
-            datetime!(2026-04-18 09:00:00 UTC),
-        );
-        seed_session(
-            &store,
-            &stamped_id(0x22),
-            Some("b"),
-            3,
-            datetime!(2026-04-18 09:05:00 UTC),
-        );
-        let path = resolve_prefix(&store, "1111", "other").unwrap();
-        assert_eq!(path, store.find_session_path(&stamped_id(0x11)).unwrap());
-    }
-
-    #[test]
-    fn resolve_prefix_widens_to_other_projects_when_current_project_misses() {
-        let dir = tempfile::tempdir().unwrap();
-        let other = SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
-        let target = stamped_id(0xab);
-        seed_session(
-            &other,
-            &target,
-            Some("foreign"),
-            1,
-            datetime!(2026-04-18 09:00:00 UTC),
-        );
-        let store = test_store(dir.path());
-        let resolved = resolve_prefix(&store, &target[..4], "live").unwrap();
-        assert_eq!(resolved, other.find_session_path(&target).unwrap());
-    }
-
-    #[test]
-    fn resolve_prefix_full_id_match_is_unique() {
-        let (_dir, store) = isolated_store();
-        let id = stamped_id(0x11);
-        seed_session(
-            &store,
-            &id,
-            Some("a"),
-            1,
-            datetime!(2026-04-18 09:00:00 UTC),
-        );
-        seed_session(
-            &store,
-            &stamped_id(0x22),
-            Some("b"),
-            1,
-            datetime!(2026-04-18 09:00:01 UTC),
-        );
         assert_eq!(
-            resolve_prefix(&store, &id, "other").unwrap(),
-            store.find_session_path(&id).unwrap(),
-        );
-    }
-
-    #[test]
-    fn resolve_prefix_ambiguous_lists_short_ids_in_error() {
-        let (_dir, store) = isolated_store();
-        let id_a = format!("aaaa{}", &stamped_id(0xaa)[4..]);
-        let id_b = format!("aaaa{}", &stamped_id(0xab)[4..]);
-        seed_session(
-            &store,
-            &id_a,
-            Some("a"),
-            3,
-            datetime!(2026-04-18 09:00:00 UTC),
-        );
-        seed_session(
-            &store,
-            &id_b,
-            Some("b"),
-            3,
-            datetime!(2026-04-18 09:05:00 UTC),
-        );
-        let err = resolve_prefix(&store, "aaaa", "other").unwrap_err();
-        assert_eq!(
-            err,
-            format!(
-                "Ambiguous prefix `aaaa` matches 2 sessions: {}, {}.",
-                &id_b[..8],
-                &id_a[..8],
-            ),
+            outcome.into_forward(),
+            Action::Op(Op::Resume {
+                target: ResumeTarget::Prefix("ab12".to_owned()),
+            }),
         );
     }
 
@@ -1057,7 +911,9 @@ mod tests {
         let expected = store.find_session_path(&stamped_id(0x11)).unwrap();
         let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
         let outcome = picker.handle_key(&key(KeyCode::Enter));
-        let ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::Resume { path }))) = outcome
+        let ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::Resume {
+            target: ResumeTarget::Path(path),
+        }))) = outcome
         else {
             panic!("expected Submitted(Resume), got {outcome:?}");
         };
@@ -1467,8 +1323,9 @@ mod tests {
         assert!(
             matches!(
                 &outcome,
-                ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::Resume { path })))
-                    if *path == archived_path
+                ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::Resume {
+                    target: ResumeTarget::Path(path),
+                }))) if *path == archived_path
             ),
             "Enter must resume the archived session: {outcome:?}",
         );

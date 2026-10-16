@@ -458,7 +458,7 @@ mod tests {
     use crate::message::Role;
     use crate::model::ResolvedModelId;
     use crate::permission::GateTarget;
-    use crate::protocol::{CapturingSink, Decision, ToolCall, ToolResult};
+    use crate::protocol::{CapturingSink, Decision, ResumeTarget, ToolCall, ToolResult};
     use crate::tool::{
         DEFAULT_TOOL_ICON, ReadExcerptLine, Tool, ToolMetadata, ToolOutput, ToolRegistry,
         ToolResultView,
@@ -1269,7 +1269,7 @@ mod tests {
             Op::Clear,
             Op::Archive,
             Op::Resume {
-                path: "/repo/other.jsonl".into(),
+                target: ResumeTarget::Path("/repo/other.jsonl".into()),
             },
             Op::Rename {
                 title: "Late".to_owned(),

@@ -135,7 +135,7 @@ A checked-in `.ox/config.toml` is untrusted, like the project credentials `rejec
 
 ## Stdio Frontends
 
-The `--no-tui` REPL and `-p` headless runs share `render_turn`, which hands each `Event::ApprovalRequested` to an `Approver` and sends its decision back as `Op::Resolve`. The request itself never reaches the event sink, so the `stream-json` output carries only the call's result.
+The `--no-tui` REPL and `-p` headless runs share `render_op`, which hands each `Event::ApprovalRequested` to an `Approver` and sends its decision back as `Op::Resolve`. The request itself never reaches the event sink, so the `stream-json` output carries only the call's result.
 
 - **REPL:** when stdin is a terminal, the prompter writes the preview to stderr, escaping hidden characters, and reads the answer from the next stdin line: `y`, `a` with the rule to allow, `n`, `f` with the feedback line, or `x` to abort. An unknown answer, empty feedback, or a rule the grant does not admit returns to the choices, and the end of input aborts. Piped input answers as a headless run does, so a scripted prompt line is never read as an answer.
 - **Headless:** with no one to ask, the deny rules, zones, and allow rules settle every call, so a headless run assumes an already-trusted invocation. `Unattended` denies a would-ask call with feedback that names the rule to add to the `allow` list, quoted as a TOML string from the call's grant. A call that offers no grant, such as a protected path, a command that runs more than one simple command, or a command containing `*`, is denied with feedback saying that no allow rule names it exactly, since a broader rule may still cover it.
@@ -172,7 +172,7 @@ The stdio sink escapes control characters other than tabs and line breaks in mod
 - `crates/oxide-code/src/config/load.rs`: `reject_project_secrets`, `reject_project_permissions`.
 - `crates/oxide-code/src/config/merge.rs`: `APPENDED` rule lists, `merge`.
 - `crates/oxide-code/src/driver/repl.rs`: `Prompter`, the stdin approval prompt.
-- `crates/oxide-code/src/driver/stdio.rs`: `render_turn`, the `Approver` trait, `Unattended`, the escaped `StdioSink` output.
+- `crates/oxide-code/src/driver/stdio.rs`: `render_op`, the `Approver` trait, `Unattended`, the escaped `StdioSink` output.
 - `crates/oxide-code/src/engine.rs`: the live policy, whose session allow rules reset when the session changes.
 - `crates/oxide-code/src/engine/abort.rs`: `await_unless_aborted`, which races an allowed call against cancel and quit.
 - `crates/oxide-code/src/engine/dispatch.rs`: `check_permission` (resolve, pin, decide), `allow_for_session` (admit against the call's grant), `await_approval`, `dispatch_tool_call`, `run_tool_round`.

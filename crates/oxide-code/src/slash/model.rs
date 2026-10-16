@@ -1,19 +1,14 @@
-//! `/model` opens the picker, or swaps with `/model <id>`. Resolution: exact catalogue id →
-//! unique substring, so the family names `opus`, `sonnet`, and `haiku` work as aliases.
+//! `/model` opens the picker, or swaps with `/model <id>`, which [`command::model`] resolves.
 
 use std::borrow::Cow;
-
-use indoc::formatdoc;
 
 use super::context::SlashContext;
 use super::matcher::rank_by_prefix;
 use super::picker::ModelEffortPicker;
 use super::registry::{ArgCompletion, SlashCommand, SlashKind, SlashOutcome};
-use crate::model::{MODELS, ModelInfo, ResolvedModelId, replacement_for};
-use crate::protocol::Op;
+use crate::command;
+use crate::model::MODELS;
 use crate::tui::action::Action;
-
-// ── ModelCmd ──
 
 pub(super) struct ModelCmd;
 
@@ -55,68 +50,16 @@ impl SlashCommand for ModelCmd {
                 ctx.info,
             ))));
         }
-        let id = resolve_model_arg(arg)?;
-        Ok(SlashOutcome::Forward(Action::Op(Op::SetModel {
-            model: Some(id),
-            effort: None,
-        })))
+        Ok(SlashOutcome::Forward(Action::Op(command::model(arg)?)))
     }
-}
-
-// ── Resolver ──
-
-fn resolve_model_arg(arg: &str) -> Result<ResolvedModelId, String> {
-    let arg = arg.to_ascii_lowercase();
-    let hits: Vec<&ModelInfo> = match MODELS.iter().find(|info| info.id == arg) {
-        Some(exact) => vec![exact],
-        None => MODELS
-            .iter()
-            .filter(|info| info.id.contains(&arg))
-            .collect(),
-    };
-    match hits.as_slice() {
-        [info] => Ok(ResolvedModelId::new(info.id.to_owned())),
-        [_, ..] => Err(formatdoc! {"
-            Model `{arg}` is ambiguous. Pick one or use a short alias (`opus`, `sonnet`, `haiku`):
-
-            {}",
-            format_models(hits),
-        }),
-        [] => {
-            let hint = replacement_for(&arg)
-                .map_or_else(String::new, |info| format!(" Did you mean `{}`?", info.id));
-            Err(formatdoc! {"
-                Unknown model: `{arg}`.{hint} Supported models:
-
-                {}",
-                format_models(MODELS),
-            })
-        }
-    }
-}
-
-/// Markdown bullet list of `id — display name` rows.
-fn format_models<'a>(models: impl IntoIterator<Item = &'a ModelInfo>) -> String {
-    models
-        .into_iter()
-        .map(|info| format!("- `{}` — {}", info.id, info.display_name))
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 #[cfg(test)]
 mod tests {
-    use indoc::indoc;
-
     use super::*;
+    use crate::model::ResolvedModelId;
+    use crate::protocol::Op;
     use crate::slash::test_session_info;
-
-    fn swap_model(id: &str) -> Action {
-        Action::Op(Op::SetModel {
-            model: Some(ResolvedModelId::new(id.to_owned())),
-            effort: None,
-        })
-    }
 
     // ── ModelCmd::name ──
 
@@ -173,98 +116,27 @@ mod tests {
         ModelCmd.execute(args, &SlashContext::new(&test_session_info(), None))
     }
 
-    fn run_forward(args: &str) -> Action {
-        run_execute(args).unwrap().into_forward()
-    }
-
     #[test]
     fn execute_no_args_opens_the_picker() {
-        run_execute("").unwrap().into_modal();
+        run_execute("  ").unwrap().into_modal();
     }
 
     #[test]
-    fn execute_family_alias_resolves_to_catalogue_id() {
-        for (alias, expected) in [
-            ("opus", "claude-opus-5-5"),
-            ("sonnet", "claude-sonnet-5-5"),
-            ("haiku", "claude-haiku-5-5"),
-        ] {
-            assert_eq!(
-                run_forward(alias),
-                swap_model(expected),
-                "alias `{alias}` should route to `{expected}`",
-            );
-        }
-    }
-
-    #[test]
-    fn execute_trims_and_lowercases_arg() {
+    fn execute_typed_id_forwards_the_resolved_model() {
         assert_eq!(
-            run_forward("  Claude-Sonnet-5-5  "),
-            swap_model("claude-sonnet-5-5")
+            run_execute("sonnet").unwrap().into_forward(),
+            Action::Op(Op::SetModel {
+                model: Some(ResolvedModelId::new("claude-sonnet-5-5".to_owned())),
+                effort: None,
+            }),
         );
     }
 
     #[test]
-    fn execute_unknown_arg_errors_with_full_listing() {
-        // Retired ids and a `[1m]` suffix also get the 5.5 model they name as a suggestion.
-        for (arg, expected) in [
-            (
-                "gpt-4",
-                indoc! {"
-                    Unknown model: `gpt-4`. Supported models:
-
-                    - `claude-opus-5-5` — Claude Opus 5.5
-                    - `claude-sonnet-5-5` — Claude Sonnet 5.5
-                    - `claude-haiku-5-5` — Claude Haiku 5.5"},
-            ),
-            (
-                "claude-opus-4-8",
-                indoc! {"
-                    Unknown model: `claude-opus-4-8`. Did you mean `claude-opus-5-5`? Supported models:
-
-                    - `claude-opus-5-5` — Claude Opus 5.5
-                    - `claude-sonnet-5-5` — Claude Sonnet 5.5
-                    - `claude-haiku-5-5` — Claude Haiku 5.5"},
-            ),
-            (
-                "sonnet[1m]",
-                indoc! {"
-                    Unknown model: `sonnet[1m]`. Did you mean `claude-sonnet-5-5`? Supported models:
-
-                    - `claude-opus-5-5` — Claude Opus 5.5
-                    - `claude-sonnet-5-5` — Claude Sonnet 5.5
-                    - `claude-haiku-5-5` — Claude Haiku 5.5"},
-            ),
-        ] {
-            assert_eq!(run_execute(arg).unwrap_err(), expected, "{arg}");
-        }
-    }
-
-    // ── resolve_model_arg ──
-
-    #[test]
-    fn resolve_model_arg_round_trips_every_models_row() {
-        for info in MODELS {
-            assert_eq!(
-                resolve_model_arg(info.id)
-                    .as_ref()
-                    .map(ResolvedModelId::as_str),
-                Ok(info.id),
-            );
-        }
-    }
-
-    #[test]
-    fn resolve_model_arg_ambiguous_substring_lists_only_matching_rows() {
-        let msg = resolve_model_arg("o").expect_err("ambiguous arg must error");
+    fn execute_unknown_id_reports_the_shared_parse_error() {
         assert_eq!(
-            msg,
-            indoc! {"
-                Model `o` is ambiguous. Pick one or use a short alias (`opus`, `sonnet`, `haiku`):
-
-                - `claude-opus-5-5` — Claude Opus 5.5
-                - `claude-sonnet-5-5` — Claude Sonnet 5.5"},
+            run_execute("gpt-4").unwrap_err(),
+            command::model("gpt-4").unwrap_err(),
         );
     }
 }

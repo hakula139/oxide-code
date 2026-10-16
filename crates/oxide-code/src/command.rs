@@ -1,0 +1,314 @@
+//! Typed slash-command forms parsed into the [`Op`] each one runs, shared by the TUI's slash
+//! commands and the bare REPL. The TUI adds the pickers and modals behind the bare forms.
+
+use indoc::formatdoc;
+
+use crate::config::Effort;
+use crate::model::{MODELS, ModelInfo, ResolvedModelId, replacement_for};
+use crate::protocol::{Op, ResumeTarget};
+
+/// Canonical names of the commands [`parse`] knows, without their leading `/`.
+pub(crate) const NAMES: [&str; 6] = ["clear", "compact", "effort", "model", "rename", "resume"];
+
+/// Parses the typed form of the command `name`, canonical and without its `/`, into the op it
+/// runs. `None` when `name` is not one of [`NAMES`]. `Err` carries the message for a malformed
+/// form, including a bare form only a picker can complete.
+pub(crate) fn parse(name: &str, args: &str) -> Option<Result<Op, String>> {
+    Some(match name {
+        "clear" => Ok(Op::Clear),
+        "compact" => Ok(compact(args)),
+        "effort" => effort(args),
+        "model" => model(args),
+        "rename" => rename(args),
+        "resume" => resume(args),
+        _ => return None,
+    })
+}
+
+/// `/compact [<instructions>]`, where trailing text focuses the summary.
+pub(crate) fn compact(args: &str) -> Op {
+    let instructions = args.trim();
+    Op::Compact {
+        instructions: (!instructions.is_empty()).then(|| instructions.to_owned()),
+    }
+}
+
+/// `/effort <level>`, case-insensitive.
+pub(crate) fn effort(arg: &str) -> Result<Op, String> {
+    let arg = required(arg, "level", "/effort <level>")?;
+    let pick = arg
+        .to_ascii_lowercase()
+        .parse()
+        .map_err(|_| format!("Unknown effort: `{arg}`. Valid: {}.", Effort::VALID_VALUES))?;
+    Ok(Op::SetModel {
+        model: None,
+        effort: Some(pick),
+    })
+}
+
+/// `/model <id>`. Matches an exact catalogue id, then a unique substring of one, so the family
+/// names `opus`, `sonnet`, and `haiku` work as aliases.
+pub(crate) fn model(arg: &str) -> Result<Op, String> {
+    let arg = required(arg, "model id", "/model <id>")?.to_ascii_lowercase();
+    let hits: Vec<&ModelInfo> = match MODELS.iter().find(|info| info.id == arg) {
+        Some(exact) => vec![exact],
+        None => MODELS
+            .iter()
+            .filter(|info| info.id.contains(&arg))
+            .collect(),
+    };
+    let info = match hits.as_slice() {
+        [info] => info,
+        [_, ..] => {
+            return Err(formatdoc! {"
+                Model `{arg}` is ambiguous. Pick one or use a short alias (`opus`, `sonnet`, `haiku`):
+
+                {}",
+                format_models(hits),
+            });
+        }
+        [] => {
+            let hint = replacement_for(&arg)
+                .map_or_else(String::new, |info| format!(" Did you mean `{}`?", info.id));
+            return Err(formatdoc! {"
+                Unknown model: `{arg}`.{hint} Supported models:
+
+                {}",
+                format_models(MODELS),
+            });
+        }
+    };
+    Ok(Op::SetModel {
+        model: Some(ResolvedModelId::new(info.id.to_owned())),
+        effort: None,
+    })
+}
+
+/// `/rename <title>`.
+pub(crate) fn rename(title: &str) -> Result<Op, String> {
+    let title = required(title, "title", "/rename <title>")?;
+    Ok(Op::Rename {
+        title: title.to_owned(),
+    })
+}
+
+/// `/resume <id-prefix>`. The engine resolves the prefix against the saved sessions.
+pub(crate) fn resume(prefix: &str) -> Result<Op, String> {
+    let prefix = required(prefix, "session id", "/resume <id-prefix>")?;
+    Ok(Op::Resume {
+        target: ResumeTarget::Prefix(prefix.to_owned()),
+    })
+}
+
+/// The trimmed `arg`, or an error naming the missing `what` and the form's `usage`.
+fn required<'a>(arg: &'a str, what: &str, usage: &str) -> Result<&'a str, String> {
+    let arg = arg.trim();
+    if arg.is_empty() {
+        return Err(format!("Missing {what}. Usage: `{usage}`."));
+    }
+    Ok(arg)
+}
+
+/// Markdown bullet list of `id — display name` rows.
+fn format_models<'a>(models: impl IntoIterator<Item = &'a ModelInfo>) -> String {
+    models
+        .into_iter()
+        .map(|info| format!("- `{}` — {}", info.id, info.display_name))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use indoc::indoc;
+
+    use super::*;
+
+    fn set_model(id: &str) -> Op {
+        Op::SetModel {
+            model: Some(ResolvedModelId::new(id.to_owned())),
+            effort: None,
+        }
+    }
+
+    fn set_effort(level: Effort) -> Op {
+        Op::SetModel {
+            model: None,
+            effort: Some(level),
+        }
+    }
+
+    // ── parse ──
+
+    #[test]
+    fn parse_routes_each_name_to_its_form() {
+        let cases = [
+            ("clear", "", Op::Clear),
+            ("compact", "auth", compact("auth")),
+            ("effort", "low", set_effort(Effort::Low)),
+            ("model", "haiku", set_model("claude-haiku-5-5")),
+            ("rename", "Fix login", rename("Fix login").unwrap()),
+            ("resume", "1a2b", resume("1a2b").unwrap()),
+        ];
+
+        assert_eq!(cases.each_ref().map(|(name, ..)| *name), NAMES);
+        for (name, args, op) in cases {
+            assert_eq!(parse(name, args), Some(Ok(op)), "{name}");
+        }
+    }
+
+    #[test]
+    fn parse_knows_no_other_name() {
+        for name in ["help", "new", "theme", "compact-all", ""] {
+            assert_eq!(parse(name, "x"), None, "{name}");
+        }
+    }
+
+    #[test]
+    fn parse_bare_forms_that_need_an_argument_name_the_usage() {
+        for (name, usage) in [
+            ("effort", "Missing level. Usage: `/effort <level>`."),
+            ("model", "Missing model id. Usage: `/model <id>`."),
+            ("rename", "Missing title. Usage: `/rename <title>`."),
+            (
+                "resume",
+                "Missing session id. Usage: `/resume <id-prefix>`.",
+            ),
+        ] {
+            assert_eq!(parse(name, "  "), Some(Err(usage.to_owned())), "{name}");
+        }
+    }
+
+    // ── compact ──
+
+    #[test]
+    fn compact_trims_the_instructions_and_drops_blank_ones() {
+        assert_eq!(compact("   \n\t  "), Op::Compact { instructions: None });
+        assert_eq!(
+            compact("  focus on the build error  "),
+            Op::Compact {
+                instructions: Some("focus on the build error".to_owned()),
+            },
+        );
+    }
+
+    // ── effort ──
+
+    #[test]
+    fn effort_accepts_each_level_in_any_case() {
+        for (arg, level) in [
+            ("low", Effort::Low),
+            ("Medium", Effort::Medium),
+            ("high", Effort::High),
+            ("XHIGH", Effort::Xhigh),
+            (" MaX ", Effort::Max),
+        ] {
+            assert_eq!(effort(arg), Ok(set_effort(level)), "{arg}");
+        }
+    }
+
+    #[test]
+    fn effort_unknown_level_lists_the_valid_ones() {
+        for arg in ["turbo", "auto"] {
+            assert_eq!(
+                effort(arg),
+                Err(format!(
+                    "Unknown effort: `{arg}`. Valid: low, medium, high, xhigh, max."
+                )),
+            );
+        }
+    }
+
+    // ── model ──
+
+    #[test]
+    fn model_round_trips_every_catalogue_id() {
+        for info in MODELS {
+            assert_eq!(model(info.id), Ok(set_model(info.id)));
+        }
+    }
+
+    #[test]
+    fn model_resolves_family_aliases_ignoring_case_and_padding() {
+        for (arg, id) in [
+            ("opus", "claude-opus-5-5"),
+            ("sonnet", "claude-sonnet-5-5"),
+            ("haiku", "claude-haiku-5-5"),
+            ("  Claude-Sonnet-5-5  ", "claude-sonnet-5-5"),
+        ] {
+            assert_eq!(model(arg), Ok(set_model(id)), "{arg}");
+        }
+    }
+
+    #[test]
+    fn model_unknown_id_suggests_a_replacement_and_lists_the_catalogue() {
+        // Retired ids and a `[1m]` suffix also get the 5.5 model they name as a suggestion.
+        for (arg, expected) in [
+            (
+                "gpt-4",
+                indoc! {"
+                    Unknown model: `gpt-4`. Supported models:
+
+                    - `claude-opus-5-5` — Claude Opus 5.5
+                    - `claude-sonnet-5-5` — Claude Sonnet 5.5
+                    - `claude-haiku-5-5` — Claude Haiku 5.5"},
+            ),
+            (
+                "claude-opus-4-8",
+                indoc! {"
+                    Unknown model: `claude-opus-4-8`. Did you mean `claude-opus-5-5`? Supported models:
+
+                    - `claude-opus-5-5` — Claude Opus 5.5
+                    - `claude-sonnet-5-5` — Claude Sonnet 5.5
+                    - `claude-haiku-5-5` — Claude Haiku 5.5"},
+            ),
+            (
+                "sonnet[1m]",
+                indoc! {"
+                    Unknown model: `sonnet[1m]`. Did you mean `claude-sonnet-5-5`? Supported models:
+
+                    - `claude-opus-5-5` — Claude Opus 5.5
+                    - `claude-sonnet-5-5` — Claude Sonnet 5.5
+                    - `claude-haiku-5-5` — Claude Haiku 5.5"},
+            ),
+        ] {
+            assert_eq!(model(arg), Err(expected.to_owned()), "{arg}");
+        }
+    }
+
+    #[test]
+    fn model_ambiguous_substring_lists_only_the_matching_rows() {
+        assert_eq!(
+            model("o").expect_err("ambiguous arg must error"),
+            indoc! {"
+                Model `o` is ambiguous. Pick one or use a short alias (`opus`, `sonnet`, `haiku`):
+
+                - `claude-opus-5-5` — Claude Opus 5.5
+                - `claude-sonnet-5-5` — Claude Sonnet 5.5"},
+        );
+    }
+
+    // ── rename ──
+
+    #[test]
+    fn rename_trims_the_title() {
+        assert_eq!(
+            rename("  Fix auth bug  "),
+            Ok(Op::Rename {
+                title: "Fix auth bug".to_owned(),
+            }),
+        );
+    }
+
+    // ── resume ──
+
+    #[test]
+    fn resume_targets_the_trimmed_prefix() {
+        assert_eq!(
+            resume(" 1a2b "),
+            Ok(Op::Resume {
+                target: ResumeTarget::Prefix("1a2b".to_owned()),
+            }),
+        );
+    }
+}

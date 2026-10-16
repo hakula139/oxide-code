@@ -33,10 +33,11 @@ use crate::message::{ContentBlock, Message};
 use crate::model::{ModelSpec, ResolvedModelId};
 use crate::permission::Policy;
 use crate::prompt::{self, PromptParts, SessionContext, UserContext};
-use crate::protocol::{Event, EventSink, Interaction, Op, UsageSnapshot};
+use crate::protocol::{Event, EventSink, Interaction, Op, ResumeTarget, UsageSnapshot};
 use crate::session::entry::{CompactInfo, UsageRecord};
-use crate::session::handle::{self, LoadedTranscript, SessionHandle};
+use crate::session::handle::{self, LoadedTranscript, RollIntoOutcome, SessionHandle};
 use crate::session::history;
+use crate::session::resolver::resolve_saved_prefix;
 use crate::session::store::SessionStore;
 use crate::session::title_generator;
 use crate::tool::{ToolMetadata, ToolRegistry};
@@ -222,7 +223,7 @@ impl Engine {
                 }
                 Op::Clear => self.clear(&sink).await,
                 Op::Archive => self.archive(&sink).await,
-                Op::Resume { path } => self.resume(&sink, &path).await,
+                Op::Resume { target } => self.resume(&sink, target).await,
                 Op::Rename { title } => self.rename(&sink, title).await,
                 Op::SetModel { model, effort } => self.set_model(&sink, model, effort),
                 Op::Login => {
@@ -463,23 +464,20 @@ impl Engine {
     }
 
     /// Finalizes the live session and continues `target`. On failure the live session stays.
-    async fn resume(&mut self, sink: &dyn EventSink, target: &Path) {
-        let outcome =
-            match handle::roll_into(&mut self.session, &self.store, &self.file_tracker, target)
-                .await
-            {
-                Ok(outcome) => outcome,
-                Err(e) => {
-                    sink.emit(
-                        Event::TurnFailed(format!(
-                            "Resume failed (still on session {}): {e:#}",
-                            self.session.session_id(),
-                        )),
-                        "resume-failed",
-                    );
-                    return;
-                }
-            };
+    async fn resume(&mut self, sink: &dyn EventSink, target: ResumeTarget) {
+        let outcome = match self.roll_into(target).await {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                sink.emit(
+                    Event::TurnFailed(format!(
+                        "Resume failed (still on session {}): {e:#}",
+                        self.session.session_id(),
+                    )),
+                    "resume-failed",
+                );
+                return;
+            }
+        };
         self.adopt_session(outcome.transcript).await;
         sink.emit(
             Event::SessionResumed {
@@ -504,6 +502,20 @@ impl Engine {
         turn::notify_if_interrupted(&self.messages, sink);
     }
 
+    /// Finalizes the live session and swaps to the one `target` names. A prefix must match one
+    /// saved session other than the live one.
+    async fn roll_into(&mut self, target: ResumeTarget) -> Result<RollIntoOutcome> {
+        let path = match target {
+            ResumeTarget::Path(path) => path,
+            ResumeTarget::Prefix(prefix) => {
+                resolve_saved_prefix(&self.store, &prefix, self.session.session_id())?
+                    .ok_or_else(|| anyhow!("session prefix `{prefix}` matches the live session"))?
+                    .path
+            }
+        };
+        handle::roll_into(&mut self.session, &self.store, &self.file_tracker, &path).await
+    }
+
     async fn adopt_session(&mut self, transcript: LoadedTranscript) {
         let LoadedTranscript {
             messages,
@@ -526,8 +538,11 @@ impl Engine {
 
     async fn rename(&self, sink: &dyn EventSink, title: String) {
         let outcome = self.session.set_manual_title(title.clone()).await;
-        sink.session_write_error(outcome.failure.as_deref());
-        if outcome.failure.is_some() {
+        if let Some(failure) = outcome.failure {
+            sink.emit(
+                Event::RenameFailed(format!("Session write failed: {failure}")),
+                "rename-failed",
+            );
             return;
         }
         sink.emit(
@@ -733,8 +748,8 @@ fn estimate_cost_usd(requests: &[UsageRecord]) -> f64 {
 
 // ── Reporting ──
 
-/// How a prompt or compaction ended, after the sink has already shown it. A headless run reports
-/// it as its stop reason.
+/// How an operation ended, after the sink has already shown it. A headless run reports it as its
+/// stop reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum TurnEnd {
@@ -745,12 +760,28 @@ pub(crate) enum TurnEnd {
 }
 
 impl TurnEnd {
-    /// How the prompt in flight ended, if `event` is its terminal event.
-    pub(crate) fn of_prompt(event: &Event) -> Option<Self> {
-        match event {
-            Event::TurnComplete => Some(Self::Completed),
-            Event::Cancelled => Some(Self::Cancelled),
-            Event::TurnFailed(_) => Some(Self::Failed),
+    /// How `op` ended, if `event` is its terminal event. Covers the ops the stdio frontends wait
+    /// on. The rest end without an event of their own (`Queue`, `Interrupt`, `Resolve`, and
+    /// `Shutdown`) or run only in the TUI, which follows them itself.
+    pub(crate) fn of(op: &Op, event: &Event) -> Option<Self> {
+        match (op, event) {
+            (Op::Prompt(_) | Op::Compact { .. } | Op::Resume { .. }, Event::TurnFailed(_))
+            | (Op::Rename { .. }, Event::RenameFailed(_))
+            // The model has no tier for the effort, so the pick changed nothing.
+            | (
+                Op::SetModel {
+                    model: None,
+                    effort: Some(_),
+                },
+                Event::ConfigChanged { effort: None, .. },
+            ) => Some(Self::Failed),
+            (Op::Prompt(_), Event::TurnComplete)
+            | (Op::Compact { .. }, Event::SessionCompacted { .. })
+            | (Op::Resume { .. }, Event::SessionResumed { .. })
+            | (Op::Clear, Event::SessionRolled { .. })
+            | (Op::Rename { .. }, Event::SessionTitleUpdated { .. })
+            | (Op::SetModel { .. }, Event::ConfigChanged { .. }) => Some(Self::Completed),
+            (Op::Prompt(_) | Op::Compact { .. }, Event::Cancelled) => Some(Self::Cancelled),
             _ => None,
         }
     }
@@ -848,10 +879,11 @@ mod tests {
 
     /// Events up to and including the terminal event of the prompt in flight.
     async fn turn_events(events: &mut mpsc::UnboundedReceiver<Event>) -> Vec<Event> {
+        let prompt = Op::Prompt(String::new());
         let mut seen = Vec::new();
         loop {
             let event = events.recv().await.expect("the engine stopped early");
-            let ended = TurnEnd::of_prompt(&event).is_some();
+            let ended = TurnEnd::of(&prompt, &event).is_some();
             seen.push(event);
             if ended {
                 return seen;
@@ -1267,7 +1299,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_resume_continues_the_target_session() {
+    async fn run_resume_continues_the_session_an_id_prefix_names() {
         with_pinned_home(async {
             let server = MockServer::start().await;
             mount_reply(&server, "reply").await;
@@ -1277,8 +1309,8 @@ mod tests {
             let engine = engine(server.uri(), &store, dir.path()).await;
             let mut handle = engine.spawn(&[]);
 
-            let path = store.find_session_path(&target_id).unwrap();
-            handle.ops.send(Op::Resume { path }).await.unwrap();
+            let target = ResumeTarget::Prefix(target_id[..8].to_owned());
+            handle.ops.send(Op::Resume { target }).await.unwrap();
             let resumed = next_matching(&mut handle.events, |event| match event {
                 Event::SessionResumed { id, history, .. } => Some((id, history)),
                 _ => None,
@@ -1317,6 +1349,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_resume_by_a_prefix_only_the_live_session_matches_fails_and_stays_live() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            mount_reply(&server, "reply").await;
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let engine = engine(server.uri(), &store, dir.path()).await;
+            let live_id = engine.session_id().to_owned();
+            let mut handle = engine.spawn(&[]);
+
+            submit(&mut handle, "first").await;
+            let target = ResumeTarget::Prefix(live_id[..8].to_owned());
+            handle.ops.send(Op::Resume { target }).await.unwrap();
+            let failure = next_matching(&mut handle.events, |event| match event {
+                Event::TurnFailed(message) => Some(message),
+                _ => None,
+            })
+            .await;
+            submit(&mut handle, "second").await;
+            handle.shutdown().await;
+
+            assert_eq!(
+                failure,
+                format!(
+                    "Resume failed (still on session {live_id}): session prefix `{}` matches the \
+                     live session",
+                    &live_id[..8],
+                ),
+            );
+            let data = store.load_session_data(&live_id).unwrap();
+            assert_eq!(data.messages.len(), 4, "the live session keeps recording");
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn run_records_every_request_so_a_resume_restores_the_session_cost() {
         with_pinned_home(async {
             let server = MockServer::start().await;
@@ -1345,8 +1413,8 @@ mod tests {
             })
             .await;
             let fresh = submit(&mut handle, "fresh").await;
-            let path = store.find_session_path(&session_id).unwrap();
-            handle.ops.send(Op::Resume { path }).await.unwrap();
+            let target = ResumeTarget::Path(store.find_session_path(&session_id).unwrap());
+            handle.ops.send(Op::Resume { target }).await.unwrap();
             next_matching(&mut handle.events, |event| {
                 matches!(event, Event::SessionResumed { .. }).then_some(())
             })
@@ -1405,8 +1473,8 @@ mod tests {
             assert!(archived);
             assert!(store.load_session_data(&archived_id).unwrap().archived);
 
-            let path = store.find_session_path(&archived_id).unwrap();
-            handle.ops.send(Op::Resume { path }).await.unwrap();
+            let target = ResumeTarget::Path(store.find_session_path(&archived_id).unwrap());
+            handle.ops.send(Op::Resume { target }).await.unwrap();
             let resumed = next_matching(&mut handle.events, |event| match event {
                 Event::SessionResumed { id, unarchived, .. } => Some((id, unarchived)),
                 _ => None,
@@ -2192,7 +2260,7 @@ mod tests {
             engine.total_estimated_cost_usd = 1.23;
             engine.policy.allow_for_session(rule);
             let target_path = store.find_session_path(&target_id).unwrap();
-            engine.resume(&sink, &target_path).await;
+            engine.resume(&sink, ResumeTarget::Path(target_path)).await;
             assert_eq!(engine.policy.session_allow(), []);
             assert_eq!(engine.session.session_id(), target_id);
             assert_eq!(engine.client.session_id(), target_id);
@@ -2258,7 +2326,9 @@ mod tests {
             engine.clear(&sink).await;
 
             let recorded_path = store.find_session_path(&recorded_id).unwrap();
-            engine.resume(&sink, &recorded_path).await;
+            engine
+                .resume(&sink, ResumeTarget::Path(recorded_path))
+                .await;
             assert_eq!(engine.prompt.user_context, SESSION_CONTEXT);
             assert!(!engine.prompt_unrecorded);
             engine.submit_prompt("second", &sink, &mut ops).await;
@@ -2287,7 +2357,7 @@ mod tests {
             engine.clear(&sink).await;
             let path = store.find_session_path(&interrupted_id).unwrap();
 
-            engine.resume(&sink, &path).await;
+            engine.resume(&sink, ResumeTarget::Path(path)).await;
             engine
                 .submit_prompt("what is 7 times 6?", &sink, &mut ops)
                 .await;
@@ -2328,7 +2398,7 @@ mod tests {
             let sink = CapturingSink::new();
 
             let target_path = store.find_session_path(&target_id).unwrap();
-            engine.resume(&sink, &target_path).await;
+            engine.resume(&sink, ResumeTarget::Path(target_path)).await;
 
             let events = sink.events();
             assert!(
@@ -2364,7 +2434,7 @@ mod tests {
             let sink = CapturingSink::new();
 
             engine
-                .resume(&sink, Path::new("missing-target.jsonl"))
+                .resume(&sink, ResumeTarget::Path("missing-target.jsonl".into()))
                 .await;
 
             assert_eq!(engine.session.session_id(), original_id);
@@ -2404,7 +2474,7 @@ mod tests {
                     events.as_slice(),
                     [
                         Event::SessionTitleUpdated { session_id, title },
-                        Event::Error(write),
+                        Event::RenameFailed(write),
                     ] if *session_id == live_id && title == "Fix login"
                         && write.starts_with("Session write failed")
                 ),
@@ -2763,31 +2833,96 @@ mod tests {
         );
     }
 
-    // ── TurnEnd::of_prompt ──
+    // ── TurnEnd::of ──
 
     #[test]
-    fn of_prompt_reads_only_the_three_terminal_events() {
-        let ends = [
-            Event::TurnComplete,
-            Event::Cancelled,
-            Event::TurnFailed("failure".to_owned()),
-            Event::StreamToken("text".to_owned()),
-            Event::Error("warning".to_owned()),
-        ]
-        .iter()
-        .map(TurnEnd::of_prompt)
-        .collect::<Vec<_>>();
+    fn of_reads_only_the_terminal_events_of_the_op_in_flight() {
+        let prompt = Op::Prompt("hi".to_owned());
+        let compact = Op::Compact { instructions: None };
+        let resume = Op::Resume {
+            target: ResumeTarget::Prefix("1a2b".to_owned()),
+        };
+        let rename = Op::Rename {
+            title: "Fix login".to_owned(),
+        };
+        let set_model = Op::SetModel {
+            model: None,
+            effort: Some(Effort::Low),
+        };
+        let compacted = |automatic| Event::SessionCompacted {
+            summary: "summary".to_owned(),
+            pre_count: 4,
+            instructions: None,
+            automatic,
+        };
+        let rolled = Event::SessionRolled {
+            id: "new".to_owned(),
+            archived: false,
+        };
+        let notice = Event::Error("Session write failed".to_owned());
+        let failed = Event::TurnFailed("failure".to_owned());
 
-        assert_eq!(
-            ends,
-            [
+        for (op, event, end) in [
+            (&prompt, Event::TurnComplete, Some(TurnEnd::Completed)),
+            (&prompt, Event::Cancelled, Some(TurnEnd::Cancelled)),
+            (&prompt, failed.clone(), Some(TurnEnd::Failed)),
+            (&prompt, compacted(true), None),
+            (&prompt, notice.clone(), None),
+            (&compact, compacted(false), Some(TurnEnd::Completed)),
+            (&compact, Event::Cancelled, Some(TurnEnd::Cancelled)),
+            (&compact, Event::TurnComplete, None),
+            (
+                &resume,
+                Event::SessionResumed {
+                    id: "1a2b".to_owned(),
+                    title: None,
+                    unarchived: false,
+                    history: Vec::new(),
+                },
                 Some(TurnEnd::Completed),
-                Some(TurnEnd::Cancelled),
+            ),
+            (&resume, failed.clone(), Some(TurnEnd::Failed)),
+            (&Op::Clear, notice.clone(), None),
+            (&Op::Clear, rolled.clone(), Some(TurnEnd::Completed)),
+            (
+                &rename,
+                Event::SessionTitleUpdated {
+                    session_id: "live".to_owned(),
+                    title: "Fix login".to_owned(),
+                },
+                Some(TurnEnd::Completed),
+            ),
+            (&rename, notice.clone(), None),
+            (
+                &rename,
+                Event::RenameFailed("Session write failed".to_owned()),
                 Some(TurnEnd::Failed),
-                None,
-                None,
-            ]
-        );
+            ),
+            (
+                &set_model,
+                Event::ConfigChanged {
+                    model: ModelSpec::resolve(MODEL.to_owned()),
+                    effort: Some(Effort::Low),
+                    requested_effort: Some(Effort::Low),
+                    auto_compaction: CompactionConfig::with_threshold_for_test(50_000).auto,
+                },
+                Some(TurnEnd::Completed),
+            ),
+            (
+                &set_model,
+                Event::ConfigChanged {
+                    model: ModelSpec::resolve("custom-model".to_owned()),
+                    effort: None,
+                    requested_effort: Some(Effort::Low),
+                    auto_compaction: CompactionConfig::with_threshold_for_test(50_000).auto,
+                },
+                Some(TurnEnd::Failed),
+            ),
+            (&set_model, failed, None),
+            (&Op::Archive, rolled, None),
+        ] {
+            assert_eq!(TurnEnd::of(op, &event), end, "{op:?} then {event:?}");
+        }
     }
 
     // ── report_abort ──

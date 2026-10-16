@@ -6,7 +6,7 @@ Companions: [commands.md](commands.md), [modals.md](modals.md). Underlying resea
 
 ## Implementation
 
-`slash/resume` hosts both `ResumeCmd` and `ResumePicker`. Bare returns the picker as `SlashOutcome::Modal`, while typed-arg resolves through `resolve_prefix_to_info` (current project first, widening to all projects on miss) and forwards `Op::Resume { path }` carrying the matched session file.
+`slash/resume` hosts both `ResumeCmd` and `ResumePicker`. Bare returns the picker as `SlashOutcome::Modal`, which forwards `Op::Resume` with `ResumeTarget::Path`, the chosen session file. Typed-arg forwards `ResumeTarget::Prefix` through `command::resume`, which the bare REPL runs too, and the engine resolves the prefix through `resolve_prefix_to_info` (current project first, widening to all projects on miss).
 
 The picker wraps [`SearchableList`](modals.md) and adds these controls and display rules:
 
@@ -21,7 +21,7 @@ The picker wraps [`SearchableList`](modals.md) and adds these controls and displ
 
 `session/handle` provides `roll_into(...)`, which mirrors `roll(...)`. It loads and sanitizes the target first, so a load failure leaves the live session untouched. Loading an archived target appends an entry unarchiving it, which `RollIntoOutcome::unarchived` reports. It then snapshots and clears the file tracker, restores the target's tracker state through `restore_verified`, swaps the handle in place, and finalizes the old session. `RollIntoOutcome` carries the target's `LoadedTranscript` (messages, recorded prompt context, compact boundary, tool-result metadata, and recorded usage) and title, plus a diagnostic pair (finalize failure of the prior session, drift list from the file tracker).
 
-`Engine::resume` in `engine.rs` drives `roll_into` and adopts the loaded transcript, which rebinds `Client::set_session_id` and replays the recorded prompt context. It then emits `Event::SessionResumed { id, title, unarchived, history }`, followed by an `Event::UsageUpdated` carrying the restored session cost when it is non-zero, and surfaces the old session's finalize failure and any tracker-drift warning as distinct `Event::Error`s. The history comes from `Engine::take_history`, the same projection the TUI paints at startup, which runs the adopted transcript through `session::history::interactions`: the compaction boundary first, then text, thinking, and each tool call paired with its result, with icons, labels, and result views already resolved. The TUI's `App::apply_session_resumed` clears the chat, replays the history through `ChatView::load_history`, notes an unarchived session, drops queued prompts (surfaces the count as a system message), and clears the modal stack.
+`Engine::resume` in `engine.rs` resolves the target to a session file, drives `roll_into`, and adopts the loaded transcript, which rebinds `Client::set_session_id` and replays the recorded prompt context. It then emits `Event::SessionResumed { id, title, unarchived, history }`, followed by an `Event::UsageUpdated` carrying the restored session cost when it is non-zero, and surfaces the old session's finalize failure and any tracker-drift warning as distinct `Event::Error`s. The history comes from `Engine::take_history`, the same projection the TUI paints at startup, which runs the adopted transcript through `session::history::interactions`: the compaction boundary first, then text, thinking, and each tool call paired with its result, with icons, labels, and result views already resolved. The TUI's `App::apply_session_resumed` clears the chat, replays the history through `ChatView::load_history`, notes an unarchived session, drops queued prompts (surfaces the count as a system message), and clears the modal stack.
 
 `SessionStore::list_paged` stats every candidate file, sorts by mtime desc, then parses files in order until it holds one readable session in the requested archive state past the page. `ListPage` carries the page and whether more matching sessions follow it. `SessionStore::list_matching` filters the same walk by the id in each file name, so a prefix lookup parses only the matching files. Each `SessionInfo` carries the file it was read from, and resume and delete act on that file. `ox --list --limit N` (default `30`, `0` = unbounded) prints ``... more (use `--limit N` to raise the cap or `--limit 0` to list all)`` when more sessions follow the cap.
 
@@ -65,7 +65,7 @@ The picker wraps [`SearchableList`](modals.md) and adds these controls and displ
 
 ## Per-Component Notes
 
-- **`ResumeCmd`**: Canonical `resume`, alias `continue`. `classify` is always `Mutating`. `echoes_input` returns false for bare (modal IS the response) and true for typed-arg (echo anchors the swap-confirmation message). Typed-arg path validates non-empty / non-whitespace, then calls `resolve_prefix_to_info`, which checks the current project first and widens on miss.
+- **`ResumeCmd`**: Canonical `resume`, alias `continue`. `classify` is always `Mutating`. `echoes_input` returns false for bare (modal IS the response) and true for typed-arg (echo anchors the swap-confirmation message). Typed-arg path forwards the trimmed prefix through `command::resume` for the engine to resolve.
 
 - **`ResumePicker`**: Wraps `SearchableList<SessionRow>` plus a footer row. Loads rows from `SessionStore::list_paged`. Tab toggles `all` and Ctrl+A toggles `archived`, each rebuilding while preserving the query. Ctrl+U clears the query, and other unbound keys edit it through the shared `LineEditor`. Enter on a focused row dispatches `Op::Resume`. Enter with no selection keeps the picker open so the user can Tab the scope or Esc out. `at_startup` builds the `ox --resume` variant, whose `Dismissal::Quit` turns a dismissal into `Op::Shutdown`.
 
@@ -75,15 +75,15 @@ The picker wraps [`SearchableList`](modals.md) and adds these controls and displ
 
 - **`SessionStore::list_paged`**: Takes a `ListScope` with project and archive flags. Stats every candidate, sorts by mtime desc, then parses files in order, keeping readable sessions in the requested archive state until it holds one past the page. `ListPage::has_more()` reports whether a matching session follows the page, for the `--list` footer and the picker's `more not loaded` note.
 
-- **`/resume <id>` resolver**: `resolve_prefix_to_info` runs the prefix lookup against the current project, then retries across all projects on miss. Returns the matched session or a `ResolveError`, which the command rephrases as a sentence.
+- **`/resume <id>` resolver**: `Engine::resume_path` calls `resolve_saved_prefix`, which runs the prefix lookup against the current project, then retries across all projects on miss, skipping the live session. A prefix without a unique match, or one that matches only the live session, fails the resume with a message saying why.
 
-- **`Op::Resume`**: Single `path` field naming the session file the user picked. The engine owns the `roll_into` call, so the slash command never touches the session handle directly.
+- **`Op::Resume`**: `target` is a `ResumeTarget`, either the `Path` of the session file the picker chose or the id `Prefix` the user typed. The engine resolves the target and owns the `roll_into` call, so the slash command never touches the session store or handle.
 
-- **`Event::SessionResumed`**: Carries id + title + the unarchived flag + the transcript projected for display, so the TUI renders it without a tool registry. App-only reaction. `StdioSink` ignores it (TUI-only event, like `SessionRolled`).
+- **`Event::SessionResumed`**: Carries id + title + the unarchived flag + the transcript projected for display, so the TUI renders it without a tool registry. `StdioSink` prints the resumed id prefix and title on stderr, plus a note when the resume unarchived the session.
 
-- **`Engine::resume` (`engine.rs`)**: Drives `roll_into`, rebinds `Client::set_session_id`, emits `SessionResumed` and, for a non-zero restored cost, `UsageUpdated`, then surfaces `finalize_failure` and `drifted_paths` as distinct `Event::Error`s. A `roll_into` failure ends the resume with `Event::TurnFailed` and keeps the live session.
+- **`Engine::resume` (`engine.rs`)**: Drives `roll_into`, rebinds `Client::set_session_id`, emits `SessionResumed` and, for a non-zero restored cost, `UsageUpdated`, then surfaces `finalize_failure` and `drifted_paths` as distinct `Event::Error`s. A prefix without a unique match or a `roll_into` failure ends the resume with `Event::TurnFailed` and keeps the live session.
 
-- **`apply_session_resumed` (TUI)**: Swaps the session id, repaints the title, clears and replays chat history, notes an unarchived session, drops queued prompts (with a system-message surface), clears the modal stack, and resumes idle.
+- **`apply_session_resumed` (TUI)**: Swaps the session id, repaints the title, clears and replays chat history, notes an unarchived session, drops queued prompts (with a system-message surface), clears the modal stack, and resumes idle. While the resume runs, `Status::Resuming` holds queued prompts, and a failed resume returns to idle with them still queued.
 
 - **`--list --limit N`**: `0` opts out of the cap, while positive values cap it. The `... more` footer line appears only when more sessions follow the cap.
 
@@ -100,19 +100,21 @@ The picker wraps [`SearchableList`](modals.md) and adds these controls and displ
 
 ## Sources
 
+- `crates/oxide-code/src/command.rs`: `resume`, the typed form shared with the bare REPL.
+- `crates/oxide-code/src/driver/stdio.rs`: `StdioSink`, which confirms a resume on stderr.
 - `crates/oxide-code/src/driver/tui.rs`: `Startup::picker`, pushed over the first frame.
-- `crates/oxide-code/src/engine.rs`: `Engine::resume`, `Engine::take_history`, `format_drift_warning`.
+- `crates/oxide-code/src/engine.rs`: `Engine::resume`, `Engine::resume_path`, `Engine::take_history`, `format_drift_warning`.
 - `crates/oxide-code/src/main.rs`: `Cli::archived`, `Cli::limit`, `Cli::resume`.
-- `crates/oxide-code/src/protocol.rs`: `Op::Resume`, `Event::SessionResumed`, `Interaction`.
+- `crates/oxide-code/src/protocol.rs`: `Op::Resume`, `ResumeTarget`, `Event::SessionResumed`, `Interaction`.
 - `crates/oxide-code/src/session/display.rs`: shared `format_metadata_line` used by the picker row.
 - `crates/oxide-code/src/session/handle.rs`: `roll_into`, `RollIntoOutcome`, `LoadedTranscript`.
 - `crates/oxide-code/src/session/history.rs`: `interactions`, the display projection `SessionResumed` carries.
 - `crates/oxide-code/src/session/list_view.rs`: `render_list` over `list_paged`.
-- `crates/oxide-code/src/session/resolver.rs`: `resolve_prefix_to_info` and its `match_in_scope` helper, shared with `/delete`.
+- `crates/oxide-code/src/session/resolver.rs`: `resolve_prefix_to_info` and its `match_in_scope` helper, called from `Engine::resume_path` and shared with `/delete`.
 - `crates/oxide-code/src/session/store/listing.rs`: `list_paged`, `latest`, `list_matching`, `ListPage`, `ListScope`.
 - `crates/oxide-code/src/slash/confirm.rs`: `ConfirmDeleteSessionModal` pushed by Ctrl+D.
 - `crates/oxide-code/src/slash/registry.rs`: `BUILT_INS` entry `&ResumeCmd`.
-- `crates/oxide-code/src/slash/resume.rs`: `ResumeCmd`, `ResumePicker` and its `at_startup` variant, `SessionRow`, and `resolve_prefix`.
+- `crates/oxide-code/src/slash/resume.rs`: `ResumeCmd`, `ResumePicker` and its `at_startup` variant, and `SessionRow`.
 - `crates/oxide-code/src/tui/app.rs`: `push_modal`.
 - `crates/oxide-code/src/tui/app/events.rs`: `apply_session_resumed`.
 - `crates/oxide-code/src/tui/components/chat.rs`: `ChatView::load_history`.

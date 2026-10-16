@@ -9,6 +9,7 @@ use ratatui::widgets::Paragraph;
 
 use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashKind, SlashOutcome};
+use crate::command;
 use crate::protocol::Op;
 use crate::tui::action::Action;
 use crate::tui::modal::chrome::{FOOTER_HEIGHT, Header, render_footer};
@@ -50,13 +51,10 @@ impl SlashCommand for RenameCmd {
     }
 
     fn execute(&self, args: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
-        let trimmed = args.trim();
-        if trimmed.is_empty() {
+        if args.trim().is_empty() {
             return Ok(SlashOutcome::Modal(Box::new(RenameModal::new(ctx.title))));
         }
-        Ok(SlashOutcome::Forward(Action::Op(Op::Rename {
-            title: trimmed.to_owned(),
-        })))
+        Ok(SlashOutcome::Forward(Action::Op(command::rename(args)?)))
     }
 }
 

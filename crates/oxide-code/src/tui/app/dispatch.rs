@@ -127,7 +127,10 @@ impl App {
             Op::Prompt(_) => return self.start_turn(op),
             Op::Interrupt => self.status_bar.set_status(Status::Cancelling),
             Op::Shutdown => self.should_quit = true,
-            Op::Resume { .. } => self.input.set_enabled(false),
+            Op::Resume { .. } => {
+                self.input.set_enabled(false);
+                self.status_bar.set_status(Status::Resuming);
+            }
             Op::Compact { .. } => {
                 self.input.set_enabled(false);
                 self.status_bar.set_status(Status::Compacting);
@@ -273,11 +276,11 @@ impl App {
     }
 
     /// Forwards the queued prompts the in-flight turn lacks. Holds them while compacting, signing
-    /// in, or cancelling, when no turn may be left to splice them in.
+    /// in, resuming, or cancelling, when no turn may be left to splice them in.
     pub(super) fn forward_queued_prompts(&mut self) {
         if matches!(
             self.status_bar.status(),
-            Status::Compacting | Status::SigningIn | Status::Cancelling,
+            Status::Compacting | Status::SigningIn | Status::Resuming | Status::Cancelling,
         ) {
             return;
         }
@@ -314,7 +317,7 @@ mod tests {
 
     use super::*;
     use crate::config::Effort;
-    use crate::protocol::{Decision, Event};
+    use crate::protocol::{Decision, Event, ResumeTarget};
     use crate::tool::{ApprovalBody, ApprovalPreview};
     use crate::tui::app::testing::{
         FakeModal, key_event, long_chat_block, push_answerable_approval, render_app, rendered_text,
@@ -959,7 +962,7 @@ mod tests {
         // `clear_history` wipes it. `finalize_idle` inside the resumed handler re-enables input.
         let (mut app, mut rx, _event_tx) = test_app(None);
         let action = Op::Resume {
-            path: "resume-target.jsonl".into(),
+            target: ResumeTarget::Path("resume-target.jsonl".into()),
         };
         app.dispatch_op(action.clone());
 
@@ -969,6 +972,7 @@ mod tests {
             !app.input.is_enabled(),
             "input must be gated until the resume event lands",
         );
+        assert_eq!(app.status_bar.status(), &Status::Resuming);
     }
 
     #[tokio::test]

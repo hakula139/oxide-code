@@ -24,7 +24,7 @@ Credentials resolve in this order: `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, 
 
 6. **Signed out is a session state.** If no explicit credential is set and no stored login works, an interactive session starts signed out and explains why, allowing `/login` to sign it in. Prompts fail with a pointer to `/login` until a credential resolves. If `/logout` leaves no credential, the session stays open in the same state. `-p` and `--no-tui` sessions still fail at startup because they cannot run `/login`.
 
-7. **TUI only.** `-p` and `--no-tui` do not run slash commands. To sign in for those modes, run `ox` once and use `/login`, or set `CLAUDE_CODE_OAUTH_TOKEN`.
+7. **TUI only.** `-p` runs no slash commands, and the `--no-tui` REPL runs only the typed session and model commands. To sign in for those modes, run `ox` once and use `/login`, or set `CLAUDE_CODE_OAUTH_TOKEN`.
 
 ## Out of Scope
 

@@ -64,6 +64,7 @@ pub(crate) enum Status {
     ToolRunning { name: String },
     Compacting,
     SigningIn,
+    Resuming,
     Cancelling,
     ExitArmed { until: Instant },
 }
@@ -296,6 +297,7 @@ impl StatusBar {
             }
             Status::Compacting => self.busy_span("Compacting · Esc to interrupt"),
             Status::SigningIn => self.busy_span("Signing in · Esc to cancel"),
+            Status::Resuming => self.busy_span("Resuming"),
             Status::Cancelling => self.busy_span("Cancelling"),
             Status::ExitArmed { .. } => {
                 Span::styled("Press Ctrl+C again to exit", self.theme.warning())
@@ -337,6 +339,7 @@ fn is_animated(status: &Status) -> bool {
             | Status::ToolRunning { .. }
             | Status::Compacting
             | Status::SigningIn
+            | Status::Resuming
             | Status::Cancelling,
     )
 }
@@ -704,6 +707,13 @@ mod tests {
     fn render_signing_in_shows_spinner_and_cancel_hint() {
         let mut bar = bar_idle(None, "~/projects/demo");
         bar.set_status(Status::SigningIn);
+        insta::assert_snapshot!(render_status(&mut bar, 80));
+    }
+
+    #[test]
+    fn render_resuming_shows_spinner_and_label() {
+        let mut bar = bar_idle(None, "~/projects/demo");
+        bar.set_status(Status::Resuming);
         insta::assert_snapshot!(render_status(&mut bar, 80));
     }
 

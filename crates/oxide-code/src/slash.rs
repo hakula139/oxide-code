@@ -1,8 +1,8 @@
 //! Slash-command surface.
 //!
 //! [`parse_slash`] detects commands. [`dispatch`] resolves them via the registry. Each command is
-//! a [`registry::SlashCommand`] impl in its own submodule. Adding one is one file plus an entry
-//! in [`registry::BUILT_INS`].
+//! a [`registry::SlashCommand`] impl in a submodule, which a pair such as `/login` and `/logout`
+//! shares. Adding one is an impl plus an entry in [`registry::BUILT_INS`].
 //!
 //! Persistence: commands never write config. Mutations are session-local. Restart returns to the
 //! user-declared config (see `docs/design/slash/commands.md` § Design Decisions 6).
@@ -38,6 +38,9 @@ pub(crate) use matcher::MatchedCommand;
 pub(crate) use parser::{Parsed, PopupState, parse_slash, popup_state, unescape_literal};
 pub(crate) use registry::{ArgCompletion, SlashKind, SlashOutcome};
 pub(crate) use resume::ResumePicker;
+
+use crate::command;
+use crate::protocol::Op;
 
 /// Filter the built-in registry against a popup query (leading `/` stripped).
 pub(crate) fn filter_built_ins(query: &str) -> Vec<MatchedCommand> {
@@ -84,7 +87,12 @@ fn dispatch_with(
         ));
     };
     cmd.execute(&parsed.args, ctx)
-        .map_err(|msg| format!("/{}: {msg}", parsed.name))
+        .map_err(|msg| named_error(parsed, &msg))
+}
+
+/// `msg` prefixed with the command name as the user typed it.
+fn named_error(parsed: &Parsed, msg: &str) -> String {
+    format!("/{}: {msg}", parsed.name)
 }
 
 fn format_available(commands: &[&dyn registry::SlashCommand]) -> String {
@@ -93,6 +101,14 @@ fn format_available(commands: &[&dyn registry::SlashCommand]) -> String {
         .map(|cmd| format!("/{}", cmd.name()))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// The op the typed form of `parsed` runs without the TUI's pickers and modals, with an error
+/// prefixed by the name the user typed. `None` when the command has no such form.
+pub(crate) fn typed_op(parsed: &Parsed) -> Option<Result<Op, String>> {
+    let cmd = registry::lookup_in(registry::BUILT_INS, &parsed.name)?;
+    let op = command::parse(cmd.name(), &parsed.args)?;
+    Some(op.map_err(|msg| named_error(parsed, &msg)))
 }
 
 /// Whether `parsed` is safe to dispatch mid-turn. Only `ReadOnly` may run while the agent is
@@ -132,6 +148,7 @@ pub(crate) fn with_isolated_xdg<R>(f: impl FnOnce(&std::path::Path) -> R) -> R {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::ResumeTarget;
     use crate::slash::registry::testing::FakeCmd;
 
     fn parsed(name: &str, args: &str) -> Parsed {
@@ -223,6 +240,35 @@ mod tests {
             dispatch_fake("etc"),
             "Unknown command: /etc. Available: /failing. Use //etc to send the literal text.",
         );
+    }
+
+    // ── typed_op ──
+
+    #[test]
+    fn typed_op_routes_an_alias_to_its_command() {
+        assert_eq!(typed_op(&parsed("new", "")), Some(Ok(Op::Clear)));
+        assert_eq!(
+            typed_op(&parsed("continue", " ab12 ")),
+            Some(Ok(Op::Resume {
+                target: ResumeTarget::Prefix("ab12".to_owned()),
+            })),
+        );
+    }
+
+    #[test]
+    fn typed_op_error_names_the_command_as_typed() {
+        assert_eq!(
+            typed_op(&parsed("continue", "")),
+            Some(Err(
+                "/continue: Missing session id. Usage: `/resume <id-prefix>`.".to_owned()
+            )),
+        );
+    }
+
+    #[test]
+    fn typed_op_is_none_for_a_command_without_a_typed_form_or_an_unknown_one() {
+        assert_eq!(typed_op(&parsed("help", "")), None);
+        assert_eq!(typed_op(&parsed("no-such-thing", "x")), None);
     }
 
     // ── classify ──
