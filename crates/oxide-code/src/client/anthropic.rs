@@ -28,7 +28,8 @@ use uuid::Uuid;
 
 use crate::client::{ResponseEvent, Wire};
 use crate::config::auth::{Auth, AuthKind, AuthSource};
-use crate::config::{CompactionConfig, Config, Effort, is_first_party_base_url};
+use crate::config::compaction::CompactionConfig;
+use crate::config::{Config, Effort, is_first_party_base_url};
 use crate::message::{ContentBlock, Message, Role};
 use crate::model::ModelSpec;
 use crate::prompt::SYSTEM_PROMPT_DYNAMIC_BOUNDARY;
@@ -492,9 +493,8 @@ mod tests {
     use super::*;
     use crate::client::{Response, StopReason, TokenUsage};
     use crate::config::auth::{Auth, AuthSource};
-    use crate::config::{
-        AutoCompactionConfig, CompactionConfig, Effort, PromptCacheTtl, test_thresholds,
-    };
+    use crate::config::compaction::{CompactionConfig, test_thresholds};
+    use crate::config::{Effort, PromptCacheTtl};
 
     // ── Fixtures ──
 
@@ -591,10 +591,7 @@ mod tests {
             TEST_MODEL,
         );
         config.prompt_cache_ttl = PromptCacheTtl::FiveMin;
-        config.compaction = CompactionConfig::resolved_for_test(AutoCompactionConfig {
-            enabled: true,
-            threshold_tokens: Some(123_456),
-        });
+        config.compaction = CompactionConfig::with_threshold_for_test(123_456);
         let client = Client::new(config, None).unwrap();
 
         assert_eq!(client.prompt_cache_ttl(), PromptCacheTtl::FiveMin);
@@ -804,10 +801,7 @@ mod tests {
     fn set_model_clamps_threshold_above_new_context_window() {
         let mut config = test_config(OFFLINE_URL, api_key(), "custom-model");
         config.max_tokens = None;
-        config.compaction = CompactionConfig::resolved_for_test(AutoCompactionConfig {
-            enabled: true,
-            threshold_tokens: Some(1_500_000),
-        });
+        config.compaction = CompactionConfig::with_threshold_for_test(1_500_000);
         let mut client = Client::new(config, Some("sid".to_owned())).unwrap();
 
         client.set_model("claude-sonnet-5-5".to_owned());

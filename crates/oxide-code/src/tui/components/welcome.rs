@@ -338,10 +338,8 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use super::*;
-    use crate::config::{
-        AutoCompactionConfig, CompactionConfig, ConfigSnapshot, Effort, PromptCacheTtl,
-        test_thresholds,
-    };
+    use crate::config::compaction::{CompactionConfig, test_thresholds};
+    use crate::config::{ConfigSnapshot, Effort, PromptCacheTtl};
     use crate::slash::LiveSessionInfo;
 
     const TEST_SEED: u64 = 0x00C0_FFEE;
@@ -369,10 +367,7 @@ mod tests {
                 max_tokens: None,
                 max_tool_rounds: None,
                 prompt_cache_ttl: PromptCacheTtl::OneHour,
-                compaction: CompactionConfig::resolved_for_test(AutoCompactionConfig {
-                    enabled: true,
-                    threshold_tokens: Some(test_thresholds::WINDOW_1M),
-                }),
+                compaction: CompactionConfig::with_threshold_for_test(test_thresholds::WINDOW_1M),
                 permission_mode: crate::permission::Mode::Auto,
                 show_thinking: false,
                 show_welcome: true,

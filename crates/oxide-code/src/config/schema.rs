@@ -6,7 +6,8 @@ use std::ops::RangeInclusive;
 use serde::de::{self, Unexpected};
 use serde::{Deserialize, Deserializer};
 
-use super::{Effort, PromptCacheTtl, StatusLineSegment, ThresholdPercent};
+use super::compaction::ThresholdPercent;
+use super::{Effort, PromptCacheTtl, StatusLineSegment};
 use crate::permission::Mode;
 use crate::util::env::whole_number_in;
 

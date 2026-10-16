@@ -5,8 +5,9 @@ use serde::ser::SerializeSeq;
 use serde::{Deserialize, Serialize, Serializer};
 
 use crate::client::{StopDetails, StopReason};
-use crate::config::{Effort, ThinkingConfig};
+use crate::config::Effort;
 use crate::message::{ContentBlock, Message, Role};
+use crate::model::ThinkingConfig;
 use crate::tool::ToolDefinition;
 
 // ── Request types ──

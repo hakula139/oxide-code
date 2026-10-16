@@ -4,31 +4,47 @@ use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Result, anyhow};
 
-/// Resolves an XDG base directory with a `$HOME`-rooted fallback.
-///
-/// `$XDG_*_HOME` is honoured only when absolute (the spec rejects relative values, which would
-/// otherwise resolve against the process cwd). Returns `None` when neither input can produce an
-/// absolute base.
-pub(crate) fn xdg_dir(
-    xdg: Option<PathBuf>,
-    home: Option<PathBuf>,
-    home_fallback: &Path,
-    subdir: &Path,
-) -> Option<PathBuf> {
-    let base = xdg
-        .filter(|p| p.is_absolute())
-        .or_else(|| home.map(|h| h.join(home_fallback)))?;
-    Some(base.join(subdir))
+/// The directory oxide-code keeps under each XDG base directory.
+const APP_DIR: &str = "ox";
+
+/// An XDG base directory that oxide-code keeps files under.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum XdgBase {
+    Config,
+    Data,
+    State,
 }
 
-/// oxide-code's data directory, `$XDG_DATA_HOME/ox` or `~/.local/share/ox`.
-pub(crate) fn data_dir() -> Option<PathBuf> {
-    xdg_dir(
-        std::env::var_os("XDG_DATA_HOME").map(PathBuf::from),
-        std::env::home_dir(),
-        Path::new(".local/share"),
-        Path::new("ox"),
-    )
+impl XdgBase {
+    pub(crate) const ALL: [Self; 3] = [Self::Config, Self::Data, Self::State];
+
+    const fn var(self) -> &'static str {
+        match self {
+            Self::Config => "XDG_CONFIG_HOME",
+            Self::Data => "XDG_DATA_HOME",
+            Self::State => "XDG_STATE_HOME",
+        }
+    }
+
+    /// The spec's default under `$HOME`.
+    const fn home_default(self) -> &'static str {
+        match self {
+            Self::Config => ".config",
+            Self::Data => ".local/share",
+            Self::State => ".local/state",
+        }
+    }
+}
+
+/// oxide-code's directory under `base`, such as `$XDG_DATA_HOME/ox` or `~/.local/share/ox`. The
+/// variable counts only when absolute, since the spec rejects relative values, which would
+/// otherwise resolve against the process cwd. `None` without a home directory to fall back to.
+pub(crate) fn app_dir(base: XdgBase) -> Option<PathBuf> {
+    let root = std::env::var_os(base.var())
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_absolute())
+        .or_else(|| std::env::home_dir().map(|home| home.join(base.home_default())))?;
+    Some(root.join(APP_DIR))
 }
 
 /// Replaces a `$HOME` prefix with `~/`, falling back to the full path.
@@ -106,58 +122,45 @@ mod tests {
     use super::testing::{HOME_VAR, abs};
     use super::*;
 
-    // ── xdg_dir ──
+    // ── app_dir ──
 
     #[test]
-    fn xdg_dir_prefers_absolute_xdg_over_home_fallback() {
-        let result = xdg_dir(
-            Some(PathBuf::from(abs("/custom/data"))),
-            Some(PathBuf::from("/home/u")),
-            Path::new(".local/share"),
-            Path::new("ox/sessions"),
-        );
-        assert_eq!(result, Some(PathBuf::from(abs("/custom/data/ox/sessions"))));
+    fn app_dir_prefers_the_base_variable_then_its_home_default() {
+        let (home, xdg) = (abs("/home/u"), abs("/xdg"));
+        for (base, var, home_default) in [
+            (XdgBase::Config, "XDG_CONFIG_HOME", ".config"),
+            (XdgBase::Data, "XDG_DATA_HOME", ".local/share"),
+            (XdgBase::State, "XDG_STATE_HOME", ".local/state"),
+        ] {
+            let (set, unset) = temp_env::with_vars(
+                [(HOME_VAR, Some(home.as_str())), (var, Some(xdg.as_str()))],
+                || {
+                    (
+                        app_dir(base),
+                        temp_env::with_var_unset(var, || app_dir(base)),
+                    )
+                },
+            );
+            assert_eq!(set, Some(Path::new(&xdg).join("ox")), "{var}");
+            assert_eq!(
+                unset,
+                Some(Path::new(&home).join(home_default).join("ox")),
+                "{var}"
+            );
+        }
     }
 
     #[test]
-    fn xdg_dir_falls_back_to_home_when_xdg_unset() {
-        let result = xdg_dir(
-            None,
-            Some(PathBuf::from("/home/u")),
-            Path::new(".config"),
-            Path::new("ox/config.toml"),
+    fn app_dir_ignores_a_relative_base_variable() {
+        let home = abs("/home/u");
+        let dir = temp_env::with_vars(
+            [
+                (HOME_VAR, Some(home.as_str())),
+                ("XDG_STATE_HOME", Some("relative/state")),
+            ],
+            || app_dir(XdgBase::State),
         );
-        assert_eq!(
-            result,
-            Some(PathBuf::from("/home/u/.config/ox/config.toml"))
-        );
-    }
-
-    #[test]
-    fn xdg_dir_ignores_relative_xdg_and_uses_home() {
-        let result = xdg_dir(
-            Some(PathBuf::from("relative")),
-            Some(PathBuf::from("/home/u")),
-            Path::new(".local/share"),
-            Path::new("ox/sessions"),
-        );
-        assert_eq!(
-            result,
-            Some(PathBuf::from("/home/u/.local/share/ox/sessions"))
-        );
-    }
-
-    #[test]
-    fn xdg_dir_is_none_without_home_or_xdg() {
-        assert!(
-            xdg_dir(
-                None,
-                None,
-                Path::new(".local/share"),
-                Path::new("ox/sessions")
-            )
-            .is_none()
-        );
+        assert_eq!(dir, Some(Path::new(&home).join(".local/state/ox")));
     }
 
     // ── tildify ──

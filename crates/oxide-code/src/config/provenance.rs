@@ -5,6 +5,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use super::load::project_config_path;
+use crate::util::env;
 use crate::util::path::tildify;
 
 // ── Layer ──
@@ -83,7 +84,7 @@ pub(crate) enum Source {
 impl Source {
     /// [`Source::Env`] when `var` is set and non-empty, matching how env vars override.
     pub(super) fn env_if_set(var: &'static str) -> Self {
-        crate::util::env::string(var).map_or(Self::Default, |_| Self::Env(var))
+        env::string(var).map_or(Self::Default, |_| Self::Env(var))
     }
 }
 

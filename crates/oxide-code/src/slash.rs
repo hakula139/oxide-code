@@ -112,9 +112,8 @@ fn classify_in(commands: &[&dyn registry::SlashCommand], parsed: &Parsed) -> Sla
 /// Fully-populated `LiveSessionInfo` for per-command tests.
 #[cfg(test)]
 pub(crate) fn test_session_info() -> LiveSessionInfo {
-    use crate::config::{
-        AutoCompactionConfig, CompactionConfig, ConfigSnapshot, Effort, PromptCacheTtl,
-    };
+    use crate::config::compaction::CompactionConfig;
+    use crate::config::{ConfigSnapshot, Effort, PromptCacheTtl};
 
     // Real MODELS row so the display name resolves to a known label.
     LiveSessionInfo {
@@ -139,10 +138,7 @@ pub(crate) fn test_session_info() -> LiveSessionInfo {
             max_tokens: None,
             max_tool_rounds: None,
             prompt_cache_ttl: PromptCacheTtl::OneHour,
-            compaction: CompactionConfig::resolved_for_test(AutoCompactionConfig {
-                enabled: true,
-                threshold_tokens: Some(155_000),
-            }),
+            compaction: CompactionConfig::with_threshold_for_test(155_000),
             permission_mode: crate::permission::Mode::Auto,
             show_thinking: false,
             show_welcome: true,

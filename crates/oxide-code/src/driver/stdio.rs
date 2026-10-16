@@ -198,7 +198,8 @@ mod tests {
     use indoc::indoc;
 
     use super::*;
-    use crate::config::{AutoCompactionConfig, Effort};
+    use crate::config::Effort;
+    use crate::config::compaction::AutoCompactionConfig;
     use crate::model::ModelSpec;
     use crate::permission::{GateTarget, PermissionClass, Policy};
     use crate::protocol::{CapturingSink, FailingSink};

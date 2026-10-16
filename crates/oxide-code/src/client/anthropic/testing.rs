@@ -10,10 +10,9 @@ use wiremock::ResponseTemplate;
 use super::Client;
 use super::transport::MessagesRequest;
 use crate::config::auth::{Auth, AuthSource};
+use crate::config::compaction::CompactionConfig;
 use crate::config::gateway::GatewayCompat;
-use crate::config::{
-    CompactionConfig, Config, DEFAULT_THEME, PromptCacheTtl, StatusLineSegment, ThemeConfig,
-};
+use crate::config::{Config, DEFAULT_THEME, PromptCacheTtl, StatusLineSegment, ThemeConfig};
 use crate::model::ModelSpec;
 
 /// Minimal [`Config`] for unit / wiremock tests.

@@ -11,7 +11,7 @@ use std::fmt::Write;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::config::{BlockBinding, Effort, ThinkingConfig, ThinkingDisplay};
+use crate::config::Effort;
 pub(crate) use pricing::TokenCostRates;
 use pricing::{HAIKU_5_5_RATES, OPUS_5_5_RATES, SONNET_5_5_RATES};
 
@@ -228,6 +228,38 @@ impl<'de> Deserialize<'de> for ModelSpec {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         String::deserialize(deserializer).map(Self::resolve)
     }
+}
+
+// ── ThinkingConfig ──
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum ThinkingConfig {
+    /// Model decides the thinking budget.
+    Adaptive {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display: Option<ThinkingDisplay>,
+        block_binding: BlockBinding,
+    },
+}
+
+/// `thinking.display` values. Omitting the field returns no thinking text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ThinkingDisplay {
+    Summarized,
+    /// Only the progress notes written between tool calls come back as text. Requires the
+    /// `thinking-display-updates-2026-08-18` beta.
+    Updates,
+}
+
+/// `thinking.block_binding`. `DropBlock` makes the API drop a replayed thinking block whose
+/// conversation prefix changed since it was produced, plus every later one, where it would
+/// otherwise reject the request. Requires the `thinking-binding-controls-2026-08-01` beta.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "prefix_mismatch_behavior", rename_all = "snake_case")]
+pub(crate) enum BlockBinding {
+    DropBlock,
 }
 
 // ── ResolvedModelId ──
@@ -512,6 +544,29 @@ mod tests {
     fn unsupported_notice_is_absent_for_catalogue_models() {
         for info in MODELS {
             assert_eq!(spec(info.id).unsupported_notice(), None, "{}", info.id);
+        }
+    }
+
+    // ── ThinkingConfig ──
+
+    #[test]
+    fn thinking_config_adaptive_serializes_display_and_block_binding() {
+        let binding = serde_json::json!({"prefix_mismatch_behavior": "drop_block"});
+        for (display, wire) in [
+            (None, None),
+            (Some(ThinkingDisplay::Summarized), Some("summarized")),
+            (Some(ThinkingDisplay::Updates), Some("updates")),
+        ] {
+            let json = serde_json::to_value(&ThinkingConfig::Adaptive {
+                display,
+                block_binding: BlockBinding::DropBlock,
+            })
+            .unwrap();
+            let mut expected = serde_json::json!({"type": "adaptive", "block_binding": binding});
+            if let Some(wire) = wire {
+                expected["display"] = wire.into();
+            }
+            assert_eq!(json, expected);
         }
     }
 }

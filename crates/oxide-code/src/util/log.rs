@@ -10,9 +10,8 @@ use tracing_appender::non_blocking::{NonBlocking, WorkerGuard};
 use tracing_subscriber::EnvFilter;
 
 use crate::util::fs::create_private_dir_all;
-use crate::util::path::xdg_dir;
+use crate::util::path::{XdgBase, app_dir};
 
-const APP_DIR: &str = "ox";
 const LOG_SUBDIR: &str = "log";
 const LOG_FILE: &str = "oxide-code.log";
 const BACKUP_LOG_FILE: &str = "oxide-code.log.1";
@@ -50,24 +49,10 @@ fn build_log_target(tui_mode: bool) -> Result<Option<(NonBlocking, WorkerGuard)>
     if !tui_mode {
         return Ok(None);
     }
-    let dir = resolve_log_dir().context("cannot determine log directory")?;
+    let dir = app_dir(XdgBase::State)
+        .map(|dir| dir.join(LOG_SUBDIR))
+        .context("cannot determine log directory")?;
     Ok(Some(open_file_appender(&dir)?))
-}
-
-fn resolve_log_dir() -> Option<PathBuf> {
-    log_dir_from(
-        std::env::var_os("XDG_STATE_HOME").map(PathBuf::from),
-        std::env::home_dir(),
-    )
-}
-
-fn log_dir_from(xdg: Option<PathBuf>, home: Option<PathBuf>) -> Option<PathBuf> {
-    xdg_dir(
-        xdg,
-        home,
-        Path::new(".local/state"),
-        &Path::new(APP_DIR).join(LOG_SUBDIR),
-    )
 }
 
 fn open_file_appender(dir: &Path) -> Result<(NonBlocking, WorkerGuard)> {
@@ -154,7 +139,7 @@ mod tests {
     use std::io::Write;
 
     use super::*;
-    use crate::util::path::testing::{HOME_VAR, abs};
+    use crate::util::path::testing::HOME_VAR;
 
     // ── make_filter ──
 
@@ -218,41 +203,6 @@ mod tests {
                 assert!(written.contains("sentinel-line"), "written={written}");
             },
         );
-    }
-
-    // ── log_dir_from ──
-
-    #[test]
-    fn log_dir_from_uses_xdg_state_home_when_set_and_absolute() {
-        let resolved = log_dir_from(
-            Some(PathBuf::from(abs("/run/user/1000/state"))),
-            Some(PathBuf::from("/home/u")),
-        );
-        assert_eq!(
-            resolved,
-            Some(PathBuf::from(abs("/run/user/1000/state/ox/log")))
-        );
-    }
-
-    #[test]
-    fn log_dir_from_falls_back_to_home_local_state_when_xdg_unset() {
-        let resolved = log_dir_from(None, Some(PathBuf::from("/home/u")));
-        assert_eq!(resolved, Some(PathBuf::from("/home/u/.local/state/ox/log")));
-    }
-
-    #[test]
-    fn log_dir_from_ignores_relative_xdg_and_uses_home_fallback() {
-        // Relative `$XDG_STATE_HOME` would resolve against cwd; `xdg_dir` rejects it.
-        let resolved = log_dir_from(
-            Some(PathBuf::from("relative/state")),
-            Some(PathBuf::from("/home/u")),
-        );
-        assert_eq!(resolved, Some(PathBuf::from("/home/u/.local/state/ox/log")));
-    }
-
-    #[test]
-    fn log_dir_from_is_none_without_xdg_or_home() {
-        assert!(log_dir_from(None, None).is_none());
     }
 
     // ── open_file_appender ──

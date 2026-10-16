@@ -22,7 +22,7 @@ use crate::message::Message;
 use crate::prompt::SessionContext;
 use crate::tool::ToolMetadata;
 use crate::util::fs::create_private_dir_all;
-use crate::util::path::data_dir;
+use crate::util::path::{XdgBase, app_dir};
 
 const SESSIONS_DIR: &str = "sessions";
 
@@ -37,7 +37,7 @@ pub(crate) struct SessionStore {
 
 impl SessionStore {
     pub(crate) fn open() -> Result<Self> {
-        let sessions_dir = data_dir()
+        let sessions_dir = app_dir(XdgBase::Data)
             .map(|dir| dir.join(SESSIONS_DIR))
             .context("cannot determine session storage directory")?;
 
