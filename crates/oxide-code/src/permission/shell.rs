@@ -1074,7 +1074,7 @@ mod tests {
             "echo '$(id)'",
             "cd x && echo > /dev/null",
             "cd x && ls",
-            "cd x && cat /etc/hosts",
+            &format!("cd x && cat {}", abs("/etc/hosts")),
             "ls $HOME",
         ] {
             assert!(!parse(command).is_opaque(), "{command:?}");
@@ -1109,8 +1109,8 @@ mod tests {
         );
         let outside = abs("/etc/hosts");
         assert_eq!(
-            writes(&format!("echo a > {outside}"), &cwd),
-            [PathBuf::from(&outside).to_string_lossy()]
+            CommandTarget::parse(&format!("echo a > {outside}"), &cwd).writes,
+            [GateTarget::for_path(&outside, &cwd)]
         );
     }
 
@@ -1145,20 +1145,10 @@ mod tests {
     fn safe_operands_names_every_word_that_may_be_a_file() {
         let command =
             CommandTarget::parse("grep -fpats --file=more -e x -- -y src", Path::new("/repo"));
-        let reads: Vec<String> = command.segments[0]
-            .safe_reads
-            .clone()
-            .unwrap()
-            .into_iter()
-            .map(|read| match read {
-                GateTarget::Path { requested, .. } => requested,
-                other => panic!("a read is a path target, got {other:?}"),
-            })
-            .collect();
-        let at = |name: &str| Path::new("/repo").join(name).to_string_lossy().into_owned();
+        let at = |name: &str| GateTarget::for_path(name, Path::new("/repo"));
         assert_eq!(
-            reads,
-            [at("pats"), at("more"), at("x"), at("-y"), at("src")]
+            command.segments[0].safe_reads,
+            Some(vec![at("pats"), at("more"), at("x"), at("-y"), at("src")])
         );
         assert_eq!(
             parse("echo $HOME *").segments[0].safe_reads,
