@@ -1,6 +1,6 @@
 # Testing
 
-Conventions for tests, coverage, and mutation testing.
+Conventions for tests, coverage, mutation testing, and live tests.
 
 ## Placement
 
@@ -46,3 +46,31 @@ cargo mutants --package oxide-code
 ```
 
 A surviving mutant usually means an assertion is too loose, so tighten it. If a mutant is genuinely equivalent, exclude it with an `exclude_re` pattern in `.cargo/mutants.toml`. Create the file for the first exclusion and add a comment explaining the equivalence.
+
+## Live Tests
+
+`tests/live.rs` covers what only a real endpoint can show: streamed text, a tool round trip, interleaved thinking replayed across turns, prompt cache reads, auto-compaction, and `--continue`. Its tests send paid requests, so they are ignored by default and return early unless `OX_LIVE=1`. Run them after changes to the client, the prompt, thinking, compaction, or session resume:
+
+```bash
+OX_LIVE=1 cargo test --test live -- --ignored
+```
+
+Each test runs `ox` with a scratch directory as its home and for its config, sessions, and logs. `ox` loads no global instructions, config file, or stored login there, so the endpoint and credentials come only from the [environment variables](../guide/configuration.md#environment-variables), and one credential variable must be set. The harness also drops inherited `OX_*` settings other than `OX_EXTRA_CA_CERTS`, along with `ANTHROPIC_EFFORT` and `ANTHROPIC_MAX_TOKENS`, so they cannot change what the tests observe. `OX_LIVE_MODEL` picks the model, `claude-haiku-5-5` by default, and `OX_LIVE_THINKING_MODEL` picks the one for the thinking test, `claude-opus-5-5` by default.
+
+After each run, a test fails when the value of `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, or `CLAUDE_CODE_OAUTH_TOKEN`, or an `ANTHROPIC_CUSTOM_HEADERS` value of 8 or more characters, appears in the run's output or in any file under the scratch directory. The failure names the variable without printing the value.
+
+Run the suite once against the Anthropic API, where the billing header carries a live `cch` hash, and once through each Anthropic-compatible gateway you support.
+
+### TUI Checklist
+
+The tests drive headless and REPL runs. Check the TUI-only paths by hand in a scratch session on Haiku, switching models where a step says so:
+
+1. **`/compact`**: Read a few files, run `/compact`, then ask about them. The reply still knows the files, and in the session file the usage record after the `compact` entry reads the earlier prefix from the cache.
+2. **`/model` swap**: Send a prompt on Opus, switch to Haiku with `/model`, and send another. Then switch back to Opus and send a third. Every reply succeeds and remembers the earlier exchanges.
+3. **Cancellation**: Press Esc while a long reply streams, and check that the stream stops within a second. The next reply also answers the cancelled prompt, which [#256](https://github.com/hakula139/oxide-code/issues/256) tracks.
+4. **Leak check**: Search the logs and session files for each credential. Pass the value straight to `grep` so it never prints, and check the exit status: `1` means no match, `0` a match, and `2` an error such as a missing directory.
+
+   ```bash
+   grep -rqF -- "$ANTHROPIC_AUTH_TOKEN" "${XDG_STATE_HOME:-$HOME/.local/state}/ox" "${XDG_DATA_HOME:-$HOME/.local/share}/ox/sessions"
+   echo $?
+   ```
