@@ -17,7 +17,7 @@ oxide-code needs an Anthropic API credential. The simplest way is to set your AP
 export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-Alternatively, if you have [Claude Code](https://code.claude.com/docs) installed and authenticated, oxide-code can use its OAuth credentials automatically. See [Configuration](configuration.md) for details.
+Alternatively, start `ox` and run `/login` to sign in to a Claude account in the browser. If you have [Claude Code](https://code.claude.com/docs) installed and authenticated, oxide-code can also use its OAuth credentials automatically. See [Configuration](configuration.md#authentication) for details.
 
 ## Start a session
 

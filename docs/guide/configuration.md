@@ -231,7 +231,7 @@ Launching from `/` or your home directory turns off the auto-allow for edits ins
 
 ## Authentication
 
-Each request carries one credential. oxide-code uses the first source that is set, in the same order as Claude Code:
+Each request carries one credential. oxide-code uses the first source that is set, in Claude Code's order with its own login ahead of the Claude Code login:
 
 | Source                                               | Sent as                         | Typical use                                           |
 | ---------------------------------------------------- | ------------------------------- | ----------------------------------------------------- |
@@ -239,13 +239,17 @@ Each request carries one credential. oxide-code uses the first source that is se
 | 2. `ANTHROPIC_API_KEY`                               | `x-api-key`                     | Anthropic Console API key                             |
 | 3. `api_key` under `[client]`                        | `x-api-key`                     | The same key, stored in the user config file          |
 | 4. `CLAUDE_CODE_OAUTH_TOKEN`                         | `Authorization: Bearer` + OAuth | Long-lived token from `claude setup-token`            |
-| 5. [Claude Code](https://code.claude.com/docs) login | `Authorization: Bearer` + OAuth | Claude Code installed and signed in                   |
+| 5. oxide-code login                                  | `Authorization: Bearer` + OAuth | Signed in with `/login`                               |
+| 6. [Claude Code](https://code.claude.com/docs) login | `Authorization: Bearer` + OAuth | Claude Code installed and signed in                   |
 
-- **`CLAUDE_CODE_OAUTH_TOKEN`** is sent as is, so it suits CI, headless machines, and secret managers. oxide-code never refreshes it and does not read the Keychain or credentials file while it is set. When the API rejects it as expired or revoked, the error names the variable, and `claude setup-token` issues a new one.
-- **The Claude Code login** comes from the `"Claude Code-credentials"` Keychain entry on macOS, falling back to `~/.claude/.credentials.json`, which is the only store on Linux. oxide-code refreshes it automatically near expiry. It is sent only to the Anthropic API: with a custom `base_url` and no other credential, startup fails and names `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_API_KEY`, so a personal subscription token never reaches a third-party host.
+- **`CLAUDE_CODE_OAUTH_TOKEN`** is sent as is, so it suits CI, headless machines, and secret managers. oxide-code never refreshes it and does not read either stored login while it is set. When the API rejects it as expired or revoked, the error names the variable, and `claude setup-token` issues a new one.
+- **The oxide-code login** comes from [`/login`](slash-commands.md#signing-in), which stores it in `$XDG_DATA_HOME/ox/credentials.json` (default: `~/.local/share/ox/credentials.json`) with mode `0600`. `/logout` deletes that file and leaves the Claude Code login alone. When the oxide-code login exists but stops working, for example after it expires, oxide-code reports it with the fix and does not fall back to the Claude Code login.
+- **The Claude Code login** comes from the `"Claude Code-credentials"` Keychain entry on macOS, falling back to `~/.claude/.credentials.json`, which is the only store on Linux.
+- **Both logins** refresh automatically near expiry and are sent only to the Anthropic API. With a custom `base_url` and no other credential, startup fails and names `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_API_KEY`, so a personal subscription token never reaches a third-party host.
+- **Without a credential**, `ox` starts signed out and shows how to sign in, and prompts fail until `/login` succeeds. `ox -p` and `ox --no-tui` exit at startup with the list of credential options.
 - **`/status` and `/config`** show the active source, such as `OAuth (CLAUDE_CODE_OAUTH_TOKEN)`, without its value.
 
-The environment variables and the Claude Code login keep credentials out of config files. An `api_key` in `~/.config/ox/config.toml` works but sits on disk in plaintext, and a project config cannot set it.
+The environment variables and the stored logins keep credentials out of config files. An `api_key` in `~/.config/ox/config.toml` works but sits on disk in plaintext, and a project config cannot set it.
 
 ## LLM gateways
 
@@ -265,7 +269,7 @@ export NODE_EXTRA_CA_CERTS=~/.config/ox/corp-cachain.pem
 - **`CLAUDE_CODE_ATTRIBUTION_HEADER=0`** drops the `x-anthropic-billing-header` attribution block from the system prompt. By default, agent turns and `/compact` summaries carry it under every credential, because strict gateways reject requests that lack it. Session titles carry it only under OAuth. As in Claude Code, the block on a custom base URL omits the per-request `cch` hash, so it stays the same from request to request.
 - **`CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS=1`** drops `output_config.format` from session-title requests, for gateways whose upstream rejects it. Titles then rely on the prompt alone to return JSON.
 
-oxide-code is stricter than Claude Code in three ways. It never sends the Claude Code login to a custom base URL, it sends one credential even when several are set, and it rejects malformed `ANTHROPIC_CUSTOM_HEADERS` lines where Claude Code skips them.
+oxide-code is stricter than Claude Code in three ways. It never sends a stored login to a custom base URL, it sends one credential even when several are set, and it rejects malformed `ANTHROPIC_CUSTOM_HEADERS` lines where Claude Code skips them.
 
 ## Environment variables
 

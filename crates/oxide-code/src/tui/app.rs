@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use crossterm::event::{Event as CrosstermEvent, EventStream, KeyCode, KeyEvent, KeyEventKind};
 use futures::{Stream, StreamExt};
+use indoc::formatdoc;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
@@ -26,6 +27,7 @@ use super::glyphs::{NEWLINE_GLYPH, USER_PROMPT_PREFIX, USER_PROMPT_PREFIX_WIDTH}
 use super::modal::{Modal, ModalAction, ModalStack};
 use super::terminal::{Tui, synchronized_update, write_status_hyperlinks};
 use super::theme::Theme;
+use crate::config::auth::AuthSource;
 use crate::config::{AutoCompactionConfig, Effort, StatusLineSegment, display_auto_compaction};
 use crate::model::ModelSpec;
 use crate::permission::SessionGrant;
@@ -53,6 +55,8 @@ pub(crate) struct App {
     session_info: LiveSessionInfo,
     events: mpsc::UnboundedReceiver<Event>,
     ops: mpsc::Sender<Op>,
+    /// Opens a sign-in URL in the system browser. Tests replace it so they never launch one.
+    open_browser: fn(&str) -> std::io::Result<()>,
     /// Prompt already painted for the in-flight turn. Replayed if auto-compaction clears chat.
     active_prompt: Option<String>,
     /// FIFO of prompts submitted mid-turn, kept as typed so Esc restores a `//` escape. The TUI owns
@@ -114,6 +118,7 @@ impl App {
             session_info,
             events,
             ops,
+            open_browser: |url| open::that_detached(url),
             active_prompt: None,
             pending_prompts: VecDeque::new(),
             forwarded_prompts: 0,
@@ -314,12 +319,17 @@ impl App {
                 self.input.set_enabled(false);
                 self.status_bar.set_status(Status::Compacting);
             }
+            Op::Login => {
+                self.input.set_enabled(false);
+                self.status_bar.set_status(Status::SigningIn);
+            }
             Op::Queue(_)
             | Op::Resolve { .. }
             | Op::SetModel { .. }
             | Op::Clear
             | Op::Archive
-            | Op::Rename { .. } => {}
+            | Op::Rename { .. }
+            | Op::Logout => {}
         }
         self.send_op(op);
     }
@@ -438,12 +448,12 @@ impl App {
         self.forward_queued_prompts();
     }
 
-    /// Forwards the queued prompts the in-flight turn lacks. Holds them while compacting or
-    /// cancelling, when no turn may be left to splice them in.
+    /// Forwards the queued prompts the in-flight turn lacks. Holds them while compacting, signing
+    /// in, or cancelling, when no turn may be left to splice them in.
     fn forward_queued_prompts(&mut self) {
         if matches!(
             self.status_bar.status(),
-            Status::Compacting | Status::Cancelling,
+            Status::Compacting | Status::SigningIn | Status::Cancelling,
         ) {
             return;
         }
@@ -548,6 +558,13 @@ impl App {
                 requested_effort,
                 auto_compaction,
             } => self.apply_config_changed(model, effort, requested_effort, auto_compaction),
+            Event::LoginStarted { url } => self.open_sign_in_url(&url),
+            Event::SignedIn { auth } => self.apply_signed_in(auth),
+            Event::SignedOut {
+                removed,
+                auth,
+                fallback_error,
+            } => self.apply_signed_out(removed, auth, fallback_error),
             Event::TurnFailed(msg) => {
                 self.chat.push_error(&msg);
                 self.finish_turn();
@@ -689,6 +706,55 @@ impl App {
             .config
             .apply_swap(model, effort, requested_effort, auto_compaction);
         self.chat.push_system_message(confirmation);
+    }
+
+    /// Opens `url` in the browser and prints it in case the browser does not open. The sign-in
+    /// returns to a loopback listener, so only a browser on this machine can complete it.
+    fn open_sign_in_url(&mut self, url: &str) {
+        let message = match (self.open_browser)(url) {
+            Ok(()) => formatdoc! {"
+            Opened the browser to sign in. If it did not open, visit this URL in a browser on \
+                this machine:
+                {url}"},
+            Err(e) => {
+                tracing::debug!("failed to open the browser: {e}");
+                formatdoc! {"
+                    Could not open the browser. Sign in at this URL in a browser on this machine:
+                    {url}"}
+            }
+        };
+        self.chat.push_system_message(message);
+    }
+
+    fn apply_signed_in(&mut self, auth: AuthSource) {
+        self.session_info.config.auth = Some(auth);
+        let message = if auth == AuthSource::OxLogin {
+            format!("Signed in. Requests now use {auth}.")
+        } else {
+            format!("Signed in. {auth} takes precedence, so requests keep using it.")
+        };
+        self.chat.push_system_message(message);
+        self.finish_turn();
+    }
+
+    fn apply_signed_out(
+        &mut self,
+        removed: bool,
+        auth: Option<AuthSource>,
+        fallback_error: Option<String>,
+    ) {
+        self.session_info.config.auth = auth;
+        let outcome = if removed {
+            "Signed out of oxide-code."
+        } else {
+            "No oxide-code login is stored."
+        };
+        let active = match (auth, fallback_error) {
+            (Some(source), _) => format!("Requests use {source}."),
+            (None, Some(e)) => format!("No credential is active: {e}"),
+            (None, None) => "No credential is active. Run /login to sign in.".to_owned(),
+        };
+        self.chat.push_system_message(format!("{outcome} {active}"));
     }
 
     /// Goes idle, then submits the next queued prompt.
@@ -995,7 +1061,7 @@ mod tests {
     fn test_app(title: Option<&str>) -> (App, mpsc::Receiver<Op>, mpsc::UnboundedSender<Event>) {
         let (event_tx, events) = mpsc::unbounded_channel::<Event>();
         let (ops, op_rx) = mpsc::channel::<Op>(8);
-        let app = App::new(
+        let mut app = App::new(
             &Theme::default(),
             test_session_info(),
             false,
@@ -1007,6 +1073,7 @@ mod tests {
                 unarchived: false,
             },
         );
+        app.open_browser = |_| Ok(());
         (app, op_rx, event_tx)
     }
 
@@ -1047,7 +1114,8 @@ mod tests {
             session_id: "test-session".to_owned(),
             session_allow: Vec::new(),
             config: ConfigSnapshot {
-                auth: crate::config::auth::AuthSource::ApiKeyEnv,
+                auth: Some(crate::config::auth::AuthSource::ApiKeyEnv),
+                signed_out_notice: None,
                 base_url: "https://api.test.invalid".to_owned(),
                 extra_ca_certs: None,
                 gateway: crate::config::gateway::GatewaySnapshot {
@@ -2074,6 +2142,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dispatch_login_disables_input_and_holds_prompts_typed_while_signing_in() {
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_op(Op::Login);
+
+        assert_eq!(rx.recv().await, Some(Op::Login));
+        assert!(!app.input.is_enabled());
+        assert_eq!(app.status_bar.status(), &Status::SigningIn);
+
+        app.dispatch_action(Action::Submit("typed-while-signing-in".to_owned()));
+
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "no turn exists to splice a prompt into while signing in",
+        );
+        assert_eq!(
+            app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
+            vec!["typed-while-signing-in".to_owned()],
+        );
+    }
+
+    #[tokio::test]
     async fn dispatch_submit_during_cancelling_holds_locally_without_forwarding() {
         let (mut app, mut rx, _event_tx) = test_app(None);
         app.dispatch_action(Action::Submit("active".to_owned()));
@@ -2645,6 +2734,137 @@ mod tests {
         let body = app.chat.last_system_text().expect("confirmation block");
         assert_eq!(body, "Effort set to xhigh.");
         assert!(app.dirty);
+    }
+
+    #[test]
+    fn handle_login_started_opens_the_browser_and_prints_the_url() {
+        let (mut app, _rx, _event_tx) = test_app(None);
+        let started = || Event::LoginStarted {
+            url: "https://example.com/authorize".to_owned(),
+        };
+
+        app.open_browser = |url| {
+            assert_eq!(url, "https://example.com/authorize");
+            Ok(())
+        };
+        app.handle_engine_event(started());
+        assert_eq!(
+            app.chat.last_system_text(),
+            Some(indoc::indoc! {"
+            Opened the browser to sign in. If it did not open, visit this URL in a browser on \
+                this machine:
+                https://example.com/authorize"}),
+        );
+
+        app.open_browser = |_| Err(io::Error::other("no browser"));
+        app.handle_engine_event(started());
+        assert_eq!(
+            app.chat.last_system_text(),
+            Some(indoc::indoc! {"
+                Could not open the browser. Sign in at this URL in a browser on this machine:
+                https://example.com/authorize"}),
+        );
+    }
+
+    #[test]
+    fn handle_signed_in_names_the_credential_requests_use() {
+        for (auth, expected) in [
+            (
+                AuthSource::OxLogin,
+                "Signed in. Requests now use OAuth (oxide-code login).",
+            ),
+            (
+                AuthSource::ApiKeyEnv,
+                "Signed in. API key (ANTHROPIC_API_KEY) takes precedence, so requests keep using \
+                 it.",
+            ),
+        ] {
+            let (mut app, _rx, _event_tx) = test_app(None);
+            app.session_info.config.auth = None;
+            app.status_bar.set_status(Status::SigningIn);
+
+            app.handle_engine_event(Event::SignedIn { auth });
+
+            assert_eq!(app.session_info.config.auth, Some(auth));
+            assert_eq!(app.chat.last_system_text(), Some(expected));
+            assert_eq!(app.status_bar.status(), &Status::Idle);
+            assert!(app.input.is_enabled());
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_signed_in_runs_a_prompt_held_while_signing_in() {
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_op(Op::Login);
+        rx.recv().await.expect("login forwarded");
+        app.dispatch_action(Action::Submit("held".to_owned()));
+
+        app.handle_engine_event(Event::SignedIn {
+            auth: AuthSource::OxLogin,
+        });
+
+        assert_eq!(rx.recv().await, Some(Op::Prompt("held".to_owned())));
+        assert_eq!(app.status_bar.status(), &Status::Streaming);
+    }
+
+    #[tokio::test]
+    async fn handle_signed_in_after_a_lost_cancel_keeps_the_held_prompt_queued() {
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_op(Op::Login);
+        rx.recv().await.expect("login forwarded");
+        app.dispatch_action(Action::Submit("held".to_owned()));
+        app.status_bar.set_status(Status::Cancelling);
+
+        app.handle_engine_event(Event::SignedIn {
+            auth: AuthSource::OxLogin,
+        });
+
+        assert_eq!(app.status_bar.status(), &Status::Idle);
+        assert_eq!(app.pending_prompts, ["held"]);
+        assert!(rx.try_recv().is_err(), "the held prompt must not run");
+    }
+
+    #[test]
+    fn handle_signed_out_reports_the_removal_and_the_credential_requests_use() {
+        for (removed, auth, fallback_error, expected) in [
+            (
+                true,
+                Some(AuthSource::ClaudeCodeLogin),
+                None,
+                "Signed out of oxide-code. Requests use OAuth (Claude Code login).",
+            ),
+            (
+                true,
+                None,
+                None,
+                "Signed out of oxide-code. No credential is active. Run /login to sign in.",
+            ),
+            (
+                true,
+                None,
+                Some("Claude Code login has expired. Run `claude` to sign in again."),
+                "Signed out of oxide-code. No credential is active: Claude Code login has expired. \
+                 Run `claude` to sign in again.",
+            ),
+            (
+                false,
+                Some(AuthSource::ApiKeyEnv),
+                None,
+                "No oxide-code login is stored. Requests use API key (ANTHROPIC_API_KEY).",
+            ),
+        ] {
+            let (mut app, _rx, _event_tx) = test_app(None);
+            app.session_info.config.auth = Some(AuthSource::OxLogin);
+
+            app.handle_engine_event(Event::SignedOut {
+                removed,
+                auth,
+                fallback_error: fallback_error.map(ToOwned::to_owned),
+            });
+
+            assert_eq!(app.session_info.config.auth, auth);
+            assert_eq!(app.chat.last_system_text(), Some(expected));
+        }
     }
 
     // ── format_config_change ──

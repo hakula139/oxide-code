@@ -36,6 +36,7 @@ pub(crate) async fn engine(base_url: String, store: &SessionStore, cwd: &Path) -
     Engine {
         policy: client.permission().clone(),
         client,
+        oauth_token_url: "http://127.0.0.1:9/token".to_owned(),
         tools: Arc::new(ToolRegistry::new(Vec::new())),
         store: store.clone(),
         session: handle::start(store, MODEL),

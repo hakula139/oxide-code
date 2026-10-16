@@ -12,9 +12,8 @@ use tracing::warn;
 use uuid::Uuid;
 
 use crate::util::fs::{atomic_write_private, create_private_dir_all};
-use crate::util::path::xdg_dir;
+use crate::util::path::data_dir;
 
-const DATA_DIR: &str = "ox";
 const FILE_NAME: &str = "user-id";
 const ID_LEN: usize = 64;
 
@@ -50,12 +49,7 @@ fn try_load_or_create_at(path: &Path) -> Result<String> {
 }
 
 fn device_id_path() -> Option<PathBuf> {
-    xdg_dir(
-        std::env::var_os("XDG_DATA_HOME").map(PathBuf::from),
-        std::env::home_dir(),
-        Path::new(".local/share"),
-        &Path::new(DATA_DIR).join(FILE_NAME),
-    )
+    data_dir().map(|dir| dir.join(FILE_NAME))
 }
 
 fn read_existing(path: &Path) -> Result<Option<String>> {

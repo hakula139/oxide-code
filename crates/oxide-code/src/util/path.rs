@@ -21,6 +21,16 @@ pub(crate) fn xdg_dir(
     Some(base.join(subdir))
 }
 
+/// oxide-code's data directory, `$XDG_DATA_HOME/ox` or `~/.local/share/ox`.
+pub(crate) fn data_dir() -> Option<PathBuf> {
+    xdg_dir(
+        std::env::var_os("XDG_DATA_HOME").map(PathBuf::from),
+        std::env::home_dir(),
+        Path::new(".local/share"),
+        Path::new("ox"),
+    )
+}
+
 /// Replaces a `$HOME` prefix with `~/`, falling back to the full path.
 pub(crate) fn tildify(path: &Path) -> String {
     std::env::home_dir()

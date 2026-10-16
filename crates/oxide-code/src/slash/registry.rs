@@ -12,6 +12,7 @@ use super::diff::DiffCmd;
 use super::effort::EffortCmd;
 use super::help::HelpCmd;
 use super::init::InitCmd;
+use super::login::{LoginCmd, LogoutCmd};
 use super::model::ModelCmd;
 use super::rename::RenameCmd;
 use super::resume::ResumeCmd;
@@ -134,6 +135,8 @@ pub(super) const BUILT_INS: &[&dyn SlashCommand] = &[
     &EffortCmd,
     &HelpCmd,
     &InitCmd,
+    &LoginCmd,
+    &LogoutCmd,
     &ModelCmd,
     &RenameCmd,
     &ResumeCmd,
