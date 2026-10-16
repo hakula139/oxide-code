@@ -195,6 +195,8 @@ impl EventSink for StdioSink {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use indoc::indoc;
 
     use super::*;
@@ -241,7 +243,7 @@ mod tests {
         Policy::default()
             .session_grant(
                 PermissionClass::Bash,
-                &GateTarget::Command(command.to_owned()),
+                &GateTarget::for_command(command, Path::new("/repo")),
             )
             .unwrap()
     }

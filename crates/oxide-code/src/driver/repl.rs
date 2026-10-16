@@ -240,6 +240,8 @@ fn shown(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use indoc::indoc;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -265,7 +267,7 @@ mod tests {
         Policy::default()
             .session_grant(
                 PermissionClass::Bash,
-                &GateTarget::Command(command.to_owned()),
+                &GateTarget::for_command(command, Path::new("/repo")),
             )
             .unwrap()
     }
@@ -373,7 +375,7 @@ mod tests {
     async fn drive_answers_an_approval_from_the_next_input_line() {
         with_pinned_home(async {
             let server = MockServer::start().await;
-            mount_tool_call_once(&server, "call-1", "bash", r#"{"command":"ls"}"#).await;
+            mount_tool_call_once(&server, "call-1", "bash", r#"{"command":"git push"}"#).await;
             mount_reply(&server, "Done.").await;
             let dir = tempfile::tempdir().unwrap();
             let engine = engine(server.uri(), &test_store(dir.path()), dir.path())
@@ -410,7 +412,7 @@ mod tests {
     async fn drive_without_a_terminal_denies_approvals_and_keeps_every_line_a_prompt() {
         with_pinned_home(async {
             let server = MockServer::start().await;
-            mount_tool_call_once(&server, "call-1", "bash", r#"{"command":"ls"}"#).await;
+            mount_tool_call_once(&server, "call-1", "bash", r#"{"command":"git push"}"#).await;
             mount_reply(&server, "Done.").await;
             let dir = tempfile::tempdir().unwrap();
             let engine = engine(server.uri(), &test_store(dir.path()), dir.path())
@@ -489,16 +491,17 @@ mod tests {
             f
 
             maybe
+            run the tests
             n
         "};
         let (decision, out) = decide(input, None).await;
 
         assert_eq!(decision, Decision::Deny);
-        assert_eq!(out.matches(CHOICES).count(), 4, "{out}");
+        assert_eq!(out.matches(CHOICES).count(), 5, "{out}");
         assert_eq!(
             out.matches("Answer with one of the letters").count(),
-            2,
-            "{out}"
+            3,
+            "a prompt typed ahead re-asks: {out}"
         );
     }
 

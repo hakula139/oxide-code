@@ -11,6 +11,7 @@ atuin
 cachain
 cachix
 catppuccin
+chdir
 claudemd
 Clawd
 clippy
@@ -38,6 +39,9 @@ envrc
 ESRCH
 fcntl
 feff
+fpats
+fprint
+fprintf
 frappe
 getpwuid
 Ghostty
@@ -58,6 +62,7 @@ macchiato
 misparse
 misparses
 mkfifo
+mksh
 MMIX
 mplan
 mpsc
@@ -77,15 +82,18 @@ nonewline
 noprefix
 nucleo
 numtide
+okdir
 oxalica
 onig
 pgid
 PKCE
 pkgs
 pname
+popd
 println
 Ptmux
 pulldown
+pushd
 RAII
 ratatui
 rects
@@ -109,6 +117,7 @@ syntect
 sysname
 SYSPROMPT
 taplo
+tcsh
 tengu
 Tera
 termio

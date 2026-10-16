@@ -89,6 +89,8 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
   "env-filter",
   "fmt",
 ] }
+tree-sitter = "0.27"
+tree-sitter-bash = "0.25"
 unicode-normalization = "0.1"
 unicode-segmentation = "1"
 unicode-width = "0.2"

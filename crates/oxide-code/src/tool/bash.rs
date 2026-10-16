@@ -45,9 +45,9 @@ impl Tool for BashTool {
         PermissionClass::Bash
     }
 
-    fn gate_target(&self, input: &serde_json::Value, _cwd: &Path) -> GateTarget {
+    fn gate_target(&self, input: &serde_json::Value, cwd: &Path) -> GateTarget {
         extract_input_field(input, "command")
-            .map(|c| GateTarget::Command(c.to_owned()))
+            .map(|command| GateTarget::for_command(command, cwd))
             .unwrap_or_default()
     }
 
@@ -446,7 +446,7 @@ mod tests {
     fn gate_target_extracts_the_command() {
         let target =
             BashTool.gate_target(&serde_json::json!({"command": "ls -la"}), Path::new("/"));
-        assert!(matches!(target, GateTarget::Command(c) if c == "ls -la"));
+        assert!(matches!(target, GateTarget::Command(c) if c.command() == "ls -la"));
     }
 
     #[test]

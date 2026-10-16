@@ -1040,6 +1040,7 @@ fn append_sentence(mut message: String, sentence: &str) -> String {
 #[cfg(test)]
 mod tests {
     use std::io::{self, Write};
+    use std::path::Path;
     use std::sync::{Arc, Mutex};
 
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
@@ -1052,6 +1053,7 @@ mod tests {
 
     use super::*;
     use crate::config::compaction::test_thresholds;
+    use crate::permission::GateTarget;
     use crate::permission::rule::Rule;
     use crate::protocol::{Decision, ToolCall, ToolResult, UsageSnapshot};
     use crate::tool::{ApprovalBody, ToolResultView};
@@ -1762,7 +1764,7 @@ mod tests {
         let grant = crate::permission::Policy::default()
             .session_grant(
                 crate::permission::PermissionClass::Bash,
-                &crate::permission::GateTarget::Command("cargo test".to_owned()),
+                &GateTarget::for_command("cargo test", Path::new("/repo")),
             )
             .unwrap();
         app.handle_engine_event(Event::ApprovalRequested {

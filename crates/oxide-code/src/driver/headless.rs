@@ -301,7 +301,7 @@ mod tests {
             for &format in OutputFormat::value_variants() {
                 let server = MockServer::start().await;
                 mount_tool_call_once(&server, "call-1", "look", "{}").await;
-                mount_tool_call_once(&server, "call-2", "bash", r#"{"command":"ls"}"#).await;
+                mount_tool_call_once(&server, "call-2", "bash", r#"{"command":"git push"}"#).await;
                 mount_reply(&server, "Done.").await;
                 let dir = tempfile::tempdir().unwrap();
                 let tools = ToolRegistry::new(vec![Box::new(LookTool), Box::new(BashTool)]);

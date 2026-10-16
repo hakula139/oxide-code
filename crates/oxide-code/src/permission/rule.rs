@@ -2,18 +2,19 @@
 //!
 //! The form mirrors Claude Code's for transferable muscle memory. A rule names a
 //! [`PermissionClass`] (`read`, `edit`, or `bash`, case-insensitive) and an optional specifier.
-//! `bash` specifiers match the command string in exact, prefix (`cargo test:*`), or wildcard
-//! (`git *`) shapes. `read` and `edit` specifiers are path globs where `*` and `?` stay within one
+//! `bash` specifiers match each simple command [`CommandTarget`] parses out of a command, in exact,
+//! prefix (`cargo test:*`), or wildcard (`git *`) shapes. `read` and `edit` specifiers are path globs where `*` and `?` stay within one
 //! path segment and `**` spans segments. A relative glob matches the cwd-relative path of a target
 //! inside the working directory, and an absolute or `~/` glob matches the resolved absolute path. A
 //! deny rule also matches the path as the call spells it and where the rule's literal prefix
 //! resolved when the policy loaded ([`Rule::resolved_prefix`]), comparing names by [`fold_name`]. A
 //! bare class name, `class()`, or `class(*)` covers the whole class.
 //!
-//! Because a `bash` command is an unparsed string, matching is best-effort UX rather than a
-//! security boundary (see `docs/design/tools/permissions.md`). The asymmetry is deliberate: an
-//! allow rule refuses to match a compound command, while a deny rule matches the whole command or
-//! any chained segment of it, so widening stays conservative and revoking stays aggressive.
+//! Matching a `bash` command narrows the ways a rule can be fooled, but it is not a security
+//! boundary (see `docs/design/tools/permissions.md`). The asymmetry is deliberate: an allow rule
+//! must match every simple command of a command that is not opaque, while a deny rule matches the
+//! whole command or any simple command of it, as written or unquoted, so widening stays
+//! conservative and revoking stays aggressive.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -23,6 +24,7 @@ use globset::{GlobBuilder, GlobMatcher};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
+use crate::permission::shell::{CommandTarget, Segment, basename};
 use crate::permission::{PermissionClass, Target, fold_name, resolve};
 use crate::util::path::{expand_user, lexical_normalize, slash_separated};
 use crate::util::text::is_hidden;
@@ -70,19 +72,19 @@ enum BashSpec {
     Wildcard(Regex),
 }
 
-/// Which rule set a match is being evaluated for, selecting how compound `bash` commands, symlinked
-/// paths, and name spellings match. Allow widens, so it matches conservatively. Deny revokes, so it
-/// matches aggressively. This keeps the security-critical asymmetry legible at the call sites in
+/// Which rule set a match is being evaluated for, selecting how `bash` commands, symlinked paths, and
+/// name spellings match. Allow widens, so it matches conservatively. Deny revokes, so it matches
+/// aggressively. This keeps the security-critical asymmetry legible at the call sites in
 /// [`crate::permission::Policy::decide`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum MatchDiscipline {
-    /// A single non-compound command must match the whole rule, and a path matches only where it
-    /// resolves, with names exactly as the rule writes them. Neither a chained command, a symlink,
-    /// nor a variant spelling widens.
+    /// Every simple command of a command that is not opaque must match as written, and a path
+    /// matches only where it resolves, with names exactly as the rule writes them. Neither a
+    /// chained command, a symlink, nor a variant spelling widens.
     Allow,
-    /// The whole command or any chained segment may match, and a path matches as resolved or as
-    /// spelled, with names folded too. A danger behind a safe head, a symlink, or a variant
-    /// spelling is caught.
+    /// The whole command or any simple command may match, as written or unquoted, and a path
+    /// matches as resolved or as spelled, with names folded too. A danger behind a safe head, a
+    /// symlink, or a variant spelling is caught.
     Deny,
 }
 
@@ -125,19 +127,23 @@ impl Rule {
         })
     }
 
-    /// The narrowest rule that allows the call in `class` with `target`: its exact command, or the
-    /// path the tool resolved, relative inside cwd. `None` when no specifier names the call alone,
-    /// as for a command with a `*` that would parse as a wildcard, or when a character of it would
-    /// not paint as itself, so the user always sees the exact rule they grant.
+    /// The narrowest rule that allows the call in `class` with `target`: the one simple command a
+    /// command runs, or the path the tool resolved, relative inside cwd. `None` when no specifier
+    /// names the call alone, as for a command that runs several or a `*` that would parse as a
+    /// wildcard, or when a character of it would not paint as itself, so the user always sees the
+    /// exact rule they grant.
     pub(super) fn for_call(class: PermissionClass, target: &Target<'_>) -> Option<Self> {
         let spec = match target {
-            Target::Command(command) if !command.contains('*') => command.trim().to_owned(),
+            Target::Command(command) => match command.segments() {
+                [segment] if !segment.text().contains('*') => segment.text().to_owned(),
+                _ => return None,
+            },
             Target::Path {
                 canonical,
                 relative,
                 ..
             } => globset::escape(&slash_separated(Path::new(relative.unwrap_or(canonical)))),
-            _ => return None,
+            Target::None => return None,
         };
         if spec.is_empty() || !spec.chars().all(paints_as_itself) {
             return None;
@@ -163,8 +169,16 @@ impl Rule {
         }
         let deny = discipline == MatchDiscipline::Deny;
         match (&self.spec, target) {
+            (_, Target::Command(command)) if !deny => {
+                !command.is_opaque()
+                    && !command.segments().is_empty()
+                    && command
+                        .segments()
+                        .iter()
+                        .all(|segment| self.allows(segment))
+            }
             (Spec::Any, _) => true,
-            (Spec::Bash(spec), Target::Command(cmd)) => spec.matches(cmd, discipline),
+            (Spec::Bash(spec), Target::Command(command)) => spec.denies(command),
             (
                 Spec::RelativePath(glob),
                 Target::Path {
@@ -188,6 +202,16 @@ impl Rule {
                     || (deny && requested != canonical && glob.is_match(requested, discipline))
             }
             _ => false,
+        }
+    }
+
+    /// Whether this `bash` rule allows `segment`, one simple command of a command that is not
+    /// opaque.
+    pub(super) fn allows(&self, segment: &Segment) -> bool {
+        match &self.spec {
+            Spec::Any => self.class == PermissionClass::Bash,
+            Spec::Bash(spec) => spec.matches(segment.text()),
+            Spec::RelativePath(_) | Spec::AbsolutePath(_) => false,
         }
     }
 
@@ -328,54 +352,29 @@ impl BashSpec {
         }
     }
 
-    fn matches(&self, command: &str, discipline: MatchDiscipline) -> bool {
-        if discipline == MatchDiscipline::Deny {
-            // Test the whole command so deny patterns containing chain operators still fire,
-            // then each segment so a danger behind a safe head (`ls && rm -rf`) is caught too.
-            return self.matches_segment(command.trim())
-                || split_segments(command).any(|seg| self.matches_segment(seg));
-        }
-        // Allow rules never widen a compound command: a single chained operator forfeits the match.
-        !is_compound(command) && self.matches_segment(command.trim())
+    /// Whether this deny specifier matches `command` as a whole, so a pattern that itself chains
+    /// commands (the shipped `* | sh` and fork-bomb defaults) still fires, or any simple command of
+    /// it as written, unquoted, or with its name's directory dropped.
+    fn denies(&self, command: &CommandTarget) -> bool {
+        self.matches(command.command().trim())
+            || command.segments().iter().any(|segment| {
+                let unquoted = segment.words().join(" ");
+                let name = segment.words().first().map_or("", String::as_str);
+                let bare = format!("{}{}", basename(name), &unquoted[name.len()..]);
+                self.matches(segment.text()) || self.matches(&unquoted) || self.matches(&bare)
+            })
     }
 
-    fn matches_segment(&self, segment: &str) -> bool {
+    fn matches(&self, command: &str) -> bool {
         match self {
-            Self::Exact(s) => segment == s,
-            Self::Prefix(p) => segment == p || segment.starts_with(&format!("{p} ")),
-            Self::Wildcard(re) => re.is_match(segment),
+            Self::Exact(s) => command == s,
+            Self::Prefix(p) => command == p || command.starts_with(&format!("{p} ")),
+            Self::Wildcard(re) => re.is_match(command),
         }
     }
 }
 
 // ── Bash Command Helpers ──
-
-/// Shell operators that chain one command into another. Used to split a command for deny matching
-/// and to reject compound commands for allow matching.
-const CHAIN_CHARS: [char; 4] = [';', '|', '&', '\n'];
-
-/// Redirection operators. They do not chain a second command, so they are not split points for deny
-/// matching, but an allow rule must still refuse them: `echo hi > /etc/passwd` is not `echo hi`.
-const REDIRECT_CHARS: [char; 2] = ['>', '<'];
-
-/// Whether a command chains, pipes, redirects, or substitutes into another command or file.
-/// Best-effort: it is the gate against an allow rule silently widening `cargo test` to
-/// `cargo test; rm -rf /` or `echo ok > /etc/passwd`.
-fn is_compound(command: &str) -> bool {
-    command.contains(CHAIN_CHARS)
-        || command.contains(REDIRECT_CHARS)
-        || command.contains("$(")
-        || command.contains('`')
-}
-
-/// Splits a command on chain operators into trimmed, non-empty segments. `&&` and `||` split on
-/// their single chars and the empty halves drop out, so `a && b` yields `a`, `b`.
-fn split_segments(command: &str) -> impl Iterator<Item = &str> {
-    command
-        .split(CHAIN_CHARS)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-}
 
 /// Converts a bash wildcard specifier to an anchored regex: literal text is escaped and `*` becomes
 /// `.*`, so `git *` matches `git status` but not `cargo git`.
@@ -393,11 +392,11 @@ fn glob_to_regex(glob: &str) -> Regex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::permission::Zone;
+    use crate::permission::{GateTarget, Zone};
     use crate::util::path::testing::{HOME_VAR, abs};
 
-    fn cmd(s: &str) -> Target<'_> {
-        Target::Command(s)
+    fn cmd(s: &str) -> GateTarget {
+        GateTarget::for_command(s, Path::new("/repo"))
     }
 
     fn path<'a>(canonical: &'a str, relative: Option<&'a str>) -> Target<'a> {
@@ -417,7 +416,7 @@ mod tests {
         let rule = Rule::parse("bash").unwrap();
         assert!(rule.matches(
             PermissionClass::Bash,
-            &cmd("anything; rm -rf /"),
+            &cmd("anything; rm -rf /").as_target(),
             MatchDiscipline::Allow
         ));
     }
@@ -440,7 +439,11 @@ mod tests {
     #[test]
     fn parse_lowercases_class_name_for_case_insensitive_match() {
         let rule = Rule::parse("Bash(ls)").unwrap();
-        assert!(rule.matches(PermissionClass::Bash, &cmd("ls"), MatchDiscipline::Allow));
+        assert!(rule.matches(
+            PermissionClass::Bash,
+            &cmd("ls").as_target(),
+            MatchDiscipline::Allow
+        ));
     }
 
     #[test]
@@ -477,16 +480,16 @@ mod tests {
 
     #[test]
     fn for_call_names_the_exact_command() {
-        let rule = Rule::for_call(PermissionClass::Bash, &cmd(" cargo test ")).unwrap();
+        let rule = Rule::for_call(PermissionClass::Bash, &cmd(" cargo test ").as_target()).unwrap();
         assert_eq!(rule.to_string(), "bash(cargo test)");
         assert!(rule.matches(
             PermissionClass::Bash,
-            &cmd("cargo test"),
+            &cmd("cargo test").as_target(),
             MatchDiscipline::Allow
         ));
         assert!(!rule.matches(
             PermissionClass::Bash,
-            &cmd("cargo test --all"),
+            &cmd("cargo test --all").as_target(),
             MatchDiscipline::Allow
         ));
     }
@@ -516,14 +519,21 @@ mod tests {
 
     #[test]
     fn for_call_declines_a_call_no_exact_rule_can_name() {
+        for command in [
+            "ls *.rs",
+            "cargo test; rm -rf /",
+            "  ",
+            "cargo test\u{1b}[2K",
+            "cargo test\u{200b}x",
+            "cargo\ttest",
+            "cargo\u{a0}test",
+        ] {
+            assert!(
+                Rule::for_call(PermissionClass::Bash, &cmd(command).as_target()).is_none(),
+                "{command:?}"
+            );
+        }
         for target in [
-            cmd("ls *.rs"),
-            cmd("cargo test; rm -rf /"),
-            cmd("  "),
-            cmd("cargo test\u{1b}[2K"),
-            cmd("cargo test\u{200b}x"),
-            cmd("cargo\ttest"),
-            cmd("cargo\u{a0}test"),
             path(&abs("/repo"), Some("")),
             path(&abs("/repo/a\u{200b}.rs"), Some("a\u{200b}.rs")),
             Target::None,
@@ -556,7 +566,11 @@ mod tests {
         ));
 
         let path_rule = Rule::parse("edit(src/**)").unwrap();
-        assert!(!path_rule.matches(PermissionClass::Edit, &cmd("src/a"), MatchDiscipline::Allow));
+        assert!(!path_rule.matches(
+            PermissionClass::Edit,
+            &cmd("src/a").as_target(),
+            MatchDiscipline::Allow
+        ));
     }
 
     #[test]
@@ -785,7 +799,7 @@ mod tests {
         let back: Rule = serde_json::from_str(&json).unwrap();
         assert!(back.matches(
             PermissionClass::Bash,
-            &cmd("cargo test --all"),
+            &cmd("cargo test --all").as_target(),
             MatchDiscipline::Allow
         ));
 
@@ -860,12 +874,12 @@ mod tests {
         let rule = Rule::parse("bash(cargo build)").unwrap();
         assert!(rule.matches(
             PermissionClass::Bash,
-            &cmd("cargo build"),
+            &cmd("cargo build").as_target(),
             MatchDiscipline::Allow
         ));
         assert!(!rule.matches(
             PermissionClass::Bash,
-            &cmd("cargo build --release"),
+            &cmd("cargo build --release").as_target(),
             MatchDiscipline::Allow
         ));
     }
@@ -875,18 +889,18 @@ mod tests {
         let rule = Rule::parse("bash(cargo test:*)").unwrap();
         assert!(rule.matches(
             PermissionClass::Bash,
-            &cmd("cargo test"),
+            &cmd("cargo test").as_target(),
             MatchDiscipline::Allow
         ));
         assert!(rule.matches(
             PermissionClass::Bash,
-            &cmd("cargo test --all"),
+            &cmd("cargo test --all").as_target(),
             MatchDiscipline::Allow
         ));
         // A different command that merely starts with the same letters must not match.
         assert!(!rule.matches(
             PermissionClass::Bash,
-            &cmd("cargo testbench"),
+            &cmd("cargo testbench").as_target(),
             MatchDiscipline::Allow
         ));
     }
@@ -896,42 +910,57 @@ mod tests {
         let rule = Rule::parse("bash(git *)").unwrap();
         assert!(rule.matches(
             PermissionClass::Bash,
-            &cmd("git status"),
+            &cmd("git status").as_target(),
             MatchDiscipline::Allow
         ));
         assert!(!rule.matches(
             PermissionClass::Bash,
-            &cmd("cargo git"),
+            &cmd("cargo git").as_target(),
             MatchDiscipline::Allow
         ));
     }
 
     #[test]
-    fn matches_allow_prefix_refuses_compound_command() {
-        // The load-bearing safety property: `cargo test:*` must not allow a chained `rm` or a
-        // redirect that clobbers a file.
+    fn matches_allow_prefix_refuses_a_command_that_runs_more() {
+        // The load-bearing safety property: `cargo test:*` must not allow a chained, piped, or
+        // substituted `rm`.
         let rule = Rule::parse("bash(cargo test:*)").unwrap();
         for command in [
             "cargo test && rm -rf /",
             "cargo test; rm -rf /",
             "cargo test | tee out",
             "cargo test $(rm -rf /)",
-            "cargo test > /etc/passwd",
         ] {
             assert!(
-                !rule.matches(PermissionClass::Bash, &cmd(command), MatchDiscipline::Allow),
+                !rule.matches(
+                    PermissionClass::Bash,
+                    &cmd(command).as_target(),
+                    MatchDiscipline::Allow
+                ),
                 "{command}"
             );
         }
     }
 
     #[test]
-    fn matches_deny_prefix_matches_any_segment_of_compound_command() {
-        // The mirror property: a deny must fire even when the danger is chained behind a safe head.
+    fn matches_deny_prefix_matches_any_simple_command_as_written_unquoted_or_by_bare_name() {
+        // The mirror property: a deny must fire even when the danger is chained behind a safe head,
+        // quoted, wrapped, or named by its path.
         let rule = Rule::parse("bash(rm -rf:*)").unwrap();
-        for command in ["rm -rf /", "ls && rm -rf /tmp/x", "echo hi; rm -rf ."] {
+        for command in [
+            "rm -rf /",
+            "ls && rm -rf /tmp/x",
+            "echo hi; rm -rf .",
+            r#""rm" '-rf' x"#,
+            "/bin/rm -rf x",
+            "FOO=1 nice -n 5 rm -rf x",
+        ] {
             assert!(
-                rule.matches(PermissionClass::Bash, &cmd(command), MatchDiscipline::Deny),
+                rule.matches(
+                    PermissionClass::Bash,
+                    &cmd(command).as_target(),
+                    MatchDiscipline::Deny
+                ),
                 "{command}"
             );
         }
@@ -949,7 +978,11 @@ mod tests {
         for (spec, command) in cases {
             let rule = Rule::parse(spec).unwrap();
             assert!(
-                rule.matches(PermissionClass::Bash, &cmd(command), MatchDiscipline::Deny),
+                rule.matches(
+                    PermissionClass::Bash,
+                    &cmd(command).as_target(),
+                    MatchDiscipline::Deny
+                ),
                 "{spec} vs {command:?}"
             );
         }
@@ -962,27 +995,9 @@ mod tests {
         let rule = Rule::parse("bash(:(){ :|:& };:)").unwrap();
         assert!(rule.matches(
             PermissionClass::Bash,
-            &cmd(":(){ :|:& };:"),
+            &cmd(":(){ :|:& };:").as_target(),
             MatchDiscipline::Deny
         ));
-    }
-
-    // ── is_compound / split_segments ──
-
-    #[test]
-    fn is_compound_flags_chains_pipes_redirects_and_substitution() {
-        for c in [
-            "a; b", "a && b", "a | b", "a\nb", "a $(b)", "a `b`", "a > f", "a >> f", "a < f",
-        ] {
-            assert!(is_compound(c), "{c:?} should be compound");
-        }
-        assert!(!is_compound("cargo test --all"));
-    }
-
-    #[test]
-    fn split_segments_drops_empty_halves_of_double_operators() {
-        let segments: Vec<_> = split_segments("a && b || c").collect();
-        assert_eq!(segments, ["a", "b", "c"]);
     }
 
     // ── glob_to_regex ──
