@@ -34,15 +34,19 @@ The picks lean toward the Codex precedent on most surfaces, since it is the one 
 
 ## Sources
 
-- `crates/oxide-code/src/agent.rs`: `agent_turn` round loop, `run_tool_round` / `ToolRound`, `dispatch_tool_call`, `await_unless_aborted`, `record_drained_prompts`, `TurnAbort` enum.
 - `crates/oxide-code/src/driver/stdio.rs`: `StdioSink::render`.
 - `crates/oxide-code/src/engine.rs`: `Engine::run`, which ignores an `Op::Queue` that arrives between turns, plus `Engine::submit_prompt` and `report_abort`, shared by the TUI, REPL, and headless drivers.
+- `crates/oxide-code/src/engine/abort.rs`: `TurnAbort` enum, `await_unless_aborted`.
+- `crates/oxide-code/src/engine/dispatch.rs`: `run_tool_round` / `ToolRound`, `dispatch_tool_call`.
+- `crates/oxide-code/src/engine/turn.rs`: `agent_turn` round loop, `record_drained_prompts`.
 - `crates/oxide-code/src/file_tracker.rs`: `FileTracker::write_and_record`.
 - `crates/oxide-code/src/protocol.rs`: `Event::{Cancelled, PromptDrained, TurnFailed}`, `Op::{Interrupt, Queue, Shutdown}`.
 - `crates/oxide-code/src/tool.rs`: `Tool::run` drop contract, `write_tracked`.
 - `crates/oxide-code/src/tool/bash.rs`: `ShellTree`, which kills the shell's process group (Unix) or Job Object (Windows) when a call times out or drops before finishing.
 - `crates/oxide-code/src/tui/action.rs`: `Action::ConfirmExit`.
-- `crates/oxide-code/src/tui/app.rs`: `App::pending_prompts` / `forwarded_prompts`, `dispatch_op` / `start_turn` / `forward_queued_prompts`, `finish_turn`, `finalize_idle` / `enter_idle` / `drain_pending_prompt`, `set_active_status`, `expire_armed_exit`.
+- `crates/oxide-code/src/tui/app.rs`: `App::pending_prompts` / `forwarded_prompts`.
+- `crates/oxide-code/src/tui/app/dispatch.rs`: `dispatch_op` / `start_turn` / `forward_queued_prompts`, `expire_armed_exit`.
+- `crates/oxide-code/src/tui/app/events.rs`: `finish_turn`, `finalize_idle` / `enter_idle` / `drain_pending_prompt`, `set_active_status`.
 - `crates/oxide-code/src/tui/components/chat.rs`: `ChatView::clear_pending_calls`, which evicts orphan tool calls at turn boundaries.
 - `crates/oxide-code/src/tui/components/chat/blocks/interrupted.rs`: `InterruptedMarker` block.
 - `crates/oxide-code/src/tui/components/input.rs`: Ctrl+D POSIX gate, Esc-pop, `set_text`.

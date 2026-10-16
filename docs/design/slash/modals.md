@@ -129,7 +129,9 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 - `crates/oxide-code/src/slash/resume.rs`: `ResumeCmd` plus `ResumePicker`.
 - `crates/oxide-code/src/slash/status.rs`: `/status` row builder plus `KvOverview`.
 - `crates/oxide-code/src/slash/theme.rs`: `/theme` live-preview picker (`ThemeCmd` plus `ThemePicker`).
-- `crates/oxide-code/src/tui/app.rs`: `App::handle_crossterm_event` modal gate, `run_slash`, `apply_slash_outcome`, `apply_modal_action`, `dispatch_action`, `clear_modals`, `push_approval_modal`, layout band.
+- `crates/oxide-code/src/tui/app/dispatch.rs`: `App::handle_crossterm_event` modal gate, `run_slash`, `apply_slash_outcome`, `apply_modal_action`, `dispatch_action`, `clear_modals`.
+- `crates/oxide-code/src/tui/app/events.rs`: `push_approval_modal`.
+- `crates/oxide-code/src/tui/app/render.rs`: `draw_frame` modal layout band.
 - `crates/oxide-code/src/tui/modal.rs`: `Modal` (including the `on_cancel` and `captures_esc` hooks), `ModalKey`, `ModalAction`, `ModalStack`.
 - `crates/oxide-code/src/tui/modal/approval.rs`: `ApprovalModal` approve-or-deny gate for agent tool calls, plus the rule and feedback editors.
 - `crates/oxide-code/src/tui/modal/chrome.rs`: shared `Header` and `render_footer`.

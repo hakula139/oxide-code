@@ -1,26 +1,38 @@
-//! Test-only [`Engine`] fixtures. Child of `engine` so it can build the private fields.
+//! Test-only engine fixtures: [`Engine`] builders and mocked replies, plus the turn fixtures the
+//! turn, dispatch, and compaction tests share. Child of `engine` so it can build the private
+//! fields.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
+use anyhow::{Result, anyhow};
+use serde_json::json;
 use tokio::sync::mpsc;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer};
 
+use super::dispatch::GateContext;
 use super::{Engine, EngineHandle, EngineTask};
 use crate::client::anthropic::testing::{
     api_key, sse_response, test_client, text_stream_body, tool_use_stream_body,
 };
+use crate::client::{Response, ResponseEvent, StopDetails, StopReason, Wire};
 use crate::file_tracker::FileTracker;
+use crate::message::{ContentBlock, Message};
 use crate::model::ModelSpec;
-use crate::prompt;
-use crate::session::handle;
+use crate::permission::{Mode, PermissionClass, Policy};
+use crate::prompt::{self, PromptParts};
+use crate::protocol::Op;
+use crate::session::handle::{self, SessionHandle};
 use crate::session::store::SessionStore;
-use crate::tool::ToolRegistry;
+use crate::session::store::testing::test_store;
+use crate::tool::{Tool, ToolDefinition, ToolMetadata, ToolOutput, ToolRegistry};
 use crate::util::path::testing::HOME_VAR;
+
+// ── Engine ──
 
 pub(super) const MODEL: &str = "claude-opus-5-5";
 pub(super) const SESSION_CONTEXT: &str = "<system-reminder>session context</system-reminder>";
@@ -154,4 +166,185 @@ pub(super) fn system_prompt(request: &serde_json::Value) -> Vec<&serde_json::Val
                 .is_some_and(|text| text.starts_with("x-anthropic-billing-header:"))
         })
         .collect()
+}
+
+// ── Turn ──
+
+/// In-process fake that scripts a [`ResponseEvent`] stream per turn and records each request's
+/// transcript.
+pub(super) struct FakeClient {
+    turns: StdMutex<VecDeque<Vec<Result<ResponseEvent>>>>,
+    requests: StdMutex<Vec<Vec<Message>>>,
+}
+
+impl FakeClient {
+    pub(super) fn new(turns: Vec<Vec<ResponseEvent>>) -> Self {
+        let turns = turns
+            .into_iter()
+            .map(|events| events.into_iter().map(Ok).collect())
+            .collect();
+        Self {
+            turns: StdMutex::new(turns),
+            requests: StdMutex::default(),
+        }
+    }
+
+    /// Appends a turn whose stream fails with `error`.
+    pub(super) fn then_fail(self, error: &str) -> Self {
+        self.turns
+            .lock()
+            .unwrap()
+            .push_back(vec![Err(anyhow!("{error}"))]);
+        self
+    }
+
+    pub(super) fn requests(&self) -> Vec<Vec<Message>> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+impl Wire for FakeClient {
+    fn stream_message(
+        &self,
+        messages: &[Message],
+        _system_sections: &[&str],
+        _user_context: Option<&str>,
+        _tools: &[ToolDefinition],
+    ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
+        self.requests.lock().unwrap().push(messages.to_vec());
+        let events = self.turns.lock().unwrap().pop_front().unwrap_or_default();
+        let (tx, rx) = mpsc::channel(events.len().max(1));
+        for event in events {
+            tx.try_send(event).expect("channel capacity");
+        }
+        Ok(rx)
+    }
+}
+
+pub(super) fn text_block(text: &str) -> ContentBlock {
+    ContentBlock::Text {
+        text: text.to_owned(),
+    }
+}
+
+pub(super) fn thinking_block(thinking: &str) -> ContentBlock {
+    ContentBlock::Thinking {
+        thinking: thinking.to_owned(),
+        signature: "sig".to_owned(),
+    }
+}
+
+/// One reply completing with `content`, streaming its text and thinking first.
+pub(super) fn reply_turn(content: Vec<ContentBlock>) -> Vec<ResponseEvent> {
+    let mut events: Vec<ResponseEvent> = content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(ResponseEvent::Text(text.clone())),
+            ContentBlock::Thinking { thinking, .. } => {
+                Some(ResponseEvent::Thinking(thinking.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    events.push(ResponseEvent::Completed(Response {
+        content,
+        ..Response::default()
+    }));
+    events
+}
+
+pub(super) fn text_turn(text: &str) -> Vec<ResponseEvent> {
+    reply_turn(vec![text_block(text)])
+}
+
+/// The turn's completed reply.
+pub(super) fn reply_of(events: &mut [ResponseEvent]) -> &mut Response {
+    match events.last_mut() {
+        Some(ResponseEvent::Completed(response)) => response,
+        last => panic!("the turn ends in its reply: {last:?}"),
+    }
+}
+
+/// Ends the turn's reply on `stop_reason`.
+pub(super) fn with_stop(
+    mut events: Vec<ResponseEvent>,
+    stop_reason: StopReason,
+    stop_details: Option<StopDetails>,
+) -> Vec<ResponseEvent> {
+    let reply = reply_of(&mut events);
+    reply.stop_reason = Some(stop_reason);
+    reply.stop_details = stop_details;
+    events
+}
+
+/// Echoes its input. Exercises the tool-dispatch path without subprocess machinery.
+pub(super) struct EchoTool;
+
+impl Tool for EchoTool {
+    fn name(&self) -> &'static str {
+        "echo"
+    }
+
+    fn description(&self) -> &'static str {
+        "echo the input"
+    }
+
+    fn permission_class(&self) -> PermissionClass {
+        PermissionClass::Bash
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        json!({"type": "object"})
+    }
+
+    fn run(
+        &self,
+        input: serde_json::Value,
+    ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + '_>> {
+        Box::pin(async move {
+            ToolOutput {
+                content: input.to_string(),
+                is_error: false,
+                metadata: ToolMetadata {
+                    title: Some("echoed".into()),
+                    ..Default::default()
+                },
+            }
+        })
+    }
+}
+
+/// Inert receiver whose `recv()` stays pending. The sender is leaked so call sites don't
+/// need to bind it for the test's lifetime.
+pub(super) fn inert_ops() -> mpsc::Receiver<Op> {
+    let (tx, rx) = crate::protocol::inert_op_channel();
+    std::mem::forget(tx);
+    rx
+}
+
+pub(super) fn empty_prompt() -> PromptParts {
+    PromptParts::default()
+}
+
+/// Gate over allow / deny rule sets, leaking the policy so the gate can borrow it for `'static`.
+/// `echo` is a `bash`-class tool with no gate target, so only a class-wide rule matches it.
+pub(super) fn gate_with(mode: Mode, allow: &[&str], deny: &[&str]) -> GateContext<'static> {
+    let owned = |rules: &[&str]| rules.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+    let policy = Box::leak(Box::new(
+        Policy::resolve(mode, &owned(allow), &owned(deny), Path::new(".")).expect("rules parse"),
+    ));
+    GateContext {
+        policy,
+        cwd: Path::new("."),
+    }
+}
+
+pub(super) fn test_session(dir: &Path) -> SessionHandle {
+    let store = test_store(dir);
+    handle::start(&store, "claude-sonnet-5-5")
+}
+
+/// Handle whose actor channel is closed. Every write returns actor-gone.
+pub(super) fn dead_test_session() -> SessionHandle {
+    handle::testing::dead("dead-test-session")
 }
