@@ -164,7 +164,8 @@ impl SessionDataBuilder {
         match entry {
             Entry::Header { version, .. } if version > CURRENT_VERSION => {
                 bail!(
-                    "session format version {version} is newer than supported ({CURRENT_VERSION}); please upgrade oxide-code"
+                    "session format version {version} is newer than supported ({CURRENT_VERSION}). \
+                     Upgrade oxide-code to open it."
                 );
             }
             Entry::Context { context, timestamp } => {

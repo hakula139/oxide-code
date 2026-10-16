@@ -78,7 +78,7 @@ pub(crate) fn normalize_resume_arg(resume: Option<&Option<String>>) -> Result<Re
         Some(Some(raw)) => {
             let trimmed = raw.trim();
             if trimmed.is_empty() {
-                bail!("empty session ID prefix; use `ox -c` (bare) to resume the latest session");
+                bail!("empty session ID prefix. Run bare `ox -c` to resume the latest session.");
             }
             if looks_like_path(trimmed) {
                 Ok(ResumeMode::Path(Path::new(trimmed)))

@@ -1,9 +1,10 @@
 //! Claude Code OAuth credential loading and refresh.
 
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
@@ -33,6 +34,41 @@ const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(10);
 
 #[cfg(target_os = "macos")]
 const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
+
+/// Where [`load_token`] looks for the Claude Code login, as error messages name it.
+#[cfg(target_os = "macos")]
+pub(super) const LOGIN_STORES: &str = "the macOS Keychain or ~/.claude/.credentials.json";
+#[cfg(not(target_os = "macos"))]
+pub(super) const LOGIN_STORES: &str = "~/.claude/.credentials.json";
+
+// ── LoginError ──
+
+/// Why the Claude Code login supplied no token. Callers match on [`Self::Missing`] to list other
+/// credential options, and every other message carries its own recovery step.
+#[derive(Debug, thiserror::Error)]
+pub(super) enum LoginError {
+    #[error("no Claude Code login found")]
+    Missing,
+    /// The Keychain refused access, and no credentials file exists to fall back on. Only the macOS
+    /// Keychain and its test fakes deny access.
+    #[cfg(any(target_os = "macos", test))]
+    #[error(
+        "macOS Keychain denied access to the Claude Code login. Allow access when the Keychain \
+         prompt appears, or set CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`) where no \
+         prompt can appear."
+    )]
+    KeychainDenied,
+    /// The token expired, and no refresh token is stored.
+    #[error("Claude Code login has expired. Run `claude` to sign in again.")]
+    Expired,
+    #[error(
+        "failed to refresh the expired Claude Code login: {0:#}. Run `claude` to sign in again."
+    )]
+    RefreshFailed(anyhow::Error),
+    /// The stored login exists but cannot be read or parsed.
+    #[error("{0:#}. Run `claude` to sign in again.")]
+    Unreadable(anyhow::Error),
+}
 
 // ── Credential Types ──
 
@@ -66,8 +102,8 @@ struct StoredCredentials<'a> {
 
 impl<'a> StoredCredentials<'a> {
     fn parse(source: Source<'a>, json: String) -> Result<Self> {
-        let file: CredentialsFile =
-            serde_json::from_str(&json).context("failed to parse Claude Code credentials")?;
+        let file: CredentialsFile = serde_json::from_str(&json)
+            .with_context(|| format!("failed to parse the Claude Code login in {source}"))?;
         Ok(Self {
             source,
             json,
@@ -82,13 +118,25 @@ enum Source<'a> {
     File(&'a Path),
 }
 
+impl fmt::Display for Source<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Keychain(_) => f.write_str("the macOS Keychain"),
+            Self::File(path) => write!(f, "{}", path.display()),
+        }
+    }
+}
+
 // ── Token Loading ──
 
 /// Loads (and refreshes if near expiry) the Claude Code OAuth access token. On macOS the Keychain
 /// is consulted first. Other platforms and Keychain misses read `~/.claude/.credentials.json`.
-pub(super) async fn load_token(extra_ca_certs: Option<&Path>) -> Result<String> {
-    let file_path = credentials_path().context("could not determine home directory")?;
-    let lock_path = lock_path().context("could not determine home directory")?;
+pub(super) async fn load_token(extra_ca_certs: Option<&Path>) -> Result<String, LoginError> {
+    let (Some(file_path), Some(lock_path)) = (credentials_path(), lock_path()) else {
+        return Err(LoginError::Unreadable(anyhow!(
+            "could not determine the home directory that holds the Claude Code login"
+        )));
+    };
     load_token_from(
         SYSTEM_KEYCHAIN,
         &file_path,
@@ -105,20 +153,13 @@ async fn load_token_from(
     lock_path: &Path,
     refresh_url: &str,
     extra_ca_certs: Option<&Path>,
-) -> Result<String> {
+) -> Result<String, LoginError> {
     let oauth = load_credentials(keychain, file_path)?.oauth;
-    let expires_at_ms = oauth.expires_at_ms();
-
-    if !is_near_expiry(expires_at_ms) {
+    if !is_near_expiry(oauth.expires_at_ms()) {
         return Ok(oauth.access_token);
     }
-
     if oauth.refresh_token.is_none() {
-        if is_expired(expires_at_ms) {
-            bail!("Claude Code OAuth token has expired (run `claude` to refresh it)");
-        }
-        warn!("OAuth token expires soon but no refresh token available");
-        return Ok(oauth.access_token);
+        return usable_until_expiry(oauth);
     }
 
     let _lock = match acquire_lock(lock_path).await {
@@ -127,7 +168,7 @@ async fn load_token_from(
             // The lock holder may have written a fresh token before releasing.
             let oauth = load_credentials(keychain, file_path)?.oauth;
             if is_expired(oauth.expires_at_ms()) {
-                return Err(e);
+                return Err(LoginError::RefreshFailed(e));
             }
             warn!("skipping OAuth token refresh, using existing: {e:#}");
             return Ok(oauth.access_token);
@@ -141,11 +182,9 @@ async fn load_token_from(
         return Ok(creds.oauth.access_token);
     }
 
-    let refresh_token = creds
-        .oauth
-        .refresh_token
-        .as_deref()
-        .context("refresh token missing after re-read")?;
+    let Some(refresh_token) = creds.oauth.refresh_token.as_deref() else {
+        return usable_until_expiry(creds.oauth);
+    };
 
     match refresh_oauth_token(refresh_url, refresh_token, extra_ca_certs).await {
         Ok(response) => {
@@ -154,9 +193,7 @@ async fn load_token_from(
             }
             Ok(response.access_token)
         }
-        Err(e) if is_expired(expires_at_ms) => {
-            Err(e).context("failed to refresh expired OAuth token")
-        }
+        Err(e) if is_expired(expires_at_ms) => Err(LoginError::RefreshFailed(e)),
         Err(e) => {
             warn!("failed to refresh OAuth token, using existing: {e:#}");
             Ok(creds.oauth.access_token)
@@ -164,27 +201,49 @@ async fn load_token_from(
     }
 }
 
+/// A near-expiry token with no refresh token stays usable until it expires.
+fn usable_until_expiry(oauth: OAuthCredential) -> Result<String, LoginError> {
+    if is_expired(oauth.expires_at_ms()) {
+        return Err(LoginError::Expired);
+    }
+    warn!("OAuth token expires soon but no refresh token available");
+    Ok(oauth.access_token)
+}
+
+/// Reads the Keychain first, then the file. When the file is missing, a denied or unparsable
+/// Keychain entry explains why no login was found.
 fn load_credentials<'a>(
     keychain: Option<&'a dyn Keychain>,
     file_path: &'a Path,
-) -> Result<StoredCredentials<'a>> {
+) -> Result<StoredCredentials<'a>, LoginError> {
+    let mut keychain_failure = None;
     if let Some(keychain) = keychain {
-        match keychain
-            .read()
-            .and_then(|json| StoredCredentials::parse(Source::Keychain(keychain), json))
-        {
-            Ok(creds) => return Ok(creds),
-            Err(e) => debug!("Keychain credentials unavailable: {e:#}"),
-        }
+        keychain_failure = match keychain.read() {
+            Ok(Some(json)) => match StoredCredentials::parse(Source::Keychain(keychain), json) {
+                Ok(creds) => return Ok(creds),
+                Err(e) => Some(LoginError::Unreadable(e)),
+            },
+            Ok(None) => None,
+            Err(denied) => Some(denied),
+        };
     }
-    read_credentials(file_path)
+
+    match read_credentials(file_path) {
+        Ok(Some(creds)) => Ok(creds),
+        Ok(None) => Err(keychain_failure.unwrap_or(LoginError::Missing)),
+        Err(e) => Err(LoginError::Unreadable(e)),
+    }
 }
 
-fn read_credentials(path: &Path) -> Result<StoredCredentials<'_>> {
-    let json = std::fs::read_to_string(path)
-        .with_context(|| format!("failed to read {}", path.display()))?;
+/// `Ok(None)` when the file does not exist.
+fn read_credentials(path: &Path) -> Result<Option<StoredCredentials<'_>>> {
+    let json = match std::fs::read_to_string(path) {
+        Ok(json) => json,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("failed to read {}", path.display())),
+    };
     enforce_private_mode(path);
-    StoredCredentials::parse(Source::File(path), json)
+    StoredCredentials::parse(Source::File(path), json).map(Some)
 }
 
 #[cfg(unix)]
@@ -211,8 +270,19 @@ fn is_expired(expires_at_ms: u64) -> bool {
 
 /// Claude Code's macOS Keychain entry, holding the same JSON document as the credentials file.
 trait Keychain: Sync {
-    fn read(&self) -> Result<String>;
+    /// The stored JSON, `None` when the entry does not exist or cannot be read for a reason other
+    /// than [`LoginError::KeychainDenied`], the only error it returns.
+    fn read(&self) -> Result<Option<String>, LoginError>;
     fn write(&self, json: &str) -> Result<()>;
+}
+
+/// `OSStatus` codes from the Security framework's `SecBase.h`.
+#[cfg(target_os = "macos")]
+mod os_status {
+    pub(super) const ITEM_NOT_FOUND: i32 = -25_300;
+    pub(super) const USER_CANCELED: i32 = -128;
+    pub(super) const AUTH_FAILED: i32 = -25_293;
+    pub(super) const INTERACTION_NOT_ALLOWED: i32 = -25_308;
 }
 
 #[cfg(target_os = "macos")]
@@ -225,16 +295,32 @@ struct SystemKeychain;
 
 #[cfg(target_os = "macos")]
 impl Keychain for SystemKeychain {
-    fn read(&self) -> Result<String> {
+    fn read(&self) -> Result<Option<String>, LoginError> {
         use security_framework::passwords::{PasswordOptions, generic_password};
 
-        let account = keychain_account()?;
-        let bytes = generic_password(PasswordOptions::new_generic_password(
-            KEYCHAIN_SERVICE,
-            &account,
-        ))
-        .context("failed to read from Keychain")?;
-        String::from_utf8(bytes).context("Keychain data is not valid UTF-8")
+        let account = match keychain_account() {
+            Ok(account) => account,
+            Err(e) => {
+                debug!("skipping the Keychain: {e:#}");
+                return Ok(None);
+            }
+        };
+        let options = PasswordOptions::new_generic_password(KEYCHAIN_SERVICE, &account);
+        match generic_password(options) {
+            Ok(bytes) => Ok(String::from_utf8(bytes)
+                .inspect_err(|_| debug!("Keychain data is not valid UTF-8"))
+                .ok()),
+            Err(e) => match e.code() {
+                os_status::ITEM_NOT_FOUND => Ok(None),
+                os_status::USER_CANCELED
+                | os_status::AUTH_FAILED
+                | os_status::INTERACTION_NOT_ALLOWED => Err(LoginError::KeychainDenied),
+                _ => {
+                    debug!("failed to read the Claude Code login from the Keychain: {e}");
+                    Ok(None)
+                }
+            },
+        }
     }
 
     fn write(&self, json: &str) -> Result<()> {
@@ -320,7 +406,8 @@ fn write_refreshed_credentials(
 
     oauth["accessToken"] = serde_json::Value::String(response.access_token.clone());
     oauth["refreshToken"] = serde_json::Value::String(response.refresh_token.clone());
-    let now = now_millis().context("system clock before UNIX epoch; cannot record token expiry")?;
+    let now =
+        now_millis().context("cannot record the token expiry: system clock is before 1970")?;
     oauth["expiresAt"] =
         serde_json::json!(now.saturating_add(response.expires_in.saturating_mul(1000)));
 
@@ -500,33 +587,56 @@ mod tests {
     }
 
     struct FakeKeychain {
-        entry: Mutex<String>,
+        entry: Mutex<Option<String>>,
+        denies: bool,
         writable: bool,
     }
 
     impl FakeKeychain {
         fn holding(entry: impl Into<String>) -> Self {
             Self {
-                entry: Mutex::new(entry.into()),
+                entry: Mutex::new(Some(entry.into())),
+                ..Self::empty()
+            }
+        }
+
+        fn empty() -> Self {
+            Self {
+                entry: Mutex::new(None),
+                denies: false,
                 writable: true,
             }
         }
 
+        fn denying() -> Self {
+            Self {
+                denies: true,
+                ..Self::empty()
+            }
+        }
+
+        fn entry(&self) -> Option<String> {
+            self.entry.lock().unwrap().clone()
+        }
+
         fn json(&self) -> serde_json::Value {
-            serde_json::from_str(&self.entry.lock().unwrap()).unwrap()
+            serde_json::from_str(&self.entry().unwrap()).unwrap()
         }
     }
 
     impl Keychain for FakeKeychain {
-        fn read(&self) -> Result<String> {
-            Ok(self.entry.lock().unwrap().clone())
+        fn read(&self) -> Result<Option<String>, LoginError> {
+            if self.denies {
+                return Err(LoginError::KeychainDenied);
+            }
+            Ok(self.entry())
         }
 
         fn write(&self, json: &str) -> Result<()> {
             if !self.writable {
                 bail!("Keychain write denied");
             }
-            json.clone_into(&mut self.entry.lock().unwrap());
+            *self.entry.lock().unwrap() = Some(json.to_owned());
             Ok(())
         }
     }
@@ -646,7 +756,21 @@ mod tests {
             read_json(&creds)["claudeAiOauth"]["accessToken"],
             "fresh-access"
         );
-        assert_eq!(*keychain.entry.lock().unwrap(), "not json");
+        assert_eq!(keychain.entry().as_deref(), Some("not json"));
+    }
+
+    #[tokio::test]
+    async fn load_token_from_denied_keychain_falls_back_to_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let creds = dir.path().join("creds.json");
+        let lock = dir.path().join("lock");
+        write_creds(&creds, "from-file", None, 9_999_999_999_999);
+
+        let keychain = FakeKeychain::denying();
+        let token = load_token_from(Some(&keychain), &creds, &lock, "http://unused", None)
+            .await
+            .unwrap();
+        assert_eq!(token, "from-file");
     }
 
     #[tokio::test]
@@ -731,7 +855,7 @@ mod tests {
         let err = load_token_from(None, &creds, &lock, "http://unused", None)
             .await
             .expect_err("expired without refresh must bail");
-        assert!(format!("{err:#}").contains("expired"));
+        assert!(matches!(err, LoginError::Expired), "{err:?}");
     }
 
     #[tokio::test]
@@ -751,8 +875,10 @@ mod tests {
         let err = load_token_from(None, &creds, &lock, &server.uri(), None)
             .await
             .expect_err("expired + refresh down must bail");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("expired OAuth"), "wrapped context: {msg}");
+        let LoginError::RefreshFailed(cause) = &err else {
+            panic!("expected RefreshFailed, got {err:?}");
+        };
+        assert!(format!("{cause:#}").contains("503"), "{cause:#}");
     }
 
     #[tokio::test]
@@ -766,8 +892,13 @@ mod tests {
         let err = load_token_from(None, &creds, &lock, "http://should-not-be-called", None)
             .await
             .expect_err("expired + lock held must bail");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("credentials lock"), "{msg}");
+        let LoginError::RefreshFailed(cause) = &err else {
+            panic!("expected RefreshFailed, got {err:?}");
+        };
+        assert!(
+            format!("{cause:#}").contains("credentials lock"),
+            "{cause:#}"
+        );
     }
 
     #[tokio::test]
@@ -796,6 +927,79 @@ mod tests {
         assert_eq!(token, "sibling");
     }
 
+    #[tokio::test]
+    async fn load_token_from_lock_released_without_a_refresh_token_keeps_the_sibling_login() {
+        let dir = tempfile::tempdir().unwrap();
+        let creds = dir.path().join("creds.json");
+        let lock = dir.path().join("lock");
+        write_creds(&creds, "dead", Some("ref"), 0);
+        std::fs::create_dir(&lock).unwrap();
+
+        let (sibling_creds, sibling_lock) = (creds.clone(), lock.clone());
+        let sibling = tokio::spawn(async move {
+            tokio::time::sleep(LOCK_RETRY_INTERVAL * 2).await;
+            write_creds(
+                &sibling_creds,
+                "sibling",
+                None,
+                now_millis().unwrap() + 60 * 1000,
+            );
+            std::fs::remove_dir(&sibling_lock).unwrap();
+        });
+
+        let token = load_token_from(None, &creds, &lock, "http://should-not-be-called", None)
+            .await
+            .unwrap();
+        sibling.await.unwrap();
+        assert_eq!(token, "sibling");
+    }
+
+    #[tokio::test]
+    async fn load_token_from_reports_why_no_login_was_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("creds.json");
+        let lock = dir.path().join("lock");
+        let (empty, denying, garbled) = (
+            FakeKeychain::empty(),
+            FakeKeychain::denying(),
+            FakeKeychain::holding("not json"),
+        );
+
+        for keychain in [None, Some(&empty as &dyn Keychain)] {
+            let err = load_token_from(keychain, &missing, &lock, "http://unused", None)
+                .await
+                .expect_err("no login anywhere");
+            assert!(matches!(err, LoginError::Missing), "{err:?}");
+        }
+
+        let err = load_token_from(Some(&denying), &missing, &lock, "http://unused", None)
+            .await
+            .expect_err("a denied Keychain and no file");
+        assert!(matches!(err, LoginError::KeychainDenied), "{err:?}");
+
+        let err = load_token_from(Some(&garbled), &missing, &lock, "http://unused", None)
+            .await
+            .expect_err("an unparsable Keychain entry and no file");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.starts_with("failed to parse the Claude Code login in the macOS Keychain: "),
+            "{msg}"
+        );
+        assert!(msg.ends_with(". Run `claude` to sign in again."), "{msg}");
+
+        let unreadable = dir.path().join("directory.json");
+        std::fs::create_dir(&unreadable).unwrap();
+        let err = load_token_from(Some(&empty), &unreadable, &lock, "http://unused", None)
+            .await
+            .expect_err("an unreadable credentials file");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.starts_with(&format!("failed to read {}: ", unreadable.display())),
+            "{msg}"
+        );
+        assert!(msg.ends_with(". Run `claude` to sign in again."), "{msg}");
+    }
+
     // ── read_credentials ──
 
     #[test]
@@ -817,7 +1021,7 @@ mod tests {
         )
         .unwrap();
 
-        let creds = read_credentials(&path).unwrap();
+        let creds = read_credentials(&path).unwrap().unwrap();
         assert_eq!(creds.oauth.access_token, "tok");
         assert_eq!(creds.oauth.refresh_token.as_deref(), Some("ref"));
         assert_eq!(creds.oauth.expires_at, 9_999_999_999_999);
@@ -841,13 +1045,17 @@ mod tests {
         )
         .unwrap();
 
-        let creds = read_credentials(&path).unwrap();
+        let creds = read_credentials(&path).unwrap().unwrap();
         assert!(creds.oauth.refresh_token.is_none());
     }
 
     #[test]
-    fn read_credentials_missing_file() {
-        assert!(read_credentials(Path::new("/nonexistent/creds.json")).is_err());
+    fn read_credentials_missing_file_is_absent() {
+        assert!(
+            read_credentials(Path::new("/nonexistent/creds.json"))
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -855,7 +1063,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("creds.json");
         std::fs::write(&path, "not json").unwrap();
-        assert!(read_credentials(&path).is_err());
+        let err = read_credentials(&path)
+            .err()
+            .expect("invalid JSON must fail");
+        assert!(
+            format!("{err:#}").starts_with(&format!(
+                "failed to parse the Claude Code login in {}",
+                path.display()
+            )),
+            "{err:#}"
+        );
     }
 
     #[test]
@@ -1040,7 +1257,7 @@ mod tests {
             scope: Some("user:profile user:inference".to_owned()),
         };
 
-        write_refreshed_credentials(&read_credentials(&path).unwrap(), &response).unwrap();
+        write_refreshed_credentials(&read_credentials(&path).unwrap().unwrap(), &response).unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
         let json: serde_json::Value = serde_json::from_str(&content).unwrap();
@@ -1093,7 +1310,7 @@ mod tests {
             scope: Some("  user:profile   user:inference  ".to_owned()),
         };
 
-        write_refreshed_credentials(&read_credentials(&path).unwrap(), &response).unwrap();
+        write_refreshed_credentials(&read_credentials(&path).unwrap().unwrap(), &response).unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
         let json: serde_json::Value = serde_json::from_str(&content).unwrap();
@@ -1130,7 +1347,7 @@ mod tests {
             scope: None,
         };
 
-        write_refreshed_credentials(&read_credentials(&path).unwrap(), &response).unwrap();
+        write_refreshed_credentials(&read_credentials(&path).unwrap().unwrap(), &response).unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
         let json: serde_json::Value = serde_json::from_str(&content).unwrap();

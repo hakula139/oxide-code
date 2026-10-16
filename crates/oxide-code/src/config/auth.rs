@@ -6,6 +6,7 @@ use std::fmt;
 use anyhow::{Context, Result, bail};
 use reqwest::header::{AUTHORIZATION, HeaderName, HeaderValue};
 
+use super::oauth::{LOGIN_STORES, LoginError};
 use crate::util::env;
 
 // ── AuthKind ──
@@ -177,7 +178,7 @@ pub(super) fn explicit_credentials(
 pub(super) async fn resolve(
     explicit: impl IntoIterator<Item = (AuthSource, Option<String>)>,
     base_url: &str,
-    stored: impl Future<Output = Result<String>>,
+    stored: impl Future<Output = Result<String, LoginError>>,
 ) -> Result<Auth> {
     if let Some((source, secret)) = explicit
         .into_iter()
@@ -188,17 +189,20 @@ pub(super) async fn resolve(
 
     if !super::is_first_party_base_url(base_url) {
         bail!(
-            "no credentials for {base_url}: set ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY, or \
+            "no credentials for {base_url}. Set ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY, or \
              CLAUDE_CODE_OAUTH_TOKEN, or add `api_key` to ~/.config/ox/config.toml. The Claude \
              Code login is sent only to the Anthropic API."
         );
     }
-    let token = stored.await.context(
-        "no credentials available: set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN, add \
-         `api_key` to ~/.config/ox/config.toml, or sign in with Claude Code (checks macOS \
-         Keychain and ~/.claude/.credentials.json)",
-    )?;
-    Ok(Auth::new(AuthSource::ClaudeCodeLogin, token))
+    match stored.await {
+        Ok(token) => Ok(Auth::new(AuthSource::ClaudeCodeLogin, token)),
+        Err(LoginError::Missing) => bail!(
+            "no credentials found: no API key or token is set, and no Claude Code login is in \
+             {LOGIN_STORES}. Set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN, add `api_key` to \
+             ~/.config/ox/config.toml, or run `claude` to sign in."
+        ),
+        Err(e) => Err(e.into()),
+    }
 }
 
 #[cfg(test)]
@@ -216,11 +220,11 @@ mod tests {
     const FIRST_PARTY: &str = "https://api.anthropic.com";
     const GATEWAY: &str = "https://gateway.example.com/anthropic";
 
-    fn unreachable_store() -> impl Future<Output = Result<String>> {
+    fn unreachable_store() -> impl Future<Output = Result<String, LoginError>> {
         std::future::poll_fn(|_| panic!("stored credentials must not be read"))
     }
 
-    fn stored_token() -> std::future::Ready<Result<String>> {
+    fn stored_token() -> std::future::Ready<Result<String, LoginError>> {
         std::future::ready(Ok("stored-token".to_owned()))
     }
 
@@ -407,20 +411,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_stored_login_failure_lists_every_credential_option() {
+    async fn resolve_missing_login_lists_every_credential_option() {
         let err = resolve(explicit(&[]), FIRST_PARTY, async {
-            bail!("keychain entry missing")
+            Err(LoginError::Missing)
         })
         .await
         .expect_err("no credential anywhere");
-        let msg = format!("{err:#}");
-        for needle in [
-            "ANTHROPIC_API_KEY",
-            "CLAUDE_CODE_OAUTH_TOKEN",
-            "api_key",
-            "keychain entry missing",
-        ] {
-            assert!(msg.contains(needle), "{needle}: {msg}");
-        }
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "no credentials found: no API key or token is set, and no Claude Code login is \
+                 in {LOGIN_STORES}. Set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN, add \
+                 `api_key` to ~/.config/ox/config.toml, or run `claude` to sign in."
+            ),
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_other_login_failures_keep_their_own_recovery_step() {
+        let err = resolve(explicit(&[]), FIRST_PARTY, async {
+            Err(LoginError::Expired)
+        })
+        .await
+        .expect_err("an expired login must fail");
+        assert_eq!(
+            format!("{err:#}"),
+            "Claude Code login has expired. Run `claude` to sign in again.",
+        );
     }
 }
