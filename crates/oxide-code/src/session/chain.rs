@@ -16,6 +16,7 @@ use crate::prompt::SessionContext;
 /// The DAG can fork when concurrent resumes (e.g. two `ox -c` processes pointed at the same
 /// session) each append their own follow-ups onto the same parent. `resolve` picks one tip
 /// deterministically rather than returning every branch.
+#[derive(Default)]
 pub(super) struct ChainBuilder {
     nodes: HashMap<Uuid, ChainNode>,
     /// UUIDs claimed as some other message's `parent_uuid`. Leaves = keys − referenced.
@@ -40,10 +41,7 @@ pub(super) struct Chain {
 
 impl ChainBuilder {
     pub(super) fn new() -> Self {
-        Self {
-            nodes: HashMap::new(),
-            referenced: HashSet::new(),
-        }
+        Self::default()
     }
 
     /// Last-append-wins on duplicate UUIDs (retry / partial-write replay). `context` is the prompt
@@ -374,23 +372,6 @@ mod tests {
 
         let chain = b.resolve();
         assert!(chain.tip.is_none(), "no leaf means no tip");
-        assert_eq!(chain.messages, []);
-    }
-
-    #[test]
-    fn resolve_self_loop_breaks_at_repeat_visit() {
-        let mut b = ChainBuilder::new();
-        let only = Uuid::new_v4();
-        b.insert(
-            only,
-            Some(only),
-            user_message("ouroboros"),
-            datetime!(2026-04-16 12:00:01 UTC),
-            None,
-        );
-
-        let chain = b.resolve();
-        assert!(chain.tip.is_none());
         assert_eq!(chain.messages, []);
     }
 

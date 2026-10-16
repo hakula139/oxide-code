@@ -20,12 +20,11 @@ use serde::{Deserialize, Serialize};
 use unicode_normalization::UnicodeNormalization;
 
 use crate::permission::rule::{MatchDiscipline, Rule};
-use crate::util::path::xdg_dir;
+use crate::util::path::{lexical_normalize, xdg_dir};
 
 // ── Mode ──
 
-/// The standing permission posture, shaped like [`crate::config::Effort`] so it threads through
-/// config and a future `/permission` control the same way.
+/// The standing permission posture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Mode {
@@ -40,9 +39,6 @@ pub(crate) enum Mode {
 }
 
 impl Mode {
-    /// Every mode in display order, for the `/permission` picker.
-    #[cfg(test)]
-    pub(crate) const ALL: [Self; 3] = [Self::Auto, Self::Plan, Self::Yolo];
     pub(crate) const VALID_VALUES: &str = "auto, plan, yolo";
 
     pub(crate) const fn as_str(self) -> &'static str {
@@ -434,22 +430,6 @@ fn enqueue(path: &Path, resolved: &mut PathBuf, pending: &mut Vec<OsString>) {
     }));
 }
 
-/// Resolves `.` and `..` components in `path` without touching the filesystem. A leading `..` that
-/// would escape the root is dropped, matching how the OS clamps traversal at `/`.
-fn lexical_normalize(path: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::ParentDir => {
-                _ = out.pop();
-            }
-            Component::CurDir => {}
-            other => out.push(other),
-        }
-    }
-    out
-}
-
 /// Whether an edit to `path` must ask: a protected name where it takes effect, or a path under
 /// one of the [`protected_roots`]. Names compare by [`fold_name`], since a case-insensitive file
 /// system such as APFS opens `.VSCODE` and `.vſcode` as `.vscode`.
@@ -676,8 +656,7 @@ impl Policy {
         })
     }
 
-    /// The user and project `read` deny rules, for a tool that reaches files below the root the gate
-    /// checked.
+    /// The user and project `read` deny rules for files below a search tool's root.
     pub(crate) fn read_deny(&self) -> ReadDeny {
         ReadDeny(
             self.deny
@@ -689,7 +668,6 @@ impl Policy {
     }
 
     /// Resolves a call to a [`Decision`]. Pure and synchronous: no I/O, no async, no classifier.
-    /// A classifier slots in where this returns [`Decision::Ask`] from the last step.
     ///
     /// Order, stopping at the first match:
     /// 1. A user or project deny rule denies, in every mode.
@@ -809,9 +787,9 @@ pub(crate) struct WalkDeny<'a> {
 }
 
 impl WalkDeny<'_> {
-    /// Whether a rule denies reading `path`, a file the walk found below its base, as the gate denies
-    /// a read of it. The walk follows no symlink, so `path` is where the file resolves, and the same
-    /// names below the requested base spell it the way the call does.
+    /// Whether a rule denies reading `path`, a file found below the walk's base. The walk follows
+    /// no symlink, so `path` is where the file resolves. The same names below the requested base
+    /// spell it the way the call does.
     pub(crate) fn denies(&self, path: &Path) -> bool {
         if self.rules.is_empty() {
             return false;
@@ -925,7 +903,7 @@ mod tests {
 
     #[test]
     fn mode_parses_all_valid_values() {
-        for mode in Mode::ALL {
+        for mode in [Mode::Auto, Mode::Plan, Mode::Yolo] {
             assert_eq!(mode.as_str().parse::<Mode>().unwrap(), mode);
         }
     }
@@ -1043,7 +1021,7 @@ mod tests {
     #[test]
     fn for_path_cwd_containing_home_is_not_a_workspace() {
         // Launched from `$HOME` (or any ancestor of it, the root included), "inside cwd" spans
-        // every dotfile, so edits there must not auto-allow. Relative rule globs still see the path.
+        // every dotfile, so edits there must not auto-allow. Relative globs still see the path.
         let (_dir, root) = temp_cwd();
         let home = root.join("home");
         std::fs::create_dir(&home).unwrap();
@@ -1071,6 +1049,30 @@ mod tests {
         let target = GateTarget::for_path("a.rs", Path::new(""));
         let (_, relative, zone) = resolved(&target);
         assert_eq!((relative, zone), (None, Zone::Outside));
+    }
+
+    #[test]
+    fn for_path_relative_cwd_parent_traversal_preserves_permission_decisions() {
+        let policy = policy(Mode::Auto, &["edit(**)"], &[]);
+        let absolute_cwd = std::env::current_dir().unwrap();
+        for cwd in ["..", "../..", "missing/../.."] {
+            for raw in ["notes.md", ".git/config"] {
+                let target = GateTarget::for_path(raw, Path::new(cwd));
+                let absolute = GateTarget::for_path(raw, &absolute_cwd.join(cwd));
+                let (_, relative, zone) = resolved(&target);
+                let (_, absolute_relative, absolute_zone) = resolved(&absolute);
+                assert_eq!(
+                    (relative, zone),
+                    (absolute_relative, absolute_zone),
+                    "{cwd:?}/{raw}",
+                );
+                assert_eq!(
+                    policy.decide(PermissionClass::Edit, &target.as_target()),
+                    policy.decide(PermissionClass::Edit, &absolute.as_target()),
+                    "{cwd:?}/{raw}",
+                );
+            }
+        }
     }
 
     #[test]
@@ -1335,20 +1337,6 @@ mod tests {
             p.decide(PermissionClass::Edit, &target.as_target()),
             Decision::Deny
         );
-    }
-
-    // ── lexical_normalize ──
-
-    #[test]
-    fn lexical_normalize_resolves_dots_without_escaping_root() {
-        // A leading `..` past root is clamped, matching the OS so a traversal can't escape.
-        for (raw, expected) in [("/a/../../b", "/b"), ("./a/../b", "b")] {
-            assert_eq!(
-                lexical_normalize(Path::new(raw)),
-                PathBuf::from(expected),
-                "{raw}"
-            );
-        }
     }
 
     // ── is_protected ──
@@ -1923,6 +1911,25 @@ mod tests {
     }
 
     // ── WalkDeny::denies ──
+
+    #[test]
+    fn walk_deny_parent_traversal_matches_the_gate_decision() {
+        let (_dir, cwd) = temp_cwd();
+        let root = cwd.ancestors().last().unwrap();
+        let absolute_rule = format!("read({}/**)", slash_separated(&cwd));
+        let policy = policy(Mode::Auto, &[], &[&absolute_rule]);
+        let read_deny = policy.read_deny();
+        let file = cwd.join("secret.txt");
+        let target = GateTarget::for_path(file.to_str().unwrap(), root);
+        assert_eq!(
+            policy.decide(PermissionClass::Read, &target.as_target()),
+            Decision::Deny,
+        );
+        for requested in [Path::new(".."), Path::new("../.."), Path::new(".")] {
+            let walk = read_deny.walk(root, requested, root);
+            assert!(walk.denies(&file), "{requested:?}");
+        }
+    }
 
     #[cfg(unix)]
     #[test]

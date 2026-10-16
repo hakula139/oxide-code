@@ -8,7 +8,11 @@ use std::pin::Pin;
 use serde::Deserialize;
 
 use super::{Tool, ToolMetadata, ToolOutput, ToolResultView, extract_input_field};
-use crate::permission::{PermissionClass, ReadDeny};
+use crate::permission::{GateTarget, PermissionClass, ReadDeny};
+use crate::util::text::plural;
+
+const NO_FILES_FOUND: &str = "No files found";
+const SHOWING_PREFIX: &str = "(Showing ";
 
 const MAX_RESULTS: usize = 100;
 
@@ -37,15 +41,8 @@ impl Tool for GlobTool {
         PermissionClass::Read
     }
 
-    fn gate_target(
-        &self,
-        input: &serde_json::Value,
-        cwd: &std::path::Path,
-    ) -> crate::permission::GateTarget {
-        // The gated target is the search root (the `path` arg, defaulting to cwd), so a path-scoped
-        // deny can block listing under a protected directory.
-        let path = extract_input_field(input, "path").unwrap_or(".");
-        crate::permission::GateTarget::for_path(path, cwd)
+    fn gate_target(&self, input: &serde_json::Value, cwd: &Path) -> GateTarget {
+        super::search_root_target(input, cwd)
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -131,12 +128,12 @@ async fn run(raw: serde_json::Value, read_deny: ReadDeny) -> ToolOutput {
 }
 
 fn glob_title(output: &str) -> String {
-    if output == "No files found" {
+    if output == NO_FILES_FOUND {
         return output.to_owned();
     }
     let body = glob_output_body(output).unwrap_or(output.trim_end());
     let count = body.lines().filter(|l| !l.trim().is_empty()).count();
-    let word = if count == 1 { "file" } else { "files" };
+    let word = plural(count, "file", "files");
     format!("Found {count} {word}")
 }
 
@@ -190,7 +187,7 @@ fn glob_files(
     matches.sort_by_key(|entry| std::cmp::Reverse(entry.1));
 
     if matches.is_empty() {
-        let mut content = "No files found".to_owned();
+        let mut content = NO_FILES_FOUND.to_owned();
         super::push_withheld_note(&mut content, withheld);
         return Ok(GlobOutput {
             content,
@@ -202,18 +199,16 @@ fn glob_files(
     let truncated = total > MAX_RESULTS;
     matches.truncate(MAX_RESULTS);
 
-    let mut content = String::new();
-    for (i, (p, _)) in matches.iter().enumerate() {
-        if i > 0 {
-            content.push('\n');
-        }
-        content.push_str(p);
-    }
+    let mut content = matches
+        .iter()
+        .map(|(path, _)| path.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
 
     if truncated {
         _ = write!(
             content,
-            "\n\n(Showing {MAX_RESULTS} of {total} matches. Use a more specific pattern.)"
+            "\n\n{SHOWING_PREFIX}{MAX_RESULTS} of {total} matches. Use a more specific pattern.)"
         );
     }
     super::push_withheld_note(&mut content, withheld);
@@ -255,7 +250,7 @@ fn build_files_view(
 ) -> Option<ToolResultView> {
     let pattern = extract_input_field(input, "pattern")?.to_owned();
     let trimmed = content.trim_end();
-    if trimmed == "No files found" {
+    if trimmed == NO_FILES_FOUND {
         return Some(ToolResultView::GlobFiles {
             pattern,
             files: Vec::new(),
@@ -285,7 +280,7 @@ fn build_files_view(
 }
 
 fn is_truncation_footer(footer: &str) -> bool {
-    footer.starts_with("(Showing ")
+    footer.starts_with(SHOWING_PREFIX)
 }
 
 fn glob_output_body(content: &str) -> Option<&str> {
@@ -324,12 +319,12 @@ mod tests {
 
     #[test]
     fn gate_target_defaults_the_search_root_to_cwd() {
-        // With no `path`, the search root is cwd, so a deny scoped to the project root still applies.
+        // A deny scoped to the project root must apply when `path` is omitted.
         let dir = tempfile::tempdir().unwrap();
         let cwd = dunce::canonicalize(dir.path()).unwrap();
 
         let target = GlobTool::default().gate_target(&serde_json::json!({"pattern": "*.rs"}), &cwd);
-        let crate::permission::GateTarget::Path { relative, .. } = target else {
+        let GateTarget::Path { relative, .. } = target else {
             panic!("expected a path target");
         };
         assert_eq!(relative.as_deref(), Some(""));
@@ -338,7 +333,7 @@ mod tests {
     // ── run ──
 
     #[tokio::test]
-    async fn run_finds_files() {
+    async fn run_matching_pattern_reports_files() {
         let dir = canonical_tempdir();
         std::fs::write(dir.path().join("a.txt"), "").unwrap();
         std::fs::write(dir.path().join("b.rs"), "").unwrap();
@@ -357,7 +352,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_missing_pattern() {
+    async fn run_missing_pattern_reports_input_error() {
         let output = GlobTool::default().run(serde_json::json!({})).await;
         assert!(output.is_error);
         assert!(output.content.contains("Invalid input"));
@@ -418,7 +413,7 @@ mod tests {
     // ── glob_files ──
 
     #[test]
-    fn glob_files_basic() {
+    fn glob_files_plain_pattern_finds_matching_paths() {
         let dir = canonical_tempdir();
         std::fs::write(dir.path().join("foo.txt"), "").unwrap();
         std::fs::write(dir.path().join("bar.txt"), "").unwrap();
@@ -432,7 +427,7 @@ mod tests {
     }
 
     #[test]
-    fn glob_files_recursive() {
+    fn glob_files_recursive_pattern_finds_nested_paths() {
         let dir = canonical_tempdir();
         let sub = dir.path().join("sub");
         std::fs::create_dir(&sub).unwrap();
@@ -504,7 +499,7 @@ mod tests {
     }
 
     #[test]
-    fn glob_files_sorted_by_mtime() {
+    fn glob_files_modification_time_orders_newest_first() {
         let dir = canonical_tempdir();
 
         std::fs::write(dir.path().join("old.txt"), "old").unwrap();
@@ -516,7 +511,7 @@ mod tests {
     }
 
     #[test]
-    fn glob_files_no_matches() {
+    fn glob_files_unmatched_pattern_reports_no_files() {
         let dir = canonical_tempdir();
         std::fs::write(dir.path().join("a.txt"), "").unwrap();
 
@@ -526,7 +521,7 @@ mod tests {
     }
 
     #[test]
-    fn glob_files_invalid_pattern() {
+    fn glob_files_invalid_pattern_reports_error() {
         let dir = canonical_tempdir();
         let err = glob_files("[invalid", None, dir.path(), &ReadDeny::default()).unwrap_err();
         assert!(err.contains("Invalid glob pattern"));
@@ -546,7 +541,7 @@ mod tests {
     }
 
     #[test]
-    fn glob_files_invalid_directory() {
+    fn glob_files_invalid_directory_reports_error() {
         let dir = canonical_tempdir();
         let err =
             glob_files("*.txt", Some("missing"), dir.path(), &ReadDeny::default()).unwrap_err();

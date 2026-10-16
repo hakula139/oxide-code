@@ -1,11 +1,26 @@
-//! Display-width-aware text utilities.
+//! Text helpers: display-width-aware truncation and count-based pluralization.
 
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 pub(crate) const ELLIPSIS: &str = "...";
-
 pub(crate) const ELLIPSIS_WIDTH: usize = 3;
+
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "callers pass integer counts directly"
+)]
+pub(crate) fn plural<'a, N: PartialEq + From<u8>>(
+    count: N,
+    singular: &'a str,
+    plural: &'a str,
+) -> &'a str {
+    if count == N::from(1) {
+        singular
+    } else {
+        plural
+    }
+}
 
 /// Truncates `s` to `max_width` display columns, appending [`ELLIPSIS`] when shortened.
 ///
@@ -96,6 +111,15 @@ pub(crate) fn escape_controls(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── plural ──
+
+    #[test]
+    fn plural_uses_singular_only_for_one() {
+        for (count, expected) in [(0, "files"), (1, "file"), (2, "files")] {
+            assert_eq!(plural(count, "file", "files"), expected);
+        }
+    }
 
     // ── truncate_to_width ──
 

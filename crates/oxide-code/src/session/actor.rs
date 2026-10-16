@@ -11,7 +11,7 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::warn;
 use uuid::Uuid;
 
-use super::entry::{Entry, UsageRecord};
+use super::entry::{Entry, TitleSource, UsageRecord};
 use super::handle::{CompactOutcome, Outcome, RecordOutcome, SharedState};
 use super::state::SessionState;
 use crate::file_tracker::FileSnapshot;
@@ -102,32 +102,16 @@ pub(super) async fn run(
     shared: Arc<SharedState>,
 ) {
     while let Some(first) = rx.recv().await {
-        let mut entries: Vec<Entry> = Vec::new();
-        let mut acks: Vec<PendingAck> = Vec::new();
-        let mut should_exit = false;
-        let mut flow = absorb(
-            first,
-            &mut entries,
-            &mut acks,
-            &mut state,
-            &shared,
-            &mut should_exit,
-        );
+        let mut batch = Batch::default();
+        let mut flow = batch.absorb(first, &mut state, &shared);
         // Compact and archive are batch barriers. If either fails, its entries stay at the queue
         // tail for `settle_barriers` to drop. Records after a compact see its synthetic root.
         while matches!(flow, BatchFlow::Continue)
             && let Ok(next) = rx.try_recv()
         {
-            flow = absorb(
-                next,
-                &mut entries,
-                &mut acks,
-                &mut state,
-                &shared,
-                &mut should_exit,
-            );
+            flow = batch.absorb(next, &mut state, &shared);
         }
-        let failure = match state.flush_entries(entries) {
+        let failure = match state.flush_entries(batch.entries) {
             Err(e) => {
                 let msg = format!("{e:#}");
                 warn!("session write batch failed: {msg}");
@@ -136,148 +120,155 @@ pub(super) async fn run(
             }
             Ok(()) => None,
         };
-        settle_barriers(&acks, &mut state, failure.is_none());
+        settle_barriers(&batch.acks, &mut state, failure.is_none());
         deliver_acks(
-            acks,
+            batch.acks,
             failure.as_deref(),
             state.persistence_stopped(),
             &shared,
         );
-        if should_exit {
+        if batch.should_exit {
             break;
         }
     }
 }
 
-fn absorb(
-    cmd: SessionCmd,
-    entries: &mut Vec<Entry>,
-    acks: &mut Vec<PendingAck>,
-    state: &mut SessionState,
-    shared: &SharedState,
-    should_exit: &mut bool,
-) -> BatchFlow {
-    let now = OffsetDateTime::now_utc();
-    match cmd {
-        SessionCmd::Record { msg, context, ack } => {
-            let (msg_entries, ai_title_seed) =
-                state.queue_message_entries(&msg, now, shared.manual_title_set());
-            if let Some(context) = context {
-                entries.push(Entry::Context {
-                    context: Box::new(context),
-                    timestamp: now,
-                });
-            }
-            entries.extend(msg_entries);
-            acks.push(PendingAck::Record { ack, ai_title_seed });
-            BatchFlow::Continue
-        }
-        SessionCmd::ToolMetadata { items, ack } => {
-            absorb_tool_metadata(items, ack, now, entries, acks);
-            BatchFlow::Continue
-        }
-        SessionCmd::Usage { records, ack } => {
-            entries.extend(records.into_iter().map(|usage| Entry::Usage {
-                uuid: Uuid::new_v4(),
-                usage,
-                timestamp: now,
-            }));
-            acks.push(PendingAck::Outcome(ack));
-            BatchFlow::Continue
-        }
-        SessionCmd::AppendAiTitle { title, ack } => {
-            // Re-check: a `/rename` can flip the latch after the generator already queued this.
-            if shared.manual_title_set() {
-                _ = ack.send(Outcome { failure: None });
-                return BatchFlow::Continue;
-            }
-            entries.push(Entry::Title {
-                title,
-                source: super::entry::TitleSource::AiGenerated,
-                updated_at: now,
-            });
-            acks.push(PendingAck::Outcome(ack));
-            BatchFlow::Continue
-        }
-        SessionCmd::SetManualTitle { title, ack } => {
-            shared.mark_manual_title_set();
-            match state.try_defer_title(title) {
-                None => _ = ack.send(Outcome { failure: None }),
-                Some(title) => {
-                    entries.push(Entry::Title {
-                        title,
-                        source: super::entry::TitleSource::UserProvided,
-                        updated_at: now,
-                    });
-                    acks.push(PendingAck::Outcome(ack));
-                }
-            }
-            BatchFlow::Continue
-        }
-        SessionCmd::Archive { ack } => {
-            entries.push(Entry::Archive {
-                archived: true,
-                at: now,
-            });
-            acks.push(PendingAck::Archive(ack));
-            BatchFlow::FlushNow
-        }
-        SessionCmd::Finish { snapshots, ack } => {
-            entries.extend(state.finish_entries(snapshots, now));
-            acks.push(PendingAck::Outcome(ack));
-            BatchFlow::Continue
-        }
-        SessionCmd::Compact {
-            summary,
-            instructions,
-            synthetic_message,
-            ack,
-        } => {
-            let pre_count = state.message_count();
-            let (compact_entries, synthetic_uuid) =
-                state.compact_entries(&summary, instructions, synthetic_message, now);
-            entries.extend(compact_entries);
-            acks.push(PendingAck::Compact {
-                ack,
-                pre_count,
-                synthetic_uuid,
-            });
-            BatchFlow::FlushNow
-        }
-        SessionCmd::Shutdown { ack } => {
-            acks.push(PendingAck::Shutdown(ack));
-            *should_exit = true;
-            BatchFlow::Continue
-        }
-        #[cfg(test)]
-        SessionCmd::Panic => panic!("deliberate actor panic for testing"),
-    }
+#[derive(Default)]
+struct Batch {
+    entries: Vec<Entry>,
+    acks: Vec<PendingAck>,
+    should_exit: bool,
 }
 
-/// Queues one sidecar per item, skipping default metadata since it adds no display fields. Acks at
-/// once when nothing needs a flush.
-fn absorb_tool_metadata(
-    items: Vec<(String, ToolMetadata)>,
-    ack: oneshot::Sender<Outcome>,
-    now: OffsetDateTime,
-    entries: &mut Vec<Entry>,
-    acks: &mut Vec<PendingAck>,
-) {
-    let queued = entries.len();
-    entries.extend(
-        items
-            .into_iter()
-            .filter(|(_, metadata)| *metadata != ToolMetadata::default())
-            .map(|(tool_use_id, metadata)| Entry::ToolResultMetadata {
-                tool_use_id,
-                metadata,
-                timestamp: now,
-            }),
-    );
-    if entries.len() > queued {
-        acks.push(PendingAck::Outcome(ack));
-    } else {
-        _ = ack.send(Outcome { failure: None });
+impl Batch {
+    fn absorb(
+        &mut self,
+        cmd: SessionCmd,
+        state: &mut SessionState,
+        shared: &SharedState,
+    ) -> BatchFlow {
+        let now = OffsetDateTime::now_utc();
+        match cmd {
+            SessionCmd::Record { msg, context, ack } => {
+                let (msg_entries, ai_title_seed) =
+                    state.queue_message_entries(&msg, now, shared.manual_title_set());
+                if let Some(context) = context {
+                    self.entries.push(Entry::Context {
+                        context: Box::new(context),
+                        timestamp: now,
+                    });
+                }
+                self.entries.extend(msg_entries);
+                self.acks.push(PendingAck::Record { ack, ai_title_seed });
+                BatchFlow::Continue
+            }
+            SessionCmd::ToolMetadata { items, ack } => {
+                self.absorb_tool_metadata(items, ack, now);
+                BatchFlow::Continue
+            }
+            SessionCmd::Usage { records, ack } => {
+                self.entries
+                    .extend(records.into_iter().map(|usage| Entry::Usage {
+                        uuid: Uuid::new_v4(),
+                        usage,
+                        timestamp: now,
+                    }));
+                self.acks.push(PendingAck::Outcome(ack));
+                BatchFlow::Continue
+            }
+            SessionCmd::AppendAiTitle { title, ack } => {
+                // Re-check: a `/rename` can flip the latch after the generator already queued this.
+                if shared.manual_title_set() {
+                    _ = ack.send(Outcome { failure: None });
+                    return BatchFlow::Continue;
+                }
+                self.entries.push(Entry::Title {
+                    title,
+                    source: TitleSource::AiGenerated,
+                    updated_at: now,
+                });
+                self.acks.push(PendingAck::Outcome(ack));
+                BatchFlow::Continue
+            }
+            SessionCmd::SetManualTitle { title, ack } => {
+                shared.mark_manual_title_set();
+                match state.try_defer_title(title) {
+                    None => _ = ack.send(Outcome { failure: None }),
+                    Some(title) => {
+                        self.entries.push(Entry::Title {
+                            title,
+                            source: TitleSource::UserProvided,
+                            updated_at: now,
+                        });
+                        self.acks.push(PendingAck::Outcome(ack));
+                    }
+                }
+                BatchFlow::Continue
+            }
+            SessionCmd::Archive { ack } => {
+                self.entries.push(Entry::Archive {
+                    archived: true,
+                    at: now,
+                });
+                self.acks.push(PendingAck::Archive(ack));
+                BatchFlow::FlushNow
+            }
+            SessionCmd::Finish { snapshots, ack } => {
+                self.entries.extend(state.finish_entries(snapshots, now));
+                self.acks.push(PendingAck::Outcome(ack));
+                BatchFlow::Continue
+            }
+            SessionCmd::Compact {
+                summary,
+                instructions,
+                synthetic_message,
+                ack,
+            } => {
+                let pre_count = state.message_count();
+                let (compact_entries, synthetic_uuid) =
+                    state.compact_entries(&summary, instructions, synthetic_message, now);
+                self.entries.extend(compact_entries);
+                self.acks.push(PendingAck::Compact {
+                    ack,
+                    pre_count,
+                    synthetic_uuid,
+                });
+                BatchFlow::FlushNow
+            }
+            SessionCmd::Shutdown { ack } => {
+                self.acks.push(PendingAck::Shutdown(ack));
+                self.should_exit = true;
+                BatchFlow::Continue
+            }
+            #[cfg(test)]
+            SessionCmd::Panic => panic!("deliberate actor panic for testing"),
+        }
+    }
+
+    /// Queues one sidecar per item, skipping default metadata since it adds no display fields.
+    /// Acks at once when nothing needs a flush.
+    fn absorb_tool_metadata(
+        &mut self,
+        items: Vec<(String, ToolMetadata)>,
+        ack: oneshot::Sender<Outcome>,
+        now: OffsetDateTime,
+    ) {
+        let queued = self.entries.len();
+        self.entries.extend(
+            items
+                .into_iter()
+                .filter(|(_, metadata)| *metadata != ToolMetadata::default())
+                .map(|(tool_use_id, metadata)| Entry::ToolResultMetadata {
+                    tool_use_id,
+                    metadata,
+                    timestamp: now,
+                }),
+        );
+        if self.entries.len() > queued {
+            self.acks.push(PendingAck::Outcome(ack));
+        } else {
+            _ = ack.send(Outcome { failure: None });
+        }
     }
 }
 
@@ -322,7 +313,7 @@ fn deliver_acks(acks: Vec<PendingAck>, failure: Option<&str>, stopped: bool, sha
             } => {
                 // Every compact failure reaches the agent, which keeps its old transcript only when
                 // told the write failed.
-                _ = ack.send(super::handle::CompactOutcome {
+                _ = ack.send(CompactOutcome {
                     pre_count,
                     failure: failure.map(str::to_owned),
                 });
@@ -349,16 +340,12 @@ fn surface_failure(failure: Option<&str>, stopped: bool, shared: &SharedState) -
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use tempfile::tempdir;
 
-    use super::super::handle::SharedState;
-    use super::super::store::SessionWriter;
-    use super::super::store::testing::test_store;
     use super::*;
-    use crate::message::Message;
-    use crate::session::state::SessionState;
+    use crate::session::state::MAX_UNWRITTEN_BYTES;
+    use crate::session::store::SessionWriter;
+    use crate::session::store::testing::{test_project_dir, test_session_file, test_store};
 
     /// Drives the actor against `cmds` until the receiver closes (we drop `tx` after sending),
     /// returning `SharedState` so callers can assert flush-failure flags.
@@ -415,7 +402,7 @@ mod tests {
 
         drive(state, vec![rec, fin]).await;
 
-        let path = super::super::store::testing::test_session_file(dir.path(), &session_id);
+        let path = test_session_file(dir.path(), &session_id);
         let content = std::fs::read_to_string(path).unwrap();
         let entries: Vec<Entry> = content
             .lines()
@@ -489,7 +476,7 @@ mod tests {
 
         let outcome = meta_rx.await.unwrap();
         assert!(outcome.failure.is_none());
-        let path = super::super::store::testing::test_session_file(dir.path(), &session_id);
+        let path = test_session_file(dir.path(), &session_id);
         let content = std::fs::read_to_string(path).unwrap();
         assert!(
             !content.contains(r#""type":"tool_result_metadata""#),
@@ -570,7 +557,7 @@ mod tests {
 
         drive(state, vec![manual_cmd, rec, fin]).await;
 
-        let path = super::super::store::testing::test_session_file(dir.path(), &session_id);
+        let path = test_session_file(dir.path(), &session_id);
         let content = std::fs::read_to_string(path).unwrap();
         let lines: Vec<&str> = content.lines().collect();
         let header_idx = lines
@@ -626,7 +613,7 @@ mod tests {
 
         drive(state, vec![a, b, rec, fin]).await;
 
-        let path = super::super::store::testing::test_session_file(dir.path(), &session_id);
+        let path = test_session_file(dir.path(), &session_id);
         let content = std::fs::read_to_string(path).unwrap();
         let title_lines: Vec<&str> = content
             .lines()
@@ -668,7 +655,7 @@ mod tests {
 
         drive(state, vec![rec, manual_cmd, ai_cmd, fin]).await;
 
-        let path = super::super::store::testing::test_session_file(dir.path(), &session_id);
+        let path = test_session_file(dir.path(), &session_id);
         let content = std::fs::read_to_string(path).unwrap();
         let title_lines: Vec<&str> = content
             .lines()
@@ -743,7 +730,7 @@ mod tests {
 
         drive(state, vec![rec, f1, f2]).await;
 
-        let path = super::super::store::testing::test_session_file(dir.path(), &session_id);
+        let path = test_session_file(dir.path(), &session_id);
         let content = std::fs::read_to_string(path).unwrap();
         let summary_count = content
             .lines()
@@ -770,7 +757,7 @@ mod tests {
 
         drive(state, vec![rec_a, rec_b, compact_cmd]).await;
 
-        let path = super::super::store::testing::test_session_file(dir.path(), &session_id);
+        let path = test_session_file(dir.path(), &session_id);
         let content = std::fs::read_to_string(path).unwrap();
         let compact_count = content
             .lines()
@@ -858,7 +845,7 @@ mod tests {
         let session_id = state.session_id.to_string();
         let (tx, rx) = mpsc::channel(4);
         let actor = tokio::spawn(run(state, rx, Arc::new(SharedState::default())));
-        let project_dir = super::super::store::testing::test_project_dir(dir.path());
+        let project_dir = test_project_dir(dir.path());
         std::fs::remove_dir_all(&project_dir).unwrap();
 
         let (rec, rec_rx) = record_cmd("before compact");
@@ -904,7 +891,7 @@ mod tests {
         let session_id = original.session_id.to_string();
         let (rec, _) = record_cmd("before archive");
         drive(original, vec![rec]).await;
-        let path = super::super::store::testing::test_session_file(dir.path(), &session_id);
+        let path = test_session_file(dir.path(), &session_id);
         let last_uuid = store.load_session_data(&session_id).unwrap().last_uuid;
         let state = SessionState::resumed(
             store.clone(),
@@ -945,8 +932,7 @@ mod tests {
         let state = SessionState::fresh(test_store(dir.path()), "m");
         let (tx, rx) = mpsc::channel(4);
         let actor = tokio::spawn(run(state, rx, Arc::new(SharedState::default())));
-        std::fs::remove_dir_all(super::super::store::testing::test_project_dir(dir.path()))
-            .unwrap();
+        std::fs::remove_dir_all(test_project_dir(dir.path())).unwrap();
 
         let (rec, rec_rx) = record_cmd("unsaved");
         tx.send(rec).await.unwrap();
@@ -971,7 +957,7 @@ mod tests {
         let store = test_store(dir.path());
         let state = SessionState::fresh(store.clone(), "m");
 
-        let project_dir = super::super::store::testing::test_project_dir(dir.path());
+        let project_dir = test_project_dir(dir.path());
         std::fs::remove_dir_all(&project_dir).unwrap();
 
         let (cmd, rx) = record_cmd("hello");
@@ -990,11 +976,10 @@ mod tests {
         let state = SessionState::fresh(test_store(dir.path()), "m");
         let (tx, rx) = mpsc::channel(1);
         let actor = tokio::spawn(run(state, rx, Arc::new(SharedState::default())));
-        std::fs::remove_dir_all(super::super::store::testing::test_project_dir(dir.path()))
-            .unwrap();
+        std::fs::remove_dir_all(test_project_dir(dir.path())).unwrap();
 
         let mut failures = Vec::new();
-        let huge = "x".repeat(super::super::state::MAX_UNWRITTEN_BYTES);
+        let huge = "x".repeat(MAX_UNWRITTEN_BYTES);
         for text in ["small", huge.as_str(), "later"] {
             let (rec, rec_rx) = record_cmd(text);
             tx.send(rec).await.unwrap();

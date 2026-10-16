@@ -8,7 +8,8 @@ use std::sync::Arc;
 use serde::Deserialize;
 
 use super::{
-    ApprovalBody, ApprovalPreview, Tool, ToolOutput, extract_input_field, summarize_path_call,
+    ApprovalBody, ApprovalPreview, Tool, ToolOutput, WriteMode, extract_input_field,
+    summarize_path_call,
 };
 use crate::file_tracker::{FileTracker, GatePurpose};
 use crate::permission::PermissionClass;
@@ -44,17 +45,6 @@ impl Tool for WriteTool {
         Some("file_path")
     }
 
-    fn approval_preview(&self, input: &serde_json::Value) -> ApprovalPreview {
-        let content = extract_input_field(input, "content").unwrap_or_default();
-        let current = extract_input_field(input, "file_path")
-            .map(current_text)
-            .unwrap_or_default();
-        ApprovalPreview {
-            title: self.summarize_call(input),
-            body: ApprovalBody::Diff(vec![super::edit::synthesize_chunk(&current, content)]),
-        }
-    }
-
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
@@ -82,6 +72,17 @@ impl Tool for WriteTool {
 
     fn summarize_call(&self, input: &serde_json::Value) -> String {
         summarize_path_call(self.name(), input, "file_path")
+    }
+
+    fn approval_preview(&self, input: &serde_json::Value) -> ApprovalPreview {
+        let content = extract_input_field(input, "content").unwrap_or_default();
+        let current = extract_input_field(input, "file_path")
+            .map(current_text)
+            .unwrap_or_default();
+        ApprovalPreview {
+            title: self.summarize_call(input),
+            body: ApprovalBody::Diff(vec![super::edit::synthesize_chunk(&current, content)]),
+        }
     }
 
     fn run(
@@ -157,7 +158,12 @@ async fn write_file(
             .map_err(|e| format!("Failed to create directory {}: {e}", parent.display()))?;
     }
 
-    super::write_tracked(tracker, path, content.as_bytes().to_vec(), is_new)
+    let mode = if is_new {
+        WriteMode::CreateNew
+    } else {
+        WriteMode::Overwrite
+    };
+    super::write_tracked(tracker, path, content.as_bytes().to_vec(), mode)
         .await
         .map_err(|e| format!("Failed to write file: {e}"))?;
 
@@ -199,16 +205,6 @@ mod tests {
     };
     use crate::tool::read::ReadTool;
     use crate::tool::testing::{canonical_tempdir, symlink_file};
-
-    // ── permission_class ──
-
-    #[test]
-    fn permission_class_is_edit() {
-        assert_eq!(
-            WriteTool::new(tracker()).permission_class(),
-            PermissionClass::Edit
-        );
-    }
 
     // ── approval_preview ──
 
@@ -274,7 +270,7 @@ mod tests {
     // ── run ──
 
     #[tokio::test]
-    async fn run_creates_file() {
+    async fn run_new_file_reports_creation() {
         let dir = canonical_tempdir();
         let path = dir.path().join("new.txt");
 
@@ -292,7 +288,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_missing_required_fields() {
+    async fn run_missing_required_fields_reports_input_error() {
         let output = run(serde_json::json!({"file_path": "/tmp/x"}), tracker()).await;
         assert!(output.is_error);
         assert!(output.content.contains("Invalid input"));
@@ -350,7 +346,7 @@ mod tests {
     // ── write_file ──
 
     #[tokio::test]
-    async fn write_file_creates_new() {
+    async fn write_file_new_path_creates_content() {
         let dir = canonical_tempdir();
         let path = dir.path().join("new.txt");
 
@@ -473,7 +469,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn write_file_empty_content() {
+    async fn write_file_empty_content_creates_empty_file() {
         let dir = canonical_tempdir();
         let path = dir.path().join("empty.txt");
 

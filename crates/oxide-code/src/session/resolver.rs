@@ -13,7 +13,7 @@ use super::store::SessionStore;
 use crate::util::text::ELLIPSIS;
 
 /// Normalized form of the CLI `--continue` argument.
-pub(crate) enum ResumeMode<'a> {
+enum ResumeMode<'a> {
     /// No `--continue` flag — start a new session.
     Fresh,
     /// Bare `--continue` — resume the most recent unarchived session in scope.
@@ -71,7 +71,7 @@ pub(crate) async fn resolve_session(
 /// Trims and classifies a `--continue` argument into a [`ResumeMode`]. Empty / whitespace
 /// prefixes are rejected explicitly to avoid silently collapsing into "resume latest" — bare
 /// `--continue` already expresses that.
-pub(crate) fn normalize_resume_arg(resume: Option<&Option<String>>) -> Result<ResumeMode<'_>> {
+fn normalize_resume_arg(resume: Option<&Option<String>>) -> Result<ResumeMode<'_>> {
     match resume {
         None => Ok(ResumeMode::Fresh),
         Some(None) => Ok(ResumeMode::Latest),
@@ -175,13 +175,13 @@ fn format_session_id_preview(ids: impl IntoIterator<Item = String>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::super::store::set_archived_at;
-    use super::super::store::testing::{
+    use super::*;
+    use crate::message::Message;
+    use crate::session::store::set_archived_at;
+    use crate::session::store::testing::{
         seed_test_session, test_project_dir, test_session_file, test_store,
         write_newest_corrupt_session,
     };
-    use super::*;
-    use crate::message::Message;
 
     // ── resolve_session ──
 

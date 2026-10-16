@@ -29,11 +29,6 @@ pub(crate) async fn current_branch_async(cwd: &Path) -> Option<String> {
     parse_branch(&output.stdout)
 }
 
-/// `&str` overload for callers that already hold a string-shaped cwd.
-pub(crate) fn current_branch_str(cwd: &str) -> Option<String> {
-    current_branch(Path::new(cwd))
-}
-
 fn branch_command(cwd: &str) -> Command {
     let mut command = Command::new("git");
     command.args(["-C", cwd, "--no-optional-locks", "branch", "--show-current"]);
@@ -267,15 +262,6 @@ mod tests {
         );
     }
 
-    // ── current_branch_str ──
-
-    #[test]
-    fn current_branch_str_outside_a_repo_is_absent() {
-        let dir = tempfile::tempdir().unwrap();
-        let cwd = dir.path().to_str().unwrap();
-        assert_eq!(with_isolated_git_env(|| current_branch_str(cwd)), None);
-    }
-
     // ── parse_branch ──
 
     #[test]
@@ -332,7 +318,7 @@ mod tests {
     // ── cwd_to_str ──
 
     #[test]
-    fn cwd_to_str_returns_path_when_utf8() {
+    fn cwd_to_str_utf8_path_is_preserved() {
         assert_eq!(cwd_to_str(Path::new("/tmp/a"), "p"), Some("/tmp/a"));
     }
 
@@ -346,7 +332,7 @@ mod tests {
     // ── check_output ──
 
     #[test]
-    fn check_output_returns_output_on_success() {
+    fn check_output_success_preserves_stdout() {
         let output = check_output(
             "test",
             "/tmp/cwd",
@@ -385,8 +371,6 @@ mod tests {
     }
 
     fn status_with_code(code: i32) -> std::process::ExitStatus {
-        // `Command::new("sh").arg("-c").arg(format!("exit {code}"))` is the portable way to mint
-        // an `ExitStatus` with a specific code from tests.
         Command::new("sh")
             .arg("-c")
             .arg(format!("exit {code}"))
@@ -418,7 +402,7 @@ mod tests {
     }
 
     #[test]
-    fn stderr_summary_returns_empty_when_every_line_is_blank() {
+    fn stderr_summary_blank_lines_have_no_summary() {
         assert_eq!(stderr_summary(b"\n   \n\t\n"), "");
     }
 }

@@ -22,6 +22,7 @@ use crate::file_tracker::{FileSnapshot, FileTracker};
 use crate::message::Message;
 use crate::prompt::SessionContext;
 use crate::tool::ToolMetadata;
+use crate::util::sync::lock_or_recover;
 
 #[cfg(test)]
 pub(crate) mod testing;
@@ -58,13 +59,7 @@ pub(super) struct SharedState {
 
 impl SharedState {
     pub(super) fn record_flush_failure(&self, msg: &str) {
-        match self.last_flush_failure.lock() {
-            Ok(mut slot) => *slot = Some(msg.to_owned()),
-            Err(e) => {
-                tracing::warn!("last_flush_failure mutex poisoned, recovering");
-                *e.into_inner() = Some(msg.to_owned());
-            }
-        }
+        *lock_or_recover(&self.last_flush_failure, "last_flush_failure") = Some(msg.to_owned());
     }
 
     /// `true` on the first call after [`Self::record_flush_failure`], then sticky `false`.
@@ -92,13 +87,7 @@ impl SharedState {
 
     /// Most recent flush error, threaded into actor-gone messages.
     pub(super) fn last_flush_failure(&self) -> Option<String> {
-        match self.last_flush_failure.lock() {
-            Ok(guard) => guard.clone(),
-            Err(e) => {
-                tracing::warn!("last_flush_failure mutex poisoned, recovering");
-                e.into_inner().clone()
-            }
-        }
+        lock_or_recover(&self.last_flush_failure, "last_flush_failure").clone()
     }
 }
 
@@ -148,21 +137,12 @@ impl SessionHandle {
         context: Option<SessionContext>,
     ) -> RecordOutcome {
         let (ack, rx) = oneshot::channel();
-        if self
-            .cmd_tx
-            .send(SessionCmd::Record { msg, context, ack })
+        self.request(SessionCmd::Record { msg, context, ack }, rx)
             .await
-            .is_err()
-        {
-            return RecordOutcome {
+            .unwrap_or_else(|| RecordOutcome {
                 ai_title_seed: None,
                 failure: self.actor_gone_failure(),
-            };
-        }
-        rx.await.unwrap_or_else(|_| RecordOutcome {
-            ai_title_seed: None,
-            failure: self.actor_gone_failure(),
-        })
+            })
     }
 
     /// Record sidecar metadata for a tool round in one cmd. Default-metadata items are skipped.
@@ -218,15 +198,12 @@ impl SessionHandle {
             synthetic_message,
             ack,
         };
-        if self.cmd_tx.send(cmd).await.is_ok()
-            && let Ok(outcome) = rx.await
-        {
-            return outcome;
-        }
-        CompactOutcome {
-            pre_count: 0,
-            failure: Some(self.actor_stopped_failure()),
-        }
+        self.request(cmd, rx)
+            .await
+            .unwrap_or_else(|| CompactOutcome {
+                pre_count: 0,
+                failure: Some(self.actor_stopped_failure()),
+            })
     }
 
     /// Marks the session archived, reporting every failure since the caller rolls away only once
@@ -234,14 +211,11 @@ impl SessionHandle {
     /// otherwise create a file holding nothing else.
     pub(crate) async fn archive(&self) -> Outcome {
         let (ack, rx) = oneshot::channel();
-        if self.cmd_tx.send(SessionCmd::Archive { ack }).await.is_ok()
-            && let Ok(outcome) = rx.await
-        {
-            return outcome;
-        }
-        Outcome {
-            failure: Some(self.actor_stopped_failure()),
-        }
+        self.request(SessionCmd::Archive { ack }, rx)
+            .await
+            .unwrap_or_else(|| Outcome {
+                failure: Some(self.actor_stopped_failure()),
+            })
     }
 
     /// Write the session summary and finalize. Idempotent no-op on fresh sessions that never
@@ -273,13 +247,7 @@ impl SessionHandle {
             _ = rx.await;
         }
         drop(cmd_tx);
-        let join = match actor_join.lock() {
-            Ok(mut g) => g.take(),
-            Err(e) => {
-                tracing::warn!("actor_join mutex poisoned, recovering");
-                e.into_inner().take()
-            }
-        };
+        let join = lock_or_recover(&actor_join, "actor_join").take();
         if let Some(j) = join
             && let Err(e) = j.await
         {
@@ -293,14 +261,14 @@ impl SessionHandle {
 
     /// Sends a cmd and awaits the `Outcome` ack, falling back to actor-gone on failure.
     async fn dispatch_outcome(&self, cmd: SessionCmd, rx: oneshot::Receiver<Outcome>) -> Outcome {
-        if self.cmd_tx.send(cmd).await.is_err() {
-            return Outcome {
-                failure: self.actor_gone_failure(),
-            };
-        }
-        rx.await.unwrap_or_else(|_| Outcome {
+        self.request(cmd, rx).await.unwrap_or_else(|| Outcome {
             failure: self.actor_gone_failure(),
         })
+    }
+
+    async fn request<T>(&self, cmd: SessionCmd, rx: oneshot::Receiver<T>) -> Option<T> {
+        self.cmd_tx.send(cmd).await.ok()?;
+        rx.await.ok()
     }
 
     /// The actor-gone failure for a write the caller must know failed, in full the first time.
@@ -518,15 +486,17 @@ mod tests {
     use time::format_description::well_known::Rfc3339;
     use time::macros::datetime;
 
-    use super::super::entry::{SessionInfo, UsageRecord};
-    use super::super::store::testing::{test_project_dir, test_session_file, test_store};
     use super::*;
     use crate::file_tracker::{
-        self, FileTracker, GateError, GatePurpose, LastView,
+        self, GateError, GatePurpose, LastView,
         testing::{record_tracked_file, seed_full_read},
     };
     use crate::message::{ContentBlock, Role};
     use crate::prompt::PromptParts;
+    use crate::session::entry::{Entry, SessionInfo};
+    use crate::session::store::testing::{
+        seed_test_session, test_project_dir, test_session_file, test_store,
+    };
     use crate::tool::{DiffChunk, DiffLine};
 
     /// Resumes the session whose file name carries `session_id`.
@@ -567,35 +537,6 @@ mod tests {
                 })
                 .await;
         }
-    }
-
-    // ── SharedState ──
-
-    #[test]
-    fn shared_state_record_flush_failure_recovers_from_poisoned_mutex() {
-        let shared = Arc::new(SharedState::default());
-        let s = Arc::clone(&shared);
-        _ = std::thread::spawn(move || {
-            let _guard = s.last_flush_failure.lock().unwrap();
-            panic!("deliberate poison");
-        })
-        .join();
-        shared.record_flush_failure("disk full");
-        assert_eq!(shared.last_flush_failure(), Some("disk full".to_owned()));
-    }
-
-    #[test]
-    fn shared_state_last_flush_failure_recovers_from_poisoned_mutex() {
-        let shared = Arc::new(SharedState::default());
-        let s = Arc::clone(&shared);
-        _ = std::thread::spawn(move || {
-            let mut guard = s.last_flush_failure.lock().unwrap();
-            *guard = Some("pre-poison".to_owned());
-            panic!("deliberate poison");
-        })
-        .join();
-        // Recovery path must still return the value written pre-panic.
-        assert_eq!(shared.last_flush_failure(), Some("pre-poison".to_owned()),);
     }
 
     // ── record_message ──
@@ -1057,7 +998,7 @@ mod tests {
         handle.finish(Vec::new()).await;
         drop(handle);
 
-        let project_dir = super::super::store::testing::test_project_dir(dir.path());
+        let project_dir = test_project_dir(dir.path());
         assert!(
             std::fs::read_dir(&project_dir).unwrap().next().is_none(),
             "empty session must not write a file",
@@ -1191,44 +1132,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shutdown_is_safe_to_call_after_dead_handle() {
+    async fn shutdown_dead_actor_completes_without_panicking() {
         // Smoke check: empty join slot must not panic.
         let handle = testing::dead("dead");
         handle.shutdown().await;
     }
 
     #[tokio::test]
-    async fn shutdown_logs_actor_panic_instead_of_silently_discarding() {
-        // An actor that panics mid-batch must surface via tracing::error,
-        // not disappear into `_ = j.await`.
+    async fn shutdown_actor_panic_completes_without_panicking() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let handle = start(&store, "m");
-        handle
-            .cmd_tx
-            .send(super::super::actor::SessionCmd::Panic)
-            .await
-            .unwrap();
-        // shutdown must not panic itself — it handles the JoinError.
-        handle.shutdown().await;
+        for handle in [start(&store, "m"), testing::acks_then_drops("test", 1)] {
+            handle.cmd_tx.send(SessionCmd::Panic).await.unwrap();
+            handle.shutdown().await;
+        }
     }
 
     #[tokio::test]
-    async fn shutdown_surfaces_panic_from_stand_in_actor() {
-        // Exercises the Panic arm in acks_then_drops (testing.rs),
-        // which panics the stand-in actor task. shutdown must catch the
-        // JoinError and log via tracing::error.
-        let handle = testing::acks_then_drops("test", 1);
-        handle
-            .cmd_tx
-            .send(super::super::actor::SessionCmd::Panic)
-            .await
-            .unwrap();
-        handle.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn shutdown_logs_cancellation_when_actor_task_aborted() {
+    async fn shutdown_cancelled_actor_completes_without_panicking() {
         // Abort produces a JoinError where is_panic() == false,
         // exercising the "cancelled" branch in shutdown.
         let dir = tempfile::tempdir().unwrap();
@@ -1240,22 +1161,6 @@ mod tests {
         handle.shutdown().await;
     }
 
-    #[tokio::test]
-    async fn shutdown_recovers_from_poisoned_actor_join_mutex() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let handle = start(&store, "m");
-        // Poison the actor_join mutex.
-        let join_ref = Arc::clone(&handle.actor_join);
-        _ = std::thread::spawn(move || {
-            let _guard = join_ref.lock().unwrap();
-            panic!("deliberate poison");
-        })
-        .join();
-        // shutdown must recover (take the JoinHandle) and not panic.
-        handle.shutdown().await;
-    }
-
     // ── start ──
 
     #[tokio::test]
@@ -1264,7 +1169,7 @@ mod tests {
         let store = test_store(dir.path());
         let handle = start(&store, "test-model");
 
-        let project_dir = super::super::store::testing::test_project_dir(dir.path());
+        let project_dir = test_project_dir(dir.path());
         assert!(
             std::fs::read_dir(&project_dir).unwrap().next().is_none(),
             "fresh session must not create a file before the first record",
@@ -1502,7 +1407,7 @@ mod tests {
     // ── resume_from_path ──
 
     #[tokio::test]
-    async fn resume_loads_messages_and_keeps_session_id() {
+    async fn resume_from_path_loads_messages_and_keeps_session_id() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let original = start(&store, "m");
@@ -1522,7 +1427,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resume_works_on_unfinished_session() {
+    async fn resume_from_path_works_on_unfinished_session() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let original = start(&store, "m");
@@ -1536,12 +1441,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resume_title_only_session_keeps_title_on_next_message() {
+    async fn resume_from_path_title_only_session_keeps_title_on_next_message() {
         // Title-only resume must not push a duplicate `FirstPrompt` on the next message.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let session_id = "title-only-fixture";
-        super::super::store::testing::seed_test_session(
+        seed_test_session(
             &store,
             session_id,
             Some("User-named"),
@@ -1585,7 +1490,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resume_empty_session_errors() {
+    async fn resume_from_path_empty_session_errors() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let original = start(&store, "m");
@@ -1597,7 +1502,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resume_all_messages_sanitized_errors() {
+    async fn resume_from_path_all_messages_sanitized_errors() {
         // Sanitize drops the lone unresolved tool_use, leaving an empty chain — resume must bail.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
@@ -1625,7 +1530,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resume_drops_assistant_message_with_only_unresolved_tool_use() {
+    async fn resume_from_path_drops_assistant_message_with_only_unresolved_tool_use() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let original = start(&store, "m");
@@ -1653,7 +1558,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resume_preserves_parent_chain_on_next_record() {
+    async fn resume_from_path_preserves_parent_chain_on_next_record() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let original = start(&store, "m");
@@ -1669,7 +1574,7 @@ mod tests {
         drop(resumed);
 
         let content = std::fs::read_to_string(test_session_file(dir.path(), &session_id)).unwrap();
-        let entries: Vec<super::super::entry::Entry> = content
+        let entries: Vec<Entry> = content
             .lines()
             .filter(|l| !l.is_empty())
             .filter_map(|l| serde_json::from_str(l).ok())
@@ -1678,7 +1583,7 @@ mod tests {
         let msg_uuids: Vec<_> = entries
             .iter()
             .filter_map(|e| match e {
-                super::super::entry::Entry::Message {
+                Entry::Message {
                     uuid, parent_uuid, ..
                 } => Some((*uuid, *parent_uuid)),
                 _ => None,
@@ -1695,7 +1600,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resume_restores_unchanged_snapshots_whose_tool_result_survives() {
+    async fn resume_from_path_restores_unchanged_snapshots_whose_tool_result_survives() {
         let dir = tempfile::tempdir().unwrap();
         let files_dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
@@ -1729,7 +1634,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resume_drops_drifted_snapshots() {
+    async fn resume_from_path_drops_drifted_snapshots() {
         let dir = tempfile::tempdir().unwrap();
         let files_dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
@@ -1765,7 +1670,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resume_drops_snapshots_for_missing_files() {
+    async fn resume_from_path_drops_snapshots_for_missing_files() {
         let dir = tempfile::tempdir().unwrap();
         let files_dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());

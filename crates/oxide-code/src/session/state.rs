@@ -1,6 +1,7 @@
 //! In-memory session state owned by the actor. Pure data with no tokio. I/O hides behind
 //! [`WriterStatus`] so lifecycle transitions test without a runtime.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Result, bail};
@@ -12,16 +13,22 @@ use super::entry::{CURRENT_VERSION, Entry, TitleSource};
 use super::store::{SessionStore, SessionWriter, encode_lines};
 use crate::file_tracker::FileSnapshot;
 use crate::message::{ContentBlock, Message, Role};
-use crate::util::text::{ELLIPSIS, ELLIPSIS_WIDTH};
+use crate::util::git::current_branch;
+use crate::util::text::truncate_to_width;
 
-/// Char cap for first-prompt-derived titles. Sized so a 120-col `--list` row still has room
+/// Terminal-column cap for first-prompt titles, leaving room in a 120-col `--list` row
 /// after the fixed `ID / Last Active / Msgs` prefix.
 const MAX_TITLE_LEN: usize = 80;
 
-/// Retry-queue size past which a failed flush stops persistence for the rest of the session.
-pub(super) const MAX_UNWRITTEN_BYTES: usize = 8 << 20;
-const PERSISTENCE_STOPPED: &str =
-    "session persistence stopped after more than 8 MiB of entries failed to write";
+/// Retry-queue size in MiB past which a failed flush stops persistence for the rest of the session.
+const MAX_UNWRITTEN_MIB: usize = 8;
+pub(super) const MAX_UNWRITTEN_BYTES: usize = MAX_UNWRITTEN_MIB << 20;
+
+fn persistence_stopped() -> String {
+    format!(
+        "session persistence stopped after more than {MAX_UNWRITTEN_MIB} MiB of entries failed to write"
+    )
+}
 
 // ── SessionState ──
 
@@ -253,7 +260,7 @@ impl SessionState {
     /// with more than [`MAX_UNWRITTEN_BYTES`] to write drops the queue and stops persistence.
     pub(super) fn flush_entries(&mut self, entries: Vec<Entry>) -> Result<()> {
         if self.persistence_stopped {
-            bail!(PERSISTENCE_STOPPED);
+            bail!("{}", persistence_stopped());
         }
         self.unwritten.extend(entries);
         if self.unwritten.is_empty() {
@@ -284,7 +291,7 @@ impl SessionState {
             if lines.len() > MAX_UNWRITTEN_BYTES {
                 self.persistence_stopped = true;
                 self.unwritten = Vec::new();
-                return Err(e.context(PERSISTENCE_STOPPED));
+                return Err(e.context(persistence_stopped()));
             }
             return Err(e);
         }
@@ -304,7 +311,7 @@ fn new_header(model: &str) -> (String, Entry) {
     let git_branch = if cfg!(test) {
         None
     } else {
-        crate::util::git::current_branch_str(&cwd)
+        current_branch(Path::new(&cwd))
     };
     let header = Entry::Header {
         session_id: session_id.clone(),
@@ -342,30 +349,17 @@ pub(super) fn extract_user_text(message: &Message) -> Option<&str> {
     })
 }
 
-/// Truncates a title to `max_len` characters, appending [`ELLIPSIS`] when truncated.
-fn truncate_title(s: &str, max_len: usize) -> String {
-    debug_assert!(
-        max_len > ELLIPSIS_WIDTH,
-        "truncate_title: max_len must exceed ELLIPSIS_WIDTH",
-    );
-    let trimmed = s.lines().next().unwrap_or(s).trim();
-    if trimmed.chars().count() <= max_len {
-        trimmed.to_owned()
-    } else {
-        let boundary = trimmed
-            .char_indices()
-            .nth(max_len - ELLIPSIS_WIDTH)
-            .map_or(trimmed.len(), |(i, _)| i);
-        format!("{}{ELLIPSIS}", &trimmed[..boundary])
-    }
+/// Truncates the trimmed first line to `max_width` terminal columns.
+fn truncate_title(s: &str, max_width: usize) -> String {
+    truncate_to_width(s.lines().next().unwrap_or(s).trim(), max_width)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::store::load_session_data_from_path;
-    use super::super::store::testing::{test_project_dir, test_session_file, test_store};
     use super::*;
     use crate::file_tracker::{FileTracker, LastView};
+    use crate::session::store::load_session_data_from_path;
+    use crate::session::store::testing::{test_project_dir, test_session_file, test_store};
 
     // ── try_defer_title ──
 
@@ -818,13 +812,13 @@ mod tests {
         let (entries, _) = state.queue_message_entries(&huge, now, false);
         let err = state.flush_entries(entries).unwrap_err();
         assert!(
-            format!("{err:#}").contains(PERSISTENCE_STOPPED),
+            format!("{err:#}").contains(&persistence_stopped()),
             "got: {err:#}"
         );
         let (entries, _) = state.queue_message_entries(&Message::assistant("after"), now, false);
         let err = state.flush_entries(entries).unwrap_err();
 
-        assert_eq!(err.to_string(), PERSISTENCE_STOPPED);
+        assert_eq!(err.to_string(), persistence_stopped());
         assert!(state.persistence_stopped());
         assert_eq!(
             std::fs::read(&path).unwrap(),
@@ -850,7 +844,7 @@ mod tests {
     // ── extract_user_text ──
 
     #[test]
-    fn extract_user_text_returns_first_non_empty_text_from_user_role_only() {
+    fn extract_user_text_selects_first_nonempty_user_text() {
         let tool_result = ContentBlock::ToolResult {
             tool_use_id: "t1".to_owned(),
             content: "output".to_owned(),
@@ -889,7 +883,7 @@ mod tests {
     // ── truncate_title ──
 
     #[test]
-    fn truncate_title_returns_at_most_max_len_chars_after_first_line_trim() {
+    fn truncate_title_trims_first_line_and_caps_terminal_width() {
         assert_eq!(truncate_title("hello world", 60), "hello world");
         assert_eq!(truncate_title("", 60), "");
         assert_eq!(truncate_title("first line\nsecond line", 60), "first line");
@@ -903,8 +897,17 @@ mod tests {
     }
 
     #[test]
-    fn truncate_title_multibyte_respects_character_count() {
-        // Exact char count: 57 é + "..." = 60, not "<= 60".
+    fn truncate_title_cjk_title_fits_terminal_column_cap() {
+        use unicode_width::UnicodeWidthStr;
+
+        let result = truncate_title(&"界".repeat(MAX_TITLE_LEN), MAX_TITLE_LEN);
+        assert_eq!(result, format!("{}...", "界".repeat(38)));
+        assert_eq!(result.width(), 79);
+    }
+
+    #[test]
+    fn truncate_title_multibyte_respects_terminal_width() {
+        // Each é is one column, so the cap keeps 57 of them plus "...".
         let s = "\u{00e9}".repeat(61);
         let result = truncate_title(&s, 60);
         assert_eq!(result.chars().count(), 60);

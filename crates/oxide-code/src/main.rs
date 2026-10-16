@@ -38,7 +38,7 @@ use session::handle::ResumedSession;
 use session::list_view::render_list;
 use session::resolver::resolve_session;
 use session::store::SessionStore;
-use session::store::listing::DEFAULT_SESSION_LIST_LIMIT;
+use session::store::listing::{DEFAULT_SESSION_LIST_LIMIT, ListScope};
 use slash::ResumePicker;
 use tool::{
     ToolRegistry, bash::BashTool, edit::EditTool, glob::GlobTool, grep::GrepTool, read::ReadTool,
@@ -135,8 +135,10 @@ async fn async_main() -> Result<Exit> {
     if cli.list {
         list_sessions(
             &mut std::io::stdout().lock(),
-            cli.all,
-            cli.archived,
+            ListScope {
+                all: cli.all,
+                archived: cli.archived,
+            },
             cli.limit,
         )?;
         return Ok(Exit::Success);
@@ -203,17 +205,12 @@ async fn async_main() -> Result<Exit> {
 
 // ── Session Helpers ──
 
-fn list_sessions(
-    out: &mut dyn std::io::Write,
-    all: bool,
-    archived: bool,
-    limit: usize,
-) -> Result<()> {
+fn list_sessions(out: &mut dyn std::io::Write, scope: ListScope, limit: usize) -> Result<()> {
     let store = SessionStore::open()?;
     let local_offset = util::time::local_offset();
     let term_width = detect_terminal_width();
     let cap = (limit > 0).then_some(limit);
-    render_list(out, &store, all, archived, local_offset, term_width, cap)
+    render_list(out, &store, scope, local_offset, term_width, cap)
 }
 
 fn detect_terminal_width() -> Option<usize> {
@@ -306,14 +303,22 @@ mod tests {
             );
 
             let mut output = Vec::new();
-            list_sessions(&mut output, false, false, 0).unwrap();
+            list_sessions(&mut output, ListScope::default(), 0).unwrap();
             let local = String::from_utf8(output).unwrap();
             assert!(local.contains("Local session"));
             assert!(!local.contains("Other session"));
             assert!(!local.contains("Project"));
 
             let mut output = Vec::new();
-            list_sessions(&mut output, true, false, 0).unwrap();
+            list_sessions(
+                &mut output,
+                ListScope {
+                    all: true,
+                    ..ListScope::default()
+                },
+                0,
+            )
+            .unwrap();
             let all = String::from_utf8(output).unwrap();
             assert!(all.contains("Local session"));
             assert!(all.contains("Other session"));
@@ -321,7 +326,15 @@ mod tests {
             assert!(!all.contains("... more"));
 
             let mut output = Vec::new();
-            list_sessions(&mut output, true, false, 1).unwrap();
+            list_sessions(
+                &mut output,
+                ListScope {
+                    all: true,
+                    ..ListScope::default()
+                },
+                1,
+            )
+            .unwrap();
             let capped = String::from_utf8(output).unwrap();
             assert!(capped.contains("Other session"));
             assert!(!capped.contains("Local session"));
@@ -329,7 +342,15 @@ mod tests {
 
             set_archived_at(&other.find_session_path("other-session").unwrap(), true).unwrap();
             let mut output = Vec::new();
-            list_sessions(&mut output, true, true, 0).unwrap();
+            list_sessions(
+                &mut output,
+                ListScope {
+                    all: true,
+                    archived: true,
+                },
+                0,
+            )
+            .unwrap();
             let archived = String::from_utf8(output).unwrap();
             assert!(archived.contains("Other session"));
             assert!(!archived.contains("Local session"));
@@ -340,7 +361,7 @@ mod tests {
     fn list_sessions_storage_error() {
         let file = tempfile::NamedTempFile::new().unwrap();
         temp_env::with_var("XDG_DATA_HOME", Some(file.path()), || {
-            assert!(list_sessions(&mut Vec::new(), false, false, 0).is_err());
+            assert!(list_sessions(&mut Vec::new(), ListScope::default(), 0).is_err());
         });
     }
 
@@ -391,7 +412,7 @@ mod tests {
         let dir = canonical_tempdir();
         std::fs::write(dir.path().join("notes.txt"), "token").unwrap();
         std::fs::write(dir.path().join("secret.txt"), "token").unwrap();
-        // An absolute rule, since the tools search from the process cwd, which the dir sits outside.
+        // An absolute rule, since the tools search from the process cwd, which is outside the dir.
         let deny = [format!("read({}/secret.txt)", slash_separated(dir.path()))];
         let read_deny = Policy::resolve(Mode::Auto, &[], &deny, dir.path())
             .unwrap()
