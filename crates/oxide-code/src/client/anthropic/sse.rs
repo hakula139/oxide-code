@@ -5,8 +5,10 @@ use futures::StreamExt;
 use tokio::sync::mpsc;
 use tracing::debug;
 
+use super::accumulator::ResponseAccumulator;
 use super::transport::{AttemptError, MessagesRequest, post_messages, with_retry};
 use super::wire::{ApiError, StreamEvent};
+use crate::client::ResponseEvent;
 
 /// Hard cap. A misbehaving upstream that never ends a frame would otherwise grow until OOM.
 #[cfg(not(test))]
@@ -15,18 +17,18 @@ const MAX_SSE_FRAME_BYTES: usize = 8 * 1024 * 1024;
 #[cfg(test)]
 const MAX_SSE_FRAME_BYTES: usize = 4 * 1024;
 
-/// Drives the streaming `/v1/messages` request and forwards parsed [`StreamEvent`]s on `tx`,
+/// Drives the streaming `/v1/messages` request and forwards its [`ResponseEvent`]s on `tx`,
 /// retrying an attempt that fails before any content block arrives. Each retry forwards a
-/// [`StreamEvent::Retrying`] notice first.
+/// [`ResponseEvent::Retrying`] notice first.
 ///
-/// Returns `Ok(())` once `message_stop` or an in-band `error` event is forwarded, or when the
-/// receiver drops (consumer cancellation is not an error). Returns `Err` for transport / HTTP
-/// failures, a stream that ends before `message_stop`, and the frame-size guard. Single malformed
+/// Returns `Ok(())` once the completed reply is forwarded, or when the receiver drops (consumer
+/// cancellation is not an error). Returns `Err` for transport / HTTP failures, an in-band `error`
+/// event, a stream that ends before `message_stop`, and the frame-size guard. Single malformed
 /// frames are logged and skipped so they do not poison the rest of the turn.
 pub(super) async fn stream_sse(
     http: &reqwest::Client,
     request: &MessagesRequest,
-    tx: &mpsc::Sender<Result<StreamEvent>>,
+    tx: &mpsc::Sender<Result<ResponseEvent>>,
 ) -> Result<()> {
     with_retry(
         |retry| async move {
@@ -34,9 +36,7 @@ pub(super) async fn stream_sse(
             pump_events(response, tx).await
         },
         |notice| {
-            _ = tx.try_send(Ok(StreamEvent::Retrying {
-                notice: notice.clone(),
-            }));
+            _ = tx.try_send(Ok(ResponseEvent::Retrying(notice.to_string())));
         },
     )
     .await
@@ -46,23 +46,23 @@ pub(super) async fn stream_sse(
 /// because the consumer has seen nothing it would have to retract.
 async fn pump_events(
     response: reqwest::Response,
-    tx: &mpsc::Sender<Result<StreamEvent>>,
+    tx: &mpsc::Sender<Result<ResponseEvent>>,
 ) -> Result<(), AttemptError> {
     let mut stream = response.bytes_stream();
     let mut frames = FrameDecoder::default();
-    let mut content_started = false;
-    let fail = |cause: &str, error: anyhow::Error, content_started: bool| {
-        if content_started {
-            AttemptError::Fatal(error)
-        } else {
+    let mut reply = ResponseAccumulator::default();
+    let fail = |cause: &str, error: anyhow::Error, retryable: bool| {
+        if retryable {
             AttemptError::retryable(cause, error)
+        } else {
+            AttemptError::Fatal(error)
         }
     };
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk
             .context("error reading response stream")
-            .map_err(|e| fail("Response stream failed", e, content_started))?;
+            .map_err(|e| fail("Response stream failed", e, !reply.content_started()))?;
         frames.push(&chunk);
 
         while let Some(frame) = frames.next_frame()? {
@@ -82,20 +82,19 @@ async fn pump_events(
                 }
             };
 
-            match &event {
-                StreamEvent::Error { error } if !content_started && is_transient(error) => {
-                    return Err(AttemptError::retryable(
-                        format!("Stream {}", error.error_type),
+            let event = match reply.apply(event) {
+                Ok(Some(event)) => event,
+                Ok(None) => continue,
+                Err(error) => {
+                    return Err(fail(
+                        &format!("Stream {}", error.error_type),
                         anyhow!("API error ({}): {}", error.error_type, error.message),
+                        !reply.content_started() && is_transient(&error),
                     ));
                 }
-                StreamEvent::ContentBlockStart { .. } | StreamEvent::ContentBlockDelta { .. } => {
-                    content_started = true;
-                }
-                _ => {}
-            }
-            let terminal = matches!(event, StreamEvent::MessageStop | StreamEvent::Error { .. });
-            if tx.send(Ok(event)).await.is_err() || terminal {
+            };
+            let completed = matches!(event, ResponseEvent::Completed(_));
+            if tx.send(Ok(event)).await.is_err() || completed {
                 return Ok(());
             }
         }
@@ -104,7 +103,7 @@ async fn pump_events(
     Err(fail(
         "Response stream ended early",
         anyhow!("response stream ended before message_stop"),
-        content_started,
+        !reply.content_started(),
     ))
 }
 
@@ -188,19 +187,24 @@ pub(super) fn parse_sse_frame(frame: &str) -> Result<Option<StreamEvent>> {
 
 #[cfg(test)]
 mod tests {
-    use indoc::indoc;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+
+    use indoc::{formatdoc, indoc};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
     use crate::client::anthropic::testing::messages_request;
     use crate::client::anthropic::wire::Delta;
+    use crate::client::{Response, TokenUsage};
+    use crate::message::ContentBlock;
 
     // ── Fixtures ──
 
     const MESSAGE_START: &str = indoc! {r#"
         event: message_start
-        data: {"type":"message_start","message":{"id":"msg_1","model":"claude-sonnet-5-5"}}
+        data: {"type":"message_start","message":{"id":"msg_1","model":"claude-sonnet-5-5","usage":{"input_tokens":5,"output_tokens":0}}}
 
     "#};
 
@@ -224,6 +228,8 @@ mod tests {
         data: {"type":"message_stop"}
 
     "#};
+
+    const START_USAGE: ResponseEvent = ResponseEvent::Usage(TokenUsage::new(5, 0));
 
     fn sse_response(body: impl Into<Vec<u8>>) -> ResponseTemplate {
         ResponseTemplate::new(200)
@@ -249,9 +255,48 @@ mod tests {
         server
     }
 
+    /// HTTP/1.1 response streaming `body` under a declared length of `declared` bytes. Declaring
+    /// more than `body` holds fails the client's body read once the connection closes.
+    fn raw_sse_response(body: &str, declared: usize) -> String {
+        formatdoc! {"
+            HTTP/1.1 200 OK\r
+            content-type: text/event-stream\r
+            content-length: {declared}\r
+            connection: close\r
+            \r
+            {body}"
+        }
+    }
+
+    /// Answers one connection per response, in order, closing each once its response is sent.
+    /// Returns the base URL.
+    fn serve_raw(responses: Vec<String>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for response in responses {
+                let (mut socket, _) = listener.accept().unwrap();
+                read_request(&mut socket);
+                socket.write_all(response.as_bytes()).unwrap();
+            }
+        });
+        base_url
+    }
+
+    /// Reads a request through its `{}` body, so closing the socket after the reply sends no reset.
+    fn read_request(socket: &mut TcpStream) {
+        let mut request = Vec::new();
+        let mut buf = [0; 1024];
+        while !request.ends_with(b"\r\n\r\n{}") {
+            let read = socket.read(&mut buf).unwrap();
+            assert_ne!(read, 0, "the client closed before sending its request");
+            request.extend_from_slice(&buf[..read]);
+        }
+    }
+
     /// Streams one request, returning its result and every forwarded event.
-    async fn run_stream(server: &MockServer) -> (Result<()>, Vec<StreamEvent>) {
-        let request = messages_request(format!("{}/v1/messages", server.uri()));
+    async fn run_stream(base_url: &str) -> (Result<()>, Vec<ResponseEvent>) {
+        let request = messages_request(format!("{base_url}/v1/messages"));
         let (tx, mut rx) = mpsc::channel(64);
         let result = stream_sse(&reqwest::Client::new(), &request, &tx).await;
         drop(tx);
@@ -266,17 +311,23 @@ mod tests {
         server.received_requests().await.unwrap().len()
     }
 
-    fn texts(events: &[StreamEvent]) -> Vec<&str> {
+    fn texts(events: &[ResponseEvent]) -> Vec<&str> {
         events
             .iter()
             .filter_map(|e| match e {
-                StreamEvent::ContentBlockDelta {
-                    delta: Delta::TextDelta { text },
-                    ..
-                } => Some(text.as_str()),
+                ResponseEvent::Text(text) => Some(text.as_str()),
                 _ => None,
             })
             .collect()
+    }
+
+    fn hi_reply() -> ResponseEvent {
+        ResponseEvent::Completed(Response {
+            content: vec![ContentBlock::Text {
+                text: "Hi".to_owned(),
+            }],
+            ..Response::default()
+        })
     }
 
     // ── stream_sse ──
@@ -290,21 +341,23 @@ mod tests {
             .replacen("\r\n\r\n", "\r\r", 1);
         let server = serve(vec![sse_response(body)]).await;
 
-        let (result, events) = run_stream(&server).await;
+        let (result, events) = run_stream(&server.uri()).await;
 
         result.expect("CR / CRLF framed stream completes");
-        assert!(
-            matches!(events[0], StreamEvent::MessageStart { .. }),
-            "{events:?}"
+        assert_eq!(
+            events,
+            [
+                START_USAGE,
+                ResponseEvent::Text("Hi".to_owned()),
+                hi_reply()
+            ],
         );
-        assert_eq!(texts(&events), ["Hi"]);
-        assert!(matches!(events.last(), Some(StreamEvent::MessageStop)));
     }
 
     #[tokio::test]
     async fn stream_sse_retries_failures_before_any_content() {
         // An in-band overload and a stream cut before content both retry. The consumer sees only
-        // the pre-content `message_start` frames from the failed attempts.
+        // the pre-content usage from the failed attempts, each replaced by the next attempt's.
         let server = serve(vec![
             sse_response([MESSAGE_START, OVERLOADED].concat()),
             sse_response(MESSAGE_START),
@@ -312,29 +365,24 @@ mod tests {
         ])
         .await;
 
-        let (result, events) = run_stream(&server).await;
+        let (result, events) = run_stream(&server.uri()).await;
 
         result.expect("third attempt succeeds");
         assert_eq!(request_count(&server).await, 3);
-        assert_eq!(texts(&events), ["Hi"]);
-        assert!(
-            !events
-                .iter()
-                .any(|e| matches!(e, StreamEvent::Error { .. })),
-            "a retried overload is not forwarded: {events:?}",
-        );
-        let notices: Vec<String> = events
-            .iter()
-            .filter_map(|e| match e {
-                StreamEvent::Retrying { notice } => Some(notice.to_string()),
-                _ => None,
-            })
-            .collect();
         assert_eq!(
-            notices,
+            events,
             [
-                "Stream overloaded_error. Retrying in 1s (retry 1 of 5).",
-                "Response stream ended early. Retrying in 1s (retry 2 of 5).",
+                START_USAGE,
+                ResponseEvent::Retrying(
+                    "Stream overloaded_error. Retrying in 1s (retry 1 of 5).".to_owned()
+                ),
+                START_USAGE,
+                ResponseEvent::Retrying(
+                    "Response stream ended early. Retrying in 1s (retry 2 of 5).".to_owned()
+                ),
+                START_USAGE,
+                ResponseEvent::Text("Hi".to_owned()),
+                hi_reply(),
             ],
         );
         let counts: Vec<String> = server
@@ -355,37 +403,69 @@ mod tests {
     #[tokio::test]
     async fn stream_sse_never_retries_after_content() {
         // Streamed text already reached the user, so an overload or a cut stream ends the call.
-        for (body, expect_error_event) in [
-            ([MESSAGE_START, TEXT_DELTA, OVERLOADED].concat(), true),
-            ([MESSAGE_START, TEXT_DELTA].concat(), false),
+        for (body, expected) in [
+            (
+                [MESSAGE_START, TEXT_DELTA, OVERLOADED].concat(),
+                "API error (overloaded_error): Overloaded",
+            ),
+            (
+                [MESSAGE_START, TEXT_DELTA].concat(),
+                "ended before message_stop",
+            ),
         ] {
             let server = serve(vec![sse_response(body)]).await;
 
-            let (result, events) = run_stream(&server).await;
+            let (result, events) = run_stream(&server.uri()).await;
 
             assert_eq!(request_count(&server).await, 1, "no retry");
             assert_eq!(texts(&events), ["Hi"]);
-            let forwarded_error = events
-                .iter()
-                .any(|e| matches!(e, StreamEvent::Error { error } if error.error_type == "overloaded_error"));
-            assert_eq!(forwarded_error, expect_error_event, "{events:?}");
-            if expect_error_event {
-                result.expect("an in-band error is forwarded for the consumer to report");
-            } else {
-                let err = result.expect_err("a cut stream fails");
-                assert!(
-                    format!("{err:#}").contains("ended before message_stop"),
-                    "{err:#}",
-                );
-            }
+            let err = result.expect_err("the attempt fails");
+            assert!(format!("{err:#}").contains(expected), "{err:#}");
         }
+    }
+
+    #[tokio::test]
+    async fn stream_sse_failed_body_read_retries_only_before_content() {
+        let cut = |body: &str| raw_sse_response(body, body.len() + 64);
+        let full = [MESSAGE_START, TEXT_DELTA, MESSAGE_STOP].concat();
+        let base_url = serve_raw(vec![
+            cut(MESSAGE_START),
+            raw_sse_response(&full, full.len()),
+        ]);
+
+        let (result, events) = run_stream(&base_url).await;
+
+        result.expect("the retry succeeds");
+        assert_eq!(
+            events,
+            [
+                START_USAGE,
+                ResponseEvent::Retrying(
+                    "Response stream failed. Retrying in 1s (retry 1 of 5).".to_owned()
+                ),
+                START_USAGE,
+                ResponseEvent::Text("Hi".to_owned()),
+                hi_reply(),
+            ],
+        );
+
+        let base_url = serve_raw(vec![cut(&[MESSAGE_START, TEXT_DELTA].concat())]);
+
+        let (result, events) = run_stream(&base_url).await;
+
+        let err = result.expect_err("a failed read after content ends the call");
+        assert!(
+            format!("{err:#}").contains("error reading response stream"),
+            "{err:#}",
+        );
+        assert_eq!(events, [START_USAGE, ResponseEvent::Text("Hi".to_owned())]);
     }
 
     #[tokio::test]
     async fn stream_sse_gives_up_on_a_stream_that_never_finishes() {
         let server = serve(vec![sse_response(MESSAGE_START)]).await;
 
-        let (result, _) = run_stream(&server).await;
+        let (result, _) = run_stream(&server.uri()).await;
 
         let err = result.expect_err("every attempt is cut");
         assert!(
@@ -401,7 +481,7 @@ mod tests {
         // error. Retrying the same upstream would only repeat it.
         let server = serve(vec![sse_response("a".repeat(MAX_SSE_FRAME_BYTES + 1024))]).await;
 
-        let (result, _) = run_stream(&server).await;
+        let (result, _) = run_stream(&server.uri()).await;
 
         let err = result.expect_err("expected overflow error");
         assert!(
@@ -415,20 +495,25 @@ mod tests {
     async fn stream_sse_skips_unusable_frames_then_keeps_streaming() {
         // An invalid UTF-8 frame (0xC3 0x28 is a lone start byte) and a comment heartbeat with no
         // `data:` line are both skipped without poisoning the rest of the stream.
-        let mut body: Vec<u8> = b"event: ping\ndata: \xc3\x28\n\n: heartbeat\n\n".to_vec();
-        body.extend_from_slice(b"event: ping\ndata: {\"type\":\"ping\"}\n\n");
+        let mut body = indoc! {b"
+            event: ping
+            data: \xc3\x28
+
+            : heartbeat
+
+        "}
+        .to_vec();
+        body.extend_from_slice(MESSAGE_START.as_bytes());
         body.extend_from_slice(MESSAGE_STOP.as_bytes());
         let server = serve(vec![sse_response(body)]).await;
 
-        let (result, events) = run_stream(&server).await;
+        let (result, events) = run_stream(&server.uri()).await;
 
         result.unwrap();
-        assert!(
-            matches!(
-                events.as_slice(),
-                [StreamEvent::Ping, StreamEvent::MessageStop]
-            ),
-            "only the valid frames surfaced: {events:?}",
+        assert_eq!(
+            events,
+            [START_USAGE, ResponseEvent::Completed(Response::default())],
+            "only the valid frames surfaced",
         );
     }
 
@@ -437,7 +522,7 @@ mod tests {
         // Consumer cancellation must surface as graceful Ok(()), not an Err on the stream.
         let server = serve(vec![sse_response(MESSAGE_START.repeat(8))]).await;
         let request = messages_request(format!("{}/v1/messages", server.uri()));
-        let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(1);
+        let (tx, rx) = mpsc::channel::<Result<ResponseEvent>>(1);
         drop(rx);
 
         let result = stream_sse(&reqwest::Client::new(), &request, &tx).await;

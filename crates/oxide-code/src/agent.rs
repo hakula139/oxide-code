@@ -8,17 +8,13 @@ use std::collections::HashMap;
 use std::future::Future;
 
 use anyhow::{Context, Result, anyhow, bail};
-use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
-use tracing::{debug, warn};
+use tracing::warn;
 
-use crate::client::anthropic::Client;
-use crate::client::anthropic::wire::{
-    ContentBlockInfo, Delta, StopDetails, StopReason, StreamEvent, Usage,
-};
+use crate::client::{Response, ResponseEvent, StopDetails, StopReason, TokenUsage, Wire};
 use crate::config::AutoCompactionConfig;
 use crate::file_tracker::{self, FileTracker};
-use crate::message::{ContentBlock, Message, Role, progress_note};
+use crate::message::{ContentBlock, Message, Role};
 use crate::permission::SessionGrant;
 use crate::permission::rule::Rule;
 use crate::prompt::PromptParts;
@@ -45,123 +41,7 @@ pub(crate) enum TurnAbort {
 
 type AbortResult<T> = std::result::Result<T, TurnAbort>;
 
-// ── Agent Client ──
-
-/// Narrow streaming trait so in-process fakes can drive [`agent_turn`].
-pub(crate) trait AgentClient: Send + Sync {
-    fn stream_message(
-        &self,
-        messages: &[Message],
-        system_sections: &[&str],
-        user_context: Option<&str>,
-        tools: &[ToolDefinition],
-    ) -> Result<mpsc::Receiver<Result<StreamEvent>>>;
-
-    /// Streams a request no later request extends, so caching its transcript tail would only add
-    /// a write premium. Defaults to [`Self::stream_message`] for clients that do no caching.
-    fn stream_one_shot(
-        &self,
-        messages: &[Message],
-        system_sections: &[&str],
-        user_context: Option<&str>,
-        tools: &[ToolDefinition],
-    ) -> Result<mpsc::Receiver<Result<StreamEvent>>> {
-        self.stream_message(messages, system_sections, user_context, tools)
-    }
-}
-
-impl AgentClient for Client {
-    fn stream_message(
-        &self,
-        messages: &[Message],
-        system_sections: &[&str],
-        user_context: Option<&str>,
-        tools: &[ToolDefinition],
-    ) -> Result<mpsc::Receiver<Result<StreamEvent>>> {
-        Client::stream_message(self, messages, system_sections, user_context, tools)
-    }
-
-    fn stream_one_shot(
-        &self,
-        messages: &[Message],
-        system_sections: &[&str],
-        user_context: Option<&str>,
-        tools: &[ToolDefinition],
-    ) -> Result<mpsc::Receiver<Result<StreamEvent>>> {
-        Client::stream_one_shot(self, messages, system_sections, user_context, tools)
-    }
-}
-
 // ── Agent Turn ──
-
-#[expect(
-    clippy::struct_field_names,
-    reason = "field names mirror Anthropic's usage payload, which session `usage` entries reuse"
-)]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct TokenUsage {
-    input_tokens: u32,
-    cache_creation_input_tokens: u32,
-    cache_read_input_tokens: u32,
-    output_tokens: u32,
-}
-
-impl TokenUsage {
-    #[cfg(test)]
-    pub(crate) const fn new(input_tokens: u32, output_tokens: u32) -> Self {
-        Self {
-            input_tokens,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 0,
-            output_tokens,
-        }
-    }
-
-    pub(crate) const fn context_tokens(self) -> u32 {
-        self.input_tokens
-            .saturating_add(self.cache_creation_input_tokens)
-            .saturating_add(self.cache_read_input_tokens)
-    }
-
-    pub(crate) const fn total_tokens(self) -> u32 {
-        self.context_tokens().saturating_add(self.output_tokens)
-    }
-
-    pub(crate) const fn input_tokens(self) -> u32 {
-        self.input_tokens
-    }
-
-    pub(crate) const fn cache_creation_input_tokens(self) -> u32 {
-        self.cache_creation_input_tokens
-    }
-
-    pub(crate) const fn cache_read_input_tokens(self) -> u32 {
-        self.cache_read_input_tokens
-    }
-
-    pub(crate) const fn output_tokens(self) -> u32 {
-        self.output_tokens
-    }
-
-    fn observe(&mut self, usage: &Usage) {
-        // Anthropic's wire usage carries fresh totals only on the events that own them:
-        // `MessageStart` reports input + cache fields with `output_tokens = 0`, and `MessageDelta`
-        // reports `output_tokens` with the input fields zeroed. Treat zero as "not reported here"
-        // so successive observations layer correctly into one snapshot.
-        if usage.input_tokens > 0 {
-            self.input_tokens = usage.input_tokens;
-        }
-        if usage.cache_creation_input_tokens > 0 {
-            self.cache_creation_input_tokens = usage.cache_creation_input_tokens;
-        }
-        if usage.cache_read_input_tokens > 0 {
-            self.cache_read_input_tokens = usage.cache_read_input_tokens;
-        }
-        if usage.output_tokens > 0 {
-            self.output_tokens = usage.output_tokens;
-        }
-    }
-}
 
 /// Usage the API reported for one turn's requests.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -262,7 +142,7 @@ pub(crate) struct GateContext<'a> {
     reason = "agent_turn owns the full per-turn dependency set; bundling them obscures lifetimes"
 )]
 pub(crate) async fn agent_turn(
-    client: &dyn AgentClient,
+    client: &dyn Wire,
     tools: &ToolRegistry,
     messages: &mut Vec<Message>,
     prompt: &PromptParts,
@@ -285,13 +165,13 @@ pub(crate) async fn agent_turn(
         )
         .await;
         report.record(round_usage);
-        let StreamOutcome {
-            blocks,
+        let Response {
+            content: blocks,
             parse_errors,
             stop_reason,
             stop_details,
         } = match stream {
-            Ok(Ok(outcome)) => outcome,
+            Ok(Ok(response)) => response,
             Ok(Err(error)) => return TurnOutcome::aborted(report, TurnAbort::Failed(error)),
             Err(abort) => return TurnOutcome::aborted(report, abort),
         };
@@ -476,7 +356,7 @@ fn truncation_error(reason: StopReason, blocks: &[ContentBlock]) -> anyhow::Erro
     reason = "auto-compaction needs the same live turn state as manual compaction"
 )]
 pub(crate) async fn auto_compact_if_needed(
-    client: &dyn AgentClient,
+    client: &dyn Wire,
     session: &SessionHandle,
     messages: &mut Vec<Message>,
     sink: &dyn EventSink,
@@ -947,277 +827,39 @@ async fn record_message(session: &SessionHandle, msg: Message, sink: &dyn EventS
 
 // ── Stream Processing ──
 
-#[derive(Debug)]
-enum BlockAccumulator {
-    Text(String),
-    ToolUse {
-        id: String,
-        name: String,
-        json_buf: String,
-    },
-    ServerToolUse {
-        id: String,
-        name: String,
-        json_buf: String,
-    },
-    Thinking {
-        thinking: String,
-        signature: String,
-    },
-    RedactedThinking {
-        data: String,
-    },
-    /// Absorbs deltas. Produces no [`ContentBlock`].
-    Skipped,
-}
-
-impl BlockAccumulator {
-    /// Surfaces any tool-input parse error alongside the produced block.
-    fn into_content_block(self) -> (Option<ContentBlock>, Option<(String, String)>) {
-        match self {
-            Self::Text(text) => (Some(ContentBlock::Text { text }), None),
-            Self::ToolUse { id, name, json_buf } => {
-                let (input, err) = parse_tool_json(&json_buf);
-                let parse_error = err.map(|e| (id.clone(), e));
-                (Some(ContentBlock::ToolUse { id, name, input }), parse_error)
-            }
-            Self::ServerToolUse { id, name, json_buf } => {
-                let (input, err) = parse_tool_json(&json_buf);
-                let parse_error = err.map(|e| (id.clone(), e));
-                (
-                    Some(ContentBlock::ServerToolUse { id, name, input }),
-                    parse_error,
-                )
-            }
-            Self::Thinking {
-                thinking,
-                signature,
-            } => (
-                Some(ContentBlock::Thinking {
-                    thinking,
-                    signature,
-                }),
-                None,
-            ),
-            Self::RedactedThinking { data } => {
-                (Some(ContentBlock::RedactedThinking { data }), None)
-            }
-            Self::Skipped => (None, None),
-        }
-    }
-
-    /// The block's thinking text in the form [`progress_note`] reads.
-    fn thinking_text(&self) -> Option<&str> {
-        match self {
-            Self::Thinking { thinking, .. } => Some(thinking),
-            Self::RedactedThinking { .. } => Some(""),
-            _ => None,
-        }
-    }
-}
-
-/// Returns empty object + error string on failure. An empty buffer is a call that streamed no
-/// input, which reads as `{}`.
-fn parse_tool_json(json_buf: &str) -> (serde_json::Value, Option<String>) {
-    if json_buf.is_empty() {
-        return (serde_json::Value::Object(serde_json::Map::new()), None);
-    }
-    match serde_json::from_str(json_buf) {
-        Ok(value) => (value, None),
-        Err(e) => {
-            warn!("malformed tool input JSON: {e}");
-            (
-                serde_json::Value::Object(serde_json::Map::new()),
-                Some(e.to_string()),
-            )
-        }
-    }
-}
-
-#[derive(Debug, Default)]
-struct StreamOutcome {
-    blocks: Vec<ContentBlock>,
-    parse_errors: HashMap<String, String>,
-    /// `None` when the stream omitted it, in which case the content alone decides the next step.
-    stop_reason: Option<StopReason>,
-    stop_details: Option<StopDetails>,
-}
-
 /// Streams one conversation request and collects its reply with [`collect_response`].
 async fn stream_response(
-    client: &dyn AgentClient,
+    client: &dyn Wire,
     messages: &[Message],
     tools: &[ToolDefinition],
     prompt: &PromptParts,
     sink: &dyn EventSink,
     usage: &mut Option<TokenUsage>,
-) -> Result<StreamOutcome> {
+) -> Result<Response> {
     let section_refs: Vec<&str> = prompt.system_sections.iter().map(String::as_str).collect();
     let rx = client.stream_message(messages, &section_refs, Some(&prompt.user_context), tools)?;
     collect_response(rx, sink, usage).await
 }
 
-/// Accumulates one response stream into its reply. `usage` tracks what the API has reported so
-/// far, so it stays accurate when the stream fails or the caller drops the future.
+/// Forwards one response stream's deltas to `sink` and returns its completed reply. `usage`
+/// tracks what the wire has reported so far, so it stays accurate when the stream fails or the
+/// caller drops the future.
 async fn collect_response(
-    mut rx: mpsc::Receiver<Result<StreamEvent>>,
+    mut rx: mpsc::Receiver<Result<ResponseEvent>>,
     sink: &dyn EventSink,
     usage: &mut Option<TokenUsage>,
-) -> Result<StreamOutcome> {
-    let mut blocks: Vec<Option<BlockAccumulator>> = Vec::new();
-    let mut stop_reason = None;
-    let mut stop_details = None;
-    let mut finished = false;
-
+) -> Result<Response> {
     while let Some(event) = rx.recv().await {
-        let event = event.context("stream error")?;
-
-        match event {
-            StreamEvent::MessageStart { message } => {
-                // A retried request starts over with its own `message_start`, so the usage of the
-                // failed attempt is discarded.
-                *usage = None;
-                if let Some(observed) = message.usage {
-                    usage.get_or_insert_default().observe(&observed);
-                }
-            }
-            StreamEvent::ContentBlockStart {
-                index,
-                content_block,
-            } => {
-                if blocks.len() <= index {
-                    blocks.resize_with(index + 1, || None);
-                }
-                let acc = init_accumulator(content_block, index);
-                match &acc {
-                    BlockAccumulator::Text(text) if !text.is_empty() => {
-                        _ = sink.send(Event::StreamToken(text.clone()));
-                    }
-                    BlockAccumulator::ToolUse { .. } | BlockAccumulator::ServerToolUse { .. } => {
-                        send_progress_note(&blocks[..index], sink);
-                    }
-                    _ => {}
-                }
-                blocks[index] = Some(acc);
-            }
-            StreamEvent::ContentBlockDelta { index, delta } => {
-                if let Some(Some(block)) = blocks.get_mut(index) {
-                    apply_delta(block, delta, sink);
-                }
-            }
-            StreamEvent::Error { error } => {
-                bail!("API error ({}): {}", error.error_type, error.message);
-            }
-            StreamEvent::Retrying { notice } => {
-                sink.emit(Event::Retrying(notice.to_string()), "retry-notice");
-            }
-            StreamEvent::MessageDelta {
-                delta,
-                usage: observed,
-            } => {
-                if let Some(observed) = observed {
-                    usage.get_or_insert_default().observe(&observed);
-                }
-                stop_reason = delta.stop_reason;
-                stop_details = delta.stop_details;
-            }
-            StreamEvent::MessageStop => {
-                finished = true;
-                break;
-            }
-            _ => {}
+        match event.context("stream error")? {
+            ResponseEvent::Text(text) => _ = sink.send(Event::StreamToken(text)),
+            ResponseEvent::Thinking(text) => _ = sink.send(Event::ThinkingToken(text)),
+            ResponseEvent::Progress(note) => _ = sink.send(Event::ProgressUpdate(note)),
+            ResponseEvent::Usage(reported) => *usage = Some(reported),
+            ResponseEvent::Retrying(notice) => sink.emit(Event::Retrying(notice), "retry-notice"),
+            ResponseEvent::Completed(response) => return Ok(response),
         }
     }
-    // A stream cut before `message_stop` may hold a partial block, so it never becomes a reply.
-    if !finished {
-        bail!("response stream ended before message_stop");
-    }
-
-    let mut outcome = StreamOutcome {
-        stop_reason,
-        stop_details,
-        ..StreamOutcome::default()
-    };
-    for acc in blocks.into_iter().flatten() {
-        let (block, parse_error) = acc.into_content_block();
-        outcome.parse_errors.extend(parse_error);
-        outcome.blocks.extend(block);
-    }
-    Ok(outcome)
-}
-
-fn init_accumulator(content_block: ContentBlockInfo, index: usize) -> BlockAccumulator {
-    match content_block {
-        ContentBlockInfo::Text { text } => BlockAccumulator::Text(text),
-        ContentBlockInfo::ToolUse { id, name } => BlockAccumulator::ToolUse {
-            id,
-            name,
-            json_buf: String::new(),
-        },
-        ContentBlockInfo::ServerToolUse { id, name } => BlockAccumulator::ServerToolUse {
-            id,
-            name,
-            json_buf: String::new(),
-        },
-        ContentBlockInfo::Thinking {
-            thinking,
-            signature,
-        } => BlockAccumulator::Thinking {
-            thinking,
-            signature,
-        },
-        ContentBlockInfo::RedactedThinking { data } => BlockAccumulator::RedactedThinking { data },
-        ContentBlockInfo::Unknown => {
-            warn!("skipping unknown content block at index {index}");
-            BlockAccumulator::Skipped
-        }
-    }
-}
-
-/// Sends the progress note for a tool use whose block starts after `preceding`.
-fn send_progress_note(preceding: &[Option<BlockAccumulator>], sink: &dyn EventSink) {
-    let thinking = preceding
-        .iter()
-        .map(|block| block.as_ref().and_then(BlockAccumulator::thinking_text));
-    if let Some(note) = progress_note(thinking) {
-        _ = sink.send(Event::ProgressUpdate(note.to_owned()));
-    }
-}
-
-fn apply_delta(block: &mut BlockAccumulator, delta: Delta, sink: &dyn EventSink) {
-    match (block, delta) {
-        (BlockAccumulator::Text(buf), Delta::TextDelta { text }) => {
-            buf.push_str(&text);
-            _ = sink.send(Event::StreamToken(text));
-        }
-        (
-            BlockAccumulator::ToolUse { json_buf, .. }
-            | BlockAccumulator::ServerToolUse { json_buf, .. },
-            Delta::InputJsonDelta { partial_json },
-        ) => {
-            json_buf.push_str(&partial_json);
-        }
-        (
-            BlockAccumulator::Thinking { thinking, .. },
-            Delta::ThinkingDelta {
-                thinking: thinking_delta,
-            },
-        ) => {
-            thinking.push_str(&thinking_delta);
-            _ = sink.send(Event::ThinkingToken(thinking_delta));
-        }
-        (
-            BlockAccumulator::Thinking { signature, .. },
-            Delta::SignatureDelta {
-                signature: sig_value,
-            },
-        ) => {
-            *signature = sig_value;
-        }
-        (block, delta) => {
-            debug!(?block, ?delta, "ignoring unhandled delta");
-        }
-    }
+    bail!("response stream ended before the reply completed")
 }
 
 #[cfg(test)]
@@ -1237,10 +879,6 @@ mod tests {
 
     use super::*;
     use crate::client::anthropic::testing::test_client;
-    use crate::client::anthropic::wire::{
-        ApiError, ContentBlockInfo, MessageDeltaBody, MessageResponse, StopDetails, StopReason,
-        StreamEvent, Usage,
-    };
     use crate::config::auth::{Auth, AuthSource};
     use crate::config::{AutoCompactionConfig, Effort};
     use crate::file_tracker::FileTracker;
@@ -1283,19 +921,32 @@ mod tests {
 
     // ── Fixtures ──
 
-    /// In-process fake that scripts a [`StreamEvent`] sequence per turn and records each request's
+    /// In-process fake that scripts a [`ResponseEvent`] stream per turn and records each request's
     /// transcript.
     struct FakeClient {
-        turns: StdMutex<VecDeque<Vec<StreamEvent>>>,
+        turns: StdMutex<VecDeque<Vec<Result<ResponseEvent>>>>,
         requests: StdMutex<Vec<Vec<Message>>>,
     }
 
     impl FakeClient {
-        fn new(turns: Vec<Vec<StreamEvent>>) -> Self {
+        fn new(turns: Vec<Vec<ResponseEvent>>) -> Self {
+            let turns = turns
+                .into_iter()
+                .map(|events| events.into_iter().map(Ok).collect())
+                .collect();
             Self {
-                turns: StdMutex::new(turns.into()),
+                turns: StdMutex::new(turns),
                 requests: StdMutex::default(),
             }
+        }
+
+        /// Appends a turn whose stream fails with `error`.
+        fn then_fail(self, error: &str) -> Self {
+            self.turns
+                .lock()
+                .unwrap()
+                .push_back(vec![Err(anyhow!("{error}"))]);
+            self
         }
 
         fn requests(&self) -> Vec<Vec<Message>> {
@@ -1305,14 +956,14 @@ mod tests {
 
     struct FailingCompactClient;
 
-    impl AgentClient for FailingCompactClient {
+    impl Wire for FailingCompactClient {
         fn stream_message(
             &self,
             _messages: &[Message],
             _system_sections: &[&str],
             _user_context: Option<&str>,
             _tools: &[ToolDefinition],
-        ) -> Result<mpsc::Receiver<Result<StreamEvent>>> {
+        ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
             Err(anyhow!("summarizer unavailable"))
         }
     }
@@ -1333,14 +984,14 @@ mod tests {
         }
     }
 
-    impl AgentClient for CountingFailingClient {
+    impl Wire for CountingFailingClient {
         fn stream_message(
             &self,
             _messages: &[Message],
             _system_sections: &[&str],
             _user_context: Option<&str>,
             _tools: &[ToolDefinition],
-        ) -> Result<mpsc::Receiver<Result<StreamEvent>>> {
+        ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Err(anyhow!("summarizer unavailable"))
         }
@@ -1351,14 +1002,14 @@ mod tests {
         release: Arc<Notify>,
     }
 
-    impl AgentClient for DelayedSummaryClient {
+    impl Wire for DelayedSummaryClient {
         fn stream_message(
             &self,
             _messages: &[Message],
             _system_sections: &[&str],
             _user_context: Option<&str>,
             _tools: &[ToolDefinition],
-        ) -> Result<mpsc::Receiver<Result<StreamEvent>>> {
+        ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
             let (tx, rx) = mpsc::channel(8);
             let started = self.started.clone();
             let release = self.release.clone();
@@ -1373,346 +1024,111 @@ mod tests {
         }
     }
 
-    impl AgentClient for FakeClient {
+    impl Wire for FakeClient {
         fn stream_message(
             &self,
             messages: &[Message],
             _system_sections: &[&str],
             _user_context: Option<&str>,
             _tools: &[ToolDefinition],
-        ) -> Result<mpsc::Receiver<Result<StreamEvent>>> {
+        ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
             self.requests.lock().unwrap().push(messages.to_vec());
             let events = self.turns.lock().unwrap().pop_front().unwrap_or_default();
             let (tx, rx) = mpsc::channel(events.len().max(1));
             for event in events {
-                tx.try_send(Ok(event)).expect("channel capacity");
+                tx.try_send(event).expect("channel capacity");
             }
             Ok(rx)
         }
     }
 
-    fn text_turn(text: &str) -> Vec<StreamEvent> {
-        vec![
-            StreamEvent::MessageStart {
-                message: MessageResponse {
-                    id: "msg_1".into(),
-                    model: "claude-sonnet-5-5".into(),
-                    usage: Some(Usage {
-                        input_tokens: 0,
-                        cache_creation_input_tokens: 0,
-                        cache_read_input_tokens: 0,
-                        output_tokens: 0,
-                    }),
-                },
-            },
-            StreamEvent::ContentBlockStart {
-                index: 0,
-                content_block: ContentBlockInfo::Text {
-                    text: String::new(),
-                },
-            },
-            StreamEvent::ContentBlockDelta {
-                index: 0,
-                delta: Delta::TextDelta { text: text.into() },
-            },
-            StreamEvent::ContentBlockStop { index: 0 },
-            StreamEvent::MessageStop,
-        ]
-    }
-
-    fn text_turn_with_initial_text(text: &str) -> Vec<StreamEvent> {
-        vec![
-            StreamEvent::MessageStart {
-                message: MessageResponse {
-                    id: "msg_1".into(),
-                    model: "claude-sonnet-5-5".into(),
-                    usage: Some(Usage {
-                        input_tokens: 0,
-                        cache_creation_input_tokens: 0,
-                        cache_read_input_tokens: 0,
-                        output_tokens: 0,
-                    }),
-                },
-            },
-            StreamEvent::ContentBlockStart {
-                index: 0,
-                content_block: ContentBlockInfo::Text { text: text.into() },
-            },
-            StreamEvent::ContentBlockStop { index: 0 },
-            StreamEvent::MessageStop,
-        ]
-    }
-
-    fn text_turn_with_usage(text: &str, input_tokens: u32, output_tokens: u32) -> Vec<StreamEvent> {
-        vec![
-            StreamEvent::MessageStart {
-                message: MessageResponse {
-                    id: "msg_1".into(),
-                    model: "claude-sonnet-5-5".into(),
-                    usage: Some(Usage {
-                        input_tokens,
-                        cache_creation_input_tokens: 0,
-                        cache_read_input_tokens: 0,
-                        output_tokens: 0,
-                    }),
-                },
-            },
-            StreamEvent::ContentBlockStart {
-                index: 0,
-                content_block: ContentBlockInfo::Text {
-                    text: String::new(),
-                },
-            },
-            StreamEvent::ContentBlockDelta {
-                index: 0,
-                delta: Delta::TextDelta { text: text.into() },
-            },
-            StreamEvent::MessageDelta {
-                delta: MessageDeltaBody {
-                    stop_reason: Some(StopReason::EndTurn),
-                    stop_details: None,
-                },
-                usage: Some(Usage {
-                    input_tokens: 0,
-                    cache_creation_input_tokens: 0,
-                    cache_read_input_tokens: 0,
-                    output_tokens,
-                }),
-            },
-            StreamEvent::MessageStop,
-        ]
-    }
-
-    fn text_turn_with_cache_usage(
-        text: &str,
-        input_tokens: u32,
-        cache_creation_input_tokens: u32,
-        cache_read_input_tokens: u32,
-        output_tokens: u32,
-    ) -> Vec<StreamEvent> {
-        vec![
-            StreamEvent::MessageStart {
-                message: MessageResponse {
-                    id: "msg_1".into(),
-                    model: "claude-sonnet-5-5".into(),
-                    usage: Some(Usage {
-                        input_tokens,
-                        cache_creation_input_tokens,
-                        cache_read_input_tokens,
-                        output_tokens: 0,
-                    }),
-                },
-            },
-            StreamEvent::ContentBlockStart {
-                index: 0,
-                content_block: ContentBlockInfo::Text {
-                    text: String::new(),
-                },
-            },
-            StreamEvent::ContentBlockDelta {
-                index: 0,
-                delta: Delta::TextDelta { text: text.into() },
-            },
-            StreamEvent::MessageDelta {
-                delta: MessageDeltaBody {
-                    stop_reason: Some(StopReason::EndTurn),
-                    stop_details: None,
-                },
-                usage: Some(Usage {
-                    input_tokens: 0,
-                    cache_creation_input_tokens: 0,
-                    cache_read_input_tokens: 0,
-                    output_tokens,
-                }),
-            },
-            StreamEvent::MessageStop,
-        ]
-    }
-
-    fn tool_use_turn(id: &str, name: &str, input_json: &str) -> Vec<StreamEvent> {
-        vec![
-            StreamEvent::ContentBlockStart {
-                index: 0,
-                content_block: ContentBlockInfo::ToolUse {
-                    id: id.into(),
-                    name: name.into(),
-                },
-            },
-            StreamEvent::ContentBlockDelta {
-                index: 0,
-                delta: Delta::InputJsonDelta {
-                    partial_json: input_json.into(),
-                },
-            },
-            StreamEvent::ContentBlockStop { index: 0 },
-            StreamEvent::MessageStop,
-        ]
-    }
-
-    fn tool_use_turn_with_usage(
-        id: &str,
-        name: &str,
-        input_json: &str,
-        input_tokens: u32,
-        output_tokens: u32,
-    ) -> Vec<StreamEvent> {
-        let mut events = tool_use_turn(id, name, input_json);
-        events.insert(
-            0,
-            StreamEvent::MessageStart {
-                message: MessageResponse {
-                    id: "msg_1".into(),
-                    model: "claude-sonnet-5-5".into(),
-                    usage: Some(Usage {
-                        input_tokens,
-                        cache_creation_input_tokens: 0,
-                        cache_read_input_tokens: 0,
-                        output_tokens,
-                    }),
-                },
-            },
-        );
-        events
-    }
-
-    enum Block<'a> {
-        Thinking(&'a str),
-        RedactedThinking,
-        Text(&'a str),
-        Echo(&'a str),
-        ServerTool(&'a str),
-    }
-
-    /// One response streaming `blocks` in order. `Echo` and `ServerTool` blocks are `echo` and
-    /// `web_search` calls by id.
-    fn blocks_turn(blocks: &[Block<'_>]) -> Vec<StreamEvent> {
-        let mut events = Vec::new();
-        for (index, block) in blocks.iter().enumerate() {
-            let (content_block, delta) = match block {
-                Block::Thinking(text) => (
-                    ContentBlockInfo::Thinking {
-                        thinking: String::new(),
-                        signature: "sig".into(),
-                    },
-                    Some(Delta::ThinkingDelta {
-                        thinking: (*text).into(),
-                    }),
-                ),
-                Block::RedactedThinking => (
-                    ContentBlockInfo::RedactedThinking {
-                        data: "opaque".into(),
-                    },
-                    None,
-                ),
-                Block::Text(text) => (
-                    ContentBlockInfo::Text {
-                        text: String::new(),
-                    },
-                    Some(Delta::TextDelta {
-                        text: (*text).into(),
-                    }),
-                ),
-                Block::Echo(id) => (
-                    ContentBlockInfo::ToolUse {
-                        id: (*id).into(),
-                        name: "echo".into(),
-                    },
-                    Some(Delta::InputJsonDelta {
-                        partial_json: "{}".into(),
-                    }),
-                ),
-                Block::ServerTool(id) => (
-                    ContentBlockInfo::ServerToolUse {
-                        id: (*id).into(),
-                        name: "web_search".into(),
-                    },
-                    Some(Delta::InputJsonDelta {
-                        partial_json: "{}".into(),
-                    }),
-                ),
-            };
-            events.push(StreamEvent::ContentBlockStart {
-                index,
-                content_block,
-            });
-            events.extend(delta.map(|delta| StreamEvent::ContentBlockDelta { index, delta }));
-            events.push(StreamEvent::ContentBlockStop { index });
+    fn text_block(text: &str) -> ContentBlock {
+        ContentBlock::Text {
+            text: text.to_owned(),
         }
-        events.push(StreamEvent::MessageStop);
+    }
+
+    fn thinking_block(thinking: &str) -> ContentBlock {
+        ContentBlock::Thinking {
+            thinking: thinking.to_owned(),
+            signature: "sig".to_owned(),
+        }
+    }
+
+    fn tool_use_block(id: &str, name: &str, input_json: &str) -> ContentBlock {
+        ContentBlock::ToolUse {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            input: serde_json::from_str(input_json).expect("fixture tool input is JSON"),
+        }
+    }
+
+    /// One reply completing with `content`, streaming its text and thinking first.
+    fn reply_turn(content: Vec<ContentBlock>) -> Vec<ResponseEvent> {
+        let mut events: Vec<ResponseEvent> = content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text { text } => Some(ResponseEvent::Text(text.clone())),
+                ContentBlock::Thinking { thinking, .. } => {
+                    Some(ResponseEvent::Thinking(thinking.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        events.push(ResponseEvent::Completed(Response {
+            content,
+            ..Response::default()
+        }));
         events
+    }
+
+    fn text_turn(text: &str) -> Vec<ResponseEvent> {
+        reply_turn(vec![text_block(text)])
+    }
+
+    fn tool_use_turn(id: &str, name: &str, input_json: &str) -> Vec<ResponseEvent> {
+        reply_turn(vec![tool_use_block(id, name, input_json)])
     }
 
     /// One turn holding a `tool_use` block per `(id, name, input_json)`.
-    fn tool_uses_turn(calls: &[(&str, &str, &str)]) -> Vec<StreamEvent> {
-        let mut events: Vec<StreamEvent> = calls
-            .iter()
-            .enumerate()
-            .flat_map(|(index, (id, name, input_json))| {
-                [
-                    StreamEvent::ContentBlockStart {
-                        index,
-                        content_block: ContentBlockInfo::ToolUse {
-                            id: (*id).into(),
-                            name: (*name).into(),
-                        },
-                    },
-                    StreamEvent::ContentBlockDelta {
-                        index,
-                        delta: Delta::InputJsonDelta {
-                            partial_json: (*input_json).into(),
-                        },
-                    },
-                    StreamEvent::ContentBlockStop { index },
-                ]
-            })
-            .collect();
-        events.push(StreamEvent::MessageStop);
+    fn tool_uses_turn(calls: &[(&str, &str, &str)]) -> Vec<ResponseEvent> {
+        reply_turn(
+            calls
+                .iter()
+                .map(|(id, name, input_json)| tool_use_block(id, name, input_json))
+                .collect(),
+        )
+    }
+
+    /// The turn's completed reply.
+    fn reply_of(events: &mut [ResponseEvent]) -> &mut Response {
+        match events.last_mut() {
+            Some(ResponseEvent::Completed(response)) => response,
+            last => panic!("the turn ends in its reply: {last:?}"),
+        }
+    }
+
+    /// Reports `input_tokens` and `output_tokens` just before the turn's reply completes.
+    fn with_usage(
+        mut events: Vec<ResponseEvent>,
+        input_tokens: u32,
+        output_tokens: u32,
+    ) -> Vec<ResponseEvent> {
+        reply_of(&mut events);
+        let usage = TokenUsage::new(input_tokens, output_tokens);
+        events.insert(events.len() - 1, ResponseEvent::Usage(usage));
         events
     }
 
-    /// Adds a `message_delta` carrying `stop_reason` just before the turn's `message_stop`.
+    /// Ends the turn's reply on `stop_reason`.
     fn with_stop(
-        mut events: Vec<StreamEvent>,
+        mut events: Vec<ResponseEvent>,
         stop_reason: StopReason,
         stop_details: Option<StopDetails>,
-    ) -> Vec<StreamEvent> {
-        let stop = events.pop();
-        assert!(matches!(stop, Some(StreamEvent::MessageStop)), "{stop:?}");
-        events.push(StreamEvent::MessageDelta {
-            delta: MessageDeltaBody {
-                stop_reason: Some(stop_reason),
-                stop_details,
-            },
-            usage: None,
-        });
-        events.push(StreamEvent::MessageStop);
-        events
-    }
-
-    /// Text block followed by a `tool_use` block, as one turn.
-    fn text_then_tool_use_turn(
-        text: &str,
-        id: &str,
-        name: &str,
-        input_json: &str,
-    ) -> Vec<StreamEvent> {
-        let mut events = text_turn(text);
-        events.pop();
-        for event in tool_use_turn(id, name, input_json) {
-            events.push(match event {
-                StreamEvent::ContentBlockStart { content_block, .. } => {
-                    StreamEvent::ContentBlockStart {
-                        index: 1,
-                        content_block,
-                    }
-                }
-                StreamEvent::ContentBlockDelta { delta, .. } => {
-                    StreamEvent::ContentBlockDelta { index: 1, delta }
-                }
-                StreamEvent::ContentBlockStop { .. } => StreamEvent::ContentBlockStop { index: 1 },
-                other => other,
-            });
-        }
+    ) -> Vec<ResponseEvent> {
+        let reply = reply_of(&mut events);
+        reply.stop_reason = Some(stop_reason);
+        reply.stop_details = stop_details;
         events
     }
 
@@ -1948,21 +1364,6 @@ mod tests {
     /// Handle whose actor channel is closed. Every write returns actor-gone.
     fn dead_test_session() -> SessionHandle {
         crate::session::handle::testing::dead("dead-test-session")
-    }
-
-    // ── TokenUsage ──
-
-    #[test]
-    fn token_usage_context_and_total_include_cache_tokens() {
-        let usage = TokenUsage {
-            input_tokens: 10,
-            cache_creation_input_tokens: 20,
-            cache_read_input_tokens: 30,
-            output_tokens: 5,
-        };
-
-        assert_eq!(usage.context_tokens(), 60);
-        assert_eq!(usage.total_tokens(), 65);
     }
 
     // ── auto_compact_if_needed ──
@@ -2569,49 +1970,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_turn_initial_text_block_streams_without_delta() {
-        let dir = tempfile::tempdir().unwrap();
-        let session = test_session(dir.path());
-        let client = FakeClient::new(vec![text_turn_with_initial_text("Hello immediately")]);
-        let tools = ToolRegistry::new(Vec::new());
-        let sink = CapturingSink::new();
-        let mut ops = inert_ops();
-        let mut messages = vec![Message::user("hi")];
-
-        agent_turn(
-            &client,
-            &tools,
-            &mut messages,
-            &empty_prompt(),
-            &sink,
-            &session,
-            &mut ops,
-            None,
-            &mut yolo_gate(),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(messages.len(), 2);
-        assert!(
-            matches!(&messages[1].content[0], ContentBlock::Text { text } if text == "Hello immediately"),
-        );
-        let streamed: Vec<String> = sink
-            .events()
-            .into_iter()
-            .filter_map(|e| match e {
-                Event::StreamToken(t) => Some(t),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(streamed, ["Hello immediately"]);
-    }
-
-    #[tokio::test]
     async fn agent_turn_reports_latest_stream_usage() {
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
-        let client = FakeClient::new(vec![text_turn_with_usage("Hello!", 100, 7)]);
+        let input_only = with_usage(text_turn("Hello!"), 100, 0);
+        let client = FakeClient::new(vec![with_usage(input_only, 100, 7)]);
         let tools = ToolRegistry::new(Vec::new());
         let sink = CapturingSink::new();
         let mut messages = vec![Message::user("hi")];
@@ -2632,39 +1995,6 @@ mod tests {
 
         assert_eq!(report.usage.map(TokenUsage::total_tokens), Some(107));
         assert_eq!(round_totals(&report), [107]);
-    }
-
-    #[tokio::test]
-    async fn agent_turn_reports_cache_usage_for_context_and_cost() {
-        let dir = tempfile::tempdir().unwrap();
-        let session = test_session(dir.path());
-        let client = FakeClient::new(vec![text_turn_with_cache_usage("Hello!", 10, 20, 30, 5)]);
-        let tools = ToolRegistry::new(Vec::new());
-        let sink = CapturingSink::new();
-        let mut messages = vec![Message::user("hi")];
-
-        let report = agent_turn(
-            &client,
-            &tools,
-            &mut messages,
-            &empty_prompt(),
-            &sink,
-            &session,
-            &mut inert_ops(),
-            None,
-            &mut yolo_gate(),
-        )
-        .await
-        .unwrap();
-
-        let usage = report.usage.expect("stream reports usage");
-        assert_eq!(usage.input_tokens(), 10);
-        assert_eq!(usage.cache_creation_input_tokens(), 20);
-        assert_eq!(usage.cache_read_input_tokens(), 30);
-        assert_eq!(usage.output_tokens(), 5);
-        assert_eq!(usage.context_tokens(), 60);
-        assert_eq!(usage.total_tokens(), 65);
-        assert_eq!(report.billable_rounds, [usage]);
     }
 
     #[tokio::test]
@@ -2817,8 +2147,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let client = FakeClient::new(vec![
-            tool_use_turn_with_usage("tool_1", "echo", r#"{"v":1}"#, 9, 2),
-            text_turn_with_usage("Done", 1, 2),
+            with_usage(tool_use_turn("tool_1", "echo", r#"{"v":1}"#), 9, 2),
+            with_usage(text_turn("Done"), 1, 2),
         ]);
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
         let sink = CapturingSink::new();
@@ -3204,8 +2534,10 @@ mod tests {
         // execution, so the abort must still carry billable_rounds from the completed round.
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
-        let client = FakeClient::new(vec![tool_use_turn_with_usage(
-            "tool_1", "gate", r"{}", 7, 3,
+        let client = FakeClient::new(vec![with_usage(
+            tool_use_turn("tool_1", "gate", r"{}"),
+            7,
+            3,
         )]);
         let started = Arc::new(Notify::new());
         let tools = ToolRegistry::new(vec![Box::new(GateTool {
@@ -3290,14 +2622,16 @@ mod tests {
 
     #[tokio::test]
     async fn agent_turn_malformed_tool_input_short_circuits_to_parse_error_result() {
-        // Truncated `input_json_delta` must not run the tool with empty input. The agent
-        // synthesizes an `is_error: true` result naming the parse failure for self-correction.
+        // A call whose streamed input failed to parse must not run with the `{}` fallback. The
+        // agent answers it with an `is_error: true` result naming the failure to self-correct on.
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
-        let client = FakeClient::new(vec![
-            tool_use_turn("tool_1", "echo", "{unclosed"),
-            text_turn("recovered"),
-        ]);
+        let mut malformed = tool_use_turn("tool_1", "echo", "{}");
+        reply_of(&mut malformed).parse_errors.insert(
+            "tool_1".to_owned(),
+            "EOF while parsing an object".to_owned(),
+        );
+        let client = FakeClient::new(vec![malformed, text_turn("recovered")]);
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
         let sink = CapturingSink::new();
         let mut messages = vec![Message::user("run echo")];
@@ -3350,7 +2684,7 @@ mod tests {
         const CAP: u32 = 3;
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
-        let turns: Vec<Vec<StreamEvent>> = (0..CAP)
+        let turns: Vec<Vec<ResponseEvent>> = (0..CAP)
             .map(|i| tool_use_turn(&format!("tool_{i}"), "echo", r"{}"))
             .collect();
         let client = FakeClient::new(turns);
@@ -3385,8 +2719,8 @@ mod tests {
         const CAP: u32 = 2;
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
-        let turns: Vec<Vec<StreamEvent>> = (0..CAP)
-            .map(|i| tool_use_turn_with_usage(&format!("tool_{i}"), "echo", r"{}", 5, 2))
+        let turns: Vec<Vec<ResponseEvent>> = (0..CAP)
+            .map(|i| with_usage(tool_use_turn(&format!("tool_{i}"), "echo", r"{}"), 5, 2))
             .collect();
         let client = FakeClient::new(turns);
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
@@ -3423,7 +2757,7 @@ mod tests {
     async fn agent_turn_with_none_cap_runs_unbounded_until_text_only_reply() {
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
-        let mut turns: Vec<Vec<StreamEvent>> = (0..50)
+        let mut turns: Vec<Vec<ResponseEvent>> = (0..50)
             .map(|i| tool_use_turn(&format!("tool_{i}"), "echo", r"{}"))
             .collect();
         turns.push(text_turn("done"));
@@ -3450,15 +2784,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_turn_mid_stream_error_event_surfaces_as_bail() {
+    async fn agent_turn_stream_error_fails_the_turn_with_its_cause() {
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
-        let client = FakeClient::new(vec![vec![StreamEvent::Error {
-            error: ApiError {
-                error_type: "overloaded_error".into(),
-                message: "Servers overloaded".into(),
-            },
-        }]]);
+        let client = FakeClient::new(Vec::new()).then_fail("API error (overloaded_error): Busy");
         let tools = ToolRegistry::new(vec![]);
         let sink = CapturingSink::new();
         let mut messages = vec![Message::user("hi")];
@@ -3476,30 +2805,25 @@ mod tests {
         )
         .await
         .expect_err("api error must propagate");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("overloaded_error"), "type in error: {msg}");
-        assert!(
-            msg.contains("Servers overloaded"),
-            "message in error: {msg}"
+        assert_eq!(
+            format!("{err:#}"),
+            "stream error: API error (overloaded_error): Busy"
         );
     }
 
     #[tokio::test]
     async fn agent_turn_failed_after_completed_round_preserves_billable_rounds() {
-        // Round 1 completes with reported usage. Round 2 emits a stream Error so the turn
-        // bails with TurnAbort::Failed. The completed round's usage must still ride out on
-        // billable_rounds so the caller bills what the API charged for.
+        // Round 1 completes with reported usage. Round 2's stream fails, so the turn bails with
+        // TurnAbort::Failed. The completed round's usage must still ride out on billable_rounds
+        // so the caller bills what the API charged for.
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
-        let client = FakeClient::new(vec![
-            tool_use_turn_with_usage("tool_1", "echo", r"{}", 9, 4),
-            vec![StreamEvent::Error {
-                error: ApiError {
-                    error_type: "overloaded_error".into(),
-                    message: "Servers overloaded".into(),
-                },
-            }],
-        ]);
+        let client = FakeClient::new(vec![with_usage(
+            tool_use_turn("tool_1", "echo", r"{}"),
+            9,
+            4,
+        )])
+        .then_fail("API error (overloaded_error): Busy");
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
         let sink = CapturingSink::new();
         let mut messages = vec![Message::user("hi")];
@@ -3531,80 +2855,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_turn_emits_each_progress_update_as_its_tool_use_starts_streaming() {
-        let dir = tempfile::tempdir().unwrap();
-        let session = test_session(dir.path());
-        let client = FakeClient::new(vec![
-            blocks_turn(&[
-                Block::Thinking(""),
-                Block::Thinking("Searching."),
-                Block::ServerTool("s1"),
-                Block::Text("Found it."),
-                Block::Echo("t1"),
-                Block::Thinking("Now b."),
-                Block::RedactedThinking,
-                Block::Echo("t2"),
-                Block::Thinking("Summing up."),
-                Block::Text("Checked."),
-            ]),
-            text_turn("Done"),
-        ]);
-        let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
-        let sink = CapturingSink::new();
-        let mut messages = vec![Message::user("run echo twice")];
-
-        agent_turn(
-            &client,
-            &tools,
-            &mut messages,
-            &empty_prompt(),
-            &sink,
-            &session,
-            &mut inert_ops(),
-            None,
-            &mut yolo_gate(),
-        )
-        .await
-        .unwrap();
-
-        let order: Vec<String> = sink
-            .events()
-            .into_iter()
-            .filter_map(|e| match e {
-                Event::StreamToken(text) => Some(format!("token {text}")),
-                Event::ProgressUpdate(text) => Some(format!("progress {text}")),
-                Event::ToolCallStart(ToolCall { id, .. }) => Some(format!("start {id}")),
-                Event::ToolCallEnd(ToolResult { id, .. }) => Some(format!("end {id}")),
-                _ => None,
-            })
-            .collect();
-        // Text cuts `t1` off from any note, and a note before text introduces no tool call.
-        assert_eq!(
-            order,
-            [
-                "progress Searching.",
-                "token Found it.",
-                "progress Now b.",
-                "token Checked.",
-                "start t1",
-                "end t1",
-                "start t2",
-                "end t2",
-                "token Done",
-            ],
-        );
-        // Every block, the empty reasoning one included, stays in history for the next round.
-        assert_eq!(messages[1].content.len(), 10);
-    }
-
-    #[tokio::test]
     async fn agent_turn_keeps_interrupted_work_note_when_tool_results_follow() {
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let client = FakeClient::new(vec![
-            blocks_turn(&[
-                Block::Echo("t1"),
-                Block::Thinking(INTERRUPTED_WORK_SENTINEL),
+            reply_turn(vec![
+                tool_use_block("t1", "echo", "{}"),
+                thinking_block(INTERRUPTED_WORK_SENTINEL),
             ]),
             text_turn("Done"),
         ]);
@@ -3641,7 +2898,7 @@ mod tests {
     async fn agent_turn_ending_on_interrupted_work_tells_user_to_continue() {
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
-        let client = FakeClient::new(vec![blocks_turn(&[Block::Thinking(
+        let client = FakeClient::new(vec![reply_turn(vec![thinking_block(
             INTERRUPTED_WORK_SENTINEL,
         )])]);
         let tools = ToolRegistry::new(vec![]);
@@ -3720,7 +2977,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let client = FakeClient::new(vec![with_stop(
-            text_then_tool_use_turn("Writing it now.", "tool_1", "echo", r#"{"content": "#),
+            reply_turn(vec![
+                text_block("Writing it now."),
+                tool_use_block("tool_1", "echo", "{}"),
+            ]),
             StopReason::MaxTokens,
             None,
         )]);
@@ -3765,7 +3025,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let client = FakeClient::new(vec![with_stop(
-            vec![StreamEvent::MessageStop],
+            reply_turn(Vec::new()),
             StopReason::EndTurn,
             None,
         )]);
@@ -3791,7 +3051,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_turn_stream_cut_before_message_stop_fails_without_committing() {
+    async fn agent_turn_stream_closed_before_the_reply_fails_without_committing() {
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let mut events = text_turn("half a sent");
@@ -3815,9 +3075,9 @@ mod tests {
         .await
         .expect_err("a cut stream fails the turn");
 
-        assert!(
-            format!("{abort:#}").contains("ended before message_stop"),
-            "{abort:#}",
+        assert_eq!(
+            abort.to_string(),
+            "response stream ended before the reply completed"
         );
         assert_eq!(messages.len(), 1, "{messages:?}");
     }
@@ -3846,7 +3106,7 @@ mod tests {
             .set_body_string(body)
     }
 
-    /// Drives one turn through the real `<Client as AgentClient>` path. The server answers with
+    /// Drives one turn through the real `<Client as Wire>` path. The server answers with
     /// `responses` in order, one request each, and repeats the last one.
     async fn real_client_turn(
         responses: Vec<ResponseTemplate>,
@@ -3975,15 +3235,14 @@ mod tests {
         let (outcome, _, _) =
             real_client_turn(vec![sse(failed), sse(answered)], &ToolRegistry::new(vec![])).await;
 
-        let usage = outcome.report.usage.expect("the answer reports usage");
         assert_eq!(
-            (
-                usage.input_tokens(),
-                usage.cache_creation_input_tokens(),
-                usage.cache_read_input_tokens(),
-                usage.output_tokens(),
-            ),
-            (5, 0, 900, 7),
+            outcome.report.usage,
+            Some(TokenUsage {
+                input_tokens: 5,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 900,
+                output_tokens: 7,
+            }),
             "the failed attempt's cache write is not billed again",
         );
     }
@@ -4756,361 +4015,43 @@ mod tests {
         assert!(matches!(abort, TurnAbort::Shutdown));
     }
 
-    // ── BlockAccumulator::into_content_block ──
+    // ── collect_response ──
 
-    #[test]
-    fn into_content_block_text_yields_text_block() {
-        let (block, err) = BlockAccumulator::Text("hi".to_owned()).into_content_block();
-        assert!(matches!(block, Some(ContentBlock::Text { text }) if text == "hi"));
-        assert!(err.is_none());
-    }
-
-    #[test]
-    fn into_content_block_tool_use_yields_tool_use_block() {
-        let (block, err) = BlockAccumulator::ToolUse {
-            id: "tool_1".to_owned(),
-            name: "bash".to_owned(),
-            json_buf: r#"{"command": "ls"}"#.to_owned(),
+    #[tokio::test]
+    async fn collect_response_forwards_each_delta_and_keeps_the_latest_usage() {
+        let reply = || Response {
+            content: vec![thinking_block("plan"), text_block("Found it.")],
+            stop_reason: Some(StopReason::EndTurn),
+            ..Response::default()
+        };
+        let events = [
+            ResponseEvent::Usage(TokenUsage::new(5, 0)),
+            ResponseEvent::Retrying("HTTP 529. Retrying in 1s (retry 1 of 5).".to_owned()),
+            ResponseEvent::Thinking("plan".to_owned()),
+            ResponseEvent::Progress("Searching.".to_owned()),
+            ResponseEvent::Text("Found it.".to_owned()),
+            ResponseEvent::Usage(TokenUsage::new(5, 7)),
+            ResponseEvent::Completed(reply()),
+        ];
+        let (tx, rx) = mpsc::channel(events.len());
+        for event in events {
+            tx.try_send(Ok(event)).unwrap();
         }
-        .into_content_block();
-        let Some(ContentBlock::ToolUse { id, name, input }) = block else {
-            panic!("expected ToolUse, got {block:?}");
-        };
-        assert_eq!(id, "tool_1");
-        assert_eq!(name, "bash");
-        assert_eq!(input, json!({"command": "ls"}));
-        assert!(err.is_none());
-    }
-
-    #[test]
-    fn into_content_block_tool_use_malformed_json_surfaces_parse_error() {
-        let (block, err) = BlockAccumulator::ToolUse {
-            id: "tool_1".to_owned(),
-            name: "bash".to_owned(),
-            json_buf: "{unclosed".to_owned(),
-        }
-        .into_content_block();
-        assert!(matches!(
-            &block,
-            Some(ContentBlock::ToolUse { id, input, .. })
-                if id == "tool_1" && *input == json!({}),
-        ));
-        let (err_id, err_msg) = err.expect("parse error surfaced");
-        assert_eq!(err_id, "tool_1");
-        assert!(!err_msg.is_empty(), "non-empty serde_json error: {err_msg}");
-    }
-
-    #[test]
-    fn into_content_block_server_tool_use_malformed_json_surfaces_parse_error() {
-        let (block, err) = BlockAccumulator::ServerToolUse {
-            id: "srv_1".to_owned(),
-            name: "web_search".to_owned(),
-            json_buf: "{unclosed".to_owned(),
-        }
-        .into_content_block();
-        assert!(matches!(
-            &block,
-            Some(ContentBlock::ServerToolUse { id, input, .. })
-                if id == "srv_1" && *input == json!({}),
-        ));
-        let (err_id, err_msg) = err.expect("parse error surfaced");
-        assert_eq!(err_id, "srv_1");
-        assert!(!err_msg.is_empty(), "non-empty serde_json error: {err_msg}");
-    }
-
-    #[test]
-    fn into_content_block_server_tool_use_yields_server_tool_use_block() {
-        let (block, err) = BlockAccumulator::ServerToolUse {
-            id: "srv_1".to_owned(),
-            name: "web_search".to_owned(),
-            json_buf: r#"{"query": "rust"}"#.to_owned(),
-        }
-        .into_content_block();
-        let Some(ContentBlock::ServerToolUse { id, name, input }) = block else {
-            panic!("expected ServerToolUse, got {block:?}");
-        };
-        assert_eq!(id, "srv_1");
-        assert_eq!(name, "web_search");
-        assert_eq!(input, json!({"query": "rust"}));
-        assert!(err.is_none());
-    }
-
-    #[test]
-    fn into_content_block_thinking_preserves_signature() {
-        let (block, err) = BlockAccumulator::Thinking {
-            thinking: "step 1".to_owned(),
-            signature: "sig_abc".to_owned(),
-        }
-        .into_content_block();
-        let Some(ContentBlock::Thinking {
-            thinking,
-            signature,
-        }) = block
-        else {
-            panic!("expected Thinking, got {block:?}");
-        };
-        assert_eq!(thinking, "step 1");
-        assert_eq!(signature, "sig_abc");
-        assert!(err.is_none());
-    }
-
-    #[test]
-    fn into_content_block_redacted_thinking_preserves_data() {
-        let (block, err) = BlockAccumulator::RedactedThinking {
-            data: "opaque-blob".to_owned(),
-        }
-        .into_content_block();
-        assert!(
-            matches!(block, Some(ContentBlock::RedactedThinking { data }) if data == "opaque-blob")
-        );
-        assert!(err.is_none());
-    }
-
-    #[test]
-    fn into_content_block_skipped_yields_none() {
-        let (block, err) = BlockAccumulator::Skipped.into_content_block();
-        assert!(block.is_none());
-        assert!(err.is_none());
-    }
-
-    // ── parse_tool_json ──
-
-    #[test]
-    fn parse_tool_json_valid_object() {
-        let (value, err) = parse_tool_json(r#"{"command": "ls", "n": 3}"#);
-        assert_eq!(value, json!({"command": "ls", "n": 3}));
-        assert!(err.is_none());
-    }
-
-    #[test]
-    fn parse_tool_json_empty_buffer_is_an_empty_object() {
-        assert_eq!(parse_tool_json(""), (json!({}), None));
-    }
-
-    #[test]
-    fn parse_tool_json_malformed_produces_empty_object_and_error() {
-        let (value, err) = parse_tool_json("{unclosed");
-        assert_eq!(value, json!({}));
-        let err = err.expect("parse error surfaced");
-        assert!(!err.is_empty(), "non-empty serde_json error: {err}");
-    }
-
-    // ── init_accumulator ──
-
-    #[test]
-    fn init_accumulator_text_starts_with_initial_text() {
-        let acc = init_accumulator(
-            ContentBlockInfo::Text {
-                text: "hi".to_owned(),
-            },
-            0,
-        );
-        assert!(matches!(acc, BlockAccumulator::Text(t) if t == "hi"));
-    }
-
-    #[test]
-    fn init_accumulator_tool_use_starts_with_empty_buf() {
-        let acc = init_accumulator(
-            ContentBlockInfo::ToolUse {
-                id: "tool_1".to_owned(),
-                name: "bash".to_owned(),
-            },
-            0,
-        );
-        let BlockAccumulator::ToolUse { id, name, json_buf } = acc else {
-            panic!("expected ToolUse, got {acc:?}");
-        };
-        assert_eq!(id, "tool_1");
-        assert_eq!(name, "bash");
-        assert_eq!(json_buf, "");
-    }
-
-    #[test]
-    fn init_accumulator_server_tool_use_starts_with_empty_buf() {
-        let acc = init_accumulator(
-            ContentBlockInfo::ServerToolUse {
-                id: "srv_1".to_owned(),
-                name: "web_search".to_owned(),
-            },
-            0,
-        );
-        let BlockAccumulator::ServerToolUse { id, name, json_buf } = acc else {
-            panic!("expected ServerToolUse, got {acc:?}");
-        };
-        assert_eq!(id, "srv_1");
-        assert_eq!(name, "web_search");
-        assert_eq!(json_buf, "");
-    }
-
-    #[test]
-    fn init_accumulator_thinking_preserves_fields() {
-        let acc = init_accumulator(
-            ContentBlockInfo::Thinking {
-                thinking: "step 1".to_owned(),
-                signature: "sig_abc".to_owned(),
-            },
-            0,
-        );
-        let BlockAccumulator::Thinking {
-            thinking,
-            signature,
-        } = acc
-        else {
-            panic!("expected Thinking, got {acc:?}");
-        };
-        assert_eq!(thinking, "step 1");
-        assert_eq!(signature, "sig_abc");
-    }
-
-    #[test]
-    fn init_accumulator_redacted_thinking_preserves_data() {
-        let acc = init_accumulator(
-            ContentBlockInfo::RedactedThinking {
-                data: "opaque-blob".to_owned(),
-            },
-            0,
-        );
-        assert!(
-            matches!(acc, BlockAccumulator::RedactedThinking { data } if data == "opaque-blob")
-        );
-    }
-
-    #[test]
-    fn init_accumulator_unknown_yields_skipped() {
-        let acc = init_accumulator(ContentBlockInfo::Unknown, 0);
-        assert!(matches!(acc, BlockAccumulator::Skipped));
-    }
-
-    // ── apply_delta ──
-
-    #[test]
-    fn apply_delta_text_appends_and_emits_stream_token() {
         let sink = CapturingSink::new();
-        let mut block = BlockAccumulator::Text("ha".to_owned());
-        apply_delta(
-            &mut block,
-            Delta::TextDelta {
-                text: "llo".to_owned(),
-            },
-            &sink,
-        );
-        let BlockAccumulator::Text(buf) = &block else {
-            panic!("expected Text, got {block:?}");
-        };
-        assert_eq!(buf, "hallo");
-        let events = sink.events();
-        assert_eq!(events.len(), 1);
-        assert!(matches!(&events[0], Event::StreamToken(t) if t == "llo"));
-    }
+        let mut usage = None;
 
-    #[test]
-    fn apply_delta_tool_use_appends_to_json_buf() {
-        let sink = CapturingSink::new();
-        let mut block = BlockAccumulator::ToolUse {
-            id: "tool_1".to_owned(),
-            name: "bash".to_owned(),
-            json_buf: r#"{"x"#.to_owned(),
-        };
-        apply_delta(
-            &mut block,
-            Delta::InputJsonDelta {
-                partial_json: r":1}".to_owned(),
-            },
-            &sink,
-        );
-        let BlockAccumulator::ToolUse { json_buf, .. } = &block else {
-            panic!("expected ToolUse, got {block:?}");
-        };
-        assert_eq!(json_buf, r#"{"x:1}"#);
-        assert_eq!(sink.events(), []);
-    }
+        let response = collect_response(rx, &sink, &mut usage).await.unwrap();
 
-    #[test]
-    fn apply_delta_server_tool_use_appends_to_json_buf() {
-        let sink = CapturingSink::new();
-        let mut block = BlockAccumulator::ServerToolUse {
-            id: "srv_1".to_owned(),
-            name: "web_search".to_owned(),
-            json_buf: r#"{"q"#.to_owned(),
-        };
-        apply_delta(
-            &mut block,
-            Delta::InputJsonDelta {
-                partial_json: r#":"rust"}"#.to_owned(),
-            },
-            &sink,
+        assert_eq!(response, reply());
+        assert_eq!(usage, Some(TokenUsage::new(5, 7)));
+        assert_eq!(
+            sink.events(),
+            [
+                Event::Retrying("HTTP 529. Retrying in 1s (retry 1 of 5).".to_owned()),
+                Event::ThinkingToken("plan".to_owned()),
+                Event::ProgressUpdate("Searching.".to_owned()),
+                Event::StreamToken("Found it.".to_owned()),
+            ],
         );
-        let BlockAccumulator::ServerToolUse { json_buf, .. } = &block else {
-            panic!("expected ServerToolUse, got {block:?}");
-        };
-        assert_eq!(json_buf, r#"{"q:"rust"}"#);
-        assert_eq!(sink.events(), []);
-    }
-
-    #[test]
-    fn apply_delta_thinking_appends_and_emits_thinking_token() {
-        let sink = CapturingSink::new();
-        let mut block = BlockAccumulator::Thinking {
-            thinking: "step 1".to_owned(),
-            signature: String::new(),
-        };
-        apply_delta(
-            &mut block,
-            Delta::ThinkingDelta {
-                thinking: ", step 2".to_owned(),
-            },
-            &sink,
-        );
-        let BlockAccumulator::Thinking { thinking, .. } = &block else {
-            panic!("expected Thinking, got {block:?}");
-        };
-        assert_eq!(thinking, "step 1, step 2");
-        let events = sink.events();
-        assert_eq!(events.len(), 1);
-        assert!(matches!(&events[0], Event::ThinkingToken(t) if t == ", step 2"));
-    }
-
-    #[test]
-    fn apply_delta_signature_updates_signature_field() {
-        let sink = CapturingSink::new();
-        let mut block = BlockAccumulator::Thinking {
-            thinking: "step 1".to_owned(),
-            signature: String::new(),
-        };
-        apply_delta(
-            &mut block,
-            Delta::SignatureDelta {
-                signature: "sig_abc".to_owned(),
-            },
-            &sink,
-        );
-        let BlockAccumulator::Thinking {
-            thinking,
-            signature,
-        } = &block
-        else {
-            panic!("expected Thinking, got {block:?}");
-        };
-        assert_eq!(thinking, "step 1");
-        assert_eq!(signature, "sig_abc");
-        assert_eq!(sink.events(), []);
-    }
-
-    #[test]
-    fn apply_delta_mismatched_pair_is_a_noop() {
-        let sink = CapturingSink::new();
-        let mut block = BlockAccumulator::Text("hi".to_owned());
-        apply_delta(
-            &mut block,
-            Delta::InputJsonDelta {
-                partial_json: "ignored".to_owned(),
-            },
-            &sink,
-        );
-        let BlockAccumulator::Text(buf) = &block else {
-            panic!("expected Text, got {block:?}");
-        };
-        assert_eq!(buf, "hi");
-        assert_eq!(sink.events(), []);
     }
 }

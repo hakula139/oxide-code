@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::agent::TokenUsage;
+use crate::client::TokenUsage;
 use crate::config::PromptCacheTtl;
 use crate::file_tracker::FileSnapshot;
 use crate::message::Message;
@@ -377,10 +377,10 @@ mod tests {
                         && usage.model == "claude-opus-5-5"
                         && usage.cache_ttl == PromptCacheTtl::OneHour
                         && [
-                            usage.tokens.input_tokens(),
-                            usage.tokens.cache_creation_input_tokens(),
-                            usage.tokens.cache_read_input_tokens(),
-                            usage.tokens.output_tokens(),
+                            usage.tokens.input_tokens,
+                            usage.tokens.cache_creation_input_tokens,
+                            usage.tokens.cache_read_input_tokens,
+                            usage.tokens.output_tokens,
                         ] == [12, 3_000, 40_000, 500]
                         && *timestamp == datetime!(2026-04-16 12:07:00 UTC)
             ),

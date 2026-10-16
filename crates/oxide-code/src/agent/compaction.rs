@@ -14,9 +14,7 @@ use anyhow::{Result, bail};
 use indoc::{formatdoc, indoc};
 use tokio::sync::mpsc;
 
-use crate::agent::{AgentClient, StreamOutcome, TokenUsage};
-use crate::client::anthropic::transport::PromptTooLong;
-use crate::client::anthropic::wire::{StopReason, StreamEvent};
+use crate::client::{PromptTooLong, Response, ResponseEvent, StopReason, TokenUsage, Wire};
 use crate::message::{ContentBlock, Message, Role};
 use crate::prompt::PromptParts;
 use crate::protocol::{Event, EventSink};
@@ -70,7 +68,7 @@ const SUMMARY_PREFIX: &str = indoc! {r"
 /// Errors when the transcript is too short to compact, when a request fails, or when the reply is
 /// empty or stopped before the summary finished, including when the last retry still overflows.
 pub(crate) async fn compact_session(
-    client: &dyn AgentClient,
+    client: &dyn Wire,
     prompt: &PromptParts,
     tools: &[ToolDefinition],
     transcript: &[Message],
@@ -104,7 +102,7 @@ pub(crate) async fn compact_session(
     let mut rx = client.stream_message(&request, &sections, user_context, tools)?;
     let mut kept = transcript.to_vec();
     let mut retries = 0;
-    let outcome = loop {
+    let response = loop {
         let result = collect_summary(rx, spent).await;
         let smaller = overflow_tokens(&result)
             .filter(|_| retries < MAX_OVERFLOW_RETRIES)
@@ -122,7 +120,7 @@ pub(crate) async fn compact_session(
         let request = retry_request(&kept, &rubric);
         rx = client.stream_one_shot(&request, &sections, user_context, tools)?;
     };
-    match outcome.stop_reason {
+    match response.stop_reason {
         None | Some(StopReason::EndTurn | StopReason::StopSequence) => {}
         Some(StopReason::MaxTokens) => {
             bail!("the summary hit the max_tokens output limit before it finished")
@@ -137,8 +135,8 @@ pub(crate) async fn compact_session(
         }
     }
 
-    let summary: String = outcome
-        .blocks
+    let summary: String = response
+        .content
         .iter()
         .filter_map(|b| match b {
             ContentBlock::Text { text } => Some(text.as_str()),
@@ -154,9 +152,9 @@ pub(crate) async fn compact_session(
 
 /// Collects one summarization reply, adding its usage to `spent` even when it fails.
 async fn collect_summary(
-    rx: mpsc::Receiver<Result<StreamEvent>>,
+    rx: mpsc::Receiver<Result<ResponseEvent>>,
     spent: &mut Vec<TokenUsage>,
-) -> Result<StreamOutcome> {
+) -> Result<Response> {
     let mut usage = RequestUsage {
         total: spent,
         request: None,
@@ -179,10 +177,10 @@ impl Drop for RequestUsage<'_> {
 
 /// Tokens a summary request ran over the context window by, or `Some(0)` when the API did not
 /// say. `None` when the request fit.
-fn overflow_tokens(result: &Result<StreamOutcome>) -> Option<u32> {
+fn overflow_tokens(result: &Result<Response>) -> Option<u32> {
     match result {
-        Ok(outcome) => {
-            (outcome.stop_reason == Some(StopReason::ModelContextWindowExceeded)).then_some(0)
+        Ok(response) => {
+            (response.stop_reason == Some(StopReason::ModelContextWindowExceeded)).then_some(0)
         }
         Err(error) => error
             .downcast_ref::<PromptTooLong>()
@@ -323,7 +321,7 @@ mod tests {
 
     use super::*;
     use crate::client::anthropic::Client;
-    use crate::client::anthropic::testing::{api_key, test_client};
+    use crate::client::anthropic::testing::{api_key, sse_body, test_client};
     use crate::message::Role;
 
     // ── compact_session ──
@@ -350,16 +348,6 @@ mod tests {
             frames.push(json!({"type": "message_stop"}));
         }
         sse_body(&frames)
-    }
-
-    fn sse_body(frames: &[serde_json::Value]) -> String {
-        use std::fmt::Write as _;
-
-        let mut body = String::new();
-        for frame in frames {
-            _ = writeln!(body, "event: ping\ndata: {frame}\n");
-        }
-        body
     }
 
     async fn mount_summary(server: &MockServer, body: String) {
@@ -1088,10 +1076,12 @@ mod tests {
 
     #[test]
     fn strip_synthetic_post_compact_prefix_leaves_assistant_messages() {
-        let mut m = Message::assistant(format!(
-            "{}\n\nnot a synthetic user root",
+        let mut m = Message::assistant(formatdoc! {"
+            {}
+
+            not a synthetic user root",
             SUMMARY_PREFIX.trim(),
-        ));
+        });
 
         assert!(!strip_synthetic_post_compact_prefix(&mut m));
         assert_eq!(m.role, Role::Assistant);

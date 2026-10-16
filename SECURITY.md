@@ -13,7 +13,7 @@ Report vulnerabilities privately through a [GitHub security advisory](https://gi
 - Steps to reproduce or a proof of concept
 - The impact and any mitigations you know of
 
-The maintainer handles reports on a best-effort basis, coordinates disclosure with the reporter, and publishes the advisory after a fix is released.
+The maintainer acknowledges a report within 7 days and shares an assessment within 14 days. For a confirmed vulnerability, the maintainer aims to release a fix within 30 days, coordinates disclosure with the reporter, and publishes the advisory once the fix is released. oxide-code has a single maintainer, so these are targets, and the advisory thread reports any delay.
 
 ## Trust model
 

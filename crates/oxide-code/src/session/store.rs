@@ -1432,7 +1432,7 @@ mod tests {
                 (
                     record.model.as_str(),
                     record.cache_ttl,
-                    record.tokens.input_tokens(),
+                    record.tokens.input_tokens,
                 )
             })
             .collect();

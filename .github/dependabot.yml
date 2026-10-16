@@ -1,0 +1,18 @@
+# Renovate opens version updates, so Dependabot only opens security updates. These entries exist to
+# set their labels, since without them each security PR gets an ecosystem label such as `rust`.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 0
+    labels:
+      - dependencies
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 0
+    labels:
+      - dependencies

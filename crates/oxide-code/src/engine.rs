@@ -14,7 +14,8 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::warn;
 
-use crate::agent::{self, AutoCompact, TokenUsage, TurnAbort, TurnOutcome, TurnReport};
+use crate::agent::{self, AutoCompact, TurnAbort, TurnOutcome, TurnReport};
+use crate::client::TokenUsage;
 use crate::client::anthropic::Client;
 use crate::config::Effort;
 use crate::config::auth::{self, Auth, AuthSource};
@@ -712,10 +713,10 @@ fn estimate_cost_usd(requests: &[UsageRecord]) -> f64 {
             let rates = ModelSpec::resolve(request.model.clone()).cost_rates()?;
             let tokens = request.tokens;
             Some(rates.estimate_usd(
-                tokens.input_tokens(),
-                tokens.cache_creation_input_tokens(),
-                tokens.cache_read_input_tokens(),
-                tokens.output_tokens(),
+                tokens.input_tokens,
+                tokens.cache_creation_input_tokens,
+                tokens.cache_read_input_tokens,
+                tokens.output_tokens,
                 request.cache_ttl,
             ))
         })
@@ -802,6 +803,7 @@ fn format_drift_warning(drifted: &[PathBuf]) -> String {
 mod tests {
     use std::time::Duration;
 
+    use indoc::indoc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use wiremock::matchers::{body_partial_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -2277,10 +2279,12 @@ mod tests {
             assert_eq!(prompt[0]["text"], "second");
             let reminder = prompt[1]["text"].as_str().unwrap();
             assert!(
-                reminder.contains(
-                    "# Model\n\nYou are powered by the model named Claude Sonnet 5.5. The exact \
-                     model ID is claude-sonnet-5-5."
-                ),
+                reminder.contains(indoc! {"
+                    # Model
+
+                    You are powered by the model named Claude Sonnet 5.5. The exact model ID is \
+                    claude-sonnet-5-5."
+                }),
                 "{reminder}"
             );
             assert!(!reminder.contains("# CLAUDE.md"), "{reminder}");

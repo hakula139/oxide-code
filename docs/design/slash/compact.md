@@ -38,7 +38,7 @@ The TUI's `App::apply_session_compacted` clears the chat, pushes a single `Compa
 
 2. **Optional free-text custom instructions.** `/compact <instructions>` lets the user steer the summary toward what they care about (`focus on the build error and how we fixed it`). The argument shape matches the existing `/rename <title>` / `/model <id>` typed-arg form, and adding it costs little. Claude Code shipped it because the rubric is generic enough that user-supplied focus noticeably improves recall.
 
-3. **Same model and request path as a turn.** The summarization request reuses the live model selection, thinking / effort settings, and OAuth / API-key auth, because it goes through `AgentClient` and the agent loop's `collect_response`. It also inherits the turn's truncated-stream detection and stop-reason handling, so a summary cut off by `max_tokens` fails the compaction before it can replace the transcript.
+3. **Same model and request path as a turn.** The summarization request reuses the live model selection, thinking / effort settings, and OAuth / API-key auth, because it goes through the same `Wire` and the agent loop's `collect_response`. It also inherits the turn's truncated-stream detection and stop-reason handling, so a summary cut off by `max_tokens` fails the compaction before it can replace the transcript.
 
 4. **Keep the conversation's tools and ask for text only.** The `tools` array is part of the cached prefix, so dropping it would miss the conversation's cache. The rubric ends by asking the model not to call any tool, as Claude Code's `NO_TOOLS_PREAMBLE` does on its fork path, and a reply that stops on `tool_use` fails the compaction.
 
@@ -120,7 +120,8 @@ A `pre_compact` hook is tracked in [#168](https://github.com/hakula139/oxide-cod
 - `crates/oxide-code/src/agent.rs`: `await_unless_aborted` races the summarization against cancel and quit, and `collect_response` reads its reply the way it reads a turn's.
 - `crates/oxide-code/src/agent/compact_boundary.rs`: `replace_session_with_summary`, shared by manual and automatic compaction.
 - `crates/oxide-code/src/agent/compaction.rs`: `compact_session` driver, the context-window retries (`drop_oldest_rounds`, `retry_request`), and the `SUMMARIZATION_USER_RUBRIC` / `SUMMARY_PREFIX` constants.
-- `crates/oxide-code/src/client/anthropic/transport.rs`: `PromptTooLong`, the typed HTTP 400 that carries the reported overflow.
+- `crates/oxide-code/src/client.rs`: `PromptTooLong`, the wire-neutral rejection that carries the reported overflow.
+- `crates/oxide-code/src/client/anthropic/transport.rs`: `prompt_too_long_message`, which types an HTTP 400 `prompt is too long` as `PromptTooLong`.
 - `crates/oxide-code/src/engine.rs`: `Engine::compact` beside `Engine::resume`, and session-cost accounting.
 - `crates/oxide-code/src/protocol.rs`: `Op::Compact`, `Event::SessionCompacted`.
 - `crates/oxide-code/src/session/actor.rs`: `SessionCmd::Compact` handler.
