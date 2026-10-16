@@ -89,8 +89,9 @@ impl TurnOutcome {
 /// Drives one user prompt to a final assistant text reply. The loop returns as soon as a round
 /// produces no tool calls, and a `pause_turn` stop re-requests without a new user message.
 /// [`Op::Queue`]s splice in as user messages at round boundaries. Long-running awaits race `ops`
-/// so `Interrupt` / `Shutdown` abort promptly. An abort mid-stream commits nothing, while an abort
-/// mid-round commits the round with the unfinished calls marked interrupted.
+/// so `Interrupt` / `Shutdown` abort promptly. An abort mid-stream commits none of the reply, while
+/// an abort mid-round commits the round with the unfinished calls marked interrupted. Either way
+/// the transcript then ends on [`Message::interruption`].
 /// `max_tool_rounds = None` runs unbounded, and `Some(n)` bails after `n` rounds without a reply.
 #[expect(
     clippy::too_many_arguments,
@@ -128,7 +129,7 @@ pub(super) async fn agent_turn(
         } = match stream {
             Ok(Ok(response)) => response,
             Ok(Err(error)) => return TurnOutcome::aborted(report, TurnAbort::Failed(error)),
-            Err(abort) => return TurnOutcome::aborted(report, abort),
+            Err(abort) => return interrupt_turn(session, sink, messages, report, abort).await,
         };
 
         let blocks = match settle_stop_reason(
@@ -179,7 +180,7 @@ pub(super) async fn agent_turn(
         )
         .await;
         if let Some(abort) = round.abort {
-            return TurnOutcome::aborted(report, abort);
+            return interrupt_turn(session, sink, messages, report, abort).await;
         }
         record_drained_prompts(pending_prompts.drain(..), messages, session, sink).await;
     }
@@ -256,6 +257,21 @@ async fn commit_assistant_message(
     };
     record_message(session, message.clone(), sink).await;
     messages.push(message);
+}
+
+/// Ends a turn on a user abort, recording [`Message::interruption`] after whatever the turn
+/// committed so later requests leave the abandoned prompts unanswered.
+async fn interrupt_turn(
+    session: &SessionHandle,
+    sink: &dyn EventSink,
+    messages: &mut Vec<Message>,
+    report: TurnReport,
+    abort: TurnAbort,
+) -> TurnOutcome {
+    let marker = Message::interruption();
+    record_message(session, marker.clone(), sink).await;
+    messages.push(marker);
+    TurnOutcome::aborted(report, abort)
 }
 
 /// User-facing notice for a `refusal` stop, naming the policy category and explanation when the
@@ -541,6 +557,25 @@ mod tests {
                 }],
                 total_lines: 1,
             })
+        }
+    }
+
+    /// Streams one text token, then holds the stream open until the turn drops it.
+    struct StalledClient(&'static str);
+
+    impl Wire for StalledClient {
+        fn stream_message(
+            &self,
+            _messages: &[Message],
+            _system_sections: &[&str],
+            _user_context: Option<&str>,
+            _tools: &[ToolDefinition],
+        ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
+            let (tx, rx) = mpsc::channel(1);
+            tx.try_send(Ok(ResponseEvent::Text(self.0.to_owned())))
+                .expect("channel capacity");
+            tokio::spawn(async move { tx.closed().await });
+            Ok(rx)
         }
     }
 
@@ -1081,9 +1116,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_turn_interrupt_during_stream_is_cancelled_abort() {
-        // Biased select picks the queued Cancel before the stream future, so the session stays at
-        // its pre-turn tail and the abort is Cancelled.
+    async fn agent_turn_interrupt_before_any_output_ends_on_the_interruption() {
+        // Biased select picks the queued Cancel before the stream future, so the turn commits only
+        // the interruption and the abort is Cancelled.
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let client = FakeClient::new(vec![text_turn("never reached")]);
@@ -1108,8 +1143,52 @@ mod tests {
         .expect_err("cancel must surface as Err(Cancelled)");
 
         assert!(matches!(abort, TurnAbort::Cancelled), "got {abort:?}");
-        assert_eq!(messages.len(), 1, "no assistant message recorded");
+        assert_eq!(messages, [Message::user("hi"), Message::interruption()]);
         drop(tx);
+    }
+
+    #[tokio::test]
+    async fn agent_turn_interrupt_mid_stream_discards_the_partial_reply() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let client = StalledClient("Once upon a time");
+        let tools = ToolRegistry::new(vec![]);
+        let sink = CapturingSink::new();
+        let mut messages = vec![Message::user("write a story")];
+        let (tx, mut rx) = mpsc::channel::<Op>(1);
+        let prompt = empty_prompt();
+        let mut gate = yolo_gate();
+
+        let (outcome, ()) = tokio::join!(
+            agent_turn(
+                &client,
+                &tools,
+                &mut messages,
+                &prompt,
+                &sink,
+                &session,
+                &mut rx,
+                None,
+                &mut gate,
+            ),
+            async {
+                while sink.events().is_empty() {
+                    tokio::task::yield_now().await;
+                }
+                tx.send(Op::Interrupt).await.unwrap();
+            },
+        );
+
+        let abort = outcome.expect_err("cancel must surface as Err(Cancelled)");
+        assert!(matches!(abort, TurnAbort::Cancelled), "got {abort:?}");
+        assert_eq!(
+            sink.events(),
+            [Event::StreamToken("Once upon a time".to_owned())]
+        );
+        assert_eq!(
+            messages,
+            [Message::user("write a story"), Message::interruption()]
+        );
     }
 
     #[tokio::test]
@@ -1139,6 +1218,7 @@ mod tests {
         .expect_err("shutdown must surface as Err(Shutdown)");
 
         assert!(matches!(abort, TurnAbort::Shutdown), "got {abort:?}");
+        assert_eq!(messages, [Message::user("hi"), Message::interruption()]);
         drop(tx);
     }
 
@@ -1267,9 +1347,10 @@ mod tests {
 
         let abort = turn_result.expect_err("cancel must surface as Err(Cancelled)");
         assert!(matches!(abort, TurnAbort::Cancelled), "got {abort:?}");
-        let [_, assistant, results] = &messages[..] else {
-            panic!("the round commits as one assistant / user pair: {messages:#?}");
+        let [_, assistant, results, interruption] = &messages[..] else {
+            panic!("the round commits, then the interruption: {messages:#?}");
         };
+        assert_eq!(interruption, &Message::interruption());
         assert_eq!(assistant.content.len(), 3, "{assistant:?}");
         let results: Vec<(&str, &str, bool)> = results
             .content

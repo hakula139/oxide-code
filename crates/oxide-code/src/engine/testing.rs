@@ -135,9 +135,9 @@ pub(super) async fn mount_stalled_reply_once(server: &MockServer) {
         .await;
 }
 
-/// Waits until `server` has received a request, so the engine is mid-request.
-pub(super) async fn until_requested(server: &MockServer) {
-    while server.received_requests().await.unwrap().is_empty() {
+/// Waits until `server` has received `count` requests, so the engine is mid-request.
+pub(super) async fn until_requested(server: &MockServer, count: usize) {
+    while server.received_requests().await.unwrap().len() < count {
         tokio::task::yield_now().await;
     }
 }

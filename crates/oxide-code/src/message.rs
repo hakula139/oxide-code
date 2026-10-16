@@ -74,7 +74,16 @@ impl Message {
             content: vec![ContentBlock::Text { text: text.into() }],
         }
     }
+
+    /// The user message that ends a turn the user interrupted, so the model reads the prompts
+    /// before it as abandoned.
+    pub(crate) fn interruption() -> Self {
+        Self::user(INTERRUPTION_MARKER)
+    }
 }
+
+/// Text of [`Message::interruption`], matching the marker Claude Code records.
+pub(crate) const INTERRUPTION_MARKER: &str = "[Request interrupted by user]";
 
 // ── Progress updates ──
 

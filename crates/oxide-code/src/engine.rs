@@ -1521,33 +1521,57 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_interrupt_ends_the_turn_and_the_next_prompt_still_runs() {
+    async fn run_interrupts_mark_each_abandoned_prompt_before_the_next_one() {
         with_pinned_home(async {
             let server = MockServer::start().await;
             mount_stalled_reply_once(&server).await;
-            mount_reply(&server, "reply").await;
+            mount_stalled_reply_once(&server).await;
+            mount_reply(&server, "42").await;
             let dir = tempfile::tempdir().unwrap();
-            let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+            let store = test_store(dir.path());
+            let engine = engine(server.uri(), &store, dir.path()).await;
+            let live_id = engine.session_id().to_owned();
             let mut handle = engine.spawn(&[]);
 
-            handle
-                .ops
-                .send(Op::Prompt("slow".to_owned()))
-                .await
-                .unwrap();
-            until_requested(&server).await;
-            handle.ops.send(Op::Interrupt).await.unwrap();
-            let cancelled = turn_events(&mut handle.events).await;
-            let next = submit(&mut handle, "next").await;
+            let mut cancelled = Vec::new();
+            for (count, prompt) in [(1, "write a story"), (2, "write a poem")] {
+                handle
+                    .ops
+                    .send(Op::Prompt(prompt.to_owned()))
+                    .await
+                    .unwrap();
+                until_requested(&server, count).await;
+                handle.ops.send(Op::Interrupt).await.unwrap();
+                cancelled.extend(turn_events(&mut handle.events).await);
+            }
+            let next = submit(&mut handle, "what is 7 times 6?").await;
             handle.shutdown().await;
 
-            assert!(
-                matches!(cancelled.as_slice(), [Event::Cancelled]),
-                "{cancelled:?}"
-            );
+            assert_eq!(cancelled, [Event::Cancelled, Event::Cancelled]);
             assert!(matches!(next.last(), Some(Event::TurnComplete)));
             let requests = request_bodies(&server).await;
-            assert_eq!(texts(&requests[1])[1..], ["slow", "next"]);
+            assert_eq!(
+                texts(&requests[2])[1..],
+                [
+                    "write a story",
+                    "[Request interrupted by user]",
+                    "write a poem",
+                    "[Request interrupted by user]",
+                    "what is 7 times 6?",
+                ]
+            );
+            let data = store.load_session_data(&live_id).unwrap();
+            assert_eq!(
+                data.messages,
+                [
+                    Message::user("write a story"),
+                    Message::interruption(),
+                    Message::user("write a poem"),
+                    Message::interruption(),
+                    Message::user("what is 7 times 6?"),
+                    Message::assistant("42"),
+                ]
+            );
         })
         .await;
     }
@@ -1569,7 +1593,7 @@ mod tests {
                 .send(Op::Prompt("five".to_owned()))
                 .await
                 .unwrap();
-            until_requested(&server).await;
+            until_requested(&server, 1).await;
             handle.ops.send(Op::Interrupt).await.unwrap();
             let events = turn_events(&mut handle.events).await;
             handle.shutdown().await;
@@ -1609,7 +1633,7 @@ mod tests {
                 } = engine.spawn(&[]);
 
                 ops.send(op).await.unwrap();
-                until_requested(&server).await;
+                until_requested(&server, 1).await;
                 ops.send(Op::Shutdown).await.unwrap();
                 let failure = tokio::time::timeout(Duration::from_secs(5), task.join())
                     .await
@@ -1643,13 +1667,16 @@ mod tests {
                 .send(Op::Prompt("mid stream".to_owned()))
                 .await
                 .unwrap();
-            until_requested(&server).await;
+            until_requested(&server, 1).await;
             tokio::time::timeout(Duration::from_secs(5), handle.shutdown())
                 .await
                 .expect("the engine must stop waiting on the stream");
 
             let data = store.load_session_data(&live_id).unwrap();
-            assert_eq!(data.messages, [Message::user("mid stream")]);
+            assert_eq!(
+                data.messages,
+                [Message::user("mid stream"), Message::interruption()]
+            );
             let paths: Vec<_> = data
                 .file_snapshots
                 .iter()
@@ -2235,6 +2262,51 @@ mod tests {
             assert_eq!(system_prompt(&turns[1]), system_prompt(&turns[0]));
             assert_eq!(turns[1]["messages"][0], turns[0]["messages"][0]);
             assert_eq!(turns[1]["messages"][1]["content"][0]["text"], "first");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn resume_shows_and_replays_an_interruption() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            mount_reply(&server, "42").await;
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let mut engine = engine(server.uri(), &store, dir.path()).await;
+            let interrupted_id = engine.session_id().to_owned();
+            let sink = CapturingSink::new();
+            let (ops_tx, mut ops) = mpsc::channel(1);
+            ops_tx.send(Op::Interrupt).await.unwrap();
+            engine.submit_prompt("write a story", &sink, &mut ops).await;
+            engine.clear(&sink).await;
+            let path = store.find_session_path(&interrupted_id).unwrap();
+
+            engine.resume(&sink, &path).await;
+            engine
+                .submit_prompt("what is 7 times 6?", &sink, &mut ops)
+                .await;
+
+            let history = sink.events().into_iter().find_map(|event| match event {
+                Event::SessionResumed { history, .. } => Some(history),
+                _ => None,
+            });
+            assert_eq!(
+                history,
+                Some(vec![
+                    Interaction::UserText("write a story".to_owned()),
+                    Interaction::Interrupted,
+                ])
+            );
+            let request = &request_bodies(&server).await[0];
+            let replayed: Vec<&str> = request["messages"][1]["content"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|block| block["text"].as_str().unwrap())
+                .collect();
+            assert_eq!(replayed, ["write a story", "[Request interrupted by user]"]);
+            assert_eq!(texts(request)[2..], ["what is 7 times 6?"]);
         })
         .await;
     }

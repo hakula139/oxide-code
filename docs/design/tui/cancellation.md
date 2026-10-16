@@ -9,7 +9,7 @@ The TUI exposes these controls and behaviors:
 - **Cancel and exit.** Esc / Ctrl+C cancels active work. Dual-press Ctrl+C exits from idle, and Ctrl+D exits when idle with an empty input buffer.
 - **Queue input.** Enter while busy appends to `App::pending_prompts: VecDeque<String>`, rendered as a dim preview above the input, and forwards the prompt as `Op::Queue`.
 - **Drain input.** `agent_turn` splices each forwarded prompt into `messages` as a trailing User message at its next round boundary and confirms it with `Event::PromptDrained`, so the model sees new instructions in the next API request without aborting in-flight work. A turn that ends first drops the prompts it still holds, and once it completes or fails the TUI submits the queue head as the next turn.
-- **Interrupt work.** Cancellation drops the `agent_turn` future: reqwest closes the SSE stream, the bash tool kills the command's process tree, and a dim italic `(interrupted)` marker lands in chat.
+- **Interrupt work.** Cancellation drops the `agent_turn` future: reqwest closes the SSE stream, the bash tool kills the command's process tree, and a dim italic `(interrupted)` marker lands in chat. The transcript then ends on a `[Request interrupted by user]` user message, so the model knows the user abandoned that prompt.
 - **Show status.** The status bar colocates the active-key hint with the spinner: `Streaming · Esc to interrupt` / `Running {tool} · Esc to interrupt` / `Cancelling` / `Press Ctrl+C again to exit`.
 
 ## Design Decisions
@@ -19,6 +19,8 @@ The picks lean toward the Codex precedent on most surfaces, since it is the one 
 1. **Drop-the-future cancellation.** Esc / Ctrl+C drops the `agent_turn` future from the agent loop, which is simpler than Codex's protocol message. The `Tool::run` contract requires each tool to stop its work when the future drops, or to finish it together with its bookkeeping. reqwest closes the SSE stream on drop, and the bash tool's `ShellTree` kills the whole process tree, so backgrounded descendants stop with the shell. Edit and Write run each file write and its tracker record in one spawned task, so a write that lands after the cancel is still recorded.
 
 2. **Commit only settled state on cancel.** A cancel mid-stream discards the partial assistant message, as Codex does. The TUI keeps the streamed prefix with an `(interrupted)` suffix. A cancel during a tool round commits the assistant message with a result for every call, because the finished calls already changed the workspace and the model must see them. Each unfinished call gets an `is_error` result saying the user interrupted it, so the transcript never holds an orphan `tool_use`. The result for a call stopped mid-run says it may have run partially, and the one for a call that never started, including one awaiting approval, says it did not run.
+
+   The turn then ends on a `[Request interrupted by user]` user message, the marker Claude Code records, after whatever it committed. This applies to a shutdown mid-turn too. Without the marker, the cancelled prompt and the next one reach the model as two unanswered prompts, and it answers both. The prompt itself stays in the transcript, since a tool round may already have acted on it and the chat still shows it. The marker is an ordinary message, so the session file and `--continue` replay it unchanged, and a resumed chat shows it as the `(interrupted)` line.
 
 3. **Mid-turn drain at round boundary, raw consecutive User messages on the wire.** Each queued prompt becomes its own `User` message with one `Text` block. Anthropic accepts consecutive same-role messages. oxide-code deliberately drops the `<system-reminder>` envelope that Claude Code and opencode wrap with, which keeps persistence trivial.
 
@@ -38,9 +40,11 @@ The picks lean toward the Codex precedent on most surfaces, since it is the one 
 - `crates/oxide-code/src/engine.rs`: `Engine::run`, which ignores an `Op::Queue` that arrives between turns, plus `Engine::submit_prompt` and `report_abort`, shared by the TUI, REPL, and headless drivers.
 - `crates/oxide-code/src/engine/abort.rs`: `TurnAbort` enum, `await_unless_aborted`.
 - `crates/oxide-code/src/engine/dispatch.rs`: `run_tool_round` / `ToolRound`, `dispatch_tool_call`.
-- `crates/oxide-code/src/engine/turn.rs`: `agent_turn` round loop, `record_drained_prompts`.
+- `crates/oxide-code/src/engine/turn.rs`: `agent_turn` round loop, `interrupt_turn`, `record_drained_prompts`.
 - `crates/oxide-code/src/file_tracker.rs`: `FileTracker::write_and_record`.
-- `crates/oxide-code/src/protocol.rs`: `Event::{Cancelled, PromptDrained, TurnFailed}`, `Op::{Interrupt, Queue, Shutdown}`.
+- `crates/oxide-code/src/message.rs`: `Message::interruption`, the marker a user abort records.
+- `crates/oxide-code/src/protocol.rs`: `Event::{Cancelled, PromptDrained, TurnFailed}`, `Interaction::Interrupted`, `Op::{Interrupt, Queue, Shutdown}`.
+- `crates/oxide-code/src/session/history.rs`: `walk_transcript`, which shows a resumed interruption marker as `Interaction::Interrupted`.
 - `crates/oxide-code/src/tool.rs`: `Tool::run` drop contract, `write_tracked`.
 - `crates/oxide-code/src/tool/bash.rs`: `ShellTree`, which kills the shell's process group (Unix) or Job Object (Windows) when a call times out or drops before finishing.
 - `crates/oxide-code/src/tui/action.rs`: `Action::ConfirmExit`.
