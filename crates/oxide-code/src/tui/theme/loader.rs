@@ -209,7 +209,7 @@ pub(super) fn parse_theme(content: &str) -> Result<Theme> {
             if let Some(slot) = missing_slot(&e) {
                 bail!(
                     "the theme has no `{slot}` slot. Add one, such as `{}`. {THEMING_GUIDE} \
-                     lists every slot",
+                     lists every slot.",
                     mocha_line(slot),
                 );
             }
@@ -793,7 +793,7 @@ mod tests {
         assert_eq!(
             format!("{err:#}"),
             format!(
-                r##"the theme has no `selection` slot. Add one, such as `selection = {{ bg = "#313244" }}`. {THEMING_GUIDE} lists every slot"##
+                r##"the theme has no `selection` slot. Add one, such as `selection = {{ bg = "#313244" }}`. {THEMING_GUIDE} lists every slot."##
             ),
         );
     }

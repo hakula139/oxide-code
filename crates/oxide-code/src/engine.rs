@@ -284,8 +284,8 @@ impl Engine {
     where
         S: EventSink + Clone + 'static,
     {
-        if let Err(e) = self.client.auth() {
-            return report_abort(sink, TurnAbort::Failed(e), "turn-failed");
+        if self.client.auth().is_err() {
+            return report_abort(sink, signed_out(), "turn-failed");
         }
         let mut inbox = Inbox::default();
         let compacted = self.auto_compact(sink, ops, &mut inbox).await;
@@ -408,6 +408,9 @@ impl Engine {
         ops: &mut mpsc::Receiver<Op>,
         instructions: Option<String>,
     ) -> TurnEnd {
+        if self.client.auth().is_err() {
+            return report_abort(sink, signed_out(), "compact-failed");
+        }
         let tools = self.tools.definitions();
         let mut spent = Vec::new();
         let mut inbox = Inbox::default();
@@ -452,7 +455,7 @@ impl Engine {
         .await;
         if !compacted {
             let abort = TurnAbort::Failed(anyhow!(
-                "Compaction was not saved, so the transcript is unchanged."
+                "Compaction was not saved, so the transcript is unchanged"
             ));
             return self.fail_compact(sink, abort);
         }
@@ -484,7 +487,7 @@ impl Engine {
     async fn archive(&mut self, sink: &dyn EventSink) {
         if self.messages.is_empty() {
             sink.emit(
-                Event::Error("Nothing to archive: this session has no messages yet.".to_owned()),
+                Event::Error("Nothing to archive: this session has no messages yet".to_owned()),
                 "archive-empty",
             );
             return;
@@ -889,6 +892,10 @@ fn report_abort(sink: &dyn EventSink, abort: TurnAbort, label: &'static str) -> 
             TurnEnd::Failed
         }
     }
+}
+
+fn signed_out() -> TurnAbort {
+    TurnAbort::Failed(anyhow!(auth::SIGNED_OUT))
 }
 
 fn sign_in_failed(e: &anyhow::Error) -> TurnAbort {
@@ -2502,11 +2509,40 @@ mod tests {
                     ] if short == "Compaction failed: the conversation has about 15 tokens, below \
                                   the 1000-token minimum"
                         && usage_write.starts_with("Session write failed")
-                        && boundary_write == "Session write failed: Session writer task has stopped."
+                        && boundary_write == "Session write failed: session writer task has stopped"
                         && (cost - 0.006).abs() < 1e-12
-                        && unsaved.starts_with("Compaction was not saved")
+                        && unsaved == "Compaction was not saved, so the transcript is unchanged"
                 ),
                 "{events:?}",
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn compact_fails_while_signed_out_without_sending_a_request() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            mount_reply(&server, "summary").await;
+            let dir = tempfile::tempdir().unwrap();
+            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+            engine.client.set_auth(None);
+            engine.messages = tool_heavy_transcript();
+            let sink = CapturingSink::new();
+            let (_ops_tx, mut ops) = crate::protocol::inert_op_channel();
+
+            let end = engine.compact(&sink, &mut ops, None).await;
+
+            assert_eq!(end, TurnEnd::Failed);
+            assert_eq!(engine.messages, tool_heavy_transcript());
+            assert_eq!(request_bodies(&server).await, [] as [serde_json::Value; 0]);
+            let events = sink.events();
+            assert!(
+                matches!(
+                    events.as_slice(),
+                    [Event::TurnFailed(msg)] if msg == "Not signed in. Run /login to sign in."
+                ),
+                "{events:?}"
             );
         })
         .await;

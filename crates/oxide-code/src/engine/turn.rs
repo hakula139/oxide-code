@@ -2,7 +2,7 @@
 //! [`super::dispatch`], records to the session, and stops on a text-only response or the optional
 //! per-turn round cap.
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail};
 use tokio::sync::mpsc;
 
 use super::abort::{AbortResult, Inbox, TurnAbort, await_unless_aborted};
@@ -100,7 +100,7 @@ impl TurnOutcome {
 /// `max_tool_rounds = None` runs unbounded, and `Some(n)` bails after `n` rounds without a reply.
 #[expect(
     clippy::too_many_arguments,
-    reason = "agent_turn owns the full per-turn dependency set; bundling them obscures lifetimes"
+    reason = "agent_turn takes the full per-turn dependency set, since a bundle struct would obscure lifetimes"
 )]
 pub(super) async fn agent_turn(
     client: &dyn Wire,
@@ -425,7 +425,7 @@ pub(super) async fn collect_response(
     usage: &mut Option<TokenUsage>,
 ) -> Result<Response> {
     while let Some(event) = rx.recv().await {
-        match event.context("stream error")? {
+        match event? {
             ResponseEvent::Text(text) => _ = sink.send(Event::StreamToken(text)),
             ResponseEvent::Thinking(text) => _ = sink.send(Event::ThinkingToken(text)),
             ResponseEvent::Progress(note) => _ = sink.send(Event::ProgressUpdate(note)),
@@ -437,7 +437,7 @@ pub(super) async fn collect_response(
             ResponseEvent::Completed(response) => return Ok(response),
         }
     }
-    bail!("response stream ended before the reply completed")
+    bail!("API stream ended before the reply completed")
 }
 
 #[cfg(test)]
@@ -1685,10 +1685,7 @@ mod tests {
         )
         .await
         .expect_err("api error must propagate");
-        assert_eq!(
-            format!("{err:#}"),
-            "stream error: API error (overloaded_error): Busy"
-        );
+        assert_eq!(format!("{err:#}"), "API error (overloaded_error): Busy");
     }
 
     #[tokio::test]
@@ -1964,7 +1961,7 @@ mod tests {
 
         assert_eq!(
             abort.to_string(),
-            "response stream ended before the reply completed"
+            "API stream ended before the reply completed"
         );
         assert_eq!(messages.len(), 1, "{messages:?}");
     }
@@ -2073,8 +2070,8 @@ mod tests {
         assert_eq!(
             notices,
             [
-                "HTTP 529. Retrying in 1s (retry 1 of 5).",
-                "HTTP 503 Service Unavailable. Retrying in 1s (retry 2 of 5).",
+                "HTTP 529. Retrying in 1 s (retry 1 of 5).",
+                "HTTP 503 Service Unavailable. Retrying in 1 s (retry 2 of 5).",
             ],
         );
         assert!(
@@ -2544,7 +2541,7 @@ mod tests {
         let events = [
             ResponseEvent::RateLimits(limits),
             ResponseEvent::Usage(TokenUsage::new(5, 0)),
-            ResponseEvent::Retrying("HTTP 529. Retrying in 1s (retry 1 of 5).".to_owned()),
+            ResponseEvent::Retrying("HTTP 529. Retrying in 1 s (retry 1 of 5).".to_owned()),
             ResponseEvent::Thinking("plan".to_owned()),
             ResponseEvent::Progress("Searching.".to_owned()),
             ResponseEvent::Text("Found it.".to_owned()),
@@ -2566,7 +2563,7 @@ mod tests {
             sink.events(),
             [
                 Event::RateLimitsUpdated(limits),
-                Event::Retrying("HTTP 529. Retrying in 1s (retry 1 of 5).".to_owned()),
+                Event::Retrying("HTTP 529. Retrying in 1 s (retry 1 of 5).".to_owned()),
                 Event::ThinkingToken("plan".to_owned()),
                 Event::ProgressUpdate("Searching.".to_owned()),
                 Event::StreamToken("Found it.".to_owned()),

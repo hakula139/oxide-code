@@ -207,10 +207,13 @@ fn signed_out_error(e: &LoginError) -> String {
     }
 }
 
+/// What a signed-out session shows when no login is stored, at startup or on a request.
+pub(crate) const SIGNED_OUT: &str = "Not signed in. Run /login to sign in.";
+
 /// The startup notice for a TUI session that starts signed out because of `e`.
 pub(super) fn signed_out_notice(e: &LoginError) -> String {
     match e {
-        LoginError::Missing => "Not signed in. Run /login to sign in.".to_owned(),
+        LoginError::Missing => SIGNED_OUT.to_owned(),
         e => format!("Not signed in: {e}"),
     }
 }
@@ -513,16 +516,14 @@ mod tests {
             .await
             .expect_err("stored login must not go to a gateway");
         assert!(matches!(err, ResolveError::Gateway(_)), "{err:?}");
-        let msg = format!("{err:#}");
-        for needle in [
-            GATEWAY,
-            "ANTHROPIC_AUTH_TOKEN",
-            "ANTHROPIC_API_KEY",
-            "CLAUDE_CODE_OAUTH_TOKEN",
-            "api_key",
-        ] {
-            assert!(msg.contains(needle), "{needle}: {msg}");
-        }
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "no credentials for {GATEWAY}. Set ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY, or \
+                 CLAUDE_CODE_OAUTH_TOKEN, or add `api_key` to ~/.config/ox/config.toml. Stored \
+                 logins are sent only to the Anthropic API."
+            ),
+        );
     }
 
     #[tokio::test]

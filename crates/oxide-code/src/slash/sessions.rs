@@ -9,18 +9,18 @@ pub(super) fn open_store(info: &LiveSessionInfo) -> Result<SessionStore, String>
     let cwd = info
         .working_dir
         .as_deref()
-        .ok_or("No working directory for this session.")?;
+        .ok_or("No working directory for this session")?;
     SessionStore::open(cwd).map_err(|e| format!("Session store unavailable: {e:#}"))
 }
 
 pub(super) fn resolve_error_message(error: ResolveError) -> String {
     match error {
-        ResolveError::NoMatch { prefix } => format!("No session matching `{prefix}`."),
+        ResolveError::NoMatch { prefix } => format!("No session matching `{prefix}`"),
         ResolveError::Ambiguous {
             prefix,
             count,
             preview,
-        } => format!("Ambiguous prefix `{prefix}` matches {count} sessions: {preview}."),
+        } => format!("Ambiguous prefix `{prefix}` matches {count} sessions: {preview}"),
         ResolveError::List { scope, cause } => {
             format!("Failed to list sessions ({scope}): {cause:#}")
         }
@@ -61,7 +61,7 @@ mod tests {
         let no_match = ResolveError::NoMatch {
             prefix: "zz".to_owned(),
         };
-        assert_eq!(resolve_error_message(no_match), "No session matching `zz`.");
+        assert_eq!(resolve_error_message(no_match), "No session matching `zz`");
 
         let ambiguous = ResolveError::Ambiguous {
             prefix: "ab".to_owned(),
@@ -70,7 +70,7 @@ mod tests {
         };
         assert_eq!(
             resolve_error_message(ambiguous),
-            "Ambiguous prefix `ab` matches 7 sessions: ab1, ab2, ab3, ab4, ab5, and 2 more.",
+            "Ambiguous prefix `ab` matches 7 sessions: ab1, ab2, ab3, ab4, ab5, and 2 more",
         );
 
         let list = ResolveError::List {

@@ -1173,7 +1173,7 @@ mod tests {
 
         let text = all_text(&mut chat);
         let count = text.matches(ASSISTANT_PREFIX).count();
-        assert_eq!(count, 1, "icon should appear once, not duplicated");
+        assert_eq!(count, 1, "icon should appear once");
     }
 
     #[test]
@@ -1436,7 +1436,7 @@ mod tests {
         let mut chat = test_chat();
         chat.append_summary_token("First attempt.");
         chat.auto_scroll = false;
-        chat.push_notice("Retrying in 1s (retry 1 of 5).");
+        chat.push_notice("Retrying in 1 s (retry 1 of 5)");
 
         chat.discard_summary();
 
@@ -1450,7 +1450,7 @@ mod tests {
         chat.append_summary_token("First attempt.");
         chat.jump_to_bottom();
         chat.auto_scroll = false;
-        chat.push_notice("Retrying in 1s (retry 1 of 5).");
+        chat.push_notice("Retrying in 1 s (retry 1 of 5)");
 
         chat.discard_summary();
 

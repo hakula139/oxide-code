@@ -76,15 +76,15 @@ impl SlashCommand for UnarchiveCmd {
         let prefix = args.trim();
         if prefix.is_empty() {
             return Err(
-                "Missing id. Use `/resume` then Ctrl+A to browse archived sessions, then Ctrl+X \
-                 to unarchive one. You can also use `/unarchive <id-prefix>`."
+                "Missing session id. Usage: `/unarchive <id-prefix>`, or press Ctrl+A in the \
+                 `/resume` picker to list archived sessions and Ctrl+X to unarchive one."
                     .to_owned(),
             );
         }
         match resolve_saved(prefix, ctx.info)? {
             Some(info) => set_archived(&info, false, &ctx.info.session_id),
             None => Ok(SlashOutcome::SystemMessage(
-                "The live session is not archived.".to_owned(),
+                "The live session is not archived".to_owned(),
             )),
         }
     }
@@ -105,7 +105,7 @@ fn set_archived(info: &SessionInfo, archived: bool, live_id: &str) -> Result<Sla
             "not archived"
         };
         return Ok(SlashOutcome::SystemMessage(format!(
-            "Session {} is {state}.",
+            "Session {} is {state}",
             id_prefix(&info.session_id),
         )));
     }
@@ -179,7 +179,7 @@ mod tests {
             let again = ArchiveCmd.execute(&target_id[..4], &ctx).unwrap();
             assert_eq!(
                 again.into_system_message(),
-                "Session abababab is already archived."
+                "Session abababab is already archived"
             );
         });
     }
@@ -209,7 +209,7 @@ mod tests {
             let err = ArchiveCmd
                 .execute("zzzz", &SlashContext::new(&info, None))
                 .unwrap_err();
-            assert_eq!(err, "No session matching `zzzz`.");
+            assert_eq!(err, "No session matching `zzzz`");
         });
     }
 
@@ -268,8 +268,8 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             err,
-            "Missing id. Use `/resume` then Ctrl+A to browse archived sessions, then Ctrl+X to \
-             unarchive one. You can also use `/unarchive <id-prefix>`.",
+            "Missing session id. Usage: `/unarchive <id-prefix>`, or press Ctrl+A in the \
+             `/resume` picker to list archived sessions and Ctrl+X to unarchive one.",
         );
     }
 
@@ -293,7 +293,7 @@ mod tests {
             let again = UnarchiveCmd.execute(&target_id[..4], &ctx).unwrap();
             assert_eq!(
                 again.into_system_message(),
-                "Session abababab is not archived."
+                "Session abababab is not archived"
             );
         });
     }
@@ -307,7 +307,7 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 note.into_system_message(),
-                "The live session is not archived."
+                "The live session is not archived"
             );
         });
     }

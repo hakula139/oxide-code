@@ -1744,7 +1744,7 @@ mod tests {
 
     #[tokio::test]
     async fn compact_session_passes_retry_notices_and_usage_limits_through() {
-        let notice = "HTTP 529 overloaded_error. Retrying in 1s (retry 1 of 5).";
+        let notice = "HTTP 529 overloaded_error. Retrying in 1 s (retry 1 of 5).";
         let limits = RateLimits {
             five_hour: Some(RateLimitWindow {
                 utilization: 0.42,

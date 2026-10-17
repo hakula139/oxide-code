@@ -297,7 +297,7 @@ mod tests {
 
         assert_eq!(app.chat.entry_count(), 2);
         let text = rendered_text(&mut app, 80, 12);
-        assert!(text.contains("Unarchived session test-ses."), "{text}");
+        assert!(text.contains("Unarchived session test-ses"), "{text}");
     }
 
     // ── push_system_message ──

@@ -278,7 +278,7 @@ impl SessionHandle {
     /// The actor-gone failure for a write the caller must know failed, in full the first time.
     fn actor_stopped_failure(&self) -> String {
         self.actor_gone_failure()
-            .unwrap_or_else(|| "Session writer task has stopped.".to_owned())
+            .unwrap_or_else(|| "session writer task has stopped".to_owned())
     }
 
     /// Surfaces actor-gone failure once, including the underlying I/O cause if known.
@@ -683,7 +683,7 @@ mod tests {
         assert_eq!(
             data.tool_result_metadata.len(),
             2,
-            "default-only sidecars are skipped; t1 and t3 land",
+            "default-only sidecars are skipped, so only t1 and t3 land",
         );
         assert_eq!(
             data.tool_result_metadata
@@ -1405,11 +1405,11 @@ mod tests {
             .collect();
         assert!(
             restored.iter().any(|p| p.ends_with("target.txt")),
-            "target's snapshots restored into tracker; got {restored:?}",
+            "target's snapshots restored into tracker, got {restored:?}",
         );
         assert!(
             !restored.iter().any(|p| p.ends_with("live.txt")),
-            "live snapshot should NOT remain in tracker after swap; got {restored:?}",
+            "live snapshot should NOT remain in tracker after swap, got {restored:?}",
         );
     }
 

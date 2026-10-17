@@ -73,11 +73,11 @@ async fn pump_events(
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk
-            .context("error reading response stream")
-            .map_err(|e| fail("Response stream failed", e, !reply.content_started()))?;
+            .context("API stream failed")
+            .map_err(|e| fail("API stream failed", e, !reply.content_started()))?;
         frames.push(&chunk);
 
-        while let Some(frame) = frames.next_frame()? {
+        while let Some(frame) = frames.next_frame().context("API stream failed")? {
             let frame = match std::str::from_utf8(&frame) {
                 Ok(s) => s,
                 Err(e) => {
@@ -113,8 +113,8 @@ async fn pump_events(
     }
 
     Err(fail(
-        "Response stream ended early",
-        anyhow!("response stream ended before message_stop"),
+        "API stream ended early",
+        anyhow!("API stream ended before message_stop"),
         !reply.content_started(),
     ))
 }
@@ -156,10 +156,7 @@ impl FrameDecoder {
         let Some(offset) = self.buf[from..].windows(2).position(|w| w == b"\n\n") else {
             self.scanned = self.buf.len();
             if self.buf.len() > MAX_SSE_FRAME_BYTES {
-                bail!(
-                    "SSE frame buffer exceeded {MAX_SSE_FRAME_BYTES} bytes without a terminating \
-                     blank line, so upstream may be misbehaving"
-                );
+                bail!("unterminated SSE frame exceeded {MAX_SSE_FRAME_BYTES} bytes");
             }
             return Ok(None);
         };
@@ -393,11 +390,11 @@ mod tests {
             [
                 START_USAGE,
                 ResponseEvent::Retrying(
-                    "Stream overloaded_error. Retrying in 1s (retry 1 of 5).".to_owned()
+                    "Stream overloaded_error. Retrying in 1 s (retry 1 of 5).".to_owned()
                 ),
                 START_USAGE,
                 ResponseEvent::Retrying(
-                    "Response stream ended early. Retrying in 1s (retry 2 of 5).".to_owned()
+                    "API stream ended early. Retrying in 1 s (retry 2 of 5).".to_owned()
                 ),
                 START_USAGE,
                 ResponseEvent::Text("Hi".to_owned()),
@@ -429,7 +426,7 @@ mod tests {
             ),
             (
                 [MESSAGE_START, TEXT_DELTA].concat(),
-                "ended before message_stop",
+                "API stream ended before message_stop",
             ),
         ] {
             let server = serve(vec![sse_response(body)]).await;
@@ -439,7 +436,7 @@ mod tests {
             assert_eq!(request_count(&server).await, 1, "no retry");
             assert_eq!(texts(&events), ["Hi"]);
             let err = result.expect_err("the attempt fails");
-            assert!(format!("{err:#}").contains(expected), "{err:#}");
+            assert_eq!(format!("{err:#}"), expected);
         }
     }
 
@@ -460,7 +457,7 @@ mod tests {
             [
                 START_USAGE,
                 ResponseEvent::Retrying(
-                    "Response stream failed. Retrying in 1s (retry 1 of 5).".to_owned()
+                    "API stream failed. Retrying in 1 s (retry 1 of 5).".to_owned()
                 ),
                 START_USAGE,
                 ResponseEvent::Text("Hi".to_owned()),
@@ -474,8 +471,8 @@ mod tests {
 
         let err = result.expect_err("a failed read after content ends the call");
         assert!(
-            format!("{err:#}").contains("error reading response stream"),
-            "{err:#}",
+            format!("{err:#}").starts_with("API stream failed: "),
+            "{err:#}"
         );
         assert_eq!(events, [START_USAGE, ResponseEvent::Text("Hi".to_owned())]);
     }
@@ -487,10 +484,7 @@ mod tests {
         let (result, _) = run_stream(&server.uri()).await;
 
         let err = result.expect_err("every attempt is cut");
-        assert!(
-            format!("{err:#}").contains("ended before message_stop"),
-            "{err:#}"
-        );
+        assert_eq!(format!("{err:#}"), "API stream ended before message_stop");
         assert!(request_count(&server).await > 1, "pre-content cuts retry");
     }
 
@@ -503,9 +497,11 @@ mod tests {
         let (result, _) = run_stream(&server.uri()).await;
 
         let err = result.expect_err("expected overflow error");
-        assert!(
-            format!("{err:#}").contains("exceeded"),
-            "overflow message: {err:#}"
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "API stream failed: unterminated SSE frame exceeded {MAX_SSE_FRAME_BYTES} bytes"
+            ),
         );
         assert_eq!(request_count(&server).await, 1);
     }
