@@ -8,10 +8,9 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use tracing::warn;
 
 use crate::session::display::id_prefix;
-use crate::session::store::delete_at;
+use crate::session::saved;
 use crate::tui::glyphs::MODAL_ERROR_PREFIX;
 use crate::tui::modal::chrome::{FOOTER_HEIGHT, Header, render_footer};
 use crate::tui::modal::{Modal, ModalAction, ModalKey, is_plain_char};
@@ -66,18 +65,14 @@ impl ConfirmDeleteSessionModal {
     /// Deletes the session file. On Ok, pop and emit a chat-stream confirmation. On Err, stay open
     /// with a sticky inline error.
     fn confirm(&mut self) -> ModalKey {
-        match delete_at(&self.path, &self.live_session_id) {
+        match saved::delete(&self.path, &self.session_id, &self.live_session_id) {
             Ok(()) => ModalKey::Submitted(ModalAction::SystemMessage(format!(
                 "Deleted session {}: {}",
                 id_prefix(&self.session_id),
                 self.display_title,
             ))),
-            Err(e) => {
-                warn!("delete failed for session {}: {e:#}", self.session_id);
-                self.error = Some(format!(
-                    "Failed to delete session {}: {e:#}",
-                    id_prefix(&self.session_id),
-                ));
+            Err(err) => {
+                self.error = Some(err);
                 ModalKey::Consumed
             }
         }

@@ -9,7 +9,7 @@ use crate::protocol::Op;
 use crate::session::display::{archive_notice, id_prefix};
 use crate::session::entry::SessionInfo;
 use crate::session::resolver::resolve_saved_prefix;
-use crate::session::store::set_archived_at;
+use crate::session::saved::{self, BARE_ARCHIVE_HINT};
 use crate::tui::action::Action;
 
 // ── ArchiveCmd ──
@@ -39,10 +39,9 @@ impl SlashCommand for ArchiveCmd {
             return Ok(SlashOutcome::Forward(Action::Op(Op::Archive)));
         }
         match resolve_saved(prefix, ctx.info)? {
-            Some(info) => set_archived(&info, true),
+            Some(info) => set_archived(&info, true, &ctx.info.session_id),
             None => Err(format!(
-                "Session prefix `{prefix}` matches the live session. Use bare `/archive` to archive \
-                 it and start a new one.",
+                "Session prefix `{prefix}` matches the live session. {BARE_ARCHIVE_HINT}"
             )),
         }
     }
@@ -83,7 +82,7 @@ impl SlashCommand for UnarchiveCmd {
             );
         }
         match resolve_saved(prefix, ctx.info)? {
-            Some(info) => set_archived(&info, false),
+            Some(info) => set_archived(&info, false, &ctx.info.session_id),
             None => Ok(SlashOutcome::SystemMessage(
                 "The live session is not archived.".to_owned(),
             )),
@@ -98,8 +97,7 @@ fn resolve_saved(prefix: &str, info: &LiveSessionInfo) -> Result<Option<SessionI
     resolve_saved_prefix(&store, prefix, &info.session_id).map_err(resolve_error_message)
 }
 
-fn set_archived(info: &SessionInfo, archived: bool) -> Result<SlashOutcome, String> {
-    let id = id_prefix(&info.session_id);
+fn set_archived(info: &SessionInfo, archived: bool, live_id: &str) -> Result<SlashOutcome, String> {
     if info.archived == archived {
         let state = if archived {
             "already archived"
@@ -107,11 +105,11 @@ fn set_archived(info: &SessionInfo, archived: bool) -> Result<SlashOutcome, Stri
             "not archived"
         };
         return Ok(SlashOutcome::SystemMessage(format!(
-            "Session {id} is {state}."
+            "Session {} is {state}.",
+            id_prefix(&info.session_id),
         )));
     }
-    set_archived_at(&info.path, archived)
-        .map_err(|e| format!("Failed to update session {id}: {e:#}"))?;
+    saved::set_archived(&info.path, &info.session_id, archived, live_id)?;
     Ok(SlashOutcome::SystemMessage(archive_notice(
         &info.session_id,
         archived,
@@ -123,8 +121,8 @@ mod tests {
     use time::macros::datetime;
 
     use super::*;
-    use crate::session::store::SessionStore;
     use crate::session::store::testing::seed_test_session;
+    use crate::session::store::{SessionStore, set_archived_at};
     use crate::slash::{stamped_id, test_session_info, with_isolated_xdg};
 
     fn seed_saved(store: &SessionStore, session_id: &str) {

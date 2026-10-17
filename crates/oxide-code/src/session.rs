@@ -13,6 +13,7 @@ mod path;
 pub(crate) mod post_compact;
 pub(crate) mod resolver;
 mod sanitize;
+pub(crate) mod saved;
 mod state;
 pub(crate) mod store;
 pub(crate) mod title_generator;

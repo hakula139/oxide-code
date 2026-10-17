@@ -4,6 +4,7 @@
 
 pub(crate) mod approval;
 pub(crate) mod chrome;
+pub(crate) mod keymap;
 pub(crate) mod kv_overview;
 pub(crate) mod line_editor;
 pub(crate) mod list_picker;

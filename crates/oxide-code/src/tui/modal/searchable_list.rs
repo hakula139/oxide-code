@@ -122,13 +122,18 @@ impl<T: SearchableItem> SearchableList<T> {
         }
     }
 
+    /// Moves the cursor to visible row `index`, or to the last row when fewer remain. Pairs with
+    /// [`Self::replace_items`] to keep the cursor's position across a refresh that dropped its row.
+    pub(crate) fn cursor_to_index(&mut self, index: usize) {
+        self.cursor = index.min(self.visible.len().saturating_sub(1));
+    }
+
     pub(crate) fn selected(&self) -> Option<&T> {
         self.visible
             .get(self.cursor)
             .and_then(|i| self.items.get(*i))
     }
 
-    #[cfg(test)]
     pub(crate) fn cursor_index(&self) -> usize {
         self.cursor
     }
@@ -448,6 +453,27 @@ mod tests {
             0,
             "filtered-out row never receives the cursor"
         );
+    }
+
+    // ── cursor_to_index ──
+
+    #[test]
+    fn cursor_to_index_clamps_to_the_last_visible_row() {
+        let mut l = list(vec![
+            FakeItem::new("apple"),
+            FakeItem::new("BERRY"),
+            FakeItem::new("apricot"),
+        ]);
+        l.cursor_to_index(1);
+        assert_eq!(l.selected().unwrap().haystack, "BERRY");
+
+        l.set_query("ap");
+        l.cursor_to_index(2);
+        assert_eq!(l.selected().unwrap().haystack, "apricot");
+
+        l.set_query("zzz");
+        l.cursor_to_index(1);
+        assert_eq!(l.cursor_index(), 0);
     }
 
     // ── replace_items ──
