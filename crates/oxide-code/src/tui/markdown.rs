@@ -86,6 +86,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn render_markdown_chunk_matches_a_single_render_when_rows_overflow_the_width() {
+        let theme = Theme::default();
+        let input = "> quote quote\n\npara text";
+        let split = complete_blocks_len(input);
+
+        let (head, after_block) = render_markdown_chunk(&input[..split], &theme, 2, false);
+        let (tail, _) = render_markdown_chunk(&input[split..], &theme, 2, after_block);
+        let chunked: Vec<_> = head.lines.into_iter().chain(tail.lines).collect();
+
+        assert_eq!(split, "> quote quote\n\n".len());
+        assert_eq!(chunked, render_markdown(input, &theme, 2).lines);
+    }
+
     // ── complete_blocks_len ──
 
     #[test]

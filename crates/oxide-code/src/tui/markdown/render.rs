@@ -39,6 +39,8 @@ pub(super) struct MarkdownRenderer<I> {
 
     /// Set after a block ends, so the next block opener emits a blank separator before its content.
     pub(super) needs_newline: bool,
+    /// Set while the last line collects inline spans, so `finish_line` wraps it exactly once.
+    line_open: bool,
 
     /// Block-prefix stack — each entry is the spans prepended to every line inside that block
     /// (blockquote `> `, list-item continuation indent, etc.). Wrapping uses the concatenation
@@ -122,6 +124,7 @@ where
             width,
             lines: Vec::new(),
             needs_newline: after_block,
+            line_open: false,
             indent_stack: Vec::new(),
             list_stack: Vec::new(),
             pending_marker: None,
@@ -206,7 +209,7 @@ where
             TagEnd::List(_) => self.end_list(),
             TagEnd::Item => {
                 // Tight list items bypass `end_paragraph`, so wrap here.
-                self.wrap_last_line();
+                self.finish_line();
                 self.indent_stack.pop();
                 self.pending_marker = None;
             }
@@ -237,7 +240,7 @@ where
     }
 
     fn end_paragraph(&mut self) {
-        self.wrap_last_line();
+        self.finish_line();
         self.needs_newline = true;
     }
 
@@ -256,7 +259,7 @@ where
 
     fn end_heading(&mut self) {
         self.pop_inline_style();
-        self.wrap_last_line();
+        self.finish_line();
         self.needs_newline = true;
     }
 
@@ -291,6 +294,8 @@ where
     fn start_list(&mut self, start_index: Option<u64>) {
         if self.list_stack.is_empty() {
             self.start_block();
+        } else {
+            self.finish_line();
         }
         self.list_stack.push(start_index);
     }
@@ -362,8 +367,6 @@ where
     // ── Tables ──
 
     fn start_table(&mut self, alignments: Vec<Alignment>) {
-        // A table can interrupt a tight list item's text, which bypasses `end_paragraph`.
-        self.wrap_last_line();
         self.start_block();
         self.table = TableState {
             active: true,
@@ -543,6 +546,7 @@ where
     }
 
     fn hard_break(&mut self) {
+        self.finish_line();
         self.push_line(Line::default());
     }
 
@@ -682,20 +686,26 @@ where
         } else {
             self.push_line(Line::from(vec![span]));
         }
+        self.line_open = true;
     }
 
-    /// Word-wrap the last accumulated line in place (retroactive wrap after span accumulation).
-    fn wrap_last_line(&mut self) {
-        if self.width == 0 {
+    /// Wraps only the open line, since rewrapping a finished one could split it under a different
+    /// prefix.
+    fn finish_line(&mut self) {
+        if !std::mem::take(&mut self.line_open) || self.width == 0 {
             return;
         }
-        let Some(line) = self.lines.pop() else {
-            return;
-        };
+        let line = self
+            .lines
+            .pop()
+            .expect("push_span leaves a line whenever it opens one");
         self.wrap_and_push(line);
     }
 
+    /// Separates the next block from the one before it, first finishing an open line such as a
+    /// tight list item's text.
     fn start_block(&mut self) {
+        self.finish_line();
         if self.needs_newline {
             self.push_blank_line();
             self.needs_newline = false;
@@ -1726,7 +1736,7 @@ mod tests {
     fn render_markdown_table_in_list_item_keeps_the_item_indent_and_fits_inside_it() {
         let lines = rendered_text_at_width(
             indoc! {"
-                - The settings in this table:
+                - Settings:
                   | Key  | Value     |
                   |------|-----------|
                   | mode | very fast |
@@ -1740,8 +1750,7 @@ mod tests {
         assert_eq!(
             lines,
             [
-                "- The settings in ",
-                "  this table:",
+                "- Settings:",
                 "  ┌──────┬──────────┐",
                 "  │ Key  │ Value    │",
                 "  ├──────┼──────────┤",
@@ -2021,6 +2030,94 @@ mod tests {
         assert_eq!(
             rendered_text_at_width("- one two three four five six seven eight", 15),
             ["- one two three", "  four five six", "  seven eight"],
+        );
+    }
+
+    #[test]
+    fn render_markdown_list_item_wraps_its_text_before_a_nested_block() {
+        let nested_list = rendered_text_at_width(
+            indoc! {"
+                - one two three four five
+                  - inner
+            "},
+            15,
+        );
+        let loose_nested_list = rendered_text_at_width(
+            indoc! {"
+                - one two three four five
+
+                  - inner
+            "},
+            15,
+        );
+        let blockquote = rendered_text_at_width(
+            indoc! {"
+                - one two three four five
+                  > quoted
+            "},
+            15,
+        );
+        let code_block = rendered_text_at_width(
+            indoc! {"
+                - one two three four five
+                  ```
+                  code
+                  ```
+            "},
+            15,
+        );
+        let table = rendered_text_at_width(
+            indoc! {"
+                - one two three four five
+                  | A |
+                  |---|
+                  | 1 |
+            "},
+            15,
+        );
+
+        assert_eq!(nested_list, ["- one two three", "  four five", "  - inner"]);
+        assert_eq!(loose_nested_list, nested_list);
+        assert_eq!(blockquote, ["- one two three", "  four five", "  > quoted"]);
+        assert_eq!(code_block, ["- one two three", "  four five", "  code"]);
+        assert_eq!(
+            table,
+            [
+                "- one two three",
+                "  four five",
+                "  ┌───┐",
+                "  │ A │",
+                "  ├───┤",
+                "  │ 1 │",
+                "  └───┘",
+            ]
+        );
+    }
+
+    #[test]
+    fn render_markdown_hard_break_wraps_the_line_it_ends() {
+        let paragraph = rendered_text_at_width("one two three four five six  \nseven eight", 15);
+        let tight_item = rendered_text_at_width("- one two three four  \n  five six", 15);
+        let blockquote = rendered_text_at_width("> one two three four  \n> five six", 15);
+
+        assert_eq!(
+            paragraph,
+            ["one two three ", "four five six", "seven eight"]
+        );
+        assert_eq!(tight_item, ["- one two three", "  four", "  five six"]);
+        assert_eq!(blockquote, ["> one two three", "> four", "> five six"]);
+    }
+
+    #[test]
+    fn render_markdown_narrow_blockquote_keeps_its_marker_on_every_row_when_a_block_follows() {
+        let lines = rendered_text_at_width("> quote quote\n\npara text", 2);
+
+        assert_eq!(
+            lines,
+            [
+                "> ", "> q", "> u", "> o", "> t", "> e", "> q", "> u", "> o", "> t", "> e", "",
+                "pa", "ra", "te", "xt",
+            ]
         );
     }
 
