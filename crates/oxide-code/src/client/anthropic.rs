@@ -9,7 +9,7 @@ mod accumulator;
 mod betas;
 mod billing;
 mod completion;
-mod identity;
+pub(crate) mod identity;
 mod sse;
 mod transport;
 pub(crate) mod wire;
@@ -86,7 +86,11 @@ pub(crate) struct Client {
 
 impl Client {
     /// Builds a client for the endpoint, credential, and request settings in `config`.
-    pub(crate) fn new(config: &Config, session_id: Option<String>) -> Result<Self> {
+    pub(crate) fn new(
+        config: &Config,
+        session_id: Option<String>,
+        device_id: String,
+    ) -> Result<Self> {
         let Config {
             model,
             effort,
@@ -111,7 +115,7 @@ impl Client {
             prompt_cache_ttl: *prompt_cache_ttl,
             show_thinking: *show_thinking,
             session_id: session_id.unwrap_or_else(|| Uuid::new_v4().to_string()),
-            device_id: identity::load_or_create_device_id(),
+            device_id,
             is_first_party: is_first_party_base_url(base_url),
         })
     }
@@ -504,7 +508,8 @@ mod tests {
 
     use super::billing::build_billing_header;
     use super::testing::{
-        Captured, api_key, auth_token, captured, oauth, test_client, test_config, text_stream_body,
+        Captured, DEVICE_ID, api_key, auth_token, captured, client_for, oauth, test_client,
+        test_config, text_stream_body,
     };
     use super::*;
     use crate::client::{Response, StopReason, TokenUsage};
@@ -579,6 +584,7 @@ mod tests {
                 TEST_MODEL,
             ),
             None,
+            DEVICE_ID.to_owned(),
         )
         .unwrap();
         assert_eq!(client.model().id(), TEST_MODEL);
@@ -593,6 +599,7 @@ mod tests {
                 TEST_MODEL,
             ),
             None,
+            DEVICE_ID.to_owned(),
         )
         .unwrap();
         assert_eq!(client.model().id(), TEST_MODEL);
@@ -606,7 +613,7 @@ mod tests {
             TEST_MODEL,
         );
         config.prompt_cache_ttl = PromptCacheTtl::FiveMin;
-        let client = Client::new(&config, None).unwrap();
+        let client = Client::new(&config, None, DEVICE_ID.to_owned()).unwrap();
 
         assert_eq!(client.prompt_cache_ttl(), PromptCacheTtl::FiveMin);
     }
@@ -620,6 +627,7 @@ mod tests {
                 TEST_MODEL,
             ),
             None,
+            DEVICE_ID.to_owned(),
         )
         .unwrap();
         let sid = client.session_id();
@@ -638,6 +646,7 @@ mod tests {
                 TEST_MODEL,
             ),
             Some(sid.clone()),
+            DEVICE_ID.to_owned(),
         )
         .unwrap();
         assert_eq!(client.session_id(), sid);
@@ -652,7 +661,7 @@ mod tests {
             .unwrap();
         let mut cfg = test_config(OFFLINE_URL, api_key(), TEST_MODEL);
         cfg.extra_ca_certs = Some(pem.path().to_path_buf());
-        Client::new(&cfg, None).expect("valid CA bundle must build a client");
+        Client::new(&cfg, None, DEVICE_ID.to_owned()).expect("valid CA bundle must build a client");
     }
 
     #[test]
@@ -661,7 +670,7 @@ mod tests {
         // the user can debug it without inspecting TLS internals.
         let mut cfg = test_config(OFFLINE_URL, api_key(), TEST_MODEL);
         cfg.extra_ca_certs = Some(std::path::PathBuf::from("/no/such/bundle.pem"));
-        let err = Client::new(&cfg, None)
+        let err = Client::new(&cfg, None, DEVICE_ID.to_owned())
             .err()
             .expect("missing CA must error");
         let msg = format!("{err:#}");
@@ -675,7 +684,7 @@ mod tests {
     async fn max_tokens_sends_the_user_cap_over_the_model_default() {
         let mut cfg = test_config(OFFLINE_URL, api_key(), "claude-opus-5-5");
         cfg.max_tokens = Some(4_096);
-        let client = Client::new(&cfg, Some("sid".to_owned())).unwrap();
+        let client = client_for(&cfg);
 
         let (body, _) = capture_stream_turn(client.clone()).await;
 
@@ -708,6 +717,7 @@ mod tests {
                 TEST_MODEL,
             ),
             Some("sid-original".to_owned()),
+            DEVICE_ID.to_owned(),
         )
         .unwrap();
         client.set_session_id("sid-rolled".to_owned());
@@ -741,7 +751,7 @@ mod tests {
     fn client_with(model: &str, effort: Option<Effort>) -> Client {
         let mut cfg = test_config(OFFLINE_URL, api_key(), model);
         cfg.effort = effort;
-        Client::new(&cfg, Some("sid".to_owned())).unwrap()
+        client_for(&cfg)
     }
 
     #[test]
@@ -776,7 +786,7 @@ mod tests {
         let mut cfg = test_config(OFFLINE_URL, api_key(), "custom-model");
         cfg.max_tokens = None;
         cfg.show_thinking = true;
-        let mut client = Client::new(&cfg, Some("sid".to_owned())).unwrap();
+        let mut client = client_for(&cfg);
 
         let (unknown, unknown_betas) = capture_stream_turn(client.clone()).await;
         for field in ["thinking", "output_config", "context_management"] {
@@ -836,8 +846,12 @@ mod tests {
 
     #[tokio::test]
     async fn set_auth_sends_the_new_credential_and_signing_out_stops_requests() {
-        let mut client =
-            Client::new(&test_config(OFFLINE_URL, api_key(), TEST_MODEL), None).unwrap();
+        let mut client = Client::new(
+            &test_config(OFFLINE_URL, api_key(), TEST_MODEL),
+            None,
+            DEVICE_ID.to_owned(),
+        )
+        .unwrap();
 
         client.set_auth(Some(Auth::new(AuthSource::OxLogin, "ox-token")));
         let request = capture_stream_request(client.clone()).await;
@@ -875,7 +889,7 @@ mod tests {
             let kind = auth.kind();
             let mut config = test_config(OFFLINE_URL, auth, TEST_MODEL);
             config.gateway.attribution = enabled;
-            let client = Client::new(&config, None).unwrap();
+            let client = Client::new(&config, None, DEVICE_ID.to_owned()).unwrap();
             assert_eq!(
                 client.attributes(streaming, kind),
                 expected,
@@ -900,11 +914,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = Client::new(
-            &test_config(server.uri(), api_key(), TEST_MODEL),
-            Some("sid".to_owned()),
-        )
-        .unwrap();
+        let client = test_client(server.uri(), api_key(), TEST_MODEL);
         let rx = client
             .stream_message(&[Message::user("hello")], &[], None, &[])
             .unwrap();
@@ -953,11 +963,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = Client::new(
-            &test_config(server.uri(), api_key(), TEST_MODEL),
-            Some("sid".to_owned()),
-        )
-        .unwrap();
+        let client = test_client(server.uri(), api_key(), TEST_MODEL);
         let events = collect_events(
             client
                 .stream_message(&[Message::user("hi")], &[], None, &[])
@@ -993,11 +999,7 @@ mod tests {
             ),
         ] {
             let source = auth.source();
-            let client = Client::new(
-                &test_config(OFFLINE_URL, auth, TEST_MODEL),
-                Some("sid".to_owned()),
-            )
-            .unwrap();
+            let client = test_client(OFFLINE_URL, auth, TEST_MODEL);
             let request = capture_stream_request(client).await;
             assert_eq!(request_header(&request, "x-api-key"), api_key, "{source:?}");
             assert_eq!(
@@ -1041,8 +1043,7 @@ mod tests {
                 .custom_headers
                 .insert(name, HeaderValue::from_static(value));
         }
-        let request =
-            capture_stream_request(Client::new(&config, Some("sid".to_owned())).unwrap()).await;
+        let request = capture_stream_request(client_for(&config)).await;
         assert_eq!(request_header(&request, "x-team"), Some("platform"));
         assert_eq!(
             request
@@ -1062,11 +1063,7 @@ mod tests {
     #[tokio::test]
     async fn stream_message_billing_block_hashes_only_first_party_requests() {
         for is_first_party in [true, false] {
-            let mut client = Client::new(
-                &test_config(OFFLINE_URL, api_key(), TEST_MODEL),
-                Some("sid".to_owned()),
-            )
-            .unwrap();
+            let mut client = test_client(OFFLINE_URL, api_key(), TEST_MODEL);
             client.is_first_party = is_first_party;
             let (body, _) = capture_stream_turn(client).await;
             let block = body["system"][0]["text"].as_str().unwrap();
@@ -1110,11 +1107,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = Client::new(
-            &test_config(server.uri(), api_key(), TEST_MODEL),
-            Some("sid".to_owned()),
-        )
-        .unwrap();
+        let client = test_client(server.uri(), api_key(), TEST_MODEL);
         collect_events(
             client
                 .stream_message(&[Message::user(prompt)], &[], Some(context), &[])
@@ -1165,11 +1158,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = Client::new(
-            &test_config(server.uri(), api_key(), TEST_MODEL),
-            Some("sid".to_owned()),
-        )
-        .unwrap();
+        let client = test_client(server.uri(), api_key(), TEST_MODEL);
         collect_events(
             client
                 .stream_message(&[Message::user("hi")], &["static-a", "static-b"], None, &[])
@@ -1220,11 +1209,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let mut client = Client::new(
-            &test_config(server.uri(), api_key(), "claude-sonnet-5-5"),
-            Some("sid".to_owned()),
-        )
-        .unwrap();
+        let mut client = test_client(server.uri(), api_key(), "claude-sonnet-5-5");
         // The conversation breakpoint omits `scope` even where the system prefix is global.
         client.is_first_party = true;
         let messages = [
@@ -1296,11 +1281,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = Client::new(
-            &test_config(server.uri(), api_key(), TEST_MODEL),
-            Some("sid".to_owned()),
-        )
-        .unwrap();
+        let client = test_client(server.uri(), api_key(), TEST_MODEL);
         let events = collect_events(
             client
                 .stream_message(&[Message::user("hi")], &[], None, &[])
@@ -1332,11 +1313,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = Client::new(
-            &test_config(server.uri(), api_key(), TEST_MODEL),
-            Some("sid".to_owned()),
-        )
-        .unwrap();
+        let client = test_client(server.uri(), api_key(), TEST_MODEL);
         let err = collect_events(
             client
                 .stream_message(&[Message::user("hi")], &[], None, &[])
@@ -1374,11 +1351,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = Client::new(
-            &test_config(server.uri(), api_key(), TEST_MODEL),
-            Some("sid".to_owned()),
-        )
-        .unwrap();
+        let client = test_client(server.uri(), api_key(), TEST_MODEL);
         let rx = client
             .stream_message(&[Message::user("hi")], &[], None, &[])
             .unwrap();
@@ -1406,11 +1379,7 @@ mod tests {
                 .mount(&server)
                 .await;
 
-            let client = Client::new(
-                &test_config(server.uri(), api_key(), TEST_MODEL),
-                Some("sid".to_owned()),
-            )
-            .unwrap();
+            let client = test_client(server.uri(), api_key(), TEST_MODEL);
             let rx = client
                 .stream_message(&[Message::user("hi")], &[], None, &[])
                 .unwrap();
@@ -1433,15 +1402,11 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = Client::new(
-            &test_config(
-                server.uri(),
-                Auth::new(AuthSource::OAuthTokenEnv, "oat-env"),
-                TEST_MODEL,
-            ),
-            Some("sid".to_owned()),
-        )
-        .unwrap();
+        let client = test_client(
+            server.uri(),
+            Auth::new(AuthSource::OAuthTokenEnv, "oat-env"),
+            TEST_MODEL,
+        );
         let rx = client
             .stream_message(&[Message::user("hi")], &[], None, &[])
             .unwrap();
@@ -1468,11 +1433,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = Client::new(
-            &test_config(server.uri(), api_key(), TEST_MODEL),
-            Some("sid".to_owned()),
-        )
-        .unwrap();
+        let client = test_client(server.uri(), api_key(), TEST_MODEL);
         let rx = client
             .stream_message(&[Message::user("hi")], &[], None, &[])
             .unwrap();
@@ -1498,11 +1459,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = Client::new(
-            &test_config(server.uri(), api_key(), TEST_MODEL),
-            Some("sid".to_owned()),
-        )
-        .unwrap();
+        let client = test_client(server.uri(), api_key(), TEST_MODEL);
         let mut rx = client
             .stream_message(&[Message::user("hi")], &[], None, &[])
             .unwrap();
@@ -1550,9 +1507,7 @@ mod tests {
     }
 
     async fn capture_stream_body(config: Config) -> serde_json::Value {
-        capture_stream_turn(Client::new(&config, Some("sid".to_owned())).unwrap())
-            .await
-            .0
+        capture_stream_turn(client_for(&config)).await.0
     }
 
     #[tokio::test]
@@ -1596,11 +1551,7 @@ mod tests {
             ("claude-opus-5-5", Some("updates"), true),
             ("claude-haiku-5-5", None, false),
         ] {
-            let client = Client::new(
-                &test_config(OFFLINE_URL, api_key(), id),
-                Some("sid".to_owned()),
-            )
-            .unwrap();
+            let client = test_client(OFFLINE_URL, api_key(), id);
             let (body, betas) = capture_stream_turn(client).await;
             assert_eq!(
                 body["thinking"].get("display"),
@@ -1618,11 +1569,7 @@ mod tests {
     #[tokio::test]
     async fn stream_message_known_model_drops_stale_thinking_blocks_under_binding_beta() {
         for info in crate::model::MODELS {
-            let client = Client::new(
-                &test_config(OFFLINE_URL, api_key(), info.id),
-                Some("sid".to_owned()),
-            )
-            .unwrap();
+            let client = test_client(OFFLINE_URL, api_key(), info.id);
             let (body, betas) = capture_stream_turn(client).await;
             assert_eq!(
                 body["thinking"]["block_binding"],

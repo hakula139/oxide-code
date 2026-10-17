@@ -25,6 +25,7 @@ use anyhow::{Context, Result, bail};
 use clap::{ArgGroup, Parser};
 use tracing::warn;
 
+use client::anthropic::identity;
 use config::Config;
 use driver::Exit;
 use driver::headless::OutputFormat;
@@ -175,6 +176,7 @@ async fn async_main() -> Result<Exit> {
     let tools = Arc::new(create_tool_registry(&file_tracker, &read_deny));
     let engine = Engine::new(
         &config,
+        identity::load_or_create_device_id(),
         tools,
         store,
         handle,
