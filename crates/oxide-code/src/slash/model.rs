@@ -92,7 +92,7 @@ mod tests {
     }
 
     #[test]
-    fn complete_arg_empty_prefix_lists_catalogue_in_picker_order() {
+    fn complete_arg_empty_prefix_lists_catalog_in_picker_order() {
         assert_eq!(
             arg_rows(""),
             [

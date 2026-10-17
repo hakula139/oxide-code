@@ -61,7 +61,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 - **`/login`** / **`/logout`**: Forward `Op::Login` and `Op::Logout`. The engine runs the browser sign-in and swaps the client's credential, and the TUI opens the browser and reports the credential requests use afterward. Both are `Mutating`. Full design: [login.md](login.md).
 
-- **`/model`**: Bare opens the combined picker ([modals.md](modals.md)). `/model <arg>` resolves an exact catalogue id first, then a unique substring, so `fable`, `opus`, `sonnet`, and `haiku` act as aliases. Both forms are mutating and idle-gated because they can emit `Op::SetModel`, which re-resolves the current effort against the new model.
+- **`/model`**: Bare opens the combined picker ([modals.md](modals.md)). `/model <arg>` resolves an exact catalog id first, then a unique substring, so `fable`, `opus`, `sonnet`, and `haiku` act as aliases. Both forms are mutating and idle-gated because they can emit `Op::SetModel`, which re-resolves the current effort against the new model.
 
 - **`/effort`**: Bare opens the Speed ↔ Intelligence slider ([modals.md](modals.md)), since a two-axis picker would force users through models they didn't mean to change. `/effort <level>` accepts the five concrete tiers, with no `auto` state. Both forms are mutating and idle-gated because they can emit `Op::SetModel`.
 

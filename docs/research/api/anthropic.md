@@ -237,7 +237,7 @@ Partners the `context-management-2025-06-27` beta header. Claude Code 2.1.301 sh
 }
 ```
 
-oxide-code applies the body-header coupling as an invariant: the body field is populated on every request whose model is in the supported catalogue, the same condition that enables the beta header. One-shot completions (the `complete` path in `client::anthropic`) skip both, matching the reference wire and keeping the title-generation path minimal.
+oxide-code applies the body-header coupling as an invariant: the body field is populated on every request whose model is in the supported catalog, the same condition that enables the beta header. One-shot completions (the `complete` path in `client::anthropic`) skip both, matching the reference wire and keeping the title-generation path minimal.
 
 ### `cache_control.ttl`
 

@@ -21,7 +21,7 @@ const THINKING_TOKEN_COUNT_BETA_HEADER: &str = "thinking-token-count-2026-05-13"
 
 /// Builds the comma-joined `anthropic-beta` header value.
 ///
-/// Agentic turns on catalogue models send the sequence Claude Code [`super::CLAUDE_CLI_VERSION`]
+/// Agentic turns on catalog models send the sequence Claude Code [`super::CLAUDE_CLI_VERSION`]
 /// sends for them, captured from `claude -p` with an API key, so it includes betas for features
 /// this client leaves unused. Fable 5.1 reuses the Opus 5.5 sequence, inferred from Claude Code
 /// 2.1.301 sending both models identical betas, so the next version bump must capture Fable too.
@@ -221,7 +221,7 @@ mod tests {
             compute_betas(&spec("claude-sonnet-5-5"), None, AuthKind::OAuth, false),
             vec![CLAUDE_CODE_BETA_HEADER, OAUTH_BETA_HEADER],
         );
-        // Family comes from the catalogue row, so an unknown id naming Haiku keeps the tag.
+        // Family comes from the catalog row, so an unknown id naming Haiku keeps the tag.
         assert_eq!(
             compute_betas(&spec("my-haiku-gateway"), None, AuthKind::ApiKey, false),
             vec![CLAUDE_CODE_BETA_HEADER],

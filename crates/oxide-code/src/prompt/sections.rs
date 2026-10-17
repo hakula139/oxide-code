@@ -36,7 +36,7 @@ pub(super) const TASK_GUIDANCE: &str = indoc! {r#"
       change "methodName" to snake case, do not reply with just "method_name", instead find the
       method in the code and modify the code.
     - You are highly capable and often allow users to complete ambitious tasks that would otherwise
-      be too complex or take too long. You should defer to user judgement about whether a task is
+      be too complex or take too long. You should defer to user judgment about whether a task is
       too large to attempt.
     - In general, do not propose changes to code you haven't read. If a user asks about or wants
       you to modify a file, read it first. Understand existing code before suggesting

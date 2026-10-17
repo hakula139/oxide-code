@@ -67,7 +67,7 @@ const SYSTEM_PROMPT_PREFIX: &str = "You are Claude Code, Anthropic's official CL
 pub(crate) struct Client {
     http: reqwest::Client,
     model: ModelSpec,
-    /// `None` for models outside the catalogue.
+    /// `None` for models outside the catalog.
     effort: Option<Effort>,
     /// `None` while signed out.
     auth: Option<Auth>,

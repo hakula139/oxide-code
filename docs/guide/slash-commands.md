@@ -40,7 +40,7 @@ Model, effort, permission mode, and theme choices last for the session. No slash
 
 - **Bare `/model` and `/effort`** open pickers. Press Enter to apply your choice or Esc to cancel.
 - **`/model <id>`** accepts a full ID or any unique substring, so `fable`, `opus`, `sonnet`, and `haiku` work as aliases. Switching models preserves the current effort.
-- **`/effort`** fails if the session uses a model outside the supported catalogue, because that model has no effort levels.
+- **`/effort`** fails if the session uses a model outside the supported catalog, because that model has no effort levels.
 
 See [`effort`](configuration.md#effort-intelligence-tier) for each model's defaults.
 
