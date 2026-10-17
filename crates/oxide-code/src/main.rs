@@ -25,6 +25,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use clap::builder::{PossibleValue, TypedValueParser};
 use clap::{ArgGroup, Parser};
+use time::error::IndeterminateOffset;
 use tracing::warn;
 
 use client::anthropic::identity;
@@ -141,11 +142,11 @@ impl TypedValueParser for ModeParser {
 }
 
 fn main() -> Result<ExitCode> {
-    util::time::init_local_offset();
+    let offset_error = util::time::init_local_offset().err();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    let exit = runtime.block_on(async_main())?;
+    let exit = runtime.block_on(async_main(offset_error))?;
     if matches!(exit, Exit::Signal(_)) {
         // tokio's stdin reader can stay blocked in `read`, and a regular drop waits for it.
         runtime.shutdown_background();
@@ -153,7 +154,7 @@ fn main() -> Result<ExitCode> {
     Ok(exit.code())
 }
 
-async fn async_main() -> Result<Exit> {
+async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
     let cli = Cli::parse();
 
     let tui_mode =
@@ -162,6 +163,9 @@ async fn async_main() -> Result<Exit> {
         bail!("--resume opens the session picker in the TUI, which needs a terminal on stdout");
     }
     let _log_guard = util::log::init_tracing(tui_mode)?;
+    if let Some(e) = offset_error {
+        warn!("cannot read local timezone offset, falling back to UTC: {e}");
+    }
     let cwd = std::env::current_dir().context("failed to read the current working directory")?;
 
     if cli.list {

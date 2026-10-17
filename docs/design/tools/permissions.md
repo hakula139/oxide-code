@@ -302,4 +302,4 @@ The stdio sink escapes control characters other than tabs and line breaks in mod
 - `crates/oxide-code/src/tui/components/chat.rs`: `ChatView::push_tool_result`, which places a result under its call.
 - `crates/oxide-code/src/tui/modal.rs`: `ModalStack`, the cancel hook, `captures_esc`.
 - `crates/oxide-code/src/tui/modal/approval.rs`: `ApprovalModal` wrapping, scrolling, character reveal, and the rule and feedback editors.
-- `crates/oxide-code/src/util/text.rs`: `is_hidden` and `escape_controls`, shared by both frontends.
+- `crates/oxide-code/src/util/text.rs`: `is_hidden`, shared by both frontends, plus the stdio sink's `escape_controls` and the REPL preview's `escape_hidden`.

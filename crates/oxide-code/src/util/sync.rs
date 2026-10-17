@@ -4,6 +4,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use tracing::warn;
 
+/// Locks `mutex` even when a panicking holder poisoned it, logging a warning that names `label`.
 pub(crate) fn lock_or_recover<'a, T>(mutex: &'a Mutex<T>, label: &str) -> MutexGuard<'a, T> {
     mutex.lock().unwrap_or_else(|error| {
         warn!("{label} mutex poisoned, recovering");
