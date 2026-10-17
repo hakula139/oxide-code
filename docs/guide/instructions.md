@@ -25,9 +25,9 @@ The project root is the Git repository root, or the working directory if it is o
 
 ## When changes take effect
 
-- **Edits during a session** are sent to the model as a reminder with your next prompt.
-- **Resuming a session** with `/resume` or `ox -c` keeps the instructions from when the session started, preserving the reusable cached prompt prefix. Any edits made since then are sent as a reminder with your next prompt.
-- **`/clear` and `/compact`** start with the current files.
+- **Edits during a session** reach the model as a reminder with your next prompt. A date change since the session started arrives the same way.
+- **Resuming a session** with `/resume` or `ox -c` keeps the instructions and date from when the session started, so the cached prompt prefix stays reusable. Edits made since then arrive as a reminder with your next prompt.
+- **`/clear` and `/compact`** start from the current files and date.
 
 ## Writing effective instructions
 

@@ -52,7 +52,7 @@ The result is the line printed by `json` and the final line of `stream-json`:
 
 `usage` contains the following fields, each set to `null` when unknown:
 
-- **`context_tokens`**: The input size of the latest request, including cached tokens, showing how full the context window is.
+- **`context_tokens`**: The input size of the latest request, including cached tokens. It shows how full the context window is.
 - **`context_window`**: The model's context window, measured in tokens.
 - **`estimated_cost_usd`**: The estimated cost of all requests in the run at public per-token rates, or `null` for models with unknown rates.
 
@@ -78,15 +78,15 @@ Each `stream-json` line is an object with a `type` and, for most types, a `data`
 | `turn_complete`             | No `data`. The turn finished with a reply                                                          |
 | `turn_failed`               | Why the turn failed, including a refused request                                                   |
 
-### Event payloads
+### Event Payloads
 
-- **`rate_limits_updated`** arrives with each response under a Claude subscription sign-in. The response may omit either window, in which case `five_hour` or `seven_day` is `null`. Otherwise, each is an object with `utilization`, the spent share from 0 to 1, and `resets_at`, the reset time in Unix seconds.
-- **`tasks_updated`** follows the `tool_call_end` of each successful `tasks` call. Its `data` contains the ordered task list, with each task's `content` and a `status` of `pending`, `in_progress`, or `completed`. The list is cleared, producing an empty array, when every task is completed or when the model sends an empty list.
+- **`rate_limits_updated`** arrives with each response under a Claude subscription sign-in. Its `five_hour` and `seven_day` windows are each an object with `utilization`, the spent share from 0 to 1, and `resets_at`, the reset time in Unix seconds, or `null` when the response omits that window.
+- **`tasks_updated`** follows the `tool_call_end` of each successful `tasks` call. Its `data` is the task list in order, each task with its `content` and a `status` of `pending`, `in_progress`, or `completed`. An empty array means the list cleared, which happens once every task is completed or when the model sends an empty list.
 - **`background_shells_updated`** arrives when a background shell starts, exits, or stops. Its `data` lists every open shell with its `id`, `command`, and `state`. The state's `type` is `running`, `exited` with the exit code in `data`, or `killed` with the signal number in `data`. A stopped shell leaves the list. When the run ends, every open shell stops without another event, so the last `background_shells_updated` can still list shells as running.
 
-### Result views
+### Result Views
 
-The `view` in `tool_call_end` is the structured result: an object with its own `type` and `data`:
+The `view` in `tool_call_end` is the structured result, an object with its own `type` and `data`:
 
 | `view` type    | `data`                                                                                                              |
 | -------------- | ------------------------------------------------------------------------------------------------------------------- |
@@ -99,18 +99,20 @@ The `view` in `tool_call_end` is the structured result: an object with its own `
 
 ### Example
 
-A run that lists files and then attempts a denied `bash` call streams lines like these. The denied call ends with a `tool_call_end` whose `is_error` is `true` and whose `content` tells the model the call was denied and names the allow rule that would permit it, when one exists.
+A run that lists files and then attempts `cargo test`, which needs approval, streams lines like these:
 
 ```json
 {"type":"tool_call_start","data":{"id":"call-1","name":"glob","input":{"pattern":"Cargo.toml"},"icon":"✱","label":"Glob(Cargo.toml)"}}
 {"type":"tool_call_end","data":{"id":"call-1","content":"Cargo.toml","is_error":false,"title":"Found 1 file","view":{"type":"glob_files","data":{"pattern":"Cargo.toml","files":["Cargo.toml"],"total":1}}}}
-{"type":"tool_call_start","data":{"id":"call-2","name":"bash","input":{"command":"ls"},"icon":"$","label":"ls"}}
-{"type":"tool_call_end","data":{"id":"call-2","content":"The bash call was denied with this feedback: This run cannot ask for approval. ...","is_error":true,"title":null,"view":{"type":"text","data":{"content":"The bash call was denied with this feedback: This run cannot ask for approval. ..."}}}}
+{"type":"tool_call_start","data":{"id":"call-2","name":"bash","input":{"command":"cargo test"},"icon":"$","label":"cargo test"}}
+{"type":"tool_call_end","data":{"id":"call-2","content":"The bash call was denied with this feedback: This run cannot ask for approval. To allow this call, add `\"bash(cargo test)\"` to the `allow` list ...","is_error":true,"title":null,"view":{"type":"text","data":{"content":"The bash call was denied with this feedback: This run cannot ask for approval. To allow this call, add `\"bash(cargo test)\"` to the `allow` list ..."}}}}
 {"type":"stream_token","data":"Done."}
 {"type":"usage_updated","data":{"context_tokens":1000,"context_window":1000000,"estimated_cost_usd":0.018}}
 {"type":"turn_complete"}
 {"type":"result","data":{"stop_reason":"completed","error":null,"message":"Done.","usage":{"context_tokens":1000,"context_window":1000000,"estimated_cost_usd":0.018},"session_id":"3f2a9c1e-5b7d-4e8f-9a0b-1c2d3e4f5a6b"}}
 ```
+
+The run cannot ask, so the `cargo test` call ends with a `tool_call_end` whose `is_error` is `true` and whose `content` tells the model the call was denied, naming the allow rule that would permit it when one can.
 
 ## Compatibility
 

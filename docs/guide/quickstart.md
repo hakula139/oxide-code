@@ -9,7 +9,7 @@ brew tap hakula139/oxide-code https://github.com/hakula139/oxide-code
 brew install oxide-code
 ```
 
-See [Installation](install.md) for instructions on using the prebuilt tarball, Cargo, Nix, and other platforms.
+See [Installation](install.md) for the prebuilt binary, Cargo, Nix, and other platforms.
 
 ## Set up credentials
 
@@ -28,7 +28,7 @@ You can also sign in with a Claude account:
 
 ## Start a session
 
-Run `ox` to start an interactive terminal session, then enter a task and press Enter:
+Run `ox` to start an interactive terminal session, then type a task and press Enter:
 
 ```text
 ❯ Read main.rs and explain the agent loop.
@@ -43,7 +43,7 @@ In the default `auto` permission mode, tool calls fall into these groups:
 - **Runs without asking**: reads, searches, read-only commands such as `ls`, `cat`, and `grep`, and edits within the working directory.
 - **Asks unless a rule decides**: other `bash` commands and edits outside the working directory.
 - **Asks even when an allow rule matches**: edits to protected config such as `.vscode` or `.envrc`.
-- **Denied**: edits under the project's own `.git`.
+- **Denied**: destructive commands such as `rm -rf` and `curl ... | sh`, and edits under the project's own `.git`.
 
 The approval prompt takes these keys:
 
@@ -55,7 +55,11 @@ The approval prompt takes these keys:
 | **F**   | Deny with a note the model reads                              |
 | **Esc** | Deny and end the turn                                         |
 
-Enter does nothing, so a keystroke intended for the input box cannot approve a call. **A** appears when a rule can match the call. It shows the rule that will be added, which you can edit, for example to `bash(cargo test:*)`, before pressing **Enter**. Session rules remain in effect until you exit or start another session, and `/status` lists them.
+When a rule can name the call, pressing **A** opens the rule it will add, such as `bash(cargo test)`, which you can edit before pressing **Enter**, for example to widen it to `bash(cargo test:*)`.
+
+Enter does nothing in the prompt, so a keystroke meant for the input box cannot approve a call.
+
+Session rules last until you exit or start another session, and `/status` lists them.
 
 See [Tool approval](configuration.md#permission-tool-approval) for the other modes and instructions on writing rules.
 

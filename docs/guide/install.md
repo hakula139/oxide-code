@@ -4,11 +4,11 @@ How to install `ox` on macOS, Linux, and Windows. For first-run setup once insta
 
 ## System requirements
 
-- **macOS**: macOS 12 or later on Apple Silicon.
+- **macOS**: 12 or later on Apple Silicon.
 - **Linux**: x86_64 Linux with glibc 2.39 or later, such as Ubuntu 24.04, Debian 13, Fedora 40, or RHEL 10.
-- **Windows**: Windows 10 or later on x86_64, with [Git for Windows](https://git-scm.com/downloads/win) and `git.exe` on `PATH`. The `bash` tool runs the `bash.exe` included with Git for Windows.
-- **Other platforms**: Intel Macs, ARM Linux, Linux with an older glibc, and musl-based Linux such as Alpine require a source build with [Rust](https://www.rust-lang.org/tools/install) 1.91 or later.
-- **Network**: Outbound HTTPS access to `api.anthropic.com` or your [LLM gateway](configuration.md#llm-gateways). Logging in with a Claude account also refreshes its token through `platform.claude.com`.
+- **Windows**: 10 or later on x86_64, with [Git for Windows](https://git-scm.com/downloads/win) and `git.exe` on `PATH`. The `bash` tool runs the `bash.exe` included with Git for Windows.
+- **Other platforms**: Intel Macs, ARM Linux, Linux with an older glibc, and musl-based Linux such as Alpine need a source build through [Cargo](#from-source-via-cargo) or [Nix](#nix).
+- **Network**: Outbound HTTPS access to `api.anthropic.com` or your [LLM gateway](configuration.md#llm-gateways). Claude account logins also exchange and refresh tokens through `platform.claude.com`.
 
 ## Install `ox`
 
@@ -16,7 +16,7 @@ How to install `ox` on macOS, Linux, and Windows. For first-run setup once insta
 | ----------------------------------- | --------------------------------------------- | ------------------ |
 | [Prebuilt binary](#prebuilt-binary) | Apple Silicon macOS, x86_64 Linux and Windows | No                 |
 | [Homebrew](#homebrew)               | Apple Silicon macOS, x86_64 Linux             | No                 |
-| [cargo](#from-source-via-cargo)     | Any platform Rust supports                    | Yes                |
+| [Cargo](#from-source-via-cargo)     | Any platform Rust supports                    | Yes                |
 | [Nix](#nix)                         | Linux and macOS                               | Yes                |
 
 ### Prebuilt binary
@@ -34,7 +34,7 @@ sudo mv ox /usr/local/bin/
 curl -fsSL "https://github.com/hakula139/oxide-code/releases/download/$VERSION/oxide-code-x86_64-unknown-linux-gnu.tar.gz" | tar -xz
 sudo mv ox /usr/local/bin/
 
-# Windows x86_64 (Git Bash / MSYS / WSL)
+# Windows x86_64 (Git Bash / MSYS). Under WSL, use the Linux commands above.
 curl -fsSLO "https://github.com/hakula139/oxide-code/releases/download/$VERSION/oxide-code-x86_64-pc-windows-msvc.zip"
 unzip oxide-code-x86_64-pc-windows-msvc.zip
 ```
@@ -58,7 +58,9 @@ brew tap hakula139/oxide-code https://github.com/hakula139/oxide-code
 brew install oxide-code
 ```
 
-### From source via cargo
+### From source via Cargo
+
+Requires [Rust](https://www.rust-lang.org/tools/install) 1.91 or later.
 
 ```bash
 cargo install --git https://github.com/hakula139/oxide-code --locked
@@ -95,15 +97,15 @@ This prints the version string. If you see `command not found`, the binary is no
 
 ## Update `ox`
 
-| Install method               | Update command                                                                 |
-| ---------------------------- | ------------------------------------------------------------------------------ |
-| Prebuilt binary              | Re-run the download commands with `VERSION` set to the new tag                 |
-| Homebrew                     | `brew update && brew upgrade oxide-code`                                       |
-| Cargo, from `main`           | `cargo install --git https://github.com/hakula139/oxide-code --locked --force` |
-| Cargo, pinned to a tag       | The same command with `--tag` set to the new tag                               |
-| Nix profile, from `main`     | `nix profile upgrade oxide-code`                                               |
-| Nix profile, pinned to a tag | `nix profile remove oxide-code`, then install the new tag's ref                |
-| Nix flake input              | Update the `oxide-code` input in your project's lock file                      |
+| Install method               | Update command                                                                                        |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------- |
+| Prebuilt binary              | Re-run the download commands with `VERSION` set to the new tag                                        |
+| Homebrew                     | `brew update && brew upgrade oxide-code`                                                              |
+| Cargo, from `main`           | `cargo install --git https://github.com/hakula139/oxide-code --locked --force`                        |
+| Cargo, pinned to a tag       | The same command with `--tag` set to the new tag                                                      |
+| Nix profile, from `main`     | `nix profile upgrade oxide-code`                                                                      |
+| Nix profile, pinned to a tag | `nix profile remove oxide-code`, then install the new tag's ref                                       |
+| Nix flake input              | `nix flake update oxide-code`. For an input pinned to a tag, change the `/vX.Y.Z` in its URL instead. |
 
 ## Uninstall `ox`
 

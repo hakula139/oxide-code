@@ -4,7 +4,7 @@ Documentation for using oxide-code (`ox`).
 
 | Document                             | Description                                                                                    |
 | ------------------------------------ | ---------------------------------------------------------------------------------------------- |
-| [Installation](install.md)           | Requirements, prebuilt binary, Homebrew, cargo, Nix, verify / update / uninstall               |
+| [Installation](install.md)           | Requirements, prebuilt binary, Homebrew, Cargo, Nix, verify / update / uninstall               |
 | [Quickstart](quickstart.md)          | Credentials, first session, tool approval, built-in tools, instruction files                   |
 | [Configuration](configuration.md)    | Layered config, authentication, models, compaction, TUI, themes, permissions, TLS, environment |
 | [Slash Commands](slash-commands.md)  | Built-in client-side commands and autocomplete                                                 |

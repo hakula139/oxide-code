@@ -1,6 +1,6 @@
 # Slash Commands
 
-Type `/` to open the autocomplete popup. Use **Up / Down** to browse, **Tab** to complete, **Enter** to submit, and **Esc** to dismiss. Each command's aliases appear beside it, as in `/clear (new, reset)`.
+Type `/` to open the autocomplete popup. Use **Up / Down** to browse, **Tab** to complete, **Enter** to submit, and **Esc** to dismiss. An alias runs the same command as its canonical name. Typing `/new` shows `/clear (new)` in the popup, and `/help` lists every alias.
 
 After `/model`, `/effort`, or `/theme`, type a space to switch the popup to **arg mode**, which lists the valid values.
 
@@ -28,12 +28,12 @@ After `/model`, `/effort`, or `/theme`, type a space to switch the popup to **ar
 
 To send text that starts with `/`, double the slash. For example, typing `//etc` sends `/etc`.
 
-Choices made with slash commands last for the session. No slash command writes config files, so a restart returns to your configured values.
+Model, effort, and theme choices last for the session. No slash command writes config files, so a restart returns to your configured values.
 
 ## When Commands Run
 
-- **During a turn**, only these read-only commands run: `/config`, `/diff`, `/help`, `/status`, and the bare `/theme` picker. oxide-code refuses the other commands until the turn finishes. Retry them then.
-- **In the bare REPL** (`--no-tui`), only `/clear`, `/compact`, `/effort <level>`, `/model <id>`, `/rename <title>`, and `/resume <id-prefix>` run, along with their aliases. Each confirmation appears on stderr. Commands that open a picker in the TUI require an argument here. The REPL rejects other commands, and a rejected or failed command makes it exit with a failure status at the end of input.
+- **During a turn**, only `/config`, `/diff`, `/help`, `/status`, and the bare `/theme` picker run. Retry other commands after the turn finishes.
+- **In the bare REPL** (`--no-tui`), only `/clear`, `/compact`, `/effort <level>`, `/model <id>`, `/rename <title>`, and `/resume <id-prefix>` run, along with their aliases, and each prints a confirmation to stderr. The REPL rejects other commands, and a rejected or failed command makes it exit with a failure status at the end of input.
 
 ## Model and Effort
 
@@ -49,9 +49,9 @@ See [`effort`](configuration.md#effort-intelligence-tier) for each model's defau
 
 After compaction:
 
-- **Resume**: the pre-compact transcript remains on disk, but `ox -c` resumes from the summary and the messages that follow it.
-- **Edits**: the file-change tracker resets, so the model must read a file again before editing it.
-- **Carried over**: queued prompts, the task list, and background shells.
+- **Transcript**: The pre-compact transcript stays on disk, but `ox -c` resumes from the summary and the messages that follow it.
+- **File tracking**: The file-change tracker resets, so the model must read a file again before editing it.
+- **Session state**: Queued prompts, the task list, and background shells carry over.
 
 `/compact` refuses conversations shorter than about 1,000 tokens. It counts messages, tool calls, and tool output, but not instructions or tool definitions. If the model returns an empty summary, compaction fails and leaves the conversation unchanged.
 

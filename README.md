@@ -17,20 +17,20 @@ oxide-code (`ox`) is a terminal agent for software engineering tasks. It runs Cl
 
 Early development. What works today:
 
-- **Terminal UI** with streaming Markdown, syntax-highlighted code blocks, a [configurable status line](docs/guide/configuration.md#tui-terminal-ui), and 5 built-in [themes](docs/guide/theming.md) with custom TOML overrides
-- **Bare REPL** (`--no-tui`) and [headless mode](docs/guide/headless.md) (`-p`) for scripts and pipelines, with output as text, a JSON result, or a JSON event stream
+- **Terminal UI**: streaming Markdown, syntax-highlighted code blocks, a [configurable status line](docs/guide/configuration.md#tui-terminal-ui), and 5 built-in [themes](docs/guide/theming.md) with custom TOML overrides
+- **[Headless mode](docs/guide/headless.md)**: one-shot `-p` runs for scripts and pipelines, with output as text, a JSON result, or a JSON event stream, plus a bare REPL (`--no-tui`)
 - **Models**: Claude Opus 5.5, Sonnet 5.5, and Haiku 5.5, each with a 1M-token context window, adjustable effort, and extended thinking
 - **Tools**: `read`, `write`, `edit`, `glob`, `grep`, and `bash`, which can also keep dev servers, watchers, and long builds running in the background
-- **Task list** the model keeps for multi-step work, shown live and carried through resume and compaction
-- **[Tool permissions](docs/guide/configuration.md#permission-tool-approval)**: `auto` (default), `plan`, and `yolo` modes, allow / deny rules matched against each command in a `bash` command line, read-only commands that skip approval, protected config paths, and an approval prompt that can allow matching calls for the session or deny with feedback for the model
+- **Task list**: the model tracks multi-step work in a list shown live and carried through resume and compaction
+- **[Tool permissions](docs/guide/configuration.md#permission-tool-approval)**: `auto` (default), `plan`, and `yolo` modes, allow / deny rules for each command in a `bash` command line, protected config paths that always ask in `auto` mode, and an approval prompt that can allow matching calls for the session
 - **Turn control**: interrupt with Esc or Ctrl+C, queue follow-up prompts that join the running turn between tool calls, and confirm exit with a second Ctrl+C
-- **[Slash commands](docs/guide/slash-commands.md)** with autocomplete, covering sessions, models and effort, compaction, sign-in, themes, and status views
-- **Context compaction** with manual `/compact` and default-on auto-compaction
+- **[Slash commands](docs/guide/slash-commands.md)**: commands for sessions, models and effort, compaction, sign-in, themes, `/init`, and status and config views, with autocomplete
+- **Context compaction**: manual `/compact` and default-on auto-compaction
 - **[Instruction files](docs/guide/instructions.md)**: `CLAUDE.md` / `AGENTS.md` discovery
-- **[Sessions](docs/guide/sessions.md)** saved as JSONL logs, with AI-generated titles, listing, archiving, and resume
-- **File-change tracking** with a Read-before-Edit gate and on-disk drift detection
-- **[Authentication](docs/guide/configuration.md#authentication)** with an Anthropic API key, browser sign-in with `/login`, the Claude Code login or a long-lived OAuth token, or an LLM gateway bearer token with custom headers
-- **Layered TOML [configuration](docs/guide/configuration.md)**
+- **[Sessions](docs/guide/sessions.md)**: JSONL logs with AI-generated titles, listing, archiving, and resume
+- **File-change tracking**: a Read-before-Edit gate and on-disk drift detection
+- **[Authentication](docs/guide/configuration.md#authentication)**: an Anthropic API key, browser sign-in with `/login`, the Claude Code login or a long-lived OAuth token, or an LLM gateway bearer token with custom headers
+- **[Configuration](docs/guide/configuration.md)**: layered TOML from user, drop-in, and project files, with environment variable overrides
 
 ## Scope
 
