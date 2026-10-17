@@ -255,6 +255,8 @@ pub(crate) enum Interaction {
     ToolCall(ToolCall),
     /// A result that follows its call, or stands alone when the transcript lost the call.
     ToolResult(ToolResult),
+    /// Where the user interrupted a turn. Renders like a live [`Event::Cancelled`].
+    Interrupted,
 }
 
 // ── Event Sink ──
@@ -427,6 +429,7 @@ mod tests {
             Interaction::ProgressUpdate("Reading.".to_owned()),
             Interaction::ToolCall(ls_call()),
             Interaction::AssistantText("reply".to_owned()),
+            Interaction::Interrupted,
         ];
         history.extend(
             views

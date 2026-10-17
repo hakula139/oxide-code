@@ -135,6 +135,7 @@ impl ChatView {
                 }
                 Interaction::ToolCall(call) => self.push_tool_call(call),
                 Interaction::ToolResult(result) => self.push_tool_result(result),
+                Interaction::Interrupted => self.push_block(InterruptedMarker),
             }
         }
     }
@@ -589,7 +590,9 @@ mod tests {
     use unicode_width::UnicodeWidthStr;
 
     use super::*;
-    use crate::tui::glyphs::{ASSISTANT_PREFIX, BAR, TOOL_BORDER_CONT, TOOL_ERROR, TOOL_SUCCESS};
+    use crate::tui::glyphs::{
+        ASSISTANT_PREFIX, BAR, INTERRUPTED_MARKER, TOOL_BORDER_CONT, TOOL_ERROR, TOOL_SUCCESS,
+    };
 
     // ── Fixtures ──
 
@@ -898,9 +901,10 @@ mod tests {
             Interaction::AssistantText("hi there".to_owned()),
             Interaction::ToolCall(call("$", "ls")),
             Interaction::ToolResult(text_result("ls", "file a", false, None)),
+            Interaction::Interrupted,
         ]);
 
-        assert_eq!(chat.blocks.len(), 5);
+        assert_eq!(chat.blocks.len(), 6);
         let text = all_text(&mut chat);
         let order = [
             "Compacted 4 messages",
@@ -910,6 +914,7 @@ mod tests {
             "hi there",
             "$ ls",
             "file a",
+            INTERRUPTED_MARKER,
         ]
         .map(|needle| {
             text.find(needle)

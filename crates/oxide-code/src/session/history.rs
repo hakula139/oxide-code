@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use super::entry::CompactInfo;
 use super::post_compact::strip_synthetic_post_compact_prefix;
-use crate::message::{ContentBlock, Message, Role, progress_update_before};
+use crate::message::{ContentBlock, INTERRUPTION_MARKER, Message, Role, progress_update_before};
 use crate::prompt::is_system_reminder;
 use crate::protocol::{Interaction, ToolCall, ToolResult};
 use crate::tool::{ToolMetadata, ToolRegistry, ToolResultView};
@@ -49,7 +49,8 @@ fn post_compact_messages(messages: &[Message]) -> Vec<Message> {
 }
 
 /// Walks a transcript in display order. Tool calls are paired inline with their `tool_use_id`
-/// results. Whitespace-only text and the context reminders sent with user prompts are dropped.
+/// results, and an interruption marker becomes [`Interaction::Interrupted`]. Whitespace-only text
+/// and the context reminders sent with user prompts are dropped.
 fn walk_transcript(
     messages: &[Message],
     tool_metadata: &HashMap<String, ToolMetadata>,
@@ -94,6 +95,12 @@ impl TranscriptWalker<'_> {
             match block {
                 ContentBlock::Text { text }
                     if msg.role == Role::User && is_system_reminder(text) => {}
+                ContentBlock::Text { text }
+                    if msg.role == Role::User && text == INTERRUPTION_MARKER =>
+                {
+                    self.flush_text(&mut text_buf, msg.role);
+                    self.out.push(Interaction::Interrupted);
+                }
                 ContentBlock::Text { text } if !text.trim().is_empty() => {
                     if !text_buf.is_empty() {
                         text_buf.push('\n');
@@ -393,6 +400,52 @@ mod tests {
             [
                 Interaction::UserText("fix it".to_owned()),
                 Interaction::AssistantText(reminder.to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn walk_transcript_marks_each_interruption_in_prompts_merged_on_resume() {
+        let text = |text: &str| ContentBlock::Text {
+            text: text.to_owned(),
+        };
+        let messages = [
+            Message {
+                role: Role::User,
+                content: vec![
+                    text("write a story"),
+                    text(INTERRUPTION_MARKER),
+                    text("run ls"),
+                ],
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![tool_use("t1", "bash", serde_json::json!({"command": "ls"}))],
+            },
+            Message {
+                role: Role::User,
+                content: vec![
+                    tool_result_block("t1", "interrupted", true),
+                    text(INTERRUPTION_MARKER),
+                    text("what is 7 times 6?"),
+                ],
+            },
+            Message::assistant("42"),
+        ];
+
+        let out = walk(&messages);
+
+        assert_eq!(
+            out,
+            [
+                Interaction::UserText("write a story".to_owned()),
+                Interaction::Interrupted,
+                Interaction::UserText("run ls".to_owned()),
+                bash_call("t1", "ls"),
+                text_result("t1", "interrupted", true),
+                Interaction::Interrupted,
+                Interaction::UserText("what is 7 times 6?".to_owned()),
+                Interaction::AssistantText("42".to_owned()),
             ]
         );
     }
