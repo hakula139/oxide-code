@@ -59,6 +59,10 @@ Streaming markdown uses a block-based stable-prefix cache:
 
 An open code block stays in the tail until the next block starts. Its highlighter resumes after the block's last complete line, so each frame highlights only the new lines, though it still wraps every row of the block.
 
+## Markdown Tables
+
+A table renders as a box in the `table_border` slot, with one cell of padding inside each border and the header row in the `table_header` slot, a bold accent by default. A rule with `├ ┼ ┤` junctions separates every pair of rows. Columns keep their natural widths when the table fits. Otherwise the widest columns shrink to a shared cap, so narrow columns stay whole, and cells word-wrap within their columns. A `<br>` in a cell starts a new line in that cell, since a GFM cell has no other line break.
+
 ## Design Decisions
 
 1. **ratatui + crossterm + tokio.** No custom rendering engine.
@@ -70,3 +74,4 @@ An open code block stays in the tail until the next block starts. Its highlighte
 7. **Catppuccin Mocha dark theme by default** with named color slots covering text, surfaces, accents, status, code, diff, headings, body, and chrome. Transparent background.
 8. **Two-tier tool display.** Inline summary with per-tool icons, plus truncated output body.
 9. **Per-block render cache with viewport-scoped rendering.** Committed blocks render lazily near the viewport, and the scroll offset anchors on a block so blocks above it changing height leave the visible rows in place.
+10. **A rule between every table row.** Without one, the continuation lines of a wrapped row leave blank cells that read as spacing, so the single-line rows around it seem to run together. Claude Code and oh-my-pi rule off every row of their boxed tables, as Codex does in its borderless ones. Ruling only tables that wrap would save a line per row, but a table would change shape as the terminal narrows.

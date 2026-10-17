@@ -106,7 +106,7 @@ pub(crate) const TABLE_TOP: TableRule = TableRule {
     right: '┐',
 };
 
-/// Rule between a table's header and body.
+/// Rule between two rows of a table.
 pub(crate) const TABLE_MIDDLE: TableRule = TableRule {
     left: '├',
     join: '┼',

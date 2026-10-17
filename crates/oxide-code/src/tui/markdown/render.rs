@@ -68,15 +68,34 @@ struct CodeBlockState {
     buf: String,
 }
 
+/// A table cell's lines, which `<br>` tags separate.
+type Cell = Vec<Line<'static>>;
+
 #[derive(Default)]
 struct TableState {
     active: bool,
     in_head: bool,
     alignments: Vec<Alignment>,
     head_rows: usize,
-    rows: Vec<Vec<Line<'static>>>,
-    current_row: Vec<Line<'static>>,
+    rows: Vec<Vec<Cell>>,
+    current_row: Vec<Cell>,
+    /// Lines of the open cell before the one `cell_buf` collects.
+    cell_lines: Cell,
     cell_buf: Vec<Span<'static>>,
+}
+
+impl TableState {
+    /// Ends the open cell's current line, as a `<br>` does.
+    fn break_cell_line(&mut self) {
+        let spans = std::mem::take(&mut self.cell_buf);
+        self.cell_lines.push(Line::from(spans));
+    }
+
+    fn end_cell(&mut self) {
+        self.break_cell_line();
+        let cell = std::mem::take(&mut self.cell_lines);
+        self.current_row.push(cell);
+    }
 }
 
 impl<'a, I> MarkdownRenderer<I>
@@ -192,10 +211,7 @@ where
                 self.table.head_rows = self.table.rows.len();
             }
             TagEnd::TableRow => self.flush_row(),
-            TagEnd::TableCell => {
-                let cell = std::mem::take(&mut self.table.cell_buf);
-                self.table.current_row.push(Line::from(cell));
-            }
+            TagEnd::TableCell => self.table.end_cell(),
             _ => {}
         }
     }
@@ -370,11 +386,15 @@ where
 
         let border_style = self.theme.table_border();
         let header_style = self.theme.table_header();
+        let row_rule = build_horizontal_rule(&col_widths, border_style, TABLE_MIDDLE);
 
         self.lines
             .push(build_horizontal_rule(&col_widths, border_style, TABLE_TOP));
 
         for (row_idx, row) in rows.iter().enumerate() {
+            if row_idx > 0 {
+                self.lines.push(row_rule.clone());
+            }
             let cell_style = if row_idx < head_rows {
                 header_style
             } else {
@@ -388,14 +408,6 @@ where
                 border_style,
                 cell_style,
             ));
-
-            if row_idx + 1 == head_rows && head_rows < rows.len() {
-                self.lines.push(build_horizontal_rule(
-                    &col_widths,
-                    border_style,
-                    TABLE_MIDDLE,
-                ));
-            }
         }
 
         self.lines.push(build_horizontal_rule(
@@ -456,7 +468,17 @@ where
         self.push_span(Span::styled(code.into_string(), style));
     }
 
+    /// Writes inline HTML verbatim, except that a `<br>` in a table cell breaks the cell's line,
+    /// since a GFM cell has no other way to hold several lines.
     fn inline_html(&mut self, html: &str) {
+        if self.table.active {
+            if is_line_break_tag(html) {
+                self.table.break_cell_line();
+            } else {
+                self.table.cell_buf.push(Span::raw(html.to_owned()));
+            }
+            return;
+        }
         self.push_span(Span::raw(html.to_owned()));
     }
 
@@ -645,12 +667,21 @@ fn leading_whitespace_width(line: &Line<'_>) -> usize {
 const TABLE_CELL_PADDING: usize = 1;
 const TABLE_COLUMN_OVERHEAD: usize = 2 * TABLE_CELL_PADDING + 1;
 
+/// Whether `html` is a `<br>` tag in any of its spellings, such as `<br/>` or `<BR />`.
+fn is_line_break_tag(html: &str) -> bool {
+    let tag = html.trim().to_ascii_lowercase();
+    tag.strip_prefix("<br")
+        .and_then(|rest| rest.strip_suffix('>'))
+        .is_some_and(|rest| matches!(rest.trim(), "" | "/"))
+}
+
 /// Computes the max display width for each column across all rows.
-fn compute_column_widths(rows: &[Vec<Line<'_>>], col_count: usize) -> Vec<usize> {
+fn compute_column_widths(rows: &[Vec<Cell>], col_count: usize) -> Vec<usize> {
     let mut widths = vec![0_usize; col_count];
     for row in rows {
         for (col, cell) in row.iter().enumerate() {
-            widths[col] = widths[col].max(cell.width());
+            let width = cell.iter().map(Line::width).max().unwrap_or(0);
+            widths[col] = widths[col].max(width);
         }
     }
     widths
@@ -702,17 +733,25 @@ fn build_horizontal_rule(col_widths: &[usize], style: Style, rule: TableRule) ->
     Line::from(Span::styled(buf, style))
 }
 
-/// Word-wraps a cell's spans, always returning at least one sub-line.
-fn wrap_cell(cell: &Line<'static>, target_width: usize) -> Vec<Line<'static>> {
-    if cell.spans.is_empty() || target_width == 0 {
-        return vec![cell.clone()];
+/// Word-wraps each of a cell's lines, always returning at least one sub-line.
+fn wrap_cell(cell: &[Line<'static>], target_width: usize) -> Vec<Line<'static>> {
+    if cell.is_empty() {
+        return vec![Line::default()];
     }
-    wrap_line(cell.clone(), target_width, 0, None)
+    cell.iter()
+        .flat_map(|line| {
+            if line.spans.is_empty() || target_width == 0 {
+                vec![line.clone()]
+            } else {
+                wrap_line(line.clone(), target_width, 0, None)
+            }
+        })
+        .collect()
 }
 
 /// Builds the visual lines for a data row, wrapping cells to column widths.
 fn build_data_rows(
-    row: &[Line<'static>],
+    row: &[Cell],
     col_widths: &[usize],
     alignments: &[Alignment],
     col_count: usize,
@@ -722,7 +761,7 @@ fn build_data_rows(
     let empty = Line::default();
     let cols: Vec<(Vec<Line<'static>>, usize)> = (0..col_count)
         .map(|col| {
-            let cell = row.get(col).unwrap_or(&empty);
+            let cell = row.get(col).map_or(&[][..], Vec::as_slice);
             let target_width = col_widths.get(col).copied().unwrap_or(0);
             (wrap_cell(cell, target_width), target_width)
         })
@@ -1205,7 +1244,7 @@ mod tests {
     // ── render_markdown: tables ──
 
     #[test]
-    fn render_markdown_table_draws_borders_header_rule_and_rows() {
+    fn render_markdown_table_draws_borders_and_a_rule_between_every_row() {
         let lines = rendered_text(indoc! {"
             | A | B |
             |---|---|
@@ -1219,6 +1258,7 @@ mod tests {
                 "│ A │ B │",
                 "├───┼───┤",
                 "│ 1 │ 2 │",
+                "├───┼───┤",
                 "│ 3 │ 4 │",
                 "└───┴───┘",
             ]
@@ -1245,8 +1285,9 @@ mod tests {
     }
 
     #[test]
-    fn render_markdown_table_header_cells_are_bold() {
+    fn render_markdown_table_styles_header_cells_and_borders_from_their_slots() {
         let t = theme();
+
         let text = render_markdown(
             indoc! {"
                 | Name |
@@ -1256,20 +1297,14 @@ mod tests {
             &t,
             0,
         );
-        let header_line = text
-            .lines
-            .iter()
-            .find(|l| l.spans.iter().any(|s| s.content.contains("Name")))
-            .expect("header line not found");
-        let name_span = header_line
-            .spans
-            .iter()
-            .find(|s| s.content.contains("Name"))
-            .unwrap();
-        assert!(
-            name_span.style.add_modifier.contains(Modifier::BOLD),
-            "header cells should be bold: {name_span:?}"
-        );
+
+        let lines = &text.lines;
+        assert_eq!(lines[1].spans[2], Span::styled("Name", t.table_header()));
+        assert_eq!(lines[3].spans[2], Span::raw("val"));
+        assert_eq!(lines[1].spans[0], Span::styled("│", t.table_border()));
+        for rule in [&lines[0], &lines[2], &lines[4]] {
+            assert_eq!(rule.spans[0].style, t.table_border(), "{rule}");
+        }
     }
 
     #[test]
@@ -1347,26 +1382,86 @@ mod tests {
     }
 
     #[test]
-    fn render_markdown_table_fits_width_budget_and_wraps_cells() {
+    fn render_markdown_table_fits_width_budget_and_rules_off_a_wrapped_row() {
         let lines = rendered_text_at_width(
             indoc! {"
-                | # | Description                         |
-                |---|-------------------------------------|
-                | 1 | short                               |
-                | 2 | a cell with enough words to wrap it |
+                | Check | Result |
+                |-------|--------|
+                | Build | passed |
+                | Tests | 2798 passed after the flaky one was retried |
+                | Lint  | clean  |
             "},
             40,
         );
         assert_eq!(
             lines,
             [
-                "┌───┬──────────────────────────────────┐",
-                "│ # │ Description                      │",
-                "├───┼──────────────────────────────────┤",
-                "│ 1 │ short                            │",
-                "│ 2 │ a cell with enough words to wrap │",
-                "│   │ it                               │",
-                "└───┴──────────────────────────────────┘",
+                "┌───────┬──────────────────────────────┐",
+                "│ Check │ Result                       │",
+                "├───────┼──────────────────────────────┤",
+                "│ Build │ passed                       │",
+                "├───────┼──────────────────────────────┤",
+                "│ Tests │ 2798 passed after the flaky  │",
+                "│       │ one was retried              │",
+                "├───────┼──────────────────────────────┤",
+                "│ Lint  │ clean                        │",
+                "└───────┴──────────────────────────────┘",
+            ]
+        );
+    }
+
+    #[test]
+    fn render_markdown_table_narrow_width_shrinks_every_column_and_keeps_the_rules_aligned() {
+        let lines = rendered_text_at_width(
+            indoc! {"
+                | Step | Run         | Note             |
+                |------|-------------|------------------|
+                | 1    | cargo build | makes the binary |
+                | 2    | cargo test  | runs all tests   |
+            "},
+            26,
+        );
+        assert_eq!(
+            lines,
+            [
+                "┌──────┬────────┬────────┐",
+                "│ Step │ Run    │ Note   │",
+                "├──────┼────────┼────────┤",
+                "│ 1    │ cargo  │ makes  │",
+                "│      │ build  │ the    │",
+                "│      │        │ binary │",
+                "├──────┼────────┼────────┤",
+                "│ 2    │ cargo  │ runs   │",
+                "│      │ test   │ all    │",
+                "│      │        │ tests  │",
+                "└──────┴────────┴────────┘",
+            ]
+        );
+    }
+
+    #[test]
+    fn render_markdown_table_br_breaks_a_cell_line_and_other_inline_html_stays_in_the_cell() {
+        let lines = rendered_text(indoc! {"
+            Intro.
+
+            | A | B |
+            |---|---|
+            | one<br>two | x |
+            | <b>bold</b> | y |
+        "});
+        assert_eq!(
+            lines,
+            [
+                "Intro.",
+                "",
+                "┌─────────────┬───┐",
+                "│ A           │ B │",
+                "├─────────────┼───┤",
+                "│ one         │ x │",
+                "│ two         │   │",
+                "├─────────────┼───┤",
+                "│ <b>bold</b> │ y │",
+                "└─────────────┴───┘",
             ]
         );
     }
@@ -1635,6 +1730,18 @@ mod tests {
         );
     }
 
+    // ── is_line_break_tag ──
+
+    #[test]
+    fn is_line_break_tag_accepts_every_br_spelling_and_rejects_other_tags() {
+        for html in ["<br>", "<br/>", "<br />", "<BR>", " <Br > "] {
+            assert!(is_line_break_tag(html), "{html:?}");
+        }
+        for html in ["<b>", "<brand>", "</br>", "<br"] {
+            assert!(!is_line_break_tag(html), "{html:?}");
+        }
+    }
+
     // ── fit_column_widths ──
 
     #[test]
@@ -1670,28 +1777,29 @@ mod tests {
     // ── wrap_cell ──
 
     #[test]
-    fn wrap_cell_wraps_long_content_to_target_width() {
-        let cell = Line::from("one two three four");
+    fn wrap_cell_wraps_each_line_to_target_width_in_order() {
+        let cell = [Line::from("one two three"), Line::from("four")];
+
         let out = wrap_cell(&cell, 8);
-        assert!(out.len() >= 2, "long cell should wrap: {out:?}");
-        for sub_line in &out {
-            let width = sub_line.width();
-            assert!(width <= 8, "sub-line exceeds target width: {sub_line:?}");
-        }
+
+        assert_eq!(
+            out,
+            [
+                Line::from("one two "),
+                Line::from("three"),
+                Line::from("four")
+            ]
+        );
     }
 
     #[test]
-    fn wrap_cell_empty_produces_single_empty_sub_line() {
-        let out = wrap_cell(&Line::default(), 10);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0], Line::default());
+    fn wrap_cell_missing_cell_produces_single_empty_sub_line() {
+        assert_eq!(wrap_cell(&[], 10), [Line::default()]);
     }
 
     #[test]
     fn wrap_cell_zero_target_width_preserves_cell() {
-        let cell = Line::from("hello");
-        let out = wrap_cell(&cell, 0);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0], cell);
+        let cell = [Line::from("hello")];
+        assert_eq!(wrap_cell(&cell, 0), cell);
     }
 }

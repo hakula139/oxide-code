@@ -670,6 +670,15 @@ mod tests {
         }
     }
 
+    #[test]
+    fn parse_theme_table_header_is_the_bold_accent_in_every_builtin() {
+        for builtin::BuiltinTheme { name, body, .. } in builtin::BUILT_IN {
+            let t = parse_theme(body).unwrap_or_else(|e| panic!("{name} parse: {e:#}"));
+            assert_eq!(t.table_header, t.accent, "{name}");
+            assert_eq!(t.table_header.modifiers, Modifier::BOLD, "{name}");
+        }
+    }
+
     /// Pin a representative subset of Catppuccin Mocha's hex codes
     /// so an accidental palette edit in `mocha.toml` surfaces as a
     /// failing test rather than a silent visual regression.
