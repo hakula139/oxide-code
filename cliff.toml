@@ -55,20 +55,21 @@ use_branch_tags = true
 sort_commits = "oldest"
 
 commit_preprocessors = [
-  # Backtick inline HTML in subjects so markdown renders it as code. `(^|[^`])`
-  # is a lookbehind stand-in (Rust regex lacks one) skipping already-fenced spans.
+  # Advisory bumps merged as `chore(deps)` before the `fix(deps)` convention.
+  # This runs first because the autolink below rewrites `(#N)`.
+  { pattern = '^chore\(deps\)(: .* \(#(17|34|94)\))', replace = 'fix(deps)$1' },
+  # Backtick inline HTML in subjects so markdown renders it as code.
+  # `(^|[^`])` is a lookbehind stand-in (Rust regex lacks one) skipping already-fenced spans.
   { pattern = '(^|[^`])(<\/?[a-zA-Z][^>]*>)', replace = '$1`$2`' },
   # GitHub autolinks `#N` in release notes but not in rendered files.
   { pattern = '\(#([0-9]+)\)', replace = '([#$1](https://github.com/hakula139/oxide-code/pull/$1))' },
   # Early PR titles joined clauses with a spaced em-dash.
   { pattern = ' — ', replace = ': ' },
-  # An advisory bump from before the `fix(deps)` convention (#17).
-  { pattern = '^chore\(deps\): (bump rustls-webpki and rand for Dependabot alerts)', replace = 'fix(deps): $1' },
 ]
 
 # `<!-- N -->` prefixes (stripped in the body template) order sections by priority.
-# First match wins: catch-all `!:` → type prefixes → skips. The `chore` skip covers
-# routine `chore(deps)` and `chore(flake)` bumps.
+# First match wins: catch-all `!:` → type prefixes → skips.
+# The `chore` skip covers routine `chore(deps)` and `chore(flake)` bumps.
 commit_parsers = [
   { message = '^[a-z]+(\([^)]+\))?!:', group = "<!-- 0 -->Breaking changes" },
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Regenerate Formula/oxide-code.rb for a release tag from its `.sha256` sidecars.
 #
-# The release workflow runs this after publishing, with the sidecars its build jobs produced. To
-# run it by hand, download the sidecars from the published release first:
+# The release workflow runs this after publishing, with the sidecars its build jobs produced.
+# To run it by hand, download the sidecars from the published release first:
 #
 #   gh release download vX.Y.Z --pattern '*.sha256' --dir /tmp/oxide-code-vX.Y.Z
 #   ./scripts/update-homebrew-formula.sh vX.Y.Z /tmp/oxide-code-vX.Y.Z
@@ -10,7 +10,7 @@
 set -euo pipefail
 
 if [[ "$#" -ne 2 ]]; then
-  echo "usage: $0 <vX.Y.Z> <sidecar-dir>" >&2
+  echo "Usage: $0 <vX.Y.Z> <sidecar-dir>" >&2
   exit 2
 fi
 
