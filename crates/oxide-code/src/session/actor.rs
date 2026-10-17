@@ -55,9 +55,9 @@ pub(super) enum SessionCmd {
         snapshots: Vec<FileSnapshot>,
         ack: oneshot::Sender<Outcome>,
     },
-    /// `/compact`: write the compaction boundary + synthetic post-compact message in one
-    /// batched flush, reset the chain anchor in `SessionState`, and ack the pre-compact
-    /// message count for the post-compact UI line.
+    /// `/compact`: write the compaction boundary and synthetic post-compact message in one batched
+    /// flush, reset the chain anchor in `SessionState`, and ack the pre-compact message count for
+    /// the post-compact UI line.
     Compact {
         summary: String,
         instructions: Option<String>,
@@ -68,8 +68,8 @@ pub(super) enum SessionCmd {
     /// Drains pending writes, acks, then exits the actor loop so shutdown returns without
     /// waiting for orphaned clones to drop.
     Shutdown { ack: oneshot::Sender<()> },
-    /// Test-only: panics inside the actor task so callers can exercise
-    /// the `JoinError::is_panic()` path in `shutdown`.
+    /// Test-only: panics inside the actor task so callers can exercise the `JoinError::is_panic()`
+    /// path in `shutdown`.
     #[cfg(test)]
     Panic,
 }

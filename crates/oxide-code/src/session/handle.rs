@@ -28,7 +28,7 @@ use crate::util::sync::lock_or_recover;
 #[cfg(test)]
 pub(crate) mod testing;
 
-/// Headroom for burst tool-round writes + concurrent title-generator.
+/// Headroom for burst tool-round writes and the concurrent title generator.
 const CHANNEL_CAPACITY: usize = 1024;
 
 // ── SessionHandle ──
@@ -92,12 +92,12 @@ impl SharedState {
     }
 }
 
-/// Combined ack from `record_message`: AI-title seed + first-failure surface in one round-trip.
+/// Combined ack from `record_message`: AI-title seed and first-failure surface in one round-trip.
 pub(crate) struct RecordOutcome {
     /// `Some` only on the first user-text message of a fresh session.
     pub(crate) ai_title_seed: Option<String>,
-    /// First I/O failure once per session. Subsequent failures stay
-    /// silent (warn-logged instead). `None` on healthy writes.
+    /// First I/O failure once per session. Subsequent failures stay silent (warn-logged instead).
+    /// `None` on healthy writes.
     pub(crate) failure: Option<String>,
 }
 
@@ -126,7 +126,7 @@ impl SessionHandle {
         !self.cmd_tx.is_closed()
     }
 
-    /// Record a conversation message. Returns after the batch flush completes.
+    /// Records a conversation message. Returns after the batch flush completes.
     pub(crate) async fn record_message(&self, msg: Message) -> RecordOutcome {
         self.record_message_with_context(msg, None).await
     }
@@ -146,7 +146,7 @@ impl SessionHandle {
             })
     }
 
-    /// Record sidecar metadata for a tool round in one cmd. Default-metadata items are skipped.
+    /// Records sidecar metadata for a tool round in one cmd. Default-metadata items are skipped.
     pub(crate) async fn record_tool_metadata_batch(
         &self,
         items: Vec<(String, ToolMetadata)>,
@@ -156,21 +156,21 @@ impl SessionHandle {
             .await
     }
 
-    /// Record the token usage of billed requests, one entry each.
+    /// Records the token usage of billed requests, one entry each.
     pub(crate) async fn record_usage(&self, records: Vec<UsageRecord>) -> Outcome {
         let (ack, rx) = oneshot::channel();
         self.dispatch_outcome(SessionCmd::Usage { records, ack }, rx)
             .await
     }
 
-    /// Append an AI-generated session title (supersedes the first-prompt title).
+    /// Appends an AI-generated session title (supersedes the first-prompt title).
     pub(crate) async fn append_ai_title(&self, title: String) -> Outcome {
         let (ack, rx) = oneshot::channel();
         self.dispatch_outcome(SessionCmd::AppendAiTitle { title, ack }, rx)
             .await
     }
 
-    /// Persist a user-supplied title. The flag flips in `SharedState` *before* dispatch so the
+    /// Persists a user-supplied title. The flag flips in `SharedState` *before* dispatch so the
     /// title generator's pre-check sees it even if the actor hasn't drained its channel yet.
     pub(crate) async fn set_manual_title(&self, title: String) -> Outcome {
         self.shared.mark_manual_title_set();
@@ -183,7 +183,7 @@ impl SessionHandle {
         self.shared.manual_title_set()
     }
 
-    /// Write the compact boundary and synthetic post-compact message, then reset the chain anchor.
+    /// Writes the compact boundary and synthetic post-compact message, then reset the chain anchor.
     /// `tasks` is the task list the summarized transcript leaves. Returns `pre_count` for the
     /// post-compact UI plus every write failure, since the caller swaps in the summary only once
     /// the boundary is on disk.
@@ -222,7 +222,7 @@ impl SessionHandle {
             })
     }
 
-    /// Write the session summary and finalize. Idempotent no-op on fresh sessions that never
+    /// Writes the session summary and finalizes. Idempotent no-op on fresh sessions that never
     /// recorded anything. `snapshots` are written as `Entry::FileSnapshot` ahead of the summary.
     pub(crate) async fn finish(&self, snapshots: Vec<FileSnapshot>) -> Outcome {
         let (ack, rx) = oneshot::channel();
@@ -230,7 +230,7 @@ impl SessionHandle {
             .await
     }
 
-    /// Finalize and tear down: writes the summary, surfaces a flush error (if any), and shuts
+    /// Finalizes and tears down: writes the summary, surfaces a flush error (if any), and shuts
     /// the actor down. Returns the failure message for the caller to route.
     pub(crate) async fn finalize(self, snapshots: Vec<FileSnapshot>) -> Option<String> {
         let outcome = self.finish(snapshots).await;
@@ -286,7 +286,7 @@ impl SessionHandle {
         if !self.shared.surface_first_actor_gone() {
             return None;
         }
-        tracing::warn!("session actor task is gone — recording dropped");
+        tracing::warn!("session actor task is gone, so the recording was dropped");
         let cause = self.shared.last_flush_failure();
         let msg = match cause {
             Some(io_err) => format!(
@@ -331,7 +331,7 @@ pub(crate) struct ResumedSession {
 
 // ── Constructors ──
 
-/// Start a fresh session and spawn its actor. The file materializes lazily on the first record cmd.
+/// Starts a fresh session and spawns its actor. The file materializes on the first record cmd.
 pub(crate) fn start(store: &SessionStore, model: &str) -> SessionHandle {
     spawn_actor(SessionState::fresh(store.clone(), model))
 }
@@ -364,7 +364,7 @@ pub(crate) async fn roll(
     }
 }
 
-/// Resumed transcript + finalize failure from the old session. The handle swap happens via
+/// Resumed transcript and finalize failure from the old session. The handle swap happens via
 /// `&mut SessionHandle`. This struct only carries what the conversation and UI rebuild from.
 #[derive(Debug)]
 pub(crate) struct RollIntoOutcome {
@@ -377,7 +377,7 @@ pub(crate) struct RollIntoOutcome {
     pub(crate) drifted_paths: Vec<PathBuf>,
 }
 
-/// Mid-session re-init: load + sanitize the target session, swap the handle in place, then
+/// Mid-session re-init: load and sanitize the target session, swap the handle in place, then
 /// finalize the old. Same shape as [`roll`] but loading from disk.
 ///
 /// Bails _without swapping_ when the target id matches the live session (would race the
@@ -393,7 +393,7 @@ pub(crate) async fn roll_into(
     if read_session_id_from_path(target)? == session.session_id() {
         bail!("already resumed: target id matches the live session");
     }
-    // Load + sanitize FIRST so a target-load error leaves the live session untouched.
+    // Load and sanitize FIRST so a target-load error leaves the live session untouched.
     let ResumedSession {
         handle: target_handle,
         transcript,
@@ -1113,8 +1113,8 @@ mod tests {
 
     #[tokio::test]
     async fn finalize_fails_when_actor_dead() {
-        // Dead-actor path must surface so callers can route the
-        // failure (warn-log on exit, sink on `/clear` roll).
+        // Dead-actor path must surface so callers can route the failure (warn-log on exit, sink on
+        // `/clear` roll).
         let handle = testing::dead("dead");
         let failure = handle.finalize(Vec::new()).await;
         assert!(failure.is_some(), "dead handle finalize surfaces failure");
@@ -1160,8 +1160,8 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_cancelled_actor_completes_without_panicking() {
-        // Abort produces a JoinError where is_panic() == false,
-        // exercising the "cancelled" branch in shutdown.
+        // Abort produces a JoinError where is_panic() == false, exercising the "cancelled" branch
+        // in shutdown.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let handle = start(&store, "m");
@@ -1231,9 +1231,8 @@ mod tests {
 
     #[tokio::test]
     async fn roll_persists_tracker_snapshots_into_old_session_then_clears_tracker() {
-        // Snapshot-before-clear: snapshots from the live tracker must
-        // land in the OLD JSONL via finalize, and the tracker must be
-        // empty afterwards so the new session starts cold.
+        // Snapshot-before-clear: snapshots from the live tracker must land in the OLD JSONL via
+        // finalize, and the tracker must be empty afterwards so the new session starts cold.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let tracker = FileTracker::default();
@@ -1710,7 +1709,7 @@ mod tests {
         );
     }
 
-    // ── Session format ──
+    // ── Session Format ──
 
     #[tokio::test]
     async fn session_writes_every_entry_type_as_byte_compatible_jsonl() {

@@ -1,5 +1,4 @@
-//! Test-only [`SessionHandle`] constructors. A child of `handle`, so it can build the private
-//! fields directly.
+//! Test-only [`SessionHandle`] constructors.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};

@@ -126,7 +126,7 @@ mod tests {
         Message::user(text)
     }
 
-    /// Asserts the chain holds single-Text messages with these texts, in order.
+    /// Asserts each message opens with a Text block holding these texts, in order.
     /// `matches!` keeps the helper free of a panic arm that coverage would flag.
     fn assert_chain_texts(chain: &[Message], want: &[&str]) {
         assert_eq!(chain.len(), want.len());

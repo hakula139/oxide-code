@@ -6,7 +6,7 @@ use std::path::Path;
 
 use xxhash_rust::xxh64::xxh64;
 
-/// Char-length cap before truncate + hash. 80 stays well under filesystem `NAME_MAX` (255).
+/// Char-length cap before truncating and hashing. 80 stays well under filesystem `NAME_MAX` (255).
 const MAX_PROJECT_DIR_LEN: usize = 80;
 
 /// Hex chars in the truncation hash suffix.

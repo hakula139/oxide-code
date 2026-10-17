@@ -216,7 +216,7 @@ mod tests {
         ];
         sanitize_resumed_messages(&mut messages);
 
-        // Assistant keeps text + t1 (resolved), and t2 drops as unresolved.
+        // Assistant keeps the text and the resolved t1, and t2 drops as unresolved.
         let assistant_blocks = &messages[1].content;
         assert_eq!(assistant_blocks.len(), 2);
         assert!(matches!(&assistant_blocks[0], ContentBlock::Text { .. }));
@@ -310,8 +310,8 @@ mod tests {
 
     #[test]
     fn sanitize_resumed_messages_drops_orphan_when_assistant_tool_use_was_dropped() {
-        // Mismatched ids: pass 1 strips the assistant's unresolved t1,
-        // leaving no surviving ids, so pass 2 drops the user's t2.
+        // Mismatched ids: pass 1 strips the assistant's unresolved t1, leaving no surviving ids, so
+        // pass 2 drops the user's t2.
         let mut messages = vec![
             Message::user("do X"),
             Message {
@@ -572,7 +572,7 @@ mod tests {
 
     #[test]
     fn insert_resume_sentinels_skips_append_when_trailing_user_has_text() {
-        // Mixed text + tool_result is a normal follow-up, so it gets no sentinel.
+        // Mixed text and tool_result is a normal follow-up, so it gets no sentinel.
         let mut messages = vec![
             Message::user("do X"),
             Message {

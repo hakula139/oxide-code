@@ -508,7 +508,7 @@ mod tests {
         assert_eq!(tasks, []);
     }
 
-    // ── JSONL format ──
+    // ── JSONL Format ──
 
     #[test]
     fn entries_parse_from_jsonl_lines() {

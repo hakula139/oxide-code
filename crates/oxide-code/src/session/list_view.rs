@@ -25,7 +25,7 @@ const MIN_TITLE_BUDGET: usize = 12;
 /// Header "Project" is 7 chars, padded to 8 so the label always fits.
 const PROJECT_COL_MIN: usize = 8;
 
-/// Project column cap. A pathologically deep path overflows its own row so the title column
+/// Project column cap. A deeper path overflows the column in its own row, so the title column
 /// keeps its width in every other row.
 const PROJECT_COL_MAX: usize = 40;
 
