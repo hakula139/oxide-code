@@ -12,12 +12,12 @@
 use std::iter;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 use indoc::{formatdoc, indoc};
 use tokio::sync::mpsc;
 use tracing::warn;
 
-use super::abort::{AbortResult, await_unless_aborted};
+use super::abort::{AbortResult, TurnAbort, await_unless_aborted};
 use super::compact_boundary;
 use super::turn::collect_response;
 use crate::client::{PromptTooLong, Response, ResponseEvent, StopReason, TokenUsage, Wire};
@@ -31,9 +31,9 @@ use crate::tool::ToolDefinition;
 
 const MAX_AUTO_COMPACT_FAILURES: u8 = 3;
 
-/// Minimum messages required for compaction to be worthwhile. Below this, the summary is
-/// usually longer than the transcript itself.
-const MIN_MESSAGES_FOR_COMPACT: usize = 4;
+/// Rough transcript size below which compaction is refused, since the summary would be about as
+/// long as the transcript. Text, tool calls, and tool results all count toward it.
+const MIN_TOKENS_FOR_COMPACT: u32 = 1_000;
 
 /// Retries for a summary request that overflowed the context window.
 const MAX_OVERFLOW_RETRIES: u32 = 3;
@@ -77,9 +77,10 @@ pub(super) struct AutoCompact<'a> {
     pub(super) spent: &'a mut Vec<TokenUsage>,
 }
 
-/// Decides whether to compact and drives it when the threshold and breaker allow. Returns
-/// `Ok(true)` when the transcript was replaced. Returns `Ok(false)` when skipped (breaker
-/// tripped, no usage, below threshold) or when summarization / boundary-write failed.
+/// Compacts `messages` when `usage` crosses the threshold and the breaker allows, returning
+/// whether it did. Skips without auto state or usage, below the threshold, or once the breaker
+/// has tripped. A failed summary or boundary write counts toward the breaker and fails the
+/// prompt, so a request over the threshold never goes out until the breaker turns compaction off.
 #[expect(
     clippy::too_many_arguments,
     reason = "auto-compaction needs the same live turn state as manual compaction"
@@ -125,8 +126,10 @@ pub(super) async fn auto_compact_if_needed(
         Ok(summary) => summary,
         Err(e) => {
             warn!("auto-compaction failed: {e:#}");
-            record_auto_compact_failure(auto, sink, Some(format!("Auto-compaction failed: {e:#}")));
-            return Ok(false);
+            return Err(record_auto_compact_failure(
+                auto,
+                &format!("Auto-compaction failed, so the prompt was not sent: {e:#}"),
+            ));
         }
     };
     let compacted = compact_boundary::replace_session_with_summary(
@@ -139,34 +142,29 @@ pub(super) async fn auto_compact_if_needed(
         true,
     )
     .await;
-    if compacted {
-        *auto.failures = 0;
-    } else {
-        record_auto_compact_failure(auto, sink, None);
+    if !compacted {
+        return Err(record_auto_compact_failure(
+            auto,
+            "Auto-compaction was not saved, so the prompt was not sent",
+        ));
     }
-    Ok(compacted)
+    *auto.failures = 0;
+    Ok(true)
 }
 
-/// Bumps the failure counter. If the bump trips the breaker, emits a one-time disablement
-/// notice. `detail` becomes a user-visible error event. Pass `None` when an earlier sink call
-/// already surfaced the failure (persist-fail goes through `session_write_error`).
-fn record_auto_compact_failure(
-    auto: &mut AutoCompact<'_>,
-    sink: &dyn EventSink,
-    detail: Option<String>,
-) {
+/// Counts a failed attempt and returns the abort that fails the prompt, ending `headline` with
+/// what sending the prompt again does.
+fn record_auto_compact_failure(auto: &mut AutoCompact<'_>, headline: &str) -> TurnAbort {
     *auto.failures += 1;
-    if let Some(detail) = detail {
-        sink.emit(Event::Error(detail), "auto-compaction-failed");
-    }
-    if *auto.failures == MAX_AUTO_COMPACT_FAILURES {
-        sink.emit(
-            Event::Error(format!(
-                "Auto-compaction disabled for this session after {MAX_AUTO_COMPACT_FAILURES} failures."
-            )),
-            "auto-compaction-disabled",
-        );
-    }
+    let next = if *auto.failures < MAX_AUTO_COMPACT_FAILURES {
+        "Send it again to retry.".to_owned()
+    } else {
+        format!(
+            "Auto-compaction is off for this session after {MAX_AUTO_COMPACT_FAILURES} failures, \
+             so sending the prompt again runs it without compaction."
+        )
+    };
+    TurnAbort::Failed(anyhow!("{headline}. {next}"))
 }
 
 /// Drives the summarization request and returns the trimmed summary. `prompt` and `tools` must be
@@ -188,23 +186,14 @@ pub(super) async fn compact_session(
     sink: &dyn EventSink,
     spent: &mut Vec<TokenUsage>,
 ) -> Result<String> {
-    if transcript.len() < MIN_MESSAGES_FOR_COMPACT {
-        bail!(
-            "session is too short to compact ({} messages, need at least {MIN_MESSAGES_FOR_COMPACT})",
-            transcript.len(),
-        );
-    }
-    let text_messages = transcript
+    let tokens = transcript
         .iter()
-        .filter(|m| {
-            m.content
-                .iter()
-                .any(|b| matches!(b, ContentBlock::Text { .. }))
-        })
-        .count();
-    if text_messages < MIN_MESSAGES_FOR_COMPACT {
+        .map(rough_tokens)
+        .fold(0, u32::saturating_add);
+    if tokens < MIN_TOKENS_FOR_COMPACT {
         bail!(
-            "session has too little text to compact ({text_messages} text messages, need at least {MIN_MESSAGES_FOR_COMPACT})",
+            "session is too short to compact (about {tokens} tokens, need at least \
+             {MIN_TOKENS_FOR_COMPACT})"
         );
     }
 
@@ -460,26 +449,13 @@ mod tests {
     use crate::client::anthropic::testing::{api_key, sse_body, test_client};
     use crate::client::{RateLimitWindow, RateLimits};
     use crate::engine::testing::{
-        FakeClient, dead_test_session, empty_prompt, inert_ops, test_session, text_turn, with_stop,
+        FakeClient, dead_test_session, empty_prompt, inert_ops, test_session, text_turn,
+        tool_heavy_transcript, with_stop,
     };
     use crate::message::Role;
     use crate::protocol::CapturingSink;
 
     // ── auto_compact_if_needed ──
-
-    struct FailingCompactClient;
-
-    impl Wire for FailingCompactClient {
-        fn stream_message(
-            &self,
-            _messages: &[Message],
-            _system_sections: &[&str],
-            _user_context: Option<&str>,
-            _tools: &[ToolDefinition],
-        ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
-            Err(anyhow!("summarizer unavailable"))
-        }
-    }
 
     struct CountingFailingClient {
         calls: AtomicUsize,
@@ -544,12 +520,7 @@ mod tests {
         let client = FakeClient::new(Vec::new());
         let sink = CapturingSink::new();
         let tracker = FileTracker::default();
-        let mut messages = vec![
-            Message::user("hi"),
-            Message::assistant("there"),
-            Message::user("next"),
-            Message::assistant("done"),
-        ];
+        let mut messages = tool_heavy_transcript();
         let mut pending = Vec::new();
         let mut failures = 0;
 
@@ -624,27 +595,22 @@ mod tests {
         .await
         .unwrap();
         assert!(!below_threshold);
-        assert_eq!(messages.len(), 4);
+        assert_eq!(messages, tool_heavy_transcript());
         assert_eq!(failures, 0);
     }
 
     #[tokio::test]
-    async fn auto_compact_if_needed_counts_summarizer_failure_without_replacing_messages() {
+    async fn auto_compact_if_needed_fails_the_prompt_when_the_summary_fails() {
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let sink = CapturingSink::new();
         let tracker = FileTracker::default();
-        let mut messages = vec![
-            Message::user("hi"),
-            Message::assistant("there"),
-            Message::user("next"),
-            Message::assistant("done"),
-        ];
+        let mut messages = tool_heavy_transcript();
         let mut pending = Vec::new();
         let mut failures = 0;
 
         let compacted = auto_compact_if_needed(
-            &FailingCompactClient,
+            &CountingFailingClient::new(),
             &session,
             &mut messages,
             &sink,
@@ -668,85 +634,28 @@ mod tests {
                 output_tokens: 1,
             }),
         )
-        .await
-        .unwrap();
+        .await;
 
-        assert!(!compacted);
+        let Err(TurnAbort::Failed(error)) = compacted else {
+            panic!("a failed summary fails the prompt: {compacted:?}");
+        };
+        assert_eq!(
+            format!("{error:#}"),
+            "Auto-compaction failed, so the prompt was not sent: summarizer unavailable. Send it \
+             again to retry.",
+        );
         assert_eq!(failures, 1);
-        assert!(matches!(&messages[0].content[0], ContentBlock::Text { text } if text == "hi"));
-        assert!(
-            sink.events().iter().any(|event| {
-                matches!(event, Event::Error(message) if message.contains("Auto-compaction failed"))
-            }),
-            "summarizer failure must surface a user-visible Event::Error",
-        );
+        assert_eq!(messages, tool_heavy_transcript());
+        assert_eq!(sink.events(), [Event::AutoCompactionStarted]);
     }
 
     #[tokio::test]
-    async fn auto_compact_if_needed_emits_disabled_notice_on_third_failure() {
-        let dir = tempfile::tempdir().unwrap();
-        let session = test_session(dir.path());
-        let sink = CapturingSink::new();
-        let tracker = FileTracker::default();
-        let mut messages = vec![
-            Message::user("hi"),
-            Message::assistant("there"),
-            Message::user("next"),
-            Message::assistant("done"),
-        ];
-        let mut pending = Vec::new();
-        let mut failures = MAX_AUTO_COMPACT_FAILURES - 1;
-
-        let compacted = auto_compact_if_needed(
-            &FailingCompactClient,
-            &session,
-            &mut messages,
-            &sink,
-            &mut inert_ops(),
-            &mut pending,
-            Some(&mut AutoCompact {
-                config: AutoCompactionConfig {
-                    enabled: true,
-                    threshold_tokens: Some(10),
-                },
-                failures: &mut failures,
-                file_tracker: &tracker,
-                prompt: &empty_prompt(),
-                tools: &[],
-                spent: &mut Vec::new(),
-            }),
-            Some(TokenUsage {
-                input_tokens: 20,
-                cache_creation_input_tokens: 0,
-                cache_read_input_tokens: 0,
-                output_tokens: 1,
-            }),
-        )
-        .await
-        .unwrap();
-
-        assert!(!compacted);
-        assert_eq!(failures, MAX_AUTO_COMPACT_FAILURES);
-        assert!(
-            sink.events().iter().any(|event| {
-                matches!(event, Event::Error(message) if message.contains("Auto-compaction disabled"))
-            }),
-            "the breaker-tripping failure must surface a one-time disablement notice",
-        );
-    }
-
-    #[tokio::test]
-    async fn auto_compact_if_needed_counts_persist_failure_without_replacing_messages() {
+    async fn auto_compact_if_needed_fails_the_prompt_when_the_boundary_is_not_saved() {
         let session = dead_test_session();
         let client = FakeClient::new(vec![text_turn("auto summary")]);
         let sink = CapturingSink::new();
         let tracker = FileTracker::default();
-        let mut messages = vec![
-            Message::user("hi"),
-            Message::assistant("there"),
-            Message::user("next"),
-            Message::assistant("done"),
-        ];
+        let mut messages = tool_heavy_transcript();
         let mut pending = Vec::new();
         let mut failures = 0;
 
@@ -775,12 +684,17 @@ mod tests {
                 output_tokens: 1,
             }),
         )
-        .await
-        .unwrap();
+        .await;
 
-        assert!(!compacted);
+        let Err(TurnAbort::Failed(error)) = compacted else {
+            panic!("an unsaved boundary fails the prompt: {compacted:?}");
+        };
+        assert_eq!(
+            format!("{error:#}"),
+            "Auto-compaction was not saved, so the prompt was not sent. Send it again to retry.",
+        );
         assert_eq!(failures, 1);
-        assert!(matches!(&messages[0].content[0], ContentBlock::Text { text } if text == "hi"));
+        assert_eq!(messages, tool_heavy_transcript());
         let events = sink.events();
         assert!(
             matches!(
@@ -797,18 +711,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auto_compact_if_needed_stops_after_failure_limit() {
+    async fn auto_compact_if_needed_third_failure_turns_auto_compaction_off() {
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let client = CountingFailingClient::new();
         let sink = CapturingSink::new();
         let tracker = FileTracker::default();
-        let mut messages = vec![
-            Message::user("hi"),
-            Message::assistant("there"),
-            Message::user("next"),
-            Message::assistant("done"),
-        ];
+        let mut messages = tool_heavy_transcript();
         let mut pending = Vec::new();
         let mut failures = MAX_AUTO_COMPACT_FAILURES - 1;
         let usage = Some(TokenUsage {
@@ -817,54 +726,46 @@ mod tests {
             cache_read_input_tokens: 0,
             output_tokens: 1,
         });
+        let mut attempt = async || {
+            auto_compact_if_needed(
+                &client,
+                &session,
+                &mut messages,
+                &sink,
+                &mut inert_ops(),
+                &mut pending,
+                Some(&mut AutoCompact {
+                    config: AutoCompactionConfig {
+                        enabled: true,
+                        threshold_tokens: Some(50_000),
+                    },
+                    failures: &mut failures,
+                    file_tracker: &tracker,
+                    prompt: &empty_prompt(),
+                    tools: &[],
+                    spent: &mut Vec::new(),
+                }),
+                usage,
+            )
+            .await
+        };
 
-        let first = auto_compact_if_needed(
-            &client,
-            &session,
-            &mut messages,
-            &sink,
-            &mut inert_ops(),
-            &mut pending,
-            Some(&mut AutoCompact {
-                config: AutoCompactionConfig {
-                    enabled: true,
-                    threshold_tokens: Some(50_000),
-                },
-                failures: &mut failures,
-                file_tracker: &tracker,
-                prompt: &empty_prompt(),
-                tools: &[],
-                spent: &mut Vec::new(),
-            }),
-            usage,
-        )
-        .await
-        .unwrap();
-        let second = auto_compact_if_needed(
-            &client,
-            &session,
-            &mut messages,
-            &sink,
-            &mut inert_ops(),
-            &mut pending,
-            Some(&mut AutoCompact {
-                config: AutoCompactionConfig {
-                    enabled: true,
-                    threshold_tokens: Some(50_000),
-                },
-                failures: &mut failures,
-                file_tracker: &tracker,
-                prompt: &empty_prompt(),
-                tools: &[],
-                spent: &mut Vec::new(),
-            }),
-            usage,
-        )
-        .await
-        .unwrap();
+        let third = attempt().await;
+        let fourth = attempt().await;
 
-        assert!(!first);
-        assert!(!second);
+        let Err(TurnAbort::Failed(error)) = third else {
+            panic!("the third failure still fails its prompt: {third:?}");
+        };
+        assert_eq!(
+            format!("{error:#}"),
+            "Auto-compaction failed, so the prompt was not sent: summarizer unavailable. \
+             Auto-compaction is off for this session after 3 failures, so sending the prompt \
+             again runs it without compaction.",
+        );
+        assert!(
+            matches!(fourth, Ok(false)),
+            "the next prompt goes out without compaction: {fourth:?}"
+        );
         assert_eq!(failures, MAX_AUTO_COMPACT_FAILURES);
         assert_eq!(client.calls(), 1);
     }
@@ -881,12 +782,7 @@ mod tests {
         };
         let sink = CapturingSink::new();
         let tracker = FileTracker::default();
-        let mut messages = vec![
-            Message::user("hi"),
-            Message::assistant("there"),
-            Message::user("next"),
-            Message::assistant("done"),
-        ];
+        let mut messages = tool_heavy_transcript();
         let mut pending = Vec::new();
         let mut failures = 0;
         let (tx, mut rx) = mpsc::channel::<Op>(1);
@@ -965,12 +861,7 @@ mod tests {
         ]);
         let sink = CapturingSink::new();
         let tracker = FileTracker::default();
-        let mut messages = vec![
-            Message::user("hi"),
-            Message::assistant("there"),
-            Message::user("next"),
-            Message::assistant("done"),
-        ];
+        let mut messages = tool_heavy_transcript();
         let mut failures = 0;
 
         let compacted = auto_compact_if_needed(
@@ -1019,14 +910,20 @@ mod tests {
         let [first, retry] = &sent_texts[..] else {
             panic!("expected the overflow and one retry: {sent_texts:?}");
         };
-        assert_eq!(first[..4], ["hi", "there", "next", "done"]);
-        assert!(
-            !retry
-                .iter()
-                .any(|text| ["hi", "there", "next"].contains(&text.as_str())),
-            "the retry keeps only the newest round: {retry:?}",
+        let rubric = SUMMARIZATION_USER_RUBRIC.trim();
+        assert_eq!(
+            first[..],
+            [
+                "Read log-a.txt and log-b.txt, then reply with the final line of each.",
+                "alpha-end, beta-end",
+                rubric,
+            ]
         );
-        assert!(retry.iter().any(|text| text == "done"), "{retry:?}");
+        assert_eq!(
+            retry[..],
+            [RETRY_TRUNCATION_MARKER, "alpha-end, beta-end", rubric],
+            "the retry keeps only the newest round",
+        );
         assert!(
             matches!(&messages[0].content[0], ContentBlock::Text { text } if text.contains("auto summary"))
         );
@@ -1118,57 +1015,13 @@ mod tests {
         Event::SummaryToken(text.to_owned())
     }
 
-    fn fake_transcript() -> Vec<Message> {
-        vec![
-            Message::user("fix the bug"),
-            Message::assistant("looking now"),
-            Message::user("any progress?"),
-            Message::assistant("found it"),
-        ]
-    }
-
-    /// Transcript whose middle round carries thinking, a tool call, and its result.
-    fn tool_round_transcript() -> Vec<Message> {
-        vec![
-            Message::user("fix the bug"),
-            Message {
-                role: Role::Assistant,
-                content: vec![
-                    ContentBlock::Thinking {
-                        thinking: "check the file".to_owned(),
-                        signature: "sig".to_owned(),
-                    },
-                    ContentBlock::Text {
-                        text: "let me check".to_owned(),
-                    },
-                    ContentBlock::ToolUse {
-                        id: "t1".to_owned(),
-                        name: "read".to_owned(),
-                        input: json!({"path": "/tmp/a"}),
-                    },
-                ],
-            },
-            Message {
-                role: Role::User,
-                content: vec![ContentBlock::ToolResult {
-                    tool_use_id: "t1".to_owned(),
-                    content: "file body".to_owned(),
-                    is_error: false,
-                }],
-            },
-            Message::assistant("found it"),
-            Message::user("any progress?"),
-            Message::assistant("fixed"),
-        ]
-    }
-
     #[tokio::test]
     async fn compact_session_returns_trimmed_summary_on_happy_path() {
         let server = MockServer::start().await;
         mount_summary(&server, streamed_summary_body("  fixed login bug  \n")).await;
 
         let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
-        let summary = summarize(&client, &fake_transcript()).await.unwrap();
+        let summary = summarize(&client, &tool_heavy_transcript()).await.unwrap();
         assert_eq!(summary, "fixed login bug");
     }
 
@@ -1182,7 +1035,7 @@ mod tests {
         .await;
 
         let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
-        let (summary, events) = summarize_streaming(&client, &fake_transcript()).await;
+        let (summary, events) = summarize_streaming(&client, &tool_heavy_transcript()).await;
         assert_eq!(summary.unwrap(), "fixed login bug");
         assert_eq!(
             events,
@@ -1212,7 +1065,7 @@ mod tests {
         .await;
 
         let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
-        let (summary, events) = summarize_streaming(&client, &fake_transcript()).await;
+        let (summary, events) = summarize_streaming(&client, &tool_heavy_transcript()).await;
         assert_eq!(summary.unwrap(), "fixed login bug");
         assert_eq!(events, [token("fixed login bug")]);
     }
@@ -1242,7 +1095,7 @@ mod tests {
             description: "Read a file.",
             input_schema: json!({"type": "object"}),
         }];
-        let transcript = tool_round_transcript();
+        let transcript = tool_heavy_transcript();
 
         let sections: Vec<&str> = prompt.system_sections.iter().map(String::as_str).collect();
         let mut rx = client
@@ -1619,29 +1472,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compact_session_too_short_transcript_errors_before_request() {
+    async fn compact_session_refuses_a_session_below_the_size_floor_without_a_request() {
         let server = MockServer::start().await;
         let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
-        let err = summarize(&client, &[Message::user("hi")])
-            .await
-            .expect_err("must refuse short transcript");
-        assert!(format!("{err:#}").contains("too short to compact"));
-    }
-
-    #[tokio::test]
-    async fn compact_session_refuses_when_too_few_messages_carry_text() {
-        let server = MockServer::start().await;
-        let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
-        let mut transcript = tool_round_transcript();
-        transcript.truncate(4);
-        transcript[1]
-            .content
-            .retain(|b| !matches!(b, ContentBlock::Text { .. }));
+        let transcript = [
+            Message::user("fix the bug"),
+            Message::assistant("looking now"),
+            Message::user("any progress?"),
+            Message::assistant("found it"),
+        ];
 
         let err = summarize(&client, &transcript)
             .await
-            .expect_err("transcript must still satisfy the useful-work threshold");
-        assert!(format!("{err:#}").contains("too little text"));
+            .expect_err("a short session is refused");
+
+        assert_eq!(
+            format!("{err:#}"),
+            "session is too short to compact (about 65 tokens, need at least 1000)",
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 0);
     }
 
     #[tokio::test]
@@ -1650,7 +1499,7 @@ mod tests {
         mount_summary(&server, streamed_summary_body("   \n  ")).await;
 
         let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
-        let (summary, events) = summarize_streaming(&client, &fake_transcript()).await;
+        let (summary, events) = summarize_streaming(&client, &tool_heavy_transcript()).await;
         let err = summary.expect_err("empty summary must error");
         assert!(format!("{err:#}").contains("empty summary"));
         assert_eq!(events, [token("   \n  "), Event::SummaryDiscarded]);
@@ -1680,7 +1529,7 @@ mod tests {
                 &client,
                 &parent_prompt(),
                 &[],
-                &fake_transcript(),
+                &tool_heavy_transcript(),
                 None,
                 &sink,
                 &mut spent,
@@ -1708,7 +1557,7 @@ mod tests {
             .await
             .unwrap();
         let client = HeldStreamClient(Mutex::new(Some(rx)));
-        let (prompt, transcript) = (parent_prompt(), fake_transcript());
+        let (prompt, transcript) = (parent_prompt(), tool_heavy_transcript());
         let sink = CapturingSink::new();
         let mut spent = Vec::new();
 
@@ -1760,7 +1609,7 @@ mod tests {
             &client,
             &parent_prompt(),
             &[],
-            &fake_transcript(),
+            &tool_heavy_transcript(),
             None,
             &sink,
             &mut Vec::new(),
@@ -1812,7 +1661,7 @@ mod tests {
         .await;
 
         let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
-        let err = summarize(&client, &fake_transcript())
+        let err = summarize(&client, &tool_heavy_transcript())
             .await
             .expect_err("in-band error must propagate");
         assert!(
@@ -1833,7 +1682,7 @@ mod tests {
             .await;
 
         let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
-        let err = summarize(&client, &fake_transcript())
+        let err = summarize(&client, &tool_heavy_transcript())
             .await
             .expect_err("expected error");
         assert!(format!("{err:#}").contains("500") || format!("{err:#}").contains("server_error"));
@@ -1843,20 +1692,13 @@ mod tests {
 
     #[test]
     fn drop_oldest_rounds_keeps_the_newest_round_when_the_gap_exceeds_the_transcript() {
-        let kept = drop_oldest_rounds(&fake_transcript(), u32::MAX).unwrap();
+        let kept = drop_oldest_rounds(&tool_heavy_transcript(), u32::MAX).unwrap();
 
-        let texts: Vec<_> = kept
-            .iter()
-            .map(|m| match &m.content[..] {
-                [ContentBlock::Text { text }] => (m.role, text.as_str()),
-                other => panic!("unexpected content {other:?}"),
-            })
-            .collect();
         assert_eq!(
-            texts,
+            kept,
             [
-                (Role::User, RETRY_TRUNCATION_MARKER),
-                (Role::Assistant, "found it")
+                Message::user(RETRY_TRUNCATION_MARKER),
+                Message::assistant("alpha-end, beta-end"),
             ],
         );
     }

@@ -27,7 +27,7 @@ Companions: [commands.md](commands.md), [session/persistence.md](../session/pers
 `Engine::compact` in `engine.rs` coordinates compaction:
 
 - On success, it hands the summary to `engine/compact_boundary`'s `replace_session_with_summary`, which calls `session.compact(...)`, clears the file tracker, replaces the in-memory `Vec<Message>` with the synthetic continuation, and emits `Event::SessionCompacted { summary, pre_count, instructions, automatic }` with `automatic: false`.
-- Failure paths (stream error, unfinished or empty summary, too-few-messages guard) emit `Event::TurnFailed` and leave the transcript unchanged. A summary whose boundary write fails is discarded before the failure is reported.
+- Failure paths (stream error, unfinished or empty summary, too-short guard) emit `Event::TurnFailed` and leave the transcript unchanged. A summary whose boundary write fails is discarded before the failure is reported.
 - Cancellation routes through the existing cancel infrastructure and emits `Event::Cancelled` like a regular turn, and a quit ends the compaction without a terminal event. Dropping the summarization future discards the streamed summary first.
 - Each summary request is recorded as a `usage` entry, and its estimated cost joins the session total whether the summary succeeds, fails, or is cancelled. An `Event::UsageUpdated` then shows the new total, after `SessionCompacted` on success and before the terminal event otherwise.
 
@@ -66,7 +66,7 @@ While the summary streams, the TUI shows it below the chat under a `Summarizing 
 
 13. **Refuse mid-turn (`classify = Mutating`).** All three reference CLIs treat manual compaction as a between-turns operation. `Mutating` is the existing oxide-code lever for that. The slash registry refuses if a turn is in flight, and the user retries after the in-flight reply finishes.
 
-14. **Refuse on too-few messages.** The driver requires at least 4 transcript messages, at least 4 of which carry text, since below that the summary is more verbose than the transcript itself. The refusal fails the compaction and leaves the session untouched.
+14. **Refuse a short transcript.** The driver requires a transcript of about 1,000 tokens, estimated at four bytes of JSON per token, since below that the summary is about as long as the transcript itself. Text, tool calls, and tool results all count, so a session made mostly of tool output compacts as readily as a conversation. The refusal fails the compaction and leaves the session untouched.
 
 15. **Refuse on empty summary.** If the model returns whitespace-only text (model errored quietly, content filter, etc.), fail the compaction and leave the transcript unchanged. Better to retry than to commit a useless summary.
 

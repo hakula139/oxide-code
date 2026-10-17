@@ -66,13 +66,13 @@ Explicit thresholds snap into a usable range. Token values below `50_000` rise t
 4. If the total crosses the threshold, it calls the same compact driver used by `/compact`.
 5. `auto_compact_if_needed` emits `AutoCompactionStarted` so the TUI can show compaction status while the summarizer runs, and the summary streams into the chat as it does for `/compact`.
 6. On success, `compact_boundary` persists the compact boundary, clears the file tracker, replaces `messages` with the synthetic post-compact message, and emits `SessionCompacted`.
-7. On failure, the streamed summary is discarded, `auto_compact_if_needed` increments the failure counter and emits an `Error`, and `submit_prompt` records the new prompt against the unchanged transcript.
+7. On failure, the streamed summary is discarded, `auto_compact_if_needed` increments the failure counter, and `submit_prompt` ends with `TurnFailed` without recording or sending the new prompt.
 
 The failure counter lives on `Engine`. Three consecutive automatic failures disable further automatic attempts until a successful compaction, a model or effort change, `/clear`, or `/resume` resets the counter. Manual `/compact` does not consult it.
 
 ## User Experience
 
-Manual and automatic compaction use the same visible `CompactedBlock`. When an automatic attempt fails, chat surfaces an error (`Auto-compaction failed: ...` from the summarizer, or `Session write failed: ...` from the boundary write) while the user's prompt proceeds against the unchanged transcript. That `Error` is a notice, so the TUI stays busy until the turn's own terminal event. After the third consecutive failure, a one-time notice appears and automatic attempts stop until a `/model` or `/effort` swap, `/clear`, `/resume`, or a successful `/compact` resets the counter.
+Manual and automatic compaction use the same visible `CompactedBlock`. When an automatic attempt fails, the prompt fails with an error saying it was not sent (`Auto-compaction failed, so the prompt was not sent: ...` from the summarizer, or `Auto-compaction was not saved, ...` after a `Session write failed: ...` notice from the boundary write), and sending it again retries the compaction. The error after the third consecutive failure says instead that automatic attempts have stopped, so sending the prompt again runs it against the unchanged transcript. Attempts resume once a `/model` or `/effort` swap, `/clear`, `/resume`, or a successful `/compact` resets the counter.
 
 During TUI auto-compaction, the status bar uses the existing `Compacting` state. Automatic `SessionCompacted` events keep the TUI busy until the queued prompt drains or the prompt submission finishes. In the bare REPL, `driver::stdio::StdioSink` renders `SessionCompacted` as a stderr boundary line.
 
@@ -91,6 +91,8 @@ During TUI auto-compaction, the status bar uses the existing `Compacting` state.
 6. **Failure circuit breaker.** A too-large or malformed compact request can be unrecoverable. After 3 consecutive automatic failures, the loop stops trying until the session changes through manual compaction, `/clear`, or `/resume`.
 
 7. **No automatic continue prompt.** If the user queued input, it drains after compaction. Otherwise the assistant waits. Synthetic "continue" prompts make the agent act without fresh user intent.
+
+8. **A failed attempt fails its prompt.** Sending the prompt against the unchanged transcript would put a request over the threshold on the wire, and the context would keep growing until it overflowed the window, which is the case auto-compaction exists for. Failing the prompt reports the failure before anything is sent, and the circuit breaker still lets the user continue without compaction after the third failure.
 
 ## Related Issues
 
