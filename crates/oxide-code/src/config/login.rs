@@ -276,6 +276,7 @@ async fn respond(stream: &mut TcpStream, reply: &str) {
 
 #[cfg(test)]
 mod tests {
+    use indoc::{formatdoc, indoc};
     use serde_json::json;
     use wiremock::matchers::{body_json, method};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -303,11 +304,12 @@ mod tests {
     }
 
     async fn browse(port: u16, target: &str) -> String {
-        send(
-            port,
-            &format!("GET {target} HTTP/1.1\r\nHost: localhost\r\n\r\n"),
-        )
-        .await
+        let request = formatdoc! {"
+            GET {target} HTTP/1.1\r
+            Host: localhost\r
+            \r
+        "};
+        send(port, &request).await
     }
 
     /// Writes `request` from a client that then stops sending, and reads its target server-side.
@@ -562,9 +564,14 @@ mod tests {
 
     #[tokio::test]
     async fn read_request_target_returns_the_target_of_a_get() {
-        let target = request_target(b"GET /callback?code=abc HTTP/1.1\r\nHost: localhost\r\n\r\n")
-            .await
-            .unwrap();
+        let request = indoc! {b"
+            GET /callback?code=abc HTTP/1.1\r
+            Host: localhost\r
+            \r
+        "};
+
+        let target = request_target(request).await.unwrap();
+
         assert_eq!(target, "/callback?code=abc");
     }
 

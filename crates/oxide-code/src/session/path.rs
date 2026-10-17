@@ -88,7 +88,7 @@ mod tests {
 
     #[test]
     fn sanitize_cwd_truncates_long_paths_with_stable_hash_suffix() {
-        let long = "/".to_string() + &"a".repeat(200);
+        let long = "/".to_owned() + &"a".repeat(200);
         let out = sanitize_cwd(Path::new(&long));
         assert_eq!(out.chars().count(), MAX_PROJECT_DIR_LEN);
         // Suffix is 16 hex chars preceded by a separator.
@@ -100,7 +100,7 @@ mod tests {
     #[test]
     fn sanitize_cwd_truncation_distinguishes_similar_long_paths() {
         // Paths sharing a prefix beyond the truncation point must still hash apart.
-        let base = "/".to_string() + &"a".repeat(200);
+        let base = "/".to_owned() + &"a".repeat(200);
         let a = sanitize_cwd(Path::new(&(base.clone() + "/alpha")));
         let b = sanitize_cwd(Path::new(&(base + "/beta")));
         assert_ne!(a, b, "hash suffix must disambiguate");
@@ -120,7 +120,7 @@ mod tests {
         use std::os::unix::ffi::OsStrExt;
         use std::path::PathBuf;
 
-        let base = "/".to_string() + &"a".repeat(200) + "/";
+        let base = "/".to_owned() + &"a".repeat(200) + "/";
         let mut bytes_a = base.as_bytes().to_vec();
         bytes_a.push(0xFF);
         let mut bytes_b = base.as_bytes().to_vec();

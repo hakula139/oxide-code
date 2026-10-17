@@ -497,6 +497,9 @@ fn first_user_text(messages: &[Message]) -> &str {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+
+    use indoc::writedoc;
     use wiremock::matchers::{header, method, path, query_param};
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
@@ -516,12 +519,16 @@ mod tests {
     const TEST_MODEL: &str = "claude-sonnet-5-5";
 
     fn sse_body(frames: &[(&str, &str)]) -> String {
-        use std::fmt::Write;
         let mut body = String::new();
         for (event, data) in frames {
-            writeln!(body, "event: {event}").unwrap();
-            writeln!(body, "data: {data}").unwrap();
-            body.push('\n');
+            _ = writedoc!(
+                body,
+                "
+                event: {event}
+                data: {data}
+
+                ",
+            );
         }
         body
     }

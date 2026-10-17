@@ -1244,7 +1244,7 @@ mod tests {
     fn handle_cancelled_commits_partial_stream_with_marker_and_becomes_idle() {
         let (mut app, _rx, _event_tx) = test_app(None);
         app.dispatch_action(Action::Submit("hi".to_owned()));
-        app.handle_engine_event(Event::StreamToken("partial answer".into()));
+        app.handle_engine_event(Event::StreamToken("partial answer".to_owned()));
         let entries_before = app.chat.entry_count();
         assert_eq!(app.status_bar.status(), &Status::Streaming);
 
@@ -1275,7 +1275,7 @@ mod tests {
         app.dispatch_action(Action::Op(Op::Interrupt));
         assert_eq!(app.status_bar.status(), &Status::Cancelling);
 
-        app.handle_engine_event(Event::StreamToken("late".into()));
+        app.handle_engine_event(Event::StreamToken("late".to_owned()));
         assert_eq!(app.status_bar.status(), &Status::Cancelling);
         app.handle_engine_event(bash_call_start("t-late", "ls"));
         assert_eq!(app.status_bar.status(), &Status::Cancelling);
@@ -1381,7 +1381,7 @@ mod tests {
     fn prompt_drained_outside_the_forwarded_queue_keeps_the_queue_and_shows_the_text() {
         // The engine only drains prompts it was handed, but a desync must still show the text.
         let (mut app, _rx, _event_tx) = test_app(None);
-        app.pending_prompts.push_back("held".into());
+        app.pending_prompts.push_back("held".to_owned());
         let chat_before = app.chat.entry_count();
 
         app.handle_engine_event(Event::PromptDrained("held".to_owned()));
@@ -1435,8 +1435,8 @@ mod tests {
         let (mut app, mut rx, _event_tx) = test_app(None);
         app.dispatch_action(Action::Submit("active".to_owned()));
         rx.recv().await.expect("active submit forwarded");
-        app.pending_prompts.push_back("a".into());
-        app.pending_prompts.push_back("b".into());
+        app.pending_prompts.push_back("a".to_owned());
+        app.pending_prompts.push_back("b".to_owned());
 
         app.handle_engine_event(Event::TurnComplete);
 
@@ -1580,8 +1580,8 @@ mod tests {
         let (mut app, mut rx, _event_tx) = test_app(None);
         app.dispatch_action(Action::Submit("active".to_owned()));
         rx.recv().await.expect("active submit forwarded");
-        app.pending_prompts.push_back("first".into());
-        app.pending_prompts.push_back("second".into());
+        app.pending_prompts.push_back("first".to_owned());
+        app.pending_prompts.push_back("second".to_owned());
         let chat_before = app.chat.entry_count();
 
         app.handle_engine_event(Event::TurnFailed("API failed".to_owned()));

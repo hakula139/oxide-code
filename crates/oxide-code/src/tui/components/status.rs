@@ -391,7 +391,7 @@ mod tests {
         StatusBar::new(
             &Theme::default(),
             vec![StatusLineSegment::PullRequest, StatusLineSegment::RunState],
-            "Opus 5.5".into(),
+            "Opus 5.5".to_owned(),
             None,
             String::new(),
             None,
@@ -658,7 +658,7 @@ mod tests {
         let mut bar = StatusBar::new(
             &Theme::default(),
             StatusLineSegment::DEFAULT.to_vec(),
-            "Opus 5.5".into(),
+            "Opus 5.5".to_owned(),
             Some(Effort::Xhigh),
             cwd.into(),
             Some("main".to_owned()),
@@ -758,9 +758,9 @@ mod tests {
                 StatusLineSegment::Model,
                 StatusLineSegment::CurrentDir,
             ],
-            "Opus 5.5".into(),
+            "Opus 5.5".to_owned(),
             Some(Effort::Xhigh),
-            "~/projects/demo".into(),
+            "~/projects/demo".to_owned(),
             Some("main".to_owned()),
         );
         let output = render_top_row(&mut bar, 120);
@@ -785,9 +785,9 @@ mod tests {
                 StatusLineSegment::ModelWithEffort,
                 StatusLineSegment::RunState,
             ],
-            "Opus 5.5".into(),
+            "Opus 5.5".to_owned(),
             Some(Effort::Xhigh),
-            "~/projects/demo".into(),
+            "~/projects/demo".to_owned(),
             Some("feat/status-line".to_owned()),
         );
         let output = render_top_row(&mut bar, 120);
@@ -874,9 +874,9 @@ mod tests {
                 StatusLineSegment::ModelWithEffort,
                 StatusLineSegment::RunState,
             ],
-            "Opus 5.5".into(),
+            "Opus 5.5".to_owned(),
             Some(Effort::Xhigh),
-            "~/projects/demo".into(),
+            "~/projects/demo".to_owned(),
             None,
         )
     }

@@ -28,7 +28,7 @@ pub(super) fn compute_fingerprint(first_prompt: &str, version: &str) -> String {
 
     let input = format!("{FINGERPRINT_SALT}{chars}{version}");
     let hash = Sha256::digest(input.as_bytes());
-    format!("{:02x}{:02x}", hash[0], hash[1])[..3].to_string()
+    format!("{:02x}{:02x}", hash[0], hash[1])[..3].to_owned()
 }
 
 /// Builds the billing attribution header. With `hashed`, it ends in the `cch=00000` placeholder
