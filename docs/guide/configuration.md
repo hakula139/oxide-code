@@ -58,6 +58,7 @@ status_line = [
   "model-with-effort",
   "context-used",
   "session-cost",
+  "permission-mode",
   "run-state",
   "thread-title",
 ]
@@ -159,7 +160,7 @@ If automatic compaction fails, oxide-code does not send the prompt, and the TUI 
 
 `show_welcome = false` blanks the chat region until you submit a prompt, which is useful when piping or screen-recording.
 
-`status_line` accepts these segment names: `current-dir`, `git-branch`, `pull-request`, `pull-request-checks`, `pull-request-review`, `model`, `model-with-effort`, `context-used`, `session-cost`, `five-hour-limit`, `weekly-limit`, `run-state`, `queued-prompts`, `task-progress`, `thread-title`, `session-id`, `theme`, `current-time`. The list must contain at least one segment. Segments with no data, such as a missing git branch, an unopened pull request, context usage before the first completed turn, or usage limits under an API key, are omitted. The three pull request segments shell out to `gh pr view` so they require the GitHub CLI on PATH. Click one of them to open the PR, its checks, or its changed files. Terminals that open links on Ctrl-click or Cmd-click do the same. `pull-request-review` shows only on repositories whose branch protection requires a review, since GitHub reports no review decision otherwise. The separator takes its style from the active theme's `separator` slot and has no setting of its own.
+`status_line` accepts these segment names: `current-dir`, `git-branch`, `pull-request`, `pull-request-checks`, `pull-request-review`, `model`, `model-with-effort`, `context-used`, `session-cost`, `five-hour-limit`, `weekly-limit`, `permission-mode`, `run-state`, `queued-prompts`, `task-progress`, `thread-title`, `session-id`, `theme`, `current-time`. The list must contain at least one segment. Segments with no data, such as a missing git branch, an unopened pull request, context usage before the first completed turn, or usage limits under an API key, are omitted. The three pull request segments shell out to `gh pr view` so they require the GitHub CLI on PATH. Click one of them to open the PR, its checks, or its changed files. Terminals that open links on Ctrl-click or Cmd-click do the same. `pull-request-review` shows only on repositories whose branch protection requires a review, since GitHub reports no review decision otherwise. The separator takes its style from the active theme's `separator` slot and has no setting of its own.
 
 | Segment               | Renders                                                       | Refresh         |
 | --------------------- | ------------------------------------------------------------- | --------------- |
@@ -174,6 +175,7 @@ If automatic compaction fails, oxide-code does not send the prompt, and the TUI 
 | `session-cost`        | `Sess: $0.4321` running USD estimate                          | Per turn        |
 | `five-hour-limit`     | `5h: 42%` of a subscription's five-hour usage limit           | Per request     |
 | `weekly-limit`        | `7d: 13%` of a subscription's weekly usage limit              | Per request     |
+| `permission-mode`     | `Mode: plan` or `Mode: yolo`, omitted in `manual`             | On switch       |
 | `run-state`           | `Ready` / spinner + label / Ctrl+C exit hint                  | On state change |
 | `queued-prompts`      | `Queued: 2` while prompts wait for the running turn           | On change       |
 | `task-progress`       | `Tasks: 2/5` completed while the session keeps a task list    | On change       |
@@ -184,7 +186,7 @@ If automatic compaction fails, oxide-code does not send the prompt, and the TUI 
 
 The usage limits come from Claude subscription sign-ins, which report how much of each window is spent with every response. A window disappears when it resets and remains gone until the next response reports it again. The [theming guide](theming.md#status-line-segments) lists the colors used by the context and usage-limit segments as a window fills.
 
-When the row is too narrow to fit every configured segment, low-utility ones drop in this order before the remaining content gets truncated: `theme` → `session-id` → `thread-title` → `current-time` → `pull-request-review` → `pull-request-checks` → `pull-request` → `git-branch` → `current-dir` → `task-progress` → `queued-prompts` → `session-cost` → `weekly-limit` → `five-hour-limit` → `context-used` → `model` → `model-with-effort` → `run-state`. Run state takes priority over every other segment. The last remaining segment is truncated to fit rather than dropped.
+When the row is too narrow to fit every configured segment, low-utility ones drop in this order before the remaining content gets truncated: `theme` → `session-id` → `thread-title` → `current-time` → `pull-request-review` → `pull-request-checks` → `pull-request` → `git-branch` → `current-dir` → `task-progress` → `queued-prompts` → `session-cost` → `weekly-limit` → `five-hour-limit` → `context-used` → `model` → `model-with-effort` → `permission-mode` → `run-state`. Run state takes priority over every other segment, and the permission mode over the rest. The last remaining segment is truncated to fit rather than dropped.
 
 `OX_STATUS_LINE` accepts the same segment names, comma-separated, with optional whitespace (`OX_STATUS_LINE="model, run-state"`). A value with no segments (`","`), an empty entry between commas (`"model,,run-state"`), or an unknown segment name fails startup with a parse error.
 
@@ -208,7 +210,7 @@ See [Theming](theming.md) for the full slot reference, color value formats (hex,
 
 ### `[permission]`: Tool approval
 
-Every tool call passes a permission check before running. Reads anywhere except SSH keys and the credential files that the [built-in rules](#built-in-rules) deny, and edits inside the working directory or an `extra_roots` directory, run without asking. In the default `manual` mode, every other call opens an approval prompt unless a rule settles it. Press `y` to approve, `a` to approve and add a session rule that allows matching calls, `n` to deny, `f` to deny and tell the model why, or Esc to deny and end the turn. With `f`, type the feedback and press Enter, and the model receives it as the call's result. Enter does nothing at the choice, and the prompt ignores keys until you pause typing for 300 ms, so keystrokes or a paste meant for the input box cannot answer it.
+Every tool call passes a permission check before running. Reads anywhere except SSH keys and the credential files that the [built-in rules](#built-in-rules) deny, and edits inside the working directory or an `extra_roots` directory, run without asking. In the default `manual` mode, every other call opens an approval prompt unless a rule settles it. The prompt names the pattern or built-in rule that made the call ask, and a denied call tells the model which rule or mode denied it. Press `y` to approve, `a` to approve and add a session rule that allows matching calls, `n` to deny, `f` to deny and tell the model why, or Esc to deny and end the turn. With `f`, type the feedback and press Enter, and the model receives it as the call's result. Enter does nothing at the choice, and the prompt ignores keys until you pause typing for 300 ms, so keystrokes or a paste meant for the input box cannot answer it.
 
 The `--no-tui` REPL asks on stderr with the same choices and reads the answer from the next input line, using `x` to end the turn. It asks only when stdin is a terminal. A REPL reading piped input and a headless run (`-p`) cannot ask, so they deny the call and tell the model which pattern to add to which `[permission.allow]` list, such as `"cargo test"` under `exec`.
 
@@ -224,10 +226,12 @@ The `a` key opens the pattern of the session rule it will add, in the syntax bel
 | `defaults`    | table  | all on     | Built-in rules to turn off by name (user config only)                 |
 
 - **`manual`** asks about every call that no rule settles.
-- **`plan`** is read-only. It denies every edit, `exec`, and `net` call, including read-only commands such as `ls`, and reads behave as in `manual`.
+- **`plan`** is read-only. Every edit, `exec`, and `net` call is denied, including read-only commands such as `ls`. Reads behave as in `manual`. The `tasks`, `bash_output`, and `bash_stop` tools count as reads, so they still run.
 - **`yolo`** runs every call that no rule settles. Deny patterns still deny, and ask patterns and the built-in ask rules still ask, so `yolo` asks before an edit to `.git/hooks` until you set `git = false`. A headless run denies those calls.
 
-The environment variable `OX_PERMISSION_MODE` overrides `mode`.
+The environment variable `OX_PERMISSION_MODE` overrides `mode`, and `ox --mode <mode>` overrides both for one run.
+
+During a session, `/mode` opens a picker of the three modes, and `/mode <mode>` switches directly. **Shift+Tab** switches between `manual` and `plan`, and its cycle includes `yolo` only when the session started in `yolo`, so a stray key press cannot run every call unprompted. A switch during a turn takes effect with the turn's next tool call. A command already running in the foreground or as a background shell continues after the switch to `plan`. The default status line includes the `permission-mode` [segment](#tui-terminal-ui), which displays `plan` or `yolo`. To display the mode in a custom `status_line`, include `permission-mode`. Restarting restores the configured mode.
 
 ```toml
 [permission.deny]

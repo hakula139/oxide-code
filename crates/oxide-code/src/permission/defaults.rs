@@ -77,13 +77,28 @@ impl Shipped {
         }
     }
 
-    /// The tier and rules of a group of patterns, or `None` for any other group.
-    pub(super) fn rules(self) -> Result<Option<(ShippedTier, Vec<Rule>)>> {
+    /// The tier the group holds calls back in: deny for the secret files, ask for the rest.
+    pub(crate) const fn tier(self) -> ShippedTier {
+        match self {
+            Self::Ssh | Self::Credentials => ShippedTier::Deny,
+            Self::Git
+            | Self::Direnv
+            | Self::Editors
+            | Self::Cargo
+            | Self::Shell
+            | Self::Agents
+            | Self::Ox
+            | Self::Devices
+            | Self::Rm => ShippedTier::Ask,
+        }
+    }
+
+    /// The rules of a group of patterns, or `None` for any other group.
+    pub(super) fn rules(self) -> Result<Option<Vec<Rule>>> {
         let home = std::env::home_dir;
         let pattern = |path: PathBuf| escaped(&lexical_normalize(&path));
-        let (tier, class, patterns): (ShippedTier, PermissionClass, Vec<String>) = match self {
+        let (class, patterns): (PermissionClass, Vec<String>) = match self {
             Self::Devices => (
-                ShippedTier::Ask,
                 PermissionClass::Edit,
                 if cfg!(unix) {
                     vec!["/dev/**".to_owned()]
@@ -92,7 +107,6 @@ impl Shipped {
                 },
             ),
             Self::Ssh => (
-                ShippedTier::Deny,
                 PermissionClass::Read,
                 home()
                     .map(|home| pattern(home.join(".ssh")))
@@ -100,7 +114,6 @@ impl Shipped {
                     .collect(),
             ),
             Self::Credentials => (
-                ShippedTier::Deny,
                 PermissionClass::Read,
                 [
                     app_dir(XdgBase::Data).map(|dir| dir.join("credentials.json")),
@@ -127,7 +140,7 @@ impl Shipped {
                     .with_context(|| format!("invalid built-in `{self}` pattern {pattern:?}"))
             })
             .collect::<Result<_>>()?;
-        Ok(Some((tier, rules)))
+        Ok(Some(rules))
     }
 }
 
@@ -137,10 +150,10 @@ impl fmt::Display for Shipped {
     }
 }
 
-/// The tier a group of shipped patterns joins. A shipped default only holds calls back, so none
-/// joins the allow tier.
+/// The tier a shipped group's rules join. A shipped default only holds calls back, so none joins
+/// the allow tier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ShippedTier {
+pub(crate) enum ShippedTier {
     Deny,
     Ask,
 }
@@ -356,11 +369,11 @@ mod tests {
             ],
             || {
                 let patterns = |group: Shipped| {
-                    let (tier, rules) = group.rules().unwrap().unwrap();
+                    let rules = group.rules().unwrap().unwrap();
                     let classes: Vec<PermissionClass> = rules.iter().map(Rule::class).collect();
                     let patterns: Vec<String> =
                         rules.iter().map(|rule| rule.pattern().to_owned()).collect();
-                    (tier, classes, patterns)
+                    (group.tier(), classes, patterns)
                 };
                 let home = slash_separated(Path::new(&abs("/home/u")));
                 let data = slash_separated(Path::new(&abs("/data")));
@@ -418,7 +431,7 @@ mod tests {
                 [(HOME_VAR, Some(spelling.as_str())), ("XDG_DATA_HOME", None)],
                 || {
                     [Shipped::Ssh, Shipped::Credentials].map(|group| {
-                        let (_, rules) = group.rules().unwrap().unwrap();
+                        let rules = group.rules().unwrap().unwrap();
                         rules
                             .iter()
                             .map(|rule| rule.pattern().to_owned())

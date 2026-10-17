@@ -1,7 +1,7 @@
-//! Tool-call approval overlay. Surfaces a gated call's preview and resolves the blocked agent to
-//! `Approve`, `AllowForSession` with a rule the user can edit first, `Deny`, `DenyWithFeedback`
-//! with typed text, or `Abort`. Built from the `ConfirmDeleteSessionModal` template. See
-//! `docs/design/tools/permissions.md`.
+//! Tool-call approval overlay. Surfaces a gated call's preview and the rule that holds it, and
+//! resolves the blocked agent to `Approve`, `AllowForSession` with a rule the user can edit first,
+//! `Deny`, `DenyWithFeedback` with typed text, or `Abort`. Built from the
+//! `ConfirmDeleteSessionModal` template. See `docs/design/tools/permissions.md`.
 
 use std::cell::{Cell, RefCell};
 use std::time::{Duration, Instant};
@@ -37,7 +37,7 @@ const SCROLL_HINT: &str = "   [↑↓] scroll";
 const MIN_BUDGET: usize = 8;
 /// Body rows painted at once. A longer preview scrolls.
 const MAX_BODY_ROWS: usize = 16;
-/// Blank row under the title, position row under the body, and the footer.
+/// Blank row under the heading, position row under the body, and the footer.
 const CHROME_ROWS: usize = 3;
 /// The label and the editor. A rejected answer's error wraps below them.
 const EDIT_ROWS: usize = 2;
@@ -56,6 +56,8 @@ const TYPE_AHEAD_GUARD: Duration = Duration::from_millis(300);
 pub(crate) struct ApprovalModal {
     id: String,
     title: String,
+    /// Why the call asks, when a rule holds it.
+    reason: Option<String>,
     body: Vec<BodyLine>,
     /// The "allow for this session" offer, absent when no session rule could allow the call or
     /// while its rule is being edited.
@@ -157,7 +159,8 @@ impl Edit {
 struct Layout {
     width: u16,
     palette: Palette,
-    title: Vec<Line<'static>>,
+    /// The title's rows, then the reason's.
+    heading: Vec<Line<'static>>,
     body: Vec<Line<'static>>,
 }
 
@@ -165,11 +168,13 @@ impl ApprovalModal {
     pub(crate) fn new(
         id: String,
         preview: ApprovalPreview,
+        reason: Option<String>,
         grant: Option<Box<SessionGrant>>,
     ) -> Self {
         Self {
             id,
             title: preview.title,
+            reason,
             body: flatten_body(&preview.body),
             grant,
             edit: None,
@@ -212,6 +217,14 @@ impl ApprovalModal {
     fn build_layout(&self, width: u16, palette: Palette) -> Layout {
         let budget = usize::from(width).max(MIN_BUDGET);
         let title = Line::from(reveal(&self.title, palette.title, palette.marker, false));
+        let reason = self
+            .reason
+            .iter()
+            .map(|reason| Line::from(reveal(reason, palette.reason, palette.marker, false)));
+        let heading = std::iter::once(title)
+            .chain(reason)
+            .flat_map(|line| wrap_line(line, budget, CONTINUATION_INDENT, None))
+            .collect();
         let body = self
             .body
             .iter()
@@ -220,7 +233,7 @@ impl ApprovalModal {
         Layout {
             width,
             palette,
-            title: wrap_line(title, budget, CONTINUATION_INDENT, None),
+            heading,
             body,
         }
     }
@@ -315,7 +328,7 @@ impl ApprovalModal {
 impl Modal for ApprovalModal {
     fn height(&self, width: u16, max_height: u16) -> u16 {
         let rows = self.with_layout(width, None, |layout| {
-            layout.title.len()
+            layout.heading.len()
                 + CHROME_ROWS
                 + self.edit_rows(width)
                 + layout.body.len().min(MAX_BODY_ROWS)
@@ -329,15 +342,15 @@ impl Modal for ApprovalModal {
             self.with_layout(area.width, Some(Palette::new(theme)), |layout| {
                 // The edit step claims its rows first, so the body yields to the answer being typed.
                 let room = usize::from(area.height)
-                    .saturating_sub(layout.title.len() + CHROME_ROWS + self.edit_rows(area.width))
+                    .saturating_sub(layout.heading.len() + CHROME_ROWS + self.edit_rows(area.width))
                     .max(usize::from(edit.is_none()));
                 let total = layout.body.len();
                 let rows = total.min(MAX_BODY_ROWS).min(room);
                 let scroll = self.scroll.min(total - rows);
-                let mut lines = layout.title.clone();
+                let mut lines = layout.heading.clone();
                 lines.push(Line::default());
                 lines.extend_from_slice(&layout.body[scroll..scroll + rows]);
-                let body_shown = layout.title.len() + 1 < usize::from(area.height);
+                let body_shown = layout.heading.len() + 1 < usize::from(area.height);
                 (lines, total, rows, scroll, body_shown)
             });
         let max_scroll = total - rows;
@@ -480,6 +493,7 @@ impl BodyLine {
 #[derive(Clone, Copy, Default, PartialEq)]
 struct Palette {
     title: Style,
+    reason: Style,
     text: Style,
     removed: Style,
     added: Style,
@@ -490,6 +504,7 @@ impl Palette {
     fn new(theme: &Theme) -> Self {
         Self {
             title: theme.accent().add_modifier(Modifier::BOLD),
+            reason: theme.muted(),
             text: theme.text(),
             removed: theme.error(),
             added: theme.success(),
@@ -589,7 +604,7 @@ fn flush(spans: &mut Vec<Span<'static>>, plain: &mut String, style: Style) {
 mod tests {
     use std::path::Path;
 
-    use indoc::formatdoc;
+    use indoc::{formatdoc, indoc};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -613,6 +628,7 @@ mod tests {
                 title: "Bash".to_owned(),
                 body: ApprovalBody::Command(command.to_owned()),
             },
+            None,
             None,
         )
     }
@@ -641,6 +657,7 @@ mod tests {
                 title: "Bash".to_owned(),
                 body: ApprovalBody::Command(command.to_owned()),
             },
+            None,
             grant.map(Box::new),
         );
         modal.expire_guard();
@@ -737,6 +754,7 @@ mod tests {
                 }]),
             },
             None,
+            None,
         );
         let dump = render_to_string(&modal, 40, modal.height(40, 40));
         assert!(dump.contains("- old line"), "removed row appears: {dump}");
@@ -791,6 +809,7 @@ mod tests {
                 body: ApprovalBody::Command(String::new()),
             },
             None,
+            None,
         );
         let dump = render_to_string(&modal, 30, modal.height(30, 30));
         let expected = formatdoc! {"
@@ -802,6 +821,41 @@ mod tests {
             [Y] approve   [N] deny   [F...
         ", first = "d".repeat(23), second = "d".repeat(17)};
         assert_eq!(dump, expected);
+    }
+
+    #[test]
+    fn render_wraps_the_reason_under_the_title_in_the_muted_style() {
+        let theme = Theme::default();
+        let modal = ApprovalModal::new(
+            "call-1".to_owned(),
+            ApprovalPreview {
+                title: "Bash".to_owned(),
+                body: ApprovalBody::Command("git push".to_owned()),
+            },
+            Some("Held by the `ask.exec` pattern `git push *`.".to_owned()),
+            None,
+        );
+
+        let dump = render_to_string(&modal, 30, modal.height(30, 30));
+
+        let expected = indoc! {"
+            Bash
+            Held by the `ask.exec` pattern
+              `git push *`.
+
+            git push
+
+            [Y] approve   [N] deny   [F...
+        "};
+        assert_eq!(dump, expected);
+        let mut terminal = Terminal::new(TestBackend::new(30, 7)).unwrap();
+        terminal
+            .draw(|frame| modal.render(frame, Rect::new(0, 0, 30, 7), &theme))
+            .unwrap();
+        assert_eq!(
+            terminal.backend().buffer()[(0, 1)].fg,
+            theme.muted().fg.unwrap()
+        );
     }
 
     #[test]

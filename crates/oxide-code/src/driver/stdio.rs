@@ -12,7 +12,8 @@ use tracing::debug;
 use crate::config::Effort;
 use crate::engine::TurnEnd;
 use crate::model::ModelSpec;
-use crate::permission::SessionGrant;
+use crate::permission::defaults::ShippedTier;
+use crate::permission::{Basis, SessionGrant};
 use crate::protocol::{Decision, Event, EventSink, Op, ToolCall, ToolResult};
 use crate::session::display::{UNTITLED_MARKER, archive_notice, id_prefix};
 use crate::tool::ApprovalPreview;
@@ -33,7 +34,13 @@ pub(super) async fn render_op(
     approver: &mut impl Approver,
 ) -> Option<TurnEnd> {
     while let Some(event) = events.recv().await {
-        let Event::ApprovalRequested { id, preview, grant } = event else {
+        let Event::ApprovalRequested {
+            id,
+            preview,
+            basis,
+            grant,
+        } = event
+        else {
             let end = TurnEnd::of(op, &event);
             render(sink, event);
             if end.is_some() {
@@ -41,7 +48,7 @@ pub(super) async fn render_op(
             }
             continue;
         };
-        let decision = approver.decide(&preview, grant.as_deref()).await;
+        let decision = approver.decide(&preview, &basis, grant.as_deref()).await;
         // A send fails only once the engine has stopped, which the next `recv` reports.
         _ = ops.send(Op::Resolve { id, decision }).await;
     }
@@ -50,10 +57,12 @@ pub(super) async fn render_op(
 
 /// How a stdio frontend answers an approval request.
 pub(super) trait Approver {
-    /// Decides the call `preview` shows, which `grant` may allow for the rest of the session.
+    /// Decides the call `preview` shows, which `basis` made ask and `grant` may allow for the rest
+    /// of the session.
     fn decide(
         &mut self,
         preview: &ApprovalPreview,
+        basis: &Basis,
         grant: Option<&SessionGrant>,
     ) -> impl Future<Output = Decision>;
 }
@@ -73,18 +82,19 @@ fn render(sink: &dyn EventSink, event: Event) {
 
 // ── Unattended ──
 
-/// Answers every approval with a denial that names the allow rule a rerun would need, for a run
-/// with nobody to ask.
+/// Answers every approval with a denial that names what a rerun would need, for a run with nobody
+/// to ask: the allow pattern that admits the call, or the rule that holds it.
 pub(super) struct Unattended;
 
 impl Approver for Unattended {
     fn decide(
         &mut self,
         _: &ApprovalPreview,
+        basis: &Basis,
         grant: Option<&SessionGrant>,
     ) -> impl Future<Output = Decision> {
-        let feedback = match grant {
-            Some(grant) => {
+        let feedback = match (grant, basis) {
+            (Some(grant), _) => {
                 let rule = grant.suggested();
                 format!(
                     "This run cannot ask for approval. To allow this call, add `{}` to the `{}` \
@@ -93,15 +103,24 @@ impl Approver for Unattended {
                     rule.class(),
                 )
             }
-            None => {
+            (None, Basis::Builtin(group)) if group.tier() == ShippedTier::Ask => format!(
+                "This run cannot ask for approval, and {basis} holds this call. It runs only \
+                 after approval in an interactive session, or once `{group} = false` under \
+                 `[permission.defaults]` in the user config turns the rule off."
+            ),
+            (None, Basis::Mode(_)) => {
                 "This run cannot ask for approval, and no exact allow pattern names this call. \
                      In the `[permission.allow]` table of the user config, a chained command \
                      needs a pattern for each of its commands, and a word that expands needs a \
                      pattern ending in a `*` that covers it and every word after it. A command \
-                     that hides what it runs, such as `$(...)` or `sh -c`, and a call an ask rule \
-                     or a built-in rule holds run only after approval in an interactive session."
+                     that hides what it runs, such as `$(...)` or `sh -c`, runs only after \
+                     approval in an interactive session."
                     .to_owned()
             }
+            (None, basis) => format!(
+                "This run cannot ask for approval, and {basis} holds this call, so it runs only \
+                 after approval in an interactive session."
+            ),
         };
         std::future::ready(Decision::DenyWithFeedback { feedback })
     }
@@ -202,6 +221,7 @@ impl StdioSink {
                 let notice = config_change(&model, effort, requested_effort);
                 writeln!(stderr, "{notice}")?;
             }
+            Event::ModeChanged(mode) => writeln!(stderr, "Using {mode} mode.")?,
             // TUI-only events have no stdio surface to update.
             Event::PromptDrained(_)
             | Event::UsageUpdated(_)
@@ -328,7 +348,9 @@ mod tests {
     use super::*;
     use crate::client::{RateLimitWindow, RateLimits};
     use crate::config::compaction::AutoCompactionConfig;
-    use crate::permission::{Access, PermissionClass, Policy, Workspace};
+    use crate::permission::defaults::Shipped;
+    use crate::permission::rule::Rule;
+    use crate::permission::{Access, Mode, PermissionClass, Policy, Tier, Workspace};
     use crate::protocol::{CapturingSink, FailingSink};
     use crate::tool::bash::background::testing::shells_in_each_state;
     use crate::tool::tasks::TaskStatus;
@@ -345,6 +367,7 @@ mod tests {
         fn decide(
             &mut self,
             preview: &ApprovalPreview,
+            _: &Basis,
             grant: Option<&SessionGrant>,
         ) -> impl Future<Output = Decision> {
             let rule = grant.map(|grant| grant.suggested().pattern().to_owned());
@@ -388,6 +411,7 @@ mod tests {
         let approval = Event::ApprovalRequested {
             id: "t1".to_owned(),
             preview: bash_preview("ls"),
+            basis: Basis::Mode(Mode::Manual),
             grant: Some(Box::new(bash_grant("ls"))),
         };
         for event in [approval, Event::TurnComplete] {
@@ -474,31 +498,63 @@ mod tests {
     // ── Unattended::decide ──
 
     #[tokio::test]
-    async fn unattended_denies_naming_the_allow_rule_or_saying_that_none_names_the_call() {
+    async fn unattended_denies_naming_the_allow_pattern_or_what_holds_the_call() {
         let command = r#"echo "a\b""#;
         let preview = bash_preview(command);
-
-        let Decision::DenyWithFeedback { feedback } = Unattended
-            .decide(&preview, Some(&bash_grant(command)))
-            .await
-        else {
-            panic!("an unattended approval denies with feedback");
+        let manual = Basis::Mode(Mode::Manual);
+        let grant = bash_grant(command);
+        let ask = Basis::Rule {
+            tier: Tier::Ask,
+            rule: Rule::parse(PermissionClass::Exec, "git push *").unwrap(),
         };
-        assert_eq!(
-            feedback,
-            r"This run cannot ask for approval. To allow this call, add `'''echo 'a\b''''` to the `exec` list in the `[permission.allow]` table of the user config."
-        );
-
-        let Decision::DenyWithFeedback { feedback } = Unattended.decide(&preview, None).await
-        else {
-            panic!("an unattended approval denies with feedback");
-        };
-        assert!(
-            feedback.starts_with(
-                "This run cannot ask for approval, and no exact allow pattern names this call."
+        let cases = [
+            (
+                &manual,
+                Some(&grant),
+                r"This run cannot ask for approval. To allow this call, add `'''echo 'a\b''''` to the `exec` list in the `[permission.allow]` table of the user config.",
             ),
-            "{feedback}"
-        );
+            (
+                &manual,
+                None,
+                "This run cannot ask for approval, and no exact allow pattern names this call. In \
+                 the `[permission.allow]` table of the user config, a chained command needs a \
+                 pattern for each of its commands, and a word that expands needs a pattern ending \
+                 in a `*` that covers it and every word after it. A command that hides what it \
+                 runs, such as `$(...)` or `sh -c`, runs only after approval in an interactive \
+                 session.",
+            ),
+            (
+                &Basis::Builtin(Shipped::Git),
+                None,
+                "This run cannot ask for approval, and the built-in `git` rule holds this call. It \
+                 runs only after approval in an interactive session, or once `git = false` under \
+                 `[permission.defaults]` in the user config turns the rule off.",
+            ),
+            (
+                &Basis::Builtin(Shipped::Ssh),
+                None,
+                "This run cannot ask for approval, and the built-in `ssh` rule holds this call, so \
+                 it runs only after approval in an interactive session.",
+            ),
+            (
+                &ask,
+                None,
+                "This run cannot ask for approval, and the `ask.exec` pattern `git push *` holds \
+                 this call, so it runs only after approval in an interactive session.",
+            ),
+        ];
+
+        for (basis, grant, expected) in cases {
+            let decision = Unattended.decide(&preview, basis, grant).await;
+
+            assert_eq!(
+                decision,
+                Decision::DenyWithFeedback {
+                    feedback: expected.to_owned()
+                },
+                "{basis:?}"
+            );
+        }
     }
 
     // ── StdioSink::render ──
@@ -796,6 +852,14 @@ mod tests {
             assert!(stdout.is_empty(), "stdout must stay empty: {stdout:?}");
             assert_eq!(stderr, expected);
         }
+    }
+
+    #[test]
+    fn render_mode_changed_names_the_mode_in_use() {
+        let (stdout, stderr) = render_one(&test_sink(false), Event::ModeChanged(Mode::Plan));
+
+        assert!(stdout.is_empty(), "stdout must stay empty: {stdout:?}");
+        assert_eq!(stderr, "Using plan mode.\n");
     }
 
     #[test]

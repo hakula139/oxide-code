@@ -212,6 +212,7 @@ impl InputArea {
                     Action::Op(Op::Interrupt)
                 });
             }
+            (KeyCode::BackTab, _) => return InputOutcome::Action(Action::CycleMode),
             (KeyCode::PageUp | KeyCode::PageDown, _)
             | (KeyCode::Home | KeyCode::End, KeyModifiers::CONTROL) => {
                 return InputOutcome::Ignored;
@@ -796,17 +797,15 @@ mod tests {
 
     #[test]
     fn handle_event_popup_tab_in_name_mode_chains_into_arg_mode_for_curated_commands() {
-        // Tab from `/mo` lands on `/model `; the arg-mode popup must reopen with the curated
-        // roster so the user keeps moving without re-opening the popup.
         let mut input = test_input();
         type_text(&mut input, "/mo");
         input.refresh_popup();
         let outcome = input.handle_event(&key(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(outcome, InputOutcome::Consumed);
-        assert_eq!(input.textarea.lines(), vec!["/model "]);
+        assert_eq!(input.textarea.lines(), vec!["/mode "]);
         assert!(
             input.popup_visible(),
-            "/model has a curated arg roster — popup chains into arg mode",
+            "/mode has a curated arg roster, so the popup chains into arg mode",
         );
     }
 

