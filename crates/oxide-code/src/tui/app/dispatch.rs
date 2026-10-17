@@ -529,7 +529,7 @@ mod tests {
 
     #[test]
     fn handle_crossterm_key_ctrl_c_idle_arms_exit_then_confirms() {
-        // First press arms; second press inside the window confirms.
+        // The first press arms, and a second press inside the window confirms.
         let (mut app, _rx, _event_tx) = test_app(None);
         app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::CONTROL));
         assert!(!app.should_quit, "first press only arms");
@@ -815,8 +815,8 @@ mod tests {
 
     #[tokio::test]
     async fn handle_crossterm_popup_enter_dispatches_canonical_command() {
-        // `/h` filters to /help; Enter dispatches it. /help is read-only so chat
-        // lands a system message and the engine receives nothing.
+        // `/h` filters to /help, and Enter dispatches it. /help is read-only, so chat lands a
+        // system message and the engine receives nothing.
         let (mut app, mut rx, _event_tx) = test_app(None);
         app.handle_crossterm_event(&key_event(KeyCode::Char('/'), KeyModifiers::NONE));
         app.handle_crossterm_event(&key_event(KeyCode::Char('h'), KeyModifiers::NONE));
@@ -933,7 +933,7 @@ mod tests {
 
     #[test]
     fn modal_gate_cancel_closes_modal_without_dispatching() {
-        // `ModalKey::Cancelled` pops the modal without dispatching; next key reaches input.
+        // `ModalKey::Cancelled` pops the modal without dispatching, so the next key reaches input.
         let (mut app, mut rx, _event_tx) = test_app(None);
         app.push_modal(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
         app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::NONE));
@@ -942,7 +942,7 @@ mod tests {
             matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
             "Cancelled must not dispatch any Op",
         );
-        // Modal closed; subsequent keys reach the input.
+        // With the modal closed, later keys reach the input.
         app.handle_crossterm_event(&key_event(KeyCode::Char('y'), KeyModifiers::NONE));
         assert_eq!(app.input.lines(), vec!["y".to_owned()]);
     }
@@ -1046,7 +1046,7 @@ mod tests {
 
     #[test]
     fn handle_esc_idle_with_queue_pops_most_recent_into_input() {
-        // The most-recent (back of FIFO) returns to input; the rest stay queued.
+        // The most recent prompt (back of FIFO) returns to input, while the rest stay queued.
         let (mut app, _rx, _event_tx) = test_app(None);
         app.pending_prompts.push_back("first".into());
         app.pending_prompts.push_back("second".into());
@@ -1078,7 +1078,7 @@ mod tests {
 
     #[test]
     fn handle_esc_with_popup_visible_dismisses_popup_and_leaves_queue_intact() {
-        // The popup gate sits in front of App's Esc routing — popup hides, queue stays put.
+        // The popup gate runs before App's Esc routing, so the popup hides and the queue stays put.
         let (mut app, _rx, _event_tx) = test_app(None);
         app.pending_prompts.push_back("queued".into());
         app.handle_crossterm_event(&key_event(KeyCode::Char('/'), KeyModifiers::NONE));
@@ -1419,8 +1419,8 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_read_only_slash_during_busy_runs_client_side_without_queueing() {
-        // Read-only slash commands during busy run client-side immediately; queueing them
-        // would make the LLM answer `/help` literally on drain.
+        // Read-only slash commands run client-side immediately during a busy turn, since queueing
+        // them would make the LLM answer `/help` literally on drain.
         let (mut app, mut rx, _event_tx) = test_app(None);
         app.dispatch_action(Action::Submit("active".to_owned()));
         rx.recv().await.expect("active submit forwarded");
@@ -1444,7 +1444,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_clear_during_busy_refuses_with_system_message_no_dispatch() {
-        // State-mutating commands refuse mid-turn — rolling while `messages` is still draining
+        // State-mutating commands refuse mid-turn, since rolling while `messages` is still draining
         // would race the in-flight turn into the wrong JSONL.
         let (mut app, mut rx, _event_tx) = test_app(None);
         app.dispatch_action(Action::Submit("active".to_owned()));
@@ -1510,7 +1510,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_init_during_busy_refuses_with_system_message_no_forward() {
-        // Mutating: refuse. Typed `/init` row still lands; only the synthesized body suppresses.
+        // Mutating: refuse. The typed `/init` row still lands, but its synthesized body does not.
         let (mut app, mut rx, _event_tx) = test_app(None);
         app.dispatch_action(Action::Submit("active".to_owned()));
         rx.recv().await.expect("active submit forwarded");
@@ -1536,8 +1536,6 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_arg_bearing_slash_during_busy_refuses_locally() {
-        // `/model <id>` and `/effort <level>` both mutate Client; pin both so a regression
-        // that special-cases only one leaks the other.
         for (cmd, gate_phrase) in [
             ("/model opus", "/model runs only when idle"),
             ("/effort xhigh", "/effort runs only when idle"),
@@ -1584,9 +1582,9 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_unknown_slash_during_busy_renders_error_no_queue() {
-        // Unknown commands route through `dispatch` so the user sees
-        // the canonical "unknown command" error with recovery hints
-        // (alternatives + `//` escape) instead of the prompt being silently sent to the LLM.
+        // Unknown commands route through `dispatch`, so the user sees the canonical
+        // "unknown command" error with recovery hints (alternatives and the `//` escape),
+        // and the prompt never reaches the LLM.
         let (mut app, mut rx, _event_tx) = test_app(None);
         app.dispatch_action(Action::Submit("active".to_owned()));
         rx.recv().await.expect("active submit forwarded");
@@ -1669,8 +1667,8 @@ mod tests {
 
     #[test]
     fn expire_armed_exit_becomes_idle_after_window() {
-        // After the 1 s window the armed state evaporates so the user
-        // isn't left staring at an exit hint they didn't act on.
+        // After the 1 s window, the armed state evaporates so the user isn't left staring at an
+        // exit hint they didn't act on.
         let (mut app, _rx, _event_tx) = test_app(None);
         app.dispatch_action(Action::ConfirmExit);
         // Force an expired deadline so the test doesn't sleep.
@@ -1685,9 +1683,8 @@ mod tests {
 
     #[test]
     fn expire_armed_exit_when_not_armed_is_a_noop() {
-        // Tick path calls `expire_armed_exit` every frame regardless of
-        // status; the false branch must leave the bar untouched and
-        // skip the dirty bump that would otherwise wake the renderer.
+        // The tick path calls `expire_armed_exit` every frame regardless of status, so the false
+        // branch must leave the bar untouched and skip the dirty bump that would wake the renderer.
         let (mut app, _rx, _event_tx) = test_app(None);
         assert_eq!(app.status_bar.status(), &Status::Idle);
 
@@ -1778,7 +1775,7 @@ mod tests {
 
     #[test]
     fn preview_theme_with_unknown_name_does_nothing_and_keeps_active_theme() {
-        // Roster drift between slash + builtin tables logs via tracing only — user state stays put.
+        // Roster drift between the slash and built-in tables only logs, so user state stays put.
         let (mut app, _rx, _event_tx) = test_app(None);
         let original_text = app.theme.text;
         let entries_before = app.chat.entry_count();
@@ -1822,8 +1819,7 @@ mod tests {
 
     #[tokio::test]
     async fn swap_theme_with_unknown_name_is_a_silent_noop() {
-        // Only a dev bug can name an unknown built-in, so log via tracing and leave UI state
-        // untouched.
+        // Only a dev bug can name an unknown built-in, so log via tracing and leave UI state alone.
         let (mut app, _rx, _event_tx) = test_app(None);
         let original = app.session_info.config.theme_name.clone();
         let entries_before = app.chat.entry_count();
@@ -1836,7 +1832,7 @@ mod tests {
         assert_eq!(
             app.chat.entry_count(),
             entries_before,
-            "no chat block — drift is dev-only",
+            "dev-only drift adds no chat block",
         );
     }
 
@@ -1854,8 +1850,7 @@ mod tests {
 
     #[test]
     fn slash_typed_swap_theme_routes_through_local_handler() {
-        // A synthesized TUI-only action (e.g. `/theme latte`) must run the local theme arm in
-        // `dispatch_action`.
+        // A synthesized TUI-only action like `/theme latte` runs its local `dispatch_action` arm.
         let (mut app, mut rx, _event_tx) = test_app(None);
         app.dispatch_action(Action::Submit("/theme latte".to_owned()));
 
