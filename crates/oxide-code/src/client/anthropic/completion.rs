@@ -19,8 +19,7 @@ impl Client {
     /// thinking blocks. `output_format` is dropped when the config turns structured outputs off,
     /// so callers can pass it unconditionally.
     ///
-    /// Distinct from [`Client::stream_message`]: no agentic beta stack, no `context_management`
-    /// directive, and the billing block ships only on OAuth (see [`Client::attributes`]).
+    /// Unlike [`Client::stream_message`], sends no agentic betas or `context_management` directive.
     pub(crate) async fn complete(
         &self,
         model: &ModelSpec,
@@ -32,7 +31,8 @@ impl Client {
     ) -> Result<String> {
         let auth = self.auth()?;
         let attribution = self
-            .attributes(false, auth.kind())
+            .gateway
+            .attribution
             .then(|| attribution_text(user, self.is_first_party));
         let body = build_completion_body(
             model.id(),
@@ -351,8 +351,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn complete_oauth_haiku_carries_billing_block_but_not_gateway_tag() {
-        // Non-agentic Haiku: drops the gateway tag, keeps the OAuth billing attestation.
+    async fn complete_oauth_haiku_sends_the_oauth_tag_without_the_claude_code_tag() {
         let server = MockServer::start().await;
         let sink: Captured<(String, String)> = captured();
         let sink_clone = std::sync::Arc::clone(&sink);
@@ -381,17 +380,49 @@ mod tests {
             .await
             .unwrap();
 
-        let (body, beta) = sink.lock().unwrap().clone().expect("request captured");
+        let (_, beta) = sink.lock().unwrap().clone().expect("request captured");
         assert!(beta.contains(OAUTH_BETA_HEADER), "OAuth tag: {beta}");
         assert!(
             !beta.contains(CLAUDE_CODE_BETA_HEADER),
-            "no gateway tag on Haiku one-shot: {beta}",
+            "no claude-code tag on a Haiku one-shot: {beta}",
         );
-        assert!(
-            body.contains("x-anthropic-billing-header:"),
-            "billing block present: {body}",
-        );
-        assert!(!body.contains("cch=00000"), "cch populated: {body}");
+    }
+
+    #[tokio::test]
+    async fn complete_carries_the_billing_block_under_every_credential_unless_turned_off() {
+        for (auth, attribution) in [
+            (api_key(), true),
+            (auth_token(), true),
+            (oauth(), true),
+            (api_key(), false),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/messages"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(completion_body("ok")))
+                .mount(&server)
+                .await;
+            let kind = auth.kind();
+            let mut config = test_config(server.uri(), auth, "claude-haiku-5-5");
+            config.gateway.attribution = attribution;
+
+            client_for(&config)
+                .complete(&haiku(), "sys", "Fix login", 40, None, None)
+                .await
+                .unwrap();
+
+            let received = server.received_requests().await.expect("recorded requests");
+            let body: serde_json::Value = serde_json::from_slice(&received[0].body).unwrap();
+            let expected = if attribution {
+                attribution_text("Fix login", false)
+            } else {
+                SYSTEM_PROMPT_PREFIX.to_owned()
+            };
+            assert_eq!(
+                body["system"][0]["text"], expected,
+                "{kind:?} {attribution}"
+            );
+        }
     }
 
     #[tokio::test]
