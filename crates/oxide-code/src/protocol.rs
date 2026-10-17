@@ -321,13 +321,18 @@ pub(crate) trait EventSink: Send + Sync {
     /// Surfaces a session-writer failure as a single user-visible [`Event::Error`].
     /// No-op when `failure` is `None`.
     fn session_write_error(&self, failure: Option<&str>) {
-        if let Some(msg) = failure {
+        if let Some(failure) = failure {
             self.emit(
-                Event::Error(format!("Session write failed: {msg}")),
+                Event::Error(session_write_failed(failure)),
                 "session-write-failed",
             );
         }
     }
+}
+
+/// The message that reports a session-writer failure.
+pub(crate) fn session_write_failed(failure: &str) -> String {
+    format!("Session write failed: {failure}")
 }
 
 // ── Test Fixtures ──

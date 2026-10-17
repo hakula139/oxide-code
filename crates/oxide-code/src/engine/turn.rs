@@ -11,7 +11,7 @@ use crate::client::{Response, ResponseEvent, StopDetails, StopReason, TokenUsage
 use crate::message::{ContentBlock, Message, Role};
 use crate::prompt::PromptParts;
 use crate::protocol::{Event, EventSink, Op};
-use crate::session::handle::{RecordOutcome, SessionHandle};
+use crate::session::handle::SessionHandle;
 use crate::tool::tasks::Task;
 use crate::tool::{ToolDefinition, ToolMetadata, ToolRegistry};
 
@@ -360,6 +360,7 @@ async fn commit_round(
     messages.push(tool_result_msg);
 }
 
+/// Records and appends each queued prompt, then confirms it with [`Event::PromptDrained`].
 pub(super) async fn record_drained_prompts(
     texts: impl IntoIterator<Item = String>,
     messages: &mut Vec<Message>,
@@ -375,7 +376,7 @@ pub(super) async fn record_drained_prompts(
 }
 
 async fn record_message(session: &SessionHandle, msg: Message, sink: &dyn EventSink) {
-    let outcome: RecordOutcome = session.record_message(msg).await;
+    let outcome = session.record_message(msg).await;
     sink.session_write_error(outcome.failure.as_deref());
 }
 

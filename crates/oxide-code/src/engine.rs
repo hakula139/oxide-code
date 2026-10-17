@@ -18,7 +18,7 @@ use serde::Serialize;
 use tokio::sync::mpsc;
 use tokio::task::{JoinError, JoinHandle};
 
-use self::abort::{Inbox, TurnAbort};
+use self::abort::{AbortResult, Inbox, TurnAbort};
 use self::compact_boundary::Boundary;
 use self::compaction::{AutoCompact, AutoCompactFailures};
 use self::turn::{TurnOutcome, TurnReport};
@@ -34,7 +34,9 @@ use crate::message::{ContentBlock, Message};
 use crate::model::{self, ModelSpec, ResolvedModelId};
 use crate::permission::{Mode, Policy, Workspace};
 use crate::prompt::{self, PromptParts, SessionContext, UserContext};
-use crate::protocol::{Event, EventSink, Interaction, Op, ResumeTarget, UsageSnapshot};
+use crate::protocol::{
+    Event, EventSink, Interaction, Op, ResumeTarget, UsageSnapshot, session_write_failed,
+};
 use crate::session::display::id_prefix;
 use crate::session::entry::{CompactInfo, UsageRecord};
 use crate::session::handle::{self, LoadedTranscript, RollIntoOutcome, SessionHandle};
@@ -117,6 +119,15 @@ pub(crate) struct Toolbox {
     pub(crate) shells: Arc<BackgroundShells>,
 }
 
+/// The session an [`Engine`] continues: the store it rolls new sessions into, the live handle and
+/// the transcript it loaded, and the tracker holding the file state it restored.
+pub(crate) struct SessionParts {
+    pub(crate) store: SessionStore,
+    pub(crate) handle: SessionHandle,
+    pub(crate) transcript: LoadedTranscript,
+    pub(crate) file_tracker: Arc<FileTracker>,
+}
+
 /// The live session with its transcript, prompt, and usage accounting.
 pub(crate) struct Engine {
     client: Client,
@@ -164,20 +175,19 @@ pub(crate) struct Engine {
 impl Engine {
     /// Continues `session` with a client and the agent settings from `config`. Fails when the
     /// client cannot be built.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "each part comes from a separate startup step in `main`"
-    )]
     pub(crate) async fn new(
         config: &Config,
         device_id: String,
         toolbox: Toolbox,
-        store: SessionStore,
-        session: SessionHandle,
-        transcript: LoadedTranscript,
-        file_tracker: Arc<FileTracker>,
+        session: SessionParts,
         interactive: bool,
     ) -> Result<Self> {
+        let SessionParts {
+            store,
+            handle: session,
+            transcript,
+            file_tracker,
+        } = session;
         let client = Client::new(config, Some(session.session_id().to_owned()), device_id)?;
         let Toolbox { tools, shells } = toolbox;
         let LoadedTranscript {
@@ -381,7 +391,7 @@ impl Engine {
         sink: &dyn EventSink,
         ops: &mut mpsc::Receiver<Op>,
         inbox: &mut Inbox,
-    ) -> Result<(), TurnAbort> {
+    ) -> AbortResult<()> {
         let tools = self.tools.definitions();
         let mut spent = Vec::new();
         let compacted = compaction::auto_compact_if_needed(
@@ -391,8 +401,9 @@ impl Engine {
             sink,
             ops,
             inbox,
-            Some(&mut AutoCompact {
+            &mut AutoCompact {
                 config: self.compaction.auto,
+                usage: self.last_usage,
                 failures: &mut self.auto_compaction_failures,
                 file_tracker: &self.file_tracker,
                 prompt: &self.prompt,
@@ -400,8 +411,7 @@ impl Engine {
                 tasks: &self.tasks,
                 shells: &self.shells,
                 spent: &mut spent,
-            }),
-            self.last_usage,
+            },
         )
         .await;
         self.bill(sink, &spent).await;
@@ -448,7 +458,7 @@ impl Engine {
         let summary = match summary {
             Ok(Ok(summary)) => summary,
             Ok(Err(e)) => {
-                let abort = TurnAbort::Failed(anyhow!("Compaction failed: {e:#}"));
+                let abort = TurnAbort::Failed(e.context("Compaction failed"));
                 return self.fail_compact(sink, abort);
             }
             Err(abort) => return self.fail_compact(sink, abort),
@@ -623,7 +633,7 @@ impl Engine {
         let outcome = self.session.set_manual_title(title.clone()).await;
         if let Some(failure) = outcome.failure {
             sink.emit(
-                Event::RenameFailed(format!("Session write failed: {failure}")),
+                Event::RenameFailed(session_write_failed(&failure)),
                 "rename-failed",
             );
             return;
@@ -1200,14 +1210,16 @@ mod tests {
                     &config,
                     DEVICE_ID.to_owned(),
                     toolbox(),
-                    store.clone(),
-                    handle::start(&store, "claude-sonnet-5-5"),
-                    LoadedTranscript {
-                        context,
-                        usage: usage.to_vec(),
-                        ..LoadedTranscript::default()
+                    SessionParts {
+                        store: store.clone(),
+                        handle: handle::start(&store, "claude-sonnet-5-5"),
+                        transcript: LoadedTranscript {
+                            context,
+                            usage: usage.to_vec(),
+                            ..LoadedTranscript::default()
+                        },
+                        file_tracker: Arc::new(FileTracker::default()),
                     },
-                    Arc::new(FileTracker::default()),
                     false,
                 )
                 .await
@@ -1256,10 +1268,12 @@ mod tests {
                 &config,
                 DEVICE_ID.to_owned(),
                 toolbox(),
-                store.clone(),
-                session.clone(),
-                LoadedTranscript::default(),
-                Arc::new(FileTracker::default()),
+                SessionParts {
+                    store: store.clone(),
+                    handle: session.clone(),
+                    transcript: LoadedTranscript::default(),
+                    file_tracker: Arc::new(FileTracker::default()),
+                },
                 false,
             )
             .await
