@@ -429,7 +429,7 @@ mod tests {
             "{reply}"
         );
         assert!(reply.ends_with(FAILED_PAGE), "{reply}");
-        assert!(!data.path().join("ox").join("credentials.json").exists());
+        assert!(!data.path().join("ox").exists());
     }
 
     #[tokio::test]

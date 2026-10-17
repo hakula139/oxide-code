@@ -743,7 +743,7 @@ mod tests {
     use super::compaction::test_thresholds;
     use super::provenance::Layer;
     use super::*;
-    use crate::util::path::tildify;
+    use crate::util::path::testing::HOME_VAR;
     use crate::util::tls::TEST_CA_PEM;
 
     // ── ConfigSnapshot::notices ──
@@ -1335,12 +1335,16 @@ mod tests {
                 extra_ca_certs = "/etc/ssl/from-file.pem"
             "#},
         );
+        let home = [(HOME_VAR, Some(dir.path()))];
         // Env supplies a `~`-prefixed path so the expansion branch is also covered.
-        let config = load_with(&dir, &[("OX_EXTRA_CA_CERTS", "~/certs/env.pem")])
+        let overrides = [("OX_EXTRA_CA_CERTS", "~/certs/env.pem")];
+        let config = Box::pin(temp_env::async_with_vars(home, load_with(&dir, &overrides)))
             .await
             .unwrap();
-        let home = std::env::home_dir().expect("home directory");
-        assert_eq!(config.extra_ca_certs, Some(home.join("certs/env.pem")));
+        assert_eq!(
+            config.extra_ca_certs,
+            Some(dir.path().join("certs/env.pem"))
+        );
     }
 
     #[tokio::test]
@@ -1909,7 +1913,7 @@ mod tests {
     #[tokio::test]
     async fn load_compaction_rejects_ambiguous_auto_thresholds() {
         let dir = tempfile::tempdir().unwrap();
-        let user = write_user_config(
+        write_user_config(
             dir.path(),
             indoc::indoc! {r"
                 [client.compaction]
@@ -1917,16 +1921,14 @@ mod tests {
                 auto_threshold_percent = 40
             "},
         );
-        let err = load_with(&dir, &[])
+        let home = [(HOME_VAR, Some(dir.path()))];
+        let err = Box::pin(temp_env::async_with_vars(home, load_with(&dir, &[])))
             .await
             .expect_err("ambiguous file thresholds must fail config load");
         assert_eq!(
             format!("{err:#}"),
-            format!(
-                "{} sets both auto_threshold_tokens and auto_threshold_percent. \
-                 Set only one compaction threshold.",
-                tildify(user.path()),
-            ),
+            "~/ox/config.toml sets both auto_threshold_tokens and auto_threshold_percent. \
+             Set only one compaction threshold.",
         );
 
         let err = load_with(

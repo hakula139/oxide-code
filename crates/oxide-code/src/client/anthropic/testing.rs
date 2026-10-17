@@ -15,6 +15,8 @@ use crate::config::gateway::GatewayCompat;
 use crate::config::{Config, DEFAULT_THEME, PromptCacheTtl, StatusLineSegment, ThemeConfig};
 use crate::model::ModelSpec;
 
+pub(crate) const DEVICE_ID: &str = "did";
+
 /// Minimal [`Config`] for unit / wiremock tests.
 pub(crate) fn test_config(base_url: impl Into<String>, auth: Auth, model: &str) -> Config {
     Config {
@@ -45,9 +47,15 @@ pub(crate) fn test_config(base_url: impl Into<String>, auth: Auth, model: &str) 
     }
 }
 
-/// Fixed session id so wire headers carry a deterministic `x-claude-code-session-id`.
+/// [`client_for`] on [`test_config`].
 pub(crate) fn test_client(base_url: impl Into<String>, auth: Auth, model: &str) -> Client {
-    Client::new(&test_config(base_url, auth, model), Some("sid".to_owned())).unwrap()
+    client_for(&test_config(base_url, auth, model))
+}
+
+/// Client on `config` with a fixed session id, so wire headers carry a deterministic
+/// `x-claude-code-session-id`.
+pub(crate) fn client_for(config: &Config) -> Client {
+    Client::new(config, Some("sid".to_owned()), DEVICE_ID.to_owned()).unwrap()
 }
 
 /// A `/v1/messages` call to `url` with an empty body and an API key.

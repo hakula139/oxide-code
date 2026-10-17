@@ -155,6 +155,7 @@ pub(crate) struct Provenance {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::path::testing::HOME_VAR;
 
     // ── Layer::label ──
 
@@ -183,12 +184,16 @@ mod tests {
     #[test]
     fn notice_names_the_new_project_path_for_a_legacy_file() {
         let legacy = Layer::LegacyProject(PathBuf::from("/repo/ox.toml"));
-        let current = tildify(&Path::new("/repo").join(".ox").join("config.toml"));
+        let current = Path::new("/repo").join(".ox").join("config.toml");
+
+        let notice = temp_env::with_var(HOME_VAR, Some("/home/u"), || legacy.notice());
+
         assert_eq!(
-            legacy.notice(),
+            notice,
             Some(format!(
                 "/repo/ox.toml is in the legacy project config location. Move its settings to \
-                 {current} and delete it."
+                 {} and delete it.",
+                current.display(),
             )),
         );
         assert_eq!(

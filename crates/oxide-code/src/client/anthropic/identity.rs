@@ -1,6 +1,6 @@
 //! Per-machine `device_id` (64 lowercase hex chars) stored at `$XDG_DATA_HOME/ox/user-id`.
 //! The id is minted lazily. Filesystem failures fall back to an ephemeral id and do not block
-//! client construction.
+//! startup.
 
 use std::fmt::Write as _;
 use std::fs;
@@ -18,7 +18,7 @@ const FILE_NAME: &str = "user-id";
 const ID_LEN: usize = 64;
 
 /// Loads the persisted id, mints one if absent, and uses an ephemeral id on filesystem failure.
-pub(super) fn load_or_create_device_id() -> String {
+pub(crate) fn load_or_create_device_id() -> String {
     fallback_to_ephemeral(try_load_or_create())
 }
 
@@ -92,10 +92,14 @@ mod tests {
     // ── load_or_create_device_id ──
 
     #[test]
-    fn load_or_create_device_id_produces_valid_id_under_normal_env() {
-        // Don't override XDG_DATA_HOME — parallel Client::new() calls would race the tempdir.
-        let id = load_or_create_device_id();
+    fn load_or_create_device_id_stores_the_id_under_the_data_dir() {
+        let dir = tempdir().unwrap();
+
+        let id = temp_env::with_var("XDG_DATA_HOME", Some(dir.path()), load_or_create_device_id);
+
         assert!(is_valid_id(&id), "{id}");
+        let on_disk = fs::read_to_string(dir.path().join("ox/user-id")).unwrap();
+        assert_eq!(on_disk, id);
     }
 
     // ── fallback_to_ephemeral ──

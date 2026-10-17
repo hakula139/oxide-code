@@ -1109,26 +1109,30 @@ mod tests {
 
     #[test]
     fn for_path_relative_cwd_parent_traversal_preserves_permission_decisions() {
+        // With `$HOME` at `../..`, the spellings cover both a workspace and a non-workspace cwd.
         let policy = policy(Mode::Auto, &["edit(**)"], &[]);
         let absolute_cwd = std::env::current_dir().unwrap();
-        for cwd in ["..", "../..", "missing/../.."] {
-            for raw in ["notes.md", ".git/config"] {
-                let target = GateTarget::for_path(raw, Path::new(cwd));
-                let absolute = GateTarget::for_path(raw, &absolute_cwd.join(cwd));
-                let (_, relative, zone) = resolved(&target);
-                let (_, absolute_relative, absolute_zone) = resolved(&absolute);
-                assert_eq!(
-                    (relative, zone),
-                    (absolute_relative, absolute_zone),
-                    "{cwd:?}/{raw}",
-                );
-                assert_eq!(
-                    policy.decide(PermissionClass::Edit, &target.as_target()),
-                    policy.decide(PermissionClass::Edit, &absolute.as_target()),
-                    "{cwd:?}/{raw}",
-                );
+        let home = dunce::canonicalize(absolute_cwd.join("../..")).unwrap();
+        temp_env::with_var(HOME_VAR, Some(&home), || {
+            for cwd in ["..", "../..", "missing/../.."] {
+                for raw in ["notes.md", ".git/config"] {
+                    let target = GateTarget::for_path(raw, Path::new(cwd));
+                    let absolute = GateTarget::for_path(raw, &absolute_cwd.join(cwd));
+                    let (_, relative, zone) = resolved(&target);
+                    let (_, absolute_relative, absolute_zone) = resolved(&absolute);
+                    assert_eq!(
+                        (relative, zone),
+                        (absolute_relative, absolute_zone),
+                        "{cwd:?}/{raw}",
+                    );
+                    assert_eq!(
+                        policy.decide(PermissionClass::Edit, &target.as_target()),
+                        policy.decide(PermissionClass::Edit, &absolute.as_target()),
+                        "{cwd:?}/{raw}",
+                    );
+                }
             }
-        }
+        });
     }
 
     #[test]

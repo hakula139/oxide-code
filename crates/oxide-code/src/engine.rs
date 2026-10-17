@@ -143,6 +143,7 @@ impl Engine {
     )]
     pub(crate) async fn new(
         config: &Config,
+        device_id: String,
         tools: Arc<ToolRegistry>,
         store: SessionStore,
         session: SessionHandle,
@@ -151,7 +152,7 @@ impl Engine {
         cwd: PathBuf,
         interactive: bool,
     ) -> Result<Self> {
-        let client = Client::new(config, Some(session.session_id().to_owned()))?;
+        let client = Client::new(config, Some(session.session_id().to_owned()), device_id)?;
         let LoadedTranscript {
             messages,
             context,
@@ -891,7 +892,8 @@ mod tests {
     };
     use super::*;
     use crate::client::anthropic::testing::{
-        api_key, completion_body, sse_body, sse_response, test_config, text_stream_body,
+        DEVICE_ID, api_key, client_for, completion_body, sse_body, sse_response, test_config,
+        text_stream_body,
     };
     use crate::config::PromptCacheTtl;
     use crate::config::compaction::{CompactionConfig, test_thresholds};
@@ -1069,6 +1071,7 @@ mod tests {
             for (context, replayed) in [(Some(recorded), true), (None, false)] {
                 let engine = Engine::new(
                     &test_config(server.uri(), api_key(), "claude-sonnet-5-5"),
+                    DEVICE_ID.to_owned(),
                     Arc::new(ToolRegistry::new(Vec::new())),
                     store.clone(),
                     handle::start(&store, "claude-sonnet-5-5"),
@@ -1118,6 +1121,7 @@ mod tests {
 
             let engine = Engine::new(
                 &config,
+                DEVICE_ID.to_owned(),
                 Arc::new(ToolRegistry::new(Vec::new())),
                 store.clone(),
                 session.clone(),
@@ -2938,7 +2942,7 @@ mod tests {
                 (Some(8_000), unwindowed, 979_000),
             ] {
                 config.max_tokens = max_tokens;
-                engine.client = Client::new(&config, Some("sid".to_owned())).unwrap();
+                engine.client = client_for(&config);
                 engine.compaction = configured;
 
                 engine.set_model(
