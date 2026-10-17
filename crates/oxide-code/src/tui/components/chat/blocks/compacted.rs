@@ -204,8 +204,8 @@ mod tests {
             indoc! {"
                 ```
                 cargo test
-                ```
-            "},
+                ```"
+            },
         );
 
         let lines = block.render(&ctx_at(60, &theme));
