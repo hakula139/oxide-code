@@ -11,12 +11,17 @@ The Anthropic Messages API streams multiple content block types beyond `text` an
 | `text`              | `text_delta`                         | Regular text output                                        |
 | `tool_use`          | `input_json_delta`                   | Client-side tool call (accumulated JSON)                   |
 | `server_tool_use`   | `input_json_delta`                   | Server-side tool call (same delta mechanism as `tool_use`) |
+| `*_tool_result`     | (none)                               | Server-side tool result, such as `web_search_tool_result`  |
 | `thinking`          | `thinking_delta` + `signature_delta` | Model reasoning (extended thinking)                        |
 | `redacted_thinking` | (none)                               | Safety-redacted thinking (opaque, no content)              |
 
 ### Server Tool Use
 
-Server tool use blocks stream identically to client `tool_use`: `input_json_delta` events accumulate the JSON input. The difference is execution, since the API runs server tools itself. Claude Code currently handles the `advisor` tool (internal).
+Server tool use blocks stream identically to client `tool_use`: `input_json_delta` events accumulate the JSON input. The difference is execution, since the API runs server tools itself and returns each result in the reply as a block such as `web_search_tool_result` or `advisor_tool_result`, which names its call in `tool_use_id` and arrives whole in one `content_block_start`. Claude Code currently handles the `advisor` tool (internal). In the 2.1.87 source, its streaming handler keeps any block type it does not model whole, and `ensureToolResultPairing` strips a `server_tool_use` whose result is missing from the same assistant message.
+
+Anthropic's [server tools guide](https://platform.claude.com/docs/en/agents-and-tools/tool-use/server-tools), checked on 2026-10-18, pairs a call with its result by `tool_use_id` alone, so the two can land in different replies. A result usually follows its call in the same reply, but two cases leave the call waiting for the next reply to open with its result: a `pause_turn` stop, which the client continues by sending the paused reply back as-is, and a server call made alongside client tool calls, which the API runs once their `tool_result` blocks arrive. Once later content closes the turn, a call still without its result fails with a 400 such as `` `web_fetch` tool use with id ... was found without a corresponding `web_fetch_tool_result` block ``. A continuation must declare the waiting call's tool, and the [web search tool guide](https://platform.claude.com/docs/en/agents-and-tools/tool-use/web-search-tool) says a replayed result whose `encrypted_content` is missing or modified fails with a 400.
+
+oxide-code stores each server tool result whole, with its API type and every other field, and sends it back as the API returned it. A streamed block of a type it does not model counts as a result when it carries a `tool_use_id`, so a new server tool whose call streams as `server_tool_use` needs no code change. The MCP connector's `mcp_tool_use` and `mcp_tool_result` blocks are out of scope, and the wire skips both. On resume, a `server_tool_use` survives only while some reply holds its result. A call that a `pause_turn` left waiting is dropped, because the next prompt would close the turn. oxide-code declares no server tools, so the API returns none of these blocks today.
 
 ## Thinking Configuration
 
@@ -101,7 +106,7 @@ Every `thinking` block includes a `signature` field received via `signature_delt
 
 Claude Code's `stripSignatureBlocks()` removes all thinking / redacted_thinking blocks whenever the `/login` dialog closes, even after a cancelled sign-in, which discards reasoning that the API would keep or drop on its own.
 
-oxide-code implements the full thinking data pipeline: typed `Thinking`, `RedactedThinking`, and `ServerToolUse` content blocks with streaming accumulation, signature handling, and round-trip preservation. Each reasoning block records the wire and model that produced it, and the Anthropic wire sends every Anthropic block back unchanged on every platform, whichever model produced it. Requests always end on a user message, so no trailing-thinking strip is needed. Adaptive thinking is enabled by default with `block_binding.prefix_mismatch_behavior = "drop_block"` (beta `thinking-binding-controls-2026-08-01`), so a change to the system prompt, the tools, or earlier messages drops the affected replayed blocks for that request. With `show_thinking` off, the chat renders each progress note as its tool use starts streaming, and a live or resumed turn that ends on the interrupted-work note asks the user to send a message.
+oxide-code implements the full thinking data pipeline: typed `Thinking`, `RedactedThinking`, `ServerToolUse`, and `ServerToolResult` content blocks with streaming accumulation, signature handling, and round-trip preservation. Each reasoning block records the wire and model that produced it, and the Anthropic wire sends every Anthropic block back unchanged on every platform, whichever model produced it. A request ends on a user message, or on a paused reply that a `pause_turn` continuation must send back as-is, so oxide-code strips no trailing thinking. Adaptive thinking is enabled by default with `block_binding.prefix_mismatch_behavior = "drop_block"` (beta `thinking-binding-controls-2026-08-01`), so a change to the system prompt, the tools, or earlier messages drops the affected replayed blocks for that request. With `show_thinking` off, the chat renders each progress note as its tool use starts streaming, and a live or resumed turn that ends on the interrupted-work note asks the user to send a message.
 
 oxide-code strips nothing when the credential changes, as on a resume under another API key or a `/login` to another account, since the API drops the blocks bound to another account itself. oxide-code does not read `input_transformations`, so such a drop shows only in the API response.
 
@@ -110,5 +115,5 @@ oxide-code strips nothing when the credential changes, as on a resume under anot
 - `claude-code/src/commands/login/login.tsx`: `stripSignatureBlocks` when the `/login` dialog closes
 - `claude-code/src/constants/betas.ts`: `INTERLEAVED_THINKING_BETA_HEADER`, `REDACT_THINKING_BETA_HEADER`
 - `claude-code/src/services/api/claude.ts`: streaming handler, delta accumulation, request construction
-- `claude-code/src/utils/messages.ts`: `normalizeMessagesForAPI`, `filterTrailingThinkingFromLastAssistant`, `filterOrphanedThinkingOnlyMessages`, `stripSignatureBlocks`
+- `claude-code/src/utils/messages.ts`: `normalizeMessagesForAPI`, `filterTrailingThinkingFromLastAssistant`, `filterOrphanedThinkingOnlyMessages`, `stripSignatureBlocks`, `ensureToolResultPairing`
 - `claude-code/src/utils/thinking.ts`: thinking config types, model support detection

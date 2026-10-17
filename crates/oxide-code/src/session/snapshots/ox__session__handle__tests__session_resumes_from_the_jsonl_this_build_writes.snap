@@ -100,6 +100,21 @@ expression: recovered
           "wire": "anthropic"
         },
         {
+          "id": "s1",
+          "input": {},
+          "name": "advisor",
+          "type": "server_tool_use"
+        },
+        {
+          "content": {
+            "encrypted_content": "opaque",
+            "type": "advisor_redacted_result"
+          },
+          "kind": "advisor_tool_result",
+          "tool_use_id": "s1",
+          "type": "server_tool_result"
+        },
+        {
           "text": "Renaming main.",
           "type": "text"
         },

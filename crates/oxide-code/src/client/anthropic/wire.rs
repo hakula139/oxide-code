@@ -75,7 +75,7 @@ impl<'a> RequestMessage<'a> {
 }
 
 /// A content block in the request shape, where reasoning carries its payload in the field the API
-/// returned it in.
+/// returned it in, and a server tool result takes back its API block type.
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum RequestBlock<'a> {
@@ -85,6 +85,13 @@ enum RequestBlock<'a> {
     },
     RedactedThinking {
         data: &'a str,
+    },
+    #[serde(untagged)]
+    ServerToolResult {
+        r#type: &'a str,
+        tool_use_id: &'a str,
+        #[serde(flatten)]
+        fields: &'a serde_json::Map<String, serde_json::Value>,
     },
     #[serde(untagged)]
     Verbatim(&'a ContentBlock),
@@ -105,6 +112,15 @@ impl<'a> RequestBlock<'a> {
                 WireKind::Anthropic => Self::RedactedThinking {
                     data: &replay.payload,
                 },
+            },
+            ContentBlock::ServerToolResult {
+                tool_use_id,
+                kind,
+                fields,
+            } => Self::ServerToolResult {
+                r#type: kind,
+                tool_use_id,
+                fields,
             },
             block => Self::Verbatim(block),
         }
@@ -315,8 +331,25 @@ pub(super) enum ContentBlockInfo {
     RedactedThinking {
         data: String,
     },
-    #[serde(other)]
-    Unknown,
+    /// An MCP connector result, skipped along with the `mcp_tool_use` call it answers. The call
+    /// reads as unknown, so a reply never keeps one without the other.
+    McpToolResult {},
+    /// A server tool's result, such as `web_search_tool_result`, which streams no deltas. Any
+    /// other block type carrying a `tool_use_id` reads as one.
+    #[serde(untagged)]
+    ServerToolResult {
+        r#type: String,
+        tool_use_id: String,
+        #[serde(flatten)]
+        fields: serde_json::Map<String, serde_json::Value>,
+    },
+    /// Serde tries the untagged variants after a tagged one fails, so a malformed known block
+    /// lands here too. `type` is raw JSON because such a block may carry any.
+    #[serde(untagged)]
+    Unknown {
+        #[serde(default)]
+        r#type: serde_json::Value,
+    },
 }
 
 #[expect(
@@ -528,6 +561,66 @@ mod tests {
         );
     }
 
+    #[test]
+    fn request_messages_send_server_tool_results_back_as_the_api_returned_them() {
+        let server_result = |tool_use_id: &str, kind: &str, content: serde_json::Value| {
+            ContentBlock::ServerToolResult {
+                tool_use_id: tool_use_id.to_owned(),
+                kind: kind.to_owned(),
+                fields: serde_json::Map::from_iter([("content".to_owned(), content)]),
+            }
+        };
+        let messages = [
+            Message::user("question"),
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    server_result(
+                        "stu_1",
+                        "web_search_tool_result",
+                        json!([{"type": "web_search_result", "encrypted_content": "opaque"}]),
+                    ),
+                    ContentBlock::Text {
+                        text: "answer".to_owned(),
+                    },
+                ],
+            },
+            Message::user("next"),
+            Message {
+                role: Role::Assistant,
+                content: vec![server_result(
+                    "stu_2",
+                    "web_fetch_tool_result",
+                    json!({"type": "web_fetch_tool_error", "error_code": "unavailable"}),
+                )],
+            },
+        ];
+
+        let v = serde_json::to_value(RequestMessages {
+            messages: &messages,
+            breakpoint: Some(one_hour_breakpoint()),
+        })
+        .unwrap();
+
+        assert_eq!(
+            v[1]["content"][0],
+            json!({
+                "type": "web_search_tool_result",
+                "tool_use_id": "stu_1",
+                "content": [{"type": "web_search_result", "encrypted_content": "opaque"}],
+            }),
+        );
+        assert_eq!(
+            v[3]["content"][0],
+            json!({
+                "type": "web_fetch_tool_result",
+                "tool_use_id": "stu_2",
+                "content": {"type": "web_fetch_tool_error", "error_code": "unavailable"},
+                "cache_control": {"type": "ephemeral", "ttl": "1h"},
+            }),
+        );
+    }
+
     // ── ContextManagement ──
 
     #[test]
@@ -685,10 +778,52 @@ mod tests {
     }
 
     #[test]
-    fn content_block_info_unknown_type() {
-        let json = r#"{"type":"some_future_block","data":"opaque"}"#;
+    fn content_block_info_server_tool_result_keeps_its_type_and_fields() {
+        let json = r#"{"type":"advisor_tool_result","tool_use_id":"stu_1","content":{"type":"advisor_redacted_result","encrypted_content":"opaque"}}"#;
         let info: ContentBlockInfo = serde_json::from_str(json).unwrap();
-        assert!(matches!(info, ContentBlockInfo::Unknown));
+        let ContentBlockInfo::ServerToolResult {
+            r#type,
+            tool_use_id,
+            fields,
+        } = info
+        else {
+            panic!("expected ServerToolResult, got {info:?}");
+        };
+        assert_eq!(
+            (r#type.as_str(), tool_use_id.as_str()),
+            ("advisor_tool_result", "stu_1"),
+        );
+        assert_eq!(
+            serde_json::Value::Object(fields),
+            json!({"content": {"type": "advisor_redacted_result", "encrypted_content": "opaque"}}),
+        );
+    }
+
+    #[test]
+    fn content_block_info_mcp_tool_result_is_no_server_tool_result() {
+        let json = r#"{"type":"mcp_tool_result","tool_use_id":"m1","content":[]}"#;
+        let info: ContentBlockInfo = serde_json::from_str(json).unwrap();
+        assert!(
+            matches!(info, ContentBlockInfo::McpToolResult {}),
+            "{info:?}"
+        );
+    }
+
+    #[test]
+    fn content_block_info_unknown_or_malformed_block_keeps_its_type() {
+        for (json, expected) in [
+            (
+                r#"{"type":"some_future_block","data":"opaque"}"#,
+                json!("some_future_block"),
+            ),
+            (r#"{"type":"tool_use","id":"toolu_01"}"#, json!("tool_use")),
+        ] {
+            let info: ContentBlockInfo = serde_json::from_str(json).unwrap();
+            assert!(
+                matches!(&info, ContentBlockInfo::Unknown { r#type } if *r#type == expected),
+                "{json}: {info:?}",
+            );
+        }
     }
 
     // ── Delta ──

@@ -149,6 +149,11 @@ enum BlockAccumulator {
         name: String,
         json_buf: String,
     },
+    ServerToolResult {
+        tool_use_id: String,
+        kind: String,
+        fields: serde_json::Map<String, serde_json::Value>,
+    },
     Thinking {
         thinking: String,
         signature: String,
@@ -174,6 +179,15 @@ impl BlockAccumulator {
                 name,
                 json_buf: String::new(),
             },
+            ContentBlockInfo::ServerToolResult {
+                r#type,
+                tool_use_id,
+                fields,
+            } => Self::ServerToolResult {
+                tool_use_id,
+                kind: r#type,
+                fields,
+            },
             ContentBlockInfo::Thinking {
                 thinking,
                 signature,
@@ -182,8 +196,14 @@ impl BlockAccumulator {
                 signature,
             },
             ContentBlockInfo::RedactedThinking { data } => Self::RedactedThinking { data },
-            ContentBlockInfo::Unknown => {
-                warn!("skipping unknown content block at index {index}");
+            ContentBlockInfo::McpToolResult {} => {
+                warn!("skipping MCP connector result at index {index}");
+                Self::Skipped
+            }
+            ContentBlockInfo::Unknown { r#type: kind } => {
+                warn!(
+                    "skipping unknown or malformed content block of type {kind} at index {index}"
+                );
                 Self::Skipped
             }
         }
@@ -260,6 +280,18 @@ impl BlockAccumulator {
                     parse_error,
                 )
             }
+            Self::ServerToolResult {
+                tool_use_id,
+                kind,
+                fields,
+            } => (
+                Some(ContentBlock::ServerToolResult {
+                    tool_use_id,
+                    kind,
+                    fields,
+                }),
+                None,
+            ),
             Self::Thinking {
                 thinking,
                 signature,
@@ -547,6 +579,62 @@ mod tests {
     }
 
     #[test]
+    fn apply_keeps_a_server_tool_result_whole_beside_its_call() {
+        let results = json!([{"type": "web_search_result", "encrypted_content": "opaque"}]);
+        let mut reply = ResponseAccumulator::new(MODEL);
+
+        let forwarded = fold(
+            &mut reply,
+            vec![
+                block_start(
+                    0,
+                    &json!({"type": "server_tool_use", "id": "s1", "name": "web_search"}),
+                ),
+                block_delta(
+                    0,
+                    &json!({"type": "input_json_delta", "partial_json": r#"{"query":"rust"}"#}),
+                ),
+                block_start(
+                    1,
+                    &json!({
+                        "type": "web_search_tool_result",
+                        "tool_use_id": "s1",
+                        "content": results,
+                    }),
+                ),
+                block_delta(1, &json!({"type": "text_delta", "text": "stray"})),
+                block_start(2, &json!({"type": "text", "text": "Found it."})),
+                json!({"type": "message_stop"}),
+            ],
+        );
+
+        assert_eq!(
+            forwarded,
+            [
+                ResponseEvent::Text("Found it.".to_owned()),
+                ResponseEvent::Completed(Response {
+                    content: vec![
+                        ContentBlock::ServerToolUse {
+                            id: "s1".to_owned(),
+                            name: "web_search".to_owned(),
+                            input: json!({"query": "rust"}),
+                        },
+                        ContentBlock::ServerToolResult {
+                            tool_use_id: "s1".to_owned(),
+                            kind: "web_search_tool_result".to_owned(),
+                            fields: serde_json::Map::from_iter([("content".to_owned(), results)]),
+                        },
+                        ContentBlock::Text {
+                            text: "Found it.".to_owned(),
+                        },
+                    ],
+                    ..Response::default()
+                }),
+            ],
+        );
+    }
+
+    #[test]
     fn apply_completes_the_reply_with_parse_errors_and_the_stop() {
         let mut reply = ResponseAccumulator::new(MODEL);
 
@@ -715,9 +803,16 @@ mod tests {
     }
 
     #[test]
-    fn start_skips_an_unknown_block() {
-        let block = BlockAccumulator::start(ContentBlockInfo::Unknown, 0);
-        assert!(matches!(block, BlockAccumulator::Skipped));
+    fn start_skips_unknown_blocks_and_mcp_connector_results() {
+        for info in [
+            ContentBlockInfo::Unknown {
+                r#type: json!("some_future_block"),
+            },
+            ContentBlockInfo::McpToolResult {},
+        ] {
+            let block = BlockAccumulator::start(info, 0);
+            assert!(matches!(block, BlockAccumulator::Skipped), "{block:?}");
+        }
     }
 
     // ── BlockAccumulator::apply ──

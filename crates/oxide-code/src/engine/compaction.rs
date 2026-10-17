@@ -9,6 +9,7 @@
 //! generates. `compact_session` leaves the session untouched, and its callers swap in the summary
 //! through `compact_boundary` once it succeeds.
 
+use std::collections::HashSet;
 use std::iter;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -397,8 +398,8 @@ fn overflow_tokens(result: &Result<Response>) -> Option<u32> {
 }
 
 /// Copies `transcript` without thinking blocks or an earlier retry's truncation marker, then drops
-/// its oldest API rounds until about `target` tokens are freed, keeping at least the newest round.
-/// `None` when only one round remains.
+/// its oldest API rounds until about `target` tokens are freed, keeping at least the newest round
+/// and never parting a server tool result from its call. `None` when only one round remains.
 fn drop_oldest_rounds(transcript: &[Message], target: u32) -> Option<Vec<Message>> {
     let transcript = match transcript {
         [first, rest @ ..] if is_truncation_marker(first) => rest,
@@ -408,7 +409,7 @@ fn drop_oldest_rounds(transcript: &[Message], target: u32) -> Option<Vec<Message
     let mut freed = 0;
     let mut cut = None;
     for (i, message) in messages.iter().enumerate() {
-        if i > 0 && message.role == Role::Assistant {
+        if i > 0 && message.role == Role::Assistant && !answers_an_earlier_call(message) {
             cut = Some(i);
             if freed >= target {
                 break;
@@ -422,6 +423,23 @@ fn drop_oldest_rounds(transcript: &[Message], target: u32) -> Option<Vec<Message
             .chain(kept)
             .collect(),
     )
+}
+
+/// Whether `message` holds a server tool result whose call an earlier reply made. A `pause_turn`,
+/// or a client call beside the server call, defers its result to the next reply.
+fn answers_an_earlier_call(message: &Message) -> bool {
+    let calls: HashSet<&str> = message
+        .content
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::ServerToolUse { id, .. } => Some(id.as_str()),
+            _ => None,
+        })
+        .collect();
+    message.content.iter().any(|b| {
+        matches!(b, ContentBlock::ServerToolResult { tool_use_id, .. }
+            if !calls.contains(tool_use_id.as_str()))
+    })
 }
 
 fn is_truncation_marker(message: &Message) -> bool {
@@ -1867,6 +1885,87 @@ mod tests {
                 Message::assistant("newer")
             ]),
         );
+    }
+
+    fn server_call(id: &str) -> ContentBlock {
+        ContentBlock::ServerToolUse {
+            id: id.to_owned(),
+            name: "web_search".to_owned(),
+            input: json!({}),
+        }
+    }
+
+    fn server_result(id: &str) -> ContentBlock {
+        ContentBlock::ServerToolResult {
+            tool_use_id: id.to_owned(),
+            kind: "web_search_tool_result".to_owned(),
+            fields: serde_json::Map::new(),
+        }
+    }
+
+    fn reply(content: Vec<ContentBlock>) -> Message {
+        Message {
+            role: Role::Assistant,
+            content,
+        }
+    }
+
+    #[test]
+    fn drop_oldest_rounds_keeps_a_deferred_server_call_with_its_result() {
+        let transcript = [
+            Message::user("search the web and list the files"),
+            reply(vec![
+                server_call("s1"),
+                ContentBlock::ToolUse {
+                    id: "t1".to_owned(),
+                    name: "bash".to_owned(),
+                    input: json!({"command": "ls"}),
+                },
+            ]),
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "t1".to_owned(),
+                    content: "f.rs".to_owned(),
+                    is_error: false,
+                }],
+            },
+            reply(vec![
+                server_result("s1"),
+                ContentBlock::Text {
+                    text: "Found it.".to_owned(),
+                },
+            ]),
+        ];
+
+        let kept = drop_oldest_rounds(&transcript, u32::MAX).unwrap();
+
+        assert_eq!(kept[0], Message::user(RETRY_TRUNCATION_MARKER));
+        assert_eq!(kept[1..], transcript[1..]);
+    }
+
+    #[test]
+    fn drop_oldest_rounds_keeps_a_paused_server_call_with_its_continuation() {
+        let transcript = [
+            Message::user("research X"),
+            reply(vec![
+                ContentBlock::Text {
+                    text: "Searching.".to_owned(),
+                },
+                server_call("s1"),
+            ]),
+            reply(vec![
+                server_result("s1"),
+                ContentBlock::Text {
+                    text: "Found X.".to_owned(),
+                },
+            ]),
+        ];
+
+        let kept = drop_oldest_rounds(&transcript, u32::MAX).unwrap();
+
+        assert_eq!(kept[0], Message::user(RETRY_TRUNCATION_MARKER));
+        assert_eq!(kept[1..], transcript[1..]);
     }
 
     #[test]
