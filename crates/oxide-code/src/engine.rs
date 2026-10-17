@@ -31,7 +31,7 @@ use crate::config::oauth;
 use crate::config::{Config, Effort};
 use crate::file_tracker::FileTracker;
 use crate::message::{ContentBlock, Message};
-use crate::model::{ModelSpec, ResolvedModelId};
+use crate::model::{self, ModelSpec, ResolvedModelId};
 use crate::permission::{Mode, Policy, Workspace};
 use crate::prompt::{self, PromptParts, SessionContext, UserContext};
 use crate::protocol::{Event, EventSink, Interaction, Op, ResumeTarget, UsageSnapshot};
@@ -854,7 +854,7 @@ fn estimate_cost_usd(requests: &[UsageRecord]) -> f64 {
     requests
         .iter()
         .filter_map(|request| {
-            let rates = ModelSpec::resolve(request.model.clone()).cost_rates()?;
+            let rates = model::cost_rates(&request.model)?;
             let tokens = request.tokens;
             Some(rates.estimate_usd(
                 tokens.input_tokens,
