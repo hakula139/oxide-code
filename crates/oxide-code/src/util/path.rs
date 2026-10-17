@@ -51,14 +51,13 @@ pub(crate) fn app_dir(base: XdgBase) -> Option<PathBuf> {
     Some(xdg_dir(base)?.join(APP_DIR))
 }
 
-/// Replaces a `$HOME` prefix with `~/`, falling back to the full path.
+/// Replaces a `$HOME` prefix with `~`, falling back to the full path.
 pub(crate) fn tildify(path: &Path) -> String {
-    std::env::home_dir()
-        .and_then(|home| path.strip_prefix(&home).ok().map(Path::to_path_buf))
-        .map_or_else(
-            || path.display().to_string(),
-            |rel| format!("~/{}", slash_separated(&rel)),
-        )
+    match std::env::home_dir().and_then(|home| path.strip_prefix(home).ok()) {
+        Some(rel) if rel.as_os_str().is_empty() => "~".to_owned(),
+        Some(rel) => format!("~/{}", slash_separated(rel)),
+        None => path.display().to_string(),
+    }
 }
 
 /// Expands a leading `~` or `~/` (or `~\` on Windows) to the user's home directory. Per-user
@@ -189,9 +188,9 @@ mod tests {
     }
 
     #[test]
-    fn tildify_leaves_home_itself_as_tilde() {
+    fn tildify_renders_home_itself_as_a_bare_tilde() {
         temp_env::with_var(HOME_VAR, Some("/tmp/oxide-home"), || {
-            assert_eq!(tildify(&PathBuf::from("/tmp/oxide-home")), "~/");
+            assert_eq!(tildify(&PathBuf::from("/tmp/oxide-home")), "~");
         });
     }
 
