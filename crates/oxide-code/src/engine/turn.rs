@@ -21,7 +21,7 @@ use crate::tool::{ToolDefinition, ToolMetadata, ToolRegistry};
 /// tool calls set.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct TurnReport {
-    /// The last round's usage, whose prompt size the auto-compaction threshold checks.
+    /// The last round's usage, which the auto-compaction threshold checks.
     pub(super) usage: Option<TokenUsage>,
     /// Every request's usage in order, including one that failed or was cancelled partway. Some
     /// models pick their price tier from a single request's prompt size, so cost is per entry.

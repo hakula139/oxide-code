@@ -230,7 +230,7 @@ impl Engine {
         )
     }
 
-    /// Starts the engine task, whose first events are [`Self::emit_session_start`]'s. `drifted`
+    /// Starts the engine task, which first emits what [`Self::emit_session_start`] shows. `drifted`
     /// lists the tracked files that changed on disk since the resumed session read them.
     pub(crate) fn spawn(self, drifted: &[PathBuf]) -> EngineHandle {
         let (ops, op_rx) = mpsc::channel(OP_CHANNEL_CAP);
