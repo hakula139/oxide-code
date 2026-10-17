@@ -291,6 +291,8 @@ where
     fn start_list(&mut self, start_index: Option<u64>) {
         if self.list_stack.is_empty() {
             self.start_block();
+        } else {
+            self.wrap_last_line();
         }
         self.list_stack.push(start_index);
     }
@@ -362,8 +364,6 @@ where
     // ── Tables ──
 
     fn start_table(&mut self, alignments: Vec<Alignment>) {
-        // A table can interrupt a tight list item's text, which bypasses `end_paragraph`.
-        self.wrap_last_line();
         self.start_block();
         self.table = TableState {
             active: true,
@@ -695,7 +695,10 @@ where
         self.wrap_and_push(line);
     }
 
+    /// Separates the next block from the one before it, first wrapping a tight list item's text,
+    /// which no paragraph end has wrapped.
     fn start_block(&mut self) {
+        self.wrap_last_line();
         if self.needs_newline {
             self.push_blank_line();
             self.needs_newline = false;
@@ -1726,7 +1729,7 @@ mod tests {
     fn render_markdown_table_in_list_item_keeps_the_item_indent_and_fits_inside_it() {
         let lines = rendered_text_at_width(
             indoc! {"
-                - The settings in this table:
+                - Settings:
                   | Key  | Value     |
                   |------|-----------|
                   | mode | very fast |
@@ -1740,8 +1743,7 @@ mod tests {
         assert_eq!(
             lines,
             [
-                "- The settings in ",
-                "  this table:",
+                "- Settings:",
                 "  ┌──────┬──────────┐",
                 "  │ Key  │ Value    │",
                 "  ├──────┼──────────┤",
@@ -2021,6 +2023,50 @@ mod tests {
         assert_eq!(
             rendered_text_at_width("- one two three four five six seven eight", 15),
             ["- one two three", "  four five six", "  seven eight"],
+        );
+    }
+
+    #[test]
+    fn render_markdown_tight_list_item_wraps_its_text_before_a_nested_block() {
+        let nested_list = rendered_text_at_width(
+            indoc! {"
+                - one two three four five
+                  - inner
+            "},
+            15,
+        );
+        let code_block = rendered_text_at_width(
+            indoc! {"
+                - one two three four five
+                  ```
+                  code
+                  ```
+            "},
+            15,
+        );
+        let table = rendered_text_at_width(
+            indoc! {"
+                - one two three four five
+                  | A |
+                  |---|
+                  | 1 |
+            "},
+            15,
+        );
+
+        assert_eq!(nested_list, ["- one two three", "  four five", "  - inner"]);
+        assert_eq!(code_block, ["- one two three", "  four five", "  code"]);
+        assert_eq!(
+            table,
+            [
+                "- one two three",
+                "  four five",
+                "  ┌───┐",
+                "  │ A │",
+                "  ├───┤",
+                "  │ 1 │",
+                "  └───┘",
+            ]
         );
     }
 
