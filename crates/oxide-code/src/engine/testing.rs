@@ -1,6 +1,6 @@
-//! Test-only engine fixtures: [`Engine`] builders and mocked replies, plus the turn fixtures the
-//! turn, dispatch, and compaction tests share. Child of `engine` so it can build the private
-//! fields.
+//! Test-only engine fixtures: [`Engine`] builders and mocked replies, the turn fixtures the turn,
+//! dispatch, and compaction tests share, and the transcripts large enough to compact. Child of
+//! `engine` so it can build the private fields.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;

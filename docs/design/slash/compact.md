@@ -66,7 +66,7 @@ While the summary streams, the TUI shows it below the chat under a `Summarizing 
 
 13. **Refuse mid-turn (`classify = Mutating`).** All three reference CLIs treat manual compaction as a between-turns operation. `Mutating` is the existing oxide-code lever for that. The slash registry refuses if a turn is in flight, and the user retries after the in-flight reply finishes.
 
-14. **Refuse a short transcript.** The driver requires a transcript of about 1,000 tokens, estimated at four bytes of JSON per token, since below that the summary is about as long as the transcript itself. Text, tool calls, and tool results all count, so a session made mostly of tool output compacts as readily as a conversation. The refusal fails the compaction and leaves the session untouched.
+14. **Refuse a short transcript.** The driver refuses an empty transcript and one under about 1,000 tokens, estimated at four bytes of JSON per token, since below that the summary is about as long as the transcript itself. Text, tool calls, and tool results all count, so a session made mostly of tool output compacts as readily as a conversation. The system prompt, instructions, and tool definitions do not count, since a summary cannot shrink them. The refusal fails the compaction and leaves the session untouched.
 
 15. **Refuse on empty summary.** If the model returns whitespace-only text (model errored quietly, content filter, etc.), fail the compaction and leave the transcript unchanged. Better to retry than to commit a useless summary.
 

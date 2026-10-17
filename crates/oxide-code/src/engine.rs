@@ -1911,12 +1911,17 @@ mod tests {
             engine.last_usage = Some(TokenUsage::new(50_000, 1));
             engine.displayed_usage = engine.last_usage;
             engine.total_estimated_cost_usd = 1.23;
+            engine.auto_compaction_failures = 2;
             let sink = CapturingSink::new();
             let (_ops_tx, mut ops) = crate::protocol::inert_op_channel();
 
             let end = engine.submit_prompt("five", &sink, &mut ops).await;
 
             assert_eq!(end, TurnEnd::Completed);
+            assert_eq!(
+                engine.auto_compaction_failures, 0,
+                "a success resets the breaker"
+            );
             let requests = request_bodies(&server).await;
             assert_eq!(requests.len(), 2);
             assert_eq!(
@@ -2006,8 +2011,8 @@ mod tests {
                         Event::UsageUpdated(_),
                         Event::TurnFailed(error),
                     ] if token == "   "
-                        && error == "Auto-compaction failed, so the prompt was not sent: compaction \
-                                     returned empty summary. Send it again to retry."
+                        && error == "Auto-compaction failed: the model returned an empty summary. \
+                                     The prompt was not sent, so send it again to retry."
                 ),
                 "{events:?}"
             );
@@ -2149,7 +2154,8 @@ mod tests {
                             ..
                         }),
                         Event::TurnFailed(unsaved),
-                    ] if short.starts_with("Compaction failed: session is too short")
+                    ] if short == "Compaction failed: the conversation has about 15 tokens, below \
+                                  the 1000-token minimum"
                         && usage_write.starts_with("Session write failed")
                         && boundary_write == "Session write failed: Session writer task has stopped."
                         && (cost - 0.006).abs() < 1e-12

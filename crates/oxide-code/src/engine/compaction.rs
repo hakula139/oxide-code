@@ -32,7 +32,7 @@ use crate::tool::ToolDefinition;
 const MAX_AUTO_COMPACT_FAILURES: u8 = 3;
 
 /// Rough transcript size below which compaction is refused, since the summary would be about as
-/// long as the transcript. Text, tool calls, and tool results all count toward it.
+/// long as the transcript.
 const MIN_TOKENS_FOR_COMPACT: u32 = 1_000;
 
 /// Retries for a summary request that overflowed the context window.
@@ -78,9 +78,9 @@ pub(super) struct AutoCompact<'a> {
 }
 
 /// Compacts `messages` when `usage` crosses the threshold and the breaker allows, returning
-/// whether it did. Skips without auto state or usage, below the threshold, or once the breaker
-/// has tripped. A failed summary or boundary write counts toward the breaker and fails the
-/// prompt, so a request over the threshold never goes out until the breaker turns compaction off.
+/// whether it did. Skips without auto state or usage, below the threshold, once the breaker has
+/// tripped, or when the transcript is too short for a summary to shrink it. A failed summary or
+/// boundary write counts toward the breaker and fails the prompt before it is sent.
 #[expect(
     clippy::too_many_arguments,
     reason = "auto-compaction needs the same live turn state as manual compaction"
@@ -103,6 +103,7 @@ pub(super) async fn auto_compact_if_needed(
     };
     if *auto.failures >= MAX_AUTO_COMPACT_FAILURES
         || !auto.config.should_trigger(usage.total_tokens())
+        || transcript_tokens(messages) < MIN_TOKENS_FOR_COMPACT
     {
         return Ok(false);
     }
@@ -128,7 +129,7 @@ pub(super) async fn auto_compact_if_needed(
             warn!("auto-compaction failed: {e:#}");
             return Err(record_auto_compact_failure(
                 auto,
-                &format!("Auto-compaction failed, so the prompt was not sent: {e:#}"),
+                &format!("Auto-compaction failed: {e:#}"),
             ));
         }
     };
@@ -145,26 +146,26 @@ pub(super) async fn auto_compact_if_needed(
     if !compacted {
         return Err(record_auto_compact_failure(
             auto,
-            "Auto-compaction was not saved, so the prompt was not sent",
+            "Auto-compaction was not saved",
         ));
     }
-    *auto.failures = 0;
     Ok(true)
 }
 
-/// Counts a failed attempt and returns the abort that fails the prompt, ending `headline` with
-/// what sending the prompt again does.
+/// Counts a failed attempt and returns the abort that fails the unsent prompt. `headline` can end
+/// on a cause's own sentence, so its period is dropped before the sentences on what to do next.
 fn record_auto_compact_failure(auto: &mut AutoCompact<'_>, headline: &str) -> TurnAbort {
     *auto.failures += 1;
     let next = if *auto.failures < MAX_AUTO_COMPACT_FAILURES {
-        "Send it again to retry.".to_owned()
+        "The prompt was not sent, so send it again to retry.".to_owned()
     } else {
         format!(
-            "Auto-compaction is off for this session after {MAX_AUTO_COMPACT_FAILURES} failures, \
-             so sending the prompt again runs it without compaction."
+            "The prompt was not sent, and auto-compaction is paused after \
+             {MAX_AUTO_COMPACT_FAILURES} failures in a row. Send the prompt again to run it \
+             without compaction, or run /compact to retry compaction first."
         )
     };
-    TurnAbort::Failed(anyhow!("{headline}. {next}"))
+    TurnAbort::Failed(anyhow!("{}. {next}", headline.trim_end_matches('.')))
 }
 
 /// Drives the summarization request and returns the trimmed summary. `prompt` and `tools` must be
@@ -175,8 +176,9 @@ fn record_auto_compact_failure(auto: &mut AutoCompact<'_>, headline: &str) -> Tu
 /// future ends them with [`Event::SummaryDiscarded`]. On success the streamed text stays up, and
 /// the caller must end it with [`Event::SessionCompacted`] or [`Event::SummaryDiscarded`].
 ///
-/// Errors when the transcript is too short to compact, when a request fails, or when the reply is
-/// empty or stopped before the summary finished, including when the last retry still overflows.
+/// Errors when the transcript is empty or too short to compact, when a request fails, or when the
+/// reply is empty or stopped before the summary finished, including when the last retry still
+/// overflows.
 pub(super) async fn compact_session(
     client: &dyn Wire,
     prompt: &PromptParts,
@@ -186,14 +188,14 @@ pub(super) async fn compact_session(
     sink: &dyn EventSink,
     spent: &mut Vec<TokenUsage>,
 ) -> Result<String> {
-    let tokens = transcript
-        .iter()
-        .map(rough_tokens)
-        .fold(0, u32::saturating_add);
+    if transcript.is_empty() {
+        bail!("the session has no messages yet");
+    }
+    let tokens = transcript_tokens(transcript);
     if tokens < MIN_TOKENS_FOR_COMPACT {
         bail!(
-            "session is too short to compact (about {tokens} tokens, need at least \
-             {MIN_TOKENS_FOR_COMPACT})"
+            "the conversation has about {tokens} tokens, below the \
+             {MIN_TOKENS_FOR_COMPACT}-token minimum"
         );
     }
 
@@ -249,7 +251,7 @@ pub(super) async fn compact_session(
         .collect();
     let trimmed = summary.trim();
     if trimmed.is_empty() {
-        bail!("compaction returned empty summary");
+        bail!("the model returned an empty summary");
     }
     stream.keep();
     Ok(trimmed.to_owned())
@@ -395,6 +397,13 @@ fn without_thinking(message: &Message) -> Option<Message> {
     })
 }
 
+fn transcript_tokens(transcript: &[Message]) -> u32 {
+    transcript
+        .iter()
+        .map(rough_tokens)
+        .fold(0, u32::saturating_add)
+}
+
 /// Estimates a message's tokens at four bytes of JSON each.
 fn rough_tokens(message: &Message) -> u32 {
     let bytes = serde_json::to_string(message).map_or(0, |json| json.len());
@@ -438,7 +447,6 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::sync::{Arc, Mutex};
 
-    use anyhow::anyhow;
     use serde_json::json;
     use tokio::sync::Notify;
     use wiremock::matchers::{method, path};
@@ -452,7 +460,6 @@ mod tests {
         FakeClient, dead_test_session, empty_prompt, inert_ops, test_session, text_turn,
         tool_heavy_transcript, with_stop,
     };
-    use crate::message::Role;
     use crate::protocol::CapturingSink;
 
     // ── auto_compact_if_needed ──
@@ -482,7 +489,7 @@ mod tests {
             _tools: &[ToolDefinition],
         ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            Err(anyhow!("summarizer unavailable"))
+            Err(anyhow!("the summarizer is unavailable. Retry in a minute."))
         }
     }
 
@@ -600,6 +607,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn auto_compact_if_needed_skips_a_transcript_too_short_to_shrink() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let client = FakeClient::new(Vec::new());
+        let sink = CapturingSink::new();
+        let tracker = FileTracker::default();
+        let short = vec![Message::user("hi"), Message::assistant("hello")];
+        let mut messages = short.clone();
+        let mut failures = 0;
+
+        let compacted = auto_compact_if_needed(
+            &client,
+            &session,
+            &mut messages,
+            &sink,
+            &mut inert_ops(),
+            &mut Vec::new(),
+            Some(&mut AutoCompact {
+                config: AutoCompactionConfig {
+                    enabled: true,
+                    threshold_tokens: Some(10),
+                },
+                failures: &mut failures,
+                file_tracker: &tracker,
+                prompt: &empty_prompt(),
+                tools: &[],
+                spent: &mut Vec::new(),
+            }),
+            Some(TokenUsage {
+                input_tokens: 20,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+                output_tokens: 1,
+            }),
+        )
+        .await;
+
+        assert!(
+            matches!(compacted, Ok(false)),
+            "a prefix-heavy context goes out without compaction: {compacted:?}"
+        );
+        assert_eq!(messages, short);
+        assert_eq!(failures, 0);
+        assert_eq!(sink.events(), []);
+        assert_eq!(client.requests(), [] as [Vec<Message>; 0]);
+    }
+
+    #[tokio::test]
     async fn auto_compact_if_needed_fails_the_prompt_when_the_summary_fails() {
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
@@ -641,8 +696,8 @@ mod tests {
         };
         assert_eq!(
             format!("{error:#}"),
-            "Auto-compaction failed, so the prompt was not sent: summarizer unavailable. Send it \
-             again to retry.",
+            "Auto-compaction failed: the summarizer is unavailable. Retry in a minute. The prompt \
+             was not sent, so send it again to retry.",
         );
         assert_eq!(failures, 1);
         assert_eq!(messages, tool_heavy_transcript());
@@ -691,7 +746,7 @@ mod tests {
         };
         assert_eq!(
             format!("{error:#}"),
-            "Auto-compaction was not saved, so the prompt was not sent. Send it again to retry.",
+            "Auto-compaction was not saved. The prompt was not sent, so send it again to retry.",
         );
         assert_eq!(failures, 1);
         assert_eq!(messages, tool_heavy_transcript());
@@ -758,9 +813,10 @@ mod tests {
         };
         assert_eq!(
             format!("{error:#}"),
-            "Auto-compaction failed, so the prompt was not sent: summarizer unavailable. \
-             Auto-compaction is off for this session after 3 failures, so sending the prompt \
-             again runs it without compaction.",
+            "Auto-compaction failed: the summarizer is unavailable. Retry in a minute. The prompt \
+             was not sent, and auto-compaction is paused after 3 failures in a row. Send the \
+             prompt again to run it without compaction, or run /compact to retry compaction \
+             first.",
         );
         assert!(
             matches!(fourth, Ok(false)),
@@ -893,35 +949,17 @@ mod tests {
         .unwrap();
 
         assert!(compacted);
-        let sent_texts: Vec<Vec<String>> = client
-            .requests()
-            .iter()
-            .map(|request| {
-                request
-                    .iter()
-                    .flat_map(|m| &m.content)
-                    .filter_map(|block| match block {
-                        ContentBlock::Text { text } => Some(text.clone()),
-                        _ => None,
-                    })
-                    .collect()
-            })
-            .collect();
-        let [first, retry] = &sent_texts[..] else {
-            panic!("expected the overflow and one retry: {sent_texts:?}");
-        };
-        let rubric = SUMMARIZATION_USER_RUBRIC.trim();
+        let rubric = Message::user(SUMMARIZATION_USER_RUBRIC.trim());
         assert_eq!(
-            first[..],
+            client.requests(),
             [
-                "Read log-a.txt and log-b.txt, then reply with the final line of each.",
-                "alpha-end, beta-end",
-                rubric,
-            ]
-        );
-        assert_eq!(
-            retry[..],
-            [RETRY_TRUNCATION_MARKER, "alpha-end, beta-end", rubric],
+                [tool_heavy_transcript(), vec![rubric.clone()]].concat(),
+                vec![
+                    Message::user(RETRY_TRUNCATION_MARKER),
+                    Message::assistant("alpha-end, beta-end"),
+                    rubric,
+                ],
+            ],
             "the retry keeps only the newest round",
         );
         assert!(
@@ -1472,24 +1510,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compact_session_refuses_a_session_below_the_size_floor_without_a_request() {
+    async fn compact_session_refuses_an_empty_or_short_session_without_a_request() {
         let server = MockServer::start().await;
         let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
-        let transcript = [
+        let short = vec![
             Message::user("fix the bug"),
             Message::assistant("looking now"),
             Message::user("any progress?"),
             Message::assistant("found it"),
         ];
 
-        let err = summarize(&client, &transcript)
-            .await
-            .expect_err("a short session is refused");
+        for (transcript, expected) in [
+            (Vec::new(), "the session has no messages yet"),
+            (
+                short,
+                "the conversation has about 65 tokens, below the 1000-token minimum",
+            ),
+        ] {
+            let err = summarize(&client, &transcript)
+                .await
+                .expect_err("the session is refused");
 
-        assert_eq!(
-            format!("{err:#}"),
-            "session is too short to compact (about 65 tokens, need at least 1000)",
-        );
+            assert_eq!(format!("{err:#}"), expected);
+        }
         assert_eq!(server.received_requests().await.unwrap().len(), 0);
     }
 
@@ -1501,7 +1544,7 @@ mod tests {
         let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
         let (summary, events) = summarize_streaming(&client, &tool_heavy_transcript()).await;
         let err = summary.expect_err("empty summary must error");
-        assert!(format!("{err:#}").contains("empty summary"));
+        assert_eq!(format!("{err:#}"), "the model returned an empty summary");
         assert_eq!(events, [token("   \n  "), Event::SummaryDiscarded]);
     }
 

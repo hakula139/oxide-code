@@ -804,8 +804,8 @@ mod tests {
         ));
         assert_eq!(
             app.active_prompt.as_deref(),
-            Some("/etc/hosts"),
-            "a post-compaction re-echo shows the literal text",
+            Some("//etc/hosts"),
+            "kept as typed, so a failed auto-compaction hands back the escape",
         );
         let text = rendered_text(&mut app, 60, 10);
         assert!(
@@ -1514,7 +1514,7 @@ mod tests {
             forwarded(),
             [Op::Prompt("/tmp".to_owned()), Op::Queue("new".to_owned())],
         );
-        assert_eq!(app.active_prompt.as_deref(), Some("/tmp"));
+        assert_eq!(app.active_prompt.as_deref(), Some("//tmp"));
     }
 
     // ── apply_slash_outcome ──

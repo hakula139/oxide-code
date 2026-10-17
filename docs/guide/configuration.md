@@ -143,6 +143,8 @@ Auto-compaction is enabled by default for the supported models. The default trig
 
 For other model ids, the default and percent-based automatic triggers stay off. An explicit token threshold still works, snapped to the `50000` floor when set lower.
 
+If automatic compaction fails, oxide-code does not send the prompt, and the TUI puts it back in the input. Sending it again retries the compaction. After 3 failures in a row, automatic compaction pauses, so the next prompt goes out without it. A successful `/compact`, a `/model` or `/effort` change, `/clear`, or `/resume` turns it back on.
+
 ### `[tui]`: Terminal UI
 
 | Key             | Type    | Default   | Description                               |
