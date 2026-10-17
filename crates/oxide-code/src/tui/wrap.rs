@@ -15,7 +15,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 ///
 /// `max_width == 0` passes the line through unwrapped. Deep indents that would leave less than one
 /// column for content fall back to a one-column minimum so wrapping still terminates.
-pub(crate) fn wrap_line(
+pub(super) fn wrap_line(
     line: Line<'static>,
     max_width: usize,
     continuation_indent: usize,
@@ -26,7 +26,7 @@ pub(crate) fn wrap_line(
 
 /// Wraps like [`wrap_line`] without breaking inside the first `lead_width` columns, so a line's
 /// prefix and indentation never end up alone on a row.
-pub(crate) fn wrap_line_keeping_lead(
+pub(super) fn wrap_line_keeping_lead(
     line: Line<'static>,
     max_width: usize,
     continuation_indent: usize,
@@ -77,7 +77,7 @@ pub(crate) fn wrap_line_keeping_lead(
 
 /// The width of the widest run [`wrap_line`] never breaks inside, so the narrowest width that wraps
 /// `line` without splitting a word. CJK text can break between any two characters.
-pub(crate) fn longest_word_width(line: &Line<'_>) -> usize {
+pub(super) fn longest_word_width(line: &Line<'_>) -> usize {
     let mut longest = 0;
     let mut run = 0;
     let mut prev = None;
@@ -214,7 +214,7 @@ fn graphemes_to_spans(graphemes: &[(&str, Style)]) -> Vec<Span<'static>> {
 const TAB_WIDTH: usize = 4;
 
 /// Expands `\t` to spaces, aligning to [`TAB_WIDTH`]-column stops.
-pub(crate) fn expand_tabs(s: &str) -> String {
+pub(super) fn expand_tabs(s: &str) -> String {
     if !s.contains('\t') {
         return s.to_owned();
     }
@@ -222,7 +222,7 @@ pub(crate) fn expand_tabs(s: &str) -> String {
 }
 
 /// Expands tabs across `spans`, carrying the column so stops align for the whole line.
-pub(crate) fn expand_tabs_in_spans(spans: Vec<Span<'static>>) -> Vec<Span<'static>> {
+pub(super) fn expand_tabs_in_spans(spans: Vec<Span<'static>>) -> Vec<Span<'static>> {
     let mut col = 0;
     spans
         .into_iter()

@@ -125,7 +125,7 @@ macro_rules! define_theme_struct {
         }
 
         #[cfg(test)]
-        pub(crate) const SLOT_NAMES: &[&str] = &[ $(stringify!($name),)* ];
+        pub(super) const SLOT_NAMES: &[&str] = &[ $(stringify!($name),)* ];
     };
 }
 
@@ -146,12 +146,12 @@ impl Default for Theme {
 
 macro_rules! define_slot_accessor {
     (diff_add) => {
-        pub(crate) fn diff_add_row(&self) -> Style {
+        pub(super) fn diff_add_row(&self) -> Style {
             Style::default().bg(self.diff_add.bg.unwrap_or(Color::Reset))
         }
     };
     (diff_del) => {
-        pub(crate) fn diff_del_row(&self) -> Style {
+        pub(super) fn diff_del_row(&self) -> Style {
             Style::default().bg(self.diff_del.bg.unwrap_or(Color::Reset))
         }
     };
@@ -173,7 +173,7 @@ macro_rules! define_slot_accessors {
 for_each_slot!(define_slot_accessors);
 
 impl Theme {
-    pub(crate) fn row_style(&self, selected: bool) -> Style {
+    pub(super) fn row_style(&self, selected: bool) -> Style {
         if selected {
             self.text().add_modifier(Modifier::BOLD)
         } else {
@@ -181,12 +181,12 @@ impl Theme {
         }
     }
 
-    pub(crate) fn separator_span(&self) -> Span<'static> {
+    pub(super) fn separator_span(&self) -> Span<'static> {
         Span::styled(SEGMENT_SEPARATOR, self.separator())
     }
 
     /// Style of a task row, which highlights the task in progress and dims the finished ones.
-    pub(crate) fn task_style(&self, status: TaskStatus) -> Style {
+    pub(super) fn task_style(&self, status: TaskStatus) -> Style {
         match status {
             TaskStatus::Pending => self.text(),
             TaskStatus::InProgress => self.info(),

@@ -8,7 +8,7 @@ use ratatui::layout::Rect;
 /// Place the terminal-native cursor at `(raw_x, y)`, clamped to the right edge of `area` so that
 /// the cursor never escapes its containing region when callers compute positions from a sum of
 /// widths (prompt + query, or column + textarea origin).
-pub(crate) fn place_clamped(frame: &mut Frame<'_>, raw_x: u16, y: u16, area: Rect) {
+pub(super) fn place_clamped(frame: &mut Frame<'_>, raw_x: u16, y: u16, area: Rect) {
     let cursor_x = raw_x.min(area.right().saturating_sub(1));
     frame.set_cursor_position((cursor_x, y));
 }

@@ -17,7 +17,7 @@ pub(crate) fn wrap_prev(index: usize, len: usize) -> usize {
 /// Scroll window over a list. `Cell`-backed because the window settles during `render(&self)`,
 /// when the granted height is finally known.
 #[derive(Debug, Default)]
-pub(crate) struct Viewport {
+pub(super) struct Viewport {
     offset: Cell<usize>,
     height: Cell<usize>,
 }
@@ -25,7 +25,7 @@ pub(crate) struct Viewport {
 impl Viewport {
     /// Visible range of `len` rows in a `height`-row window, moved as little as possible to keep
     /// `cursor` in view.
-    pub(crate) fn window(&self, len: usize, height: usize, cursor: Option<usize>) -> Range<usize> {
+    pub(super) fn window(&self, len: usize, height: usize, cursor: Option<usize>) -> Range<usize> {
         let mut offset = self.offset.get().min(len.saturating_sub(height));
         if let Some(cursor) = cursor {
             if cursor < offset {
@@ -40,18 +40,18 @@ impl Viewport {
     }
 
     /// Rows the last render showed, at least one, for page-sized cursor steps.
-    pub(crate) fn page(&self) -> usize {
+    pub(super) fn page(&self) -> usize {
         self.height.get().max(1)
     }
 
     /// Scrolls a cursor-less window by `delta` rows, stopping where the last of `len` rows shows.
-    pub(crate) fn scroll_by(&self, delta: isize, len: usize) {
+    pub(super) fn scroll_by(&self, delta: isize, len: usize) {
         let max_offset = len.saturating_sub(self.height.get());
         let offset = self.offset.get().saturating_add_signed(delta);
         self.offset.set(offset.min(max_offset));
     }
 
-    pub(crate) fn reset(&self) {
+    pub(super) fn reset(&self) {
         self.offset.set(0);
     }
 }
