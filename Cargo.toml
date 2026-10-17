@@ -107,6 +107,12 @@ windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 wiremock = "0.6"
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
 [profile.release]
 lto = true
 codegen-units = 1

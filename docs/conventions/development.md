@@ -1,6 +1,6 @@
 # Development
 
-Learn how to set up the development environment, what the pre-commit hooks check, how the toolchain is pinned, and what CI runs. For other ways to build `ox`, see [Installation](../guide/install.md).
+Learn how to set up the development environment, what the pre-commit hooks check, How the toolchain is pinned, what debug information builds retain, and what CI runs. For other ways to build `ox`, see [Installation](../guide/install.md).
 
 ## Dev Shell
 
@@ -27,7 +27,11 @@ The Node-based hooks require `node_modules` and silently skip when it is missing
 
 - `rust-toolchain.toml` pins the exact Rust release used by the dev shell, CI, and release builds. The flake reads the pin through rust-overlay, while jobs outside Nix install it with `rustup toolchain install`.
 - Renovate bumps the pin in its automerged flake-inputs group. If a new release adds lint failures, fix them in that PR so it can merge.
-- `rust-version` in the root `Cargo.toml` sets the minimum supported Rust version for `cargo install` users. The MSRV job checks it, and [Versioning](../../RELEASING.md#versioning) explains how to bump it.
+- The root `Cargo.toml` sets `rust-version`, the minimum Rust version supported for users who run `cargo install`. The MSRV job checks this version, and [Versioning](../../RELEASING.md#versioning) explains how to bump it.
+
+## Debug Info
+
+Dev and test builds include line tables for `ox` and no debug info for dependencies, keeping each checkout's `target/` small. Panic messages and backtraces still show file and line information for `ox` code, while frames in dependency code may show only function names. To inspect variables in a debugger, set `CARGO_PROFILE_DEV_DEBUG=true` to rebuild `ox` with full debug info.
 
 ## CI
 
