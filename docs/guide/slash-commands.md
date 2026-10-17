@@ -6,25 +6,25 @@ After `/model`, `/effort`, or `/theme`, type a space to switch the popup to **ar
 
 ## Built-in Commands
 
-| Command                                     | Description                                                                                  |
-| ------------------------------------------- | -------------------------------------------------------------------------------------------- |
-| `/archive [<id-prefix>]`                    | Archive this session and start a fresh one, or archive a saved session by ID prefix.         |
-| `/clear` (aliases `/new`, `/reset`)         | Start a fresh session. The previous one stays resumable with `ox -c`.                        |
-| `/compact [<instructions>]`                 | Compress the conversation into a summary. Trailing text steers the focus.                    |
-| `/config`                                   | Open the resolved configuration, where each value came from, and the loaded config files.    |
-| `/delete <id-prefix>`                       | Delete a saved session by ID prefix, after a Y / N confirmation.                             |
-| `/diff`                                     | Show uncommitted git changes and untracked files in chat, capped at 64 KB.                   |
-| `/effort [<level>]`                         | Open the slider, or set the level directly (`low`, `medium`, `high`, `xhigh`, `max`).        |
-| `/help`                                     | Open a read-only list of available commands.                                                 |
-| `/init`                                     | Create `AGENTS.md` or `CLAUDE.md`, or propose edits to an existing one as a diff to confirm. |
-| `/login`                                    | Sign in to a Claude account in the browser and store the login for oxide-code.               |
-| `/logout`                                   | Remove the oxide-code login. The Claude Code login stays in place.                           |
-| `/model [<id>]`                             | Open the model and effort picker, or switch directly by ID or unique substring.              |
-| `/rename [<title>]`                         | Open a single-line editor pre-filled with the current title, or set it directly.             |
-| `/resume [<id-prefix>]` (alias `/continue`) | Open the session picker (search, scope and archived toggles), or jump by ID prefix.          |
-| `/status`                                   | Show the model, auth, settings, session rules, and background shells.                        |
-| `/theme [<name>]`                           | Open the theme picker with live preview, or switch directly to a built-in theme.             |
-| `/unarchive <id-prefix>`                    | List an archived session again.                                                              |
+| Command                                     | Description                                                                                                                           |
+| ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `/archive [<id-prefix>]`                    | Archive this session and start a fresh one, or archive a saved session by ID prefix.                                                  |
+| `/clear` (aliases `/new`, `/reset`)         | Start a fresh session. The previous one stays resumable with `ox -c`.                                                                 |
+| `/compact [<instructions>]`                 | Compress the conversation into a summary. Trailing text steers the focus.                                                             |
+| `/config`                                   | Open the resolved configuration, where each value came from, and the loaded config files.                                             |
+| `/delete <id-prefix>`                       | Delete a saved session by ID prefix, after a Y / N confirmation.                                                                      |
+| `/diff`                                     | Show uncommitted git changes and untracked files in chat, capped at 64 KB.                                                            |
+| `/effort [<level>]`                         | Open the slider, or set the level directly (`low`, `medium`, `high`, `xhigh`, `max`).                                                 |
+| `/help`                                     | Open a read-only list of available commands.                                                                                          |
+| `/init`                                     | Create `AGENTS.md` or `CLAUDE.md`, or propose edits to an existing one as a diff to confirm.                                          |
+| `/login`                                    | Sign in to a Claude account in the browser and store the login for oxide-code.                                                        |
+| `/logout`                                   | Remove the oxide-code login. The Claude Code login stays in place.                                                                    |
+| `/model [<id>]`                             | Open the model and effort picker, or switch directly by ID or unique substring.                                                       |
+| `/rename [<title>]`                         | Open a single-line editor pre-filled with the current title, or set it directly.                                                      |
+| `/resume [<id-prefix>]` (alias `/continue`) | Open the session picker (search, scope and archived toggles, Ctrl+X to archive or unarchive, Ctrl+D to delete), or jump by ID prefix. |
+| `/status`                                   | Show the model, auth, settings, session rules, and background shells.                                                                 |
+| `/theme [<name>]`                           | Open the theme picker with live preview, or switch directly to a built-in theme.                                                      |
+| `/unarchive <id-prefix>`                    | List an archived session again.                                                                                                       |
 
 To send text that starts with `/`, double the slash. For example, typing `//etc` sends `/etc`.
 
