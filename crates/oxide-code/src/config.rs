@@ -72,14 +72,11 @@ pub(crate) struct ConfigSnapshot {
 }
 
 impl ConfigSnapshot {
-    /// Startup notices: config files in superseded locations, an unsupported model, then why the
-    /// session is signed out.
+    /// Startup notices: an unsupported model, then why the session is signed out.
     pub(crate) fn notices(&self) -> Vec<String> {
-        self.provenance
-            .layers
-            .iter()
-            .filter_map(provenance::Layer::notice)
-            .chain(self.model.unsupported_notice())
+        self.model
+            .unsupported_notice()
+            .into_iter()
             .chain(self.signed_out_notice.clone())
             .collect()
     }
@@ -402,11 +399,8 @@ impl Config {
         let effort = resolve_effort(&model, client.effort, &origins)?;
 
         let max_tokens = Sourced::from_option(
-            env_number(
-                aliased("OX_MAX_TOKENS", "ANTHROPIC_MAX_TOKENS"),
-                1..=u32::MAX,
-            )?
-            .or_else(|| origins.sourced("client.max_tokens", client.max_tokens)),
+            env_number("OX_MAX_TOKENS", 1..=u32::MAX)?
+                .or_else(|| origins.sourced("client.max_tokens", client.max_tokens)),
         );
         let max_tool_rounds = Sourced::from_option(
             env_number("OX_MAX_TOOL_ROUNDS", 1..=u32::MAX)?
@@ -586,8 +580,7 @@ fn resolve_effort(
     file: Option<Effort>,
     origins: &Origins,
 ) -> Result<Sourced<Option<Effort>>> {
-    let pick = env_parse::<Effort>(aliased("OX_EFFORT", "ANTHROPIC_EFFORT"))?
-        .or_else(|| origins.sourced("client.effort", file));
+    let pick = env_parse::<Effort>("OX_EFFORT")?.or_else(|| origins.sourced("client.effort", file));
     let effort = model.resolve_effort(pick.as_ref().map(|pick| pick.value));
     Ok(match pick {
         Some(pick) if effort.is_some() => Sourced::new(effort, pick.source),
@@ -700,15 +693,6 @@ where
     Ok(env::number(var, range)?.map(|value| Sourced::new(value, Source::Env(var))))
 }
 
-/// `var`, or its older `alias` when only the alias is set.
-fn aliased(var: &'static str, alias: &'static str) -> &'static str {
-    if env::string(var).is_none() && env::string(alias).is_some() {
-        alias
-    } else {
-        var
-    }
-}
-
 // ── Base URL ──
 
 fn validate_base_url(raw: &str) -> Result<()> {
@@ -818,36 +802,14 @@ mod tests {
             },
             provenance: Provenance {
                 model: Source::Env("ANTHROPIC_MODEL"),
-                effort: Source::Env("ANTHROPIC_EFFORT"),
+                effort: Source::Env("OX_EFFORT"),
                 ..Provenance::default()
             },
         }
     }
 
     #[test]
-    fn notices_list_legacy_files_then_an_unsupported_model() {
-        let mut cfg = sample_config();
-        cfg.provenance.layers = vec![
-            Layer::User(PathBuf::from("/cfg/ox/config.toml")),
-            Layer::LegacyProject(PathBuf::from("/repo/ox.toml")),
-            Layer::Project(PathBuf::from("/repo/.ox/config.toml")),
-        ];
-
-        let notices = cfg.snapshot().notices();
-
-        assert_eq!(notices.len(), 2, "{notices:?}");
-        assert!(
-            notices[0].starts_with("/repo/ox.toml is in the legacy"),
-            "{notices:?}"
-        );
-        assert!(
-            notices[1].starts_with("`claude-test-1-0` is not a supported model"),
-            "{notices:?}"
-        );
-    }
-
-    #[test]
-    fn notices_end_with_why_the_session_is_signed_out() {
+    fn notices_list_an_unsupported_model_then_why_the_session_is_signed_out() {
         let mut cfg = sample_config();
         cfg.auth = None;
         cfg.signed_out_notice = Some("Not signed in. Run /login to sign in.".to_owned());
@@ -855,6 +817,10 @@ mod tests {
         let notices = cfg.snapshot().notices();
 
         assert_eq!(notices.len(), 2, "{notices:?}");
+        assert!(
+            notices[0].starts_with("`claude-test-1-0` is not a supported model"),
+            "{notices:?}"
+        );
         assert_eq!(notices[1], "Not signed in. Run /login to sign in.");
     }
 
@@ -862,7 +828,6 @@ mod tests {
     fn notices_are_empty_for_a_current_setup() {
         let mut cfg = sample_config();
         cfg.model = ModelSpec::resolve("claude-opus-5-5".to_owned());
-        cfg.provenance.layers = vec![Layer::Project(PathBuf::from("/repo/.ox/config.toml"))];
         assert_eq!(cfg.snapshot().notices(), [] as [String; 0]);
     }
 
@@ -876,7 +841,7 @@ mod tests {
 
         snap.apply_swap(model.clone(), Some(Effort::Xhigh), None, auto);
         assert_eq!(snap.provenance.model, Source::Env("ANTHROPIC_MODEL"));
-        assert_eq!(snap.provenance.effort, Source::Env("ANTHROPIC_EFFORT"));
+        assert_eq!(snap.provenance.effort, Source::Env("OX_EFFORT"));
         assert_eq!(snap.compaction.auto, auto);
 
         snap.apply_swap(model, Some(Effort::Low), Some(Effort::Low), auto);
@@ -1001,8 +966,6 @@ mod tests {
         "CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS",
         "ANTHROPIC_MODEL",
         "ANTHROPIC_BASE_URL",
-        "ANTHROPIC_MAX_TOKENS",
-        "ANTHROPIC_EFFORT",
         "OX_EFFORT",
         "OX_MAX_TOKENS",
         "OX_EXTRA_CA_CERTS",
@@ -1283,7 +1246,7 @@ mod tests {
         let whole = format!("1 to {}", u32::MAX);
         for (var, raw, range) in [
             ("OX_MAX_TOKENS", "32k", whole.clone()),
-            ("ANTHROPIC_MAX_TOKENS", "0", whole.clone()),
+            ("OX_MAX_TOKENS", "0", whole.clone()),
             ("OX_MAX_TOOL_ROUNDS", "-3", whole),
             (
                 "OX_COMPACTION_AUTO_THRESHOLD_TOKENS",
@@ -1674,10 +1637,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config = load_with(
             &dir,
-            &[
-                ("ANTHROPIC_MODEL", "claude-opus-5-5"),
-                ("ANTHROPIC_EFFORT", "low"),
-            ],
+            &[("ANTHROPIC_MODEL", "claude-opus-5-5"), ("OX_EFFORT", "low")],
         )
         .await
         .unwrap();
@@ -1689,10 +1649,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config = load_with(
             &dir,
-            &[
-                ("ANTHROPIC_MODEL", "custom-model"),
-                ("ANTHROPIC_EFFORT", "max"),
-            ],
+            &[("ANTHROPIC_MODEL", "custom-model"), ("OX_EFFORT", "max")],
         )
         .await
         .unwrap();
@@ -1740,32 +1697,6 @@ mod tests {
             format!("{err:#}"),
             r#"invalid OX_EFFORT "insane": expected one of low, medium, high, xhigh, max"#,
         );
-    }
-
-    #[tokio::test]
-    async fn load_ox_names_beat_their_anthropic_aliases() {
-        let dir = tempfile::tempdir().unwrap();
-        let aliases = [("ANTHROPIC_EFFORT", "low"), ("ANTHROPIC_MAX_TOKENS", "200")];
-
-        let config = load_with(&dir, &aliases).await.unwrap();
-        assert_eq!(config.effort, Some(Effort::Low));
-        assert_eq!(config.max_tokens, Some(200));
-        assert_eq!(config.provenance.effort, Source::Env("ANTHROPIC_EFFORT"));
-        assert_eq!(
-            config.provenance.max_tokens,
-            Source::Env("ANTHROPIC_MAX_TOKENS")
-        );
-
-        let both = [
-            &aliases[..],
-            &[("OX_EFFORT", "high"), ("OX_MAX_TOKENS", "100")],
-        ]
-        .concat();
-        let config = load_with(&dir, &both).await.unwrap();
-        assert_eq!(config.effort, Some(Effort::High));
-        assert_eq!(config.max_tokens, Some(100));
-        assert_eq!(config.provenance.effort, Source::Env("OX_EFFORT"));
-        assert_eq!(config.provenance.max_tokens, Source::Env("OX_MAX_TOKENS"));
     }
 
     // ── Config::load: status_line ──
@@ -2263,7 +2194,7 @@ mod tests {
             &[
                 ("ANTHROPIC_BASE_URL", "https://gateway.example.com"),
                 ("ANTHROPIC_AUTH_TOKEN", "gateway-token"),
-                ("ANTHROPIC_MAX_TOKENS", "64"),
+                ("OX_MAX_TOKENS", "64"),
                 ("CLAUDE_CODE_ATTRIBUTION_HEADER", "0"),
                 ("OX_COMPACTION_AUTO_THRESHOLD_PERCENT", "40"),
                 ("OX_EXTRA_CA_CERTS", "/etc/ssl/ca.pem"),
@@ -2281,7 +2212,7 @@ mod tests {
                 base_url: Source::Env("ANTHROPIC_BASE_URL"),
                 extra_ca_certs: Source::Env("OX_EXTRA_CA_CERTS"),
                 attribution: Source::Env("CLAUDE_CODE_ATTRIBUTION_HEADER"),
-                max_tokens: Source::Env("ANTHROPIC_MAX_TOKENS"),
+                max_tokens: Source::Env("OX_MAX_TOKENS"),
                 prompt_cache_ttl: Source::Env("OX_PROMPT_CACHE_TTL"),
                 compaction: Source::Env("OX_COMPACTION_AUTO_THRESHOLD_PERCENT"),
                 permission_mode: Source::Env("OX_PERMISSION_MODE"),

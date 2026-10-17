@@ -319,8 +319,7 @@ fn credentials() -> Vec<(&'static str, String)> {
 /// Whether an inherited variable changes what the tests observe. The endpoint, credential,
 /// header, CA, and attribution variables pass through.
 fn is_behavior_var(name: &str) -> bool {
-    (name.starts_with("OX_") && name != "OX_EXTRA_CA_CERTS")
-        || matches!(name, "ANTHROPIC_EFFORT" | "ANTHROPIC_MAX_TOKENS")
+    name.starts_with("OX_") && name != "OX_EXTRA_CA_CERTS"
 }
 
 fn env_or(name: &str, default: &str) -> String {

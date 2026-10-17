@@ -617,11 +617,6 @@ mod tests {
             (PermissionClass::Exec, "cat $HOME", "expands at run time"),
             (PermissionClass::Exec, "echo $(date)", "expands at run time"),
             (PermissionClass::Exec, "mkfs*", "holds a glob"),
-            (
-                PermissionClass::Exec,
-                "cargo test:*",
-                "the old `:*` prefix form. Write the `*` as a word of its own, as in `cargo test *`.",
-            ),
             (PermissionClass::Exec, "ls *.rs", "holds a glob"),
             (PermissionClass::Exec, "FOO=$BAR cmd", "expands at run time"),
             (PermissionClass::Exec, "FOO=1", "must name a command"),

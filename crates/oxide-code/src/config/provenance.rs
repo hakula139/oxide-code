@@ -4,9 +4,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use super::load::project_config_path;
 use crate::util::env;
-use crate::util::path::tildify;
 
 // ── Layer ──
 
@@ -18,8 +16,6 @@ pub(crate) enum Layer {
     /// A `$XDG_CONFIG_HOME/ox/config.d/*.toml` drop-in, applied in file-name order after the user
     /// file.
     DropIn(PathBuf),
-    /// A project `ox.toml` from before the `.ox/` directory, applied below `.ox/config.toml`.
-    LegacyProject(PathBuf),
     /// `.ox/config.toml` in the nearest directory at or above the working directory that has one.
     Project(PathBuf),
 }
@@ -27,17 +23,14 @@ pub(crate) enum Layer {
 impl Layer {
     pub(crate) fn path(&self) -> &Path {
         match self {
-            Self::User(path)
-            | Self::DropIn(path)
-            | Self::LegacyProject(path)
-            | Self::Project(path) => path,
+            Self::User(path) | Self::DropIn(path) | Self::Project(path) => path,
         }
     }
 
-    /// Project layers come from the checkout, so they may not set credentials, endpoints, or
+    /// The project layer comes from the checkout, so it may not set credentials, endpoints, or
     /// permission grants.
     pub(super) const fn is_project(&self) -> bool {
-        matches!(self, Self::LegacyProject(_) | Self::Project(_))
+        matches!(self, Self::Project(_))
     }
 
     /// Short name for the layer, as `/config` shows it.
@@ -48,22 +41,8 @@ impl Layer {
                 "config.d/{}",
                 path.file_name().unwrap_or_default().to_string_lossy()
             ),
-            Self::LegacyProject(_) => "ox.toml".to_owned(),
             Self::Project(_) => "project".to_owned(),
         }
-    }
-
-    /// Startup notice for a layer that still loads from a superseded location.
-    pub(super) fn notice(&self) -> Option<String> {
-        let Self::LegacyProject(path) = self else {
-            return None;
-        };
-        let current = project_config_path(path.parent()?);
-        Some(format!(
-            "{} is in the legacy project config location. Move its settings to {} and delete it.",
-            tildify(path),
-            tildify(&current),
-        ))
     }
 }
 
@@ -157,7 +136,6 @@ pub(crate) struct Provenance {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::util::path::testing::HOME_VAR;
 
     // ── Layer::label ──
 
@@ -172,35 +150,8 @@ mod tests {
             "config.d/10-nix.toml",
         );
         assert_eq!(
-            Layer::LegacyProject(PathBuf::from("/repo/ox.toml")).label(),
-            "ox.toml"
-        );
-        assert_eq!(
             Layer::Project(PathBuf::from("/repo/.ox/config.toml")).label(),
             "project"
-        );
-    }
-
-    // ── Layer::notice ──
-
-    #[test]
-    fn notice_names_the_new_project_path_for_a_legacy_file() {
-        let legacy = Layer::LegacyProject(PathBuf::from("/repo/ox.toml"));
-        let current = Path::new("/repo").join(".ox").join("config.toml");
-
-        let notice = temp_env::with_var(HOME_VAR, Some("/home/u"), || legacy.notice());
-
-        assert_eq!(
-            notice,
-            Some(format!(
-                "/repo/ox.toml is in the legacy project config location. Move its settings to \
-                 {} and delete it.",
-                current.display(),
-            )),
-        );
-        assert_eq!(
-            Layer::Project(PathBuf::from("/repo/.ox/config.toml")).notice(),
-            None
         );
     }
 

@@ -7,7 +7,6 @@
 //! the only thing standing between the model and an unchecked tool call.
 
 pub(crate) mod defaults;
-pub(crate) mod legacy;
 pub(crate) mod rule;
 pub(crate) mod shell;
 
@@ -19,6 +18,8 @@ use std::sync::{Arc, LazyLock};
 
 use anyhow::{Result, bail, ensure};
 use caseless::Caseless;
+use clap::ValueEnum;
+use clap::builder::PossibleValue;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use unicode_normalization::UnicodeNormalization;
@@ -32,7 +33,7 @@ use crate::util::path::{expand_user, lexical_normalize};
 
 /// The standing permission posture, which settles the calls no rule does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase", try_from = "String")]
+#[serde(rename_all = "lowercase")]
 pub(crate) enum Mode {
     /// Ask about every call the rules leave open.
     #[default]
@@ -78,21 +79,19 @@ impl FromStr for Mode {
             "manual" => Ok(Self::Manual),
             "plan" => Ok(Self::Plan),
             "yolo" => Ok(Self::Yolo),
-            "auto" => bail!(
-                "expected one of {}. The asking mode \"auto\" is now \"manual\", the default, so \
-                 use \"manual\" or leave the mode unset",
-                Self::VALID_VALUES
-            ),
             _ => bail!("expected one of {}", Self::VALID_VALUES),
         }
     }
 }
 
-impl TryFrom<String> for Mode {
-    type Error = anyhow::Error;
+/// Lists each mode in `--help` with the description the `/mode` picker shows.
+impl ValueEnum for Mode {
+    fn value_variants<'a>() -> &'a [Self] {
+        &Self::ALL
+    }
 
-    fn try_from(s: String) -> Result<Self> {
-        s.parse()
+    fn to_possible_value(&self) -> Option<PossibleValue> {
+        Some(PossibleValue::new(self.as_str()).help(self.description()))
     }
 }
 
@@ -1380,16 +1379,6 @@ mod tests {
         }
         let err = "bypass".parse::<Mode>().unwrap_err().to_string();
         assert_eq!(err, "expected one of manual, plan, yolo");
-    }
-
-    #[test]
-    fn mode_names_the_replacement_for_the_renamed_auto() {
-        let err = "auto".parse::<Mode>().unwrap_err().to_string();
-        assert_eq!(
-            err,
-            "expected one of manual, plan, yolo. The asking mode \"auto\" is now \"manual\", the \
-             default, so use \"manual\" or leave the mode unset"
-        );
     }
 
     // ── Workspace::resolve ──
