@@ -17,21 +17,20 @@ oxide-code (`ox`) is a terminal agent for software engineering tasks. It runs Cl
 
 Early development. What works today:
 
-- Terminal UI: streaming output, markdown rendering, syntax-highlighted code blocks, [configurable status line](docs/guide/configuration.md#tui-terminal-ui), and 5 built-in themes with custom-TOML overrides
-- Bare REPL (`--no-tui`) and [headless one-shot mode](docs/guide/headless.md) (`-p`) for scripts and pipelines, with output as text, a JSON result, or a JSON event stream
-- Agent loop with extended thinking and tool-use round-trip
-- Claude Opus 5.5, Sonnet 5.5, and Haiku 5.5, each with a 1M-token context window and adjustable effort
-- File and search tools: `read`, `write`, `edit`, `glob`, `grep`, `bash`
-- Background shell commands for dev servers, watchers, and long builds, which `bash` starts and `bash_output` reads incrementally, listed in the TUI's `/status`, and ended by `bash_stop` or with the session
-- Task list the model keeps with the `tasks` tool for multi-step work, shown above the input in the TUI, on stderr in the REPL, and in an opt-in status-line segment, and carried through resume and compaction
-- Tool permissions: `auto` (default), `plan`, and `yolo` modes, allow / deny rules that match each simple command of a parsed `bash` command line, read-only commands that run without approval, protected config paths whose edits need approval in `auto` mode even when an allow rule matches, and an approval prompt for gated calls in the TUI and REPL that can allow matching calls for the rest of the session or deny with feedback for the model
-- Turn interruption (Esc / Ctrl+C) plus mid-turn queued follow-up prompts that splice into the same turn between tool calls, with double-press Ctrl+C exit confirmation
-- Slash commands with `/`-triggered autocomplete (name and curated-arg modes): `/archive`, `/clear`, `/compact`, `/config`, `/delete`, `/diff`, `/effort`, `/help`, `/init`, `/login`, `/logout`, `/model`, `/rename`, `/resume`, `/status`, `/theme`, `/unarchive`, with the typed session and model commands also in the bare REPL
-- Context compression with manual `/compact` and default-on auto-compaction
-- `CLAUDE.md` / `AGENTS.md` instruction-file discovery
-- Session persistence with JSONL conversation logs, AI-generated titles, listing, archiving, and resume
-- Per-session file-change tracking with a Read-before-Edit gate and on-disk drift detection
-- Authentication (Anthropic API key, browser sign-in with `/login`, Claude Code login or long-lived OAuth token, LLM gateway bearer token with custom headers) and layered TOML config
+- **Terminal UI** with streaming Markdown, syntax-highlighted code blocks, a [configurable status line](docs/guide/configuration.md#tui-terminal-ui), and 5 built-in [themes](docs/guide/theming.md) with custom TOML overrides
+- **Bare REPL** (`--no-tui`) and [headless mode](docs/guide/headless.md) (`-p`) for scripts and pipelines, with output as text, a JSON result, or a JSON event stream
+- **Models**: Claude Opus 5.5, Sonnet 5.5, and Haiku 5.5, each with a 1M-token context window, adjustable effort, and extended thinking
+- **Tools**: `read`, `write`, `edit`, `glob`, `grep`, and `bash`, which can also keep dev servers, watchers, and long builds running in the background
+- **Task list** the model keeps for multi-step work, shown live and carried through resume and compaction
+- **[Tool permissions](docs/guide/configuration.md#permission-tool-approval)**: `auto` (default), `plan`, and `yolo` modes, allow / deny rules matched against each command in a `bash` command line, read-only commands that skip approval, protected config paths, and an approval prompt that can allow matching calls for the session or deny with feedback for the model
+- **Turn control**: interrupt with Esc or Ctrl+C, queue follow-up prompts that join the running turn between tool calls, and confirm exit with a second Ctrl+C
+- **[Slash commands](docs/guide/slash-commands.md)** with autocomplete, covering sessions, models and effort, compaction, sign-in, themes, and status views
+- **Context compaction** with manual `/compact` and default-on auto-compaction
+- **[Instruction files](docs/guide/instructions.md)**: `CLAUDE.md` / `AGENTS.md` discovery
+- **[Sessions](docs/guide/sessions.md)** saved as JSONL logs, with AI-generated titles, listing, archiving, and resume
+- **File-change tracking** with a Read-before-Edit gate and on-disk drift detection
+- **[Authentication](docs/guide/configuration.md#authentication)** with an Anthropic API key, browser sign-in with `/login`, the Claude Code login or a long-lived OAuth token, or an LLM gateway bearer token with custom headers
+- **Layered TOML [configuration](docs/guide/configuration.md)**
 
 ## Scope
 
@@ -54,7 +53,7 @@ Releases follow the [versioning policy](RELEASING.md#versioning), and stable rel
 
 ## Installation
 
-Four install paths are supported: prebuilt tarball, Homebrew tap, `cargo install`, and Nix flake. See [Installation](docs/guide/install.md) for the full matrix. The most common one-liners:
+[Installation](docs/guide/install.md) covers every platform and method, plus updating and uninstalling. The most common commands:
 
 ```bash
 # macOS aarch64 (Apple Silicon). Set VERSION to the newest tag on the Releases page.
@@ -82,7 +81,7 @@ ox
 
 ## Documentation
 
-See the [user guide](docs/guide/) for installation, configuration, slash commands, instruction files, sessions, and theming.
+The [user guide](docs/guide/) covers installation, a quickstart, configuration, slash commands, instruction files, sessions, headless mode, and theming.
 
 ## Development
 

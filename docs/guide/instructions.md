@@ -1,15 +1,10 @@
 # Instruction Files
 
-Instruction files let you give the assistant persistent, project-specific context. These Markdown files are loaded when a session starts and sent with every request. A session keeps its initial instructions and date, including across `/resume`, so the cached prompt prefix stays reusable. File edits and date rollovers arrive as a reminder with your next prompt, and `/clear` and `/compact` start from the current files.
+Instruction files are Markdown files that provide persistent, project-specific context for the assistant. oxide-code loads them when a session starts and includes them with every request.
 
 ## Supported filenames
 
-At each location, oxide-code looks for these filenames in order:
-
-1. `CLAUDE.md`
-2. `AGENTS.md`
-
-The first file found at each location wins. Use whichever convention your project prefers.
+At each location, oxide-code loads `CLAUDE.md`, or `AGENTS.md` if `CLAUDE.md` is missing or empty. Choose the filename your project prefers. Each file is read as written, without expanding Claude Code's `@path` imports.
 
 ## Where instruction files can live
 
@@ -21,7 +16,18 @@ Instruction files are loaded from three scopes:
 | Project          | `<dir>/CLAUDE.md`, every directory from the project root down to the CWD | Team-shared conventions                    |
 | Project (hidden) | `<dir>/.claude/CLAUDE.md`, same walk inside `.claude/`                   | Same as above, but out of the project root |
 
-Files closer to your working directory appear later in the prompt and conventionally take precedence. For a working directory of `/repo/crates/core`, files load in this order: `~/.claude/` → `/repo/` → `/repo/crates/` → `/repo/crates/core/`. oxide-code checks both the root-level and `.claude/` variants at each step. The project root is the git repository root when available, falling back to the current working directory.
+The project root is the Git repository root, or the working directory if it is outside a repository. Files closer to the working directory appear later in the prompt and conventionally take precedence. For a working directory of `/repo/crates/core`, files load in this order:
+
+1. `~/.claude/`
+2. `/repo/`, then `/repo/.claude/`
+3. `/repo/crates/`, then `/repo/crates/.claude/`
+4. `/repo/crates/core/`, then `/repo/crates/core/.claude/`
+
+## When changes take effect
+
+- **Edits during a session** are sent to the model as a reminder with your next prompt.
+- **Resuming a session** with `/resume` or `ox -c` keeps the instructions from when the session started, preserving the reusable cached prompt prefix. Any edits made since then are sent as a reminder with your next prompt.
+- **`/clear` and `/compact`** start with the current files.
 
 ## Writing effective instructions
 
@@ -45,6 +51,6 @@ A typical file lists coding conventions and project-specific rules:
 
 Tips:
 
-- Keep instructions concise, since they consume tokens on every API call.
-- Focus on rules the assistant can't infer from the code itself.
-- Put personal preferences in the global file. Put team-shared conventions at the project level.
+- Run `/init` to have the assistant draft a file from the codebase or suggest edits to an existing one.
+- Keep instructions concise because they consume tokens on every API call.
+- Focus on rules the assistant cannot infer from the code itself.

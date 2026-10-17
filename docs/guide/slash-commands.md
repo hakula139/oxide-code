@@ -1,64 +1,69 @@
 # Slash Commands
 
-Type `/` to open the autocomplete popup. **Up / Down** browse, **Tab** completes, **Enter** submits, **Esc** dismisses. Aliases (`/clear (new, reset)`) all route to the same command.
+Type `/` to open the autocomplete popup. Use **Up / Down** to browse, **Tab** to complete, **Enter** to submit, and **Esc** to dismiss. Each command's aliases appear beside it, as in `/clear (new, reset)`.
 
-For commands with curated arguments (`/model`, `/effort`, `/theme`), the popup switches to **arg mode** after `/<name>` + space, listing valid values.
+After `/model`, `/effort`, or `/theme`, type a space to switch the popup to **arg mode**, which lists the valid values.
 
 ## Built-in Commands
 
-| Command                                     | Description                                                                                 |
-| ------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| `/archive [<id-prefix>]`                    | Archive this session and start a fresh one, or archive a saved session by id prefix.        |
-| `/clear` (aliases `/new`, `/reset`)         | Start a fresh session. The previous one stays resumable via `ox -c`.                        |
-| `/compact [<instructions>]`                 | Compress the conversation into a summary. Trailing text steers the focus.                   |
-| `/config`                                   | Open the resolved configuration, where each value came from, and the loaded config files.   |
-| `/delete <id-prefix>`                       | Delete a saved session by id prefix, with a Y/N confirm modal before the unlink.            |
-| `/diff`                                     | Show uncommitted git changes plus untracked files in chat, capped at 64 KB.                 |
-| `/effort [<level>]`                         | Open the slider, or set the tier directly (`low`, `medium`, `high`, `xhigh`, `max`).        |
-| `/help`                                     | Open a read-only modal listing available commands.                                          |
-| `/init`                                     | Create `AGENTS.md` / `CLAUDE.md`, or propose edits to an existing one as a diff to confirm. |
-| `/login`                                    | Sign in to a Claude account in the browser and store the login for oxide-code.              |
-| `/logout`                                   | Remove the oxide-code login. The Claude Code login stays in place.                          |
-| `/model [<id>]`                             | Open the model + effort picker, or swap directly (alias / substring / exact id).            |
-| `/rename [<title>]`                         | Open a single-line modal pre-filled with the current title, or set it directly.             |
-| `/resume [<id-prefix>]` (alias `/continue`) | Open the session picker (search, scope and archived toggles), or jump by id prefix.         |
-| `/status`                                   | Open a read-only modal of the model, auth, settings, session rules, and background shells.  |
-| `/theme [<name>]`                           | Open the theme picker (live preview), or swap directly to a built-in theme.                 |
-| `/unarchive <id-prefix>`                    | List an archived session again.                                                             |
+| Command                                     | Description                                                                                  |
+| ------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `/archive [<id-prefix>]`                    | Archive this session and start a fresh one, or archive a saved session by ID prefix.         |
+| `/clear` (aliases `/new`, `/reset`)         | Start a fresh session. The previous one stays resumable with `ox -c`.                        |
+| `/compact [<instructions>]`                 | Compress the conversation into a summary. Trailing text steers the focus.                    |
+| `/config`                                   | Open the resolved configuration, where each value came from, and the loaded config files.    |
+| `/delete <id-prefix>`                       | Delete a saved session by ID prefix, after a Y / N confirmation.                             |
+| `/diff`                                     | Show uncommitted git changes and untracked files in chat, capped at 64 KB.                   |
+| `/effort [<level>]`                         | Open the slider, or set the level directly (`low`, `medium`, `high`, `xhigh`, `max`).        |
+| `/help`                                     | Open a read-only list of available commands.                                                 |
+| `/init`                                     | Create `AGENTS.md` or `CLAUDE.md`, or propose edits to an existing one as a diff to confirm. |
+| `/login`                                    | Sign in to a Claude account in the browser and store the login for oxide-code.               |
+| `/logout`                                   | Remove the oxide-code login. The Claude Code login stays in place.                           |
+| `/model [<id>]`                             | Open the model and effort picker, or switch directly by ID or unique substring.              |
+| `/rename [<title>]`                         | Open a single-line editor pre-filled with the current title, or set it directly.             |
+| `/resume [<id-prefix>]` (alias `/continue`) | Open the session picker (search, scope and archived toggles), or jump by ID prefix.          |
+| `/status`                                   | Show the model, auth, settings, session rules, and background shells.                        |
+| `/theme [<name>]`                           | Open the theme picker with live preview, or switch directly to a built-in theme.             |
+| `/unarchive <id-prefix>`                    | List an archived session again.                                                              |
 
-## Sending a Literal `/foo`
+To send text that starts with `/`, double the slash. For example, typing `//etc` sends `/etc`.
 
-Double the leading slash. Typing `//etc` sends the literal `/etc`.
+Choices made with slash commands last for the session. No slash command writes config files, so a restart returns to your configured values.
 
-## In the Bare REPL
+## When Commands Run
 
-The `--no-tui` REPL runs the typed forms of `/clear`, `/compact`, `/effort <level>`, `/model <id>`, `/rename <title>`, and `/resume <id-prefix>`, including their aliases, and confirms each one on stderr. The forms that open a picker or modal in the TUI need their argument here. The REPL rejects other commands, and a rejected or failed command makes it exit with a failure status at the end of input.
-
-## Mid-Turn Behavior
-
-State-mutating commands are refused while a turn is in flight, so retry them after the turn finishes. That includes `/archive`, `/clear`, `/compact`, `/delete`, `/init`, `/login`, `/logout`, `/rename`, `/resume`, typed `/theme <name>`, `/unarchive`, and both bare and typed forms of `/effort` and `/model`. Read-only commands (`/config`, `/diff`, `/help`, `/status`) and the bare `/theme` picker run immediately.
+- **During a turn**, only these read-only commands run: `/config`, `/diff`, `/help`, `/status`, and the bare `/theme` picker. oxide-code refuses the other commands until the turn finishes. Retry them then.
+- **In the bare REPL** (`--no-tui`), only `/clear`, `/compact`, `/effort <level>`, `/model <id>`, `/rename <title>`, and `/resume <id-prefix>` run, along with their aliases. Each confirmation appears on stderr. Commands that open a picker in the TUI require an argument here. The REPL rejects other commands, and a rejected or failed command makes it exit with a failure status at the end of input.
 
 ## Model and Effort
 
-Bare `/model` and `/effort` open pickers. Both apply on Enter and cancel on Esc.
+- **Bare `/model` and `/effort`** open pickers. Press Enter to apply your choice or Esc to cancel.
+- **`/model <id>`** accepts a full ID or any unique substring, so `opus`, `sonnet`, and `haiku` work as aliases. Switching models preserves the current effort.
+- **`/effort`** fails if the session uses a model outside the supported catalogue, because that model has no effort levels.
 
-`/model <id>` accepts a full id or any unique substring of one, so `opus`, `sonnet`, and `haiku` work as aliases. Swapping models keeps the current effort. `/effort` errors on a model id outside the supported catalogue. See [Configuration](configuration.md) for per-model effort defaults.
+See [`effort`](configuration.md#effort-intelligence-tier) for each model's defaults.
 
 ## Compaction
 
-`/compact` summarizes the visible conversation into a single `Compacted N messages → 1 summary` block. The next prompt continues from that summary, which replaces the prior chat in the model's context.
+`/compact` summarizes the visible conversation in a single `Compacted N messages → 1 summary` block. The next prompt continues from that summary. Text after the command adds focus instructions, as in `/compact focus on the build error and how we fixed it`. This helps when only part of the work matters going forward.
 
-`/compact <instructions>` appends free-text focus instructions to the rubric (e.g., `/compact focus on the build error and how we fixed it`). Useful when only a slice of the work matters going forward.
+After compaction:
 
-The pre-compact transcript stays on disk, but resuming via `ox -c` starts from the compacted summary and post-compact tail. The file-change tracker resets on compact, so any `Edit` after `/compact` requires a fresh `Read`. Queued prompts and the task list survive the compaction.
+- **Resume**: the pre-compact transcript remains on disk, but `ox -c` resumes from the summary and the messages that follow it.
+- **Edits**: the file-change tracker resets, so the model must read a file again before editing it.
+- **Carried over**: queued prompts, the task list, and background shells.
 
-`/compact` refuses a conversation shorter than about 1,000 tokens, counting messages, tool calls, and tool output but not instructions or tool definitions. An empty summary from the model also fails the compaction and leaves the conversation unchanged.
+`/compact` refuses conversations shorter than about 1,000 tokens. It counts messages, tool calls, and tool output, but not instructions or tool definitions. If the model returns an empty summary, compaction fails and leaves the conversation unchanged.
 
 ## Signing In
 
-`/login` opens the Claude sign-in page in your browser and prints its URL in case the browser does not open. The sign-in returns to a local address, so finish it in a browser on the machine running `ox`. Signing in from a browser on another machine, such as over SSH, is tracked in [#239](https://github.com/hakula139/oxide-code/issues/239). After you approve access, oxide-code stores the login in `$XDG_DATA_HOME/ox/credentials.json` (default: `~/.local/share/ox/credentials.json`) and uses it for the rest of the session and for later sessions. Press **Esc** to cancel a sign-in, which also ends on its own after 5 minutes.
+`/login` opens the Claude sign-in page in your browser and prints its URL in case the browser does not open. Sign-in returns to a local address, so complete it in a browser on the machine running `ox`. Signing in from a browser on another machine, such as over SSH, is tracked in [#239](https://github.com/hakula139/oxide-code/issues/239). Press **Esc** to cancel. Sign-in also ends automatically after 5 minutes.
 
-`/logout` deletes that file. A session that was using it switches to the Claude Code login when one is available, or stays open signed out until the next `/login`. When the Claude Code login exists but cannot be used, for example because it expired, `/logout` says why. Both commands end by naming the credential requests use. An environment variable or `client.api_key` takes precedence over both logins, so `/login` says when one of them keeps the session on that credential. See [Authentication](configuration.md#authentication) for the full order.
+After you approve access, oxide-code stores the login in `$XDG_DATA_HOME/ox/credentials.json` (default: `~/.local/share/ox/credentials.json`) and uses it for the current and later sessions.
+
+`/logout` deletes that file. A session using it switches to the Claude Code login if one is available. Otherwise, it stays open signed out until the next `/login`. If the Claude Code login exists but cannot be used, for example because it expired, `/logout` explains why.
+
+Both commands end by naming the credential that requests will now use. An environment variable or `client.api_key` takes precedence over either login, and `/login` tells you when one of them keeps the session on that credential. See [Authentication](configuration.md#authentication) for the full order.
 
 ## Sessions
 
@@ -66,10 +71,6 @@ The pre-compact transcript stays on disk, but resuming via `ox -c` starts from t
 
 ## Theme
 
-`/theme` opens the picker. **Up / Down** preview each theme live, number keys jump to a row, **Enter** applies for the rest of the session, and **Esc** reverts.
+`/theme` opens the picker. Use **Up / Down** to preview themes live, number keys to jump to a row, **Enter** to apply a theme for the rest of the session, and **Esc** to revert.
 
-`/theme <name>` swaps directly to a built-in (`mocha`, `macchiato`, `frappe`, `latte`, `material`). Custom themes go in `~/.config/ox/config.toml` under `[tui.theme] base`.
-
-## Persistence
-
-Slash-command choices stay session-local and no slash command writes config files, so a restart returns to your configured values.
+`/theme <name>` switches directly to a built-in theme: `mocha`, `macchiato`, `frappe`, `latte`, or `material`. To use a custom theme file, set it as `[tui.theme] base` in your config, as described in [Theming](theming.md#custom-theme-files).

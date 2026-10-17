@@ -4,19 +4,24 @@ How to install `ox` on macOS, Linux, and Windows. For first-run setup once insta
 
 ## System requirements
 
-- **OS**: macOS 12+, Linux with glibc 2.39 or later (such as Ubuntu 24.04, Debian 13, Fedora 40, or RHEL 10), or Windows 10+. Older glibc and musl-based Linux, such as Alpine, need a source build.
-- **Architecture**: prebuilt binaries cover `aarch64` macOS (Apple Silicon) and `x86_64` Linux and Windows. Other platforms, including Intel Macs, need a source build.
-- **Network**: outbound HTTPS to `api.anthropic.com`
-- **Windows only**: [Git for Windows](https://git-scm.com/downloads/win) with `git.exe` on `PATH`, since the bash tool runs the `bash.exe` it ships
-- **From-source builds only**: [Rust](https://www.rust-lang.org/tools/install) 1.91+
+- **macOS**: macOS 12 or later on Apple Silicon.
+- **Linux**: x86_64 Linux with glibc 2.39 or later, such as Ubuntu 24.04, Debian 13, Fedora 40, or RHEL 10.
+- **Windows**: Windows 10 or later on x86_64, with [Git for Windows](https://git-scm.com/downloads/win) and `git.exe` on `PATH`. The `bash` tool runs the `bash.exe` included with Git for Windows.
+- **Other platforms**: Intel Macs, ARM Linux, Linux with an older glibc, and musl-based Linux such as Alpine require a source build with [Rust](https://www.rust-lang.org/tools/install) 1.91 or later.
+- **Network**: Outbound HTTPS access to `api.anthropic.com` or your [LLM gateway](configuration.md#llm-gateways). Logging in with a Claude account also refreshes its token through `platform.claude.com`.
 
 ## Install `ox`
 
-Pick whichever path matches how you usually install developer tools.
+| Method                              | Platforms                                     | Builds from source |
+| ----------------------------------- | --------------------------------------------- | ------------------ |
+| [Prebuilt binary](#prebuilt-binary) | Apple Silicon macOS, x86_64 Linux and Windows | No                 |
+| [Homebrew](#homebrew)               | Apple Silicon macOS, x86_64 Linux             | No                 |
+| [cargo](#from-source-via-cargo)     | Any platform Rust supports                    | Yes                |
+| [Nix](#nix)                         | Linux and macOS                               | Yes                |
 
 ### Prebuilt binary
 
-Download the archive for your platform from [Releases](https://github.com/hakula139/oxide-code/releases), extract it, and move the `ox` binary onto your `PATH`. The commands below fetch the release named by `VERSION`, so set it to the newest tag on that page:
+Download the archive for your platform from [Releases](https://github.com/hakula139/oxide-code/releases), extract it, and move the `ox` binary to a directory on your `PATH`. Set `VERSION` to the newest tag listed on that page:
 
 ```bash
 VERSION=v0.1.0-alpha.3
@@ -34,7 +39,9 @@ curl -fsSLO "https://github.com/hakula139/oxide-code/releases/download/$VERSION/
 unzip oxide-code-x86_64-pc-windows-msvc.zip
 ```
 
-Each archive includes `LICENSE` and `THIRD-PARTY-NOTICES` alongside the `ox` executable, and each release publishes an `oxide-code-<target>.sha256` checksum beside it. Releases after `v0.1.0-alpha.2` also carry a build provenance attestation, which ties each archive to the release workflow run that built it. To verify one with the GitHub CLI before extracting it, download the archive to disk first:
+Each archive contains `ox`, `LICENSE`, and `THIRD-PARTY-NOTICES`. Each release also publishes an `oxide-code-<target>.sha256` checksum alongside the archive.
+
+Releases after `v0.1.0-alpha.2` also include a build provenance attestation linking each archive to the release workflow run that built it. To verify an archive with the GitHub CLI, download it to disk before extracting it:
 
 ```bash
 curl -fsSLO "https://github.com/hakula139/oxide-code/releases/download/$VERSION/oxide-code-aarch64-apple-darwin.tar.gz"
@@ -42,30 +49,26 @@ gh attestation verify oxide-code-aarch64-apple-darwin.tar.gz --repo hakula139/ox
 tar -xzf oxide-code-aarch64-apple-darwin.tar.gz
 ```
 
-### Homebrew (Apple Silicon macOS, x86_64 Linux)
+### Homebrew
 
-Tap this repo, then install:
+The formula installs the prebuilt release binary on Apple Silicon macOS and x86_64 Linux:
 
 ```bash
 brew tap hakula139/oxide-code https://github.com/hakula139/oxide-code
 brew install oxide-code
 ```
 
-The formula installs the prebuilt release binary, so it needs no Rust toolchain.
-
 ### From source via cargo
-
-If you already have a Rust toolchain set up:
 
 ```bash
 cargo install --git https://github.com/hakula139/oxide-code --locked
 ```
 
-This compiles `oxide-code` from the `main` branch and installs `ox` to `~/.cargo/bin`. Pass `--tag vX.Y.Z` to pin a specific release.
+This builds the `main` branch and installs `ox` to `~/.cargo/bin`. To pin a release, pass `--tag vX.Y.Z`.
 
 ### Nix
 
-The repo ships a flake that source-builds `ox`:
+The repo includes a flake that builds `ox` from source:
 
 ```bash
 nix run github:hakula139/oxide-code                     # one-shot
@@ -80,7 +83,7 @@ inputs.oxide-code.url = "github:hakula139/oxide-code";
 # Outputs: packages.${system}.{default, oxide-code}
 ```
 
-Without a tag, these refs build the `main` branch. Tags from `v0.1.0-alpha.2` on ship the flake, and a tag suffix pins the flake input the same way.
+A ref without a tag builds the `main` branch. Tags from `v0.1.0-alpha.2` onward include the flake, so adding a `/vX.Y.Z` suffix to the flake input pins a release.
 
 ## Verify your installation
 
@@ -88,18 +91,19 @@ Without a tag, these refs build the `main` branch. Tags from `v0.1.0-alpha.2` on
 ox --version
 ```
 
-If `ox` is on `PATH`, this prints the version string. A `command not found` means the binary didn't land somewhere your shell searches, so re-check the move or install step for the path you used.
+This prints the version string. If you see `command not found`, the binary is not in a directory on your `PATH`. Recheck the move or install step for your method.
 
 ## Update `ox`
 
-| Install method  | Update command                                                                 |
-| --------------- | ------------------------------------------------------------------------------ |
-| Prebuilt binary | Re-run the download block from above with `VERSION` set to the new tag         |
-| Homebrew        | `brew update && brew upgrade oxide-code`                                       |
-| Cargo           | `cargo install --git https://github.com/hakula139/oxide-code --locked --force` |
-| Nix profile     | `nix profile upgrade oxide-code` (or refresh the flake input in your project)  |
-
-The Cargo and Nix commands follow `main`. An install pinned to a tag stays on that tag, so update it by installing the new tag: pass `--tag vX.Y.Z` to `cargo install --force`, or run `nix profile remove oxide-code` and then install the new tag's ref.
+| Install method               | Update command                                                                 |
+| ---------------------------- | ------------------------------------------------------------------------------ |
+| Prebuilt binary              | Re-run the download commands with `VERSION` set to the new tag                 |
+| Homebrew                     | `brew update && brew upgrade oxide-code`                                       |
+| Cargo, from `main`           | `cargo install --git https://github.com/hakula139/oxide-code --locked --force` |
+| Cargo, pinned to a tag       | The same command with `--tag` set to the new tag                               |
+| Nix profile, from `main`     | `nix profile upgrade oxide-code`                                               |
+| Nix profile, pinned to a tag | `nix profile remove oxide-code`, then install the new tag's ref                |
+| Nix flake input              | Update the `oxide-code` input in your project's lock file                      |
 
 ## Uninstall `ox`
 
