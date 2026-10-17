@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
@@ -12,15 +12,17 @@ use tracing::warn;
 
 use crate::session::display::id_prefix;
 use crate::session::store::delete_at;
+use crate::tui::glyphs::MODAL_ERROR_PREFIX;
 use crate::tui::modal::chrome::{FOOTER_HEIGHT, Header, render_footer};
-use crate::tui::modal::{Modal, ModalAction, ModalKey};
+use crate::tui::modal::{Modal, ModalAction, ModalKey, is_plain_char};
 use crate::tui::theme::Theme;
 use crate::util::text::truncate_to_width;
 
 // ── Constants ──
 
 const TITLE: &str = "Delete this session?";
-const FOOTER_HINT: &str = "[Y] delete   [N] cancel";
+const FOOTER_HINTS: [&str; 2] = ["Y to delete", "N to cancel"];
+
 /// The identity and metadata rows.
 const BODY_HEIGHT: u16 = 2;
 /// Width floor so narrow terminals still paint the full body without panicking.
@@ -72,7 +74,10 @@ impl ConfirmDeleteSessionModal {
             ))),
             Err(e) => {
                 warn!("delete failed for session {}: {e:#}", self.session_id);
-                self.error = Some(format!("{e:#}"));
+                self.error = Some(format!(
+                    "Failed to delete session {}: {e:#}",
+                    id_prefix(&self.session_id),
+                ));
                 ModalKey::Consumed
             }
         }
@@ -100,14 +105,12 @@ impl Modal for ConfirmDeleteSessionModal {
         )));
         if let Some(err) = &self.error {
             lines.push(Line::from(Span::styled(
-                truncate_to_width(&format!("! {err}"), budget),
+                truncate_to_width(&format!("{MODAL_ERROR_PREFIX}{err}"), budget),
                 theme.error(),
             )));
         }
         frame.render_widget(Paragraph::new(lines).style(theme.surface()), area);
-
-        let hint = Span::styled(truncate_to_width(FOOTER_HINT, budget), theme.dim());
-        render_footer(frame, area, Line::from(hint), theme);
+        render_footer(frame, area, &FOOTER_HINTS, theme);
     }
 
     fn handle_key(&mut self, event: &KeyEvent) -> ModalKey {
@@ -129,18 +132,14 @@ impl Modal for ConfirmDeleteSessionModal {
     }
 }
 
-fn is_plain_char(event: &KeyEvent) -> bool {
-    event.modifiers.is_empty() || event.modifiers == KeyModifiers::SHIFT
-}
-
 #[cfg(test)]
 mod tests {
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
+    use crossterm::event::KeyModifiers;
 
     use super::*;
     use crate::session::store::SessionStore;
     use crate::session::store::testing::{seed_test_session, test_store};
+    use crate::tui::modal::testing::render_rows;
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::from(code)
@@ -174,68 +173,61 @@ mod tests {
         )
     }
 
-    fn render_to_string(modal: &ConfirmDeleteSessionModal, width: u16, height: u16) -> String {
-        let theme = Theme::default();
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal
-            .draw(|frame| modal.render(frame, Rect::new(0, 0, width, height), &theme))
-            .unwrap();
-        let buf = terminal.backend().buffer();
-        let mut out = String::new();
-        for y in 0..height {
-            for x in 0..width {
-                out.push_str(buf[(x, y)].symbol());
-            }
-            out.push('\n');
-        }
-        out
+    fn rendered_rows(modal: &ConfirmDeleteSessionModal, width: u16) -> Vec<String> {
+        render_rows(modal, width, modal.height(width, u16::MAX))
+            .into_iter()
+            .map(|row| row.trim_end().to_owned())
+            .collect()
     }
 
-    // ── render ──
+    // ── ConfirmDeleteSessionModal::render ──
 
     #[test]
     fn render_paints_title_identity_metadata_and_footer() {
         let (_dir, store) = isolated_store();
         let modal = seed_modal(&store, "abcd1234", "Fix auth flow");
-        let dump = render_to_string(&modal, 60, modal.height(60, u16::MAX));
-        assert!(dump.contains(TITLE), "title appears: {dump}");
-        assert!(dump.contains("abcd1234"), "id prefix appears: {dump}");
-        assert!(dump.contains("Fix auth flow"), "title appears: {dump}");
-        assert!(
-            dump.contains("3 msgs · 2 hours ago"),
-            "metadata appears: {dump}"
+        assert_eq!(
+            rendered_rows(&modal, 60),
+            [
+                "Delete this session?",
+                "",
+                "abcd1234 — Fix auth flow",
+                "3 msgs · 2 hours ago",
+                "",
+                "Y to delete  ·  N to cancel",
+            ],
         );
-        assert!(dump.contains("[Y] delete"), "footer hint appears: {dump}");
     }
 
     #[test]
     fn render_places_the_error_row_above_the_footer() {
         let (_dir, store) = isolated_store();
         let mut modal = seed_modal(&store, "abcd1234", "Fix auth flow");
-        assert_eq!(modal.height(60, u16::MAX), 6);
         modal.error = Some("permission denied".to_owned());
-        assert_eq!(modal.height(60, u16::MAX), 7, "the error row claims a line");
-
-        let dump = render_to_string(&modal, 60, modal.height(60, u16::MAX));
-        let rows: Vec<&str> = dump.lines().map(str::trim_end).collect();
-        assert_eq!(rows[4], "! permission denied", "{dump}");
-        assert_eq!(rows[5], "");
-        assert_eq!(rows[6], FOOTER_HINT);
+        assert_eq!(
+            rendered_rows(&modal, 60)[3..],
+            [
+                "3 msgs · 2 hours ago",
+                "! permission denied",
+                "",
+                "Y to delete  ·  N to cancel",
+            ],
+        );
     }
 
     #[test]
     fn render_does_not_panic_at_minimum_widths() {
         let (_dir, store) = isolated_store();
         let modal = seed_modal(&store, "abcd1234", "T");
-        for w in [4_u16, 8, 20] {
-            render_to_string(&modal, w, modal.height(w, u16::MAX));
+        for width in [4_u16, 8, 20] {
+            rendered_rows(&modal, width);
         }
     }
 
-    // ── handle_key ──
+    // ── ConfirmDeleteSessionModal::handle_key ──
 
     #[test]
-    fn y_press_runs_delete_and_submits_with_chat_confirmation() {
+    fn handle_key_y_press_runs_delete_and_submits_with_chat_confirmation() {
         let (_dir, store) = isolated_store();
         let mut modal = seed_modal(&store, "abcd1234", "Fix auth flow");
         let id_to_delete = modal.session_id.clone();
@@ -244,14 +236,7 @@ mod tests {
         let ModalKey::Submitted(ModalAction::SystemMessage(msg)) = outcome else {
             panic!("Y must Submit(SystemMessage); got {outcome:?}");
         };
-        assert!(
-            msg.starts_with("Deleted session abcd1234"),
-            "confirmation must lead with the id prefix: {msg}",
-        );
-        assert!(
-            msg.contains("Fix auth flow"),
-            "confirmation includes title: {msg}"
-        );
+        assert_eq!(msg, "Deleted session abcd1234: Fix auth flow");
         assert!(
             store
                 .list()
@@ -263,7 +248,7 @@ mod tests {
     }
 
     #[test]
-    fn enter_press_is_an_alias_for_y_and_runs_delete() {
+    fn handle_key_enter_press_is_an_alias_for_y_and_runs_delete() {
         let (_dir, store) = isolated_store();
         let mut modal = seed_modal(&store, "abcd1234", "Fix auth flow");
         let outcome = modal.handle_key(&key(KeyCode::Enter));
@@ -275,7 +260,7 @@ mod tests {
     }
 
     #[test]
-    fn uppercase_y_also_confirms() {
+    fn handle_key_uppercase_y_also_confirms() {
         let (_dir, store) = isolated_store();
         let mut modal = seed_modal(&store, "abcd1234", "Fix auth");
         let outcome = modal.handle_key(&key(KeyCode::Char('Y')));
@@ -286,7 +271,7 @@ mod tests {
     }
 
     #[test]
-    fn control_y_and_control_enter_do_not_confirm_delete() {
+    fn handle_key_control_y_and_control_enter_do_not_confirm_delete() {
         let (_dir, store) = isolated_store();
         let mut modal = seed_modal(&store, "abcd1234", "Fix auth");
         let id_kept = modal.session_id.clone();
@@ -308,7 +293,7 @@ mod tests {
     }
 
     #[test]
-    fn n_press_cancels_without_running_delete() {
+    fn handle_key_n_press_cancels_without_running_delete() {
         let (_dir, store) = isolated_store();
         let mut modal = seed_modal(&store, "abcd1234", "Fix auth flow");
         let id_kept = modal.session_id.clone();
@@ -329,7 +314,7 @@ mod tests {
     }
 
     #[test]
-    fn confirm_failure_latches_error_until_a_deliberate_y_or_n_choice() {
+    fn handle_key_confirm_failure_latches_error_until_a_deliberate_y_or_n_choice() {
         // Same-id-as-live triggers delete_at's refusal, so the modal stays on screen with the
         // error visible. Stray keys (arrows, unrecognized chars, modifier events) must leave the
         // latch, which only Y / Enter (re-attempt) or N (cancel) clears. This pins the diagnostic
@@ -354,10 +339,15 @@ mod tests {
 
         let outcome = modal.handle_key(&key(KeyCode::Char('y')));
         assert!(matches!(outcome, ModalKey::Consumed));
-        let err = modal.error.as_deref().expect("error must latch on failure");
-        assert!(
-            err.contains("refusing to delete the live session"),
-            "got: {err}"
+        assert_eq!(
+            modal.error.as_deref(),
+            Some(
+                format!(
+                    "Failed to delete session abcd1234: refusing to delete the live session: \
+                     {live_id}"
+                )
+                .as_str()
+            ),
         );
 
         // Stray keys must not wipe the latch.
@@ -375,7 +365,7 @@ mod tests {
     }
 
     #[test]
-    fn unrecognized_keys_consume_silently_without_running_delete() {
+    fn handle_key_unrecognized_keys_consume_silently_without_running_delete() {
         let (_dir, store) = isolated_store();
         let mut modal = seed_modal(&store, "abcd1234", "Fix auth flow");
         let outcome = modal.handle_key(&key(KeyCode::Char('z')));

@@ -1,16 +1,24 @@
 //! Chrome shared by modal bodies: the title header and the bottom hint footer.
 
+use std::borrow::Borrow;
+
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::Modifier;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use crate::tui::theme::Theme;
 use crate::util::text::truncate_to_width;
 
-/// Footer hint for pickers that commit on Enter.
-pub(crate) const CONFIRM_HINT: &str = "Enter to confirm  ·  Esc to cancel";
+// ── Constants ──
+
+pub(crate) const HINT_SEPARATOR: &str = "  ·  ";
+pub(crate) const KEY_UP_DOWN: &str = "↑ / ↓";
+pub(crate) const KEY_LEFT_RIGHT: &str = "← / →";
+
+/// Footer hints for pickers that commit on Enter.
+pub(crate) const CONFIRM_HINTS: [&str; 2] = ["Enter to confirm", "Esc to cancel"];
 
 /// Rows [`render_footer`] occupies: a blank gap above the hint line.
 pub(crate) const FOOTER_HEIGHT: u16 = 2;
@@ -69,8 +77,25 @@ impl Header {
 
 // ── Footer ──
 
-/// Paints `hint` on the bottom row of `area`, provided the gap row above it fits too.
-pub(crate) fn render_footer(frame: &mut Frame<'_>, area: Rect, hint: Line<'static>, theme: &Theme) {
+/// Paints `hints` joined by [`HINT_SEPARATOR`] on the bottom row of `area`, provided the gap row
+/// above it fits too. A narrow row cuts the tail, so callers list the essential hints first.
+pub(crate) fn render_footer<S: Borrow<str>>(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    hints: &[S],
+    theme: &Theme,
+) {
+    render_footer_text(frame, area, &hints.join(HINT_SEPARATOR), theme.dim(), theme);
+}
+
+/// Paints `text` in `style` where [`render_footer`] paints its hints, truncated to the row.
+pub(crate) fn render_footer_text(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    text: &str,
+    style: Style,
+    theme: &Theme,
+) {
     if area.height < FOOTER_HEIGHT {
         return;
     }
@@ -79,7 +104,11 @@ pub(crate) fn render_footer(frame: &mut Frame<'_>, area: Rect, hint: Line<'stati
         height: 1,
         ..area
     };
-    frame.render_widget(Paragraph::new(hint).style(theme.surface()), row);
+    let text = truncate_to_width(text, usize::from(area.width));
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(text, style))).style(theme.surface()),
+        row,
+    );
 }
 
 #[cfg(test)]
@@ -88,15 +117,7 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use super::*;
-
-    fn row_text(terminal: &Terminal<TestBackend>, y: u16) -> String {
-        let buf = terminal.backend().buffer();
-        (0..buf.area.width)
-            .map(|x| buf[(x, y)].symbol())
-            .collect::<String>()
-            .trim_end()
-            .to_owned()
-    }
+    use crate::tui::modal::testing::render_rows_with;
 
     // ── Header::height ──
 
@@ -122,35 +143,51 @@ mod tests {
     // ── render_footer ──
 
     #[test]
-    fn render_footer_paints_the_bottom_row_below_a_gap() {
-        let mut terminal = Terminal::new(TestBackend::new(20, 4)).unwrap();
-        terminal
-            .draw(|frame| {
-                render_footer(
-                    frame,
-                    Rect::new(0, 0, 20, 4),
-                    Line::from("Esc to close"),
-                    &Theme::default(),
-                );
-            })
-            .unwrap();
-        assert_eq!(row_text(&terminal, 2), "");
-        assert_eq!(row_text(&terminal, 3), "Esc to close");
+    fn render_footer_joins_hints_on_the_bottom_row_below_a_gap() {
+        let rows = render_rows_with(40, 4, |frame, area, theme| {
+            render_footer(frame, area, &CONFIRM_HINTS, theme);
+        });
+        assert_eq!(rows[2].trim_end(), "");
+        assert_eq!(rows[3].trim_end(), "Enter to confirm  ·  Esc to cancel");
+    }
+
+    #[test]
+    fn render_footer_truncates_the_tail_hints_on_a_narrow_row() {
+        let rows = render_rows_with(24, 2, |frame, area, theme| {
+            render_footer(frame, area, &CONFIRM_HINTS, theme);
+        });
+        assert_eq!(rows[1], "Enter to confirm  ·  ...");
     }
 
     #[test]
     fn render_footer_skips_an_area_without_room_for_the_gap() {
-        let mut terminal = Terminal::new(TestBackend::new(20, 1)).unwrap();
+        let rows = render_rows_with(20, 1, |frame, area, theme| {
+            render_footer(frame, area, &["Esc to close"], theme);
+        });
+        assert_eq!(rows[0].trim_end(), "");
+    }
+
+    // ── render_footer_text ──
+
+    #[test]
+    fn render_footer_text_truncates_a_message_in_its_own_style() {
+        let theme = Theme::default();
+        let mut terminal = Terminal::new(TestBackend::new(12, 2)).unwrap();
         terminal
             .draw(|frame| {
-                render_footer(
+                render_footer_text(
                     frame,
-                    Rect::new(0, 0, 20, 1),
-                    Line::from("Esc to close"),
-                    &Theme::default(),
+                    frame.area(),
+                    "! permission denied",
+                    theme.error(),
+                    &theme,
                 );
             })
             .unwrap();
-        assert_eq!(row_text(&terminal, 0), "");
+
+        let buffer = terminal.backend().buffer();
+        let row: String = (0..12).map(|x| buffer[(x, 1)].symbol()).collect();
+        assert_eq!(row, "! permiss...");
+        assert_eq!(buffer[(0, 1)].fg, theme.error().fg.unwrap());
     }
 }

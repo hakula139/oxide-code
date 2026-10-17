@@ -38,7 +38,7 @@ The modal implementation uses these shared components:
 
 - `tui/modal` defines the trait, key outcome, and `ModalStack` manager.
 - Generic primitives sit alongside `tui/modal`: `list_picker` (cursor + render for selection lists), `kv_overview` (sectioned read-only kv table), and `searchable_list` (substring filter for the `/resume` picker).
-- `chrome` supplies the shared title header and hint footer, and `line_editor` is the single-line text field behind `/rename`, the picker search query, and the approval rule and feedback editors, built on `ratatui-textarea` so readline keys work and Ctrl chords never insert letters.
+- `chrome` supplies the shared title header and hint footer. `render_footer` joins hint fragments such as `CONFIRM_HINTS` with `HINT_SEPARATOR` and cuts the tail on a narrow row, so callers list the essential hints first. `line_editor` is the single-line text field behind `/rename`, the picker search query, and the approval rule and feedback editors, built on `ratatui-textarea` so readline keys work and Ctrl chords never insert letters.
 - Lists scroll through `tui::viewport`, whose window settles at render time from the height the modal was granted.
 
 Concrete modals embed these primitives.
@@ -92,7 +92,7 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 
 - **`/rename` editor**: `RenameModal` is a single-line text editor pre-filled with the current title (cap 80 chars, mirroring the actor's first-prompt cap). Render is a fixed five-row stack: title, gap, prompt + buffer, gap, footer hint. Editing runs through the shared `LineEditor`, so the cursor moves within the title, pastes land as one line, and a title wider than the row scrolls to keep the cursor in view. Enter on a non-empty trimmed buffer submits `Op::Rename`, and blank Enter is a silent no-op so the user can keep typing.
 
-- **`/resume` picker**: `ResumePicker` wraps `SearchableList<SessionRow>` and adds a footer line. Each row paints a two-line title plus dim metadata block (id prefix · relative time · message count · branch · project) followed by a trailing blank. Tab toggles current-project ↔ all-projects and Ctrl+A toggles the archived view, each reloading rows while the typed query survives the rebuild. Enter on a focused row submits `Op::Resume`. Enter with no selection stays open so the user can Tab the scope or Esc out. The footer counts the loaded rows and flags when more sessions remain beyond the 30-session load cap (`30 most recent sessions · more not loaded`). Load failures take over the footer so a failure can't disguise itself as "0 sessions". Ctrl+D on the cursor row pushes `ConfirmDeleteSessionModal`. On focus regain the picker reloads and re-seeks the cursor to the previously selected row.
+- **`/resume` picker**: `ResumePicker` wraps `SearchableList<SessionRow>` and adds a footer line. Each row paints a two-line title plus dim metadata block (id prefix · relative time · message count · branch · project) followed by a trailing blank. Tab toggles current-project ↔ all-projects and Ctrl+A toggles the archived view, each reloading rows while the typed query survives the rebuild. Enter on a focused row submits `Op::Resume`. Enter with no selection stays open so the user can Tab the scope or Esc out. The footer leads with the Enter and Esc hints, counts the loaded rows, and flags when more sessions remain beyond the 30-session load cap (`30 most recent sessions`, then `more not loaded`). Load failures take over the footer so a failure can't disguise itself as "0 sessions". Ctrl+D on the cursor row pushes `ConfirmDeleteSessionModal`. On focus regain the picker reloads and re-seeks the cursor to the previously selected row.
 
 - **Confirm-delete modal**: `ConfirmDeleteSessionModal` runs `delete_at` on the session's file synchronously on Y / Enter and submits `ModalAction::SystemMessage("Deleted session {id}: {title}")` on success so the user has chat-stream evidence the action ran. Failures latch into a sticky inline error that clears only on a deliberate Y / N choice, so a stray key can't wipe the diagnostic. Pushed by `/delete <id-prefix>` and by `/resume`'s Ctrl+D.
 
@@ -134,7 +134,7 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 - `crates/oxide-code/src/tui/app/render.rs`: `draw_frame` modal layout band.
 - `crates/oxide-code/src/tui/modal.rs`: `Modal` (including the `on_cancel` and `captures_esc` hooks), `ModalKey`, `ModalAction`, `ModalStack`.
 - `crates/oxide-code/src/tui/modal/approval.rs`: `ApprovalModal` approve-or-deny gate for agent tool calls, plus the rule and feedback editors.
-- `crates/oxide-code/src/tui/modal/chrome.rs`: shared `Header` and `render_footer`.
+- `crates/oxide-code/src/tui/modal/chrome.rs`: shared `Header`, `render_footer`, and the hint fragments.
 - `crates/oxide-code/src/tui/modal/kv_overview.rs`: generic `KvOverview` plus `KvSection`.
 - `crates/oxide-code/src/tui/modal/line_editor.rs`: single-line `LineEditor` over `ratatui-textarea`.
 - `crates/oxide-code/src/tui/modal/list_picker.rs`: generic `ListPicker<T: PickerItem>`.

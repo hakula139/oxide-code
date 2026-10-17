@@ -3,11 +3,13 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
+use unicode_width::UnicodeWidthStr;
 
 use super::chrome::Header;
+use crate::tui::glyphs::{ACTIVE_MARKER, CURSOR_MARKER, CURSOR_MARKER_WIDTH};
+use crate::tui::saturating_u16;
 use crate::tui::theme::Theme;
 use crate::tui::viewport::{Viewport, wrap_next, wrap_prev};
 use crate::util::text::truncate_to_width;
@@ -19,7 +21,7 @@ pub(crate) trait PickerItem {
     /// Primary text, left-aligned.
     fn label(&self) -> &str;
 
-    /// Optional secondary text, right-aligned (rendered dim).
+    /// Optional dim text after the label columns, truncated to the row.
     fn description(&self) -> Option<&str> {
         None
     }
@@ -42,9 +44,6 @@ pub(crate) fn numeric_hint(index: usize) -> Option<char> {
 
 // ── ListPicker ──
 
-const CURSOR_MARKER: &str = "> ";
-const CURSOR_MARKER_WIDTH: usize = 2;
-const ACTIVE_MARKER: &str = "✓";
 const COLUMN_GAP: usize = 2;
 
 /// Selectable list with cursor + active marker. Rows past the granted height scroll.
@@ -109,7 +108,7 @@ impl<T: PickerItem> ListPicker<T> {
 
     /// Header plus one row per item, within `max_height`.
     pub(crate) fn height(&self, _width: u16, max_height: u16) -> u16 {
-        let rows = u16::try_from(self.items.len()).unwrap_or(u16::MAX);
+        let rows = saturating_u16(self.items.len());
         self.header.height().saturating_add(rows).min(max_height)
     }
 
@@ -120,7 +119,7 @@ impl<T: PickerItem> ListPicker<T> {
         let label_width = self
             .items
             .iter()
-            .map(|i| i.label().chars().count())
+            .map(|i| i.label().width())
             .max()
             .unwrap_or(0);
 
@@ -144,35 +143,33 @@ impl<T: PickerItem> ListPicker<T> {
         theme: &Theme,
     ) -> Line<'static> {
         let is_cursor = idx == self.selected;
-        let row_style = if is_cursor {
-            theme.text().add_modifier(Modifier::BOLD)
-        } else {
-            theme.dim()
-        };
+        let row_style = theme.row_style(is_cursor);
 
         let mut spans: Vec<Span<'static>> = Vec::with_capacity(6);
 
-        // Cursor gutter — `> ` on cursor row, two spaces otherwise.
         spans.push(Span::styled(
             if is_cursor {
                 CURSOR_MARKER.to_owned()
             } else {
-                " ".repeat(CURSOR_MARKER_WIDTH)
+                " ".repeat(usize::from(CURSOR_MARKER_WIDTH))
             },
             theme.accent(),
         ));
 
-        // Numeric mnemonic (or two-space gutter when none).
+        // Numeric mnemonic (or three-space gutter when none).
         if let Some(c) = item.key_hint() {
             spans.push(Span::styled(format!("{c}. "), row_style));
         } else {
             spans.push(Span::styled("   ".to_owned(), row_style));
         }
 
-        let label = format!("{:width$}", item.label(), width = label_width);
+        let label = format!(
+            "{}{}",
+            item.label(),
+            " ".repeat(label_width - item.label().width())
+        );
         spans.push(Span::styled(label, row_style));
 
-        // Active marker: `✓` after the label, before the description.
         spans.push(Span::styled(
             if item.is_active() {
                 format!("  {ACTIVE_MARKER} ")
@@ -183,7 +180,7 @@ impl<T: PickerItem> ListPicker<T> {
         ));
 
         if let Some(desc) = item.description() {
-            let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+            let used: usize = spans.iter().map(|s| s.content.width()).sum();
             let budget = usize::from(area_width).saturating_sub(used + COLUMN_GAP);
             let truncated = truncate_to_width(desc, budget);
             spans.push(Span::styled(truncated, theme.dim()));
@@ -195,10 +192,8 @@ impl<T: PickerItem> ListPicker<T> {
 
 #[cfg(test)]
 mod tests {
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
-
     use super::*;
+    use crate::tui::modal::testing::render_rows_with;
 
     // ── Test fixture ──
 
@@ -239,6 +234,12 @@ mod tests {
 
     fn picker(items: Vec<FakeItem>) -> ListPicker<FakeItem> {
         ListPicker::new("Pick one", items)
+    }
+
+    fn render_rows<T: PickerItem>(picker: &ListPicker<T>, width: u16, height: u16) -> Vec<String> {
+        render_rows_with(width, height, |frame, area, theme| {
+            picker.render(frame, area, theme);
+        })
     }
 
     // ── numeric_hint ──
@@ -283,7 +284,7 @@ mod tests {
     // ── select_by_hint ──
 
     #[test]
-    fn select_by_hint_jumps_to_matching_item_and_returns_true() {
+    fn select_by_hint_jumps_to_matching_item() {
         let mut p = picker(vec![
             FakeItem {
                 hint: Some('1'),
@@ -303,7 +304,7 @@ mod tests {
     }
 
     #[test]
-    fn select_by_hint_unknown_key_leaves_cursor_and_returns_false() {
+    fn select_by_hint_unknown_key_leaves_cursor() {
         let mut p = picker(vec![FakeItem {
             hint: Some('1'),
             ..FakeItem::new("a")
@@ -363,22 +364,43 @@ mod tests {
     // ── render ──
 
     #[test]
-    fn render_runs_without_panicking_at_minimum_width() {
-        // Smoke test: narrow widths must not panic on the truncation arithmetic. Real visual
-        // snapshots happen in the concrete picker tests where output is meaningful.
+    fn render_aligns_columns_by_display_width() {
+        let p = picker(vec![
+            FakeItem {
+                description: Some("abcdefghij"),
+                ..FakeItem::new("中文")
+            },
+            FakeItem {
+                description: Some("xyz"),
+                active: true,
+                ..FakeItem::new("a")
+            },
+        ]);
+        let rows = render_rows(&p, 20, p.height(20, 20));
+        assert_eq!(rows[2].trim_end(), ">    中文    ab...");
+        assert_eq!(rows[3].trim_end(), "     a     ✓ xyz");
+    }
+
+    #[test]
+    fn render_truncates_the_description_at_a_narrow_width() {
         let p = picker(vec![FakeItem {
             description: Some("a long description"),
             ..FakeItem::new("very-long-label")
         }])
         .with_description("title-line");
-        let theme = Theme::default();
-        let mut terminal = Terminal::new(TestBackend::new(20, 8)).unwrap();
-        terminal
-            .draw(|frame| {
-                let area = Rect::new(0, 0, 20, p.height(20, 8));
-                p.render(frame, area, &theme);
-            })
-            .expect("render must not panic");
+
+        let rows = render_rows(&p, 32, p.height(32, 8));
+
+        let rows: Vec<&str> = rows.iter().map(|row| row.trim_end()).collect();
+        assert_eq!(
+            rows,
+            [
+                "Pick one",
+                "title-line",
+                "",
+                ">    very-long-label    a l..."
+            ]
+        );
     }
 
     #[test]
@@ -399,12 +421,10 @@ mod tests {
         assert!(item.key_hint().is_none());
 
         let p = ListPicker::new("Pick one", vec![MinimalItem("a"), MinimalItem("b")]);
-        let theme = Theme::default();
-        let h = p.height(40, 40);
-        let mut terminal = Terminal::new(TestBackend::new(40, h)).unwrap();
-        terminal
-            .draw(|frame| p.render(frame, Rect::new(0, 0, 40, h), &theme))
-            .expect("render must not panic without descriptions");
+        let rows = render_rows(&p, 40, p.height(40, 40));
+
+        let rows: Vec<&str> = rows.iter().map(|row| row.trim_end()).collect();
+        assert_eq!(rows, ["Pick one", "", ">    a", "     b"]);
     }
 
     #[test]
@@ -412,26 +432,11 @@ mod tests {
         const LABELS: [&str; 6] = ["r0", "r1", "r2", "r3", "r4", "r5"];
         let mut p = picker(LABELS.into_iter().map(FakeItem::new).collect());
         p.select_initial(|item| item.label == "r4");
-        let theme = Theme::default();
-        let h = p.height(20, 5);
-        let mut terminal = Terminal::new(TestBackend::new(20, h)).unwrap();
-        terminal
-            .draw(|frame| p.render(frame, Rect::new(0, 0, 20, h), &theme))
-            .unwrap();
-
-        let buf = terminal.backend().buffer();
-        let rows: Vec<String> = (0..h)
-            .map(|y| (0..20).map(|x| buf[(x, y)].symbol()).collect::<String>())
-            .collect();
-        assert!(
-            rows[0].starts_with("Pick one"),
-            "header stays pinned: {rows:?}"
+        let rows = render_rows(&p, 20, p.height(20, 5));
+        assert_eq!(
+            rows.iter().map(|row| row.trim_end()).collect::<Vec<_>>(),
+            ["Pick one", "", "     r2", "     r3", ">    r4"],
+            "the header stays pinned and the cursor row lands at the bottom",
         );
-        assert!(rows[2].contains("r2") && rows[4].contains("> "), "{rows:?}");
-        assert!(
-            rows[4].contains("r4"),
-            "cursor row visible at the bottom: {rows:?}"
-        );
-        assert!(!rows.iter().any(|r| r.contains("r0")), "{rows:?}");
     }
 }

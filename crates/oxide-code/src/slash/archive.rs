@@ -4,11 +4,12 @@
 
 use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashKind, SlashOutcome};
+use super::sessions::{open_store, resolve_error_message};
 use crate::protocol::Op;
 use crate::session::display::{archive_notice, id_prefix};
 use crate::session::entry::SessionInfo;
 use crate::session::resolver::resolve_saved_prefix;
-use crate::session::store::{SessionStore, set_archived_at};
+use crate::session::store::set_archived_at;
 use crate::tui::action::Action;
 
 // ── ArchiveCmd ──
@@ -40,8 +41,8 @@ impl SlashCommand for ArchiveCmd {
         match resolve_saved(prefix, &ctx.info.session_id)? {
             Some(info) => set_archived(&info, true),
             None => Err(format!(
-                "`{prefix}` matches the live session. Use bare `/archive` to archive it and start \
-                 a new one.",
+                "Session prefix `{prefix}` matches the live session. Use bare `/archive` to archive \
+                 it and start a new one.",
             )),
         }
     }
@@ -76,7 +77,7 @@ impl SlashCommand for UnarchiveCmd {
         let prefix = args.trim();
         if prefix.is_empty() {
             return Err(
-                "missing id. Use `/resume` then Ctrl+A to browse archived sessions, or \
+                "Missing id. Use `/resume` then Ctrl+A to browse archived sessions, or \
                  `/unarchive <id-prefix>`."
                     .to_owned(),
             );
@@ -93,8 +94,8 @@ impl SlashCommand for UnarchiveCmd {
 // ── Helpers ──
 
 fn resolve_saved(prefix: &str, live_id: &str) -> Result<Option<SessionInfo>, String> {
-    let store = SessionStore::open().map_err(|e| format!("session store unavailable: {e:#}"))?;
-    resolve_saved_prefix(&store, prefix, live_id)
+    let store = open_store()?;
+    resolve_saved_prefix(&store, prefix, live_id).map_err(resolve_error_message)
 }
 
 fn set_archived(info: &SessionInfo, archived: bool) -> Result<SlashOutcome, String> {
@@ -110,7 +111,7 @@ fn set_archived(info: &SessionInfo, archived: bool) -> Result<SlashOutcome, Stri
         )));
     }
     set_archived_at(&info.path, archived)
-        .map_err(|e| format!("failed to update session {id}: {e:#}"))?;
+        .map_err(|e| format!("Failed to update session {id}: {e:#}"))?;
     Ok(SlashOutcome::SystemMessage(archive_notice(
         &info.session_id,
         archived,
@@ -122,6 +123,7 @@ mod tests {
     use time::macros::datetime;
 
     use super::*;
+    use crate::session::store::SessionStore;
     use crate::session::store::testing::seed_test_session;
     use crate::slash::{stamped_id, test_session_info, with_isolated_xdg};
 
@@ -140,13 +142,19 @@ mod tests {
         sessions.into_iter().map(|s| s.session_id).collect()
     }
 
-    // ── ArchiveCmd metadata ──
+    // ── ArchiveCmd::name ──
 
     #[test]
-    fn archive_metadata_matches_built_ins_contract() {
+    fn name_and_metadata_of_archive_match_built_ins_contract() {
         assert_eq!(ArchiveCmd.name(), "archive");
         assert_ne!(ArchiveCmd.description(), "");
         assert_eq!(ArchiveCmd.usage(), Some("[<id-prefix>]"));
+    }
+
+    // ── ArchiveCmd::classify ──
+
+    #[test]
+    fn classify_archive_is_always_mutating() {
         assert_eq!(ArchiveCmd.classify(""), SlashKind::Mutating);
         assert_eq!(ArchiveCmd.classify("ab"), SlashKind::Mutating);
     }
@@ -154,7 +162,7 @@ mod tests {
     // ── ArchiveCmd::execute ──
 
     #[test]
-    fn archive_bare_forwards_the_archive_action() {
+    fn execute_archive_bare_forwards_the_archive_action() {
         let info = test_session_info();
         let outcome = ArchiveCmd
             .execute("", &SlashContext::new(&info, None))
@@ -163,7 +171,7 @@ mod tests {
     }
 
     #[test]
-    fn archive_prefix_hides_a_saved_session_from_listings_once() {
+    fn execute_archive_prefix_hides_a_saved_session_from_listings_once() {
         with_isolated_xdg(|_| {
             let store = SessionStore::open().unwrap();
             let target_id = stamped_id(0xab);
@@ -184,7 +192,7 @@ mod tests {
     }
 
     #[test]
-    fn archive_prefix_matching_only_the_live_session_points_to_bare_archive() {
+    fn execute_archive_prefix_matching_only_the_live_session_points_to_bare_archive() {
         with_isolated_xdg(|_| {
             let store = SessionStore::open().unwrap();
             seed_saved(&store, "test-session");
@@ -192,25 +200,29 @@ mod tests {
             let ctx = SlashContext::new(&info, None);
 
             let err = ArchiveCmd.execute("test-", &ctx).unwrap_err();
-            assert!(err.contains("Use bare `/archive`"), "{err}");
+            assert_eq!(
+                err,
+                "Session prefix `test-` matches the live session. Use bare `/archive` to archive \
+                 it and start a new one.",
+            );
             assert_eq!(listed_ids(&store), ["test-session"]);
         });
     }
 
     #[test]
-    fn archive_unknown_prefix_errors() {
+    fn execute_archive_unknown_prefix_reports_no_match() {
         with_isolated_xdg(|_| {
             let info = test_session_info();
             let err = ArchiveCmd
                 .execute("zzzz", &SlashContext::new(&info, None))
                 .unwrap_err();
-            assert_eq!(err, "no session matching `zzzz`");
+            assert_eq!(err, "No session matching `zzzz`.");
         });
     }
 
     #[cfg(unix)]
     #[test]
-    fn archive_prefix_reports_a_failed_write() {
+    fn execute_archive_prefix_reports_a_failed_write() {
         use std::os::unix::fs::PermissionsExt;
 
         with_isolated_xdg(|_| {
@@ -224,21 +236,31 @@ mod tests {
             let err = ArchiveCmd
                 .execute(&target_id[..4], &SlashContext::new(&info, None))
                 .unwrap_err();
-            assert!(
-                err.starts_with("failed to update session abababab: "),
-                "{err}"
-            );
+            let cause = set_archived_at(&path, true).unwrap_err();
+            assert_eq!(err, format!("Failed to update session abababab: {cause:#}"));
         });
     }
 
-    // ── UnarchiveCmd metadata ──
+    // ── UnarchiveCmd::name ──
 
     #[test]
-    fn unarchive_metadata_matches_built_ins_contract() {
+    fn name_and_metadata_of_unarchive_match_built_ins_contract() {
         assert_eq!(UnarchiveCmd.name(), "unarchive");
         assert_ne!(UnarchiveCmd.description(), "");
         assert_eq!(UnarchiveCmd.usage(), Some("<id-prefix>"));
+    }
+
+    // ── UnarchiveCmd::classify ──
+
+    #[test]
+    fn classify_unarchive_is_mutating() {
         assert_eq!(UnarchiveCmd.classify("ab"), SlashKind::Mutating);
+    }
+
+    // ── UnarchiveCmd::echoes_input ──
+
+    #[test]
+    fn echoes_input_unarchive_only_with_a_prefix() {
         assert!(!UnarchiveCmd.echoes_input("  "), "bare form stands alone");
         assert!(UnarchiveCmd.echoes_input("ab"));
     }
@@ -246,17 +268,20 @@ mod tests {
     // ── UnarchiveCmd::execute ──
 
     #[test]
-    fn unarchive_bare_points_to_the_archived_picker() {
+    fn execute_unarchive_bare_points_to_the_archived_picker() {
         let info = test_session_info();
         let err = UnarchiveCmd
             .execute("", &SlashContext::new(&info, None))
             .unwrap_err();
-        assert!(err.starts_with("missing id"), "{err}");
-        assert!(err.contains("Ctrl+A"), "{err}");
+        assert_eq!(
+            err,
+            "Missing id. Use `/resume` then Ctrl+A to browse archived sessions, or \
+             `/unarchive <id-prefix>`.",
+        );
     }
 
     #[test]
-    fn unarchive_prefix_lists_an_archived_session_again_once() {
+    fn execute_unarchive_prefix_lists_an_archived_session_again_once() {
         with_isolated_xdg(|_| {
             let store = SessionStore::open().unwrap();
             let target_id = stamped_id(0xab);
@@ -281,7 +306,7 @@ mod tests {
     }
 
     #[test]
-    fn unarchive_live_session_prefix_is_a_no_op_note() {
+    fn execute_unarchive_live_session_prefix_is_a_no_op_note() {
         with_isolated_xdg(|_| {
             let info = test_session_info();
             let note = UnarchiveCmd

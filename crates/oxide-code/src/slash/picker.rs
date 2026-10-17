@@ -13,7 +13,8 @@ use crate::config::Effort;
 use crate::model::{MODELS, ModelInfo, ResolvedModelId};
 use crate::protocol::Op;
 use crate::tui::action::Action;
-use crate::tui::modal::chrome::{CONFIRM_HINT, FOOTER_HEIGHT, render_footer};
+use crate::tui::glyphs::RADIO_SELECTED;
+use crate::tui::modal::chrome::{CONFIRM_HINTS, FOOTER_HEIGHT, KEY_LEFT_RIGHT, render_footer};
 use crate::tui::modal::list_picker::{ListPicker, PickerItem, numeric_hint};
 use crate::tui::modal::{Modal, ModalAction, ModalKey};
 use crate::tui::theme::Theme;
@@ -146,12 +147,12 @@ impl ModelEffortPicker {
         let suffix = if was_default { " (default)" } else { "" };
         let color = tier_color(level);
         Some(Line::from(vec![
-            Span::styled("● ", Style::default().fg(color)),
+            Span::styled(format!("{RADIO_SELECTED} "), Style::default().fg(color)),
             Span::styled(
                 format!("{level} effort{suffix}"),
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
             ),
-            Span::styled("  ← →  to adjust", theme.dim()),
+            Span::styled(format!("  {KEY_LEFT_RIGHT} to adjust"), theme.dim()),
         ]))
     }
 }
@@ -185,12 +186,7 @@ impl Modal for ModelEffortPicker {
             };
             frame.render_widget(Paragraph::new(line).style(theme.surface()), row);
         }
-        render_footer(
-            frame,
-            area,
-            Line::from(Span::styled(CONFIRM_HINT, theme.dim())),
-            theme,
-        );
+        render_footer(frame, area, &CONFIRM_HINTS, theme);
     }
 
     fn handle_key(&mut self, event: &KeyEvent) -> ModalKey {
@@ -221,7 +217,7 @@ impl Modal for ModelEffortPicker {
     }
 }
 
-// ── Helpers ──
+// ── Direction ──
 
 #[derive(Debug, Clone, Copy)]
 enum Direction {
@@ -231,12 +227,10 @@ enum Direction {
 
 #[cfg(test)]
 mod tests {
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
-
     use super::*;
     use crate::model::ModelSpec;
     use crate::slash::test_session_info;
+    use crate::tui::modal::testing::render_rows;
 
     /// `test_session_info` ships Opus 5.5 active at `high`.
     fn picker() -> ModelEffortPicker {
@@ -264,7 +258,7 @@ mod tests {
         }
     }
 
-    // ── new ──
+    // ── ModelEffortPicker::new ──
 
     #[test]
     fn new_lists_catalogue_and_positions_cursor_on_active_model() {
@@ -283,80 +277,7 @@ mod tests {
         assert_eq!(p.shown_effort(), Some(Effort::High), "Sonnet 5.5 default");
     }
 
-    // ── handle_key ──
-
-    #[test]
-    fn numeric_jump_routes_cursor_to_matching_row() {
-        let mut p = picker();
-        p.handle_key(&key(KeyCode::Char('3')));
-        let row = p.list.selected().expect("selected row");
-        assert_eq!(row.info.id, "claude-haiku-5-5");
-    }
-
-    #[test]
-    fn right_and_left_walk_the_full_ladder_with_wrap() {
-        let mut p = picker();
-        p.handle_key(&key(KeyCode::Right));
-        assert_eq!(p.shown_effort(), Some(Effort::Xhigh));
-        p.handle_key(&key(KeyCode::Right));
-        p.handle_key(&key(KeyCode::Right));
-        assert_eq!(p.shown_effort(), Some(Effort::Low), "Right wraps past max");
-        p.handle_key(&key(KeyCode::Left));
-        assert_eq!(p.shown_effort(), Some(Effort::Max), "Left wraps past low");
-    }
-
-    #[test]
-    fn effort_pick_survives_cursor_moves() {
-        let mut p = picker();
-        p.handle_key(&key(KeyCode::Left));
-        p.handle_key(&key(KeyCode::Down));
-        assert_eq!(p.shown_effort(), Some(Effort::Medium));
-    }
-
-    #[test]
-    fn enter_with_no_changes_returns_cancelled() {
-        let mut p = picker();
-        let outcome = p.handle_key(&key(KeyCode::Enter));
-        assert!(matches!(outcome, ModalKey::Cancelled));
-    }
-
-    #[test]
-    fn enter_after_effort_round_trip_returns_cancelled() {
-        let mut p = picker();
-        p.handle_key(&key(KeyCode::Right));
-        p.handle_key(&key(KeyCode::Left));
-        let outcome = p.handle_key(&key(KeyCode::Enter));
-        assert!(matches!(outcome, ModalKey::Cancelled));
-    }
-
-    #[test]
-    fn enter_after_model_change_emits_swap_with_model_only() {
-        let mut p = picker();
-        p.handle_key(&key(KeyCode::Down));
-        let (model, effort) = submitted_swap(p.handle_key(&key(KeyCode::Enter)));
-        assert_eq!(model.as_deref(), Some("claude-sonnet-5-5"));
-        assert_eq!(effort, None, "effort stays unset when only the model moved");
-    }
-
-    #[test]
-    fn enter_after_effort_change_emits_swap_with_effort_only() {
-        let mut p = picker();
-        p.handle_key(&key(KeyCode::Right));
-        let (model, effort) = submitted_swap(p.handle_key(&key(KeyCode::Enter)));
-        assert_eq!(model, None, "model stays unset when only the effort moved");
-        assert_eq!(effort, Some(Effort::Xhigh));
-    }
-
-    #[test]
-    fn enter_on_unknown_model_without_touch_swaps_model_only() {
-        // The highlighted row's default is what a model-only swap resolves to, so it is not sent.
-        let mut p = picker_on_unknown_model();
-        let (model, effort) = submitted_swap(p.handle_key(&key(KeyCode::Enter)));
-        assert_eq!(model.as_deref(), Some("claude-opus-5-5"));
-        assert_eq!(effort, None);
-    }
-
-    // ── render ──
+    // ── ModelEffortPicker::render_effort_row ──
 
     #[test]
     fn render_effort_row_marks_default_only_without_active_effort() {
@@ -369,53 +290,136 @@ mod tests {
                 .map(|span| span.content.as_ref())
                 .collect()
         };
-        assert!(row_text(&picker()).starts_with("● high effort  "));
-        assert!(row_text(&picker_on_unknown_model()).starts_with("● medium effort (default)"));
+
+        assert_eq!(row_text(&picker()), "● high effort  ← / → to adjust");
+        assert_eq!(
+            row_text(&picker_on_unknown_model()),
+            "● medium effort (default)  ← / → to adjust"
+        );
     }
 
+    // ── ModelEffortPicker::render ──
+
     #[test]
-    fn render_runs_at_typical_widths_without_panicking() {
-        let theme = Theme::default();
+    fn render_lists_models_above_the_effort_row_and_footer() {
         let p = picker();
-        for width in [40_u16, 80, 120] {
-            let h = p.height(width, 20);
-            let mut terminal = Terminal::new(TestBackend::new(width, h)).unwrap();
-            terminal
-                .draw(|frame| {
-                    p.render(frame, Rect::new(0, 0, width, h), &theme);
-                })
-                .expect("render must not panic");
-        }
+        let height = p.height(80, 20);
+
+        let rows = render_rows(&p, 80, height);
+
+        let rows: Vec<&str> = rows.iter().map(|row| row.trim_end()).collect();
+        assert_eq!(
+            rows,
+            [
+                "Select model",
+                "Switch the active model for this session. Restarting returns to your config.",
+                "",
+                "> 1. claude-opus-5-5    ✓ Claude Opus 5.5",
+                "  2. claude-sonnet-5-5    Claude Sonnet 5.5",
+                "  3. claude-haiku-5-5     Claude Haiku 5.5",
+                "",
+                "● high effort  ← / → to adjust",
+                "",
+                "Enter to confirm  ·  Esc to cancel",
+            ]
+        );
     }
 
     #[test]
     fn render_pins_the_effort_row_and_footer_below_a_scrolled_list() {
-        let theme = Theme::default();
-        let last = MODELS.len() - 1;
         let mut p = picker();
-        for _ in 0..last {
+        for _ in 1..MODELS.len() {
             p.handle_key(&key(KeyCode::Down));
         }
-        let (width, height) = (60, 8);
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal
-            .draw(|frame| p.render(frame, Rect::new(0, 0, width, height), &theme))
-            .unwrap();
 
-        let buf = terminal.backend().buffer();
-        let row = |y: u16| -> String {
-            (0..width)
-                .map(|x| buf[(x, y)].symbol())
-                .collect::<String>()
-                .trim_end()
-                .to_owned()
-        };
-        let cursor_row = row(3);
-        assert!(
-            cursor_row.contains(MODELS[last].id),
-            "cursor row: {cursor_row:?}"
+        let rows = render_rows(&p, 80, 8);
+
+        let rows: Vec<&str> = rows.iter().map(|row| row.trim_end()).collect();
+        assert_eq!(
+            rows,
+            [
+                "Select model",
+                "Switch the active model for this session. Restarting returns to your config.",
+                "",
+                "> 3. claude-haiku-5-5     Claude Haiku 5.5",
+                "",
+                "● high effort  ← / → to adjust",
+                "",
+                "Enter to confirm  ·  Esc to cancel",
+            ]
         );
-        assert!(row(5).contains("effort"), "effort row: {:?}", row(5));
-        assert_eq!(row(7), CONFIRM_HINT);
+    }
+
+    // ── ModelEffortPicker::handle_key ──
+
+    #[test]
+    fn handle_key_numeric_jump_routes_cursor_to_matching_row() {
+        let mut p = picker();
+        p.handle_key(&key(KeyCode::Char('3')));
+        let row = p.list.selected().expect("selected row");
+        assert_eq!(row.info.id, "claude-haiku-5-5");
+    }
+
+    #[test]
+    fn handle_key_right_and_left_walk_the_full_ladder_with_wrap() {
+        let mut p = picker();
+        p.handle_key(&key(KeyCode::Right));
+        assert_eq!(p.shown_effort(), Some(Effort::Xhigh));
+        p.handle_key(&key(KeyCode::Right));
+        p.handle_key(&key(KeyCode::Right));
+        assert_eq!(p.shown_effort(), Some(Effort::Low), "Right wraps past max");
+        p.handle_key(&key(KeyCode::Left));
+        assert_eq!(p.shown_effort(), Some(Effort::Max), "Left wraps past low");
+    }
+
+    #[test]
+    fn handle_key_effort_pick_survives_cursor_moves() {
+        let mut p = picker();
+        p.handle_key(&key(KeyCode::Left));
+        p.handle_key(&key(KeyCode::Down));
+        assert_eq!(p.shown_effort(), Some(Effort::Medium));
+    }
+
+    #[test]
+    fn handle_key_enter_with_no_changes_returns_cancelled() {
+        let mut p = picker();
+        let outcome = p.handle_key(&key(KeyCode::Enter));
+        assert!(matches!(outcome, ModalKey::Cancelled));
+    }
+
+    #[test]
+    fn handle_key_enter_after_effort_round_trip_returns_cancelled() {
+        let mut p = picker();
+        p.handle_key(&key(KeyCode::Right));
+        p.handle_key(&key(KeyCode::Left));
+        let outcome = p.handle_key(&key(KeyCode::Enter));
+        assert!(matches!(outcome, ModalKey::Cancelled));
+    }
+
+    #[test]
+    fn handle_key_enter_after_model_change_emits_swap_with_model_only() {
+        let mut p = picker();
+        p.handle_key(&key(KeyCode::Down));
+        let (model, effort) = submitted_swap(p.handle_key(&key(KeyCode::Enter)));
+        assert_eq!(model.as_deref(), Some("claude-sonnet-5-5"));
+        assert_eq!(effort, None, "effort stays unset when only the model moved");
+    }
+
+    #[test]
+    fn handle_key_enter_after_effort_change_emits_swap_with_effort_only() {
+        let mut p = picker();
+        p.handle_key(&key(KeyCode::Right));
+        let (model, effort) = submitted_swap(p.handle_key(&key(KeyCode::Enter)));
+        assert_eq!(model, None, "model stays unset when only the effort moved");
+        assert_eq!(effort, Some(Effort::Xhigh));
+    }
+
+    #[test]
+    fn handle_key_enter_on_unknown_model_without_touch_swaps_model_only() {
+        // The highlighted row's default is what a model-only swap resolves to, so it is not sent.
+        let mut p = picker_on_unknown_model();
+        let (model, effort) = submitted_swap(p.handle_key(&key(KeyCode::Enter)));
+        assert_eq!(model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(effort, None);
     }
 }

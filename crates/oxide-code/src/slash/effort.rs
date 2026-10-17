@@ -12,6 +12,8 @@ use crate::model::ModelSpec;
 use crate::protocol::Op;
 use crate::tui::action::Action;
 
+// ── EffortCmd ──
+
 pub(super) struct EffortCmd;
 
 impl SlashCommand for EffortCmd {
@@ -68,7 +70,8 @@ impl SlashCommand for EffortCmd {
 
 fn no_effort_tier_msg(model: &ModelSpec) -> String {
     format!(
-        "{} has no effort tier. Switch to a supported model first with /model (e.g. /model opus).",
+        "{} has no effort tier. Switch to a supported model first with `/model`, for example \
+         `/model opus`.",
         model.display_name(),
     )
 }
@@ -85,15 +88,17 @@ mod tests {
     use super::*;
     use crate::slash::test_session_info;
 
-    // ── EffortCmd metadata ──
+    // ── EffortCmd::name ──
 
     #[test]
-    fn metadata_matches_built_ins_contract() {
+    fn name_and_metadata_match_built_ins_contract() {
         assert_eq!(EffortCmd.name(), "effort");
         assert_eq!(EffortCmd.aliases(), [] as [&str; 0]);
         assert_ne!(EffortCmd.description(), "");
         assert_eq!(EffortCmd.usage(), Some("[<level>]"));
     }
+
+    // ── EffortCmd::classify ──
 
     #[test]
     fn classify_is_mutating_for_modal_and_direct_forms() {
@@ -139,6 +144,9 @@ mod tests {
 
     // ── EffortCmd::execute ──
 
+    const NO_TIER_ERROR: &str = "custom-model has no effort tier. Switch to a supported model \
+                                 first with `/model`, for example `/model opus`.";
+
     fn run_execute(args: &str) -> Result<SlashOutcome, String> {
         run_execute_with_model(test_session_info().config.model.id(), args)
     }
@@ -156,11 +164,9 @@ mod tests {
 
     #[test]
     fn execute_no_args_on_no_tier_model_errors_with_recovery_hint() {
-        let msg = run_execute_with_model("custom-model", "").expect_err("must error");
-        assert!(
-            msg.contains("custom-model") && msg.contains("/model"),
-            "display name + recovery hint: {msg}",
-        );
+        let err = run_execute_with_model("custom-model", "").unwrap_err();
+
+        assert_eq!(err, NO_TIER_ERROR);
     }
 
     #[test]
@@ -186,27 +192,29 @@ mod tests {
     #[test]
     fn execute_explicit_level_on_no_tier_model_errors_with_recovery_hint() {
         // Without this, the pick silently resolves to None and confuses the user.
-        let msg = run_execute_with_model("custom-model", "xhigh").expect_err("must error");
-        assert!(
-            msg.contains("custom-model") && msg.contains("/model"),
-            "display name + recovery hint: {msg}",
-        );
+        let err = run_execute_with_model("custom-model", "xhigh").unwrap_err();
+
+        assert_eq!(err, NO_TIER_ERROR);
     }
 
     #[test]
     fn execute_unknown_level_errors_listing_valid_options() {
-        let msg = run_execute("turbo").expect_err("unknown level must error");
-        assert!(msg.starts_with("Unknown effort: `turbo`."), "{msg}");
-        for valid in Effort::VALID_VALUES.split(", ") {
-            assert!(msg.contains(valid), "lists `{valid}`: {msg}");
-        }
-        assert!(!msg.contains("auto"), "{msg}");
+        let err = run_execute("turbo").unwrap_err();
+
+        assert_eq!(
+            err,
+            "Unknown effort: `turbo`. Valid: low, medium, high, xhigh, max."
+        );
     }
 
     #[test]
     fn execute_auto_is_unknown() {
-        let msg = run_execute("auto").expect_err("auto is not a selectable effort");
-        assert!(msg.starts_with("Unknown effort: `auto`."), "{msg}");
+        let err = run_execute("auto").unwrap_err();
+
+        assert_eq!(
+            err,
+            "Unknown effort: `auto`. Valid: low, medium, high, xhigh, max."
+        );
     }
 
     // ── parse_effort_arg ──

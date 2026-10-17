@@ -8,18 +8,15 @@ use anyhow::Result;
 use crossterm::Command;
 use crossterm::cursor::{RestorePosition, SavePosition};
 use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
-use crossterm::style::{
-    Attribute as CtAttribute, Color as CtColor, Print, SetAttribute, SetBackgroundColor,
-    SetForegroundColor,
-};
+use crossterm::style::PrintStyledContent;
 use crossterm::terminal::{
     self, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use crossterm::{execute, queue};
 use ratatui::Terminal;
-use ratatui::prelude::CrosstermBackend;
+use ratatui::prelude::{CrosstermBackend, IntoCrossterm};
 
-use super::components::status::{HyperlinkCell, StatusHyperlink};
+use super::components::status::StatusHyperlink;
 
 pub(crate) type Tui = Terminal<CrosstermBackend<Stdout>>;
 
@@ -39,7 +36,7 @@ fn enter_tui_mode(stdout: &mut impl Write) -> Result<()> {
     queue!(
         stdout,
         EnterAlternateScreen,
-        EnableAlternateScroll,
+        AlternateScroll { enable: true },
         EnableBracketedPaste
     )?;
     // crossterm writes the Kitty keyboard commands only as escape codes and fails them on Windows.
@@ -65,7 +62,11 @@ pub(crate) fn restore() {
 }
 
 fn leave_tui_mode(stdout: &mut impl Write) -> Result<()> {
-    queue!(stdout, DisableAlternateScroll, DisableBracketedPaste)?;
+    queue!(
+        stdout,
+        AlternateScroll { enable: false },
+        DisableBracketedPaste
+    )?;
     #[cfg(not(windows))]
     queue!(stdout, crossterm::event::PopKeyboardEnhancementFlags)?;
     execute!(stdout, LeaveAlternateScreen, crossterm::cursor::Show)?;
@@ -85,43 +86,22 @@ fn write_deferred_panics(deferred: &Mutex<DeferredPanics>, out: &mut impl Write)
     Ok(())
 }
 
-/// DECSET `?1007h`. Tells the terminal emulator to translate physical wheel-mouse events into
-/// arrow-key sequences while the alternate screen is active. Wheel scroll keeps working without
-/// claiming `EnableMouseCapture`, so native drag-select-and-copy stays available to the user.
+/// DEC mode 1007, which makes the terminal send wheel scrolls in the alternate screen as arrow
+/// keys. Wheel scrolling then works without mouse capture, so native drag selection stays usable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct EnableAlternateScroll;
-
-impl Command for EnableAlternateScroll {
-    fn write_ansi(&self, f: &mut impl fmt::Write) -> fmt::Result {
-        write!(f, "\x1b[?1007h")
-    }
-
-    #[cfg(windows)]
-    fn execute_winapi(&self) -> std::io::Result<()> {
-        Err(std::io::Error::other(
-            "EnableAlternateScroll requires ANSI sequences",
-        ))
-    }
-
-    #[cfg(windows)]
-    fn is_ansi_code_supported(&self) -> bool {
-        true
-    }
+struct AlternateScroll {
+    enable: bool,
 }
 
-/// DECSET `?1007l`. Pairs with [`EnableAlternateScroll`] on shutdown.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct DisableAlternateScroll;
-
-impl Command for DisableAlternateScroll {
+impl Command for AlternateScroll {
     fn write_ansi(&self, f: &mut impl fmt::Write) -> fmt::Result {
-        write!(f, "\x1b[?1007l")
+        write!(f, "\x1b[?1007{}", if self.enable { 'h' } else { 'l' })
     }
 
     #[cfg(windows)]
     fn execute_winapi(&self) -> std::io::Result<()> {
         Err(std::io::Error::other(
-            "DisableAlternateScroll requires ANSI sequences",
+            "AlternateScroll requires ANSI sequences",
         ))
     }
 
@@ -155,8 +135,6 @@ pub(crate) fn write_status_hyperlinks<W: Write>(
 
 /// Builds the OSC 8 byte stream for the link batch. Empty when no link has a usable URL.
 fn build_status_hyperlink_envelope(links: &[StatusHyperlink]) -> io::Result<Vec<u8>> {
-    use std::io::Write as _;
-
     let mut buf: Vec<u8> = Vec::new();
     let mut wrote_any = false;
     for link in links {
@@ -173,7 +151,8 @@ fn build_status_hyperlink_envelope(links: &[StatusHyperlink]) -> io::Result<Vec<
         write!(buf, "\x1b[{row};{col}H")?;
         write!(buf, "\x1b]8;;{safe_url}\x07")?;
         for cell in &link.cells {
-            write_styled_symbol(&mut buf, cell)?;
+            let style = cell.style.into_crossterm();
+            queue!(buf, PrintStyledContent(style.apply(&cell.symbol)))?;
         }
         write!(buf, "\x1b]8;;\x07")?;
         write!(buf, "\x1b[0m")?;
@@ -182,60 +161,6 @@ fn build_status_hyperlink_envelope(links: &[StatusHyperlink]) -> io::Result<Vec<
         queue!(&mut buf, RestorePosition)?;
     }
     Ok(buf)
-}
-
-/// Replays one captured cell, resetting SGR first so modifiers cannot leak across cells.
-fn write_styled_symbol<W: Write>(out: &mut W, cell: &HyperlinkCell) -> io::Result<()> {
-    queue!(out, SetAttribute(CtAttribute::Reset))?;
-    if let Some(fg) = cell.style.fg {
-        queue!(out, SetForegroundColor(ratatui_color_to_crossterm(fg)))?;
-    }
-    if let Some(bg) = cell.style.bg {
-        queue!(out, SetBackgroundColor(ratatui_color_to_crossterm(bg)))?;
-    }
-    let modifier = cell.style.add_modifier;
-    if modifier.contains(ratatui::style::Modifier::BOLD) {
-        queue!(out, SetAttribute(CtAttribute::Bold))?;
-    }
-    if modifier.contains(ratatui::style::Modifier::DIM) {
-        queue!(out, SetAttribute(CtAttribute::Dim))?;
-    }
-    if modifier.contains(ratatui::style::Modifier::ITALIC) {
-        queue!(out, SetAttribute(CtAttribute::Italic))?;
-    }
-    if modifier.contains(ratatui::style::Modifier::UNDERLINED) {
-        queue!(out, SetAttribute(CtAttribute::Underlined))?;
-    }
-    if modifier.contains(ratatui::style::Modifier::REVERSED) {
-        queue!(out, SetAttribute(CtAttribute::Reverse))?;
-    }
-    queue!(out, Print(&cell.symbol))?;
-    Ok(())
-}
-
-fn ratatui_color_to_crossterm(c: ratatui::style::Color) -> CtColor {
-    use ratatui::style::Color as RC;
-    match c {
-        RC::Reset => CtColor::Reset,
-        RC::Black => CtColor::Black,
-        RC::Red => CtColor::DarkRed,
-        RC::Green => CtColor::DarkGreen,
-        RC::Yellow => CtColor::DarkYellow,
-        RC::Blue => CtColor::DarkBlue,
-        RC::Magenta => CtColor::DarkMagenta,
-        RC::Cyan => CtColor::DarkCyan,
-        RC::Gray => CtColor::Grey,
-        RC::DarkGray => CtColor::DarkGrey,
-        RC::LightRed => CtColor::Red,
-        RC::LightGreen => CtColor::Green,
-        RC::LightYellow => CtColor::Yellow,
-        RC::LightBlue => CtColor::Blue,
-        RC::LightMagenta => CtColor::Magenta,
-        RC::LightCyan => CtColor::Cyan,
-        RC::White => CtColor::White,
-        RC::Indexed(i) => CtColor::AnsiValue(i),
-        RC::Rgb(r, g, b) => CtColor::Rgb { r, g, b },
-    }
 }
 
 /// Background-thread panic reports waiting for [`restore`] to print them.
@@ -312,7 +237,7 @@ fn route_panic(
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use ratatui::style::{Modifier, Style};
+    use ratatui::style::{Color, Modifier, Style};
     use ratatui::{TerminalOptions, Viewport, layout::Rect};
 
     use super::*;
@@ -402,6 +327,18 @@ mod tests {
         assert!(
             index_of(&buf, POP_KITTY_FLAGS).is_some(),
             "Kitty keyboard flags must be popped outside Windows"
+        );
+    }
+
+    #[test]
+    fn leave_tui_mode_write_failure_returns_the_io_error() {
+        let mut out = &mut [][..];
+
+        let error = leave_tui_mode(&mut out).unwrap_err();
+
+        assert_eq!(
+            error.downcast_ref::<io::Error>().unwrap().kind(),
+            io::ErrorKind::WriteZero,
         );
     }
 
@@ -507,7 +444,7 @@ mod tests {
 
         let result = synchronized_update(&mut terminal, |_| Err(anyhow::anyhow!("draw failed")));
 
-        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().to_string(), "draw failed");
         let bytes = buf.lock().unwrap();
         assert!(
             index_of(&bytes, END_SYNC).is_some(),
@@ -540,40 +477,47 @@ mod tests {
     // ── build_status_hyperlink_envelope ──
 
     #[test]
-    fn build_status_hyperlink_envelope_emits_cup_then_osc8_per_link() {
+    fn build_status_hyperlink_envelope_wraps_each_link_in_cup_and_osc8() {
         let link = plain_hyperlink(
             Rect::new(2, 0, 3, 1),
             "https://example.com/pull/86",
             &["#", "8", "6"],
         );
+
         let bytes = build_status_hyperlink_envelope(&[link]).unwrap();
-        let output = String::from_utf8(bytes).unwrap();
-        assert!(
-            output.starts_with("\x1b7"),
-            "DECSC parks the cursor before our writes: {output:?}",
+
+        assert_eq!(
+            String::from_utf8(bytes).unwrap(),
+            "\x1b7\x1b[1;3H\x1b]8;;https://example.com/pull/86\x07#86\x1b]8;;\x07\x1b[0m\x1b8",
         );
-        assert!(
-            output.ends_with("\x1b8"),
-            "DECRC restores the cursor after our writes: {output:?}",
-        );
-        assert!(
-            output.contains("\x1b[1;3H"),
-            "CUP to row 1 col 3 (1-based): {output:?}",
-        );
-        assert!(
-            output.contains("\x1b]8;;https://example.com/pull/86\x07"),
-            "OSC 8 opener with URL: {output:?}",
-        );
-        let osc8_open_at = output.find("\x1b]8;;https").unwrap();
-        let osc8_close_at = output.rfind("\x1b]8;;\x07").unwrap();
-        let between = &output[osc8_open_at..osc8_close_at];
-        assert!(
-            between.contains('#') && between.contains('8') && between.contains('6'),
-            "visible bytes #, 8, 6 sit between opener and closer: {between:?}",
-        );
-        assert!(
-            output.contains("\x1b]8;;\x07\x1b[0m"),
-            "closer + SGR reset: {output:?}",
+    }
+
+    #[test]
+    fn build_status_hyperlink_envelope_replays_each_cell_style_and_resets_it() {
+        let link = StatusHyperlink {
+            rect: Rect::new(0, 0, 2, 1),
+            url: "https://x".to_owned(),
+            cells: vec![
+                HyperlinkCell {
+                    symbol: "A".to_owned(),
+                    style: Style::default()
+                        .fg(Color::Red)
+                        .bg(Color::Blue)
+                        .add_modifier(Modifier::BOLD),
+                },
+                HyperlinkCell {
+                    symbol: "B".to_owned(),
+                    style: Style::default().add_modifier(Modifier::ITALIC),
+                },
+            ],
+        };
+
+        let bytes = build_status_hyperlink_envelope(&[link]).unwrap();
+
+        assert_eq!(
+            String::from_utf8(bytes).unwrap(),
+            "\x1b7\x1b[1;1H\x1b]8;;https://x\x07\x1b[48;5;4m\x1b[38;5;1m\x1b[1mA\x1b[0m\x1b[3mB\x1b[0m\
+             \x1b]8;;\x07\x1b[0m\x1b8",
         );
     }
 
@@ -593,66 +537,6 @@ mod tests {
     }
 
     #[test]
-    fn build_status_hyperlink_envelope_replays_styled_cell_modifiers() {
-        let modifiers = Modifier::BOLD
-            | Modifier::DIM
-            | Modifier::ITALIC
-            | Modifier::UNDERLINED
-            | Modifier::REVERSED;
-        let link = StatusHyperlink {
-            rect: Rect::new(0, 0, 1, 1),
-            url: "https://x".to_owned(),
-            cells: vec![HyperlinkCell {
-                symbol: "X".to_owned(),
-                style: Style::default().add_modifier(modifiers),
-            }],
-        };
-        let bytes = build_status_hyperlink_envelope(&[link]).unwrap();
-        let output = String::from_utf8(bytes).unwrap();
-        for (sgr, label) in [
-            ("\x1b[1m", "bold"),
-            ("\x1b[2m", "dim"),
-            ("\x1b[3m", "italic"),
-            ("\x1b[4m", "underlined"),
-            ("\x1b[7m", "reverse"),
-        ] {
-            assert!(
-                output.contains(sgr),
-                "missing {label} SGR escape: {output:?}",
-            );
-        }
-        assert!(
-            output.contains('X'),
-            "visible cell symbol replayed: {output:?}"
-        );
-    }
-
-    #[test]
-    fn build_status_hyperlink_envelope_resets_sgr_between_cells_with_different_modifiers() {
-        let link = StatusHyperlink {
-            rect: Rect::new(0, 0, 2, 1),
-            url: "https://x".to_owned(),
-            cells: vec![
-                HyperlinkCell {
-                    symbol: "A".to_owned(),
-                    style: Style::default().add_modifier(Modifier::BOLD),
-                },
-                HyperlinkCell {
-                    symbol: "B".to_owned(),
-                    style: Style::default().add_modifier(Modifier::ITALIC),
-                },
-            ],
-        };
-        let bytes = build_status_hyperlink_envelope(&[link]).unwrap();
-        let output = String::from_utf8(bytes).unwrap();
-        let after_first_cell = output.split('A').nth(1).unwrap_or_default();
-        assert!(
-            after_first_cell.starts_with("\x1b[0m"),
-            "second cell starts with SGR reset to drop the prior cell's modifiers: {output:?}",
-        );
-    }
-
-    #[test]
     fn build_status_hyperlink_envelope_is_empty_when_safe_url_is_empty() {
         let link = plain_hyperlink(Rect::new(0, 0, 1, 1), "\x1b\x07", &["x"]);
         let bytes = build_status_hyperlink_envelope(&[link]).unwrap();
@@ -660,41 +544,6 @@ mod tests {
             bytes.is_empty(),
             "no bytes (no DECSC either) when sanitized URL is empty",
         );
-    }
-
-    // ── ratatui_color_to_crossterm ──
-
-    #[test]
-    fn ratatui_color_to_crossterm_round_trips_every_palette_variant() {
-        use ratatui::style::Color as RC;
-        let cases = [
-            (RC::Reset, CtColor::Reset),
-            (RC::Black, CtColor::Black),
-            (RC::Red, CtColor::DarkRed),
-            (RC::Green, CtColor::DarkGreen),
-            (RC::Yellow, CtColor::DarkYellow),
-            (RC::Blue, CtColor::DarkBlue),
-            (RC::Magenta, CtColor::DarkMagenta),
-            (RC::Cyan, CtColor::DarkCyan),
-            (RC::Gray, CtColor::Grey),
-            (RC::DarkGray, CtColor::DarkGrey),
-            (RC::LightRed, CtColor::Red),
-            (RC::LightGreen, CtColor::Green),
-            (RC::LightYellow, CtColor::Yellow),
-            (RC::LightBlue, CtColor::Blue),
-            (RC::LightMagenta, CtColor::Magenta),
-            (RC::LightCyan, CtColor::Cyan),
-            (RC::White, CtColor::White),
-            (RC::Indexed(33), CtColor::AnsiValue(33)),
-            (RC::Rgb(1, 2, 3), CtColor::Rgb { r: 1, g: 2, b: 3 }),
-        ];
-        for (input, expected) in cases {
-            assert_eq!(
-                ratatui_color_to_crossterm(input),
-                expected,
-                "color {input:?}"
-            );
-        }
     }
 
     // ── route_panic ──

@@ -14,7 +14,7 @@ The picker wraps [`SearchableList`](modals.md) and adds these controls and displ
 - Tab toggles current-project ↔ all-projects, and Ctrl+A toggles the active ↔ archived view, retitling the header to `Resume archived session`. Both reload rows from `SessionStore::list_paged` while preserving the typed query.
 - Enter on a focused row submits, while Enter with no selection keeps the picker open so the user can Tab the scope or Esc out.
 - Esc / Ctrl+C cancel via the universal stack gate.
-- The footer counts the loaded rows. If more sessions follow the 30-row cap, it says so (`30 most recent sessions · more not loaded`), since queries search only loaded rows.
+- The footer leads with the Enter and Esc hints, then counts the loaded rows. If more sessions follow the 30-row cap, it says so (`30 most recent sessions`, then `more not loaded`), since queries search only loaded rows.
 - Ctrl+D on the cursor row pushes [`ConfirmDeleteSessionModal`](modals.md). On focus regain the picker reloads and re-seeks the cursor to the previously selected row, so cancel-delete keeps the user in place.
 
 `ox --resume` starts the TUI in a fresh session with no file yet, then opens the picker on the first frame. `main.rs` builds it with `ResumePicker::at_startup`, and `driver::tui::run` pushes `Startup::picker` onto the modal stack before the event loop starts. The startup picker carries `Dismissal::Quit`, so Esc / Ctrl+C call `on_cancel`, which resolves to `Op::Shutdown`, and the footer reads `Esc to quit`. Pressing Enter resumes through the same `roll_into` path as `/resume`. A session file is created only with the first message, so neither path leaves an empty session on disk.
@@ -75,7 +75,7 @@ The picker wraps [`SearchableList`](modals.md) and adds these controls and displ
 
 - **`SessionStore::list_paged`**: Takes a `ListScope` with project and archive flags. Stats every candidate, sorts by mtime desc, then parses files in order, keeping readable sessions in the requested archive state until it holds one past the page. `ListPage::has_more()` reports whether a matching session follows the page, for the `--list` footer and the picker's `more not loaded` note.
 
-- **`/resume <id>` resolver**: `resolve_prefix_to_info` runs the prefix lookup against the current project, then retries across all projects on miss. Returns the matched session or a user-readable error.
+- **`/resume <id>` resolver**: `resolve_prefix_to_info` runs the prefix lookup against the current project, then retries across all projects on miss. Returns the matched session or a `ResolveError`, which the command rephrases as a sentence.
 
 - **`Op::Resume`**: Single `path` field naming the session file the user picked. The engine owns the `roll_into` call, so the slash command never touches the session handle directly.
 

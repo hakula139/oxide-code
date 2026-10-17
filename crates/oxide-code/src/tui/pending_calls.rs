@@ -75,15 +75,7 @@ mod tests {
         assert_eq!(header, FALLBACK_RESULT_HEADER);
     }
 
-    // ── PendingCalls ──
-
-    #[test]
-    fn remove_drains_the_entry() {
-        let mut calls = PendingCalls::new();
-        calls.insert("t1".to_owned(), "Edit(/tmp/f.rs)".to_owned());
-        assert_eq!(calls.remove("t1").as_deref(), Some("Edit(/tmp/f.rs)"));
-        assert_eq!(calls.remove("t1"), None);
-    }
+    // ── PendingCalls::insert ──
 
     #[test]
     fn insert_overwrites_existing_entry() {
@@ -91,5 +83,15 @@ mod tests {
         calls.insert("t1".to_owned(), "Edit(/tmp/f.rs)".to_owned());
         calls.insert("t1".to_owned(), "Edit(retry)".to_owned());
         assert_eq!(calls.remove("t1").as_deref(), Some("Edit(retry)"));
+    }
+
+    // ── PendingCalls::remove ──
+
+    #[test]
+    fn remove_drains_the_entry() {
+        let mut calls = PendingCalls::new();
+        calls.insert("t1".to_owned(), "Edit(/tmp/f.rs)".to_owned());
+        assert_eq!(calls.remove("t1").as_deref(), Some("Edit(/tmp/f.rs)"));
+        assert_eq!(calls.remove("t1"), None);
     }
 }

@@ -10,6 +10,7 @@ use ratatui::text::{Line, Span};
 use ratatui_textarea::{CursorMove, TextArea};
 use unicode_width::UnicodeWidthChar;
 
+use crate::tui::saturating_u16;
 use crate::tui::theme::Theme;
 
 const PROMPT: &str = "/ ";
@@ -101,7 +102,7 @@ impl LineEditor {
 
     /// Places the terminal cursor at the editing position on row `y`, clamped inside `area`.
     pub(crate) fn place_cursor(&self, frame: &mut Frame<'_>, area: Rect, y: u16) {
-        let column = u16::try_from(self.visible(area.width).1).unwrap_or(u16::MAX);
+        let column = saturating_u16(self.visible(area.width).1);
         let raw_x = area.x.saturating_add(PROMPT_WIDTH).saturating_add(column);
         crate::tui::cursor::place_clamped(frame, raw_x, y, area);
     }
