@@ -56,7 +56,7 @@ Four install paths are supported: prebuilt tarball, Homebrew tap, `cargo install
 
 ```bash
 # macOS aarch64 (Apple Silicon). Set VERSION to the newest tag on the Releases page.
-VERSION=v0.1.0-alpha.2
+VERSION=v0.1.0-alpha.3
 curl -fsSL "https://github.com/hakula139/oxide-code/releases/download/$VERSION/oxide-code-aarch64-apple-darwin.tar.gz" | tar -xz
 sudo mv ox /usr/local/bin/
 
