@@ -163,6 +163,7 @@ mod tests {
     use time::macros::datetime;
 
     use super::*;
+    use crate::file_tracker::{FileState, LastView};
     use crate::message::{ContentBlock, Role};
     use crate::tool::tasks::testing::plan;
 
@@ -401,24 +402,30 @@ mod tests {
     fn file_snapshot_round_trips_with_inlined_payload_fields() {
         let snapshot = FileSnapshot {
             path: std::path::PathBuf::from("/tmp/a.rs"),
-            content_hash: 0xDEAD_BEEF,
-            last_view: crate::file_tracker::LastView::Full,
-            recorded_at: datetime!(2026-04-29 12:34:56 UTC),
-            tool_use_id: None,
+            state: FileState {
+                content_hash: 0xDEAD_BEEF,
+                last_view: LastView::Full,
+                recorded_at: datetime!(2026-04-29 12:34:56 UTC),
+                tool_use_id: None,
+            },
         };
         let entry = Entry::FileSnapshot {
             snapshot: snapshot.clone(),
         };
-        let json = serde_json::to_value(&entry).unwrap();
-        assert_eq!(json["type"], "file_snapshot");
-        assert_eq!(json["path"], "/tmp/a.rs");
-        assert_eq!(json["content_hash"], 0xDEAD_BEEF_u64);
-        assert!(
-            json.get("snapshot").is_none(),
-            "payload must flatten, not nest under `snapshot`",
-        );
 
-        let parsed: Entry = serde_json::from_value(json).unwrap();
+        let json = serde_json::to_value(&entry).unwrap();
+        let parsed: Entry = serde_json::from_value(json.clone()).unwrap();
+
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "type": "file_snapshot",
+                "path": "/tmp/a.rs",
+                "content_hash": 0xDEAD_BEEF_u64,
+                "last_view": {"kind": "full"},
+                "recorded_at": "2026-04-29T12:34:56Z",
+            }),
+        );
         let Entry::FileSnapshot { snapshot: parsed } = parsed else {
             panic!("expected FileSnapshot");
         };
@@ -437,12 +444,24 @@ mod tests {
             "recorded_at": "2026-04-29T12:00:00Z",
             "future_field": "from a newer writer",
         });
+
         let parsed: Entry = serde_json::from_value(json).unwrap();
+
         let Entry::FileSnapshot { snapshot } = parsed else {
             panic!("expected FileSnapshot, got {parsed:?}");
         };
-        assert_eq!(snapshot.path, std::path::PathBuf::from("/tmp/a.rs"));
-        assert_eq!(snapshot.content_hash, 1);
+        assert_eq!(
+            snapshot,
+            FileSnapshot {
+                path: std::path::PathBuf::from("/tmp/a.rs"),
+                state: FileState {
+                    content_hash: 1,
+                    last_view: LastView::Full,
+                    recorded_at: datetime!(2026-04-29 12:00:00 UTC),
+                    tool_use_id: None,
+                },
+            },
+        );
     }
 
     // ── Entry::Compact ──

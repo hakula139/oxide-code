@@ -500,7 +500,7 @@ mod tests {
 
     use super::*;
     use crate::file_tracker::{
-        GateError, GatePurpose, LastView,
+        FileState, GateError, GatePurpose, LastView,
         testing::{record_tracked_file, seed_full_read},
     };
     use crate::message::{ContentBlock, Replay, Role};
@@ -1783,20 +1783,24 @@ mod tests {
             .finish(vec![
                 FileSnapshot {
                     path: PathBuf::from("/repo/f.rs"),
-                    content_hash: 42,
-                    last_view: LastView::Full,
-                    recorded_at: datetime!(2026-01-01 00:00:01 UTC),
-                    tool_use_id: Some("t1".to_owned()),
+                    state: FileState {
+                        content_hash: 42,
+                        last_view: LastView::Full,
+                        recorded_at: datetime!(2026-01-01 00:00:01 UTC),
+                        tool_use_id: Some("t1".to_owned()),
+                    },
                 },
                 FileSnapshot {
                     path: PathBuf::from("/repo/g.rs"),
-                    content_hash: 43,
-                    last_view: LastView::Partial {
-                        ranges: vec![(1, 20)],
-                        total_lines: 40,
+                    state: FileState {
+                        content_hash: 43,
+                        last_view: LastView::Partial {
+                            ranges: vec![(1, 20)],
+                            total_lines: 40,
+                        },
+                        recorded_at: datetime!(2026-01-01 00:00:02 UTC),
+                        tool_use_id: Some("t2".to_owned()),
                     },
-                    recorded_at: datetime!(2026-01-01 00:00:02 UTC),
-                    tool_use_id: Some("t2".to_owned()),
                 },
             ])
             .await;

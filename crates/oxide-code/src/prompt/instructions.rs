@@ -5,13 +5,13 @@ use std::path::{Path, PathBuf};
 use indoc::{formatdoc, indoc};
 use tokio::fs;
 
-/// First file found per location wins.
+/// Names tried in order at each location. The first file with non-blank content wins.
 pub(crate) const INSTRUCTION_FILENAMES: &[&str] = &["CLAUDE.md", "AGENTS.md"];
 
-/// Tool-agnostic subdirectories walked alongside each location (e.g. `<dir>/.claude/CLAUDE.md`).
+/// Subdirectories walked alongside each location (e.g. `<dir>/.claude/CLAUDE.md`).
 pub(crate) const INSTRUCTION_DIRS: &[&str] = &[".claude"];
 
-/// Candidates tried in order at a single location. The first hit wins.
+/// Candidates tried in order at a single location.
 struct Slot {
     candidates: Vec<PathBuf>,
     label: &'static str,
