@@ -1,11 +1,10 @@
 //! The synthetic user message that opens a compacted transcript. Compaction writes it with the
 //! summary, and the resumed display strips its prefix again, since the boundary block shows it.
 
-use std::fmt::Write as _;
-
 use indoc::{formatdoc, indoc};
 
 use crate::message::{ContentBlock, Message, Role};
+use crate::prompt::system_reminder;
 use crate::tool::bash::background::BackgroundShell;
 use crate::tool::tasks::Task;
 
@@ -42,16 +41,16 @@ fn task_reminder(tasks: &[Task]) -> Option<String> {
     if tasks.is_empty() {
         return None;
     }
-    let mut list = String::new();
-    for task in tasks {
-        _ = writeln!(list, "- [{}] {}", task.status.as_str(), task.content);
-    }
-    Some(formatdoc! {"
-        <system-reminder>
+    let list = tasks
+        .iter()
+        .map(|task| format!("- [{}] {}", task.status.as_str(), task.content))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(system_reminder(&formatdoc! {"
         Your task list carries over from before the summary. Keep it current with the tasks tool:
 
-        {list}</system-reminder>"
-    })
+        {list}"
+    }))
 }
 
 /// The block that lists the open background shells after the summary, since the calls that
@@ -60,23 +59,24 @@ fn shell_reminder(shells: &[BackgroundShell]) -> Option<String> {
     if shells.is_empty() {
         return None;
     }
-    let mut list = String::new();
-    for shell in shells {
-        _ = writeln!(
-            list,
-            "- {} ({}): {}",
-            shell.id,
-            shell.state.describe(),
-            shell.command_preview()
-        );
-    }
-    Some(formatdoc! {"
-        <system-reminder>
+    let list = shells
+        .iter()
+        .map(|shell| {
+            format!(
+                "- {} ({}): {}",
+                shell.id,
+                shell.state.describe(),
+                shell.command_preview()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(system_reminder(&formatdoc! {"
         These background shells are still open from before the summary. Read them with bash_output,
         and stop the ones you no longer need with bash_stop:
 
-        {list}</system-reminder>"
-    })
+        {list}"
+    }))
 }
 
 /// Removes the synthetic summary prefix from a resumed post-compact root message.
