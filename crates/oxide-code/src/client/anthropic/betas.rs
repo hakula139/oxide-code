@@ -158,8 +158,7 @@ mod tests {
             compute_betas(&spec("claude-haiku-5-5"), None, AuthKind::OAuth, true)[..2],
             [OAUTH_BETA_HEADER, INTERLEAVED_THINKING_BETA_HEADER],
         );
-        // A gateway auth token keeps the API-key beta set, since the OAuth beta is
-        // subscription-only.
+        // A gateway auth token keeps the API-key betas, since the OAuth beta is subscription-only.
         let opus = spec("claude-opus-5-5");
         assert_eq!(
             compute_betas(&opus, None, AuthKind::AuthToken, true),

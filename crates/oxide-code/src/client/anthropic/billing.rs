@@ -86,7 +86,7 @@ mod tests {
 
     #[test]
     fn compute_fingerprint_short_message_pads_with_zero() {
-        // "Hi" (len 2): all fingerprint indices are out of bounds; chars default to '0'.
+        // "Hi" (len 2) has no char at any fingerprint index, so every position defaults to '0'.
         let short = compute_fingerprint("Hi", "2.1.87");
         let empty = compute_fingerprint("", "2.1.87");
         assert_eq!(short, empty, "both should pad all positions with '0'");
@@ -174,7 +174,7 @@ mod tests {
 
     #[test]
     fn inject_cch_replaces_only_first_occurrence() {
-        // `system` precedes `messages` — matches our struct field order.
+        // `system` precedes `messages`, as in the request struct's field order.
         let body = r#"{"system":[{"type":"text","text":"cch=00000;"}],"messages":[{"role":"user","content":[{"type":"text","text":"cch=00000"}]}]}"#;
         let result = inject_cch(body).unwrap();
 

@@ -33,8 +33,7 @@ pub(crate) fn create_private_dir_all(path: &Path) -> Result<()> {
 /// Atomically writes `bytes` to `path` with `0o600` perms on Unix.
 ///
 /// Writes to a sibling temp file (same parent so `rename` stays a directory-internal atomic op),
-/// flushes contents to disk, then renames over the destination. On any failure the temp file is
-/// removed instead of being leaked.
+/// flushes contents to disk, then renames over the destination. Any failure removes the temp file.
 pub(crate) fn atomic_write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path
         .parent()
@@ -219,8 +218,7 @@ mod tests {
 
     #[test]
     fn atomic_write_private_cleans_up_temp_when_rename_fails() {
-        // POSIX `rename(file, existing_dir)` errors with EISDIR; the
-        // function must remove the temp file rather than leak it.
+        // POSIX `rename(file, existing_dir)` fails with EISDIR, and the temp file must not leak.
         let dir = tempdir().unwrap();
         let target = dir.path().join("target");
         fs::create_dir(&target).unwrap();

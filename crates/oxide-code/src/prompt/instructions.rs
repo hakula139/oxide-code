@@ -35,7 +35,7 @@ pub(super) async fn load(cwd: &Path, git_root: Option<&Path>) -> String {
     render(&files)
 }
 
-/// Emits a global slot (when home exists) plus one root-level + one `.claude/` slot per directory.
+/// Emits a global slot (when home exists), then a root-level and a `.claude/` slot per directory.
 fn candidate_slots(cwd: &Path, project_root: &Path) -> Vec<Slot> {
     let mut slots = Vec::new();
 

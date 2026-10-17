@@ -67,7 +67,7 @@ struct Cli {
     #[arg(long, requires = "list")]
     archived: bool,
 
-    /// Resume a session: bare flag picks the most recent, an ID prefix picks a specific one.
+    /// Resume a session: the most recent with no value, or the one matching an ID prefix.
     #[expect(
         clippy::option_option,
         reason = "encodes three CLI states: absent (None), flag only (Some(None)), flag with value (Some(Some))"
