@@ -8,7 +8,6 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use tracing::warn;
-use uuid::Uuid;
 
 use crate::util::fs::{atomic_write_private, create_private_dir_all};
 use crate::util::path::{XdgBase, app_dir};
@@ -56,8 +55,8 @@ fn read_existing(path: &Path) -> Result<Option<String>> {
         Ok(b) => b,
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
         Err(e) => {
-            return Err(anyhow::Error::from(e)
-                .context(format!("failed to read device id at {}", path.display())));
+            return Err(e)
+                .with_context(|| format!("failed to read device id at {}", path.display()));
         }
     };
     let trimmed = std::str::from_utf8(&bytes).map(str::trim).ok();
@@ -71,13 +70,13 @@ fn is_valid_id(s: &str) -> bool {
 }
 
 fn generate() -> String {
-    let mut buf = String::with_capacity(ID_LEN);
-    let a = Uuid::new_v4().into_bytes();
-    let b = Uuid::new_v4().into_bytes();
-    for byte in a.iter().chain(b.iter()) {
-        write!(&mut buf, "{byte:02x}").expect("writing to a String never fails");
+    let mut bytes = [0u8; ID_LEN / 2];
+    getrandom::fill(&mut bytes).expect("the OS random source is readable");
+    let mut id = String::with_capacity(ID_LEN);
+    for byte in bytes {
+        write!(&mut id, "{byte:02x}").expect("writing to a String never fails");
     }
-    buf
+    id
 }
 
 #[cfg(test)]
@@ -104,13 +103,13 @@ mod tests {
     // ── fallback_to_ephemeral ──
 
     #[test]
-    fn fallback_to_ephemeral_uses_persisted_id_on_ok() {
+    fn fallback_to_ephemeral_keeps_the_persisted_id() {
         let persisted = "a".repeat(64);
         assert_eq!(fallback_to_ephemeral(Ok(persisted.clone())), persisted);
     }
 
     #[test]
-    fn fallback_to_ephemeral_mints_fresh_id_on_err() {
+    fn fallback_to_ephemeral_mints_an_id_when_storage_fails() {
         let id = fallback_to_ephemeral(Err(anyhow::anyhow!("disk full")));
         assert!(is_valid_id(&id), "fallback mints a valid id: {id}");
     }
@@ -121,19 +120,13 @@ mod tests {
     fn try_load_or_create_at_persists_across_calls() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("ox/user-id");
+
         let id1 = try_load_or_create_at(&path).unwrap();
         let id2 = try_load_or_create_at(&path).unwrap();
+
         assert!(is_valid_id(&id1));
         assert_eq!(id1, id2, "second call returns the persisted id");
-    }
-
-    #[test]
-    fn try_load_or_create_at_writes_id_to_path() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("ox/user-id");
-        let id = try_load_or_create_at(&path).unwrap();
-        let on_disk = fs::read_to_string(&path).unwrap();
-        assert_eq!(on_disk.trim(), id);
+        assert_eq!(fs::read_to_string(&path).unwrap(), id1);
     }
 
     #[test]
@@ -150,7 +143,7 @@ mod tests {
 
     #[test]
     fn try_load_or_create_at_propagates_unwritable_parent_as_error() {
-        // The parent is a regular file, so `mkdir` fails.
+        // `blocker` is a regular file, so no path beneath it can be read or created.
         let dir = tempdir().unwrap();
         let blocker = dir.path().join("blocker");
         fs::write(&blocker, "").unwrap();
@@ -166,11 +159,7 @@ mod tests {
     fn try_load_or_create_at_errors_on_path_without_parent() {
         // Empty path: NotFound from read_existing, then `.parent()` is None.
         let err = try_load_or_create_at(Path::new("")).unwrap_err();
-        let chain = format!("{err:#}");
-        assert!(
-            chain.contains("no parent"),
-            "actionable error for parentless path: {chain}"
-        );
+        assert_eq!(format!("{err:#}"), "device-id path has no parent");
     }
 
     // ── read_existing ──
@@ -188,10 +177,9 @@ mod tests {
         // Reading a directory as a file errors with IsADirectory.
         let dir = tempdir().unwrap();
         let err = read_existing(dir.path()).unwrap_err();
-        let chain = format!("{err:#}");
-        assert!(
-            chain.contains("failed to read device id"),
-            "wrap message: {chain}"
+        assert_eq!(
+            err.to_string(),
+            format!("failed to read device id at {}", dir.path().display()),
         );
     }
 
