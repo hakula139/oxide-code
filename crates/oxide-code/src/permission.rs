@@ -269,8 +269,8 @@ pub(crate) fn extra_root(raw: &str) -> Result<PathBuf> {
     };
     ensure!(
         is_workspace(&root),
-        "invalid extra root {raw:?}: `/`, the home directory, and their ancestors cannot be \
-         workspace roots"
+        "invalid extra root {raw:?}: `/`, the home directory, \
+         and their ancestors cannot be workspace roots"
     );
     Ok(root)
 }
@@ -1420,8 +1420,8 @@ mod tests {
         std::fs::create_dir(&home).unwrap();
         let too_broad = |raw: &str| {
             format!(
-                "invalid extra root {raw:?}: `/`, the home directory, and their ancestors cannot \
-                 be workspace roots"
+                "invalid extra root {raw:?}: `/`, the home directory, \
+                 and their ancestors cannot be workspace roots"
             )
         };
         let fs_root = slash_separated(base.ancestors().last().unwrap());
@@ -1456,8 +1456,8 @@ mod tests {
         assert_eq!(
             err.to_string(),
             format!(
-                "invalid extra root {raw:?}: it runs through a symlink loop or an unreadable \
-                 directory"
+                "invalid extra root {raw:?}: \
+                 it runs through a symlink loop or an unreadable directory"
             ),
         );
     }
@@ -1504,8 +1504,8 @@ mod tests {
             assert_eq!(
                 err.to_string(),
                 format!(
-                    "invalid extra root {link:?}: `/`, the home directory, and their ancestors \
-                     cannot be workspace roots"
+                    "invalid extra root {link:?}: `/`, the home directory, \
+                     and their ancestors cannot be workspace roots"
                 ),
             );
             assert!(!is_workspace(&base.join("up")));

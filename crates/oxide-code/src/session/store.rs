@@ -1619,8 +1619,9 @@ mod tests {
         assert_eq!(
             format!("{err:#}"),
             format!(
-                "session format version {future_version} is newer than supported \
-                 ({CURRENT_VERSION}). Upgrade oxide-code to open it."
+                "session format version {future_version} is newer \
+                 than supported ({CURRENT_VERSION}). \
+                 Upgrade oxide-code to open it."
             ),
         );
     }

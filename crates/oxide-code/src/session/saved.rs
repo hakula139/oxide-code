@@ -67,8 +67,8 @@ mod tests {
 
         assert_eq!(
             err,
-            "Session live-ses is the live session. Use bare `/archive` to archive it and start a \
-             new one.",
+            "Session live-ses is the live session. \
+             Use bare `/archive` to archive it and start a new one.",
         );
         assert_eq!(listed_ids(&store, false), ["live-session"]);
 

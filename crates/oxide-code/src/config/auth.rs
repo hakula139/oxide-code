@@ -109,8 +109,8 @@ impl AuthSource {
                 "Check client.api_key in your user config. `/config` shows which file sets it."
             }
             Self::OAuthTokenEnv => {
-                "CLAUDE_CODE_OAUTH_TOKEN may be expired or revoked. Generate a new one with \
-                 `claude setup-token`."
+                "CLAUDE_CODE_OAUTH_TOKEN may be expired or revoked. \
+                 Generate a new one with `claude setup-token`."
             }
             Self::OxLogin => Login::Ox.sign_in_step(),
             Self::ClaudeCodeLogin => Login::ClaudeCode.sign_in_step(),
@@ -184,9 +184,10 @@ impl fmt::Debug for Auth {
 pub(super) enum ResolveError {
     /// `base_url` is a gateway, which never receives a stored login.
     #[error(
-        "no credentials for {0}. Set ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY, or \
-         CLAUDE_CODE_OAUTH_TOKEN, or add `api_key` to ~/.config/ox/config.toml. Stored logins are \
-         sent only to the Anthropic API."
+        "no credentials for {0}. \
+         Set ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY, or CLAUDE_CODE_OAUTH_TOKEN, \
+         or add `api_key` to ~/.config/ox/config.toml. \
+         Stored logins are sent only to the Anthropic API."
     )]
     Gateway(String),
     /// No stored login supplied a token. A TUI session starts signed out, since `/login` can sign
@@ -198,10 +199,10 @@ pub(super) enum ResolveError {
 fn signed_out_error(e: &LoginError) -> String {
     match e {
         LoginError::Missing => format!(
-            "no credentials found: no API key or token is set, no oxide-code login is stored, and \
-             no Claude Code login is in {LOGIN_STORES}. Set ANTHROPIC_API_KEY or \
-             CLAUDE_CODE_OAUTH_TOKEN, add `api_key` to ~/.config/ox/config.toml, or sign in with \
-             /login in the `ox` TUI."
+            "no credentials found: no API key or token is set, no oxide-code login is stored, \
+             and no Claude Code login is in {LOGIN_STORES}. \
+             Set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN, \
+             add `api_key` to ~/.config/ox/config.toml, or sign in with /login in the `ox` TUI."
         ),
         e => e.to_string(),
     }
@@ -519,9 +520,10 @@ mod tests {
         assert_eq!(
             format!("{err:#}"),
             format!(
-                "no credentials for {GATEWAY}. Set ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY, or \
-                 CLAUDE_CODE_OAUTH_TOKEN, or add `api_key` to ~/.config/ox/config.toml. Stored \
-                 logins are sent only to the Anthropic API."
+                "no credentials for {GATEWAY}. \
+                 Set ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY, or CLAUDE_CODE_OAUTH_TOKEN, \
+                 or add `api_key` to ~/.config/ox/config.toml. \
+                 Stored logins are sent only to the Anthropic API."
             ),
         );
     }
@@ -541,9 +543,9 @@ mod tests {
             format!("{err:#}"),
             format!(
                 "no credentials found: no API key or token is set, no oxide-code login is stored, \
-                 and no Claude Code login is in {LOGIN_STORES}. Set ANTHROPIC_API_KEY or \
-                 CLAUDE_CODE_OAUTH_TOKEN, add `api_key` to ~/.config/ox/config.toml, or sign in \
-                 with /login in the `ox` TUI."
+                 and no Claude Code login is in {LOGIN_STORES}. \
+                 Set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN, \
+                 add `api_key` to ~/.config/ox/config.toml, or sign in with /login in the `ox` TUI."
             ),
         );
     }

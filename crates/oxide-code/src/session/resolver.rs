@@ -289,8 +289,8 @@ mod tests {
         assert_eq!(
             err,
             format!(
-                "no session matching prefix `{}` in this project (use --all to search every \
-                 project)",
+                "no session matching prefix `{}` in this project \
+                 (use --all to search every project)",
                 &full_id[..10],
             ),
         );
@@ -439,8 +439,8 @@ mod tests {
             .to_string();
         assert_eq!(
             err,
-            "ambiguous prefix `ab` matches 7 sessions: ab6-sess, ab5-sess, ab4-sess, ab3-sess, \
-             ab2-sess, and 2 more",
+            "ambiguous prefix `ab` matches 7 sessions: \
+             ab6-sess, ab5-sess, ab4-sess, ab3-sess, ab2-sess, and 2 more",
         );
     }
 

@@ -61,12 +61,13 @@ impl Tool for BashTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "bash".to_owned(),
-            description: "Execute a shell command and return its output. For a dev server, a \
-                 watcher, or a long build, set run_in_background, without a trailing `&`: the \
-                 call returns a shell ID at once. You are not notified when the command \
-                 finishes, so check on it with bash_output, and stop it with bash_stop. A \
-                 background shell stays open, running or finished, until bash_stop stops it or \
-                 the session ends."
+            description: "Execute a shell command and return its output. \
+                          For a dev server, a watcher, or a long build, set run_in_background, \
+                          without a trailing `&`: the call returns a shell ID at once. \
+                          You are not notified when the command finishes, \
+                          so check on it with bash_output, and stop it with bash_stop. \
+                          A background shell stays open, running or finished, \
+                          until bash_stop stops it or the session ends."
                 .to_owned(),
             input_schema: input_schema(),
             class: PermissionClass::Exec,
@@ -139,11 +140,14 @@ fn input_schema() -> serde_json::Value {
             },
             "timeout": {
                 "type": "integer",
-                "description": "Timeout in milliseconds, at most 600000. Omit or pass 0 for the default of 120000."
+                "description": "Timeout in milliseconds, at most 600000. \
+                                Omit or pass 0 for the default of 120000."
             },
             "run_in_background": {
                 "type": "boolean",
-                "description": "Start the command as a background shell and return its ID without waiting. The timeout field does not apply."
+                "description": "Start the command as a background shell \
+                                and return its ID without waiting. \
+                                The timeout field does not apply."
             }
         },
         "required": ["command"]

@@ -658,8 +658,8 @@ mod tests {
             ),
             (
                 AuthSource::ApiKeyEnv,
-                "Signed in. API key (ANTHROPIC_API_KEY) takes precedence, so requests keep using \
-                 it.",
+                "Signed in. \
+                 API key (ANTHROPIC_API_KEY) takes precedence, so requests keep using it.",
             ),
         ] {
             let (mut app, _rx, _event_tx) = test_app(None);
@@ -726,7 +726,8 @@ mod tests {
                 true,
                 None,
                 Some("Claude Code login has expired. Run `claude` to sign in again."),
-                "Signed out of oxide-code. No credential is active: Claude Code login has expired. \
+                "Signed out of oxide-code. \
+                 No credential is active: Claude Code login has expired. \
                  Run `claude` to sign in again.",
             ),
             (
@@ -1339,7 +1340,8 @@ mod tests {
         );
         assert!(
             !text.contains("(result)"),
-            "generic fallback must not leak through when the pending call label is known, got:\n{text}",
+            "generic fallback must not leak through when the pending call label is known, \
+             got:\n{text}",
         );
     }
 

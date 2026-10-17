@@ -549,8 +549,8 @@ mod tests {
             ("redirect_uri", "http://localhost:1234/callback"),
             (
                 "scope",
-                "org:create_api_key user:file_upload user:inference user:mcp_servers \
-                 user:profile user:sessions:claude_code",
+                "org:create_api_key user:file_upload user:inference user:mcp_servers user:profile \
+                 user:sessions:claude_code",
             ),
             ("code_challenge", "challenge-1"),
             ("code_challenge_method", "S256"),

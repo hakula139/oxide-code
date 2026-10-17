@@ -290,8 +290,8 @@ impl SessionHandle {
         let cause = self.shared.last_flush_failure();
         let msg = match cause {
             Some(io_err) => format!(
-                "Session writer task has stopped after I/O error: {io_err}. Conversation \
-                 history may be incomplete."
+                "Session writer task has stopped after I/O error: {io_err}. \
+                 Conversation history may be incomplete."
             ),
             None => "Session writer task has stopped. Conversation history may be incomplete."
                 .to_owned(),

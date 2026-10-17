@@ -114,7 +114,8 @@ fn input_schema() -> serde_json::Value {
             },
             "context": {
                 "type": "integer",
-                "description": "Number of context lines to show before and after each match (content mode only)"
+                "description": "Number of context lines to show before and after each match \
+                                (content mode only)"
             },
             "case_insensitive": {
                 "type": "boolean",

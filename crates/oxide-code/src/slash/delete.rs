@@ -45,11 +45,9 @@ impl SlashCommand for DeleteCmd {
     fn execute(&self, args: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
         let arg = args.trim();
         if arg.is_empty() {
-            return Err(
-                "Missing session id. Usage: `/delete <id-prefix>`, or press Ctrl+D in the \
-                 `/resume` picker."
-                    .to_owned(),
-            );
+            return Err("Missing session id. \
+                        Usage: `/delete <id-prefix>`, or press Ctrl+D in the `/resume` picker."
+                .to_owned());
         }
         let store = open_store(ctx.info)?;
         let live_id = ctx.info.session_id.as_str();
@@ -140,8 +138,8 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             err,
-            "Missing session id. Usage: `/delete <id-prefix>`, or press Ctrl+D in the `/resume` \
-             picker.",
+            "Missing session id. \
+             Usage: `/delete <id-prefix>`, or press Ctrl+D in the `/resume` picker.",
         );
     }
 
@@ -317,8 +315,8 @@ mod tests {
             let err = DeleteCmd.execute("aaaa", &ctx).unwrap_err();
             assert_eq!(
                 err,
-                "Ambiguous prefix `aaaa` matches 6 sessions: aaaaa5a5, aaaaa4a4, aaaaa3a3, \
-                 aaaaa2a2, aaaaa1a1, and 1 more",
+                "Ambiguous prefix `aaaa` matches 6 sessions: \
+                 aaaaa5a5, aaaaa4a4, aaaaa3a3, aaaaa2a2, aaaaa1a1, and 1 more",
             );
         });
     }
