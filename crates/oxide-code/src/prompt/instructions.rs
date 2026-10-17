@@ -1,5 +1,6 @@
 //! Instruction file discovery and loading (CLAUDE.md, AGENTS.md).
 
+use std::io;
 use std::path::{Path, PathBuf};
 
 use indoc::{formatdoc, indoc};
@@ -23,16 +24,17 @@ struct InstructionFile {
     label: &'static str,
 }
 
-/// Walks `~/.claude/`, then root → cwd. Subdirectory files appear later (higher priority).
-pub(super) async fn load(cwd: &Path, git_root: Option<&Path>) -> String {
+/// Walks `~/.claude/`, then root → cwd. Subdirectory files appear later (higher priority). Also
+/// returns a warning for each candidate that exists but cannot be read.
+pub(super) async fn load(cwd: &Path, git_root: Option<&Path>) -> (String, Vec<String>) {
     let slots = candidate_slots(cwd, git_root.unwrap_or(cwd));
-    let files = load_files(slots).await;
+    let (files, warnings) = load_files(slots).await;
 
     if files.is_empty() {
-        return String::new();
+        return (String::new(), warnings);
     }
 
-    render(&files)
+    (render(&files), warnings)
 }
 
 /// Emits a global slot (when home exists), then a root-level and a `.claude/` slot per directory.
@@ -86,26 +88,42 @@ fn walk_root_to_cwd(root: &Path, cwd: &Path) -> Vec<PathBuf> {
     dirs
 }
 
-async fn load_files(slots: Vec<Slot>) -> Vec<InstructionFile> {
+/// The first non-empty file of each slot, and a warning for each candidate that cannot be read. A
+/// slot whose first candidate cannot be read falls back to the next one.
+async fn load_files(slots: Vec<Slot>) -> (Vec<InstructionFile>, Vec<String>) {
     let mut files = Vec::new();
+    let mut warnings = Vec::new();
 
     for Slot { candidates, label } in slots {
         for path in candidates {
-            if let Ok(content) = fs::read_to_string(&path).await {
-                let content = content.trim().to_owned();
-                if !content.is_empty() {
-                    files.push(InstructionFile {
-                        path,
-                        content,
-                        label,
-                    });
-                    break;
+            let content = match fs::read_to_string(&path).await {
+                Ok(content) => content.trim().to_owned(),
+                Err(e) if is_absent(&e) => continue,
+                Err(e) => {
+                    warnings.push(format!("Skipped instruction file {}: {e}", path.display()));
+                    continue;
                 }
+            };
+            if !content.is_empty() {
+                files.push(InstructionFile {
+                    path,
+                    content,
+                    label,
+                });
+                break;
             }
         }
     }
 
-    files
+    (files, warnings)
+}
+
+/// Whether a read failed because the path names no file, as when a parent is a regular file.
+fn is_absent(e: &io::Error) -> bool {
+    matches!(
+        e.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+    )
 }
 
 fn render(files: &[InstructionFile]) -> String {
@@ -149,7 +167,7 @@ mod tests {
             .await
             .unwrap();
 
-        let result = load(dir.path(), None).await;
+        let (result, _) = load(dir.path(), None).await;
         assert!(
             result.contains("Fallback rules."),
             "should discover CLAUDE.md using cwd as project root"
@@ -165,7 +183,7 @@ mod tests {
             .await
             .unwrap();
 
-        let result = load(dir.path(), Some(dir.path())).await;
+        let (result, _) = load(dir.path(), Some(dir.path())).await;
         assert!(
             result.contains("Hidden rules."),
             "should discover .claude/CLAUDE.md"
@@ -293,7 +311,7 @@ mod tests {
             candidates: vec![claude_path.clone(), agents_path],
             label: "test",
         }];
-        let files = load_files(slots).await;
+        let (files, _) = load_files(slots).await;
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path, claude_path);
         assert_eq!(files[0].content, "claude content");
@@ -309,7 +327,7 @@ mod tests {
             candidates: vec![dir.path().join("CLAUDE.md"), agents_path.clone()],
             label: "test",
         }];
-        let files = load_files(slots).await;
+        let (files, _) = load_files(slots).await;
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path, agents_path);
         assert_eq!(files[0].content, "agents content");
@@ -333,7 +351,7 @@ mod tests {
                 label: "second",
             },
         ];
-        let files = load_files(slots).await;
+        let (files, _) = load_files(slots).await;
         assert_eq!(files.len(), 2);
         assert_eq!(files[0].path, a_path);
         assert_eq!(files[1].path, b_path);
@@ -351,22 +369,53 @@ mod tests {
             candidates: vec![empty_path, agents_path.clone()],
             label: "test",
         }];
-        let files = load_files(slots).await;
+        let (files, _) = load_files(slots).await;
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path, agents_path);
     }
 
     #[tokio::test]
-    async fn load_files_absent_yields_empty() {
+    async fn load_files_warns_of_an_unreadable_file_and_falls_back_to_the_next() {
+        let dir = tempfile::tempdir().expect("failed to create tempdir");
+        let claude_path = dir.path().join("CLAUDE.md");
+        let agents_path = dir.path().join("AGENTS.md");
+        fs::write(&claude_path, b"\xff\xfe").await.unwrap();
+        fs::write(&agents_path, "agents content").await.unwrap();
+        let cause = std::fs::read_to_string(&claude_path).unwrap_err();
         let slots = vec![Slot {
-            candidates: vec![
-                PathBuf::from("/nonexistent/CLAUDE.md"),
-                PathBuf::from("/nonexistent/AGENTS.md"),
-            ],
+            candidates: vec![claude_path.clone(), agents_path.clone()],
             label: "test",
         }];
-        let files = load_files(slots).await;
+
+        let (files, warnings) = load_files(slots).await;
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, agents_path);
+        assert_eq!(
+            warnings,
+            [format!(
+                "Skipped instruction file {}: {cause}",
+                claude_path.display()
+            )],
+        );
+    }
+
+    #[tokio::test]
+    async fn load_files_absent_yields_empty_without_warnings() {
+        let dir = tempfile::tempdir().expect("failed to create tempdir");
+        let regular = dir.path().join("regular");
+        fs::write(&regular, "a file, not a directory")
+            .await
+            .unwrap();
+        let slots = vec![Slot {
+            candidates: vec![dir.path().join("CLAUDE.md"), regular.join("CLAUDE.md")],
+            label: "test",
+        }];
+
+        let (files, warnings) = load_files(slots).await;
+
         assert!(files.is_empty());
+        assert_eq!(warnings, [] as [String; 0]);
     }
 
     // ── render ──

@@ -39,13 +39,9 @@ impl App {
             }
             Event::ToolCallEnd(result) => self.chat.push_tool_result(result),
             Event::PromptDrained(text) => self.apply_prompt_drained(text),
-            Event::UsageUpdated(usage) => {
-                self.status_bar.set_usage(Some(usage));
-            }
+            Event::UsageUpdated(usage) => self.status_bar.set_usage(Some(usage)),
             Event::RateLimitsUpdated(limits) => self.status_bar.set_rate_limits(Some(limits)),
-            Event::TurnComplete => {
-                self.finish_turn();
-            }
+            Event::TurnComplete => self.finish_turn(),
             Event::Cancelled => {
                 self.chat.push_interrupted_marker();
                 self.active_prompt = None;
@@ -107,6 +103,7 @@ impl App {
                     self.finish_turn();
                 }
             }
+            Event::Notice(msg) => self.chat.push_system_message(msg),
             Event::Error(msg) | Event::RenameFailed(msg) => self.chat.push_error(&msg),
             Event::ApprovalRequested {
                 id,
@@ -1545,7 +1542,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_retrying_and_error_notices_keep_the_turn_running() {
+    async fn handle_retrying_notice_and_error_events_keep_the_turn_running() {
         let (mut app, mut rx, _event_tx) = test_app(None);
         app.dispatch_action(Action::Submit("active".to_owned()));
         rx.recv().await.expect("active submit forwarded");
@@ -1556,6 +1553,9 @@ mod tests {
             "HTTP 529 overloaded_error. Retrying in 1 s (retry 1 of 5).".to_owned(),
         ));
         assert!(!app.chat.last_is_error(), "a retry is not an error block");
+        let notice = "Skipped instruction file /repo/CLAUDE.md: Permission denied";
+        app.handle_engine_event(Event::Notice(notice.to_owned()));
+        assert_eq!(app.chat.last_system_text(), Some(notice));
         app.handle_engine_event(Event::Error("Session write failed: disk full".to_owned()));
 
         assert!(app.chat.last_is_error(), "error entry appended");

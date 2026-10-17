@@ -82,17 +82,24 @@ pub(crate) struct UserContext {
 
 impl UserContext {
     /// Reads the instruction files that apply in `cwd`, plus today's date and `model`'s identity.
-    pub(crate) async fn load(cwd: &Path, model: &ModelSpec) -> Self {
+    /// Also returns a warning for each instruction file that exists but cannot be read.
+    pub(crate) async fn load(cwd: &Path, model: &ModelSpec) -> (Self, Vec<String>) {
         let git_root = repo_root(cwd).await;
         Self::load_with_root(cwd, git_root.as_deref(), model).await
     }
 
-    async fn load_with_root(cwd: &Path, git_root: Option<&Path>, model: &ModelSpec) -> Self {
-        Self {
-            instructions: instructions::load(cwd, git_root).await,
+    async fn load_with_root(
+        cwd: &Path,
+        git_root: Option<&Path>,
+        model: &ModelSpec,
+    ) -> (Self, Vec<String>) {
+        let (instructions, warnings) = instructions::load(cwd, git_root).await;
+        let context = Self {
+            instructions,
             date: environment::current_date(),
             model: environment::model_identity(model),
-        }
+        };
+        (context, warnings)
     }
 }
 
@@ -104,8 +111,9 @@ pub(crate) struct SessionContext {
     seen: UserContext,
 }
 
-/// Detects the environment and loads instruction files for a new session.
-pub(crate) async fn build_prompt(model: &ModelSpec, cwd: &Path) -> PromptParts {
+/// Detects the environment and loads instruction files for a new session. Also returns the
+/// warnings [`UserContext::load`] does.
+pub(crate) async fn build_prompt(model: &ModelSpec, cwd: &Path) -> (PromptParts, Vec<String>) {
     let git_root = repo_root(cwd).await;
     assemble(model, cwd, git_root.as_deref()).await
 }
@@ -131,16 +139,21 @@ pub(crate) async fn restore_prompt(stored: SessionContext, cwd: &Path) -> Prompt
     }
 }
 
-async fn assemble(model: &ModelSpec, cwd: &Path, git_root: Option<&Path>) -> PromptParts {
+async fn assemble(
+    model: &ModelSpec,
+    cwd: &Path,
+    git_root: Option<&Path>,
+) -> (PromptParts, Vec<String>) {
     let environment = Environment::detect(cwd, git_root);
-    let context = UserContext::load_with_root(cwd, git_root, model).await;
+    let (context, warnings) = UserContext::load_with_root(cwd, git_root, model).await;
 
-    PromptParts {
+    let parts = PromptParts {
         system_sections: system_sections(&environment),
         environment,
         user_context: render_user_context(&context),
         seen: context,
-    }
+    };
+    (parts, warnings)
 }
 
 fn system_sections(environment: &Environment) -> Vec<String> {
@@ -373,7 +386,7 @@ mod tests {
     #[tokio::test]
     async fn build_prompt_names_the_model_in_user_context_only() {
         let model = spec("claude-opus-5-5");
-        let parts = build_prompt(&model, &cwd()).await;
+        let (parts, _) = build_prompt(&model, &cwd()).await;
         let identity = environment::model_identity(&model);
         assert!(
             parts.user_context.contains(&formatdoc! {"
@@ -426,7 +439,7 @@ mod tests {
         init_git_repo(tmp.path());
         std::fs::write(tmp.path().join("CLAUDE.md"), "Test project rules.").unwrap();
 
-        let parts = assemble(&spec("test-model"), tmp.path(), Some(tmp.path())).await;
+        let (parts, _) = assemble(&spec("test-model"), tmp.path(), Some(tmp.path())).await;
 
         let expected_system_sections = [
             "You are an interactive agent",
@@ -485,7 +498,7 @@ mod tests {
         std::fs::create_dir_all(&sub).unwrap();
         std::fs::write(sub.join("CLAUDE.md"), "Subdir rules.").unwrap();
 
-        let parts = assemble(&spec("test-model"), &sub, Some(root)).await;
+        let (parts, _) = assemble(&spec("test-model"), &sub, Some(root)).await;
         let ctx = &parts.user_context;
 
         assert!(ctx.contains("Root rules."));

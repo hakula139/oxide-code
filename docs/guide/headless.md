@@ -74,6 +74,7 @@ Each `stream-json` line is an object with a `type` and, for most types, a `data`
 | `rate_limits_updated`       | A subscription's usage limits, described below                                                     |
 | `tasks_updated`             | The session's whole task list, described below                                                     |
 | `background_shells_updated` | Every open background shell, described below                                                       |
+| `notice`                    | A warning the run works around, such as an instruction file it cannot read                         |
 | `error`                     | A problem that does not end the turn, such as a session write failure                              |
 | `turn_complete`             | No `data`. The turn finished with a reply                                                          |
 | `turn_failed`               | Why the turn failed, including a refused request                                                   |

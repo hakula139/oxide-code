@@ -244,7 +244,7 @@ impl StdioSink {
                 writeln!(stdout)?;
                 writeln!(stderr, "{INTERRUPTED_MARKER}")?;
             }
-            Event::Retrying(msg) => {
+            Event::Retrying(msg) | Event::Notice(msg) => {
                 writeln!(stderr, "{}", escape_controls(&msg))?;
             }
             Event::Error(msg) | Event::TurnFailed(msg) | Event::RenameFailed(msg) => {
@@ -905,11 +905,19 @@ mod tests {
     }
 
     #[test]
-    fn render_retrying_writes_the_notice_to_stderr() {
-        let notice = "HTTP 529 overloaded_error. Retrying in 1 s (retry 1 of 5).";
-        let (stdout, stderr) = render_one(&test_sink(false), Event::Retrying(notice.to_owned()));
-        assert!(stdout.is_empty(), "{stdout:?}");
-        assert_eq!(stderr, format!("{notice}\n"));
+    fn render_retrying_and_notices_write_the_text_to_stderr() {
+        let retry = "HTTP 529 overloaded_error. Retrying in 1 s (retry 1 of 5).";
+        let notice = "Skipped instruction file /repo/CLAUDE.md: Permission denied";
+
+        let (retry_stdout, retry_stderr) =
+            render_one(&test_sink(false), Event::Retrying(retry.to_owned()));
+        let (notice_stdout, notice_stderr) =
+            render_one(&test_sink(false), Event::Notice(notice.to_owned()));
+
+        assert_eq!(retry_stdout, "");
+        assert_eq!(retry_stderr, format!("{retry}\n"));
+        assert_eq!(notice_stdout, "");
+        assert_eq!(notice_stderr, format!("{notice}\n"));
     }
 
     #[test]

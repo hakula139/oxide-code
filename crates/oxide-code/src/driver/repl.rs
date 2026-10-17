@@ -369,7 +369,7 @@ mod tests {
                 .events()
                 .into_iter()
                 .filter_map(|event| match event {
-                    Event::Error(msg) | Event::TurnFailed(msg) => Some(msg),
+                    Event::Notice(msg) | Event::Error(msg) | Event::TurnFailed(msg) => Some(msg),
                     _ => None,
                 })
                 .collect();

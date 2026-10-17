@@ -45,7 +45,8 @@ pub(super) const SESSION_CONTEXT: &str = "<system-reminder>session context</syst
 /// rebuilt one. Pass an empty directory, and run under [`with_pinned_home`], so the context never
 /// reads the developer's instruction files or git state.
 pub(crate) async fn engine(base_url: String, store: &SessionStore, cwd: &Path) -> Engine {
-    let mut prompt = prompt::build_prompt(&ModelSpec::resolve(MODEL.to_owned()), cwd).await;
+    let (mut prompt, instruction_warnings) =
+        prompt::build_prompt(&ModelSpec::resolve(MODEL.to_owned()), cwd).await;
     SESSION_CONTEXT.clone_into(&mut prompt.user_context);
     let config = test_config(base_url, api_key(), MODEL);
     let session = handle::start(store, MODEL);
@@ -66,6 +67,7 @@ pub(crate) async fn engine(base_url: String, store: &SessionStore, cwd: &Path) -
         tasks: Vec::new(),
         prompt,
         prompt_unrecorded: true,
+        instruction_warnings,
         file_tracker: Arc::new(FileTracker::default()),
         shells: Arc::default(),
         policy: config.permission,

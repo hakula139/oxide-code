@@ -220,6 +220,9 @@ pub(crate) enum Event {
         auth: Option<AuthSource>,
         fallback_error: Option<String>,
     },
+    /// User-visible warning about a condition the session works around, such as tracked files that
+    /// changed on disk since a resumed session read them. Renders as a notice.
+    Notice(String),
     /// User-visible error that leaves any in-flight turn running, such as a session write failure.
     /// Renders as a dedicated chat block.
     Error(String),
@@ -586,6 +589,7 @@ mod tests {
             Event::LoginStarted { .. } => "login_started",
             Event::SignedIn { .. } => "signed_in",
             Event::SignedOut { .. } => "signed_out",
+            Event::Notice(_) => "notice",
             Event::Error(_) => "error",
             Event::ApprovalRequested { .. } => "approval_requested",
             Event::SessionRulesUpdated(_) => "session_rules_updated",
@@ -717,6 +721,7 @@ mod tests {
                 auth: None,
                 fallback_error: Some("Claude Code login has expired.".to_owned()),
             },
+            Event::Notice("1 tracked file changed on disk".to_owned()),
             Event::Error("Session write failed.".to_owned()),
             Event::SessionRulesUpdated(vec![
                 Rule::parse(PermissionClass::Exec, "cargo test *").unwrap(),

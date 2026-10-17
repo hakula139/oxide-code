@@ -4,7 +4,7 @@ Instruction files are Markdown files that provide persistent, project-specific c
 
 ## Supported Filenames
 
-At each location, oxide-code loads `CLAUDE.md`, or `AGENTS.md` if `CLAUDE.md` is missing or empty. Choose the filename your project prefers. Each file is read as written, without expanding Claude Code's `@path` imports.
+At each location, oxide-code loads `CLAUDE.md`, or `AGENTS.md` if `CLAUDE.md` is missing, empty, or unreadable. A file that exists but cannot be read, such as one without read permission or one that is not UTF-8 text, is skipped with a notice. Choose the filename your project prefers. Each file is read as written, without expanding Claude Code's `@path` imports.
 
 ## Where Instruction Files Can Live
 
