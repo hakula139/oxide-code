@@ -24,7 +24,7 @@ const STARTER_POOL: &[Starter] = &[
     ("/diff", "show git changes"),
     ("/effort", "tune Speed ↔ Intelligence"),
     ("/help", "list commands"),
-    ("/init", "author or update AGENTS.md"),
+    ("/init", "create or update AGENTS.md / CLAUDE.md"),
     ("/login", "sign in to a Claude account"),
     ("/model", "switch model"),
     ("/rename", "set session title"),

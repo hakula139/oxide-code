@@ -4,14 +4,14 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 ## Implementation
 
-15 built-ins: `/archive`, `/clear`, `/compact`, `/config`, `/delete`, `/diff`, `/effort`, `/help`, `/init`, `/model`, `/rename`, `/resume`, `/status`, `/theme`, `/unarchive`. Each lives in its own `slash/<name>.rs` file implementing `SlashCommand`. Adding one is a new file plus an entry in `BUILT_INS` (alphabetical).
+17 built-ins: `/archive`, `/clear`, `/compact`, `/config`, `/delete`, `/diff`, `/effort`, `/help`, `/init`, `/login`, `/logout`, `/model`, `/rename`, `/resume`, `/status`, `/theme`, `/unarchive`. Each lives in its own `slash/<name>.rs` file implementing `SlashCommand`. Adding one is a new file plus an entry in `BUILT_INS` (alphabetical).
 
 - `/clear` rolls the session UUID and clears chat + file tracker.
 - `/compact` compresses the visible transcript into a summary and resets the continuation chain.
 - `/model` swaps the active model mid-session via `Client::set_model`.
 - `/effort` sets an explicit effort tier.
 - `/theme` swaps the TUI palette mid-session, with bare opening a live-preview list picker.
-- `/init` synthesizes an AGENTS.md / CLAUDE.md author-or-update prompt and forwards to the agent loop.
+- `/init` asks the model to create the project's AGENTS.md or CLAUDE.md, picking the file first when neither exists, or to propose changes to the existing ones as a diff. Full design: [init.md](init.md).
 - `/rename` sets the session title manually and locks out the AI title generator. Bare opens a single-line editor pre-filled with the current title.
 - `/resume` swaps to a different session in place. Bare opens a searchable picker, while typed-arg jumps directly. Full design: [resume.md](resume.md).
 - `/delete <id-prefix>` unlinks a saved session's JSONL after a Y/N confirm. The `/resume` picker offers the same gesture via Ctrl+D on the cursor row.
@@ -54,7 +54,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 - **`/compact`**: Refuses mid-turn, streams a summarization request, writes a compact boundary plus synthetic continuation message, resets the file tracker, and keeps queued prompts for the post-compact turn. Full design: [compact.md](compact.md).
 
-- **`/init`**: Returns `Forward(Action::Op(Op::Prompt(PROMPT)))` with a static body asking the model to author / update AGENTS.md. The expanded body is invisible in the live session but recorded in JSONL for resume.
+- **`/init`**: With an instruction file at the project root or in its `.claude/` directory, returns `Forward(Action::Op(Op::Prompt(..)))` with a body asking the model to propose its changes as a diff before it edits. With none, opens a picker whose choice forwards the prompt that creates that file. The expanded body is invisible in the live session but recorded in JSONL for resume. Full design: [init.md](init.md).
 
 - **`/login`** / **`/logout`**: Forward `Op::Login` and `Op::Logout`. The engine runs the browser sign-in and swaps the client's credential, and the TUI opens the browser and reports the credential requests use afterward. Both are `Mutating`. Full design: [login.md](login.md).
 
@@ -97,7 +97,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 - `crates/oxide-code/src/slash/effort.rs`: `EffortCmd`, level parser.
 - `crates/oxide-code/src/slash/effort_slider.rs`: bare `/effort` Speed ↔ Intelligence slider modal.
 - `crates/oxide-code/src/slash/help.rs`: `/help` row builder plus `KvOverview` constructor.
-- `crates/oxide-code/src/slash/init.rs`: `InitCmd`, `PROMPT`.
+- `crates/oxide-code/src/slash/init.rs`: `InitCmd`, the file picker, and the create and update prompts.
 - `crates/oxide-code/src/slash/login.rs`: `LoginCmd` and `LogoutCmd`.
 - `crates/oxide-code/src/slash/model.rs`: `ModelCmd`, resolver.
 - `crates/oxide-code/src/slash/picker.rs`: combined model + effort picker modal.

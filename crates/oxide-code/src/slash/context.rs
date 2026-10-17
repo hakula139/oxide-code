@@ -14,6 +14,9 @@ pub(crate) struct LiveSessionInfo {
     pub(crate) cwd: String,
     /// The real path behind the display `cwd`, for the status bar's git probes and `/diff`.
     pub(crate) git_cwd: Option<PathBuf>,
+    /// The root `/init` checks for instruction files: the git repository containing the session's
+    /// working directory, or that directory itself outside a repository.
+    pub(crate) project_root: PathBuf,
     pub(crate) git_branch: Option<String>,
     pub(crate) version: &'static str,
     pub(crate) session_id: String,
@@ -38,6 +41,8 @@ impl<'a> SlashContext<'a> {
 
 #[cfg(test)]
 pub(crate) mod testing {
+    use std::path::PathBuf;
+
     use super::LiveSessionInfo;
     use crate::config::compaction::CompactionConfig;
     use crate::config::{ConfigSnapshot, Effort, PromptCacheTtl};
@@ -48,6 +53,7 @@ pub(crate) mod testing {
         LiveSessionInfo {
             cwd: "~/test".to_owned(),
             git_cwd: None,
+            project_root: PathBuf::from("/repo"),
             git_branch: Some("main".to_owned()),
             version: "0.0.0-test",
             session_id: "test-session".to_owned(),

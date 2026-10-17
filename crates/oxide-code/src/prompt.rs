@@ -1,16 +1,16 @@
 //! System prompt assembly: cacheable static sections plus a per-session user-context reminder.
 
 pub(crate) mod environment;
-mod instructions;
+pub(crate) mod instructions;
 mod sections;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use indoc::formatdoc;
 use serde::{Deserialize, Serialize};
-use tokio::process::Command;
 
 use crate::model::ModelSpec;
+use crate::util::git::repo_root;
 use environment::Environment;
 use sections::{
     CAUTION, INTRO, OUTPUT_EFFICIENCY, STYLE, SYSTEM_SECTION, TASK_GUIDANCE, TOOL_GUIDANCE,
@@ -83,7 +83,7 @@ pub(crate) struct UserContext {
 impl UserContext {
     /// Reads the instruction files that apply in `cwd`, plus today's date and `model`'s identity.
     pub(crate) async fn load(cwd: &Path, model: &ModelSpec) -> Self {
-        let git_root = find_git_root(cwd).await;
+        let git_root = repo_root(cwd).await;
         Self::load_with_root(cwd, git_root.as_deref(), model).await
     }
 
@@ -106,7 +106,7 @@ pub(crate) struct SessionContext {
 
 /// Detects the environment and loads instruction files for a new session.
 pub(crate) async fn build_prompt(model: &ModelSpec, cwd: &Path) -> PromptParts {
-    let git_root = find_git_root(cwd).await;
+    let git_root = repo_root(cwd).await;
     assemble(model, cwd, git_root.as_deref()).await
 }
 
@@ -119,7 +119,7 @@ pub(crate) async fn restore_prompt(stored: SessionContext, cwd: &Path) -> Prompt
         seen,
     } = stored;
     if !environment.describes(cwd) {
-        let git_root = find_git_root(cwd).await;
+        let git_root = repo_root(cwd).await;
         environment = Environment::detect(cwd, git_root.as_deref());
     }
 
@@ -239,33 +239,14 @@ pub(crate) fn is_system_reminder(text: &str) -> bool {
     text.starts_with("<system-reminder>")
 }
 
-async fn find_git_root(cwd: &Path) -> Option<PathBuf> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .current_dir(cwd)
-        .stderr(std::process::Stdio::null())
-        .output()
-        .await
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let root = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if root.is_empty() {
-        return None;
-    }
-
-    Some(PathBuf::from(root))
-}
-
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use indoc::indoc;
 
     use super::*;
-    use crate::util::git::testing::{isolated_git, with_isolated_git_env_async};
+    use crate::util::git::testing::isolated_git;
 
     const IDENTITY: &str = "You are powered by the model test-model.";
 
@@ -603,30 +584,6 @@ mod tests {
                 The instruction files were removed, so the earlier instructions no longer apply.
                 </system-reminder>"},
         );
-    }
-
-    // ── find_git_root ──
-
-    #[tokio::test]
-    async fn find_git_root_inside_repo_finds_the_root() {
-        let tmp = tempfile::tempdir().expect("failed to create tempdir");
-        init_git_repo(tmp.path());
-
-        let root = with_isolated_git_env_async(find_git_root(tmp.path()))
-            .await
-            .expect("expected git root");
-        // macOS routes tempdirs through `/private`.
-        let expected = tmp.path().canonicalize().unwrap();
-        let actual = root.canonicalize().unwrap();
-        assert_eq!(actual, expected);
-        assert!(actual.join(".git").exists(), "root should contain .git");
-    }
-
-    #[tokio::test]
-    async fn find_git_root_outside_repo_finds_no_root() {
-        let tmp = tempfile::tempdir().expect("failed to create tempdir");
-        let root = with_isolated_git_env_async(find_git_root(tmp.path())).await;
-        assert!(root.is_none());
     }
 
     // ── sections ──
