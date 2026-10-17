@@ -20,17 +20,17 @@ Each file sets only the keys it names, and a later layer wins key by key, so a d
 - **Other arrays**, such as `tui.status_line`, come whole from the last layer that sets them.
 - **`auto_threshold_tokens` and `auto_threshold_percent`** act as one setting, so a layer that sets either replaces both.
 
-### Drop-ins
+### Drop-Ins
 
 `config.d/` lets a dotfile manager, a Nix module, or a team script own one file without editing your `config.toml`. Drop-ins load after `config.toml`, sorted by file name byte by byte, so a numeric prefix such as `10-team.toml` or `50-nix.toml` sets their order. Hidden files, subdirectories, and files without a `.toml` extension are skipped, and a symlink loads its target.
 
 Drop-ins share the `config.toml` schema and count as user config. An invalid drop-in, including a symlink whose target is missing, stops startup with an error that names the file. A malformed permission pattern or extra root names the file that holds it in the same way.
 
-### Project config
+### Project Config
 
 A project file comes from the checkout, so it cannot set `client.api_key`, `client.base_url`, `client.extra_ca_certs`, or any `[permission]` key other than `deny` and `ask`. Setting one fails the config load. This keeps a repository from redirecting your credentials or widening what runs without asking.
 
-## Config file
+## Config File
 
 All fields are optional. Only specify the values you want to override.
 
@@ -62,7 +62,7 @@ status_line = [
 ]
 ```
 
-### `[client]`: API connection
+### `[client]`: API Connection
 
 | Key                | Type    | Default                     | Description                                               |
 | ------------------ | ------- | --------------------------- | --------------------------------------------------------- |
@@ -75,11 +75,11 @@ status_line = [
 | `max_tool_rounds`  | integer | unset (unbounded)           | Per-turn safety cap on tool rounds                        |
 | `prompt_cache_ttl` | string  | `"1h"`                      | Prompt-cache TTL (`"5m"` or `"1h"`)                       |
 
-#### `model`: supported models
+#### `model`: Supported Models
 
-oxide-code supports `claude-fable-5-1`, `claude-opus-5-5`, `claude-sonnet-5-5`, and `claude-haiku-5-5`. Each has a 1M-token context window and adaptive thinking. Fable 5.1 isn't available to every account, and some third-party gateways serve it. Any other ID, such as a gateway alias, is sent verbatim without `effort`, `thinking`, or context management. Its `max_tokens` defaults to `16000`, no cost estimate is provided, and automatic compaction stays off unless you set `auto_threshold_tokens`. oxide-code warns about unsupported IDs at startup. For a `claude-*` ID that names a model family or an ID with a `[1m]` suffix, it suggests the matching supported model.
+oxide-code supports `claude-fable-5-1`, `claude-opus-5-5`, `claude-sonnet-5-5`, and `claude-haiku-5-5`. Each has a 1M-token context window and adaptive thinking. Whether you can use Fable 5.1 depends on your account and gateway, as documented in the dated [Anthropic API notes](../research/api/anthropic.md#per-model-beta-sets). Any other ID, such as a gateway alias, is sent verbatim without `effort`, `thinking`, or context management. Its `max_tokens` defaults to `16000`, no cost estimate is provided, and automatic compaction stays off unless you set `auto_threshold_tokens`. oxide-code warns about unsupported IDs at startup. For a `claude-*` ID that names a model family or an ID with a `[1m]` suffix, it suggests the matching supported model.
 
-#### `effort`: intelligence tier
+#### `effort`: Intelligence Tier
 
 `effort` maps 1:1 to the `output_config.effort` body field. Accepted values: `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`. Every supported model accepts all five.
 
@@ -94,26 +94,28 @@ Per-model defaults when `effort` is unset, matching the API's own defaults:
 
 A `/model` swap carries the current effort over to the new model.
 
-Tier guide for the 5.5 models (from Anthropic's [effort documentation](https://platform.claude.com/docs/en/build-with-claude/effort)):
+This tier guide applies to Opus 5.5, Sonnet 5.5, and Haiku 5.5. It comes from Anthropic's [effort documentation](https://platform.claude.com/docs/en/build-with-claude/effort):
 
 - `max` / `xhigh`: Only where you have measured a quality gain, since turns run much longer and cost more.
 - `high`: Knowledge work, long agent tasks, and strict instruction following.
 - `medium`: The starting point for most work, including agentic coding and multistep tool use.
 - `low`: Chat and short, latency-sensitive tasks. At this level, long agent tasks are more likely to stop early or skip verifying a change.
 
-#### `max_tokens`: response ceiling
+Fable 5.1 starts at its `high` default, one tier above the 5.5 models' `medium` starting point. The same documentation recommends `xhigh` or `max` for its most demanding agentic and coding work, and `medium` or `low` for routine or latency-sensitive work after you have confirmed that quality holds.
 
-When unset, `max_tokens` is `64000` on the supported models, half their 128K output ceiling. `effort` controls how much the model thinks, so this cap only bounds runaway output. Other ids get `16000`, which fits the lower output ceilings of older or smaller models, and the default follows a `/model` swap. Set `max_tokens` (via TOML or `OX_MAX_TOKENS`) to change it.
+#### `max_tokens`: Response Ceiling
 
-#### `max_tool_rounds`: agent-loop safety cap
+When unset, `max_tokens` is `64000` on the supported models, half their 128K output ceiling. `effort` controls how much the model thinks, so this cap only bounds runaway output. Other IDs get `16000`, which fits the lower output ceilings of older or smaller models, and the default follows a `/model` swap. Set `max_tokens` (via TOML or `OX_MAX_TOKENS`) to change it.
+
+#### `max_tool_rounds`: Agent-Loop Safety Cap
 
 When unset, the agent loop has no per-turn round cap. Setting `max_tool_rounds = N` (or `OX_MAX_TOOL_ROUNDS=N`) bails the turn after `N` rounds with a runaway-loop error. The cap is a guard against tools stuck in a retry loop, since normal agent sessions routinely run hundreds of rounds.
 
-#### `base_url`: endpoint
+#### `base_url`: Endpoint
 
 Set `base_url` in user config or `ANTHROPIC_BASE_URL`. A project config cannot set it, because project files are loaded from the checkout and should not be able to redirect credentials. The URL must use HTTPS unless it points at localhost for a local proxy.
 
-#### `extra_ca_certs`: corporate trust anchors
+#### `extra_ca_certs`: Corporate Trust Anchors
 
 oxide-code verifies TLS certificates using the operating system's trust store, so a corporate CA installed system-wide works without extra configuration. For gateways and other private-CA endpoints whose root CA isn't in that store, set `extra_ca_certs` to a PEM bundle to add those roots to oxide-code's trust store:
 
@@ -127,11 +129,11 @@ Use an absolute or `~`-rooted path. Relative paths resolve from the launch cwd. 
 
 On macOS, a server certificate valid for longer than Apple's 825-day limit is accepted when it chains to a CA in the bundle, even one already installed system-wide, unless that CA is one of Apple's built-in roots.
 
-#### `prompt_cache_ttl`: cache duration
+#### `prompt_cache_ttl`: Cache Duration
 
 Accepted values: `"5m"` (matches the server default as of 2026-03-06) and `"1h"` (higher write premium, bigger hit-rate win on long sessions). oxide-code defaults to `"1h"` because Anthropic's silent 2026-03 TTL drop cut typical prompt-caching savings from 80 %+ to 40-55 %. See [Agentic Request Body Fields](../research/api/anthropic.md#agentic-request-body-fields) for the wire shape and cost analysis.
 
-### `[client.compaction]`: context compression
+### `[client.compaction]`: Context Compression
 
 Auto-compaction is enabled by default for the supported models. The default trigger leaves room for the next response and a safety buffer. Set one threshold override when you want compaction to happen earlier:
 
@@ -143,7 +145,7 @@ Auto-compaction is enabled by default for the supported models. The default trig
 
 `auto_threshold_tokens` and `auto_threshold_percent` are mutually exclusive. Percent must be between `1` and `100`. Either form resolves to a token count clamped into the usable range: values below `50000` tokens snap up to that floor, and values above the model-derived safe trigger snap down. The model-derived ceiling shifts with `/model`, so a global threshold sized for a larger context window keeps working after a swap.
 
-For other model ids, the default and percent-based automatic triggers stay off. An explicit token threshold still works, snapped to the `50000` floor when set lower.
+For other model IDs, the default and percent-based automatic triggers stay off. An explicit token threshold still works, snapped to the `50000` floor when set lower.
 
 If automatic compaction fails, oxide-code does not send the prompt, and the TUI puts it back in the input. Sending it again retries the compaction. After 3 failures in a row, automatic compaction pauses, so the next prompt goes out without it, and `/status` shows it as paused. A successful `/compact`, a `/model` or `/effort` change, `/clear`, `/archive`, or `/resume` turns it back on.
 
@@ -178,7 +180,7 @@ If automatic compaction fails, oxide-code does not send the prompt, and the TUI 
 | `run-state`           | `Ready` / spinner + label / Ctrl+C exit hint                  | On state change |
 | `queued-prompts`      | `Queued: 2` while prompts wait for the running turn           | On change       |
 | `task-progress`       | `Tasks: 2/5` completed while the session keeps a task list    | On change       |
-| `thread-title`        | AI-generated session title                                    | After turn 1    |
+| `thread-title`        | Session title, AI-generated or set by `/rename`               | On change       |
 | `session-id`          | `ID: 3f2a9c1e`, the prefix `ox -c` resumes                    | On change       |
 | `theme`               | `Theme: mocha`, or a theme file's name                        | On `/theme`     |
 | `current-time`        | `HH:MM` in the local timezone                                 | Per minute      |
@@ -189,11 +191,11 @@ When the row is too narrow to fit every configured segment, low-utility ones dro
 
 `OX_STATUS_LINE` accepts the same segment names, comma-separated, with optional whitespace (`OX_STATUS_LINE="model, run-state"`). A value with no segments (`","`), an empty entry between commas (`"model,,run-state"`), or an unknown segment name fails startup with a parse error.
 
-### `[tui.theme]`: Terminal theme
+### `[tui.theme]`: Terminal Theme
 
 | Key         | Type   | Default   | Description                                      |
 | ----------- | ------ | --------- | ------------------------------------------------ |
-| `base`      | string | `"mocha"` | Built-in theme name OR filesystem path to a TOML |
+| `base`      | string | `"mocha"` | Built-in theme name or filesystem path to a TOML |
 | `overrides` | table  | -         | Per-slot patches applied on top of the base      |
 
 ```toml
@@ -207,7 +209,7 @@ accent = { bold = false }
 
 See [Theming](theming.md) for the full slot reference, color value formats (hex, ANSI names, indexed, `reset`), and override semantics.
 
-### `[permission]`: Tool approval
+### `[permission]`: Tool Approval
 
 Every tool call passes a permission check before running. Reads anywhere except SSH keys and the credential files that the [built-in rules](#built-in-rules) deny, and edits inside the working directory or an `extra_roots` directory, run without asking. In the default `manual` mode, every other call opens an approval prompt unless a rule settles it. The prompt names the pattern or built-in rule that made the call ask, and a denied call tells the model which rule or mode denied it. Press `y` to approve, `a` to approve and add a session rule that allows matching calls, `n` to deny, `f` to deny and tell the model why, or Esc to deny and end the turn. With `f`, type the feedback and press Enter, and the model receives it as the call's result. Enter does nothing at the choice, and the prompt ignores keys until you pause typing for 300 ms, so keystrokes or a paste meant for the input box cannot answer it.
 
@@ -244,13 +246,13 @@ exec = ["cargo test *", "git status"]
 edit = ["~/notes/**"]
 ```
 
-#### Rule tables
+#### Rule Tables
 
 Each of `deny`, `ask`, and `allow` holds a pattern list per class: `read` (read, grep, glob, tasks, bash_output, and bash_stop tools), `edit` (edit and write), `exec` (bash), `net`, and `mcp`. `bash_output` and `bash_stop` belong to `read` because they act only on shells that an allowed `bash` call started. Inside `[permission]`, the dotted form `ask.exec = ["git push *"]` works too.
 
 Deny wins over ask, and ask wins over allow, the working-directory allow, and session rules, so `ask.exec = ["git push *"]` asks even when an allow pattern covers the push. The pattern `*` matches every call in its class. A path pattern never matches a `tasks`, `bash_output`, or `bash_stop` call, so only `deny.read = ["*"]` blocks them. Under that deny, `bash` can still start background shells, which then run unread until the session ends. `allow.read` has no effect, since reads already run without asking.
 
-#### `exec` patterns
+#### `exec` Patterns
 
 An `exec` pattern is one command, matched word by word after quotes are removed and `$'...'` escapes are decoded. A `*` standing alone as a word is the only wildcard. In an allow pattern, it matches exactly one word before the end of the pattern, or any number of words at the end, so `cargo test *` covers `cargo test` and `cargo test --all`, and `git * --force` covers `git push --force` but misses `git push origin --force`. Quote a word to match it as written, as in `'*'`. A glob inside a word, as in `mkfs*`, fails to load, so write a pattern for each command it should cover, such as `mkfs.ext4 *`.
 
@@ -260,17 +262,17 @@ A command chained with `;`, `&&`, `||`, or `|` is allowed only when every part i
 
 `read` patterns reach a `bash` command in two places. A file read through `<` faces them like a read tool's file, so `deny.read = ["/**/.env"]` denies `sort < .env`. A file reader (`cat`, `find`, `grep`, `head`, `ls`, `sed`, `tail`, or `wc`) asks when a deny or ask `read` pattern matches one of its file arguments or a file one of its globs matches when the call is checked, so `cat ~/.ss*/id_rsa` asks even under `allow.exec = ["cat *"]`. An argument that expands a variable, as in `cat $F`, may name any file, so it asks whenever a deny or ask `read` pattern exists, and the built-in `ssh` rule is one. Any other program can open whatever files it likes once it runs, so an `exec` allow pattern such as `python3 *` can run its command on files the `read` patterns hold. Deny such commands with an `exec` pattern too.
 
-#### Path patterns
+#### Path Patterns
 
 `read` and `edit` patterns are globs in the style of `.gitignore`, except that a leading `/` means the file system root. A pattern with no `/` other than a trailing one, such as `.env`, matches that name at any depth below the working directory and each extra root. A pattern that starts with `./` or has a `/` anywhere except at the end, such as `./secrets` or `src/*.json`, starts at those directories. A pattern that starts with `/` or `~/` is an absolute path, so `/**/.env` matches a `.env` anywhere on disk. `*` and `?` match within one path segment, `**` spans segments, a trailing `/` is ignored, and a pattern also covers everything below a path it matches, so `secrets` covers `secrets/key`. A pattern with a `.` or `..` segment fails to load, so name a path outside these directories from `/` or `~/`.
 
 Allow patterns match a path only as it resolves, with exact case and spelling. Deny and ask patterns also match the path as the call writes it and, when the pattern's literal leading directories run through a symlink at startup, the location they resolve to. They treat names that differ only in case, Unicode normalization, invisible characters, or trailing dots as the same name, so `deny.read = [".env"]` also blocks `.ENV`. A `read` deny or ask pattern also hides the files it matches from a `grep` or `glob` over their directory, and the output counts the hidden files without naming them.
 
-#### `net` and `mcp` patterns
+#### `net` and `mcp` Patterns
 
 A `net` pattern is a host glob such as `*.example.com`, and an `mcp` pattern is a `server/tool` glob such as `github/get_*`. No built-in tool uses `net` or `mcp` yet, so these lists load but match nothing. A `bash` command that reaches the network, such as `curl`, is an `exec` call, so deny it with an `exec` pattern such as `curl *`.
 
-#### Built-in rules
+#### Built-In Rules
 
 oxide-code ships the rules below. The ones that ask about edits protect their paths: such an edit asks even when an allow pattern, the working-directory allow, or `yolo` would run it. Protected file names match the way deny patterns do, ignoring case, Unicode normalization, invisible characters, and trailing dots, and a symlinked protected name in the launch directory or an extra root protects its target as well.
 
@@ -295,13 +297,13 @@ Built-in rules sit in the deny and ask tiers, so an allow pattern cannot overrid
 cargo = false
 ```
 
-#### Workspace roots
+#### Workspace Roots
 
 Each `extra_roots` entry is an absolute or `~/` path, such as `"~/src/shared-lib"`, and the user config and drop-ins add to one list. Symlinks in it resolve at startup, and a relative entry, `/`, your home directory, or a parent of it fails the config load. Protected paths inside an extra root still need approval.
 
 Launching from `/`, your home directory, or a parent of it turns off the auto-allow for every edit, `extra_roots` included, so those edits need an allow pattern or an approval. So does an edit to a file with more than one hard link.
 
-#### Project files
+#### Project Files
 
 A project config can only add `deny` and `ask` patterns. Setting `mode`, `allow`, `extra_roots`, `defaults`, or any other key under `[permission]` there fails the config load, so a repository can restrict what runs but never widen it.
 
@@ -327,7 +329,7 @@ Each request carries one credential. oxide-code uses the first source that is se
 
 The environment variables and the stored logins keep credentials out of config files. An `api_key` in `~/.config/ox/config.toml` works but sits on disk in plaintext, and a project config cannot set it.
 
-## LLM gateways
+## LLM Gateways
 
 oxide-code reads the gateway variables Claude Code uses:
 
@@ -349,7 +351,7 @@ oxide-code is stricter than Claude Code in three ways. It never sends a stored l
 
 A gateway that does not serve the configured model may return HTTP 404 with a plain-text `404 page not found` response. The gateway may list the models it serves at `GET /v1/models`.
 
-## Environment variables
+## Environment Variables
 
 Environment variables override all config file values.
 

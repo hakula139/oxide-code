@@ -80,7 +80,7 @@ On resume, oxide-code loads the saved history and appends new messages to the sa
 
 Inside the TUI, `/resume` (alias `/continue`) opens a session picker without restarting the process.
 
-- Type to filter by id, title, or project. Press Tab to toggle current-project / all-projects scope and Ctrl+A to toggle active / archived sessions. Press Enter to resume the highlighted session in place.
+- Type to filter by ID, title, or project. Press Tab to toggle current-project / all-projects scope and Ctrl+A to toggle active / archived sessions. Press Enter to resume the highlighted session in place.
 - To skip the picker, pass `/resume <id-prefix>` to jump directly, which also works in the `--no-tui` REPL. An ambiguous prefix lists the candidates. This form matches active and archived sessions, excluding the live session. It checks the current project first and searches all projects only when there is no match in the current project.
 - The picker loads the 30 most recent sessions in the selected scope and archive view, and notes in its footer when older ones are omitted.
 - Chat repopulates from the resumed transcript, and any queued prompts are discarded because they were typed for the previous session. The next prompt continues the resumed thread just as it would after `ox -c`.

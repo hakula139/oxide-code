@@ -42,7 +42,7 @@ Each ships as a vendored TOML file [in the source tree][themes-src] and doubles 
 base = "~/.config/ox/themes/dark-extra.toml"
 ```
 
-If the value isn't a built-in name AND can't be read as a regular file of at most 64 KiB, oxide-code refuses to start with an actionable error message.
+If the value isn't a built-in name and can't be read as a regular file of at most 64 KiB, oxide-code refuses to start with an actionable error message.
 
 ## Slot Value Formats
 
@@ -234,7 +234,7 @@ The separator glyph itself (`│`) is fixed, and the `separator` slot controls o
 error = "#ff0000"
 # Inline form patches just modifiers. fg / bg come from the base.
 accent = { bold = false }
-# Inline form patches fg AND adds bold.
+# Inline form patches fg and adds bold.
 link = { fg = "#ff79c6", bold = true }
 ```
 

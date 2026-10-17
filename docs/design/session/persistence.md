@@ -102,7 +102,7 @@ The session's [task list](../tools/tasks.md) needs no entry of its own. On resum
 
 ### Archiving
 
-An `archive` entry sets whether default listings and bare `ox -c` skip the session, and the latest one wins. Bare `/archive` queues one through the actor before the roll that finalizes the session. Use `/archive <prefix>`, `/unarchive <prefix>`, or Ctrl+X. in the `/resume` picker append an entry to another session's file and restore its mtime, so toggling its archive status does not change its position in listings. Resuming an archived session appends an entry that unarchives it. Files never move, so path-based resume and every other reference to a session file keep working.
+An `archive` entry sets whether default listings and bare `ox -c` skip the session, and the latest one wins. Bare `/archive` queues one through the actor before the roll that finalizes the session. `/archive <prefix>`, `/unarchive <prefix>`, and Ctrl+X in the `/resume` picker append an entry to another session's file and restore its mtime, so toggling its archive status does not change its position in listings. Resuming an archived session appends an entry that unarchives it. Files never move, so path-based resume and every other reference to a session file keep working.
 
 ### Fork-on-Conflict Concurrency
 
@@ -114,7 +114,7 @@ In the TUI, the first user prompt of a fresh session spawns a detached tokio tas
 
 ### Session Cost
 
-Each request behind a turn, a `/compact` summary, or an auto-compaction summary appends a `usage` entry, while the background title request goes unrecorded. The entry holds a `uuid`, the request's `model` id and `cache_ttl` (`"5m"` or `"1h"`), the four provider counts `input_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`, and `output_tokens`, and a `timestamp`. The model and TTL let the engine price the request at the rates it ran with, even after a `/model` swap or a TTL change.
+Each request behind a turn, a `/compact` summary, or an auto-compaction summary appends a `usage` entry, while the background title request goes unrecorded. The entry holds a `uuid`, the request's `model` ID and `cache_ttl` (`"5m"` or `"1h"`), the four provider counts `input_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`, and `output_tokens`, and a `timestamp`. The model and TTL let the engine price the request at the rates it ran with, even after a `/model` swap or a TTL change.
 
 On resume, the loader collects every `usage` entry in the file, including those on abandoned branches and before compact boundaries, since the session paid for each. The engine sums their estimated cost into the session total, which `/clear` resets with the fresh session. A file without `usage` entries resumes with a cost of zero. Older binaries skip `usage` lines as unknown entries and still resume the transcript.
 
@@ -133,12 +133,14 @@ Write failures surface through the session handle:
 Session listing separates file discovery from metadata parsing:
 
 - **Scope.** `ox --list` walks the current project subdirectory by default, and `--all` widens to every project.
-- **Discovery.** The walk only stats files, so bare `ox -c` parses files only until it finds the newest readable unarchived one, and a prefix lookup parses only files whose name carries a matching id.
+- **Discovery.** The walk only stats files, so bare `ox -c` parses files only until it finds the newest readable unarchived one, and a prefix lookup parses only files whose name carries a matching ID.
 - **Metadata.** A parsed file yields its header, the latest `Entry::Title` and `Entry::Summary`, and the archive state. A prefix pre-filter on the `"type"` discriminator keeps message lines off the full-parse hot path.
 - **Archive view.** `--list` and the `/resume` picker show unarchived sessions, or only archived ones with `--list --archived` and the picker's Ctrl+A.
 - **Page budget.** Archive state is stored in each file, so a listing parses sessions in order until it finds one beyond the page, then reports only whether more sessions follow. When few sessions are archived, the archived view parses further.
 
-- Sessions without a title show `(untitled)`.
+Listings sort rows and render them as follows:
+
+- Sessions without a title are shown as `(untitled)`.
 - Sessions without a summary still list (`Msgs` displays `-`).
 - Sort by file mtime, with the file name breaking ties.
 - Under `--all`, a `Project` column shows the tildified stored `cwd`.

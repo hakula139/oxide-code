@@ -68,7 +68,7 @@ The tests drive headless and REPL runs. Check the TUI-only paths by hand in a sc
 
 1. **`/compact`**: Read a few files, run `/compact`, then ask about them. The reply still knows the files, and in the session file the usage record after the `compact` entry reads the earlier prefix from the cache.
 2. **`/model` swap**: Send a prompt on Opus, switch to Haiku with `/model`, and send another. Then switch back to Opus and send a third. Every reply succeeds and remembers the earlier exchanges.
-3. **Cancellation**: Press Esc while a long reply streams, and check that the stream stops within a second. The next reply also answers the cancelled prompt, which [#256](https://github.com/hakula139/oxide-code/issues/256) tracks.
+3. **Cancellation**: Press Esc while a long reply streams, and check that the stream stops within a second. Then send a new prompt and verify that the reply answers only that prompt.
 4. **Leak check**: Search the logs and session files for each credential. Pass the value straight to `grep` so it never prints, and check the exit status: `1` means no match, `0` a match, and `2` an error such as a missing directory.
 
    ```bash

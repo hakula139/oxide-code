@@ -40,7 +40,7 @@ Resume is a subcommand, with a full-screen alt-screen picker running before chat
 
 - **Key bindings**: Up / Down / PgUp / PgDn / Tab / Enter / Esc plus emacs-style Ctrl-P / Ctrl-N / Ctrl-^P / Ctrl-^N. No vim keys, no numeric shortcuts. Backspace pops one char from search. No preview pane.
 
-- **Mid-session form**: `/resume` is available only while idle (`available_during_task() == false`), wired through the same picker and direct-id paths as the launch-time resume flow.
+- **Mid-session form**: `/resume` is available only while idle (`available_during_task() == false`), wired through the same picker and direct-ID paths as the launch-time resume flow.
 
 ## opencode (TypeScript + Solid + Kobalte)
 
