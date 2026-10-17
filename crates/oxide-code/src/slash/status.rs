@@ -33,7 +33,7 @@ fn build_modal(info: &LiveSessionInfo) -> KvOverview {
     let model = format!("{} ({})", model.display_name(), model.id());
     let auto_compaction = match info.auto_compaction_paused_after {
         Some(failures) => {
-            format!("paused after {failures} failures in a row (run /compact to resume)")
+            format!("paused after {failures} failures in a row (run `/compact` to resume)")
         }
         None => display_auto_compaction(info.config.compaction.auto),
     };
@@ -205,7 +205,7 @@ mod tests {
         );
         assert_eq!(
             paused.as_deref(),
-            Some("Auto Compaction    paused after 3 failures in a row (run /compact to resume)"),
+            Some("Auto Compaction    paused after 3 failures in a row (run `/compact` to resume)"),
         );
     }
 }
