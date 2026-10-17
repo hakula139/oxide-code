@@ -140,6 +140,7 @@ input_file: crates/oxide-code/src/session/fixtures/v0.1.0-alpha.1.jsonl
       "role": "assistant"
     }
   ],
+  "tasks": [],
   "title": "Fix f.rs",
   "tool_metadata": {
     "t1": {

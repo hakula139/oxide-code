@@ -12,11 +12,13 @@ use crate::message::{ContentBlock, Message, Role};
 use crate::prompt::PromptParts;
 use crate::protocol::{Event, EventSink, Op};
 use crate::session::handle::{RecordOutcome, SessionHandle};
+use crate::tool::tasks::Task;
 use crate::tool::{ToolDefinition, ToolMetadata, ToolRegistry};
 
 // ── Agent Turn ──
 
-/// Usage the API reported for one turn's requests.
+/// What one turn leaves for the engine: the usage its requests reported and the task list its
+/// tool calls set.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct TurnReport {
     /// Latest single round's usage, used by the auto-compaction threshold check, which compares
@@ -25,6 +27,8 @@ pub(super) struct TurnReport {
     /// Every request's usage in order, including one that failed or was cancelled partway. Some
     /// models pick their price tier from a single request's prompt size, so cost is per entry.
     pub(super) billable_rounds: Vec<TokenUsage>,
+    /// The task list the turn's last `tasks` call left, `None` when no call set one.
+    pub(super) tasks: Option<Vec<Task>>,
 }
 
 impl TurnReport {
@@ -169,6 +173,9 @@ pub(super) async fn agent_turn(
             gate,
         )
         .await;
+        if round.tasks.is_some() {
+            report.tasks = round.tasks;
+        }
         // Calls that finished before an abort already took effect, so the model must see them.
         commit_round(
             session,
@@ -532,14 +539,8 @@ mod tests {
                 if input.get("fail").is_some() {
                     return ToolOutput::error("cannot view notes");
                 }
-                ToolOutput {
-                    content: input["file_path"].as_str().unwrap_or_default().to_owned(),
-                    is_error: false,
-                    metadata: ToolMetadata {
-                        title: Some("Viewed notes".into()),
-                        ..Default::default()
-                    },
-                }
+                ToolOutput::success(input["file_path"].as_str().unwrap_or_default())
+                    .with_title("Viewed notes")
             })
         }
 

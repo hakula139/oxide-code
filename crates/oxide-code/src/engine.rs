@@ -20,6 +20,7 @@ use tokio::task::JoinHandle;
 use tracing::warn;
 
 use self::abort::TurnAbort;
+use self::compact_boundary::Boundary;
 use self::compaction::{AutoCompact, AutoCompactFailures};
 use self::turn::{TurnOutcome, TurnReport};
 use crate::client::TokenUsage;
@@ -41,6 +42,7 @@ use crate::session::history;
 use crate::session::resolver::resolve_saved_prefix;
 use crate::session::store::SessionStore;
 use crate::session::title_generator;
+use crate::tool::tasks::Task;
 use crate::tool::{ToolMetadata, ToolRegistry};
 
 /// Ops a frontend can queue before the engine reads them. A turn keeps reading ops while it runs,
@@ -111,6 +113,8 @@ pub(crate) struct Engine {
     /// Metadata the loaded transcript's tool results persisted, until [`Self::take_history`]
     /// projects it.
     tool_metadata: HashMap<String, ToolMetadata>,
+    /// The task list the model keeps with the `tasks` tool, which a compaction carries over.
+    tasks: Vec<Task>,
     prompt: PromptParts,
     /// `prompt` changed since the session last recorded it, so the next user message records it.
     prompt_unrecorded: bool,
@@ -155,6 +159,7 @@ impl Engine {
             compact,
             tool_metadata,
             usage,
+            tasks,
         } = transcript;
         let prompt_unrecorded = context.is_none();
         let prompt = session_prompt(context, client.model(), &cwd).await;
@@ -167,6 +172,7 @@ impl Engine {
             messages,
             compact,
             tool_metadata,
+            tasks,
             prompt,
             prompt_unrecorded,
             file_tracker,
@@ -203,14 +209,15 @@ impl Engine {
         )
     }
 
-    /// Starts the engine task. The first events warn about the tracked files in `drifted`, which
-    /// changed on disk since the resumed session read them, and about a transcript that ends on an
-    /// interrupted response.
+    /// Starts the engine task. The first events show the resumed session's usage and task list,
+    /// then warn about the tracked files in `drifted`, which changed on disk since the resumed
+    /// session read them, and about a transcript that ends on an interrupted response.
     pub(crate) fn spawn(self, drifted: &[PathBuf]) -> EngineHandle {
         let (ops, op_rx) = mpsc::channel(OP_CHANNEL_CAP);
         let (event_tx, events) = mpsc::unbounded_channel();
         let sink = ChannelSink(event_tx);
         self.emit_usage_update(&sink);
+        self.emit_restored_tasks(&sink);
         report_drift(&sink, drifted);
         turn::notify_if_interrupted(&self.messages, &sink);
         let task = EngineTask(tokio::spawn(self.run(sink, op_rx)));
@@ -303,7 +310,7 @@ impl Engine {
             policy: &mut self.policy,
             cwd: &self.cwd,
         };
-        let TurnOutcome { report, result } = turn::agent_turn(
+        let TurnOutcome { mut report, result } = turn::agent_turn(
             &self.client,
             &self.tools,
             &mut self.messages,
@@ -316,6 +323,9 @@ impl Engine {
         )
         .await;
         self.account_usage(sink, &report).await;
+        if let Some(tasks) = report.tasks.take() {
+            self.tasks = tasks;
+        }
         match result {
             Ok(()) => {
                 sink.emit(Event::TurnComplete, "turn-complete");
@@ -346,6 +356,7 @@ impl Engine {
                 file_tracker: &self.file_tracker,
                 prompt: &self.prompt,
                 tools: &tools,
+                tasks: &self.tasks,
                 spent: &mut spent,
             }),
             self.last_usage,
@@ -400,9 +411,12 @@ impl Engine {
             &self.file_tracker,
             &mut self.messages,
             sink,
-            summary,
-            instructions,
-            false,
+            Boundary {
+                summary,
+                instructions,
+                tasks: self.tasks.clone(),
+                automatic: false,
+            },
         )
         .await;
         if !compacted {
@@ -499,6 +513,7 @@ impl Engine {
             "session-resumed",
         );
         self.emit_usage_update(sink);
+        self.emit_restored_tasks(sink);
         // `SessionResumed` clears the chat, so anything about the old session must follow it.
         if let Some(failure) = outcome.finalize_failure {
             sink.emit(
@@ -533,12 +548,14 @@ impl Engine {
             compact,
             tool_metadata,
             usage,
+            tasks,
         } = transcript;
         self.client
             .set_session_id(self.session.session_id().to_owned());
         self.messages = messages;
         self.compact = compact;
         self.tool_metadata = tool_metadata;
+        self.tasks = tasks;
         self.prompt_unrecorded = context.is_none();
         self.prompt = session_prompt(context, self.client.model(), &self.cwd).await;
         self.policy.clear_session_allow();
@@ -703,6 +720,14 @@ impl Engine {
         self.auto_compaction_failures.reset(sink);
         self.last_usage = None;
         self.displayed_usage = None;
+    }
+
+    /// Shows the task list a loaded session restored. An empty one needs no event, since the
+    /// frontend empties its list when the session changes.
+    fn emit_restored_tasks(&self, sink: &dyn EventSink) {
+        if !self.tasks.is_empty() {
+            sink.emit(Event::TasksUpdated(self.tasks.clone()), "tasks-restored");
+        }
     }
 
     fn emit_usage_update(&self, sink: &dyn EventSink) {
@@ -877,7 +902,10 @@ mod tests {
     use crate::permission::Mode;
     use crate::permission::rule::Rule;
     use crate::protocol::CapturingSink;
+    use crate::session::post_compact::synthesize_post_compact_message;
     use crate::session::store::testing::test_store;
+    use crate::tool::tasks::TasksTool;
+    use crate::tool::tasks::testing::plan;
 
     /// Next event the engine emits that `pick` accepts, skipping the rest.
     async fn next_matching<T>(
@@ -1116,7 +1144,7 @@ mod tests {
     // ── spawn ──
 
     #[tokio::test]
-    async fn spawn_reports_the_resumed_cost_drift_and_an_interrupted_transcript_first() {
+    async fn spawn_reports_the_resumed_cost_tasks_drift_and_an_interrupted_transcript_first() {
         with_pinned_home(async {
             let server = MockServer::start().await;
             let dir = tempfile::tempdir().unwrap();
@@ -1132,9 +1160,11 @@ mod tests {
                 },
             ];
             engine.total_estimated_cost_usd = 1.23;
+            engine.tasks = plan();
 
             let mut handle = engine.spawn(&[PathBuf::from("a.rs")]);
             let cost = handle.events.recv().await.unwrap();
+            let tasks = handle.events.recv().await.unwrap();
             let drift = handle.events.recv().await.unwrap();
             let interrupted = handle.events.recv().await.unwrap();
             let failure = handle.shutdown().await;
@@ -1150,6 +1180,7 @@ mod tests {
                 ),
                 "{cost:?}"
             );
+            assert_eq!(tasks, Event::TasksUpdated(plan()));
             assert!(
                 matches!(&drift, Event::Error(msg) if msg.ends_with("Read before Edit: a.rs")),
                 "{drift:?}"
@@ -1943,6 +1974,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn submit_prompt_adopts_the_task_list_a_tasks_call_sets() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            let input = serde_json::json!({ "tasks": plan() }).to_string();
+            mount_tool_call_once(&server, "call-1", "tasks", &input).await;
+            mount_reply(&server, "done").await;
+            let dir = tempfile::tempdir().unwrap();
+            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path())
+                .await
+                .with_tools(ToolRegistry::new(vec![Box::new(TasksTool)]));
+            let sink = CapturingSink::new();
+            let (_ops_tx, mut ops) = crate::protocol::inert_op_channel();
+
+            let end = engine.submit_prompt("plan it", &sink, &mut ops).await;
+
+            assert_eq!(end, TurnEnd::Completed);
+            assert_eq!(engine.tasks, plan());
+            let events = sink.events();
+            let updated = events
+                .iter()
+                .position(|event| matches!(event, Event::TasksUpdated(_)))
+                .expect("the tasks call reports the new list");
+            assert!(
+                matches!(&events[updated - 1], Event::ToolCallEnd(result) if result.id == "call-1"),
+                "{events:?}"
+            );
+            assert_eq!(events[updated], Event::TasksUpdated(plan()));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn submit_prompt_keeps_the_list_through_a_later_round_that_sets_none() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            let planned = serde_json::json!({ "tasks": plan() }).to_string();
+            let rejected = serde_json::json!({ "tasks": [
+                {"content": "Fix the parser", "status": "in_progress"},
+                {"content": "Fix the lexer", "status": "in_progress"},
+            ]})
+            .to_string();
+            mount_tool_call_once(&server, "call-1", "tasks", &planned).await;
+            mount_tool_call_once(&server, "call-2", "tasks", &rejected).await;
+            mount_reply(&server, "done").await;
+            let dir = tempfile::tempdir().unwrap();
+            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path())
+                .await
+                .with_tools(ToolRegistry::new(vec![Box::new(TasksTool)]));
+            let (_ops_tx, mut ops) = crate::protocol::inert_op_channel();
+
+            let end = engine
+                .submit_prompt("plan it", &CapturingSink::new(), &mut ops)
+                .await;
+
+            assert_eq!(end, TurnEnd::Completed);
+            assert_eq!(server.received_requests().await.unwrap().len(), 3);
+            assert_eq!(engine.tasks, plan());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn submit_prompt_adopts_the_list_of_a_turn_that_fails_after_the_call() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            let input = serde_json::json!({ "tasks": plan() }).to_string();
+            mount_tool_call_once(&server, "call-1", "tasks", &input).await;
+            let dir = tempfile::tempdir().unwrap();
+            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path())
+                .await
+                .with_tools(ToolRegistry::new(vec![Box::new(TasksTool)]));
+            engine.max_tool_rounds = Some(1);
+            let (_ops_tx, mut ops) = crate::protocol::inert_op_channel();
+
+            let end = engine
+                .submit_prompt("plan it", &CapturingSink::new(), &mut ops)
+                .await;
+
+            assert_eq!(end, TurnEnd::Failed);
+            assert_eq!(engine.tasks, plan());
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn submit_prompt_auto_compacts_before_recording_the_new_prompt() {
         with_pinned_home(async {
             let server = MockServer::start().await;
@@ -2153,6 +2269,40 @@ mod tests {
             assert_eq!(focus, "focus");
             assert_eq!(usage.context_tokens, None);
             assert!((usage.estimated_cost_usd.unwrap() - (1.23 + 0.006)).abs() < 1e-12);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn compact_carries_the_task_list_into_the_summary_and_through_a_resume() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            mount_reply(&server, "manual summary").await;
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let mut engine = engine(server.uri(), &store, dir.path()).await;
+            let session_id = engine.session_id().to_owned();
+            engine.messages = tool_heavy_transcript();
+            engine.tasks = plan();
+            let (_ops_tx, mut ops) = crate::protocol::inert_op_channel();
+
+            let end = engine.compact(&CapturingSink::new(), &mut ops, None).await;
+
+            assert_eq!(end, TurnEnd::Completed);
+            assert_eq!(
+                engine.messages,
+                [synthesize_post_compact_message("manual summary", &plan())]
+            );
+            assert_eq!(engine.tasks, plan());
+
+            engine.clear(&CapturingSink::new()).await;
+            let compacted = store.find_session_path(&session_id).unwrap();
+            engine
+                .resume(&CapturingSink::new(), ResumeTarget::Path(compacted))
+                .await;
+
+            assert_eq!(engine.session_id(), session_id);
+            assert_eq!(engine.tasks, plan());
         })
         .await;
     }
@@ -2425,6 +2575,45 @@ mod tests {
                 ),
                 "{resumed:?}",
             );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn clear_drops_the_task_list_and_resume_restores_it_after_the_session() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            let input = serde_json::json!({ "tasks": plan() }).to_string();
+            mount_tool_call_once(&server, "call-1", "tasks", &input).await;
+            mount_reply(&server, "done").await;
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let mut engine = engine(server.uri(), &store, dir.path())
+                .await
+                .with_tools(ToolRegistry::new(vec![Box::new(TasksTool)]));
+            let planned_id = engine.session_id().to_owned();
+            let (_ops_tx, mut ops) = crate::protocol::inert_op_channel();
+            engine
+                .submit_prompt("plan it", &CapturingSink::new(), &mut ops)
+                .await;
+
+            engine.clear(&CapturingSink::new()).await;
+            assert_eq!(engine.tasks, []);
+
+            let sink = CapturingSink::new();
+            let planned_path = store.find_session_path(&planned_id).unwrap();
+            engine.resume(&sink, ResumeTarget::Path(planned_path)).await;
+            assert_eq!(engine.tasks, plan());
+            let events = sink.events();
+            let resumed = events
+                .iter()
+                .position(|event| matches!(event, Event::SessionResumed { .. }))
+                .expect("the resume succeeds");
+            let restored = events
+                .iter()
+                .position(|event| *event == Event::TasksUpdated(plan()))
+                .expect("the resume shows the restored list");
+            assert!(resumed < restored, "{events:?}");
         })
         .await;
     }

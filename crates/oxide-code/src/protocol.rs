@@ -16,6 +16,7 @@ use crate::config::compaction::AutoCompactionConfig;
 use crate::model::{ModelSpec, ResolvedModelId};
 use crate::permission::SessionGrant;
 use crate::permission::rule::Rule;
+use crate::tool::tasks::Task;
 use crate::tool::{ApprovalPreview, ToolResultView};
 
 // ── Ops ──
@@ -227,6 +228,10 @@ pub(crate) enum Event {
     },
     /// The user granted a session allow rule. Carries every session allow rule now in force.
     SessionRulesUpdated(Vec<Rule>),
+    /// A `tasks` call set the session's task list, or a loaded session restored a non-empty one.
+    /// Carries the whole list. Frontends empty their copy on [`Self::SessionRolled`] and
+    /// [`Self::SessionResumed`].
+    TasksUpdated(Vec<Task>),
 }
 
 // ── Tool Calls ──
@@ -366,6 +371,7 @@ mod tests {
     use super::*;
     use crate::client::RateLimitWindow;
     use crate::permission::{GateTarget, PermissionClass, Policy};
+    use crate::tool::tasks::testing::plan;
     use crate::tool::{
         ApprovalBody, DiffChunk, DiffLine, GrepFileGroup, GrepMatchLine, ReadExcerptLine,
     };
@@ -439,6 +445,7 @@ mod tests {
                 files: vec!["src/main.rs".to_owned()],
                 total: 1,
             },
+            ToolResultView::Tasks { tasks: plan() },
         ];
         let mut history = vec![
             Interaction::Compacted {
@@ -567,6 +574,7 @@ mod tests {
             Event::Error(_) => "error",
             Event::ApprovalRequested { .. } => "approval_requested",
             Event::SessionRulesUpdated(_) => "session_rules_updated",
+            Event::TasksUpdated(_) => "tasks_updated",
         }
     }
 
@@ -578,6 +586,15 @@ mod tests {
             }),
             seven_day: None,
         }
+    }
+
+    fn cargo_test_grant() -> SessionGrant {
+        Policy::default()
+            .session_grant(
+                PermissionClass::Bash,
+                &GateTarget::for_command("cargo test", Path::new("/repo")),
+            )
+            .unwrap()
     }
 
     /// Every [`Event`] variant, plus one approval per [`ApprovalBody`] variant.
@@ -671,16 +688,10 @@ mod tests {
                     title: "Bash".to_owned(),
                     body: ApprovalBody::Command("cargo test".to_owned()),
                 },
-                grant: Some(Box::new(
-                    Policy::default()
-                        .session_grant(
-                            PermissionClass::Bash,
-                            &GateTarget::for_command("cargo test", Path::new("/repo")),
-                        )
-                        .unwrap(),
-                )),
+                grant: Some(Box::new(cargo_test_grant())),
             },
             Event::SessionRulesUpdated(vec![Rule::parse("bash(cargo test:*)").unwrap()]),
+            Event::TasksUpdated(plan()),
         ]
     }
 
@@ -781,6 +792,22 @@ mod tests {
                         },
                     },
                 },
+            }),
+        );
+    }
+
+    #[test]
+    fn event_carries_a_task_list_as_content_and_status_pairs() {
+        let event = Event::TasksUpdated(plan());
+        assert_eq!(
+            serde_json::to_value(event).unwrap(),
+            json!({
+                "type": "tasks_updated",
+                "data": [
+                    {"content": "Read the config loader", "status": "completed"},
+                    {"content": "Add the entry type", "status": "in_progress"},
+                    {"content": "Write the tests", "status": "pending"},
+                ],
             }),
         );
     }

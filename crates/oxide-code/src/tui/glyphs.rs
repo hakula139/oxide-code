@@ -6,6 +6,8 @@
 //! - Continuation indents (`*_CONT`) match the prefix's display width.
 //! - Tool status indicators (`✓` / `✗`) carry no trailing space. The renderer handles the gap.
 
+use crate::tool::tasks::TaskStatus;
+
 // ── User Prompt ──
 
 /// First-line prefix for user-typed prompts.
@@ -44,6 +46,17 @@ pub(crate) const TOOL_SUCCESS: &str = "✓";
 
 /// Tool-result failure indicator.
 pub(crate) const TOOL_ERROR: &str = "✗";
+
+// ── Tasks ──
+
+/// Marker before a task, by status.
+pub(crate) const fn task_marker(status: TaskStatus) -> &'static str {
+    match status {
+        TaskStatus::Pending => "○",
+        TaskStatus::InProgress => "●",
+        TaskStatus::Completed => "✓",
+    }
+}
 
 // ── Error ──
 
@@ -192,6 +205,19 @@ mod tests {
             ERROR_PREFIX.starts_with(TOOL_ERROR),
             "ERROR_PREFIX ({ERROR_PREFIX:?}) must start with TOOL_ERROR ({TOOL_ERROR:?})",
         );
+    }
+
+    // ── Tasks ──
+
+    #[test]
+    fn task_markers_each_render_in_one_column() {
+        for status in [
+            TaskStatus::Pending,
+            TaskStatus::InProgress,
+            TaskStatus::Completed,
+        ] {
+            assert_eq!(task_marker(status).width(), 1, "{status:?}");
+        }
     }
 
     // ── Spinner ──

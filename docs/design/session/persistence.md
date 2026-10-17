@@ -17,7 +17,7 @@ Every session is a single append-only `.jsonl` file with one JSON object per lin
 | `file_snapshot`        | Sidecar        | File-tracker state restored on resume when disk state still matches |
 | `usage`                | After request  | One billed request's token usage, model, and prompt-cache TTL       |
 | `context`              | Before message | Prompt context of that message. Latest on the resolved chain wins   |
-| `compact`              | Boundary       | Summary boundary plus pre-compact count and optional instructions   |
+| `compact`              | Boundary       | Summary, pre-compact count, and optional instructions and tasks     |
 | `archive`              | Re-appended    | Archive state: `archived` + `at`. Latest wins                       |
 | `summary`              | Last line      | Exit marker: `message_count` + `updated_at`. Latest wins            |
 
@@ -41,7 +41,7 @@ An older binary reading a newer file skips entry types it does not know as malfo
 
 Reasoning blocks are compatible in both directions. A `thinking` block keeps its `signature` and a `redacted_thinking` block keeps its `data`, as every release wrote them, and both add the `wire` and `model` that produced them, which older binaries ignore. A block saved without them loads as an Anthropic block with no model. The Anthropic wire sends every Anthropic block back unchanged whichever model produced it, as Anthropic's guide to [switching models](https://platform.claude.com/docs/en/build-with-claude/preserved-thinking#switching-models) asks, so the recorded `model` changes no request. Which blocks a model reads depends on the platform, and the API drops or ignores the rest, as the [research note](../../research/api/extended-thinking.md#constraints) details.
 
-A `wire` value that an older binary does not know fails to parse, and that binary skips the whole message as a malformed line, so adding a `wire` value needs a header `version` bump.
+A `wire` value that an older binary does not know fails to parse, and that binary skips the whole message as a malformed line, so adding a `wire` value needs a header `version` bump. A task `status` works the same way inside a `compact` entry: an unknown one makes an older binary skip the boundary, so adding a status needs a bump too.
 
 Tests in `session/handle.rs` hold every release to this guarantee, using one fixture per release in `crates/oxide-code/src/session/fixtures/`, named after its tag:
 
@@ -95,6 +95,10 @@ A session records its prompt context: the environment section, the first message
 - **Replay the resolved branch.** On resume, the latest context entry on the resolved chain is replayed verbatim, so the request sends the same cached system prompt and first message. A forked session replays the context recorded on its own branch.
 - **Refresh changed context.** If the session resumes in another directory, the environment section is redetected. Any later instruction, date, or model change, including a `/model` swap, is attached to the next user message as a `<system-reminder>` block, which transcript displays omit, so the system prompt stays byte-identical across a swap.
 - **Rebuild missing context.** A transcript lacking a `context` entry, or one where no user message followed the last compaction, rebuilds the context and records it with the next message.
+
+### Task list
+
+The session's [task list](../tools/tasks.md) needs no entry of its own. On resume, the loader takes it from the last successful `tasks` call on the resolved chain, or else from the `tasks` field of the last `compact` entry, which records the list the summarized transcript left. The field is omitted when the list was empty.
 
 ### Archiving
 

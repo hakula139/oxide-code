@@ -22,6 +22,7 @@ use crate::file_tracker::{FileSnapshot, FileTracker};
 use crate::message::Message;
 use crate::prompt::SessionContext;
 use crate::tool::ToolMetadata;
+use crate::tool::tasks::{self, Task};
 use crate::util::sync::lock_or_recover;
 
 #[cfg(test)]
@@ -183,18 +184,21 @@ impl SessionHandle {
     }
 
     /// Write the compact-boundary + synthetic post-compact message, reset the chain anchor.
-    /// Returns `pre_count` for the post-compact UI plus every write failure, since the caller swaps
-    /// in the summary only once the boundary is on disk.
+    /// `tasks` is the task list the summarized transcript leaves. Returns `pre_count` for the
+    /// post-compact UI plus every write failure, since the caller swaps in the summary only once
+    /// the boundary is on disk.
     pub(crate) async fn compact(
         &self,
         summary: String,
         instructions: Option<String>,
+        tasks: Vec<Task>,
         synthetic_message: Message,
     ) -> CompactOutcome {
         let (ack, rx) = oneshot::channel();
         let cmd = SessionCmd::Compact {
             summary,
             instructions,
+            tasks,
             synthetic_message,
             ack,
         };
@@ -309,6 +313,8 @@ pub(crate) struct LoadedTranscript {
     pub(crate) tool_metadata: HashMap<String, ToolMetadata>,
     /// Every billed request the session recorded, which seeds its cost estimate.
     pub(crate) usage: Vec<UsageRecord>,
+    /// The task list the transcript leaves, from its last `tasks` call or else its compaction.
+    pub(crate) tasks: Vec<Task>,
 }
 
 /// Live handle plus display-only extras the TUI uses to reconstruct what the user saw live.
@@ -439,6 +445,9 @@ fn from_resumed_data(
 
     let first_user_prompt_seen =
         data.messages.iter().any(|m| extract_user_text(m).is_some()) || data.title.is_some();
+    let tasks = tasks::latest(&data.messages)
+        .or_else(|| data.compact.as_ref().map(|compact| compact.tasks.clone()))
+        .unwrap_or_default();
     let message_count = u32::try_from(data.messages.len()).unwrap_or(u32::MAX);
     let title = data.title.map(|t| t.title);
 
@@ -459,6 +468,7 @@ fn from_resumed_data(
             compact: data.compact,
             tool_metadata: data.tool_result_metadata,
             usage: data.usage,
+            tasks,
         },
         title,
         unarchived: data.archived,
@@ -497,6 +507,7 @@ mod tests {
     use crate::session::store::testing::{
         seed_test_session, test_project_dir, test_session_file, test_store,
     };
+    use crate::tool::tasks::testing::plan;
     use crate::tool::{DiffChunk, DiffLine};
 
     /// Resumes the session whose file name carries `session_id`.
@@ -874,6 +885,7 @@ mod tests {
             .compact(
                 "synth summary".to_owned(),
                 Some("focus".to_owned()),
+                Vec::new(),
                 Message::user("post"),
             )
             .await;
@@ -898,7 +910,7 @@ mod tests {
     async fn compact_reports_every_failure_to_reach_the_actor() {
         async fn compact(handle: &SessionHandle) -> CompactOutcome {
             handle
-                .compact("s".to_owned(), None, Message::user("synth"))
+                .compact("s".to_owned(), None, Vec::new(), Message::user("synth"))
                 .await
         }
 
@@ -1752,6 +1764,7 @@ mod tests {
             .compact(
                 "Asked to edit f.rs.".to_owned(),
                 Some("focus on f.rs".to_owned()),
+                plan(),
                 Message::user("Summary: asked to edit f.rs."),
             )
             .await;
@@ -1847,6 +1860,14 @@ mod tests {
                     ),
                     tool_use("t3", "grep", serde_json::json!({ "pattern": "fn " })),
                     tool_use("t4", "bash", serde_json::json!({ "command": "cargo test" })),
+                    tool_use(
+                        "t5",
+                        "tasks",
+                        serde_json::json!({ "tasks": [
+                            { "content": "Rename main", "status": "completed" },
+                            { "content": "Fix the failing test", "status": "in_progress" },
+                        ] }),
+                    ),
                 ],
             })
             .await;
@@ -1857,6 +1878,7 @@ mod tests {
                     tool_result("t2", "fn main() {}", false),
                     tool_result("t3", "g.rs:1: fn main() {}", false),
                     tool_result("t4", "test result: FAILED", true),
+                    tool_result("t5", "Updated the task list: 1 of 2 completed.", false),
                 ],
             })
             .await;
@@ -1991,11 +2013,13 @@ mod tests {
                 "summary": compact.summary,
                 "pre_message_count": compact.pre_message_count,
                 "instructions": compact.instructions,
+                "tasks": compact.tasks,
             })),
             "context": transcript.context,
             "messages": transcript.messages,
             "tool_metadata": transcript.tool_metadata,
             "usage": transcript.usage,
+            "tasks": transcript.tasks,
             "file_snapshots": resumed.file_snapshots,
         });
 

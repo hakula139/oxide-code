@@ -199,12 +199,14 @@ impl SessionDataBuilder {
                 summary,
                 pre_message_count,
                 instructions,
+                tasks,
                 ..
             } => {
                 self.pending_compact = Some(CompactInfo {
                     summary,
                     pre_message_count,
                     instructions,
+                    tasks,
                 });
             }
             _ => {}
@@ -623,6 +625,7 @@ mod tests {
     use crate::config::PromptCacheTtl;
     use crate::message::ContentBlock;
     use crate::prompt::PromptParts;
+    use crate::tool::tasks::testing::plan;
     use crate::util::path::testing::HOME_VAR;
 
     fn test_project_path(dir: &Path, filename: &str) -> PathBuf {
@@ -959,6 +962,7 @@ mod tests {
                 summary: "summary".to_owned(),
                 pre_message_count: 1,
                 instructions: None,
+                tasks: Vec::new(),
                 timestamp: datetime!(2026-04-16 12:00:03 UTC),
             }])
             .unwrap();
@@ -1035,6 +1039,7 @@ mod tests {
                 summary: "summary".to_owned(),
                 pre_message_count: 1,
                 instructions: None,
+                tasks: Vec::new(),
                 timestamp: datetime!(2026-04-17 12:00:00 UTC),
             }])
             .unwrap();
@@ -1120,6 +1125,7 @@ mod tests {
                     summary: "summary".to_owned(),
                     pre_message_count: 1,
                     instructions: None,
+                    tasks: Vec::new(),
                     timestamp: datetime!(2026-04-16 12:00:02 UTC),
                 },
                 sample_message_at(
@@ -1234,6 +1240,7 @@ mod tests {
                 summary: "summary".to_owned(),
                 pre_message_count: 1,
                 instructions: Some("focus".to_owned()),
+                tasks: plan(),
                 timestamp: datetime!(2026-04-16 12:00:02 UTC),
             }])
             .unwrap();
@@ -1270,6 +1277,7 @@ mod tests {
                 summary: "summary".to_owned(),
                 pre_message_count: 1,
                 instructions: Some("focus".to_owned()),
+                tasks: plan(),
             })
         );
     }
@@ -1292,6 +1300,7 @@ mod tests {
             summary: "summary".to_owned(),
             pre_message_count: 1,
             instructions: None,
+            tasks: Vec::new(),
             timestamp: datetime!(2026-04-16 12:00:02 UTC),
         }])
         .unwrap();
@@ -1336,6 +1345,7 @@ mod tests {
                 summary: "summary".to_owned(),
                 pre_message_count: 1,
                 instructions: None,
+                tasks: Vec::new(),
                 timestamp: datetime!(2026-04-16 12:00:02 UTC),
             }])
             .unwrap();

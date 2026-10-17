@@ -7,7 +7,8 @@ input_file: crates/oxide-code/src/session/fixtures/v0.1.0-alpha.3.jsonl
   "compact": {
     "instructions": "focus on f.rs",
     "pre_message_count": 2,
-    "summary": "Asked to edit f.rs."
+    "summary": "Asked to edit f.rs.",
+    "tasks": []
   },
   "context": {
     "environment": {
@@ -172,6 +173,7 @@ input_file: crates/oxide-code/src/session/fixtures/v0.1.0-alpha.3.jsonl
       "role": "assistant"
     }
   ],
+  "tasks": [],
   "title": "Fix f.rs",
   "tool_metadata": {
     "t1": {

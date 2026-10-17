@@ -18,7 +18,7 @@ use tokio::sync::mpsc;
 use tracing::warn;
 
 use super::abort::{AbortResult, TurnAbort, await_unless_aborted};
-use super::compact_boundary;
+use super::compact_boundary::{self, Boundary};
 use super::turn::collect_response;
 use crate::client::{PromptTooLong, Response, ResponseEvent, StopReason, TokenUsage, Wire};
 use crate::config::compaction::AutoCompactionConfig;
@@ -28,6 +28,7 @@ use crate::prompt::PromptParts;
 use crate::protocol::{Event, EventSink, Op};
 use crate::session::handle::SessionHandle;
 use crate::tool::ToolDefinition;
+use crate::tool::tasks::Task;
 
 const MAX_AUTO_COMPACT_FAILURES: u8 = 3;
 
@@ -108,6 +109,8 @@ pub(super) struct AutoCompact<'a> {
     /// The conversation's request prefix, which the summarizer reuses to read its prompt cache.
     pub(super) prompt: &'a PromptParts,
     pub(super) tools: &'a [ToolDefinition],
+    /// The task list the summary message carries over.
+    pub(super) tasks: &'a [Task],
     /// Each summary request's usage, recorded even when the summary fails or the user cancels it.
     pub(super) spent: &'a mut Vec<TokenUsage>,
 }
@@ -174,9 +177,12 @@ pub(super) async fn auto_compact_if_needed(
         auto.file_tracker,
         messages,
         sink,
-        summary,
-        None,
-        true,
+        Boundary {
+            summary,
+            instructions: None,
+            tasks: auto.tasks.to_vec(),
+            automatic: true,
+        },
     )
     .await;
     if !compacted {
@@ -503,6 +509,8 @@ mod tests {
     };
     use crate::message::Replay;
     use crate::protocol::CapturingSink;
+    use crate::session::post_compact::synthesize_post_compact_message;
+    use crate::tool::tasks::testing::plan;
 
     // ── AutoCompactFailures::reset ──
 
@@ -626,6 +634,7 @@ mod tests {
                 file_tracker: &tracker,
                 prompt: &empty_prompt(),
                 tools: &[],
+                tasks: &[],
                 spent: &mut Vec::new(),
             }),
             None,
@@ -650,6 +659,7 @@ mod tests {
                 file_tracker: &tracker,
                 prompt: &empty_prompt(),
                 tools: &[],
+                tasks: &[],
                 spent: &mut Vec::new(),
             }),
             Some(TokenUsage {
@@ -693,6 +703,7 @@ mod tests {
                 file_tracker: &tracker,
                 prompt: &empty_prompt(),
                 tools: &[],
+                tasks: &[],
                 spent: &mut Vec::new(),
             }),
             Some(TokenUsage {
@@ -740,6 +751,7 @@ mod tests {
                 file_tracker: &tracker,
                 prompt: &empty_prompt(),
                 tools: &[],
+                tasks: &[],
                 spent: &mut Vec::new(),
             }),
             Some(TokenUsage {
@@ -790,6 +802,7 @@ mod tests {
                 file_tracker: &tracker,
                 prompt: &empty_prompt(),
                 tools: &[],
+                tasks: &[],
                 spent: &mut Vec::new(),
             }),
             Some(TokenUsage {
@@ -858,6 +871,7 @@ mod tests {
                     file_tracker: &tracker,
                     prompt: &empty_prompt(),
                     tools: &[],
+                    tasks: &[],
                     spent: &mut Vec::new(),
                 }),
                 usage,
@@ -897,7 +911,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auto_compact_if_needed_queues_submit_while_summarizing() {
+    async fn auto_compact_if_needed_queues_submit_and_carries_the_task_list_over() {
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let started = Arc::new(Notify::new());
@@ -921,6 +935,7 @@ mod tests {
             file_tracker: &tracker,
             prompt: &empty_prompt(),
             tools: &[],
+            tasks: &plan(),
             spent: &mut Vec::new(),
         };
 
@@ -967,9 +982,9 @@ mod tests {
                 ..
             }
         )));
-        assert_eq!(messages.len(), 1);
-        assert!(
-            matches!(&messages[0].content[0], ContentBlock::Text { text } if text.contains("auto summary"))
+        assert_eq!(
+            messages,
+            [synthesize_post_compact_message("auto summary", &plan())]
         );
     }
 
@@ -1006,6 +1021,7 @@ mod tests {
                 file_tracker: &tracker,
                 prompt: &empty_prompt(),
                 tools: &[],
+                tasks: &[],
                 spent: &mut Vec::new(),
             }),
             Some(TokenUsage {

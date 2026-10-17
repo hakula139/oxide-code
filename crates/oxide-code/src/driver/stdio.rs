@@ -1,5 +1,6 @@
 //! Stdio rendering of engine events for the `--no-tui` REPL and `--prompt` headless modes.
 
+use std::fmt::Write as _;
 use std::io::Write;
 
 use anyhow::Result;
@@ -13,7 +14,8 @@ use crate::permission::SessionGrant;
 use crate::protocol::{Decision, Event, EventSink, Op, ToolCall, ToolResult};
 use crate::session::display::{UNTITLED_MARKER, archive_notice, id_prefix};
 use crate::tool::ApprovalPreview;
-use crate::tui::glyphs::INTERRUPTED_MARKER;
+use crate::tool::tasks::{Progress, Task};
+use crate::tui::glyphs::{INTERRUPTED_MARKER, task_marker};
 use crate::util::text::escape_controls;
 
 // ── Turn Rendering ──
@@ -144,6 +146,7 @@ impl StdioSink {
                 }
                 writeln!(stderr)?;
             }
+            Event::TasksUpdated(tasks) => write!(stderr, "{}", task_lines(&tasks))?,
             Event::SessionCompacted {
                 pre_count,
                 automatic,
@@ -221,6 +224,21 @@ impl EventSink for StdioSink {
     }
 }
 
+/// A progress header, one marked line per task, and a closing blank line, or nothing for a
+/// cleared list.
+fn task_lines(tasks: &[Task]) -> String {
+    let Some(Progress { completed, total }) = Progress::of(tasks) else {
+        return String::new();
+    };
+    let mut lines = format!("Tasks: {completed}/{total}\n");
+    for task in tasks {
+        let content = escape_controls(&task.content);
+        _ = writeln!(lines, "  {} {content}", task_marker(task.status));
+    }
+    lines.push('\n');
+    lines
+}
+
 /// The session an [`Event::SessionResumed`] continues, then a note when resuming it unarchived it.
 fn resumed_notice(id: &str, title: Option<&str>, unarchived: bool) -> String {
     let title = title.map_or_else(|| UNTITLED_MARKER.to_owned(), escape_controls);
@@ -253,6 +271,8 @@ mod tests {
     use crate::config::compaction::AutoCompactionConfig;
     use crate::permission::{GateTarget, PermissionClass, Policy};
     use crate::protocol::{CapturingSink, FailingSink};
+    use crate::tool::tasks::TaskStatus;
+    use crate::tool::tasks::testing::{plan, task};
     use crate::tool::{ApprovalBody, ToolResultView};
 
     /// Answers every approval with its decision, recording what each request offered.
@@ -479,6 +499,12 @@ mod tests {
             Event::ToolCallEnd(text_result("t1", "ok\u{1b}[8m", false, Some("Ran"))),
         );
         assert_eq!(stderr, "  Ran\nok\\u{1b}[8m\n\n");
+
+        let (_, stderr) = render_one(
+            &sink,
+            Event::TasksUpdated(vec![task("Fix\u{1b}[2K it", TaskStatus::Pending)]),
+        );
+        assert_eq!(stderr, "Tasks: 0/1\n  ○ Fix\\u{1b}[2K it\n\n");
     }
 
     #[test]
@@ -549,6 +575,28 @@ mod tests {
             Event::ToolCallEnd(text_result("t2", "   \n", true, None)),
         );
         assert_eq!(stderr, "\n");
+    }
+
+    #[test]
+    fn render_tasks_updated_marks_each_task_under_its_progress_and_skips_a_cleared_list() {
+        let sink = test_sink(false);
+
+        let (stdout, stderr) = render_one(&sink, Event::TasksUpdated(plan()));
+        assert_eq!(stdout, "");
+        assert_eq!(
+            stderr,
+            [
+                "Tasks: 1/3\n",
+                "  ✓ Read the config loader\n",
+                "  ● Add the entry type\n",
+                "  ○ Write the tests\n",
+                "\n",
+            ]
+            .concat(),
+        );
+
+        let (stdout, stderr) = render_one(&sink, Event::TasksUpdated(Vec::new()));
+        assert_eq!((stdout.as_str(), stderr.as_str()), ("", ""));
     }
 
     #[test]

@@ -35,7 +35,7 @@ Segments outside the [default order](#default-order) are opt-in.
 
 `StatusLineSegment` in `config.rs` defines the roster above. `[tui] status_line = [...]` controls the order. `OX_STATUS_LINE` accepts the same comma-separated names. Segment colors and the separator glyph come from the active theme.
 
-`StatusBar` keeps component state and delegates segment formatting to `tui/components/status/line.rs`. `App` copies the queued prompt count, the session ID, and the theme name into it before each frame, since it owns all three.
+`StatusBar` keeps component state and delegates segment formatting to `tui/components/status/line.rs`. `App` copies the queued prompt count, the task list's progress, the session ID, and the theme name into it before each frame, since it owns all four.
 
 Segment render rules:
 
@@ -46,7 +46,7 @@ Segment render rules:
 - The `model` and `model-with-effort` segments drop the `Claude` family prefix to save width (e.g., `Opus 5.5 (xhigh)`). Other surfaces (welcome screen, prompt environment, error blocks) keep the full `Claude Opus 5.5` label.
 - The pull request checks and review segments color their state with the theme's `success`, `warning`, `error`, and `muted` slots, and link the PR's checks and changed-files pages.
 - The review segment shows only where branch protection requires a review, since GitHub reports no review decision otherwise.
-- `task-progress` always renders nothing, because oxide-code keeps no task list. The task list is tracked in [#135](https://github.com/hakula139/oxide-code/issues/135).
+- `task-progress` counts the completed tasks on the session's [task list](../tools/tasks.md) and shows only while the list holds a task.
 
 ## Usage Data
 
@@ -90,7 +90,7 @@ The default order tracks reading flow: location and branch orient the user, mode
 ## Design Decisions
 
 1. **Typed segment roster.** A typed segment list is enough for first-party data and keeps rendering inside Ratatui, so the config needs no format DSL.
-2. **Implemented segments only.** Unsupported names fail config parsing, so the accepted vocabulary matches the shipped segments. `task-progress` is the one name accepted ahead of its data, so a roster that lists it starts showing the task list once [#135](https://github.com/hakula139/oxide-code/issues/135) lands.
+2. **Implemented segments only.** Unsupported names fail config parsing, so the accepted vocabulary matches the shipped segments.
 3. **Local usage first.** Context and session cost use provider usage that oxide-code observed, either in the current process or recorded in the session file.
 4. **Segment omission.** Missing usage, unknown pricing, absent branch, and blank titles disappear cleanly with no placeholder.
 5. **Background probes.** `git-branch` and the pull request segments re-probe as background child processes, 5 s and 60 s respectively after the previous probe finishes, with at most one run of each in flight. One `gh pr view` call serves all three PR segments. It reads the checks and review state only when the roster shows them, since those fields add every check on the head commit to the query. The bar stays current after `git checkout` or `gh pr create`, and a slow `gh` network round-trip never stalls input or rendering.

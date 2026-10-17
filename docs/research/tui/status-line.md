@@ -62,5 +62,4 @@ Cost display should stay best-effort because account discounts, marketplace bill
 ## Additional Patterns
 
 1. **ccusage integration.** Block and daily billing are useful, but shelling out to an external npm package adds installation, trust, cache, and schema concerns.
-2. **Task-progress segments.** Those need task state that oxide-code does not own yet. The task list is tracked in [#135](https://github.com/hakula139/oxide-code/issues/135).
-3. **Command-based status lines.** Claude Code's command hook moves rendering, errors, and latency outside the Rust UI loop. Tracked in [#166](https://github.com/hakula139/oxide-code/issues/166).
+2. **Command-based status lines.** Claude Code's command hook moves rendering, errors, and latency outside the Rust UI loop. Tracked in [#166](https://github.com/hakula139/oxide-code/issues/166).

@@ -234,7 +234,7 @@ fn render_model(model: &str) -> String {
     }
 }
 
-/// Whether `text` is a context reminder, which transcript displays leave out.
+/// Whether `text` is a `<system-reminder>` block, which transcript displays leave out.
 pub(crate) fn is_system_reminder(text: &str) -> bool {
     text.starts_with("<system-reminder>")
 }

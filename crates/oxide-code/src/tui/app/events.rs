@@ -111,6 +111,7 @@ impl App {
                 self.push_approval_modal(id, preview, grant);
             }
             Event::SessionRulesUpdated(rules) => self.session_info.session_allow = rules,
+            Event::TasksUpdated(tasks) => self.tasks.set(tasks),
         }
         self.dirty = true;
     }
@@ -175,6 +176,7 @@ impl App {
     fn apply_session_rolled(&mut self, id: String, archived: bool) {
         let old_id = std::mem::replace(&mut self.session_info.session_id, id);
         self.session_info.session_allow.clear();
+        self.tasks.clear();
         self.status_bar.set_title(None);
         self.status_bar.set_usage(None);
         self.chat.clear_history();
@@ -194,6 +196,7 @@ impl App {
     ) {
         self.session_info.session_id = id;
         self.session_info.session_allow.clear();
+        self.tasks.clear();
         self.status_bar.set_title(title);
         self.status_bar.set_usage(None);
         self.chat.clear_history();
@@ -431,6 +434,8 @@ mod tests {
     use crate::permission::rule::Rule;
     use crate::permission::{GateTarget, PermissionClass, Policy};
     use crate::protocol::{ResumeTarget, ToolCall, ToolResult, UsageSnapshot};
+    use crate::tool::tasks::TaskStatus;
+    use crate::tool::tasks::testing::{plan, task};
     use crate::tool::{ApprovalBody, ToolResultView};
     use crate::tui::action::Action;
     use crate::tui::app::testing::{five_hour_limit, rendered_text, test_app};
@@ -771,12 +776,27 @@ mod tests {
     }
 
     #[test]
+    fn handle_tasks_updated_replaces_the_panel_list() {
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.handle_engine_event(Event::TasksUpdated(vec![task(
+            "Sketch the design",
+            TaskStatus::Pending,
+        )]));
+
+        app.handle_engine_event(Event::TasksUpdated(plan()));
+
+        assert_eq!(app.tasks.tasks(), plan());
+        assert!(app.dirty);
+    }
+
+    #[test]
     fn handle_session_rolled_clears_chat_rebinds_id_and_drops_stale_title() {
         let (mut app, _rx, _event_tx) = test_app(Some("Old session title"));
         app.chat.push_user_message("old prompt".to_owned());
         let original_id = app.session_info.session_id.clone();
         app.status_bar.set_usage(Some(usage_snapshot()));
         app.session_info.session_allow = vec![Rule::parse("bash(ls)").unwrap()];
+        app.tasks.set(plan());
 
         app.handle_engine_event(Event::SessionRolled {
             id: "rolled-session".to_owned(),
@@ -797,6 +817,7 @@ mod tests {
             "stale usage must be cleared on roll",
         );
         assert_eq!(app.session_info.session_allow, []);
+        assert_eq!(app.tasks.tasks(), []);
         assert!(
             app.chat.is_empty(),
             "clear must drain the chat so the welcome can repaint",
@@ -831,6 +852,7 @@ mod tests {
         app.pending_prompts.push_back("queued".to_owned());
         app.handle_engine_event(bash_call_start("pending-1", "ls"));
         app.session_info.session_allow = vec![Rule::parse("bash(ls)").unwrap()];
+        app.tasks.set(plan());
         let original_id = app.session_info.session_id.clone();
 
         app.handle_engine_event(Event::SessionResumed {
@@ -851,6 +873,7 @@ mod tests {
             "stale usage must be cleared on resume",
         );
         assert_eq!(app.session_info.session_allow, []);
+        assert_eq!(app.tasks.tasks(), []);
         assert_eq!(
             app.chat.entry_count(),
             3,
@@ -968,6 +991,7 @@ mod tests {
         app.chat.push_user_message("pre-compact prompt".to_owned());
         app.status_bar.set_usage(Some(usage_snapshot()));
         app.handle_engine_event(bash_call_start("pending-1", "ls"));
+        app.tasks.set(plan());
 
         app.handle_engine_event(Event::SessionCompacted {
             summary: "## Recap\n\nDid the thing.".to_owned(),
@@ -989,6 +1013,11 @@ mod tests {
         assert!(
             app.status_bar.usage().is_none(),
             "stale usage must be cleared on compact",
+        );
+        assert_eq!(
+            app.tasks.tasks(),
+            plan(),
+            "the task list outlives compaction"
         );
         assert_eq!(app.status_bar.status(), &Status::Idle);
         assert!(app.input.is_enabled(), "compact returns to idle input");
