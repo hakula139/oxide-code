@@ -171,11 +171,11 @@ Unset, it defaults to `base16-ocean.dark`, which the dark built-ins use. `latte`
 
 ### Markdown chrome
 
-| Slot              | Role                |
-| ----------------- | ------------------- |
-| `horizontal_rule` | `---` rule          |
-| `table_header`    | Table header cell   |
-| `table_border`    | Table border glyphs |
+| Slot              | Role                                     |
+| ----------------- | ---------------------------------------- |
+| `horizontal_rule` | `---` rule                               |
+| `table_header`    | Table header cells (bold accent)         |
+| `table_border`    | Table borders and the rules between rows |
 
 ### UI chrome
 

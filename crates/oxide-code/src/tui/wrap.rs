@@ -71,6 +71,27 @@ pub(crate) fn wrap_line_keeping_lead(
         .collect()
 }
 
+/// The width of the widest run [`wrap_line`] never breaks inside, so the narrowest width that wraps
+/// `line` without splitting a word. CJK text can break between any two characters.
+pub(crate) fn longest_word_width(line: &Line<'_>) -> usize {
+    let mut longest = 0;
+    let mut run = 0;
+    let mut prev = None;
+    for g in line.spans.iter().flat_map(|s| s.content.graphemes(true)) {
+        if is_whitespace(g) {
+            run = 0;
+        } else {
+            if prev.is_some_and(|prev| breaks_around_wide(prev, g)) {
+                run = 0;
+            }
+            run += g.width();
+            longest = longest.max(run);
+        }
+        prev = Some(g);
+    }
+    longest
+}
+
 // ── Word Wrap Algorithm ──
 
 /// Greedy word-wrap over styled graphemes. The first line wraps at `first_width` without breaking
@@ -114,23 +135,20 @@ fn take_one_line(
 
         if width + g_width > max_width {
             let space_break = (is_whitespace(g) && width >= lead_width).then_some(i);
-            if let Some(end) = space_break.or(last_break) {
-                let mut next = end;
-                while next < graphemes.len() && is_whitespace(graphemes[next].0) {
-                    next += 1;
-                }
-                return (end, next);
-            }
-            // No break opportunity, so split before the overflowing grapheme, or one earlier when
-            // it is closing punctuation.
-            let end = if i == start {
+            // Break at the last opportunity, or else split before the overflowing grapheme, one
+            // earlier when it is closing punctuation.
+            let end = space_break.or(last_break).unwrap_or(if i == start {
                 i + 1
             } else if i - 1 > start && is_closing_punctuation(g) {
                 i - 1
             } else {
                 i
-            };
-            return (end, end);
+            });
+            let mut next = end;
+            while next < graphemes.len() && is_whitespace(graphemes[next].0) {
+                next += 1;
+            }
+            return (end, next);
         }
 
         if is_whitespace(g) && width >= lead_width {
@@ -236,7 +254,9 @@ mod tests {
     use ratatui::style::{Color, Modifier, Style};
     use ratatui::text::{Line, Span};
 
-    use super::{expand_tabs, expand_tabs_in_spans, wrap_line, wrap_line_keeping_lead};
+    use super::{
+        expand_tabs, expand_tabs_in_spans, longest_word_width, wrap_line, wrap_line_keeping_lead,
+    };
 
     fn texts(lines: &[Line<'_>]) -> Vec<String> {
         lines.iter().map(ToString::to_string).collect()
@@ -373,6 +393,11 @@ mod tests {
         assert_eq!(wrap("ab   cd"), ["ab ", "cd"]);
         assert_eq!(wrap("abc de"), ["abc", "de"]);
         assert_eq!(wrap("abc   de"), ["abc", "de"]);
+        assert_eq!(
+            texts(&wrap_line(Line::from("✅ ab"), 1, 0, None)),
+            ["✅", "a", "b"],
+            "a grapheme wider than the row splits off without a blank row after it"
+        );
     }
 
     // ── wrap_line_keeping_lead ──
@@ -390,6 +415,23 @@ mod tests {
         };
         assert_eq!(wrap(4), ["  ab ", "  cd ", "  ef"]);
         assert_eq!(wrap(5), ["  ab c", "  d ef"]);
+    }
+
+    // ── longest_word_width ──
+
+    #[test]
+    fn longest_word_width_spans_style_changes_and_stops_at_wrap_breaks() {
+        let bold = Style::default().add_modifier(Modifier::BOLD);
+        let styled = Line::from(vec![
+            Span::raw("ab cd"),
+            Span::styled("ef ", bold),
+            Span::raw("g"),
+        ]);
+
+        assert_eq!(longest_word_width(&styled), 4);
+        assert_eq!(longest_word_width(&Line::from("中文，好")), 4);
+        assert_eq!(longest_word_width(&Line::from("✅ a")), 2);
+        assert_eq!(longest_word_width(&Line::default()), 0);
     }
 
     // ── expand_tabs ──

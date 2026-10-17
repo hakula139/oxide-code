@@ -44,7 +44,7 @@ list_marker = "#1e66f5"
 
 # Markdown chrome
 horizontal_rule = "#acb0be"
-table_header = { fg = "#4c4f69", bold = true }
+table_header = { fg = "#1e66f5", bold = true }
 table_border = "#acb0be"
 
 # UI chrome

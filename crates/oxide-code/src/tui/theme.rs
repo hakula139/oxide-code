@@ -93,10 +93,10 @@ macro_rules! for_each_slot {
             (blockquote, "Markdown blockquote marker (`> `)"),
             (list_marker, "List item bullet / number marker"),
 
-            // Markdown chrome (default-aligned with `dim` / `heading_h2`)
+            // Markdown chrome (default-aligned with `dim` / `accent`)
             (horizontal_rule, "Markdown horizontal rule (`---`)"),
-            (table_header, "Markdown table header cell"),
-            (table_border, "Markdown table border glyphs"),
+            (table_header, "Markdown table header cell (bold accent)"),
+            (table_border, "Markdown table borders and row rules"),
 
             // UI chrome
             (tool_border, "Left border for tool call blocks"),
@@ -305,12 +305,6 @@ mod tests {
         assert_eq!(t.border_unfocused(), dim);
         assert_eq!(t.horizontal_rule(), dim);
         assert_eq!(t.table_border(), dim);
-    }
-
-    #[test]
-    fn default_table_header_matches_heading_h2() {
-        let t = Theme::default();
-        assert_eq!(t.table_header(), t.heading_h2());
     }
 
     // ── Theme::diff_add_row / Theme::diff_del_row ──
