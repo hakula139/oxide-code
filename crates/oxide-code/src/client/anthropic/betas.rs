@@ -21,12 +21,11 @@ const THINKING_TOKEN_COUNT_BETA_HEADER: &str = "thinking-token-count-2026-05-13"
 
 /// Builds the comma-joined `anthropic-beta` header value.
 ///
-/// Order is load-bearing: 3P proxies fingerprint the exact sequence and reject mismatches. Agentic
-/// turns on catalogue models send the sequence Claude Code [`super::CLAUDE_CLI_VERSION`] sends for
-/// them, captured from `claude -p` with an API key, so it includes betas for features this client
-/// leaves unused. `oauth` takes the slot Claude Code's `getAllModelBetas` gives it. One-shots carry
-/// at most the claude-code tag and the auth extension. The thinking betas derive from the request
-/// body's `thinking` field, so they always match it.
+/// Agentic turns on catalogue models send the sequence Claude Code [`super::CLAUDE_CLI_VERSION`]
+/// sends for them, captured from `claude -p` with an API key, so it includes betas for features
+/// this client leaves unused. `oauth` takes the slot Claude Code's `getAllModelBetas` gives it.
+/// One-shots carry at most the claude-code tag and the auth extension. The thinking betas derive
+/// from the request body's `thinking` field, so they always match it.
 pub(super) fn compute_betas(
     model: &ModelSpec,
     thinking: Option<&ThinkingConfig>,
@@ -77,7 +76,7 @@ pub(super) fn compute_betas(
 }
 
 /// `cache_control` for the static system prefix. `scope: "global"` shares the cache across
-/// sessions and is 1P-only (see [`crate::config::is_first_party_base_url`]).
+/// sessions, and Claude Code sends it only to the Anthropic API.
 pub(super) fn static_prefix_cache_control(
     is_first_party: bool,
     ttl: PromptCacheTtl,

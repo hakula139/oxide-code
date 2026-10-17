@@ -28,7 +28,7 @@ use tracing::debug;
 use uuid::Uuid;
 
 use crate::client::{ResponseEvent, Wire};
-use crate::config::auth::{Auth, AuthKind, AuthSource};
+use crate::config::auth::{Auth, AuthSource};
 use crate::config::gateway::GatewayCompat;
 use crate::config::{Config, Effort, PromptCacheTtl, is_first_party_base_url};
 use crate::message::{ContentBlock, Message, Role};
@@ -81,7 +81,7 @@ pub(crate) struct Client {
     show_thinking: bool,
     session_id: String,
     device_id: String,
-    /// Whether the base URL is the Anthropic API, which alone gets `scope: "global"` and `cch`.
+    /// Limits `scope: "global"` and `cch` to the Anthropic API, as Claude Code does.
     is_first_party: bool,
 }
 
@@ -215,7 +215,8 @@ impl Client {
 
         // The fingerprint skips the user context, which Claude Code marks as a meta message.
         let attribution = self
-            .attributes(true, auth.kind())
+            .gateway
+            .attribution
             .then(|| attribution_text(first_user_text(messages), self.is_first_party));
 
         let (static_sections, dynamic_sections) = split_at_boundary(system_sections);
@@ -280,14 +281,6 @@ impl Client {
 
         Ok(rx)
     }
-
-    /// Whether a request carries the billing attribution block. Streaming requests (agent turns,
-    /// `/compact` summaries) carry it under every credential kind, as Claude Code's do.
-    /// Non-streaming one-shots carry it only under OAuth. Some relay gateways admit a request on
-    /// this block or on `metadata.user_id`, so API-key one-shots pass there on the metadata alone.
-    fn attributes(&self, streaming: bool, auth: AuthKind) -> bool {
-        self.gateway.attribution && (streaming || auth == AuthKind::OAuth)
-    }
 }
 
 impl Wire for Client {
@@ -337,8 +330,9 @@ fn build_http(gateway: &GatewayCompat, extra_ca_certs: Option<&Path>) -> Result<
         USER_AGENT,
         HeaderValue::from_str(&format!("claude-cli/{CLAUDE_CLI_VERSION} (external, cli)"))?,
     );
-
     headers.insert("x-app", HeaderValue::from_static("cli"));
+
+    // Claude Code's Anthropic SDK sends these on every request.
     headers.insert("x-stainless-lang", HeaderValue::from_static("js"));
     headers.insert(
         "x-stainless-package-version",
@@ -406,7 +400,8 @@ fn build_metadata(device_id: &str, session_id: &str) -> RequestMetadata {
     RequestMetadata { user_id }
 }
 
-/// Wire order is load-bearing for billing injection.
+/// The billing block leads, as in Claude Code, so [`billing::inject_cch`] finds its placeholder
+/// first. Some relay gateways reject the block in any other slot.
 fn build_system_blocks<'a, const N: usize>(
     attribution: Option<&'a str>,
     extras: [(&'a str, Option<CacheControl>); N],
@@ -509,8 +504,8 @@ mod tests {
 
     use super::billing::build_billing_header;
     use super::testing::{
-        Captured, DEVICE_ID, api_key, auth_token, captured, client_for, oauth, test_client,
-        test_config, text_stream_body,
+        Captured, DEVICE_ID, api_key, captured, client_for, oauth, test_client, test_config,
+        text_stream_body,
     };
     use super::*;
     use crate::client::{Response, StopReason, TokenUsage};
@@ -872,32 +867,6 @@ mod tests {
         );
     }
 
-    // ── Client::attributes ──
-
-    #[test]
-    fn attributes_streaming_requests_and_oauth_one_shots_unless_disabled() {
-        for (auth, enabled, streaming, expected) in [
-            (api_key(), true, true, true),
-            (auth_token(), true, true, true),
-            (oauth(), true, true, true),
-            (api_key(), true, false, false),
-            (auth_token(), true, false, false),
-            (oauth(), true, false, true),
-            (oauth(), false, true, false),
-            (oauth(), false, false, false),
-        ] {
-            let kind = auth.kind();
-            let mut config = test_config(OFFLINE_URL, auth, TEST_MODEL);
-            config.gateway.attribution = enabled;
-            let client = Client::new(&config, None, DEVICE_ID.to_owned()).unwrap();
-            assert_eq!(
-                client.attributes(streaming, kind),
-                expected,
-                "{kind:?} enabled={enabled} streaming={streaming}",
-            );
-        }
-    }
-
     // ── Client::stream_message ──
 
     #[tokio::test]
@@ -1136,8 +1105,8 @@ mod tests {
 
     #[tokio::test]
     async fn stream_message_third_party_base_url_drops_global_scope_keeps_its_beta() {
-        // On 3P, the beta still ships as part of Claude Code's sequence, but the body-side
-        // `scope: "global"`, a first-party cache scope, is dropped.
+        // As in Claude Code, the beta ships on every base URL, while the body-side
+        // `scope: "global"` goes only to the Anthropic API.
         let server = MockServer::start().await;
         let sink: Captured<(String, String)> = captured();
         let sink_clone = std::sync::Arc::clone(&sink);
