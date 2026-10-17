@@ -799,7 +799,7 @@ mod tests {
         assert_eq!(grep_title("No files found"), "No matches found");
     }
 
-    // ── grep_files (content mode) ──
+    // ── grep_files: content mode ──
 
     #[test]
     fn grep_files_plain_pattern_finds_matching_lines() {
@@ -872,7 +872,7 @@ mod tests {
         let mut p = params("ccc", dir.path());
         p.context = 1;
         let result = grep_files(&p).unwrap();
-        // Context line uses `-` separator, match uses `:`.
+        // Context lines use the `-` separator, and the match uses `:`.
         assert!(result.contains("test.txt:2-bbb"));
         assert!(result.contains("test.txt:3:ccc"));
         assert!(result.contains("test.txt:4-ddd"));
@@ -1201,7 +1201,7 @@ mod tests {
         assert!(result.contains("large.txt"));
     }
 
-    // ── grep_files (head_limit) ──
+    // ── grep_files: head_limit ──
 
     #[test]
     fn grep_files_head_limit_truncates_matching_lines() {
@@ -1270,7 +1270,7 @@ mod tests {
         assert_eq!(match_lines.len(), 3);
     }
 
-    // ── grep_files (files_with_matches mode) ──
+    // ── grep_files: files_with_matches mode ──
 
     #[test]
     fn grep_files_files_with_matches_mode_lists_matching_paths() {
@@ -1334,7 +1334,7 @@ mod tests {
         assert_eq!(result, "No files found");
     }
 
-    // ── grep_files (count mode) ──
+    // ── grep_files: count mode ──
 
     #[test]
     fn grep_files_count_mode_reports_occurrences() {
@@ -1367,10 +1367,9 @@ mod tests {
         p.output_mode = OutputMode::Count;
         p.head_limit = Some(2);
         let result = grep_files(&p).unwrap();
-        // Summary should report all 5 files, not just the 2 shown.
+        // The summary counts all 5 files even though `head_limit` caps the listing at 2.
         assert!(result.contains("5 total occurrences across 5 files"));
         assert!(result.contains("Results limited to 2 files"));
-        // Only 2 file lines shown.
         let file_lines: Vec<_> = result.lines().filter(|l| l.ends_with(":1")).collect();
         assert_eq!(file_lines.len(), 2);
     }

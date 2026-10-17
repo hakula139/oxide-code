@@ -514,8 +514,7 @@ struct StopInput {
 }
 
 impl Tool for BashStopTool {
-    /// Read class, since it ends only a shell the session itself started and so never needs
-    /// approval.
+    /// Read class, since it ends only a shell the session started and so never needs approval.
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "bash_stop".to_owned(),
