@@ -26,6 +26,7 @@ const STARTER_POOL: &[Starter] = &[
     ("/help", "list commands"),
     ("/init", "create or update AGENTS.md / CLAUDE.md"),
     ("/login", "sign in to a Claude account"),
+    ("/mode", "switch permission mode"),
     ("/model", "switch model"),
     ("/rename", "set session title"),
     ("/resume", "switch to another session"),
@@ -45,6 +46,7 @@ const TIP_POOL: &[&str] = &[
     "press Ctrl+End to jump chat back to bottom",
     "press Enter to send, Shift+Enter for newline",
     "press Esc to cancel an in-flight response",
+    "press Shift+Tab to switch to plan mode and back",
 ];
 
 const STARTER_PICK: usize = 3;

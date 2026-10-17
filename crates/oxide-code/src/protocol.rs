@@ -14,8 +14,8 @@ use crate::config::Effort;
 use crate::config::auth::AuthSource;
 use crate::config::compaction::AutoCompactionConfig;
 use crate::model::{ModelSpec, ResolvedModelId};
-use crate::permission::SessionGrant;
 use crate::permission::rule::Rule;
+use crate::permission::{Basis, Mode, SessionGrant};
 use crate::tool::bash::background::BackgroundShell;
 use crate::tool::tasks::Task;
 use crate::tool::{ApprovalPreview, ToolResultView};
@@ -44,6 +44,9 @@ pub(crate) enum Op {
         model: Option<ResolvedModelId>,
         effort: Option<Effort>,
     },
+    /// Switches the permission mode and confirms with [`Event::ModeChanged`]. Mid-turn, the switch
+    /// applies from the next tool call the gate weighs.
+    SetMode(Mode),
     /// Summarizes the transcript into a synthetic continuation, focused by `instructions`, and
     /// persists the compaction boundary. Confirms with [`Event::SessionCompacted`].
     Compact { instructions: Option<String> },
@@ -201,6 +204,8 @@ pub(crate) enum Event {
         requested_effort: Option<Effort>,
         auto_compaction: AutoCompactionConfig,
     },
+    /// The permission mode after an [`Op::SetMode`].
+    ModeChanged(Mode),
     /// An [`Op::Login`] is waiting for the user to sign in at `url`, which the frontend opens in a
     /// browser.
     LoginStarted { url: String },
@@ -220,11 +225,12 @@ pub(crate) enum Event {
     Error(String),
     /// A gated tool call needs the user's approval before it runs. Carries the tool-use id so a
     /// stale decision for a dropped call is ignored, plus a small preview for the modal to render.
-    /// `grant` is the session allow rule the user may add instead, when one can name the call.
-    /// The agent loop blocks on the matching [`Op::Resolve`].
+    /// `basis` is what made the call ask, and `grant` is the session allow rule the user may add
+    /// instead, when one can name the call. The agent loop blocks on the matching [`Op::Resolve`].
     ApprovalRequested {
         id: String,
         preview: ApprovalPreview,
+        basis: Basis,
         grant: Option<Box<SessionGrant>>,
     },
     /// The user granted a session allow rule. Carries every session allow rule now in force.
@@ -375,7 +381,7 @@ mod tests {
 
     use super::*;
     use crate::client::RateLimitWindow;
-    use crate::permission::{Access, PermissionClass, Policy, Workspace};
+    use crate::permission::{Access, PermissionClass, Policy, Tier, Workspace};
     use crate::tool::bash::background::testing::shells_in_each_state;
     use crate::tool::tasks::testing::plan;
     use crate::tool::{
@@ -483,6 +489,7 @@ mod tests {
             Op::Interrupt => "interrupt",
             Op::Resolve { .. } => "resolve",
             Op::SetModel { .. } => "set_model",
+            Op::SetMode(_) => "set_mode",
             Op::Compact { .. } => "compact",
             Op::Clear => "clear",
             Op::Archive => "archive",
@@ -527,6 +534,7 @@ mod tests {
                 model: Some(ResolvedModelId::new("claude-opus-5-5".to_owned())),
                 effort: Some(Effort::High),
             },
+            Op::SetMode(Mode::Plan),
             Op::Compact {
                 instructions: Some("focus on auth".to_owned()),
             },
@@ -574,6 +582,7 @@ mod tests {
             Event::SessionResumed { .. } => "session_resumed",
             Event::SessionCompacted { .. } => "session_compacted",
             Event::ConfigChanged { .. } => "config_changed",
+            Event::ModeChanged(_) => "mode_changed",
             Event::LoginStarted { .. } => "login_started",
             Event::SignedIn { .. } => "signed_in",
             Event::SignedOut { .. } => "signed_out",
@@ -604,9 +613,36 @@ mod tests {
             .unwrap()
     }
 
+    /// One approval per [`ApprovalBody`] variant, each held by a different basis.
+    fn approval_requests() -> [Event; 2] {
+        [
+            Event::ApprovalRequested {
+                id: "t2".to_owned(),
+                preview: ApprovalPreview {
+                    title: "Edit".to_owned(),
+                    body: ApprovalBody::Diff(diff_chunks()),
+                },
+                basis: Basis::Mode(Mode::Manual),
+                grant: None,
+            },
+            Event::ApprovalRequested {
+                id: "t3".to_owned(),
+                preview: ApprovalPreview {
+                    title: "Bash".to_owned(),
+                    body: ApprovalBody::Command("cargo test".to_owned()),
+                },
+                basis: Basis::Rule {
+                    tier: Tier::Ask,
+                    rule: Rule::parse(PermissionClass::Exec, "cargo *").unwrap(),
+                },
+                grant: Some(Box::new(cargo_test_grant())),
+            },
+        ]
+    }
+
     /// Every [`Event`] variant, plus one approval per [`ApprovalBody`] variant.
     fn every_event() -> Vec<Event> {
-        vec![
+        let mut events = vec![
             Event::StreamToken("hello".to_owned()),
             Event::ThinkingToken("hmm".to_owned()),
             Event::ProgressUpdate("Reading.".to_owned()),
@@ -664,6 +700,7 @@ mod tests {
                     threshold_tokens: Some(400_000),
                 },
             },
+            Event::ModeChanged(Mode::Yolo),
             Event::LoginStarted {
                 url: "https://claude.ai/oauth/authorize?state=s".to_owned(),
             },
@@ -681,28 +718,14 @@ mod tests {
                 fallback_error: Some("Claude Code login has expired.".to_owned()),
             },
             Event::Error("Session write failed.".to_owned()),
-            Event::ApprovalRequested {
-                id: "t2".to_owned(),
-                preview: ApprovalPreview {
-                    title: "Edit".to_owned(),
-                    body: ApprovalBody::Diff(diff_chunks()),
-                },
-                grant: None,
-            },
-            Event::ApprovalRequested {
-                id: "t3".to_owned(),
-                preview: ApprovalPreview {
-                    title: "Bash".to_owned(),
-                    body: ApprovalBody::Command("cargo test".to_owned()),
-                },
-                grant: Some(Box::new(cargo_test_grant())),
-            },
             Event::SessionRulesUpdated(vec![
                 Rule::parse(PermissionClass::Exec, "cargo test *").unwrap(),
             ]),
             Event::TasksUpdated(plan()),
             Event::BackgroundShellsUpdated(shells_in_each_state()),
-        ]
+        ];
+        events.extend(approval_requests());
+        events
     }
 
     // ── Op ──

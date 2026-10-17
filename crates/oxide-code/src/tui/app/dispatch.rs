@@ -222,6 +222,7 @@ impl App {
             Action::Submit(text) => self.handle_submit_prompt(&text),
             Action::Op(op) => self.dispatch_op(op),
             Action::ConfirmExit => self.confirm_exit(),
+            Action::CycleMode => self.cycle_mode(),
             Action::PreviewTheme { name } => self.preview_theme(&name),
             Action::SwapTheme { name } => self.swap_theme(&name),
         }
@@ -248,6 +249,7 @@ impl App {
             Op::Queue(_)
             | Op::Resolve { .. }
             | Op::SetModel { .. }
+            | Op::SetMode(_)
             | Op::Clear
             | Op::Archive
             | Op::Rename { .. }
@@ -291,6 +293,20 @@ impl App {
             let until = Instant::now() + EXIT_WINDOW;
             self.status_bar.set_status(Status::ExitArmed { until });
         }
+    }
+
+    /// Switches to the mode after the current one in the Shift+Tab cycle, or to the cycle's first
+    /// mode from one outside it.
+    fn cycle_mode(&mut self) {
+        let current = self.session_info.config.permission_mode;
+        let next = self
+            .mode_cycle
+            .iter()
+            .position(|&mode| mode == current)
+            .map_or(self.mode_cycle[0], |index| {
+                self.mode_cycle[(index + 1) % self.mode_cycle.len()]
+            });
+        self.dispatch_op(Op::SetMode(next));
     }
 
     /// Returns `true` when an [`Status::ExitArmed`] window has elapsed and the bar was reset.
@@ -360,6 +376,11 @@ impl App {
             }
             match slash::classify(&parsed) {
                 SlashKind::ReadOnly | SlashKind::Unknown => _ = self.run_slash(&parsed),
+                SlashKind::Steering => {
+                    if let Some(action) = self.run_slash(&parsed) {
+                        self.dispatch_action(action);
+                    }
+                }
                 SlashKind::Mutating => {
                     self.chat.push_system_message(format!(
                         "/{} runs only when idle. Try again after the turn finishes.",
@@ -437,11 +458,14 @@ mod tests {
 
     use super::*;
     use crate::config::Effort;
+    use crate::permission::defaults::Shipped;
+    use crate::permission::{Basis, Mode};
     use crate::protocol::{Decision, Event, ResumeTarget};
     use crate::tool::{ApprovalBody, ApprovalPreview};
     use crate::tui::app::testing::{
         FakeModal, KeyLogModal, key_event, long_chat_block, mouse_event, mouse_event_at,
-        push_answerable_approval, render_app, rendered_text, test_app,
+        push_answerable_approval, render_app, rendered_text, test_app, test_app_with,
+        test_session_info,
     };
     use crate::tui::clipboard::CopyError;
     use crate::tui::components::status::StatusHyperlink;
@@ -923,6 +947,7 @@ mod tests {
                 title: "Bash(rm -rf /)".to_owned(),
                 body: ApprovalBody::Command("rm -rf /".to_owned()),
             },
+            basis: Basis::Builtin(Shipped::Rm),
             grant: None,
         });
 
@@ -1563,6 +1588,58 @@ mod tests {
             Err(mpsc::error::TryRecvError::Empty),
         ));
         assert!(app.chat.last_is_error());
+    }
+
+    #[tokio::test]
+    async fn dispatch_mode_during_busy_reaches_the_engine_mid_turn() {
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("active".to_owned()));
+        rx.recv().await.expect("active submit forwarded");
+
+        app.dispatch_action(Action::Submit("/mode plan".to_owned()));
+        app.handle_crossterm_event(&key_event(KeyCode::BackTab, KeyModifiers::SHIFT));
+        app.dispatch_action(Action::Submit("/mode".to_owned()));
+
+        assert_eq!(rx.try_recv().ok(), Some(Op::SetMode(Mode::Plan)));
+        assert_eq!(rx.try_recv().ok(), Some(Op::SetMode(Mode::Plan)));
+        assert!(app.modals.is_active(), "the bare form opens the picker");
+        assert!(app.pending_prompts.is_empty());
+    }
+
+    // ── cycle_mode ──
+
+    #[test]
+    fn cycle_mode_steps_through_manual_and_plan_plus_yolo_for_a_yolo_start() {
+        for (start, expected) in [
+            (Mode::Manual, [Mode::Plan, Mode::Manual, Mode::Plan]),
+            (Mode::Plan, [Mode::Manual, Mode::Plan, Mode::Manual]),
+            (Mode::Yolo, [Mode::Manual, Mode::Plan, Mode::Yolo]),
+        ] {
+            let mut info = test_session_info();
+            info.config.permission_mode = start;
+            let (mut app, mut rx, _event_tx) = test_app_with(info, None);
+
+            let sent = expected.map(|_| {
+                app.handle_crossterm_event(&key_event(KeyCode::BackTab, KeyModifiers::SHIFT));
+                let Some(Op::SetMode(mode)) = rx.try_recv().ok() else {
+                    panic!("Shift+Tab sends a mode switch");
+                };
+                app.handle_engine_event(Event::ModeChanged(mode));
+                mode
+            });
+
+            assert_eq!(sent, expected, "{start}");
+        }
+    }
+
+    #[test]
+    fn cycle_mode_from_a_mode_outside_the_cycle_returns_to_manual() {
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.handle_engine_event(Event::ModeChanged(Mode::Yolo));
+
+        app.handle_crossterm_event(&key_event(KeyCode::BackTab, KeyModifiers::SHIFT));
+
+        assert_eq!(rx.try_recv().ok(), Some(Op::SetMode(Mode::Manual)));
     }
 
     // ── expire_armed_exit ──

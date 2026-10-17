@@ -48,6 +48,7 @@ Modals shipping today:
 
 - **Combined `/model + /effort` picker** (over `ListPicker`).
 - **`/effort` slider**: Bare `/effort` Speed ↔ Intelligence slider.
+- **`/mode` picker**: Permission mode picker (over `ListPicker`).
 - **`/theme` picker**: Live-preview palette picker (over `ListPicker`).
 - **`/init` picker**: Instruction-file picker for a project with no `AGENTS.md` or `CLAUDE.md` (over `ListPicker`).
 - **`/rename` editor**: Single-line title editor pre-filled with the current title.
@@ -74,7 +75,7 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 
 7. **Bare `/model` and bare `/effort` open separate modals.** Threading both bare forms through one modal would force a single-axis decision through a two-axis interface. `/model` keeps the multi-axis combined picker (model and effort cycle together), while `/effort` gets its own single-axis slider. Typed-arg `/model <id>` and `/effort <level>` keep direct-switch behaviour for scripting and power users.
 
-8. **`ListPicker` is a state + render primitive.** Concrete pickers embed it and forward keys to it. This separates "list selection state" from "what does Enter dispatch", avoiding the boxed-callback pattern while staying broadly reusable. `/model + /effort`, `/theme`, and `/init` build on it.
+8. **`ListPicker` is a state + render primitive.** Concrete pickers embed it and forward keys to it. This separates "list selection state" from "what does Enter dispatch", avoiding the boxed-callback pattern while staying broadly reusable. `/model + /effort`, `/mode`, `/theme`, and `/init` build on it.
 
 9. **Read-only kv overviews share `KvOverview`.** `/status`, `/config`, and `/help` all build the same title + sectioned-rows + footer shape, so the layout, key handling, and dismiss live in one place. Per-command files own only the fixture (rows, headings) and a thin constructor, and new overviews are a `Vec<KvSection>` away.
 
@@ -89,6 +90,8 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 - **Combined `/model + /effort` picker**: `ModelEffortPicker` wraps `ListPicker<ModelRow>` and tracks the effort axis separately. Left / Right cycles the effort row through all five tiers, which every supported model accepts. Until the user picks a tier, the row shows the active effort, falling back to the highlighted model's default. Submit emits one `Op::SetModel { model, effort }` with `Option` axes (only changed axes populated). Enter on a no-op cancels.
 
 - **`/effort` slider**: `EffortSlider` is a horizontal Speed ↔ Intelligence visual. Lists all five tiers and seeds the cursor at the active effort. Unknown model ids have no effort, so bare `/effort` errors on them. Tiers render with uniform `●` / `○` glyphs plus per-tier ANSI color along blue → red. Color encodes identity, bold encodes the active pick. ANSI-named colors decouple the gradient from theme TOML so the user's terminal palette supplies the actual rendering.
+
+- **`/mode` picker**: `ModePicker` wraps `ListPicker<ModeRow>` over `manual`, `plan`, and `yolo`, each with a short description, and seeds the cursor at the active mode. Enter forwards `Op::SetMode` for the highlighted row and cancels on the active one, and numeric `1`–`3` shortcuts jump to a row. It opens mid-turn, since the engine applies a switch from the turn's next gated call.
 
 - **`/theme` picker**: `ThemePicker` wraps `ListPicker<ThemeRow>` over the curated built-in roster and emits `Action::PreviewTheme` on every cursor move so the App repaints the chat in the candidate palette without committing. Esc snaps back via the cached `preview_theme_snapshot`, while Enter promotes the preview to an `Action::SwapTheme` swap. Numeric `1`–`9` shortcuts jump to a row to match the visual ladder.
 
@@ -128,6 +131,7 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 - `crates/oxide-code/src/slash/effort_slider.rs`: `/effort` slider.
 - `crates/oxide-code/src/slash/help.rs`: `/help` row builder plus `KvOverview`.
 - `crates/oxide-code/src/slash/init.rs`: `/init` instruction-file picker (`InitPicker`).
+- `crates/oxide-code/src/slash/mode.rs`: `/mode` picker (`ModeCmd` plus `ModePicker`).
 - `crates/oxide-code/src/slash/picker.rs`: combined `/model + /effort` picker.
 - `crates/oxide-code/src/slash/registry.rs`: `SlashOutcome`, including the `Modal` variant.
 - `crates/oxide-code/src/slash/rename.rs`: `RenameCmd` plus `RenameModal` editor.

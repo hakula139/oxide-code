@@ -5,10 +5,13 @@ use indoc::formatdoc;
 
 use crate::config::Effort;
 use crate::model::{MODELS, ModelInfo, ResolvedModelId, replacement_for};
+use crate::permission::Mode;
 use crate::protocol::{Op, ResumeTarget};
 
 /// Canonical names of the commands [`parse`] knows, without their leading `/`.
-pub(crate) const NAMES: [&str; 6] = ["clear", "compact", "effort", "model", "rename", "resume"];
+pub(crate) const NAMES: [&str; 7] = [
+    "clear", "compact", "effort", "mode", "model", "rename", "resume",
+];
 
 /// Parses the typed form of the command `name`, canonical and without its `/`, into the op it
 /// runs. `None` when `name` is not one of [`NAMES`]. `Err` carries the message for a malformed
@@ -18,6 +21,7 @@ pub(crate) fn parse(name: &str, args: &str) -> Option<Result<Op, String>> {
         "clear" => Ok(Op::Clear),
         "compact" => Ok(compact(args)),
         "effort" => effort(args),
+        "mode" => mode(args),
         "model" => model(args),
         "rename" => rename(args),
         "resume" => resume(args),
@@ -44,6 +48,16 @@ pub(crate) fn effort(arg: &str) -> Result<Op, String> {
         model: None,
         effort: Some(pick),
     })
+}
+
+/// `/mode <mode>`, case-insensitive.
+pub(crate) fn mode(arg: &str) -> Result<Op, String> {
+    let arg = required(arg, "mode", "/mode <mode>")?;
+    let mode = arg
+        .to_ascii_lowercase()
+        .parse()
+        .map_err(|_| format!("Unknown mode: `{arg}`. Valid: {}.", Mode::VALID_VALUES))?;
+    Ok(Op::SetMode(mode))
 }
 
 /// `/model <id>`. Matches an exact catalogue id, then a unique substring of one, so the family
@@ -146,6 +160,7 @@ mod tests {
             ("clear", "", Op::Clear),
             ("compact", "auth", compact("auth")),
             ("effort", "low", set_effort(Effort::Low)),
+            ("mode", "plan", Op::SetMode(Mode::Plan)),
             ("model", "haiku", set_model("claude-haiku-5-5")),
             ("rename", "Fix login", rename("Fix login").unwrap()),
             ("resume", "1a2b", resume("1a2b").unwrap()),
@@ -168,6 +183,7 @@ mod tests {
     fn parse_bare_forms_that_need_an_argument_name_the_usage() {
         for (name, usage) in [
             ("effort", "Missing level. Usage: `/effort <level>`."),
+            ("mode", "Missing mode. Usage: `/mode <mode>`."),
             ("model", "Missing model id. Usage: `/model <id>`."),
             ("rename", "Missing title. Usage: `/rename <title>`."),
             (
@@ -215,6 +231,29 @@ mod tests {
                 Err(format!(
                     "Unknown effort: `{arg}`. Valid: low, medium, high, xhigh, max."
                 )),
+            );
+        }
+    }
+
+    // ── mode ──
+
+    #[test]
+    fn mode_accepts_each_mode_in_any_case() {
+        for (arg, expected) in [
+            ("manual", Mode::Manual),
+            (" Plan ", Mode::Plan),
+            ("YOLO", Mode::Yolo),
+        ] {
+            assert_eq!(mode(arg), Ok(Op::SetMode(expected)), "{arg}");
+        }
+    }
+
+    #[test]
+    fn mode_unknown_mode_lists_the_valid_ones() {
+        for arg in ["auto", "Turbo"] {
+            assert_eq!(
+                mode(arg),
+                Err(format!("Unknown mode: `{arg}`. Valid: manual, plan, yolo.")),
             );
         }
     }

@@ -1,6 +1,7 @@
 //! One round's tool calls: the permission gate, approvals, and each call's result.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -8,13 +9,13 @@ use futures::StreamExt as _;
 use futures::stream::FuturesUnordered;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
+use tracing::{debug, warn};
 
-use super::abort::{AbortResult, TurnAbort, await_unless_aborted};
+use super::abort::{AbortResult, Inbox, TurnAbort, await_unless_aborted};
 use crate::file_tracker::FileTracker;
 use crate::message::ContentBlock;
 use crate::permission::rule::Rule;
-use crate::permission::{Policy, SessionGrant, Workspace};
+use crate::permission::{Basis, Policy, SessionGrant, Workspace};
 use crate::protocol::{Decision, Event, EventSink, Op, ToolCall, ToolResult};
 use crate::tool::tasks::Task;
 use crate::tool::{
@@ -86,7 +87,7 @@ pub(super) async fn run_tool_round(
     parse_errors: &HashMap<String, String>,
     sink: &dyn EventSink,
     ops: &mut mpsc::Receiver<Op>,
-    pending: &mut Vec<String>,
+    inbox: &mut Inbox,
     dispatch_ctx: &mut DispatchContext<'_>,
 ) -> ToolRound {
     let mut round = ToolRound {
@@ -100,7 +101,7 @@ pub(super) async fn run_tool_round(
         parse_errors,
         sink,
         ops,
-        pending,
+        inbox,
         dispatch_ctx,
     };
     let parallel_safe = |name: &str| tools.get(name).is_some_and(|(spec, _)| spec.parallel_safe);
@@ -136,7 +137,7 @@ struct Dispatcher<'r, 'd> {
     parse_errors: &'r HashMap<String, String>,
     sink: &'r dyn EventSink,
     ops: &'r mut mpsc::Receiver<Op>,
-    pending: &'r mut Vec<String>,
+    inbox: &'r mut Inbox,
     dispatch_ctx: &'r mut DispatchContext<'d>,
 }
 
@@ -275,7 +276,9 @@ impl<'r> Dispatcher<'r, '_> {
             })
             .collect();
         while !runs.is_empty() {
-            match await_unless_aborted(runs.select_next_some(), self.ops, self.pending).await {
+            match await_unless_aborted(runs.select_next_some(), self.ops, self.inbox, self.sink)
+                .await
+            {
                 Ok((slot, output)) => started[slot].output = Some(output),
                 Err(abort) => {
                     drop(runs);
@@ -340,13 +343,20 @@ impl<'r> Dispatcher<'r, '_> {
     ) -> AbortResult<Option<ToolOutput>> {
         let name = spec.name.as_str();
         let class = spec.class;
-        match self
+        if let Some(mode) = self.inbox.mode.take() {
+            self.dispatch_ctx.policy.set_mode(mode);
+        }
+        let verdict = self
             .dispatch_ctx
             .policy
-            .decide(class, &prepared.access.as_target())
-        {
+            .verdict(class, &prepared.access.as_target());
+        debug!(
+            "permission: {name} call {id} settled as {:?} by {}",
+            verdict.decision, verdict.basis
+        );
+        match verdict.decision {
             crate::permission::Decision::Allow => Ok(None),
-            crate::permission::Decision::Deny => Ok(Some(denied_output(name))),
+            crate::permission::Decision::Deny => Ok(Some(denied_output(name, &verdict.basis))),
             crate::permission::Decision::Ask => {
                 // The approval request is a control-plane event: if it can't be delivered, no
                 // frontend can answer it and `await_approval` would block forever. Fail closed on
@@ -362,18 +372,19 @@ impl<'r> Dispatcher<'r, '_> {
                     .send(Event::ApprovalRequested {
                         id: id.to_owned(),
                         preview,
+                        basis: verdict.basis.clone(),
                         grant: grant.clone().map(Box::new),
                     })
                     .is_err()
                 {
-                    return Ok(Some(denied_output(name)));
+                    return Ok(Some(denied_output(name, &verdict.basis)));
                 }
-                match await_approval(id, self.ops, self.pending).await? {
+                match await_approval(id, self.ops, self.inbox, self.sink).await? {
                     Decision::Approve => Ok(None),
                     Decision::AllowForSession { rule } => {
-                        Ok(self.allow_for_session(grant.as_ref(), *rule, name))
+                        Ok(self.allow_for_session(grant.as_ref(), *rule, name, &verdict.basis))
                     }
-                    Decision::Deny => Ok(Some(denied_output(name))),
+                    Decision::Deny => Ok(Some(denied_output(name, "the user"))),
                     Decision::DenyWithFeedback { feedback } => Ok(Some(ToolOutput::error(
                         format!("The {name} call was denied with this feedback: {feedback}"),
                     ))),
@@ -384,12 +395,14 @@ impl<'r> Dispatcher<'r, '_> {
     }
 
     /// Adds the frontend's `rule` to the session allow rules once the call's own `grant` admits it,
-    /// since the frontend's check is advisory. Returns a denial when it does not.
+    /// since the frontend's check is advisory. A refused rule returns a denial by `basis`, which
+    /// made the call ask.
     fn allow_for_session(
         &mut self,
         grant: Option<&SessionGrant>,
         rule: Rule,
         name: &str,
+        basis: &Basis,
     ) -> Option<ToolOutput> {
         let admitted = grant
             .context("this call offers no session rule")
@@ -410,35 +423,37 @@ impl<'r> Dispatcher<'r, '_> {
                     )),
                     "session-rule-refused",
                 );
-                Some(denied_output(name))
+                Some(denied_output(name, basis))
             }
         }
     }
 }
 
-/// The synthetic tool result returned for a denied call. Marked `is_error` so the model treats it
-/// as a failed call and can try another approach.
-fn denied_output(name: &str) -> ToolOutput {
+/// The synthetic tool result for a call denied by `by`, a [`Basis`] or the user. Marked `is_error`
+/// so the model treats it as a failed call and can try another approach.
+fn denied_output(name: &str, by: impl fmt::Display) -> ToolOutput {
     ToolOutput::error(format!(
-        "The {name} call was denied by the permission policy. Do not retry it. \
-         Choose a different approach or ask the user to adjust permissions."
+        "The {name} call was denied by {by}. Do not retry it. Choose a different approach or ask \
+         the user to adjust permissions."
     ))
 }
 
 /// Blocks on the `ops` channel for the [`Op::Resolve`] matching `id`, the same channel the turn
 /// loop races elsewhere so no second channel is introduced. An interrupt or shutdown aborts the
-/// turn, an [`Op::Queue`] buffers into `pending`, and a decision for a different id is ignored (a
-/// stale reply for an already-resolved call). Cancel-safe by drop: it holds no state.
+/// turn, an [`Op::Queue`] or [`Op::SetMode`] goes to `inbox`, and a decision for a different id is
+/// ignored (a stale reply for an already-resolved call). Cancel-safe by drop: it holds no state.
 async fn await_approval(
     id: &str,
     ops: &mut mpsc::Receiver<Op>,
-    pending: &mut Vec<String>,
+    inbox: &mut Inbox,
+    sink: &dyn EventSink,
 ) -> AbortResult<Decision> {
     loop {
         match ops.recv().await {
             Some(Op::Interrupt) => return Err(TurnAbort::Cancelled),
             Some(Op::Shutdown) | None => return Err(TurnAbort::Shutdown),
-            Some(Op::Queue(text)) => pending.push(text),
+            Some(Op::Queue(text)) => inbox.prompts.push(text),
+            Some(Op::SetMode(mode)) => inbox.switch_mode(mode, sink),
             Some(Op::Resolve {
                 id: target,
                 decision,
@@ -537,13 +552,13 @@ mod tests {
         dispatch_ctx: &mut DispatchContext<'_>,
     ) -> AbortResult<Gated> {
         let parse_errors = HashMap::new();
-        let mut pending = Vec::new();
+        let mut inbox = Inbox::default();
         let mut dispatcher = Dispatcher {
             tools,
             parse_errors: &parse_errors,
             sink,
             ops,
-            pending: &mut pending,
+            inbox: &mut inbox,
             dispatch_ctx,
         };
         Ok(match dispatcher.gate(id, name, input).await? {
@@ -648,7 +663,7 @@ mod tests {
             &HashMap::new(),
             &sink,
             &mut rx,
-            &mut Vec::new(),
+            &mut Inbox::default(),
             &mut dispatch_ctx,
         )
         .await;
@@ -704,7 +719,7 @@ mod tests {
                 &parse_errors,
                 &sink,
                 &mut inert_ops(),
-                &mut Vec::new(),
+                &mut Inbox::default(),
                 &mut dispatch_ctx,
             ),
         )
@@ -766,7 +781,7 @@ mod tests {
             call("tool_2", "hang", json!({})),
             call("tool_3", "hang", json!({})),
         ];
-        let (parse_errors, mut pending) = (HashMap::new(), Vec::new());
+        let (parse_errors, mut inbox) = (HashMap::new(), Inbox::default());
         let interrupt = async {
             let tokens = [started.recv().await.unwrap(), started.recv().await.unwrap()];
             assert!(tokens.iter().all(|token| !token.is_cancelled()));
@@ -781,7 +796,7 @@ mod tests {
                 &parse_errors,
                 &sink,
                 &mut rx,
-                &mut pending,
+                &mut inbox,
                 &mut dispatch_ctx,
             ),
             interrupt,
@@ -827,7 +842,7 @@ mod tests {
             &HashMap::new(),
             &sink,
             &mut inert_ops(),
-            &mut Vec::new(),
+            &mut Inbox::default(),
             &mut dispatch_ctx,
         )
         .await;
@@ -901,7 +916,11 @@ mod tests {
         .output();
 
         assert!(denial.is_error);
-        assert_eq!(denial.content, denied_output("echo").content);
+        assert_eq!(
+            denial.content,
+            "The echo call was denied by the `deny.exec` pattern `*`. Do not retry it. Choose a \
+             different approach or ask the user to adjust permissions."
+        );
         assert_eq!(
             approval_ids(&sink),
             [] as [&str; 0],
@@ -937,9 +956,13 @@ mod tests {
         assert!(
             matches!(
                 sink.events().as_slice(),
-                [Event::ApprovalRequested { id, .. }] if id == "tool_1",
+                [Event::ApprovalRequested {
+                    id,
+                    basis: Basis::Mode(Mode::Manual),
+                    ..
+                }] if id == "tool_1",
             ),
-            "ask must surface one approval event carrying the call id: {:?}",
+            "ask must surface one approval event carrying the call id and its basis: {:?}",
             sink.events(),
         );
     }
@@ -1045,7 +1068,10 @@ mod tests {
 
             assert_eq!(
                 denial.content,
-                denied_output(name).content,
+                format!(
+                    "The {name} call was denied by `manual` mode. Do not retry it. Choose a \
+                     different approach or ask the user to adjust permissions."
+                ),
                 "{class} {pattern}"
             );
             assert_eq!(dispatch_ctx.policy.session_allow(), [], "{class} {pattern}");
@@ -1087,7 +1113,11 @@ mod tests {
         .expect("an undeliverable approval resolves without abort")
         .output();
 
-        assert_eq!(denial.content, denied_output("echo").content);
+        assert_eq!(
+            denial.content,
+            "The echo call was denied by `manual` mode. Do not retry it. Choose a different \
+             approach or ask the user to adjust permissions."
+        );
     }
 
     #[tokio::test]
@@ -1116,7 +1146,11 @@ mod tests {
         .output();
 
         assert!(denial.is_error);
-        assert_eq!(denial.content, denied_output("echo").content);
+        assert_eq!(
+            denial.content,
+            "The echo call was denied by the user. Do not retry it. Choose a different approach \
+             or ask the user to adjust permissions."
+        );
     }
 
     #[tokio::test]
@@ -1250,28 +1284,42 @@ mod tests {
         })
         .unwrap();
 
-        let decision = await_approval("tool_1", &mut rx, &mut Vec::new())
-            .await
-            .expect("matching decision resolves");
+        let decision = await_approval(
+            "tool_1",
+            &mut rx,
+            &mut Inbox::default(),
+            &CapturingSink::new(),
+        )
+        .await
+        .expect("matching decision resolves");
         assert_eq!(decision, Decision::Deny);
     }
 
     #[tokio::test]
-    async fn await_approval_buffers_a_mid_approval_submit_into_pending() {
-        let (tx, mut rx) = mpsc::channel::<Op>(2);
+    async fn await_approval_holds_a_mid_approval_submit_and_mode_switch_in_the_inbox() {
+        let (tx, mut rx) = mpsc::channel::<Op>(3);
         tx.try_send(Op::Queue("queued".to_owned())).unwrap();
+        tx.try_send(Op::SetMode(Mode::Plan)).unwrap();
         tx.try_send(Op::Resolve {
             id: "tool_1".to_owned(),
             decision: Decision::Approve,
         })
         .unwrap();
-        let mut pending = Vec::new();
+        let mut inbox = Inbox::default();
+        let sink = CapturingSink::new();
 
-        let decision = await_approval("tool_1", &mut rx, &mut pending)
+        let decision = await_approval("tool_1", &mut rx, &mut inbox, &sink)
             .await
             .expect("approval resolves");
+
         assert_eq!(decision, Decision::Approve);
-        assert_eq!(pending, vec!["queued".to_owned()], "the submit buffers");
+        assert_eq!(inbox.prompts, vec!["queued".to_owned()]);
+        assert_eq!(inbox.mode, Some(Mode::Plan));
+        assert!(
+            matches!(sink.events().as_slice(), [Event::ModeChanged(Mode::Plan)]),
+            "{:?}",
+            sink.events(),
+        );
     }
 
     #[tokio::test]
@@ -1279,9 +1327,14 @@ mod tests {
         for (op, want_shutdown) in [(Op::Interrupt, false), (Op::Shutdown, true)] {
             let (tx, mut rx) = mpsc::channel::<Op>(1);
             tx.try_send(op.clone()).unwrap();
-            let abort = await_approval("tool_1", &mut rx, &mut Vec::new())
-                .await
-                .expect_err("interrupt / shutdown abort the wait");
+            let abort = await_approval(
+                "tool_1",
+                &mut rx,
+                &mut Inbox::default(),
+                &CapturingSink::new(),
+            )
+            .await
+            .expect_err("interrupt / shutdown abort the wait");
             if want_shutdown {
                 assert!(matches!(abort, TurnAbort::Shutdown), "{op:?}");
             } else {
@@ -1294,9 +1347,14 @@ mod tests {
     async fn await_approval_dropped_channel_collapses_to_shutdown() {
         let (tx, mut rx) = mpsc::channel::<Op>(1);
         drop(tx);
-        let abort = await_approval("tool_1", &mut rx, &mut Vec::new())
-            .await
-            .expect_err("a closed channel aborts");
+        let abort = await_approval(
+            "tool_1",
+            &mut rx,
+            &mut Inbox::default(),
+            &CapturingSink::new(),
+        )
+        .await
+        .expect_err("a closed channel aborts");
         assert!(matches!(abort, TurnAbort::Shutdown));
     }
 }

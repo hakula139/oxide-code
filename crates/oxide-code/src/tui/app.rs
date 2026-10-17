@@ -28,6 +28,7 @@ use super::git_probes::GitProbes;
 use super::modal::{Modal, ModalStack};
 use super::terminal::Tui;
 use super::theme::Theme;
+use crate::permission::Mode;
 use crate::protocol::{Event, Interaction, Op};
 use crate::session::display::archive_notice;
 use crate::slash::LiveSessionInfo;
@@ -49,6 +50,9 @@ pub(crate) struct App {
     tasks: TaskPanel,
     input: InputArea,
     session_info: LiveSessionInfo,
+    /// The modes Shift+Tab steps through. `yolo` joins only when the session starts in it, so a
+    /// stray key press cannot leave every call unprompted.
+    mode_cycle: &'static [Mode],
     events: mpsc::UnboundedReceiver<Event>,
     ops: mpsc::Sender<Op>,
     /// Opens a URL in the system browser. Tests replace it so they never launch one.
@@ -119,6 +123,10 @@ impl App {
             &session_info.config.status_line,
             Instant::now(),
         );
+        let mode_cycle = match session_info.config.permission_mode {
+            Mode::Yolo => &[Mode::Manual, Mode::Plan, Mode::Yolo][..],
+            Mode::Manual | Mode::Plan => &[Mode::Manual, Mode::Plan][..],
+        };
         Self {
             theme: theme.clone(),
             status_bar,
@@ -127,6 +135,7 @@ impl App {
             tasks: TaskPanel::default(),
             input: InputArea::new(theme),
             session_info,
+            mode_cycle,
             events,
             ops,
             open_browser: |url| open::that_detached(url),

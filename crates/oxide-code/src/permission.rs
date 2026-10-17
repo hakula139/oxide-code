@@ -1,6 +1,7 @@
-//! Tool permission gate. A resolved [`Policy`] (mode plus the deny, ask, and allow rule tiers) and a
-//! [`Target`] describing a tool call resolve to a [`Decision`] of allow / ask / deny through the
-//! pure [`Policy::decide`] pipeline. Design: `docs/design/tools/permissions.md`.
+//! Tool permission gate. A resolved [`Policy`] (mode plus the deny, ask, and allow rule tiers) and
+//! a [`Target`] describing a tool call resolve to a [`Verdict`] through the pure
+//! [`Policy::verdict`] pipeline: a [`Decision`] of allow / ask / deny and the [`Basis`] that
+//! settled it. Design: `docs/design/tools/permissions.md`.
 //!
 //! The gate is the whole safety boundary: oxide-code has no sandbox, so the decision pipeline is
 //! the only thing standing between the model and an unchecked tool call.
@@ -18,6 +19,7 @@ use std::sync::{Arc, LazyLock};
 
 use anyhow::{Result, bail, ensure};
 use caseless::Caseless;
+use clap::ValueEnum;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use unicode_normalization::UnicodeNormalization;
@@ -30,19 +32,20 @@ use crate::util::path::{expand_user, lexical_normalize};
 // ── Mode ──
 
 /// The standing permission posture, which settles the calls no rule does.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "lowercase", try_from = "String")]
 pub(crate) enum Mode {
     /// Ask about every call the rules leave open.
     #[default]
     Manual,
-    /// Read-only analysis: every edit, exec, and net call denies.
+    /// Read-only analysis: every edit, exec, and net call is denied.
     Plan,
     /// Run every call the rules leave open. Deny and ask rules still hold.
     Yolo,
 }
 
 impl Mode {
+    pub(crate) const ALL: [Self; 3] = [Self::Manual, Self::Plan, Self::Yolo];
     pub(crate) const VALID_VALUES: &str = "manual, plan, yolo";
 
     pub(crate) const fn as_str(self) -> &'static str {
@@ -50,6 +53,14 @@ impl Mode {
             Self::Manual => "manual",
             Self::Plan => "plan",
             Self::Yolo => "yolo",
+        }
+    }
+
+    pub(crate) const fn description(self) -> &'static str {
+        match self {
+            Self::Manual => "Ask about calls no rule settles",
+            Self::Plan => "Read-only: deny edits and commands",
+            Self::Yolo => "Run calls no rule settles",
         }
     }
 }
@@ -128,7 +139,8 @@ impl fmt::Display for PermissionClass {
 // ── Tier ──
 
 /// Where a rule list sits in the pipeline: deny outranks ask, which outranks allow.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub(crate) enum Tier {
     Deny,
     Ask,
@@ -642,6 +654,82 @@ pub(crate) enum Decision {
     Deny,
 }
 
+/// A call's [`Decision`] and what settled it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Verdict {
+    pub(crate) decision: Decision,
+    pub(crate) basis: Basis,
+}
+
+/// What settled a call's [`Decision`], which the gate logs, a denial names to the model, and an
+/// approval prompt shows the user.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+pub(crate) enum Basis {
+    /// A configured pattern in the deny, ask, or allow tier.
+    Rule { tier: Tier, rule: Rule },
+    /// A session allow rule.
+    Session(Rule),
+    /// An enabled built-in rule.
+    Builtin(Shipped),
+    /// The mode: `plan` denying an edit, exec, or net call, or settling a call no rule does.
+    Mode(Mode),
+    /// A read-class call, which runs unless a deny or ask rule holds it.
+    Read,
+    /// An edit inside a workspace root.
+    Workspace,
+    /// A known-safe read, which runs without a rule.
+    SafeRead,
+    /// An allowed command, by what let each of its simple commands and its writes through.
+    Command(Vec<Basis>),
+}
+
+impl Basis {
+    /// The sentence an approval prompt shows for a call this basis asks about, or `None` when the
+    /// mode asks because no rule settles the call.
+    pub(crate) fn reason(&self) -> Option<String> {
+        match self {
+            Self::Mode(_) => None,
+            basis => Some(format!("Held by {basis}.")),
+        }
+    }
+}
+
+impl fmt::Display for Basis {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Rule { tier, rule } => {
+                write!(
+                    f,
+                    "the `{tier}.{}` pattern `{}`",
+                    rule.class(),
+                    rule.pattern()
+                )
+            }
+            Self::Session(rule) => write!(
+                f,
+                "the session `allow.{}` pattern `{}`",
+                rule.class(),
+                rule.pattern()
+            ),
+            Self::Builtin(group) => write!(f, "the built-in `{group}` rule"),
+            Self::Mode(mode) => write!(f, "`{mode}` mode"),
+            Self::Read => f.write_str("the default for reads"),
+            Self::Workspace => f.write_str("the default for edits inside the workspace"),
+            Self::SafeRead => f.write_str("a known-safe read"),
+            Self::Command(parts) => {
+                for (index, part) in parts.iter().enumerate() {
+                    if index > 0 {
+                        f.write_str(", ")?;
+                    }
+                    write!(f, "{part}")?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
 // ── Policy ──
 
 /// Resolved permission policy: the active mode plus the parsed rule tiers. Built once from config
@@ -650,14 +738,41 @@ pub(crate) enum Decision {
 pub(crate) struct Policy {
     mode: Mode,
     /// User, project, and enabled shipped deny rules.
-    deny: Vec<Rule>,
+    deny: Vec<TierRule>,
     /// User, project, and enabled shipped ask rules.
-    ask: Vec<Rule>,
+    ask: Vec<TierRule>,
     allow: Vec<Rule>,
     /// Rules the user granted from an approval for the rest of the session. In memory only.
     session_allow: Vec<Rule>,
     /// The shipped groups `[permission.defaults]` leaves on.
     enabled: Vec<Shipped>,
+}
+
+/// A deny or ask rule, with the shipped group it comes from.
+#[derive(Debug, Clone)]
+struct TierRule {
+    rule: Rule,
+    builtin: Option<Shipped>,
+}
+
+impl TierRule {
+    const fn configured(rule: Rule) -> Self {
+        Self {
+            rule,
+            builtin: None,
+        }
+    }
+
+    /// The basis of a decision this rule settles from `tier`.
+    fn basis(&self, tier: Tier) -> Basis {
+        match self.builtin {
+            Some(group) => Basis::Builtin(group),
+            None => Basis::Rule {
+                tier,
+                rule: self.rule.clone(),
+            },
+        }
+    }
 }
 
 /// A manual-mode policy with every shipped group on but none of their patterns.
@@ -681,8 +796,8 @@ impl Policy {
     pub(crate) fn new(mode: Mode, deny: Vec<Rule>, ask: Vec<Rule>, allow: Vec<Rule>) -> Self {
         Self {
             mode,
-            deny,
-            ask,
+            deny: deny.into_iter().map(TierRule::configured).collect(),
+            ask: ask.into_iter().map(TierRule::configured).collect(),
             allow,
             ..Self::default()
         }
@@ -693,8 +808,8 @@ impl Policy {
     /// resolves, an anchored one from each anchor directory of `workspace`.
     pub(crate) fn resolve(
         mode: Mode,
-        mut deny: Vec<Rule>,
-        mut ask: Vec<Rule>,
+        deny: Vec<Rule>,
+        ask: Vec<Rule>,
         allow: Vec<Rule>,
         disabled: &[Shipped],
         workspace: &Workspace,
@@ -704,11 +819,17 @@ impl Policy {
                 .into_iter()
                 .filter(|group| !disabled.contains(group))
         };
+        let mut deny: Vec<TierRule> = deny.into_iter().map(TierRule::configured).collect();
+        let mut ask: Vec<TierRule> = ask.into_iter().map(TierRule::configured).collect();
         for group in enabled() {
             if let Some((tier, rules)) = group.rules()? {
+                let shipped = rules.into_iter().map(|rule| TierRule {
+                    rule,
+                    builtin: Some(group),
+                });
                 match tier {
-                    ShippedTier::Deny => deny.extend(rules),
-                    ShippedTier::Ask => ask.extend(rules),
+                    ShippedTier::Deny => deny.extend(shipped),
+                    ShippedTier::Ask => ask.extend(shipped),
                 }
             }
         }
@@ -717,10 +838,15 @@ impl Policy {
             .iter()
             .map(|anchor| anchor.spelled.clone())
             .collect();
-        let with_prefixes = |rules: Vec<Rule>| {
+        let with_prefixes = |rules: Vec<TierRule>| {
             rules
                 .into_iter()
-                .map(|rule| rule.with_resolved_prefixes(&anchors))
+                .map(|entry| {
+                    Ok(TierRule {
+                        rule: entry.rule.with_resolved_prefixes(&anchors)?,
+                        builtin: entry.builtin,
+                    })
+                })
                 .collect::<Result<Vec<_>>>()
         };
         Ok(Self {
@@ -735,6 +861,10 @@ impl Policy {
 
     pub(crate) const fn mode(&self) -> Mode {
         self.mode
+    }
+
+    pub(crate) const fn set_mode(&mut self, mode: Mode) {
+        self.mode = mode;
     }
 
     pub(crate) fn session_allow(&self) -> &[Rule] {
@@ -776,13 +906,19 @@ impl Policy {
             self.deny
                 .iter()
                 .chain(&self.ask)
+                .map(|entry| &entry.rule)
                 .filter(|rule| rule.class() == PermissionClass::Read)
                 .cloned()
                 .collect(),
         )
     }
 
-    /// Resolves a call to a [`Decision`]. Pure and synchronous: no I/O, no async, no classifier.
+    /// Resolves a call to a [`Decision`], as [`Self::verdict`] does.
+    pub(crate) fn decide(&self, class: PermissionClass, target: &Target<'_>) -> Decision {
+        self.verdict(class, target).decision
+    }
+
+    /// Resolves a call to a [`Verdict`]. Pure and synchronous: no I/O, no async, no classifier.
     ///
     /// Order, stopping at the first match:
     /// 1. A deny rule denies, in every mode.
@@ -797,9 +933,10 @@ impl Policy {
     /// file it writes, or a read of a file it redirects into its input. It asks at step 3 in each
     /// case [`Self::asks`] lists, and step 6 allows it only when it is not opaque and
     /// [`Self::allows_command`] holds.
-    pub(crate) fn decide(&self, class: PermissionClass, target: &Target<'_>) -> Decision {
-        if holds_back(&self.deny, class, target) {
-            return Decision::Deny;
+    pub(crate) fn verdict(&self, class: PermissionClass, target: &Target<'_>) -> Verdict {
+        let verdict = |decision, basis| Verdict { decision, basis };
+        if let Some(rule) = held_by(&self.deny, class, target) {
+            return verdict(Decision::Deny, rule.basis(Tier::Deny));
         }
 
         if self.mode == Mode::Plan
@@ -808,125 +945,204 @@ impl Policy {
                 PermissionClass::Edit | PermissionClass::Exec | PermissionClass::Net
             )
         {
-            return Decision::Deny;
+            return verdict(Decision::Deny, Basis::Mode(Mode::Plan));
         }
 
-        if self.asks(class, target) {
-            return Decision::Ask;
+        if let Some(basis) = self.asks(class, target) {
+            return verdict(Decision::Ask, basis);
         }
 
-        let workspace_edit = class == PermissionClass::Edit
+        if class == PermissionClass::Read {
+            return verdict(Decision::Allow, Basis::Read);
+        }
+        if class == PermissionClass::Edit
             && matches!(
                 target,
                 Target::Path {
                     zone: Zone::Workspace,
                     ..
                 }
-            );
-        if class == PermissionClass::Read || workspace_edit || self.allows(class, target) {
-            return Decision::Allow;
+            )
+        {
+            return verdict(Decision::Allow, Basis::Workspace);
+        }
+        if let Some(basis) = self.allows(class, target) {
+            return verdict(Decision::Allow, basis);
         }
 
-        if self.mode == Mode::Yolo {
+        let fallback = if self.mode == Mode::Yolo {
             Decision::Allow
         } else {
             Decision::Ask
-        }
+        };
+        verdict(fallback, Basis::Mode(self.mode))
     }
 
-    /// Whether the ask tier holds the call: an ask rule matches it, it edits a protected path, or
-    /// it is a command that writes one, reads a file a deny or ask `read` rule matches, or, while
-    /// the `rm` group is on, [removes recursively by force](Segment::removes_recursively_by_force).
-    /// A read whose file a variable names may be any file, so it asks whenever such a rule exists.
-    fn asks(&self, class: PermissionClass, target: &Target<'_>) -> bool {
-        if holds_back(&self.ask, class, target)
-            || (class == PermissionClass::Edit && self.is_protected(target))
+    /// What holds the call in the ask tier: an ask rule, the protected group of a path the call
+    /// edits or a command writes, the [`read` rule](Self::read_holder) for a file a reader opens,
+    /// or the `rm` group for a [forced recursive delete](Segment::removes_recursively_by_force).
+    fn asks(&self, class: PermissionClass, target: &Target<'_>) -> Option<Basis> {
+        if let Some(rule) = held_by(&self.ask, class, target) {
+            return Some(rule.basis(Tier::Ask));
+        }
+        if class == PermissionClass::Edit
+            && let Some(group) = self.protected_group(target)
         {
-            return true;
+            return Some(Basis::Builtin(group));
         }
         let Target::Command(command) = target else {
-            return false;
+            return None;
         };
-        let held = |read: &Access| {
-            let read = read.as_target();
-            holds_back(&self.deny, PermissionClass::Read, &read)
-                || holds_back(&self.ask, PermissionClass::Read, &read)
-        };
-        let reads_held = self
-            .deny
-            .iter()
-            .chain(&self.ask)
-            .any(|rule| rule.class() == PermissionClass::Read);
         command
             .writes()
             .iter()
-            .any(|write| self.is_protected(&write.as_target()))
-            || command.segments().iter().any(|segment| {
-                (reads_held && segment.reads_anything()) || segment.reads().iter().any(held)
-            })
-            || (self.enabled.contains(&Shipped::Rm)
-                && command
+            .find_map(|write| self.protected_group(&write.as_target()))
+            .map(Basis::Builtin)
+            .or_else(|| {
+                command
                     .segments()
                     .iter()
-                    .any(Segment::removes_recursively_by_force))
+                    .find_map(|segment| self.read_holder(segment))
+            })
+            .or_else(|| {
+                (self.enabled.contains(&Shipped::Rm)
+                    && command
+                        .segments()
+                        .iter()
+                        .any(Segment::removes_recursively_by_force))
+                .then_some(Basis::Builtin(Shipped::Rm))
+            })
     }
 
-    /// Whether `target` is a path an enabled protected group holds.
-    fn is_protected(&self, target: &Target<'_>) -> bool {
-        matches!(target, Target::Path { protected, .. }
-            if protected.iter().any(|group| self.enabled.contains(group)))
+    /// The deny or ask `read` rule that holds a file `segment` may read, or the first `read` rule
+    /// of either tier when it may read any file.
+    fn read_holder(&self, segment: &Segment) -> Option<Basis> {
+        let tiers = || {
+            self.deny
+                .iter()
+                .map(|rule| (rule, Tier::Deny))
+                .chain(self.ask.iter().map(|rule| (rule, Tier::Ask)))
+        };
+        segment
+            .reads()
+            .iter()
+            .find_map(|read| {
+                let read = read.as_target();
+                tiers()
+                    .find(|(rule, _)| {
+                        rule.rule
+                            .matches(PermissionClass::Read, &read, MatchDiscipline::Deny)
+                    })
+                    .map(|(rule, tier)| rule.basis(tier))
+            })
+            .or_else(|| {
+                segment
+                    .reads_anything()
+                    .then(|| {
+                        tiers()
+                            .find(|(rule, _)| rule.rule.class() == PermissionClass::Read)
+                            .map(|(rule, tier)| rule.basis(tier))
+                    })
+                    .flatten()
+            })
     }
 
-    /// Whether an allow rule or a session allow rule matches the call.
-    fn allows(&self, class: PermissionClass, target: &Target<'_>) -> bool {
+    /// The enabled protected group that holds `target`, if it is a path one does.
+    fn protected_group(&self, target: &Target<'_>) -> Option<Shipped> {
         match target {
-            Target::Command(command) => self.allows_command(command),
-            _ => self
-                .allow_rules()
-                .any(|rule| rule.matches(class, target, MatchDiscipline::Allow)),
+            Target::Path { protected, .. } => protected
+                .iter()
+                .copied()
+                .find(|group| self.enabled.contains(group)),
+            _ => None,
         }
     }
 
-    /// Whether every part of a command is allowed: it is not opaque and runs at least one simple
-    /// command, each simple command is allowed by a rule or is a known-safe read, and each file it
-    /// writes is inside a workspace root or allowed for editing.
-    fn allows_command(&self, command: &CommandTarget) -> bool {
-        !command.is_opaque()
-            && !command.segments().is_empty()
-            && command.segments().iter().all(|segment| {
-                self.allow_rules().any(|rule| rule.allows(segment))
-                    || segment.safe_reads().is_some()
-            })
-            && command.writes().iter().all(|write| {
-                let write = write.as_target();
-                matches!(
-                    write,
-                    Target::Path {
-                        zone: Zone::Workspace,
-                        ..
-                    }
-                ) || self
-                    .allow_rules()
-                    .any(|rule| rule.matches(PermissionClass::Edit, &write, MatchDiscipline::Allow))
-            })
+    /// The allow rule or session allow rule that matches the call, or for a command what lets
+    /// each of its parts through.
+    fn allows(&self, class: PermissionClass, target: &Target<'_>) -> Option<Basis> {
+        match target {
+            Target::Command(command) => self.allows_command(command),
+            _ => self.allow_rule(|rule| rule.matches(class, target, MatchDiscipline::Allow)),
+        }
     }
 
-    fn allow_rules(&self) -> impl Iterator<Item = &Rule> {
-        self.allow.iter().chain(&self.session_allow)
+    /// What lets every part of a command through, when each does: it is not opaque and runs at
+    /// least one simple command, each simple command is allowed by a rule or is a known-safe read,
+    /// and each file it writes is inside a workspace root or allowed for editing.
+    fn allows_command(&self, command: &CommandTarget) -> Option<Basis> {
+        if command.is_opaque() || command.segments().is_empty() {
+            return None;
+        }
+        let segments = command.segments().iter().map(|segment| {
+            self.allow_rule(|rule| rule.allows(segment))
+                .or_else(|| segment.safe_reads().map(|_| Basis::SafeRead))
+        });
+        let writes = command.writes().iter().map(|write| {
+            let write = write.as_target();
+            if matches!(
+                write,
+                Target::Path {
+                    zone: Zone::Workspace,
+                    ..
+                }
+            ) {
+                Some(Basis::Workspace)
+            } else {
+                self.allow_rule(|rule| {
+                    rule.matches(PermissionClass::Edit, &write, MatchDiscipline::Allow)
+                })
+            }
+        });
+        segments
+            .chain(writes)
+            .collect::<Option<Vec<_>>>()
+            .map(Basis::Command)
+    }
+
+    /// The first allow rule, then the first session allow rule, that `accepts`.
+    fn allow_rule(&self, accepts: impl Fn(&Rule) -> bool) -> Option<Basis> {
+        self.allow
+            .iter()
+            .find(|rule| accepts(rule))
+            .map(|rule| Basis::Rule {
+                tier: Tier::Allow,
+                rule: rule.clone(),
+            })
+            .or_else(|| {
+                self.session_allow
+                    .iter()
+                    .find(|rule| accepts(rule))
+                    .map(|rule| Basis::Session(rule.clone()))
+            })
     }
 }
 
-/// Whether one of the deny or ask `rules` matches the call, or, for a command, an edit of a file it
-/// writes or a read of a file it redirects into its input.
-fn holds_back(rules: &[Rule], class: PermissionClass, target: &Target<'_>) -> bool {
+/// The first of the deny or ask `rules` that matches the call, or, for a command, an edit of a
+/// file it writes or a read of a file it redirects into its input.
+fn held_by<'a>(
+    rules: &'a [TierRule],
+    class: PermissionClass,
+    target: &Target<'_>,
+) -> Option<&'a TierRule> {
     rules
         .iter()
-        .any(|rule| rule.matches(class, target, MatchDiscipline::Deny))
-        || matches!(target, Target::Command(command) if command.writes().iter().any(|write| {
-            holds_back(rules, PermissionClass::Edit, &write.as_target())
-        }) || command.reads().iter().any(|read| {
-            holds_back(rules, PermissionClass::Read, &read.as_target())
-        }))
+        .find(|entry| entry.rule.matches(class, target, MatchDiscipline::Deny))
+        .or_else(|| {
+            let Target::Command(command) = target else {
+                return None;
+            };
+            command
+                .writes()
+                .iter()
+                .find_map(|write| held_by(rules, PermissionClass::Edit, &write.as_target()))
+                .or_else(|| {
+                    command
+                        .reads()
+                        .iter()
+                        .find_map(|read| held_by(rules, PermissionClass::Read, &read.as_target()))
+                })
+        })
 }
 
 /// An approval's "allow for this session" offer: the suggested rule, plus the call that any edit
@@ -1786,6 +2002,59 @@ mod tests {
         assert_eq!(decide(&p, EDIT, &target), Decision::Deny);
     }
 
+    // ── Basis ──
+
+    fn rule_basis(tier: Tier, class: PermissionClass, pattern: &str) -> Basis {
+        Basis::Rule {
+            tier,
+            rule: Rule::parse(class, pattern).unwrap(),
+        }
+    }
+
+    #[test]
+    fn basis_display_names_each_basis_as_a_denial_or_log_cites_it() {
+        let make = Rule::parse(EXEC, "make *").unwrap();
+        for (basis, expected) in [
+            (
+                rule_basis(Tier::Deny, READ, ".env"),
+                "the `deny.read` pattern `.env`",
+            ),
+            (
+                Basis::Session(make.clone()),
+                "the session `allow.exec` pattern `make *`",
+            ),
+            (Basis::Builtin(Shipped::Ssh), "the built-in `ssh` rule"),
+            (Basis::Mode(Mode::Plan), "`plan` mode"),
+            (Basis::Read, "the default for reads"),
+            (
+                Basis::Workspace,
+                "the default for edits inside the workspace",
+            ),
+            (Basis::SafeRead, "a known-safe read"),
+            (
+                Basis::Command(vec![Basis::SafeRead, Basis::Session(make)]),
+                "a known-safe read, the session `allow.exec` pattern `make *`",
+            ),
+        ] {
+            assert_eq!(basis.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn basis_reason_names_the_rule_that_holds_a_call_but_not_the_mode() {
+        assert_eq!(
+            rule_basis(Tier::Ask, EXEC, "git push *")
+                .reason()
+                .as_deref(),
+            Some("Held by the `ask.exec` pattern `git push *`."),
+        );
+        assert_eq!(
+            Basis::Builtin(Shipped::Git).reason().as_deref(),
+            Some("Held by the built-in `git` rule."),
+        );
+        assert_eq!(Basis::Mode(Mode::Manual).reason(), None);
+    }
+
     // ── Policy::resolve ──
 
     #[test]
@@ -2631,6 +2900,170 @@ mod tests {
             assert_eq!(decide(&format!("cat < {key}")), Decision::Deny);
             assert_eq!(decide(&format!("cat {key}")), Decision::Ask);
         });
+    }
+
+    // ── Policy::verdict ──
+
+    fn verdict(policy: &Policy, class: PermissionClass, target: &Access) -> (Decision, Basis) {
+        let verdict = policy.verdict(class, &target.as_target());
+        (verdict.decision, verdict.basis)
+    }
+
+    #[test]
+    fn verdict_names_the_configured_rule_or_default_that_settles_each_call() {
+        let notes = abs("/notes/**");
+        let p = policy(
+            Mode::Manual,
+            &[(READ, ".env")],
+            &[(EXEC, "git push *")],
+            &[(EDIT, &notes)],
+        );
+
+        for (class, target, expected) in [
+            (
+                READ,
+                workspace("/repo/.env", ".env"),
+                (Decision::Deny, rule_basis(Tier::Deny, READ, ".env")),
+            ),
+            (
+                EXEC,
+                command("git push origin"),
+                (Decision::Ask, rule_basis(Tier::Ask, EXEC, "git push *")),
+            ),
+            (
+                READ,
+                outside(&abs("/etc/hosts")),
+                (Decision::Allow, Basis::Read),
+            ),
+            (
+                EDIT,
+                workspace("/repo/a.rs", "a.rs"),
+                (Decision::Allow, Basis::Workspace),
+            ),
+            (
+                EDIT,
+                outside(&abs("/notes/todo.md")),
+                (Decision::Allow, rule_basis(Tier::Allow, EDIT, &notes)),
+            ),
+            (
+                EXEC,
+                command("git status"),
+                (Decision::Ask, Basis::Mode(Mode::Manual)),
+            ),
+        ] {
+            assert_eq!(verdict(&p, class, &target), expected, "{target:?}");
+        }
+    }
+
+    #[test]
+    fn verdict_of_an_allowed_command_names_what_lets_each_part_through() {
+        let make = Rule::parse(EXEC, "make *").unwrap();
+        let mut p = policy(Mode::Manual, &[], &[], &[(EXEC, "cargo test *")]);
+        p.allow_for_session(make.clone());
+
+        let settled = verdict(
+            &p,
+            EXEC,
+            &command("cargo test > out.txt && make all | wc -l"),
+        );
+
+        assert_eq!(
+            settled,
+            (
+                Decision::Allow,
+                Basis::Command(vec![
+                    rule_basis(Tier::Allow, EXEC, "cargo test *"),
+                    Basis::Session(make),
+                    Basis::SafeRead,
+                    Basis::Workspace,
+                ]),
+            ),
+        );
+    }
+
+    #[test]
+    fn verdict_of_a_held_command_names_the_read_rule_or_built_in_group_that_holds_it() {
+        let p = policy(
+            Mode::Manual,
+            &[],
+            &[(READ, "*.pem")],
+            &[(EXEC, "cat *"), (EXEC, "rm *")],
+        );
+        let pem = rule_basis(Tier::Ask, READ, "*.pem");
+
+        for (case, expected) in [
+            ("cat key.pem", pem.clone()),
+            ("cat $F", pem),
+            ("rm -rf build", Basis::Builtin(Shipped::Rm)),
+        ] {
+            assert_eq!(
+                verdict(&p, EXEC, &command(case)),
+                (Decision::Ask, expected),
+                "{case}"
+            );
+        }
+        assert_eq!(
+            verdict(
+                &p,
+                EDIT,
+                &path(
+                    "/repo/.git/config",
+                    Some(".git/config"),
+                    Zone::Workspace,
+                    &[Shipped::Git]
+                ),
+            ),
+            (Decision::Ask, Basis::Builtin(Shipped::Git)),
+        );
+    }
+
+    #[test]
+    fn verdict_credits_a_shipped_pattern_to_its_built_in_group() {
+        let (_dir, base) = temp_cwd();
+        let home = base.join("home");
+        let key = slash_separated(&home.join(".ssh/id_ed25519"));
+        temp_env::with_var(HOME_VAR, Some(&home), || {
+            let workspace = Workspace::new(&base);
+            let p = Policy::resolve(
+                Mode::Yolo,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                &[],
+                &workspace,
+            )
+            .unwrap();
+            let settle = |case: &str| verdict(&p, EXEC, &Access::for_command(case, &workspace));
+
+            assert_eq!(
+                settle(&format!("cat < {key}")),
+                (Decision::Deny, Basis::Builtin(Shipped::Ssh)),
+            );
+            assert_eq!(
+                settle(&format!("cat {key}")),
+                (Decision::Ask, Basis::Builtin(Shipped::Ssh)),
+            );
+        });
+    }
+
+    #[test]
+    fn verdict_names_the_mode_when_it_settles_the_call() {
+        let plan = policy(Mode::Plan, &[], &[], &[(EXEC, "ls")]);
+        let yolo = policy(Mode::Yolo, &[], &[], &[]);
+
+        assert_eq!(
+            verdict(&plan, EXEC, &command("ls")),
+            (Decision::Deny, Basis::Mode(Mode::Plan)),
+        );
+        assert_eq!(
+            verdict(&yolo, EXEC, &command("git status")),
+            (Decision::Allow, Basis::Mode(Mode::Yolo)),
+        );
+        assert_eq!(
+            verdict(&yolo, EDIT, &Access::Name("notes".to_owned())),
+            (Decision::Allow, Basis::Mode(Mode::Yolo)),
+            "an edit that names no path has no protected group",
+        );
     }
 
     // ── SessionGrant::accept ──

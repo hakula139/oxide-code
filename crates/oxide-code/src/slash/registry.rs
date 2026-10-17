@@ -13,6 +13,7 @@ use super::effort::EffortCmd;
 use super::help::HelpCmd;
 use super::init::InitCmd;
 use super::login::{LoginCmd, LogoutCmd};
+use super::mode::ModeCmd;
 use super::model::ModelCmd;
 use super::rename::RenameCmd;
 use super::resume::ResumeCmd;
@@ -69,12 +70,14 @@ impl SlashOutcome {
     }
 }
 
-/// Drives busy-gating: only `ReadOnly` may dispatch mid-turn; the App refuses `Mutating` and
-/// rejects `Unknown` while a stream is in flight.
+/// Drives busy-gating: `ReadOnly` and `Steering` may dispatch mid-turn, while the App refuses
+/// `Mutating` and rejects `Unknown` while a stream is in flight.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum SlashKind {
     /// Pure local read (chat output / modal open). Safe to run during streaming.
     ReadOnly,
+    /// Forwards an op the engine applies to the in-flight turn, such as a permission mode switch.
+    Steering,
     /// Touches session state or forwards an op that races the in-flight client.
     /// Refused until the agent is idle.
     Mutating,
@@ -100,7 +103,7 @@ pub(super) trait SlashCommand: Sync {
 
     fn description(&self) -> &'static str;
 
-    /// Per-form: `ReadOnly` or `Mutating`, never `Unknown`.
+    /// Per-form: `ReadOnly`, `Steering`, or `Mutating`, never `Unknown`.
     fn classify(&self, _args: &str) -> SlashKind {
         SlashKind::ReadOnly
     }
@@ -137,6 +140,7 @@ pub(super) const BUILT_INS: &[&dyn SlashCommand] = &[
     &InitCmd,
     &LoginCmd,
     &LogoutCmd,
+    &ModeCmd,
     &ModelCmd,
     &RenameCmd,
     &ResumeCmd,

@@ -10,8 +10,8 @@ use super::stdio::{Approver, StdioSink, Unattended, render_op, render_queued};
 use super::{Exit, shutdown_signal};
 use crate::command;
 use crate::engine::{Engine, EngineHandle, TurnEnd};
-use crate::permission::SessionGrant;
 use crate::permission::rule::Rule;
+use crate::permission::{Basis, SessionGrant};
 use crate::protocol::{Decision, Event, EventSink, Op};
 use crate::slash::{self, Parsed};
 use crate::tool::{ApprovalBody, ApprovalPreview};
@@ -148,12 +148,13 @@ impl<R: AsyncBufRead + Unpin, W: Write> Approver for Prompter<'_, R, W> {
     async fn decide(
         &mut self,
         preview: &ApprovalPreview,
+        basis: &Basis,
         grant: Option<&SessionGrant>,
     ) -> Decision {
         if !self.attended {
-            return Unattended.decide(preview, grant).await;
+            return Unattended.decide(preview, basis, grant).await;
         }
-        _ = write_preview(&mut self.out, preview);
+        _ = write_preview(&mut self.out, preview, basis);
         let choices = if grant.is_some() {
             GRANT_CHOICES
         } else {
@@ -223,8 +224,9 @@ impl<R: AsyncBufRead + Unpin, W: Write> Prompter<'_, R, W> {
     }
 }
 
-/// Writes the call `preview` shows, one line per command line or diff row.
-fn write_preview(out: &mut impl Write, preview: &ApprovalPreview) -> io::Result<()> {
+/// Writes the call `preview` shows, one line per command line or diff row, then why `basis` made
+/// it ask when a rule holds it.
+fn write_preview(out: &mut impl Write, preview: &ApprovalPreview, basis: &Basis) -> io::Result<()> {
     writeln!(out, "{} needs approval:", shown(&preview.title))?;
     match &preview.body {
         ApprovalBody::Command(command) => {
@@ -242,6 +244,9 @@ fn write_preview(out: &mut impl Write, preview: &ApprovalPreview) -> io::Result<
                 }
             }
         }
+    }
+    if let Some(reason) = basis.reason() {
+        writeln!(out, "{}", shown(&reason))?;
     }
     Ok(())
 }
@@ -271,7 +276,7 @@ mod tests {
     use crate::engine::testing::{
         engine, mount_reply, mount_tool_call_once, request_bodies, stopped_engine, with_pinned_home,
     };
-    use crate::permission::{Access, PermissionClass, Policy, Workspace};
+    use crate::permission::{Access, Mode, PermissionClass, Policy, Tier, Workspace};
     use crate::protocol::CapturingSink;
     use crate::session::store::testing::test_store;
     use crate::tool::bash::BashTool;
@@ -301,7 +306,13 @@ mod tests {
             out: Vec::new(),
             attended: true,
         };
-        let decision = prompter.decide(&bash_preview("cargo test"), grant).await;
+        let decision = prompter
+            .decide(
+                &bash_preview("cargo test"),
+                &Basis::Mode(Mode::Manual),
+                grant,
+            )
+            .await;
         (decision, String::from_utf8(prompter.out).unwrap())
     }
 
@@ -508,8 +519,8 @@ mod tests {
             );
             assert_eq!(
                 reports[2],
-                "/help is not a REPL command. The REPL runs /clear, /compact, /effort, /model, \
-                 /rename, /resume. Use //help to send the literal text.",
+                "/help is not a REPL command. The REPL runs /clear, /compact, /effort, /mode, \
+                 /model, /rename, /resume. Use //help to send the literal text.",
             );
         })
         .await;
@@ -696,7 +707,9 @@ mod tests {
             attended: true,
         };
 
-        let decision = prompter.decide(&bash_preview("ls"), None).await;
+        let decision = prompter
+            .decide(&bash_preview("ls"), &Basis::Mode(Mode::Manual), None)
+            .await;
 
         assert_eq!(decision, Decision::Abort);
         let out = String::from_utf8(prompter.out).unwrap();
@@ -706,8 +719,13 @@ mod tests {
     // ── write_preview ──
 
     #[test]
-    fn write_preview_lists_diff_rows_and_escapes_hidden_characters() {
+    fn write_preview_lists_diff_rows_then_the_rule_and_escapes_hidden_characters() {
+        let basis = Basis::Rule {
+            tier: Tier::Ask,
+            rule: Rule::parse(PermissionClass::Edit, "src/\u{200b}*.rs").unwrap(),
+        };
         let mut out = Vec::new();
+
         write_preview(
             &mut out,
             &ApprovalPreview {
@@ -723,6 +741,7 @@ mod tests {
                     }],
                 }]),
             },
+            &basis,
         )
         .unwrap();
 
@@ -732,6 +751,7 @@ mod tests {
                 Edit(src/a.rs) needs approval:
                   - let a = 1;
                   + let a = 2;\u{1b}[2K\u{200b}
+                Held by the `ask.edit` pattern `src/\u{200b}*.rs`.
             "},
         );
     }

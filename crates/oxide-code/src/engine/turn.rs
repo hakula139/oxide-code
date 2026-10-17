@@ -5,7 +5,7 @@
 use anyhow::{Context, Result, anyhow, bail};
 use tokio::sync::mpsc;
 
-use super::abort::{AbortResult, TurnAbort, await_unless_aborted};
+use super::abort::{AbortResult, Inbox, TurnAbort, await_unless_aborted};
 use super::dispatch::{self, DispatchContext};
 use crate::client::{Response, ResponseEvent, StopDetails, StopReason, TokenUsage, Wire};
 use crate::message::{ContentBlock, Message, Role};
@@ -92,8 +92,9 @@ impl TurnOutcome {
 
 /// Drives one user prompt to a final assistant text reply. The loop returns as soon as a round
 /// produces no tool calls, and a `pause_turn` stop re-requests without a new user message.
-/// [`Op::Queue`]s splice in as user messages at round boundaries. Long-running awaits race `ops`
-/// so `Interrupt` / `Shutdown` abort promptly. An abort mid-stream commits none of the reply, while
+/// [`Op::Queue`]s splice in as user messages at round boundaries, and an [`Op::SetMode`] waits in
+/// `inbox` for the next gated call. Long-running awaits race `ops` so `Interrupt` / `Shutdown`
+/// abort promptly. An abort mid-stream commits none of the reply, while
 /// an abort mid-round commits the round with the unfinished calls marked interrupted. Either way
 /// the transcript then ends on [`Message::interruption`].
 /// `max_tool_rounds = None` runs unbounded, and `Some(n)` bails after `n` rounds without a reply.
@@ -109,11 +110,11 @@ pub(super) async fn agent_turn(
     sink: &dyn EventSink,
     session: &SessionHandle,
     ops: &mut mpsc::Receiver<Op>,
+    inbox: &mut Inbox,
     max_tool_rounds: Option<u32>,
     dispatch_ctx: &mut DispatchContext<'_>,
 ) -> TurnOutcome {
     let tool_defs = tools.definitions();
-    let mut pending_prompts: Vec<String> = Vec::new();
     let mut report = TurnReport::default();
 
     for _ in 0..max_tool_rounds.unwrap_or(u32::MAX) {
@@ -121,7 +122,8 @@ pub(super) async fn agent_turn(
         let stream = await_unless_aborted(
             stream_response(client, messages, &tool_defs, prompt, sink, &mut round_usage),
             ops,
-            &mut pending_prompts,
+            inbox,
+            sink,
         )
         .await;
         report.record(round_usage);
@@ -169,7 +171,7 @@ pub(super) async fn agent_turn(
             &parse_errors,
             sink,
             ops,
-            &mut pending_prompts,
+            inbox,
             dispatch_ctx,
         )
         .await;
@@ -189,7 +191,7 @@ pub(super) async fn agent_turn(
         if let Some(abort) = round.abort {
             return interrupt_turn(session, sink, messages, report, abort).await;
         }
-        record_drained_prompts(pending_prompts.drain(..), messages, session, sink).await;
+        record_drained_prompts(inbox.prompts.drain(..), messages, session, sink).await;
     }
 
     // `None` resolves to `u32::MAX`, so this branch is reachable only when the caller set
@@ -679,6 +681,7 @@ mod tests {
             &sink,
             &session,
             &mut inert_ops(),
+            &mut Inbox::default(),
             None,
             &mut yolo_dispatch(),
         )
@@ -718,6 +721,7 @@ mod tests {
             &sink,
             &session,
             &mut inert_ops(),
+            &mut Inbox::default(),
             None,
             &mut yolo_dispatch(),
         )
@@ -753,6 +757,7 @@ mod tests {
             &sink,
             &session,
             &mut inert_ops(),
+            &mut Inbox::default(),
             None,
             &mut yolo_dispatch(),
         )
@@ -793,6 +798,7 @@ mod tests {
             &sink,
             &session,
             &mut inert_ops(),
+            &mut Inbox::default(),
             None,
             &mut yolo_dispatch(),
         )
@@ -823,6 +829,7 @@ mod tests {
             &sink,
             &session,
             &mut inert_ops(),
+            &mut Inbox::default(),
             None,
             &mut yolo_dispatch(),
         )
@@ -902,6 +909,7 @@ mod tests {
             &sink,
             &session,
             &mut inert_ops(),
+            &mut Inbox::default(),
             None,
             &mut yolo_in(cwd.path()),
         )
@@ -965,6 +973,7 @@ mod tests {
             &sink,
             &session,
             &mut inert_ops(),
+            &mut Inbox::default(),
             None,
             &mut yolo_dispatch(),
         )
@@ -1008,6 +1017,7 @@ mod tests {
             &sink,
             &session,
             &mut rx,
+            &mut Inbox::default(),
             None,
             &mut yolo_dispatch(),
         )
@@ -1067,6 +1077,7 @@ mod tests {
             &sink,
             &session,
             &mut rx,
+            &mut Inbox::default(),
             None,
             &mut yolo_dispatch(),
         )
@@ -1118,6 +1129,7 @@ mod tests {
             &sink,
             &session,
             &mut rx,
+            &mut Inbox::default(),
             None,
             &mut yolo_dispatch(),
         )
@@ -1140,6 +1152,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<Op>(1);
         let prompt = empty_prompt();
         let mut dispatch_ctx = yolo_dispatch();
+        let mut inbox = Inbox::default();
 
         let (outcome, ()) = tokio::join!(
             agent_turn(
@@ -1150,6 +1163,7 @@ mod tests {
                 &sink,
                 &session,
                 &mut rx,
+                &mut inbox,
                 None,
                 &mut dispatch_ctx,
             ),
@@ -1193,6 +1207,7 @@ mod tests {
             &sink,
             &session,
             &mut rx,
+            &mut Inbox::default(),
             None,
             &mut yolo_dispatch(),
         )
@@ -1224,6 +1239,7 @@ mod tests {
             &sink,
             &session,
             &mut rx,
+            &mut Inbox::default(),
             None,
             &mut yolo_dispatch(),
         )
@@ -1274,6 +1290,7 @@ mod tests {
                 &sink,
                 &session,
                 &mut rx,
+                &mut Inbox::default(),
                 None,
                 &mut yolo_dispatch(),
             )
@@ -1308,6 +1325,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<Op>(1);
         let prompt = empty_prompt();
         let mut dispatch_ctx = yolo_dispatch();
+        let mut inbox = Inbox::default();
 
         let (turn_result, ()) = tokio::join!(
             agent_turn(
@@ -1318,6 +1336,7 @@ mod tests {
                 &sink,
                 &session,
                 &mut rx,
+                &mut inbox,
                 None,
                 &mut dispatch_ctx,
             ),
@@ -1401,6 +1420,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<Op>(1);
         let prompt = empty_prompt();
         let mut dispatch_ctx = yolo_dispatch();
+        let mut inbox = Inbox::default();
 
         let (outcome, ()) = tokio::join!(
             agent_turn(
@@ -1411,6 +1431,7 @@ mod tests {
                 &sink,
                 &session,
                 &mut rx,
+                &mut inbox,
                 None,
                 &mut dispatch_ctx,
             ),
@@ -1454,6 +1475,7 @@ mod tests {
             &sink,
             &session,
             &mut inert_ops(),
+            &mut Inbox::default(),
             None,
             &mut yolo_dispatch(),
         )
@@ -1497,6 +1519,7 @@ mod tests {
             &sink,
             &session,
             &mut inert_ops(),
+            &mut Inbox::default(),
             None,
             &mut yolo_dispatch(),
         )
@@ -1553,6 +1576,7 @@ mod tests {
             &sink,
             &session,
             &mut inert_ops(),
+            &mut Inbox::default(),
             Some(CAP),
             &mut yolo_dispatch(),
         )
@@ -1588,6 +1612,7 @@ mod tests {
             &sink,
             &session,
             &mut inert_ops(),
+            &mut Inbox::default(),
             Some(CAP),
             &mut yolo_dispatch(),
         )
@@ -1627,6 +1652,7 @@ mod tests {
             &sink,
             &session,
             &mut inert_ops(),
+            &mut Inbox::default(),
             None,
             &mut yolo_dispatch(),
         )
@@ -1653,6 +1679,7 @@ mod tests {
             &sink,
             &session,
             &mut inert_ops(),
+            &mut Inbox::default(),
             None,
             &mut yolo_dispatch(),
         )
@@ -1689,6 +1716,7 @@ mod tests {
             &sink,
             &session,
             &mut inert_ops(),
+            &mut Inbox::default(),
             None,
             &mut yolo_dispatch(),
         )
@@ -1730,6 +1758,7 @@ mod tests {
             &sink,
             &session,
             &mut inert_ops(),
+            &mut Inbox::default(),
             None,
             &mut yolo_dispatch(),
         )
@@ -1766,6 +1795,7 @@ mod tests {
             &sink,
             &session,
             &mut inert_ops(),
+            &mut Inbox::default(),
             None,
             &mut yolo_dispatch(),
         )
@@ -1800,6 +1830,7 @@ mod tests {
             &sink,
             &session,
             &mut inert_ops(),
+            &mut Inbox::default(),
             None,
             &mut yolo_dispatch(),
         )
@@ -1849,6 +1880,7 @@ mod tests {
             &sink,
             &session,
             &mut inert_ops(),
+            &mut Inbox::default(),
             None,
             &mut yolo_dispatch(),
         )
@@ -1894,6 +1926,7 @@ mod tests {
             &sink,
             &session,
             &mut inert_ops(),
+            &mut Inbox::default(),
             None,
             &mut yolo_dispatch(),
         )
@@ -1922,6 +1955,7 @@ mod tests {
             &sink,
             &session,
             &mut inert_ops(),
+            &mut Inbox::default(),
             None,
             &mut yolo_dispatch(),
         )
@@ -1996,6 +2030,7 @@ mod tests {
             &sink,
             &session,
             &mut inert_ops(),
+            &mut Inbox::default(),
             None,
             &mut yolo_dispatch(),
         )
@@ -2171,6 +2206,7 @@ mod tests {
             &sink,
             &session,
             &mut inert_ops(),
+            &mut Inbox::default(),
             None,
             &mut dispatch_with(
                 crate::permission::Mode::Manual,
@@ -2193,7 +2229,7 @@ mod tests {
         assert_eq!(tool_use_id, "tool_1");
         assert!(*is_error);
         assert!(
-            content.contains("denied by the permission policy"),
+            content.starts_with("The echo call was denied by the `deny.exec` pattern `*`."),
             "the echo must not have run: {content}",
         );
         assert!(
@@ -2203,6 +2239,58 @@ mod tests {
                 .any(|e| matches!(e, Event::ApprovalRequested { .. })),
             "a deny rule never prompts",
         );
+    }
+
+    #[tokio::test]
+    async fn agent_turn_mode_switch_arriving_mid_turn_gates_the_next_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let client = FakeClient::new(vec![
+            tool_use_turn("tool_1", "echo", r#"{"v":42}"#),
+            text_turn("Done"),
+        ]);
+        let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
+        let sink = CapturingSink::new();
+        let mut messages = vec![Message::user("run echo")];
+        let (tx, mut rx) = mpsc::channel::<Op>(1);
+        tx.try_send(Op::SetMode(crate::permission::Mode::Plan))
+            .unwrap();
+        let mut inbox = Inbox::default();
+        let mut dispatch_ctx = yolo_dispatch();
+
+        let outcome = agent_turn(
+            &client,
+            &tools,
+            &mut messages,
+            &empty_prompt(),
+            &sink,
+            &session,
+            &mut rx,
+            &mut inbox,
+            None,
+            &mut dispatch_ctx,
+        )
+        .await;
+
+        assert!(outcome.result.is_ok());
+        assert_eq!(dispatch_ctx.policy.mode(), crate::permission::Mode::Plan);
+        assert_eq!(inbox.mode, None, "the gate took the switch");
+        let ContentBlock::ToolResult { content, .. } = &messages[2].content[0] else {
+            panic!("expected ToolResult, got {:?}", messages[2].content[0]);
+        };
+        assert!(
+            content.starts_with("The echo call was denied by `plan` mode."),
+            "{content}"
+        );
+        assert!(
+            matches!(
+                sink.events().first(),
+                Some(Event::ModeChanged(crate::permission::Mode::Plan))
+            ),
+            "the switch confirms on receipt: {:?}",
+            sink.events(),
+        );
+        drop(tx);
     }
 
     #[tokio::test]
@@ -2216,7 +2304,7 @@ mod tests {
             (Decision::Approve, r#"{"v":42}"#, false),
             (
                 Decision::Deny,
-                "The echo call was denied by the permission policy.",
+                "The echo call was denied by the user.",
                 false,
             ),
             (
@@ -2249,6 +2337,7 @@ mod tests {
                 &sink,
                 &session,
                 &mut ops,
+                &mut Inbox::default(),
                 None,
                 &mut dispatch_with(
                     crate::permission::Mode::Manual,
@@ -2325,6 +2414,7 @@ mod tests {
             &sink,
             &session,
             &mut ops,
+            &mut Inbox::default(),
             None,
             &mut dispatch_ctx,
         )
@@ -2351,7 +2441,7 @@ mod tests {
         };
         assert!(*is_error);
         assert!(
-            content.contains("denied by the permission policy"),
+            content.starts_with("The write call was denied by the user."),
             "{content}"
         );
     }

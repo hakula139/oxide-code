@@ -8,6 +8,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::client::{RateLimitWindow, RateLimits};
 use crate::config::{Effort, StatusLineSegment};
+use crate::permission::Mode;
 use crate::protocol::UsageSnapshot;
 use crate::session::display::id_prefix;
 use crate::tool::tasks::Progress;
@@ -157,6 +158,8 @@ impl StatusLine {
                 .rate_limits
                 .and_then(|limits| rate_limit_label("7d", limits.seven_day))
                 .map(|(label, style)| Span::styled(label, Self::segment_style(theme, style))),
+            StatusLineSegment::PermissionMode => permission_mode_label(state.permission_mode)
+                .map(|(label, style)| Span::styled(label, Self::segment_style(theme, style))),
             StatusLineSegment::RunState => Some(state.status_span.clone()),
             StatusLineSegment::QueuedPrompts => (state.queued_prompts > 0).then(|| {
                 Span::styled(
@@ -215,6 +218,7 @@ pub(super) struct StatusLineState<'a> {
     pub(super) git_branch: Option<&'a str>,
     pub(super) pull_request: Option<&'a PullRequest>,
     pub(super) rate_limits: Option<RateLimits>,
+    pub(super) permission_mode: Mode,
     /// Pre-rendered run-state segment from the parent component.
     pub(super) status_span: Span<'static>,
     pub(super) queued_prompts: usize,
@@ -308,9 +312,10 @@ fn segment_utility(segment: StatusLineSegment) -> u8 {
         StatusLineSegment::WeeklyLimit => 12,
         StatusLineSegment::FiveHourLimit => 13,
         StatusLineSegment::ContextUsed => 14,
-        StatusLineSegment::Model => 15,
-        StatusLineSegment::ModelWithEffort => 16,
-        StatusLineSegment::RunState => 17,
+        StatusLineSegment::PermissionMode => 15,
+        StatusLineSegment::Model => 16,
+        StatusLineSegment::ModelWithEffort => 17,
+        StatusLineSegment::RunState => 18,
     }
 }
 
@@ -364,6 +369,14 @@ fn usage_style(percent: f64) -> SegmentStyle {
         SegmentStyle::Warning
     } else {
         SegmentStyle::Text
+    }
+}
+
+fn permission_mode_label(mode: Mode) -> Option<(&'static str, SegmentStyle)> {
+    match mode {
+        Mode::Manual => None,
+        Mode::Plan => Some(("Mode: plan", SegmentStyle::Accent)),
+        Mode::Yolo => Some(("Mode: yolo", SegmentStyle::Error)),
     }
 }
 
@@ -432,6 +445,7 @@ mod tests {
             git_branch: None,
             pull_request: None,
             rate_limits: None,
+            permission_mode: Mode::Manual,
             status_span: Span::raw("Ready"),
             queued_prompts: 0,
             task_progress: None,
@@ -832,6 +846,33 @@ mod tests {
     }
 
     #[test]
+    fn render_permission_mode_flags_plan_and_yolo_and_hides_manual() {
+        let rendered = |permission_mode| {
+            render(
+                vec![
+                    StatusLineSegment::PermissionMode,
+                    StatusLineSegment::RunState,
+                ],
+                &StatusLineState {
+                    permission_mode,
+                    ..bare_state()
+                },
+            )
+        };
+        let theme = Theme::default();
+
+        let plan = rendered(Mode::Plan);
+        assert_eq!(text_of(&plan), "  Mode: plan │ Ready");
+        assert_eq!(plan.line.spans[1].style, theme.accent());
+
+        let yolo = rendered(Mode::Yolo);
+        assert_eq!(text_of(&yolo), "  Mode: yolo │ Ready");
+        assert_eq!(yolo.line.spans[1].style, theme.error());
+
+        assert_eq!(text_of(&rendered(Mode::Manual)), "  Ready");
+    }
+
+    #[test]
     fn render_queued_prompts_counts_the_queue_in_the_muted_style_and_hides_an_empty_one() {
         let rendered = |queued_prompts| {
             render(
@@ -932,6 +973,7 @@ mod tests {
             StatusLineSegment::WeeklyLimit,
             StatusLineSegment::FiveHourLimit,
             StatusLineSegment::ContextUsed,
+            StatusLineSegment::PermissionMode,
             StatusLineSegment::Model,
             StatusLineSegment::ModelWithEffort,
             StatusLineSegment::RunState,

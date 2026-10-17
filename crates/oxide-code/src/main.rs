@@ -33,7 +33,7 @@ use driver::headless::OutputFormat;
 use driver::tui::Startup;
 use engine::{Engine, Toolbox};
 use file_tracker::FileTracker;
-use permission::ReadFilter;
+use permission::{Mode, ReadFilter};
 use session::display::archive_notice;
 use session::handle::ResumedSession;
 use session::list_view::render_list;
@@ -87,6 +87,10 @@ struct Cli {
     /// List recent sessions and exit.
     #[arg(short, long, conflicts_with_all = ["prompt", "continue"])]
     list: bool,
+
+    /// Start in this permission mode, overriding `permission.mode` and `OX_PERMISSION_MODE`.
+    #[arg(long, value_enum, value_name = "MODE")]
+    mode: Option<Mode>,
 
     /// Disable the TUI and use a bare REPL instead.
     #[arg(long)]
@@ -148,7 +152,10 @@ async fn async_main() -> Result<Exit> {
         return Ok(Exit::Success);
     }
 
-    let config = Config::load(&cwd, tui_mode).await?;
+    let mut config = Config::load(&cwd, tui_mode).await?;
+    if let Some(mode) = cli.mode {
+        config.apply_mode_flag(mode);
+    }
     let show_thinking = config.show_thinking;
     let theme = tui_mode
         .then(|| tui::theme::resolve_theme(&config.theme))
@@ -270,6 +277,18 @@ mod tests {
         assert_eq!(
             missing.map(|error| error.kind()),
             Some(ErrorKind::MissingRequiredArgument),
+        );
+    }
+
+    #[test]
+    fn cli_mode_takes_a_permission_mode() {
+        let cli = Cli::try_parse_from(["ox", "--mode", "plan"]).unwrap();
+        assert_eq!(cli.mode, Some(Mode::Plan));
+        assert_eq!(Cli::try_parse_from(["ox"]).unwrap().mode, None);
+        let invalid = Cli::try_parse_from(["ox", "--mode", "auto"]).err();
+        assert_eq!(
+            invalid.map(|error| error.kind()),
+            Some(ErrorKind::InvalidValue)
         );
     }
 

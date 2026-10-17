@@ -4,12 +4,13 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 ## Implementation
 
-17 built-ins: `/archive`, `/clear`, `/compact`, `/config`, `/delete`, `/diff`, `/effort`, `/help`, `/init`, `/login`, `/logout`, `/model`, `/rename`, `/resume`, `/status`, `/theme`, `/unarchive`. Each implements `SlashCommand` in a `slash/<name>.rs` file, which a pair such as `/login` and `/logout` shares. Adding one is an impl plus an entry in `BUILT_INS` (alphabetical).
+18 built-ins: `/archive`, `/clear`, `/compact`, `/config`, `/delete`, `/diff`, `/effort`, `/help`, `/init`, `/login`, `/logout`, `/mode`, `/model`, `/rename`, `/resume`, `/status`, `/theme`, `/unarchive`. Each implements `SlashCommand` in a `slash/<name>.rs` file, which a pair such as `/login` and `/logout` shares. Adding one is an impl plus an entry in `BUILT_INS` (alphabetical).
 
 - `/clear` rolls the session UUID and clears chat + file tracker.
 - `/compact` compresses the visible transcript into a summary and resets the continuation chain.
 - `/model` swaps the active model mid-session via `Engine::set_model`.
 - `/effort` sets an explicit effort tier.
+- `/mode` switches the permission mode, even mid-turn.
 - `/theme` swaps the TUI palette mid-session, with bare opening a live-preview list picker.
 - `/init` asks the model to create the project's AGENTS.md or CLAUDE.md, picking the file first when neither exists, or to propose changes to the existing ones as a diff. Full design: [init.md](init.md).
 - `/rename` sets the session title manually and locks out the AI title generator. Bare opens a single-line editor pre-filled with the current title.
@@ -40,15 +41,15 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 10. **Built-in commands only.** `BUILT_INS` is the entire registry, with no discovery of user-defined commands. Skills as commands are tracked in [#163](https://github.com/hakula139/oxide-code/issues/163).
 
-11. **Read-only commands fast-path the busy turn.** `classify` defaults to `SlashKind::ReadOnly`, and the dispatcher runs them client-side even when input is disabled. State-mutating commands override to `SlashKind::Mutating` and refuse mid-turn.
+11. **Read-only commands fast-path the busy turn.** `classify` defaults to `SlashKind::ReadOnly`, and the dispatcher runs them client-side even when input is disabled, discarding any action they forward. State-mutating commands override to `SlashKind::Mutating` and refuse mid-turn. `SlashKind::Steering` marks a form whose forwarded op the engine applies to the turn in flight, so the dispatcher sends it mid-turn too. `/mode <mode>` is the only one.
 
 12. **One trait return carries every effect: `SlashOutcome`.** `Forward(Action)` hands a state-mutating action back to the App, which applies a TUI-only action locally and sends an op to the engine. `Modal(_)` opens a modal, and `SystemMessage` / `GitDiff` print into chat. A failure returns `Err(String)`, which the dispatcher prefixes with the typed command name.
 
 13. **Commands read a borrowed `SlashContext` and write nothing.** The context carries `LiveSessionInfo` and the live session title. The App applies the returned outcome in one place on both the idle and busy paths, so no command reaches into `ChatView` or the modal stack. See [modals.md](modals.md) for the full modal design.
 
-14. **Modal-only commands suppress their own echo.** `SlashCommand::echoes_input(args) -> bool` defaults to true. Modal-only forms (`/status`, `/config`, `/help`, plus bare `/effort`, `/model`, `/rename`, `/resume`, and `/theme`) override to false, since the modal IS the response and the typed `> /foo` line would orphan in history once the modal closes. Typed forms keep echoing because the swap-confirmation system message anchors the pair.
+14. **Modal-only commands suppress their own echo.** `SlashCommand::echoes_input(args) -> bool` defaults to true. Modal-only forms (`/status`, `/config`, `/help`, plus bare `/effort`, `/mode`, `/model`, `/rename`, `/resume`, and `/theme`) override to false, since the modal IS the response and the typed `> /foo` line would orphan in history once the modal closes. Typed forms keep echoing because the swap-confirmation system message anchors the pair.
 
-15. **Typed forms parse in core, so the bare REPL runs them too.** `command::parse` turns the typed forms of `/clear`, `/compact`, `/effort`, `/model`, `/rename`, and `/resume` into the `Op` each one runs. The TUI commands call the same parsers and add what needs the TUI: the pickers and modals behind the bare forms, and a check that rejects `/effort` before sending it when the live model has no effort tier. `slash::typed_op` resolves aliases for the `--no-tui` REPL, which sends the op and renders until `TurnEnd::of` reads its terminal event, so an effort pick the model has no tier for fails there. The REPL rejects any other command with a message naming the commands it runs, and a bare form that needs an argument gets its usage.
+15. **Typed forms parse in core, so the bare REPL runs them too.** `command::parse` turns the typed forms of `/clear`, `/compact`, `/effort`, `/mode`, `/model`, `/rename`, and `/resume` into the `Op` each one runs. The TUI commands call the same parsers and add what needs the TUI: the pickers and modals behind the bare forms, and a check that rejects `/effort` before sending it when the live model has no effort tier. `slash::typed_op` resolves aliases for the `--no-tui` REPL, which sends the op and renders until `TurnEnd::of` reads its terminal event, so an effort pick the model has no tier for fails there. The REPL rejects any other command with a message naming the commands it runs, and a bare form that needs an argument gets its usage.
 
 ## Per-Command Notes
 
@@ -63,6 +64,8 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 - **`/model`**: Bare opens the combined picker ([modals.md](modals.md)). `/model <arg>` resolves an exact catalogue id first, then a unique substring, so `opus`, `sonnet`, and `haiku` act as aliases. Both forms are mutating and idle-gated because they can emit `Op::SetModel`, which re-resolves the current effort against the new model.
 
 - **`/effort`**: Bare opens the Speed ↔ Intelligence slider ([modals.md](modals.md)), since a two-axis picker would force users through models they didn't mean to change. `/effort <level>` accepts the five concrete tiers, with no `auto` state. Both forms are mutating and idle-gated because they can emit `Op::SetModel`.
+
+- **`/mode`**: Bare opens a list picker of the three permission modes ([modals.md](modals.md)), and `/mode <mode>` forwards `Op::SetMode` directly. Bare is `ReadOnly`, so its picker opens mid-turn and submits the op as a modal action. Typed is `Steering`, so the dispatcher forwards its op mid-turn. Either switch applies from the turn's next gated call. Shift+Tab sends the same op. [permissions.md](../tools/permissions.md#switching-modes) covers how the engine applies it.
 
 - **`/theme`**: Bare opens a live-preview list picker ([modals.md](modals.md)) over the built-in palettes. Up / Down repaints the TUI in the candidate, and Esc snaps back. `/theme <name>` validates against the curated roster and swaps directly. Custom file-path themes aren't accepted via the slash form.
 
@@ -84,10 +87,10 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 ## Sources
 
-- `crates/oxide-code/src/command.rs`: `parse` and the typed forms of `/clear`, `/compact`, `/effort`, `/model`, `/rename`, and `/resume`, plus the model resolver.
+- `crates/oxide-code/src/command.rs`: `parse` and the typed forms of `/clear`, `/compact`, `/effort`, `/mode`, `/model`, `/rename`, and `/resume`, plus the model resolver.
 - `crates/oxide-code/src/driver/repl.rs`: `command_op`, which runs typed slash commands in the bare REPL.
 - `crates/oxide-code/src/driver/stdio.rs`: `render_op`, plus the `StdioSink` confirmations for the session and config events.
-- `crates/oxide-code/src/engine.rs`: `Engine::run` arms for `Op::Clear` and `Op::SetModel`, `Engine::set_model`, which re-resolves the compaction threshold for the new model, `Engine::archive`, which waits for the archive entry to reach disk before rolling the session, and `TurnEnd::of`.
+- `crates/oxide-code/src/engine.rs`: `Engine::run` arms for `Op::Clear`, `Op::SetModel`, and `Op::SetMode`, `Engine::set_model`, which re-resolves the compaction threshold for the new model, `Engine::archive`, which waits for the archive entry to reach disk before rolling the session, and `TurnEnd::of`.
 - `crates/oxide-code/src/session/display.rs`: shared `id_prefix`, `display_title`, and `format_metadata_line` for the picker row and delete confirm modal, plus `archive_notice`.
 - `crates/oxide-code/src/session/resolver.rs`: `resolve_prefix_to_info` checks the current project first, widens the search on a miss, and returns a typed `ResolveError` that the CLI prints as is and slash commands rephrase. `resolve_saved_prefix` distinguishes live-only matches for `/archive`, `/unarchive`, and `/delete`.
 - `crates/oxide-code/src/session/saved.rs`: `set_archived` and `delete`, shared by the typed commands and the `/resume` picker, which refuse the live session and word each failure for the user.
@@ -105,9 +108,10 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 - `crates/oxide-code/src/slash/help.rs`: `/help` row builder plus `KvOverview` constructor.
 - `crates/oxide-code/src/slash/init.rs`: `InitCmd`, the file picker, and the create and update prompts.
 - `crates/oxide-code/src/slash/login.rs`: `LoginCmd` and `LogoutCmd`.
+- `crates/oxide-code/src/slash/mode.rs`: `ModeCmd` plus `ModePicker`.
 - `crates/oxide-code/src/slash/model.rs`: `ModelCmd`.
 - `crates/oxide-code/src/slash/picker.rs`: combined model + effort picker modal.
-- `crates/oxide-code/src/slash/registry.rs`: `SlashCommand` trait, `BUILT_INS`, `SlashOutcome`.
+- `crates/oxide-code/src/slash/registry.rs`: `SlashCommand` trait, `BUILT_INS`, `SlashKind`, `SlashOutcome`.
 - `crates/oxide-code/src/slash/rename.rs`: `RenameCmd` plus `RenameModal` editor.
 - `crates/oxide-code/src/slash/resume.rs`: `ResumeCmd` plus `ResumePicker` (see `resume.md`).
 - `crates/oxide-code/src/slash/sessions.rs`: `open_store` and `resolve_error_message`, shared by the session commands.

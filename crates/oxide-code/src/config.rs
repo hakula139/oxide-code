@@ -105,6 +105,12 @@ impl ConfigSnapshot {
         self.effort = effort;
         self.compaction.auto = auto_compaction;
     }
+
+    /// Applies a `/mode` or Shift+Tab switch, which `/config` then credits to the session.
+    pub(crate) fn apply_mode(&mut self, mode: Mode) {
+        self.permission_mode = mode;
+        self.provenance.permission_mode = Source::Session;
+    }
 }
 
 // ── Effort ──
@@ -235,6 +241,7 @@ pub(crate) enum StatusLineSegment {
     SessionCost,
     FiveHourLimit,
     WeeklyLimit,
+    PermissionMode,
     RunState,
     QueuedPrompts,
     TaskProgress,
@@ -260,6 +267,7 @@ impl StatusLineSegment {
         (Self::SessionCost, "session-cost"),
         (Self::FiveHourLimit, "five-hour-limit"),
         (Self::WeeklyLimit, "weekly-limit"),
+        (Self::PermissionMode, "permission-mode"),
         (Self::RunState, "run-state"),
         (Self::QueuedPrompts, "queued-prompts"),
         (Self::TaskProgress, "task-progress"),
@@ -277,6 +285,7 @@ impl StatusLineSegment {
         Self::ModelWithEffort,
         Self::ContextUsed,
         Self::SessionCost,
+        Self::PermissionMode,
         Self::RunState,
         Self::ThreadTitle,
     ];
@@ -471,6 +480,12 @@ impl Config {
             theme,
             provenance,
         })
+    }
+
+    /// Applies `--mode`, which overrides the config files and `OX_PERMISSION_MODE`.
+    pub(crate) fn apply_mode_flag(&mut self, mode: Mode) {
+        self.permission.set_mode(mode);
+        self.provenance.permission_mode = Source::Flag("--mode");
     }
 
     /// Descriptors for `/config` and `/status`, minus the auth secret.
@@ -890,6 +905,18 @@ mod tests {
         snap.apply_swap(opus, Some(Effort::Medium), None, auto);
         assert_eq!(snap.provenance.effort, Source::Default);
         assert_eq!(snap.effort, Some(Effort::Medium));
+    }
+
+    // ── ConfigSnapshot::apply_mode ──
+
+    #[test]
+    fn apply_mode_marks_the_switch_as_session_set() {
+        let mut snap = sample_config().snapshot();
+
+        snap.apply_mode(Mode::Plan);
+
+        assert_eq!(snap.permission_mode, Mode::Plan);
+        assert_eq!(snap.provenance.permission_mode, Source::Session);
     }
 
     // ── Effort ──
@@ -2261,6 +2288,20 @@ mod tests {
                 ..Provenance::default()
             },
         );
+    }
+
+    // ── Config::apply_mode_flag ──
+
+    #[test]
+    fn apply_mode_flag_sets_the_gate_mode_and_credits_the_flag() {
+        let mut config = sample_config();
+
+        config.apply_mode_flag(Mode::Yolo);
+
+        assert_eq!(config.permission.mode(), Mode::Yolo);
+        let snap = config.snapshot();
+        assert_eq!(snap.permission_mode, Mode::Yolo);
+        assert_eq!(snap.provenance.permission_mode, Source::Flag("--mode"));
     }
 
     // ── Config::snapshot ──

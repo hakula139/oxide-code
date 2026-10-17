@@ -1,8 +1,9 @@
 //! CLI startup, headless session persistence, and session-list output.
 
+use std::fmt::Write as _;
 use std::process::{Command, Stdio};
 
-use indoc::indoc;
+use indoc::{indoc, writedoc};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -184,4 +185,89 @@ async fn headless_rejected_request_preserves_branch_and_user_message() {
             "content": [{"type": "text", "text": "hello"}],
         })],
     );
+}
+
+#[tokio::test]
+async fn headless_mode_flag_overrides_the_configured_mode() {
+    let server = MockServer::start().await;
+    let start = serde_json::json!({"type": "message_start", "message": {"id": "msg_1", "model": "claude-opus-5-5", "usage": {"input_tokens": 1, "output_tokens": 0}}});
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(sse(&[
+            start.clone(),
+            serde_json::json!({"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "toolu_1", "name": "bash"}}),
+            serde_json::json!({"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": r#"{"command":"ls"}"#}}),
+            serde_json::json!({"type": "content_block_stop", "index": 0}),
+            serde_json::json!({"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 1}}),
+            serde_json::json!({"type": "message_stop"}),
+        ]))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(sse(&[
+            start,
+            serde_json::json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": "Done."}}),
+            serde_json::json!({"type": "content_block_stop", "index": 0}),
+            serde_json::json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 1}}),
+            serde_json::json!({"type": "message_stop"}),
+        ]))
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let config_dir = dir.path().join("config/ox");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "[permission]\nmode = \"yolo\"\n",
+    )
+    .unwrap();
+
+    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_ox"))
+        .args(["-p", "list the files", "--mode", "plan"])
+        .current_dir(dir.path())
+        .env("HOME", dir.path())
+        .env("XDG_CONFIG_HOME", dir.path().join("config"))
+        .env("XDG_DATA_HOME", dir.path().join("data"))
+        .env("XDG_STATE_HOME", dir.path().join("state"))
+        .env("ANTHROPIC_AUTH_TOKEN", "test-token")
+        .env("ANTHROPIC_BASE_URL", server.uri())
+        .env_remove("OX_PERMISSION_MODE")
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2, "the denial goes back to the model");
+    let followup: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+    let result = &followup["messages"].as_array().unwrap().last().unwrap()["content"][0];
+    assert_eq!(result["type"], "tool_result", "{result}");
+    assert!(
+        result["content"]
+            .as_str()
+            .is_some_and(|content| content.starts_with("The bash call was denied by `plan` mode.")),
+        "{result}"
+    );
+}
+
+/// A streamed Messages reply of `frames`, each under an event named for its `type`.
+fn sse(frames: &[serde_json::Value]) -> ResponseTemplate {
+    let mut body = String::new();
+    for frame in frames {
+        _ = writedoc!(
+            body,
+            "
+            event: {event}
+            data: {frame}
+
+            ",
+            event = frame["type"].as_str().expect("each frame has a type"),
+        );
+    }
+    ResponseTemplate::new(200)
+        .set_body_string(body)
+        .insert_header("content-type", "text/event-stream")
 }
