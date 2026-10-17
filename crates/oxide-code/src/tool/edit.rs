@@ -143,9 +143,9 @@ async fn run(raw: serde_json::Value, ctx: &ToolCtx) -> ToolOutput {
         Err(e) => return e,
     };
 
-    let name = super::file_name(&input.file_path);
+    let path = &input.file_path;
     match edit_file(
-        &input.file_path,
+        path,
         &input.old_string,
         &input.new_string,
         input.replace_all,
@@ -153,9 +153,15 @@ async fn run(raw: serde_json::Value, ctx: &ToolCtx) -> ToolOutput {
     )
     .await
     {
-        Ok((content, chunks)) => ToolOutput::success(content)
-            .with_title(format!("Edited {name}"))
-            .with_diff_chunks(chunks),
+        Ok(chunks) => {
+            let content = match chunks.len() {
+                1 => format!("Successfully edited {path}."),
+                n => format!("Replaced {n} occurrences in {path}."),
+            };
+            ToolOutput::success(content)
+                .with_title(format!("Edited {}", super::file_name(path)))
+                .with_diff_chunks(chunks)
+        }
         Err(msg) => ToolOutput::error(msg),
     }
 }
@@ -170,8 +176,8 @@ async fn run(raw: serde_json::Value, ctx: &ToolCtx) -> ToolOutput {
 ///   content changed since that Read.
 /// - CRLF is preserved: the file is normalized to LF for matching, and the dominant EOL is restored
 ///   on write so we don't flip line endings just because the caller used `\n` in `old_string`.
-/// - Returns `(message, diff_chunks)` on success, with one chunk per replaced match. The chunks carry
-///   real post-edit line numbers, shifted by the cumulative delta of earlier replacements.
+/// - Returns one diff chunk per replaced match. The chunks carry real post-edit line numbers,
+///   shifted by the cumulative delta of earlier replacements.
 /// - A relative `path` resolves against the context's cwd.
 async fn edit_file(
     path: &str,
@@ -179,7 +185,7 @@ async fn edit_file(
     new_string: &str,
     replace_all: bool,
     ctx: &ToolCtx,
-) -> Result<(String, Vec<DiffChunk>), String> {
+) -> Result<Vec<DiffChunk>, String> {
     if old_string.is_empty() {
         return Err("old_string must not be empty.".to_owned());
     }
@@ -238,13 +244,7 @@ async fn edit_file(
     super::write_tracked(ctx, &file_path, updated.into_bytes(), WriteMode::Overwrite)
         .await
         .map_err(|e| format!("Failed to write {path}: {e}"))?;
-
-    let message = if replace_all && match_count > 1 {
-        format!("Replaced {match_count} occurrences in {path}.")
-    } else {
-        format!("Successfully edited {path}.")
-    };
-    Ok((message, chunks))
+    Ok(chunks)
 }
 
 // ── Diff Production ──
@@ -255,12 +255,14 @@ fn build_diff_chunks(
     new_string: &str,
     take: usize,
 ) -> Vec<DiffChunk> {
-    let positions = match_positions(original, old_string, take);
+    let positions = original
+        .match_indices(old_string)
+        .map(|(i, _)| i)
+        .take(take);
     let shift_per_match = new_string.matches('\n').count().cast_signed()
         - old_string.matches('\n').count().cast_signed();
 
     positions
-        .into_iter()
         .enumerate()
         .map(|(idx, byte_pos)| {
             let original_line = line_at_byte(original, byte_pos);
@@ -279,20 +281,6 @@ fn build_diff_chunks(
             chunk
         })
         .collect()
-}
-
-fn match_positions(haystack: &str, pattern: &str, take: usize) -> Vec<usize> {
-    let mut positions = Vec::new();
-    let mut start = 0;
-    while positions.len() < take {
-        let Some(rel) = haystack[start..].find(pattern) else {
-            break;
-        };
-        let abs = start + rel;
-        positions.push(abs);
-        start = abs + pattern.len().max(1);
-    }
-    positions
 }
 
 fn line_at_byte(content: &str, offset: usize) -> usize {
@@ -322,16 +310,13 @@ fn trim_chunk(chunk: &mut DiffChunk) {
 }
 
 fn common_boundaries<T: Eq>(old: &[T], new: &[T]) -> (usize, usize) {
-    let max_prefix = old.len().min(new.len());
-    let mut prefix = 0;
-    while prefix < max_prefix && old[prefix] == new[prefix] {
-        prefix += 1;
-    }
-    let max_suffix = old.len().min(new.len()) - prefix;
-    let mut suffix = 0;
-    while suffix < max_suffix && old[old.len() - 1 - suffix] == new[new.len() - 1 - suffix] {
-        suffix += 1;
-    }
+    let prefix = old.iter().zip(new).take_while(|(a, b)| a == b).count();
+    let suffix = old[prefix..]
+        .iter()
+        .rev()
+        .zip(new[prefix..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
     (prefix, suffix)
 }
 
@@ -539,12 +524,58 @@ mod tests {
         let output = testing::run(&EditTool, input, &seeded_ctx(&path)).await;
 
         assert!(!output.is_error);
+        assert_eq!(
+            output.content,
+            format!("Successfully edited {}.", path.display())
+        );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "goodbye world");
         assert_eq!(
             output.metadata.title.as_deref(),
             Some("Edited test.txt"),
             "success path attaches the Edited title",
         );
+    }
+
+    #[tokio::test]
+    async fn run_replace_all_reports_every_replaced_occurrence() {
+        let dir = canonical_tempdir();
+        let path = dir.path().join("test.txt");
+        std::fs::write(&path, "aaa bbb aaa").unwrap();
+        let input = serde_json::json!({
+            "file_path": path,
+            "old_string": "aaa",
+            "new_string": "ccc",
+            "replace_all": true,
+        });
+
+        let output = run(input, &seeded_ctx(&path)).await;
+
+        assert_eq!(
+            output.content,
+            format!("Replaced 2 occurrences in {}.", path.display())
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "ccc bbb ccc");
+    }
+
+    #[tokio::test]
+    async fn run_replace_all_with_a_single_match_reports_an_edit() {
+        let dir = canonical_tempdir();
+        let path = dir.path().join("test.txt");
+        std::fs::write(&path, "hello world").unwrap();
+        let input = serde_json::json!({
+            "file_path": path,
+            "old_string": "hello",
+            "new_string": "goodbye",
+            "replace_all": true,
+        });
+
+        let output = run(input, &seeded_ctx(&path)).await;
+
+        assert_eq!(
+            output.content,
+            format!("Successfully edited {}.", path.display())
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "goodbye world");
     }
 
     #[tokio::test]
@@ -617,55 +648,6 @@ mod tests {
                 fn bar() {}
             "}
         );
-    }
-
-    #[tokio::test]
-    async fn edit_file_replace_all_updates_every_match() {
-        let dir = canonical_tempdir();
-        let path = dir.path().join("test.txt");
-        std::fs::write(&path, "aaa bbb aaa").unwrap();
-
-        let (msg, chunks) = edit_file(
-            path.to_str().unwrap(),
-            "aaa",
-            "ccc",
-            true,
-            &seeded_ctx(&path),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(
-            msg,
-            format!("Replaced 2 occurrences in {}.", path.display())
-        );
-        assert_eq!(chunks.len(), 2, "replace_all emits one chunk per match");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "ccc bbb ccc");
-    }
-
-    #[tokio::test]
-    async fn edit_file_replace_all_single_match_updates_content() {
-        let dir = canonical_tempdir();
-        let path = dir.path().join("test.txt");
-        std::fs::write(&path, "hello world").unwrap();
-
-        let (msg, chunks) = edit_file(
-            path.to_str().unwrap(),
-            "hello",
-            "goodbye",
-            true,
-            &seeded_ctx(&path),
-        )
-        .await
-        .unwrap();
-
-        assert!(msg.contains("Successfully edited"));
-        assert_eq!(
-            chunks.len(),
-            1,
-            "single-match replace_all still replaces once"
-        );
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "goodbye world");
     }
 
     #[tokio::test]
@@ -1029,7 +1011,7 @@ mod tests {
         )
         .unwrap();
 
-        let (_, chunks) = edit_file(path.to_str().unwrap(), "B", "X", true, &seeded_ctx(&path))
+        let chunks = edit_file(path.to_str().unwrap(), "B", "X", true, &seeded_ctx(&path))
             .await
             .unwrap();
 
@@ -1079,7 +1061,7 @@ mod tests {
         )
         .unwrap();
 
-        let (_, chunks) = edit_file(
+        let chunks = edit_file(
             path.to_str().unwrap(),
             "B",
             "X\nY",
@@ -1140,7 +1122,7 @@ mod tests {
         )
         .unwrap();
 
-        let (_, chunks) = edit_file(
+        let chunks = edit_file(
             path.to_str().unwrap(),
             "X\nY",
             "Z",
@@ -1211,36 +1193,6 @@ mod tests {
                 text: "    return 42;".to_owned()
             }],
         );
-    }
-
-    // ── match_positions ──
-
-    #[test]
-    fn match_positions_finds_non_overlapping_offsets() {
-        assert_eq!(match_positions("aXbXcXd", "X", usize::MAX), vec![1, 3, 5]);
-    }
-
-    #[test]
-    fn match_positions_take_limits_count() {
-        assert_eq!(match_positions("aXbXcX", "X", 2), vec![1, 3]);
-    }
-
-    #[test]
-    fn match_positions_advances_past_pattern_to_avoid_overlap() {
-        assert_eq!(match_positions("aaaa", "aa", usize::MAX), vec![0, 2]);
-    }
-
-    #[test]
-    fn match_positions_no_match_is_empty() {
-        assert_eq!(
-            match_positions("hello", "xyz", usize::MAX),
-            [] as [usize; 0]
-        );
-    }
-
-    #[test]
-    fn match_positions_take_zero_is_empty() {
-        assert_eq!(match_positions("aXbXcX", "X", 0), [] as [usize; 0]);
     }
 
     // ── line_at_byte ──

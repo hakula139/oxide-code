@@ -119,26 +119,26 @@ async fn run(raw: serde_json::Value, ctx: &ToolCtx) -> ToolOutput {
         Err(e) => return e,
     };
 
-    match write_file(&input.file_path, &input.content, ctx).await {
-        Ok((content, is_new)) => {
-            let verb = if is_new { "Created" } else { "Updated" };
-            ToolOutput::success(content)
-                .with_title(format!("{verb} {}", super::file_name(&input.file_path)))
-        }
+    let path = &input.file_path;
+    let name = super::file_name(path);
+    match write_file(path, &input.content, ctx).await {
+        Ok(WriteMode::CreateNew) => ToolOutput::success(format!("Successfully created {path}."))
+            .with_title(format!("Created {name}")),
+        Ok(WriteMode::Overwrite) => ToolOutput::success(format!("Successfully updated {path}."))
+            .with_title(format!("Updated {name}")),
         Err(msg) => ToolOutput::error(msg),
     }
 }
 
-/// Returns `(message, is_new)` on success, where `is_new` means the write created the file. A
-/// relative `path` resolves against the context's cwd.
-async fn write_file(path: &str, content: &str, ctx: &ToolCtx) -> Result<(String, bool), String> {
+/// Returns whether the write created the file or overwrote it. A relative `path` resolves against
+/// the context's cwd.
+async fn write_file(path: &str, content: &str, ctx: &ToolCtx) -> Result<WriteMode, String> {
     let file_path = ctx.cwd().join(path);
     let pre_meta = match tokio::fs::symlink_metadata(&file_path).await {
         Ok(meta) => Some(meta),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(format!("Failed to access {path}: {e}")),
     };
-    let is_new = pre_meta.is_none();
 
     if let Some(meta) = &pre_meta {
         validate_write_target(path, meta)?;
@@ -151,21 +151,15 @@ async fn write_file(path: &str, content: &str, ctx: &ToolCtx) -> Result<(String,
             .map_err(|e| format!("Failed to create directory {}: {e}", parent.display()))?;
     }
 
-    let mode = if is_new {
-        WriteMode::CreateNew
-    } else {
+    let mode = if pre_meta.is_some() {
         WriteMode::Overwrite
+    } else {
+        WriteMode::CreateNew
     };
     super::write_tracked(ctx, &file_path, content.as_bytes().to_vec(), mode)
         .await
         .map_err(|e| format!("Failed to write {path}: {e}"))?;
-
-    let msg = if is_new {
-        format!("Successfully created {path}.")
-    } else {
-        format!("Successfully updated {path}.")
-    };
-    Ok((msg, is_new))
+    Ok(mode)
 }
 
 /// Validates an existing target's `metadata`. The gate pinned the path to its resolved location,
@@ -308,7 +302,10 @@ mod tests {
         let output = testing::run(&WriteTool, input, &ctx(dir.path())).await;
 
         assert!(!output.is_error);
-        assert!(output.content.contains("created"));
+        assert_eq!(
+            output.content,
+            format!("Successfully created {}.", path.display())
+        );
         assert_eq!(output.metadata.title.as_deref(), Some("Created new.txt"));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello world");
     }
@@ -322,7 +319,6 @@ mod tests {
 
     #[tokio::test]
     async fn run_overwrites_existing_file_uses_updated_verb() {
-        // Pins the `Updated` arm. `run_creates_file` covers `Created`.
         let dir = canonical_tempdir();
         let path = dir.path().join("existing.txt");
         std::fs::write(&path, "old").unwrap();
@@ -339,6 +335,10 @@ mod tests {
         .await;
 
         assert!(!output.is_error);
+        assert_eq!(
+            output.content,
+            format!("Successfully updated {}.", path.display())
+        );
         assert_eq!(
             output.metadata.title.as_deref(),
             Some("Updated existing.txt"),
@@ -376,11 +376,11 @@ mod tests {
         let dir = canonical_tempdir();
         let path = dir.path().join("new.txt");
 
-        let (msg, is_new) = write_file(path.to_str().unwrap(), "content", &temp_ctx())
+        let mode = write_file(path.to_str().unwrap(), "content", &temp_ctx())
             .await
             .unwrap();
-        assert!(msg.contains("created"));
-        assert!(is_new);
+
+        assert_eq!(mode, WriteMode::CreateNew);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "content");
     }
 
@@ -389,10 +389,9 @@ mod tests {
         let dir = canonical_tempdir();
         let ctx = ctx(dir.path());
 
-        let (msg, is_new) = write_file("notes/new.txt", "content", &ctx).await.unwrap();
+        let mode = write_file("notes/new.txt", "content", &ctx).await.unwrap();
 
-        assert_eq!(msg, "Successfully created notes/new.txt.");
-        assert!(is_new);
+        assert_eq!(mode, WriteMode::CreateNew);
         let path = dir.path().join("notes/new.txt");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "content");
         assert_eq!(
@@ -427,11 +426,11 @@ mod tests {
         let ctx = temp_ctx();
         seed_full_read(&ctx.tracker, &path);
 
-        let (msg, is_new) = write_file(path.to_str().unwrap(), "new content", &ctx)
+        let mode = write_file(path.to_str().unwrap(), "new content", &ctx)
             .await
             .unwrap();
-        assert!(msg.contains("updated"));
-        assert!(!is_new);
+
+        assert_eq!(mode, WriteMode::Overwrite);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "new content");
     }
 
