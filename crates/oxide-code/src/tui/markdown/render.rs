@@ -42,11 +42,11 @@ pub(super) struct MarkdownRenderer<I> {
     /// Set while the last line collects inline spans, so `finish_line` wraps it exactly once.
     line_open: bool,
 
-    /// Block-prefix stack — each entry is the spans prepended to every line inside that block
+    /// Block-prefix stack. Each entry holds the spans prepended to every line inside that block
     /// (blockquote `> `, list-item continuation indent, etc.). Wrapping uses the concatenation
     /// as the continuation prefix so deep nesting stays visually aligned.
     indent_stack: Vec<Vec<Span<'static>>>,
-    /// One entry per nested list; `Some(n)` for ordered (next marker = `n. `), `None` for
+    /// One entry per nested list: `Some(n)` for ordered (next marker = `n. `) and `None` for
     /// unordered (`- `).
     list_stack: Vec<Option<u64>>,
     /// List-item markers queued by `start_item`, each with the `indent_stack` depth of its item.
@@ -92,8 +92,7 @@ struct TableState {
 }
 
 impl TableState {
-    /// Ends the open cell's current line, as a `<br>` does, trimming the whitespace around the
-    /// break.
+    /// Ends the open cell's current line as a `<br>` does, trimming whitespace around the break.
     fn break_cell_line(&mut self) {
         let mut line = Line::from(std::mem::take(&mut self.cell_buf));
         if !self.cell_lines.is_empty() {
@@ -356,18 +355,16 @@ where
     /// Pushes one highlighted line through the block indent and wrapping, keeping its line style.
     /// Wrapped rows hang at the code's own indent.
     fn push_code_line(&mut self, line: Line<'static>) {
-        let style = line.style;
-        let code = Line::from(expand_tabs_in_spans(line.spans));
+        let code = Line {
+            spans: expand_tabs_in_spans(line.spans),
+            ..line
+        };
         let code_width = code.width();
         let lead = leading_whitespace_width(&code);
         let line = self.prefixed(code);
         let keep = line.width() - code_width + lead;
 
-        let start = self.lines.len();
         self.wrap_and_push_hanging(line, lead, keep);
-        for row in &mut self.lines[start..] {
-            row.style = style;
-        }
     }
 
     // ── Tables ──
@@ -615,7 +612,7 @@ where
     }
 
     /// Prepends the indent prefixes, each pending marker in place of the indent at its depth.
-    fn prefixed(&mut self, line: Line<'static>) -> Line<'static> {
+    fn prefixed(&mut self, mut line: Line<'static>) -> Line<'static> {
         let markers = std::mem::take(&mut self.pending_markers);
         let mut spans: Vec<Span<'static>> = Vec::new();
         for (depth, prefix) in self.indent_stack.iter().enumerate() {
@@ -624,8 +621,8 @@ where
                 .find_map(|(marker_depth, marker)| (*marker_depth == depth).then_some(marker));
             spans.extend(marker.unwrap_or(prefix).iter().cloned());
         }
-        spans.extend(line.spans);
-        Line::from(spans)
+        line.spans.splice(0..0, spans);
+        line
     }
 
     fn wrap_and_push(&mut self, line: Line<'static>) {
@@ -678,8 +675,7 @@ where
         self.line_open = true;
     }
 
-    /// Wraps only the open line, since rewrapping a finished one could split it under a different
-    /// prefix.
+    /// Wraps only the open line, since rewrapping a finished one could split it under a new prefix.
     fn finish_line(&mut self) {
         if !std::mem::take(&mut self.line_open) || self.width == 0 {
             return;
