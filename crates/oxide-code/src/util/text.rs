@@ -8,6 +8,7 @@ pub(crate) const ELLIPSIS: &str = "...";
 /// Columns [`ELLIPSIS`] fills, one per byte since it is ASCII.
 pub(crate) const ELLIPSIS_WIDTH: usize = ELLIPSIS.len();
 
+/// `singular` when `count` is one, `plural` otherwise.
 #[expect(
     clippy::needless_pass_by_value,
     reason = "callers pass integer counts directly"
