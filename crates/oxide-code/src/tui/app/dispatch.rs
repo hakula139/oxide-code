@@ -261,24 +261,28 @@ impl App {
     /// Sends `op` to the engine. Channel errors surface as chat error blocks.
     fn send_op(&mut self, op: Op) {
         if let Err(e) = self.ops.try_send(op) {
-            match e {
-                mpsc::error::TrySendError::Closed(_) => {
-                    self.chat
-                        .push_error("The engine stopped unexpectedly. Restart `ox` to recover.");
-                    self.input.set_enabled(false);
-                    self.should_quit = true;
-                }
-                // An approval decision is a control-plane reply the engine is waiting for, so a
-                // dropped one leaves the turn blocked until the user cancels it.
-                mpsc::error::TrySendError::Full(Op::Resolve { .. }) => {
-                    self.chat.push_error(
-                        "Approval could not be delivered. Press Esc to cancel the blocked turn.",
-                    );
-                }
-                mpsc::error::TrySendError::Full(_) => {
-                    self.chat
-                        .push_error("Op channel is full, so the request was dropped.");
-                }
+            self.surface_send_error(&e);
+        }
+    }
+
+    fn surface_send_error(&mut self, e: &mpsc::error::TrySendError<Op>) {
+        match e {
+            mpsc::error::TrySendError::Closed(_) => {
+                self.chat
+                    .push_error("The engine stopped unexpectedly. Restart `ox` to recover.");
+                self.input.set_enabled(false);
+                self.should_quit = true;
+            }
+            // An approval decision is a control-plane reply the engine is waiting for, so a
+            // dropped one leaves the turn blocked until the user cancels it.
+            mpsc::error::TrySendError::Full(Op::Resolve { .. }) => {
+                self.chat.push_error(
+                    "Approval could not be delivered. Press Esc to cancel the blocked turn.",
+                );
+            }
+            mpsc::error::TrySendError::Full(_) => {
+                self.chat
+                    .push_error("Op channel is full, so the request was dropped.");
             }
         }
     }
@@ -401,8 +405,10 @@ impl App {
         self.forward_queued_prompts();
     }
 
-    /// Forwards the queued prompts the in-flight turn lacks. Holds them while compacting, signing
-    /// in, resuming, or cancelling, when no turn may be left to splice them in.
+    /// Forwards the queued prompts the in-flight turn lacks, in order. A prompt that a full channel
+    /// turns away stays queued for a later call, and a closed channel surfaces one error. Holds the
+    /// prompts while compacting, signing in, resuming, or cancelling, when no turn may be left to
+    /// splice them in.
     pub(super) fn forward_queued_prompts(&mut self) {
         if matches!(
             self.status_bar.status(),
@@ -412,8 +418,14 @@ impl App {
         }
         while let Some(queued) = self.pending_prompts.get(self.forwarded_prompts) {
             let prompt = slash::unescape_literal(queued).to_owned();
-            self.send_op(Op::Queue(prompt));
-            self.forwarded_prompts += 1;
+            match self.ops.try_send(Op::Queue(prompt)) {
+                Ok(()) => self.forwarded_prompts += 1,
+                Err(mpsc::error::TrySendError::Full(_)) => break,
+                Err(e) => {
+                    self.surface_send_error(&e);
+                    break;
+                }
+            }
         }
     }
 
@@ -1929,6 +1941,64 @@ mod tests {
             [Op::Prompt("/tmp".to_owned()), Op::Queue("new".to_owned())],
         );
         assert_eq!(app.active_prompt.as_deref(), Some("//tmp"));
+    }
+
+    // ── forward_queued_prompts ──
+
+    #[test]
+    fn forward_queued_prompts_keeps_a_prompt_the_full_channel_turned_away_queued() {
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("active".to_owned()));
+        while app.ops.try_send(Op::Interrupt).is_ok() {}
+        let entries_before = app.chat.entry_count();
+
+        app.dispatch_action(Action::Submit("a".to_owned()));
+
+        assert_eq!(app.pending_prompts, ["a"]);
+        assert_eq!(app.forwarded_prompts, 0);
+        assert_eq!(app.chat.entry_count(), entries_before, "no error block");
+    }
+
+    #[test]
+    fn forward_queued_prompts_resends_a_prompt_the_full_channel_turned_away() {
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("active".to_owned()));
+        while app.ops.try_send(Op::Interrupt).is_ok() {}
+        app.dispatch_action(Action::Submit("a".to_owned()));
+        while rx.try_recv().is_ok() {}
+
+        app.dispatch_action(Action::Submit("b".to_owned()));
+        let mut sent = Vec::new();
+        while let Ok(op) = rx.try_recv() {
+            if let Op::Queue(prompt) = &op {
+                app.handle_engine_event(Event::PromptDrained(prompt.clone()));
+            }
+            sent.push(op);
+        }
+        app.handle_engine_event(Event::TurnComplete);
+        sent.extend(std::iter::from_fn(|| rx.try_recv().ok()));
+
+        assert_eq!(sent, [Op::Queue("a".to_owned()), Op::Queue("b".to_owned())]);
+        assert!(app.pending_prompts.is_empty());
+    }
+
+    #[test]
+    fn forward_queued_prompts_reports_a_closed_channel_once() {
+        let (mut app, rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("active".to_owned()));
+        app.pending_prompts.extend(["a".to_owned(), "b".to_owned()]);
+        drop(rx);
+        let entries_before = app.chat.entry_count();
+
+        app.forward_queued_prompts();
+
+        assert_eq!(app.chat.entry_count(), entries_before + 1);
+        assert_eq!(
+            app.chat.last_error_text(),
+            Some("The engine stopped unexpectedly. Restart `ox` to recover."),
+        );
+        assert!(app.should_quit);
+        assert_eq!(app.forwarded_prompts, 0);
     }
 
     // ── apply_slash_outcome ──
