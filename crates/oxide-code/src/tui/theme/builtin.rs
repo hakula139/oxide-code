@@ -2,10 +2,6 @@
 //! self-contained and the vendored files in `crates/oxide-code/themes/` double as user examples.
 
 pub(super) const MOCHA: &str = include_str!("../../../themes/mocha.toml");
-pub(super) const MACCHIATO: &str = include_str!("../../../themes/macchiato.toml");
-pub(super) const FRAPPE: &str = include_str!("../../../themes/frappe.toml");
-pub(super) const LATTE: &str = include_str!("../../../themes/latte.toml");
-pub(super) const MATERIAL: &str = include_str!("../../../themes/material.toml");
 
 pub(crate) struct BuiltinTheme {
     pub(crate) name: &'static str,
@@ -24,22 +20,22 @@ pub(crate) const BUILT_IN: &[BuiltinTheme] = &[
     BuiltinTheme {
         name: "macchiato",
         description: "Catppuccin dark (medium)",
-        body: MACCHIATO,
+        body: include_str!("../../../themes/macchiato.toml"),
     },
     BuiltinTheme {
         name: "frappe",
         description: "Catppuccin dark (soft)",
-        body: FRAPPE,
+        body: include_str!("../../../themes/frappe.toml"),
     },
     BuiltinTheme {
         name: "latte",
         description: "Catppuccin light",
-        body: LATTE,
+        body: include_str!("../../../themes/latte.toml"),
     },
     BuiltinTheme {
         name: "material",
         description: "Material dark",
-        body: MATERIAL,
+        body: include_str!("../../../themes/material.toml"),
     },
 ];
 
