@@ -37,21 +37,25 @@ In the default `auto` permission mode, reads and searches run without asking, as
 
 ## What it can do
 
-oxide-code has seven built-in tools:
+oxide-code has nine built-in tools:
 
-| Tool    | Purpose                                          |
-| ------- | ------------------------------------------------ |
-| `bash`  | Run shell commands                               |
-| `read`  | Read files with line numbers                     |
-| `write` | Create or overwrite files                        |
-| `edit`  | Replace exact strings in files                   |
-| `glob`  | Find files by pattern                            |
-| `grep`  | Search file contents with regex                  |
-| `tasks` | Keep a task list for multi-step work, shown live |
+| Tool          | Purpose                                          |
+| ------------- | ------------------------------------------------ |
+| `bash`        | Run shell commands                               |
+| `bash_output` | Read what a background shell printed             |
+| `bash_stop`   | Stop a background shell                          |
+| `read`        | Read files with line numbers                     |
+| `write`       | Create or overwrite files                        |
+| `edit`        | Replace exact strings in files                   |
+| `glob`        | Find files by pattern                            |
+| `grep`        | Search file contents with regex                  |
+| `tasks`       | Keep a task list for multi-step work, shown live |
 
 The assistant decides which tools to use based on your request. You can guide it by being specific: "edit the function signature in `src/lib.rs`" is better than "fix the code".
 
 For work that takes several steps, the assistant keeps a task list with the `tasks` tool. The TUI shows it above the input, with `✓` for completed tasks, `●` for the one in progress, and `○` for pending ones, and the list clears once every task is done. The list stays with the session through `/compact` and resume, and `/clear` starts the next session without one.
+
+For a dev server, a watcher, or a long build, the assistant can run a command in the background and read its output with `bash_output` while it keeps working. `/status` lists the background shells. They end when you exit or start another session with `/clear`, `/archive`, or `/resume`, and interrupting a turn with Esc leaves them running. To stop one sooner, ask the assistant.
 
 ## Customize behavior
 

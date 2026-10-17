@@ -22,7 +22,7 @@ For commands with curated arguments (`/model`, `/effort`, `/theme`), the popup s
 | `/model [<id>]`                             | Open the model + effort picker, or swap directly (alias / substring / exact id).            |
 | `/rename [<title>]`                         | Open a single-line modal pre-filled with the current title, or set it directly.             |
 | `/resume [<id-prefix>]` (alias `/continue`) | Open the session picker (search, scope and archived toggles), or jump by id prefix.         |
-| `/status`                                   | Open a read-only modal of model, effort, cwd, version, auth, session id, and session rules. |
+| `/status`                                   | Open a read-only modal of the model, auth, settings, session rules, and background shells.  |
 | `/theme [<name>]`                           | Open the theme picker (live preview), or swap directly to a built-in theme.                 |
 | `/unarchive <id-prefix>`                    | List an archived session again.                                                             |
 

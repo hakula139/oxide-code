@@ -22,6 +22,7 @@ Early development. What works today:
 - Agent loop with extended thinking and tool-use round-trip
 - Claude Opus 5.5, Sonnet 5.5, and Haiku 5.5, each with a 1M-token context window and adjustable effort
 - File and search tools: `read`, `write`, `edit`, `glob`, `grep`, `bash`
+- Background shell commands for dev servers, watchers, and long builds, which `bash` starts and `bash_output` reads incrementally, listed in the TUI's `/status`, and ended by `bash_stop` or with the session
 - Task list the model keeps with the `tasks` tool for multi-step work, shown above the input in the TUI, on stderr in the REPL, and in an opt-in status-line segment, and carried through resume and compaction
 - Tool permissions: `auto` (default), `plan`, and `yolo` modes, allow / deny rules that match each simple command of a parsed `bash` command line, read-only commands that run without approval, protected config paths whose edits need approval in `auto` mode even when an allow rule matches, and an approval prompt for gated calls in the TUI and REPL that can allow matching calls for the rest of the session or deny with feedback for the model
 - Turn interruption (Esc / Ctrl+C) plus mid-turn queued follow-up prompts that splice into the same turn between tool calls, with double-press Ctrl+C exit confirmation

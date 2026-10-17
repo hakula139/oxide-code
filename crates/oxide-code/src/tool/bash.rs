@@ -1,11 +1,14 @@
 //! Shell command execution tool with timeout.
 
+pub(crate) mod background;
+
 use std::collections::VecDeque;
 use std::future::Future;
 use std::io;
 use std::path::Path;
 use std::pin::Pin;
 use std::process::{ExitStatus, Stdio};
+use std::sync::Arc;
 use std::time::Duration;
 
 use indoc::formatdoc;
@@ -14,12 +17,17 @@ use serde::Deserialize;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::{ChildStderr, ChildStdout};
 
-use super::{Prepared, Tool, ToolCtx, ToolOutput, ToolSpec, extract_input_field, title_case};
+use self::background::{BackgroundShells, ShellState};
+use super::{
+    ApprovalBody, ApprovalPreview, Prepared, Tool, ToolCtx, ToolOutput, ToolSpec,
+    extract_input_field, pascal_case,
+};
 use crate::permission::{Access, PermissionClass};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_mins(2);
 const MAX_TIMEOUT: Duration = Duration::from_mins(10);
-const KILL_DRAIN_GRACE: Duration = Duration::from_millis(250);
+/// How long a drain waits for the pipes to close once the shell has exited or its tree is gone.
+const DRAIN_GRACE: Duration = Duration::from_millis(250);
 
 /// The variable each command's environment carries the session ID in, so a script it runs can tell
 /// which session started it.
@@ -34,13 +42,28 @@ const PIPE_READ_CHUNK_BYTES: usize = 8 * 1024;
 
 const NO_OUTPUT_MARKER: &str = "(no output)";
 
-pub(crate) struct BashTool;
+#[cfg_attr(test, derive(Default))]
+pub(crate) struct BashTool {
+    shells: Arc<BackgroundShells>,
+}
+
+impl BashTool {
+    pub(crate) fn new(shells: Arc<BackgroundShells>) -> Self {
+        Self { shells }
+    }
+}
 
 impl Tool for BashTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "bash".to_owned(),
-            description: "Execute a shell command and return its output.".to_owned(),
+            description: "Execute a shell command and return its output. For a dev server, a \
+                 watcher, or a long build, set run_in_background, without a trailing `&`: the \
+                 call returns a shell ID at once. You are not notified when the command \
+                 finishes, so check on it with bash_output, and stop it with bash_stop. A \
+                 background shell stays open, running or finished, until bash_stop stops it or \
+                 the session ends."
+                .to_owned(),
             input_schema: input_schema(),
             class: PermissionClass::Bash,
             parallel_safe: false,
@@ -63,7 +86,28 @@ impl Tool for BashTool {
     }
 
     fn summarize_call(&self, name: &str, input: &serde_json::Value, _cwd: &Path) -> String {
-        extract_input_field(input, "command").map_or_else(|| title_case(name), str::to_owned)
+        extract_input_field(input, "command").map_or_else(|| pascal_case(name), str::to_owned)
+    }
+
+    fn approval_preview(
+        &self,
+        name: &str,
+        input: &serde_json::Value,
+        cwd: &Path,
+    ) -> ApprovalPreview {
+        let background = input
+            .get("run_in_background")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true);
+        let label = pascal_case(name);
+        ApprovalPreview {
+            title: if background {
+                format!("{label} (background)")
+            } else {
+                label
+            },
+            body: ApprovalBody::Command(self.summarize_call(name, input, cwd)),
+        }
     }
 
     fn run<'a>(
@@ -71,7 +115,7 @@ impl Tool for BashTool {
         prepared: Prepared,
         ctx: &'a ToolCtx,
     ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + 'a>> {
-        Box::pin(run(prepared.input, ctx))
+        Box::pin(run(&self.shells, prepared.input, ctx))
     }
 }
 
@@ -92,6 +136,10 @@ fn input_schema() -> serde_json::Value {
             "timeout": {
                 "type": "integer",
                 "description": "Timeout in milliseconds, at most 600000. Omit or pass 0 for the default of 120000."
+            },
+            "run_in_background": {
+                "type": "boolean",
+                "description": "Start the command as a background shell and return its ID without waiting. The timeout field does not apply."
             }
         },
         "required": ["command"]
@@ -105,19 +153,23 @@ struct Input {
     description: Option<String>,
     #[serde(default)]
     timeout: Option<u64>,
+    #[serde(default)]
+    run_in_background: bool,
 }
 
 // ── Execution ──
 
-async fn run(raw: serde_json::Value, ctx: &ToolCtx) -> ToolOutput {
+async fn run(shells: &Arc<BackgroundShells>, raw: serde_json::Value, ctx: &ToolCtx) -> ToolOutput {
     let input: Input = match super::parse_input(raw) {
         Ok(v) => v,
         Err(e) => return e,
     };
 
-    let timeout = resolve_timeout(input.timeout);
-
-    let mut output = execute(&input.command, timeout, ctx).await;
+    let mut output = if input.run_in_background {
+        background::start(shells, &input.command, ctx)
+    } else {
+        execute(&input.command, resolve_timeout(input.timeout), ctx).await
+    };
 
     if let Some(desc) = input.description {
         output.metadata.title = Some(desc);
@@ -164,7 +216,7 @@ async fn execute(command: &str, timeout: Duration, ctx: &ToolCtx) -> ToolOutput 
         // Killing the tree closes its pipe ends, so the grace drain only waits on a holder that
         // escaped it.
         shell.kill();
-        _ = tokio::time::timeout(KILL_DRAIN_GRACE, async {
+        _ = tokio::time::timeout(DRAIN_GRACE, async {
             tokio::join!(
                 stdout_capture.drain(&mut stdout),
                 stderr_capture.drain(&mut stderr),
@@ -213,12 +265,7 @@ fn timeout_output(timeout: Duration, stdout: &PipeCapture, stderr: &PipeCapture)
 }
 
 fn exit_footer(status: ExitStatus) -> String {
-    #[cfg(unix)]
-    if let Some(signal) = std::os::unix::process::ExitStatusExt::signal(&status) {
-        return format!("(killed by signal {signal})");
-    }
-    // Without a signal, `wait` always reports an exit code, so the fallback never renders.
-    format!("(exit code {})", status.code().unwrap_or(-1))
+    format!("({})", ShellState::of(status).describe())
 }
 
 // ── Shell Resolution ──
@@ -341,14 +388,7 @@ impl PipeCapture {
     where
         R: AsyncRead + Unpin,
     {
-        let mut buf = vec![0; PIPE_READ_CHUNK_BYTES];
-        loop {
-            let n = reader.read(&mut buf).await?;
-            if n == 0 {
-                return Ok(());
-            }
-            self.push(&buf[..n]);
-        }
+        read_chunks(reader, |chunk| self.push(chunk)).await
     }
 
     fn kept(&self) -> usize {
@@ -364,6 +404,20 @@ impl PipeCapture {
         let overflow = self.tail.len().saturating_sub(PIPE_TAIL_BYTES);
         self.tail.drain(..overflow);
         self.omitted += overflow;
+    }
+}
+
+async fn read_chunks<R>(reader: &mut R, mut record: impl FnMut(&[u8])) -> io::Result<()>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut buf = vec![0; PIPE_READ_CHUNK_BYTES];
+    loop {
+        let n = reader.read(&mut buf).await?;
+        if n == 0 {
+            return Ok(());
+        }
+        record(&buf[..n]);
     }
 }
 
@@ -457,7 +511,8 @@ mod tests {
 
     #[test]
     fn prepare_extracts_the_command() {
-        let prepared = BashTool.prepare(serde_json::json!({"command": "ls -la"}), &temp_ctx());
+        let prepared =
+            BashTool::default().prepare(serde_json::json!({"command": "ls -la"}), &temp_ctx());
         assert!(matches!(prepared.access, Access::Command(c) if c.command() == "ls -la"));
     }
 
@@ -465,22 +520,54 @@ mod tests {
     fn prepare_missing_command_is_none() {
         // A call with no `command` field falls to `None`, which only a tool-wide rule matches, so a
         // malformed bash call cannot slip past a command-specific allow.
-        let prepared = BashTool.prepare(serde_json::json!({}), &temp_ctx());
+        let prepared = BashTool::default().prepare(serde_json::json!({}), &temp_ctx());
         assert!(matches!(prepared.access, Access::None));
+    }
+
+    // ── approval_preview ──
+
+    #[test]
+    fn approval_preview_marks_a_background_command_in_the_title() {
+        let tool = BashTool::default();
+        let cwd = Path::new("/repo");
+
+        let foreground =
+            tool.approval_preview("bash", &serde_json::json!({"command": "cargo test"}), cwd);
+        let background = tool.approval_preview(
+            "bash",
+            &serde_json::json!({"command": "cargo watch", "run_in_background": true}),
+            cwd,
+        );
+
+        assert_eq!(foreground.title, "Bash");
+        assert_eq!(
+            foreground.body,
+            ApprovalBody::Command("cargo test".to_owned())
+        );
+        assert_eq!(background.title, "Bash (background)");
+        assert_eq!(
+            background.body,
+            ApprovalBody::Command("cargo watch".to_owned())
+        );
     }
 
     // ── run ──
 
     #[tokio::test]
     async fn run_valid_command_executes_successfully() {
-        let output = run(serde_json::json!({"command": "echo hello"}), &temp_ctx()).await;
+        let output = run(
+            &Arc::default(),
+            serde_json::json!({"command": "echo hello"}),
+            &temp_ctx(),
+        )
+        .await;
         assert!(!output.is_error);
         assert_eq!(output.content, "hello");
     }
 
     #[tokio::test]
     async fn run_missing_command_field_reports_input_error() {
-        let output = run(serde_json::json!({}), &temp_ctx()).await;
+        let output = run(&Arc::default(), serde_json::json!({}), &temp_ctx()).await;
         assert!(output.is_error);
         assert!(output.content.contains("Invalid input"));
     }
@@ -492,7 +579,7 @@ mod tests {
             "description": "Print greeting",
         });
 
-        let output = testing::run(&BashTool, input, &temp_ctx()).await;
+        let output = testing::run(&BashTool::default(), input, &temp_ctx()).await;
 
         assert!(!output.is_error);
         assert_eq!(output.content, "hello");
@@ -503,6 +590,7 @@ mod tests {
     async fn run_timeout_keeps_partial_output() {
         // The timeout leaves bash ample time to print before the kill, even under parallel load.
         let output = run(
+            &Arc::default(),
             serde_json::json!({
                 "command": "echo started; sleep 10",
                 "timeout": 1_000

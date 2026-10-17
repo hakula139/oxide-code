@@ -42,6 +42,7 @@ use crate::session::history;
 use crate::session::resolver::resolve_saved_prefix;
 use crate::session::store::SessionStore;
 use crate::session::title_generator;
+use crate::tool::bash::background::BackgroundShells;
 use crate::tool::tasks::Task;
 use crate::tool::{ToolMetadata, ToolRegistry};
 
@@ -99,6 +100,12 @@ impl EventSink for ChannelSink {
 
 // ── Engine ──
 
+/// The tool registry and the background shells its `bash` tools share with the engine.
+pub(crate) struct Toolbox {
+    pub(crate) tools: Arc<ToolRegistry>,
+    pub(crate) shells: Arc<BackgroundShells>,
+}
+
 /// The live session with its transcript, prompt, and usage accounting.
 pub(crate) struct Engine {
     client: Client,
@@ -119,6 +126,8 @@ pub(crate) struct Engine {
     /// `prompt` changed since the session last recorded it, so the next user message records it.
     prompt_unrecorded: bool,
     file_tracker: Arc<FileTracker>,
+    /// The background shells the `bash` tools start, which end with the session.
+    shells: Arc<BackgroundShells>,
     /// The configured policy plus the session allow rules granted since the live session began.
     policy: Policy,
     /// `None` means the agent loop runs without a per-turn round cap.
@@ -145,7 +154,7 @@ impl Engine {
     pub(crate) async fn new(
         config: &Config,
         device_id: String,
-        tools: Arc<ToolRegistry>,
+        toolbox: Toolbox,
         store: SessionStore,
         session: SessionHandle,
         transcript: LoadedTranscript,
@@ -153,6 +162,7 @@ impl Engine {
         interactive: bool,
     ) -> Result<Self> {
         let client = Client::new(config, Some(session.session_id().to_owned()), device_id)?;
+        let Toolbox { tools, shells } = toolbox;
         let LoadedTranscript {
             messages,
             context,
@@ -177,6 +187,7 @@ impl Engine {
             prompt,
             prompt_unrecorded,
             file_tracker,
+            shells,
             policy: config.permission.clone(),
             max_tool_rounds: config.max_tool_rounds,
             compaction: config.compaction,
@@ -218,6 +229,7 @@ impl Engine {
         let (ops, op_rx) = mpsc::channel(OP_CHANNEL_CAP);
         let (event_tx, events) = mpsc::unbounded_channel();
         let sink = ChannelSink(event_tx);
+        self.shells.attach(Arc::new(sink.clone()));
         self.emit_usage_update(&sink);
         self.emit_restored_tasks(&sink);
         report_drift(&sink, drifted);
@@ -361,6 +373,7 @@ impl Engine {
                 prompt: &self.prompt,
                 tools: &tools,
                 tasks: &self.tasks,
+                shells: &self.shells,
                 spent: &mut spent,
             }),
             self.last_usage,
@@ -419,6 +432,7 @@ impl Engine {
                 summary,
                 instructions,
                 tasks: self.tasks.clone(),
+                shells: self.shells.list(),
                 automatic: false,
             },
         )
@@ -546,6 +560,7 @@ impl Engine {
     }
 
     async fn adopt_session(&mut self, sink: &dyn EventSink, transcript: LoadedTranscript) {
+        self.shells.stop_all().await;
         let LoadedTranscript {
             messages,
             context,
@@ -750,8 +765,10 @@ impl Engine {
         );
     }
 
-    /// Flushes and closes the live session, returning the write failure if any.
+    /// Ends the background shells, then flushes and closes the live session, returning the write
+    /// failure if any.
     async fn finalize(self) -> Option<String> {
+        self.shells.stop_all().await;
         self.session
             .finalize(self.file_tracker.snapshot_all())
             .await
@@ -908,8 +925,18 @@ mod tests {
     use crate::protocol::CapturingSink;
     use crate::session::post_compact::synthesize_post_compact_message;
     use crate::session::store::testing::test_store;
+    use crate::tool::bash::background::ShellState;
+    use crate::tool::bash::background::testing::{shell, start_shell};
     use crate::tool::tasks::TasksTool;
     use crate::tool::tasks::testing::plan;
+
+    /// A toolbox without tools, for an engine that [`Engine::new`] builds.
+    fn toolbox() -> Toolbox {
+        Toolbox {
+            tools: Arc::new(ToolRegistry::new(Vec::new())),
+            shells: Arc::default(),
+        }
+    }
 
     /// Next event the engine emits that `pick` accepts, skipping the rest.
     async fn next_matching<T>(
@@ -1078,7 +1105,7 @@ mod tests {
                 let engine = Engine::new(
                     &config,
                     DEVICE_ID.to_owned(),
-                    Arc::new(ToolRegistry::new(Vec::new())),
+                    toolbox(),
                     store.clone(),
                     handle::start(&store, "claude-sonnet-5-5"),
                     LoadedTranscript {
@@ -1128,7 +1155,7 @@ mod tests {
             let engine = Engine::new(
                 &config,
                 DEVICE_ID.to_owned(),
-                Arc::new(ToolRegistry::new(Vec::new())),
+                toolbox(),
                 store.clone(),
                 session.clone(),
                 LoadedTranscript::default(),
@@ -1665,6 +1692,33 @@ mod tests {
             let snapshots = store.load_session_data(&live_id).unwrap().file_snapshots;
             let paths: Vec<_> = snapshots.iter().map(|snapshot| &snapshot.path).collect();
             assert_eq!(paths, [&read_path]);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn run_reports_the_background_shells_and_ends_them_on_shutdown() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let engine = engine(server.uri(), &store, dir.path()).await;
+            let background = Arc::downgrade(&engine.shells);
+            let mut handle = engine.spawn(&[]);
+            let leaked = dir.path().join("leaked");
+            let command = format!("sleep 2 && touch '{}'", leaked.display());
+
+            start_shell(&background.upgrade().unwrap(), &command);
+            let listed = next_matching(&mut handle.events, |event| match event {
+                Event::BackgroundShellsUpdated(list) => Some(list),
+                _ => None,
+            })
+            .await;
+            handle.shutdown().await;
+
+            assert_eq!(listed, [shell("shell-1", &command, ShellState::Running)]);
+            tokio::time::sleep(Duration::from_millis(2_500)).await;
+            assert!(!leaked.exists(), "the shell outlived the session");
         })
         .await;
     }
@@ -2297,7 +2351,11 @@ mod tests {
             assert_eq!(end, TurnEnd::Completed);
             assert_eq!(
                 engine.messages,
-                [synthesize_post_compact_message("manual summary", &plan())]
+                [synthesize_post_compact_message(
+                    "manual summary",
+                    &plan(),
+                    &[]
+                )]
             );
             assert_eq!(engine.tasks, plan());
 
@@ -2309,6 +2367,34 @@ mod tests {
 
             assert_eq!(engine.session_id(), session_id);
             assert_eq!(engine.tasks, plan());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn compact_lists_the_open_background_shells_in_the_summary_message() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            mount_reply(&server, "manual summary").await;
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let mut engine = engine(server.uri(), &store, dir.path()).await;
+            engine.messages = tool_heavy_transcript();
+            start_shell(&engine.shells, "sleep 30");
+            let (_ops_tx, mut ops) = crate::protocol::inert_op_channel();
+
+            let end = engine.compact(&CapturingSink::new(), &mut ops, None).await;
+
+            assert_eq!(end, TurnEnd::Completed);
+            assert_eq!(
+                engine.messages,
+                [synthesize_post_compact_message(
+                    "manual summary",
+                    &[],
+                    &[shell("shell-1", "sleep 30", ShellState::Running)],
+                )]
+            );
+            engine.shells.stop_all().await;
         })
         .await;
     }
@@ -2624,6 +2710,30 @@ mod tests {
         .await;
     }
 
+    #[tokio::test]
+    async fn clear_and_resume_end_the_background_shells() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let mut engine = engine(server.uri(), &store, dir.path()).await;
+            let target_id = finished_session(&store).await;
+            let target_path = store.find_session_path(&target_id).unwrap();
+
+            start_shell(&engine.shells, "sleep 30");
+            engine.clear(&CapturingSink::new()).await;
+            let after_clear = engine.shells.list();
+            start_shell(&engine.shells, "sleep 30");
+            engine
+                .resume(&CapturingSink::new(), ResumeTarget::Path(target_path))
+                .await;
+
+            assert_eq!(after_clear, []);
+            assert_eq!(engine.shells.list(), []);
+        })
+        .await;
+    }
+
     // ── archive ──
 
     #[tokio::test]
@@ -2781,6 +2891,7 @@ mod tests {
             engine.total_estimated_cost_usd = 1.23;
             let rule = Rule::parse("bash(cargo test:*)").unwrap();
             engine.policy.allow_for_session(rule.clone());
+            start_shell(&engine.shells, "sleep 30");
             let sink = CapturingSink::new();
 
             engine
@@ -2794,10 +2905,15 @@ mod tests {
             assert_eq!(engine.displayed_usage, Some(displayed_usage));
             assert!((engine.total_estimated_cost_usd - 1.23).abs() < f64::EPSILON);
             assert_eq!(engine.policy.session_allow(), [rule]);
+            assert_eq!(
+                engine.shells.list(),
+                [shell("shell-1", "sleep 30", ShellState::Running)]
+            );
             assert!(matches!(
                 sink.events().as_slice(),
                 [Event::TurnFailed(msg)] if msg.contains("still on session")
             ));
+            engine.shells.stop_all().await;
         })
         .await;
     }

@@ -18,7 +18,7 @@ Companions: [commands.md](commands.md), [session/persistence.md](../session/pers
 
 `session/handle` exposes `compact(summary, instructions, tasks, synthetic_message) -> CompactOutcome`:
 
-- The actor writes one `Entry::Compact` followed by the synthetic post-compact `Entry::Message` (a `role: user` carrying `SUMMARY_PREFIX + summary`, plus a reminder of the task list when it holds any), with the synthetic message's `parent_uuid` deliberately set to `None`.
+- The actor writes one `Entry::Compact` followed by the synthetic post-compact `Entry::Message` (a `role: user` carrying `SUMMARY_PREFIX + summary`, plus reminders of the task list and the open background shells when there are any), with the synthetic message's `parent_uuid` deliberately set to `None`.
 - `SessionState`'s `last_message_uuid` is reset to the synthetic message's id and `message_count` resets to `1`.
 - `SessionCmd::Compact` is a batch barrier, so queued writes cannot share the same flush after the boundary.
 - The file tracker is reset to match `/clear`.
@@ -52,7 +52,7 @@ While the summary streams, the TUI shows it below the chat under a `Summarizing 
    - **Trim on overflow.** Retries drop the oldest API rounds and strip every thinking block, since a new turn may omit earlier thinking but must not replay it after a changed prefix. A tool-use turn is the one place the API requires its thinking, so a retry whose kept rounds end on a tool result closes that turn with a short assistant message before the rubric.
    - **Reserve summary room.** Claude Code's `truncateHeadForPTLRetry` drops the oldest API rounds, retrying a `prompt is too long` rejection up to three times, and frees just the reported overflow, or a fifth of the rounds when the error names no counts. oxide-code retries a `model_context_window_exceeded` stop the same way and frees about 20k tokens beyond the reported overflow, so the retry leaves the summary room to finish. The retries miss the cache, which a recovery path can afford, and mark no cache breakpoint on a transcript no later request reads.
 
-7. **Synthetic post-compact user message with `parent_uuid: None`.** Materializing the summary as a `role: user` `Message` is the converged answer across all three reference CLIs, since assistant messages can't lead a turn and system blocks are special-cased at the prefix. Setting `parent_uuid: None` on the synthetic head lets the existing `chain` walker stop naturally at the boundary, with no special-case in `chain.rs`. The synthetic message body is `SUMMARY_PREFIX + "\n\n" + summary`, where `SUMMARY_PREFIX` is a curated re-entry framing taken from the Codex template that tells the next-turn model to _use_ the summary and continue without re-asking what to do. When the session keeps a [task list](../tools/tasks.md), a `<system-reminder>` block after the summary lists it, since the `tasks` calls that built it are gone.
+7. **Synthetic post-compact user message with `parent_uuid: None`.** Materializing the summary as a `role: user` `Message` is the converged answer across all three reference CLIs, since assistant messages can't lead a turn and system blocks are special-cased at the prefix. Setting `parent_uuid: None` on the synthetic head lets the existing `chain` walker stop naturally at the boundary, with no special-case in `chain.rs`. The synthetic message body is `SUMMARY_PREFIX + "\n\n" + summary`, where `SUMMARY_PREFIX` is a curated re-entry framing taken from the Codex template that tells the next-turn model to _use_ the summary and continue without re-asking what to do. When the session keeps a [task list](../tools/tasks.md) or open [background shells](../tools/background-shells.md), a `<system-reminder>` block after the summary lists each, since the `tasks` and `bash` calls behind them are gone.
 
 8. **`Entry::Compact` JSONL boundary.** Carries `summary`, `pre_message_count`, optional `instructions`, the task list as `tasks` when it holds any, and `timestamp`. Position: written immediately before the synthetic post-compact `Entry::Message`. Loader treats the compact entry as a chain reset, keeps `CompactInfo` for resume display, and only accepts messages that belong to the new tail.
 
@@ -131,7 +131,7 @@ A `pre_compact` hook is tracked in [#168](https://github.com/hakula139/oxide-cod
 - `crates/oxide-code/src/session/actor.rs`: `SessionCmd::Compact` handler.
 - `crates/oxide-code/src/session/entry.rs`: `Entry::Compact` variant.
 - `crates/oxide-code/src/session/handle.rs`: `SessionHandle::compact`, `CompactOutcome`.
-- `crates/oxide-code/src/session/post_compact.rs`: `SUMMARY_PREFIX`, `synthesize_post_compact_message` and its `task_reminder` block, plus `strip_synthetic_post_compact_prefix`, which hides the prefix when a resumed session displays it.
+- `crates/oxide-code/src/session/post_compact.rs`: `SUMMARY_PREFIX`, `synthesize_post_compact_message` and its `task_reminder` and `shell_reminder` blocks, plus `strip_synthetic_post_compact_prefix`, which hides the prefix when a resumed session displays it.
 - `crates/oxide-code/src/session/state.rs`: `compact_entries` and `commit_compact` (chain reset).
 - `crates/oxide-code/src/session/store.rs`: resume loader compact boundary reset, tail filtering, and `CompactInfo`.
 - `crates/oxide-code/src/slash/compact.rs`: `CompactCmd`.
