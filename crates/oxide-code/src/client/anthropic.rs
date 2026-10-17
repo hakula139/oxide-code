@@ -3,7 +3,8 @@
 //!
 //! The wire shape mirrors the official `claude-code` CLI: pinned User-Agent and Stainless SDK
 //! header set, billing attestation in `system[0]`, and per-request beta headers gated on model /
-//! auth-mode capabilities. Deviating from any of these trips 3P gateway fingerprinting.
+//! auth-mode capabilities. Some relay gateways admit only requests that carry the billing
+//! attestation or `metadata.user_id`.
 
 mod accumulator;
 mod betas;
@@ -48,7 +49,7 @@ use wire::{
 const API_VERSION: &str = "2023-06-01";
 
 /// Claude Code release the user agent, billing header, and agentic beta sequence all mirror.
-/// Gateways reject pre-allowlist versions, so bump it only together with a fresh beta capture.
+/// Some relay gateways enforce a `cc_version` floor. Bump it only with a fresh beta capture.
 const CLAUDE_CLI_VERSION: &str = "2.1.296";
 const STAINLESS_PACKAGE_VERSION: &str = "0.81.0";
 const STAINLESS_RUNTIME_VERSION: &str = "v24.3.0";
@@ -80,7 +81,7 @@ pub(crate) struct Client {
     show_thinking: bool,
     session_id: String,
     device_id: String,
-    /// Gates `scope: "global"` in `cache_control`, which 3P gateways reject.
+    /// Whether the base URL is the Anthropic API, which alone gets `scope: "global"` and `cch`.
     is_first_party: bool,
 }
 
@@ -280,10 +281,10 @@ impl Client {
         Ok(rx)
     }
 
-    /// Whether a request carries the billing attribution block. Strict gateways that verify the
-    /// Claude Code wire shape reject streaming requests (agent turns, `/compact` summaries)
-    /// without it under every credential kind. Non-streaming one-shots attribute only OAuth
-    /// traffic, because gateways don't gate them on the block.
+    /// Whether a request carries the billing attribution block. Streaming requests (agent turns,
+    /// `/compact` summaries) carry it under every credential kind, as Claude Code's do.
+    /// Non-streaming one-shots carry it only under OAuth. Some relay gateways admit a request on
+    /// this block or on `metadata.user_id`, so API-key one-shots pass there on the metadata alone.
     fn attributes(&self, streaming: bool, auth: AuthKind) -> bool {
         self.gateway.attribution && (streaming || auth == AuthKind::OAuth)
     }
@@ -337,7 +338,6 @@ fn build_http(gateway: &GatewayCompat, extra_ca_certs: Option<&Path>) -> Result<
         HeaderValue::from_str(&format!("claude-cli/{CLAUDE_CLI_VERSION} (external, cli)"))?,
     );
 
-    // 3P gateways fingerprint the Stainless header set.
     headers.insert("x-app", HeaderValue::from_static("cli"));
     headers.insert("x-stainless-lang", HeaderValue::from_static("js"));
     headers.insert(
@@ -387,7 +387,8 @@ fn attribution_text(first_user_text: &str, is_first_party: bool) -> String {
     billing::build_billing_header(CLAUDE_CLI_VERSION, &fingerprint, is_first_party)
 }
 
-/// Field order is load-bearing because gateways validate the JSON shape of `metadata.user_id`.
+/// Some relay gateways admit a request without the billing block only when `user_id` holds a
+/// JSON object with `session_id`.
 fn build_metadata(device_id: &str, session_id: &str) -> RequestMetadata {
     #[derive(serde::Serialize)]
     struct UserId<'a> {
@@ -1135,8 +1136,8 @@ mod tests {
 
     #[tokio::test]
     async fn stream_message_third_party_base_url_drops_global_scope_keeps_its_beta() {
-        // On 3P, the beta still ships for gateway fingerprint parity, but the body-side
-        // `scope: "global"` is dropped because gateways reject it downstream of tools.
+        // On 3P, the beta still ships as part of Claude Code's sequence, but the body-side
+        // `scope: "global"`, a first-party cache scope, is dropped.
         let server = MockServer::start().await;
         let sink: Captured<(String, String)> = captured();
         let sink_clone = std::sync::Arc::clone(&sink);
@@ -1169,7 +1170,7 @@ mod tests {
         let (body, beta) = sink.lock().unwrap().clone().expect("request captured");
         assert!(
             beta.contains("prompt-caching-scope-2026-01-05"),
-            "prompt-caching-scope beta ships on 3P for fingerprint parity: {beta}",
+            "prompt-caching-scope beta ships on 3P: {beta}",
         );
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         let system = v["system"].as_array().expect("system array");
@@ -1590,8 +1591,8 @@ mod tests {
 
     #[test]
     fn build_metadata_wraps_ids_in_stringified_json_with_canonical_field_order() {
-        // Field order is `device_id, account_uuid, session_id`. `serde_json::json!` would
-        // alphabetize and trip 3P validation.
+        // Claude Code's field order is `device_id, account_uuid, session_id`, which
+        // `serde_json::json!` would alphabetize.
         let meta = build_metadata("dev-1", "abc-123");
         assert_eq!(
             meta.user_id,

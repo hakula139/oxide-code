@@ -729,7 +729,7 @@ fn is_loopback_url(url: &reqwest::Url) -> bool {
 }
 
 /// Whether `base_url` points at Anthropic's production or staging host. Gates the stored-login
-/// fallback and body-side `cache_control.scope = "global"`, which gateways reject.
+/// fallback, body-side `cache_control.scope = "global"`, and the billing block's `cch` hash.
 pub(crate) fn is_first_party_base_url(base_url: &str) -> bool {
     reqwest::Url::parse(base_url)
         .ok()
