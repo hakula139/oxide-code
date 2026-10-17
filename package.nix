@@ -3,6 +3,7 @@
   git,
   lib,
   rustPlatform,
+  stdenv,
   versionCheckHook,
 }:
 
@@ -35,6 +36,15 @@ rustPlatform.buildRustPackage {
   preCheck = ''
     export HOME=$TMPDIR
   '';
+
+  # The darwin sandbox blocks trustd, so every Security framework trust evaluation fails with
+  # errSecInternalComponent. These tests run only under `cargo test` on macOS.
+  checkFlags = lib.optionals stdenv.hostPlatform.isDarwin [
+    "--skip=util::tls::tests::apply_extra_ca_certs_connects_to_a_long_lived_leaf_from_the_bundle"
+    "--skip=util::tls::tests::exempt_anchors_"
+    "--skip=util::tls::tests::extra_ca_verifier_new_"
+    "--skip=util::tls::tests::verify_server_cert_"
+  ];
 
   doInstallCheck = true;
   nativeInstallCheckInputs = [ versionCheckHook ];

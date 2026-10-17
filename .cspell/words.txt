@@ -2,6 +2,7 @@ acked
 acking
 acks
 agentic
+ALPN
 anthropic
 anthropics
 anyhow
@@ -87,6 +88,7 @@ nonewline
 noprefix
 nucleo
 numtide
+OCSP
 okdir
 OLDPWD
 oxalica
@@ -119,6 +121,7 @@ serie
 sess
 smol
 statix
+stdenv
 substituters
 swatinem
 syntect
@@ -139,6 +142,7 @@ tokio
 toks
 toolu
 tracing
+trustd
 unmaterialized
 unresumable
 unrotated

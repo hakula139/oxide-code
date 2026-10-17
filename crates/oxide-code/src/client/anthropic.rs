@@ -654,8 +654,7 @@ mod tests {
 
     #[test]
     fn new_with_extra_ca_certs_accepts_valid_bundle() {
-        // This pins Client wiring only. End-to-end trust would need a TLS mock server signed by
-        // `TEST_CA_PEM`. PEM parsing and builder application are covered in `util::tls`.
+        // This pins Client wiring only. `util::tls` covers the handshake through a bundle.
         let pem = tempfile::NamedTempFile::new().unwrap();
         std::io::Write::write_all(&mut pem.as_file(), crate::util::tls::TEST_CA_PEM.as_bytes())
             .unwrap();
