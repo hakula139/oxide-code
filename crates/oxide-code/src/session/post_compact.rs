@@ -21,11 +21,13 @@ pub(crate) fn synthesize_post_compact_message(
     tasks: &[Task],
     shells: &[BackgroundShell],
 ) -> Message {
+    let prefix = SUMMARY_PREFIX.trim();
+    let summary = summary.trim();
     let mut message = Message::user(formatdoc! {"
         {prefix}
 
         {summary}
-    ", prefix = SUMMARY_PREFIX.trim(), summary = summary.trim()});
+    "});
     message.content.extend(
         [task_reminder(tasks), shell_reminder(shells)]
             .into_iter()

@@ -661,7 +661,8 @@ mod tests {
             indoc! {"
                 started
 
-                Command timed out after 1000 ms"}
+                Command timed out after 1000 ms"
+            }
         );
     }
 
@@ -749,7 +750,8 @@ mod tests {
             indoc! {"
                 partial
 
-                (exit code 1)"}
+                (exit code 1)"
+            }
         );
     }
 
@@ -874,7 +876,8 @@ mod tests {
             indoc! {"
                 done
 
-                Command timed out after 1000 ms"}
+                Command timed out after 1000 ms"
+            }
         );
         assert!(
             start.elapsed() < Duration::from_secs(3),
@@ -892,7 +895,8 @@ mod tests {
             indoc! {"
                 before
 
-                (killed by signal 9)"}
+                (killed by signal 9)"
+            }
         );
     }
 
@@ -1000,7 +1004,8 @@ mod tests {
                 hello
 
                 ... [7 bytes omitted] ...
-                world"},
+                world"
+            },
         );
     }
 
@@ -1017,7 +1022,8 @@ mod tests {
             indoc! {"
                 ab
                 ... [10 bytes omitted] ...
-                cd"},
+                cd"
+            },
         );
     }
 
@@ -1029,7 +1035,8 @@ mod tests {
             indoc! {"
                 0123
                 ... [12 bytes omitted] ...
-                4321"},
+                4321"
+            },
         );
     }
 

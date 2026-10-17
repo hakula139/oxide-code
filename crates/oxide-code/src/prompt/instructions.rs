@@ -398,7 +398,8 @@ mod tests {
 
                 Contents of /project/CLAUDE.md (project instructions):
 
-                Project rules."},
+                Project rules."
+            },
         );
     }
 }

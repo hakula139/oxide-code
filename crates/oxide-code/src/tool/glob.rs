@@ -600,7 +600,8 @@ mod tests {
             indoc! {"
                 config.toml
 
-                (1 file withheld by read deny or ask rules)"}
+                (1 file withheld by read deny or ask rules)"
+            }
         );
         assert_eq!(result.truncated_total, None);
         assert_eq!(
@@ -622,7 +623,8 @@ mod tests {
             indoc! {"
                 No files found
 
-                (1 file withheld by read deny or ask rules)"}
+                (1 file withheld by read deny or ask rules)"
+            }
         );
     }
 

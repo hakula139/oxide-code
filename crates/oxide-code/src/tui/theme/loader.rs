@@ -800,11 +800,12 @@ mod tests {
 
     #[test]
     fn parse_theme_unknown_slot_key() {
+        let mocha = builtin::MOCHA;
         let body = formatdoc! {r##"
             {mocha}
 
             unknown_slot = "#000000"
-        "##, mocha = builtin::MOCHA};
+        "##};
         let err = parse_theme(&body).expect_err("unknown slot rejected");
         let msg = format!("{err:#}");
         assert!(msg.contains("unknown field"), "{msg}");

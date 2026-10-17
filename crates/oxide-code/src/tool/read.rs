@@ -421,7 +421,8 @@ mod tests {
             indoc! {"
                 1\talpha
                 2\tbeta
-                3\tgamma"}
+                3\tgamma"
+            }
         );
     }
 
@@ -450,7 +451,8 @@ mod tests {
                 2\tb
                 3\tc
 
-                (Showing lines 2–3 of 5 total)"}
+                (Showing lines 2–3 of 5 total)"
+            }
         );
     }
 
@@ -710,11 +712,12 @@ mod tests {
         let view = ReadTool
             .result_view(
                 &input,
-                indoc! { "\
+                indoc! {"
                     2\tbeta
                     3\tgamma
 
-                    (Showing lines 2–3 of 5 total)" },
+                    (Showing lines 2–3 of 5 total)"
+                },
                 &ToolMetadata::default(),
                 Path::new("/repo"),
             )
