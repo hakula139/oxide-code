@@ -1,13 +1,14 @@
 //! Filesystem helpers for persisting private state (0o700 dirs, 0o600 files).
 
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::Write;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use uuid::Uuid;
+use tempfile::NamedTempFile;
 
-/// Creates `path` (and parents) with `0o700` perms on Unix.
+/// Creates `path` and its missing parents with `0o700` perms on Unix, also tightening an existing
+/// `path` to `0o700` when permitted.
 pub(crate) fn create_private_dir_all(path: &Path) -> Result<()> {
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true);
@@ -32,45 +33,20 @@ pub(crate) fn create_private_dir_all(path: &Path) -> Result<()> {
 
 /// Atomically writes `bytes` to `path` with `0o600` perms on Unix.
 ///
-/// Writes to a sibling temp file (same parent so `rename` stays a directory-internal atomic op),
-/// flushes contents to disk, then renames over the destination. Any failure removes the temp file.
+/// The bytes are synced to a temp file in `path`'s directory, then renamed over `path`. Any
+/// failure removes the temp file.
 pub(crate) fn atomic_write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path
         .parent()
         .with_context(|| format!("path {} has no parent directory", path.display()))?;
-    let tmp = parent.join(format!(
-        ".{}.tmp.{}",
-        path.file_name().and_then(|s| s.to_str()).unwrap_or("file"),
-        Uuid::new_v4().simple(),
-    ));
-
-    let mut opts = OpenOptions::new();
-    opts.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
-    }
-    let mut file = opts
-        .open(&tmp)
-        .with_context(|| format!("failed to create temp file {}", tmp.display()))?;
-
-    let write_result = file
-        .write_all(bytes)
-        .and_then(|()| file.sync_all())
-        .map_err(anyhow::Error::from);
-    if let Err(e) = write_result {
-        _ = fs::remove_file(&tmp);
-        return Err(e.context(format!("failed to write temp file {}", tmp.display())));
-    }
-    drop(file);
-
-    if let Err(e) = fs::rename(&tmp, path) {
-        _ = fs::remove_file(&tmp);
-        return Err(
-            anyhow::Error::from(e).context(format!("failed to install file at {}", path.display()))
-        );
-    }
+    let mut file = NamedTempFile::new_in(parent)
+        .with_context(|| format!("failed to create a temp file in {}", parent.display()))?;
+    file.write_all(bytes)
+        .and_then(|()| file.as_file().sync_all())
+        .with_context(|| format!("failed to write temp file {}", file.path().display()))?;
+    file.persist(path)
+        .map_err(|e| e.error)
+        .with_context(|| format!("failed to install file at {}", path.display()))?;
     Ok(())
 }
 
@@ -84,12 +60,13 @@ mod tests {
 
     use super::*;
 
-    fn tmp_leftovers(dir: &Path) -> Vec<OsString> {
-        fs::read_dir(dir)
+    fn entry_names(dir: &Path) -> Vec<OsString> {
+        let mut names: Vec<OsString> = fs::read_dir(dir)
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
-            .filter(|name| name.to_string_lossy().contains(".tmp."))
-            .collect()
+            .collect();
+        names.sort();
+        names
     }
 
     // ── create_private_dir_all ──
@@ -155,11 +132,12 @@ mod tests {
         let blocker = dir.path().join("blocker");
         fs::write(&blocker, b"").unwrap();
         let target = blocker.join("nested");
+
         let err = create_private_dir_all(&target).unwrap_err();
-        let chain = format!("{err:#}");
-        assert!(
-            chain.contains("failed to create") && chain.contains("nested"),
-            "actionable error: {chain}"
+
+        assert_eq!(
+            err.to_string(),
+            format!("failed to create {}", target.display()),
         );
     }
 
@@ -189,47 +167,45 @@ mod tests {
     fn atomic_write_private_does_not_leave_temp_file_on_success() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("file");
+
         atomic_write_private(&path, b"x").unwrap();
-        let leftovers = tmp_leftovers(dir.path());
-        assert!(leftovers.is_empty(), "tmp leftovers: {leftovers:?}");
+
+        assert_eq!(entry_names(dir.path()), ["file"]);
     }
 
     #[test]
     fn atomic_write_private_errors_when_parent_is_missing() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join("does/not/exist/file");
-        let err = atomic_write_private(&path, b"x").unwrap_err();
-        let chain = format!("{err:#}");
-        assert!(
-            chain.contains("failed to create temp file"),
-            "actionable error: {chain}"
+        let parent = dir.path().join("does/not/exist");
+
+        let err = atomic_write_private(&parent.join("file"), b"x").unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            format!("failed to create a temp file in {}", parent.display()),
         );
     }
 
     #[test]
     fn atomic_write_private_errors_when_path_has_no_parent() {
         let err = atomic_write_private(Path::new("/"), b"x").unwrap_err();
-        let chain = format!("{err:#}");
-        assert!(
-            chain.contains("no parent directory"),
-            "actionable error: {chain}"
-        );
+
+        assert_eq!(err.to_string(), "path / has no parent directory");
     }
 
     #[test]
     fn atomic_write_private_cleans_up_temp_when_rename_fails() {
-        // POSIX `rename(file, existing_dir)` fails with EISDIR, and the temp file must not leak.
+        // Renaming a file over an existing directory fails on every platform.
         let dir = tempdir().unwrap();
         let target = dir.path().join("target");
         fs::create_dir(&target).unwrap();
 
         let err = atomic_write_private(&target, b"x").unwrap_err();
-        let chain = format!("{err:#}");
-        assert!(
-            chain.contains("failed to install file"),
-            "actionable error: {chain}"
+
+        assert_eq!(
+            err.to_string(),
+            format!("failed to install file at {}", target.display()),
         );
-        let leftovers = tmp_leftovers(dir.path());
-        assert!(leftovers.is_empty(), "tmp cleaned up: {leftovers:?}");
+        assert_eq!(entry_names(dir.path()), ["target"]);
     }
 }
