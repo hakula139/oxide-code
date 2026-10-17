@@ -26,10 +26,12 @@ impl KeyChord {
         }
     }
 
-    /// Whether `event` presses this key with Ctrl held exactly when the chord needs it. Other
-    /// modifiers are ignored.
+    /// Whether `event` presses this key. A character needs Ctrl held exactly when the chord does,
+    /// while any other key matches whatever modifiers are held.
     fn matches(self, event: &KeyEvent) -> bool {
-        event.code == self.code && event.modifiers.contains(KeyModifiers::CONTROL) == self.ctrl
+        event.code == self.code
+            && (!matches!(self.code, KeyCode::Char(_))
+                || event.modifiers.contains(KeyModifiers::CONTROL) == self.ctrl)
     }
 
     #[cfg(test)]
@@ -63,8 +65,8 @@ impl fmt::Display for KeyChord {
 pub(crate) struct KeyAction<A, V> {
     pub(crate) action: A,
     pub(crate) key: KeyChord,
-    /// Hint text after the key, such as `to resume`, for the modal state `V`. `None` leaves the
-    /// action out of the footer while it has nothing to act on.
+    /// Hint text after the key, such as `to resume`, for the modal state `V`. `None` hides the
+    /// hint while the action has nothing to act on, such as a row action over an empty list.
     pub(crate) label: fn(&V) -> Option<&'static str>,
 }
 
@@ -86,10 +88,10 @@ impl<A: Copy, V> Keymap<A, V> {
             .map(|entry| entry.action)
     }
 
-    /// `{key} {label}` for each action labeled in `view`, in table order.
-    pub(crate) fn hints<'a>(&'a self, view: &'a V) -> impl Iterator<Item = String> + 'a {
+    /// Each action labeled in `view` with its `{key} {label}` hint, in table order.
+    pub(crate) fn hints<'a>(&'a self, view: &'a V) -> impl Iterator<Item = (A, String)> + 'a {
         self.actions.iter().filter_map(move |entry| {
-            (entry.label)(view).map(|label| format!("{} {label}", entry.key))
+            (entry.label)(view).map(|label| (entry.action, format!("{} {label}", entry.key)))
         })
     }
 
@@ -109,6 +111,7 @@ mod tests {
     enum TestAction {
         Toggle,
         Reset,
+        Confirm,
     }
 
     /// `Toggle` names the state it switches to, and `Reset` shows only while the state is on.
@@ -122,6 +125,11 @@ mod tests {
             action: TestAction::Reset,
             key: KeyChord::plain(KeyCode::Enter),
             label: |on| on.then_some("to reset"),
+        },
+        KeyAction {
+            action: TestAction::Confirm,
+            key: KeyChord::plain(KeyCode::Char('y')),
+            label: |_| Some("to confirm"),
         },
     ];
 
@@ -143,7 +151,7 @@ mod tests {
     // ── Keymap::action_for ──
 
     #[test]
-    fn action_for_requires_ctrl_exactly_when_the_chord_has_it() {
+    fn action_for_matches_ctrl_exactly_on_characters_and_ignores_it_on_other_keys() {
         let keymap = keymap();
         let press = |code, modifiers| keymap.action_for(&KeyEvent::new(code, modifiers));
 
@@ -153,10 +161,21 @@ mod tests {
         );
         assert_eq!(press(KeyCode::Char('x'), KeyModifiers::NONE), None);
         assert_eq!(
-            press(KeyCode::Enter, KeyModifiers::SHIFT),
-            Some(TestAction::Reset),
+            press(KeyCode::Char('y'), KeyModifiers::NONE),
+            Some(TestAction::Confirm),
         );
-        assert_eq!(press(KeyCode::Enter, KeyModifiers::CONTROL), None);
+        assert_eq!(press(KeyCode::Char('y'), KeyModifiers::CONTROL), None);
+        for modifiers in [
+            KeyModifiers::NONE,
+            KeyModifiers::SHIFT,
+            KeyModifiers::CONTROL,
+        ] {
+            assert_eq!(
+                press(KeyCode::Enter, modifiers),
+                Some(TestAction::Reset),
+                "{modifiers:?}",
+            );
+        }
         assert_eq!(press(KeyCode::Tab, KeyModifiers::NONE), None);
     }
 
@@ -168,11 +187,18 @@ mod tests {
 
         assert_eq!(
             keymap.hints(&false).collect::<Vec<_>>(),
-            ["Ctrl+X to start"]
+            [
+                (TestAction::Toggle, "Ctrl+X to start".to_owned()),
+                (TestAction::Confirm, "Y to confirm".to_owned()),
+            ],
         );
         assert_eq!(
             keymap.hints(&true).collect::<Vec<_>>(),
-            ["Ctrl+X to stop", "Enter to reset"],
+            [
+                (TestAction::Toggle, "Ctrl+X to stop".to_owned()),
+                (TestAction::Reset, "Enter to reset".to_owned()),
+                (TestAction::Confirm, "Y to confirm".to_owned()),
+            ],
         );
     }
 }

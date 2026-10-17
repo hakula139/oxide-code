@@ -102,7 +102,7 @@ The session's [task list](../tools/tasks.md) needs no entry of its own. On resum
 
 ### Archiving
 
-An `archive` entry sets whether default listings and bare `ox -c` skip the session, and the latest one wins. Bare `/archive` queues one through the actor before the roll that finalizes the session, `/archive <prefix>` and `/unarchive <prefix>` append an entry to another session's file and restore its mtime, so toggling its archive status does not change its position in listings. Resuming an archived session appends an entry that unarchives it. Files never move, so path-based resume and every other reference to a session file keep working.
+An `archive` entry sets whether default listings and bare `ox -c` skip the session, and the latest one wins. Bare `/archive` queues one through the actor before the roll that finalizes the session. Use `/archive <prefix>`, `/unarchive <prefix>`, or Ctrl+X. in the `/resume` picker append an entry to another session's file and restore its mtime, so toggling its archive status does not change its position in listings. Resuming an archived session appends an entry that unarchives it. Files never move, so path-based resume and every other reference to a session file keep working.
 
 ### Fork-on-conflict concurrency
 

@@ -44,21 +44,9 @@ mod tests {
     use time::macros::datetime;
 
     use super::*;
-    use crate::session::store::SessionStore;
-    use crate::session::store::listing::ListScope;
-    use crate::session::store::testing::{seed_test_session, test_session_file, test_store};
-
-    fn listed_ids(store: &SessionStore, archived: bool) -> Vec<String> {
-        let scope = ListScope {
-            all: false,
-            archived,
-        };
-        let page = store.list_paged(None, scope).unwrap();
-        page.into_sessions()
-            .into_iter()
-            .map(|info| info.session_id)
-            .collect()
-    }
+    use crate::session::store::testing::{
+        listed_ids, seed_test_session, test_session_file, test_store,
+    };
 
     // ── set_archived ──
 
@@ -83,6 +71,7 @@ mod tests {
              new one.",
         );
         assert_eq!(listed_ids(&store, false), ["live-session"]);
+
         set_archived(&path, "live-session", false, "live-session").unwrap();
     }
 }

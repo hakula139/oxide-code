@@ -76,8 +76,8 @@ impl SlashCommand for UnarchiveCmd {
         let prefix = args.trim();
         if prefix.is_empty() {
             return Err(
-                "Missing id. Use `/resume` then Ctrl+A to browse archived sessions, or \
-                 `/unarchive <id-prefix>`."
+                "Missing id. Use `/resume` then Ctrl+A to browse archived sessions, then Ctrl+X \
+                 to unarchive one. You can also use `/unarchive <id-prefix>`."
                     .to_owned(),
             );
         }
@@ -121,7 +121,7 @@ mod tests {
     use time::macros::datetime;
 
     use super::*;
-    use crate::session::store::testing::seed_test_session;
+    use crate::session::store::testing::{listed_ids, seed_test_session};
     use crate::session::store::{SessionStore, set_archived_at};
     use crate::slash::{stamped_id, test_session_info, with_isolated_xdg};
 
@@ -133,11 +133,6 @@ mod tests {
             Some(1),
             datetime!(2026-04-18 09:00:00 UTC),
         );
-    }
-
-    fn listed_ids(store: &SessionStore) -> Vec<String> {
-        let sessions = store.list().unwrap();
-        sessions.into_iter().map(|s| s.session_id).collect()
     }
 
     // ── ArchiveCmd::name ──
@@ -179,7 +174,7 @@ mod tests {
 
             let note = ArchiveCmd.execute(&target_id[..4], &ctx).unwrap();
             assert_eq!(note.into_system_message(), archive_notice(&target_id, true));
-            assert_eq!(listed_ids(&store), [] as [String; 0]);
+            assert_eq!(listed_ids(&store, false), [] as [String; 0]);
 
             let again = ArchiveCmd.execute(&target_id[..4], &ctx).unwrap();
             assert_eq!(
@@ -203,7 +198,7 @@ mod tests {
                 "Session prefix `test-` matches the live session. Use bare `/archive` to archive \
                  it and start a new one.",
             );
-            assert_eq!(listed_ids(&store), ["test-session"]);
+            assert_eq!(listed_ids(&store, false), ["test-session"]);
         });
     }
 
@@ -273,8 +268,8 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             err,
-            "Missing id. Use `/resume` then Ctrl+A to browse archived sessions, or \
-             `/unarchive <id-prefix>`.",
+            "Missing id. Use `/resume` then Ctrl+A to browse archived sessions, then Ctrl+X to \
+             unarchive one. You can also use `/unarchive <id-prefix>`.",
         );
     }
 
@@ -293,7 +288,7 @@ mod tests {
                 note.into_system_message(),
                 archive_notice(&target_id, false)
             );
-            assert_eq!(listed_ids(&store), [target_id.as_str()]);
+            assert_eq!(listed_ids(&store, false), [target_id.as_str()]);
 
             let again = UnarchiveCmd.execute(&target_id[..4], &ctx).unwrap();
             assert_eq!(

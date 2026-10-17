@@ -110,8 +110,16 @@ impl<T: SearchableItem> SearchableList<T> {
         self.recompute_visible();
     }
 
+    /// Replaces all items and re-runs the filter, keeping the cursor index, clamped to the last
+    /// row, and the scroll position. A refresh that dropped the cursor row lands on the next one.
+    pub(crate) fn refresh_items(&mut self, items: Vec<T>) {
+        self.items = items;
+        self.visible = self.filtered();
+        self.cursor = self.cursor.min(self.visible.len().saturating_sub(1));
+    }
+
     /// Seek the cursor to the first visible row matching `f`. No-op if no row matches. Pairs with
-    /// [`Self::replace_items`] to keep the cursor pinned across a refresh.
+    /// [`Self::refresh_items`] to keep the cursor pinned across a refresh.
     pub(crate) fn cursor_to<F: Fn(&T) -> bool>(&mut self, f: F) {
         if let Some(vi) = self
             .visible
@@ -122,18 +130,13 @@ impl<T: SearchableItem> SearchableList<T> {
         }
     }
 
-    /// Moves the cursor to visible row `index`, or to the last row when fewer remain. Pairs with
-    /// [`Self::replace_items`] to keep the cursor's position across a refresh that dropped its row.
-    pub(crate) fn cursor_to_index(&mut self, index: usize) {
-        self.cursor = index.min(self.visible.len().saturating_sub(1));
-    }
-
     pub(crate) fn selected(&self) -> Option<&T> {
         self.visible
             .get(self.cursor)
             .and_then(|i| self.items.get(*i))
     }
 
+    #[cfg(test)]
     pub(crate) fn cursor_index(&self) -> usize {
         self.cursor
     }
@@ -170,25 +173,29 @@ impl<T: SearchableItem> SearchableList<T> {
     }
 
     fn recompute_visible(&mut self) {
-        let query = self.query.text();
-        // Empty-needle fast path skips the per-row to_lowercase allocation.
-        self.visible = if query.is_empty() {
-            (0..self.items.len()).collect()
-        } else {
-            let needle = query.to_lowercase();
-            self.items
-                .iter()
-                .enumerate()
-                .filter_map(|(i, item)| {
-                    item.haystack()
-                        .to_lowercase()
-                        .contains(&needle)
-                        .then_some(i)
-                })
-                .collect()
-        };
+        self.visible = self.filtered();
         self.cursor = 0;
         self.viewport.reset();
+    }
+
+    /// Indices of the items that pass the query, in item order.
+    fn filtered(&self) -> Vec<usize> {
+        let query = self.query.text();
+        // Empty-needle fast path skips the per-row to_lowercase allocation.
+        if query.is_empty() {
+            return (0..self.items.len()).collect();
+        }
+        let needle = query.to_lowercase();
+        self.items
+            .iter()
+            .enumerate()
+            .filter_map(|(i, item)| {
+                item.haystack()
+                    .to_lowercase()
+                    .contains(&needle)
+                    .then_some(i)
+            })
+            .collect()
     }
 
     /// Total rows occupied by chrome (header + search row + gap).
@@ -455,27 +462,6 @@ mod tests {
         );
     }
 
-    // ── cursor_to_index ──
-
-    #[test]
-    fn cursor_to_index_clamps_to_the_last_visible_row() {
-        let mut l = list(vec![
-            FakeItem::new("apple"),
-            FakeItem::new("BERRY"),
-            FakeItem::new("apricot"),
-        ]);
-        l.cursor_to_index(1);
-        assert_eq!(l.selected().unwrap().haystack, "BERRY");
-
-        l.set_query("ap");
-        l.cursor_to_index(2);
-        assert_eq!(l.selected().unwrap().haystack, "apricot");
-
-        l.set_query("zzz");
-        l.cursor_to_index(1);
-        assert_eq!(l.cursor_index(), 0);
-    }
-
     // ── replace_items ──
 
     #[test]
@@ -492,6 +478,55 @@ mod tests {
             "the prior `alpha` query no longer matches the new items",
         );
         assert_eq!(l.cursor_index(), 0, "replace_items must reset cursor");
+    }
+
+    // ── refresh_items ──
+
+    #[test]
+    fn refresh_items_keeps_the_cursor_index_and_the_scroll_position() {
+        let mut l = numbered(10, 3);
+        for _ in 0..5 {
+            l.select_next();
+        }
+        let shown = |l: &SearchableList<FakeItem>| -> Vec<String> {
+            render_rows(l, 20, l.height(20, 40))[4..7]
+                .iter()
+                .map(|row| row.trim_end().to_owned())
+                .collect()
+        };
+        shown(&l);
+        l.select_prev();
+        assert_eq!(shown(&l), ["  item-3", "> item-4", "  item-5"]);
+
+        l.refresh_items(
+            (0..10)
+                .filter(|&i| i != 4)
+                .map(|i| FakeItem::new(item_label(i)))
+                .collect(),
+        );
+
+        assert_eq!(shown(&l), ["  item-3", "> item-5", "  item-6"]);
+    }
+
+    #[test]
+    fn refresh_items_clamps_the_cursor_and_keeps_the_filter() {
+        let mut l = list(vec![
+            FakeItem::new("apple"),
+            FakeItem::new("BERRY"),
+            FakeItem::new("apricot"),
+        ]);
+        l.set_query("ap");
+        l.select_next();
+
+        l.refresh_items(vec![FakeItem::new("apple"), FakeItem::new("BERRY")]);
+
+        assert_eq!(l.visible_len(), 1, "the query still applies");
+        assert_eq!(l.selected().unwrap().haystack, "apple");
+
+        l.set_query("zzz");
+        l.refresh_items(vec![FakeItem::new("apple")]);
+        assert_eq!(l.cursor_index(), 0);
+        assert!(l.selected().is_none());
     }
 
     // ── select_next / select_prev ──
