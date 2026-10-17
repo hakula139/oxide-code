@@ -76,11 +76,12 @@ fn render_boundary(header: &str, summary: &str, ctx: &RenderCtx<'_>) -> Vec<Line
         let rendered = render_markdown(summary, ctx.theme, md_width);
         for line in rendered.lines {
             let mut prefixed = prepend_markdown_prefix(line, TOOL_BORDER_PREFIX, bar_style);
-            // Markdown render may set Line::style for code blocks; preserve that and only
-            // patch the body spans to the chat text style when no fg is set.
-            for span in &mut prefixed.spans[1..] {
-                if span.style.fg.is_none() {
-                    span.style = span.style.patch(body_style);
+            // Plain code fences color the row via `Line::style`, which any span color overrides.
+            if prefixed.style.fg.is_none() {
+                for span in &mut prefixed.spans[1..] {
+                    if span.style.fg.is_none() {
+                        span.style = span.style.patch(body_style);
+                    }
                 }
             }
             out.push(prefixed);
@@ -191,6 +192,31 @@ mod tests {
                 text.starts_with(TOOL_BORDER_PREFIX),
                 "row {i}: bar prefix missing: {text:?}",
             );
+        }
+    }
+
+    #[test]
+    fn render_plain_code_fence_keeps_code_color() {
+        let theme = Theme::default();
+        let block = CompactedBlock::new(
+            4,
+            None,
+            indoc! {"
+                ```
+                cargo test
+                ```
+            "},
+        );
+
+        let lines = block.render(&ctx_at(60, &theme));
+
+        let code = lines
+            .iter()
+            .find(|line| line.to_string().contains("cargo test"))
+            .expect("code row");
+        for span in &code.spans[1..] {
+            let painted = code.style.patch(span.style);
+            assert_eq!(painted.fg, theme.code().fg, "{code:?}");
         }
     }
 
