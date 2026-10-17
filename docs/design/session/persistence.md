@@ -29,9 +29,9 @@ Every session is a single append-only `.jsonl` file with one JSON object per lin
 
 ## Compatibility
 
-Every release resumes the session files that every earlier release wrote, prereleases included. This is stricter than the [stability surface](../../../RELEASING.md#stability-surface), which promises session JSONL compatibility only between stable releases within a minor version, and it lets users keep their sessions across any upgrade.
+Session files follow the [stability surface](../../../RELEASING.md#stability-surface): within a minor version, each stable release can resume session files written by earlier stable releases of that minor version. Before 0.1.0, a release may stop reading files from earlier versions, and an earlier prerelease binary may skip lines in a newer file without a header `version` bump. The loader treats a line in a shape it no longer reads as malformed and skips it. Since a skipped message breaks the chain that resume follows back from its newest leaf, the session resumes with only the messages after the last skipped one.
 
-A newer binary reads an older file as long as every change to the format is one of these:
+Within the stability surface, a newer binary can read an older file as long as every format change is one of the following:
 
 - **Additions.** A new entry type, or a new field that deserializes to a default when absent.
 - **Removals.** A removed field, since the loader ignores fields it does not know. The data the field held is lost on resume.
@@ -39,17 +39,15 @@ A newer binary reads an older file as long as every change to the format is one 
 
 An older binary reading a newer file skips entry types it does not know as malformed lines and ignores unknown fields. Bump the header's `version` only when an older binary would misread a newer file, since an older binary refuses any file whose `version` is newer than it supports.
 
-Reasoning blocks are compatible in both directions. A `thinking` block keeps its `signature` and a `redacted_thinking` block keeps its `data`, as every release wrote them, and both add the `wire` and `model` that produced them, which older binaries ignore. A block saved without them loads as an Anthropic block with no model. The Anthropic wire sends every Anthropic block back unchanged whichever model produced it, as Anthropic's guide to [switching models](https://platform.claude.com/docs/en/build-with-claude/preserved-thinking#switching-models) asks, so the recorded `model` changes no request. Which blocks a model reads depends on the platform, and the API drops or ignores the rest, as the [research note](../../research/api/extended-thinking.md#constraints) details.
+A reasoning block stores the `wire` and `model` that produced it alongside a `payload` that only that wire can read, such as the `signature` of an Anthropic `thinking` block or the `data` of a `redacted_thinking` block. The Anthropic wire sends every Anthropic block back unchanged whichever model produced it, as Anthropic's guide to [switching models](https://platform.claude.com/docs/en/build-with-claude/preserved-thinking#switching-models) asks, so the recorded `model` changes no request. Which blocks a model reads depends on the platform, and the API drops or ignores the rest, as the [research note](../../research/api/extended-thinking.md#constraints) details.
 
 A `wire` value that an older binary does not know fails to parse, and that binary skips the whole message as a malformed line, so adding a `wire` value needs a header `version` bump. A task `status` works the same way inside a `compact` entry: an unknown one makes an older binary skip the boundary, so adding a status needs a bump too.
 
-Tests in `session/handle.rs` hold every release to this guarantee, using one fixture per release in `crates/oxide-code/src/session/fixtures/`, named after its tag:
+Tests in `session/handle.rs` enforce this guarantee for stable releases, using one fixture per release starting with `v0.1.0`. Each fixture lives in `crates/oxide-code/src/session/fixtures/` and is named after its tag:
 
-- **Fixture source.** One test writes a session holding every entry type and content block, with messages, prompt contexts, and sidecars after its compaction so that a resume reads them. It snapshots the file with its per-run UUIDs, timestamps, and working directory masked. `scripts/prepare-release.sh` copies that snapshot as the new release's fixture.
+- **Fixture source.** One test writes a session containing every entry type and content block, then adds messages, prompt contexts, and sidecars after compaction so a resume reads them. It snapshots the file after masking its per-run UUIDs, timestamps, and working directory. For each stable tag, `scripts/prepare-release.sh` copies that snapshot as the fixture for the new release.
 - **Resume check.** Another test fills each fixture's masks with fixed values, then lists and resumes it. It snapshots what the listing and the resume recovered: the title, branch, archive state, compaction, prompt context, transcript, sidecars, and recorded usage. It then appends a message and checks that the message continues the resumed chain. The same check runs on the session this build writes, so a pull request that changes the format also shows how its files will resume.
-- **Changed behavior.** A change to how an old file resumes fails that fixture's snapshot. Fixtures are frozen release output, so never edit one, and accept a changed fixture snapshot only for a change this section allows.
-
-The `v0.1.0-alpha` releases predate the release step, so their fixtures come from running the same session against each tag's writer, limited to the entry types that tag wrote. Their file snapshots predate the `tool_use_id` that resume matches against the transcript, so those sessions resume without file snapshots and the agent re-reads a file before editing it.
+- **Changed behavior.** If a change alters how an old file resumes, that fixture's snapshot will fail. Fixtures capture frozen release output, so never edit them. Accept a changed fixture snapshot only when the change is allowed by this section.
 
 ## Storage Layout
 

@@ -34,7 +34,7 @@ A `Rule` consists of a class and a pattern. Its tier is determined by the list t
 - **`plan`** is read-only. It denies every `edit`, `exec`, and `net` call, including a known-safe `bash` read, and reads behave as in `manual`.
 - **`yolo`** runs every call the rules leave open. Deny and ask rules still hold, shipped defaults included, so `yolo` still asks before editing `.git/hooks` until the `git` default is turned off.
 
-Deny and ask rules apply in every mode. In `plan`, only ask rules for `read` and `mcp` calls still ask, since `plan` denies the other classes first. The `auto` mode will return with the classifier tracked in [#131](https://github.com/hakula139/oxide-code/issues/131), which will decide open calls without asking. Calls that match the ask tier will still go to the user, because an ask rule records that the user wants to see the call.
+Deny and ask rules apply in every mode. In `plan`, only ask rules for `read` and `mcp` calls still ask, since `plan` denies the other classes first. An `auto` mode, tracked in [#131](https://github.com/hakula139/oxide-code/issues/131), will decide open calls with a classifier. Calls that match the ask tier will still go to the user, because an ask rule records that the user wants to see the call.
 
 The modes correspond to these settings in Claude Code and Codex:
 
@@ -164,7 +164,7 @@ ssh = false
 | `cargo`       | ask `edit`     | `.cargo/config`, `.cargo/config.toml`, `rust-toolchain`, and `rust-toolchain.toml`                                  |
 | `shell`       | ask `edit`     | the bash, zsh, and POSIX shell startup files anywhere                                                               |
 | `agents`      | ask `edit`     | `.codex` at any depth, `.claude/settings.json`, `.claude/settings.local.json`, and everything under `.claude/hooks` |
-| `ox`          | ask `edit`     | `.ox` at any depth, a legacy `ox.toml` anywhere, and oxide-code's own config, data, and state directories           |
+| `ox`          | ask `edit`     | `.ox` at any depth and oxide-code's own config, data, and state directories                                         |
 | `devices`     | ask `edit`     | `/dev/**` on Unix, which a redirection to a device other than the standard streams writes                           |
 | `rm`          | ask `exec`     | an `rm` whose arguments before `--` hold both its recursive and force options, or a word that expands               |
 | `ssh`         | deny `read`    | `~/.ssh`, plus ask `edit` for `~/.ssh/config` and `~/.ssh/authorized_keys`                                          |
@@ -217,15 +217,6 @@ The `[permission]` table parses into a `PermissionTable` on `FileConfig`. `deny_
 
 A checked-in `.ox/config.toml` is untrusted, just like the project credentials that `reject_project_secrets` blocks. A project file may set only `permission.deny` and `permission.ask`. Any other `[permission]` key there, such as `mode`, `allow`, `extra_roots`, or `defaults`, is rejected with a message pointing to user config. The merge appends project rules to the user's rules, allowing a repo to restrict itself or require approval without widening what the user allowed or turning off a default.
 
-## Migration
-
-Earlier versions used flat `allow` and `deny` arrays of `class(specifier)` strings, and their `auto` mode asked about open calls. Each old form fails to load with a message naming its replacement, so config meaning never changes silently:
-
-- **`permission.allow`, `permission.ask`, or `permission.deny` as an array** fails with the table entries that replace it, every such array and an `auto` mode in one message. `bash` becomes `exec`, a prefix rule `bash(cargo test:*)` becomes `cargo test *`, a class-wide rule becomes `*`, and a relative path glob gains `./` because old relative globs applied inside the cwd. A rule the new grammar cannot express, such as `bash(mkfs*)`, `bash(* | sh)`, or `bash(git * --force)`, whose `*` matched any run of characters, appears as a comment explaining why. A converted allow table that holds a path pattern notes that the pattern now also covers everything below a directory it matches.
-- **`mode = "auto"`** fails and says that the asking mode is now `manual`, the default. The same message applies to `OX_PERMISSION_MODE`. The classifier tracked in [#131](https://github.com/hakula139/oxide-code/issues/131) will bring `auto` back with a new meaning, and its release notes will flag the change.
-
-`plan` and `yolo` load as before. `yolo` used to skip the shipped defaults and protected paths, and it now honors them along with ask rules, so it still asks before editing `.git/hooks`. Old shipped deny defaults either became ask defaults or were removed: `rm -rf` asks through `rm`, a redirection to a disk device asks through `devices`, edits to `.git` ask through `git`, and a pipe into a shell needs no rule because opaque commands ask in `manual`. Fork bombs, `dd`, and `mkfs` have no default, so `manual` asks unless an allow rule names them, and `yolo` runs them.
-
 ## Stdio Frontends
 
 The `--no-tui` REPL and `-p` headless runs share `render_op`. It passes each `Event::ApprovalRequested` to an `Approver` and sends the decision back as `Op::Resolve`. The request itself never reaches the event sink, so `stream-json` output contains only the call's result.
@@ -257,24 +248,22 @@ The stdio sink escapes control characters other than tabs and line breaks in mod
 
 7. **Project files tighten only.** Honoring a project's `allow`, `mode`, `extra_roots`, or `defaults` would let a teammate's repo broaden what the local user permitted, creating the same privilege-escalation vector as project-set credentials. Appending `deny` and `ask` rules lets a repo restrict itself without that risk.
 
-8. **Old configs fail loudly.** A flat rule array or the renamed `auto` mode fails to load with its replacement. Reading `auto` as `manual` would work today but silently change meaning when the classifier ships.
+8. **Deny rules are the enforced boundary for path tools.** The deny list matches both spellings of the path as the file system sees it when the gate checks, each pattern's literal prefix as resolved when the policy loaded, and folded names. It does not cover a symlink swapped into an intermediate directory after the check or files touched by a `bash` command, so an untrusted model still needs an external OS sandbox.
 
-9. **Deny rules are the enforced boundary for path tools.** The deny list matches both spellings of the path as the file system sees it when the gate checks, each pattern's literal prefix as resolved when the policy loaded, and folded names. It does not cover a symlink swapped into an intermediate directory after the check or files touched by a `bash` command, so an untrusted model still needs an external OS sandbox.
+9. **Decision on the existing channel.** Routing approvals through `ops` and the `ModalStack` reuses the turn loop's existing cancel / quit / queue semantics, avoiding the need for a second channel or control-flow path.
 
-10. **Decision on the existing channel.** Routing approvals through `ops` and the `ModalStack` reuses the turn loop's existing cancel / quit / queue semantics, avoiding the need for a second channel or control-flow path.
+10. **Every decision names its basis.** A denial that only said "the permission policy" left the model and the user to guess which of several rules fired. Carrying the basis with the decision lets the denial, the approval prompt, the headless feedback, and the debug log all name the same rule, so a user knows which pattern to change.
 
-11. **Every decision names its basis.** A denial that only said "the permission policy" left the model and the user to guess which of several rules fired. Carrying the basis with the decision lets the denial, the approval prompt, the headless feedback, and the debug log all name the same rule, so a user knows which pattern to change.
+11. **Mode switches wait for the next gated call.** A switch mid-turn changes how the remaining calls are weighed without revisiting calls that already passed the gate, which would mean cancelling a running command or a pending approval. Confirming on receipt keeps the status line honest about the mode the next call meets.
 
-12. **Mode switches wait for the next gated call.** A switch mid-turn changes how the remaining calls are weighed without revisiting calls that already passed the gate, which would mean cancelling a running command or a pending approval. Confirming on receipt keeps the status line honest about the mode the next call meets.
+12. **Shift+Tab reaches `yolo` only from a `yolo` start.** A stray key press then cannot leave every call unprompted in a session that started with prompts. Claude Code likewise leaves `bypassPermissions` out of its Shift+Tab cycle unless the session started with it allowed, while `/mode yolo` stays available as a deliberate, typed choice.
 
-13. **Shift+Tab reaches `yolo` only from a `yolo` start.** A stray key press then cannot leave every call unprompted in a session that started with prompts. Claude Code likewise leaves `bypassPermissions` out of its Shift+Tab cycle unless the session started with it allowed, while `/mode yolo` stays available as a deliberate, typed choice.
-
-14. **Approvals stay in process.** A persisted grant has no disk ground truth to revalidate on resume, unlike a `FileSnapshot` rehash, so restoring it would regress trust. In keeping with the slash-command persistence stance ([decision 6](../slash/commands.md#design-decisions)), session commands remain reversible, and cross-session writes wait for an explicit confirmed action.
+13. **Approvals stay in process.** A persisted grant has no disk ground truth to revalidate on resume, unlike a `FileSnapshot` rehash, so restoring it would regress trust. In keeping with the slash-command persistence stance ([decision 6](../slash/commands.md#design-decisions)), session commands remain reversible, and cross-session writes wait for an explicit confirmed action.
 
 ## Sources
 
 - `crates/oxide-code/src/config.rs`: `Config::load`, `resolve_permission`, `OX_PERMISSION_MODE`, `Effort` enum template.
-- `crates/oxide-code/src/config/load.rs`: `reject_project_secrets`, `reject_project_permissions`, `reject_old_permissions`.
+- `crates/oxide-code/src/config/load.rs`: `reject_project_secrets`, `reject_project_permissions`.
 - `crates/oxide-code/src/config/merge.rs`: `APPENDED_TABLES` and `APPENDED` lists, `merge`.
 - `crates/oxide-code/src/config/schema.rs`: `PermissionTable`, `TierTable`, the `defaults` map.
 - `crates/oxide-code/src/driver/repl.rs`: `Prompter`, the stdin approval prompt.
@@ -285,7 +274,6 @@ The stdio sink escapes control characters other than tabs and line breaks in mod
 - `crates/oxide-code/src/main.rs`: the `--mode` flag.
 - `crates/oxide-code/src/permission.rs`: `Mode`, `PermissionClass`, `Workspace`, `Access::for_path`, `Access::for_command`, `Verdict`, `Basis`, `Policy::verdict`, `Policy::session_grant`, `SessionGrant`, `ReadFilter`.
 - `crates/oxide-code/src/permission/defaults.rs`: the shipped defaults, `ShippedTier`, protected names and home locations, and `[permission.defaults]` names.
-- `crates/oxide-code/src/permission/legacy.rs`: conversion of old `class(specifier)` rules for the migration error.
 - `crates/oxide-code/src/permission/rule.rs`: `Rule`, the exec, path, net, and MCP patterns, `MatchDiscipline`, and `Rule::for_call`.
 - `crates/oxide-code/src/permission/shell.rs`: `CommandTarget::parse`, wrapper stripping, named and program words, opaque forms, redirection reads and writes, known-safe commands, reader glob expansion, and the forced recursive `rm` check.
 - `crates/oxide-code/src/protocol.rs`: `Event::ApprovalRequested`, `Event::SessionRulesUpdated`, `Event::ModeChanged`, `Op::Resolve`, `Op::SetMode`, `Decision`.
