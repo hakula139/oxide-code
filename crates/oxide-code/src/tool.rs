@@ -525,16 +525,19 @@ fn prepare_search_root(input: serde_json::Value, ctx: &ToolCtx) -> Prepared {
 struct SearchRoot {
     /// The resolved root, which exists.
     base: PathBuf,
-    /// The root as the call spells it, for the read deny rules each found file faces.
+    /// The root as the call spells it, for the read deny and ask rules each found file faces.
     spelled: PathBuf,
     /// The canonical working directory, so hits under the canonical base render relative to it.
     cwd: PathBuf,
+    /// The session's workspace, whose anchor directories those rules apply below.
+    workspace: Arc<Workspace>,
 }
 
 impl SearchRoot {
-    /// The root `access` resolved for a search in `cwd` whose call spells it as `path`, the cwd by
-    /// default. The root must exist.
-    fn new(access: &Access, path: Option<&str>, cwd: &Path) -> Result<Self, String> {
+    /// The root `access` resolved for a search in `workspace` whose call spells it as `path`, the
+    /// cwd by default. The root must exist.
+    fn new(access: &Access, path: Option<&str>, workspace: Arc<Workspace>) -> Result<Self, String> {
+        let cwd = workspace.cwd();
         let spelled = PathBuf::from(path.unwrap_or("."));
         let Some(base) = access.resolved() else {
             return Err(format!(
@@ -550,7 +553,12 @@ impl SearchRoot {
         }
         let cwd = dunce::canonicalize(cwd)
             .map_err(|e| format!("Failed to get working directory: {e}"))?;
-        Ok(Self { base, spelled, cwd })
+        Ok(Self {
+            base,
+            spelled,
+            cwd,
+            workspace,
+        })
     }
 }
 
@@ -854,10 +862,10 @@ pub(crate) fn truncate_line(line: &str, max_chars: usize) -> Cow<'_, str> {
     ))
 }
 
-const WITHHELD_NOTE_END: &str = "withheld by read deny rules)";
+const WITHHELD_NOTE_END: &str = "withheld by read deny or ask rules)";
 
-/// Appends the note a search tool adds when read deny rules withheld `count` of the files it found.
-/// The note counts them without naming any.
+/// Appends the note a search tool adds when read deny or ask rules withheld `count` of the files
+/// it found. The note counts them without naming any.
 pub(crate) fn push_withheld_note(content: &mut String, count: usize) {
     if count == 0 {
         return;
@@ -886,7 +894,8 @@ pub(crate) mod testing {
 
     use super::{SearchRoot, Tool, ToolCtx, ToolOutput, ToolRegistry, run_capped};
     use crate::file_tracker::FileTracker;
-    use crate::permission::{Access, Workspace};
+    use crate::permission::rule::Rule;
+    use crate::permission::{Access, Mode, PermissionClass, Policy, ReadFilter, Workspace};
 
     /// A fresh tracker's context in `cwd`, for call `toolu_test` of session `test-session`.
     pub(crate) fn ctx(cwd: &Path) -> ToolCtx {
@@ -918,11 +927,21 @@ pub(crate) mod testing {
         tool.run(tool.prepare(input, ctx), ctx).await
     }
 
+    /// The read filter of a policy that denies reading whatever one of `patterns` matches.
+    pub(crate) fn deny_reads(patterns: &[&str]) -> ReadFilter {
+        let deny = patterns
+            .iter()
+            .map(|pattern| Rule::parse(PermissionClass::Read, pattern).unwrap())
+            .collect();
+        Policy::new(Mode::Manual, deny, Vec::new(), Vec::new()).read_filter()
+    }
+
     /// The root a search call in `cwd` that names `path` walks, resolved the way the search tools'
     /// `prepare` resolves it.
     pub(super) fn search_root(cwd: &Path, path: Option<&str>) -> Result<SearchRoot, String> {
-        let access = Access::for_path(path.unwrap_or("."), &Workspace::new(cwd));
-        SearchRoot::new(&access, path, cwd)
+        let workspace = Arc::new(Workspace::new(cwd));
+        let access = Access::for_path(path.unwrap_or("."), &workspace);
+        SearchRoot::new(&access, path, workspace)
     }
 
     impl ToolRegistry {
@@ -981,7 +1000,8 @@ mod tests {
     use super::testing::{canonical_tempdir, ctx, search_root, symlink_file, temp_ctx};
     use super::write::WriteTool;
     use super::*;
-    use crate::permission::{Decision, Mode, Policy, Zone};
+    use crate::permission::rule::Rule;
+    use crate::permission::{Decision, Mode, PermissionClass, Policy, Zone};
 
     fn all_tools() -> Vec<Box<dyn Tool>> {
         vec![
@@ -1043,7 +1063,7 @@ mod tests {
         assert_eq!(
             catalog,
             [
-                ("bash".to_owned(), PermissionClass::Bash, false),
+                ("bash".to_owned(), PermissionClass::Exec, false),
                 ("bash_output".to_owned(), PermissionClass::Read, false),
                 ("bash_stop".to_owned(), PermissionClass::Read, false),
                 ("edit".to_owned(), PermissionClass::Edit, false),
@@ -1223,16 +1243,17 @@ mod tests {
 
     #[test]
     fn spec_class_rules_cover_every_tool_in_the_class() {
-        // Rules address classes: a `read(...)` deny must stop grep and glob from dumping the file
-        // it names, and an `edit(...)` deny must stop write as well as edit.
+        // Rules address classes: a `read` deny must stop grep and glob from dumping the file it
+        // names, and an `edit` deny must stop write as well as edit.
         let dir = canonical_tempdir();
         std::fs::write(dir.path().join(".env"), "SECRET=1").unwrap();
         let deny = [
-            "read(.env)".to_owned(),
-            "edit(.env)".to_owned(),
-            "bash(cat .env)".to_owned(),
-        ];
-        let policy = Policy::resolve(Mode::Auto, &[], &deny, dir.path()).unwrap();
+            (PermissionClass::Read, ".env"),
+            (PermissionClass::Edit, ".env"),
+            (PermissionClass::Exec, "cat .env"),
+        ]
+        .map(|(class, pattern)| Rule::parse(class, pattern).unwrap());
+        let policy = Policy::new(Mode::Manual, deny.to_vec(), Vec::new(), Vec::new());
         let cases = [
             ("read", serde_json::json!({"file_path": ".env"})),
             ("grep", serde_json::json!({"pattern": ".", "path": ".env"})),
@@ -1334,7 +1355,8 @@ mod tests {
 
     #[test]
     fn prepare_resolves_a_search_root_but_leaves_its_spelling_in_the_input() {
-        // The read deny rules a search's hits face match against the root as the call spells it.
+        // The read deny and ask rules a search's hits face match against the root as the call
+        // spells it.
         let dir = canonical_tempdir();
         let input = serde_json::json!({"pattern": "x", "path": "."});
 
@@ -1824,7 +1846,8 @@ mod tests {
 
     #[test]
     fn search_root_refuses_an_access_that_is_not_a_path() {
-        let err = SearchRoot::new(&Access::None, Some("src"), Path::new("/repo"))
+        let workspace = Arc::new(Workspace::new(Path::new("/repo")));
+        let err = SearchRoot::new(&Access::None, Some("src"), workspace)
             .err()
             .unwrap();
         assert_eq!(err, "Cannot access src: the search root was not resolved.");
@@ -2125,8 +2148,8 @@ mod tests {
     #[test]
     fn push_withheld_note_counts_files_and_strips_back_off() {
         for (count, note) in [
-            (1, "(1 file withheld by read deny rules)"),
-            (3, "(3 files withheld by read deny rules)"),
+            (1, "(1 file withheld by read deny or ask rules)"),
+            (3, "(3 files withheld by read deny or ask rules)"),
         ] {
             let mut content = "a.rs".to_owned();
             push_withheld_note(&mut content, count);

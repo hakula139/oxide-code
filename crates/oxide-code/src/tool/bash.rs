@@ -65,7 +65,7 @@ impl Tool for BashTool {
                  the session ends."
                 .to_owned(),
             input_schema: input_schema(),
-            class: PermissionClass::Bash,
+            class: PermissionClass::Exec,
             parallel_safe: false,
         }
     }
@@ -511,9 +511,12 @@ mod tests {
 
     #[test]
     fn prepare_extracts_the_command() {
-        let prepared =
-            BashTool::default().prepare(serde_json::json!({"command": "ls -la"}), &temp_ctx());
-        assert!(matches!(prepared.access, Access::Command(c) if c.command() == "ls -la"));
+        let ctx = temp_ctx();
+        let prepared = BashTool::default().prepare(serde_json::json!({"command": "ls -la"}), &ctx);
+        assert_eq!(
+            prepared.access,
+            Access::for_command("ls -la", &ctx.workspace)
+        );
     }
 
     #[test]

@@ -63,7 +63,7 @@ fn build_modal(info: &LiveSessionInfo) -> KvOverview {
         let rules = info
             .session_allow
             .iter()
-            .map(|rule| ("Allow".to_owned(), rule.to_string()))
+            .map(|rule| (format!("allow.{}", rule.class()), rule.pattern().to_owned()))
             .collect();
         sections.push(KvSection::new(rules).with_heading("Session Rules"));
     }
@@ -87,6 +87,7 @@ fn build_modal(info: &LiveSessionInfo) -> KvOverview {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::permission::PermissionClass;
     use crate::permission::rule::Rule;
     use crate::slash::test_session_info;
     use crate::tool::bash::background::testing::shells_in_each_state;
@@ -132,19 +133,29 @@ mod tests {
         let without = render_modal(&build_modal(&info), 80);
         assert!(!without.contains("Session Rules"), "{without}");
 
-        info.session_allow = ["bash(cargo test:*)", "edit(out/**)"]
-            .map(|text| Rule::parse(text).unwrap())
-            .to_vec();
+        info.session_allow = [
+            (PermissionClass::Exec, "cargo test *"),
+            (PermissionClass::Edit, "./out/**"),
+        ]
+        .map(|(class, pattern)| Rule::parse(class, pattern).unwrap())
+        .to_vec();
         let rendered = render_modal(&build_modal(&info), 80);
-        let rules: Vec<&str> = rendered
+        let rules: Vec<Vec<&str>> = rendered
             .lines()
             .skip_while(|line| !line.contains("Session Rules"))
-            .filter(|line| line.contains("Allow"))
-            .map(str::trim)
+            .skip(1)
+            .map(|line| line.split_whitespace().collect::<Vec<_>>())
+            .filter(|words| !words.is_empty())
             .collect();
-        assert_eq!(rules.len(), 2, "{rendered}");
-        assert!(rules[0].ends_with("bash(cargo test:*)"), "{rendered}");
-        assert!(rules[1].ends_with("edit(out/**)"), "{rendered}");
+        assert_eq!(
+            rules,
+            [
+                vec!["allow.exec", "cargo", "test", "*"],
+                vec!["allow.edit", "./out/**"],
+                vec!["Esc", "to", "close"],
+            ],
+            "{rendered}"
+        );
     }
 
     #[test]

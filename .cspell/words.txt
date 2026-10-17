@@ -119,6 +119,7 @@ rustls
 serde
 serie
 sess
+shopt
 smol
 statix
 stdenv

@@ -17,7 +17,7 @@ Layers run from the foundation to the frontends.
 | Foundation | `util`         | Shared helpers for environment variables, the filesystem, git probes, logging, paths, mutex recovery, text width, local time, and TLS           |
 | Domain     | `config`       | Layered configuration with per-value provenance, credentials, gateway settings, and stored OAuth logins with browser sign-in                    |
 | Domain     | `model`        | Supported-model catalogue, per-model request capabilities, and pricing                                                                          |
-| Domain     | `permission`   | Tool permission gate: modes, allow / ask / deny rules, path resolution, and shell-command parsing                                               |
+| Domain     | `permission`   | Tool permission gate: modes, deny / ask / allow rules, shipped defaults, path resolution, and shell-command parsing                             |
 | Domain     | `prompt`       | System prompt assembly, environment detection, and instruction-file discovery                                                                   |
 | Services   | `client`       | The `Wire` streaming contract and the Anthropic Messages API client: request bodies and headers, a retrying transport, SSE, and one-shots       |
 | Services   | `command`      | Typed slash-command forms parsed into the `Op` each one runs, shared by the TUI's slash commands and the bare REPL                              |

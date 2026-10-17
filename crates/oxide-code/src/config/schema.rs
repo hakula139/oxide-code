@@ -1,14 +1,18 @@
 //! The TOML schema every config file shares: the `[client]`, `[permission]`, and `[tui]` tables.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::ops::RangeInclusive;
 
+use anyhow::{Context, Result};
 use serde::de::{self, Unexpected};
 use serde::{Deserialize, Deserializer};
 
 use super::compaction::ThresholdPercent;
 use super::{Effort, PromptCacheTtl, StatusLineSegment};
-use crate::permission::Mode;
+use crate::permission::defaults::Shipped;
+use crate::permission::rule::Rule;
+use crate::permission::{Mode, PermissionClass, Tier};
 use crate::util::env::whole_number_in;
 
 /// One config file, or several merged. Every key is optional.
@@ -49,15 +53,52 @@ pub(super) struct CompactionTable {
     pub(super) threshold_percent: Option<u8>,
 }
 
-/// `allow` and `deny` hold raw rule strings and `extra_roots` raw paths, which `Config::load`
-/// parses, so a malformed entry fails at startup.
+/// The tier tables hold raw patterns and `extra_roots` raw paths, which `Config::load` parses, so a
+/// malformed entry fails at startup. `defaults` turns shipped rule groups off by name.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(super) struct PermissionTable {
     pub(super) mode: Option<Mode>,
-    pub(super) allow: Option<Vec<String>>,
-    pub(super) deny: Option<Vec<String>>,
     pub(super) extra_roots: Option<Vec<String>>,
+    pub(super) deny: Option<TierTable>,
+    pub(super) ask: Option<TierTable>,
+    pub(super) allow: Option<TierTable>,
+    pub(super) defaults: Option<BTreeMap<Shipped, bool>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(super) struct TierTable {
+    pub(super) read: Option<Vec<String>>,
+    pub(super) edit: Option<Vec<String>>,
+    pub(super) exec: Option<Vec<String>>,
+    pub(super) net: Option<Vec<String>>,
+    pub(super) mcp: Option<Vec<String>>,
+}
+
+impl TierTable {
+    /// Parses every pattern of the `tier` table, naming the key and pattern of a malformed one.
+    pub(super) fn rules(&self, tier: Tier) -> Result<Vec<Rule>> {
+        [
+            (PermissionClass::Read, &self.read),
+            (PermissionClass::Edit, &self.edit),
+            (PermissionClass::Exec, &self.exec),
+            (PermissionClass::Net, &self.net),
+            (PermissionClass::Mcp, &self.mcp),
+        ]
+        .into_iter()
+        .flat_map(|(class, patterns)| {
+            patterns
+                .iter()
+                .flatten()
+                .map(move |pattern| (class, pattern))
+        })
+        .map(|(class, pattern)| {
+            Rule::parse(class, pattern)
+                .with_context(|| format!("invalid permission.{tier}.{class} pattern {pattern:?}"))
+        })
+        .collect()
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]

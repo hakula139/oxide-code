@@ -36,15 +36,19 @@ impl XdgBase {
     }
 }
 
-/// oxide-code's directory under `base`, such as `$XDG_DATA_HOME/ox` or `~/.local/share/ox`. The
-/// variable counts only when absolute, since the spec rejects relative values, which would
-/// otherwise resolve against the process cwd. `None` without a home directory to fall back to.
-pub(crate) fn app_dir(base: XdgBase) -> Option<PathBuf> {
-    let root = std::env::var_os(base.var())
+/// The XDG directory `base`, such as `$XDG_DATA_HOME` or `~/.local/share`. The variable counts
+/// only when absolute, since the spec rejects relative values, which would otherwise resolve
+/// against the process cwd. `None` without a home directory to fall back to.
+pub(crate) fn xdg_dir(base: XdgBase) -> Option<PathBuf> {
+    std::env::var_os(base.var())
         .map(PathBuf::from)
         .filter(|dir| dir.is_absolute())
-        .or_else(|| std::env::home_dir().map(|home| home.join(base.home_default())))?;
-    Some(root.join(APP_DIR))
+        .or_else(|| std::env::home_dir().map(|home| home.join(base.home_default())))
+}
+
+/// oxide-code's directory under [`xdg_dir`], such as `$XDG_DATA_HOME/ox` or `~/.local/share/ox`.
+pub(crate) fn app_dir(base: XdgBase) -> Option<PathBuf> {
+    Some(xdg_dir(base)?.join(APP_DIR))
 }
 
 /// Replaces a `$HOME` prefix with `~/`, falling back to the full path.

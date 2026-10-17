@@ -7,13 +7,12 @@ use toml::{Table, Value};
 
 use super::provenance::{Layer, Source, Sourced};
 
-/// Dotted keys whose arrays concatenate across layers, lowest layer first, so a higher layer adds
-/// rules and roots without discarding the lower layer's.
-const APPENDED: &[&str] = &[
-    "permission.allow",
-    "permission.deny",
-    "permission.extra_roots",
-];
+/// Tables whose arrays concatenate across layers, lowest layer first, so a higher layer adds rules
+/// without discarding the lower layer's.
+const APPENDED_TABLES: &[&str] = &["permission.deny", "permission.ask", "permission.allow"];
+
+/// Arrays outside [`APPENDED_TABLES`] that concatenate the same way.
+const APPENDED: &[&str] = &["permission.extra_roots"];
 
 /// Keys under one table that replace each other: a layer that sets any of them clears the rest
 /// from lower layers, so a project's percent threshold takes precedence over a user's token
@@ -85,7 +84,7 @@ fn merge_table(
                 merge_table(base, overlay, &path, layer, keys);
             }
             (Some(Value::Array(base)), Value::Array(overlay))
-                if APPENDED.contains(&path.as_str()) =>
+                if APPENDED.contains(&path.as_str()) || APPENDED_TABLES.contains(&prefix) =>
             {
                 base.extend(overlay);
                 keys.insert(path, layer);
@@ -237,14 +236,15 @@ mod tests {
     }
 
     #[test]
-    fn merge_concatenates_permission_rules_lowest_layer_first() {
+    fn merge_concatenates_permission_lists_lowest_layer_first() {
         let (table, origins) = merged(&[
             (
                 "a",
                 indoc! {r#"
                     [permission]
-                    allow = ["bash(ls)"]
-                    deny = ["bash(rm:*)"]
+                    extra_roots = ["/srv/a"]
+                    allow.exec = ["ls"]
+                    deny.exec = ["rm *"]
                 "#},
             ),
             ("b", r#"permission.mode = "plan""#),
@@ -252,21 +252,28 @@ mod tests {
                 "c",
                 indoc! {r#"
                     [permission]
-                    allow = ["bash(cat:*)"]
-                    deny = ["bash(curl:*)", "bash(rm:*)"]
+                    extra_roots = ["/srv/b"]
+                    allow.exec = ["cat *"]
+                    ask.edit = ["./Cargo.toml"]
+                    deny.exec = ["curl *", "rm *"]
                 "#},
             ),
         ]);
 
         assert_eq!(
-            strings(&table, "permission.allow"),
-            ["bash(ls)", "bash(cat:*)"]
+            strings(&table, "permission.extra_roots"),
+            ["/srv/a", "/srv/b"]
+        );
+        assert_eq!(strings(&table, "permission.allow.exec"), ["ls", "cat *"]);
+        assert_eq!(strings(&table, "permission.ask.edit"), ["./Cargo.toml"]);
+        assert_eq!(
+            strings(&table, "permission.deny.exec"),
+            ["rm *", "curl *", "rm *"]
         );
         assert_eq!(
-            strings(&table, "permission.deny"),
-            ["bash(rm:*)", "bash(curl:*)", "bash(rm:*)"]
+            origins.source("permission.deny.exec"),
+            Source::File(layer("c"))
         );
-        assert_eq!(origins.source("permission.deny"), Source::File(layer("c")));
     }
 
     #[test]

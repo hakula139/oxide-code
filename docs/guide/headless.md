@@ -9,7 +9,7 @@ ox -p "Fix the failing test" --output stream-json   # Stream every event as a JS
 ```
 
 - **Sessions**: Each run starts and saves a new session, which you can resume later in the TUI with `ox -c <session_id>`.
-- **Approvals**: No one can respond to approval prompts during a headless run, so calls that require approval are denied. The denial tells the model which allow rule would permit the call. Add `allow` rules for the calls your script needs, as described in [Tool approval](configuration.md#permission-tool-approval).
+- **Approvals**: No one can respond to approval prompts during a headless run, so calls that require approval are denied. The denial tells the model which allow pattern would permit the call. Add `allow` patterns for the calls your script needs, as described in [Tool approval](configuration.md#permission-tool-approval).
 
 ## Output Formats
 
@@ -105,14 +105,14 @@ A run that lists files and then attempts `cargo test`, which needs approval, str
 {"type":"tool_call_start","data":{"id":"call-1","name":"glob","input":{"pattern":"Cargo.toml"},"icon":"✱","label":"Glob(Cargo.toml)"}}
 {"type":"tool_call_end","data":{"id":"call-1","content":"Cargo.toml","is_error":false,"title":"Found 1 file","view":{"type":"glob_files","data":{"pattern":"Cargo.toml","files":["Cargo.toml"],"total":1}}}}
 {"type":"tool_call_start","data":{"id":"call-2","name":"bash","input":{"command":"cargo test"},"icon":"$","label":"cargo test"}}
-{"type":"tool_call_end","data":{"id":"call-2","content":"The bash call was denied with this feedback: This run cannot ask for approval. To allow this call, add `\"bash(cargo test)\"` to the `allow` list ...","is_error":true,"title":null,"view":{"type":"text","data":{"content":"The bash call was denied with this feedback: This run cannot ask for approval. To allow this call, add `\"bash(cargo test)\"` to the `allow` list ..."}}}}
+{"type":"tool_call_end","data":{"id":"call-2","content":"The bash call was denied with this feedback: This run cannot ask for approval. To allow this call, add `\"cargo test\"` to the `exec` list ...","is_error":true,"title":null,"view":{"type":"text","data":{"content":"The bash call was denied with this feedback: This run cannot ask for approval. To allow this call, add `\"cargo test\"` to the `exec` list ..."}}}}
 {"type":"stream_token","data":"Done."}
 {"type":"usage_updated","data":{"context_tokens":1000,"context_window":1000000,"estimated_cost_usd":0.018}}
 {"type":"turn_complete"}
 {"type":"result","data":{"stop_reason":"completed","error":null,"message":"Done.","usage":{"context_tokens":1000,"context_window":1000000,"estimated_cost_usd":0.018},"session_id":"3f2a9c1e-5b7d-4e8f-9a0b-1c2d3e4f5a6b"}}
 ```
 
-The run cannot ask, so the `cargo test` call ends with a `tool_call_end` whose `is_error` is `true` and whose `content` tells the model the call was denied, naming the allow rule that would permit it when one can.
+The run cannot ask, so the `cargo test` call ends with a `tool_call_end` whose `is_error` is `true` and whose `content` tells the model the call was denied, naming the allow pattern that would permit it when one can.
 
 ## Compatibility
 
