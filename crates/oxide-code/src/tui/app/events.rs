@@ -8,7 +8,7 @@ use crate::config::auth::AuthSource;
 use crate::config::compaction::AutoCompactionConfig;
 use crate::config::{Effort, display_auto_compaction};
 use crate::model::ModelSpec;
-use crate::permission::SessionGrant;
+use crate::permission::{Basis, Mode, SessionGrant};
 use crate::protocol::{Event, Interaction, Op};
 use crate::session::display::archive_notice;
 use crate::slash;
@@ -91,6 +91,7 @@ impl App {
                 requested_effort,
                 auto_compaction,
             } => self.apply_config_changed(model, effort, requested_effort, auto_compaction),
+            Event::ModeChanged(mode) => self.apply_mode_changed(mode),
             Event::LoginStarted { url } => self.open_sign_in_url(&url),
             Event::SignedIn { auth } => self.apply_signed_in(auth),
             Event::SignedOut {
@@ -107,9 +108,12 @@ impl App {
                 }
             }
             Event::Error(msg) | Event::RenameFailed(msg) => self.chat.push_error(&msg),
-            Event::ApprovalRequested { id, preview, grant } => {
-                self.push_approval_modal(id, preview, grant);
-            }
+            Event::ApprovalRequested {
+                id,
+                preview,
+                basis,
+                grant,
+            } => self.push_approval_modal(id, preview, &basis, grant),
             Event::SessionRulesUpdated(rules) => self.session_info.session_allow = rules,
             Event::TasksUpdated(tasks) => self.tasks.set(tasks),
             Event::BackgroundShellsUpdated(shells) => self.session_info.background_shells = shells,
@@ -138,10 +142,15 @@ impl App {
         &mut self,
         id: String,
         preview: ApprovalPreview,
+        basis: &Basis,
         grant: Option<Box<SessionGrant>>,
     ) {
-        self.modals
-            .push(Box::new(ApprovalModal::new(id, preview, grant)));
+        self.modals.push(Box::new(ApprovalModal::new(
+            id,
+            preview,
+            basis.reason(),
+            grant,
+        )));
     }
 
     fn finish_turn(&mut self) {
@@ -278,6 +287,12 @@ impl App {
             .config
             .apply_swap(model, effort, requested_effort, auto_compaction);
         self.chat.push_system_message(confirmation);
+    }
+
+    fn apply_mode_changed(&mut self, mode: Mode) {
+        self.session_info.config.apply_mode(mode);
+        self.chat
+            .push_system_message(format!("Switched to {mode} mode."));
     }
 
     /// Opens `url` in the browser and prints it in case the browser does not open. The sign-in
@@ -434,6 +449,7 @@ mod tests {
 
     use super::*;
     use crate::config::compaction::test_thresholds;
+    use crate::config::provenance::Source;
     use crate::permission::rule::Rule;
     use crate::permission::{Access, PermissionClass, Policy, Workspace};
     use crate::protocol::{ResumeTarget, ToolCall, ToolResult, UsageSnapshot};
@@ -580,6 +596,22 @@ mod tests {
         let body = app.chat.last_system_text().expect("confirmation block");
         assert_eq!(body, "Effort set to xhigh.");
         assert!(app.dirty);
+    }
+
+    #[test]
+    fn handle_mode_changed_records_the_session_mode_and_shows_it() {
+        let (mut app, _rx, _event_tx) = test_app(None);
+
+        app.handle_engine_event(Event::ModeChanged(Mode::Plan));
+
+        assert_eq!(app.session_info.config.permission_mode, Mode::Plan);
+        assert_eq!(
+            app.session_info.config.provenance.permission_mode,
+            Source::Session
+        );
+        assert_eq!(app.chat.last_system_text(), Some("Switched to plan mode."));
+        let text = rendered_text(&mut app, 120, 12);
+        assert!(text.contains("Mode: plan"), "{text}");
     }
 
     #[test]
@@ -761,6 +793,7 @@ mod tests {
                 title: "Bash".to_owned(),
                 body: ApprovalBody::Command("cargo test".to_owned()),
             },
+            basis: Basis::Mode(Mode::Manual),
             grant: Some(Box::new(grant)),
         });
 

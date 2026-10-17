@@ -21,6 +21,7 @@ mod help;
 mod init;
 mod login;
 mod matcher;
+mod mode;
 mod model;
 mod parser;
 mod picker;
@@ -111,8 +112,8 @@ pub(crate) fn typed_op(parsed: &Parsed) -> Option<Result<Op, String>> {
     Some(op.map_err(|msg| named_error(parsed, &msg)))
 }
 
-/// Whether `parsed` is safe to dispatch mid-turn. Only `ReadOnly` may run while the agent is
-/// streaming; the caller defers `Mutating` and rejects `Unknown`.
+/// Whether `parsed` is safe to dispatch mid-turn. `ReadOnly` and `Steering` may run while the
+/// agent is streaming, while the caller defers `Mutating` and rejects `Unknown`.
 pub(crate) fn classify(parsed: &Parsed) -> SlashKind {
     classify_in(registry::BUILT_INS, parsed)
 }

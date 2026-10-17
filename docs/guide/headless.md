@@ -9,7 +9,7 @@ ox -p "Fix the failing test" --output stream-json   # Stream every event as a JS
 ```
 
 - **Sessions**: Each run starts and saves a new session, which you can resume later in the TUI with `ox -c <session_id>`.
-- **Approvals**: No one can respond to approval prompts during a headless run, so calls that require approval are denied. The denial tells the model which allow pattern would permit the call. Add `allow` patterns for the calls your script needs, as described in [Tool approval](configuration.md#permission-tool-approval).
+- **Approvals**: No one can respond to approval prompts during a headless run, so calls that require approval are denied. The denial tells the model which allow pattern would permit the call, or which rule holds it. Add `allow` patterns for the calls your script needs, as described in [Tool approval](configuration.md#permission-tool-approval). Pass `--mode plan` to keep a run read-only, or `--mode yolo` to run every call that no rule settles.
 
 ## Output Formats
 

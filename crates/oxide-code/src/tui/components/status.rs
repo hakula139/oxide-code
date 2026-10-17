@@ -13,6 +13,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use self::line::{RenderedStatusLine, StatusLine, StatusLineState};
 use crate::client::RateLimits;
 use crate::config::{Effort, StatusLineSegment};
+use crate::permission::Mode;
 use crate::protocol::UsageSnapshot;
 use crate::tool::tasks::Progress;
 use crate::tui::glyphs::SPINNER_FRAMES;
@@ -48,6 +49,7 @@ pub(crate) struct StatusBar {
     git_branch: Option<String>,
     pull_request: Option<git::PullRequest>,
     rate_limits: Option<RateLimits>,
+    permission_mode: Mode,
     queued_prompts: usize,
     task_progress: Option<Progress>,
     session_id: String,
@@ -95,6 +97,7 @@ impl StatusBar {
             git_branch,
             pull_request: None,
             rate_limits: None,
+            permission_mode: Mode::default(),
             queued_prompts: 0,
             task_progress: None,
             session_id: String::new(),
@@ -146,6 +149,10 @@ impl StatusBar {
 
     pub(crate) fn set_rate_limits(&mut self, rate_limits: Option<RateLimits>) {
         self.rate_limits = rate_limits;
+    }
+
+    pub(crate) fn set_permission_mode(&mut self, mode: Mode) {
+        self.permission_mode = mode;
     }
 
     pub(crate) fn set_queued_prompts(&mut self, count: usize) {
@@ -329,6 +336,7 @@ impl StatusBar {
                 git_branch: self.git_branch.as_deref(),
                 pull_request: self.pull_request.as_ref(),
                 rate_limits: self.rate_limits,
+                permission_mode: self.permission_mode,
                 status_span: self.status_span(),
                 queued_prompts: self.queued_prompts,
                 task_progress: self.task_progress,

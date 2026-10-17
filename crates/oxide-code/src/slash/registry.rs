@@ -13,6 +13,7 @@ use super::effort::EffortCmd;
 use super::help::HelpCmd;
 use super::init::InitCmd;
 use super::login::{LoginCmd, LogoutCmd};
+use super::mode::ModeCmd;
 use super::model::ModelCmd;
 use super::rename::RenameCmd;
 use super::resume::ResumeCmd;
@@ -69,12 +70,14 @@ impl SlashOutcome {
     }
 }
 
-/// Drives busy-gating: only `ReadOnly` may dispatch mid-turn; the App refuses `Mutating` and
-/// rejects `Unknown` while a stream is in flight.
+/// Drives busy-gating: `ReadOnly` and `Steering` may dispatch mid-turn, while the App refuses
+/// `Mutating` and rejects `Unknown` while a stream is in flight.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum SlashKind {
     /// Pure local read (chat output / modal open). Safe to run during streaming.
     ReadOnly,
+    /// Forwards an op the engine applies to the in-flight turn, such as a permission mode switch.
+    Steering,
     /// Touches session state or forwards an op that races the in-flight client.
     /// Refused until the agent is idle.
     Mutating,
@@ -100,7 +103,7 @@ pub(super) trait SlashCommand: Sync {
 
     fn description(&self) -> &'static str;
 
-    /// Per-form: `ReadOnly` or `Mutating`, never `Unknown`.
+    /// Per-form: `ReadOnly`, `Steering`, or `Mutating`, never `Unknown`.
     fn classify(&self, _args: &str) -> SlashKind {
         SlashKind::ReadOnly
     }
@@ -137,6 +140,7 @@ pub(super) const BUILT_INS: &[&dyn SlashCommand] = &[
     &InitCmd,
     &LoginCmd,
     &LogoutCmd,
+    &ModeCmd,
     &ModelCmd,
     &RenameCmd,
     &ResumeCmd,
@@ -199,6 +203,7 @@ mod tests {
     use super::*;
     use crate::protocol::Op;
     use crate::slash::registry::testing::FakeCmd;
+    use crate::slash::test_session_info;
     use crate::tui::modal::ModalAction;
     use crate::tui::modal::testing::ScriptedModal;
 
@@ -311,6 +316,33 @@ mod tests {
             ..FakeCmd::DEFAULT
         };
         assert_eq!(empty_metadata_offenders(&[&empty]), vec!["no-desc"]);
+    }
+
+    #[test]
+    fn built_ins_steering_forms_forward_only_ops_the_engine_takes_mid_turn() {
+        let info = test_session_info();
+        let ctx = SlashContext::new(&info, None);
+        let mut steering = 0;
+
+        for cmd in BUILT_INS {
+            let completions = cmd
+                .complete_arg("")
+                .into_iter()
+                .map(|c| c.value.into_owned());
+            let forms = [String::new(), "x".to_owned()]
+                .into_iter()
+                .chain(completions);
+            for args in forms.filter(|args| cmd.classify(args) == SlashKind::Steering) {
+                match cmd.execute(&args, &ctx) {
+                    Ok(SlashOutcome::Forward(Action::Op(Op::Queue(_) | Op::SetMode(_))))
+                    | Err(_) => {}
+                    other => panic!("/{} {args} forwards {other:?}", cmd.name()),
+                }
+                steering += 1;
+            }
+        }
+
+        assert!(steering > 0, "no built-in form steers");
     }
 
     // ── lookup_in ──

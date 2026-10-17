@@ -17,7 +17,7 @@ use indoc::{formatdoc, indoc};
 use tokio::sync::mpsc;
 use tracing::warn;
 
-use super::abort::{AbortResult, TurnAbort, await_unless_aborted};
+use super::abort::{AbortResult, Inbox, TurnAbort, await_unless_aborted};
 use super::compact_boundary::{self, Boundary};
 use super::turn::collect_response;
 use crate::client::{PromptTooLong, Response, ResponseEvent, StopReason, TokenUsage, Wire};
@@ -132,7 +132,7 @@ pub(super) async fn auto_compact_if_needed(
     messages: &mut Vec<Message>,
     sink: &dyn EventSink,
     ops: &mut mpsc::Receiver<Op>,
-    pending: &mut Vec<String>,
+    inbox: &mut Inbox,
     auto: Option<&mut AutoCompact<'_>>,
     usage: Option<TokenUsage>,
 ) -> AbortResult<bool> {
@@ -161,7 +161,8 @@ pub(super) async fn auto_compact_if_needed(
             auto.spent,
         ),
         ops,
-        pending,
+        inbox,
+        sink,
     )
     .await?
     {
@@ -600,7 +601,7 @@ mod tests {
         let sink = CapturingSink::new();
         let tracker = FileTracker::default();
         let mut messages = tool_heavy_transcript();
-        let mut pending = Vec::new();
+        let mut inbox = Inbox::default();
         let mut failures = AutoCompactFailures::default();
 
         let absent = auto_compact_if_needed(
@@ -609,7 +610,7 @@ mod tests {
             &mut messages,
             &sink,
             &mut inert_ops(),
-            &mut pending,
+            &mut inbox,
             None,
             Some(TokenUsage {
                 input_tokens: 20,
@@ -628,7 +629,7 @@ mod tests {
             &mut messages,
             &sink,
             &mut inert_ops(),
-            &mut pending,
+            &mut inbox,
             Some(&mut AutoCompact {
                 config: AutoCompactionConfig {
                     enabled: true,
@@ -654,7 +655,7 @@ mod tests {
             &mut messages,
             &sink,
             &mut inert_ops(),
-            &mut pending,
+            &mut inbox,
             Some(&mut AutoCompact {
                 config: AutoCompactionConfig {
                     enabled: true,
@@ -699,7 +700,7 @@ mod tests {
             &mut messages,
             &sink,
             &mut inert_ops(),
-            &mut Vec::new(),
+            &mut Inbox::default(),
             Some(&mut AutoCompact {
                 config: AutoCompactionConfig {
                     enabled: true,
@@ -739,7 +740,7 @@ mod tests {
         let sink = CapturingSink::new();
         let tracker = FileTracker::default();
         let mut messages = tool_heavy_transcript();
-        let mut pending = Vec::new();
+        let mut inbox = Inbox::default();
         let mut failures = AutoCompactFailures::default();
 
         let compacted = auto_compact_if_needed(
@@ -748,7 +749,7 @@ mod tests {
             &mut messages,
             &sink,
             &mut inert_ops(),
-            &mut pending,
+            &mut inbox,
             Some(&mut AutoCompact {
                 config: AutoCompactionConfig {
                     enabled: true,
@@ -791,7 +792,7 @@ mod tests {
         let sink = CapturingSink::new();
         let tracker = FileTracker::default();
         let mut messages = tool_heavy_transcript();
-        let mut pending = Vec::new();
+        let mut inbox = Inbox::default();
         let mut failures = AutoCompactFailures::default();
 
         let compacted = auto_compact_if_needed(
@@ -800,7 +801,7 @@ mod tests {
             &mut messages,
             &sink,
             &mut inert_ops(),
-            &mut pending,
+            &mut inbox,
             Some(&mut AutoCompact {
                 config: AutoCompactionConfig {
                     enabled: true,
@@ -855,7 +856,7 @@ mod tests {
         let sink = CapturingSink::new();
         let tracker = FileTracker::default();
         let mut messages = tool_heavy_transcript();
-        let mut pending = Vec::new();
+        let mut inbox = Inbox::default();
         let mut failures = AutoCompactFailures::new(MAX_AUTO_COMPACT_FAILURES - 1);
         let usage = Some(TokenUsage {
             input_tokens: 50_000,
@@ -870,7 +871,7 @@ mod tests {
                 &mut messages,
                 &sink,
                 &mut inert_ops(),
-                &mut pending,
+                &mut inbox,
                 Some(&mut AutoCompact {
                     config: AutoCompactionConfig {
                         enabled: true,
@@ -933,7 +934,7 @@ mod tests {
         let sink = CapturingSink::new();
         let tracker = FileTracker::default();
         let mut messages = tool_heavy_transcript();
-        let mut pending = Vec::new();
+        let mut inbox = Inbox::default();
         let mut failures = AutoCompactFailures::default();
         let (tx, mut rx) = mpsc::channel::<Op>(1);
         let mut auto = AutoCompact {
@@ -956,7 +957,7 @@ mod tests {
             &mut messages,
             &sink,
             &mut rx,
-            &mut pending,
+            &mut inbox,
             Some(&mut auto),
             Some(TokenUsage {
                 input_tokens: 20,
@@ -977,7 +978,7 @@ mod tests {
         let compacted = compacted.unwrap();
 
         assert!(compacted);
-        assert_eq!(pending, vec!["queued after summary"]);
+        assert_eq!(inbox.prompts, vec!["queued after summary"]);
         assert_eq!(*auto.failures, AutoCompactFailures::default());
         assert_eq!(
             sink.events()
@@ -1026,7 +1027,7 @@ mod tests {
             &mut messages,
             &sink,
             &mut inert_ops(),
-            &mut Vec::new(),
+            &mut Inbox::default(),
             Some(&mut AutoCompact {
                 config: AutoCompactionConfig {
                     enabled: true,

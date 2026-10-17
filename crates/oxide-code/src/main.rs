@@ -23,6 +23,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
+use clap::builder::{PossibleValue, TypedValueParser};
 use clap::{ArgGroup, Parser};
 use tracing::warn;
 
@@ -33,7 +34,7 @@ use driver::headless::OutputFormat;
 use driver::tui::Startup;
 use engine::{Engine, Toolbox};
 use file_tracker::FileTracker;
-use permission::ReadFilter;
+use permission::{Mode, ReadFilter};
 use session::display::archive_notice;
 use session::handle::ResumedSession;
 use session::list_view::render_list;
@@ -88,6 +89,10 @@ struct Cli {
     #[arg(short, long, conflicts_with_all = ["prompt", "continue"])]
     list: bool,
 
+    /// Start in this permission mode, overriding `permission.mode` and `OX_PERMISSION_MODE`.
+    #[arg(long, value_parser = ModeParser, value_name = "MODE")]
+    mode: Option<Mode>,
+
     /// Disable the TUI and use a bare REPL instead.
     #[arg(long)]
     no_tui: bool,
@@ -109,6 +114,30 @@ struct Cli {
     /// Open the TUI on the session picker. Quitting the picker exits without starting a session.
     #[arg(short, long, conflicts_with_all = ["continue", "list", "no_tui", "prompt"])]
     resume: bool,
+}
+
+/// Parses `--mode` through the `FromStr` of [`Mode`], whose error names the replacement for the
+/// renamed `auto`, and lists the modes in `--help`.
+#[derive(Clone)]
+struct ModeParser;
+
+impl TypedValueParser for ModeParser {
+    type Value = Mode;
+
+    fn parse_ref(
+        &self,
+        cmd: &clap::Command,
+        arg: Option<&clap::Arg>,
+        value: &std::ffi::OsStr,
+    ) -> Result<Mode, clap::Error> {
+        str::parse::<Mode>.parse_ref(cmd, arg, value)
+    }
+
+    fn possible_values(&self) -> Option<Box<dyn Iterator<Item = PossibleValue> + '_>> {
+        Some(Box::new(Mode::ALL.into_iter().map(|mode| {
+            PossibleValue::new(mode.as_str()).help(mode.description())
+        })))
+    }
 }
 
 fn main() -> Result<ExitCode> {
@@ -148,7 +177,10 @@ async fn async_main() -> Result<Exit> {
         return Ok(Exit::Success);
     }
 
-    let config = Config::load(&cwd, tui_mode).await?;
+    let mut config = Config::load(&cwd, tui_mode).await?;
+    if let Some(mode) = cli.mode {
+        config.apply_mode_flag(mode);
+    }
     let show_thinking = config.show_thinking;
     let theme = tui_mode
         .then(|| tui::theme::resolve_theme(&config.theme))
@@ -270,6 +302,24 @@ mod tests {
         assert_eq!(
             missing.map(|error| error.kind()),
             Some(ErrorKind::MissingRequiredArgument),
+        );
+    }
+
+    #[test]
+    fn cli_mode_takes_a_permission_mode() {
+        let cli = Cli::try_parse_from(["ox", "--mode", "plan"]).unwrap();
+        assert_eq!(cli.mode, Some(Mode::Plan));
+        assert_eq!(Cli::try_parse_from(["ox"]).unwrap().mode, None);
+        let invalid = Cli::try_parse_from(["ox", "--mode", "auto"])
+            .err()
+            .expect("auto is not a mode");
+        assert_eq!(invalid.kind(), ErrorKind::ValueValidation);
+        assert!(
+            invalid.to_string().starts_with(
+                "error: invalid value 'auto' for '--mode <MODE>': expected one of manual, plan, \
+                 yolo. The asking mode \"auto\" is now \"manual\""
+            ),
+            "{invalid}",
         );
     }
 

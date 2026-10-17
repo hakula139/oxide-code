@@ -2,7 +2,7 @@
 
 Type `/` to open the autocomplete popup. Use **Up / Down** to browse, **Tab** to complete, **Enter** to submit, and **Esc** to dismiss. An alias runs the same command as its canonical name. Typing `/new` shows `/clear (new)` in the popup, and `/help` lists every alias.
 
-After `/model`, `/effort`, or `/theme`, type a space to switch the popup to **arg mode**, which lists the valid values.
+After `/effort`, `/mode`, `/model`, or `/theme`, type a space to switch the popup to **arg mode**, which lists the valid values.
 
 ## Built-in Commands
 
@@ -19,6 +19,7 @@ After `/model`, `/effort`, or `/theme`, type a space to switch the popup to **ar
 | `/init`                                     | Create `AGENTS.md` or `CLAUDE.md`, or propose edits to an existing one as a diff to confirm.                                          |
 | `/login`                                    | Sign in to a Claude account in the browser and store the login for oxide-code.                                                        |
 | `/logout`                                   | Remove the oxide-code login. The Claude Code login stays in place.                                                                    |
+| `/mode [<mode>]`                            | Open the permission mode picker, or switch directly to `manual`, `plan`, or `yolo`.                                                   |
 | `/model [<id>]`                             | Open the model and effort picker, or switch directly by ID or unique substring.                                                       |
 | `/rename [<title>]`                         | Open a single-line editor pre-filled with the current title, or set it directly.                                                      |
 | `/resume [<id-prefix>]` (alias `/continue`) | Open the session picker (search, scope and archived toggles, Ctrl+X to archive or unarchive, Ctrl+D to delete), or jump by ID prefix. |
@@ -28,12 +29,12 @@ After `/model`, `/effort`, or `/theme`, type a space to switch the popup to **ar
 
 To send text that starts with `/`, double the slash. For example, typing `//etc` sends `/etc`.
 
-Model, effort, and theme choices last for the session. No slash command writes config files, so a restart returns to your configured values.
+Model, effort, permission mode, and theme choices last for the session. No slash command writes config files, so a restart returns to your configured values.
 
 ## When Commands Run
 
-- **During a turn**, only `/config`, `/diff`, `/help`, `/status`, and the bare `/theme` picker run. Retry other commands after the turn finishes.
-- **In the bare REPL** (`--no-tui`), only `/clear`, `/compact`, `/effort <level>`, `/model <id>`, `/rename <title>`, and `/resume <id-prefix>` run, along with their aliases, and each prints a confirmation to stderr. The REPL rejects other commands, and a rejected or failed command makes it exit with a failure status at the end of input.
+- **During a turn**, only `/config`, `/diff`, `/help`, `/mode`, `/status`, and the bare `/theme` picker run. A mode switch applies from the turn's next tool call. Retry other commands after the turn finishes.
+- **In the bare REPL** (`--no-tui`), only `/clear`, `/compact`, `/effort <level>`, `/mode <mode>`, `/model <id>`, `/rename <title>`, and `/resume <id-prefix>` run, along with their aliases, and each prints a confirmation to stderr. The REPL rejects other commands, and a rejected or failed command makes it exit with a failure status at the end of input.
 
 ## Model and Effort
 
@@ -42,6 +43,10 @@ Model, effort, and theme choices last for the session. No slash command writes c
 - **`/effort`** fails if the session uses a model outside the supported catalogue, because that model has no effort levels.
 
 See [`effort`](configuration.md#effort-intelligence-tier) for each model's defaults.
+
+## Permission Mode
+
+`/mode` opens a picker of the [permission modes](configuration.md#permission-tool-approval). Use **Up / Down** or a number key to move, **Enter** to switch, and **Esc** to cancel. `/mode <mode>` switches directly, and **Shift+Tab** switches between `manual` and `plan`, adding `yolo` to the cycle only when the session started in it.
 
 ## Compaction
 

@@ -28,7 +28,7 @@ A `Rule` consists of a class and a pattern. Its tier is determined by the list t
 
 ## Modes
 
-`permission.mode` picks one of three modes. `OX_PERMISSION_MODE` overrides it and follows `effort`'s behavior for empty values and typos: an empty value is absent, and a typo fails.
+`permission.mode` picks one of three modes. `OX_PERMISSION_MODE` overrides it and follows `effort`'s behavior for empty values and typos: an empty value is absent, and a typo fails. `--mode` overrides both for one run, and `/config` credits it to the flag.
 
 - **`manual`**, the default, sends every call the rules leave open to the user, as described in the [approval round-trip](#approval-round-trip). If there is nobody to ask, the run denies them.
 - **`plan`** is read-only. It denies every `edit`, `exec`, and `net` call, including a known-safe `bash` read, and reads behave as in `manual`.
@@ -44,6 +44,14 @@ The modes correspond to these settings in Claude Code and Codex:
 | `plan`     | `plan`                                          | the `read-only` sandbox, which also runs commands that only read   |
 | `yolo`     | `bypassPermissions`, which also keeps ask rules | `--yolo`, which keeps no rules                                     |
 
+### Switching Modes
+
+`Op::SetMode` switches the engine's policy. The TUI sends it from the `/mode` picker, `/mode <mode>`, or Shift+Tab, while the REPL sends it from `/mode <mode>`. Headless runs send none because `--mode` reaches the engine through `Config` before it starts. The engine confirms each switch with `Event::ModeChanged`, which the TUI records in its session snapshot, the status line shows, and the REPL prints. While idle, the engine applies the switch at once.
+
+During a turn, a compaction, or a sign-in, the op arrives at `await_unless_aborted` or `await_approval`, which keep it in the operation's `Inbox` beside the queued prompts and confirm it on receipt. The gate takes a waiting switch before it weighs each call, so a switch applies from the turn's next gated call, including one in the same round. The engine applies any switch still waiting once the operation ends. Calls already gated keep their decisions, so switching to `plan` does not stop a running command.
+
+Shift+Tab cycles `manual` → `plan` → `manual`. The cycle adds `yolo` after `plan` only when the session started in `yolo`, from config, `OX_PERMISSION_MODE`, or `--mode`. When invoked from a mode outside the cycle, such as `yolo` selected with `/mode`, it returns to `manual`. The TUI advances from the last mode it requested, so pressing again before the engine confirms the first request moves on to the next mode. The key is fixed until configurable key bindings land with [#278](https://github.com/hakula139/oxide-code/issues/278).
+
 ## Decision Pipeline
 
 The gate evaluates each call in a fixed order and stops at the first match.
@@ -55,6 +63,8 @@ The gate evaluates each call in a fixed order and stops at the first match.
 5. **Edit-class call inside the workspace** → allow.
 6. **Allow tier** → allow. An allow rule or session grant matches the call.
 7. **Mode** → allow in `yolo`, and ask in `manual` and `plan`.
+
+Each step settles the call with a `Verdict`, which pairs the `Decision` with the `Basis` that reached it: a configured rule and its tier, the built-in group behind a shipped pattern or a protected path, a session grant, the read or workspace default, the mode, or for an allowed `bash` command what let each part through. The gate logs every verdict at debug level. A denial names its basis in the result the model reads, such as the `deny.exec` pattern `curl *`, and the approval prompt names the rule that holds the call. A call the mode asks about has no rule to name, so the prompt shows none.
 
 The tiers apply in this order: deny rules outrank all ask and allow rules, and ask rules outrank all allow rules, session grants, and the workspace allow. Steps 4 and 5 come after the ask tier. Thus, `ask.read = ["~/.aws/**"]` makes reading those files ask, and `ask.edit = ["Cargo.lock"]` makes editing the project's lock file ask.
 
@@ -166,13 +176,13 @@ The first seven groups define the protected names of the [Protected zone](#path-
 
 When the gate asks, the decision travels through the existing `ops` channel polled by the turn loop. `run_tool_round` gates calls one at a time, so at most one approval can be outstanding and no ID fan-out is needed. Consecutive calls whose `ToolSpec` marks them parallel-safe, namely the read-only `read`, `grep`, and `glob` tools, run together once each call passes the gate. This way, an approval never waits on a running call. If a batch is interrupted, results from finished calls are kept and each unfinished call's `ToolCtx` token is cancelled, stopping blocking `grep` and `glob` walks. The TUI places each result under its call. The REPL repeats a call's header above its result when another call's result was printed in between, so batches read the same in live and resumed sessions.
 
-For a call that asks, the dispatcher emits `Event::ApprovalRequested { id, preview, grant }` with the ID, the session grant described below, and a small `Clone` preview. The preview is an edit diff from `edit::synthesize_chunk`, a diff against the file's current content for `write`, or the command string under the tool name for `bash`. The gate intercepts the call before it runs, just as the parse-error short-circuit returns a synthetic `ToolOutput`. It waits for a decision in a sibling of `await_unless_aborted`. That sibling's select loop maps `Op::Interrupt` to `Cancelled` and `Op::Shutdown` to `Shutdown`, buffers `Op::Queue` in `pending`, and matches `Op::Resolve { id, decision }`. It ignores decisions whose IDs do not match the outstanding call, and dropping the wait future is cancel-safe.
+For a call that asks, the dispatcher emits `Event::ApprovalRequested { id, preview, basis, grant }` with the ID, the basis that made the call ask, the session grant described below, and a small `Clone` preview. The preview is an edit diff from `edit::synthesize_chunk`, a diff against the file's current content for `write`, or the command string under the tool name for `bash`. The gate intercepts the call before it runs, just as the parse-error short-circuit returns a synthetic `ToolOutput`. It waits for a decision in a sibling of `await_unless_aborted`. That sibling's select loop maps `Op::Interrupt` to `Cancelled` and `Op::Shutdown` to `Shutdown`, keeps `Op::Queue` and `Op::SetMode` in the turn's `Inbox`, and matches `Op::Resolve { id, decision }`. It ignores decisions whose IDs do not match the outstanding call, and dropping the wait future is cancel-safe.
 
 Every frontend responds with one of the `Decision` variants:
 
 - **`Approve`** runs the call.
 - **`AllowForSession`** runs the call and adds a session grant, described below.
-- **`Deny`** returns a synthetic error `ToolOutput` stating that the policy denied the call. The model receives the refusal as a tool result and can choose another approach.
+- **`Deny`** returns a synthetic error `ToolOutput` stating that the user denied the call. The model receives the refusal as a tool result and can choose another approach.
 - **`DenyWithFeedback`** returns the user's text in that error result, so the model learns why the call was denied and what to do next.
 - **`Abort`** ends the turn as `Op::Interrupt` does. The call's result records that it never ran.
 
@@ -220,8 +230,8 @@ Earlier versions used flat `allow` and `deny` arrays of `class(specifier)` strin
 
 The `--no-tui` REPL and `-p` headless runs share `render_op`. It passes each `Event::ApprovalRequested` to an `Approver` and sends the decision back as `Op::Resolve`. The request itself never reaches the event sink, so `stream-json` output contains only the call's result.
 
-- **REPL:** When stdin is a terminal, the prompter writes the preview to stderr, escaping hidden characters, and reads the answer from the next stdin line: `y`, `a` followed by the pattern to allow, `n`, `f` followed by the feedback line, or `x` to abort. An unknown answer, empty feedback, or a pattern the grant does not admit returns to the choices. End of input aborts. Piped input answers the way it does in a headless run, so a scripted prompt line is never read as an answer.
-- **Headless:** When nobody is available to ask, rules and zones decide every call, so a headless run assumes an already-trusted invocation. `Unattended` denies calls that would ask and provides feedback naming the pattern to add and the class list under `[permission.allow]` that admits it, quoted as a TOML string from the call's grant. Calls with no grant, such as those targeting protected paths, matching ask rules, running more than one simple command, or containing a word that expands, are denied with feedback explaining that no allow pattern names them exactly. A broader pattern may still cover such a call.
+- **REPL:** When stdin is a terminal, the prompter writes the preview and the rule that holds the call to stderr, escaping hidden characters, and reads the answer from the next stdin line: `y`, `a` followed by the pattern to allow, `n`, `f` followed by the feedback line, or `x` to abort. An unknown answer, empty feedback, or a pattern the grant does not admit returns to the choices. End of input aborts. Piped input answers the way it does in a headless run, so a scripted prompt line is never read as an answer.
+- **Headless:** When nobody is available to ask, rules and zones decide every call, so a headless run assumes an already-trusted invocation. `Unattended` denies calls that would ask and provides feedback naming the pattern to add and the class list under `[permission.allow]` that admits it, quoted as a TOML string from the call's grant. A call that an ask rule or a built-in rule holds is denied, and the feedback names that rule. For a built-in ask rule, it also names the `[permission.defaults]` key that turns it off. A reader command that would open a file guarded by the `ssh` or `credentials` deny group also prompts for approval. Its feedback names the group without suggesting that the user disable it. Other calls with no grant, such as those running more than one simple command or containing a word that expands, are denied with feedback explaining that no allow pattern names them exactly. A broader pattern may still cover such a call.
 
 The stdio sink escapes control characters other than tabs and line breaks in model and tool text, preventing streamed text or a tool label from redrawing the terminal to disguise the REPL's preview.
 
@@ -253,7 +263,13 @@ The stdio sink escapes control characters other than tabs and line breaks in mod
 
 10. **Decision on the existing channel.** Routing approvals through `ops` and the `ModalStack` reuses the turn loop's existing cancel / quit / queue semantics, avoiding the need for a second channel or control-flow path.
 
-11. **Approvals stay in process.** A persisted grant has no disk ground truth to revalidate on resume, unlike a `FileSnapshot` rehash, so restoring it would regress trust. In keeping with the slash-command persistence stance ([decision 6](../slash/commands.md#design-decisions)), session commands remain reversible, and cross-session writes wait for an explicit confirmed action.
+11. **Every decision names its basis.** A denial that only said "the permission policy" left the model and the user to guess which of several rules fired. Carrying the basis with the decision lets the denial, the approval prompt, the headless feedback, and the debug log all name the same rule, so a user knows which pattern to change.
+
+12. **Mode switches wait for the next gated call.** A switch mid-turn changes how the remaining calls are weighed without revisiting calls that already passed the gate, which would mean cancelling a running command or a pending approval. Confirming on receipt keeps the status line honest about the mode the next call meets.
+
+13. **Shift+Tab reaches `yolo` only from a `yolo` start.** A stray key press then cannot leave every call unprompted in a session that started with prompts. Claude Code likewise leaves `bypassPermissions` out of its Shift+Tab cycle unless the session started with it allowed, while `/mode yolo` stays available as a deliberate, typed choice.
+
+14. **Approvals stay in process.** A persisted grant has no disk ground truth to revalidate on resume, unlike a `FileSnapshot` rehash, so restoring it would regress trust. In keeping with the slash-command persistence stance ([decision 6](../slash/commands.md#design-decisions)), session commands remain reversible, and cross-session writes wait for an explicit confirmed action.
 
 ## Sources
 
@@ -263,16 +279,18 @@ The stdio sink escapes control characters other than tabs and line breaks in mod
 - `crates/oxide-code/src/config/schema.rs`: `PermissionTable`, `TierTable`, the `defaults` map.
 - `crates/oxide-code/src/driver/repl.rs`: `Prompter`, the stdin approval prompt.
 - `crates/oxide-code/src/driver/stdio.rs`: `render_op`, the `Approver` trait, `Unattended`, the escaped `StdioSink` output and its repeated call headers.
-- `crates/oxide-code/src/engine.rs`: the live policy, whose session grants reset when the session changes.
-- `crates/oxide-code/src/engine/abort.rs`: `await_unless_aborted`, which races an allowed call against cancel and quit.
-- `crates/oxide-code/src/engine/dispatch.rs`: `run_tool_round` (parallel-safe batches), `Dispatcher::gate` (prepare, then decide), `check_permission`, `allow_for_session` (admit against the call's grant), `await_approval`.
-- `crates/oxide-code/src/permission.rs`: `Mode`, `PermissionClass`, `Workspace`, `Access::for_path`, `Access::for_command`, `Policy::decide`, `Policy::session_grant`, `SessionGrant`, `ReadFilter`.
+- `crates/oxide-code/src/engine.rs`: the live policy, whose session grants reset when the session changes, `Engine::set_mode`, and `Engine::adopt_mode`.
+- `crates/oxide-code/src/engine/abort.rs`: `await_unless_aborted`, which races an allowed call against cancel and quit, and the `Inbox` that keeps queued prompts and mode switches.
+- `crates/oxide-code/src/engine/dispatch.rs`: `run_tool_round` (parallel-safe batches), `Dispatcher::gate` (prepare, then decide), `check_permission` (take a waiting mode switch, then log the verdict), `allow_for_session` (admit against the call's grant), `await_approval`, `denied_output`.
+- `crates/oxide-code/src/main.rs`: the `--mode` flag.
+- `crates/oxide-code/src/permission.rs`: `Mode`, `PermissionClass`, `Workspace`, `Access::for_path`, `Access::for_command`, `Verdict`, `Basis`, `Policy::verdict`, `Policy::session_grant`, `SessionGrant`, `ReadFilter`.
 - `crates/oxide-code/src/permission/defaults.rs`: the shipped defaults, `ShippedTier`, protected names and home locations, and `[permission.defaults]` names.
 - `crates/oxide-code/src/permission/legacy.rs`: conversion of old `class(specifier)` rules for the migration error.
 - `crates/oxide-code/src/permission/rule.rs`: `Rule`, the exec, path, net, and MCP patterns, `MatchDiscipline`, and `Rule::for_call`.
 - `crates/oxide-code/src/permission/shell.rs`: `CommandTarget::parse`, wrapper stripping, named and program words, opaque forms, redirection reads and writes, known-safe commands, reader glob expansion, and the forced recursive `rm` check.
-- `crates/oxide-code/src/protocol.rs`: `Event::ApprovalRequested`, `Event::SessionRulesUpdated`, `Op::Resolve`, `Decision`.
+- `crates/oxide-code/src/protocol.rs`: `Event::ApprovalRequested`, `Event::SessionRulesUpdated`, `Event::ModeChanged`, `Op::Resolve`, `Op::SetMode`, `Decision`.
 - `crates/oxide-code/src/slash/confirm.rs`: `ConfirmDeleteSessionModal`, the approval-modal template.
+- `crates/oxide-code/src/slash/mode.rs`: `ModeCmd` and the `/mode` picker.
 - `crates/oxide-code/src/slash/status.rs`: the Session Rules listing.
 - `crates/oxide-code/src/tool.rs`: `Tool` trait (`spec`, `path_field`, `prepare`, `approval_preview`, `run`), `ToolSpec`, `ToolCtx`, `Prepared`, `SearchRoot`, `ApprovalPreview`, `read_validated`, `write_no_follow`, `open_no_follow`, `push_withheld_note`.
 - `crates/oxide-code/src/tool/bash.rs`: unbounded execution surface.
@@ -280,6 +298,7 @@ The stdio sink escapes control characters other than tabs and line breaks in mod
 - `crates/oxide-code/src/tool/glob.rs`: read filter on each match.
 - `crates/oxide-code/src/tool/grep.rs`: read filter in `collect_files`.
 - `crates/oxide-code/src/tool/write.rs`: new-file creation, symlink refusal, current-content preview.
+- `crates/oxide-code/src/tui/app/dispatch.rs`: `App::cycle_mode`, the Shift+Tab cycle.
 - `crates/oxide-code/src/tui/components/chat.rs`: `ChatView::push_tool_result`, which places a result under its call.
 - `crates/oxide-code/src/tui/modal.rs`: `ModalStack`, the cancel hook, `captures_esc`.
 - `crates/oxide-code/src/tui/modal/approval.rs`: `ApprovalModal` wrapping, scrolling, character reveal, and the rule and feedback editors.

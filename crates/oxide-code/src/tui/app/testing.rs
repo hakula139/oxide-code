@@ -26,11 +26,19 @@ use crate::tui::theme::Theme;
 pub(super) fn test_app(
     title: Option<&str>,
 ) -> (App, mpsc::Receiver<Op>, mpsc::UnboundedSender<Event>) {
+    test_app_with(test_session_info(), title)
+}
+
+/// [`test_app`] started on `session_info`.
+pub(super) fn test_app_with(
+    session_info: LiveSessionInfo,
+    title: Option<&str>,
+) -> (App, mpsc::Receiver<Op>, mpsc::UnboundedSender<Event>) {
     let (event_tx, events) = mpsc::unbounded_channel::<Event>();
     let (ops, op_rx) = mpsc::channel::<Op>(8);
     let mut app = App::new(
         &Theme::default(),
-        test_session_info(),
+        session_info,
         false,
         events,
         ops,
@@ -205,6 +213,7 @@ pub(super) fn push_answerable_approval(app: &mut App, command: &str) {
             title: "Bash".to_owned(),
             body: ApprovalBody::Command(command.to_owned()),
         },
+        None,
         None,
     );
     modal.expire_guard();

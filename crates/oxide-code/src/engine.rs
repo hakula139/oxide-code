@@ -19,7 +19,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::warn;
 
-use self::abort::TurnAbort;
+use self::abort::{Inbox, TurnAbort};
 use self::compact_boundary::Boundary;
 use self::compaction::{AutoCompact, AutoCompactFailures};
 use self::turn::{TurnOutcome, TurnReport};
@@ -33,7 +33,7 @@ use crate::config::{Config, Effort};
 use crate::file_tracker::FileTracker;
 use crate::message::{ContentBlock, Message};
 use crate::model::{ModelSpec, ResolvedModelId};
-use crate::permission::{Policy, Workspace};
+use crate::permission::{Mode, Policy, Workspace};
 use crate::prompt::{self, PromptParts, SessionContext, UserContext};
 use crate::protocol::{Event, EventSink, Interaction, Op, ResumeTarget, UsageSnapshot};
 use crate::session::entry::{CompactInfo, UsageRecord};
@@ -257,6 +257,7 @@ impl Engine {
                 Op::Resume { target } => self.resume(&sink, target).await,
                 Op::Rename { title } => self.rename(&sink, title).await,
                 Op::SetModel { model, effort } => self.set_model(&sink, model, effort),
+                Op::SetMode(mode) => self.set_mode(&sink, mode),
                 Op::Login => {
                     if self.login(&sink, &mut ops).await == TurnEnd::Shutdown {
                         break;
@@ -286,8 +287,10 @@ impl Engine {
         if let Err(e) = self.client.auth() {
             return report_abort(sink, TurnAbort::Failed(e), "turn-failed");
         }
-        let mut pending = Vec::new();
-        if let Err(abort) = self.auto_compact(sink, ops, &mut pending).await {
+        let mut inbox = Inbox::default();
+        let compacted = self.auto_compact(sink, ops, &mut inbox).await;
+        self.adopt_mode(&mut inbox);
+        if let Err(abort) = compacted {
             return report_abort(sink, abort, "auto-compact-failed");
         }
 
@@ -307,7 +310,13 @@ impl Engine {
             .await;
         sink.session_write_error(outcome.failure.as_deref());
         self.messages.push(user_msg);
-        turn::record_drained_prompts(pending, &mut self.messages, &self.session, sink).await;
+        turn::record_drained_prompts(
+            inbox.prompts.drain(..),
+            &mut self.messages,
+            &self.session,
+            sink,
+        )
+        .await;
 
         if self.interactive
             && let Some(seed) = outcome.ai_title_seed
@@ -334,10 +343,12 @@ impl Engine {
             sink,
             &self.session,
             ops,
+            &mut inbox,
             self.max_tool_rounds,
             &mut dispatch_ctx,
         )
         .await;
+        self.adopt_mode(&mut inbox);
         self.account_usage(sink, &report).await;
         if let Some(tasks) = report.tasks.take() {
             self.tasks = tasks;
@@ -355,7 +366,7 @@ impl Engine {
         &mut self,
         sink: &dyn EventSink,
         ops: &mut mpsc::Receiver<Op>,
-        pending: &mut Vec<String>,
+        inbox: &mut Inbox,
     ) -> Result<(), TurnAbort> {
         let tools = self.tools.definitions();
         let mut spent = Vec::new();
@@ -365,7 +376,7 @@ impl Engine {
             &mut self.messages,
             sink,
             ops,
-            pending,
+            inbox,
             Some(&mut AutoCompact {
                 config: self.compaction.auto,
                 failures: &mut self.auto_compaction_failures,
@@ -399,7 +410,7 @@ impl Engine {
     ) -> TurnEnd {
         let tools = self.tools.definitions();
         let mut spent = Vec::new();
-        let mut pending = Vec::new();
+        let mut inbox = Inbox::default();
         let summary = abort::await_unless_aborted(
             compaction::compact_session(
                 &self.client,
@@ -411,9 +422,11 @@ impl Engine {
                 &mut spent,
             ),
             ops,
-            &mut pending,
+            &mut inbox,
+            sink,
         )
         .await;
+        self.adopt_mode(&mut inbox);
         self.bill(sink, &spent).await;
         let summary = match summary {
             Ok(Ok(summary)) => summary,
@@ -630,6 +643,19 @@ impl Engine {
         self.emit_usage_update(sink);
     }
 
+    /// Switches the permission mode for later calls.
+    fn set_mode(&mut self, sink: &dyn EventSink, mode: Mode) {
+        self.policy.set_mode(mode);
+        sink.emit(Event::ModeChanged(mode), "mode-changed");
+    }
+
+    /// Applies the mode switch an operation left in `inbox`.
+    fn adopt_mode(&mut self, inbox: &mut Inbox) {
+        if let Some(mode) = inbox.mode.take() {
+            self.policy.set_mode(mode);
+        }
+    }
+
     /// Signs in through the browser and stores the new oxide-code login.
     async fn login(&mut self, sink: &dyn EventSink, ops: &mut mpsc::Receiver<Op>) -> TurnEnd {
         let pending = match PendingLogin::start().await {
@@ -643,9 +669,11 @@ impl Engine {
             "login-started",
         );
 
-        let mut queued = Vec::new();
+        let mut inbox = Inbox::default();
         let finish = pending.finish(&self.oauth_token_url, self.client.extra_ca_certs());
-        match abort::await_unless_aborted(finish, ops, &mut queued).await {
+        let signed_in = abort::await_unless_aborted(finish, ops, &mut inbox, sink).await;
+        self.adopt_mode(&mut inbox);
+        match signed_in {
             Ok(Ok(auth)) => {
                 self.adopt_login(sink, auth);
                 TurnEnd::Completed
@@ -839,7 +867,8 @@ impl TurnEnd {
             | (Op::Resume { .. }, Event::SessionResumed { .. })
             | (Op::Clear, Event::SessionRolled { .. })
             | (Op::Rename { .. }, Event::SessionTitleUpdated { .. })
-            | (Op::SetModel { .. }, Event::ConfigChanged { .. }) => Some(Self::Completed),
+            | (Op::SetModel { .. }, Event::ConfigChanged { .. })
+            | (Op::SetMode(_), Event::ModeChanged(_)) => Some(Self::Completed),
             (Op::Prompt(_) | Op::Compact { .. }, Event::Cancelled) => Some(Self::Cancelled),
             _ => None,
         }
@@ -1617,6 +1646,7 @@ mod tests {
                     model: None,
                     effort: Some(Effort::Low),
                 },
+                Op::SetMode(Mode::Plan),
                 Op::Shutdown,
             ] {
                 ops.send(op).await.unwrap();
@@ -1639,6 +1669,7 @@ mod tests {
                             requested_effort: Some(Effort::Low),
                             ..
                         },
+                        Event::ModeChanged(Mode::Plan),
                     ] if *session_id == live_id && title == "Fix login"
                 ),
                 "{seen:?}"
@@ -2241,6 +2272,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn submit_prompt_keeps_a_mode_switch_sent_during_a_failed_auto_compaction() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            mount_reply(&server, "   ").await;
+            let dir = tempfile::tempdir().unwrap();
+            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+            engine.compaction = CompactionConfig::with_threshold_for_test(50_000);
+            engine.messages = tool_heavy_transcript();
+            engine.last_usage = Some(TokenUsage::new(50_000, 1));
+            let sink = CapturingSink::new();
+            let (ops_tx, mut ops) = mpsc::channel(1);
+            ops_tx.try_send(Op::SetMode(Mode::Plan)).unwrap();
+
+            let end = engine.submit_prompt("five", &sink, &mut ops).await;
+
+            assert_eq!(end, TurnEnd::Failed);
+            assert_eq!(engine.policy.mode(), Mode::Plan);
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn submit_prompt_fails_while_signed_out_without_sending_a_request() {
         with_pinned_home(async {
             let server = MockServer::start().await;
@@ -2455,6 +2508,26 @@ mod tests {
                 ),
                 "{events:?}",
             );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn compact_keeps_a_mode_switch_sent_before_a_cancel() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            let dir = tempfile::tempdir().unwrap();
+            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+            engine.messages = tool_heavy_transcript();
+            let sink = CapturingSink::new();
+            let (ops_tx, mut ops) = mpsc::channel(2);
+            ops_tx.try_send(Op::SetMode(Mode::Plan)).unwrap();
+            ops_tx.try_send(Op::Interrupt).unwrap();
+
+            let end = engine.compact(&sink, &mut ops, None).await;
+
+            assert_eq!(end, TurnEnd::Cancelled);
+            assert_eq!(engine.policy.mode(), Mode::Plan);
         })
         .await;
     }
@@ -3134,6 +3207,54 @@ mod tests {
         .await;
     }
 
+    // ── set_mode ──
+
+    #[tokio::test]
+    async fn set_mode_switches_the_gate_and_confirms() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            let dir = tempfile::tempdir().unwrap();
+            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+            let sink = CapturingSink::new();
+
+            engine.set_mode(&sink, Mode::Yolo);
+
+            assert_eq!(engine.policy.mode(), Mode::Yolo);
+            assert!(
+                matches!(sink.events().as_slice(), [Event::ModeChanged(Mode::Yolo)]),
+                "{:?}",
+                sink.events()
+            );
+        })
+        .await;
+    }
+
+    // ── adopt_mode ──
+
+    #[tokio::test]
+    async fn adopt_mode_keeps_a_switch_that_arrives_mid_turn() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            mount_reply(&server, "reply").await;
+            let dir = tempfile::tempdir().unwrap();
+            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+            let sink = CapturingSink::new();
+            let (tx, mut ops) = mpsc::channel(1);
+            tx.try_send(Op::SetMode(Mode::Plan)).unwrap();
+
+            engine.submit_prompt("hello", &sink, &mut ops).await;
+
+            assert_eq!(engine.policy.mode(), Mode::Plan);
+            assert!(
+                matches!(sink.events().first(), Some(Event::ModeChanged(Mode::Plan))),
+                "{:?}",
+                sink.events()
+            );
+            drop(tx);
+        })
+        .await;
+    }
+
     // ── login ──
 
     #[tokio::test]
@@ -3217,6 +3338,25 @@ mod tests {
                 ),
                 "{failed:?}"
             );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn login_keeps_a_mode_switch_sent_before_a_cancel() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            let dir = tempfile::tempdir().unwrap();
+            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+            let sink = CapturingSink::new();
+            let (ops_tx, mut ops) = mpsc::channel(2);
+            ops_tx.try_send(Op::SetMode(Mode::Plan)).unwrap();
+            ops_tx.try_send(Op::Interrupt).unwrap();
+
+            let end = engine.login(&sink, &mut ops).await;
+
+            assert_eq!(end, TurnEnd::Cancelled);
+            assert_eq!(engine.policy.mode(), Mode::Plan);
         })
         .await;
     }
@@ -3429,6 +3569,7 @@ mod tests {
             model: None,
             effort: Some(Effort::Low),
         };
+        let set_mode = Op::SetMode(Mode::Plan);
         let compacted = |automatic| Event::SessionCompacted {
             summary: "summary".to_owned(),
             pre_count: 4,
@@ -3499,6 +3640,12 @@ mod tests {
                 Some(TurnEnd::Failed),
             ),
             (&set_model, failed, None),
+            (
+                &set_mode,
+                Event::ModeChanged(Mode::Plan),
+                Some(TurnEnd::Completed),
+            ),
+            (&set_mode, notice.clone(), None),
             (&Op::Archive, rolled, None),
         ] {
             assert_eq!(TurnEnd::of(op, &event), end, "{op:?} then {event:?}");

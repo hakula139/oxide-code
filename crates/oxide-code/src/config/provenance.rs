@@ -77,7 +77,8 @@ pub(crate) enum Source {
     Default,
     File(Layer),
     Env(&'static str),
-    /// Changed during the session by `/model` or `/effort`.
+    Flag(&'static str),
+    /// Changed during the session by `/model`, `/effort`, `/mode`, or Shift+Tab.
     Session,
 }
 
@@ -94,6 +95,7 @@ impl fmt::Display for Source {
             Self::Default => f.write_str("default"),
             Self::File(layer) => f.write_str(&layer.label()),
             Self::Env(var) => write!(f, "${var}"),
+            Self::Flag(flag) => f.write_str(flag),
             Self::Session => f.write_str("session"),
         }
     }
@@ -205,9 +207,10 @@ mod tests {
     // ── Source ──
 
     #[test]
-    fn source_display_names_the_layer_or_variable() {
+    fn source_display_names_the_layer_variable_or_flag() {
         assert_eq!(Source::Default.to_string(), "default");
         assert_eq!(Source::Env("OX_EFFORT").to_string(), "$OX_EFFORT");
+        assert_eq!(Source::Flag("--mode").to_string(), "--mode");
         assert_eq!(Source::Session.to_string(), "session");
         assert_eq!(
             Source::File(Layer::DropIn(PathBuf::from("/x/config.d/a.toml"))).to_string(),

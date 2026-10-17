@@ -12,6 +12,8 @@ pub(crate) enum Action {
     Op(Op),
     /// Ctrl+C while idle. A second one inside the exit window quits.
     ConfirmExit,
+    /// Shift+Tab, which switches to the next permission mode.
+    CycleMode,
     /// Live-preview the picker's highlighted theme without committing it. Cursor moves in the
     /// `/theme` modal emit this, and cancelling the modal restores the open-time snapshot.
     PreviewTheme {
