@@ -9,6 +9,7 @@ use time::OffsetDateTime;
 use time::macros::datetime;
 use uuid::Uuid;
 
+use super::listing::ListScope;
 use super::{
     SessionData, SessionStore, SessionWriter, encode_lines, file_session_id,
     load_session_data_from_path, open_append_at,
@@ -137,6 +138,19 @@ pub(crate) fn seed_test_session(
             }])
             .unwrap();
     }
+}
+
+/// Ids of the home project's sessions in the given archive state, most recently active first.
+pub(crate) fn listed_ids(store: &SessionStore, archived: bool) -> Vec<String> {
+    let scope = ListScope {
+        all: false,
+        archived,
+    };
+    let page = store.list_paged(None, scope).unwrap();
+    page.into_sessions()
+        .into_iter()
+        .map(|info| info.session_id)
+        .collect()
 }
 
 /// Writes an unparsable session file with id `corrupt`. Call it last: it then has the newest
