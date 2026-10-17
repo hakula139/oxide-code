@@ -36,7 +36,7 @@ use crate::util::env;
 use crate::util::path::expand_user;
 use crate::util::tls::load_extra_ca_certs;
 
-const DEFAULT_MODEL: &str = "claude-opus-5-5";
+pub(crate) const DEFAULT_MODEL: &str = "claude-opus-5-5";
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 pub(crate) const DEFAULT_THEME: &str = "mocha";
 

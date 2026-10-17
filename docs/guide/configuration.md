@@ -79,7 +79,7 @@ status_line = [
 
 #### `model`: supported models
 
-oxide-code supports `claude-opus-5-5`, `claude-sonnet-5-5`, and `claude-haiku-5-5`, each with a 1M-token context window and adaptive thinking. Any other id, such as a gateway alias, is sent verbatim without `effort`, `thinking`, or context management. Its `max_tokens` defaults to `16000`, it gets no cost estimate, and its automatic compaction trigger stays off unless you set `auto_threshold_tokens`. oxide-code warns about such an id at startup, and for a retired `claude-*` id or a `[1m]` suffix it suggests the matching 5.5 model.
+oxide-code supports `claude-fable-5-1`, `claude-opus-5-5`, `claude-sonnet-5-5`, and `claude-haiku-5-5`. Each has a 1M-token context window and adaptive thinking. Fable 5.1 isn't available to every account, and some third-party gateways serve it. Any other ID, such as a gateway alias, is sent verbatim without `effort`, `thinking`, or context management. Its `max_tokens` defaults to `16000`, no cost estimate is provided, and automatic compaction stays off unless you set `auto_threshold_tokens`. oxide-code warns about unsupported IDs at startup. For a `claude-*` ID that names a model family or an ID with a `[1m]` suffix, it suggests the matching supported model.
 
 #### `effort`: intelligence tier
 
@@ -89,6 +89,7 @@ Per-model defaults when `effort` is unset, matching the API's own defaults:
 
 | Model      | Default  |
 | ---------- | -------- |
+| Fable 5.1  | `high`   |
 | Opus 5.5   | `medium` |
 | Sonnet 5.5 | `high`   |
 | Haiku 5.5  | `medium` |
@@ -156,7 +157,7 @@ If automatic compaction fails, oxide-code does not send the prompt, and the TUI 
 | `show_welcome`  | boolean | `true`    | Paint the welcome splash on an empty chat |
 | `status_line`   | array   | see below | Ordered status-line segments              |
 
-`show_thinking = true` opts the request into `thinking.display = "summarized"` so the API streams reasoning text. Otherwise reasoning stays hidden, and on Opus 5.5 and Sonnet 5.5 the chat still shows the short progress notes the model writes before each tool call.
+`show_thinking = true` opts the request into `thinking.display = "summarized"` so the API streams reasoning text. Otherwise, reasoning stays hidden, and the chat still shows the short progress notes the model writes before each tool call on every supported model except Haiku 5.5.
 
 `show_welcome = false` blanks the chat region until you submit a prompt, which is useful when piping or screen-recording.
 

@@ -9,7 +9,7 @@ use ratatui::widgets::Paragraph;
 
 use super::context::LiveSessionInfo;
 use super::effort_slider::tier_color;
-use crate::config::Effort;
+use crate::config::{DEFAULT_MODEL, Effort};
 use crate::model::{MODELS, ModelInfo, ResolvedModelId};
 use crate::protocol::Op;
 use crate::tui::action::Action;
@@ -75,15 +75,18 @@ pub(super) struct ModelEffortPicker {
 }
 
 impl ModelEffortPicker {
-    /// Infallible because every catalogue row has an effort axis.
+    /// Infallible because every catalogue row has an effort axis. A session on an id outside the
+    /// catalogue opens on the default model's row.
     pub(super) fn new(info: &LiveSessionInfo) -> Self {
-        let active_model = info.config.model.id().to_owned();
+        let model = &info.config.model;
+        let active_model = model.id().to_owned();
         let rows = ModelRow::build(&active_model);
 
         let mut list = ListPicker::new("Select model", rows).with_description(
             "Switch the active model for this session. Restarting returns to your config.",
         );
-        list.select_initial(|row| row.is_active);
+        let initial = model.info().map_or(DEFAULT_MODEL, |row| row.id);
+        list.select_initial(|row| row.info.id == initial);
 
         Self {
             list,
@@ -270,11 +273,16 @@ mod tests {
     }
 
     #[test]
-    fn new_on_unknown_model_shows_highlighted_row_default() {
+    fn new_on_unknown_model_highlights_default_model_and_shows_row_default() {
         let mut p = picker_on_unknown_model();
+
+        let row = p.list.selected().expect("default model row");
+        assert_eq!(row.info.id, "claude-opus-5-5");
+        assert!(!row.is_active);
         assert_eq!(p.shown_effort(), Some(Effort::Medium), "Opus 5.5 default");
-        p.handle_key(&key(KeyCode::Char('2')));
-        assert_eq!(p.shown_effort(), Some(Effort::High), "Sonnet 5.5 default");
+
+        p.handle_key(&key(KeyCode::Char('1')));
+        assert_eq!(p.shown_effort(), Some(Effort::High), "Fable 5.1 default");
     }
 
     // ── ModelEffortPicker::render_effort_row ──
@@ -314,9 +322,10 @@ mod tests {
                 "Select model",
                 "Switch the active model for this session. Restarting returns to your config.",
                 "",
-                "> 1. claude-opus-5-5    ✓ Claude Opus 5.5",
-                "  2. claude-sonnet-5-5    Claude Sonnet 5.5",
-                "  3. claude-haiku-5-5     Claude Haiku 5.5",
+                "  1. claude-fable-5-1     Claude Fable 5.1",
+                "> 2. claude-opus-5-5    ✓ Claude Opus 5.5",
+                "  3. claude-sonnet-5-5    Claude Sonnet 5.5",
+                "  4. claude-haiku-5-5     Claude Haiku 5.5",
                 "",
                 "● high effort  ← / → to adjust",
                 "",
@@ -328,9 +337,7 @@ mod tests {
     #[test]
     fn render_pins_the_effort_row_and_footer_below_a_scrolled_list() {
         let mut p = picker();
-        for _ in 1..MODELS.len() {
-            p.handle_key(&key(KeyCode::Down));
-        }
+        p.handle_key(&key(KeyCode::Char('4')));
 
         let rows = render_rows(&p, 80, 8);
 
@@ -341,7 +348,7 @@ mod tests {
                 "Select model",
                 "Switch the active model for this session. Restarting returns to your config.",
                 "",
-                "> 3. claude-haiku-5-5     Claude Haiku 5.5",
+                "> 4. claude-haiku-5-5     Claude Haiku 5.5",
                 "",
                 "● high effort  ← / → to adjust",
                 "",
@@ -355,7 +362,7 @@ mod tests {
     #[test]
     fn handle_key_numeric_jump_routes_cursor_to_matching_row() {
         let mut p = picker();
-        p.handle_key(&key(KeyCode::Char('3')));
+        p.handle_key(&key(KeyCode::Char('4')));
         let row = p.list.selected().expect("selected row");
         assert_eq!(row.info.id, "claude-haiku-5-5");
     }

@@ -1,6 +1,5 @@
 //! Runtime environment detection for system prompt context.
 
-use std::fmt::Write as _;
 use std::path::Path;
 
 use indoc::formatdoc;
@@ -115,20 +114,17 @@ fn format_local_date(now: time::OffsetDateTime, offset: time::UtcOffset) -> Stri
 
 // ── Model Identity ──
 
-/// Names `model`, its exact id, and its knowledge cutoff when the catalogue knows them.
+/// Names `model`, its exact id, and its knowledge cutoff when the catalogue knows the model.
 pub(super) fn model_identity(model: &ModelSpec) -> String {
     let id = model.id();
     let Some(info) = model.info() else {
         return format!("You are powered by the model {id}.");
     };
-    let mut identity = format!(
-        "You are powered by the model named {}. The exact model ID is {id}.",
-        info.display_name,
-    );
-    if let Some(cutoff) = info.cutoff {
-        _ = write!(identity, " Assistant knowledge cutoff is {cutoff}.");
-    }
-    identity
+    format!(
+        "You are powered by the model named {}. The exact model ID is {id}. Assistant knowledge \
+         cutoff is {}.",
+        info.display_name, info.cutoff,
+    )
 }
 
 #[cfg(test)]
@@ -264,15 +260,6 @@ mod tests {
             model_identity(&spec("claude-opus-5-5")),
             "You are powered by the model named Claude Opus 5.5. The exact model ID is \
              claude-opus-5-5. Assistant knowledge cutoff is June 2026.",
-        );
-    }
-
-    #[test]
-    fn model_identity_omits_an_unknown_cutoff() {
-        assert_eq!(
-            model_identity(&spec("claude-sonnet-5-5")),
-            "You are powered by the model named Claude Sonnet 5.5. The exact model ID is \
-             claude-sonnet-5-5.",
         );
     }
 

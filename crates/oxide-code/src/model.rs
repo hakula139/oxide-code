@@ -13,7 +13,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::config::Effort;
 pub(crate) use pricing::TokenCostRates;
-use pricing::{HAIKU_5_5_RATES, OPUS_5_5_RATES, SONNET_5_5_RATES};
+use pricing::{FABLE_5_1_RATES, HAIKU_5_5_RATES, OPUS_5_5_RATES, SONNET_5_5_RATES};
 
 // ── ModelInfo ──
 
@@ -23,7 +23,7 @@ pub(crate) struct ModelInfo {
     pub(crate) id: &'static str,
     pub(crate) display_name: &'static str,
     pub(crate) family: Family,
-    pub(crate) cutoff: Option<&'static str>,
+    pub(crate) cutoff: &'static str,
     /// The API's own default when a request omits `output_config.effort`. Sent explicitly so the
     /// UI shows the level the request actually runs at.
     pub(crate) default_effort: Effort,
@@ -35,6 +35,7 @@ pub(crate) struct ModelInfo {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Family {
+    Fable,
     Opus,
     Sonnet,
     Haiku,
@@ -42,8 +43,9 @@ pub(crate) enum Family {
 
 impl Family {
     /// The family's name as it appears in model ids.
-    const fn id_token(self) -> &'static str {
+    pub(crate) const fn id_token(self) -> &'static str {
         match self {
+            Self::Fable => "fable",
             Self::Opus => "opus",
             Self::Sonnet => "sonnet",
             Self::Haiku => "haiku",
@@ -63,10 +65,19 @@ const UNKNOWN_MODEL_MAX_TOKENS: u32 = 16_000;
 /// Listing order is the `/model` picker order.
 pub(crate) const MODELS: &[ModelInfo] = &[
     ModelInfo {
+        id: "claude-fable-5-1",
+        display_name: "Claude Fable 5.1",
+        family: Family::Fable,
+        cutoff: "June 2026",
+        default_effort: Effort::High,
+        progress_updates: true,
+        cost_rates: FABLE_5_1_RATES,
+    },
+    ModelInfo {
         id: "claude-opus-5-5",
         display_name: "Claude Opus 5.5",
         family: Family::Opus,
-        cutoff: Some("June 2026"),
+        cutoff: "June 2026",
         default_effort: Effort::Medium,
         progress_updates: true,
         cost_rates: OPUS_5_5_RATES,
@@ -75,7 +86,7 @@ pub(crate) const MODELS: &[ModelInfo] = &[
         id: "claude-sonnet-5-5",
         display_name: "Claude Sonnet 5.5",
         family: Family::Sonnet,
-        cutoff: None,
+        cutoff: "June 2026",
         default_effort: Effort::High,
         progress_updates: true,
         cost_rates: SONNET_5_5_RATES,
@@ -84,7 +95,7 @@ pub(crate) const MODELS: &[ModelInfo] = &[
         id: "claude-haiku-5-5",
         display_name: "Claude Haiku 5.5",
         family: Family::Haiku,
-        cutoff: None,
+        cutoff: "June 2026",
         default_effort: Effort::Medium,
         progress_updates: false,
         cost_rates: HAIKU_5_5_RATES,
@@ -297,14 +308,13 @@ mod tests {
     // ── replacement_for ──
 
     #[test]
-    fn replacement_for_maps_1m_suffix_and_retired_claude_ids_to_catalogue_rows() {
+    fn replacement_for_maps_1m_suffix_and_family_claude_ids_to_catalogue_rows() {
         for (id, expected) in [
             ("claude-opus-5-5[1m]", "claude-opus-5-5"),
             ("opus[1m]", "claude-opus-5-5"),
-            ("CLAUDE-SONNET-4-6[1M]", "claude-sonnet-5-5"),
-            ("claude-opus-4-8", "claude-opus-5-5"),
-            ("claude-3-5-sonnet-20241022", "claude-sonnet-5-5"),
-            ("claude-haiku-4-5", "claude-haiku-5-5"),
+            ("CLAUDE-SONNET-5-5[1M]", "claude-sonnet-5-5"),
+            ("claude-haiku-5-5-20261001", "claude-haiku-5-5"),
+            ("claude-fable-latest", "claude-fable-5-1"),
         ] {
             assert_eq!(
                 replacement_for(id).map(|info| info.id),
@@ -319,7 +329,7 @@ mod tests {
         for id in [
             "gpt-5",
             "my-opus-gateway",
-            "anthropic.claude-opus-4-8",
+            "anthropic.claude-opus-5-5",
             "claude-future-9",
         ] {
             assert!(replacement_for(id).is_none(), "{id}");
@@ -337,16 +347,12 @@ mod tests {
     }
 
     #[test]
-    fn resolve_keeps_near_miss_and_retired_ids_unknown() {
-        // Exact match only, so prefixed gateway names, retired generations, and a `[1m]` suffix all
-        // resolve with no catalogue row.
+    fn resolve_keeps_near_miss_ids_unknown() {
         for unknown in [
-            "claude-opus-5",
+            "claude-opus",
             "claude-opus-5-5[1m]",
             "claude-opus-5-5-20261001",
             "anthropic.claude-opus-5-5",
-            "claude-opus-4-8",
-            "claude-haiku-4-5",
             "gpt-5",
         ] {
             let model = spec(unknown);
@@ -360,6 +366,7 @@ mod tests {
     #[test]
     fn resolve_effort_falls_back_to_per_model_default() {
         for (id, expected) in [
+            ("claude-fable-5-1", Effort::High),
             ("claude-opus-5-5", Effort::Medium),
             ("claude-sonnet-5-5", Effort::High),
             ("claude-haiku-5-5", Effort::Medium),
@@ -394,6 +401,7 @@ mod tests {
     #[test]
     fn resolve_max_tokens_prefers_pick_then_catalogue_default() {
         for (id, default) in [
+            ("claude-fable-5-1", 64_000),
             ("claude-opus-5-5", 64_000),
             ("claude-sonnet-5-5", 64_000),
             ("claude-haiku-5-5", 64_000),
@@ -411,6 +419,7 @@ mod tests {
     fn thinking_known_model_is_adaptive_with_display_following_show_thinking() {
         let drop_block = serde_json::json!({"prefix_mismatch_behavior": "drop_block"});
         for (id, hidden_display) in [
+            ("claude-fable-5-1", Some("updates")),
             ("claude-opus-5-5", Some("updates")),
             ("claude-sonnet-5-5", Some("updates")),
             ("claude-haiku-5-5", None),
@@ -465,15 +474,17 @@ mod tests {
 
     #[test]
     fn cost_rates_route_each_model_to_its_own_card() {
-        // 100K input + 1M output stays within Haiku's base card: Opus $0.40 + $20, Sonnet
-        // $0.20 + $10, Haiku $0.01 + $0.50.
+        // 50K input + 50K cache reads + 1M output stays within Haiku's base card: Fable
+        // $0.50 + $0.0125 + $50, Opus $0.20 + $0.01 + $20, Sonnet $0.10 + $0.005 + $10, and Haiku
+        // $0.005 + $0.0005 + $0.50.
         for (id, expected) in [
-            ("claude-opus-5-5", 20.4),
-            ("claude-sonnet-5-5", 10.2),
-            ("claude-haiku-5-5", 0.51),
+            ("claude-fable-5-1", 50.5125),
+            ("claude-opus-5-5", 20.21),
+            ("claude-sonnet-5-5", 10.105),
+            ("claude-haiku-5-5", 0.5055),
         ] {
             let rates = spec(id).cost_rates().unwrap();
-            let cost = rates.estimate_usd(100_000, 0, 0, 1_000_000, PromptCacheTtl::FiveMin);
+            let cost = rates.estimate_usd(50_000, 0, 50_000, 1_000_000, PromptCacheTtl::FiveMin);
             assert!((cost - expected).abs() < 1e-9, "{id}: {cost} vs {expected}");
         }
     }
@@ -488,6 +499,7 @@ mod tests {
     #[test]
     fn display_name_known_id_renders_row_label() {
         for (id, expected) in [
+            ("claude-fable-5-1", "Claude Fable 5.1"),
             ("claude-opus-5-5", "Claude Opus 5.5"),
             ("claude-sonnet-5-5", "Claude Sonnet 5.5"),
             ("claude-haiku-5-5", "Claude Haiku 5.5"),
@@ -506,6 +518,7 @@ mod tests {
     #[test]
     fn short_display_name_strips_claude_family_prefix() {
         for (id, expected) in [
+            ("claude-fable-5-1", "Fable 5.1"),
             ("claude-opus-5-5", "Opus 5.5"),
             ("claude-sonnet-5-5", "Sonnet 5.5"),
             ("claude-haiku-5-5", "Haiku 5.5"),
@@ -524,11 +537,13 @@ mod tests {
     #[test]
     fn unsupported_notice_names_lost_features_and_suggests_replacement() {
         assert_eq!(
-            spec("claude-opus-4-8").unsupported_notice().as_deref(),
+            spec("claude-opus-5-5-20261001")
+                .unsupported_notice()
+                .as_deref(),
             Some(
-                "`claude-opus-4-8` is not a supported model, so requests go without thinking, \
-                 effort, and context management, and auto-compaction and cost tracking stay off. \
-                 Did you mean `claude-opus-5-5` (Claude Opus 5.5)?"
+                "`claude-opus-5-5-20261001` is not a supported model, so requests go without \
+                 thinking, effort, and context management, and auto-compaction and cost tracking \
+                 stay off. Did you mean `claude-opus-5-5` (Claude Opus 5.5)?"
             ),
         );
         assert_eq!(

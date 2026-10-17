@@ -23,9 +23,11 @@ const THINKING_TOKEN_COUNT_BETA_HEADER: &str = "thinking-token-count-2026-05-13"
 ///
 /// Agentic turns on catalogue models send the sequence Claude Code [`super::CLAUDE_CLI_VERSION`]
 /// sends for them, captured from `claude -p` with an API key, so it includes betas for features
-/// this client leaves unused. `oauth` takes the slot Claude Code's `getAllModelBetas` gives it.
-/// One-shots carry at most the claude-code tag and the auth extension. The thinking betas derive
-/// from the request body's `thinking` field, so they always match it.
+/// this client leaves unused. Fable 5.1 reuses the Opus 5.5 sequence, inferred from Claude Code
+/// 2.1.301 sending both models identical betas, so the next version bump must capture Fable too.
+/// `oauth` takes the slot Claude Code's `getAllModelBetas` gives it. One-shots carry at most the
+/// claude-code tag and the auth extension. The thinking betas derive from the request body's
+/// `thinking` field, so they always match it.
 pub(super) fn compute_betas(
     model: &ModelSpec,
     thinking: Option<&ThinkingConfig>,
@@ -123,6 +125,8 @@ mod tests {
             mid-conversation-system-2026-04-07,claude-code-20250219,per-turn-control-2026-07-01,\
             advisor-tool-2026-03-01,effort-2025-11-24";
         for (id, captured) in [
+            // Uncaptured on this release, so it reuses the Opus 5.5 sequence `compute_betas` cites.
+            ("claude-fable-5-1", claude_code),
             ("claude-opus-5-5", claude_code),
             ("claude-sonnet-5-5", claude_code),
             ("claude-haiku-5-5", haiku),
@@ -217,9 +221,9 @@ mod tests {
             compute_betas(&spec("claude-sonnet-5-5"), None, AuthKind::OAuth, false),
             vec![CLAUDE_CODE_BETA_HEADER, OAUTH_BETA_HEADER],
         );
-        // Family comes from the catalogue row, so a retired Haiku id is treated as unknown.
+        // Family comes from the catalogue row, so an unknown id naming Haiku keeps the tag.
         assert_eq!(
-            compute_betas(&spec("claude-haiku-4-5"), None, AuthKind::ApiKey, false),
+            compute_betas(&spec("my-haiku-gateway"), None, AuthKind::ApiKey, false),
             vec![CLAUDE_CODE_BETA_HEADER],
         );
     }

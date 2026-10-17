@@ -37,12 +37,13 @@ opencode keeps usage in a fixed prompt footer with no configurable status line. 
 
 ## Pricing Reference
 
-Anthropic's pricing page lists first-party Claude API prices in USD per million tokens and separate prompt-cache rates for 5-minute writes, 1-hour writes, cache reads, and output tokens. The rows for oxide-code's model table are:
+Anthropic's [pricing page](https://platform.claude.com/docs/en/about-claude/pricing) lists first-party Claude API prices in USD per million tokens, with separate rates for 5-minute cache writes, 1-hour cache writes, cache reads, and output tokens. As of 2026-10-17, the rows for oxide-code's model table are:
 
 | Model                     | Input | 5m cache write | 1h cache write | Cache read | Output |
 | ------------------------- | ----- | -------------- | -------------- | ---------- | ------ |
+| Fable 5.1                 | $10   | $12.50         | $20            | $0.25      | $50    |
 | Opus 5.5                  | $4    | $5             | $8             | $0.20      | $20    |
-| Sonnet 5.5                | $2    | $2.50          | $4             | $0.20      | $10    |
+| Sonnet 5.5                | $2    | $2.50          | $4             | $0.10      | $10    |
 | Haiku 5.5 (≤ 100K prompt) | $0.10 | $0.125         | $0.20          | $0.01      | $0.50  |
 | Haiku 5.5 (> 100K prompt) | $0.50 | $0.625         | $1             | $0.05      | $2.50  |
 
