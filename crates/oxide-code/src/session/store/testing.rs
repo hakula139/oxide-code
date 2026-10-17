@@ -1,5 +1,4 @@
-//! Test-only session fixtures and id-keyed lookups. A child of `store`, so it can build
-//! [`SessionWriter`] from its private fields.
+//! Test-only session fixtures and id-keyed lookups.
 
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};

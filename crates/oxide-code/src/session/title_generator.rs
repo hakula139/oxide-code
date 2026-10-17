@@ -213,8 +213,8 @@ mod tests {
         )
     }
 
-    /// Sink backed by an mpsc channel so tests can wait on `recv()`
-    /// with a timeout instead of polling `CapturingSink`.
+    /// Sink backed by an mpsc channel so tests can wait on `recv()` with a timeout instead of
+    /// polling `CapturingSink`.
     #[derive(Clone)]
     struct ChannelSink(tokio::sync::mpsc::UnboundedSender<Event>);
 
@@ -225,8 +225,8 @@ mod tests {
         }
     }
 
-    /// Session handle with one recorded message so the file is
-    /// materialized when `append_ai_title` runs.
+    /// Session handle with one recorded message so the file is materialized when `append_ai_title`
+    /// runs.
     async fn prepared_session(dir: &Path) -> SessionHandle {
         let store = test_store(dir);
         let handle = crate::session::handle::start(&store, HAIKU_MODEL);
@@ -395,8 +395,8 @@ mod tests {
 
     #[tokio::test]
     async fn generate_and_record_conversational_reply_bails_without_updating_title() {
-        // Haiku sometimes answers the prompt instead of titling it. The
-        // bail keeps the first-prompt title on disk and out of the UI.
+        // Haiku sometimes answers the prompt instead of titling it. The bail keeps the first-prompt
+        // title on disk and out of the UI.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(wm_path("/v1/messages"))
@@ -461,7 +461,7 @@ mod tests {
     async fn generate_and_record_post_finalize_actor_gone_is_silent() {
         // Title-gen is best-effort: a session that finalized (`/clear`, `/resume`) before this
         // background task returned must not surface "Session write failed" into the UI of the
-        // *next* session. Warn-log only; no Error and no title event.
+        // *next* session. It only logs a warning, with no Error and no title event.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(wm_path("/v1/messages"))
@@ -489,7 +489,7 @@ mod tests {
             !events
                 .iter()
                 .any(|e| matches!(e, Event::SessionTitleUpdated { .. })),
-            "post-finalize must skip SessionTitleUpdated — title belongs to the dead session: {events:?}",
+            "post-finalize must skip SessionTitleUpdated because the title belongs to the dead session: {events:?}",
         );
     }
 
@@ -522,8 +522,8 @@ mod tests {
 
     #[test]
     fn title_output_format_matches_title_envelope_shape() {
-        // The schema must line up with [`TitleEnvelope`] so a
-        // schema-conforming response parses via `parse_title`.
+        // The schema must line up with [`TitleEnvelope`] so a schema-conforming response parses via
+        // `parse_title`.
         let fmt = title_output_format();
         let v = serde_json::to_value(&fmt).unwrap();
         assert_eq!(v["type"], "json_schema");
@@ -548,17 +548,16 @@ mod tests {
 
     #[test]
     fn parse_title_errors_on_empty_title_field() {
-        // An envelope with an empty title is as useless as no title at
-        // all. Bail so the first-prompt fallback stays in place.
+        // An envelope with an empty title is as useless as no title at all. Bail so the
+        // first-prompt fallback stays in place.
         let err = parse_title(r#"{"title": ""}"#).unwrap_err().to_string();
         assert!(err.contains("empty title"), "got: {err}");
     }
 
     #[test]
     fn parse_title_errors_on_plain_text_response() {
-        // Haiku's conversational refusal ("I'd be happy to help!
-        // However, I need more details...") would otherwise land on the
-        // status bar as a multi-sentence "title". Require the JSON
+        // Haiku's conversational refusal ("I'd be happy to help! However, I need more details...")
+        // would otherwise land on the status bar as a multi-sentence "title". Require the JSON
         // envelope so the first-prompt title survives instead.
         let err = parse_title("I'd be happy to help! However, I need more details.")
             .unwrap_err()
@@ -638,7 +637,7 @@ mod tests {
 
     #[test]
     fn strip_code_fence_handles_no_opening_newline() {
-        // Single-line fenced block — no language tag, no newline.
+        // Single-line fenced block with no language tag or newline.
         assert_eq!(strip_code_fence("```body```"), "body");
     }
 
@@ -659,8 +658,8 @@ mod tests {
 
     #[test]
     fn truncate_prompt_respects_char_boundaries_for_multibyte() {
-        // 1000 é + "tail": truncate to 4 chars should give just "tail",
-        // not broken bytes from an é midpoint.
+        // 1000 é followed by "tail": truncating to 4 chars should give just "tail", not broken
+        // bytes from an é midpoint.
         let s: String = "\u{00e9}".repeat(1_000) + "tail";
         let out = truncate_prompt(&s, 4);
         assert_eq!(out, "tail");

@@ -48,7 +48,7 @@ fn format_relative_time(ts: OffsetDateTime, now: OffsetDateTime) -> String {
 
 /// `{id_prefix} · {when} · {N msgs} · {branch} · {project}`. Trailing components are omitted when
 /// their inputs are zero or `None`. Caller decides whether to include the project: the picker
-/// hides it in scoped mode (every row shares the project), the delete confirm always shows it.
+/// hides it in scoped mode (every row shares the project), and the delete confirm always shows it.
 pub(crate) fn format_metadata_line(
     session_id: &str,
     last_active_at: OffsetDateTime,
