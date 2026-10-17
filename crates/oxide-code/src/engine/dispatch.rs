@@ -946,7 +946,7 @@ mod tests {
 
     #[tokio::test]
     async fn gate_allow_for_session_runs_later_calls_the_rule_covers_unasked() {
-        let tools = ToolRegistry::new(vec![Box::new(BashTool)]);
+        let tools = ToolRegistry::new(vec![Box::new(BashTool::default())]);
         let sink = CapturingSink::new();
         let mut dispatch_ctx = dispatch_with(Mode::Auto, &[], &[], Path::new("/repo"));
         let rule = Rule::parse("bash(cargo test:*)").unwrap();
@@ -1003,7 +1003,7 @@ mod tests {
     async fn gate_allow_for_session_denies_a_rule_the_call_grant_does_not_admit() {
         // The engine re-checks the frontend's rule against its own grant: a rule that misses the
         // call, one in another class, and any rule for a call that offered no grant all deny.
-        let tools = ToolRegistry::new(vec![Box::new(BashTool), Box::new(EchoTool)]);
+        let tools = ToolRegistry::new(vec![Box::new(BashTool::default()), Box::new(EchoTool)]);
         for (name, input, rule) in [
             (
                 "bash",

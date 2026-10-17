@@ -79,8 +79,8 @@ impl FromStr for Mode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum PermissionClass {
-    /// Never mutates the workspace (`read`, `grep`, `glob`, `tasks`), so it allows unless a deny
-    /// rule matches.
+    /// Reads the workspace or acts only on state the session owns (`read`, `grep`, `glob`, `tasks`,
+    /// `bash_output`, `bash_stop`), so it allows unless a deny rule matches.
     Read,
     /// Mutates the file the call names (`edit`, `write`).
     Edit,
@@ -116,7 +116,8 @@ impl FromStr for PermissionClass {
             "bash" => Ok(Self::Bash),
             _ => bail!(
                 "unknown permission class {s:?}: expected one of {} (`read` covers the read, \
-                 grep, glob, and tasks tools, and `edit` covers edit and write)",
+                 grep, glob, tasks, bash_output, and bash_stop tools, and `edit` covers edit and \
+                 write)",
                 Self::VALID_VALUES
             ),
         }

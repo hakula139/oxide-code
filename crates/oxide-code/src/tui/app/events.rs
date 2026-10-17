@@ -112,6 +112,7 @@ impl App {
             }
             Event::SessionRulesUpdated(rules) => self.session_info.session_allow = rules,
             Event::TasksUpdated(tasks) => self.tasks.set(tasks),
+            Event::BackgroundShellsUpdated(shells) => self.session_info.background_shells = shells,
         }
         self.dirty = true;
     }
@@ -176,6 +177,7 @@ impl App {
     fn apply_session_rolled(&mut self, id: String, archived: bool) {
         let old_id = std::mem::replace(&mut self.session_info.session_id, id);
         self.session_info.session_allow.clear();
+        self.session_info.background_shells.clear();
         self.tasks.clear();
         self.status_bar.set_title(None);
         self.status_bar.set_usage(None);
@@ -196,6 +198,7 @@ impl App {
     ) {
         self.session_info.session_id = id;
         self.session_info.session_allow.clear();
+        self.session_info.background_shells.clear();
         self.tasks.clear();
         self.status_bar.set_title(title);
         self.status_bar.set_usage(None);
@@ -434,6 +437,8 @@ mod tests {
     use crate::permission::rule::Rule;
     use crate::permission::{Access, PermissionClass, Policy, Workspace};
     use crate::protocol::{ResumeTarget, ToolCall, ToolResult, UsageSnapshot};
+    use crate::tool::bash::background::ShellState;
+    use crate::tool::bash::background::testing::{shell, shells_in_each_state};
     use crate::tool::tasks::TaskStatus;
     use crate::tool::tasks::testing::{plan, task};
     use crate::tool::{ApprovalBody, ToolResultView};
@@ -790,12 +795,29 @@ mod tests {
     }
 
     #[test]
+    fn handle_background_shells_updated_replaces_the_status_list() {
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.handle_engine_event(Event::BackgroundShellsUpdated(vec![shell(
+            "shell-1",
+            "cargo watch",
+            ShellState::Running,
+        )]));
+        app.dirty = false;
+
+        app.handle_engine_event(Event::BackgroundShellsUpdated(shells_in_each_state()));
+
+        assert_eq!(app.session_info.background_shells, shells_in_each_state());
+        assert!(app.dirty);
+    }
+
+    #[test]
     fn handle_session_rolled_clears_chat_rebinds_id_and_drops_stale_title() {
         let (mut app, _rx, _event_tx) = test_app(Some("Old session title"));
         app.chat.push_user_message("old prompt".to_owned());
         let original_id = app.session_info.session_id.clone();
         app.status_bar.set_usage(Some(usage_snapshot()));
         app.session_info.session_allow = vec![Rule::parse("bash(ls)").unwrap()];
+        app.session_info.background_shells = shells_in_each_state();
         app.tasks.set(plan());
 
         app.handle_engine_event(Event::SessionRolled {
@@ -817,6 +839,7 @@ mod tests {
             "stale usage must be cleared on roll",
         );
         assert_eq!(app.session_info.session_allow, []);
+        assert_eq!(app.session_info.background_shells, []);
         assert_eq!(app.tasks.tasks(), []);
         assert!(
             app.chat.is_empty(),
@@ -852,6 +875,7 @@ mod tests {
         app.pending_prompts.push_back("queued".to_owned());
         app.handle_engine_event(bash_call_start("pending-1", "ls"));
         app.session_info.session_allow = vec![Rule::parse("bash(ls)").unwrap()];
+        app.session_info.background_shells = shells_in_each_state();
         app.tasks.set(plan());
         let original_id = app.session_info.session_id.clone();
 
@@ -873,6 +897,7 @@ mod tests {
             "stale usage must be cleared on resume",
         );
         assert_eq!(app.session_info.session_allow, []);
+        assert_eq!(app.session_info.background_shells, []);
         assert_eq!(app.tasks.tasks(), []);
         assert_eq!(
             app.chat.entry_count(),

@@ -307,7 +307,7 @@ pub(crate) trait Tool: Send + Sync {
     /// The label the UI shows for a call of the tool registered as `name`, with a path argument
     /// shown relative to `cwd`.
     fn summarize_call(&self, name: &str, input: &serde_json::Value, _cwd: &Path) -> String {
-        let label = title_case(name);
+        let label = pascal_case(name);
         match self.summarize_input(input) {
             Some(arg) => format!("{label}({arg})"),
             None => label,
@@ -328,7 +328,8 @@ pub(crate) trait Tool: Send + Sync {
     }
 
     /// Builds the approval modal's preview of the prepared `input`: the tool name over the
-    /// [`Self::summarize_call`] label by default, or a diff for edit and write.
+    /// [`Self::summarize_call`] label by default, a diff for edit and write, or `Bash (background)`
+    /// over a background command.
     fn approval_preview(
         &self,
         name: &str,
@@ -336,7 +337,7 @@ pub(crate) trait Tool: Send + Sync {
         cwd: &Path,
     ) -> ApprovalPreview {
         ApprovalPreview {
-            title: title_case(name),
+            title: pascal_case(name),
             body: ApprovalBody::Command(self.summarize_call(name, input, cwd)),
         }
     }
@@ -358,12 +359,17 @@ pub(crate) fn extract_input_field<'a>(input: &'a serde_json::Value, key: &str) -
     input.get(key).and_then(serde_json::Value::as_str)
 }
 
-pub(crate) fn title_case(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        Some(first) => first.to_uppercase().chain(chars).collect(),
-        None => String::new(),
+/// Renders a tool name as the label the UI shows, `bash_output` as `BashOutput`.
+fn pascal_case(name: &str) -> String {
+    let mut label = String::with_capacity(name.len());
+    for word in name.split('_') {
+        let mut chars = word.chars();
+        if let Some(first) = chars.next() {
+            label.extend(first.to_uppercase());
+            label.push_str(chars.as_str());
+        }
     }
+    label
 }
 
 // ── Tool Registry ──
@@ -562,15 +568,15 @@ async fn tracker_key(path: &Path) -> PathBuf {
 /// argument is a filesystem path.
 ///
 /// `path_key` names the JSON field to extract from `input` (e.g. `"file_path"`, `"path"`).
-/// Falls back to the bare title-cased tool name when the field is absent or non-string. The path
-/// renders through [`display_path`] so it appears relative to `cwd`.
+/// Falls back to the bare tool label when the field is absent or non-string. The path renders
+/// through [`display_path`] so it appears relative to `cwd`.
 fn summarize_path_call(
     name: &str,
     input: &serde_json::Value,
     path_key: &str,
     cwd: &Path,
 ) -> String {
-    let label = title_case(name);
+    let label = pascal_case(name);
     match extract_input_field(input, path_key) {
         Some(path) => format!("{label}({})", display_path(Path::new(path), cwd)),
         None => label,
@@ -967,6 +973,7 @@ mod tests {
     use indoc::{formatdoc, indoc};
 
     use super::bash::BashTool;
+    use super::bash::background::{BashOutputTool, BashStopTool};
     use super::edit::EditTool;
     use super::glob::GlobTool;
     use super::grep::GrepTool;
@@ -979,7 +986,9 @@ mod tests {
 
     fn all_tools() -> Vec<Box<dyn Tool>> {
         vec![
-            Box::new(BashTool),
+            Box::new(BashTool::default()),
+            Box::new(BashOutputTool::default()),
+            Box::new(BashStopTool::default()),
             Box::new(EditTool),
             Box::new(GlobTool::default()),
             Box::new(GrepTool::default()),
@@ -1036,6 +1045,8 @@ mod tests {
             catalog,
             [
                 ("bash".to_owned(), PermissionClass::Bash, false),
+                ("bash_output".to_owned(), PermissionClass::Read, false),
+                ("bash_stop".to_owned(), PermissionClass::Read, false),
                 ("edit".to_owned(), PermissionClass::Edit, false),
                 ("glob".to_owned(), PermissionClass::Read, true),
                 ("grep".to_owned(), PermissionClass::Read, true),
@@ -1059,6 +1070,8 @@ mod tests {
     fn tool_catalog_icons_match_the_published_prefix_set() {
         let expected = [
             ("bash", "$"),
+            ("bash_output", "»"),
+            ("bash_stop", "■"),
             ("edit", "✎"),
             ("glob", "✱"),
             ("grep", "⌕"),
@@ -1121,9 +1134,19 @@ mod tests {
     }
 
     #[test]
-    fn tool_summarize_call_wraps_arg_in_title_cased_name() {
+    fn tool_summarize_call_wraps_arg_in_the_tool_label() {
         let cases = [
             ("bash", serde_json::json!({"command": "ls"}), "ls"),
+            (
+                "bash_output",
+                serde_json::json!({"shell_id": "shell-2"}),
+                "BashOutput(shell-2)",
+            ),
+            (
+                "bash_stop",
+                serde_json::json!({"shell_id": "shell-2"}),
+                "BashStop(shell-2)",
+            ),
             (
                 "edit",
                 serde_json::json!({"file_path": "/a/b.rs", "old_string": "x", "new_string": "y"}),
@@ -1162,7 +1185,7 @@ mod tests {
         for t in all_tools() {
             let name = t.spec().name;
             let got = t.summarize_call(&name, &serde_json::json!({}), Path::new("/repo"));
-            assert_eq!(got, title_case(&name), "tool {name}");
+            assert_eq!(got, pascal_case(&name), "tool {name}");
         }
     }
 
@@ -1329,38 +1352,37 @@ mod tests {
 
     #[test]
     fn approval_preview_default_titles_with_the_tool_name() {
-        // The body carries the full command, wrapped, so the title only names the tool.
-        let preview = BashTool.approval_preview(
-            "bash",
-            &serde_json::json!({"command": "cargo test"}),
+        let preview = GlobTool::default().approval_preview(
+            "glob",
+            &serde_json::json!({"pattern": "*.rs"}),
             Path::new("/repo"),
         );
-        assert_eq!(preview.title, "Bash");
-        assert_eq!(preview.body, ApprovalBody::Command("cargo test".to_owned()));
+        assert_eq!(preview.title, "Glob");
+        assert_eq!(preview.body, ApprovalBody::Command("Glob(*.rs)".to_owned()));
     }
 
-    // ── title_case ──
+    // ── pascal_case ──
 
     #[test]
-    fn title_case_capitalizes_first_char_only() {
-        assert_eq!(title_case("grep"), "Grep");
-        assert_eq!(title_case("bash"), "Bash");
-        assert_eq!(title_case("Foo"), "Foo");
-        assert_eq!(title_case(""), "");
-        assert_eq!(title_case("a"), "A");
+    fn pascal_case_capitalizes_each_snake_case_word() {
+        assert_eq!(pascal_case("grep"), "Grep");
+        assert_eq!(pascal_case("bash_output"), "BashOutput");
+        assert_eq!(pascal_case("Foo"), "Foo");
+        assert_eq!(pascal_case(""), "");
+        assert_eq!(pascal_case("a"), "A");
     }
 
     // ── ToolRegistry::get ──
 
     #[test]
     fn get_finds_registered_tool() {
-        let registry = ToolRegistry::new(vec![Box::new(BashTool)]);
+        let registry = ToolRegistry::new(vec![Box::new(BashTool::default())]);
         assert_eq!(registry.get("bash").unwrap().0.name, "bash");
     }
 
     #[test]
     fn get_unknown_tool_has_no_entry() {
-        let registry = ToolRegistry::new(vec![Box::new(BashTool)]);
+        let registry = ToolRegistry::new(vec![Box::new(BashTool::default())]);
         assert!(registry.get("nonexistent").is_none());
     }
 
@@ -1368,7 +1390,7 @@ mod tests {
 
     #[test]
     fn definitions_produces_tool_with_valid_schema() {
-        let registry = ToolRegistry::new(vec![Box::new(BashTool)]);
+        let registry = ToolRegistry::new(vec![Box::new(BashTool::default())]);
         let defs = registry.definitions();
         assert_eq!(defs.len(), 1);
         assert_eq!(defs[0].name, "bash");
@@ -1382,13 +1404,13 @@ mod tests {
 
     #[test]
     fn icon_delegates_to_registered_tool() {
-        let registry = ToolRegistry::new(vec![Box::new(BashTool)]);
+        let registry = ToolRegistry::new(vec![Box::new(BashTool::default())]);
         assert_eq!(registry.icon("bash"), "$");
     }
 
     #[test]
     fn icon_unknown_tool_falls_back_to_default() {
-        let registry = ToolRegistry::new(vec![Box::new(BashTool)]);
+        let registry = ToolRegistry::new(vec![Box::new(BashTool::default())]);
         assert_eq!(registry.icon("nonexistent"), DEFAULT_TOOL_ICON);
     }
 
@@ -1396,7 +1418,10 @@ mod tests {
 
     #[test]
     fn label_delegates_to_registered_tool() {
-        let registry = ToolRegistry::new(vec![Box::new(BashTool), Box::new(GrepTool::default())]);
+        let registry = ToolRegistry::new(vec![
+            Box::new(BashTool::default()),
+            Box::new(GrepTool::default()),
+        ]);
         assert_eq!(
             registry.label(
                 "bash",
@@ -1417,7 +1442,7 @@ mod tests {
 
     #[test]
     fn label_unknown_tool_falls_back_to_raw_name() {
-        let registry = ToolRegistry::new(vec![Box::new(BashTool)]);
+        let registry = ToolRegistry::new(vec![Box::new(BashTool::default())]);
         let input = serde_json::json!({"command": "echo hi"});
         assert_eq!(
             registry.label("nonexistent", &input, Path::new("/repo")),
@@ -1630,7 +1655,7 @@ mod tests {
 
     #[test]
     fn result_view_falls_back_to_text_for_unknown_tool() {
-        let registry = ToolRegistry::new(vec![Box::new(BashTool)]);
+        let registry = ToolRegistry::new(vec![Box::new(BashTool::default())]);
         let metadata = ToolMetadata::default();
         let view = registry.result_view(
             "nonexistent",
@@ -1650,7 +1675,7 @@ mod tests {
 
     #[test]
     fn result_view_falls_back_to_text_when_tool_has_no_structured_view() {
-        let registry = ToolRegistry::new(vec![Box::new(BashTool)]);
+        let registry = ToolRegistry::new(vec![Box::new(BashTool::default())]);
         let metadata = ToolMetadata::default();
         let view = registry.result_view(
             "bash",

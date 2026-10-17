@@ -66,6 +66,7 @@ pub(crate) async fn engine(base_url: String, store: &SessionStore, cwd: &Path) -
         prompt,
         prompt_unrecorded: true,
         file_tracker: Arc::new(FileTracker::default()),
+        shells: Arc::default(),
         policy: config.permission,
         max_tool_rounds: config.max_tool_rounds,
         compaction: config.compaction,

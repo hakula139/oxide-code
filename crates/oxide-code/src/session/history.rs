@@ -206,7 +206,7 @@ mod tests {
     use crate::tool::{DEFAULT_TOOL_ICON, DiffChunk, DiffLine};
 
     fn tools() -> ToolRegistry {
-        ToolRegistry::new(vec![Box::new(BashTool), Box::new(EditTool)])
+        ToolRegistry::new(vec![Box::new(BashTool::default()), Box::new(EditTool)])
     }
 
     fn walk(messages: &[Message]) -> Vec<Interaction> {
@@ -289,7 +289,7 @@ mod tests {
     #[test]
     fn interactions_opens_with_the_compaction_boundary_and_hides_the_synthetic_root() {
         let messages = [
-            synthesize_post_compact_message("internal summary", &plan()),
+            synthesize_post_compact_message("internal summary", &plan(), &[]),
             Message::assistant("post-compact reply"),
         ];
 
@@ -312,7 +312,7 @@ mod tests {
 
     #[test]
     fn interactions_keeps_a_real_prompt_merged_into_the_compaction_root() {
-        let mut merged = synthesize_post_compact_message("internal", &[]);
+        let mut merged = synthesize_post_compact_message("internal", &[], &[]);
         merged.content.push(ContentBlock::Text {
             text: "real follow-up".to_owned(),
         });
@@ -337,7 +337,7 @@ mod tests {
 
     #[test]
     fn interactions_without_compaction_keeps_the_first_message_whole() {
-        let root = synthesize_post_compact_message("internal summary", &[]);
+        let root = synthesize_post_compact_message("internal summary", &[], &[]);
 
         let out = interactions(&[root], None, &HashMap::new(), &tools(), Path::new("/repo"));
 

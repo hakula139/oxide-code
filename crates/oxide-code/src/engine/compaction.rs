@@ -28,6 +28,7 @@ use crate::prompt::PromptParts;
 use crate::protocol::{Event, EventSink, Op};
 use crate::session::handle::SessionHandle;
 use crate::tool::ToolDefinition;
+use crate::tool::bash::background::BackgroundShells;
 use crate::tool::tasks::Task;
 
 const MAX_AUTO_COMPACT_FAILURES: u8 = 3;
@@ -111,6 +112,8 @@ pub(super) struct AutoCompact<'a> {
     pub(super) tools: &'a [ToolDefinition],
     /// The task list the summary message carries over.
     pub(super) tasks: &'a [Task],
+    /// The background shells whose open ones the summary message lists.
+    pub(super) shells: &'a BackgroundShells,
     /// Each summary request's usage, recorded even when the summary fails or the user cancels it.
     pub(super) spent: &'a mut Vec<TokenUsage>,
 }
@@ -181,6 +184,7 @@ pub(super) async fn auto_compact_if_needed(
             summary,
             instructions: None,
             tasks: auto.tasks.to_vec(),
+            shells: auto.shells.list(),
             automatic: true,
         },
     )
@@ -635,6 +639,7 @@ mod tests {
                 prompt: &empty_prompt(),
                 tools: &[],
                 tasks: &[],
+                shells: &BackgroundShells::default(),
                 spent: &mut Vec::new(),
             }),
             None,
@@ -660,6 +665,7 @@ mod tests {
                 prompt: &empty_prompt(),
                 tools: &[],
                 tasks: &[],
+                shells: &BackgroundShells::default(),
                 spent: &mut Vec::new(),
             }),
             Some(TokenUsage {
@@ -704,6 +710,7 @@ mod tests {
                 prompt: &empty_prompt(),
                 tools: &[],
                 tasks: &[],
+                shells: &BackgroundShells::default(),
                 spent: &mut Vec::new(),
             }),
             Some(TokenUsage {
@@ -752,6 +759,7 @@ mod tests {
                 prompt: &empty_prompt(),
                 tools: &[],
                 tasks: &[],
+                shells: &BackgroundShells::default(),
                 spent: &mut Vec::new(),
             }),
             Some(TokenUsage {
@@ -803,6 +811,7 @@ mod tests {
                 prompt: &empty_prompt(),
                 tools: &[],
                 tasks: &[],
+                shells: &BackgroundShells::default(),
                 spent: &mut Vec::new(),
             }),
             Some(TokenUsage {
@@ -872,6 +881,7 @@ mod tests {
                     prompt: &empty_prompt(),
                     tools: &[],
                     tasks: &[],
+                    shells: &BackgroundShells::default(),
                     spent: &mut Vec::new(),
                 }),
                 usage,
@@ -936,6 +946,7 @@ mod tests {
             prompt: &empty_prompt(),
             tools: &[],
             tasks: &plan(),
+            shells: &BackgroundShells::default(),
             spent: &mut Vec::new(),
         };
 
@@ -984,7 +995,11 @@ mod tests {
         )));
         assert_eq!(
             messages,
-            [synthesize_post_compact_message("auto summary", &plan())]
+            [synthesize_post_compact_message(
+                "auto summary",
+                &plan(),
+                &[]
+            )]
         );
     }
 
@@ -1022,6 +1037,7 @@ mod tests {
                 prompt: &empty_prompt(),
                 tools: &[],
                 tasks: &[],
+                shells: &BackgroundShells::default(),
                 spent: &mut Vec::new(),
             }),
             Some(TokenUsage {

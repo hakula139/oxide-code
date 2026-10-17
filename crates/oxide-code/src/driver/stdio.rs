@@ -206,7 +206,8 @@ impl StdioSink {
             | Event::SignedIn { .. }
             | Event::SignedOut { .. }
             | Event::ApprovalRequested { .. }
-            | Event::SessionRulesUpdated(_) => {}
+            | Event::SessionRulesUpdated(_)
+            | Event::BackgroundShellsUpdated(_) => {}
             Event::TurnComplete => {
                 writeln!(stdout)?;
             }
@@ -320,6 +321,7 @@ mod tests {
     use crate::config::compaction::AutoCompactionConfig;
     use crate::permission::{Access, PermissionClass, Policy, Workspace};
     use crate::protocol::{CapturingSink, FailingSink};
+    use crate::tool::bash::background::testing::shells_in_each_state;
     use crate::tool::tasks::TaskStatus;
     use crate::tool::tasks::testing::{plan, task};
     use crate::tool::{ApprovalBody, ToolResultView};
@@ -700,6 +702,7 @@ mod tests {
             Event::AutoCompactionResumed,
             Event::SummaryToken("Recap".to_owned()),
             Event::SummaryDiscarded,
+            Event::BackgroundShellsUpdated(shells_in_each_state()),
         ] {
             let (stdout, stderr) = render_one(&test_sink(false), event);
             assert!(stdout.is_empty(), "stdout must stay empty: {stdout:?}");

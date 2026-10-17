@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use crate::config::ConfigSnapshot;
 use crate::permission::rule::Rule;
+use crate::tool::bash::background::BackgroundShell;
 
 /// Live snapshot of the running session handed to every slash command. Built at TUI startup and
 /// kept current from engine events, so commands always see the current model, effort, session id,
@@ -25,6 +26,8 @@ pub(crate) struct LiveSessionInfo {
     pub(crate) session_allow: Vec<Rule>,
     /// Failures in a row that paused automatic compaction, until the engine reports a resume.
     pub(crate) auto_compaction_paused_after: Option<u8>,
+    /// The open background shells, as the engine last reported them.
+    pub(crate) background_shells: Vec<BackgroundShell>,
     pub(crate) config: ConfigSnapshot,
 }
 
@@ -62,6 +65,7 @@ pub(crate) mod testing {
             session_id: "test-session".to_owned(),
             session_allow: Vec::new(),
             auto_compaction_paused_after: None,
+            background_shells: Vec::new(),
             config: ConfigSnapshot {
                 auth: Some(crate::config::auth::AuthSource::ApiKeyEnv),
                 signed_out_notice: None,

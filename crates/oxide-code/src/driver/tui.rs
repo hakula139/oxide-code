@@ -49,6 +49,7 @@ pub(crate) async fn run(
         session_id: engine.session_id().to_owned(),
         session_allow: Vec::new(),
         auto_compaction_paused_after: None,
+        background_shells: Vec::new(),
         config,
     };
     let interactions = engine.take_history();

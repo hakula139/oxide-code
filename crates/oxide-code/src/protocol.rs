@@ -16,6 +16,7 @@ use crate::config::compaction::AutoCompactionConfig;
 use crate::model::{ModelSpec, ResolvedModelId};
 use crate::permission::SessionGrant;
 use crate::permission::rule::Rule;
+use crate::tool::bash::background::BackgroundShell;
 use crate::tool::tasks::Task;
 use crate::tool::{ApprovalPreview, ToolResultView};
 
@@ -232,6 +233,10 @@ pub(crate) enum Event {
     /// Carries the whole list. Frontends empty their copy on [`Self::SessionRolled`] and
     /// [`Self::SessionResumed`].
     TasksUpdated(Vec<Task>),
+    /// A background shell started, exited, or stopped. Carries every open shell. Frontends empty
+    /// their copy on [`Self::SessionRolled`] and [`Self::SessionResumed`], since the session's
+    /// shells end with it.
+    BackgroundShellsUpdated(Vec<BackgroundShell>),
 }
 
 // ── Tool Calls ──
@@ -371,6 +376,7 @@ mod tests {
     use super::*;
     use crate::client::RateLimitWindow;
     use crate::permission::{Access, PermissionClass, Policy, Workspace};
+    use crate::tool::bash::background::testing::shells_in_each_state;
     use crate::tool::tasks::testing::plan;
     use crate::tool::{
         ApprovalBody, DiffChunk, DiffLine, GrepFileGroup, GrepMatchLine, ReadExcerptLine,
@@ -575,6 +581,7 @@ mod tests {
             Event::ApprovalRequested { .. } => "approval_requested",
             Event::SessionRulesUpdated(_) => "session_rules_updated",
             Event::TasksUpdated(_) => "tasks_updated",
+            Event::BackgroundShellsUpdated(_) => "background_shells_updated",
         }
     }
 
@@ -692,6 +699,7 @@ mod tests {
             },
             Event::SessionRulesUpdated(vec![Rule::parse("bash(cargo test:*)").unwrap()]),
             Event::TasksUpdated(plan()),
+            Event::BackgroundShellsUpdated(shells_in_each_state()),
         ]
     }
 
@@ -807,6 +815,30 @@ mod tests {
                     {"content": "Read the config loader", "status": "completed"},
                     {"content": "Add the entry type", "status": "in_progress"},
                     {"content": "Write the tests", "status": "pending"},
+                ],
+            }),
+        );
+    }
+
+    #[test]
+    fn event_carries_each_background_shell_with_its_state_tagged() {
+        let event = Event::BackgroundShellsUpdated(shells_in_each_state());
+        assert_eq!(
+            serde_json::to_value(event).unwrap(),
+            json!({
+                "type": "background_shells_updated",
+                "data": [
+                    {"id": "shell-1", "command": "cargo watch", "state": {"type": "running"}},
+                    {
+                        "id": "shell-2",
+                        "command": "make test",
+                        "state": {"type": "exited", "data": 2},
+                    },
+                    {
+                        "id": "shell-3",
+                        "command": "sleep 60",
+                        "state": {"type": "killed", "data": 15},
+                    },
                 ],
             }),
         );

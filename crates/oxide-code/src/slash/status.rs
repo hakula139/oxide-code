@@ -67,6 +67,20 @@ fn build_modal(info: &LiveSessionInfo) -> KvOverview {
             .collect();
         sections.push(KvSection::new(rules).with_heading("Session Rules"));
     }
+    if !info.background_shells.is_empty() {
+        let shells = info
+            .background_shells
+            .iter()
+            .map(|shell| {
+                (
+                    shell.id.clone(),
+                    shell.state.describe(),
+                    shell.command_preview(),
+                )
+            })
+            .collect();
+        sections.push(KvSection::annotated(shells).with_heading("Background Shells"));
+    }
     KvOverview::new("Status", sections)
 }
 
@@ -75,6 +89,7 @@ mod tests {
     use super::*;
     use crate::permission::rule::Rule;
     use crate::slash::test_session_info;
+    use crate::tool::bash::background::testing::shells_in_each_state;
     use crate::tui::modal::Modal;
     use crate::tui::modal::testing::render_rows;
 
@@ -130,6 +145,32 @@ mod tests {
         assert_eq!(rules.len(), 2, "{rendered}");
         assert!(rules[0].ends_with("bash(cargo test:*)"), "{rendered}");
         assert!(rules[1].ends_with("edit(out/**)"), "{rendered}");
+    }
+
+    #[test]
+    fn build_modal_lists_background_shells_with_their_state() {
+        let mut info = test_session_info();
+        let without = render_modal(&build_modal(&info), 80);
+        assert!(!without.contains("Background Shells"), "{without}");
+
+        info.background_shells = shells_in_each_state();
+        let rendered = render_modal(&build_modal(&info), 80);
+
+        let shells: Vec<&str> = rendered
+            .lines()
+            .skip_while(|line| !line.contains("Background Shells"))
+            .filter(|line| line.contains("shell-"))
+            .map(str::trim)
+            .collect();
+        assert_eq!(
+            shells,
+            [
+                "shell-1            running              cargo watch",
+                "shell-2            exit code 2          make test",
+                "shell-3            killed by signal 15  sleep 60",
+            ],
+            "{rendered}",
+        );
     }
 
     #[test]
