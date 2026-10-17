@@ -226,7 +226,7 @@ oxide-code ships `prompt-caching-scope-2026-01-05` on every agentic request, as 
 
 Shape is otherwise identical in both modes. Only the body-side `scope` field toggles.
 
-This mirrors the Claude Code 2.1.301 bundle, which sends `scope: "global"` and the `cch` placeholder only when the base URL is `api.anthropic.com`. The 2.1.87 source checked only the provider, which still reads as first-party when `ANTHROPIC_BASE_URL` points at a gateway. The relay gateway accepted the global scope too, so the gate exists only to match Claude Code.
+This mirrors the Claude Code 2.1.301 bundle, which, as read on 2026-10-17, sends `scope: "global"` and the `cch` placeholder only when the base URL is `api.anthropic.com`. The 2.1.87 source checked only the provider, which still reads as first-party when `ANTHROPIC_BASE_URL` points at a gateway. The gate also keeps requests valid on gateways like the one in [#23](https://github.com/hakula139/oxide-code/pull/23) that reject the global scope after tool definitions, though the relay gateway probed on 2026-10-17 accepted it.
 
 ## Agentic Request Body Fields
 
@@ -306,7 +306,7 @@ A billing block that is present must also pass these checks:
 
 None of these changes the outcome on its own: the user agent, `x-app`, `anthropic-beta`, the Stainless headers, `x-claude-code-session-id`, `?beta=true`, the identity block, tools, and streaming. The static block passed with `cache_control` carrying `scope: "global"`, lacking `ttl`, or absent, and so did oxide-code's thinking, effort, and `context_management` fields. System blocks of up to 20k characters of text unrelated to Claude Code passed, with or without the identity block. A model the gateway does not serve gets a plain-text `404 page not found` from the correct base URL, and `GET /v1/models` lists the models it serves.
 
-oxide-code passed every path through the gateway on Opus 5.5, Sonnet 5.5, and Haiku 5.5: headless, a tool-using turn, the REPL, and the TUI with Haiku 5.5 session titles. At that commit, its API-key session titles carried no billing block and passed on `metadata.user_id` alone. oh-my-pi 18.11.0 with an API key gets the 400, since its API-key requests carry neither the billing block nor `metadata.user_id`.
+oxide-code passed every path through the gateway on Opus 5.5, Sonnet 5.5, and Haiku 5.5: headless, a tool-using turn, the REPL, and the TUI with Haiku 5.5 session titles. At 419d3b9a, its API-key session titles carried no billing block and passed on `metadata.user_id` alone. oh-my-pi 18.11.0 with an API key gets the 400, since its API-key requests carry neither the billing block nor `metadata.user_id`.
 
 ## API Version
 

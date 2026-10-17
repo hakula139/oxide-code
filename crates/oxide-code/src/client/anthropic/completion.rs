@@ -136,7 +136,7 @@ mod tests {
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
-    use super::super::betas::{CLAUDE_CODE_BETA_HEADER, OAUTH_BETA_HEADER};
+    use super::super::betas::OAUTH_BETA_HEADER;
     use super::super::testing::{
         Captured, DEVICE_ID, api_key, auth_token, captured, client_for, oauth, test_client,
         test_config,
@@ -144,7 +144,6 @@ mod tests {
     use super::*;
     use crate::client::anthropic::testing::completion_body;
     use crate::client::anthropic::{CLAUDE_CLI_VERSION, SYSTEM_PROMPT_PREFIX};
-    use crate::config::auth::{Auth, AuthSource};
 
     fn haiku() -> ModelSpec {
         ModelSpec::resolve("claude-haiku-5-5".to_owned())
@@ -348,44 +347,6 @@ mod tests {
             assert_eq!(v["output_config"]["format"], expected_format, "{body}");
             assert_eq!(beta, OAUTH_BETA_HEADER, "only the auth tag ships: {beta}");
         }
-    }
-
-    #[tokio::test]
-    async fn complete_oauth_haiku_sends_the_oauth_tag_without_the_claude_code_tag() {
-        let server = MockServer::start().await;
-        let sink: Captured<(String, String)> = captured();
-        let sink_clone = std::sync::Arc::clone(&sink);
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .respond_with(move |req: &Request| {
-                let body = String::from_utf8_lossy(&req.body).into_owned();
-                let beta = req
-                    .headers
-                    .get("anthropic-beta")
-                    .map(|v| v.to_str().unwrap().to_owned())
-                    .unwrap_or_default();
-                *sink_clone.lock().unwrap() = Some((body, beta));
-                ResponseTemplate::new(200).set_body_string(completion_body("Fix"))
-            })
-            .mount(&server)
-            .await;
-
-        let client = test_client(
-            server.uri(),
-            Auth::new(AuthSource::ClaudeCodeLogin, "tok"),
-            "claude-haiku-5-5",
-        );
-        _ = client
-            .complete(&haiku(), "", "hi", 40, None, None)
-            .await
-            .unwrap();
-
-        let (_, beta) = sink.lock().unwrap().clone().expect("request captured");
-        assert!(beta.contains(OAUTH_BETA_HEADER), "OAuth tag: {beta}");
-        assert!(
-            !beta.contains(CLAUDE_CODE_BETA_HEADER),
-            "no claude-code tag on a Haiku one-shot: {beta}",
-        );
     }
 
     #[tokio::test]
