@@ -91,7 +91,7 @@ fn build_completion_body(
 ) -> Result<String> {
     let messages = [Message::user(user)];
 
-    let system_blocks = build_system_blocks(attribution, [(system, None)]);
+    let system_blocks = build_system_blocks(attribution, &[(system, None)]);
 
     let mut body = serde_json::to_string(&CreateMessageRequest {
         model,

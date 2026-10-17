@@ -219,7 +219,7 @@ impl Client {
             static_prefix_cache_control(self.is_first_party, self.prompt_cache_ttl);
         let system_blocks = build_system_blocks(
             attribution.as_deref(),
-            [
+            &[
                 (static_joined.as_str(), Some(static_cache_control)),
                 (dynamic_joined.as_str(), None),
             ],
@@ -395,11 +395,11 @@ fn build_metadata(device_id: &str, session_id: &str) -> RequestMetadata {
 
 /// The billing block leads, as in Claude Code, so [`billing::inject_cch`] finds its placeholder
 /// first. Some relay gateways reject the block in any other slot.
-fn build_system_blocks<'a, const N: usize>(
+fn build_system_blocks<'a>(
     attribution: Option<&'a str>,
-    extras: [(&'a str, Option<CacheControl>); N],
+    extras: &[(&'a str, Option<CacheControl>)],
 ) -> Vec<SystemBlock<'a>> {
-    let mut blocks = Vec::with_capacity(2 + N);
+    let mut blocks = Vec::with_capacity(2 + extras.len());
     if let Some(text) = attribution {
         blocks.push(SystemBlock {
             r#type: "text",
@@ -412,7 +412,7 @@ fn build_system_blocks<'a, const N: usize>(
         text: SYSTEM_PROMPT_PREFIX,
         cache_control: None,
     });
-    for (text, cache_control) in extras {
+    for &(text, cache_control) in extras {
         if !text.is_empty() {
             blocks.push(SystemBlock {
                 r#type: "text",
@@ -498,7 +498,6 @@ mod tests {
     use wiremock::matchers::{header, method, path, query_param};
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
-    use super::billing::build_billing_header;
     use super::testing::{
         Captured, DEVICE_ID, api_key, captured, client_for, oauth, test_client, test_config,
         text_stream_body,
@@ -1571,37 +1570,43 @@ mod tests {
 
     #[test]
     fn build_system_blocks_orders_billing_then_identity_then_extras() {
-        let billing = build_billing_header(CLAUDE_CLI_VERSION, "abc", true);
         let cache = CacheControl {
             r#type: "ephemeral",
             scope: Some("global"),
             ttl: Some("1h"),
         };
+
         let blocks = build_system_blocks(
-            Some(&billing),
-            [("static body", Some(cache)), ("dynamic body", None)],
+            Some("billing"),
+            &[("static body", Some(cache)), ("dynamic body", None)],
         );
 
-        assert_eq!(blocks.len(), 4);
-        assert_eq!(blocks[0].text, billing);
-        assert!(blocks[0].cache_control.is_none(), "billing has no cc");
-        assert_eq!(blocks[1].text, SYSTEM_PROMPT_PREFIX);
-        assert!(blocks[1].cache_control.is_none(), "identity has no cc");
-        assert_eq!(blocks[2].text, "static body");
         assert_eq!(
-            blocks[2].cache_control.as_ref().and_then(|c| c.scope),
-            Some("global"),
+            serde_json::to_value(blocks).unwrap(),
+            serde_json::json!([
+                {"type": "text", "text": "billing"},
+                {"type": "text", "text": SYSTEM_PROMPT_PREFIX},
+                {
+                    "type": "text",
+                    "text": "static body",
+                    "cache_control": {"type": "ephemeral", "scope": "global", "ttl": "1h"},
+                },
+                {"type": "text", "text": "dynamic body"},
+            ]),
         );
-        assert_eq!(blocks[3].text, "dynamic body");
-        assert!(blocks[3].cache_control.is_none(), "dynamic has no cc");
     }
 
     #[test]
     fn build_system_blocks_drops_empty_extras_and_omits_billing_when_absent() {
-        let blocks = build_system_blocks(None, [("", None), ("only-content", None)]);
-        assert_eq!(blocks.len(), 2);
-        assert_eq!(blocks[0].text, SYSTEM_PROMPT_PREFIX);
-        assert_eq!(blocks[1].text, "only-content");
+        let blocks = build_system_blocks(None, &[("", None), ("only-content", None)]);
+
+        assert_eq!(
+            serde_json::to_value(blocks).unwrap(),
+            serde_json::json!([
+                {"type": "text", "text": SYSTEM_PROMPT_PREFIX},
+                {"type": "text", "text": "only-content"},
+            ]),
+        );
     }
 
     // ── normalize_platform ──

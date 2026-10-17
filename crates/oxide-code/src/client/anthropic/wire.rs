@@ -261,7 +261,7 @@ pub(super) struct SystemBlock<'a> {
 
 /// `scope: "global"` shares cache across sessions (1P only). Default ttl is `"1h"`. Opt out via
 /// `prompt_cache_ttl = "5m"` to use the server-side 5-minute default.
-#[derive(Serialize)]
+#[derive(Clone, Copy, Serialize)]
 pub(super) struct CacheControl {
     pub(super) r#type: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
