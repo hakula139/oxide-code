@@ -63,7 +63,7 @@ fn build_modal(info: &LiveSessionInfo) -> KvOverview {
         let rules = info
             .session_allow
             .iter()
-            .map(|rule| (rule.class().to_string(), rule.pattern().to_owned()))
+            .map(|rule| (format!("allow.{}", rule.class()), rule.pattern().to_owned()))
             .collect();
         sections.push(KvSection::new(rules).with_heading("Session Rules"));
     }
@@ -150,8 +150,8 @@ mod tests {
         assert_eq!(
             rules,
             [
-                vec!["exec", "cargo", "test", "*"],
-                vec!["edit", "./out/**"],
+                vec!["allow.exec", "cargo", "test", "*"],
+                vec!["allow.edit", "./out/**"],
                 vec!["Esc", "to", "close"],
             ],
             "{rendered}"

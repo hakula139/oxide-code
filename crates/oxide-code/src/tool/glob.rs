@@ -21,7 +21,7 @@ const SHOWING_PREFIX: &str = "(Showing ";
 
 const MAX_RESULTS: usize = 100;
 
-/// Withholds each path a `read` deny rule matches from the results.
+/// Withholds each path a `read` deny or ask rule matches from the results.
 #[cfg_attr(test, derive(Default))]
 pub(crate) struct GlobTool {
     read_filter: ReadFilter,
@@ -618,7 +618,7 @@ mod tests {
             indoc! {"
                 config.toml
 
-                (1 file withheld by read deny rules)"}
+                (1 file withheld by read deny or ask rules)"}
         );
         assert_eq!(result.truncated_total, None);
         assert_eq!(
@@ -640,7 +640,7 @@ mod tests {
             indoc! {"
                 No files found
 
-                (1 file withheld by read deny rules)"}
+                (1 file withheld by read deny or ask rules)"}
         );
     }
 
@@ -662,7 +662,7 @@ mod tests {
             formatdoc! {"
                 {}
 
-                (1 file withheld by read deny rules)",
+                (1 file withheld by read deny or ask rules)",
                 outside.join("app.toml").display()
             }
         );

@@ -67,8 +67,8 @@ struct PathGlob {
 
 /// Which tier a match is being evaluated for, selecting how commands, symlinked paths, and name
 /// spellings match. Allow widens, so it matches conservatively. Deny and ask hold calls back, so
-/// they match aggressively. This keeps the security-critical asymmetry legible at the call sites in
-/// [`crate::permission::Policy::decide`].
+/// they match aggressively. Naming the discipline at every match keeps this security-critical
+/// asymmetry legible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum MatchDiscipline {
     /// Every simple command of a command that is not opaque must match its named words, each
@@ -76,8 +76,8 @@ pub(super) enum MatchDiscipline {
     /// pattern writes them. Neither a chained command, a symlink, nor a variant spelling widens.
     Allow,
     /// Any simple command may match, by its named words, its program words, or its program's bare
-    /// name, and a path matches as resolved or as spelled, with names folded too. A danger behind a
-    /// safe head, a symlink, or a variant spelling is caught.
+    /// name, with each word folded as names are, and a path matches as resolved or as spelled, with
+    /// names folded too. A danger behind a safe head, a symlink, or a variant spelling is caught.
     Deny,
 }
 
@@ -122,8 +122,8 @@ impl Rule {
                 ..
             } => match relative {
                 Some("") => return None,
-                Some(relative) => format!("./{}", escaped(relative)),
-                None => escaped(canonical),
+                Some(relative) => format!("./{}", escaped(Path::new(relative))),
+                None => escaped(Path::new(canonical)),
             },
             Target::Name(name) => globset::escape(name),
             Target::None => return None,
@@ -168,10 +168,19 @@ impl Rule {
             (Pattern::Exec(words), Target::Command(command)) => command
                 .segments()
                 .iter()
-                .any(|segment| holds_back(words, segment)),
-            (Pattern::Path(globs), Target::Path { .. }) => {
-                globs.iter().any(|glob| glob.is_match(target, discipline))
-            }
+                .any(|segment| segment_held(words, segment)),
+            (
+                Pattern::Path(globs),
+                Target::Path {
+                    canonical,
+                    rooted,
+                    requested,
+                    deny_rooted,
+                    ..
+                },
+            ) => globs
+                .iter()
+                .any(|glob| glob.is_match(canonical, rooted, requested, deny_rooted, discipline)),
             (Pattern::Host(glob) | Pattern::Tool(glob), Target::Name(name)) => glob.is_match(name),
             _ => false,
         }
@@ -211,7 +220,7 @@ impl Rule {
             else {
                 continue;
             };
-            let target = escaped(&slash_separated(&target));
+            let target = escaped(&target);
             let glob = if rest.is_empty() {
                 target
             } else {
@@ -257,8 +266,8 @@ fn paints_as_itself(c: char) -> bool {
 }
 
 /// `path` with its separators as `/` and every glob character escaped, so it matches only itself.
-fn escaped(path: &str) -> String {
-    globset::escape(&slash_separated(Path::new(path)))
+pub(super) fn escaped(path: &Path) -> String {
+    globset::escape(&slash_separated(path))
 }
 
 // ── Exec Patterns ──
@@ -285,7 +294,7 @@ fn quote(word: &str) -> String {
 
 /// Whether a deny or ask pattern matches `segment` by its named words, its program words, or its
 /// program words with the program's directory dropped.
-fn holds_back(pattern: &[PatternWord], segment: &Segment) -> bool {
+fn segment_held(pattern: &[PatternWord], segment: &Segment) -> bool {
     let program = segment.program();
     words_match(pattern, segment.named(), MatchDiscipline::Deny)
         || words_match(pattern, program, MatchDiscipline::Deny)
@@ -296,14 +305,17 @@ fn holds_back(pattern: &[PatternWord], segment: &Segment) -> bool {
 
 /// Whether `pattern` matches all of `words`. A trailing `*` matches whatever words remain, and
 /// every other pattern word matches one word. Under allow, that word must be literal, since a
-/// word that expands or globs can become several.
+/// word that expands or globs can become several, and must equal the pattern word. Under deny, the
+/// two compare folded, so `RM -Rf` matches `rm -rf` as a case-insensitive file system runs it.
 fn words_match(pattern: &[PatternWord], words: &[ShellWord], discipline: MatchDiscipline) -> bool {
+    let deny = discipline == MatchDiscipline::Deny;
     match pattern.split_first() {
         None => words.is_empty(),
         Some((PatternWord::Any, [])) => true,
         Some((head, rest)) => words.split_first().is_some_and(|(word, tail)| {
-            (discipline == MatchDiscipline::Deny || word.is_literal())
+            (deny || word.is_literal())
                 && match head {
+                    PatternWord::Literal(text) if deny => fold_name(word.text()) == fold_name(text),
                     PatternWord::Literal(text) => word.text() == text,
                     PatternWord::Any => true,
                 }
@@ -322,19 +334,32 @@ impl PathGlob {
     fn parse(raw: &str) -> Result<Self> {
         ensure!(
             !raw.starts_with('!'),
-            "rules have no negation, so a pattern cannot start with `!`"
+            "a pattern cannot start with `!`, since patterns have no negation. Write the paths to \
+             match instead, or turn off the built-in rule that covers them."
         );
         let mut pattern = slash_separated(Path::new(raw));
         if pattern == "~" || pattern.starts_with("~/") {
             let home = std::env::home_dir().context("cannot expand `~`: no home directory")?;
-            pattern = format!("{}{}", escaped(&home.to_string_lossy()), &pattern[1..]);
+            pattern = format!("{}{}", escaped(&home), &pattern[1..]);
         }
+        ensure!(
+            !pattern
+                .split('/')
+                .enumerate()
+                .any(|(i, name)| name == ".." || (name == "." && i > 0)),
+            "the pattern holds a `.` or `..` component, which no resolved path does. Start it with \
+             `/` or `~/` to name a path outside the working directory and extra roots."
+        );
         let path = Path::new(&pattern);
         ensure!(
             path.is_absolute() || !path.has_root(),
             "a rooted pattern needs a drive on Windows, as in `C:/...`"
         );
         if path.is_absolute() {
+            let trimmed = pattern.trim_end_matches('/');
+            if Path::new(trimmed).is_absolute() {
+                pattern.truncate(trimmed.len());
+            }
             return Self::new(pattern, true);
         }
 
@@ -368,18 +393,16 @@ impl PathGlob {
         })
     }
 
-    /// Whether this glob matches the path `target` under `discipline`.
-    fn is_match(&self, target: &Target<'_>, discipline: MatchDiscipline) -> bool {
-        let Target::Path {
-            canonical,
-            rooted,
-            requested,
-            deny_rooted,
-            ..
-        } = target
-        else {
-            return false;
-        };
+    /// Whether this glob matches a path target under `discipline`, given the target's spellings as
+    /// [`Target::Path`] holds them.
+    fn is_match(
+        &self,
+        canonical: &str,
+        rooted: &[String],
+        requested: &str,
+        deny_rooted: &[String],
+        discipline: MatchDiscipline,
+    ) -> bool {
         let deny = discipline == MatchDiscipline::Deny;
         let hit = |path: &str| {
             self.exact.is_match(path) || (deny && self.folded.is_match(fold_path(path)))
@@ -399,12 +422,18 @@ fn path_glob(glob: &str) -> Result<Glob> {
 }
 
 /// `glob` split into its literal prefix, the components before the first glob character, and the
-/// rest after the separating `/`.
+/// rest after the separating `/`. A prefix that is a root, such as `/` or `C:/`, keeps its slash.
 fn literal_prefix(glob: &str) -> (&str, &str) {
     match glob.find(['*', '?', '[', ']', '{', '}', '\\']) {
         None => (glob, ""),
         Some(meta) => match glob[..meta].rfind('/') {
-            Some(slash) => (&glob[..slash.max(1)], &glob[slash + 1..]),
+            Some(slash) => {
+                let root = slash == 0 || glob[..slash].ends_with(':');
+                (
+                    &glob[..if root { slash + 1 } else { slash }],
+                    &glob[slash + 1..],
+                )
+            }
             None => ("", glob),
         },
     }
@@ -423,7 +452,7 @@ fn fold_path(path: &str) -> String {
 /// A host glob compared without case, where `*` matches any run of characters.
 fn host_glob(raw: &str) -> Result<GlobMatcher> {
     ensure!(
-        !raw.contains(['/', ':']) && !raw.chars().any(char::is_whitespace),
+        !raw.is_empty() && !raw.contains(['/', ':']) && !raw.chars().any(char::is_whitespace),
         "expected a host name such as `*.example.com`, without a scheme, port, or path"
     );
     Ok(GlobBuilder::new(raw)
@@ -520,7 +549,7 @@ mod tests {
     #[test]
     fn parse_rejects_a_malformed_pattern_in_each_grammar() {
         for (class, pattern, error) in [
-            (PermissionClass::Exec, "", "must be one simple command"),
+            (PermissionClass::Exec, "", "must name a command"),
             (
                 PermissionClass::Exec,
                 "cargo test; rm -rf /",
@@ -550,9 +579,14 @@ mod tests {
             (PermissionClass::Exec, "cat $HOME", "expands at run time"),
             (PermissionClass::Exec, "echo $(date)", "expands at run time"),
             (PermissionClass::Exec, "mkfs*", "holds a glob"),
+            (
+                PermissionClass::Exec,
+                "cargo test:*",
+                "the old `:*` prefix form. Write the `*` as a word of its own, as in `cargo test *`.",
+            ),
             (PermissionClass::Exec, "ls *.rs", "holds a glob"),
             (PermissionClass::Exec, "FOO=$BAR cmd", "expands at run time"),
-            (PermissionClass::Exec, "FOO=1", "must be one simple command"),
+            (PermissionClass::Exec, "FOO=1", "must name a command"),
             (PermissionClass::Exec, "ls 'open", "does not parse"),
             (
                 PermissionClass::Edit,
@@ -561,6 +595,22 @@ mod tests {
             ),
             (PermissionClass::Edit, "!.env.example", "no negation"),
             (PermissionClass::Read, "./", "names no path"),
+            (
+                PermissionClass::Read,
+                "../shared/x",
+                "a `.` or `..` component",
+            ),
+            (
+                PermissionClass::Edit,
+                "src/./main.rs",
+                "a `.` or `..` component",
+            ),
+            (
+                PermissionClass::Edit,
+                "/repo/../etc/**",
+                "a `.` or `..` component",
+            ),
+            (PermissionClass::Net, "", "expected a host name"),
             (
                 PermissionClass::Net,
                 "https://example.com",
@@ -578,6 +628,103 @@ mod tests {
             let err = format!("{:#}", Rule::parse(class, pattern).unwrap_err());
             assert!(err.contains(error), "{class} {pattern:?}: {err}");
         }
+    }
+
+    // ── Rule::for_call ──
+
+    #[test]
+    fn for_call_names_the_one_simple_command_by_its_quoted_named_words() {
+        for (command, expected) in [
+            (" cargo test ", "cargo test"),
+            ("RUST_LOG=debug cargo test 2>&1", "cargo test"),
+            (
+                "git commit -m \"it's done\"",
+                r"git commit -m 'it'\''s done'",
+            ),
+            ("GIT_PAGER=cat git log", "GIT_PAGER=cat git log"),
+            ("echo '*' ''", "echo '*' ''"),
+        ] {
+            let target = cmd(command);
+            let rule = Rule::for_call(PermissionClass::Exec, &target.as_target()).unwrap();
+            assert_eq!(rule.pattern(), expected, "{command:?}");
+            assert!(allows(&rule, command), "{command:?}");
+        }
+        assert!(!allows(&exec("cargo test"), "cargo test --all"));
+    }
+
+    #[test]
+    fn for_call_names_the_path_under_dot_slash_inside_cwd_and_absolute_outside() {
+        let canonical = abs("/repo/src/a[1].rs");
+        let rooted = ["src/a[1].rs".to_owned()];
+        let rule = Rule::for_call(PermissionClass::Edit, &path(&canonical, &rooted)).unwrap();
+        assert_eq!(rule.pattern(), "./src/a[[]1[]].rs");
+        let other = ["src/a1.rs".to_owned()];
+        assert!(!matches_path(
+            &rule,
+            &path(&abs("/repo/src/a1.rs"), &other),
+            MatchDiscipline::Allow
+        ));
+
+        let top = ["a.rs".to_owned()];
+        let rule = Rule::for_call(PermissionClass::Edit, &path(&abs("/repo/a.rs"), &top)).unwrap();
+        assert_eq!(
+            rule.pattern(),
+            "./a.rs",
+            "a bare name would match at any depth"
+        );
+
+        let outside = abs("/etc/hosts");
+        let rule = Rule::for_call(PermissionClass::Edit, &path(&outside, &[])).unwrap();
+        assert_eq!(rule.pattern(), slash_separated(Path::new(&outside)));
+    }
+
+    #[test]
+    fn for_call_declines_a_call_no_exact_rule_can_name() {
+        for command in [
+            "ls *.rs",
+            "cat $F",
+            "cargo test; rm -rf /",
+            "  ",
+            "cargo test \u{1b}[2K",
+            "echo 'a\u{200b}b'",
+            "echo 'a\tb'",
+        ] {
+            assert!(
+                Rule::for_call(PermissionClass::Exec, &cmd(command).as_target()).is_none(),
+                "{command:?}"
+            );
+        }
+        let empty = [String::new()];
+        let hidden = ["a\u{200b}.rs".to_owned()];
+        let hidden_path = abs("/repo/a\u{200b}.rs");
+        for target in [
+            path(&abs("/repo"), &empty),
+            path(&hidden_path, &hidden),
+            Target::None,
+        ] {
+            assert!(
+                Rule::for_call(PermissionClass::Edit, &target).is_none(),
+                "{target:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn for_call_names_a_host_or_tool_by_its_escaped_name() {
+        let host = Rule::for_call(PermissionClass::Net, &Target::Name("api.example.com")).unwrap();
+        assert_eq!(host.pattern(), "api.example.com");
+
+        let tool = Rule::for_call(PermissionClass::Mcp, &Target::Name("srv/a*b")).unwrap();
+        assert_eq!(tool.pattern(), "srv/a[*]b");
+        let matches = |name| {
+            tool.matches(
+                PermissionClass::Mcp,
+                &Target::Name(name),
+                MatchDiscipline::Allow,
+            )
+        };
+        assert!(matches("srv/a*b"));
+        assert!(!matches("srv/axb"));
     }
 
     // ── Rule::matches: exec ──
@@ -697,6 +844,16 @@ mod tests {
         assert!(holds(&exec("GIT_PAGER=sh git *"), "GIT_PAGER=sh git log"));
     }
 
+    #[test]
+    fn matches_exec_deny_folds_each_word_where_allow_compares_it_exactly() {
+        let rule = exec("rm -rf *");
+        for command in ["RM -Rf x", "/BIN/RM -RF x", "r\u{200c}m -rf x"] {
+            assert!(holds(&rule, command), "{command}");
+        }
+        assert!(!allows(&rule, "RM -rf x"));
+        assert!(allows(&rule, "rm -rf x"));
+    }
+
     // ── Rule::matches: paths ──
 
     #[test]
@@ -768,8 +925,21 @@ mod tests {
             MatchDiscipline::Allow
         ));
 
+        let nginx = edit(&format!("{}/", abs("/etc/nginx")));
+        for target in [abs("/etc/nginx"), abs("/etc/nginx/nginx.conf")] {
+            assert!(
+                matches_path(&nginx, &path(&target, &[]), MatchDiscipline::Allow),
+                "a trailing `/` is ignored: {target}"
+            );
+        }
+
         temp_env::with_var(HOME_VAR, Some(abs("/home/u")), || {
-            let notes = edit("~/notes");
+            let notes = edit("~/notes/");
+            assert!(matches_path(
+                &notes,
+                &path(&abs("/home/u/notes"), &[]),
+                MatchDiscipline::Allow
+            ));
             assert!(matches_path(
                 &notes,
                 &path(&abs("/home/u/notes/today.md"), &[]),
@@ -884,103 +1054,6 @@ mod tests {
         }
     }
 
-    // ── Rule::for_call ──
-
-    #[test]
-    fn for_call_names_the_one_simple_command_by_its_quoted_named_words() {
-        for (command, expected) in [
-            (" cargo test ", "cargo test"),
-            ("RUST_LOG=debug cargo test 2>&1", "cargo test"),
-            (
-                "git commit -m \"it's done\"",
-                r"git commit -m 'it'\''s done'",
-            ),
-            ("GIT_PAGER=cat git log", "GIT_PAGER=cat git log"),
-            ("echo '*' ''", "echo '*' ''"),
-        ] {
-            let target = cmd(command);
-            let rule = Rule::for_call(PermissionClass::Exec, &target.as_target()).unwrap();
-            assert_eq!(rule.pattern(), expected, "{command:?}");
-            assert!(allows(&rule, command), "{command:?}");
-        }
-        assert!(!allows(&exec("cargo test"), "cargo test --all"));
-    }
-
-    #[test]
-    fn for_call_names_the_path_under_dot_slash_inside_cwd_and_absolute_outside() {
-        let canonical = abs("/repo/src/a[1].rs");
-        let rooted = ["src/a[1].rs".to_owned()];
-        let rule = Rule::for_call(PermissionClass::Edit, &path(&canonical, &rooted)).unwrap();
-        assert_eq!(rule.pattern(), "./src/a[[]1[]].rs");
-        let other = ["src/a1.rs".to_owned()];
-        assert!(!matches_path(
-            &rule,
-            &path(&abs("/repo/src/a1.rs"), &other),
-            MatchDiscipline::Allow
-        ));
-
-        let top = ["a.rs".to_owned()];
-        let rule = Rule::for_call(PermissionClass::Edit, &path(&abs("/repo/a.rs"), &top)).unwrap();
-        assert_eq!(
-            rule.pattern(),
-            "./a.rs",
-            "a bare name would match at any depth"
-        );
-
-        let outside = abs("/etc/hosts");
-        let rule = Rule::for_call(PermissionClass::Edit, &path(&outside, &[])).unwrap();
-        assert_eq!(rule.pattern(), slash_separated(Path::new(&outside)));
-    }
-
-    #[test]
-    fn for_call_declines_a_call_no_exact_rule_can_name() {
-        for command in [
-            "ls *.rs",
-            "cat $F",
-            "cargo test; rm -rf /",
-            "  ",
-            "cargo test \u{1b}[2K",
-            "echo 'a\u{200b}b'",
-            "echo 'a\tb'",
-        ] {
-            assert!(
-                Rule::for_call(PermissionClass::Exec, &cmd(command).as_target()).is_none(),
-                "{command:?}"
-            );
-        }
-        let empty = [String::new()];
-        let hidden = ["a\u{200b}.rs".to_owned()];
-        let hidden_path = abs("/repo/a\u{200b}.rs");
-        for target in [
-            path(&abs("/repo"), &empty),
-            path(&hidden_path, &hidden),
-            Target::None,
-        ] {
-            assert!(
-                Rule::for_call(PermissionClass::Edit, &target).is_none(),
-                "{target:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn for_call_names_a_host_or_tool_by_its_escaped_name() {
-        let host = Rule::for_call(PermissionClass::Net, &Target::Name("api.example.com")).unwrap();
-        assert_eq!(host.pattern(), "api.example.com");
-
-        let tool = Rule::for_call(PermissionClass::Mcp, &Target::Name("srv/a*b")).unwrap();
-        assert_eq!(tool.pattern(), "srv/a[*]b");
-        let matches = |name| {
-            tool.matches(
-                PermissionClass::Mcp,
-                &Target::Name(name),
-                MatchDiscipline::Allow,
-            )
-        };
-        assert!(matches("srv/a*b"));
-        assert!(!matches("srv/axb"));
-    }
-
     // ── Rule::with_resolved_prefixes ──
 
     #[test]
@@ -1054,5 +1127,20 @@ mod tests {
             serde_json::from_value::<Rule>(serde_json::json!({"class": "exec", "pattern": "a; b"}))
                 .unwrap_err();
         assert!(err.to_string().contains("one simple command"), "{err}");
+    }
+
+    // ── literal_prefix ──
+
+    #[test]
+    fn literal_prefix_splits_at_the_last_slash_before_a_glob_and_keeps_a_root_slash() {
+        for (glob, expected) in [
+            ("/a/b*/c", ("/a", "b*/c")),
+            ("/secrets*", ("/", "secrets*")),
+            ("C:/secrets*", ("C:/", "secrets*")),
+            ("src/a", ("src/a", "")),
+            ("*.rs", ("", "*.rs")),
+        ] {
+            assert_eq!(literal_prefix(glob), expected, "{glob}");
+        }
     }
 }

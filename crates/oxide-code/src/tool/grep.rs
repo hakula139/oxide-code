@@ -26,7 +26,7 @@ const MAX_LINE_CHARS: usize = 500;
 const MAX_GREP_FILE_SIZE: u64 = 1024 * 1024;
 const REGEX_SIZE_LIMIT: usize = 1 << 20;
 
-/// Withholds each file a `read` deny rule matches from the results.
+/// Withholds each file a `read` deny or ask rule matches from the results.
 #[cfg_attr(test, derive(Default))]
 pub(crate) struct GrepTool {
     read_filter: ReadFilter,
@@ -284,7 +284,7 @@ fn grep_files(params: &GrepParams<'_>) -> Result<String, String> {
 struct CollectedFiles {
     files: Vec<PathBuf>,
     skipped_large: Vec<(PathBuf, u64)>,
-    /// Files a `read` deny rule withheld.
+    /// Files a `read` deny or ask rule withheld.
     withheld: usize,
 }
 
@@ -1111,7 +1111,7 @@ mod tests {
             indoc! {"
                 a.rs:1:TOKEN=public
 
-                (1 file withheld by read deny rules)"}
+                (1 file withheld by read deny or ask rules)"}
         );
 
         p.pattern = "secret";
@@ -1121,7 +1121,7 @@ mod tests {
             indoc! {"
                 No matches found
 
-                (1 file withheld by read deny rules)"}
+                (1 file withheld by read deny or ask rules)"}
         );
         let title = grep_title(crate::tool::strip_withheld_note(&result));
         assert_eq!(title, "No matches found");
@@ -1154,7 +1154,7 @@ mod tests {
             formatdoc! {"
                 {}:1:TOKEN=public
 
-                (1 file withheld by read deny rules)",
+                (1 file withheld by read deny or ask rules)",
                 outside.join("app.toml").display()
             }
         );

@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use toml::{Table, Value};
 use tracing::debug;
 
@@ -11,7 +11,7 @@ use super::merge::{Origins, merge};
 use super::provenance::Layer;
 use super::schema::FileConfig;
 use crate::permission::legacy::migration_error;
-use crate::permission::{Tier, extra_root};
+use crate::permission::{Mode, Tier, extra_root};
 use crate::util::path::{XdgBase, app_dir};
 
 const CONFIG_FILE: &str = "config.toml";
@@ -128,9 +128,9 @@ pub(crate) fn user_config_path() -> Option<PathBuf> {
 // ── Reading ──
 
 /// Parses one layer. `Ok(None)` when the user file is missing, and `Err` when a file is unreadable,
-/// including a drop-in symlink whose target is gone, fails the schema, holds old flat permission
-/// rules, a malformed pattern, or an invalid extra root, or is a project file setting a user-only
-/// key.
+/// including a drop-in symlink whose target is gone, is a project file setting a user-only key,
+/// holds an old permission form, fails the schema, or holds a malformed pattern or an invalid extra
+/// root.
 fn read_layer(layer: &Layer) -> Result<Option<Table>> {
     let path = layer.path();
     let content = match std::fs::read_to_string(path) {
@@ -147,7 +147,10 @@ fn read_layer(layer: &Layer) -> Result<Option<Table>> {
     // rules and roots resolve here so a malformed one names its file before the lists concatenate.
     let invalid = || format!("invalid config at {}", path.display());
     let table: Table = content.parse().with_context(invalid)?;
-    reject_flat_rules(&table).with_context(invalid)?;
+    if layer.is_project() {
+        reject_project_permissions(&table, path)?;
+    }
+    reject_old_permissions(&table).with_context(invalid)?;
     let config: FileConfig = toml::from_str(&content).with_context(invalid)?;
     let permission = &config.permission;
     for (tier, table) in [
@@ -161,7 +164,6 @@ fn read_layer(layer: &Layer) -> Result<Option<Table>> {
     }
     if layer.is_project() {
         reject_project_secrets(&config, path)?;
-        reject_project_permissions(&config, path)?;
     }
     for raw in permission.extra_roots.iter().flatten() {
         extra_root(raw).with_context(invalid)?;
@@ -170,58 +172,79 @@ fn read_layer(layer: &Layer) -> Result<Option<Table>> {
     Ok(Some(table))
 }
 
-/// Fails on a tier set to a flat list of `class(specifier)` rules, the form the tier tables
-/// replaced, with the table entries that replace it.
-fn reject_flat_rules(table: &Table) -> Result<()> {
+/// Fails on the permission forms this version replaced: a tier set to a flat list of
+/// `class(specifier)` rules, and `mode = "auto"`. One error names the replacement of each, so a
+/// config migrates in one pass.
+fn reject_old_permissions(table: &Table) -> Result<()> {
     let Some(permission) = table.get("permission").and_then(Value::as_table) else {
         return Ok(());
     };
-    for tier in [Tier::Deny, Tier::Ask, Tier::Allow] {
-        if let Some(Value::Array(rules)) = permission.get(&tier.to_string()) {
-            bail!("{}", migration_error(&tier.to_string(), rules));
-        }
+    let mut errors: Vec<String> = [Tier::Deny, Tier::Ask, Tier::Allow]
+        .into_iter()
+        .filter_map(|tier| match permission.get(&tier.to_string()) {
+            Some(Value::Array(rules)) => Some(migration_error(tier, rules)),
+            _ => None,
+        })
+        .collect();
+    if permission.get("mode").and_then(Value::as_str) == Some("auto") {
+        errors.extend(
+            "auto"
+                .parse::<Mode>()
+                .err()
+                .map(|e| format!("permission.mode = \"auto\": {e}")),
+        );
     }
+    ensure!(errors.is_empty(), "{}", errors.join("\n\n"));
     Ok(())
 }
 
 fn reject_project_secrets(config: &FileConfig, path: &Path) -> Result<()> {
     let client = &config.client;
+    let blocked: Vec<&str> = [
+        (client.api_key.is_some(), "client.api_key"),
+        (client.base_url.is_some(), "client.base_url"),
+        (client.extra_ca_certs.is_some(), "client.extra_ca_certs"),
+    ]
+    .into_iter()
+    .filter_map(|(set, key)| set.then_some(key))
+    .collect();
     reject_project_keys(
         path,
-        &[
-            (client.api_key.is_some(), "client.api_key"),
-            (client.base_url.is_some(), "client.base_url"),
-            (client.extra_ca_certs.is_some(), "client.extra_ca_certs"),
-        ],
-        "Move credential and endpoint settings to ~/.config/ox/config.toml or environment \
-         variables.",
+        &blocked,
+        &format!(
+            "Move credential and endpoint settings to {} or environment variables.",
+            user_config_hint()
+        ),
     )
 }
 
-/// A project file is untrusted, so it may only add `deny` and `ask` rules. Setting `mode`, `allow`,
-/// `extra_roots`, or `defaults` there is a hard error so the user learns the setting did not take
-/// effect.
-fn reject_project_permissions(config: &FileConfig, path: &Path) -> Result<()> {
-    let permission = &config.permission;
-    reject_project_keys(
-        path,
-        &[
-            (permission.mode.is_some(), "permission.mode"),
-            (permission.allow.is_some(), "permission.allow"),
-            (permission.extra_roots.is_some(), "permission.extra_roots"),
-            (permission.defaults.is_some(), "permission.defaults"),
-        ],
-        "A project file may only add permission.deny and permission.ask. Set mode, allow, \
-         extra_roots, and defaults in ~/.config/ox/config.toml (or mode via OX_PERMISSION_MODE).",
-    )
-}
-
-/// Fails naming every key in `keys` that the project file at `path` sets.
-fn reject_project_keys(path: &Path, keys: &[(bool, &str)], fix: &str) -> Result<()> {
-    let blocked: Vec<&str> = keys
-        .iter()
-        .filter_map(|&(set, key)| set.then_some(key))
+/// A project file is untrusted, so under `[permission]` it may only add `deny` and `ask` rules.
+/// Any other key there, including one a later version adds, is a hard error so the user learns the
+/// setting did not take effect.
+fn reject_project_permissions(table: &Table, path: &Path) -> Result<()> {
+    let Some(permission) = table.get("permission").and_then(Value::as_table) else {
+        return Ok(());
+    };
+    let blocked: Vec<String> = permission
+        .keys()
+        .filter(|key| !matches!(key.as_str(), "deny" | "ask"))
+        .map(|key| format!("permission.{key}"))
         .collect();
+    let blocked: Vec<&str> = blocked.iter().map(String::as_str).collect();
+    reject_project_keys(
+        path,
+        &blocked,
+        &format!(
+            "Within [permission], a project file may only add deny and ask rules. Set mode, \
+             allow, extra_roots, and defaults in {} or a config.d drop-in, or the mode with \
+             OX_PERMISSION_MODE.",
+            user_config_hint()
+        ),
+    )
+}
+
+/// Fails naming every key in `blocked`, the user-only keys the project file at `path` sets.
+fn reject_project_keys(path: &Path, blocked: &[&str], fix: &str) -> Result<()> {
     if blocked.is_empty() {
         return Ok(());
     }
@@ -229,6 +252,14 @@ fn reject_project_keys(path: &Path, keys: &[(bool, &str)], fix: &str) -> Result<
         "{} cannot set {}. {fix}",
         path.display(),
         blocked.join(", ")
+    )
+}
+
+/// The user config path a fix points to, as written in the docs when no config directory resolves.
+fn user_config_hint() -> String {
+    user_config_path().map_or_else(
+        || "~/.config/ox/config.toml".to_owned(),
+        |path| path.display().to_string(),
     )
 }
 
@@ -634,7 +665,8 @@ mod tests {
             format!("{err:#}"),
             format!(
                 "invalid config at {}: invalid permission.ask.exec pattern \"ls | sh\": it must be \
-                 one simple command, such as `cargo test *`",
+                 one simple command, such as `cargo test *`. Write a pattern for each command of \
+                 a chain or pipeline.",
                 path.display()
             )
         );
@@ -670,45 +702,36 @@ mod tests {
     }
 
     #[test]
-    fn read_layer_rejects_flat_permission_rules_with_the_tables_that_replace_them() {
+    fn read_layer_rejects_every_old_permission_form_in_one_error() {
         let dir = tempfile::tempdir().unwrap();
         let path = write(
             &dir.path().join("config.toml"),
             indoc! {r#"
                 [permission]
+                mode = "auto"
+                allow = ["bash(cargo test:*)"]
                 deny = ["bash(git push:*)", "read(.env)"]
             "#},
         );
 
-        let err = read_layer(&Layer::User(path.clone())).expect_err("old flat rules");
+        let err = read_layer(&Layer::User(path.clone())).expect_err("old permission forms");
         assert_eq!(
             format!("{err:#}"),
             formatdoc! {r#"
-                invalid config at {}: permission.deny is a list of `class(specifier)` rules, which per-class tables replaced. Write it as:
+                invalid config at {}: permission.deny is an old `class(specifier)` rule list, which oxide-code no longer reads. Remove it and add this table at the end of the file:
 
                 [permission.deny]
                 read = ["./.env"]
-                exec = ["git push *"]"#,
+                exec = ["git push *"]
+
+                permission.allow is an old `class(specifier)` rule list, which oxide-code no longer reads. Remove it and add this table at the end of the file:
+
+                [permission.allow]
+                exec = ["cargo test *"]
+
+                permission.mode = "auto": expected one of manual, plan, yolo. The asking mode "auto" is now "manual", the default, so use "manual" or leave the mode unset."#,
                 path.display()
             }
-        );
-    }
-
-    #[test]
-    fn read_layer_rejects_the_auto_mode_naming_its_rename() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write(
-            &dir.path().join("config.toml"),
-            r#"permission.mode = "auto""#,
-        );
-
-        let err = read_layer(&Layer::User(path)).expect_err("the renamed mode");
-        assert!(
-            format!("{err:#}").contains(
-                "expected one of manual, plan, yolo, since \"auto\" was renamed. The mode that \
-                 asks about every call the rules leave open is now \"manual\", the default."
-            ),
-            "{err:#}"
         );
     }
 
@@ -812,7 +835,7 @@ mod tests {
                 msg.contains("client.api_key, client.base_url, client.extra_ca_certs"),
                 "{msg}"
             );
-            assert!(msg.contains("~/.config/ox/config.toml"), "{msg}");
+            assert!(msg.contains(&user_config_hint()), "{msg}");
         }
         assert!(
             read_layer(&Layer::User(dir.path().join("ox.toml")))
@@ -823,30 +846,44 @@ mod tests {
     }
 
     #[test]
-    fn read_layer_rejects_every_widening_permission_key_in_a_project() {
+    fn read_layer_rejects_every_permission_key_but_deny_and_ask_in_a_project() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write(
-            &dir.path().join(".ox/config.toml"),
-            indoc! {r#"
-                [permission]
-                mode = "yolo"
-                extra_roots = ["~/"]
-                allow.exec = ["rm -rf *"]
-                defaults.git = false
-            "#},
-        );
+        for (body, blocked) in [
+            (
+                indoc! {r#"
+                    [permission]
+                    mode = "yolo"
+                    extra_roots = ["~/"]
+                    allow.exec = ["rm -rf *"]
+                    defaults.git = false
+                    later_key = true
+                "#},
+                "permission.allow, permission.defaults, permission.extra_roots, \
+                 permission.later_key, permission.mode",
+            ),
+            (
+                indoc! {r#"
+                    [permission]
+                    allow = ["bash(ls)"]
+                    deny = ["bash(rm:*)"]
+                "#},
+                "permission.allow",
+            ),
+        ] {
+            let path = write(&dir.path().join(".ox/config.toml"), body);
 
-        let err = read_layer(&Layer::Project(path.clone())).expect_err("project widening");
-        assert_eq!(
-            format!("{err:#}"),
-            format!(
-                "{} cannot set permission.mode, permission.allow, permission.extra_roots, \
-                 permission.defaults. A project file may only add permission.deny and \
-                 permission.ask. Set mode, allow, extra_roots, and defaults in \
-                 ~/.config/ox/config.toml (or mode via OX_PERMISSION_MODE).",
-                path.display()
-            )
-        );
+            let err = read_layer(&Layer::Project(path.clone())).expect_err(body);
+            assert_eq!(
+                format!("{err:#}"),
+                format!(
+                    "{} cannot set {blocked}. Within [permission], a project file may only add \
+                     deny and ask rules. Set mode, allow, extra_roots, and defaults in {} or a \
+                     config.d drop-in, or the mode with OX_PERMISSION_MODE.",
+                    path.display(),
+                    user_config_hint()
+                )
+            );
+        }
     }
 
     #[test]

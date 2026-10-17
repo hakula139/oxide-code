@@ -93,11 +93,15 @@ impl Approver for Unattended {
                     rule.class(),
                 )
             }
-            None => "This run cannot ask for approval, and no allow pattern names this call \
-                     exactly. Approve it in an interactive session, or add a broader pattern that \
-                     covers it to the `[permission.allow]` table of the user config. A call that \
-                     an ask rule or a protected path holds asks whatever the allow rules say."
-                .to_owned(),
+            None => {
+                "This run cannot ask for approval, and no exact allow pattern names this call. \
+                     A chained command needs a pattern for each of its commands, and a word that \
+                     expands needs a `*` in its place, both in the `[permission.allow]` table of \
+                     the user config. A command that hides what it runs, such as `$(...)` or \
+                     `sh -c`, and a call an ask rule or a built-in rule holds run only after \
+                     approval in an interactive session."
+                    .to_owned()
+            }
         };
         std::future::ready(Decision::DenyWithFeedback { feedback })
     }
@@ -490,7 +494,9 @@ mod tests {
             panic!("an unattended approval denies with feedback");
         };
         assert!(
-            feedback.contains("no allow pattern names this call exactly"),
+            feedback.starts_with(
+                "This run cannot ask for approval, and no exact allow pattern names this call."
+            ),
             "{feedback}"
         );
     }

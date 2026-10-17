@@ -327,13 +327,13 @@ pub(super) fn empty_prompt() -> PromptParts {
     PromptParts::default()
 }
 
-/// Dispatch context in `cwd` over `exec` allow / deny patterns and the shipped defaults, leaking
+/// Dispatch context in `cwd` over `exec` deny / allow patterns and the shipped defaults, leaking
 /// the policy so the context can borrow it for `'static`. `echo` is an `exec`-class tool that
 /// accesses nothing, so only `*` matches it.
 pub(super) fn dispatch_with(
     mode: Mode,
-    allow: &[&str],
     deny: &[&str],
+    allow: &[&str],
     cwd: &Path,
 ) -> DispatchContext<'static> {
     let rules = |patterns: &[&str]| {

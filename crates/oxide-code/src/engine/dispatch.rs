@@ -687,7 +687,7 @@ mod tests {
             Box::new(EchoTool),
         ]);
         let sink = CapturingSink::new();
-        let mut dispatch_ctx = dispatch_with(Mode::Manual, &["*"], &[], Path::new("/repo"));
+        let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &["*"], Path::new("/repo"));
         let calls = vec![
             call("tool_1", "meet", json!({"v": 1})),
             call("tool_2", "meet", json!({})),
@@ -864,7 +864,7 @@ mod tests {
         // it.
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
         let sink = CapturingSink::new();
-        let mut dispatch_ctx = dispatch_with(Mode::Manual, &["*"], &[], Path::new("/repo"));
+        let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &["*"], Path::new("/repo"));
 
         let gate = gate_call(
             &tools,
@@ -886,7 +886,7 @@ mod tests {
     async fn gate_deny_rule_short_circuits_to_a_synthetic_denial() {
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
         let sink = CapturingSink::new();
-        let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &["*"], Path::new("/repo"));
+        let mut dispatch_ctx = dispatch_with(Mode::Manual, &["*"], &[], Path::new("/repo"));
 
         let denial = gate_call(
             &tools,
@@ -1126,7 +1126,7 @@ mod tests {
         // the model reads why the call failed.
         let tools = ToolRegistry::new(vec![]);
         let sink = CapturingSink::new();
-        let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &["*"], Path::new("/repo"));
+        let mut dispatch_ctx = dispatch_with(Mode::Manual, &["*"], &[], Path::new("/repo"));
 
         let output = gate_call(
             &tools,

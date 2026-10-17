@@ -6,9 +6,9 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::permission::rule::Rule;
-use crate::permission::{PermissionClass, Tier, folded_names, resolve};
-use crate::util::path::{XdgBase, app_dir, slash_separated};
+use crate::permission::rule::{Rule, escaped};
+use crate::permission::{PermissionClass, folded_names, resolve};
+use crate::util::path::{XdgBase, app_dir};
 
 // ── Shipped ──
 
@@ -30,7 +30,7 @@ pub(crate) enum Shipped {
 }
 
 impl Shipped {
-    pub(crate) const ALL: [Self; 11] = [
+    pub(super) const ALL: [Self; 11] = [
         Self::Git,
         Self::Direnv,
         Self::Editors,
@@ -65,11 +65,11 @@ impl Shipped {
     }
 
     /// The tier and rules of a group of patterns, or `None` for a group of protected names.
-    pub(super) fn rules(self) -> Result<Option<(Tier, Vec<Rule>)>> {
+    pub(super) fn rules(self) -> Result<Option<(ShippedTier, Vec<Rule>)>> {
         let home = || std::env::home_dir().map(|home| escaped(&home));
-        let (tier, class, patterns): (Tier, PermissionClass, Vec<String>) = match self {
+        let (tier, class, patterns): (ShippedTier, PermissionClass, Vec<String>) = match self {
             Self::Devices => (
-                Tier::Ask,
+                ShippedTier::Ask,
                 PermissionClass::Edit,
                 if cfg!(unix) {
                     vec!["/dev/**".to_owned()]
@@ -78,20 +78,23 @@ impl Shipped {
                 },
             ),
             Self::Rm => (
-                Tier::Ask,
+                ShippedTier::Ask,
                 PermissionClass::Exec,
-                vec!["rm -rf *".to_owned(), "rm -fr *".to_owned()],
+                RM_PATTERNS
+                    .iter()
+                    .map(|&pattern| pattern.to_owned())
+                    .collect(),
             ),
             Self::Ssh => (
-                Tier::Deny,
+                ShippedTier::Deny,
                 PermissionClass::Read,
                 home()
-                    .map(|home| format!("{home}/.ssh/**"))
+                    .map(|home| format!("{home}/.ssh"))
                     .into_iter()
                     .collect(),
             ),
             Self::Credentials => (
-                Tier::Deny,
+                ShippedTier::Deny,
                 PermissionClass::Read,
                 [
                     app_dir(XdgBase::Data).map(|dir| escaped(&dir.join("credentials.json"))),
@@ -117,10 +120,24 @@ impl Shipped {
     }
 }
 
-/// `path` as a glob that matches only itself.
-fn escaped(path: &Path) -> String {
-    globset::escape(&slash_separated(path))
+/// The tier a group of shipped patterns joins. A shipped default only holds calls back, so none
+/// joins the allow tier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ShippedTier {
+    Deny,
+    Ask,
 }
+
+/// The common spellings of a forced recursive `rm`. Deny and ask patterns compare words folded, so
+/// `-Rf` and `-RF` match `-rf`.
+const RM_PATTERNS: &[&str] = &[
+    "rm -rf *",
+    "rm -fr *",
+    "rm -r -f *",
+    "rm -f -r *",
+    "rm --recursive --force *",
+    "rm --force --recursive *",
+];
 
 // ── Protected Names ──
 
@@ -296,10 +313,101 @@ pub(super) fn protected_by(paths: &[&Path], roots: &[(Shipped, PathBuf)]) -> Vec
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::path::slash_separated;
     use crate::util::path::testing::{HOME_VAR, abs};
 
     fn groups(raw: &str) -> Vec<Shipped> {
         protected_by(&[Path::new(raw)], &[])
+    }
+
+    // ── Shipped::rules ──
+
+    #[test]
+    fn rules_put_each_pattern_group_in_its_tier_and_class() {
+        temp_env::with_vars(
+            [
+                (HOME_VAR, Some(abs("/home/u"))),
+                ("XDG_DATA_HOME", Some(abs("/data"))),
+            ],
+            || {
+                let patterns = |group: Shipped| {
+                    let (tier, rules) = group.rules().unwrap().unwrap();
+                    let classes: Vec<PermissionClass> = rules.iter().map(Rule::class).collect();
+                    let patterns: Vec<String> =
+                        rules.iter().map(|rule| rule.pattern().to_owned()).collect();
+                    (tier, classes, patterns)
+                };
+                let home = slash_separated(Path::new(&abs("/home/u")));
+                let data = slash_separated(Path::new(&abs("/data")));
+                assert_eq!(
+                    patterns(Shipped::Devices),
+                    (
+                        ShippedTier::Ask,
+                        if cfg!(unix) {
+                            vec![PermissionClass::Edit]
+                        } else {
+                            Vec::new()
+                        },
+                        if cfg!(unix) {
+                            vec!["/dev/**".to_owned()]
+                        } else {
+                            Vec::new()
+                        },
+                    )
+                );
+                assert_eq!(
+                    patterns(Shipped::Rm),
+                    (
+                        ShippedTier::Ask,
+                        vec![PermissionClass::Exec; RM_PATTERNS.len()],
+                        RM_PATTERNS
+                            .iter()
+                            .map(|&pattern| pattern.to_owned())
+                            .collect()
+                    )
+                );
+                assert_eq!(
+                    patterns(Shipped::Ssh),
+                    (
+                        ShippedTier::Deny,
+                        vec![PermissionClass::Read],
+                        vec![format!("{home}/.ssh")]
+                    )
+                );
+                assert_eq!(
+                    patterns(Shipped::Credentials),
+                    (
+                        ShippedTier::Deny,
+                        vec![PermissionClass::Read; 2],
+                        vec![
+                            format!("{data}/ox/credentials.json"),
+                            format!("{home}/.claude/.credentials.json"),
+                        ]
+                    )
+                );
+                assert!(Shipped::Git.rules().unwrap().is_none());
+            },
+        );
+    }
+
+    // ── protected_roots ──
+
+    #[cfg(unix)]
+    #[test]
+    fn protected_roots_tags_where_each_symlinked_name_resolves_with_its_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dunce::canonicalize(dir.path()).unwrap();
+        std::fs::create_dir_all(cwd.join("tools/vscode")).unwrap();
+        std::os::unix::fs::symlink("tools/vscode", cwd.join(".vscode")).unwrap();
+
+        let roots = protected_roots(&cwd, std::slice::from_ref(&cwd));
+
+        assert!(roots.contains(&(Shipped::Editors, cwd.join("tools/vscode"))));
+        assert!(
+            !roots.iter().any(
+                |(group, path)| *group != Shipped::Editors && *path == cwd.join("tools/vscode")
+            )
+        );
     }
 
     // ── protected_by ──
@@ -389,68 +497,6 @@ mod tests {
         assert_eq!(
             protected_by(&[Path::new("/home/u/.config/oxen/config.toml")], &roots),
             []
-        );
-    }
-
-    // ── protected_roots ──
-
-    #[cfg(unix)]
-    #[test]
-    fn protected_roots_tags_where_each_symlinked_name_resolves_with_its_group() {
-        let dir = tempfile::tempdir().unwrap();
-        let cwd = dunce::canonicalize(dir.path()).unwrap();
-        std::fs::create_dir_all(cwd.join("tools/vscode")).unwrap();
-        std::os::unix::fs::symlink("tools/vscode", cwd.join(".vscode")).unwrap();
-
-        let roots = protected_roots(&cwd, std::slice::from_ref(&cwd));
-
-        assert!(roots.contains(&(Shipped::Editors, cwd.join("tools/vscode"))));
-        assert!(
-            !roots.iter().any(
-                |(group, path)| *group != Shipped::Editors && *path == cwd.join("tools/vscode")
-            )
-        );
-    }
-
-    // ── Shipped::rules ──
-
-    #[test]
-    fn rules_put_each_pattern_group_in_its_tier_and_class() {
-        temp_env::with_vars(
-            [
-                (HOME_VAR, Some(abs("/home/u"))),
-                ("XDG_DATA_HOME", Some(abs("/data"))),
-            ],
-            || {
-                let patterns = |group: Shipped| {
-                    let (tier, rules) = group.rules().unwrap().unwrap();
-                    let classes: Vec<PermissionClass> = rules.iter().map(Rule::class).collect();
-                    let patterns: Vec<String> =
-                        rules.iter().map(|rule| rule.pattern().to_owned()).collect();
-                    (tier, classes, patterns)
-                };
-                assert_eq!(
-                    patterns(Shipped::Rm),
-                    (
-                        Tier::Ask,
-                        vec![PermissionClass::Exec; 2],
-                        vec!["rm -rf *".to_owned(), "rm -fr *".to_owned()]
-                    )
-                );
-                assert_eq!(
-                    patterns(Shipped::Ssh),
-                    (
-                        Tier::Deny,
-                        vec![PermissionClass::Read],
-                        vec![format!(
-                            "{}/.ssh/**",
-                            slash_separated(Path::new(&abs("/home/u")))
-                        )]
-                    )
-                );
-                assert_eq!(patterns(Shipped::Credentials).2.len(), 2);
-                assert!(Shipped::Git.rules().unwrap().is_none());
-            },
         );
     }
 }

@@ -22,7 +22,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use unicode_normalization::UnicodeNormalization;
 
-use crate::permission::defaults::{Shipped, protected_by, protected_roots};
+use crate::permission::defaults::{Shipped, ShippedTier, protected_by, protected_roots};
 use crate::permission::rule::{MatchDiscipline, Rule};
 use crate::permission::shell::{CommandTarget, Segment};
 use crate::util::path::{expand_user, lexical_normalize};
@@ -69,8 +69,8 @@ impl FromStr for Mode {
             "plan" => Ok(Self::Plan),
             "yolo" => Ok(Self::Yolo),
             "auto" => bail!(
-                "expected one of {}, since \"auto\" was renamed. The mode that asks about every \
-                 call the rules leave open is now \"manual\", the default.",
+                "expected one of {}. The asking mode \"auto\" is now \"manual\", the default, so \
+                 use \"manual\" or leave the mode unset.",
                 Self::VALID_VALUES
             ),
             _ => bail!("expected one of {}", Self::VALID_VALUES),
@@ -150,9 +150,6 @@ impl fmt::Display for Tier {
         f.write_str(self.as_str())
     }
 }
-
-/// Symlinks followed while resolving one path before it counts as a loop, Linux's `MAXSYMLINKS`.
-const MAX_SYMLINK_HOPS: usize = 40;
 
 // ── Workspace ──
 
@@ -465,6 +462,9 @@ fn relative_to_folded(path: &Path, base: &[String]) -> Option<String> {
         })
 }
 
+/// Symlinks followed while resolving one path before it counts as a loop, Linux's `MAXSYMLINKS`.
+const MAX_SYMLINK_HOPS: usize = 40;
+
 /// Resolves `path` to the location a tool will touch, walking it one component at a time the way
 /// the kernel does. Every existing symlink is followed, a dangling one included since `open`
 /// follows it too, and `..` steps back from wherever the walk stands. Past the first missing
@@ -661,6 +661,7 @@ pub(crate) struct Policy {
 }
 
 /// A manual-mode policy with no rules beyond the shipped protected names.
+#[cfg(test)]
 impl Default for Policy {
     fn default() -> Self {
         Self {
@@ -696,13 +697,12 @@ impl Policy {
     /// resolves, an anchored one from each anchor directory of `workspace`.
     pub(crate) fn resolve(
         mode: Mode,
-        deny: Vec<Rule>,
-        ask: Vec<Rule>,
-        mut allow: Vec<Rule>,
+        mut deny: Vec<Rule>,
+        mut ask: Vec<Rule>,
+        allow: Vec<Rule>,
         disabled: &[Shipped],
         workspace: &Workspace,
     ) -> Result<Self> {
-        let (mut deny, mut ask) = (deny, ask);
         let enabled = || {
             Shipped::ALL
                 .into_iter()
@@ -711,9 +711,8 @@ impl Policy {
         for group in enabled() {
             if let Some((tier, rules)) = group.rules()? {
                 match tier {
-                    Tier::Deny => deny.extend(rules),
-                    Tier::Ask => ask.extend(rules),
-                    Tier::Allow => allow.extend(rules),
+                    ShippedTier::Deny => deny.extend(rules),
+                    ShippedTier::Ask => ask.extend(rules),
                 }
             }
         }
@@ -798,10 +797,11 @@ impl Policy {
     /// 6. An allow rule or a session allow rule allows.
     /// 7. `yolo` allows, and the other modes ask.
     ///
-    /// A `bash` command is denied when a deny rule matches one of its simple commands or an edit of
-    /// a file it writes. It asks at step 3 when an ask rule does, when it writes a protected path,
-    /// or when a deny or ask `read` rule matches a file a known-safe command in it reads. Step 6
-    /// allows it only when it is not opaque and [`Self::allows_command`] holds.
+    /// A `bash` command is denied when a deny rule matches one of its simple commands, an edit of a
+    /// file it writes, or a read of a file it redirects into its input. It asks at step 3 when an
+    /// ask rule does, when it writes a protected path, or when a deny or ask `read` rule matches a
+    /// file a known-safe command in it reads. Step 6 allows it only when it is not opaque and
+    /// [`Self::allows_command`] holds.
     pub(crate) fn decide(&self, class: PermissionClass, target: &Target<'_>) -> Decision {
         if holds_back(&self.deny, class, target) {
             return Decision::Deny;
@@ -912,13 +912,15 @@ impl Policy {
 }
 
 /// Whether one of the deny or ask `rules` matches the call, or, for a command, an edit of a file it
-/// writes.
+/// writes or a read of a file it redirects into its input.
 fn holds_back(rules: &[Rule], class: PermissionClass, target: &Target<'_>) -> bool {
     rules
         .iter()
         .any(|rule| rule.matches(class, target, MatchDiscipline::Deny))
         || matches!(target, Target::Command(command) if command.writes().iter().any(|write| {
             holds_back(rules, PermissionClass::Edit, &write.as_target())
+        }) || command.reads().iter().any(|read| {
+            holds_back(rules, PermissionClass::Read, &read.as_target())
         }))
 }
 
@@ -1165,8 +1167,8 @@ mod tests {
         let err = "auto".parse::<Mode>().unwrap_err().to_string();
         assert_eq!(
             err,
-            "expected one of manual, plan, yolo, since \"auto\" was renamed. The mode that asks \
-             about every call the rules leave open is now \"manual\", the default."
+            "expected one of manual, plan, yolo. The asking mode \"auto\" is now \"manual\", the \
+             default, so use \"manual\" or leave the mode unset."
         );
     }
 
@@ -1190,8 +1192,15 @@ mod tests {
         });
 
         assert_eq!(workspace.cwd(), repo);
+        let anchor = |dir: &Path| Anchor {
+            resolved: dir.to_path_buf(),
+            spelled: dir.to_path_buf(),
+        };
+        assert_eq!(
+            workspace.anchors,
+            [anchor(&repo), anchor(&shared), anchor(&home.join("notes"))]
+        );
         assert_eq!(workspace.roots(), [repo, shared, home.join("notes")]);
-        assert_eq!(workspace.anchors.len(), 3);
     }
 
     #[test]
@@ -1892,6 +1901,111 @@ mod tests {
         }
     }
 
+    // ── Policy::allow_for_session ──
+
+    #[test]
+    fn allow_for_session_allows_what_asked_until_cleared() {
+        let mut p = policy(Mode::Manual, &[], &[], &[]);
+        let hosts = abs("/etc/hosts");
+        let hosts_glob = slash_separated(Path::new(&hosts));
+        assert_eq!(
+            decide(&p, EXEC, &command("cargo test --all")),
+            Decision::Ask
+        );
+
+        for (class, pattern) in [
+            (EXEC, "cargo test *"),
+            (EXEC, "cargo test *"),
+            (EDIT, &*hosts_glob),
+        ] {
+            p.allow_for_session(Rule::parse(class, pattern).unwrap());
+        }
+        let held: Vec<&str> = p.session_allow().iter().map(Rule::pattern).collect();
+        assert_eq!(held, ["cargo test *", hosts_glob.as_str()]);
+        assert_eq!(
+            decide(&p, EXEC, &command("cargo test --all")),
+            Decision::Allow
+        );
+        assert_eq!(decide(&p, EDIT, &outside(&hosts)), Decision::Allow);
+
+        p.clear_session_allow();
+        assert_eq!(p.session_allow(), []);
+        assert_eq!(
+            decide(&p, EXEC, &command("cargo test --all")),
+            Decision::Ask
+        );
+    }
+
+    // ── Policy::session_grant ──
+
+    #[test]
+    fn session_grant_suggests_a_rule_that_allows_the_call() {
+        let p = policy(Mode::Manual, &[], &[], &[]);
+        let target = command("RUST_LOG=debug cargo test 2>&1");
+
+        let grant = p.session_grant(EXEC, &target).unwrap();
+        assert_eq!(grant.suggested().pattern(), "cargo test");
+        let mut granted = p.clone();
+        granted.allow_for_session(grant.suggested().clone());
+        assert_eq!(decide(&granted, EXEC, &target), Decision::Allow);
+        assert!(
+            p.session_grant(EXEC, &command("cargo test && git push"))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn session_grant_declines_a_call_that_no_allow_rule_can_let_through() {
+        let (_dir, cwd) = temp_cwd();
+        std::fs::create_dir(cwd.join(".git")).unwrap();
+        let p = policy(Mode::Manual, &[], &[(EXEC, "git push *")], &[]);
+
+        let protected = Access::for_path(".git/config", &Workspace::new(&cwd));
+        assert!(p.session_grant(EDIT, &protected).is_none());
+        assert!(p.session_grant(EXEC, &command("git push origin")).is_none());
+        assert!(p.session_grant(EXEC, &command("ls *.rs")).is_none());
+    }
+
+    // ── Policy::read_filter ──
+
+    #[test]
+    fn read_filter_withholds_exactly_the_files_the_gate_holds_back() {
+        let (_dir, cwd) = temp_cwd();
+        let secrets = format!("{}/secrets", cwd.display());
+        let p = resolved_policy(
+            Mode::Manual,
+            &[(READ, ".env"), (EDIT, "notes.md")],
+            &[(READ, &secrets)],
+            &[],
+            &cwd,
+        );
+        let filter = p.read_filter();
+        let workspace = Workspace::new(&cwd);
+        let walk = filter.walk(&cwd, Path::new("."), &workspace);
+
+        for (name, held) in [
+            (".env", Some(Decision::Deny)),
+            ("sub/.ENV", Some(Decision::Deny)),
+            ("secrets/key", Some(Decision::Ask)),
+            ("notes.md", None),
+            ("src/main.rs", None),
+        ] {
+            let gate = Access::for_path(name, &workspace);
+            assert_eq!(walk.withholds(&cwd.join(name)), held.is_some(), "{name}");
+            assert_eq!(
+                decide(&p, READ, &gate),
+                held.unwrap_or(Decision::Allow),
+                "{name}"
+            );
+        }
+        let empty = ReadFilter::default();
+        assert!(
+            !empty
+                .walk(&cwd, Path::new("."), &workspace)
+                .withholds(&cwd.join(".env"))
+        );
+    }
+
     // ── Policy::decide: tiers ──
 
     #[test]
@@ -2150,6 +2264,31 @@ mod tests {
     }
 
     #[test]
+    fn decide_plan_denies_an_edit_or_exec_call_ahead_of_the_ask_tier() {
+        let p = policy(
+            Mode::Plan,
+            &[],
+            &[(EDIT, "Cargo.lock"), (EXEC, "git push *")],
+            &[],
+        );
+        for (class, target) in [
+            (EDIT, workspace(&abs("/repo/Cargo.lock"), "Cargo.lock")),
+            (
+                EDIT,
+                path(
+                    &abs("/repo/.git/config"),
+                    Some(".git/config"),
+                    Zone::Workspace,
+                    &[Shipped::Git],
+                ),
+            ),
+            (EXEC, command("git push origin")),
+        ] {
+            assert_eq!(decide(&p, class, &target), Decision::Deny, "{target:?}");
+        }
+    }
+
+    #[test]
     fn decide_yolo_runs_what_no_rule_covers_but_keeps_deny_and_ask() {
         let p = policy(
             Mode::Yolo,
@@ -2298,69 +2437,54 @@ mod tests {
         assert_eq!(decide("grep --file=.env x"), Decision::Ask);
     }
 
-    // ── Policy::allow_for_session ──
-
     #[test]
-    fn allow_for_session_allows_what_asked_until_cleared() {
-        let mut p = policy(Mode::Manual, &[], &[], &[]);
-        let hosts = abs("/etc/hosts");
-        let hosts_glob = slash_separated(Path::new(&hosts));
-        assert_eq!(
-            decide(&p, EXEC, &command("cargo test --all")),
-            Decision::Ask
-        );
-
-        for (class, pattern) in [
-            (EXEC, "cargo test *"),
-            (EXEC, "cargo test *"),
-            (EDIT, &*hosts_glob),
-        ] {
-            p.allow_for_session(Rule::parse(class, pattern).unwrap());
-        }
-        let held: Vec<&str> = p.session_allow().iter().map(Rule::pattern).collect();
-        assert_eq!(held, ["cargo test *", hosts_glob.as_str()]);
-        assert_eq!(
-            decide(&p, EXEC, &command("cargo test --all")),
-            Decision::Allow
-        );
-        assert_eq!(decide(&p, EDIT, &outside(&hosts)), Decision::Allow);
-
-        p.clear_session_allow();
-        assert_eq!(p.session_allow(), []);
-        assert_eq!(
-            decide(&p, EXEC, &command("cargo test --all")),
-            Decision::Ask
-        );
-    }
-
-    // ── Policy::session_grant ──
-
-    #[test]
-    fn session_grant_suggests_a_rule_that_allows_the_call() {
-        let p = policy(Mode::Manual, &[], &[], &[]);
-        let target = command("RUST_LOG=debug cargo test 2>&1");
-
-        let grant = p.session_grant(EXEC, &target).unwrap();
-        assert_eq!(grant.suggested().pattern(), "cargo test");
-        let mut granted = p.clone();
-        granted.allow_for_session(grant.suggested().clone());
-        assert_eq!(decide(&granted, EXEC, &target), Decision::Allow);
-        assert!(
-            p.session_grant(EXEC, &command("cargo test && git push"))
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn session_grant_declines_a_call_that_no_allow_rule_can_let_through() {
+    fn decide_command_weighs_each_input_redirection_as_a_read() {
         let (_dir, cwd) = temp_cwd();
-        std::fs::create_dir(cwd.join(".git")).unwrap();
-        let p = policy(Mode::Manual, &[], &[(EXEC, "git push *")], &[]);
+        let p = policy(
+            Mode::Yolo,
+            &[(READ, ".env")],
+            &[(READ, "secrets")],
+            &[(EXEC, "*")],
+        );
+        let decide = |case: &str| {
+            p.decide(
+                EXEC,
+                &Access::for_command(case, &Workspace::new(&cwd)).as_target(),
+            )
+        };
+        for (case, expected) in [
+            ("cat < README.md", Decision::Allow),
+            ("cat < .env", Decision::Deny),
+            ("wc -l 3< config/.env", Decision::Deny),
+            ("python3 run.py < secrets/key", Decision::Ask),
+        ] {
+            assert_eq!(decide(case), expected, "{case}");
+        }
+    }
 
-        let protected = Access::for_path(".git/config", &Workspace::new(&cwd));
-        assert!(p.session_grant(EDIT, &protected).is_none());
-        assert!(p.session_grant(EXEC, &command("git push origin")).is_none());
-        assert!(p.session_grant(EXEC, &command("ls *.rs")).is_none());
+    #[test]
+    fn decide_command_denies_an_input_redirection_from_a_shipped_read_deny() {
+        let (_dir, base) = temp_cwd();
+        let home = base.join("home");
+        let key = slash_separated(&home.join(".ssh/id_ed25519"));
+        temp_env::with_var(HOME_VAR, Some(&home), || {
+            let workspace = Workspace::new(&base);
+            let p = Policy::resolve(
+                Mode::Manual,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                &[],
+                &workspace,
+            )
+            .unwrap();
+
+            let decide =
+                |case: &str| p.decide(EXEC, &Access::for_command(case, &workspace).as_target());
+
+            assert_eq!(decide(&format!("cat < {key}")), Decision::Deny);
+            assert_eq!(decide(&format!("cat {key}")), Decision::Ask);
+        });
     }
 
     // ── SessionGrant::accept ──
@@ -2407,46 +2531,6 @@ mod tests {
         assert_eq!(
             back.accept(grant.suggested().pattern()).unwrap(),
             *grant.suggested()
-        );
-    }
-
-    // ── Policy::read_filter ──
-
-    #[test]
-    fn read_filter_withholds_exactly_the_files_the_gate_holds_back() {
-        let (_dir, cwd) = temp_cwd();
-        let secrets = format!("{}/secrets", cwd.display());
-        let p = resolved_policy(
-            Mode::Manual,
-            &[(READ, ".env"), (EDIT, "notes.md")],
-            &[(READ, &secrets)],
-            &[],
-            &cwd,
-        );
-        let filter = p.read_filter();
-        let workspace = Workspace::new(&cwd);
-        let walk = filter.walk(&cwd, Path::new("."), &workspace);
-
-        for (name, held) in [
-            (".env", Some(Decision::Deny)),
-            ("sub/.ENV", Some(Decision::Deny)),
-            ("secrets/key", Some(Decision::Ask)),
-            ("notes.md", None),
-            ("src/main.rs", None),
-        ] {
-            let gate = Access::for_path(name, &workspace);
-            assert_eq!(walk.withholds(&cwd.join(name)), held.is_some(), "{name}");
-            assert_eq!(
-                decide(&p, READ, &gate),
-                held.unwrap_or(Decision::Allow),
-                "{name}"
-            );
-        }
-        let empty = ReadFilter::default();
-        assert!(
-            !empty
-                .walk(&cwd, Path::new("."), &workspace)
-                .withholds(&cwd.join(".env"))
         );
     }
 

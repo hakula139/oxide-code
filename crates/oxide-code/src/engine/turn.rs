@@ -2174,8 +2174,8 @@ mod tests {
             None,
             &mut dispatch_with(
                 crate::permission::Mode::Manual,
-                &[],
                 &["*"],
+                &[],
                 Path::new("/repo"),
             ),
         )

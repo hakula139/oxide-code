@@ -510,7 +510,7 @@ mod tests {
             assert!(
                 output
                     .content
-                    .ends_with("(1 file withheld by read deny rules)"),
+                    .ends_with("(1 file withheld by read deny or ask rules)"),
                 "{tool}: {}",
                 output.content
             );

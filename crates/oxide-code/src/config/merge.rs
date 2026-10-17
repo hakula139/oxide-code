@@ -9,7 +9,7 @@ use super::provenance::{Layer, Source, Sourced};
 
 /// Tables whose arrays concatenate across layers, lowest layer first, so a higher layer adds rules
 /// without discarding the lower layer's.
-const APPENDED_TABLES: &[&str] = &["permission.allow", "permission.ask", "permission.deny"];
+const APPENDED_TABLES: &[&str] = &["permission.deny", "permission.ask", "permission.allow"];
 
 /// Arrays outside [`APPENDED_TABLES`] that concatenate the same way.
 const APPENDED: &[&str] = &["permission.extra_roots"];

@@ -1,6 +1,6 @@
 # Tool Permissions and Approval
 
-Every tool call passes through a permission gate. Rules place calls in one of three tiers: deny, ask, or allow. The mode decides the calls the rules leave open, and `plan` also denies every call that could change something. Planned extensions, including a classifier and an OS sandbox, are tracked in [#130](https://github.com/hakula139/oxide-code/issues/130).
+Every tool call passes through a permission gate. Rules place calls in one of three tiers: deny, ask, or allow. The mode decides the calls the rules leave open, and `plan` also denies every `edit`, `exec`, and `net` call. Planned extensions, including a classifier and an OS sandbox, are tracked in [#130](https://github.com/hakula139/oxide-code/issues/130).
 
 Companion docs: [research/tools/permissions.md](../../research/tools/permissions.md), [slash/modals.md](../slash/modals.md), [session/file-tracking.md](../session/file-tracking.md).
 
@@ -34,7 +34,7 @@ A `Rule` consists of a class and a pattern. Its tier is determined by the list t
 - **`plan`** is read-only. It denies every `edit`, `exec`, and `net` call, including a known-safe `bash` read, and reads behave as in `manual`.
 - **`yolo`** runs every call the rules leave open. Deny and ask rules still hold, shipped defaults included, so `yolo` still asks before editing `.git/hooks` until the `git` default is turned off.
 
-Deny rules apply in every mode, and ask rules apply in every mode except `plan`, which denies the calls they would ask about. The `auto` mode will return with the classifier tracked in [#131](https://github.com/hakula139/oxide-code/issues/131), which will decide open calls without asking. Calls that match the ask tier will still go to the user, because an ask rule records that the user wants to see the call.
+Deny and ask rules apply in every mode. In `plan`, only ask rules for `read` and `mcp` calls still ask, since `plan` denies the other classes first. The `auto` mode will return with the classifier tracked in [#131](https://github.com/hakula139/oxide-code/issues/131), which will decide open calls without asking. Calls that match the ask tier will still go to the user, because an ask rule records that the user wants to see the call.
 
 The modes correspond to these settings in Claude Code and Codex:
 
@@ -48,9 +48,9 @@ The modes correspond to these settings in Claude Code and Codex:
 
 The gate evaluates each call in a fixed order and stops at the first match.
 
-1. **Deny tier** → deny. A deny rule for the call's class matches, or a `bash` command writes a file matched by a deny `edit` rule.
+1. **Deny tier** → deny. A deny rule for the call's class matches, or a `bash` command writes a file matched by a deny `edit` rule or redirects input from a file matched by a deny `read` rule.
 2. **`plan`** → deny an `edit`, `exec`, or `net` call.
-3. **Ask tier** → ask. An ask rule for the call's class matches, an edit-class call targets a protected path, or a `bash` command writes a file matched by an ask `edit` rule or marked as protected. A `bash` command also asks if a deny or ask `read` rule matches a file that a known-safe command in it may read.
+3. **Ask tier** → ask. An ask rule for the call's class matches, an edit-class call targets a protected path, or a `bash` command writes a file matched by an ask `edit` rule or marked as protected. A `bash` command also asks if it redirects input from a file matched by an ask `read` rule, or if a deny or ask `read` rule matches a file that a known-safe command in it may read.
 4. **Read-class call** → allow.
 5. **Edit-class call inside the workspace** → allow.
 6. **Allow tier** → allow. An allow rule or session grant matches the call.
@@ -76,15 +76,15 @@ Each resolved target belongs to one zone:
 
 ## Command Targets
 
-A `bash` call's target is its command as parsed by tree-sitter-bash. `Access::for_command` splits the command into simple commands across `;`, `&&`, `||`, `&`, pipes, line breaks, subshells, and compound statements. Each simple command drops transparent wrappers and their options, including `builtin`, `command`, `env`, `exec`, `nice`, `nohup`, `time`, and `timeout`. For example, `nice -n 5 cargo test 2>&1` runs the simple command `cargo test`. Command words are unquoted, and a leading unquoted `~` or `~/` expands to the home directory. Each output redirection to a file (`>`, `>>`, `>|`, `>&`, `&>`, `&>>`) becomes an edit-class path target, resolved and zoned like a path tool's target, except for `/dev/null` and the other standard streams.
+A `bash` call's target is its command as parsed by tree-sitter-bash. `Access::for_command` splits the command into simple commands across `;`, `&&`, `||`, `&`, pipes, line breaks, subshells, and compound statements. Each simple command drops transparent wrappers and their options, including `builtin`, `command`, `env`, `exec`, `nice`, `nohup`, `time`, and `timeout`. For example, `nice -n 5 cargo test 2>&1` runs the simple command `cargo test`. Command words are unquoted, and a leading unquoted `~` or `~/` expands to the home directory. Each output redirection to a file (`>`, `>>`, `>|`, `>&`, `&>`, `&>>`) becomes an edit-class path target, and each input redirection (`<`) a read-class one, both resolved and zoned like a path tool's target. A redirection to `/dev/null`, `/dev/stdout`, `/dev/stderr`, or `/dev/tty` adds no target.
 
-Each simple command retains two word lists. Its program words start at the program that runs, after all assignments and wrappers. Its named words also start at the program unless a leading assignment or an `env` argument sets a variable outside a short list of variables that affect only output, such as `RUST_LOG`, `LANG`, `TZ`, or `NO_COLOR`. Other variables can change which program runs or what it loads, as `PATH`, `LD_PRELOAD`, and `GIT_PAGER` can. In those cases, the named words start at the assignment and include all following words, including wrappers. Thus, `GIT_PAGER=sh git log` needs a rule that names the assignment and is never a known-safe read. Deny and ask rules still see the program that runs.
+Each simple command retains two word lists. Its program words start at the program that runs, after all assignments and wrappers. Its named words also start at the program unless a leading assignment or an `env` argument sets a variable outside a short list of variables that affect only output, such as `RUST_LOG`, `LANG`, `TZ`, or `NO_COLOR`. Other variables can change which program runs or what it loads, as `PATH`, `LD_PRELOAD`, and `GIT_PAGER` can. In those cases, the named words start at the assignment and include all following words, including wrappers. Thus, `GIT_PAGER=sh git log` needs a rule that names the assignment and is never a known-safe read. A wrapper spelled with a directory, as in `./nice` or `/usr/bin/env`, may be any program, so the named words also start at it. Deny and ask rules still see the program that runs.
 
 A command is opaque if the parse cannot show everything it runs or writes:
 
 - It fails to parse, or contains a command or process substitution, an arithmetic expansion, or a `[[` or `((` test, which can evaluate a substitution inside an array subscript.
-- Its command name is not a literal word, as in `$CMD -rf x`.
-- It runs a shell such as `sh`, `bash`, or `zsh`, or a builtin that runs code (`eval`, `source`, `.`, `trap`, `let`). Thus, both `sh -c '...'` and `curl ... | sh` are opaque.
+- Its command name is not a literal word or holds a glob, as in `$CMD -rf x` or `/bin/s? -c ls`.
+- It runs a shell such as `sh`, `bash`, or `zsh`, or a builtin that runs code (`eval`, `source`, `.`, `trap`, `let`), compared by folded name, so `BASH` counts too. Thus, both `sh -c '...'` and `curl ... | sh` are opaque.
 - A wrapper uses an option the parser does not know, such as `env -S`.
 - A redirection target is not a literal path, contains a glob, or names more than one file.
 - It assigns a variable the shell reads, such as `PATH`, `HOME`, `IFS`, or `BASH_ENV`, either with a plain assignment or in a `for` loop. It is also opaque if it declares or exports a variable outside the short list above, because later commands can see that variable.
@@ -102,7 +102,7 @@ Some read-only commands run without an allow rule. `echo`, `false`, `pwd`, and `
 
 GNU tools accept long options by any valid prefix, so `sed --in` is refused as `--in-place`.
 
-Every argument that may name a file counts as a read of that path, including each word after the options and values attached to options. If a deny or ask `read` rule matches one, the command asks at step 3, even when an `exec` rule allows it, because its arguments may cover more files than it reads.
+Every argument that may name a file counts as a read of that path, including each word after the options and values attached to options. If a deny or ask `read` rule matches one, the command asks at step 3, even when an `exec` rule allows it, because its arguments may cover more files than it reads. An argument that expands or globs names no path to check, so an `exec` allow such as `cat *` runs `cat secret.tx?` whatever the `read` rules say. The `read` rules reach other programs only through input redirections, since a program can open any file once it runs.
 
 ## Patterns
 
@@ -116,7 +116,7 @@ A pattern fails to load if it is empty, does not parse, contains more than one c
 
 An allow pattern matches a simple command’s named words, including the assignments and wrappers that remain in it. A literal pattern word matches only a command word with that exact value, provided it neither expands nor globs. A `*` before the last word matches one such word, since an expanding or globbing word can become several. A trailing `*` matches all remaining words. Every simple command must match an allow pattern or be a known-safe read for the command to be allowed, so `cargo test *` never covers `cargo test && rm -rf /`.
 
-A deny or ask pattern matches a simple command in any of three spellings: its named words, its program words, or its program words with the program's directory dropped. A pattern word matches the command word unquoted, or as written if it expands, and `*` matches any word. Thus, `rm -rf *` stops `"rm" -rf x`, `/bin/rm -rf x`, `FOO=1 nice rm -rf x`, and `cd src && rm -rf x`.
+A deny or ask pattern matches a simple command in any of three spellings: its named words, its program words, or its program words with the program's directory dropped. A pattern word matches the command word unquoted, or as written if it expands, with both folded as protected names are, and `*` matches any word. Thus, `rm -rf *` stops `"rm" -rf x`, `/bin/rm -rf x`, `RM -RF x`, `FOO=1 nice rm -rf x`, and `cd src && rm -rf x`.
 
 ### Path Patterns
 
@@ -127,7 +127,7 @@ A `read` or `edit` pattern is a gitignore-style glob. Its starting characters de
 - Any other pattern with a `/` before its final character is anchored the same way. For example, `src/*.rs` matches `.rs` files directly inside `src` in each anchor directory.
 - A pattern with no other `/` matches a name at any depth below each anchor directory, so `.env` covers both `.env` and `config/.env`.
 
-A trailing `/` is ignored, and a pattern also matches everything beneath a path it matches. Thus, `secrets` and `~/.ssh` cover their contents. `*` and `?` match within one name, `**` spans names, and `[...]` and `{a,b}` work as in `globset`. A leading `!` fails to load because rules do not support negation. To cover every file with a given name on disk, use the root-anchored pattern `/**/.env`. On Windows, `\` separates names like `/`, root-anchored patterns need a drive, as in `C:/...`, and a root-anchored pattern without one fails to load.
+A trailing `/` is ignored, and a pattern also matches everything beneath a path it matches. Thus, `secrets` and `~/.ssh` cover their contents. `*` and `?` match within one name, `**` spans names, and `[...]` and `{a,b}` work as in `globset`. A leading `!` fails to load because rules do not support negation, and so does a `.` or `..` component, which no resolved path holds. To cover every file with a given name on disk, use the root-anchored pattern `/**/.env`. On Windows, `\` separates names like `/`, root-anchored patterns need a drive, as in `C:/...`, and a root-anchored pattern without one fails to load.
 
 An allow pattern matches the resolved path. If anchored, it matches the path beneath each anchor directory as that directory resolves. Deny and ask patterns also match the path as spelled in the call, after lexical normalization, beneath each anchor directory in both its resolved and spelled forms. This prevents `.env -> ../shared/.env` from routing a read around `deny.read = [".env"]`. They also compare names as protected paths do, so `.env` covers `.ENV` and `.env.`. When the policy loads, a deny or ask pattern whose literal prefix, the components before its first glob character, passes through a symlink also matches the prefix's resolved location. For anchored patterns, this is checked from each anchor directory. For example, with `secrets -> ../vault`, `secrets/**` also covers `../vault/key`.
 
@@ -155,11 +155,11 @@ ssh = false
 | `agents`      | ask `edit`     | `.codex` at any depth, `.claude/settings.json`, `.claude/settings.local.json`, and everything under `.claude/hooks` |
 | `ox`          | ask `edit`     | `.ox` at any depth, a legacy `ox.toml` anywhere, and oxide-code's own config, data, and state directories           |
 | `devices`     | ask `edit`     | `/dev/**` on Unix, which a redirection to a device other than the standard streams writes                           |
-| `rm`          | ask `exec`     | `rm -rf *` and `rm -fr *`                                                                                           |
-| `ssh`         | deny `read`    | `~/.ssh/**`                                                                                                         |
+| `rm`          | ask `exec`     | `rm -rf *`, `rm -fr *`, `rm -r -f *`, `rm -f -r *`, `rm --recursive --force *`, and `rm --force --recursive *`      |
+| `ssh`         | deny `read`    | `~/.ssh`                                                                                                            |
 | `credentials` | deny `read`    | oxide-code's `credentials.json` in its data directory and Claude Code's `~/.claude/.credentials.json`               |
 
-The first seven groups define the protected names of the [Protected zone](#path-targets). Each covers files that can run or configure code outside the task at hand, so edits to them ask even when an allow rule or the workspace would otherwise permit the edit. The rest of `.claude`, including `worktrees` and `plans`, remains editable. The other defaults are patterns that match like user rules in the same tier. A `read` deny default also withholds its files from `grep` and `glob` walks.
+The first seven groups define the protected names of the [Protected zone](#path-targets). Each covers files that can run or configure code outside the task at hand, so edits to them ask even when an allow rule or the workspace would otherwise permit the edit. The rest of `.claude`, including `worktrees` and `plans`, remains editable. The other defaults are patterns that match like user rules in the same tier. No default joins the allow tier, so an allow rule never overrides one, and `true` in a later layer turns a default back on. A `read` deny default also withholds its files from `grep` and `glob` walks.
 
 ## Approval Round-Trip
 
@@ -204,16 +204,16 @@ rm = false
 
 The `[permission]` table parses into a `PermissionTable` on `FileConfig`. `deny_unknown_fields` applies at every level, so an unknown class or default name fails to load and lists the accepted names. Every `permission.<tier>.<class>` list and `permission.extra_roots` entry is concatenated across config layers, while a `permission.defaults` key set in a higher layer replaces the lower one. `Config::load` resolves the policy after the compaction block, including each deny and ask pattern's literal prefix. It also resolves the extra roots with `Workspace::resolve`, failing to load if a root is relative, passes through a symlink loop, or is `/`, `$HOME`, or an ancestor of `$HOME`.
 
-A checked-in `.ox/config.toml` is untrusted, just like the project credentials that `reject_project_secrets` blocks. A project file may set only `permission.deny` and `permission.ask`. Setting `mode`, `allow`, `extra_roots`, or `defaults` there is rejected with a message pointing to user config. The merge appends project rules to the user's rules, allowing a repo to restrict itself or require approval without widening what the user allowed or turning off a default.
+A checked-in `.ox/config.toml` is untrusted, just like the project credentials that `reject_project_secrets` blocks. A project file may set only `permission.deny` and `permission.ask`. Any other `[permission]` key there, such as `mode`, `allow`, `extra_roots`, or `defaults`, is rejected with a message pointing to user config. The merge appends project rules to the user's rules, allowing a repo to restrict itself or require approval without widening what the user allowed or turning off a default.
 
 ## Migration
 
 Earlier versions used flat `allow` and `deny` arrays of `class(specifier)` strings, and their `auto` mode asked about open calls. Each old form fails to load with a message naming its replacement, so config meaning never changes silently:
 
-- **`permission.allow`, `permission.ask`, or `permission.deny` as an array** fails with the table entries that replace it. `bash` becomes `exec`, a prefix rule `bash(cargo test:*)` becomes `cargo test *`, a class-wide rule becomes `*`, and a relative path glob gains `./` because old relative globs applied inside the cwd. A rule the new grammar cannot express, such as `bash(mkfs*)` or `bash(* | sh)`, appears as a comment explaining why.
+- **`permission.allow`, `permission.ask`, or `permission.deny` as an array** fails with the table entries that replace it, every such array and an `auto` mode in one message. `bash` becomes `exec`, a prefix rule `bash(cargo test:*)` becomes `cargo test *`, a class-wide rule becomes `*`, and a relative path glob gains `./` because old relative globs applied inside the cwd. A rule the new grammar cannot express, such as `bash(mkfs*)`, `bash(* | sh)`, or `bash(git * --force)`, whose `*` matched any run of characters, appears as a comment explaining why. A converted allow table that holds a path pattern notes that the pattern now also covers everything below a directory it matches.
 - **`mode = "auto"`** fails and says that the asking mode is now `manual`, the default. The same message applies to `OX_PERMISSION_MODE`. The classifier tracked in [#131](https://github.com/hakula139/oxide-code/issues/131) will bring `auto` back with a new meaning, and its release notes will flag the change.
 
-`plan` and `yolo` load as before. `yolo` used to skip the shipped defaults and protected paths, and it now honors them along with ask rules, so it still asks before editing `.git/hooks`. Old shipped deny defaults either became ask defaults or were removed: `rm -rf` asks through `rm`, a redirection to a disk device asks through `devices`, edits to `.git` ask through `git`, and a pipe into a shell needs no rule because opaque commands always ask. Fork bombs, `dd`, and `mkfs` have no default and ask unless an allow rule names them.
+`plan` and `yolo` load as before. `yolo` used to skip the shipped defaults and protected paths, and it now honors them along with ask rules, so it still asks before editing `.git/hooks`. Old shipped deny defaults either became ask defaults or were removed: `rm -rf` asks through `rm`, a redirection to a disk device asks through `devices`, edits to `.git` ask through `git`, and a pipe into a shell needs no rule because opaque commands ask in `manual`. Fork bombs, `dd`, and `mkfs` have no default and ask unless an allow rule names them.
 
 ## Stdio Frontends
 
@@ -232,7 +232,7 @@ The stdio sink escapes control characters other than tabs and line breaks in mod
 
 ## Design Decisions
 
-1. **Tiers hold in every mode.** Deny and ask rules apply whatever the mode, and the mode mostly decides what the rules leave open. A `yolo` that skipped rules made a deny rule's meaning depend on a setting elsewhere, so `yolo` only changes the fallback from ask to run, as Claude Code's bypass mode keeps deny rules, ask rules, and protected paths. `plan` denies ahead of the ask tier because a read-only session has nothing to ask about.
+1. **Tiers hold in every mode.** Deny and ask rules apply whatever the mode, and the mode mostly decides what the rules leave open. A `yolo` that skipped rules made a deny rule's meaning depend on a setting elsewhere, so `yolo` only changes the fallback from ask to run, as Claude Code's bypass mode keeps deny rules, ask rules, and protected paths. `plan` denies `edit`, `exec`, and `net` calls ahead of the ask tier because approving one would break the read-only session.
 
 2. **Ask outranks allow.** An ask rule records a call the user wants to see, such as `git push`, even when a broad allow covers it. Placing the ask tier above every allow, including session grants, the workspace allow, and a future classifier, preserves that request as the allows grow.
 
@@ -257,7 +257,7 @@ The stdio sink escapes control characters other than tabs and line breaks in mod
 ## Sources
 
 - `crates/oxide-code/src/config.rs`: `Config::load`, `resolve_permission`, `OX_PERMISSION_MODE`, `Effort` enum template.
-- `crates/oxide-code/src/config/load.rs`: `reject_project_secrets`, `reject_project_permissions`, the old rule-array check.
+- `crates/oxide-code/src/config/load.rs`: `reject_project_secrets`, `reject_project_permissions`, `reject_old_permissions`.
 - `crates/oxide-code/src/config/merge.rs`: `APPENDED_TABLES` and `APPENDED` lists, `merge`.
 - `crates/oxide-code/src/config/schema.rs`: `PermissionTable`, `TierTable`, the `defaults` map.
 - `crates/oxide-code/src/driver/repl.rs`: `Prompter`, the stdin approval prompt.
@@ -266,10 +266,10 @@ The stdio sink escapes control characters other than tabs and line breaks in mod
 - `crates/oxide-code/src/engine/abort.rs`: `await_unless_aborted`, which races an allowed call against cancel and quit.
 - `crates/oxide-code/src/engine/dispatch.rs`: `run_tool_round` (parallel-safe batches), `Dispatcher::gate` (prepare, then decide), `check_permission`, `allow_for_session` (admit against the call's grant), `await_approval`.
 - `crates/oxide-code/src/permission.rs`: `Mode`, `PermissionClass`, `Workspace`, `Access::for_path`, `Access::for_command`, `Policy::decide`, `Policy::session_grant`, `SessionGrant`, `ReadFilter`.
-- `crates/oxide-code/src/permission/defaults.rs`: the shipped defaults, protected names, and `[permission.defaults]` names.
+- `crates/oxide-code/src/permission/defaults.rs`: the shipped defaults, `ShippedTier`, protected names, and `[permission.defaults]` names.
 - `crates/oxide-code/src/permission/legacy.rs`: conversion of old `class(specifier)` rules for the migration error.
 - `crates/oxide-code/src/permission/rule.rs`: `Rule`, the exec, path, net, and MCP patterns, `MatchDiscipline`, and `Rule::for_call`.
-- `crates/oxide-code/src/permission/shell.rs`: `CommandTarget::parse`, wrapper stripping, named and program words, opaque forms, redirection writes, and known-safe commands.
+- `crates/oxide-code/src/permission/shell.rs`: `CommandTarget::parse`, wrapper stripping, named and program words, opaque forms, redirection reads and writes, and known-safe commands.
 - `crates/oxide-code/src/protocol.rs`: `Event::ApprovalRequested`, `Event::SessionRulesUpdated`, `Op::Resolve`, `Decision`.
 - `crates/oxide-code/src/slash/confirm.rs`: `ConfirmDeleteSessionModal`, the approval-modal template.
 - `crates/oxide-code/src/slash/status.rs`: the Session Rules listing.

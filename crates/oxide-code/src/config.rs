@@ -763,6 +763,7 @@ mod tests {
     use super::compaction::test_thresholds;
     use super::provenance::Layer;
     use super::*;
+    use crate::permission::{Access, Decision, PermissionClass};
     use crate::util::path::testing::HOME_VAR;
     use crate::util::tls::TEST_CA_PEM;
 
@@ -1969,6 +1970,59 @@ mod tests {
     }
 
     // ── Config::load: permission ──
+
+    #[tokio::test]
+    async fn load_permission_resolves_each_tier_and_the_defaults_across_layers() {
+        let dir = tempfile::tempdir().unwrap();
+        write_user_config(
+            dir.path(),
+            indoc::indoc! {r#"
+                [permission.deny]
+                exec = ["git push *"]
+
+                [permission.ask]
+                exec = ["cargo publish *"]
+
+                [permission.allow]
+                exec = ["git *", "cargo *", "rm *"]
+
+                [permission.defaults]
+                git = false
+                rm = false
+            "#},
+        );
+        write_drop_in(dir.path(), "10-team.toml", "permission.defaults.git = true");
+
+        let config = load_with(&dir, &[]).await.unwrap();
+
+        let decide = |class, target: Access| config.permission.decide(class, &target.as_target());
+        let command = |command: &str| Access::for_command(command, &config.workspace);
+        assert_eq!(
+            decide(PermissionClass::Exec, command("git push origin")),
+            Decision::Deny
+        );
+        assert_eq!(
+            decide(PermissionClass::Exec, command("cargo publish")),
+            Decision::Ask
+        );
+        assert_eq!(
+            decide(PermissionClass::Exec, command("cargo build")),
+            Decision::Allow
+        );
+        assert_eq!(
+            decide(PermissionClass::Exec, command("rm -rf target")),
+            Decision::Allow,
+            "`rm = false` turns the shipped `rm` rule off"
+        );
+        assert_eq!(
+            decide(
+                PermissionClass::Edit,
+                Access::for_path(".git/config", &config.workspace)
+            ),
+            Decision::Ask,
+            "a later layer turns the `git` default back on"
+        );
+    }
 
     #[tokio::test]
     async fn load_permission_mode_env_beats_file() {

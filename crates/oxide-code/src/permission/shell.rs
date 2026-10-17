@@ -13,7 +13,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tree_sitter::{Node, Parser, Tree};
 
-use crate::permission::{Access, Workspace};
+use crate::permission::{Access, Workspace, fold_name};
 use crate::util::path::expand_user;
 
 /// Shells, whose `-c` script, script file, or stdin is code the analysis does not see.
@@ -85,7 +85,7 @@ const SHELL_VARIABLES: &[&str] = &[
 /// Redirection operators that write their target.
 const WRITE_OPERATORS: &[&str] = &[">", ">>", ">|", "&>", "&>>", ">&"];
 
-/// Redirection targets that are devices, so writing them edits no file.
+/// Redirection targets that are devices, so redirecting to or from them touches no file.
 const DEVICES: &[&str] = &["/dev/null", "/dev/stderr", "/dev/stdout", "/dev/tty"];
 
 /// Wrappers that run the command after their own options, so rules see through them.
@@ -202,6 +202,8 @@ pub(crate) struct CommandTarget {
     segments: Vec<Segment>,
     /// The files its output redirections write, resolved like an edit's path.
     writes: Vec<Access>,
+    /// The files its input redirections read, resolved like a read's path.
+    reads: Vec<Access>,
     /// Whether it runs code the analysis does not see or cannot place.
     opaque: bool,
 }
@@ -213,6 +215,7 @@ impl CommandTarget {
             workspace,
             segments: Vec::new(),
             writes: Vec::new(),
+            reads: Vec::new(),
             opaque: false,
             changes_dir: false,
             relative_path: false,
@@ -221,6 +224,7 @@ impl CommandTarget {
         Self {
             segments: walk.segments,
             writes: walk.writes,
+            reads: walk.reads,
             opaque: walk.opaque || (walk.changes_dir && walk.relative_path),
         }
     }
@@ -231,6 +235,10 @@ impl CommandTarget {
 
     pub(super) fn writes(&self) -> &[Access] {
         &self.writes
+    }
+
+    pub(super) fn reads(&self) -> &[Access] {
+        &self.reads
     }
 
     pub(super) const fn is_opaque(&self) -> bool {
@@ -307,10 +315,11 @@ struct Walk<'a> {
     workspace: &'a Workspace,
     segments: Vec<Segment>,
     writes: Vec<Access>,
+    reads: Vec<Access>,
     opaque: bool,
     /// Whether some segment changes the working directory.
     changes_dir: bool,
-    /// Whether some write or known-safe read names a relative path.
+    /// Whether some redirection or known-safe read names a relative path.
     relative_path: bool,
 }
 
@@ -395,14 +404,18 @@ impl Walk<'_> {
         let Some((first, args)) = words.split_first() else {
             return;
         };
-        let name = first.value.as_deref();
+        let name = first.value.as_deref().filter(|_| !first.glob);
         match name {
             None => self.opaque = true,
             Some(name) => {
                 let base = basename(name);
-                if SHELLS.contains(&base) || CODE_BUILTINS.contains(&base) {
+                let folded = fold_name(base);
+                let runner = [base, folded.as_str()]
+                    .into_iter()
+                    .find(|runner| SHELLS.contains(runner) || CODE_BUILTINS.contains(runner));
+                if let Some(runner) = runner {
                     self.opaque = true;
-                    self.nested_script(base, args);
+                    self.nested_script(runner, args);
                 }
                 self.changes_dir |= DIRECTORY_CHANGERS.contains(&name);
             }
@@ -435,8 +448,9 @@ impl Walk<'_> {
 
     /// Strips the transparent wrappers that lead `words`, returning the words of the command that
     /// runs and the words a rule must name. The latter keep every wrapper from the first one that
-    /// sets a variable outside [`SAFE_VARIABLES`]. A wrapper option the analysis does not know
-    /// leaves the command where it cannot be found, so it turns the command opaque.
+    /// sets a variable outside [`SAFE_VARIABLES`] or is spelled with a directory, since
+    /// `./nice` may be any program. A wrapper option the analysis does not know leaves the command
+    /// where it cannot be found, so it turns the command opaque.
     fn strip_wrappers<'w, 't>(
         &mut self,
         words: &'w [Word<'t>],
@@ -456,7 +470,7 @@ impl Walk<'_> {
                         })
                     });
                     runs = &args[start..];
-                    pinned |= sets_unsafe;
+                    pinned |= sets_unsafe || name != wrapper.name;
                     if !pinned {
                         named = runs;
                     }
@@ -494,11 +508,15 @@ impl Walk<'_> {
     fn redirect(&mut self, node: Node<'_>, src: &str) {
         self.visit_children(node, src);
         let mut cursor = node.walk();
-        let operator = node
+        let Some(operator) = node
             .children(&mut cursor)
             .find(|child| !child.is_named())
-            .map(|child| child.kind());
-        if !operator.is_some_and(|op| WRITE_OPERATORS.contains(&op)) {
+            .map(|child| child.kind())
+        else {
+            return;
+        };
+        let reads = operator == "<";
+        if !reads && !WRITE_OPERATORS.contains(&operator) {
             return;
         }
         let destinations: Vec<Node<'_>> = node
@@ -516,14 +534,19 @@ impl Walk<'_> {
             self.opaque = true;
             return;
         };
-        if operator == Some(">&") && (destination.kind() == "number" || path == "-") {
+        if operator == ">&" && (destination.kind() == "number" || path == "-") {
             return;
         }
         if DEVICES.contains(&path.as_str()) {
             return;
         }
         self.relative_path |= Path::new(&path).is_relative();
-        self.writes.push(Access::for_path(&path, self.workspace));
+        let access = Access::for_path(&path, self.workspace);
+        if reads {
+            self.reads.push(access);
+        } else {
+            self.writes.push(access);
+        }
     }
 }
 
@@ -817,6 +840,15 @@ pub(super) enum PatternWord {
     Any,
 }
 
+const NAMES_NO_COMMAND: &str = "it must name a command, such as `cargo test *`";
+
+const ONE_COMMAND: &str = "it must be one simple command, such as `cargo test *`. Write a \
+                           pattern for each command of a chain or pipeline.";
+
+const HOLDS_REDIRECTION: &str = "it holds a redirection. Leave it out, since a pattern matches a \
+                                 command with its redirections set aside, and an `edit` pattern \
+                                 covers the file it writes.";
+
 /// Parses an `exec` pattern into its words: one simple command, optionally led by assignments,
 /// whose words are each literal or a lone unquoted `*`.
 pub(super) fn pattern_words(pattern: &str) -> Result<Vec<PatternWord>> {
@@ -825,17 +857,17 @@ pub(super) fn pattern_words(pattern: &str) -> Result<Vec<PatternWord>> {
     ensure!(!root.has_error(), "it does not parse as a shell command");
     let mut cursor = root.walk();
     let nodes: Vec<Node<'_>> = root.named_children(&mut cursor).collect();
-    let &[command] = nodes.as_slice() else {
-        bail!("it must be one simple command, such as `cargo test *`");
+    let command = match nodes.as_slice() {
+        [] => bail!("{NAMES_NO_COMMAND}"),
+        [command] => *command,
+        [..] => bail!("{ONE_COMMAND}"),
     };
-    ensure!(
-        command.kind() != "redirected_statement",
-        "it holds a redirection, which `edit` patterns cover"
-    );
-    ensure!(
-        command.kind() == "command",
-        "it must be one simple command, such as `cargo test *`"
-    );
+    match command.kind() {
+        "command" => {}
+        "redirected_statement" => bail!("{HOLDS_REDIRECTION}"),
+        "variable_assignment" => bail!("{NAMES_NO_COMMAND}"),
+        _ => bail!("{ONE_COMMAND}"),
+    }
 
     let mut words = Vec::new();
     let mut names_command = false;
@@ -846,20 +878,21 @@ pub(super) fn pattern_words(pattern: &str) -> Result<Vec<PatternWord>> {
                 let word = assignment_word(child, pattern);
                 ensure!(
                     word.literal,
-                    "the assignment {:?} expands at run time",
+                    "the assignment {:?} expands at run time. Quote its value to match it as \
+                     written.",
                     word.text
                 );
                 words.push(PatternWord::Literal(word.text));
                 continue;
             }
             "file_redirect" | "herestring_redirect" | "heredoc_redirect" => {
-                bail!("it holds a redirection, which `edit` patterns cover");
+                bail!("{HOLDS_REDIRECTION}");
             }
             "command_name" => {
                 names_command = true;
                 match child.named_child(0) {
                     Some(name) => name,
-                    None => bail!("it must name a command"),
+                    None => bail!("{NAMES_NO_COMMAND}"),
                 }
             }
             _ => child,
@@ -873,14 +906,24 @@ pub(super) fn pattern_words(pattern: &str) -> Result<Vec<PatternWord>> {
         let Some(value) = word.value else {
             bail!("the word {written:?} expands at run time. Quote it to match it as written.");
         };
-        ensure!(
-            !word.glob,
-            "the word {written:?} holds a glob, but only a lone `*` is a wildcard. Quote it to \
-             match it as written."
-        );
+        if word.glob {
+            match written.strip_suffix(":*") {
+                Some(prefix) => bail!(
+                    "the word {written:?} ends in the old `:*` prefix form. Write the `*` as a \
+                     word of its own, as in `{}{prefix} *{}`.",
+                    &pattern[..node.start_byte()],
+                    &pattern[node.end_byte()..]
+                ),
+                None => bail!(
+                    "the word {written:?} holds a glob, but only a `*` standing alone as a word \
+                     is a wildcard. Write a pattern for each command it should cover, or quote \
+                     the word to match it as written."
+                ),
+            }
+        }
         words.push(PatternWord::Literal(value));
     }
-    ensure!(names_command, "it must name a command");
+    ensure!(names_command, "{NAMES_NO_COMMAND}");
     Ok(words)
 }
 
@@ -1055,16 +1098,24 @@ mod tests {
 
     /// Each write's path relative to `cwd`, or as requested outside it.
     fn writes(command: &str, cwd: &Path) -> Vec<String> {
-        CommandTarget::parse(command, &Workspace::new(cwd))
-            .writes
+        spelled(CommandTarget::parse(command, &Workspace::new(cwd)).writes)
+    }
+
+    /// Each input redirection's path relative to `cwd`, or as requested outside it.
+    fn reads(command: &str, cwd: &Path) -> Vec<String> {
+        spelled(CommandTarget::parse(command, &Workspace::new(cwd)).reads)
+    }
+
+    fn spelled(targets: Vec<Access>) -> Vec<String> {
+        targets
             .into_iter()
-            .map(|write| match write {
+            .map(|target| match target {
                 Access::Path {
                     relative,
                     requested,
                     ..
                 } => relative.unwrap_or(requested),
-                other => panic!("a write is a path target, got {other:?}"),
+                other => panic!("a redirection target is a path, got {other:?}"),
             })
             .collect()
     }
@@ -1219,7 +1270,7 @@ mod tests {
             "nohup rm -rf x",
             "time -p rm -rf x",
             "timeout -s KILL --preserve-status 5m rm -rf x",
-            "/usr/bin/nice nohup -- timeout 5 rm -rf x",
+            "nice nohup -- timeout 5 rm -rf x",
             "builtin rm -rf x",
             "command -p rm -rf x",
             "exec -a name rm -rf x",
@@ -1236,6 +1287,26 @@ mod tests {
                 "{command:?}"
             );
             assert!(!command.is_opaque(), "{command:?}");
+        }
+    }
+
+    #[test]
+    fn parse_keeps_a_wrapper_spelled_with_a_directory_in_the_named_words() {
+        for (command, named, program) in [
+            (
+                "/usr/bin/nice nohup -- timeout 5 rm -rf x",
+                "/usr/bin/nice nohup -- timeout 5 rm -rf x",
+                "rm -rf x",
+            ),
+            ("./nice cat a", "./nice cat a", "cat a"),
+            ("nice tools/env cat a", "tools/env cat a", "cat a"),
+        ] {
+            let command = parse(command);
+            let segment = &command.segments[0];
+
+            assert_eq!(joined(segment.named()), named, "{command:?}");
+            assert_eq!(joined(segment.program()), program, "{command:?}");
+            assert!(segment.safe_reads.is_none(), "{command:?}");
         }
     }
 
@@ -1285,6 +1356,11 @@ mod tests {
             "exec sh -c 'ls'",
             "command eval ls",
             "builtin . env.sh",
+            "/bin/s? -c ls",
+            "BASH -c ls",
+            "/bin/ZSH script.zsh",
+            "cat < $F",
+            "cat < *.txt",
         ] {
             assert!(parse(command).is_opaque(), "{command:?}");
         }
@@ -1317,6 +1393,65 @@ mod tests {
         }
     }
 
+    // ── Walk::redirect ──
+
+    #[test]
+    fn redirect_counts_each_file_an_output_redirection_writes() {
+        let (_dir, cwd) = temp_cwd();
+        assert_eq!(
+            writes("echo a > out.txt 2>> log &> all >| clobber >& both", &cwd),
+            ["out.txt", "log", "all", "clobber", "both"]
+        );
+        let outside = abs("/etc/hosts");
+        assert_eq!(
+            CommandTarget::parse(&format!("echo a > {outside}"), &Workspace::new(&cwd)).writes,
+            [Access::for_path(&outside, &Workspace::new(&cwd))]
+        );
+    }
+
+    #[test]
+    fn redirect_counts_each_file_an_input_redirection_reads() {
+        let (_dir, cwd) = temp_cwd();
+
+        let target =
+            CommandTarget::parse("sort < in.txt 3< more.txt > out.txt", &Workspace::new(&cwd));
+
+        assert_eq!(spelled(target.reads.clone()), ["in.txt", "more.txt"]);
+        assert_eq!(spelled(target.writes.clone()), ["out.txt"]);
+        assert!(!target.is_opaque());
+        assert!(
+            parse("cd x && cat < in.txt").is_opaque(),
+            "a relative input after a cd may name another file"
+        );
+    }
+
+    #[test]
+    fn redirect_skips_heredocs_descriptors_and_devices() {
+        let (_dir, cwd) = temp_cwd();
+        for command in [
+            "cat <<< x",
+            "cat <<EOF\nx\nEOF",
+            "make 2>&1",
+            "make 3>&-",
+            "make <&3",
+            "make > /dev/null 2> /dev/stderr < /dev/null",
+        ] {
+            assert!(writes(command, &cwd).is_empty(), "{command:?}");
+            assert!(reads(command, &cwd).is_empty(), "{command:?}");
+            assert!(
+                !CommandTarget::parse(command, &Workspace::new(&cwd)).is_opaque(),
+                "{command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn redirect_to_a_target_it_cannot_place_is_opaque() {
+        for command in ["echo > \"$OUT\"", "echo > *.txt", "echo >&2 hi"] {
+            assert!(parse(command).is_opaque(), "{command:?}");
+        }
+    }
+
     // ── pattern_words ──
 
     #[test]
@@ -1343,47 +1478,6 @@ mod tests {
             pattern("git * --force"),
             [literal("git"), PatternWord::Any, literal("--force")]
         );
-    }
-
-    // ── Walk::redirect ──
-
-    #[test]
-    fn redirect_counts_each_file_an_output_redirection_writes() {
-        let (_dir, cwd) = temp_cwd();
-        assert_eq!(
-            writes("echo a > out.txt 2>> log &> all >| clobber >& both", &cwd),
-            ["out.txt", "log", "all", "clobber", "both"]
-        );
-        let outside = abs("/etc/hosts");
-        assert_eq!(
-            CommandTarget::parse(&format!("echo a > {outside}"), &Workspace::new(&cwd)).writes,
-            [Access::for_path(&outside, &Workspace::new(&cwd))]
-        );
-    }
-
-    #[test]
-    fn redirect_skips_inputs_descriptors_and_devices() {
-        let (_dir, cwd) = temp_cwd();
-        for command in [
-            "cat < in.txt",
-            "cat <<< x",
-            "make 2>&1",
-            "make 3>&-",
-            "make > /dev/null 2> /dev/stderr",
-        ] {
-            assert!(writes(command, &cwd).is_empty(), "{command:?}");
-            assert!(
-                !CommandTarget::parse(command, &Workspace::new(&cwd)).is_opaque(),
-                "{command:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn redirect_to_a_target_it_cannot_place_is_opaque() {
-        for command in ["echo > \"$OUT\"", "echo > *.txt", "echo >&2 hi"] {
-            assert!(parse(command).is_opaque(), "{command:?}");
-        }
     }
 
     // ── safe_operands ──

@@ -862,10 +862,10 @@ pub(crate) fn truncate_line(line: &str, max_chars: usize) -> Cow<'_, str> {
     ))
 }
 
-const WITHHELD_NOTE_END: &str = "withheld by read deny rules)";
+const WITHHELD_NOTE_END: &str = "withheld by read deny or ask rules)";
 
-/// Appends the note a search tool adds when read deny rules withheld `count` of the files it found.
-/// The note counts them without naming any.
+/// Appends the note a search tool adds when read deny or ask rules withheld `count` of the files
+/// it found. The note counts them without naming any.
 pub(crate) fn push_withheld_note(content: &mut String, count: usize) {
     if count == 0 {
         return;
@@ -1355,7 +1355,8 @@ mod tests {
 
     #[test]
     fn prepare_resolves_a_search_root_but_leaves_its_spelling_in_the_input() {
-        // The read deny rules a search's hits face match against the root as the call spells it.
+        // The read deny and ask rules a search's hits face match against the root as the call
+        // spells it.
         let dir = canonical_tempdir();
         let input = serde_json::json!({"pattern": "x", "path": "."});
 
@@ -2147,8 +2148,8 @@ mod tests {
     #[test]
     fn push_withheld_note_counts_files_and_strips_back_off() {
         for (count, note) in [
-            (1, "(1 file withheld by read deny rules)"),
-            (3, "(3 files withheld by read deny rules)"),
+            (1, "(1 file withheld by read deny or ask rules)"),
+            (3, "(3 files withheld by read deny or ask rules)"),
         ] {
             let mut content = "a.rs".to_owned();
             push_withheld_note(&mut content, count);
