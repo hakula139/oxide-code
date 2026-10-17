@@ -26,6 +26,7 @@ These rules apply to comments, docs, commit messages, PR and issue text, and str
 - Avoid semicolons in prose. They are fine in code and literal syntax, and between list items that contain commas.
 - Define things by what they are. Add a contrast with what they are not only when omitting it could lead to a materially wrong reading.
 - Avoid lists of three or more similarly structured phrases when they add rhythm without supporting the argument.
+- Use American spelling, such as `behavior` and `recognize`. `cspell` checks only against the American English dictionary.
 - Use straight quotes. Arrows and comparison operators (`→`, `≤`, `≠`) are welcome.
 - Put spaces around `/` and arrows when they separate words or phrases, as in `Read / Write` and `low → high`. Keep compound terms such as `I/O` tight.
 - Place commas and periods outside closing quotation marks.

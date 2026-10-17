@@ -1032,7 +1032,7 @@ mod tests {
             picker.load_error,
             Some(format!("Failed to load sessions: {cause:#}")),
         );
-        assert_eq!(picker.loaded, 0, "no rows materialise on the Err arm");
+        assert_eq!(picker.loaded, 0, "no rows materialize on the Err arm");
     }
 
     // ── ResumePicker::submit ──

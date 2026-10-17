@@ -593,7 +593,7 @@ fn format_count<'a>(
 
 // ── Result View ──
 
-/// Returns `None` for any unrecognised line so the block falls through to text.
+/// Returns `None` for any unrecognized line so the block falls through to text.
 fn parse_content_view(content: &str) -> Option<ToolResultView> {
     if content.contains("\n\nSkipped (exceeds ") {
         return None;
@@ -1553,7 +1553,7 @@ mod tests {
 
     #[test]
     fn parse_content_view_falls_back_on_invalid_line() {
-        // Any unrecognised row makes the whole view fall back to text, so none is silently dropped.
+        // Any unrecognized row makes the whole view fall back to text, so none is silently dropped.
         assert!(parse_content_view("src/main.rs:1:hit\nunexpected line").is_none());
     }
 
