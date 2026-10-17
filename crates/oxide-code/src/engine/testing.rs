@@ -16,8 +16,9 @@ use wiremock::{Mock, MockServer};
 
 use super::dispatch::GateContext;
 use super::{Engine, EngineHandle, EngineTask};
+use crate::client::anthropic::Client;
 use crate::client::anthropic::testing::{
-    api_key, sse_response, test_client, text_stream_body, tool_use_stream_body,
+    api_key, sse_response, test_config, text_stream_body, tool_use_stream_body,
 };
 use crate::client::{Response, ResponseEvent, StopDetails, StopReason, Wire};
 use crate::file_tracker::FileTracker;
@@ -44,20 +45,23 @@ pub(super) const SESSION_CONTEXT: &str = "<system-reminder>session context</syst
 pub(crate) async fn engine(base_url: String, store: &SessionStore, cwd: &Path) -> Engine {
     let mut prompt = prompt::build_prompt(&ModelSpec::resolve(MODEL.to_owned()), cwd).await;
     SESSION_CONTEXT.clone_into(&mut prompt.user_context);
-    let client = test_client(base_url, api_key(), MODEL);
+    let config = test_config(base_url, api_key(), MODEL);
+    let session = handle::start(store, MODEL);
     Engine {
-        policy: client.permission().clone(),
-        client,
+        client: Client::new(&config, Some(session.session_id().to_owned())).unwrap(),
         oauth_token_url: "http://127.0.0.1:9/token".to_owned(),
         tools: Arc::new(ToolRegistry::new(Vec::new())),
         store: store.clone(),
-        session: handle::start(store, MODEL),
+        session,
         messages: Vec::new(),
         compact: None,
         tool_metadata: HashMap::new(),
         prompt,
         prompt_unrecorded: true,
         file_tracker: Arc::new(FileTracker::default()),
+        policy: config.permission,
+        max_tool_rounds: config.max_tool_rounds,
+        compaction: config.compaction,
         cwd: cwd.to_owned(),
         interactive: false,
         auto_compaction_failures: 0,

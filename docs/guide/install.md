@@ -19,7 +19,7 @@ Pick whichever path matches how you usually install developer tools.
 Download the archive for your platform from [Releases](https://github.com/hakula139/oxide-code/releases), extract it, and move the `ox` binary onto your `PATH`. The commands below fetch the release named by `VERSION`, so set it to the newest tag on that page:
 
 ```bash
-VERSION=v0.1.0-alpha.2
+VERSION=v0.1.0-alpha.3
 
 # macOS aarch64 (Apple Silicon)
 curl -fsSL "https://github.com/hakula139/oxide-code/releases/download/$VERSION/oxide-code-aarch64-apple-darwin.tar.gz" | tar -xz

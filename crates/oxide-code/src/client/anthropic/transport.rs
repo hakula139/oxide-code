@@ -53,7 +53,7 @@ impl Client {
         auth: &Auth,
     ) -> Result<MessagesRequest> {
         Ok(MessagesRequest {
-            url: format!("{}/v1/messages?beta=true", self.config.base_url),
+            url: format!("{}/v1/messages?beta=true", self.base_url),
             betas,
             session_id: self.session_id.clone(),
             body,
