@@ -4,7 +4,7 @@ Research on the modal / picker / dialog primitives that turn slash commands into
 
 Companion to [commands.md](commands.md), which covers the command-surface shape. This file focuses on the interactive UI.
 
-## Claude Code (TypeScript + Ink)
+## Claude Code (TypeScript)
 
 Modals are React components rendered by Ink. ~50 of ~100 commands are `type: 'local-jsx'`.
 
@@ -18,7 +18,7 @@ Modals are React components rendered by Ink. ~50 of ~100 commands are `type: 'lo
 - **Nesting**: Supported via React tree (modal can render another modal as a child).
 - **Live data**: Dynamic `description` getter on the command record pulls live state (e.g., `Set the AI model (currently ${renderModelName(getMainLoopModel())})`).
 
-## OpenAI Codex (Rust + Ratatui)
+## OpenAI Codex (Rust)
 
 Trait-based view stack at the bottom of the frame. The closest stack-wise to oxide-code.
 
@@ -37,7 +37,7 @@ Trait-based view stack at the bottom of the frame. The closest stack-wise to oxi
 - **Result delivery**: Async via `AppEvent::SubmitApprovalDecision { decision, ... }`. The agent doesn't block, since views drop a typed event on the app event channel.
 - **Keymap composition**: `RuntimeKeymap` plus per-view overrides (`ApprovalKeymap` locks Esc to Cancel, while `ListKeymap` adds j/k navigation).
 
-## opencode (TypeScript + Solid.js + Kobalte)
+## opencode (TypeScript)
 
 Imperative single-modal API.
 
@@ -83,7 +83,7 @@ Imperative single-modal API.
 
 5. **Lazy live-data getters on slash command metadata.** Claude Code's dynamic `description()` lets the popup show `(currently sonnet)` without a refresh hook. Cheap, useful, doesn't require the modal infrastructure.
 
-## Patterns to Reject
+## Patterns Not Adopted
 
 1. **opencode's single-modal-only.** Saves ~30 lines of stack code, but costs every confirm-inside-picker flow forever.
 

@@ -7,10 +7,10 @@ Design policy for mouse behavior in the TUI.
 Three user-visible features:
 
 1. **Scroll the chat with the mouse wheel**, in a bare terminal and inside tmux.
-2. **Click `#NN` in the status bar to open the pull request in the browser**, with a plain click or the terminal's own Ctrl / Cmd-click.
+2. **Click `#NN` in the status bar to open the pull request in the browser**, with a plain click or the terminal's own Ctrl / Cmd+click.
 3. **Select chat content with the mouse and paste it elsewhere**, in any terminal the user runs `ox` in (iTerm2, WezTerm, kitty, Alacritty, Terminal.app, GNOME Terminal, Konsole, Ghostty, Windows Terminal, VS Code's integrated terminal, Cursor's integrated terminal).
 
-The TUI captures the mouse so wheel events reach it everywhere, and selects and copies chat text itself, since capture takes drags away from the terminal. The status-bar PR segments are wrapped in an OSC 8 hyperlink envelope, which terminals open on Ctrl / Cmd-click, and `ox` opens them itself on a plain click.
+The TUI captures the mouse so wheel events reach it everywhere, and selects and copies chat text itself, since capture takes drags away from the terminal. The status-bar PR segments are wrapped in an OSC 8 hyperlink envelope, which terminals open on Ctrl / Cmd+click, and `ox` opens them itself on a plain click.
 
 ## Decision
 
@@ -18,13 +18,13 @@ The TUI captures the mouse so wheel events reach it everywhere, and selects and 
 
 `App::handle_crossterm_event` forwards wheel events to `ChatView::handle_event`, which scrolls three rows per notch without moving the input cursor. While a modal or the slash-command popup is open, each notch reaches it as one Up or Down key instead, so the wheel steps a list's selection or scrolls an overview. A plain left press on a status-bar link opens it, as [below](#osc-8-hyperlinks-on-the-pr-status-segments) describes. Other left-button presses, drags, and releases go to `ChatView::handle_mouse`, which selects text. Other mouse events return early so the motion reports that capture enables don't each force a frame.
 
-## Mouse capture
+## Mouse Capture
 
 `EnableMouseCapture` writes `?1000h`, `?1002h`, `?1003h`, `?1015h`, and `?1006h`, and crossterm parses the SGR (`?1006`) reports into `MouseEvent`s. Selection needs the drag mode, and `?1000h` alone already makes the terminal hand clicks to the app, so a narrower set of modes would not keep native selection. On Windows, crossterm enables console mouse input, which has no wheel-only setting.
 
 Terminal-side wheel translation can't cover tmux. DECSET 1007 (alternate scroll) makes a bare terminal send wheel events in the alternate screen as arrow keys, but under tmux with `mouse on`, tmux receives the wheel itself. Its default `WheelUpPane` binding passes the event to a pane only when the pane reports the mouse (`#{mouse_any_flag}`). Otherwise tmux drops the event or enters copy mode and scrolls tmux history over the TUI. With capture on, tmux forwards both wheel directions to `ox` under its default bindings.
 
-## Text selection
+## Text Selection
 
 Dragging with the left button over the chat selects text, and releasing the button copies it. A double click selects a word, which whitespace and bracket, quote, and separator characters bound, and a triple click selects a row. Dragging after a double or triple click extends the selection by words or rows. A press on the second cell of a wide character takes the whole character. A plain click selects nothing and clears the previous selection. Selection covers only the chat area, and a drag past the last row ends at that row's end.
 
@@ -52,11 +52,11 @@ The native write runs on a blocking thread and keeps its `arboard` handle for th
 
 `tmux load-buffer -w` stores the text in a paste buffer and, on tmux 3.2 and later, forwards it to the outer terminal's clipboard unless `set-clipboard` is off. This works under tmux's default `set-clipboard external`, where tmux ignores OSC 52 written by the pane itself. Older tmux rejects `-w`, so `ox` retries without it, and the notice says that only the tmux buffer holds the text.
 
-The OSC 52 write goes out inside the next frame's synchronized update. Under GNU screen (`STY` set, outside tmux), screen passes it to the outer terminal only inside its DCS passthrough (`ESC P` ... `ESC \`) and abandons a string over its 768-byte buffer, so `ox` sends the payload as a run of DCS strings of 76 base64 bytes each. Terminal.app and the Linux console ignore OSC 52, so when no other route worked, `ox` writes nothing and names the fix: Fn-drag or Cmd-R, which turns off mouse reporting, in Terminal.app, and Shift-drag in the console. iTerm2 applies OSC 52 only once "Applications in terminal may access clipboard" is on, so its notice names that setting. Selections over 100,000 bytes, xterm's default cap, go only to the system clipboard.
+The OSC 52 write goes out inside the next frame's synchronized update. Under GNU screen (`STY` set, outside tmux), screen passes it to the outer terminal only inside its DCS passthrough (`ESC P` ... `ESC \`) and abandons a string over its 768-byte buffer, so `ox` sends the payload as a run of DCS strings of 76 base64 bytes each. Terminal.app and the Linux console ignore OSC 52, so when no other route worked, `ox` writes nothing and names the fix: Fn+drag or Cmd+R, which turns off mouse reporting, in Terminal.app, and Shift+drag in the console. iTerm2 applies OSC 52 only once "Applications in terminal may access clipboard" is on, so its notice names that setting. Selections over 100,000 bytes, xterm's default cap, go only to the system clipboard.
 
 A pill at the chat's bottom-left corner reports the outcome for three seconds, truncated to the width the jump-to-bottom pill leaves. OSC 52 has no acknowledgment, so a terminal that blocks clipboard writes still shows the copy as done. VS Code's Remote SSH terminal drops OSC 52 this way, and since Cursor's remote terminal reports the same `TERM_PROGRAM` and applies it, `ox` cannot warn about it.
 
-## OSC 8 hyperlinks on the PR status segments
+## OSC 8 Hyperlinks on the PR Status Segments
 
 The `pull-request` status segment renders `#NN` as plain spans and links the PR, while `pull-request-checks` and `pull-request-review` link its checks and changed-files pages. After the frame buffer is painted, `StatusBar::render` records each hyperlink rect, URL, chars, and style. `App::render` drains that queue after `terminal.draw()` and replays OSC 8 directly to the crossterm backend inside the same synchronized update, so the linked cells present with the frame.
 
@@ -72,11 +72,11 @@ Three mechanics worth surfacing:
 - **BEL (`\x07`) terminator.** Some xterm.js-based terminals (VS Code's and Cursor's integrated terminals) misparse self-contained per-cell ST (`\x1b\\`) closers, leaking visible bytes into the next cells of the line. BEL is one byte and every modern emulator parses it identically.
 - **Plain OSC 8 inside tmux.** tmux 3.4 and later parse OSC 8, place the link in pane coordinates, and forward it to outer terminals that have the `hyperlinks` terminal feature. For an outer terminal tmux does not detect, add `set -as terminal-features ',<TERM>:hyperlinks'` to `tmux.conf`, where `<TERM>` matches the outer terminal's `$TERM`. Older tmux drops the OSC and keeps the visible text.
 
-Mouse capture hands plain clicks to `ox`, and some terminals, such as kitty and WezTerm, also deliver clicks on links to an app that captures the mouse. `App::emit_status_hyperlinks` therefore keeps the frame's link rects, and a left press without modifiers inside one opens its URL through `App::open_browser`. A press with modifiers is left to the terminal, so a terminal that opens OSC 8 links on Ctrl / Cmd-click itself doesn't open the page twice. Terminals that ignore OSC control strings leave the visible text intact. Terminals that print raw OSC bytes may show escape text, which is the legacy fallback.
+Mouse capture hands plain clicks to `ox`, and some terminals, such as kitty and WezTerm, also deliver clicks on links to an app that captures the mouse. `App::emit_status_hyperlinks` therefore keeps the frame's link rects, and a left press without modifiers inside one opens its URL through `App::open_browser`. A press with modifiers is left to the terminal, so a terminal that opens OSC 8 links on Ctrl / Cmd+click itself doesn't open the page twice. Terminals that ignore OSC control strings leave the visible text intact. Terminals that print raw OSC bytes may show escape text, which is the legacy fallback.
 
 URLs are sanitized: every control char is filtered out before the envelope is built, so a malformed value can't break out of the OSC 8 sequence.
 
-## Out of scope
+## Out of Scope
 
 - Click-to-expand on tool-result blocks.
 - OSC 8 hyperlinks inside markdown body text (would require threading URLs through the markdown renderer).
@@ -91,7 +91,7 @@ Manual verification across terminals:
 2. Page up. Confirm the jump-to-bottom pill appears.
 3. Press Ctrl+End. Confirm chat snaps to bottom and re-arms auto-scroll.
 4. Drag-select a chat region in a bare terminal, inside tmux, and over SSH. Confirm the highlight and the copy notice, then paste somewhere external and confirm the bytes round-trip. Double-click a word and triple-click a row. Hold a drag past the top edge and confirm the chat scrolls. Press Ctrl+C and confirm it copies without interrupting. Then hold the bypass modifier and confirm native selection still works.
-5. With the `pull-request`, `pull-request-checks`, and `pull-request-review` status segments configured, click each, then Ctrl-click each (Cmd-click on iTerm2 / Terminal.app). Confirm the browser opens the PR, its checks page, and its changed-files page once per click.
+5. With the `pull-request`, `pull-request-checks`, and `pull-request-review` status segments configured, click each, then Ctrl+click each (Cmd+click on iTerm2 / Terminal.app). Confirm the browser opens the PR, its checks page, and its changed-files page once per click.
 6. Wheel scroll, both in a bare terminal and inside tmux with `mouse on`. Confirm chat scrolls and tmux stays out of copy mode.
 7. Quit. Confirm alt-screen restored.
 

@@ -2,7 +2,7 @@
 
 Research on the empty-state / first-paint surface across reference projects. Based on [Claude Code](https://github.com/hakula139/claude-code), [OpenAI Codex](https://github.com/openai/codex), and [opencode](https://github.com/anomalyco/opencode).
 
-## Claude Code (TypeScript + Ink)
+## Claude Code (TypeScript)
 
 Most elaborate of the three: a multi-panel dashboard at wide widths, single-column at narrow.
 
@@ -26,7 +26,7 @@ Most elaborate of the three: a multi-panel dashboard at wide widths, single-colu
 
 - **Notable**: Aggressive memoization (`OffscreenFreeze`, `React.memo` on `LogoHeader`) avoids cascading re-renders. The release-notes-seen counter advances `lastReleaseNotesSeen` config so the logo suppresses on later startups. Mascot poses are static art.
 
-## OpenAI Codex (Rust + Ratatui)
+## OpenAI Codex (Rust)
 
 Two-stage flow: an animated onboarding splash (auth gate) followed by a permanent session header pushed onto chat history. Architecturally closest to oxide-code.
 
@@ -50,7 +50,7 @@ Two-stage flow: an animated onboarding splash (auth gate) followed by a permanen
 
 - **Notable**: storing the welcome inside chat history means `/clear` would have to explicitly re-emit it. The trade-off is automatic preservation in scroll-back. Animations are surprisingly elaborate for a Rust TUI: 4 art variants × 36 frames each.
 
-## opencode (TypeScript + @opentui + Solid.js)
+## opencode (TypeScript)
 
 Most distinct from chat: a route-based full-screen Home with no chat-region inheritance.
 
@@ -99,7 +99,7 @@ Most distinct from chat: a route-based full-screen Home with no chat-region inhe
 
 5. **opencode's footer-as-passive-welcome**: when the welcome dismisses, a thin always-on hint persists in the input footer. oxide-code's status bar already plays this role for the active model + cwd, so the welcome dismisses cleanly.
 
-## Patterns to Reject
+## Patterns Not Adopted
 
 1. **Claude Code's feed panels**. Recent-sessions / release-notes / upsells turn onboarding into a dashboard. Maintenance cost is high (each feed is a separate live data source) and the value to a returning user is near-zero.
 

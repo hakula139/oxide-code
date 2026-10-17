@@ -30,7 +30,6 @@ deserialize
 desync
 direnv
 disambiguable
-EISDIR
 ELOOP
 ENOENT
 ENOTDIR

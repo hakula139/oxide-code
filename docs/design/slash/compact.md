@@ -19,7 +19,7 @@ Companions: [commands.md](commands.md), [session/persistence.md](../session/pers
 `session/handle` exposes `compact(summary, instructions, tasks, synthetic_message) -> CompactOutcome`:
 
 - The actor writes one `Entry::Compact` followed by the synthetic post-compact `Entry::Message` (a `role: user` carrying `SUMMARY_PREFIX + summary`, plus reminders of the task list and the open background shells when there are any), with the synthetic message's `parent_uuid` deliberately set to `None`.
-- `SessionState`'s `last_message_uuid` is reset to the synthetic message's id and `message_count` resets to `1`.
+- `SessionState`'s `last_message_uuid` is reset to the synthetic message's ID and `message_count` resets to `1`.
 - `SessionCmd::Compact` is a batch barrier, so queued writes cannot share the same flush after the boundary.
 - The file tracker is reset to match `/clear`.
 - On resume, `load_session_data_from_path` treats `Entry::Compact` as a generation boundary, clears pre-compact sidecars, filters out later stale writes from the old chain, and carries `CompactInfo` so the TUI can render the boundary block while the model transcript keeps the synthetic root.
@@ -56,7 +56,7 @@ While the summary streams, the TUI shows it below the chat under a `Summarizing 
 
 8. **`Entry::Compact` JSONL boundary.** Carries `summary`, `pre_message_count`, optional `instructions`, the task list as `tasks` when it holds any, and `timestamp`. Position: written immediately before the synthetic post-compact `Entry::Message`. Loader treats the compact entry as a chain reset, keeps `CompactInfo` for resume display, and only accepts messages that belong to the new tail.
 
-9. **Preserve session identity.** All three reference CLIs converged on this. `/clear` rolls because intent resets, while `/compact` preserves because intent is retained and context is compressed. The JSONL file, session id, project, and title all carry through unchanged. The chain reset is purely an in-memory or replay concern.
+9. **Preserve session identity.** All three reference CLIs converged on this. `/clear` rolls because intent resets, while `/compact` preserves because intent is retained and context is compressed. The JSONL file, session ID, project, and title all carry through unchanged. The chain reset is purely an in-memory or replay concern.
 
 10. **Reset the file tracker.** `/compact` discards the read history because Edit and Write contracts depend on a Read having happened _in the visible transcript_. Since the visible transcript is now the summary, the previous `Read`s are no longer "in scope" from a user-visible standpoint. The reset forces a fresh `Read` before any `Edit`, matching the post-`/clear` behavior. The trade-off (extra Reads after compact) is the right side of the safety / convenience line.
 
@@ -96,7 +96,7 @@ While the summary streams, the TUI shows it below the chat under a `Summarizing 
 
 - **`Entry::Compact`**: Variant on the internally tagged `Entry` enum. Fields: `summary: String`, `pre_message_count: u32`, `instructions: Option<String>`, `timestamp: OffsetDateTime`. Tagged `"type": "compact"` (lowercase, snake_case).
 
-- **`SessionCmd::Compact`**: Actor command carrying the new state. Writes `Entry::Compact` and the synthetic post-compact `Entry::Message` in one batched flush, resets `last_message_uuid` to the synthetic message id, resets `message_count` to `1`, and forces a batch flush before later queued commands run. Acks via `oneshot` like the rest of `SessionCmd`.
+- **`SessionCmd::Compact`**: Actor command carrying the new state. Writes `Entry::Compact` and the synthetic post-compact `Entry::Message` in one batched flush, resets `last_message_uuid` to the synthetic message ID, resets `message_count` to `1`, and forces a batch flush before later queued commands run. Acks via `oneshot` like the rest of `SessionCmd`.
 
 - **`session::handle::compact`**: Async API. Sends `SessionCmd::Compact`, awaits the ack, and returns `CompactOutcome { pre_count, failure }`. Like `archive`, it reports a failure whenever the command or its ack cannot reach the writer task. The caller clears the file tracker only after the boundary flush succeeds.
 

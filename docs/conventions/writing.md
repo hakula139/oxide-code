@@ -36,6 +36,9 @@ These rules apply to comments, docs, commit messages, PR and issue text, and str
 - Put each paragraph on one line without hard wrapping, and separate paragraphs with a blank line.
 - Use prose for explanations, bullets for parallel options or requirements, numbered lists for sequences, and tables for comparisons.
 - Align trailing comments in directory trees and similar listings in one column, several spaces beyond the longest entry.
+- Write headings in Title Case. Capitalize every word except articles, coordinating conjunctions, and prepositions of four letters or fewer, such as `a`, `and`, `for`, `from`, and `with`, unless the word starts or ends the heading. In a hyphenated compound, capitalize each part except an inner small word, as in `Built-In` and `Fork-on-Conflict`. Keep code spans and lowercase names such as oxide-code and opencode as written. PR, issue, and release bodies follow GitHub's sentence case, so the PR template keeps `## Test plan` and `CHANGELOG.md` keeps `### Breaking changes`.
+- Join a modifier to its key or mouse action with `+`, as in Shift+Tab and Ctrl+click, and write approval keys as the uppercase letters the TUI prompt shows. In the README and user guides, also put key names in bold, such as **Esc** and **Ctrl+C**.
+- Write "ID" in prose, and keep lowercase `id` for identifiers, flags, and placeholders such as `<id-prefix>`. Write file modes as four octal digits, as in `0600`, and percentages without a space, as in 80%. In the README and user guides, write "working directory" in place of cwd.
 
 ## Documentation
 

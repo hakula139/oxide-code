@@ -6,7 +6,7 @@ Research on TUI cancellation, exit, and input queueing across reference projects
 
 Cancellation rides an `AbortController`. Esc cancels, Ctrl+C is overloaded for cancel-then-exit.
 
-- **Cancel**: Esc aborts via `useCancelRequest.ts` → `abortController.abort('interrupt')`. Partial assistant turn is preserved with an `"Interrupted by user"` synthetic `tool_result` against dangling `tool_use` ids. On resume, `conversationRecovery.ts` transforms to an `interrupted_prompt` plus synthetic user message.
+- **Cancel**: Esc aborts via `useCancelRequest.ts` → `abortController.abort('interrupt')`. Partial assistant turn is preserved with an `"Interrupted by user"` synthetic `tool_result` against dangling `tool_use` IDs. On resume, `conversationRecovery.ts` transforms to an `interrupted_prompt` plus synthetic user message.
 
 - **Dual-press exit**: `useDoublePress.ts`, 800 ms window for Ctrl+C / Ctrl+D. Esc never exits.
 

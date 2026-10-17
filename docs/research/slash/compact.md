@@ -4,7 +4,7 @@ Research on how `/compact` (context compression via summarization) is implemente
 
 Companion to [commands.md](commands.md). Storage-layer notes (JSONL entry shape, resume semantics) live in [session/persistence.md](../session/persistence.md). This file focuses on the _summarization_ surface: trigger, prompt, replacement strategy, auto-fire policy.
 
-## Claude Code (TypeScript + Ink)
+## Claude Code (TypeScript)
 
 Most elaborate of the three: 9-section rubric, partial-compact rewind UI, hook-driven bookkeeping, and auto-compact on a fixed token buffer.
 
@@ -24,7 +24,7 @@ Most elaborate of the three: 9-section rubric, partial-compact rewind UI, hook-d
 
 - **UX**: Spinner cycles `Running PreCompact hooks...` → `Compacting conversation` → `Running PostCompact hooks...`, then a dim `Compacted` line on success. Not-enough-messages aborts, mid-summarization abort shows "Compaction canceled.", prompt-too-long retries 3× trimming oldest rounds, and auto failures stay suppressed from the user.
 
-## OpenAI Codex (Rust + Ratatui)
+## OpenAI Codex (Rust)
 
 Terse prompt and history rebuild that drops every non-user-text round. Auto-compact fires both pre-sampling and mid-turn.
 
@@ -44,7 +44,7 @@ Terse prompt and history rebuild that drops every non-user-text round. Auto-comp
 
 - **Failures**: Stream errors retry up to `stream_max_retries` with a `Reconnecting...` notice. `Interrupted` propagates as Cancelled. `ContextWindowExceeded` during the compact request itself trims oldest rows when `turn_input_len > 1`, else surfaces an error. `steer_input` rejects mid-compaction queueing with `NonSteerableTurnKind::Compact`.
 
-## opencode (TypeScript + Solid)
+## opencode (TypeScript)
 
 Dedicated `compaction` agent, anchored re-summarization via `<previous-summary>`, and a `prune` pass that wipes old tool-output bodies before the summarization call.
 
@@ -105,7 +105,7 @@ Dedicated `compaction` agent, anchored re-summarization via `<previous-summary>`
 
 8. **Surface a post-compact boundary block.** oxide-code's dedicated `CompactedBlock` fits a `Compacted X messages → 1 summary` header plus rendered summary markdown.
 
-## Patterns to Reject
+## Patterns Not Adopted
 
 1. **9-section structured rubric (Claude Code).** Aimed at resumption across an indefinite gap, across sessions, across humans. oxide-code's compaction is in-process and single-user, where "All user messages: List ALL user messages" and verbatim-quote requirements bloat the summary 3-5×. A short directive (intent, decisions, code paths, next step, user constraints) gets the same outcome at one-third the size. Codex's prompt is the right reference shape.
 

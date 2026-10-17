@@ -55,7 +55,7 @@ Segment render rules:
 
 Anthropic `Usage` carries `cache_creation_input_tokens` and `cache_read_input_tokens`. `TokenUsage::context_tokens()` returns input + cache creation + cache read. `TokenUsage::total_tokens()` returns context + output and is the auto-compaction trigger input.
 
-Each `agent_turn` reports the latest provider usage and the total across its requests, including a request the user cancelled or that failed partway. `Engine` keeps the latest usage for the next auto-compaction check, updates the displayed usage snapshot, adds the turn's estimated cost when rates are known, then emits `Event::UsageUpdated(UsageSnapshot)` before the turn's terminal event. The summarization requests behind `/compact` and auto-compaction add their estimated cost the same way. Each of these requests also lands in the session file as a `usage` entry carrying its model id and prompt-cache TTL, so a resumed session can price each request at the rates it ran with.
+Each `agent_turn` reports the latest provider usage and the total across its requests, including a request the user cancelled or that failed partway. `Engine` keeps the latest usage for the next auto-compaction check, updates the displayed usage snapshot, adds the turn's estimated cost when rates are known, then emits `Event::UsageUpdated(UsageSnapshot)` before the turn's terminal event. The summarization requests behind `/compact` and auto-compaction add their estimated cost the same way. Each of these requests also lands in the session file as a `usage` entry carrying its model ID and prompt-cache TTL, so a resumed session can price each request at the rates it ran with.
 
 Known first-party Claude API rates live in `model/pricing.rs`, and the `model.rs` catalog attaches them to each model. Unknown models render context without session cost. The estimate excludes the background title request, account discounts, marketplace billing, data-residency multipliers, fast mode, and server-side tool surcharges.
 
@@ -87,7 +87,7 @@ status_line = [
 ]
 ```
 
-Unlike Claude Code's reference script, oxide-code stays one row because Ratatui owns the app chrome, and its cost segment is a local estimate.
+Claude Code's status line is a command you configure, and each line it prints becomes a row. oxide-code renders its built-in segments in one row because Ratatui owns the app chrome.
 
 The default order tracks reading flow: location and branch orient the user, model and usage describe cost and context pressure, the permission mode says what the next call may do, and run state sits near the end because it changes most often.
 

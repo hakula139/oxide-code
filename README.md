@@ -23,7 +23,7 @@ Early development. What works today:
 - **Tools**: `read`, `write`, `edit`, `glob`, `grep`, and `bash`, which can also keep dev servers, watchers, and long builds running in the background
 - **Task list**: the model tracks multi-step work in a list shown live and carried through resume and compaction
 - **[Tool permissions](docs/guide/configuration.md#permission-tool-approval)**: `manual` (default), read-only `plan`, and `yolo` modes you can switch mid-session, deny / ask / allow patterns for each tool class and each command in a `bash` command line, built-in rules that guard protected config paths, SSH keys, and credentials, and an approval prompt that names the rule holding the call and can allow matching calls for the session
-- **Turn control**: interrupt with Esc or Ctrl+C, queue follow-up prompts that join the running turn between tool calls, and confirm exit with a second Ctrl+C
+- **Turn control**: interrupt with **Esc** or **Ctrl+C**, queue follow-up prompts that join the running turn between tool calls, and confirm exit with a second **Ctrl+C**
 - **[Slash commands](docs/guide/slash-commands.md)**: commands for sessions, models and effort, permission modes, compaction, sign-in, themes, `/init`, and status and config views, with autocomplete
 - **Context compaction**: manual `/compact` and default-on auto-compaction
 - **[Instruction files](docs/guide/instructions.md)**: `CLAUDE.md` / `AGENTS.md` discovery

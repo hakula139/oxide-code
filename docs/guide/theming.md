@@ -1,8 +1,8 @@
 # Theming
 
-oxide-code's TUI palette is fully user-configurable. Pick one of the bundled Catppuccin or Material palettes, point at a TOML file you wrote yourself, or patch individual color slots on top of any base. No recompile.
+oxide-code's TUI palette is fully user-configurable. Pick one of the bundled Catppuccin or Material palettes, point at a TOML file you wrote yourself, or patch individual color slots on top of any base, all without rebuilding `ox`.
 
-## Quick start
+## Quick Start
 
 ```toml
 # ~/.config/ox/config.toml or .ox/config.toml
@@ -19,7 +19,7 @@ accent = { bold = false }
 
 Both `[tui.theme]` keys are optional. Without them the default is `mocha` (Catppuccin Mocha) with no overrides.
 
-## Built-in themes
+## Built-In Themes
 
 | Name        | Family     | Variant               |
 | ----------- | ---------- | --------------------- |
@@ -33,7 +33,7 @@ Each ships as a vendored TOML file [in the source tree][themes-src] and doubles 
 
 [themes-src]: https://github.com/hakula139/oxide-code/tree/main/crates/oxide-code/themes
 
-## Custom theme files
+## Custom Theme Files
 
 `base` accepts any filesystem path to a TOML body using the same shape as the vendored themes. A leading `~/` expands to `$HOME`, but no other expansion happens: environment variables (`$HOME`, `${XDG_CONFIG_HOME}`) and Windows-style references (`%USERPROFILE%`) pass through literally and will fail to read. Relative paths resolve against the directory you launched `ox` from, so prefer absolute or `~/`-anchored paths.
 
@@ -42,9 +42,9 @@ Each ships as a vendored TOML file [in the source tree][themes-src] and doubles 
 base = "~/.config/ox/themes/dark-extra.toml"
 ```
 
-If the value isn't a built-in name AND can't be read as a regular file of at most 64 KiB, oxide-code refuses to start with an actionable error message.
+If the value isn't a built-in name and can't be read as a regular file of at most 64 KiB, oxide-code refuses to start with an actionable error message.
 
-## Slot value formats
+## Slot Value Formats
 
 Every `fg` / `bg` value, and every bare-string slot, accepts:
 
@@ -64,7 +64,7 @@ See the [ANSI escape code reference][ansi] for what each name maps to in your te
 
 [ansi]: https://en.wikipedia.org/wiki/ANSI_escape_code#Colors
 
-## Slot definitions
+## Slot Definitions
 
 A custom theme file must define **every slot**. A missing slot is a parse error, so typos surface immediately. For partial customization on top of a base, use `[tui.theme.overrides]` instead (see [Overrides](#overrides) below).
 
@@ -93,7 +93,7 @@ Recognized modifier keys: `bold`, `italic`, `underlined`, `dim`, `reversed`. An 
 
 Each slot maps to one role in the TUI. Override a slot by name to restyle that role.
 
-### Text hierarchy
+### Text Hierarchy
 
 | Slot    | Role                                 |
 | ------- | ------------------------------------ |
@@ -109,7 +109,7 @@ Each slot maps to one role in the TUI. Override a slot by name to restyle that r
 
 > **Always declare `surface` as an inline table with `bg`**, e.g. `surface = { bg = "#1e1e2e" }` or `surface = { bg = "reset" }`. A bare-string `surface = "#1e1e2e"` would route to `fg` (per the slot-definition rules above) and silently repaint every panel's text in the surface color.
 
-### Semantic accents
+### Semantic Accents
 
 | Slot        | Role                                      |
 | ----------- | ----------------------------------------- |
@@ -118,13 +118,13 @@ Each slot maps to one role in the TUI. Override a slot by name to restyle that r
 | `queued`    | Queued user prompts in the preview ghosts |
 | `assistant` | Assistant message bar / icon              |
 
-### Status indicators
+### Status Indicators
 
 | Slot      | Role                                            |
 | --------- | ----------------------------------------------- |
 | `info`    | In-progress / neutral signals (e.g., streaming) |
 | `success` | Successful tool results, ready status           |
-| `warning` | Caution status (e.g., the Ctrl+C exit hint)     |
+| `warning` | Caution status (e.g., the **Ctrl+C** exit hint) |
 | `error`   | Errors, failed tools, critical status           |
 
 ### Code
@@ -144,14 +144,14 @@ Unset, it defaults to `base16-ocean.dark`, which the dark built-ins use. `latte`
 
 [syntect]: https://github.com/trishume/syntect
 
-### Diff backgrounds (bg-only)
+### Diff Backgrounds (Background Only)
 
 | Slot       | Role                                         |
 | ---------- | -------------------------------------------- |
 | `diff_add` | Background fill for added rows in Edit diffs |
 | `diff_del` | Background fill for deleted rows             |
 
-### Markdown headings
+### Markdown Headings
 
 | Slot            | Role                                   |
 | --------------- | -------------------------------------- |
@@ -160,7 +160,7 @@ Unset, it defaults to `base16-ocean.dark`, which the dark built-ins use. `latte`
 | `heading_h3`    | H3, bold italic                        |
 | `heading_minor` | H4-H6, italic                          |
 
-### Markdown body
+### Markdown Body
 
 | Slot          | Role                                 |
 | ------------- | ------------------------------------ |
@@ -169,7 +169,7 @@ Unset, it defaults to `base16-ocean.dark`, which the dark built-ins use. `latte`
 | `blockquote`  | Blockquote prefix marker             |
 | `list_marker` | Bullet / number marker on list items |
 
-### Markdown chrome
+### Markdown Chrome
 
 | Slot              | Role                                     |
 | ----------------- | ---------------------------------------- |
@@ -177,7 +177,7 @@ Unset, it defaults to `base16-ocean.dark`, which the dark built-ins use. `latte`
 | `table_header`    | Table header cells (bold accent)         |
 | `table_border`    | Table borders and the rules between rows |
 
-### UI chrome
+### UI Chrome
 
 | Slot               | Role                                        |
 | ------------------ | ------------------------------------------- |
@@ -190,7 +190,7 @@ Unset, it defaults to `base16-ocean.dark`, which the dark built-ins use. `latte`
 
 Declare `selection` as an inline table with `bg`, such as `selection = { bg = "#313244" }`, so selected text keeps its own colors. Pick a background that leaves `dim` and `thinking` text at a contrast of at least 3:1.
 
-### Status-line segments
+### Status-Line Segments
 
 Each status-line segment routes to one of the slots above so re-skinning the slot re-skins everywhere it appears. To restyle one segment, override the slot it uses.
 
@@ -234,7 +234,7 @@ The separator glyph itself (`│`) is fixed, and the `separator` slot controls o
 error = "#ff0000"
 # Inline form patches just modifiers. fg / bg come from the base.
 accent = { bold = false }
-# Inline form patches fg AND adds bold.
+# Inline form patches fg and adds bold.
 link = { fg = "#ff79c6", bold = true }
 ```
 
@@ -252,21 +252,16 @@ Overrides from every [config layer](configuration.md#layers) merge by slot name,
 
 ## Errors
 
-Bisected severity:
+Theme errors fall into two severities:
 
 - **Theme selection errors** are fatal when the TUI starts. An unknown built-in name with no matching file path, a path that is not a regular file of at most 64 KiB, a file that cannot be read, or a file with a parse error in the base body stops oxide-code at startup with a message identifying what went wrong. `-p` and `--no-tui` runs never load the theme, so a theme error does not stop them.
 - **Per-slot value errors** warn and fall back. If an override's color string can't be parsed, its slot name isn't recognized, its patch is neither a color string nor a table of `fg`, `bg`, and modifier flags, or an inline patch is empty, oxide-code logs a warning and uses the base slot's value for that role. The TUI still launches.
 
-The default tracing level is `warn`, so per-slot fallback messages surface without requiring `RUST_LOG`. Routing depends on mode:
-
-- **TUI**: Diagnostics go to `$XDG_STATE_HOME/ox/log/oxide-code.log` (default `~/.local/state/ox/log/oxide-code.log`). Routing to a file keeps `warn!` output off the alternate screen, where it would otherwise paint over the rendered frame. The file is readable only by your user. Once it passes 10 MiB it moves to `oxide-code.log.1`, replacing the previous backup, so the log directory holds at most two files.
-- **Bare REPL / headless / `--list`**: Diagnostics go to stderr, the natural CLI surface.
-
-Set `RUST_LOG=info` (or `debug`) for more detail.
+The default log level is `warn`, so per-slot fallback warnings appear in the [log](configuration.md#logs) even when `RUST_LOG` is unset.
 
 ## Examples
 
-### Mocha base + a brighter error color
+### Mocha Base + a Brighter Error Color
 
 ```toml
 [tui.theme.overrides]
@@ -275,7 +270,7 @@ error = "#ff5555"
 
 (`base` defaults to `mocha` when omitted.)
 
-### Custom theme file with a few overrides on top
+### Custom Theme File with a Few Overrides on Top
 
 ```toml
 [tui.theme]
@@ -286,7 +281,7 @@ accent = { fg = "#bd93f9", bold = true }
 link = { fg = "#8be9fd", underlined = true }
 ```
 
-### Use the terminal's foreground for primary text
+### Use the Terminal's Foreground for Primary Text
 
 ```toml
 [tui.theme.overrides]
@@ -295,7 +290,7 @@ text = "reset"
 
 Useful for transparent / non-truecolor terminals where forcing an RGB foreground fights the user's terminal scheme.
 
-### Tint the chat panel background
+### Tint the Chat Panel Background
 
 ```toml
 [tui.theme.overrides]

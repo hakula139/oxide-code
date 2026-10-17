@@ -21,7 +21,7 @@ Anthropic's delta usage often carries only output tokens, so stream processing k
 
 ## Threshold
 
-Every supported model in `model.rs` has a `1_000_000`-token context window. Unknown model ids have no window, so auto-compaction stays disabled for them.
+Every supported model in `model.rs` has a `1_000_000`-token context window. Unknown model IDs have no window, so auto-compaction stays disabled for them.
 
 The threshold is:
 
