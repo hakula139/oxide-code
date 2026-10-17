@@ -48,6 +48,8 @@ pub(crate) struct ChatView {
     viewport: Rect,
     auto_scroll: bool,
     new_content_since_pause: u32,
+    /// Whether `new_content_since_pause` counts the summary in flight.
+    summary_counted: bool,
     /// Slot tops of the last paint, which the next frame anchors the scroll offset on.
     painted: SlotTops,
     /// Rows of the last paint, which a double click finds its word in.
@@ -113,6 +115,7 @@ impl ChatView {
             viewport: Rect::default(),
             auto_scroll: true,
             new_content_since_pause: 0,
+            summary_counted: false,
             painted: SlotTops::default(),
             painted_rows: Vec::new(),
             selection: None,
@@ -158,8 +161,7 @@ impl ChatView {
     pub(crate) fn push_user_message(&mut self, text: String) {
         self.commit_streaming();
         self.push_block(UserMessage::new(text));
-        self.auto_scroll = true;
-        self.new_content_since_pause = 0;
+        self.rearm_auto_scroll();
     }
 
     /// Appends a streamed token to the current assistant response.
@@ -189,13 +191,14 @@ impl ChatView {
     pub(crate) fn append_summary_token(&mut self, token: &str) {
         if self.summary_buffer.is_empty() {
             self.bump_paused_counter();
+            self.summary_counted = !self.auto_scroll;
         }
         self.summary_buffer.push_str(token);
     }
 
     /// Drops the compaction summary in flight, which then no longer counts as new content.
     pub(crate) fn discard_summary(&mut self) {
-        if !self.summary_buffer.is_empty() && !self.auto_scroll {
+        if std::mem::take(&mut self.summary_counted) {
             self.new_content_since_pause = self.new_content_since_pause.saturating_sub(1);
         }
         self.summary_buffer.clear();
@@ -314,8 +317,7 @@ impl ChatView {
         self.scroll_offset = 0;
         self.max_offset = 0;
         self.pending_scroll = 0;
-        self.auto_scroll = true;
-        self.new_content_since_pause = 0;
+        self.rearm_auto_scroll();
         self.painted = SlotTops::default();
         self.painted_rows.clear();
         self.selection = None;
@@ -439,9 +441,8 @@ impl ChatView {
 
     /// Re-arms auto-scroll, so the next frame shows the latest content.
     pub(crate) fn jump_to_bottom(&mut self) {
-        self.auto_scroll = true;
+        self.rearm_auto_scroll();
         self.pending_scroll = 0;
-        self.new_content_since_pause = 0;
     }
 }
 
@@ -520,8 +521,7 @@ impl ChatView {
     fn settle_scroll(&mut self, placement: &Placement) {
         let dragging = self.selection.as_ref().is_some_and(Selection::held);
         if self.pending_scroll > 0 && placement.offset == placement.max_offset && !dragging {
-            self.auto_scroll = true;
-            self.new_content_since_pause = 0;
+            self.rearm_auto_scroll();
         }
         self.pending_scroll = 0;
         self.scroll_offset = placement.offset;
@@ -538,6 +538,13 @@ impl ChatView {
         if !self.auto_scroll {
             self.pending_scroll = self.pending_scroll.saturating_add_unsigned(rows);
         }
+    }
+
+    /// Follows the tail again, which clears the count of content that arrived while paused.
+    fn rearm_auto_scroll(&mut self) {
+        self.auto_scroll = true;
+        self.new_content_since_pause = 0;
+        self.summary_counted = false;
     }
 
     fn bump_paused_counter(&mut self) {
@@ -1434,6 +1441,32 @@ mod tests {
 
         chat.append_summary_token("Second attempt.");
         assert_eq!(chat.new_content_since_pause(), 2);
+    }
+
+    #[test]
+    fn discard_summary_keeps_the_count_when_the_pause_began_after_the_summary() {
+        let mut chat = test_chat();
+        chat.append_summary_token("First attempt.");
+        chat.auto_scroll = false;
+        chat.push_notice("Retrying in 1s (retry 1 of 5).");
+
+        chat.discard_summary();
+
+        assert_eq!(chat.new_content_since_pause(), 1, "the notice still counts");
+    }
+
+    #[test]
+    fn discard_summary_keeps_the_count_when_a_jump_to_the_bottom_cleared_the_summary() {
+        let mut chat = test_chat();
+        chat.auto_scroll = false;
+        chat.append_summary_token("First attempt.");
+        chat.jump_to_bottom();
+        chat.auto_scroll = false;
+        chat.push_notice("Retrying in 1s (retry 1 of 5).");
+
+        chat.discard_summary();
+
+        assert_eq!(chat.new_content_since_pause(), 1, "the notice still counts");
     }
 
     // ── commit_streaming ──
