@@ -10,13 +10,12 @@ use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    Prepared, SearchRoot, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolResultView, ToolSpec,
-    extract_input_field,
+    NO_FILES_FOUND, Prepared, SearchRoot, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolResultView,
+    ToolSpec, extract_input_field,
 };
 use crate::permission::{PermissionClass, ReadFilter};
 use crate::util::text::plural;
 
-const NO_FILES_FOUND: &str = "No files found";
 const SHOWING_PREFIX: &str = "(Showing ";
 
 const MAX_RESULTS: usize = 100;
@@ -118,16 +117,16 @@ async fn run(prepared: Prepared, ctx: &ToolCtx, read_filter: ReadFilter) -> Tool
 
     let workspace = Arc::clone(&ctx.workspace);
     let cancel = ctx.cancel.clone();
-    match tokio::task::spawn_blocking(move || {
+    match super::run_blocking(move || {
         let root = SearchRoot::new(&access, path.as_deref(), workspace)?;
         glob_files(&pattern, &root, &read_filter, &cancel)
     })
     .await
     {
-        Ok(Ok(GlobOutput {
+        Ok(GlobOutput {
             content,
             truncated_total,
-        })) => {
+        }) => {
             let title = glob_title(super::strip_withheld_note(&content));
             let output = ToolOutput::success(content).with_title(title);
             match truncated_total {
@@ -135,8 +134,7 @@ async fn run(prepared: Prepared, ctx: &ToolCtx, read_filter: ReadFilter) -> Tool
                 None => output,
             }
         }
-        Ok(Err(msg)) => ToolOutput::error(msg),
-        Err(e) => ToolOutput::error(format!("Internal error: {e}")),
+        Err(msg) => ToolOutput::error(msg),
     }
 }
 
@@ -186,7 +184,7 @@ fn glob_files(
 
     let read_filter = read_filter.walk(base, spelled, workspace);
     let mut withheld = 0;
-    let mut matches: Vec<(String, std::time::SystemTime)> = super::walk_files(base, cancel)
+    let entries = super::walk_files(base, cancel)
         .filter(|entry| {
             let rel = entry.path().strip_prefix(base).unwrap_or(entry.path());
             glob.is_match(rel)
@@ -195,14 +193,11 @@ fn glob_files(
             let held = read_filter.withholds(entry.path());
             withheld += usize::from(held);
             !held
-        })
-        .map(|entry| {
-            let mtime = super::entry_mtime(&entry);
-            (super::display_path(entry.path(), cwd), mtime)
-        })
+        });
+    let mut matches: Vec<String> = super::newest_first(entries)
+        .iter()
+        .map(|entry| super::display_path(entry.path(), cwd))
         .collect();
-
-    matches.sort_by_key(|entry| std::cmp::Reverse(entry.1));
 
     if matches.is_empty() {
         let mut content = NO_FILES_FOUND.to_owned();
@@ -217,11 +212,7 @@ fn glob_files(
     let truncated = total > MAX_RESULTS;
     matches.truncate(MAX_RESULTS);
 
-    let mut content = matches
-        .iter()
-        .map(|(path, _)| path.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
+    let mut content = matches.join("\n");
 
     if truncated {
         _ = write!(

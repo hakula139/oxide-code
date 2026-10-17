@@ -11,14 +11,13 @@ use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    GrepFileGroup, GrepMatchLine, Prepared, SearchRoot, Tool, ToolCtx, ToolMetadata, ToolOutput,
-    ToolResultView, ToolSpec, extract_input_field,
+    GrepFileGroup, GrepMatchLine, NO_FILES_FOUND, Prepared, SearchRoot, Tool, ToolCtx,
+    ToolMetadata, ToolOutput, ToolResultView, ToolSpec, extract_input_field,
 };
 use crate::permission::{PermissionClass, ReadFilter, WalkFilter};
 use crate::util::text::plural;
 
 const NO_MATCHES_FOUND: &str = "No matches found";
-const NO_FILES_FOUND: &str = "No files found";
 const RESULTS_LIMIT_PREFIX: &str = "(Results limited to ";
 
 const DEFAULT_HEAD_LIMIT: usize = 250;
@@ -177,7 +176,7 @@ async fn run(prepared: Prepared, ctx: &ToolCtx, read_filter: ReadFilter) -> Tool
 
     let workspace = Arc::clone(&ctx.workspace);
     let cancel = ctx.cancel.clone();
-    match tokio::task::spawn_blocking(move || {
+    match super::run_blocking(move || {
         grep_files(&GrepParams {
             pattern: &pattern,
             root: SearchRoot::new(&access, path.as_deref(), workspace)?,
@@ -192,12 +191,11 @@ async fn run(prepared: Prepared, ctx: &ToolCtx, read_filter: ReadFilter) -> Tool
     })
     .await
     {
-        Ok(Ok(content)) => {
+        Ok(content) => {
             let title = grep_title(super::strip_withheld_note(&content));
             ToolOutput::success(content).with_title(title)
         }
-        Ok(Err(msg)) => ToolOutput::error(msg),
-        Err(e) => ToolOutput::error(format!("Internal error: {e}")),
+        Err(msg) => ToolOutput::error(msg),
     }
 }
 
@@ -316,38 +314,34 @@ fn collect_files(
 
     let mut skipped_large = Vec::new();
     let mut withheld = 0;
-    let mut files_with_mtime: Vec<(PathBuf, std::time::SystemTime)> =
-        super::walk_files(base, cancel)
-            .filter(|entry| {
-                include_matcher.is_none_or(|m| {
-                    let name = entry.file_name().to_string_lossy();
-                    m.is_match(name.as_ref())
-                })
+    let entries = super::walk_files(base, cancel)
+        .filter(|entry| {
+            include_matcher.is_none_or(|m| {
+                let name = entry.file_name().to_string_lossy();
+                m.is_match(name.as_ref())
             })
-            .filter(|entry| {
-                let held = read_filter.withholds(entry.path());
-                withheld += usize::from(held);
-                !held
-            })
-            .filter(|entry| {
-                if let Ok(meta) = entry.metadata()
-                    && meta.len() > MAX_GREP_FILE_SIZE
-                {
-                    skipped_large.push((entry.path().to_path_buf(), meta.len()));
-                    return false;
-                }
-                true
-            })
-            .map(|entry| {
-                let mtime = super::entry_mtime(&entry);
-                (entry.into_path(), mtime)
-            })
-            .collect();
-
-    files_with_mtime.sort_by_key(|entry| std::cmp::Reverse(entry.1));
+        })
+        .filter(|entry| {
+            let held = read_filter.withholds(entry.path());
+            withheld += usize::from(held);
+            !held
+        })
+        .filter(|entry| {
+            if let Ok(meta) = entry.metadata()
+                && meta.len() > MAX_GREP_FILE_SIZE
+            {
+                skipped_large.push((entry.path().to_path_buf(), meta.len()));
+                return false;
+            }
+            true
+        });
+    let files = super::newest_first(entries)
+        .into_iter()
+        .map(ignore::DirEntry::into_path)
+        .collect();
 
     CollectedFiles {
-        files: files_with_mtime.into_iter().map(|(p, _)| p).collect(),
+        files,
         skipped_large,
         withheld,
     }

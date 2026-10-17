@@ -10,6 +10,7 @@ pub(crate) mod tasks;
 pub(crate) mod write;
 
 use std::borrow::Cow;
+use std::cmp::Reverse;
 use std::fmt::Write as _;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -813,17 +814,32 @@ fn walk_files<'a>(
         .filter(|e| e.file_type().is_some_and(|ft| ft.is_file()))
 }
 
-/// Reads the entry's modification time for sorting / display.
-///
-/// Falls back to [`SystemTime::UNIX_EPOCH`] when stat fails (entry vanished, permission denied,
-/// platform without mtime). Callers use the result only for ordering, where the epoch sorts
-/// unreadable entries oldest.
+/// `entries` sorted newest first by modification time, keeping walk order among equal times.
+fn newest_first(entries: impl Iterator<Item = ignore::DirEntry>) -> Vec<ignore::DirEntry> {
+    let mut entries: Vec<_> = entries.collect();
+    entries.sort_by_cached_key(|entry| Reverse(entry_mtime(entry)));
+    entries
+}
+
+/// The entry's modification time, or [`SystemTime::UNIX_EPOCH`] when stat fails (entry vanished,
+/// permission denied, platform without mtime), which sorts unreadable entries oldest.
 fn entry_mtime(entry: &ignore::DirEntry) -> SystemTime {
     entry
         .metadata()
         .ok()
         .and_then(|m| m.modified().ok())
         .unwrap_or(SystemTime::UNIX_EPOCH)
+}
+
+// ── Blocking Work ──
+
+/// Runs `work` on the blocking thread pool, reporting a panic that ends it as an error.
+async fn run_blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .unwrap_or_else(|e| Err(format!("Internal error: {e}")))
 }
 
 // ── Formatting ──
@@ -855,6 +871,8 @@ fn truncate_line(line: &str, max_chars: usize) -> Cow<'_, str> {
         &line[..boundary]
     ))
 }
+
+const NO_FILES_FOUND: &str = "No files found";
 
 const WITHHELD_NOTE_END: &str = "withheld by read deny or ask rules)";
 
@@ -2101,6 +2119,42 @@ mod tests {
 
         assert!(first.is_some(), "an uncancelled walk yields files");
         assert_eq!(walk.count(), 0, "the walk stops at the cancel");
+    }
+
+    // ── newest_first ──
+
+    #[test]
+    fn newest_first_orders_by_mtime_and_keeps_input_order_among_ties() {
+        let dir = canonical_tempdir();
+        let base = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        for (name, offset) in [("a.txt", 0), ("b.txt", 60), ("c.txt", 0)] {
+            let file = std::fs::File::create(dir.path().join(name)).unwrap();
+            file.set_modified(base + std::time::Duration::from_secs(offset))
+                .unwrap();
+        }
+        let mut entries: Vec<_> = walk_files(dir.path(), &CancellationToken::new()).collect();
+        entries.sort_by_key(|entry| Reverse(entry.file_name().to_owned()));
+
+        let sorted = newest_first(entries.into_iter());
+
+        let names: Vec<_> = sorted
+            .iter()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["b.txt", "c.txt", "a.txt"]);
+    }
+
+    // ── run_blocking ──
+
+    #[tokio::test]
+    async fn run_blocking_reports_a_panic_as_an_internal_error() {
+        let err = run_blocking(|| -> Result<(), String> { panic!("boom") })
+            .await
+            .unwrap_err();
+
+        let (task, message) = err.split_once(" panicked ").unwrap();
+        assert!(task.starts_with("Internal error: task "), "{err}");
+        assert_eq!(message, "with message \"boom\"");
     }
 
     // ── truncate_line ──
