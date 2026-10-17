@@ -331,10 +331,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn draw_frame_with_conversation_and_tool_call() {
-        let (mut app, _rx, _event_tx) = test_app(None);
-        app.chat.push_user_message("what files are here?".into());
+    /// Pushes a finished `ls` call listing two files.
+    fn push_ls_call(app: &mut App) {
         app.chat.push_tool_call(ToolCall {
             id: "t1".to_owned(),
             name: "bash".to_owned(),
@@ -351,6 +349,13 @@ mod tests {
                 content: "README.md\nCargo.toml".to_owned(),
             },
         });
+    }
+
+    #[test]
+    fn draw_frame_with_conversation_and_tool_call() {
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.chat.push_user_message("what files are here?".into());
+        push_ls_call(&mut app);
         app.chat.append_stream_token("Two files.");
         app.chat.commit_streaming();
         insta::assert_snapshot!(render_app(&mut app, 60, 12));
@@ -509,6 +514,7 @@ mod tests {
             None,
         );
         app.dispatch_action(Action::Submit("active".into()));
+        push_ls_call(&mut app);
         app.pending_prompts.push_back("queued 0".to_owned());
 
         app.handle_engine_event(Event::TasksUpdated(plan()));
