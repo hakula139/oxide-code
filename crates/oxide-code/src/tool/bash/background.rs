@@ -23,6 +23,7 @@ use crate::tool::{
     Prepared, Tool, ToolCtx, ToolOutput, ToolSpec, extract_input_field, parse_input,
 };
 use crate::util::sync::lock_or_recover;
+use crate::util::text::ELLIPSIS;
 
 /// Background shells a session keeps open at once, running or finished.
 const MAX_SHELLS: usize = 16;
@@ -40,12 +41,12 @@ pub(crate) struct BackgroundShell {
 }
 
 impl BackgroundShell {
-    /// The command's first line, followed by `...` when more lines follow.
+    /// The command's first line, followed by [`ELLIPSIS`] when more lines follow.
     pub(crate) fn command_preview(&self) -> String {
         let mut lines = self.command.lines();
         let first = lines.next().unwrap_or_default();
         if lines.next().is_some() {
-            format!("{first} ...")
+            format!("{first} {ELLIPSIS}")
         } else {
             first.to_owned()
         }
@@ -419,15 +420,7 @@ impl BashOutputTool {
     }
 }
 
-#[derive(Deserialize)]
-struct OutputInput {
-    shell_id: String,
-    timeout: Option<u64>,
-}
-
 impl Tool for BashOutputTool {
-    /// Read class, since it reads only a shell the session already started and so never needs
-    /// approval. Serial, since a read empties the shell's unread output.
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "bash_output".to_owned(),
@@ -440,24 +433,10 @@ impl Tool for BashOutputTool {
                           such as a server, it lasts the whole timeout. \
                           An unknown ID lists the open shells."
                 .to_owned(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "shell_id": {
-                        "type": "string",
-                        "description": "The ID bash returned when it started the shell, \
-                                        such as \"shell-1\""
-                    },
-                    "timeout": {
-                        "type": "integer",
-                        "description": "Milliseconds to wait for the command to finish \
-                                        before reading, capped at 600000. \
-                                        Omit or pass 0 to read at once."
-                    }
-                },
-                "required": ["shell_id"]
-            }),
+            input_schema: output_input_schema(),
+            // It reads only a shell the session started, so it never needs approval.
             class: PermissionClass::Read,
+            // A read empties the shell's unread output.
             parallel_safe: false,
         }
     }
@@ -479,28 +458,6 @@ impl Tool for BashOutputTool {
     }
 }
 
-async fn read(shells: &BackgroundShells, raw: serde_json::Value) -> ToolOutput {
-    let input: OutputInput = match parse_input(raw) {
-        Ok(input) => input,
-        Err(e) => return e,
-    };
-    let output = match shells.output(&input.shell_id) {
-        Ok(output) => output,
-        Err(message) => return ToolOutput::error(message),
-    };
-    if let Some(ms) = input.timeout.filter(|&ms| ms > 0) {
-        output
-            .wait(Duration::from_millis(ms).min(MAX_TIMEOUT))
-            .await;
-    }
-
-    let footer = match output.state() {
-        ShellState::Running => "(still running)".to_owned(),
-        ended => format!("({})", ended.describe()),
-    };
-    ToolOutput::success(with_footer(output.take(), &footer))
-}
-
 // ── Bash Stop Tool ──
 
 /// Ends a background shell and every process it started.
@@ -515,13 +472,7 @@ impl BashStopTool {
     }
 }
 
-#[derive(Deserialize)]
-struct StopInput {
-    shell_id: String,
-}
-
 impl Tool for BashStopTool {
-    /// Read class, since it ends only a shell the session started and so never needs approval.
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "bash_stop".to_owned(),
@@ -530,17 +481,8 @@ impl Tool for BashStopTool {
                           Stop a finished shell too once you no longer need its output, \
                           since a session keeps only a limited number of shells open."
                 .to_owned(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "shell_id": {
-                        "type": "string",
-                        "description": "The ID bash returned when it started the shell, \
-                                        such as \"shell-1\""
-                    }
-                },
-                "required": ["shell_id"]
-            }),
+            input_schema: stop_input_schema(),
+            // It ends only a shell the session started, so it never needs approval.
             class: PermissionClass::Read,
             parallel_safe: false,
         }
@@ -561,6 +503,77 @@ impl Tool for BashStopTool {
     ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + 'a>> {
         Box::pin(stop(&self.shells, prepared.input))
     }
+}
+
+// ── Input ──
+
+fn output_input_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "shell_id": {
+                "type": "string",
+                "description": "The ID bash returned when it started the shell, \
+                                such as \"shell-1\""
+            },
+            "timeout": {
+                "type": "integer",
+                "description": "Milliseconds to wait for the command to finish \
+                                before reading, capped at 600000. \
+                                Omit or pass 0 to read at once."
+            }
+        },
+        "required": ["shell_id"]
+    })
+}
+
+#[derive(Deserialize)]
+struct OutputInput {
+    shell_id: String,
+    timeout: Option<u64>,
+}
+
+fn stop_input_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "shell_id": {
+                "type": "string",
+                "description": "The ID bash returned when it started the shell, \
+                                such as \"shell-1\""
+            }
+        },
+        "required": ["shell_id"]
+    })
+}
+
+#[derive(Deserialize)]
+struct StopInput {
+    shell_id: String,
+}
+
+// ── Execution ──
+
+async fn read(shells: &BackgroundShells, raw: serde_json::Value) -> ToolOutput {
+    let input: OutputInput = match parse_input(raw) {
+        Ok(input) => input,
+        Err(e) => return e,
+    };
+    let output = match shells.output(&input.shell_id) {
+        Ok(output) => output,
+        Err(message) => return ToolOutput::error(message),
+    };
+    if let Some(ms) = input.timeout.filter(|&ms| ms > 0) {
+        output
+            .wait(Duration::from_millis(ms).min(MAX_TIMEOUT))
+            .await;
+    }
+
+    let footer = match output.state() {
+        ShellState::Running => "(still running)".to_owned(),
+        ended => format!("({})", ended.describe()),
+    };
+    ToolOutput::success(with_footer(output.take(), &footer))
 }
 
 async fn stop(shells: &BackgroundShells, raw: serde_json::Value) -> ToolOutput {

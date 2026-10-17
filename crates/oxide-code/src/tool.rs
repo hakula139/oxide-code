@@ -456,13 +456,11 @@ pub(crate) async fn run_capped(tool: &dyn Tool, prepared: Prepared, ctx: &ToolCt
 }
 
 /// Trims `content` to fit under [`MAX_OUTPUT_BYTES`], keeping the head and tail and replacing the
-/// middle with a `[N bytes truncated]` marker.
+/// middle with a `... [N bytes truncated, head + tail kept] ...` marker.
 ///
 /// Returns `(content, original_len)`, where `original_len` is `Some` only when truncation fired so
 /// the caller can record the pre-cap size. Skips truncation when the omitted slice is smaller than
 /// the marker, which would otherwise grow the output.
-/// Char-boundary floors keep the returned `String` valid UTF-8 even when the cap lands inside a
-/// multibyte sequence.
 fn cap_output(content: String) -> (String, Option<usize>) {
     if content.len() <= MAX_OUTPUT_BYTES {
         return (content, None);

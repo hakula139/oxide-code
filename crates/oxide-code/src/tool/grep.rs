@@ -71,9 +71,8 @@ impl Tool for GrepTool {
         // their summary header visible.
         let mode = input
             .get("output_mode")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("content");
-        if mode != "content" {
+            .map_or(Ok(OutputMode::default()), OutputMode::deserialize);
+        if !matches!(mode, Ok(OutputMode::Content)) {
             return None;
         }
         parse_content_view(content)
@@ -205,7 +204,7 @@ fn grep_title(output: &str) -> String {
     }
     // Count / files-with-matches modes lead with "Found N ...".
     if let Some(line) = output.lines().find(|l| l.starts_with("Found ")) {
-        return line.trim_end_matches('.').to_owned();
+        return line.to_owned();
     }
     let match_count = output
         .lines()
@@ -590,10 +589,6 @@ fn format_count<'a>(
 
 /// Returns `None` for any unrecognized line so the block falls through to text.
 fn parse_content_view(content: &str) -> Option<ToolResultView> {
-    if content.contains("\n\nSkipped (exceeds ") {
-        return None;
-    }
-
     let trimmed = content.trim_end();
     if trimmed == NO_MATCHES_FOUND {
         return Some(ToolResultView::GrepMatches {
@@ -1413,29 +1408,31 @@ mod tests {
 
     #[test]
     fn result_view_content_mode_groups_by_file() {
-        let input = serde_json::json!({"pattern": "fn"});
-        let view = GrepTool::default()
-            .result_view(
+        let expected = ToolResultView::GrepMatches {
+            groups: vec![GrepFileGroup {
+                path: "src/main.rs".to_owned(),
+                lines: vec![GrepMatchLine {
+                    number: 10,
+                    text: "fn main()".to_owned(),
+                    is_match: true,
+                }],
+            }],
+            truncated: false,
+        };
+
+        for input in [
+            serde_json::json!({"pattern": "fn"}),
+            serde_json::json!({"pattern": "fn", "output_mode": "content"}),
+        ] {
+            let view = GrepTool::default().result_view(
                 &input,
                 "src/main.rs:10:fn main()",
                 &ToolMetadata::default(),
                 Path::new("/repo"),
-            )
-            .unwrap();
-        assert_eq!(
-            view,
-            ToolResultView::GrepMatches {
-                groups: vec![GrepFileGroup {
-                    path: "src/main.rs".to_owned(),
-                    lines: vec![GrepMatchLine {
-                        number: 10,
-                        text: "fn main()".to_owned(),
-                        is_match: true,
-                    }],
-                }],
-                truncated: false,
-            },
-        );
+            );
+
+            assert_eq!(view.as_ref(), Some(&expected), "{input}");
+        }
     }
 
     #[test]
@@ -1541,13 +1538,22 @@ mod tests {
     #[test]
     fn parse_content_view_falls_back_when_skipped_warnings_present() {
         // GrepMatches can't hold the skipped-file warning, so the view falls back to show it.
-        let content = indoc! {"
-            src/main.rs:1:hit
+        for content in [
+            indoc! {"
+                src/main.rs:1:hit
 
-            Skipped (exceeds 1 MB size limit):
-              big.txt (5.0 MB)"
-        };
-        assert!(parse_content_view(content).is_none());
+                Skipped (exceeds 1 MB size limit):
+                  big.txt (5.0 MB)"
+            },
+            indoc! {"
+                No matches found
+
+                Skipped (exceeds 1 MB size limit):
+                  big.txt (5.0 MB)"
+            },
+        ] {
+            assert_eq!(parse_content_view(content), None, "{content}");
+        }
     }
 
     #[test]

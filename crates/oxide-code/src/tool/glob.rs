@@ -64,7 +64,7 @@ impl Tool for GlobTool {
         metadata: &ToolMetadata,
         _cwd: &Path,
     ) -> Option<ToolResultView> {
-        build_files_view(input, content, metadata)
+        parse_files_view(input, content, metadata)
     }
 
     fn run<'a>(
@@ -253,7 +253,7 @@ fn compile_glob(pattern: &str) -> Result<globset::GlobMatcher, String> {
 
 // ── Result View ──
 
-fn build_files_view(
+fn parse_files_view(
     input: &serde_json::Value,
     content: &str,
     metadata: &ToolMetadata,
@@ -850,7 +850,7 @@ mod tests {
 
     #[test]
     fn result_view_path_with_embedded_blank_line_falls_back() {
-        let view = build_files_view(
+        let view = parse_files_view(
             &serde_json::json!({"pattern": "*.rs"}),
             indoc! {"
                 weird

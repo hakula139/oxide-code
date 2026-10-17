@@ -73,7 +73,6 @@ fn count(tasks: &[Task], status: TaskStatus) -> usize {
 pub(crate) struct TasksTool;
 
 impl Tool for TasksTool {
-    /// Read class, since it touches only the session's own task list and so never needs approval.
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: NAME.to_owned(),
@@ -93,6 +92,7 @@ impl Tool for TasksTool {
                           The user already sees the list, so don't repeat it in your reply."
                 .to_owned(),
             input_schema: input_schema(),
+            // It touches only the session's own task list, so it never needs approval.
             class: PermissionClass::Read,
             parallel_safe: false,
         }
@@ -197,14 +197,17 @@ fn run(input: &serde_json::Value) -> ToolOutput {
         Err(message) => return ToolOutput::error(message),
     };
 
-    let output = match Progress::of(&tasks) {
-        None => ToolOutput::success("Cleared the task list.").with_title("Cleared the task list"),
+    match Progress::of(&tasks) {
+        None => ToolOutput::success("Cleared the task list.")
+            .with_title("Cleared the task list")
+            .with_tasks(tasks),
         Some(Progress { completed, total }) if completed == total => {
             ToolOutput::success("Every task is completed, so the task list was cleared.")
                 .with_title(format!(
                     "Completed {total} {}",
                     plural(total, "task", "tasks")
                 ))
+                .with_tasks(Vec::new())
         }
         Some(Progress { completed, total }) => ToolOutput::success(format!(
             "Updated the task list: {completed} of {total} completed. \
@@ -213,19 +216,9 @@ fn run(input: &serde_json::Value) -> ToolOutput {
         .with_title(format!(
             "Updated {total} {}, {completed} completed",
             plural(total, "task", "tasks"),
-        )),
-    };
-    output.with_tasks(kept(tasks))
-}
-
-fn kept(tasks: Vec<Task>) -> Vec<Task> {
-    if tasks
-        .iter()
-        .all(|task| task.status == TaskStatus::Completed)
-    {
-        return Vec::new();
+        ))
+        .with_tasks(tasks),
     }
-    tasks
 }
 
 // ── Transcript ──
@@ -250,8 +243,8 @@ pub(crate) fn latest(messages: &[Message]) -> Option<Vec<Task>> {
             ContentBlock::ToolUse { id, name, input }
                 if name == NAME && succeeded.get(id.as_str()) == Some(&true) =>
             {
-                if let Ok(tasks) = parse(input) {
-                    return Some(kept(tasks));
+                if let Some(tasks) = run(input).tasks {
+                    return Some(tasks);
                 }
             }
             _ => {}
