@@ -135,6 +135,7 @@ fn render(files: &[InstructionFile]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::path::testing::HOME_VAR;
 
     // ── load ──
 
@@ -221,23 +222,26 @@ mod tests {
 
     #[test]
     fn candidate_slots_lists_global_before_project() {
-        let root = PathBuf::from("/repo");
-        let slots = candidate_slots(&root, &root);
+        let (home, root) = (Path::new("/home/u"), Path::new("/repo"));
 
-        if let Some(home) = std::env::home_dir() {
-            assert_eq!(slots.len(), 3);
-            assert_eq!(slots[0].label, "user's global instructions");
-            assert_eq!(
-                slots[0].candidates,
-                vec![
-                    home.join(".claude").join("CLAUDE.md"),
-                    home.join(".claude").join("AGENTS.md"),
-                ]
-            );
-        } else {
-            assert_eq!(slots.len(), 2);
-        }
-        assert_eq!(slots[slots.len() - 2].label, "project instructions");
+        let slots = temp_env::with_var(HOME_VAR, Some(home), || candidate_slots(root, root));
+
+        let labels: Vec<_> = slots.iter().map(|s| s.label).collect();
+        assert_eq!(
+            labels,
+            [
+                "user's global instructions",
+                "project instructions",
+                "project instructions (.claude/)",
+            ]
+        );
+        assert_eq!(
+            slots[0].candidates,
+            vec![
+                home.join(".claude").join("CLAUDE.md"),
+                home.join(".claude").join("AGENTS.md"),
+            ]
+        );
     }
 
     // ── walk_root_to_cwd ──
