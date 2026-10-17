@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Fail if a given Rust file lacks a //! module doc, naming each such file.
+# The Rust module docs pre-commit hook in flake.nix runs this.
+
 set -euo pipefail
 
 status=0

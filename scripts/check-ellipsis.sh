@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Fail if a given file contains U+2026, listing each line that does.
+# The ASCII ellipsis pre-commit hook in flake.nix runs this.
+
 set -euo pipefail
 
 if grep -nIH $'\342\200\246' "$@"; then
