@@ -1,6 +1,6 @@
 # Renovate opens version updates, so Dependabot only opens security updates. These entries exist to
 # set their labels and commit types. Without them, each security PR gets an ecosystem label such as
-# `rust` and copies the type of the previous Dependabot commit.
+# `rust` and a commit type Dependabot infers from recent commits.
 version: 2
 updates:
   - package-ecosystem: cargo
@@ -22,6 +22,20 @@ updates:
     # npm packages are dev tools that never ship in `ox`, so their bumps stay out of the changelog.
     commit-message:
       prefix: chore
+      include: scope
+    labels:
+      - dependencies
+  - package-ecosystem: github-actions
+    # `/` covers the workflows, and the glob adds the composite actions they share.
+    directories:
+      - /
+      - /.github/actions/*
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 0
+    # Actions only run in CI, so their bumps take the `ci` type, which the changelog skips.
+    commit-message:
+      prefix: ci
       include: scope
     labels:
       - dependencies

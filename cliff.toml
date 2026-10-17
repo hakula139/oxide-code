@@ -55,9 +55,9 @@ use_branch_tags = true
 sort_commits = "oldest"
 
 commit_preprocessors = [
-  # Advisory bumps merged as `chore(deps)` before the `fix(deps)` convention.
+  # Cargo advisory bumps merged as `chore(deps)` before the `fix(deps)` convention.
   # This runs first because the autolink below rewrites `(#N)`.
-  { pattern = '^chore\(deps\)(: .* \(#(17|34|94)\))', replace = 'fix(deps)$1' },
+  { pattern = '(?m)^chore\(deps\)(: .* \(#(17|34)\))$', replace = 'fix(deps)$1' },
   # Backtick inline HTML in subjects so markdown renders it as code.
   # `(^|[^`])` is a lookbehind stand-in (Rust regex lacks one) skipping already-fenced spans.
   { pattern = '(^|[^`])(<\/?[a-zA-Z][^>]*>)', replace = '$1`$2`' },
