@@ -90,7 +90,7 @@ impl ResponseAccumulator {
             BlockAccumulator::Text(text) if !text.is_empty() => {
                 Some(ResponseEvent::Text(text.clone()))
             }
-            BlockAccumulator::ToolUse { .. } | BlockAccumulator::ServerToolUse { .. } => {
+            BlockAccumulator::ToolUse { .. } => {
                 let thinking = self.blocks.iter().map(BlockAccumulator::thinking_text);
                 progress_note(thinking).map(|note| ResponseEvent::Progress(note.to_owned()))
             }
@@ -143,11 +143,8 @@ enum BlockAccumulator {
         id: String,
         name: String,
         json_buf: String,
-    },
-    ServerToolUse {
-        id: String,
-        name: String,
-        json_buf: String,
+        /// A `server_tool_use` call, which the API runs itself.
+        server: bool,
     },
     ServerToolResult {
         tool_use_id: String,
@@ -169,16 +166,8 @@ impl BlockAccumulator {
     fn start(info: ContentBlockInfo, index: usize) -> Self {
         match info {
             ContentBlockInfo::Text { text } => Self::Text(text),
-            ContentBlockInfo::ToolUse { id, name } => Self::ToolUse {
-                id,
-                name,
-                json_buf: String::new(),
-            },
-            ContentBlockInfo::ServerToolUse { id, name } => Self::ServerToolUse {
-                id,
-                name,
-                json_buf: String::new(),
-            },
+            ContentBlockInfo::ToolUse { id, name } => Self::tool_use(id, name, false),
+            ContentBlockInfo::ServerToolUse { id, name } => Self::tool_use(id, name, true),
             ContentBlockInfo::ServerToolResult {
                 r#type,
                 tool_use_id,
@@ -209,6 +198,15 @@ impl BlockAccumulator {
         }
     }
 
+    fn tool_use(id: String, name: String, server: bool) -> Self {
+        Self::ToolUse {
+            id,
+            name,
+            json_buf: String::new(),
+            server,
+        }
+    }
+
     /// Appends one delta, returning the text or reasoning it streams.
     fn apply(&mut self, delta: Delta) -> Option<ResponseEvent> {
         match (self, delta) {
@@ -216,10 +214,7 @@ impl BlockAccumulator {
                 buf.push_str(&text);
                 Some(ResponseEvent::Text(text))
             }
-            (
-                Self::ToolUse { json_buf, .. } | Self::ServerToolUse { json_buf, .. },
-                Delta::InputJsonDelta { partial_json },
-            ) => {
+            (Self::ToolUse { json_buf, .. }, Delta::InputJsonDelta { partial_json }) => {
                 json_buf.push_str(&partial_json);
                 None
             }
@@ -267,18 +262,20 @@ impl BlockAccumulator {
         };
         match self {
             Self::Text(text) => (Some(ContentBlock::Text { text }), None),
-            Self::ToolUse { id, name, json_buf } => {
+            Self::ToolUse {
+                id,
+                name,
+                json_buf,
+                server,
+            } => {
                 let (input, err) = parse_tool_json(&json_buf);
                 let parse_error = err.map(|e| (id.clone(), e));
-                (Some(ContentBlock::ToolUse { id, name, input }), parse_error)
-            }
-            Self::ServerToolUse { id, name, json_buf } => {
-                let (input, err) = parse_tool_json(&json_buf);
-                let parse_error = err.map(|e| (id.clone(), e));
-                (
-                    Some(ContentBlock::ServerToolUse { id, name, input }),
-                    parse_error,
-                )
+                let block = if server {
+                    ContentBlock::ServerToolUse { id, name, input }
+                } else {
+                    ContentBlock::ToolUse { id, name, input }
+                };
+                (Some(block), parse_error)
             }
             Self::ServerToolResult {
                 tool_use_id,
@@ -782,11 +779,14 @@ mod tests {
             },
             0,
         );
-        assert!(matches!(
-            tool,
-            BlockAccumulator::ToolUse { id, name, json_buf }
-                if id == "tool_1" && name == "bash" && json_buf.is_empty()
-        ));
+        assert!(
+            matches!(
+                &tool,
+                BlockAccumulator::ToolUse { id, name, json_buf, server: false }
+                    if id == "tool_1" && name == "bash" && json_buf.is_empty()
+            ),
+            "{tool:?}",
+        );
 
         let server = BlockAccumulator::start(
             ContentBlockInfo::ServerToolUse {
@@ -795,11 +795,14 @@ mod tests {
             },
             0,
         );
-        assert!(matches!(
-            server,
-            BlockAccumulator::ServerToolUse { id, name, json_buf }
-                if id == "srv_1" && name == "web_search" && json_buf.is_empty()
-        ));
+        assert!(
+            matches!(
+                &server,
+                BlockAccumulator::ToolUse { id, name, json_buf, server: true }
+                    if id == "srv_1" && name == "web_search" && json_buf.is_empty()
+            ),
+            "{server:?}",
+        );
     }
 
     #[test]
@@ -819,33 +822,22 @@ mod tests {
 
     #[test]
     fn apply_appends_tool_input_without_streaming_it() {
-        for mut block in [
-            BlockAccumulator::ToolUse {
-                id: "tool_1".to_owned(),
-                name: "bash".to_owned(),
-                json_buf: r#"{"x"#.to_owned(),
-            },
-            BlockAccumulator::ServerToolUse {
-                id: "srv_1".to_owned(),
-                name: "web_search".to_owned(),
-                json_buf: r#"{"x"#.to_owned(),
-            },
-        ] {
-            let forwarded = block.apply(Delta::InputJsonDelta {
-                partial_json: ":1}".to_owned(),
-            });
+        let mut block = BlockAccumulator::ToolUse {
+            id: "tool_1".to_owned(),
+            name: "bash".to_owned(),
+            json_buf: r#"{"x"#.to_owned(),
+            server: false,
+        };
 
-            assert_eq!(forwarded, None);
-            assert!(
-                matches!(
-                    &block,
-                    BlockAccumulator::ToolUse { json_buf, .. }
-                        | BlockAccumulator::ServerToolUse { json_buf, .. }
-                        if json_buf == r#"{"x:1}"#
-                ),
-                "{block:?}",
-            );
-        }
+        let forwarded = block.apply(Delta::InputJsonDelta {
+            partial_json: ":1}".to_owned(),
+        });
+
+        assert_eq!(forwarded, None);
+        assert!(
+            matches!(&block, BlockAccumulator::ToolUse { json_buf, .. } if json_buf == r#"{"x:1}"#),
+            "{block:?}",
+        );
     }
 
     #[test]
@@ -937,6 +929,7 @@ mod tests {
             id: "tool_1".to_owned(),
             name: "bash".to_owned(),
             json_buf: r#"{"command": "ls"}"#.to_owned(),
+            server: false,
         }
         .into_content_block(MODEL);
         assert_eq!(
@@ -949,10 +942,11 @@ mod tests {
         );
         assert_eq!(err, None);
 
-        let (server, err) = BlockAccumulator::ServerToolUse {
+        let (server, err) = BlockAccumulator::ToolUse {
             id: "srv_1".to_owned(),
             name: "web_search".to_owned(),
             json_buf: r#"{"query": "rust"}"#.to_owned(),
+            server: true,
         }
         .into_content_block(MODEL);
         assert_eq!(
@@ -968,33 +962,25 @@ mod tests {
 
     #[test]
     fn into_content_block_malformed_tool_input_surfaces_a_parse_error() {
-        for block in [
-            BlockAccumulator::ToolUse {
-                id: "tool_1".to_owned(),
-                name: "bash".to_owned(),
-                json_buf: "{unclosed".to_owned(),
-            },
-            BlockAccumulator::ServerToolUse {
-                id: "tool_1".to_owned(),
-                name: "web_search".to_owned(),
-                json_buf: "{unclosed".to_owned(),
-            },
-        ] {
-            let (block, err) = block.into_content_block(MODEL);
+        let block = BlockAccumulator::ToolUse {
+            id: "srv_1".to_owned(),
+            name: "web_search".to_owned(),
+            json_buf: "{unclosed".to_owned(),
+            server: true,
+        };
 
-            assert!(
-                matches!(
-                    &block,
-                    Some(
-                        ContentBlock::ToolUse { input, .. }
-                            | ContentBlock::ServerToolUse { input, .. }
-                    ) if *input == json!({})
-                ),
-                "{block:?}",
-            );
-            let serde_error = serde_json::from_str::<serde_json::Value>("{unclosed").unwrap_err();
-            assert_eq!(err, Some(("tool_1".to_owned(), serde_error.to_string())));
-        }
+        let (block, err) = block.into_content_block(MODEL);
+
+        assert_eq!(
+            block,
+            Some(ContentBlock::ServerToolUse {
+                id: "srv_1".to_owned(),
+                name: "web_search".to_owned(),
+                input: json!({}),
+            }),
+        );
+        let serde_error = serde_json::from_str::<serde_json::Value>("{unclosed").unwrap_err();
+        assert_eq!(err, Some(("srv_1".to_owned(), serde_error.to_string())));
     }
 
     // ── parse_tool_json ──
