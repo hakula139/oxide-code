@@ -1,11 +1,9 @@
-//! Error block — `✗ message` in the error color, no left bar.
+//! Error block: `✗ message` in the error color, with no left bar.
 
-use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthStr;
+use ratatui::text::Line;
 
-use super::{ChatBlock, RenderCtx};
-use crate::tui::glyphs::ERROR_PREFIX;
-use crate::tui::wrap::wrap_line;
+use super::{ChatBlock, RenderCtx, push_icon_wrapped};
+use crate::tui::glyphs::{ERROR_CONT, ERROR_PREFIX};
 
 /// A fatal agent or API error. Multi-line messages render one logical line per row, the icon
 /// on the first and a width-aligned indent on the rest.
@@ -25,20 +23,11 @@ impl ChatBlock for ErrorBlock {
     fn render(&self, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
         let style = ctx.theme.error();
         let width = usize::from(ctx.width);
-        let indent = ERROR_PREFIX.width();
-        let cont_prefix = vec![Span::raw(" ".repeat(indent))];
+
         let mut out = Vec::new();
         for (i, body_line) in self.message.lines().enumerate() {
-            let prefix = if i == 0 {
-                ERROR_PREFIX.to_owned()
-            } else {
-                " ".repeat(indent)
-            };
-            let line = Line::from(vec![
-                Span::styled(prefix, style),
-                Span::styled(body_line.to_owned(), style),
-            ]);
-            out.extend(wrap_line(line, width, indent, Some(&cont_prefix)));
+            let prefix = if i == 0 { ERROR_PREFIX } else { ERROR_CONT };
+            push_icon_wrapped(&mut out, prefix, style, body_line, style, width);
         }
         out
     }
@@ -57,6 +46,7 @@ impl ChatBlock for ErrorBlock {
 #[cfg(test)]
 mod tests {
     use indoc::indoc;
+    use unicode_width::UnicodeWidthStr;
 
     use super::*;
     use crate::tui::theme::Theme;
@@ -110,7 +100,7 @@ mod tests {
 
     #[test]
     fn render_continuation_rows_align_under_first_line_body() {
-        // First-row prefix is `✗ ` (icon + space); follow-up logical rows must indent to the
+        // The first row starts with `✗ ` (icon and space), and later logical rows indent to the
         // same column so the message reads as one block.
         let theme = Theme::default();
         let block = ErrorBlock::new("first\nsecond");

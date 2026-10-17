@@ -1214,13 +1214,11 @@ mod tests {
 
     #[test]
     fn render_markdown_fenced_code_block_plain_has_no_background() {
-        // Plain fenced blocks (no language) use the `code`
-        // style, which omits the bg fill so wrapping / width variance
-        // across lines doesn't leave ragged highlight edges.
+        // Plain fenced blocks (no language) use the `code` style, which omits the bg fill
+        // so wrapping / width variance across lines doesn't leave ragged highlight edges.
         //
-        // The fallback path builds each line via `Line::styled(..)`, so
-        // the style lands on the Line, not the inner spans. Walk both
-        // layers to guard against either placement.
+        // The fallback path builds each line via `Line::styled(..)`, so the style lands on the Line
+        // and the spans stay unstyled. Walk both layers to guard against either placement.
         let t = theme();
         let text = render_markdown(
             indoc! {"

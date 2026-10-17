@@ -214,10 +214,10 @@ mod tests {
     // ── prepend_markdown_prefix ──
 
     #[test]
-    fn prepend_markdown_prefix_adds_styled_prefix_and_keeps_line_style() {
+    fn prepend_markdown_prefix_adds_styled_prefix_and_keeps_line_style_and_alignment() {
         let line_style = Style::default().fg(Color::Green);
         let prefix_style = Style::default().fg(Color::Blue);
-        let line = Line::styled("content", line_style);
+        let line = Line::styled("content", line_style).centered();
 
         let result = prepend_markdown_prefix(line, "◉ ", prefix_style);
 
@@ -225,6 +225,7 @@ mod tests {
             result,
             Line::from(vec![Span::styled("◉ ", prefix_style), Span::raw("content")])
                 .style(line_style)
+                .centered()
         );
     }
 
