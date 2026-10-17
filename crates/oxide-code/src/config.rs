@@ -29,9 +29,9 @@ use self::gateway::{GatewayCompat, GatewaySnapshot};
 use self::load::Loaded;
 use self::merge::Origins;
 use self::provenance::{Provenance, Source, Sourced};
-use self::schema::{FileConfig, PermissionTable};
+use self::schema::{FileConfig, PermissionTable, TierTable};
 use crate::model::ModelSpec;
-use crate::permission::{Mode, Policy, Workspace};
+use crate::permission::{Mode, Policy, Tier, Workspace};
 use crate::util::env;
 use crate::util::path::expand_user;
 use crate::util::tls::load_extra_ca_certs;
@@ -621,7 +621,8 @@ fn validate_status_line(segments: Vec<StatusLineSegment>) -> Result<Vec<StatusLi
 /// Resolves the permission policy and the workspace launched in `cwd` from the merged file config
 /// plus the `OX_PERMISSION_MODE` override, along with the source of the mode. The env mode wins
 /// over the file mode with the empty-is-absent and parse-error-propagates behavior `effort` uses,
-/// so a typo fails loudly. Deny prefixes resolve against `cwd`, as the gate's paths do.
+/// so a typo fails loudly. Deny and ask prefixes resolve from the workspace's anchor directories,
+/// as the gate's paths do.
 fn resolve_permission(
     file: PermissionTable,
     origins: &Origins,
@@ -632,9 +633,23 @@ fn resolve_permission(
         .or_else(|| origins.sourced("permission.mode", file.mode))
         .unwrap_or_else(|| Sourced::fallback(Mode::default()));
 
-    let allow = file.allow.unwrap_or_default();
-    let deny = file.deny.unwrap_or_default();
-    let policy = Policy::resolve(mode.value, &allow, &deny, cwd)?;
+    let rules = |table: Option<TierTable>, tier| {
+        table.map_or_else(|| Ok(Vec::new()), |table| table.rules(tier))
+    };
+    let disabled: Vec<_> = file
+        .defaults
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(group, on)| (!on).then_some(group))
+        .collect();
+    let policy = Policy::resolve(
+        mode.value,
+        rules(file.deny, Tier::Deny)?,
+        rules(file.ask, Tier::Ask)?,
+        rules(file.allow, Tier::Allow)?,
+        &disabled,
+        &workspace,
+    )?;
     Ok((policy, workspace, mode.source))
 }
 
@@ -773,7 +788,7 @@ mod tests {
             max_tool_rounds: Some(100),
             prompt_cache_ttl: PromptCacheTtl::FiveMin,
             compaction: CompactionConfig::with_threshold_for_test(42),
-            permission: Policy::resolve(Mode::Plan, &[], &[], Path::new("")).unwrap(),
+            permission: Policy::new(Mode::Plan, Vec::new(), Vec::new(), Vec::new()),
             workspace: Workspace::new(Path::new("/repo")),
             show_thinking: true,
             show_welcome: false,
@@ -1069,7 +1084,7 @@ mod tests {
         assert!(config.gateway.structured_outputs);
         assert_eq!(config.theme.base, DEFAULT_THEME);
         assert!(config.theme.overrides.is_empty());
-        assert_eq!(config.permission.mode(), Mode::Auto);
+        assert_eq!(config.permission.mode(), Mode::Manual);
         assert_eq!(
             config.provenance,
             Provenance {
@@ -1979,7 +1994,7 @@ mod tests {
             .expect_err("invalid mode must propagate");
         assert_eq!(
             format!("{err:#}"),
-            r#"invalid OX_PERMISSION_MODE "bypass": expected one of auto, plan, yolo"#,
+            r#"invalid OX_PERMISSION_MODE "bypass": expected one of manual, plan, yolo"#,
         );
     }
 
@@ -2037,14 +2052,17 @@ mod tests {
         write_user_config(
             dir.path(),
             indoc::indoc! {r#"
-                [permission]
-                allow = ["edit(src/**/[)"]
+                [permission.allow]
+                edit = ["src/**/["]
             "#},
         );
         let err = load_with(&dir, &[])
             .await
             .expect_err("malformed rule must propagate");
-        assert!(format!("{err:#}").contains("invalid path glob"));
+        assert!(
+            format!("{err:#}").contains(r#"invalid permission.allow.edit pattern "src/**/[": "#),
+            "{err:#}"
+        );
     }
 
     // ── Config::load: provenance ──

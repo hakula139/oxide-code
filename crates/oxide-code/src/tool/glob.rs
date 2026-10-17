@@ -4,6 +4,7 @@ use std::fmt::Write as _;
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
@@ -12,7 +13,7 @@ use super::{
     Prepared, SearchRoot, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolResultView, ToolSpec,
     extract_input_field,
 };
-use crate::permission::{PermissionClass, ReadDeny};
+use crate::permission::{PermissionClass, ReadFilter};
 use crate::util::text::plural;
 
 const NO_FILES_FOUND: &str = "No files found";
@@ -23,12 +24,12 @@ const MAX_RESULTS: usize = 100;
 /// Withholds each path a `read` deny rule matches from the results.
 #[cfg_attr(test, derive(Default))]
 pub(crate) struct GlobTool {
-    read_deny: ReadDeny,
+    read_filter: ReadFilter,
 }
 
 impl GlobTool {
-    pub(crate) fn new(read_deny: ReadDeny) -> Self {
-        Self { read_deny }
+    pub(crate) fn new(read_filter: ReadFilter) -> Self {
+        Self { read_filter }
     }
 }
 
@@ -72,7 +73,7 @@ impl Tool for GlobTool {
         prepared: Prepared,
         ctx: &'a ToolCtx,
     ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + 'a>> {
-        Box::pin(run(prepared, ctx, self.read_deny.clone()))
+        Box::pin(run(prepared, ctx, self.read_filter.clone()))
     }
 }
 
@@ -104,7 +105,7 @@ struct Input {
 
 // ── Execution ──
 
-async fn run(prepared: Prepared, ctx: &ToolCtx, read_deny: ReadDeny) -> ToolOutput {
+async fn run(prepared: Prepared, ctx: &ToolCtx, read_filter: ReadFilter) -> ToolOutput {
     let Prepared { input: raw, access } = prepared;
     let input: Input = match super::parse_input(raw) {
         Ok(v) => v,
@@ -113,11 +114,11 @@ async fn run(prepared: Prepared, ctx: &ToolCtx, read_deny: ReadDeny) -> ToolOutp
 
     let Input { pattern, path } = input;
 
-    let cwd = ctx.cwd().to_path_buf();
+    let workspace = Arc::clone(&ctx.workspace);
     let cancel = ctx.cancel.clone();
     match tokio::task::spawn_blocking(move || {
-        let root = SearchRoot::new(&access, path.as_deref(), &cwd)?;
-        glob_files(&pattern, &root, &read_deny, &cancel)
+        let root = SearchRoot::new(&access, path.as_deref(), workspace)?;
+        glob_files(&pattern, &root, &read_filter, &cancel)
     })
     .await
     {
@@ -154,7 +155,7 @@ struct GlobOutput {
 }
 
 /// Walks `root`, filters entries against `pattern`, and returns up to `MAX_RESULTS` matches sorted
-/// newest-first by mtime, rendered relative to the root's canonical cwd. Matches `read_deny`
+/// newest-first by mtime, rendered relative to the root's canonical cwd. Matches `read_filter`
 /// withholds are counted in a trailing note, and the walk stops once `cancel` fires.
 ///
 /// `walk_files` skips files matched by `.gitignore` or a global ignore file, so only non-ignored
@@ -163,10 +164,15 @@ struct GlobOutput {
 fn glob_files(
     pattern: &str,
     root: &SearchRoot,
-    read_deny: &ReadDeny,
+    read_filter: &ReadFilter,
     cancel: &CancellationToken,
 ) -> Result<GlobOutput, String> {
-    let SearchRoot { base, spelled, cwd } = root;
+    let SearchRoot {
+        base,
+        spelled,
+        cwd,
+        workspace,
+    } = root;
     if !base.is_dir() {
         return Err(format!(
             "{} is not a directory",
@@ -176,7 +182,7 @@ fn glob_files(
 
     let glob = compile_glob(pattern)?;
 
-    let read_deny = read_deny.walk(base, spelled, cwd);
+    let read_filter = read_filter.walk(base, spelled, workspace);
     let mut withheld = 0;
     let mut matches: Vec<(String, std::time::SystemTime)> = super::walk_files(base, cancel)
         .filter(|entry| {
@@ -184,9 +190,9 @@ fn glob_files(
             glob.is_match(rel)
         })
         .filter(|entry| {
-            let denied = read_deny.denies(entry.path());
-            withheld += usize::from(denied);
-            !denied
+            let held = read_filter.withholds(entry.path());
+            withheld += usize::from(held);
+            !held
         })
         .map(|entry| {
             let mtime = super::entry_mtime(&entry);
@@ -321,18 +327,18 @@ mod tests {
     use indoc::{formatdoc, indoc};
 
     use super::*;
-    use crate::permission::{Access, Mode, Policy};
-    use crate::tool::testing::{self, canonical_tempdir, ctx, search_root, temp_ctx};
+    use crate::permission::Access;
+    use crate::tool::testing::{self, canonical_tempdir, ctx, deny_reads, search_root, temp_ctx};
     use crate::util::path::slash_separated;
 
     fn glob_in(
         pattern: &str,
         path: Option<&str>,
         cwd: &Path,
-        read_deny: &ReadDeny,
+        read_filter: &ReadFilter,
     ) -> Result<GlobOutput, String> {
         let root = search_root(cwd, path)?;
-        glob_files(pattern, &root, read_deny, &CancellationToken::new())
+        glob_files(pattern, &root, read_filter, &CancellationToken::new())
     }
 
     // ── prepare ──
@@ -443,7 +449,7 @@ mod tests {
         std::fs::write(dir.path().join("bar.txt"), "").unwrap();
         std::fs::write(dir.path().join("baz.rs"), "").unwrap();
 
-        let result = glob_in("*.txt", None, dir.path(), &ReadDeny::default()).unwrap();
+        let result = glob_in("*.txt", None, dir.path(), &ReadFilter::default()).unwrap();
         let mut files: Vec<&str> = result.content.lines().collect();
         files.sort_unstable();
         assert_eq!(files, ["bar.txt", "foo.txt"]);
@@ -458,7 +464,7 @@ mod tests {
         std::fs::write(dir.path().join("top.rs"), "").unwrap();
         std::fs::write(sub.join("nested.rs"), "").unwrap();
 
-        let result = glob_in("**/*.rs", None, dir.path(), &ReadDeny::default()).unwrap();
+        let result = glob_in("**/*.rs", None, dir.path(), &ReadFilter::default()).unwrap();
         assert!(result.content.lines().any(|l| l == "top.rs"));
         assert!(result.content.lines().any(|l| l == "sub/nested.rs"));
     }
@@ -471,11 +477,11 @@ mod tests {
         std::fs::write(dir.path().join("src/a.rs"), "").unwrap();
         std::fs::write(nested.join("b.rs"), "").unwrap();
 
-        let scoped = glob_in("src/*.rs", None, dir.path(), &ReadDeny::default()).unwrap();
+        let scoped = glob_in("src/*.rs", None, dir.path(), &ReadFilter::default()).unwrap();
         assert_eq!(scoped.content, "src/a.rs");
 
         // A pattern without `/` matches the file name at any depth.
-        let bare = glob_in("b.rs", None, dir.path(), &ReadDeny::default()).unwrap();
+        let bare = glob_in("b.rs", None, dir.path(), &ReadFilter::default()).unwrap();
         assert_eq!(bare.content, "src/nested/b.rs");
     }
 
@@ -487,13 +493,13 @@ mod tests {
         std::fs::write(dir.path().join("src/b.rs"), "").unwrap();
 
         assert_eq!(
-            glob_in("./*.rs", None, dir.path(), &ReadDeny::default())
+            glob_in("./*.rs", None, dir.path(), &ReadFilter::default())
                 .unwrap()
                 .content,
             "a.rs"
         );
         assert_eq!(
-            glob_in("././src/*.rs", None, dir.path(), &ReadDeny::default())
+            glob_in("././src/*.rs", None, dir.path(), &ReadFilter::default())
                 .unwrap()
                 .content,
             "src/b.rs"
@@ -510,10 +516,11 @@ mod tests {
         std::fs::create_dir(&outside).unwrap();
         std::fs::write(outside.join("x.rs"), "").unwrap();
 
-        let inside = glob_in("*.rs", Some("src"), &cwd, &ReadDeny::default()).unwrap();
+        let inside = glob_in("*.rs", Some("src"), &cwd, &ReadFilter::default()).unwrap();
         assert_eq!(inside.content, "src/lib.rs");
 
-        let outside_hit = glob_in("*.rs", Some("../outside"), &cwd, &ReadDeny::default()).unwrap();
+        let outside_hit =
+            glob_in("*.rs", Some("../outside"), &cwd, &ReadFilter::default()).unwrap();
         assert_eq!(
             outside_hit.content,
             slash_separated(&outside.join("x.rs")),
@@ -529,7 +536,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(50));
         std::fs::write(dir.path().join("new.txt"), "new").unwrap();
 
-        let result = glob_in("*.txt", None, dir.path(), &ReadDeny::default()).unwrap();
+        let result = glob_in("*.txt", None, dir.path(), &ReadFilter::default()).unwrap();
         assert_eq!(result.content, "new.txt\nold.txt");
     }
 
@@ -538,7 +545,7 @@ mod tests {
         let dir = canonical_tempdir();
         std::fs::write(dir.path().join("a.txt"), "").unwrap();
 
-        let result = glob_in("*.rs", None, dir.path(), &ReadDeny::default()).unwrap();
+        let result = glob_in("*.rs", None, dir.path(), &ReadFilter::default()).unwrap();
         assert_eq!(result.content, "No files found");
         assert!(result.truncated_total.is_none());
     }
@@ -546,7 +553,7 @@ mod tests {
     #[test]
     fn glob_files_invalid_pattern_reports_error() {
         let dir = canonical_tempdir();
-        let err = glob_in("[invalid", None, dir.path(), &ReadDeny::default()).unwrap_err();
+        let err = glob_in("[invalid", None, dir.path(), &ReadFilter::default()).unwrap_err();
         assert!(err.contains("Invalid glob pattern"));
     }
 
@@ -554,7 +561,7 @@ mod tests {
     fn glob_files_absolute_pattern_points_at_path() {
         let dir = canonical_tempdir();
         let pattern = format!("{}/*.rs", dir.path().display());
-        let err = glob_in(&pattern, None, dir.path(), &ReadDeny::default()).unwrap_err();
+        let err = glob_in(&pattern, None, dir.path(), &ReadFilter::default()).unwrap_err();
         assert_eq!(
             err,
             format!(
@@ -566,11 +573,12 @@ mod tests {
     #[test]
     fn glob_files_invalid_directory_reports_error() {
         let dir = canonical_tempdir();
-        let err = glob_in("*.txt", Some("missing"), dir.path(), &ReadDeny::default()).unwrap_err();
+        let err =
+            glob_in("*.txt", Some("missing"), dir.path(), &ReadFilter::default()).unwrap_err();
         assert!(err.starts_with("Cannot access missing: "), "{err}");
 
         std::fs::write(dir.path().join("a.txt"), "").unwrap();
-        let err = glob_in("*.txt", Some("a.txt"), dir.path(), &ReadDeny::default()).unwrap_err();
+        let err = glob_in("*.txt", Some("a.txt"), dir.path(), &ReadFilter::default()).unwrap_err();
         assert_eq!(err, "a.txt is not a directory");
     }
 
@@ -581,7 +589,7 @@ mod tests {
             std::fs::write(dir.path().join(format!("{i:04}.txt")), "").unwrap();
         }
 
-        let result = glob_in("*.txt", None, dir.path(), &ReadDeny::default()).unwrap();
+        let result = glob_in("*.txt", None, dir.path(), &ReadFilter::default()).unwrap();
         let file_count = result
             .content
             .lines()
@@ -602,12 +610,9 @@ mod tests {
         std::fs::write(dir.path().join("config.toml"), "").unwrap();
         std::fs::create_dir(dir.path().join("secrets")).unwrap();
         std::fs::write(dir.path().join("secrets/key.toml"), "").unwrap();
-        let deny = ["read(secrets/**)".to_owned()];
-        let read_deny = Policy::resolve(Mode::Auto, &[], &deny, dir.path())
-            .unwrap()
-            .read_deny();
+        let read_filter = deny_reads(&["secrets/**"]);
 
-        let result = glob_in("*.toml", None, dir.path(), &read_deny).unwrap();
+        let result = glob_in("*.toml", None, dir.path(), &read_filter).unwrap();
         assert_eq!(
             result.content,
             indoc! {"
@@ -629,7 +634,7 @@ mod tests {
         );
         assert_eq!(view, None);
 
-        let result = glob_in("secrets/*", None, dir.path(), &read_deny).unwrap();
+        let result = glob_in("secrets/*", None, dir.path(), &read_filter).unwrap();
         assert_eq!(
             result.content,
             indoc! {"
@@ -649,12 +654,9 @@ mod tests {
         std::fs::write(outside.join(".env"), "").unwrap();
         std::fs::write(outside.join("app.toml"), "").unwrap();
         std::os::unix::fs::symlink(&outside, cwd.join("config")).unwrap();
-        let deny = ["read(**/.env)".to_owned()];
-        let read_deny = Policy::resolve(Mode::Auto, &[], &deny, &cwd)
-            .unwrap()
-            .read_deny();
+        let read_filter = deny_reads(&[".env"]);
 
-        let result = glob_in("*", Some("config"), &cwd, &read_deny).unwrap();
+        let result = glob_in("*", Some("config"), &cwd, &read_filter).unwrap();
         assert_eq!(
             result.content,
             formatdoc! {"
@@ -680,12 +682,12 @@ mod tests {
             ".github/workflows/*.yml",
             None,
             dir.path(),
-            &ReadDeny::default(),
+            &ReadFilter::default(),
         )
         .unwrap();
         assert_eq!(result.content, ".github/workflows/ci.yml");
 
-        let all = glob_in("*.yml", None, dir.path(), &ReadDeny::default()).unwrap();
+        let all = glob_in("*.yml", None, dir.path(), &ReadFilter::default()).unwrap();
         assert_eq!(all.content, ".github/workflows/ci.yml");
     }
 
@@ -697,7 +699,7 @@ mod tests {
         std::fs::write(dir.path().join("ignored.txt"), "").unwrap();
         std::fs::write(dir.path().join("tracked.txt"), "").unwrap();
 
-        let result = glob_in("*.txt", None, dir.path(), &ReadDeny::default()).unwrap();
+        let result = glob_in("*.txt", None, dir.path(), &ReadFilter::default()).unwrap();
         assert_eq!(result.content, "tracked.txt");
     }
 

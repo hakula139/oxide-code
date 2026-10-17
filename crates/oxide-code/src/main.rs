@@ -33,7 +33,7 @@ use driver::headless::OutputFormat;
 use driver::tui::Startup;
 use engine::{Engine, Toolbox};
 use file_tracker::FileTracker;
-use permission::ReadDeny;
+use permission::ReadFilter;
 use session::display::archive_notice;
 use session::handle::ResumedSession;
 use session::list_view::render_list;
@@ -175,7 +175,7 @@ async fn async_main() -> Result<Exit> {
         .resume
         .then(|| ResumePicker::at_startup(store.clone(), handle.session_id().to_owned(), cli.all));
 
-    let toolbox = create_toolbox(&config.permission.read_deny());
+    let toolbox = create_toolbox(&config.permission.read_filter());
     let engine = Engine::new(
         &config,
         identity::load_or_create_device_id(),
@@ -229,7 +229,7 @@ fn detect_terminal_width() -> Option<usize> {
 }
 
 /// The built-in tools, with the background shells the `bash` tools share with the engine.
-fn create_toolbox(read_deny: &ReadDeny) -> Toolbox {
+fn create_toolbox(read_filter: &ReadFilter) -> Toolbox {
     let shells = Arc::new(BackgroundShells::default());
     let tools = ToolRegistry::new(vec![
         Box::new(BashTool::new(Arc::clone(&shells))),
@@ -238,8 +238,8 @@ fn create_toolbox(read_deny: &ReadDeny) -> Toolbox {
         Box::new(ReadTool),
         Box::new(WriteTool),
         Box::new(EditTool),
-        Box::new(GlobTool::new(read_deny.clone())),
-        Box::new(GrepTool::new(read_deny.clone())),
+        Box::new(GlobTool::new(read_filter.clone())),
+        Box::new(GrepTool::new(read_filter.clone())),
         Box::new(TasksTool),
     ]);
     Toolbox {
@@ -254,10 +254,9 @@ mod tests {
     use time::macros::datetime;
 
     use super::*;
-    use crate::permission::{Mode, Policy};
     use crate::session::store::set_archived_at;
     use crate::session::store::testing::seed_test_session;
-    use crate::tool::testing::{canonical_tempdir, ctx, ctx_with, temp_ctx};
+    use crate::tool::testing::{canonical_tempdir, ctx, ctx_with, deny_reads, temp_ctx};
 
     // ── Cli ──
 
@@ -390,7 +389,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_toolbox_tools_share_the_ctx_file_tracker() {
-        let tools = create_toolbox(&ReadDeny::default()).tools;
+        let tools = create_toolbox(&ReadFilter::default()).tools;
         let names: Vec<_> = tools
             .definitions()
             .into_iter()
@@ -448,7 +447,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_toolbox_shares_its_background_shells_with_the_bash_tools() {
-        let toolbox = create_toolbox(&ReadDeny::default());
+        let toolbox = create_toolbox(&ReadFilter::default());
         let tools = &toolbox.tools;
         let ctx = temp_ctx();
 
@@ -486,15 +485,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_toolbox_hands_read_deny_to_the_search_tools() {
+    async fn create_toolbox_hands_the_read_filter_to_the_search_tools() {
         let dir = canonical_tempdir();
         std::fs::write(dir.path().join("notes.txt"), "token").unwrap();
         std::fs::write(dir.path().join("secret.txt"), "token").unwrap();
-        let deny = ["read(secret.txt)".to_owned()];
-        let read_deny = Policy::resolve(Mode::Auto, &[], &deny, dir.path())
-            .unwrap()
-            .read_deny();
-        let tools = create_toolbox(&read_deny).tools;
+        let read_filter = deny_reads(&["secret.txt"]);
+        let tools = create_toolbox(&read_filter).tools;
         let ctx = ctx(dir.path());
 
         for (tool, pattern) in [("glob", "*.txt"), ("grep", "token")] {

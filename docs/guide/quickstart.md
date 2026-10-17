@@ -43,12 +43,12 @@ In the chat:
 
 ## Approve tool calls
 
-In the default `auto` permission mode, tool calls fall into these groups:
+In the default `manual` permission mode, tool calls fall into these groups:
 
 - **Runs without asking**: reads, searches, read-only commands such as `ls`, `cat`, and `grep`, and edits within the working directory.
 - **Asks unless a rule decides**: other `bash` commands and edits outside the working directory.
-- **Asks even when an allow rule matches**: edits to protected config such as `.vscode` or `.envrc`.
-- **Denied**: destructive commands such as `rm -rf` and `curl ... | sh`, and edits under the project's own `.git`.
+- **Asks even when an allow pattern matches**: edits to protected config such as `.git`, `.vscode`, or `.envrc`, and forced recursive deletes such as `rm -rf`.
+- **Denied**: reads of SSH keys and credential files.
 
 The approval prompt takes these keys:
 
@@ -60,13 +60,13 @@ The approval prompt takes these keys:
 | **F**   | Deny with a note the model reads                              |
 | **Esc** | Deny and end the turn                                         |
 
-When a rule can name the call, pressing **A** opens the rule it will add, such as `bash(cargo test)`, which you can edit before pressing **Enter**, for example to widen it to `bash(cargo test:*)`.
+When a pattern can name the call, pressing **A** opens the pattern it will allow, such as `cargo test`, which you can edit before pressing **Enter**, for example to widen it to `cargo test *`.
 
 Enter does nothing in the prompt, so a keystroke meant for the input box cannot approve a call.
 
 Session rules last until you exit or start another session, and `/status` lists them.
 
-See [Tool approval](configuration.md#permission-tool-approval) for the other modes and instructions on writing rules.
+See [Tool approval](configuration.md#permission-tool-approval) for the other modes and instructions on writing patterns.
 
 ## What it can do
 

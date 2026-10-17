@@ -562,12 +562,12 @@ mod tests {
         }
     }
 
-    /// Parallel-safe tool in the `bash` class, so `auto` asks before each of its calls.
+    /// Parallel-safe tool in the `exec` class, so `manual` asks before each of its calls.
     struct AskingTool;
 
     impl Tool for AskingTool {
         fn spec(&self) -> ToolSpec {
-            parallel_spec("probe", PermissionClass::Bash)
+            parallel_spec("probe", PermissionClass::Exec)
         }
 
         fn run<'a>(
@@ -632,7 +632,7 @@ mod tests {
             Box::new(EchoTool),
         ]);
         let sink = CapturingSink::new();
-        let mut dispatch_ctx = dispatch_with(Mode::Auto, &[], &[], Path::new("/repo"));
+        let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
         let (tx, mut rx) = mpsc::channel::<Op>(1);
         tx.try_send(Op::Interrupt).unwrap();
         let calls = vec![
@@ -687,7 +687,7 @@ mod tests {
             Box::new(EchoTool),
         ]);
         let sink = CapturingSink::new();
-        let mut dispatch_ctx = dispatch_with(Mode::Auto, &["bash"], &[], Path::new("/repo"));
+        let mut dispatch_ctx = dispatch_with(Mode::Manual, &["*"], &[], Path::new("/repo"));
         let calls = vec![
             call("tool_1", "meet", json!({"v": 1})),
             call("tool_2", "meet", json!({})),
@@ -759,7 +759,7 @@ mod tests {
             Box::new(HangTool(started_tx)),
         ]);
         let sink = CapturingSink::new();
-        let mut dispatch_ctx = dispatch_with(Mode::Auto, &[], &[], Path::new("/repo"));
+        let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
         let (tx, mut rx) = mpsc::channel::<Op>(1);
         let calls = vec![
             call("tool_1", "meet", json!({"v": 1})),
@@ -807,7 +807,7 @@ mod tests {
     async fn run_tool_round_reports_the_list_only_a_successful_tasks_call_sets() {
         let tools = ToolRegistry::new(vec![Box::new(TasksTool)]);
         let sink = CapturingSink::new();
-        let mut dispatch_ctx = dispatch_with(Mode::Auto, &[], &[], Path::new("/repo"));
+        let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
         let both_in_progress = json!({"tasks": [
             {"content": "Fix the parser", "status": "in_progress"},
             {"content": "Fix the lexer", "status": "in_progress"},
@@ -860,10 +860,11 @@ mod tests {
 
     #[tokio::test]
     async fn gate_allow_proceeds_without_an_approval_event() {
-        // `echo` is a bash-class tool, so `auto` asks by default, and a class-wide allow clears it.
+        // `echo` is an exec-class tool, so `manual` asks by default, and a class-wide allow clears
+        // it.
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
         let sink = CapturingSink::new();
-        let mut dispatch_ctx = dispatch_with(Mode::Auto, &["bash"], &[], Path::new("/repo"));
+        let mut dispatch_ctx = dispatch_with(Mode::Manual, &["*"], &[], Path::new("/repo"));
 
         let gate = gate_call(
             &tools,
@@ -885,7 +886,7 @@ mod tests {
     async fn gate_deny_rule_short_circuits_to_a_synthetic_denial() {
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
         let sink = CapturingSink::new();
-        let mut dispatch_ctx = dispatch_with(Mode::Auto, &[], &["bash"], Path::new("/repo"));
+        let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &["*"], Path::new("/repo"));
 
         let denial = gate_call(
             &tools,
@@ -913,7 +914,7 @@ mod tests {
     async fn gate_ask_emits_event_and_approve_proceeds() {
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
         let sink = CapturingSink::new();
-        let mut dispatch_ctx = dispatch_with(Mode::Auto, &[], &[], Path::new("/repo"));
+        let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
         let (tx, mut rx) = mpsc::channel::<Op>(1);
         tx.try_send(Op::Resolve {
             id: "tool_1".to_owned(),
@@ -948,8 +949,8 @@ mod tests {
     async fn gate_allow_for_session_runs_later_calls_the_rule_covers_unasked() {
         let tools = ToolRegistry::new(vec![Box::new(BashTool::default())]);
         let sink = CapturingSink::new();
-        let mut dispatch_ctx = dispatch_with(Mode::Auto, &[], &[], Path::new("/repo"));
-        let rule = Rule::parse("bash(cargo test:*)").unwrap();
+        let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
+        let rule = Rule::parse(PermissionClass::Exec, "cargo test *").unwrap();
         let (tx, mut rx) = mpsc::channel::<Op>(1);
         tx.try_send(Op::Resolve {
             id: "tool_1".to_owned(),
@@ -984,12 +985,13 @@ mod tests {
                         .as_ref()
                         .expect("a command offers a grant")
                         .suggested()
-                        .to_string(),
+                        .pattern()
+                        .to_owned(),
                 ),
                 _ => None,
             })
             .collect();
-        assert_eq!(suggested, ["bash(cargo test)"], "only the first call asks");
+        assert_eq!(suggested, ["cargo test"], "only the first call asks");
         assert!(
             events.iter().any(
                 |e| matches!(e, Event::SessionRulesUpdated(rules) if *rules == [rule.clone()])
@@ -1004,22 +1006,27 @@ mod tests {
         // The engine re-checks the frontend's rule against its own grant: a rule that misses the
         // call, one in another class, and any rule for a call that offered no grant all deny.
         let tools = ToolRegistry::new(vec![Box::new(BashTool::default()), Box::new(EchoTool)]);
-        for (name, input, rule) in [
+        for (name, input, (class, pattern)) in [
             (
                 "bash",
                 json!({ "command": "cargo test" }),
-                "bash(cargo build:*)",
+                (PermissionClass::Exec, "cargo build *"),
             ),
-            ("bash", json!({ "command": "cargo test" }), "edit(**)"),
-            ("echo", json!({}), "bash"),
+            (
+                "bash",
+                json!({ "command": "cargo test" }),
+                (PermissionClass::Edit, "*"),
+            ),
+            ("echo", json!({}), (PermissionClass::Exec, "*")),
         ] {
+            let rule = Rule::parse(class, pattern).unwrap();
             let sink = CapturingSink::new();
-            let mut dispatch_ctx = dispatch_with(Mode::Auto, &[], &[], Path::new("/repo"));
+            let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
             let (tx, mut rx) = mpsc::channel::<Op>(1);
             tx.try_send(Op::Resolve {
                 id: "tool_1".to_owned(),
                 decision: Decision::AllowForSession {
-                    rule: Box::new(Rule::parse(rule).unwrap()),
+                    rule: Box::new(rule),
                 },
             })
             .unwrap();
@@ -1037,21 +1044,25 @@ mod tests {
             .expect("a refused rule resolves without abort")
             .output();
 
-            assert_eq!(denial.content, denied_output(name).content, "{rule}");
-            assert_eq!(dispatch_ctx.policy.session_allow(), [], "{rule}");
+            assert_eq!(
+                denial.content,
+                denied_output(name).content,
+                "{class} {pattern}"
+            );
+            assert_eq!(dispatch_ctx.policy.session_allow(), [], "{class} {pattern}");
             let events = sink.events();
             assert!(
                 events.iter().any(|e| matches!(
                     e,
                     Event::Error(msg) if msg.starts_with(&format!("Session rule refused, so the {name} call was denied: "))
                 )),
-                "{rule}: {events:?}",
+                "{class} {pattern}: {events:?}",
             );
             assert!(
                 !events
                     .iter()
                     .any(|e| matches!(e, Event::SessionRulesUpdated(_))),
-                "{rule}: {events:?}",
+                "{class} {pattern}: {events:?}",
             );
         }
     }
@@ -1061,7 +1072,7 @@ mod tests {
         // If the approval event can't be delivered, no modal can answer it, so the gate must deny
         // before `await_approval` blocks forever. An inert receiver would hang on a regression.
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
-        let mut dispatch_ctx = dispatch_with(Mode::Auto, &[], &[], Path::new("/repo"));
+        let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
         let (_tx, mut rx) = mpsc::channel::<Op>(1);
 
         let denial = gate_call(
@@ -1084,7 +1095,7 @@ mod tests {
     async fn gate_ask_deny_decision_yields_a_synthetic_denial() {
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
         let sink = CapturingSink::new();
-        let mut dispatch_ctx = dispatch_with(Mode::Auto, &[], &[], Path::new("/repo"));
+        let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
         let (tx, mut rx) = mpsc::channel::<Op>(1);
         tx.try_send(Op::Resolve {
             id: "tool_1".to_owned(),
@@ -1115,7 +1126,7 @@ mod tests {
         // the model reads why the call failed.
         let tools = ToolRegistry::new(vec![]);
         let sink = CapturingSink::new();
-        let mut dispatch_ctx = dispatch_with(Mode::Auto, &[], &["bash"], Path::new("/repo"));
+        let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &["*"], Path::new("/repo"));
 
         let output = gate_call(
             &tools,
@@ -1147,7 +1158,7 @@ mod tests {
         std::fs::write(cwd.join("real.txt"), "x").unwrap();
         std::os::unix::fs::symlink("real.txt", cwd.join("link.txt")).unwrap();
         let tools = ToolRegistry::new(vec![Box::new(ReadTool)]);
-        let mut dispatch_ctx = dispatch_with(Mode::Auto, &[], &[], &cwd);
+        let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], &cwd);
 
         let gate = gate_call(
             &tools,
@@ -1184,7 +1195,7 @@ mod tests {
         let tools = ToolRegistry::new(vec![Box::new(WriteTool)]);
         let mut dispatch_ctx = DispatchContext {
             workspace: Arc::new(workspace),
-            ..dispatch_with(Mode::Auto, &[], &[], &repo)
+            ..dispatch_with(Mode::Manual, &[], &[], &repo)
         };
 
         for (id, path, asks) in [

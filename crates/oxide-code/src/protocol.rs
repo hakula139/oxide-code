@@ -506,7 +506,7 @@ mod tests {
             Op::Resolve {
                 id: "t1".to_owned(),
                 decision: Decision::AllowForSession {
-                    rule: Box::new(Rule::parse("bash(cargo test:*)").unwrap()),
+                    rule: Box::new(Rule::parse(PermissionClass::Exec, "cargo test *").unwrap()),
                 },
             },
             Op::Resolve {
@@ -598,7 +598,7 @@ mod tests {
     fn cargo_test_grant() -> SessionGrant {
         Policy::default()
             .session_grant(
-                PermissionClass::Bash,
+                PermissionClass::Exec,
                 &Access::for_command("cargo test", &Workspace::new(Path::new("/repo"))),
             )
             .unwrap()
@@ -697,7 +697,9 @@ mod tests {
                 },
                 grant: Some(Box::new(cargo_test_grant())),
             },
-            Event::SessionRulesUpdated(vec![Rule::parse("bash(cargo test:*)").unwrap()]),
+            Event::SessionRulesUpdated(vec![
+                Rule::parse(PermissionClass::Exec, "cargo test *").unwrap(),
+            ]),
             Event::TasksUpdated(plan()),
             Event::BackgroundShellsUpdated(shells_in_each_state()),
         ]
@@ -730,10 +732,13 @@ mod tests {
         );
         assert_eq!(
             serde_json::to_value(Decision::AllowForSession {
-                rule: Box::new(Rule::parse("bash(cargo test:*)").unwrap()),
+                rule: Box::new(Rule::parse(PermissionClass::Exec, "cargo test *").unwrap()),
             })
             .unwrap(),
-            json!({"type": "allow_for_session", "data": {"rule": "bash(cargo test:*)"}}),
+            json!({
+                "type": "allow_for_session",
+                "data": {"rule": {"class": "exec", "pattern": "cargo test *"}},
+            }),
         );
         assert_eq!(
             serde_json::to_value(Decision::DenyWithFeedback {

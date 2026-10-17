@@ -586,7 +586,7 @@ mod tests {
                 name: "gate".to_owned(),
                 description: "blocks until the turn is cancelled".to_owned(),
                 input_schema: json!({"type": "object"}),
-                class: crate::permission::PermissionClass::Bash,
+                class: crate::permission::PermissionClass::Exec,
                 parallel_safe: false,
             }
         }
@@ -626,8 +626,8 @@ mod tests {
             .collect()
     }
 
-    /// Dispatch context in `cwd` whose gate bypasses every rule (`yolo`), so the turn tests
-    /// exercise the loop without the permission layer interceding. The `dispatch` and
+    /// Dispatch context in `cwd` whose gate runs every call that no deny or ask rule stops
+    /// (`yolo`), so the turn tests exercise the loop without approvals. The `dispatch` and
     /// `permission` tests cover the gate itself.
     fn yolo_in(cwd: &Path) -> DispatchContext<'static> {
         dispatch_with(crate::permission::Mode::Yolo, &[], &[], cwd)
@@ -2173,9 +2173,9 @@ mod tests {
             &mut inert_ops(),
             None,
             &mut dispatch_with(
-                crate::permission::Mode::Auto,
+                crate::permission::Mode::Manual,
                 &[],
-                &["bash"],
+                &["*"],
                 Path::new("/repo"),
             ),
         )
@@ -2250,7 +2250,12 @@ mod tests {
                 &session,
                 &mut ops,
                 None,
-                &mut dispatch_with(crate::permission::Mode::Auto, &[], &[], Path::new("/repo")),
+                &mut dispatch_with(
+                    crate::permission::Mode::Manual,
+                    &[],
+                    &[],
+                    Path::new("/repo"),
+                ),
             )
             .await;
 
@@ -2303,7 +2308,7 @@ mod tests {
             text_turn("Done"),
         ]);
         let tools = ToolRegistry::new(vec![Box::new(crate::tool::write::WriteTool)]);
-        let mut dispatch_ctx = dispatch_with(crate::permission::Mode::Auto, &[], &[], &cwd);
+        let mut dispatch_ctx = dispatch_with(crate::permission::Mode::Manual, &[], &[], &cwd);
         let mut messages = vec![Message::user("take notes")];
         let (op_tx, mut ops) = mpsc::channel(4);
         let sink = ReplyingSink {

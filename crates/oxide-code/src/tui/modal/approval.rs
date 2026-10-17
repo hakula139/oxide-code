@@ -406,8 +406,8 @@ impl Modal for ApprovalModal {
             KeyCode::Char('a' | 'A') if is_plain_char(event) && self.body_visible() => {
                 match self.grant.take() {
                     Some(offer) => {
-                        let rule = offer.suggested().to_string();
-                        self.start_edit(Purpose::Rule(offer), &rule)
+                        let pattern = offer.suggested().pattern().to_owned();
+                        self.start_edit(Purpose::Rule(offer), &pattern)
                     }
                     None => ModalKey::Consumed,
                 }
@@ -594,6 +594,7 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use super::*;
+    use crate::permission::rule::Rule;
     use crate::permission::{Access, PermissionClass, Policy, Workspace};
     use crate::tool::DiffLine;
 
@@ -633,7 +634,7 @@ mod tests {
     /// A shown modal that offers the session rule [`Policy::session_grant`] suggests for `command`.
     fn granted_modal(command: &str) -> ApprovalModal {
         let target = Access::for_command(command, &Workspace::new(Path::new("/repo")));
-        let grant = Policy::default().session_grant(PermissionClass::Bash, &target);
+        let grant = Policy::default().session_grant(PermissionClass::Exec, &target);
         let mut modal = ApprovalModal::new(
             "call-1".to_owned(),
             ApprovalPreview {
@@ -1028,16 +1029,16 @@ mod tests {
         modal.expire_guard();
         let editing = render_to_string(&modal, 60, modal.height(60, 40));
         assert!(editing.contains(RULE_LABEL), "{editing}");
-        assert!(editing.contains("bash(cargo test)"), "{editing}");
+        assert!(editing.contains("cargo test"), "{editing}");
         assert!(editing.contains("[Enter] allow for session"), "{editing}");
 
-        // `y` and `n` type into the rule while it is being edited.
+        // `y` and `n` type into the pattern while it is being edited.
         type_text(&mut modal, "yn");
         assert!(modal.captures_esc());
-        for _ in 0.."yn)".len() {
+        for _ in 0.."yn".len() {
             modal.handle_key(&key(KeyCode::Backspace));
         }
-        type_text(&mut modal, ":*)");
+        type_text(&mut modal, " *");
         let outcome = modal.handle_key(&key(KeyCode::Enter));
         let ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::Resolve { id, decision }))) =
             outcome
@@ -1048,7 +1049,10 @@ mod tests {
         let Decision::AllowForSession { rule } = decision else {
             panic!("expected AllowForSession, got {decision:?}");
         };
-        assert_eq!(rule.to_string(), "bash(cargo test:*)");
+        assert_eq!(
+            *rule,
+            Rule::parse(PermissionClass::Exec, "cargo test *").unwrap()
+        );
     }
 
     #[test]
@@ -1057,10 +1061,10 @@ mod tests {
         modal.handle_key(&key(KeyCode::Char('a')));
         modal.expire_guard();
         render_to_string(&modal, 60, modal.height(60, 40));
-        for _ in 0.."test)".len() {
+        for _ in 0.."test".len() {
             modal.handle_key(&key(KeyCode::Backspace));
         }
-        modal.handle_paste("build)");
+        modal.handle_paste("build");
 
         assert!(matches!(
             modal.handle_key(&key(KeyCode::Enter)),
@@ -1069,7 +1073,7 @@ mod tests {
         let height = modal.height(60, 40);
         let rejected = render_to_string(&modal, 60, height);
         assert!(
-            rejected.contains("the rule no longer covers this call"),
+            rejected.contains("the pattern no longer covers this call"),
             "{rejected}"
         );
 
@@ -1097,7 +1101,7 @@ mod tests {
         ));
 
         let full = render_to_string(&modal, 60, 6);
-        assert!(full.contains("bash(cargo test)"), "{full}");
+        assert!(full.contains("cargo test"), "{full}");
         assert!(
             full.contains("[Enter]"),
             "the body yields its rows to the editor: {full}"
@@ -1116,13 +1120,23 @@ mod tests {
         modal.expire_guard();
         render_to_string(&modal, 60, modal.height(60, 40));
         modal.handle_key(&key(KeyCode::End));
-        modal.handle_key(&key(KeyCode::Backspace));
+        type_text(&mut modal, " $X");
         modal.handle_key(&key(KeyCode::Enter));
 
         let rejected = render_to_string(&modal, 60, modal.height(60, 40));
-        let error = rejected.split(RULE_LABEL).nth(1).unwrap_or_default();
+        let error: Vec<&str> = rejected
+            .split(RULE_LABEL)
+            .nth(1)
+            .unwrap_or_default()
+            .lines()
+            .map(str::trim_end)
+            .collect();
         assert!(
-            error.contains("unbalanced") && error.contains("parenthesis"),
+            error.windows(2).any(|lines| lines
+                == [
+                    r#"the word "$X" expands at run time. Quote it to match it as"#,
+                    "written.",
+                ]),
             "{rejected}"
         );
         assert!(rejected.contains("rows 1-"), "{rejected}");

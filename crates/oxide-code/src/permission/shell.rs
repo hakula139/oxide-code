@@ -2,14 +2,16 @@
 //! simple commands it runs and the files its output redirections write, so rules weigh each simple
 //! command on its own. Leading assignments and transparent wrappers are stripped first. A command
 //! the analysis cannot vouch for is opaque: rules may deny it or leave it to ask, but never allow
-//! it. Design: `docs/design/tools/permissions.md`.
+//! it. `exec` patterns parse here too, so they read words the way commands do. Design:
+//! `docs/design/tools/permissions.md`.
 
 use std::path::Path;
 use std::sync::LazyLock;
 
+use anyhow::{Result, bail, ensure};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use tree_sitter::{Node, Parser};
+use tree_sitter::{Node, Parser, Tree};
 
 use crate::permission::{Access, Workspace};
 use crate::util::path::expand_user;
@@ -195,8 +197,6 @@ static SAFE_SED_SCRIPT: LazyLock<Regex> = LazyLock::new(|| {
 /// A `bash` call's command and what the analysis found in it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct CommandTarget {
-    /// The command as the call passes it.
-    command: String,
     /// Each simple command it runs, including those inside substitutions and literal `sh -c` or
     /// `eval` scripts.
     segments: Vec<Segment>,
@@ -219,15 +219,10 @@ impl CommandTarget {
         };
         walk.script(command);
         Self {
-            command: command.to_owned(),
             segments: walk.segments,
             writes: walk.writes,
             opaque: walk.opaque || (walk.changes_dir && walk.relative_path),
         }
-    }
-
-    pub(crate) fn command(&self) -> &str {
-        &self.command
     }
 
     pub(super) fn segments(&self) -> &[Segment] {
@@ -246,29 +241,62 @@ impl CommandTarget {
 /// One simple command.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct Segment {
-    /// The command as written, from where a rule must name it. Leading assignments of
+    /// The words an allow rule must name, without redirections. Leading assignments of
     /// [`SAFE_VARIABLES`] and transparent wrappers are left out, up to the first assignment of
-    /// another variable.
-    text: String,
-    /// The words of the program that runs, past every assignment and wrapper, unquoted, or as
-    /// written where a word expands.
-    words: Vec<String>,
+    /// another variable, which starts the list and keeps every word after it.
+    named: Vec<ShellWord>,
+    /// Where the program that runs starts in `named`, past every assignment and wrapper.
+    program: usize,
     /// The files a shipped known-safe read-only command reads, resolved like a read's path, or
     /// `None` for any other command.
     safe_reads: Option<Vec<Access>>,
 }
 
 impl Segment {
-    pub(super) fn text(&self) -> &str {
-        &self.text
+    pub(super) fn named(&self) -> &[ShellWord] {
+        &self.named
     }
 
-    pub(super) fn words(&self) -> &[String] {
-        &self.words
+    pub(super) fn program(&self) -> &[ShellWord] {
+        &self.named[self.program..]
+    }
+
+    /// The program words with the program's directory dropped, when its name has one, so
+    /// `/bin/rm -rf x` also reads as `rm -rf x`.
+    pub(super) fn bare_program(&self) -> Option<Vec<ShellWord>> {
+        let (name, args) = self.program().split_first()?;
+        let bare = basename(&name.text);
+        (bare != name.text).then(|| {
+            std::iter::once(ShellWord {
+                text: bare.to_owned(),
+                literal: name.literal,
+            })
+            .chain(args.iter().cloned())
+            .collect()
+        })
     }
 
     pub(super) fn safe_reads(&self) -> Option<&[Access]> {
         self.safe_reads.as_deref()
+    }
+}
+
+/// One word of a simple command as rules compare it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct ShellWord {
+    /// The word unquoted, or as written where part of it expands at run time.
+    text: String,
+    /// Whether `text` is the only value the word can take, since it neither expands nor globs.
+    literal: bool,
+}
+
+impl ShellWord {
+    pub(super) fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub(super) const fn is_literal(&self) -> bool {
+        self.literal
     }
 }
 
@@ -288,13 +316,7 @@ struct Walk<'a> {
 
 impl Walk<'_> {
     fn script(&mut self, source: &str) {
-        let mut parser = Parser::new();
-        parser
-            .set_language(&tree_sitter_bash::LANGUAGE.into())
-            .expect("the bundled bash grammar matches the tree-sitter ABI");
-        let tree = parser
-            .parse(source, None)
-            .expect("parsing stops early only on a timeout or cancellation, and neither is set");
+        let tree = parse_tree(source);
         let root = tree.root_node();
         self.opaque |= root.has_error();
         self.visit(root, source);
@@ -354,19 +376,22 @@ impl Walk<'_> {
             })
             .map(|word| Word::new(word, src))
             .collect();
+        let mut assignments = Vec::new();
         let mut unsafe_assignment = None;
         for child in node.named_children(&mut cursor) {
             if child.kind() == "variable_assignment" {
                 if !SAFE_VARIABLES.contains(&assigned(&src[child.byte_range()])) {
-                    unsafe_assignment.get_or_insert(child);
+                    unsafe_assignment.get_or_insert(assignments.len());
                 }
+                assignments.push(assignment_word(child, src));
                 self.visit_children(child, src);
             } else {
                 self.visit(child, src);
             }
         }
 
-        let (words, named) = self.strip_wrappers(&words);
+        let all = &words;
+        let (words, named) = self.strip_wrappers(all);
         let Some((first, args)) = words.split_first() else {
             return;
         };
@@ -393,10 +418,17 @@ impl Walk<'_> {
                     .map(|operand| Access::for_path(operand, self.workspace))
                     .collect()
             });
-        let start = unsafe_assignment.unwrap_or(named[0].node).start_byte();
+        let named: Vec<ShellWord> = match unsafe_assignment {
+            Some(first) => assignments
+                .split_off(first)
+                .into_iter()
+                .chain(all.iter().map(|word| word.shell_word(src)))
+                .collect(),
+            None => named.iter().map(|word| word.shell_word(src)).collect(),
+        };
         self.segments.push(Segment {
-            text: src[start..node.end_byte()].to_owned(),
-            words: words.iter().map(|word| word.shell_value(src)).collect(),
+            program: named.len() - words.len(),
+            named,
             safe_reads,
         });
     }
@@ -507,6 +539,16 @@ fn runs_hidden_code(node: Node<'_>) -> bool {
         "compound_statement" => node.child(0).is_some_and(|open| open.kind() == "(("),
         _ => false,
     }
+}
+
+fn parse_tree(source: &str) -> Tree {
+    let mut parser = Parser::new();
+    parser
+        .set_language(&tree_sitter_bash::LANGUAGE.into())
+        .expect("the bundled bash grammar matches the tree-sitter ABI");
+    parser
+        .parse(source, None)
+        .expect("parsing stops early only on a timeout or cancellation, and neither is set")
 }
 
 /// The last component of a command path, so `/bin/sh` counts as `sh`.
@@ -650,10 +692,43 @@ impl<'t> Word<'t> {
         }
     }
 
-    fn shell_value(&self, src: &str) -> String {
-        self.value
-            .clone()
-            .unwrap_or_else(|| src[self.node.byte_range()].to_owned())
+    fn shell_word(&self, src: &str) -> ShellWord {
+        ShellWord {
+            text: self
+                .value
+                .clone()
+                .unwrap_or_else(|| src[self.node.byte_range()].to_owned()),
+            literal: self.value.is_some() && !self.glob,
+        }
+    }
+}
+
+/// A leading `NAME=VALUE` assignment as a word, with its value unquoted and a leading `~`
+/// expanded. Neither pathname nor brace expansion applies to an assignment, so only a value or a
+/// subscript that expands keeps it from being literal.
+fn assignment_word(node: Node<'_>, src: &str) -> ShellWord {
+    let written = || ShellWord {
+        text: src[node.byte_range()].to_owned(),
+        literal: false,
+    };
+    if node
+        .child_by_field_name("name")
+        .is_none_or(|name| name.kind() != "variable_name")
+    {
+        return written();
+    }
+    let Some(value) = node.child_by_field_name("value") else {
+        return ShellWord {
+            text: src[node.byte_range()].to_owned(),
+            literal: true,
+        };
+    };
+    match unquote(value, src, true) {
+        Some((unquoted, _)) => ShellWord {
+            text: format!("{}{unquoted}", &src[node.start_byte()..value.start_byte()]),
+            literal: true,
+        },
+        None => written(),
     }
 }
 
@@ -730,6 +805,83 @@ fn unquote_double(inner: &str) -> String {
         }
     }
     value
+}
+
+// ── Patterns ──
+
+/// One word of an `exec` pattern.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum PatternWord {
+    Literal(String),
+    /// An unquoted `*` standing alone.
+    Any,
+}
+
+/// Parses an `exec` pattern into its words: one simple command, optionally led by assignments,
+/// whose words are each literal or a lone unquoted `*`.
+pub(super) fn pattern_words(pattern: &str) -> Result<Vec<PatternWord>> {
+    let tree = parse_tree(pattern);
+    let root = tree.root_node();
+    ensure!(!root.has_error(), "it does not parse as a shell command");
+    let mut cursor = root.walk();
+    let nodes: Vec<Node<'_>> = root.named_children(&mut cursor).collect();
+    let &[command] = nodes.as_slice() else {
+        bail!("it must be one simple command, such as `cargo test *`");
+    };
+    ensure!(
+        command.kind() != "redirected_statement",
+        "it holds a redirection, which `edit` patterns cover"
+    );
+    ensure!(
+        command.kind() == "command",
+        "it must be one simple command, such as `cargo test *`"
+    );
+
+    let mut words = Vec::new();
+    let mut names_command = false;
+    let mut cursor = command.walk();
+    for child in command.named_children(&mut cursor) {
+        let node = match child.kind() {
+            "variable_assignment" => {
+                let word = assignment_word(child, pattern);
+                ensure!(
+                    word.literal,
+                    "the assignment {:?} expands at run time",
+                    word.text
+                );
+                words.push(PatternWord::Literal(word.text));
+                continue;
+            }
+            "file_redirect" | "herestring_redirect" | "heredoc_redirect" => {
+                bail!("it holds a redirection, which `edit` patterns cover");
+            }
+            "command_name" => {
+                names_command = true;
+                match child.named_child(0) {
+                    Some(name) => name,
+                    None => bail!("it must name a command"),
+                }
+            }
+            _ => child,
+        };
+        let written = &pattern[node.byte_range()];
+        if node.kind() == "word" && written == "*" {
+            words.push(PatternWord::Any);
+            continue;
+        }
+        let word = Word::new(node, pattern);
+        let Some(value) = word.value else {
+            bail!("the word {written:?} expands at run time. Quote it to match it as written.");
+        };
+        ensure!(
+            !word.glob,
+            "the word {written:?} holds a glob, but only a lone `*` is a wildcard. Quote it to \
+             match it as written."
+        );
+        words.push(PatternWord::Literal(value));
+    }
+    ensure!(names_command, "it must name a command");
+    Ok(words)
 }
 
 // ── Known-Safe Commands ──
@@ -868,16 +1020,37 @@ mod tests {
         CommandTarget::parse(command, &Workspace::new(Path::new("/repo")))
     }
 
+    fn joined(words: &[ShellWord]) -> String {
+        words
+            .iter()
+            .map(ShellWord::text)
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// Each simple command's named words, joined on spaces.
     fn texts(command: &str) -> Vec<String> {
         parse(command)
             .segments
-            .into_iter()
-            .map(|segment| segment.text)
+            .iter()
+            .map(|segment| joined(segment.named()))
             .collect()
     }
 
     fn words(command: &str) -> Vec<String> {
-        parse(command).segments.remove(0).words
+        parse(command).segments[0]
+            .program()
+            .iter()
+            .map(|word| word.text().to_owned())
+            .collect()
+    }
+
+    fn pattern(raw: &str) -> Vec<PatternWord> {
+        pattern_words(raw).unwrap()
+    }
+
+    fn literal(text: &str) -> PatternWord {
+        PatternWord::Literal(text.to_owned())
     }
 
     /// Each write's path relative to `cwd`, or as requested outside it.
@@ -916,9 +1089,7 @@ mod tests {
         ] {
             assert_eq!(texts(command), expected, "{command:?}");
         }
-        let command = parse("cargo test --all");
-        assert_eq!(command.command(), "cargo test --all");
-        assert!(!command.is_opaque());
+        assert!(!parse("cargo test --all").is_opaque());
     }
 
     #[test]
@@ -951,8 +1122,8 @@ mod tests {
         ] {
             let command = parse(command);
             let segment = &command.segments[0];
-            assert_eq!(segment.text, text, "{command:?}");
-            assert_eq!(segment.words[0], name, "{command:?}");
+            assert_eq!(joined(segment.named()), text, "{command:?}");
+            assert_eq!(segment.program()[0].text(), name, "{command:?}");
             assert!(segment.safe_reads.is_none(), "{command:?}");
             assert!(!command.is_opaque(), "{command:?}");
         }
@@ -996,6 +1167,45 @@ mod tests {
         });
     }
 
+    #[test]
+    fn parse_marks_each_word_that_expands_or_globs_as_not_literal() {
+        let command = parse(r#"FOO="a b" BAR=$X EMPTY= a[$i]=1 cat 'x*' *.rs "$HOME" ~/n"#);
+        let segment = &command.segments[0];
+        let named: Vec<(&str, bool)> = segment
+            .named()
+            .iter()
+            .map(|word| (word.text(), word.is_literal()))
+            .collect();
+        let home = expand_user("~/n").unwrap().to_string_lossy().into_owned();
+        assert_eq!(
+            named,
+            [
+                ("FOO=a b", true),
+                ("BAR=$X", false),
+                ("EMPTY=", true),
+                ("a[$i]=1", false),
+                ("cat", true),
+                ("x*", true),
+                ("*.rs", false),
+                ("\"$HOME\"", false),
+                (home.as_str(), true),
+            ]
+        );
+        assert_eq!(
+            joined(segment.program()),
+            format!("cat x* *.rs \"$HOME\" {home}")
+        );
+    }
+
+    #[test]
+    fn parse_drops_the_program_directory_for_the_bare_program_only() {
+        let command = parse("FOO=1 /usr/bin/rm -rf x");
+        let segment = &command.segments[0];
+        assert_eq!(joined(&segment.bare_program().unwrap()), "rm -rf x");
+        assert_eq!(joined(segment.named()), "FOO=1 /usr/bin/rm -rf x");
+        assert!(parse("rm -rf x").segments[0].bare_program().is_none());
+    }
+
     // ── CommandTarget::parse: wrappers ──
 
     #[test]
@@ -1015,7 +1225,16 @@ mod tests {
             "exec -a name rm -rf x",
         ] {
             let command = parse(command);
-            assert_eq!(command.segments[0].text, "rm -rf x", "{command:?}");
+            assert_eq!(
+                joined(command.segments[0].program()),
+                "rm -rf x",
+                "{command:?}"
+            );
+            assert_eq!(
+                joined(command.segments[0].named()),
+                "rm -rf x",
+                "{command:?}"
+            );
             assert!(!command.is_opaque(), "{command:?}");
         }
     }
@@ -1096,6 +1315,34 @@ mod tests {
                 texts(command)
             );
         }
+    }
+
+    // ── pattern_words ──
+
+    #[test]
+    fn pattern_words_unquotes_each_word_and_reads_a_lone_star_as_a_wildcard() {
+        temp_env::with_var(HOME_VAR, Some(abs("/home/u")), || {
+            let home = PathBuf::from(abs("/home/u")).join("x");
+            assert_eq!(
+                pattern(r#"GIT_PAGER=cat git  commit -m "a b" '*' \* ~/x *"#),
+                [
+                    literal("GIT_PAGER=cat"),
+                    literal("git"),
+                    literal("commit"),
+                    literal("-m"),
+                    literal("a b"),
+                    literal("*"),
+                    literal("*"),
+                    literal(&home.to_string_lossy()),
+                    PatternWord::Any,
+                ]
+            );
+        });
+        assert_eq!(pattern("*"), [PatternWord::Any]);
+        assert_eq!(
+            pattern("git * --force"),
+            [literal("git"), PatternWord::Any, literal("--force")]
+        );
     }
 
     // ── Walk::redirect ──

@@ -4,13 +4,14 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use toml::Table;
+use toml::{Table, Value};
 use tracing::debug;
 
 use super::merge::{Origins, merge};
 use super::provenance::Layer;
 use super::schema::FileConfig;
-use crate::permission::{extra_root, parse_rules};
+use crate::permission::legacy::migration_error;
+use crate::permission::{Tier, extra_root};
 use crate::util::path::{XdgBase, app_dir};
 
 const CONFIG_FILE: &str = "config.toml";
@@ -127,8 +128,9 @@ pub(crate) fn user_config_path() -> Option<PathBuf> {
 // ── Reading ──
 
 /// Parses one layer. `Ok(None)` when the user file is missing, and `Err` when a file is unreadable,
-/// including a drop-in symlink whose target is gone, fails the schema, holds a malformed
-/// permission rule or extra root, or is a project file setting a user-only key.
+/// including a drop-in symlink whose target is gone, fails the schema, holds old flat permission
+/// rules, a malformed pattern, or an invalid extra root, or is a project file setting a user-only
+/// key.
 fn read_layer(layer: &Layer) -> Result<Option<Table>> {
     let path = layer.path();
     let content = match std::fs::read_to_string(path) {
@@ -144,23 +146,42 @@ fn read_layer(layer: &Layer) -> Result<Option<Table>> {
     // The typed parse reports unknown keys and bad values with their line and column, and the
     // rules and roots resolve here so a malformed one names its file before the lists concatenate.
     let invalid = || format!("invalid config at {}", path.display());
+    let table: Table = content.parse().with_context(invalid)?;
+    reject_flat_rules(&table).with_context(invalid)?;
     let config: FileConfig = toml::from_str(&content).with_context(invalid)?;
-    for rules in [&config.permission.allow, &config.permission.deny]
-        .into_iter()
-        .flatten()
-    {
-        parse_rules(rules).with_context(invalid)?;
+    let permission = &config.permission;
+    for (tier, table) in [
+        (Tier::Deny, &permission.deny),
+        (Tier::Ask, &permission.ask),
+        (Tier::Allow, &permission.allow),
+    ] {
+        if let Some(table) = table {
+            table.rules(tier).with_context(invalid)?;
+        }
     }
     if layer.is_project() {
         reject_project_secrets(&config, path)?;
         reject_project_permissions(&config, path)?;
     }
-    for raw in config.permission.extra_roots.iter().flatten() {
+    for raw in permission.extra_roots.iter().flatten() {
         extra_root(raw).with_context(invalid)?;
     }
-    let table = content.parse().with_context(invalid)?;
     debug!("loaded config from {}", path.display());
     Ok(Some(table))
+}
+
+/// Fails on a tier set to a flat list of `class(specifier)` rules, the form the tier tables
+/// replaced, with the table entries that replace it.
+fn reject_flat_rules(table: &Table) -> Result<()> {
+    let Some(permission) = table.get("permission").and_then(Value::as_table) else {
+        return Ok(());
+    };
+    for tier in [Tier::Deny, Tier::Ask, Tier::Allow] {
+        if let Some(Value::Array(rules)) = permission.get(&tier.to_string()) {
+            bail!("{}", migration_error(&tier.to_string(), rules));
+        }
+    }
+    Ok(())
 }
 
 fn reject_project_secrets(config: &FileConfig, path: &Path) -> Result<()> {
@@ -177,8 +198,9 @@ fn reject_project_secrets(config: &FileConfig, path: &Path) -> Result<()> {
     )
 }
 
-/// A project file is untrusted, so it may only add `deny` rules. Setting `mode`, `allow`, or
-/// `extra_roots` there is a hard error so the user learns the setting did not take effect.
+/// A project file is untrusted, so it may only add `deny` and `ask` rules. Setting `mode`, `allow`,
+/// `extra_roots`, or `defaults` there is a hard error so the user learns the setting did not take
+/// effect.
 fn reject_project_permissions(config: &FileConfig, path: &Path) -> Result<()> {
     let permission = &config.permission;
     reject_project_keys(
@@ -187,9 +209,10 @@ fn reject_project_permissions(config: &FileConfig, path: &Path) -> Result<()> {
             (permission.mode.is_some(), "permission.mode"),
             (permission.allow.is_some(), "permission.allow"),
             (permission.extra_roots.is_some(), "permission.extra_roots"),
+            (permission.defaults.is_some(), "permission.defaults"),
         ],
-        "A project file may only add permission.deny. Set mode, allow, and extra_roots in \
-         ~/.config/ox/config.toml (or mode via OX_PERMISSION_MODE).",
+        "A project file may only add permission.deny and permission.ask. Set mode, allow, \
+         extra_roots, and defaults in ~/.config/ox/config.toml (or mode via OX_PERMISSION_MODE).",
     )
 }
 
@@ -211,12 +234,15 @@ fn reject_project_keys(path: &Path, keys: &[(bool, &str)], fix: &str) -> Result<
 
 #[cfg(test)]
 mod tests {
-    use indoc::indoc;
+    use std::collections::BTreeMap;
+
+    use indoc::{formatdoc, indoc};
 
     use super::*;
     use crate::config::provenance::Source;
     use crate::config::{Effort, StatusLineSegment};
     use crate::permission::Mode;
+    use crate::permission::defaults::Shipped;
 
     fn write(path: &Path, body: &str) -> PathBuf {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -275,36 +301,59 @@ mod tests {
     }
 
     #[test]
-    fn load_layers_concatenate_permission_rules_across_user_drop_in_and_project() {
+    fn load_layers_concatenate_permission_lists_across_user_drop_in_and_project() {
         let dir = tempfile::tempdir().unwrap();
         write(
             &dir.path().join("config.toml"),
             indoc! {r#"
                 [permission]
-                allow = ["bash(ls)"]
-                deny = ["bash(rm:*)"]
+                extra_roots = ["/srv/a"]
+
+                [permission.allow]
+                exec = ["ls"]
+
+                [permission.deny]
+                exec = ["rm *"]
             "#},
         );
         write(
             &dir.path().join("config.d/10-team.toml"),
-            r#"permission.allow = ["bash(cargo test:*)"]"#,
+            indoc! {r#"
+                [permission]
+                extra_roots = ["/srv/b"]
+                allow.exec = ["cargo test *"]
+                ask.edit = ["**/*.lock"]
+            "#},
         );
         let project = write(
             &dir.path().join("repo/.ox/config.toml"),
-            r#"permission.deny = ["bash(git push:*)"]"#,
+            indoc! {r#"
+                [permission]
+                deny.exec = ["git push *"]
+                ask.edit = ["./Cargo.toml"]
+            "#},
         );
         let mut layers = discover(Some(dir.path()), None).unwrap();
         layers.push(Layer::Project(project));
 
         let Loaded { config, .. } = load_layers(layers).unwrap();
 
+        let permission = config.permission;
         assert_eq!(
-            config.permission.allow.as_deref(),
-            Some(&["bash(ls)".to_owned(), "bash(cargo test:*)".to_owned()][..]),
+            permission.extra_roots,
+            Some(vec!["/srv/a".to_owned(), "/srv/b".to_owned()])
         );
         assert_eq!(
-            config.permission.deny.as_deref(),
-            Some(&["bash(rm:*)".to_owned(), "bash(git push:*)".to_owned()][..]),
+            permission.allow.unwrap().exec,
+            Some(vec!["ls".to_owned(), "cargo test *".to_owned()])
+        );
+        assert_eq!(
+            permission.ask.unwrap().edit,
+            Some(vec!["**/*.lock".to_owned(), "./Cargo.toml".to_owned()])
+        );
+        assert_eq!(
+            permission.deny.unwrap().exec,
+            Some(vec!["rm *".to_owned(), "git push *".to_owned()])
         );
     }
 
@@ -487,7 +536,10 @@ mod tests {
 
                 [permission]
                 mode = "plan"
-                deny = ["bash(rm:*)"]
+                defaults.rm = false
+
+                [permission.deny]
+                exec = ["rm *"]
 
                 [tui]
                 show_thinking = true
@@ -513,8 +565,12 @@ mod tests {
         assert_eq!(client.compaction.threshold_percent, Some(40));
         assert_eq!(config.permission.mode, Some(Mode::Plan));
         assert_eq!(
-            config.permission.deny.as_deref(),
-            Some(&["bash(rm:*)".to_owned()][..])
+            config.permission.defaults,
+            Some(BTreeMap::from([(Shipped::Rm, false)]))
+        );
+        assert_eq!(
+            config.permission.deny.unwrap().exec,
+            Some(vec!["rm *".to_owned()])
         );
         assert_eq!(config.tui.show_thinking, Some(true));
         assert_eq!(
@@ -566,20 +622,94 @@ mod tests {
     }
 
     #[test]
-    fn read_layer_names_the_file_of_a_malformed_permission_rule() {
+    fn read_layer_names_the_file_tier_and_class_of_a_malformed_pattern() {
         let dir = tempfile::tempdir().unwrap();
         let path = write(
             &dir.path().join("config.toml"),
-            r#"permission.deny = ["bash(ls", "read(**/.env)"]"#,
+            r#"permission.ask.exec = ["git push", "ls | sh"]"#,
         );
 
-        let err = read_layer(&Layer::User(path.clone())).expect_err("a malformed rule");
-        let msg = format!("{err:#}");
-        assert!(
-            msg.starts_with(&format!("invalid config at {}: ", path.display())),
-            "{msg}"
+        let err = read_layer(&Layer::User(path.clone())).expect_err("a malformed pattern");
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "invalid config at {}: invalid permission.ask.exec pattern \"ls | sh\": it must be \
+                 one simple command, such as `cargo test *`",
+                path.display()
+            )
         );
-        assert!(msg.contains("unbalanced parenthesis"), "{msg}");
+    }
+
+    #[test]
+    fn read_layer_parses_each_class_list_in_its_own_grammar() {
+        // Each pattern parses in another class's grammar, so the error shows that the key's own
+        // grammar rejected it.
+        let dir = tempfile::tempdir().unwrap();
+        for (tier, class, pattern) in [
+            ("deny", "read", "!.env"),
+            ("ask", "edit", "!.env"),
+            ("ask", "exec", "src/*.rs"),
+            ("allow", "net", "github/get_me"),
+            ("allow", "mcp", "api.example.com"),
+        ] {
+            let path = write(
+                &dir.path().join("config.toml"),
+                &format!("permission.{tier}.{class} = [{pattern:?}]"),
+            );
+
+            let err = read_layer(&Layer::User(path.clone())).expect_err(pattern);
+            let msg = format!("{err:#}");
+            assert!(
+                msg.starts_with(&format!(
+                    "invalid config at {}: invalid permission.{tier}.{class} pattern {pattern:?}: ",
+                    path.display()
+                )),
+                "{msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn read_layer_rejects_flat_permission_rules_with_the_tables_that_replace_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(
+            &dir.path().join("config.toml"),
+            indoc! {r#"
+                [permission]
+                deny = ["bash(git push:*)", "read(.env)"]
+            "#},
+        );
+
+        let err = read_layer(&Layer::User(path.clone())).expect_err("old flat rules");
+        assert_eq!(
+            format!("{err:#}"),
+            formatdoc! {r#"
+                invalid config at {}: permission.deny is a list of `class(specifier)` rules, which per-class tables replaced. Write it as:
+
+                [permission.deny]
+                read = ["./.env"]
+                exec = ["git push *"]"#,
+                path.display()
+            }
+        );
+    }
+
+    #[test]
+    fn read_layer_rejects_the_auto_mode_naming_its_rename() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(
+            &dir.path().join("config.toml"),
+            r#"permission.mode = "auto""#,
+        );
+
+        let err = read_layer(&Layer::User(path)).expect_err("the renamed mode");
+        assert!(
+            format!("{err:#}").contains(
+                "expected one of manual, plan, yolo, since \"auto\" was renamed. The mode that \
+                 asks about every call the rules leave open is now \"manual\", the default."
+            ),
+            "{err:#}"
+        );
     }
 
     /// Non-`NotFound` IO errors (e.g. directory → `IsADirectory`) must surface with the path.
@@ -693,28 +823,29 @@ mod tests {
     }
 
     #[test]
-    fn read_layer_rejects_permission_mode_allow_and_extra_roots_in_a_project() {
-        // A project file may tighten (deny) but never widen (mode, allow, extra roots), so each
-        // widening key is blocked.
+    fn read_layer_rejects_every_widening_permission_key_in_a_project() {
         let dir = tempfile::tempdir().unwrap();
         let path = write(
             &dir.path().join(".ox/config.toml"),
             indoc! {r#"
                 [permission]
                 mode = "yolo"
-                allow = ["bash(rm -rf:*)"]
                 extra_roots = ["~/"]
+                allow.exec = ["rm -rf *"]
+                defaults.git = false
             "#},
         );
 
-        let err = read_layer(&Layer::Project(path)).expect_err("project widening must be blocked");
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains(
-                "cannot set permission.mode, permission.allow, permission.extra_roots. A project \
-                 file may only add permission.deny."
-            ),
-            "{msg}"
+        let err = read_layer(&Layer::Project(path.clone())).expect_err("project widening");
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "{} cannot set permission.mode, permission.allow, permission.extra_roots, \
+                 permission.defaults. A project file may only add permission.deny and \
+                 permission.ask. Set mode, allow, extra_roots, and defaults in \
+                 ~/.config/ox/config.toml (or mode via OX_PERMISSION_MODE).",
+                path.display()
+            )
         );
     }
 
@@ -729,7 +860,8 @@ mod tests {
                 max_tokens = 8192
 
                 [permission]
-                deny = ["bash(git push:*)"]
+                deny.read = ["./secrets/**"]
+                ask.exec = ["git push *"]
 
                 [tui]
                 show_welcome = false
@@ -740,8 +872,12 @@ mod tests {
         assert_eq!(config.client.model.as_deref(), Some("claude-sonnet-5-5"));
         assert_eq!(config.client.max_tokens, Some(8192));
         assert_eq!(
-            config.permission.deny.as_deref(),
-            Some(&["bash(git push:*)".to_owned()][..])
+            config.permission.deny.unwrap().read,
+            Some(vec!["./secrets/**".to_owned()])
+        );
+        assert_eq!(
+            config.permission.ask.unwrap().exec,
+            Some(vec!["git push *".to_owned()])
         );
         assert_eq!(config.tui.show_welcome, Some(false));
     }

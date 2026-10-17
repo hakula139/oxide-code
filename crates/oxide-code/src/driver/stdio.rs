@@ -84,14 +84,19 @@ impl Approver for Unattended {
         grant: Option<&SessionGrant>,
     ) -> impl Future<Output = Decision> {
         let feedback = match grant {
-            Some(grant) => format!(
-                "This run cannot ask for approval. To allow this call, add `{}` to the `allow` \
-                 list in the `[permission]` table of the user config.",
-                toml::Value::from(grant.suggested().to_string()),
-            ),
-            None => "This run cannot ask for approval, and no allow rule names this call exactly. \
-                     Approve it in an interactive session, or add a broader rule that covers it \
-                     to the `allow` list in the `[permission]` table of the user config."
+            Some(grant) => {
+                let rule = grant.suggested();
+                format!(
+                    "This run cannot ask for approval. To allow this call, add `{}` to the `{}` \
+                     list in the `[permission.allow]` table of the user config.",
+                    toml::Value::from(rule.pattern()),
+                    rule.class(),
+                )
+            }
+            None => "This run cannot ask for approval, and no allow pattern names this call \
+                     exactly. Approve it in an interactive session, or add a broader pattern that \
+                     covers it to the `[permission.allow]` table of the user config. A call that \
+                     an ask rule or a protected path holds asks whatever the allow rules say."
                 .to_owned(),
         };
         std::future::ready(Decision::DenyWithFeedback { feedback })
@@ -338,7 +343,7 @@ mod tests {
             preview: &ApprovalPreview,
             grant: Option<&SessionGrant>,
         ) -> impl Future<Output = Decision> {
-            let rule = grant.map(|grant| grant.suggested().to_string());
+            let rule = grant.map(|grant| grant.suggested().pattern().to_owned());
             self.offered.push((preview.title.clone(), rule));
             std::future::ready(self.decision.clone())
         }
@@ -365,7 +370,7 @@ mod tests {
     fn bash_grant(command: &str) -> SessionGrant {
         Policy::default()
             .session_grant(
-                PermissionClass::Bash,
+                PermissionClass::Exec,
                 &Access::for_command(command, &Workspace::new(Path::new("/repo"))),
             )
             .unwrap()
@@ -393,7 +398,7 @@ mod tests {
         assert_eq!(end, Some(TurnEnd::Completed));
         assert_eq!(
             approver.offered,
-            [("Bash".to_owned(), Some("bash(ls)".to_owned()))],
+            [("Bash".to_owned(), Some("ls".to_owned()))],
         );
         assert_eq!(
             ops.try_recv().ok(),
@@ -475,9 +480,9 @@ mod tests {
         else {
             panic!("an unattended approval denies with feedback");
         };
-        assert!(
-            feedback.contains(r#"add `'bash(echo "a\b")'` to the `allow` list"#),
-            "the rule is quoted as a TOML string: {feedback}"
+        assert_eq!(
+            feedback,
+            r"This run cannot ask for approval. To allow this call, add `'''echo 'a\b''''` to the `exec` list in the `[permission.allow]` table of the user config."
         );
 
         let Decision::DenyWithFeedback { feedback } = Unattended.decide(&preview, None).await
@@ -485,7 +490,7 @@ mod tests {
             panic!("an unattended approval denies with feedback");
         };
         assert!(
-            feedback.contains("no allow rule names this call exactly"),
+            feedback.contains("no allow pattern names this call exactly"),
             "{feedback}"
         );
     }

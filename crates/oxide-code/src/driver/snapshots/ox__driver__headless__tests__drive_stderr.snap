@@ -6,4 +6,4 @@ expression: "stderrs[0]"
 README.md
 
 $ git push
-The bash call was denied with this feedback: This run cannot ask for approval. To allow this call, add `"bash(git push)"` to the `allow` list in the `[permission]` table of the user config.
+The bash call was denied with this feedback: This run cannot ask for approval. To allow this call, add `"git push"` to the `exec` list in the `[permission.allow]` table of the user config.

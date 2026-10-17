@@ -4,6 +4,7 @@ use std::fmt::Write as _;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::Arc;
 
 use indoc::formatdoc;
 use serde::Deserialize;
@@ -13,7 +14,7 @@ use super::{
     GrepFileGroup, GrepMatchLine, Prepared, SearchRoot, Tool, ToolCtx, ToolMetadata, ToolOutput,
     ToolResultView, ToolSpec, extract_input_field,
 };
-use crate::permission::{PermissionClass, ReadDeny, WalkDeny};
+use crate::permission::{PermissionClass, ReadFilter, WalkFilter};
 use crate::util::text::plural;
 
 const NO_MATCHES_FOUND: &str = "No matches found";
@@ -28,12 +29,12 @@ const REGEX_SIZE_LIMIT: usize = 1 << 20;
 /// Withholds each file a `read` deny rule matches from the results.
 #[cfg_attr(test, derive(Default))]
 pub(crate) struct GrepTool {
-    read_deny: ReadDeny,
+    read_filter: ReadFilter,
 }
 
 impl GrepTool {
-    pub(crate) fn new(read_deny: ReadDeny) -> Self {
-        Self { read_deny }
+    pub(crate) fn new(read_filter: ReadFilter) -> Self {
+        Self { read_filter }
     }
 }
 
@@ -84,7 +85,7 @@ impl Tool for GrepTool {
         prepared: Prepared,
         ctx: &'a ToolCtx,
     ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + 'a>> {
-        Box::pin(run(prepared, ctx, self.read_deny.clone()))
+        Box::pin(run(prepared, ctx, self.read_filter.clone()))
     }
 }
 
@@ -156,7 +157,7 @@ struct Input {
 
 // ── Execution ──
 
-async fn run(prepared: Prepared, ctx: &ToolCtx, read_deny: ReadDeny) -> ToolOutput {
+async fn run(prepared: Prepared, ctx: &ToolCtx, read_filter: ReadFilter) -> ToolOutput {
     let Prepared { input: raw, access } = prepared;
     let input: Input = match super::parse_input(raw) {
         Ok(v) => v,
@@ -173,18 +174,18 @@ async fn run(prepared: Prepared, ctx: &ToolCtx, read_deny: ReadDeny) -> ToolOutp
         head_limit,
     } = input;
 
-    let cwd = ctx.cwd().to_path_buf();
+    let workspace = Arc::clone(&ctx.workspace);
     let cancel = ctx.cancel.clone();
     match tokio::task::spawn_blocking(move || {
         grep_files(&GrepParams {
             pattern: &pattern,
-            root: SearchRoot::new(&access, path.as_deref(), &cwd)?,
+            root: SearchRoot::new(&access, path.as_deref(), workspace)?,
             include_glob: include.as_deref(),
             output_mode,
             context: context.unwrap_or(0),
             case_insensitive,
             head_limit,
-            read_deny,
+            read_filter,
             cancel,
         })
     })
@@ -227,7 +228,7 @@ struct GrepParams<'a> {
     context: usize,
     case_insensitive: bool,
     head_limit: Option<usize>,
-    read_deny: ReadDeny,
+    read_filter: ReadFilter,
     /// Stops the walk and the file reads once the call is interrupted.
     cancel: CancellationToken,
 }
@@ -256,11 +257,13 @@ fn grep_files(params: &GrepParams<'_>) -> Result<String, String> {
     };
 
     let root = &params.root;
-    let read_deny = params.read_deny.walk(&root.base, &root.spelled, &root.cwd);
+    let read_filter = params
+        .read_filter
+        .walk(&root.base, &root.spelled, &root.workspace);
     let collected = collect_files(
         &root.base,
         include_matcher.as_ref(),
-        &read_deny,
+        &read_filter,
         &params.cancel,
     );
 
@@ -286,11 +289,11 @@ struct CollectedFiles {
 }
 
 /// The files to search under `base`. A file `base` itself passed the gate, so only the files a walk
-/// finds face `read_deny`.
+/// finds face `read_filter`.
 fn collect_files(
     base: &Path,
     include_matcher: Option<&globset::GlobMatcher>,
-    read_deny: &WalkDeny<'_>,
+    read_filter: &WalkFilter<'_>,
     cancel: &CancellationToken,
 ) -> CollectedFiles {
     if base.is_file() {
@@ -321,9 +324,9 @@ fn collect_files(
                 })
             })
             .filter(|entry| {
-                let denied = read_deny.denies(entry.path());
-                withheld += usize::from(denied);
-                !denied
+                let held = read_filter.withholds(entry.path());
+                withheld += usize::from(held);
+                !held
             })
             .filter(|entry| {
                 if let Ok(meta) = entry.metadata()
@@ -672,8 +675,8 @@ mod tests {
     use indoc::indoc;
 
     use super::*;
-    use crate::permission::{Access, Mode, Policy};
-    use crate::tool::testing::{self, canonical_tempdir, ctx, search_root, temp_ctx};
+    use crate::permission::Access;
+    use crate::tool::testing::{self, canonical_tempdir, ctx, deny_reads, search_root, temp_ctx};
     use crate::util::path::slash_separated;
 
     /// Content-mode params searching all of `cwd`, so result paths render relative to it.
@@ -686,7 +689,7 @@ mod tests {
             context: 0,
             case_insensitive: false,
             head_limit: None,
-            read_deny: ReadDeny::default(),
+            read_filter: ReadFilter::default(),
             cancel: CancellationToken::new(),
         }
     }
@@ -1101,11 +1104,8 @@ mod tests {
         std::fs::write(dir.path().join("a.rs"), "TOKEN=public\n").unwrap();
         std::fs::create_dir(dir.path().join("sub")).unwrap();
         std::fs::write(dir.path().join("sub/.env"), "TOKEN=secret\n").unwrap();
-        let deny = ["read(**/.env)".to_owned()];
-        let policy = Policy::resolve(Mode::Auto, &[], &deny, dir.path()).unwrap();
-
         let mut p = params("TOKEN", dir.path());
-        p.read_deny = policy.read_deny();
+        p.read_filter = deny_reads(&[".env"]);
         assert_eq!(
             grep_files(&p).unwrap(),
             indoc! {"
@@ -1146,12 +1146,9 @@ mod tests {
         std::fs::write(outside.join("secrets/db.key"), "TOKEN=secret\n").unwrap();
         std::fs::write(outside.join("app.toml"), "TOKEN=public\n").unwrap();
         std::os::unix::fs::symlink(&outside, cwd.join("config")).unwrap();
-        let deny = ["read(**/secrets/**)".to_owned()];
-        let policy = Policy::resolve(Mode::Auto, &[], &deny, &cwd).unwrap();
-
         let mut p = params("TOKEN", &cwd);
         p.root = search_root(&cwd, Some("config")).unwrap();
-        p.read_deny = policy.read_deny();
+        p.read_filter = deny_reads(&["secrets"]);
         assert_eq!(
             grep_files(&p).unwrap(),
             formatdoc! {"
