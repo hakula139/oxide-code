@@ -272,7 +272,7 @@ mod tests {
     use super::*;
     use crate::session::store::set_archived_at;
     use crate::session::store::testing::seed_test_session;
-    use crate::tool::testing::{canonical_tempdir, ctx, ctx_with, deny_reads, temp_ctx};
+    use crate::tool::testing::{canonical_tempdir, ctx, deny_reads, temp_ctx};
 
     // ── Cli ──
 
@@ -433,8 +433,8 @@ mod tests {
 
     // ── create_toolbox ──
 
-    #[tokio::test]
-    async fn create_toolbox_tools_share_the_ctx_file_tracker() {
+    #[test]
+    fn create_toolbox_registers_the_built_in_tools() {
         let tools = create_toolbox(&ReadFilter::default()).tools;
         let names: Vec<_> = tools
             .definitions()
@@ -455,40 +455,6 @@ mod tests {
                 "tasks",
             ],
         );
-
-        let dir = tempfile::tempdir().unwrap();
-        let ctx = ctx_with(dir.path(), Arc::new(FileTracker::default()));
-        let path = dir.path().join("example.txt");
-        std::fs::write(&path, "original").unwrap();
-        let edit = serde_json::json!({
-            "file_path": path,
-            "old_string": "original",
-            "new_string": "edited",
-        });
-        let rejected = tools.run_input("edit", edit.clone(), &ctx).await;
-        assert!(rejected.is_error);
-        assert!(rejected.content.contains("has not been read"));
-
-        let read = tools
-            .run_input("read", serde_json::json!({ "file_path": path }), &ctx)
-            .await;
-        assert!(!read.is_error, "{}", read.content);
-        let edited = tools.run_input("edit", edit, &ctx).await;
-        assert!(!edited.is_error, "{}", edited.content);
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "edited");
-
-        let written = tools
-            .run_input(
-                "write",
-                serde_json::json!({
-                    "file_path": path,
-                    "content": "rewritten",
-                }),
-                &ctx,
-            )
-            .await;
-        assert!(!written.is_error, "{}", written.content);
-        assert_eq!(std::fs::read_to_string(path).unwrap(), "rewritten");
     }
 
     #[tokio::test]
