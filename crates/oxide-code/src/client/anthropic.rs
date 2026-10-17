@@ -3,7 +3,8 @@
 //!
 //! The wire shape mirrors the official `claude-code` CLI: pinned User-Agent and Stainless SDK
 //! header set, billing attestation in `system[0]`, and per-request beta headers gated on model /
-//! auth-mode capabilities. Some gateways accept only requests that match it.
+//! auth-mode capabilities. Some relay gateways admit only requests that carry the billing
+//! attestation or `metadata.user_id`.
 
 mod accumulator;
 mod betas;
@@ -48,7 +49,7 @@ use wire::{
 const API_VERSION: &str = "2023-06-01";
 
 /// Claude Code release the user agent, billing header, and agentic beta sequence all mirror.
-/// Bump it only together with a fresh beta capture, so the betas match the release it names.
+/// Some relay gateways enforce a `cc_version` floor. Bump it only with a fresh beta capture.
 const CLAUDE_CLI_VERSION: &str = "2.1.296";
 const STAINLESS_PACKAGE_VERSION: &str = "0.81.0";
 const STAINLESS_RUNTIME_VERSION: &str = "v24.3.0";
@@ -281,9 +282,9 @@ impl Client {
     }
 
     /// Whether a request carries the billing attribution block. Streaming requests (agent turns,
-    /// `/compact` summaries) carry it under every credential kind, as Claude Code's do, and a
-    /// relay gateway tested on 2026-10-17 rejected hand-built requests without it. Non-streaming
-    /// one-shots carry it only under OAuth.
+    /// `/compact` summaries) carry it under every credential kind, as Claude Code's do.
+    /// Non-streaming one-shots carry it only under OAuth. Some relay gateways admit a request on
+    /// this block or on `metadata.user_id`, so API-key one-shots pass there on the metadata alone.
     fn attributes(&self, streaming: bool, auth: AuthKind) -> bool {
         self.gateway.attribution && (streaming || auth == AuthKind::OAuth)
     }
@@ -386,6 +387,8 @@ fn attribution_text(first_user_text: &str, is_first_party: bool) -> String {
     billing::build_billing_header(CLAUDE_CLI_VERSION, &fingerprint, is_first_party)
 }
 
+/// Some relay gateways admit a request without the billing block only when `user_id` holds a
+/// JSON object with `session_id`.
 fn build_metadata(device_id: &str, session_id: &str) -> RequestMetadata {
     #[derive(serde::Serialize)]
     struct UserId<'a> {

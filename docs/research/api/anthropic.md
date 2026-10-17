@@ -44,7 +44,7 @@ OAuth requests use `Authorization: Bearer <token>` (not `x-api-key`).
 
 ## Required Headers and Parameters
 
-Four things make up the canonical Claude Code request shape. The first two are OAuth-load-bearing because their absence triggers 401 / 429 against `api.anthropic.com` on non-Haiku models (see [What Happens Without These](#what-happens-without-these)). The latter two ship on every request. A third-party relay gateway checked more than the client identity headers (see [Third-Party Gateway Validation](#third-party-gateway-validation)).
+Four things make up the canonical Claude Code request shape. The first two are OAuth-load-bearing because their absence triggers 401 / 429 against `api.anthropic.com` on non-Haiku models (see [What Happens Without These](#what-happens-without-these)). The latter two ship on every request. At a third-party relay gateway, the attribution header can decide whether a request passes, while the identity headers have no effect on their own (see [Third-Party Gateway Validation](#third-party-gateway-validation)).
 
 ### 1. Beta headers
 
@@ -178,7 +178,7 @@ User-Agent: claude-cli/<version> (external, cli)
 x-app: cli
 ```
 
-The `User-Agent` must start with `claude-cli/`. Claude Code constructs it as `claude-cli/<version> (<user_type>, <entrypoint>)` where `user_type` is `external` (or `ant` for Anthropic employees) and `entrypoint` is `cli`.
+Claude Code constructs the `User-Agent` as `claude-cli/<version> (<user_type>, <entrypoint>)` where `user_type` is `external` (or `ant` for Anthropic employees) and `entrypoint` is `cli`.
 
 The Stainless TS SDK also emits `x-stainless-lang`, `-package-version`, `-runtime`, `-runtime-version`, `-os`, `-arch`, `-timeout`, and `-retry-count`, and oxide-code sends the same set.
 
@@ -290,13 +290,23 @@ As of April 4, 2026, Anthropic enforces that OAuth subscription credits (Pro / M
 
 The `cch` hash is the primary technical enforcement mechanism, and both the algorithm (xxHash64, non-cryptographic) and the constants are publicly known. No additional protections exist: no TLS fingerprinting, binary attestation, pre-registration handshake, replay detection, or connection association. Anthropic could escalate enforcement at any time, but today's scheme reads as billing plumbing with no security boundary behind it.
 
-oxide-code attaches the attestation block to every streaming request (agent turns and `/compact` summaries) under every auth mode, and to non-streaming one-shots (session titles) under OAuth. `CLAUDE_CODE_ATTRIBUTION_HEADER=0` drops it everywhere. Claude Code emits the block under both auth modes. Requests to the Anthropic API carry a valid `cch` hash. Since 2.1.181, Claude Code sends custom base URLs the block without `cch`, so a gateway that caches on the request body sees a stable prefix, and oxide-code matches that. The fingerprint salt and xxHash64 seed are version-specific constants, so they may change with Claude Code releases. The 2.1.301 bundle keeps the same salt and character indices and changes the message selection, as [Fingerprint](#fingerprint-3-char-version-suffix) describes. Its seed lives in the native Bun HTTP stack, outside the JavaScript bundle, and a scan of the 2.1.301 binary did not find it ([#123](https://github.com/hakula139/oxide-code/issues/123#issuecomment-6210505896)). On 2026-10-16, the Anthropic API accepted oxide-code's requests carrying a `cch` computed with the seed above, which shows that the API accepts the hash but not that it verifies it.
+oxide-code attaches the attestation block to every streaming request (agent turns and `/compact` summaries) under every auth mode, and to non-streaming one-shots (session titles) under OAuth. `CLAUDE_CODE_ATTRIBUTION_HEADER=0` drops it everywhere. Claude Code emits the block under both auth modes, and a relay gateway checks its version and fingerprint (see [Third-Party Gateway Validation](#third-party-gateway-validation)). Requests to the Anthropic API carry a valid `cch` hash. Since 2.1.181, Claude Code sends custom base URLs the block without `cch`, so a gateway that caches on the request body sees a stable prefix, and oxide-code matches that. The fingerprint salt and xxHash64 seed are version-specific constants, so they may change with Claude Code releases. The 2.1.301 bundle keeps the same salt and character indices and changes the message selection, as [Fingerprint](#fingerprint-3-char-version-suffix) describes. Its seed lives in the native Bun HTTP stack, outside the JavaScript bundle, and a scan of the 2.1.301 binary did not find it ([#123](https://github.com/hakula139/oxide-code/issues/123#issuecomment-6210505896)). On 2026-10-16, the Anthropic API accepted oxide-code's requests carrying a `cch` computed with the seed above, which shows that the API accepts the hash but not that it verifies it.
 
 ## Third-Party Gateway Validation
 
-On 2026-10-17, a third-party relay gateway accepted an API-key request from an `ox -p` build of `main`, which mirrors Claude Code 2.1.296. The request carried the `claude-cli/2.1.296 (external, cli)` user agent, the billing block, a static system block of about 7.2k characters, and the user context in the first user message. Hand-built requests to `/v1/messages` with the same user agent and `x-app: cli` but no billing block got HTTP 400 `invalid_request_error` with "Please use authentic Claude Code client or upgrade your version". That happened with system blocks of 0, 2000, 3500, and 8000 characters, with and without the identity block. The gateway checks more of the request than its user agent, and the hint to upgrade misleads, since it accepted the same version from oxide-code. With every hand-built request rejected, a system-block size limit can't be probed outside a real client request.
+On 2026-10-17, probes against a third-party relay gateway with an API key replayed oxide-code's request, built from `main` at 419d3b9a in Claude Code 2.1.296's shape, and removed or added one element at a time.
 
-The same gateway answered an unsupported model name with HTTP 404 and the plain-text body `404 page not found`, so the error looks like a wrong base URL.
+The gateway admits a request that carries the billing block or a `metadata.user_id` whose JSON object has a `session_id`. A request with neither gets HTTP 400 `invalid_request_error` with "Please use authentic Claude Code client or upgrade your version". A plain-string `user_id`, or an object with only `device_id`, does not count. Field order, JSON spacing, and the `device_id` format go unchecked.
+
+A billing block that is present must also pass these checks:
+
+- A `cc_version` without its `.<fingerprint>` suffix, or `cc_version=1.0.0`, gets the same 400, so the gateway enforces a version floor.
+- A `cc_version` of 2.1.87 or 9.9.9 with the fingerprint computed for 2.1.296 passes the gate and then gets HTTP 503 "All providers unavailable", which points to an upstream check that the fingerprint matches the version.
+- A billing block in the second system block gets the same 503.
+
+None of these changes the outcome on its own: the user agent, `x-app`, `anthropic-beta`, the Stainless headers, `x-claude-code-session-id`, `?beta=true`, the identity block, tools, and streaming. The static block passed with `cache_control` carrying `scope: "global"`, lacking `ttl`, or absent, and so did oxide-code's thinking, effort, and `context_management` fields. System blocks of up to 20k characters of text unrelated to Claude Code passed, with or without the identity block. A model the gateway does not serve gets a plain-text `404 page not found` from the correct base URL, and `GET /v1/models` lists the models it serves.
+
+oxide-code passed every path through the gateway on Opus 5.5, Sonnet 5.5, and Haiku 5.5: headless, a tool-using turn, the REPL, and the TUI with Haiku 5.5 session titles. Its API-key session titles carry no billing block and pass on `metadata.user_id` alone, and [#328](https://github.com/hakula139/oxide-code/issues/328) tracks adding the block to them. oh-my-pi 18.11.0 with an API key gets the 400, since its API-key requests carry neither the billing block nor `metadata.user_id`.
 
 ## API Version
 
