@@ -165,15 +165,11 @@ impl Modal for ModePicker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::slash::test_session_info;
+    use crate::slash::registry::testing::run_execute;
     use crate::tui::modal::testing::render_rows;
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::from(code)
-    }
-
-    fn run_execute(args: &str) -> Result<SlashOutcome, String> {
-        ModeCmd.execute(args, &SlashContext::new(&test_session_info(), None))
     }
 
     fn submitted(current: Mode, keys: &[KeyCode]) -> Option<Op> {
@@ -235,13 +231,13 @@ mod tests {
 
     #[test]
     fn execute_no_args_opens_the_picker() {
-        run_execute("").unwrap().into_modal();
+        run_execute(&ModeCmd, "").unwrap().into_modal();
     }
 
     #[test]
     fn execute_with_a_mode_forwards_the_switch() {
         assert_eq!(
-            run_execute(" Yolo ").unwrap().into_forward(),
+            run_execute(&ModeCmd, " Yolo ").unwrap().into_forward(),
             Action::Op(Op::SetMode(Mode::Yolo)),
         );
     }
@@ -249,7 +245,7 @@ mod tests {
     #[test]
     fn execute_unknown_mode_errors_listing_valid_options() {
         assert_eq!(
-            run_execute("turbo").unwrap_err(),
+            run_execute(&ModeCmd, "turbo").unwrap_err(),
             "Unknown mode: `turbo`. Valid: manual, plan, yolo."
         );
     }

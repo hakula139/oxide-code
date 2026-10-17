@@ -1,5 +1,5 @@
-//! `/effort` — horizontal Speed ↔ Intelligence slider opened by bare `/effort`. Typed-arg
-//! `/effort <level>` keeps direct-switch semantics in [`super::effort::EffortCmd`].
+//! The horizontal Speed ↔ Intelligence slider that bare `/effort` opens. The typed
+//! `/effort <level>` switches directly in [`super::effort::EffortCmd`].
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
@@ -23,7 +23,7 @@ const SPEED_LABEL: &str = "Speed";
 const INTEL_LABEL: &str = "Intelligence";
 
 const GLYPH_PREFIX_WIDTH: usize = 2;
-/// Fixed inter-tier spacing — slot-based widths drifted by half a col on even-length labels.
+/// Fixed inter-tier spacing, since slot-based widths drift by half a column on even-length labels.
 const TIER_GAP: usize = 3;
 
 const TITLE: &str = "Select effort";
@@ -33,8 +33,8 @@ const BODY_HEIGHT: u16 = 7;
 
 // ── Tier Colors ──
 
-/// Per-tier color (Low blue → Max red). Magenta — not yellow — at Xhigh keeps High and Xhigh
-/// distinct on pastel palettes where green and yellow read close.
+/// Per-tier color from Low blue to Max red. Xhigh is magenta because the gradient's yellow reads
+/// close to High's green on pastel palettes.
 pub(super) fn tier_color(level: Effort) -> Color {
     match level {
         Effort::Low => Color::Blue,

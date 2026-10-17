@@ -10,7 +10,7 @@ use ratatui::widgets::Paragraph;
 use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashKind, SlashOutcome};
 use crate::command;
-use crate::protocol::Op;
+use crate::session::display::MAX_TITLE_WIDTH;
 use crate::tui::action::Action;
 use crate::tui::modal::chrome::{FOOTER_HEIGHT, Header, render_footer};
 use crate::tui::modal::line_editor::LineEditor;
@@ -21,9 +21,6 @@ use crate::tui::theme::Theme;
 
 const MODAL_TITLE: &str = "Rename session";
 const FOOTER_HINTS: [&str; 2] = ["Enter to save", "Esc to cancel"];
-
-/// Mirrors the actor's first-prompt title cap so manual titles fit one `--list` row.
-const MAX_TITLE_CHARS: usize = 80;
 
 // ── RenameCmd ──
 
@@ -69,18 +66,15 @@ impl RenameModal {
     fn new(initial: Option<&str>) -> Self {
         Self {
             header: Header::new(MODAL_TITLE),
-            editor: LineEditor::new(initial.unwrap_or_default()).with_max_chars(MAX_TITLE_CHARS),
+            editor: LineEditor::new(initial.unwrap_or_default()).with_max_width(MAX_TITLE_WIDTH),
         }
     }
 
     fn submit(&self) -> ModalKey {
-        let trimmed = self.editor.text().trim();
-        if trimmed.is_empty() {
+        let Ok(op) = command::rename(self.editor.text()) else {
             return ModalKey::Consumed;
-        }
-        ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::Rename {
-            title: trimmed.to_owned(),
-        })))
+        };
+        ModalKey::Submitted(ModalAction::Dispatch(Action::Op(op)))
     }
 }
 
@@ -122,15 +116,10 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use super::*;
-    use crate::slash::context::SlashContext;
+    use crate::protocol::Op;
+    use crate::slash::registry::testing::run_execute;
+    use crate::slash::test_session_info;
     use crate::tui::modal::testing::render_rows;
-
-    fn run_execute(args: &str, title: Option<&str>) -> SlashOutcome {
-        let info = crate::slash::test_session_info();
-        RenameCmd
-            .execute(args, &SlashContext::new(&info, title))
-            .unwrap()
-    }
 
     // ── RenameCmd::name ──
 
@@ -164,7 +153,9 @@ mod tests {
     #[test]
     fn execute_typed_arg_forwards_rename_action_with_trimmed_title() {
         assert_eq!(
-            run_execute("  Fix auth bug  ", None).into_forward(),
+            run_execute(&RenameCmd, "  Fix auth bug  ")
+                .unwrap()
+                .into_forward(),
             Action::Op(Op::Rename {
                 title: "Fix auth bug".to_owned(),
             }),
@@ -173,7 +164,11 @@ mod tests {
 
     #[test]
     fn execute_bare_form_opens_modal_pre_filled_with_current_title() {
-        let mut modal = run_execute("", Some("Existing title")).into_modal();
+        let info = test_session_info();
+        let mut modal = RenameCmd
+            .execute("", &SlashContext::new(&info, Some("Existing title")))
+            .unwrap()
+            .into_modal();
         let result = modal.handle_key(&KeyEvent::from(KeyCode::Enter));
         let ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::Rename { title }))) = result
         else {
@@ -184,7 +179,7 @@ mod tests {
 
     #[test]
     fn execute_bare_form_with_no_current_title_opens_empty_modal() {
-        let mut modal = run_execute("", None).into_modal();
+        let mut modal = run_execute(&RenameCmd, "").unwrap().into_modal();
         let result = modal.handle_key(&KeyEvent::from(KeyCode::Enter));
         assert!(
             matches!(result, ModalKey::Consumed),
@@ -327,7 +322,7 @@ mod tests {
 
     #[test]
     fn handle_key_char_at_max_length_drops_extra_input() {
-        let prefilled: String = "a".repeat(MAX_TITLE_CHARS);
+        let prefilled: String = "a".repeat(MAX_TITLE_WIDTH);
         let mut modal = RenameModal::new(Some(&prefilled));
         modal.handle_key(&KeyEvent::from(KeyCode::Char('z')));
         let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Enter));

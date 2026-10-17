@@ -1,4 +1,4 @@
-//! `/config` — open a read-only [`KvOverview`] of the resolved config, where each value came from,
+//! `/config` opens a read-only [`KvOverview`] of the resolved config, where each value came from,
 //! and the config files that loaded.
 
 use std::path::Path;
@@ -120,8 +120,7 @@ fn display_names(names: &[String]) -> String {
     }
 }
 
-/// The loaded files, lowest precedence first, led by where the user file belongs when it did not
-/// load.
+/// The loaded files, lowest precedence first, led by where the user file belongs if it is absent.
 fn file_rows(layers: &[Layer], user_path: Option<&Path>) -> Vec<(String, String)> {
     let user_loaded = layers.iter().any(|layer| matches!(layer, Layer::User(_)));
     let missing_user = (!user_loaded).then(|| {

@@ -4,7 +4,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 ## Implementation
 
-18 built-ins: `/archive`, `/clear`, `/compact`, `/config`, `/delete`, `/diff`, `/effort`, `/help`, `/init`, `/login`, `/logout`, `/mode`, `/model`, `/rename`, `/resume`, `/status`, `/theme`, `/unarchive`. Each implements `SlashCommand` in a `slash/<name>.rs` file, which a pair such as `/login` and `/logout` shares. Adding one is an impl plus an entry in `BUILT_INS` (alphabetical).
+18 built-ins: `/archive`, `/clear`, `/compact`, `/config`, `/delete`, `/diff`, `/effort`, `/help`, `/init`, `/login`, `/logout`, `/mode`, `/model`, `/rename`, `/resume`, `/status`, `/theme`, `/unarchive`.
 
 - `/clear` rolls the session UUID and clears chat + file tracker.
 - `/compact` compresses the visible transcript into a summary and resets the continuation chain.
@@ -21,7 +21,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 ## Design Decisions
 
-1. **Trait registry.** `trait SlashCommand` mirrors `tool::Tool`, with one file per command or command pair. Adding `/foo` means creating its implementation and adding it to `BUILT_INS`.
+1. **Trait registry.** `trait SlashCommand` mirrors `tool::Tool`, with one `slash/<name>.rs` file per command or per pair such as `/login` and `/logout`. Adding `/foo` means implementing the trait and adding it to `BUILT_INS` in alphabetical order.
 
 2. **Parse at submit.** `App::dispatch_action` hands an `Action::Submit` to `handle_submit_prompt`, which runs `parse_slash` first, then dispatches locally or forwards.
 
@@ -47,7 +47,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 13. **Commands read a borrowed `SlashContext` and write nothing.** The context carries `LiveSessionInfo` and the live session title. The App applies the returned outcome in one place on both the idle and busy paths, so no command reaches into `ChatView` or the modal stack. See [modals.md](modals.md) for the full modal design.
 
-14. **A command suppresses its echo when its response stands alone.** `SlashCommand::echoes_input(args) -> bool` defaults to true. Modal-only forms (`/status`, `/config`, `/help`, plus bare `/effort`, `/mode`, `/model`, `/rename`, `/resume`, and `/theme`) override to false, since the modal is the response and the typed `> /foo` line would orphan in history once the modal closes. Bare `/unarchive` and `/delete` override to false too, so the error explaining the missing argument stands alone. Typed forms keep echoing because the swap-confirmation system message anchors the pair.
+14. **A command suppresses its echo when its response stands alone.** `SlashCommand::echoes_input(args) -> bool` defaults to true. Modal-only forms (`/status`, `/config`, `/help`, plus bare `/effort`, `/mode`, `/model`, `/rename`, `/resume`, and `/theme`) override it to false because the modal is the response, and the typed `/foo` line would be orphaned in history once the modal closes. Bare `/unarchive` and `/delete` also override it to false so the error explaining the missing argument stands alone. Typed forms keep echoing, so chat records the command, usually followed by a confirmation such as `Switched to plan mode`.
 
 15. **Typed forms parse in core, so the bare REPL runs them too.** `command::parse` turns the typed forms of `/clear`, `/compact`, `/effort`, `/mode`, `/model`, `/rename`, and `/resume` into the `Op` each one runs. The TUI commands call the same parsers and add what needs the TUI: the pickers and modals behind the bare forms, and a check that rejects `/effort` before sending it when the live model has no effort tier. `slash::typed_op` resolves aliases for the `--no-tui` REPL, which sends the op and renders until `TurnEnd::of` reads its terminal event, so an effort pick the model has no tier for fails there. The REPL rejects any other command with a message naming the commands it runs, and a bare form that needs an argument gets its usage.
 
@@ -73,11 +73,11 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 - **`/config`**: Opens a [`KvOverview`](modals.md) with two headed sections: resolved effective config with the layer that set each value, and the config files loaded at startup. Both come from the startup load, so the files listed are the ones behind the values shown.
 
-- **`/help`**: Opens a [`KvOverview`](modals.md) listing every registered command with its description. Aliases parenthesize after the canonical name, and `usage()` placeholder appends.
+- **`/help`**: Opens a [`KvOverview`](modals.md) listing every registered command with its description. Aliases follow the canonical name in parentheses, then the `usage()` placeholder.
 
-- **`/diff`**: The lone printer. Pushes uncommitted git changes plus untracked files into chat as a system message, capped at 64 KB on a UTF-8 boundary. After the first commit it uses `git diff HEAD`. Before the first commit it combines `git diff --cached` and `git diff` because `HEAD` does not exist yet. Modal output would crop without scrollback, so the diff earns its place in the transcript.
+- **`/diff`**: The lone printer. Pushes uncommitted git changes plus untracked files into chat as a diff block, capped at 64 KB on a UTF-8 boundary, or a `Working tree clean` system message when there are none. After the first commit it uses `git diff HEAD`. Before the first commit it combines `git diff --cached` and `git diff` because `HEAD` does not exist yet. Modal output would crop without scrollback, so the diff earns its place in the transcript.
 
-- **`/rename`**: Bare opens a single-line title editor pre-filled with the current title (cap 80 chars, mirroring the actor's first-prompt cap), and `/rename <title>` applies directly. Both forms forward `Op::Rename` and lock out AI title generation for the rest of the session so a slow Haiku call can't overwrite the user's pick. `classify` is always `Mutating`. Bare suppresses echo because the modal is the response, while typed-arg echoes since the swap-confirmation system message anchors the pair. See [modals.md](modals.md).
+- **`/rename`**: Bare opens a single-line title editor pre-filled with the current title, and `/rename <title>` applies directly. Both forms build their `Op::Rename` through `command::rename`, which keeps the title's first line and truncates it to the 80-column cap that first-prompt titles share, and the editor stops taking input at that cap. Both lock out AI title generation for the rest of the session so a slow Haiku call can't overwrite the user's pick. `classify` is always `Mutating`. Bare suppresses echo because the modal is the response, while the typed form echoes so chat records the rename. See [modals.md](modals.md).
 
 - **`/resume`** (alias `/continue`): Bare opens a searchable session picker ([modals.md](modals.md)), which forwards `Op::Resume` with the chosen session file. `/resume <id-prefix>` forwards the prefix, which the engine resolves through a current-project-first lookup that widens to all projects on a miss. Both forms refuse mid-turn. Bare suppresses echo while typed-arg echoes. Full design: [resume.md](resume.md).
 
@@ -91,7 +91,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 - `crates/oxide-code/src/driver/repl.rs`: `command_op`, which runs typed slash commands in the bare REPL.
 - `crates/oxide-code/src/driver/stdio.rs`: `render_op`, plus the `StdioSink` confirmations for the session and config events.
 - `crates/oxide-code/src/engine.rs`: `Engine::run` arms for `Op::Clear`, `Op::SetModel`, and `Op::SetMode`, `Engine::set_model`, which re-resolves the compaction threshold for the new model, `Engine::archive`, which waits for the archive entry to reach disk before rolling the session, and `TurnEnd::of`.
-- `crates/oxide-code/src/session/display.rs`: shared `id_prefix`, `display_title`, and `format_metadata_line` for the picker row and delete confirm modal, plus `archive_notice`.
+- `crates/oxide-code/src/session/display.rs`: shared `id_prefix`, `display_title`, and `format_metadata_line` for the picker row and delete confirm modal, `archive_notice`, and the `MAX_TITLE_WIDTH` cap that `fit_title` applies to first-prompt and `/rename` titles.
 - `crates/oxide-code/src/session/resolver.rs`: `resolve_prefix_to_info` checks the current project first, widens the search on a miss, and returns a typed `ResolveError` that the CLI prints as is and slash commands rephrase. `resolve_saved_prefix` distinguishes live-only matches for `/archive`, `/unarchive`, and `/delete`.
 - `crates/oxide-code/src/session/saved.rs`: `set_archived` and `delete`, shared by the typed commands and the `/resume` picker, which refuse the live session and word each failure for the user.
 - `crates/oxide-code/src/session/store.rs`: `delete_at`, which refuses to delete the live session at the filesystem boundary, and `set_archived_at`.

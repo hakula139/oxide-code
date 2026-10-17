@@ -8,7 +8,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui_textarea::{CursorMove, TextArea};
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::tui::saturating_u16;
 use crate::tui::theme::Theme;
@@ -19,7 +19,7 @@ const PROMPT_WIDTH: u16 = 2;
 /// One-line editor rendered as `/ ` followed by the text.
 pub(crate) struct LineEditor {
     textarea: TextArea<'static>,
-    max_chars: usize,
+    max_width: usize,
     placeholder: Option<&'static str>,
     /// First char shown when the text overflows its row. `Cell` because it settles at render.
     scroll: Cell<usize>,
@@ -31,17 +31,17 @@ impl LineEditor {
         textarea.move_cursor(CursorMove::End);
         Self {
             textarea,
-            max_chars: usize::MAX,
+            max_width: usize::MAX,
             placeholder: None,
             scroll: Cell::new(0),
         }
     }
 
-    /// Caps the text at `max_chars` characters. Truncates the current text, and edits that would
-    /// grow past the cap are dropped.
-    pub(crate) fn with_max_chars(mut self, max_chars: usize) -> Self {
-        let text: String = self.text().chars().take(max_chars).collect();
-        self.max_chars = max_chars;
+    /// Caps the text at `max_width` display columns. Truncates the current text, and edits that
+    /// would grow past the cap are dropped.
+    pub(crate) fn with_max_width(mut self, max_width: usize) -> Self {
+        let text = head_within(self.text(), max_width);
+        self.max_width = max_width;
         self.set_text(&text);
         self
     }
@@ -67,7 +67,7 @@ impl LineEditor {
         if is_blocked_key(event) || !self.textarea.input(*event) {
             return false;
         }
-        if self.text().chars().count() > self.max_chars {
+        if self.text().width() > self.max_width {
             self.textarea.undo();
             return false;
         }
@@ -78,16 +78,13 @@ impl LineEditor {
     /// as a line break collapsed to a space. Keeps what fits under the cap and returns whether
     /// the text changed.
     pub(crate) fn paste(&mut self, text: &str) -> bool {
-        let room = self.max_chars.saturating_sub(self.text().chars().count());
-        let flat: String = text
+        let room = self.max_width.saturating_sub(self.text().width());
+        let flat = text
             .split(char::is_control)
             .filter(|part| !part.is_empty())
             .collect::<Vec<_>>()
-            .join(" ")
-            .chars()
-            .take(room)
-            .collect();
-        self.textarea.insert_str(flat)
+            .join(" ");
+        self.textarea.insert_str(head_within(&flat, room))
     }
 
     /// The prompt plus the slice of the text that fits `width`, or the placeholder while empty.
@@ -142,6 +139,16 @@ fn is_blocked_key(event: &KeyEvent) -> bool {
     }
 }
 
+fn head_within(text: &str, max_width: usize) -> String {
+    let mut used = 0;
+    text.chars()
+        .take_while(|c| {
+            used += c.width().unwrap_or(0);
+            used <= max_width
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     // cspell:ignore bcdefghij cdefg mnopqrstu rstuvwxyz
@@ -173,11 +180,11 @@ mod tests {
         assert_eq!(editor.text(), "abc");
     }
 
-    // ── with_max_chars ──
+    // ── with_max_width ──
 
     #[test]
-    fn with_max_chars_truncates_and_drops_growth_past_the_cap() {
-        let mut editor = LineEditor::new("hello world").with_max_chars(5);
+    fn with_max_width_truncates_and_drops_growth_past_the_cap() {
+        let mut editor = LineEditor::new("hello world").with_max_width(5);
         assert_eq!(editor.text(), "hello");
 
         assert!(!editor.handle_key(&key(KeyCode::Char('x'))));
@@ -186,6 +193,20 @@ mod tests {
         assert!(editor.handle_key(&key(KeyCode::Backspace)));
         assert!(editor.handle_key(&key(KeyCode::Char('!'))));
         assert_eq!(editor.text(), "hell!", "room freed by a delete is usable");
+    }
+
+    #[test]
+    fn with_max_width_counts_wide_chars_by_column() {
+        let mut editor = LineEditor::new("界界界").with_max_width(5);
+        assert_eq!(editor.text(), "界界");
+
+        assert!(!editor.handle_key(&key(KeyCode::Char('界'))));
+        assert!(editor.handle_key(&key(KeyCode::Char('a'))));
+        assert_eq!(
+            editor.text(),
+            "界界a",
+            "a narrow char fills the last column"
+        );
     }
 
     // ── set_text ──
@@ -249,9 +270,13 @@ mod tests {
 
     #[test]
     fn paste_keeps_only_what_fits_under_the_cap() {
-        let mut editor = LineEditor::new("ab").with_max_chars(5);
-        assert!(editor.paste("cdefg"));
-        assert_eq!(editor.text(), "abcde");
+        let mut editor = LineEditor::new("ab").with_max_width(6);
+        assert!(editor.paste("c界d界"));
+        assert_eq!(
+            editor.text(),
+            "abc界d",
+            "a wide char past the cap is dropped"
+        );
         assert!(!editor.paste("x"), "a full field takes nothing");
         assert!(!editor.paste("\n\n"), "line breaks alone insert nothing");
     }

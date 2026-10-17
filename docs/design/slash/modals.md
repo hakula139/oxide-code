@@ -10,7 +10,7 @@ A modal is a self-contained UI that takes keyboard focus, owns its render, emits
 
 Three things drove the abstraction:
 
-1. **Live preview.** `/theme` swaps palettes as the user arrows through choices and snaps back on Esc. This was the original motivating case for the trait shape.
+1. **Live preview.** `/theme` swaps palettes as the user arrows through choices and snaps back on Esc.
 2. **Multi-step interaction.** The combined `/model + /effort` picker and the confirm-delete modal nested in `/resume`.
 3. **Agent-driven prompts.** When a tool call needs approval, the agent emits `Event::ApprovalRequested` and blocks until the user's decision comes back. The App pushes an `ApprovalModal`, which routes the decision back as `Op::Resolve`.
 
@@ -97,7 +97,7 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 
 - **`/init` picker**: `InitPicker` wraps `ListPicker<FileRow>` over `AGENTS.md` and `CLAUDE.md`, each described by the other tools that read it. Enter forwards the prompt that creates the highlighted file, and numeric `1` / `2` shortcuts jump to a row. [init.md](init.md) covers when it opens.
 
-- **`/rename` editor**: `RenameModal` is a single-line text editor pre-filled with the current title (cap 80 chars, mirroring the actor's first-prompt cap). Render is a fixed five-row stack: title, gap, prompt + buffer, gap, footer hint. Editing runs through the shared `LineEditor`, so the cursor moves within the title, pastes land as one line, and a title wider than the row scrolls to keep the cursor in view. Enter on a non-empty trimmed buffer submits `Op::Rename`, and blank Enter is a silent no-op so the user can keep typing.
+- **`/rename` editor**: `RenameModal` is a single-line text editor pre-filled with the current title, which takes input up to the 80-column title cap. Render is a fixed five-row stack: title, gap, prompt + buffer, gap, footer hint. Editing runs through the shared `LineEditor`, so the cursor moves within the title, pastes land as one line, and a title wider than the row scrolls to keep the cursor in view. Enter on a non-empty trimmed buffer submits `Op::Rename` through `command::rename`, the typed form's parser, and blank Enter is a silent no-op so the user can keep typing.
 
 - **`/resume` picker**: `ResumePicker` wraps `SearchableList<SessionRow>` and adds a footer line. Each row paints a two-line title plus dim metadata block (ID prefix · relative time · message count · branch · project) followed by a trailing blank. Tab toggles current-project ↔ all-projects and Ctrl+A toggles the archived view, each reloading rows while the typed query survives the rebuild. Enter on a focused row submits `Op::Resume`. Enter with no selection stays open so the user can Tab the scope or Esc out. The footer leads with the Enter and Esc hints, then counts the loaded rows, and flags when more sessions remain beyond the 30-session load cap (`30 most recent sessions`, then `more not loaded`). Load failures take over the footer so a failure can't disguise itself as "0 sessions". Ctrl+D on the cursor row pushes `ConfirmDeleteSessionModal`, and Ctrl+X archives or unarchives the cursor row in place. On focus regain the picker reloads and re-seeks the cursor to the previously selected row, or to the row that followed a deleted one.
 

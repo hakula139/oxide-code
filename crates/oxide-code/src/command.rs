@@ -7,6 +7,7 @@ use crate::config::Effort;
 use crate::model::{MODELS, ModelInfo, ResolvedModelId, replacement_for};
 use crate::permission::Mode;
 use crate::protocol::{Op, ResumeTarget};
+use crate::session::display::fit_title;
 
 /// Canonical names of the commands [`parse`] knows, without their leading `/`.
 pub(crate) const NAMES: [&str; 7] = [
@@ -103,11 +104,11 @@ pub(crate) fn model(arg: &str) -> Result<Op, String> {
     })
 }
 
-/// `/rename <title>`.
+/// `/rename <title>`, fitted to the session's title cap.
 pub(crate) fn rename(title: &str) -> Result<Op, String> {
     let title = required(title, "title", "/rename <title>")?;
     Ok(Op::Rename {
-        title: title.to_owned(),
+        title: fit_title(title),
     })
 }
 
@@ -142,6 +143,7 @@ mod tests {
     use indoc::indoc;
 
     use super::*;
+    use crate::session::display::MAX_TITLE_WIDTH;
 
     fn set_model(id: &str) -> Op {
         Op::SetModel {
@@ -356,6 +358,18 @@ mod tests {
             rename("  Fix auth bug  "),
             Ok(Op::Rename {
                 title: "Fix auth bug".to_owned(),
+            }),
+        );
+    }
+
+    #[test]
+    fn rename_fits_a_long_title_to_the_session_cap() {
+        let pasted = format!("{}\nSecond line", "a".repeat(MAX_TITLE_WIDTH + 1));
+
+        assert_eq!(
+            rename(&pasted),
+            Ok(Op::Rename {
+                title: format!("{}...", "a".repeat(MAX_TITLE_WIDTH - 3)),
             }),
         );
     }

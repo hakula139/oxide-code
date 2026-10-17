@@ -1,16 +1,20 @@
-//! Shared display-layer helpers for session listings and archive notices, used by the resume
-//! picker, the `/delete` confirm modal, and the archive commands.
+//! Shared display-layer helpers for session titles, listings, and archive notices, used by the
+//! resume picker, the `/delete` confirm modal, the archive commands, and `/rename`.
 
 use std::fmt::Write as _;
 
 use time::{OffsetDateTime, UtcOffset};
 
 use super::entry::SessionInfo;
-use crate::util::text::plural;
+use crate::util::text::{plural, truncate_to_width};
 
 const SEPARATOR: &str = " · ";
 const ID_PREFIX_WIDTH: usize = 8;
 pub(crate) const UNTITLED_MARKER: &str = "(untitled)";
+
+/// Column cap on first-prompt and manual titles, leaving room in a 120-column `--list` row after
+/// the fixed `ID / Last Active / Msgs` prefix.
+pub(crate) const MAX_TITLE_WIDTH: usize = 80;
 
 /// First [`ID_PREFIX_WIDTH`] bytes of `session_id`, falling back to the full id when shorter.
 pub(crate) fn id_prefix(session_id: &str) -> &str {
@@ -23,6 +27,11 @@ pub(crate) fn display_title(info: &SessionInfo) -> String {
     info.title
         .as_ref()
         .map_or_else(|| UNTITLED_MARKER.to_owned(), |t| t.title.clone())
+}
+
+/// The first line of `text`, trimmed and truncated to [`MAX_TITLE_WIDTH`] columns.
+pub(crate) fn fit_title(text: &str) -> String {
+    truncate_to_width(text.lines().next().unwrap_or(text).trim(), MAX_TITLE_WIDTH)
 }
 
 /// Compact "N units ago" with an ISO-date fallback past 30 days. Negative deltas (clock skew or
@@ -127,6 +136,37 @@ mod tests {
             updated_at: datetime!(2026-05-08 09:00:00 UTC),
         });
         assert_eq!(display_title(&info), "Fix auth flow");
+    }
+
+    // ── fit_title ──
+
+    #[test]
+    fn fit_title_keeps_the_trimmed_first_line() {
+        assert_eq!(
+            fit_title("  Fix auth flow  \nDetails below"),
+            "Fix auth flow"
+        );
+        assert_eq!(fit_title(""), "");
+    }
+
+    #[test]
+    fn fit_title_truncates_past_the_column_cap() {
+        let exact = "\u{00e9}".repeat(MAX_TITLE_WIDTH);
+        assert_eq!(fit_title(&exact), exact);
+
+        let long = "\u{00e9}".repeat(MAX_TITLE_WIDTH + 1);
+        assert_eq!(
+            fit_title(&long),
+            format!("{}...", "\u{00e9}".repeat(MAX_TITLE_WIDTH - 3)),
+        );
+    }
+
+    #[test]
+    fn fit_title_counts_wide_chars_by_column() {
+        assert_eq!(
+            fit_title(&"界".repeat(MAX_TITLE_WIDTH)),
+            format!("{}...", "界".repeat(38)),
+        );
     }
 
     // ── format_relative_time ──

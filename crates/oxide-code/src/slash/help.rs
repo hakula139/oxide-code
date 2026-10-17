@@ -1,5 +1,5 @@
-//! `/help` — open a read-only [`KvOverview`] of every registered command. Aliases parenthesize
-//! after the canonical name; the optional `usage()` placeholder appends after that.
+//! `/help` opens a read-only [`KvOverview`] of every registered command. Aliases follow the
+//! canonical name in parentheses, then the optional `usage()` placeholder.
 
 use std::fmt::Write as _;
 
@@ -37,7 +37,7 @@ fn build_modal() -> KvOverview {
     KvOverview::new("Help", vec![KvSection::new(rows)])
 }
 
-/// `/name (aliases) <usage>` — alias list and usage are optional.
+/// `/name (aliases) <usage>`, where the aliases and usage are optional.
 fn display_label(cmd: &dyn SlashCommand) -> String {
     let mut out = format!("/{}", cmd.name());
     if !cmd.aliases().is_empty() {

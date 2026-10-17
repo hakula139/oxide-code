@@ -32,9 +32,6 @@ impl SlashCommand for DeleteCmd {
     }
 
     fn echoes_input(&self, args: &str) -> bool {
-        // Bare `/delete` is rejected with a self-explanatory error block, so echoing the empty
-        // command would just orphan a `> /delete` line above it. The typed-arg form echoes for
-        // chat context. Mirrors the pattern `/resume`, `/effort`, etc. follow.
         !args.trim().is_empty()
     }
 
@@ -121,8 +118,8 @@ mod tests {
 
     #[test]
     fn echoes_input_suppressed_on_bare_form_and_active_on_typed_arg() {
-        // Bare form's error block stands alone; typed form anchors the chat line above the
-        // confirm modal so the user can re-read what they targeted.
+        // The bare form's error block stands alone, while the typed form keeps its line above the
+        // confirm modal so the user can re-read the target.
         assert!(!DeleteCmd.echoes_input(""));
         assert!(!DeleteCmd.echoes_input("   "), "whitespace counts as bare");
         assert!(DeleteCmd.echoes_input("abcd"));
@@ -270,7 +267,7 @@ mod tests {
 
     #[test]
     fn execute_with_live_id_prefix_returns_other_match_when_one_exists() {
-        // Live + a non-live session both match the prefix. The non-live one wins, no error.
+        // The live session and another session both match the prefix, so the other one wins.
         with_isolated_xdg(|_| {
             let store = open_store(&test_session_info()).unwrap();
             let live_id = "test-session";

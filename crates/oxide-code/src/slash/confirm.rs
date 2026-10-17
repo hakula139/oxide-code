@@ -352,8 +352,8 @@ mod tests {
             assert!(modal.error.is_some(), "{stray:?} must not clear the latch");
         }
 
-        // A deliberate Y re-attempt clears the latch before re-running confirm; the re-attempt
-        // hits the same refusal and re-latches, but it's a fresh diagnostic, not the stale one.
+        // A deliberate Y clears the latch before re-running confirm, and the retry re-latches a
+        // fresh diagnostic from the same refusal.
         let outcome = modal.handle_key(&key(KeyCode::Char('y')));
         assert!(matches!(outcome, ModalKey::Consumed));
         assert!(modal.error.is_some(), "fresh failure re-latches");

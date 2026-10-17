@@ -1,6 +1,5 @@
-//! `/resume` (alias `/continue`) — open the session picker, or resume directly with
-//! `/resume <id-prefix>`. `ox --resume` opens the same picker at startup. The picker uses
-//! [`SearchableList`] so the same chrome powers any future searchable modal.
+//! `/resume` (alias `/continue`) opens a [`SearchableList`] session picker, and
+//! `/resume <id-prefix>` resumes directly. `ox --resume` opens the same picker at startup.
 
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
@@ -39,7 +38,7 @@ const PICKER_DESCRIPTION: &str = "Pick a session to resume in place";
 const ARCHIVED_PICKER_TITLE: &str = "Resume archived session";
 const ARCHIVED_PICKER_DESCRIPTION: &str = "Pick a session to unarchive and resume in place";
 const VIEWPORT_HEIGHT: u16 = 6;
-/// Each row paints title + metadata + a trailing blank for breathing room between sessions.
+/// Each row paints a title, a metadata line, and a blank line that separates sessions.
 const ROW_HEIGHT: u16 = 3;
 /// Floor on the title column so narrow terminals still show a truncated label.
 const TITLE_FLOOR: usize = 8;
@@ -88,7 +87,7 @@ impl SlashCommand for ResumeCmd {
 
 // ── SessionRow ──
 
-/// Row payload for the resume picker — display strings + a search haystack.
+/// Row payload for the resume picker: display strings and a search haystack.
 struct SessionRow {
     session_id: String,
     path: PathBuf,
@@ -723,8 +722,8 @@ mod tests {
 
     #[test]
     fn from_info_in_scoped_mode_omits_project_from_haystack_and_metadata() {
-        // scope=current means every visible row shares the project — surfacing it would be
-        // visual noise and would confuse the substring filter.
+        // Every row in the current scope shares the project, so showing it would add noise and
+        // let the substring filter match on it.
         let info = raw_session_info(
             stamped_id(0xab),
             "/work/oxide",
@@ -830,8 +829,8 @@ mod tests {
 
     #[test]
     fn render_metadata_includes_msg_count_and_git_branch_when_present() {
-        // The full picker row: id · time · N msgs · branch · project. Singular vs plural is
-        // exercised here too — `1 msg` vs `5 msgs`.
+        // The full picker row: id · time · N msgs · branch · project, in both `1 msg` and
+        // `5 msgs` forms.
         let info = raw_session_info_full(
             stamped_id(0xab),
             "/work/oxide",
@@ -863,7 +862,7 @@ mod tests {
 
     #[test]
     fn render_metadata_omits_msg_count_when_session_never_finalized() {
-        // `exit: None` means no Summary line was found — surface no count rather than `0 msgs`.
+        // `exit: None` means the file has no Summary line, so the row shows no message count.
         let info = raw_session_info(
             stamped_id(0xab),
             "/work/oxide",
@@ -1012,8 +1011,7 @@ mod tests {
 
     #[test]
     fn reload_sets_load_error_and_clears_rows_when_list_paged_fails() {
-        // `load_error` lets the footer distinguish "load failed" from "0 sessions"; without it
-        // the user has no signal that the listing call errored.
+        // `load_error` lets the footer tell a failed load apart from "0 sessions".
         let (dir, store) = isolated_store();
         let project_dir = crate::session::store::testing::test_project_dir(dir.path());
         std::fs::remove_dir_all(&project_dir).unwrap();
@@ -1419,8 +1417,8 @@ mod tests {
 
     #[test]
     fn handle_key_tab_widens_scope_to_other_project_sessions_and_preserves_query() {
-        // Bare picker stays scoped; Tab widens, preserves the typed filter, AND keeps the
-        // live-session out of the widened result so the user can never resume themselves.
+        // Tab widens the scoped picker and keeps the typed filter, while the live session stays
+        // out of the widened rows so the user can't resume it.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         seed_session(
@@ -1527,8 +1525,8 @@ mod tests {
 
     #[test]
     fn handle_key_unrecognized_keys_are_consumed_without_side_effects() {
-        // Both bare unhandled keys (Insert) and unbound Ctrl chars are absorbed silently —
-        // neither may push into the filter or move the cursor.
+        // An unhandled bare key such as Insert and an unbound Ctrl chord are both absorbed, with
+        // neither editing the filter or moving the cursor.
         let (_dir, store) = isolated_store();
         seed_session(
             &store,
@@ -1873,8 +1871,8 @@ mod tests {
 
     #[test]
     fn on_focus_regained_preserves_cursor_when_row_is_still_present() {
-        // Cancel-delete must leave the user on the row they were inspecting; without re-seeking
-        // after reload, replace_items would yank the cursor back to row 0.
+        // Cancelling a delete leaves the user on the row they were inspecting, since the reload
+        // re-seeks after `replace_items` resets the cursor to row 0.
         let (_dir, store) = isolated_store();
         for (byte, title) in [(0x11_u8, "first"), (0x22, "second"), (0x33, "third")] {
             seed_session(

@@ -1,4 +1,4 @@
-//! Slash-command trait and built-in registry. Adding a command: one file + one [`BUILT_INS`] entry.
+//! Slash-command trait and built-in registry.
 
 use std::borrow::Cow;
 
@@ -117,8 +117,8 @@ pub(super) trait SlashCommand: Sync {
         Vec::new()
     }
 
-    /// Whether the typed `/foo` line should echo into chat. Default true; override to false for
-    /// modal-only forms where the modal IS the response and the echo would otherwise orphan.
+    /// Whether the typed line echoes into chat. A form whose modal is its whole response returns
+    /// `false`, since the echo would sit above nothing.
     fn echoes_input(&self, _args: &str) -> bool {
         true
     }
@@ -163,6 +163,12 @@ pub(super) fn lookup_in<'a>(
 #[cfg(test)]
 pub(super) mod testing {
     use super::{SlashCommand, SlashContext, SlashOutcome};
+    use crate::slash::test_session_info;
+
+    /// Runs `cmd` with `args` against [`test_session_info`] and no session title.
+    pub(crate) fn run_execute(cmd: &dyn SlashCommand, args: &str) -> Result<SlashOutcome, String> {
+        cmd.execute(args, &SlashContext::new(&test_session_info(), None))
+    }
 
     pub(crate) struct FakeCmd {
         pub(crate) name: &'static str,

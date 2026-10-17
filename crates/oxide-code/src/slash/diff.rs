@@ -1,6 +1,6 @@
-//! `/diff` — show uncommitted git changes inline. Runs `git diff HEAD` (falls back to
-//! `git diff --cached` pre-first-commit) and appends untracked file names. Capped at
-//! [`MAX_BYTES`] so a runaway diff can't stall rendering.
+//! `/diff` shows uncommitted git changes inline. Runs `git diff HEAD`, or `git diff --cached` and
+//! `git diff` before the first commit, then lists untracked files. Capped at [`MAX_BYTES`] so a
+//! runaway diff can't stall rendering.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -44,7 +44,7 @@ impl SlashCommand for DiffCmd {
 
 // ── Execution ──
 
-/// Tracked + untracked diff at `cwd`. Falls back to `--cached` when HEAD is absent (fresh repo).
+/// The tracked diff and the untracked file list at `cwd`, truncated for display.
 fn collect_diff_in(cwd: &Path) -> Result<String> {
     if !inside_git_repo(cwd)? {
         bail!("not inside a git repository");
@@ -161,7 +161,7 @@ fn git_failure_message(args: &[&str], stderr: &[u8]) -> String {
 
 // ── Truncation ──
 
-/// Cut on a UTF-8 boundary (≤ [`MAX_BYTES`]); footer names dropped size.
+/// Cuts `s` on a UTF-8 boundary within [`MAX_BYTES`], with a footer naming the dropped size.
 fn truncate(mut s: String, full_hint: &str) -> String {
     if s.len() <= MAX_BYTES {
         return s;
@@ -541,7 +541,7 @@ mod tests {
 
     #[test]
     fn truncate_cuts_on_utf8_boundary_and_never_exceeds_max_bytes() {
-        // Final char straddles the cap; cut backs up to preceding boundary.
+        // The final char straddles the cap, so the cut backs up to the preceding boundary.
         let prefix = "a".repeat(MAX_BYTES - 1);
         let s = format!("{prefix}€trailing"); // '€' is 3 bytes
         let got = truncate(s, "`git diff --cached` and `git diff`");

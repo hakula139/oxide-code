@@ -59,7 +59,7 @@ mod tests {
     use super::*;
     use crate::model::ResolvedModelId;
     use crate::protocol::Op;
-    use crate::slash::test_session_info;
+    use crate::slash::registry::testing::run_execute;
 
     // ── ModelCmd::name ──
 
@@ -113,19 +113,15 @@ mod tests {
 
     // ── ModelCmd::execute ──
 
-    fn run_execute(args: &str) -> Result<SlashOutcome, String> {
-        ModelCmd.execute(args, &SlashContext::new(&test_session_info(), None))
-    }
-
     #[test]
     fn execute_no_args_opens_the_picker() {
-        run_execute("  ").unwrap().into_modal();
+        run_execute(&ModelCmd, "  ").unwrap().into_modal();
     }
 
     #[test]
     fn execute_typed_id_forwards_the_resolved_model() {
         assert_eq!(
-            run_execute("sonnet").unwrap().into_forward(),
+            run_execute(&ModelCmd, "sonnet").unwrap().into_forward(),
             Action::Op(Op::SetModel {
                 model: Some(ResolvedModelId::new("claude-sonnet-5-5".to_owned())),
                 effort: None,
@@ -136,7 +132,7 @@ mod tests {
     #[test]
     fn execute_unknown_id_reports_the_shared_parse_error() {
         assert_eq!(
-            run_execute("gpt-4").unwrap_err(),
+            run_execute(&ModelCmd, "gpt-4").unwrap_err(),
             command::model("gpt-4").unwrap_err(),
         );
     }
