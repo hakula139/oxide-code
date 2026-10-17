@@ -331,6 +331,9 @@ pub(super) enum ContentBlockInfo {
     RedactedThinking {
         data: String,
     },
+    /// An MCP connector result, skipped along with the `mcp_tool_use` call it answers. The call
+    /// reads as unknown, so a reply never keeps one without the other.
+    McpToolResult {},
     /// A server tool's result, such as `web_search_tool_result`, which streams no deltas. Any
     /// other block type carrying a `tool_use_id` reads as one.
     #[serde(untagged)]
@@ -341,9 +344,12 @@ pub(super) enum ContentBlockInfo {
         fields: serde_json::Map<String, serde_json::Value>,
     },
     /// Serde tries the untagged variants after a tagged one fails, so a malformed known block
-    /// lands here too.
+    /// lands here too. `type` is raw JSON because such a block may carry any.
     #[serde(untagged)]
-    Unknown {},
+    Unknown {
+        #[serde(default)]
+        r#type: serde_json::Value,
+    },
 }
 
 #[expect(
@@ -794,13 +800,29 @@ mod tests {
     }
 
     #[test]
-    fn content_block_info_unknown_or_malformed_block() {
-        for json in [
-            r#"{"type":"some_future_block","data":"opaque"}"#,
-            r#"{"type":"tool_use","id":"toolu_01"}"#,
+    fn content_block_info_mcp_tool_result_is_no_server_tool_result() {
+        let json = r#"{"type":"mcp_tool_result","tool_use_id":"m1","content":[]}"#;
+        let info: ContentBlockInfo = serde_json::from_str(json).unwrap();
+        assert!(
+            matches!(info, ContentBlockInfo::McpToolResult {}),
+            "{info:?}"
+        );
+    }
+
+    #[test]
+    fn content_block_info_unknown_or_malformed_block_keeps_its_type() {
+        for (json, expected) in [
+            (
+                r#"{"type":"some_future_block","data":"opaque"}"#,
+                json!("some_future_block"),
+            ),
+            (r#"{"type":"tool_use","id":"toolu_01"}"#, json!("tool_use")),
         ] {
             let info: ContentBlockInfo = serde_json::from_str(json).unwrap();
-            assert!(matches!(info, ContentBlockInfo::Unknown {}), "{json}");
+            assert!(
+                matches!(&info, ContentBlockInfo::Unknown { r#type } if *r#type == expected),
+                "{json}: {info:?}",
+            );
         }
     }
 

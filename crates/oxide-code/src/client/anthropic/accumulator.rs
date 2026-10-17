@@ -196,8 +196,14 @@ impl BlockAccumulator {
                 signature,
             },
             ContentBlockInfo::RedactedThinking { data } => Self::RedactedThinking { data },
-            ContentBlockInfo::Unknown {} => {
-                warn!("skipping unknown content block at index {index}");
+            ContentBlockInfo::McpToolResult {} => {
+                warn!("skipping MCP connector result at index {index}");
+                Self::Skipped
+            }
+            ContentBlockInfo::Unknown { r#type: kind } => {
+                warn!(
+                    "skipping unknown or malformed content block of type {kind} at index {index}"
+                );
                 Self::Skipped
             }
         }
@@ -797,9 +803,16 @@ mod tests {
     }
 
     #[test]
-    fn start_skips_an_unknown_block() {
-        let block = BlockAccumulator::start(ContentBlockInfo::Unknown {}, 0);
-        assert!(matches!(block, BlockAccumulator::Skipped));
+    fn start_skips_unknown_blocks_and_mcp_connector_results() {
+        for info in [
+            ContentBlockInfo::Unknown {
+                r#type: json!("some_future_block"),
+            },
+            ContentBlockInfo::McpToolResult {},
+        ] {
+            let block = BlockAccumulator::start(info, 0);
+            assert!(matches!(block, BlockAccumulator::Skipped), "{block:?}");
+        }
     }
 
     // ── BlockAccumulator::apply ──
