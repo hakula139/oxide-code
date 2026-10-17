@@ -449,7 +449,9 @@ mod tests {
 
     use super::*;
     use crate::tool::MAX_OUTPUT_BYTES;
-    use crate::tool::testing::{self, canonical_tempdir, ctx, temp_ctx};
+    use crate::tool::testing::{self, temp_ctx};
+    #[cfg(unix)]
+    use crate::tool::testing::{canonical_tempdir, ctx};
 
     // ── prepare ──
 
