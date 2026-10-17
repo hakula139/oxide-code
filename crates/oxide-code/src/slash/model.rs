@@ -7,6 +7,7 @@ use indoc::formatdoc;
 
 use super::context::SlashContext;
 use super::matcher::rank_by_prefix;
+use super::picker::ModelEffortPicker;
 use super::registry::{ArgCompletion, SlashCommand, SlashKind, SlashOutcome};
 use crate::model::{MODELS, ModelInfo, ResolvedModelId, replacement_for};
 use crate::protocol::Op;
@@ -50,9 +51,9 @@ impl SlashCommand for ModelCmd {
     fn execute(&self, args: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
         let arg = args.trim();
         if arg.is_empty() {
-            return Ok(SlashOutcome::Modal(Box::new(
-                super::picker::ModelEffortPicker::new(ctx.info),
-            )));
+            return Ok(SlashOutcome::Modal(Box::new(ModelEffortPicker::new(
+                ctx.info,
+            ))));
         }
         let id = resolve_model_arg(arg)?;
         Ok(SlashOutcome::Forward(Action::Op(Op::SetModel {
@@ -76,7 +77,7 @@ fn resolve_model_arg(arg: &str) -> Result<ResolvedModelId, String> {
     match hits.as_slice() {
         [info] => Ok(ResolvedModelId::new(info.id.to_owned())),
         [_, ..] => Err(formatdoc! {"
-            `{arg}` is ambiguous. Pick one or use a short alias (`opus`, `sonnet`, `haiku`):
+            Model `{arg}` is ambiguous. Pick one or use a short alias (`opus`, `sonnet`, `haiku`):
 
             {}",
             format_models(hits),
@@ -117,15 +118,17 @@ mod tests {
         })
     }
 
-    // ── ModelCmd metadata ──
+    // ── ModelCmd::name ──
 
     #[test]
-    fn metadata_matches_built_ins_contract() {
+    fn name_and_metadata_match_built_ins_contract() {
         assert_eq!(ModelCmd.name(), "model");
         assert_eq!(ModelCmd.aliases(), [] as [&str; 0]);
         assert_ne!(ModelCmd.description(), "");
         assert_eq!(ModelCmd.usage(), Some("[<id>]"));
     }
+
+    // ── ModelCmd::classify ──
 
     #[test]
     fn classify_is_mutating_for_picker_and_direct_forms() {
@@ -205,26 +208,36 @@ mod tests {
     #[test]
     fn execute_unknown_arg_errors_with_full_listing() {
         // Retired ids and a `[1m]` suffix also get the 5.5 model they name as a suggestion.
-        for (arg, head) in [
-            ("gpt-4", "Unknown model: `gpt-4`. Supported models:"),
+        for (arg, expected) in [
+            (
+                "gpt-4",
+                indoc! {"
+                    Unknown model: `gpt-4`. Supported models:
+
+                    - `claude-opus-5-5` — Claude Opus 5.5
+                    - `claude-sonnet-5-5` — Claude Sonnet 5.5
+                    - `claude-haiku-5-5` — Claude Haiku 5.5"},
+            ),
             (
                 "claude-opus-4-8",
-                "Unknown model: `claude-opus-4-8`. Did you mean `claude-opus-5-5`? Supported models:",
+                indoc! {"
+                    Unknown model: `claude-opus-4-8`. Did you mean `claude-opus-5-5`? Supported models:
+
+                    - `claude-opus-5-5` — Claude Opus 5.5
+                    - `claude-sonnet-5-5` — Claude Sonnet 5.5
+                    - `claude-haiku-5-5` — Claude Haiku 5.5"},
             ),
             (
                 "sonnet[1m]",
-                "Unknown model: `sonnet[1m]`. Did you mean `claude-sonnet-5-5`? Supported models:",
+                indoc! {"
+                    Unknown model: `sonnet[1m]`. Did you mean `claude-sonnet-5-5`? Supported models:
+
+                    - `claude-opus-5-5` — Claude Opus 5.5
+                    - `claude-sonnet-5-5` — Claude Sonnet 5.5
+                    - `claude-haiku-5-5` — Claude Haiku 5.5"},
             ),
         ] {
-            let msg = run_execute(arg).expect_err("unknown arg must error");
-            assert!(msg.starts_with(head), "{msg}");
-            for info in MODELS {
-                assert!(
-                    msg.contains(&format!("- `{}` — {}", info.id, info.display_name)),
-                    "{} should appear as a bullet: {msg}",
-                    info.id,
-                );
-            }
+            assert_eq!(run_execute(arg).unwrap_err(), expected, "{arg}");
         }
     }
 
@@ -248,7 +261,7 @@ mod tests {
         assert_eq!(
             msg,
             indoc! {"
-                `o` is ambiguous. Pick one or use a short alias (`opus`, `sonnet`, `haiku`):
+                Model `o` is ambiguous. Pick one or use a short alias (`opus`, `sonnet`, `haiku`):
 
                 - `claude-opus-5-5` — Claude Opus 5.5
                 - `claude-sonnet-5-5` — Claude Sonnet 5.5"},

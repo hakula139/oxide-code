@@ -1101,7 +1101,11 @@ mod tests {
     #[tokio::test]
     async fn dispatch_init_forwards_synthesized_prompt_and_flips_to_streaming() {
         // Chat shows only `/init`, while the engine must receive the synthesized body.
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("AGENTS.md"), "# AGENTS.md\n").unwrap();
         let (mut app, mut rx, _event_tx) = test_app(None);
+        app.session_info.project_root = root.path().to_owned();
+
         app.dispatch_action(Action::Submit("/init".to_owned()));
 
         assert_eq!(app.chat.entry_count(), 1, "only the typed `/init` line");
@@ -1111,9 +1115,30 @@ mod tests {
         assert!(
             matches!(
                 &forwarded,
-                Op::Prompt(body) if body.contains("AGENTS.md") && body != "/init"
+                Op::Prompt(body) if body.contains("- `AGENTS.md`") && body.contains("unified diff")
             ),
-            "expected a prompt with the expanded body, got {forwarded:?}",
+            "expected the update prompt, got {forwarded:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_init_without_an_instruction_file_starts_the_turn_from_the_picker() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.session_info.project_root = root.path().to_owned();
+
+        app.dispatch_action(Action::Submit("/init".to_owned()));
+        assert!(app.modals.is_active(), "the file picker opens first");
+        assert!(rx.try_recv().is_err(), "no turn before the pick");
+        app.handle_crossterm_event(&key_event(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_crossterm_event(&key_event(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(!app.modals.is_active());
+        assert_eq!(app.status_bar.status(), &Status::Streaming);
+        let forwarded = rx.recv().await.expect("create prompt forwarded");
+        assert!(
+            matches!(&forwarded, Op::Prompt(body) if body.contains("create `CLAUDE.md`")),
+            "expected the create prompt for the second file, got {forwarded:?}",
         );
     }
 

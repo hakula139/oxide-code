@@ -13,12 +13,12 @@ use std::borrow::Cow;
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
 use crate::slash::{PopupState, complete_arg_for, filter_built_ins};
+use crate::tui::saturating_u16;
 use crate::tui::theme::Theme;
 use crate::tui::viewport::{wrap_next, wrap_prev};
 use crate::util::text::truncate_to_width;
@@ -149,10 +149,10 @@ impl SlashPopup {
         self.selected = wrap_prev(self.selected, self.rows.len());
     }
 
-    /// Row count needed in layout; zero when hidden, capped at [`MAX_VISIBLE_ROWS`] plus chrome.
+    /// Rows the layout needs, zero when hidden and capped at [`MAX_VISIBLE_ROWS`] plus chrome.
     pub(crate) fn height(&self) -> u16 {
         let visible = self.rows.len().min(MAX_VISIBLE_ROWS);
-        let body = u16::try_from(visible).unwrap_or(u16::MAX);
+        let body = saturating_u16(visible);
         if body == 0 {
             0
         } else {
@@ -223,7 +223,7 @@ impl SlashPopup {
         width: usize,
     ) -> Line<'static> {
         let pad = label_width.saturating_sub(label_text.width());
-        let row_style = row_style(&self.theme, selected);
+        let row_style = self.theme.row_style(selected);
         let desc_budget = width.saturating_sub(label_width + COLUMN_GAP);
         let desc = truncate_to_width(&row.description, desc_budget);
 
@@ -232,15 +232,6 @@ impl SlashPopup {
         spans.push(Span::raw(gap));
         spans.push(Span::styled(desc, row_style));
         Line::from(spans)
-    }
-}
-
-/// Selected → `text` + BOLD; non-selected → dim. Contrast mirrors Claude Code's popup.
-fn row_style(theme: &Theme, selected: bool) -> Style {
-    if selected {
-        theme.text().add_modifier(Modifier::BOLD)
-    } else {
-        theme.dim()
     }
 }
 
@@ -378,7 +369,7 @@ mod tests {
     }
 
     #[test]
-    fn selected_is_none_when_hidden() {
+    fn selected_hidden_popup_has_no_selection() {
         let popup = popup_with_state(None);
         assert!(popup.selected().is_none());
     }

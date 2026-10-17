@@ -6,14 +6,20 @@
 
 pub(crate) mod action;
 pub(crate) mod app;
-pub(crate) mod components;
-pub(crate) mod cursor;
-pub(crate) mod git_probes;
+mod components;
+mod cursor;
+mod git_probes;
 pub(crate) mod glyphs;
-pub(crate) mod markdown;
+mod markdown;
 pub(crate) mod modal;
-pub(crate) mod pending_calls;
+mod pending_calls;
 pub(crate) mod terminal;
 pub(crate) mod theme;
 pub(crate) mod viewport;
-pub(crate) mod wrap;
+mod wrap;
+
+// ── Helpers ──
+
+fn saturating_u16(n: usize) -> u16 {
+    u16::try_from(n).unwrap_or(u16::MAX)
+}

@@ -6,6 +6,8 @@ use super::registry::{SlashCommand, SlashOutcome};
 use crate::config::{display_auth, display_auto_compaction, display_bool, display_effort};
 use crate::tui::modal::kv_overview::{KvOverview, KvSection};
 
+// ── StatusCmd ──
+
 pub(super) struct StatusCmd;
 
 impl SlashCommand for StatusCmd {
@@ -71,34 +73,17 @@ mod tests {
     use crate::permission::rule::Rule;
     use crate::slash::test_session_info;
     use crate::tui::modal::Modal;
-    use crate::tui::theme::Theme;
+    use crate::tui::modal::testing::render_rows;
 
     fn render_modal(modal: &KvOverview, width: u16) -> String {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-        use ratatui::layout::Rect;
-
         let height = modal.height(width, u16::MAX);
-        let theme = Theme::default();
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal
-            .draw(|frame| modal.render(frame, Rect::new(0, 0, width, height), &theme))
-            .unwrap();
-        let buffer = terminal.backend().buffer();
-        let mut out = String::new();
-        for y in 0..height {
-            for x in 0..width {
-                out.push_str(buffer[(x, y)].symbol());
-            }
-            out.push('\n');
-        }
-        out
+        format!("{}\n", render_rows(modal, width, height).join("\n"))
     }
 
-    // ── StatusCmd metadata ──
+    // ── StatusCmd::name ──
 
     #[test]
-    fn metadata_matches_built_ins_contract() {
+    fn name_and_metadata_match_built_ins_contract() {
         assert_eq!(StatusCmd.name(), "status");
         assert_eq!(StatusCmd.aliases(), [] as [&str; 0]);
         assert_ne!(StatusCmd.description(), "");

@@ -62,37 +62,49 @@ mod tests {
             .into_forward()
     }
 
-    // ── LoginCmd metadata ──
+    // ── LoginCmd::name ──
 
     #[test]
-    fn login_metadata_matches_built_ins_contract() {
+    fn name_and_metadata_of_login_match_built_ins_contract() {
         assert_eq!(LoginCmd.name(), "login");
         assert_eq!(LoginCmd.aliases(), [] as [&str; 0]);
         assert_ne!(LoginCmd.description(), "");
+    }
+
+    // ── LoginCmd::classify ──
+
+    #[test]
+    fn classify_login_is_mutating() {
         assert_eq!(LoginCmd.classify(""), SlashKind::Mutating);
     }
 
     // ── LoginCmd::execute ──
 
     #[test]
-    fn login_forwards_the_login_action() {
+    fn execute_login_forwards_the_login_action() {
         assert_eq!(forwarded(&LoginCmd), Action::Op(Op::Login));
     }
 
-    // ── LogoutCmd metadata ──
+    // ── LogoutCmd::name ──
 
     #[test]
-    fn logout_metadata_matches_built_ins_contract() {
+    fn name_and_metadata_of_logout_match_built_ins_contract() {
         assert_eq!(LogoutCmd.name(), "logout");
         assert_eq!(LogoutCmd.aliases(), [] as [&str; 0]);
         assert_ne!(LogoutCmd.description(), "");
+    }
+
+    // ── LogoutCmd::classify ──
+
+    #[test]
+    fn classify_logout_is_mutating() {
         assert_eq!(LogoutCmd.classify(""), SlashKind::Mutating);
     }
 
     // ── LogoutCmd::execute ──
 
     #[test]
-    fn logout_forwards_the_logout_action() {
+    fn execute_logout_forwards_the_logout_action() {
         assert_eq!(forwarded(&LogoutCmd), Action::Op(Op::Logout));
     }
 }

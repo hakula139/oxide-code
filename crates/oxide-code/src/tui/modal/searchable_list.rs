@@ -12,6 +12,7 @@ use ratatui::widgets::Paragraph;
 
 use super::chrome::Header;
 use super::line_editor::LineEditor;
+use crate::tui::glyphs::{CURSOR_MARKER, CURSOR_MARKER_WIDTH};
 use crate::tui::theme::Theme;
 use crate::tui::viewport::{Viewport, wrap_next, wrap_prev};
 
@@ -37,8 +38,6 @@ pub(crate) trait SearchableItem {
 
 // ── SearchableList ──
 
-const CURSOR_MARKER: &str = "> ";
-const CURSOR_MARKER_WIDTH: u16 = 2;
 const SEARCH_PLACEHOLDER: &str = "Type to filter (substring match)";
 const SEARCH_ROW_HEIGHT: u16 = 1;
 const SECTION_GAP: u16 = 1;
@@ -277,6 +276,7 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use super::*;
+    use crate::tui::modal::testing::render_rows_with;
     use crate::util::text::truncate_to_width;
 
     // ── Test fixture ──
@@ -346,7 +346,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_query_includes_every_item() {
+    fn set_query_empty_restores_every_item() {
         let mut l = list(vec![FakeItem::new("a"), FakeItem::new("b")]);
         l.set_query("zzz");
         assert_eq!(l.visible_len(), 0);
@@ -518,16 +518,10 @@ mod tests {
         )
     }
 
-    /// Renders `l` into a `width` x `height` area and returns the painted rows.
     fn render_rows(l: &SearchableList<FakeItem>, width: u16, height: u16) -> Vec<String> {
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal
-            .draw(|frame| l.render(frame, Rect::new(0, 0, width, height), &Theme::default()))
-            .unwrap();
-        let buf = terminal.backend().buffer();
-        (0..height)
-            .map(|y| (0..width).map(|x| buf[(x, y)].symbol()).collect())
-            .collect()
+        render_rows_with(width, height, |frame, area, theme| {
+            l.render(frame, area, theme);
+        })
     }
 
     #[test]
@@ -565,7 +559,7 @@ mod tests {
     }
 
     #[test]
-    fn navigation_on_empty_visible_set_is_silent_noop() {
+    fn select_next_prev_and_paging_with_nothing_visible_keep_the_cursor() {
         // Filter out everything → all four navigation guards must short-circuit. Without the
         // is_empty checks, `% self.visible.len()` would panic.
         let mut l = list(vec![FakeItem::new("alpha"), FakeItem::new("beta")]);

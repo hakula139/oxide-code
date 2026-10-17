@@ -27,9 +27,12 @@ mod picker;
 mod registry;
 mod rename;
 mod resume;
+mod sessions;
 mod status;
 mod theme;
 
+#[cfg(test)]
+pub(crate) use context::testing::test_session_info;
 pub(crate) use context::{LiveSessionInfo, SlashContext};
 pub(crate) use matcher::MatchedCommand;
 pub(crate) use parser::{Parsed, PopupState, parse_slash, popup_state, unescape_literal};
@@ -74,7 +77,7 @@ fn dispatch_with(
 ) -> Result<SlashOutcome, String> {
     let Some(cmd) = registry::lookup_in(commands, &parsed.name) else {
         return Err(format!(
-            "unknown command: /{name}. Available: {available}. \
+            "Unknown command: /{name}. Available: {available}. \
              Use //{name} to send the literal text.",
             name = parsed.name,
             available = format_available(commands),
@@ -85,15 +88,11 @@ fn dispatch_with(
 }
 
 fn format_available(commands: &[&dyn registry::SlashCommand]) -> String {
-    use std::fmt::Write as _;
-    let mut out = String::new();
-    for cmd in commands {
-        if !out.is_empty() {
-            out.push_str(", ");
-        }
-        _ = write!(out, "/{}", cmd.name());
-    }
-    out
+    commands
+        .iter()
+        .map(|cmd| format!("/{}", cmd.name()))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Whether `parsed` is safe to dispatch mid-turn. Only `ReadOnly` may run while the agent is
@@ -106,46 +105,6 @@ fn classify_in(commands: &[&dyn registry::SlashCommand], parsed: &Parsed) -> Sla
     match registry::lookup_in(commands, &parsed.name) {
         None => SlashKind::Unknown,
         Some(cmd) => cmd.classify(&parsed.args),
-    }
-}
-
-/// Fully-populated `LiveSessionInfo` for per-command tests.
-#[cfg(test)]
-pub(crate) fn test_session_info() -> LiveSessionInfo {
-    use crate::config::compaction::CompactionConfig;
-    use crate::config::{ConfigSnapshot, Effort, PromptCacheTtl};
-
-    // Real MODELS row so the display name resolves to a known label.
-    LiveSessionInfo {
-        cwd: "~/test".to_owned(),
-        git_cwd: None,
-        git_branch: Some("main".to_owned()),
-        version: "0.0.0-test",
-        session_id: "test-session".to_owned(),
-        session_allow: Vec::new(),
-        config: ConfigSnapshot {
-            auth: Some(crate::config::auth::AuthSource::ApiKeyEnv),
-            signed_out_notice: None,
-            base_url: "https://api.test.invalid".to_owned(),
-            extra_ca_certs: None,
-            gateway: crate::config::gateway::GatewaySnapshot {
-                custom_header_names: Vec::new(),
-                attribution: true,
-                structured_outputs: true,
-            },
-            model: crate::model::ModelSpec::resolve("claude-opus-5-5".to_owned()),
-            effort: Some(Effort::High),
-            max_tokens: None,
-            max_tool_rounds: None,
-            prompt_cache_ttl: PromptCacheTtl::OneHour,
-            compaction: CompactionConfig::with_threshold_for_test(155_000),
-            permission_mode: crate::permission::Mode::Auto,
-            show_thinking: false,
-            show_welcome: true,
-            status_line: crate::config::StatusLineSegment::DEFAULT.to_vec(),
-            theme_name: "mocha".to_owned(),
-            provenance: crate::config::provenance::Provenance::default(),
-        },
     }
 }
 
@@ -173,16 +132,44 @@ pub(crate) fn with_isolated_xdg<R>(f: impl FnOnce(&std::path::Path) -> R) -> R {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::Op;
-    use crate::slash::registry::SlashCommand;
-    use crate::tui::action::Action;
+    use crate::slash::registry::testing::FakeCmd;
+
+    fn parsed(name: &str, args: &str) -> Parsed {
+        Parsed {
+            name: name.to_owned(),
+            args: args.to_owned(),
+        }
+    }
 
     fn run_dispatch(name: &str) -> Result<SlashOutcome, String> {
-        let parsed = Parsed {
-            name: name.to_owned(),
-            args: String::new(),
-        };
+        let parsed = parsed(name, "");
         dispatch(&parsed, &SlashContext::new(&test_session_info(), None))
+    }
+
+    // ── echoes_input ──
+
+    #[test]
+    fn echoes_input_modal_only_commands_suppress_their_typed_line() {
+        for name in ["status", "config", "help"] {
+            let parsed = parsed(name, "");
+            assert!(!echoes_input(&parsed), "/{name} must not echo");
+        }
+    }
+
+    #[test]
+    fn echoes_input_picker_or_typed_commands_split_on_args() {
+        for name in ["effort", "model", "theme"] {
+            let bare = parsed(name, "");
+            assert!(!echoes_input(&bare), "bare /{name} must not echo");
+            let typed = parsed(name, "x");
+            assert!(echoes_input(&typed), "typed /{name} must echo");
+        }
+    }
+
+    #[test]
+    fn echoes_input_unknown_command_echoes_so_error_block_has_context() {
+        let parsed = parsed("no-such-thing", "");
+        assert!(echoes_input(&parsed));
     }
 
     // ── dispatch ──
@@ -193,145 +180,70 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_prompt_submit_command_produces_synthesized_body() {
-        let action = run_dispatch("init").unwrap().into_forward();
-        assert!(
-            matches!(
-                &action,
-                Action::Op(Op::Prompt(body))
-                    if body.contains("AGENTS.md")
-            ),
-            "expected a prompt with the AGENTS.md body, got {action:?}",
-        );
-    }
-
-    #[test]
-    fn dispatch_unknown_command_message_lists_available_and_escape_hint() {
+    fn dispatch_unknown_command_lists_every_built_in() {
         let msg = run_dispatch("etc").expect_err("unknown command must error");
-        assert!(msg.starts_with("unknown command: /etc."), "{msg}");
-        assert!(msg.contains("/help"), "should list /help: {msg}");
         for cmd in registry::BUILT_INS {
             let needle = format!("/{}", cmd.name());
             assert!(msg.contains(&needle), "should list `{needle}`: {msg}");
         }
-        assert!(
-            msg.contains("//etc"),
-            "should mention `//etc` escape: {msg}"
-        );
     }
 
     // ── dispatch_with ──
 
-    /// Always-erroring; exercises error-wrapping and alias resolution.
-    struct Failing;
-    impl registry::SlashCommand for Failing {
-        fn name(&self) -> &'static str {
-            "failing"
-        }
-        fn aliases(&self) -> &'static [&'static str] {
-            &["bust", "boom"]
-        }
-        fn description(&self) -> &'static str {
-            "test"
-        }
-        fn execute(&self, _: &str, _: &SlashContext<'_>) -> Result<SlashOutcome, String> {
-            Err("explicit failure".to_owned())
-        }
-    }
-
-    #[test]
-    fn failing_fixture_metadata_matches_what_dispatcher_tests_assume() {
-        assert_eq!(Failing.name(), "failing");
-        assert_eq!(Failing.aliases(), &["bust", "boom"]);
-        assert_eq!(Failing.description(), "test");
-    }
-
-    fn run_failing(name: &str) -> String {
-        let parsed = Parsed {
-            name: name.to_owned(),
-            args: String::new(),
-        };
+    fn dispatch_fake(name: &str) -> String {
+        let parsed = parsed(name, "");
         let info = test_session_info();
-        dispatch_with(&[&Failing], &parsed, &SlashContext::new(&info, None)).unwrap_err()
+        dispatch_with(
+            &[&FakeCmd {
+                name: "failing",
+                aliases: &["bust", "boom"],
+                error: "Explicit failure.",
+                ..FakeCmd::DEFAULT
+            }],
+            &parsed,
+            &SlashContext::new(&info, None),
+        )
+        .unwrap_err()
     }
 
     #[test]
     fn dispatch_with_command_failure_prefixes_the_command_name() {
-        assert_eq!(run_failing("failing"), "/failing: explicit failure");
+        assert_eq!(dispatch_fake("failing"), "/failing: Explicit failure.");
     }
 
     #[test]
     fn dispatch_with_alias_routes_to_canonical_impl() {
         // Error must echo the alias the user typed.
-        assert_eq!(run_failing("boom"), "/boom: explicit failure");
-    }
-
-    // ── echoes_input ──
-
-    #[test]
-    fn echoes_input_modal_only_commands_suppress_their_typed_line() {
-        for name in ["status", "config", "help"] {
-            let parsed = Parsed {
-                name: name.to_owned(),
-                args: String::new(),
-            };
-            assert!(!echoes_input(&parsed), "/{name} must not echo");
-        }
+        assert_eq!(dispatch_fake("boom"), "/boom: Explicit failure.");
     }
 
     #[test]
-    fn echoes_input_picker_or_typed_commands_split_on_args() {
-        for name in ["effort", "model", "theme"] {
-            let bare = Parsed {
-                name: name.to_owned(),
-                args: String::new(),
-            };
-            assert!(!echoes_input(&bare), "bare /{name} must not echo");
-            let typed = Parsed {
-                name: name.to_owned(),
-                args: "x".to_owned(),
-            };
-            assert!(echoes_input(&typed), "typed /{name} must echo");
-        }
-    }
-
-    #[test]
-    fn echoes_input_unknown_command_echoes_so_error_block_has_context() {
-        let parsed = Parsed {
-            name: "no-such-thing".to_owned(),
-            args: String::new(),
-        };
-        assert!(echoes_input(&parsed));
+    fn dispatch_with_unknown_command_lists_available_and_the_escape() {
+        assert_eq!(
+            dispatch_fake("etc"),
+            "Unknown command: /etc. Available: /failing. Use //etc to send the literal text.",
+        );
     }
 
     // ── classify ──
 
     #[test]
     fn classify_built_in_read_only_command_is_read_only() {
-        let parsed = Parsed {
-            name: "help".to_owned(),
-            args: String::new(),
-        };
+        let parsed = parsed("help", "");
         assert_eq!(classify(&parsed), SlashKind::ReadOnly);
     }
 
     #[test]
     fn classify_built_in_state_mutating_command_is_mutating() {
         for name in ["clear", "new", "reset", "init"] {
-            let parsed = Parsed {
-                name: name.to_owned(),
-                args: String::new(),
-            };
+            let parsed = parsed(name, "");
             assert_eq!(classify(&parsed), SlashKind::Mutating, "{name}");
         }
     }
 
     #[test]
     fn classify_unknown_command_is_unknown() {
-        let parsed = Parsed {
-            name: "no-such-thing".to_owned(),
-            args: String::new(),
-        };
+        let parsed = parsed("no-such-thing", "");
         assert_eq!(classify(&parsed), SlashKind::Unknown);
     }
 }

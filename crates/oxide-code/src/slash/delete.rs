@@ -7,13 +7,14 @@ use std::path::Path;
 use super::confirm::ConfirmDeleteSessionModal;
 use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashKind, SlashOutcome};
+use super::sessions::{open_store, resolve_error_message};
 use crate::session::display::{display_title, format_metadata_line};
 use crate::session::entry::SessionInfo;
 use crate::session::resolver::resolve_saved_prefix;
-use crate::session::store::SessionStore;
 use crate::util::path::tildify;
 
-/// `/delete <id-prefix>` typed-arg form.
+// ── DeleteCmd ──
+
 pub(super) struct DeleteCmd;
 
 impl SlashCommand for DeleteCmd {
@@ -45,16 +46,17 @@ impl SlashCommand for DeleteCmd {
         let arg = args.trim();
         if arg.is_empty() {
             return Err(
-                "missing id. Use `/resume` then Ctrl+D, or `/delete <id-prefix>` for direct removal."
+                "Missing id. Use `/resume` then Ctrl+D, or `/delete <id-prefix>` for direct removal."
                     .to_owned(),
             );
         }
-        let store =
-            SessionStore::open().map_err(|e| format!("session store unavailable: {e:#}"))?;
+        let store = open_store()?;
         let live_id = ctx.info.session_id.as_str();
-        let info = resolve_saved_prefix(&store, arg, live_id)?.ok_or_else(|| {
-            format!("cannot delete the live session: `{arg}` matches the active session")
-        })?;
+        let info = resolve_saved_prefix(&store, arg, live_id)
+            .map_err(resolve_error_message)?
+            .ok_or_else(|| {
+                format!("Cannot delete the live session: `{arg}` matches the active session.")
+            })?;
         Ok(SlashOutcome::Modal(Box::new(
             ConfirmDeleteSessionModal::new(
                 info.path.clone(),
@@ -88,19 +90,22 @@ mod tests {
     use time::macros::datetime;
 
     use super::*;
+    use crate::session::store::SessionStore;
     use crate::session::store::testing::seed_test_session;
     use crate::slash::registry::SlashCommand;
     use crate::slash::{stamped_id, test_session_info, with_isolated_xdg};
 
-    // ── DeleteCmd metadata ──
+    // ── DeleteCmd::name ──
 
     #[test]
-    fn metadata_matches_built_ins_contract() {
+    fn name_and_metadata_match_built_ins_contract() {
         assert_eq!(DeleteCmd.name(), "delete");
         assert_eq!(DeleteCmd.aliases(), [] as [&str; 0]);
         assert_ne!(DeleteCmd.description(), "");
         assert_eq!(DeleteCmd.usage(), Some("<id-prefix>"));
     }
+
+    // ── DeleteCmd::classify ──
 
     #[test]
     fn classify_is_always_mutating() {
@@ -109,6 +114,8 @@ mod tests {
         assert_eq!(DeleteCmd.classify(""), SlashKind::Mutating);
         assert_eq!(DeleteCmd.classify("ab"), SlashKind::Mutating);
     }
+
+    // ── DeleteCmd::echoes_input ──
 
     #[test]
     fn echoes_input_suppressed_on_bare_form_and_active_on_typed_arg() {
@@ -122,22 +129,24 @@ mod tests {
     // ── DeleteCmd::execute ──
 
     #[test]
-    fn execute_bare_returns_friendly_error_about_missing_id() {
-        with_isolated_xdg(|_| {
-            let info = test_session_info();
-            let ctx = SlashContext::new(&info, None);
-            let err = DeleteCmd.execute("", &ctx).unwrap_err();
-            assert!(err.contains("missing id"), "{err}");
-        });
+    fn execute_bare_points_to_the_picker_and_typed_form() {
+        let info = test_session_info();
+        let err = DeleteCmd
+            .execute("", &SlashContext::new(&info, None))
+            .unwrap_err();
+        assert_eq!(
+            err,
+            "Missing id. Use `/resume` then Ctrl+D, or `/delete <id-prefix>` for direct removal.",
+        );
     }
 
     #[test]
-    fn execute_with_unknown_prefix_returns_friendly_error() {
+    fn execute_unknown_prefix_reports_no_match() {
         with_isolated_xdg(|_| {
             let info = test_session_info();
             let ctx = SlashContext::new(&info, None);
             let err = DeleteCmd.execute("zzz1234", &ctx).unwrap_err();
-            assert!(err.contains("no session matching"), "{err}");
+            assert_eq!(err, "No session matching `zzz1234`.");
         });
     }
 
@@ -166,7 +175,7 @@ mod tests {
     #[test]
     fn execute_widens_to_other_projects_when_current_project_misses() {
         // Pin the widening path: scoped resolution misses, the all-projects retry finds the
-        // target. Without widening the user would see "no session matching" for a real session.
+        // target. Without widening the user would see "No session matching" for a real session.
         with_isolated_xdg(|dir| {
             let sessions_dir = dir.join("ox").join("sessions");
             std::fs::create_dir_all(&sessions_dir).unwrap();
@@ -232,9 +241,8 @@ mod tests {
 
     #[test]
     fn execute_with_live_id_prefix_returns_distinct_live_session_error() {
-        // The live session id is filtered out of match results, but a prefix that matches only
-        // the live id surfaces a distinct error so the user sees the real reason rather than the
-        // generic "no session matching" they'd get for a typo.
+        // The resolver drops the live id from its matches, so a prefix that matches only the live
+        // session gets its own explanation.
         with_isolated_xdg(|_| {
             let store = SessionStore::open().unwrap();
             let live_id = "test-session";
@@ -249,9 +257,9 @@ mod tests {
             let ctx = SlashContext::new(&info, None);
 
             let err = DeleteCmd.execute(live_id, &ctx).unwrap_err();
-            assert!(
-                err.contains("cannot delete the live session"),
-                "live-only match must surface the dedicated message: {err}",
+            assert_eq!(
+                err,
+                "Cannot delete the live session: `test-session` matches the active session.",
             );
         });
     }
@@ -285,27 +293,27 @@ mod tests {
     }
 
     #[test]
-    fn execute_ambiguous_prefix_lists_short_ids_in_error() {
+    fn execute_ambiguous_prefix_lists_short_ids_and_counts_the_rest() {
         with_isolated_xdg(|_| {
             let store = SessionStore::open().unwrap();
-            let id_a = format!("aaaa{}", &stamped_id(0xaa)[4..]);
-            let id_b = format!("aaaa{}", &stamped_id(0xab)[4..]);
-            for id in [&id_a, &id_b] {
+            for byte in 0xa0..=0xa5 {
                 seed_test_session(
                     &store,
-                    id,
+                    &format!("aaaa{}", &stamped_id(byte)[4..]),
                     Some("t"),
                     Some(1),
-                    datetime!(2026-04-18 09:00:00 UTC),
+                    datetime!(2026-04-18 09:00:00 UTC) + time::Duration::seconds(i64::from(byte)),
                 );
             }
             let info = test_session_info();
             let ctx = SlashContext::new(&info, None);
 
             let err = DeleteCmd.execute("aaaa", &ctx).unwrap_err();
-            assert!(err.contains("ambiguous prefix"), "{err}");
-            assert!(err.contains(&id_a[..8]), "first id in {err}");
-            assert!(err.contains(&id_b[..8]), "second id in {err}");
+            assert_eq!(
+                err,
+                "Ambiguous prefix `aaaa` matches 6 sessions: aaaaa5a5, aaaaa4a4, aaaaa3a3, \
+                 aaaaa2a2, aaaaa1a1, and 1 more.",
+            );
         });
     }
 

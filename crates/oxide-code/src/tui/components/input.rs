@@ -17,12 +17,14 @@ use crate::protocol::Op;
 use crate::slash::{PopupState, arg_placeholder_for, popup_state};
 use crate::tui::action::Action;
 use crate::tui::glyphs::{USER_PROMPT_PREFIX, USER_PROMPT_PREFIX_WIDTH};
+use crate::tui::saturating_u16;
 use crate::tui::theme::Theme;
 
 // ── Constants ──
 
 /// Maximum number of visible content lines before the input stops growing.
 const MAX_VISIBLE_LINES: u16 = 6;
+const BORDER_ROWS: u16 = 2;
 
 /// Result of routing one terminal event through [`InputArea::handle_event`].
 #[derive(Debug, PartialEq, Eq)]
@@ -43,8 +45,6 @@ pub(crate) struct InputArea {
     textarea: TextArea<'static>,
     popup: SlashPopup,
     enabled: bool,
-    /// `Cell` because `render(&self)` is immutable.
-    scroll_top: Cell<u16>,
     /// Textarea width at the last render, which sets the wrap layout.
     rendered_width: Cell<u16>,
     /// Cached [`Self::visual_line_count`], cleared when the text or the rendered width changes.
@@ -66,7 +66,6 @@ impl InputArea {
             textarea,
             enabled: true,
             popup: SlashPopup::new(theme),
-            scroll_top: Cell::new(0),
             rendered_width: Cell::new(0),
             visual_lines: Cell::new(None),
         }
@@ -99,12 +98,18 @@ impl InputArea {
         self.textarea.select_all();
         self.textarea.insert_str(text);
         self.visual_lines.set(None);
-        self.scroll_top.set(0);
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.textarea
+            .lines()
+            .iter()
+            .all(|line| line.trim().is_empty())
     }
 
     pub(crate) fn height(&self) -> u16 {
         let content_lines = self.visual_line_count();
-        content_lines.min(MAX_VISIBLE_LINES) + 2
+        content_lines.min(MAX_VISIBLE_LINES) + BORDER_ROWS
     }
 
     pub(crate) fn popup_visible(&self) -> bool {
@@ -163,16 +168,7 @@ impl InputArea {
 
         let sc = self.textarea.screen_cursor();
         let cursor_row = saturating_u16(sc.row);
-        let height = textarea_area.height;
-        let prev = self.scroll_top.get();
-        let top = if cursor_row < prev {
-            cursor_row
-        } else if height > 0 && prev + height <= cursor_row {
-            cursor_row + 1 - height
-        } else {
-            prev
-        };
-        self.scroll_top.set(top);
+        let (top, _) = self.textarea.scroll_offset();
 
         let raw_cursor_x = textarea_area.x.saturating_add(saturating_u16(sc.col));
         let cursor_y = textarea_area.y + cursor_row - top;
@@ -319,18 +315,15 @@ impl InputArea {
 
     fn popup_completion_text(&self) -> Option<String> {
         let row = self.popup.selected()?;
-        Some(match self.popup.mode()? {
-            PopupMode::Name => format!("/{} ", row.value),
-            PopupMode::Arg { name } => format!("/{name} {} ", row.value),
-        })
+        Some(format!(
+            "{} ",
+            format_completion(self.popup.mode()?, &row.value)
+        ))
     }
 
     fn popup_submit_selected(&mut self) -> Option<Action> {
         let row = self.popup.selected()?;
-        let submission = match self.popup.mode()? {
-            PopupMode::Name => format!("/{}", row.value),
-            PopupMode::Arg { name } => format!("/{name} {}", row.value),
-        };
+        let submission = format_completion(self.popup.mode()?, &row.value);
         self.set_text("");
         self.popup.set_state(None);
         Some(Action::Submit(submission))
@@ -371,13 +364,6 @@ impl InputArea {
         count
     }
 
-    pub(crate) fn is_empty(&self) -> bool {
-        self.textarea
-            .lines()
-            .iter()
-            .all(|line| line.trim().is_empty())
-    }
-
     fn submit(&mut self) -> Option<Action> {
         if self.is_empty() {
             return None;
@@ -392,6 +378,13 @@ impl InputArea {
 }
 
 // ── Free Functions ──
+
+fn format_completion(mode: &PopupMode, value: &str) -> String {
+    match mode {
+        PopupMode::Name => format!("/{value}"),
+        PopupMode::Arg { name } => format!("/{name} {value}"),
+    }
+}
 
 /// Fires only in `Arg` mode with an empty prefix and a `usage()` to surface.
 fn ghost_text_from_state(state: &PopupState<'_>, usage: Option<&str>) -> Option<String> {
@@ -420,16 +413,11 @@ fn normalize_placeholder(usage: &str) -> String {
     format!("[{inner}]")
 }
 
-/// Saturating `usize` to `u16` conversion for terminal dimensions.
-fn saturating_u16(n: usize) -> u16 {
-    u16::try_from(n).unwrap_or(u16::MAX)
-}
-
 #[cfg(test)]
 mod tests {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
+    use ratatui::backend::{Backend, TestBackend};
     use ratatui::layout::Position;
 
     use super::*;
@@ -440,6 +428,25 @@ mod tests {
 
     fn key(code: KeyCode, modifiers: KeyModifiers) -> Event {
         Event::Key(KeyEvent::new(code, modifiers))
+    }
+
+    fn type_text(input: &mut InputArea, text: &str) {
+        for ch in text.chars() {
+            input.textarea.input(Event::Key(KeyEvent::new(
+                KeyCode::Char(ch),
+                KeyModifiers::NONE,
+            )));
+        }
+    }
+
+    fn render_to_backend(input: &InputArea, width: u16, height: u16) -> TestBackend {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| {
+                input.render(frame, frame.area());
+            })
+            .unwrap();
+        terminal.backend().clone()
     }
 
     // ── set_enabled ──
@@ -461,7 +468,7 @@ mod tests {
     #[test]
     fn height_empty_input_is_three() {
         let input = test_input();
-        assert_eq!(input.height(), 3); // 1 content + 2 borders
+        assert_eq!(input.height(), 1 + BORDER_ROWS);
     }
 
     #[test]
@@ -469,7 +476,7 @@ mod tests {
         let mut input = test_input();
         input.textarea.insert_newline();
         input.textarea.insert_newline();
-        assert_eq!(input.height(), 5); // 3 content + 2 borders
+        assert_eq!(input.height(), 3 + BORDER_ROWS);
     }
 
     #[test]
@@ -477,7 +484,7 @@ mod tests {
         let mut input = test_input();
         type_text(&mut input, "aaaaaa bbbbbb cccccc dddddd");
         render_to_backend(&input, 12, 3);
-        assert_eq!(input.height(), 6, "4 word-wrapped rows + 2 borders");
+        assert_eq!(input.height(), 4 + BORDER_ROWS, "4 word-wrapped rows");
     }
 
     #[test]
@@ -486,7 +493,7 @@ mod tests {
         for _ in 0..10 {
             input.textarea.insert_newline();
         }
-        assert_eq!(input.height(), MAX_VISIBLE_LINES + 2);
+        assert_eq!(input.height(), MAX_VISIBLE_LINES + BORDER_ROWS);
     }
 
     // ── render_popup ──
@@ -720,311 +727,7 @@ mod tests {
         );
     }
 
-    // ── render ──
-
-    fn render_to_backend(input: &InputArea, width: u16, height: u16) -> TestBackend {
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal
-            .draw(|frame| {
-                input.render(frame, frame.area());
-            })
-            .unwrap();
-        terminal.backend().clone()
-    }
-
-    fn type_text(input: &mut InputArea, text: &str) {
-        for ch in text.chars() {
-            input.textarea.input(Event::Key(KeyEvent::new(
-                KeyCode::Char(ch),
-                KeyModifiers::NONE,
-            )));
-        }
-    }
-
-    #[test]
-    fn render_empty_buffer_shows_only_prompt_marker_and_borders() {
-        let input = test_input();
-        insta::assert_snapshot!(render_to_backend(&input, 60, 3));
-    }
-
-    #[test]
-    fn render_with_text_shows_typed_content() {
-        let mut input = test_input();
-        type_text(&mut input, "hello world");
-        insta::assert_snapshot!(render_to_backend(&input, 60, 3));
-    }
-
-    #[test]
-    fn render_busy_state_keeps_text_styled_normally() {
-        // Composing mid-turn (for the queue) must look identical to
-        // composing idle — Claude Code does the same. Sample the first
-        // textarea cell across both states and pin them to `text`.
-        let theme = Theme::default();
-        let mut input = InputArea::new(&theme);
-        type_text(&mut input, "pending");
-
-        let enabled_fg = render_to_backend(&input, 60, 3)
-            .buffer()
-            .cell(Position::new(USER_PROMPT_PREFIX_WIDTH, 1))
-            .unwrap()
-            .fg;
-        input.set_enabled(false);
-        let disabled_fg = render_to_backend(&input, 60, 3)
-            .buffer()
-            .cell(Position::new(USER_PROMPT_PREFIX_WIDTH, 1))
-            .unwrap()
-            .fg;
-
-        assert_eq!(enabled_fg, theme.text().fg.unwrap());
-        assert_eq!(disabled_fg, theme.text().fg.unwrap());
-    }
-
-    #[test]
-    fn render_prompt_marker_always_uses_user_color() {
-        // The chevron stays the user accent across run-states because
-        // composing mid-turn is allowed — same intent as the typed text styling above.
-        let theme = Theme::default();
-        let mut input = InputArea::new(&theme);
-
-        let enabled_fg = render_to_backend(&input, 60, 3)
-            .buffer()
-            .cell(Position::new(0, 1))
-            .unwrap()
-            .fg;
-        input.set_enabled(false);
-        let disabled_fg = render_to_backend(&input, 60, 3)
-            .buffer()
-            .cell(Position::new(0, 1))
-            .unwrap()
-            .fg;
-
-        assert_eq!(enabled_fg, theme.user().fg.unwrap());
-        assert_eq!(disabled_fg, theme.user().fg.unwrap());
-    }
-
-    #[test]
-    fn render_multiline_grows_textarea_region() {
-        let mut input = test_input();
-        type_text(&mut input, "line 1");
-        input.textarea.insert_newline();
-        type_text(&mut input, "line 2");
-        input.textarea.insert_newline();
-        type_text(&mut input, "line 3");
-        insta::assert_snapshot!(render_to_backend(&input, 60, input.height()));
-    }
-
-    #[test]
-    fn render_long_line_wraps_and_engages_scroll_offset() {
-        // Narrow width forces word-wrap; typing past the visible row
-        // engages scroll_top so the cursor stays on-screen.
-        let mut input = test_input();
-        type_text(
-            &mut input,
-            "a long input that overflows a narrow terminal and forces the textarea to wrap",
-        );
-        insta::assert_snapshot!(render_to_backend(&input, 30, 5));
-    }
-
-    #[test]
-    fn render_paints_ghost_text_after_cursor_in_arg_mode() {
-        // Mirrors the textarea's built-in placeholder layout: cursor at the insertion point,
-        // dim hint starts the column right of it.
-        let mut input = test_input();
-        type_text(&mut input, "/model ");
-        input.refresh_popup();
-        let mut terminal = Terminal::new(TestBackend::new(60, 3)).unwrap();
-        terminal.draw(|f| input.render(f, f.area())).unwrap();
-
-        let buf = terminal.backend().buffer();
-        let row: String = (0..60).map(|x| buf[(x, 1)].symbol()).collect();
-        assert!(
-            row.contains("/model  [id]"),
-            "ghost-text must sit one column past the cursor: {row:?}",
-        );
-
-        let pos = terminal.get_cursor_position().unwrap();
-        let cursor_col = USER_PROMPT_PREFIX_WIDTH + u16::try_from("/model ".len()).unwrap();
-        assert_eq!(
-            (pos.x, pos.y),
-            (cursor_col, 1),
-            "OS cursor must land at the typed insertion point, not on `[`",
-        );
-    }
-
-    #[test]
-    fn render_omits_ghost_text_once_user_types_arg_prefix() {
-        let mut input = test_input();
-        type_text(&mut input, "/model claude-");
-        input.refresh_popup();
-        let backend = render_to_backend(&input, 60, 3);
-        let rendered = format!("{backend}");
-        assert!(
-            !rendered.contains("[id]"),
-            "ghost-text must hide once prefix is typed: {rendered}",
-        );
-    }
-
-    #[test]
-    fn render_advances_scroll_top_when_cursor_below_viewport() {
-        // After typing N+1 logical lines, the cursor sits at row N
-        // while we render with only 3 visible content rows. The
-        // scroll-tracking math must advance `scroll_top` so the
-        // cursor stays on-screen — pin it to the expected offset.
-        let mut input = test_input();
-        for _ in 0..7 {
-            input.textarea.insert_newline();
-        }
-        type_text(&mut input, "tail");
-
-        render_to_backend(&input, 60, 5);
-
-        assert_eq!(
-            input.scroll_top.get(),
-            5,
-            "cursor at row 7 + height 3 → scroll_top = 7 + 1 - 3",
-        );
-    }
-
-    #[test]
-    fn render_rewinds_scroll_top_when_cursor_above_viewport() {
-        // First render parks `scroll_top` past the start; moving the
-        // cursor back to row 0 must rewind it so the cursor doesn't
-        // disappear off the top of the viewport.
-        let mut input = test_input();
-        for _ in 0..7 {
-            input.textarea.insert_newline();
-        }
-        type_text(&mut input, "tail");
-        render_to_backend(&input, 60, 5);
-        assert!(input.scroll_top.get() > 0);
-
-        for _ in 0..7 {
-            input.textarea.input(key(KeyCode::Up, KeyModifiers::NONE));
-        }
-        render_to_backend(&input, 60, 5);
-
-        assert_eq!(
-            input.scroll_top.get(),
-            0,
-            "cursor row 0 < prev → scroll_top tracks back down to cursor",
-        );
-    }
-
-    // ── visual_line_count ──
-
-    #[test]
-    fn visual_line_count_no_width_falls_back_to_logical() {
-        // Before the first render the textarea has no wrap width.
-        let mut input = test_input();
-        assert_eq!(input.visual_line_count(), 1);
-
-        input.handle_event(&key(KeyCode::Enter, KeyModifiers::SHIFT));
-        assert_eq!(input.visual_line_count(), 2);
-    }
-
-    #[test]
-    fn visual_line_count_tracks_edits_and_width_changes() {
-        let mut input = test_input();
-        render_to_backend(&input, 12, 6);
-        assert_eq!(input.visual_line_count(), 1);
-
-        for ch in "a".repeat(25).chars() {
-            input.handle_event(&key(KeyCode::Char(ch), KeyModifiers::NONE));
-        }
-        assert_eq!(input.visual_line_count(), 3, "typing re-measures");
-
-        input.handle_event(&Event::Paste("dddddddddd".to_owned()));
-        assert_eq!(input.visual_line_count(), 4, "a paste re-measures");
-
-        render_to_backend(&input, 40, 6);
-        assert_eq!(input.visual_line_count(), 1, "a wider render re-measures");
-
-        input.set_text("a\nb\nc");
-        assert_eq!(input.visual_line_count(), 3, "set_text re-measures");
-    }
-
-    #[test]
-    fn visual_line_count_breaks_at_word_boundaries() {
-        // 27 chars fit 3 rows of 10 by width alone, but words cannot straddle a row break.
-        let mut input = test_input();
-        type_text(&mut input, "aaaaaa bbbbbb cccccc dddddd");
-        render_to_backend(&input, 12, 6);
-        assert_eq!(input.visual_line_count(), 4);
-    }
-
-    #[test]
-    fn visual_line_count_splits_an_unbroken_token_at_the_width() {
-        // A pasted URL or path wider than the band wraps onto the following rows.
-        let mut input = test_input();
-        type_text(&mut input, "abcdefghijklmnopqrstuvwxy");
-        render_to_backend(&input, 12, 3);
-        assert_eq!(input.visual_line_count(), 3);
-    }
-
-    #[test]
-    fn visual_line_count_mixed_logical_and_wrapped() {
-        let mut input = test_input();
-        input.set_text("hello\nabcdefghijklmno");
-        render_to_backend(&input, 12, 3);
-        assert_eq!(input.visual_line_count(), 3, "1 row + 2 rows");
-    }
-
-    // ── submit ──
-
-    #[test]
-    fn submit_clears_textarea() {
-        let mut input = test_input();
-        input.textarea.input(Event::Key(KeyEvent::new(
-            KeyCode::Char('x'),
-            KeyModifiers::NONE,
-        )));
-
-        input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(input.textarea.lines(), vec![""]);
-    }
-
-    #[test]
-    fn submit_empty_produces_no_action() {
-        let mut input = test_input();
-        let outcome = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(outcome, InputOutcome::Consumed);
-    }
-
-    #[test]
-    fn submit_keeps_the_yank_buffer() {
-        // Ctrl+W yanks `bar`, and Ctrl+Y after the submit must still paste it.
-        let mut input = test_input();
-        type_text(&mut input, "foo bar");
-        input.handle_event(&key(KeyCode::Char('w'), KeyModifiers::CONTROL));
-        input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
-        input.handle_event(&key(KeyCode::Char('y'), KeyModifiers::CONTROL));
-        assert_eq!(input.textarea.lines(), vec!["bar"]);
-    }
-
-    #[test]
-    fn submit_trims_whitespace() {
-        let mut input = test_input();
-        input.textarea.input(Event::Key(KeyEvent::new(
-            KeyCode::Char(' '),
-            KeyModifiers::NONE,
-        )));
-        input.textarea.input(Event::Key(KeyEvent::new(
-            KeyCode::Char('a'),
-            KeyModifiers::NONE,
-        )));
-        input.textarea.input(Event::Key(KeyEvent::new(
-            KeyCode::Char(' '),
-            KeyModifiers::NONE,
-        )));
-
-        let outcome = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(
-            outcome,
-            InputOutcome::Action(Action::Submit("a".to_owned())),
-        );
-    }
-
-    // ── popup routing ──
+    // ── handle_event: popup ──
 
     /// Drive the input into a popup-visible state by typing a `/`,
     /// so popup-key tests start from a known fixture.
@@ -1181,6 +884,172 @@ mod tests {
         );
     }
 
+    // ── render ──
+
+    #[test]
+    fn render_empty_buffer_shows_only_prompt_marker_and_borders() {
+        let input = test_input();
+        insta::assert_snapshot!(render_to_backend(&input, 60, 3));
+    }
+
+    #[test]
+    fn render_with_text_shows_typed_content() {
+        let mut input = test_input();
+        type_text(&mut input, "hello world");
+        insta::assert_snapshot!(render_to_backend(&input, 60, 3));
+    }
+
+    #[test]
+    fn render_busy_state_keeps_text_styled_normally() {
+        // Composing mid-turn for the queue looks the same as composing idle, as in Claude Code.
+        let theme = Theme::default();
+        let mut input = InputArea::new(&theme);
+        type_text(&mut input, "pending");
+
+        let enabled_fg = render_to_backend(&input, 60, 3)
+            .buffer()
+            .cell(Position::new(USER_PROMPT_PREFIX_WIDTH, 1))
+            .unwrap()
+            .fg;
+        input.set_enabled(false);
+        let disabled_fg = render_to_backend(&input, 60, 3)
+            .buffer()
+            .cell(Position::new(USER_PROMPT_PREFIX_WIDTH, 1))
+            .unwrap()
+            .fg;
+
+        assert_eq!(enabled_fg, theme.text().fg.unwrap());
+        assert_eq!(disabled_fg, theme.text().fg.unwrap());
+    }
+
+    #[test]
+    fn render_prompt_marker_always_uses_user_color() {
+        // The chevron keeps the user accent while busy, since composing mid-turn is allowed.
+        let theme = Theme::default();
+        let mut input = InputArea::new(&theme);
+
+        let enabled_fg = render_to_backend(&input, 60, 3)
+            .buffer()
+            .cell(Position::new(0, 1))
+            .unwrap()
+            .fg;
+        input.set_enabled(false);
+        let disabled_fg = render_to_backend(&input, 60, 3)
+            .buffer()
+            .cell(Position::new(0, 1))
+            .unwrap()
+            .fg;
+
+        assert_eq!(enabled_fg, theme.user().fg.unwrap());
+        assert_eq!(disabled_fg, theme.user().fg.unwrap());
+    }
+
+    #[test]
+    fn render_multiline_grows_textarea_region() {
+        let mut input = test_input();
+        type_text(&mut input, "line 1");
+        input.textarea.insert_newline();
+        type_text(&mut input, "line 2");
+        input.textarea.insert_newline();
+        type_text(&mut input, "line 3");
+        insta::assert_snapshot!(render_to_backend(&input, 60, input.height()));
+    }
+
+    #[test]
+    fn render_long_line_wraps_and_engages_scroll_offset() {
+        // A narrow width forces a word wrap, and text past the last visible row scrolls the
+        // viewport so the cursor stays on screen.
+        let mut input = test_input();
+        type_text(
+            &mut input,
+            "a long input that overflows a narrow terminal and forces the textarea to wrap",
+        );
+        insta::assert_snapshot!(render_to_backend(&input, 30, 5));
+    }
+
+    #[test]
+    fn render_paints_ghost_text_after_cursor_in_arg_mode() {
+        // Mirrors the textarea's built-in placeholder layout: cursor at the insertion point,
+        // dim hint starts the column right of it.
+        let mut input = test_input();
+        type_text(&mut input, "/model ");
+        input.refresh_popup();
+        let mut terminal = Terminal::new(TestBackend::new(60, 3)).unwrap();
+        terminal.draw(|f| input.render(f, f.area())).unwrap();
+
+        let buf = terminal.backend().buffer();
+        let row: String = (0..60).map(|x| buf[(x, 1)].symbol()).collect();
+        assert!(
+            row.contains("/model  [id]"),
+            "ghost-text must sit one column past the cursor: {row:?}",
+        );
+
+        let pos = terminal.get_cursor_position().unwrap();
+        let cursor_col = USER_PROMPT_PREFIX_WIDTH + u16::try_from("/model ".len()).unwrap();
+        assert_eq!(
+            (pos.x, pos.y),
+            (cursor_col, 1),
+            "OS cursor must land at the typed insertion point, not on `[`",
+        );
+    }
+
+    #[test]
+    fn render_omits_ghost_text_once_user_types_arg_prefix() {
+        let mut input = test_input();
+        type_text(&mut input, "/model claude-");
+        input.refresh_popup();
+        let backend = render_to_backend(&input, 60, 3);
+        let rendered = format!("{backend}");
+        assert!(
+            !rendered.contains("[id]"),
+            "ghost-text must hide once prefix is typed: {rendered}",
+        );
+    }
+
+    #[test]
+    fn render_keeps_cursor_on_the_textarea_insertion_row_when_the_viewport_grows() {
+        let mut input = test_input();
+        for _ in 0..7 {
+            input.textarea.insert_newline();
+        }
+        type_text(&mut input, "tail");
+        let x = USER_PROMPT_PREFIX_WIDTH;
+
+        for height in [5, 8] {
+            let mut backend = render_to_backend(&input, 60, height);
+
+            assert_eq!(input.textarea.scroll_offset(), (5, 0));
+            assert_eq!(
+                backend.get_cursor_position().unwrap(),
+                Position::new(x + 4, 3)
+            );
+            let row: String = (x..x + 4)
+                .map(|col| backend.buffer()[(col, 3)].symbol())
+                .collect();
+            assert_eq!(row, "tail");
+        }
+    }
+
+    #[test]
+    fn render_places_cursor_on_the_first_row_after_scrolling_back_up() {
+        let mut input = test_input();
+        for _ in 0..7 {
+            input.textarea.insert_newline();
+        }
+        type_text(&mut input, "tail");
+        render_to_backend(&input, 60, 5);
+        for _ in 0..7 {
+            input.textarea.input(key(KeyCode::Up, KeyModifiers::NONE));
+        }
+
+        let mut backend = render_to_backend(&input, 60, 5);
+
+        assert_eq!(
+            backend.get_cursor_position().unwrap(),
+            Position::new(USER_PROMPT_PREFIX_WIDTH, 1),
+        );
+    }
+
     // ── ghost_text ──
 
     #[test]
@@ -1189,6 +1058,120 @@ mod tests {
         type_text(&mut input, "/mod");
         input.refresh_popup();
         assert_eq!(input.ghost_text(), None);
+    }
+
+    // ── visual_line_count ──
+
+    #[test]
+    fn visual_line_count_no_width_falls_back_to_logical() {
+        // Before the first render the textarea has no wrap width.
+        let mut input = test_input();
+        assert_eq!(input.visual_line_count(), 1);
+
+        input.handle_event(&key(KeyCode::Enter, KeyModifiers::SHIFT));
+        assert_eq!(input.visual_line_count(), 2);
+    }
+
+    #[test]
+    fn visual_line_count_tracks_edits_and_width_changes() {
+        let mut input = test_input();
+        render_to_backend(&input, 12, 6);
+        assert_eq!(input.visual_line_count(), 1);
+
+        for ch in "a".repeat(25).chars() {
+            input.handle_event(&key(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+        assert_eq!(input.visual_line_count(), 3, "typing re-measures");
+
+        input.handle_event(&Event::Paste("dddddddddd".to_owned()));
+        assert_eq!(input.visual_line_count(), 4, "a paste re-measures");
+
+        render_to_backend(&input, 40, 6);
+        assert_eq!(input.visual_line_count(), 1, "a wider render re-measures");
+
+        input.set_text("a\nb\nc");
+        assert_eq!(input.visual_line_count(), 3, "set_text re-measures");
+    }
+
+    #[test]
+    fn visual_line_count_breaks_at_word_boundaries() {
+        // 27 chars fit 3 rows of 10 by width alone, but words cannot straddle a row break.
+        let mut input = test_input();
+        type_text(&mut input, "aaaaaa bbbbbb cccccc dddddd");
+        render_to_backend(&input, 12, 6);
+        assert_eq!(input.visual_line_count(), 4);
+    }
+
+    #[test]
+    fn visual_line_count_splits_an_unbroken_token_at_the_width() {
+        // A pasted URL or path wider than the band wraps onto the following rows.
+        let mut input = test_input();
+        type_text(&mut input, "abcdefghijklmnopqrstuvwxy");
+        render_to_backend(&input, 12, 3);
+        assert_eq!(input.visual_line_count(), 3);
+    }
+
+    #[test]
+    fn visual_line_count_mixed_logical_and_wrapped() {
+        let mut input = test_input();
+        input.set_text("hello\nabcdefghijklmno");
+        render_to_backend(&input, 12, 3);
+        assert_eq!(input.visual_line_count(), 3, "1 row + 2 rows");
+    }
+
+    // ── submit ──
+
+    #[test]
+    fn submit_clears_textarea() {
+        let mut input = test_input();
+        input.textarea.input(Event::Key(KeyEvent::new(
+            KeyCode::Char('x'),
+            KeyModifiers::NONE,
+        )));
+
+        input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(input.textarea.lines(), vec![""]);
+    }
+
+    #[test]
+    fn submit_empty_produces_no_action() {
+        let mut input = test_input();
+        let outcome = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(outcome, InputOutcome::Consumed);
+    }
+
+    #[test]
+    fn submit_keeps_the_yank_buffer() {
+        // Ctrl+W yanks `bar`, and Ctrl+Y after the submit must still paste it.
+        let mut input = test_input();
+        type_text(&mut input, "foo bar");
+        input.handle_event(&key(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
+        input.handle_event(&key(KeyCode::Char('y'), KeyModifiers::CONTROL));
+        assert_eq!(input.textarea.lines(), vec!["bar"]);
+    }
+
+    #[test]
+    fn submit_trims_whitespace() {
+        let mut input = test_input();
+        input.textarea.input(Event::Key(KeyEvent::new(
+            KeyCode::Char(' '),
+            KeyModifiers::NONE,
+        )));
+        input.textarea.input(Event::Key(KeyEvent::new(
+            KeyCode::Char('a'),
+            KeyModifiers::NONE,
+        )));
+        input.textarea.input(Event::Key(KeyEvent::new(
+            KeyCode::Char(' '),
+            KeyModifiers::NONE,
+        )));
+
+        let outcome = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            outcome,
+            InputOutcome::Action(Action::Submit("a".to_owned())),
+        );
     }
 
     // ── ghost_text_from_state ──

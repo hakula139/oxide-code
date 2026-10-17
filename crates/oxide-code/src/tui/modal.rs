@@ -1,8 +1,6 @@
-//! Modal overlay primitive — intercepts keys while active and emits a typed result on submission.
-//! Renders between chat scroll and input. [`ModalStack`] is `Vec`-backed so a future overlay
-//! (e.g. "confirm leave?") can `push` over an existing picker without ownership churn.
+//! Modal stack that routes keys to the top overlay and renders it between chat and input.
 //!
-//! Companion design: `docs/design/slash/modals.md`.
+//! Design: `docs/design/slash/modals.md`.
 
 pub(crate) mod approval;
 pub(crate) mod chrome;
@@ -18,10 +16,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use crate::tui::action::Action;
+use crate::tui::glyphs::HORIZONTAL_RULE;
 use crate::tui::theme::Theme;
 
 const TOP_BORDER_HEIGHT: u16 = 1;
-const TOP_BORDER_GLYPH: char = '─';
 
 // ── Modal Trait ──
 
@@ -116,7 +114,6 @@ impl ModalStack {
         !self.stack.is_empty()
     }
 
-    /// Push a modal onto the stack.
     pub(crate) fn push(&mut self, modal: Box<dyn Modal>) {
         self.stack.push(modal);
     }
@@ -159,7 +156,7 @@ impl ModalStack {
             ..area
         };
         let border = Line::from(Span::styled(
-            TOP_BORDER_GLYPH.to_string().repeat(usize::from(area.width)),
+            HORIZONTAL_RULE.repeat(usize::from(area.width)),
             theme.dim(),
         ));
         frame.render_widget(Paragraph::new(border).style(theme.surface()), border_area);
@@ -214,20 +211,27 @@ impl ModalStack {
     /// override the hook to refresh after a nested confirm modal mutated shared state.
     fn pop_and_notify(&mut self) {
         self.stack.pop();
-        if let Some(top) = self.stack.last_mut() {
-            top.on_focus_regained();
-        }
+        self.notify_top();
     }
 
     /// Pop the top entry for a cancellation, firing its [`Modal::on_cancel`] hook and notifying the
     /// new top. Returns the hook's action, or [`ModalAction::Cancelled`] for a silent close.
     fn pop_cancelled(&mut self) -> ModalAction {
         let action = self.stack.pop().and_then(|mut m| m.on_cancel());
+        self.notify_top();
+        action.unwrap_or(ModalAction::Cancelled)
+    }
+
+    fn notify_top(&mut self) {
         if let Some(top) = self.stack.last_mut() {
             top.on_focus_regained();
         }
-        action.unwrap_or(ModalAction::Cancelled)
     }
+}
+
+/// No modifier besides Shift, which terminals report on uppercase letters.
+pub(crate) fn is_plain_char(event: &KeyEvent) -> bool {
+    event.modifiers.is_empty() || event.modifiers == KeyModifiers::SHIFT
 }
 
 fn is_universal_cancel(event: &KeyEvent) -> bool {
@@ -239,13 +243,55 @@ fn is_universal_cancel(event: &KeyEvent) -> bool {
 
 #[cfg(test)]
 pub(crate) mod testing {
-    //! Synthetic modal for exercising the manager without coupling
-    //! tests to a concrete picker.
-
-    use super::*;
+    //! Row readers for rendered modals, and a synthetic modal that exercises the stack without a
+    //! concrete picker.
 
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
+
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+    use unicode_width::UnicodeWidthStr;
+
+    use super::*;
+
+    /// Renders `modal` into a `width` x `height` buffer and returns each row as displayed.
+    pub(crate) fn render_rows(modal: &dyn Modal, width: u16, height: u16) -> Vec<String> {
+        render_rows_with(width, height, |frame, area, theme| {
+            modal.render(frame, area, theme);
+        })
+    }
+
+    /// [`render_rows`] for any render closure, such as a picker that is not a [`Modal`].
+    pub(super) fn render_rows_with(
+        width: u16,
+        height: u16,
+        render: impl FnOnce(&mut Frame<'_>, Rect, &Theme),
+    ) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| render(frame, Rect::new(0, 0, width, height), &Theme::default()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..height).map(|y| row_text(buffer, y)).collect()
+    }
+
+    /// Skips the cells a wide symbol covers, which hold a placeholder space.
+    fn row_text(buffer: &Buffer, y: u16) -> String {
+        let mut text = String::new();
+        let mut covered = 0;
+        for x in 0..buffer.area.width {
+            let symbol = buffer[(x, y)].symbol();
+            if covered > 0 {
+                covered -= 1;
+            } else {
+                text.push_str(symbol);
+                covered = symbol.width().saturating_sub(1);
+            }
+        }
+        text
+    }
 
     /// Emits a fixed action on a sentinel key for exercising `ModalStack`.
     pub(crate) struct ScriptedModal {
@@ -335,10 +381,8 @@ mod tests {
     use std::sync::Arc;
 
     use crossterm::event::KeyCode;
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
 
-    use super::testing::ScriptedModal;
+    use super::testing::{ScriptedModal, render_rows_with};
     use super::*;
     use crate::protocol::Op;
 
@@ -350,10 +394,60 @@ mod tests {
         KeyEvent::new(code, modifiers)
     }
 
+    // ── Modal::on_focus_regained ──
+
+    /// Modal that doesn't override `on_focus_regained`, so the default empty body fires on pop.
+    struct BareModal;
+
+    impl Modal for BareModal {
+        fn height(&self, _w: u16, _max: u16) -> u16 {
+            1
+        }
+        fn render(&self, _f: &mut Frame<'_>, _a: Rect, _t: &Theme) {}
+        fn handle_key(&mut self, _e: &KeyEvent) -> ModalKey {
+            ModalKey::Consumed
+        }
+    }
+
+    #[test]
+    fn on_focus_regained_default_leaves_parent_on_top() {
+        // Pin that the trait's default empty body is safe to invoke. ScriptedModal overrides the
+        // hook for assertion purposes, so the default arm needs separate coverage.
+        let mut stack = ModalStack::new();
+        stack.push(Box::new(BareModal));
+        stack.push(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
+        stack.handle_key(&key('c'));
+        assert_eq!(
+            stack.height(80, 40),
+            1 + TOP_BORDER_HEIGHT,
+            "BareModal is back on top after its child cancels"
+        );
+    }
+
+    // ── ModalKey::fmt ──
+
+    #[test]
+    fn fmt_names_each_variant_and_its_action() {
+        // The Debug impl is hand-rolled because Box<dyn Modal> can't derive it. Pin each arm
+        // directly so test panic messages remain useful even if no test actually fires them.
+        assert_eq!(format!("{:?}", ModalKey::Consumed), "Consumed");
+        assert_eq!(format!("{:?}", ModalKey::Cancelled), "Cancelled");
+        assert_eq!(
+            format!("{:?}", ModalKey::Submitted(ModalAction::Cancelled)),
+            "Submitted(Cancelled)"
+        );
+        assert_eq!(
+            format!("{:?}", ModalKey::Preview(ModalAction::Cancelled)),
+            "Preview(Cancelled)"
+        );
+        let push: ModalKey = ModalKey::Push(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
+        assert_eq!(format!("{push:?}"), "Push(<modal>)");
+    }
+
     // ── is_active ──
 
     #[test]
-    fn empty_stack_reports_inactive_and_zero_height() {
+    fn is_active_empty_stack_is_inactive_with_zero_height() {
         let stack = ModalStack::new();
         assert!(!stack.is_active());
         assert_eq!(stack.height(80, 40), 0);
@@ -440,54 +534,44 @@ mod tests {
         let body_height = modal.declared_height;
         stack.push(Box::new(modal));
 
-        let theme = Theme::default();
-        let width: u16 = 12;
-        let total_height = stack.height(width, 40);
+        let total_height = stack.height(12, 40);
         assert_eq!(total_height, body_height + TOP_BORDER_HEIGHT);
 
-        let mut terminal = Terminal::new(TestBackend::new(width, total_height)).unwrap();
-        terminal
-            .draw(|frame| {
-                stack.render(frame, Rect::new(0, 0, width, total_height), &theme);
-            })
-            .expect("render must not panic");
+        let rows = render_rows_with(12, total_height, |frame, area, theme| {
+            stack.render(frame, area, theme);
+        });
 
-        let buf = terminal.backend().buffer();
-        for x in 0..width {
-            let symbol = buf[(x, 0)].symbol();
-            assert_eq!(
-                symbol,
-                TOP_BORDER_GLYPH.to_string(),
-                "top row col {x} must be border glyph; got {symbol:?}",
-            );
-        }
+        let blank = " ".repeat(12);
+        assert_eq!(
+            rows,
+            [
+                HORIZONTAL_RULE.repeat(12),
+                blank.clone(),
+                blank.clone(),
+                blank
+            ]
+        );
     }
 
     #[test]
     fn render_no_ops_when_stack_empty_or_area_smaller_than_body() {
-        // Three short-circuit branches in `render`: empty stack, area.height == 0, and
-        // body_height == 0 (area only big enough for the border row).
-        let theme = Theme::default();
-
         let empty = ModalStack::new();
-        let mut t1 = Terminal::new(TestBackend::new(8, 2)).unwrap();
-        t1.draw(|frame| empty.render(frame, Rect::new(0, 0, 8, 2), &theme))
-            .expect("empty render");
-
         let mut stack = ModalStack::new();
         stack.push(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
-        let mut t2 = Terminal::new(TestBackend::new(8, 1)).unwrap();
-        t2.draw(|frame| stack.render(frame, Rect::new(0, 0, 8, 0), &theme))
-            .expect("zero-height render");
 
-        // area.height == TOP_BORDER_HEIGHT — only the border fits; body skipped.
-        let mut t3 = Terminal::new(TestBackend::new(8, TOP_BORDER_HEIGHT)).unwrap();
-        t3.draw(|frame| {
-            stack.render(frame, Rect::new(0, 0, 8, TOP_BORDER_HEIGHT), &theme);
-        })
-        .expect("border-only render");
-        let buf = t3.backend().buffer();
-        assert_eq!(buf[(0, 0)].symbol(), TOP_BORDER_GLYPH.to_string());
+        let empty_rows = render_rows_with(8, 2, |frame, area, theme| {
+            empty.render(frame, area, theme);
+        });
+        let zero_height_rows = render_rows_with(8, 1, |frame, area, theme| {
+            stack.render(frame, Rect { height: 0, ..area }, theme);
+        });
+        let border_only_rows = render_rows_with(8, TOP_BORDER_HEIGHT, |frame, area, theme| {
+            stack.render(frame, area, theme);
+        });
+
+        assert_eq!(empty_rows, [" ".repeat(8), " ".repeat(8)]);
+        assert_eq!(zero_height_rows, [" ".repeat(8)]);
+        assert_eq!(border_only_rows, [HORIZONTAL_RULE.repeat(8)]);
     }
 
     // ── handle_key ──
@@ -565,7 +649,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_key_submit_pops_and_yields_modal_action_user() {
+    fn handle_key_submit_pops_and_yields_the_dispatched_action() {
         let mut stack = ModalStack::new();
         let action = Action::Op(Op::Interrupt);
         stack.push(Box::new(ScriptedModal::new(ModalAction::Dispatch(
@@ -581,8 +665,8 @@ mod tests {
 
     #[test]
     fn handle_key_preview_yields_action_without_popping_stack() {
-        // Live-preview modals (theme picker) emit a `User` action on cursor moves so the App can
-        // repaint, but the modal must stay on screen until Enter or Esc.
+        // Live-preview modals such as the theme picker emit a `Dispatch` action on cursor moves so
+        // the App can repaint, but the modal must stay on screen until Enter or Esc.
         let mut stack = ModalStack::new();
         let mut modal = ScriptedModal::new(ModalAction::Cancelled);
         modal.preview_action = ModalAction::Dispatch(Action::Op(Op::Interrupt));
@@ -600,7 +684,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_key_on_empty_stack_returns_none_without_panicking() {
+    fn handle_key_empty_stack_delivers_nothing() {
         // No active modal → no key delivery, no stack mutation.
         let mut stack = ModalStack::new();
         assert!(stack.handle_key(&key('s')).is_none());
@@ -689,7 +773,7 @@ mod tests {
     }
 
     #[test]
-    fn pop_notifies_underlying_top_via_on_focus_regained() {
+    fn handle_key_pop_notifies_underlying_top_via_on_focus_regained() {
         // After a nested modal pops (cancel / submit / universal-cancel), the parent regains
         // focus and gets exactly one on_focus_regained call so it can refresh stale data.
         use std::sync::atomic::Ordering;
@@ -730,15 +814,6 @@ mod tests {
     }
 
     #[test]
-    fn empty_stack_pop_and_notify_is_a_noop() {
-        // No active modal → pop on universal-cancel is short-circuited at the empty-stack guard,
-        // so the helper is never reached. Cover the helper's "no top to notify" branch directly.
-        let mut stack = ModalStack::new();
-        stack.pop_and_notify();
-        assert!(!stack.is_active());
-    }
-
-    #[test]
     fn handle_key_push_take_once_falls_through_to_consumed_after_first_push() {
         // ScriptedModal's push_child is take-once. A second 'h' press after the child has been
         // pushed and popped must not double-push.
@@ -767,52 +842,6 @@ mod tests {
             stack.height(80, 40),
             3 + TOP_BORDER_HEIGHT,
             "no nested modal"
-        );
-    }
-
-    // ── Debug for ModalKey ──
-
-    #[test]
-    fn debug_format_distinguishes_each_variant() {
-        // The Debug impl is hand-rolled because Box<dyn Modal> can't derive it. Pin each arm
-        // directly so test panic messages remain useful even if no test actually fires them.
-        assert_eq!(format!("{:?}", ModalKey::Consumed), "Consumed");
-        assert_eq!(format!("{:?}", ModalKey::Cancelled), "Cancelled");
-        assert!(
-            format!("{:?}", ModalKey::Submitted(ModalAction::Cancelled)).starts_with("Submitted(")
-        );
-        assert!(format!("{:?}", ModalKey::Preview(ModalAction::Cancelled)).starts_with("Preview("));
-        let push: ModalKey = ModalKey::Push(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
-        assert_eq!(format!("{push:?}"), "Push(<modal>)");
-    }
-
-    // ── Modal::on_focus_regained default ──
-
-    /// Modal that doesn't override `on_focus_regained`, so the default empty body fires on pop.
-    struct BareModal;
-
-    impl Modal for BareModal {
-        fn height(&self, _w: u16, _max: u16) -> u16 {
-            1
-        }
-        fn render(&self, _f: &mut Frame<'_>, _a: Rect, _t: &Theme) {}
-        fn handle_key(&mut self, _e: &KeyEvent) -> ModalKey {
-            ModalKey::Consumed
-        }
-    }
-
-    #[test]
-    fn default_on_focus_regained_is_a_noop_and_does_not_panic() {
-        // Pin that the trait's default empty body is safe to invoke. ScriptedModal overrides the
-        // hook for assertion purposes, so the default arm needs separate coverage.
-        let mut stack = ModalStack::new();
-        stack.push(Box::new(BareModal));
-        stack.push(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
-        stack.handle_key(&key('c'));
-        assert_eq!(
-            stack.height(80, 40),
-            1 + TOP_BORDER_HEIGHT,
-            "BareModal is back on top after its child cancels"
         );
     }
 }

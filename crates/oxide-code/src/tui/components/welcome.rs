@@ -9,10 +9,11 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::config::display_effort;
 use crate::slash::LiveSessionInfo;
+use crate::tui::glyphs::INLINE_SEPARATOR;
 use crate::tui::theme::Theme;
 use crate::util::text::{center_truncate_to_width, truncate_to_width};
 
-// ── Content pools ──
+// ── Content Pools ──
 
 type Starter = (&'static str, &'static str);
 
@@ -23,7 +24,7 @@ const STARTER_POOL: &[Starter] = &[
     ("/diff", "show git changes"),
     ("/effort", "tune Speed ↔ Intelligence"),
     ("/help", "list commands"),
-    ("/init", "author or update AGENTS.md"),
+    ("/init", "create or update AGENTS.md / CLAUDE.md"),
     ("/login", "sign in to a Claude account"),
     ("/model", "switch model"),
     ("/rename", "set session title"),
@@ -48,7 +49,7 @@ const TIP_POOL: &[&str] = &[
 
 const STARTER_PICK: usize = 3;
 
-// ── Layout constants ──
+// ── Layout Constants ──
 
 const WORDMARK: &str = "oxide-code";
 const RIBBON_FLANK: &str = "━━━━";
@@ -117,7 +118,7 @@ pub(crate) fn paint(frame: &mut Frame<'_>, area: Rect, theme: &Theme, snap: &Wel
     frame.render_widget(paragraph, area);
 }
 
-// ── Line builders ──
+// ── Line Builders ──
 
 fn build_lines(
     width: u16,
@@ -193,9 +194,13 @@ fn push_identity(
 fn environment_text(snap: &WelcomeSnapshot, full: bool, with_starters: bool) -> String {
     // Drop the " effort" suffix below COLLAPSED_MIN so the line fits at NARROW_MIN.
     let suffix = if with_starters { " effort" } else { "" };
-    let mut text = format!("{} · {}{}", snap.model_label, snap.effort_label, suffix);
+    let mut text = format!(
+        "{model}{INLINE_SEPARATOR}{effort}{suffix}",
+        model = snap.model_label,
+        effort = snap.effort_label,
+    );
     if full {
-        text.push_str(" · ");
+        text.push_str(INLINE_SEPARATOR);
         text.push_str(snap.auth_label);
     }
     text
@@ -289,7 +294,7 @@ fn push_tip(lines: &mut Vec<Line<'static>>, theme: &Theme, tip: &'static str, co
     ]));
 }
 
-// ── Random picks ──
+// ── Random Picks ──
 
 // Knuth's MMIX LCG constants — not cryptographic, just enough spread per session.
 const LCG_MULT: u64 = 6_364_136_223_846_793_005;
@@ -311,11 +316,7 @@ fn pick_starters(seed: u64) -> [Starter; STARTER_PICK] {
         let j = i + usize::try_from((state >> 33) % span).unwrap_or(0);
         deck.swap(i, j);
     }
-    [
-        STARTER_POOL[deck[0]],
-        STARTER_POOL[deck[1]],
-        STARTER_POOL[deck[2]],
-    ]
+    std::array::from_fn(|i| STARTER_POOL[deck[i]])
 }
 
 fn pick_tip(seed: u64) -> &'static str {
@@ -338,44 +339,18 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use super::*;
-    use crate::config::compaction::{CompactionConfig, test_thresholds};
-    use crate::config::{ConfigSnapshot, Effort, PromptCacheTtl};
-    use crate::slash::LiveSessionInfo;
+    use crate::config::Effort;
+    use crate::slash::test_session_info;
 
     const TEST_SEED: u64 = 0x00C0_FFEE;
 
     fn fixture() -> LiveSessionInfo {
-        LiveSessionInfo {
-            cwd: "~/github/oxide-code".to_owned(),
-            git_cwd: None,
-            git_branch: Some("main".to_owned()),
-            version: "0.1.0",
-            session_id: "test-session".to_owned(),
-            session_allow: Vec::new(),
-            config: ConfigSnapshot {
-                auth: Some(crate::config::auth::AuthSource::ClaudeCodeLogin),
-                signed_out_notice: None,
-                base_url: "https://api.test.invalid".to_owned(),
-                extra_ca_certs: None,
-                gateway: crate::config::gateway::GatewaySnapshot {
-                    custom_header_names: Vec::new(),
-                    attribution: true,
-                    structured_outputs: true,
-                },
-                model: crate::model::ModelSpec::resolve("claude-opus-5-5".to_owned()),
-                effort: Some(Effort::Xhigh),
-                max_tokens: None,
-                max_tool_rounds: None,
-                prompt_cache_ttl: PromptCacheTtl::OneHour,
-                compaction: CompactionConfig::with_threshold_for_test(test_thresholds::WINDOW_1M),
-                permission_mode: crate::permission::Mode::Auto,
-                show_thinking: false,
-                show_welcome: true,
-                status_line: crate::config::StatusLineSegment::DEFAULT.to_vec(),
-                theme_name: "mocha".to_owned(),
-                provenance: crate::config::provenance::Provenance::default(),
-            },
-        }
+        let mut info = test_session_info();
+        info.cwd = "~/github/oxide-code".to_owned();
+        info.version = "0.1.0";
+        info.config.auth = Some(crate::config::auth::AuthSource::ClaudeCodeLogin);
+        info.config.effort = Some(Effort::Xhigh);
+        info
     }
 
     fn snap_for(info: &LiveSessionInfo) -> WelcomeSnapshot {

@@ -10,7 +10,6 @@ use super::display::id_prefix;
 use super::entry::SessionInfo;
 use super::handle::{self, LoadedTranscript, ResumedSession};
 use super::store::SessionStore;
-use crate::util::text::ELLIPSIS;
 
 /// Normalized form of the CLI `--continue` argument.
 enum ResumeMode<'a> {
@@ -56,8 +55,7 @@ pub(crate) async fn resolve_session(
                 .path
         }
         ResumeMode::Prefix(prefix) => {
-            match_in_scope(store, prefix, None, all)
-                .map_err(anyhow::Error::msg)?
+            match_in_scope(store, prefix, None, all)?
                 .with_context(|| format!("no session matching prefix `{prefix}`{scope_hint}"))?
                 .path
         }
@@ -99,13 +97,33 @@ fn looks_like_path(arg: &str) -> bool {
             .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"))
 }
 
-/// Matches `prefix` against session ids in the current project, then in every project.
-/// Excludes `live_id`. Errors name the failing scope.
+/// Why a session-id prefix resolved to no single session. `Display` is the lowercase `anyhow`
+/// headline for startup, which slash commands rephrase as a sentence.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ResolveError {
+    #[error("no session matching `{prefix}`")]
+    NoMatch { prefix: String },
+    /// `preview` names the first matching ids in short form, then how many more matched.
+    #[error("ambiguous prefix `{prefix}` matches {count} sessions: {preview}")]
+    Ambiguous {
+        prefix: String,
+        count: usize,
+        preview: String,
+    },
+    #[error("list sessions ({scope}): {cause:#}")]
+    List {
+        scope: &'static str,
+        cause: anyhow::Error,
+    },
+}
+
+/// Matches `prefix` against session ids other than `live_id`, first in the current project, then
+/// in every project.
 pub(crate) fn resolve_prefix_to_info(
     store: &SessionStore,
     prefix: &str,
     live_id: &str,
-) -> Result<Option<SessionInfo>, String> {
+) -> Result<Option<SessionInfo>, ResolveError> {
     if let Some(info) = match_in_scope(store, prefix, Some(live_id), false)? {
         return Ok(Some(info));
     }
@@ -118,14 +136,16 @@ pub(crate) fn resolve_saved_prefix(
     store: &SessionStore,
     prefix: &str,
     live_id: &str,
-) -> Result<Option<SessionInfo>, String> {
+) -> Result<Option<SessionInfo>, ResolveError> {
     if let Some(info) = resolve_prefix_to_info(store, prefix, live_id)? {
         return Ok(Some(info));
     }
     if live_id.starts_with(prefix) {
         return Ok(None);
     }
-    Err(format!("no session matching `{prefix}`"))
+    Err(ResolveError::NoMatch {
+        prefix: prefix.to_owned(),
+    })
 }
 
 fn match_in_scope(
@@ -133,7 +153,7 @@ fn match_in_scope(
     prefix: &str,
     live_id: Option<&str>,
     all: bool,
-) -> Result<Option<SessionInfo>, String> {
+) -> Result<Option<SessionInfo>, ResolveError> {
     let scope = if all {
         "all projects"
     } else {
@@ -141,36 +161,33 @@ fn match_in_scope(
     };
     let mut matches = store
         .list_matching(prefix, all)
-        .map_err(|e| format!("list sessions ({scope}): {e:#}"))?;
+        .map_err(|cause| ResolveError::List { scope, cause })?;
     matches.retain(|info| live_id != Some(info.session_id.as_str()));
     match matches.len() {
         0 => Ok(None),
         1 => Ok(matches.pop()),
-        n => {
-            let ids = matches.into_iter().map(|s| s.session_id);
-            let preview = format_session_id_preview(ids);
-            Err(format!(
-                "ambiguous prefix `{prefix}` matches {n} sessions: {preview}",
-            ))
-        }
+        count => Err(ResolveError::Ambiguous {
+            prefix: prefix.to_owned(),
+            count,
+            preview: format_session_id_preview(matches.into_iter().map(|s| s.session_id)),
+        }),
     }
 }
 
-/// Renders up to `MATCH_PREVIEW_LIMIT` ids as [`id_prefix`] short forms, with `, ...` for overflow.
+/// Renders up to `MATCH_PREVIEW_LIMIT` ids as [`id_prefix`] short forms, then how many remain.
 fn format_session_id_preview(ids: impl IntoIterator<Item = String>) -> String {
     const MATCH_PREVIEW_LIMIT: usize = 5;
     let mut iter = ids.into_iter();
-    let first_batch: Vec<String> = iter
+    let mut parts: Vec<String> = iter
         .by_ref()
         .take(MATCH_PREVIEW_LIMIT)
         .map(|id| id_prefix(&id).to_owned())
         .collect();
-    let mut out = first_batch.join(", ");
-    if iter.next().is_some() {
-        out.push_str(", ");
-        out.push_str(ELLIPSIS);
+    let more = iter.count();
+    if more > 0 {
+        parts.push(format!("and {more} more"));
     }
-    out
+    parts.join(", ")
 }
 
 #[cfg(test)]
@@ -269,7 +286,14 @@ mod tests {
             .err()
             .unwrap()
             .to_string();
-        assert!(err.contains("use --all"), "got: {err}");
+        assert_eq!(
+            err,
+            format!(
+                "no session matching prefix `{}` in this project (use --all to search every \
+                 project)",
+                &full_id[..10],
+            ),
+        );
 
         let resumed = resolve_session(&store, "m", Some(&arg), true)
             .await
@@ -284,9 +308,9 @@ mod tests {
             .err()
             .unwrap()
             .to_string();
-        assert!(
-            !err.contains("use --all"),
-            "hint should not suggest --all when already set: {err}",
+        assert_eq!(
+            err, "no session matching prefix `zzzz`",
+            "the hint drops --all once it is set",
         );
     }
 
@@ -366,7 +390,10 @@ mod tests {
             .err()
             .unwrap()
             .to_string();
-        assert!(err.contains("no sessions"), "got: {err}");
+        assert_eq!(
+            err,
+            "no sessions to resume in this project (use --all to search every project)",
+        );
     }
 
     #[tokio::test]
@@ -384,40 +411,53 @@ mod tests {
             .err()
             .unwrap()
             .to_string();
-        assert!(err.contains("no session matching prefix"), "got: {err}");
+        assert_eq!(
+            err,
+            "no session matching prefix `zzzz` in this project (use --all to search every project)",
+        );
     }
 
     #[tokio::test]
-    async fn resolve_session_prefix_reports_ambiguous_matches() {
-        // 20 v4 UUIDs across 16 hex chars guarantees ≥ 2 collisions by pigeonhole.
+    async fn resolve_session_prefix_reports_ambiguous_matches_newest_first() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-
-        for _ in 0..20 {
-            let s = handle::start(&store, "m");
-            s.record_message(Message::user("noop")).await;
-            s.finish(Vec::new()).await;
+        for i in 0..7 {
+            seed_test_session(
+                &store,
+                &format!("ab{i}-session"),
+                None,
+                Some(1),
+                time::macros::datetime!(2026-04-18 09:00:00 UTC) + time::Duration::seconds(i),
+            );
         }
 
-        let listed = store.list().unwrap();
-        let mut counts = std::collections::HashMap::<char, usize>::new();
-        for info in &listed {
-            *counts
-                .entry(info.session_id.chars().next().unwrap())
-                .or_default() += 1;
-        }
-        let (prefix_char, count) = counts.into_iter().max_by_key(|&(_, n)| n).unwrap();
-        assert!(count >= 2, "pigeonhole violation: 20 UUIDs over 16 chars");
-        let prefix = prefix_char.to_string();
-
-        let prefix_arg = Some(prefix.clone());
+        let prefix_arg = Some("ab".to_owned());
         let err = resolve_session(&store, "m", Some(&prefix_arg), false)
             .await
             .err()
             .unwrap()
             .to_string();
-        assert!(err.contains("ambiguous prefix"), "got: {err}");
-        assert!(err.contains(&prefix), "got: {err}");
+        assert_eq!(
+            err,
+            "ambiguous prefix `ab` matches 7 sessions: ab6-sess, ab5-sess, ab4-sess, ab3-sess, \
+             ab2-sess, and 2 more",
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_session_prefix_reports_a_listing_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        std::fs::remove_dir_all(test_project_dir(dir.path())).unwrap();
+        let cause = store.list_matching("ab", false).unwrap_err();
+
+        let prefix_arg = Some("ab".to_owned());
+        let err = resolve_session(&store, "m", Some(&prefix_arg), false)
+            .await
+            .err()
+            .unwrap()
+            .to_string();
+        assert_eq!(err, format!("list sessions (current project): {cause:#}"));
     }
 
     #[tokio::test]
@@ -430,7 +470,7 @@ mod tests {
             .err()
             .unwrap()
             .to_string();
-        assert!(err.contains("session not found"), "got: {err}");
+        assert_eq!(err, "session not found: /does/not/exist.jsonl");
     }
 
     // ── normalize_resume_arg ──
@@ -489,8 +529,10 @@ mod tests {
         for raw in ["", "   ", "\t\n"] {
             let arg = Some(raw.to_owned());
             let err = normalize_resume_arg(Some(&arg)).err().unwrap().to_string();
-            assert!(err.contains("empty session ID prefix"), "{raw:?} → {err:?}");
-            assert!(err.contains("bare"), "{raw:?} → {err:?}");
+            assert_eq!(
+                err, "empty session ID prefix. Run bare `ox -c` to resume the latest session.",
+                "{raw:?}",
+            );
         }
     }
 
@@ -532,8 +574,8 @@ mod tests {
 
     #[test]
     fn resolve_prefix_to_info_filters_live_id_so_caller_layers_its_own_message() {
-        // The resolver excludes the live id silently; `/delete` adds the dedicated "cannot delete
-        // the live session" error, `/resume` falls through to "no session matching".
+        // The resolver excludes the live id silently, so `/delete` adds its dedicated "Cannot
+        // delete the live session" error and `/resume` falls through to "No session matching".
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let live_id = "abcd1234-eeff-1122-3344-556677889900";
@@ -557,20 +599,29 @@ mod tests {
     fn resolve_prefix_to_info_ambiguous_lists_short_ids() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        for tail in ["a", "b"] {
-            let id = format!("aaaaaaaa-{tail}eef-1122-3344-556677889900");
-            seed_test_session(
-                &store,
-                &id,
-                Some("dup"),
-                Some(1),
+        for (id, created_at) in [
+            (
+                "abcd1111-eeff-1122-3344-556677889900",
                 time::macros::datetime!(2026-04-18 09:00:00 UTC),
-            );
+            ),
+            (
+                "abcd2222-eeff-1122-3344-556677889900",
+                time::macros::datetime!(2026-04-18 09:00:01 UTC),
+            ),
+        ] {
+            seed_test_session(&store, id, Some("dup"), Some(1), created_at);
         }
 
-        let err = resolve_prefix_to_info(&store, "aaaaaaaa", "live").unwrap_err();
-        assert!(err.contains("ambiguous prefix"), "{err}");
-        assert!(err.contains("aaaaaaaa"), "id preview present: {err}");
+        let err = resolve_prefix_to_info(&store, "abcd", "live").unwrap_err();
+
+        assert!(
+            matches!(
+                &err,
+                ResolveError::Ambiguous { prefix, count: 2, preview }
+                    if prefix == "abcd" && preview == "abcd2222, abcd1111"
+            ),
+            "{err:?}",
+        );
     }
 
     // ── resolve_saved_prefix ──
@@ -596,10 +647,10 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        assert_eq!(
-            resolve_saved_prefix(&store, "zzz", live_id).unwrap_err(),
-            "no session matching `zzz`",
-        );
+        assert!(matches!(
+            resolve_saved_prefix(&store, "zzz", live_id),
+            Err(ResolveError::NoMatch { prefix }) if prefix == "zzz",
+        ));
     }
 
     // ── format_session_id_preview ──
@@ -615,18 +666,17 @@ mod tests {
     }
 
     #[test]
-    fn format_session_id_preview_caps_at_five_and_appends_ellipsis() {
-        let ids: Vec<String> = (0..7).map(|i| format!("abcdefgh{i}")).collect();
-        let out = format_session_id_preview(ids);
-        let short_count = out.split(", ").filter(|s| *s != "...").count();
-        assert_eq!(short_count, 5, "{out:?}");
-        assert!(out.ends_with(", ..."), "{out:?}");
+    fn format_session_id_preview_caps_at_five_and_counts_the_rest() {
+        let ids = (0..6).map(|i| format!("id{i}"));
+        assert_eq!(
+            format_session_id_preview(ids),
+            "id0, id1, id2, id3, id4, and 1 more",
+        );
     }
 
     #[test]
-    fn format_session_id_preview_no_ellipsis_at_limit() {
-        let ids: Vec<String> = (0..5).map(|i| format!("id{i}")).collect();
-        let out = format_session_id_preview(ids);
-        assert!(!out.ends_with(", ..."), "{out:?}");
+    fn format_session_id_preview_lists_every_id_at_the_limit() {
+        let ids = (0..5).map(|i| format!("id{i}"));
+        assert_eq!(format_session_id_preview(ids), "id0, id1, id2, id3, id4");
     }
 }

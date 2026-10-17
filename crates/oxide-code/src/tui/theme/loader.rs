@@ -88,6 +88,9 @@ fn patch_slot(theme: &mut Theme, slot_name: &str, patch: &toml::Value) -> Result
         .ok_or_else(|| anyhow::anyhow!("unknown slot {slot_name:?}"))?;
     let patch = SlotPatch::deserialize(patch.clone())
         .context("expected a color string or a table of fg, bg, and modifier flags")?;
+    if matches!(&patch, SlotPatch::Inline(inline) if inline.is_empty()) {
+        bail!("empty patch (no fg, bg, or modifier flags)");
+    }
     *slot = patch.apply(*slot)?;
     Ok(())
 }
@@ -108,9 +111,9 @@ super::for_each_slot!(define_slot_for_name);
 
 // ── SlotPatch ──
 
-/// Per-slot override from `[tui.theme.overrides]`. Patches are additive: bare-string overwrites
-/// `fg` only, inline-table patches only the fields that appear (so `accent = { bold = false }`
-/// clears bold without touching `fg`).
+/// One slot value from a theme file or `[tui.theme.overrides]`, applied over a base slot. A bare
+/// string sets `fg` only, and an inline table changes only the fields it names, so
+/// `accent = { bold = false }` clears bold without touching `fg`.
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum SlotPatch {
@@ -119,9 +122,9 @@ enum SlotPatch {
 }
 
 /// Inline TOML patch with every field optional. `Option<bool>` distinguishes "no change" / "set" /
-/// "clear". Empty patches (`error = {}`) are rejected by [`apply`](Self::apply) so the slot warns
-/// and falls back rather than silently re-writing the base with itself. Serde's untagged enum
-/// dispatcher would swallow a `Deserialize`-time message, so the warn path is clearer.
+/// "clear". [`patch_slot`] rejects an empty override (`error = {}`), so the slot warns and keeps
+/// its base value. Serde's untagged enum dispatcher would swallow a `Deserialize`-time message,
+/// so that check runs after deserialization.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct InlinePatch {
@@ -159,10 +162,6 @@ impl InlinePatch {
     }
 
     fn apply(&self, base: Slot) -> Result<Slot> {
-        if self.is_empty() {
-            bail!("empty patch (no fg, bg, or modifier flags)");
-        }
-
         let fg = self
             .fg
             .as_deref()
@@ -204,21 +203,23 @@ pub(super) fn parse_theme(content: &str) -> Result<Theme> {
     file.into_theme()
 }
 
-/// `ThemeFile` deserialization + `into_theme` converter. `deny_unknown_fields` catches typos;
-/// `into_theme` wraps each slot's parse error with its name.
+/// `ThemeFile` deserialization and its `into_theme` converter, which wraps each slot's parse error
+/// with the slot name. `deny_unknown_fields` catches typos.
 macro_rules! define_theme_file {
     ( $( ($name:ident, $doc:literal), )* ) => {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct ThemeFile {
-            $( $name: SlotDef, )*
+            $( $name: SlotPatch, )*
             syntax_theme: Option<String>,
         }
 
         impl ThemeFile {
             fn into_theme(self) -> Result<Theme> {
-                let parse = |def: SlotDef, name: &'static str| -> Result<Slot> {
-                    def.into_slot().with_context(|| format!("slot {name:?}"))
+                let parse = |patch: SlotPatch, name: &'static str| -> Result<Slot> {
+                    patch
+                        .apply(Slot::default())
+                        .with_context(|| format!("slot {name:?}"))
                 };
                 Ok(Theme {
                     $( $name: parse(self.$name, stringify!($name))?, )*
@@ -245,83 +246,6 @@ fn syntax_theme(name: Option<&str>) -> Result<&'static SyntaxTheme> {
     })
 }
 
-/// One slot's TOML representation; `untagged` accepts either bare string or inline table.
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum SlotDef {
-    Bare(String),
-    Inline(InlineSlot),
-}
-
-/// Inline TOML form of a slot — `fg` / `bg` plus one bool per recognized modifier.
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "modifiers are independent flags by design (matches ratatui::style::Modifier)"
-)]
-#[derive(Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct InlineSlot {
-    fg: Option<String>,
-    bg: Option<String>,
-    #[serde(default)]
-    bold: bool,
-    #[serde(default)]
-    italic: bool,
-    #[serde(default)]
-    underlined: bool,
-    #[serde(default)]
-    dim: bool,
-    #[serde(default)]
-    reversed: bool,
-}
-
-impl SlotDef {
-    fn into_slot(self) -> Result<Slot> {
-        match self {
-            Self::Bare(s) => Ok(Slot {
-                fg: Some(parse_color(&s)?),
-                bg: None,
-                modifiers: Modifier::empty(),
-            }),
-            Self::Inline(i) => i.into_slot(),
-        }
-    }
-}
-
-impl InlineSlot {
-    fn into_slot(self) -> Result<Slot> {
-        let fg = self
-            .fg
-            .as_deref()
-            .map(parse_color)
-            .transpose()
-            .context("fg")?;
-        let bg = self
-            .bg
-            .as_deref()
-            .map(parse_color)
-            .transpose()
-            .context("bg")?;
-        let mut modifiers = Modifier::empty();
-        if self.bold {
-            modifiers |= Modifier::BOLD;
-        }
-        if self.italic {
-            modifiers |= Modifier::ITALIC;
-        }
-        if self.underlined {
-            modifiers |= Modifier::UNDERLINED;
-        }
-        if self.dim {
-            modifiers |= Modifier::DIM;
-        }
-        if self.reversed {
-            modifiers |= Modifier::REVERSED;
-        }
-        Ok(Slot { fg, bg, modifiers })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use indoc::{formatdoc, indoc};
@@ -329,6 +253,9 @@ mod tests {
 
     use super::super::builtin;
     use super::*;
+
+    const COLOR_FORMATS_HINT: &str = "expected hex (#rrggbb), ANSI name (red, bright_blue, ...), \
+                                      indexed (ansi:0..255), or reset";
 
     fn config(base: &str, overrides: &str) -> ThemeConfig {
         ThemeConfig {
@@ -582,6 +509,27 @@ mod tests {
         });
     }
 
+    // ── patch_slot ──
+
+    #[test]
+    fn patch_slot_empty_table_is_rejected_and_keeps_base() {
+        let mut theme = Theme::default();
+        let accent = theme.accent;
+
+        let err = patch_slot(
+            &mut theme,
+            "accent",
+            &toml::Value::Table(toml::Table::new()),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            format!("{err:#}"),
+            "empty patch (no fg, bg, or modifier flags)"
+        );
+        assert_eq!(theme.accent, accent);
+    }
+
     // ── slot_for_name ──
 
     /// Every slot name must route to a unique slot. Catches the
@@ -621,7 +569,7 @@ mod tests {
     // ── SlotPatch::apply ──
 
     #[test]
-    fn slot_patch_inline_with_bg_only_keeps_base_fg_and_modifiers() {
+    fn apply_inline_with_bg_only_keeps_base_fg_and_modifiers() {
         let base = Slot {
             fg: Some(Color::Red),
             bg: None,
@@ -631,19 +579,22 @@ mod tests {
             bg: Some("#000000".to_owned()),
             ..InlinePatch::default()
         });
+
         let out = patch.apply(base).unwrap();
-        assert_eq!(out.fg, Some(Color::Red), "fg from base");
-        assert_eq!(out.bg, Some(Color::Rgb(0, 0, 0)), "bg from patch");
-        assert!(out.modifiers.contains(Modifier::BOLD), "modifier from base");
+
+        assert_eq!(
+            out,
+            Slot {
+                bg: Some(Color::Rgb(0, 0, 0)),
+                ..base
+            }
+        );
     }
 
     #[test]
-    fn slot_patch_inline_none_modifiers_preserve_every_base_flag() {
-        // Locks down the three-state contract: a patch with no
-        // modifier fields (all `None`) must leave every base modifier
-        // untouched. Catches the regression where the loop is
-        // refactored to `flag.unwrap_or(false)` and silently clears
-        // every base modifier whenever an unrelated patch field is set.
+    fn apply_inline_none_modifiers_preserve_every_base_flag() {
+        // A patch that names no modifier leaves every base modifier set. Reading an absent flag as
+        // `false` would clear them whenever an unrelated field changes.
         let base = Slot {
             fg: Some(Color::Red),
             bg: None,
@@ -657,17 +608,20 @@ mod tests {
             fg: Some("#abcdef".to_owned()),
             ..InlinePatch::default()
         });
+
         let out = patch.apply(base).unwrap();
+
         assert_eq!(
-            out.modifiers, base.modifiers,
-            "every base modifier survives"
+            out,
+            Slot {
+                fg: Some(Color::Rgb(0xab, 0xcd, 0xef)),
+                ..base
+            }
         );
     }
 
     #[test]
-    fn slot_patch_inline_with_fg_overwrites_base_fg() {
-        // Sibling to the bg-only test: an inline patch carrying `fg`
-        // replaces the base fg while preserving bg and modifiers.
+    fn apply_inline_with_fg_overwrites_base_fg() {
         let base = Slot {
             fg: Some(Color::Red),
             bg: Some(Color::Rgb(0x10, 0x10, 0x10)),
@@ -677,35 +631,16 @@ mod tests {
             fg: Some("#abcdef".to_owned()),
             ..InlinePatch::default()
         });
-        let out = patch.apply(base).unwrap();
-        assert_eq!(out.fg, Some(Color::Rgb(0xab, 0xcd, 0xef)), "fg from patch");
-        assert_eq!(
-            out.bg,
-            Some(Color::Rgb(0x10, 0x10, 0x10)),
-            "bg from base survives",
-        );
-        assert!(
-            out.modifiers.contains(Modifier::ITALIC),
-            "modifier from base survives",
-        );
-    }
 
-    #[test]
-    fn inline_patch_empty_table_apply_errors_with_actionable_message() {
-        // `accent = {}` parses fine — serde's untagged enum dispatcher
-        // would swallow a `Deserialize`-time message — but `apply`
-        // refuses to re-write the base with itself. The error reaches
-        // `resolve_theme`, which warns and falls back to base.
-        let base = Slot {
-            fg: Some(Color::Rgb(0xab, 0xcd, 0xef)),
-            bg: None,
-            modifiers: Modifier::empty(),
-        };
-        let err = InlinePatch::default()
-            .apply(base)
-            .expect_err("empty patch must error");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("empty patch"), "{msg}");
+        let out = patch.apply(base).unwrap();
+
+        assert_eq!(
+            out,
+            Slot {
+                fg: Some(Color::Rgb(0xab, 0xcd, 0xef)),
+                ..base
+            }
+        );
     }
 
     // ── parse_theme: built-ins ──
@@ -718,10 +653,8 @@ mod tests {
         }
     }
 
-    /// `surface` is the bg-only panel fill — a regression where any
-    /// built-in declares it as a bare-string fg (which `SlotDef::Bare`
-    /// would route to `fg`, leaving `bg = None`) would silently paint
-    /// every panel's text in the surface color. Pin the contract.
+    /// `surface` is the bg-only panel fill. A built-in that declared it as a bare string would set
+    /// `fg` instead and paint every panel's text in the surface color.
     #[test]
     fn parse_theme_surface_is_bg_only_in_every_builtin() {
         for builtin::BuiltinTheme { name, body, .. } in builtin::BUILT_IN {
@@ -833,44 +766,46 @@ mod tests {
     #[test]
     fn parse_theme_invalid_color_in_slot_names_the_slot() {
         let body = mocha_with_slot_replacement(r##"error = "#f38ba8""##, r#"error = "orange""#);
-        let err = parse_theme(&body).expect_err("bad color rejected");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("error"), "{msg}");
-        assert!(msg.contains("orange"), "{msg}");
+
+        let err = parse_theme(&body).unwrap_err();
+
+        assert_eq!(
+            format!("{err:#}"),
+            format!(r#"slot "error": unknown color "orange": {COLOR_FORMATS_HINT}"#),
+        );
     }
 
-    /// Sibling to the bare-string parse-error test, but the offending
-    /// value is the `fg` field of an inline-table slot — exercises the
-    /// `InlineSlot::into_slot` fg parse path.
     #[test]
     fn parse_theme_invalid_inline_fg_color_names_the_slot() {
         let body = mocha_with_slot_replacement(
             r##"accent = { fg = "#89b4fa", bold = true }"##,
             r#"accent = { fg = "lavender", bold = true }"#,
         );
-        let err = parse_theme(&body).expect_err("bad inline fg rejected");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("accent"), "{msg}");
-        assert!(msg.contains("fg"), "{msg}");
-        assert!(msg.contains("lavender"), "{msg}");
+
+        let err = parse_theme(&body).unwrap_err();
+
+        assert_eq!(
+            format!("{err:#}"),
+            format!(r#"slot "accent": fg: unknown color "lavender": {COLOR_FORMATS_HINT}"#),
+        );
     }
 
-    /// Inline `bg` parse error — exercises the `InlineSlot::into_slot`
-    /// bg parse path that the bare-string and inline-fg tests miss.
     #[test]
     fn parse_theme_invalid_inline_bg_color_names_the_slot() {
         let body = mocha_with_slot_replacement(
             r##"diff_add = { bg = "#2a3a37" }"##,
             r#"diff_add = { bg = "magenta-ish" }"#,
         );
-        let err = parse_theme(&body).expect_err("bad inline bg rejected");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("diff_add"), "{msg}");
-        assert!(msg.contains("bg"), "{msg}");
-        assert!(msg.contains("magenta-ish"), "{msg}");
+
+        let err = parse_theme(&body).unwrap_err();
+
+        assert_eq!(
+            format!("{err:#}"),
+            format!(r#"slot "diff_add": bg: unknown color "magenta-ish": {COLOR_FORMATS_HINT}"#),
+        );
     }
 
-    // ── parse_theme: SlotDef forms ──
+    // ── parse_theme: SlotPatch forms ──
 
     #[test]
     fn parse_theme_bare_string_slot_yields_fg_only_no_modifiers() {
@@ -879,6 +814,18 @@ mod tests {
         assert_eq!(t.user.fg, Some(Color::Rgb(0xfa, 0xb3, 0x87)));
         assert_eq!(t.user.bg, None);
         assert!(t.user.modifiers.is_empty());
+    }
+
+    #[test]
+    fn parse_theme_empty_inline_slot_uses_terminal_defaults() {
+        let body = mocha_with_slot_replacement(
+            r##"accent = { fg = "#89b4fa", bold = true }"##,
+            "accent = {}",
+        );
+
+        let theme = parse_theme(&body).unwrap();
+
+        assert_eq!(theme.accent, Slot::default());
     }
 
     #[test]

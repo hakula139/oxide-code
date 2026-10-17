@@ -54,6 +54,8 @@ pub(super) fn lookup(name: &str) -> Option<&'static str> {
 mod tests {
     use super::*;
 
+    // ── lookup ──
+
     #[test]
     fn lookup_finds_each_builtin_by_name() {
         for BuiltinTheme { name, body, .. } in BUILT_IN {
@@ -63,7 +65,7 @@ mod tests {
     }
 
     #[test]
-    fn lookup_unknown_name_is_none() {
+    fn lookup_unknown_name_is_absent() {
         assert!(lookup("solarized").is_none());
         assert!(lookup("").is_none());
     }
