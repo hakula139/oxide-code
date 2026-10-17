@@ -322,17 +322,17 @@ pub(crate) trait Tool: Send + Sync {
 
     /// Builds the approval modal's preview of the prepared `input`: the tool name over the
     /// [`Self::summarize_call`] label by default, a diff for edit and write, or `Bash (background)`
-    /// over a background command.
-    fn approval_preview(
-        &self,
-        name: &str,
-        input: &serde_json::Value,
-        cwd: &Path,
-    ) -> ApprovalPreview {
-        ApprovalPreview {
+    /// over a background command. Async because the write preview reads the file it would replace.
+    fn approval_preview<'a>(
+        &'a self,
+        name: &'a str,
+        input: &'a serde_json::Value,
+        cwd: &'a Path,
+    ) -> Pin<Box<dyn Future<Output = ApprovalPreview> + Send + 'a>> {
+        Box::pin(std::future::ready(ApprovalPreview {
             title: pascal_case(name),
             body: ApprovalBody::Command(self.summarize_call(name, input, cwd)),
-        }
+        }))
     }
 
     /// Executes the prepared call. A user cancel can drop the future at any await and cancels
@@ -1365,13 +1365,15 @@ mod tests {
 
     // ── Tool::approval_preview ──
 
-    #[test]
-    fn approval_preview_default_titles_with_the_tool_name() {
-        let preview = GlobTool::default().approval_preview(
-            "glob",
-            &serde_json::json!({"pattern": "*.rs"}),
-            Path::new("/repo"),
-        );
+    #[tokio::test]
+    async fn approval_preview_default_titles_with_the_tool_name() {
+        let preview = GlobTool::default()
+            .approval_preview(
+                "glob",
+                &serde_json::json!({"pattern": "*.rs"}),
+                Path::new("/repo"),
+            )
+            .await;
         assert_eq!(preview.title, "Glob");
         assert_eq!(preview.body, ApprovalBody::Command("Glob(*.rs)".to_owned()));
     }

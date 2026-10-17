@@ -75,18 +75,18 @@ impl Tool for EditTool {
         })
     }
 
-    fn approval_preview(
-        &self,
-        name: &str,
-        input: &serde_json::Value,
-        cwd: &Path,
-    ) -> ApprovalPreview {
+    fn approval_preview<'a>(
+        &'a self,
+        name: &'a str,
+        input: &'a serde_json::Value,
+        cwd: &'a Path,
+    ) -> Pin<Box<dyn Future<Output = ApprovalPreview> + Send + 'a>> {
         let old = extract_input_field(input, "old_string").unwrap_or_default();
         let new = extract_input_field(input, "new_string").unwrap_or_default();
-        ApprovalPreview {
+        Box::pin(std::future::ready(ApprovalPreview {
             title: self.summarize_call(name, input, cwd),
             body: ApprovalBody::Diff(vec![synthesize_chunk(old, new)]),
-        }
+        }))
     }
 
     fn run<'a>(
@@ -491,18 +491,20 @@ mod tests {
 
     // ── approval_preview ──
 
-    #[test]
-    fn approval_preview_renders_old_and_new_as_a_diff() {
+    #[tokio::test]
+    async fn approval_preview_renders_old_and_new_as_a_diff() {
         let tool = EditTool;
-        let preview = tool.approval_preview(
-            "edit",
-            &serde_json::json!({
-                "file_path": "/repo/src/main.rs",
-                "old_string": "let a = 1;",
-                "new_string": "let a = 2;",
-            }),
-            Path::new("/repo"),
-        );
+        let preview = tool
+            .approval_preview(
+                "edit",
+                &serde_json::json!({
+                    "file_path": "/repo/src/main.rs",
+                    "old_string": "let a = 1;",
+                    "new_string": "let a = 2;",
+                }),
+                Path::new("/repo"),
+            )
+            .await;
 
         assert_eq!(preview.title, "Edit(src/main.rs)");
         assert_eq!(

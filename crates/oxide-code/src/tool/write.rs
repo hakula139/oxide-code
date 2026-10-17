@@ -49,20 +49,23 @@ impl Tool for WriteTool {
         summarize_path_call(name, input, "file_path", cwd)
     }
 
-    fn approval_preview(
-        &self,
-        name: &str,
-        input: &serde_json::Value,
-        cwd: &Path,
-    ) -> ApprovalPreview {
-        let content = extract_input_field(input, "content").unwrap_or_default();
-        let current = extract_input_field(input, "file_path")
-            .map(|path| current_text(&cwd.join(path), path))
-            .unwrap_or_default();
-        ApprovalPreview {
-            title: self.summarize_call(name, input, cwd),
-            body: ApprovalBody::Diff(vec![super::edit::synthesize_chunk(&current, content)]),
-        }
+    fn approval_preview<'a>(
+        &'a self,
+        name: &'a str,
+        input: &'a serde_json::Value,
+        cwd: &'a Path,
+    ) -> Pin<Box<dyn Future<Output = ApprovalPreview> + Send + 'a>> {
+        Box::pin(async move {
+            let content = extract_input_field(input, "content").unwrap_or_default();
+            let current = match extract_input_field(input, "file_path") {
+                Some(path) => current_text(&cwd.join(path), path).await,
+                None => String::new(),
+            };
+            ApprovalPreview {
+                title: self.summarize_call(name, input, cwd),
+                body: ApprovalBody::Diff(vec![super::edit::synthesize_chunk(&current, content)]),
+            }
+        })
     }
 
     fn run<'a>(
@@ -76,13 +79,9 @@ impl Tool for WriteTool {
 
 /// The text an overwrite of `path`, spelled `shown`, would replace. A missing file, or one the
 /// write refuses (a symlink, a non-regular or oversized file), previews as empty.
-fn current_text(path: &Path, shown: &str) -> String {
-    let writable = std::fs::symlink_metadata(path)
-        .is_ok_and(|meta| validate_write_target(shown, &meta).is_ok());
-    if !writable {
-        return String::new();
-    }
-    std::fs::read(path)
+async fn current_text(path: &Path, shown: &str) -> String {
+    read_target(path, shown)
+        .await
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
         .unwrap_or_default()
 }
@@ -169,8 +168,8 @@ async fn write_file(path: &str, content: &str, ctx: &ToolCtx) -> Result<(String,
     Ok((msg, is_new))
 }
 
-/// Validates the un-followed `metadata` of an existing target. The gate pinned the path to its
-/// resolved location, so a symlink here appeared afterward and is refused.
+/// Validates an existing target's `metadata`. The gate pinned the path to its resolved location,
+/// so a symlink there appeared afterward and is refused.
 fn validate_write_target(path: &str, metadata: &std::fs::Metadata) -> Result<(), String> {
     if metadata.file_type().is_symlink() {
         return Err(format!(
@@ -181,13 +180,19 @@ fn validate_write_target(path: &str, metadata: &std::fs::Metadata) -> Result<(),
 }
 
 async fn check_gate(path: &Path, shown: &str, tracker: &FileTracker) -> Result<(), String> {
-    let bytes = tokio::fs::read(path)
-        .await
-        .map_err(|e| format!("Error reading {shown}: {e}"))?;
+    let bytes = read_target(path, shown).await?;
     tracker
         .verify_current_content(&super::tracker_key(path).await, &bytes, GatePurpose::Write)
-        .map_err(|e| e.to_string())?;
-    Ok(())
+        .map_err(|e| e.to_string())
+}
+
+/// Reads the existing target `path`, spelled `shown`, if [`validate_write_target`] accepts it.
+async fn read_target(path: &Path, shown: &str) -> Result<Vec<u8>, String> {
+    let (_, bytes) = super::read_validated(path, shown, |metadata| {
+        validate_write_target(shown, metadata)
+    })
+    .await?;
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -197,78 +202,95 @@ mod tests {
     use crate::file_tracker::testing::seed_full_read;
     use crate::tool::read::ReadTool;
     use crate::tool::testing::{self, canonical_tempdir, ctx, symlink_file, temp_ctx};
+    use crate::tool::{DiffChunk, DiffLine};
+
+    // ── Fixtures ──
+
+    fn added_line(text: &str) -> ApprovalBody {
+        ApprovalBody::Diff(vec![DiffChunk {
+            old: Vec::new(),
+            new: vec![DiffLine {
+                number: 1,
+                text: text.to_owned(),
+            }],
+        }])
+    }
 
     // ── approval_preview ──
 
-    #[test]
-    fn approval_preview_renders_content_as_an_all_added_diff() {
-        let tool = WriteTool;
-        let preview = tool.approval_preview(
-            "write",
-            &serde_json::json!({
-                "file_path": "/repo/src/new.rs",
-                "content": "fn main() {}",
-            }),
-            Path::new("/repo"),
-        );
+    #[tokio::test]
+    async fn approval_preview_renders_a_new_file_as_an_all_added_diff() {
+        let input = serde_json::json!({
+            "file_path": "/repo/src/new.rs",
+            "content": "fn main() {}",
+        });
+
+        let preview = WriteTool
+            .approval_preview("write", &input, Path::new("/repo"))
+            .await;
 
         assert_eq!(preview.title, "Write(src/new.rs)");
-        let ApprovalBody::Diff(chunks) = preview.body else {
-            panic!("write preview should be a diff");
-        };
-        let chunk = &chunks[0];
-        assert!(chunk.old.is_empty(), "a new file has no removed lines");
-        assert!(chunk.new.iter().any(|l| l.text.contains("fn main() {}")));
+        assert_eq!(preview.body, added_line("fn main() {}"));
     }
 
-    #[test]
-    fn approval_preview_diffs_an_overwrite_against_the_current_content() {
-        let dir = tempfile::tempdir().unwrap();
+    #[tokio::test]
+    async fn approval_preview_without_a_file_path_renders_the_content_as_added() {
+        let input = serde_json::json!({"content": "fn main() {}"});
+
+        let preview = WriteTool
+            .approval_preview("write", &input, Path::new("/repo"))
+            .await;
+
+        assert_eq!(preview.title, "Write");
+        assert_eq!(preview.body, added_line("fn main() {}"));
+    }
+
+    #[tokio::test]
+    async fn approval_preview_diffs_an_overwrite_against_the_current_content() {
+        let dir = canonical_tempdir();
         let path = dir.path().join("notes.txt");
         std::fs::write(&path, "keep\nold line\n").unwrap();
-        let tool = WriteTool;
+        let input = serde_json::json!({
+            "file_path": path,
+            "content": "keep\nnew line\n",
+        });
 
-        let preview = tool.approval_preview(
-            "write",
-            &serde_json::json!({
-                "file_path": path,
-                "content": "keep\nnew line\n",
-            }),
-            dir.path(),
+        let preview = WriteTool
+            .approval_preview("write", &input, dir.path())
+            .await;
+
+        assert_eq!(
+            preview.body,
+            ApprovalBody::Diff(vec![DiffChunk {
+                old: vec![DiffLine {
+                    number: 2,
+                    text: "old line".to_owned(),
+                }],
+                new: vec![DiffLine {
+                    number: 2,
+                    text: "new line".to_owned(),
+                }],
+            }]),
         );
-        let ApprovalBody::Diff(chunks) = preview.body else {
-            panic!("write preview should be a diff");
-        };
-        let removed: Vec<_> = chunks[0].old.iter().map(|l| l.text.as_str()).collect();
-        let added: Vec<_> = chunks[0].new.iter().map(|l| l.text.as_str()).collect();
-        assert_eq!(removed, ["old line"]);
-        assert_eq!(added, ["new line"]);
     }
 
-    #[test]
-    fn approval_preview_does_not_read_through_a_symlink() {
-        let dir = tempfile::tempdir().unwrap();
+    #[tokio::test]
+    async fn approval_preview_does_not_read_through_a_symlink() {
+        let dir = canonical_tempdir();
         let secret = dir.path().join("secret.txt");
         std::fs::write(&secret, "token").unwrap();
         let link = dir.path().join("link.txt");
         symlink_file(&secret, &link);
-        let tool = WriteTool;
+        let input = serde_json::json!({
+            "file_path": link,
+            "content": "new",
+        });
 
-        let preview = tool.approval_preview(
-            "write",
-            &serde_json::json!({
-                "file_path": link,
-                "content": "new",
-            }),
-            dir.path(),
-        );
-        let ApprovalBody::Diff(chunks) = preview.body else {
-            panic!("write preview should be a diff");
-        };
-        assert!(
-            chunks[0].old.is_empty(),
-            "a refused target previews as empty"
-        );
+        let preview = WriteTool
+            .approval_preview("write", &input, dir.path())
+            .await;
+
+        assert_eq!(preview.body, added_line("new"));
     }
 
     // ── run ──

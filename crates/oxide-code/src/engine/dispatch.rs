@@ -368,8 +368,9 @@ impl<'r> Dispatcher<'r, '_> {
                     .dispatch_ctx
                     .policy
                     .session_grant(class, &prepared.access);
-                let preview =
-                    tool.approval_preview(name, &prepared.input, self.dispatch_ctx.workspace.cwd());
+                let preview = tool
+                    .approval_preview(name, &prepared.input, self.dispatch_ctx.workspace.cwd())
+                    .await;
                 if self
                     .sink
                     .send(Event::ApprovalRequested {

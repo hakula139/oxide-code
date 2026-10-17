@@ -94,25 +94,25 @@ impl Tool for BashTool {
         extract_input_field(input, "command").map_or_else(|| pascal_case(name), str::to_owned)
     }
 
-    fn approval_preview(
-        &self,
-        name: &str,
-        input: &serde_json::Value,
-        cwd: &Path,
-    ) -> ApprovalPreview {
+    fn approval_preview<'a>(
+        &'a self,
+        name: &'a str,
+        input: &'a serde_json::Value,
+        cwd: &'a Path,
+    ) -> Pin<Box<dyn Future<Output = ApprovalPreview> + Send + 'a>> {
         let background = input
             .get("run_in_background")
             .and_then(serde_json::Value::as_bool)
             == Some(true);
         let label = pascal_case(name);
-        ApprovalPreview {
+        Box::pin(std::future::ready(ApprovalPreview {
             title: if background {
                 format!("{label} (background)")
             } else {
                 label
             },
             body: ApprovalBody::Command(self.summarize_call(name, input, cwd)),
-        }
+        }))
     }
 
     fn run<'a>(
@@ -587,18 +587,21 @@ mod tests {
 
     // ── approval_preview ──
 
-    #[test]
-    fn approval_preview_marks_a_background_command_in_the_title() {
+    #[tokio::test]
+    async fn approval_preview_marks_a_background_command_in_the_title() {
         let tool = BashTool::default();
         let cwd = Path::new("/repo");
 
-        let foreground =
-            tool.approval_preview("bash", &serde_json::json!({"command": "cargo test"}), cwd);
-        let background = tool.approval_preview(
-            "bash",
-            &serde_json::json!({"command": "cargo watch", "run_in_background": true}),
-            cwd,
-        );
+        let foreground = tool
+            .approval_preview("bash", &serde_json::json!({"command": "cargo test"}), cwd)
+            .await;
+        let background = tool
+            .approval_preview(
+                "bash",
+                &serde_json::json!({"command": "cargo watch", "run_in_background": true}),
+                cwd,
+            )
+            .await;
 
         assert_eq!(foreground.title, "Bash");
         assert_eq!(
