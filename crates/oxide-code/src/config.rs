@@ -813,7 +813,7 @@ mod tests {
     fn notices_list_an_unsupported_model_then_why_the_session_is_signed_out() {
         let mut cfg = sample_config();
         cfg.auth = None;
-        cfg.signed_out_notice = Some("Not signed in. Run /login to sign in.".to_owned());
+        cfg.signed_out_notice = Some("Not signed in. Run `/login` to sign in.".to_owned());
 
         let notices = cfg.snapshot().notices();
 
@@ -822,7 +822,7 @@ mod tests {
             notices[0].starts_with("`claude-test-1-0` is not a supported model"),
             "{notices:?}"
         );
-        assert_eq!(notices[1], "Not signed in. Run /login to sign in.");
+        assert_eq!(notices[1], "Not signed in. Run `/login` to sign in.");
     }
 
     #[test]
@@ -1551,14 +1551,14 @@ mod tests {
         assert!(interactive.auth.is_none());
         assert_eq!(
             interactive.signed_out_notice.as_deref(),
-            Some("Not signed in: oxide-code login has expired. Run /login to sign in again."),
+            Some("Not signed in: oxide-code login has expired. Run `/login` to sign in again."),
         );
         assert_eq!(
             format!(
                 "{:#}",
                 other.expect_err("only an interactive session starts signed out")
             ),
-            "oxide-code login has expired. Run /login to sign in again.",
+            "oxide-code login has expired. Run `/login` to sign in again.",
         );
     }
 

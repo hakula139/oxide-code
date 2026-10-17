@@ -2415,7 +2415,7 @@ mod tests {
             assert!(
                 matches!(
                     events.as_slice(),
-                    [Event::TurnFailed(msg)] if msg == "Not signed in. Run /login to sign in."
+                    [Event::TurnFailed(msg)] if msg == "Not signed in. Run `/login` to sign in."
                 ),
                 "{events:?}"
             );
@@ -2636,7 +2636,7 @@ mod tests {
             assert!(
                 matches!(
                     events.as_slice(),
-                    [Event::TurnFailed(msg)] if msg == "Not signed in. Run /login to sign in."
+                    [Event::TurnFailed(msg)] if msg == "Not signed in. Run `/login` to sign in."
                 ),
                 "{events:?}"
             );

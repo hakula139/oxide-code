@@ -65,7 +65,7 @@ impl Login {
     /// Recovery step for a login that stopped working.
     pub(super) const fn sign_in_step(self) -> &'static str {
         match self {
-            Self::Ox => "Run /login to sign in again.",
+            Self::Ox => "Run `/login` to sign in again.",
             Self::ClaudeCode => "Run `claude` to sign in again.",
         }
     }

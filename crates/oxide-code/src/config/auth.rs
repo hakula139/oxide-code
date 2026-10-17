@@ -202,14 +202,14 @@ fn signed_out_error(e: &LoginError) -> String {
             "no credentials found: no API key or token is set, no oxide-code login is stored, \
              and no Claude Code login is in {LOGIN_STORES}. \
              Set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN, \
-             add `api_key` to ~/.config/ox/config.toml, or sign in with /login in the `ox` TUI."
+             add `api_key` to ~/.config/ox/config.toml, or sign in with `/login` in the `ox` TUI."
         ),
         e => e.to_string(),
     }
 }
 
 /// What a session shows on a request while signed out, and at startup when no login is stored.
-pub(crate) const SIGNED_OUT: &str = "Not signed in. Run /login to sign in.";
+pub(crate) const SIGNED_OUT: &str = "Not signed in. Run `/login` to sign in.";
 
 /// The startup notice for a TUI session that starts signed out because of `e`.
 pub(super) fn signed_out_notice(e: &LoginError) -> String {
@@ -384,7 +384,7 @@ mod tests {
             (AuthSource::ApiKeyEnv, "ANTHROPIC_API_KEY"),
             (AuthSource::ApiKeyFile, "client.api_key in your user config"),
             (AuthSource::OAuthTokenEnv, "claude setup-token"),
-            (AuthSource::OxLogin, "Run /login"),
+            (AuthSource::OxLogin, "Run `/login`"),
             (AuthSource::ClaudeCodeLogin, "Run `claude`"),
         ] {
             let hint = source.rejection_hint();
@@ -454,11 +454,11 @@ mod tests {
     fn signed_out_notice_names_the_step_that_signs_in() {
         assert_eq!(
             signed_out_notice(&LoginError::Missing),
-            "Not signed in. Run /login to sign in.",
+            "Not signed in. Run `/login` to sign in.",
         );
         assert_eq!(
             signed_out_notice(&LoginError::Expired(Login::Ox)),
-            "Not signed in: oxide-code login has expired. Run /login to sign in again.",
+            "Not signed in: oxide-code login has expired. Run `/login` to sign in again.",
         );
         assert_eq!(
             signed_out_notice(&LoginError::Unreadable(
@@ -554,7 +554,7 @@ mod tests {
                 "no credentials found: no API key or token is set, no oxide-code login is stored, \
                  and no Claude Code login is in {LOGIN_STORES}. \
                  Set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN, \
-                 add `api_key` to ~/.config/ox/config.toml, or sign in with /login in the `ox` TUI."
+                 add `api_key` to ~/.config/ox/config.toml, or sign in with `/login` in the `ox` TUI."
             ),
         );
     }
