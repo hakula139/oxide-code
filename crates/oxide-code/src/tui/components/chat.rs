@@ -120,7 +120,7 @@ impl ChatView {
             painted_rows: Vec::new(),
             selection: None,
             clicks: ClickCounter::default(),
-            pending_calls: PendingCalls::new(),
+            pending_calls: PendingCalls::default(),
         }
     }
 
@@ -246,11 +246,12 @@ impl ChatView {
     /// Adds a tool result under the header [`result_header`] picks. It goes right below its call,
     /// even when calls that ran alongside it came after, so the chat reads like a resumed one.
     pub(crate) fn push_tool_result(&mut self, result: ToolResult) {
-        let (label, call_block) = self.pending_calls.remove(&result.id).unzip();
-        let header = result_header(result.title, label);
+        let call = self.pending_calls.remove(&result.id);
+        let at = call.as_ref().map(|call| call.block + 1);
+        let header = result_header(result.title, call.map(|call| call.label));
         let block = ToolResultBlock::new(&header, result.view, result.is_error);
         self.bump_paused_counter();
-        match call_block.map(|call_block| call_block + 1) {
+        match at {
             Some(at) if at < self.blocks.len() => self.insert_block(at, block),
             _ => self.push_block(block),
         }

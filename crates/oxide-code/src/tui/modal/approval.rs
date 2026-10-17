@@ -1,12 +1,11 @@
 //! Tool-call approval overlay. Surfaces a gated call's preview and the rule that holds it, and
 //! resolves the blocked agent to `Approve`, `AllowForSession` with a rule the user can edit first,
-//! `Deny`, `DenyWithFeedback` with typed text, or `Abort`. Built from the
-//! `ConfirmDeleteSessionModal` template. See `docs/design/tools/permissions.md`.
+//! `Deny`, `DenyWithFeedback` with typed text, or `Abort`. See `docs/design/tools/permissions.md`.
 
 use std::cell::{Cell, RefCell};
 use std::time::{Duration, Instant};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -18,7 +17,8 @@ use crate::protocol::{Decision, Op};
 use crate::tool::{ApprovalBody, ApprovalPreview, DiffChunk};
 use crate::tui::action::Action;
 use crate::tui::modal::line_editor::LineEditor;
-use crate::tui::modal::{Modal, ModalAction, ModalKey};
+use crate::tui::modal::{Modal, ModalAction, ModalKey, is_plain_char};
+use crate::tui::saturating_u16;
 use crate::tui::theme::Theme;
 use crate::tui::wrap::{expand_tabs, wrap_line};
 use crate::util::text::{is_hidden, truncate_to_width};
@@ -29,10 +29,12 @@ const FOOTER_HINT: &str = "[Y] approve   [N] deny   [F] feedback   [Esc] abort";
 const GRANT_FOOTER_HINT: &str =
     "[Y] approve   [A] allow for session   [N] deny   [F] feedback   [Esc] abort";
 const RULE_FOOTER_HINT: &str = "[Enter] allow for session   [Esc] back";
-const RULE_LABEL: &str = "Allow for the rest of this session:";
 const FEEDBACK_FOOTER_HINT: &str = "[Enter] deny with feedback   [Esc] back";
-const FEEDBACK_LABEL: &str = "Deny, and tell the model why:";
 const SCROLL_HINT: &str = "   [↑↓] scroll";
+
+const RULE_LABEL: &str = "Allow for the rest of this session:";
+const FEEDBACK_LABEL: &str = "Deny, and tell the model why:";
+
 /// Width floor so narrow terminals still paint the body without panicking.
 const MIN_BUDGET: usize = 8;
 /// Body rows painted at once. A longer preview scrolls.
@@ -42,8 +44,10 @@ const CHROME_ROWS: usize = 3;
 /// The label and the editor. A rejected answer's error wraps below them.
 const EDIT_ROWS: usize = 2;
 const CONTINUATION_INDENT: usize = 2;
+
 /// Stands in for each character of a whitespace run a plain space would misrepresent.
 const WHITESPACE_MARKER: char = '·';
+
 /// Quiet period before the modal answers keys. Keys inside it drop and restart it, since a burst
 /// of them was typed or pasted for the input the modal covers.
 const TYPE_AHEAD_GUARD: Duration = Duration::from_millis(300);
@@ -68,7 +72,7 @@ pub(crate) struct ApprovalModal {
     scroll: usize,
     view: Cell<View>,
     /// Reused across frames so a large preview is wrapped once per width and palette.
-    layout: RefCell<Option<Layout>>,
+    wrapped: RefCell<Option<Wrapped>>,
     /// End of the current [`TYPE_AHEAD_GUARD`] window.
     guard_until: Instant,
 }
@@ -156,12 +160,22 @@ impl Edit {
     }
 }
 
-struct Layout {
+/// The heading and body wrapped for one width and palette.
+struct Wrapped {
     width: u16,
     palette: Palette,
     /// The title's rows, then the reason's.
     heading: Vec<Line<'static>>,
     body: Vec<Line<'static>>,
+}
+
+/// The heading and the visible body rows, with the window's offset and size within the body.
+struct BodyWindow {
+    lines: Vec<Line<'static>>,
+    scroll: usize,
+    rows: usize,
+    total: usize,
+    body_shown: bool,
 }
 
 impl ApprovalModal {
@@ -180,7 +194,7 @@ impl ApprovalModal {
             edit: None,
             scroll: 0,
             view: Cell::default(),
-            layout: RefCell::default(),
+            wrapped: RefCell::default(),
             guard_until: Instant::now() + TYPE_AHEAD_GUARD,
         }
     }
@@ -197,24 +211,24 @@ impl ApprovalModal {
         }))
     }
 
-    /// Runs `f` on the layout for `width`. A `None` palette accepts a cached layout of any palette.
-    fn with_layout<R>(
+    /// Runs `f` on the rows wrapped for `width`. A `None` palette accepts any cached palette.
+    fn with_wrapped<R>(
         &self,
         width: u16,
         palette: Option<Palette>,
-        f: impl FnOnce(&Layout) -> R,
+        f: impl FnOnce(&Wrapped) -> R,
     ) -> R {
-        let mut cache = self.layout.borrow_mut();
-        if let Some(layout) = cache.as_ref()
-            && layout.width == width
-            && palette.is_none_or(|palette| palette == layout.palette)
+        let mut cache = self.wrapped.borrow_mut();
+        if let Some(wrapped) = cache.as_ref()
+            && wrapped.width == width
+            && palette.is_none_or(|palette| palette == wrapped.palette)
         {
-            return f(layout);
+            return f(wrapped);
         }
-        f(cache.insert(self.build_layout(width, palette.unwrap_or_default())))
+        f(cache.insert(self.wrap(width, palette.unwrap_or_default())))
     }
 
-    fn build_layout(&self, width: u16, palette: Palette) -> Layout {
+    fn wrap(&self, width: u16, palette: Palette) -> Wrapped {
         let budget = usize::from(width).max(MIN_BUDGET);
         let title = Line::from(reveal(&self.title, palette.title, palette.marker, false));
         let reason = self
@@ -230,7 +244,7 @@ impl ApprovalModal {
             .iter()
             .flat_map(|line| wrap_line(line.to_line(&palette), budget, CONTINUATION_INDENT, None))
             .collect();
-        Layout {
+        Wrapped {
             width,
             palette,
             heading,
@@ -271,11 +285,8 @@ impl ApprovalModal {
         Some(match edit.handle_key(event, ready) {
             EditStep::Stay => ModalKey::Consumed,
             EditStep::Back => {
-                if let Some(Edit {
-                    purpose: Purpose::Rule(offer),
-                    ..
-                }) = self.edit.take()
-                {
+                let purpose = self.edit.take().map(|edit| edit.purpose);
+                if let Some(Purpose::Rule(offer)) = purpose {
                     self.grant = Some(offer);
                 }
                 ModalKey::Consumed
@@ -307,6 +318,28 @@ impl ApprovalModal {
         })
     }
 
+    /// The heading and the body rows that fit `area`. The edit step claims its rows first, so the
+    /// body yields to the answer being typed.
+    fn body_window(&self, wrapped: &Wrapped, area: Rect) -> BodyWindow {
+        let room = usize::from(area.height)
+            .saturating_sub(wrapped.heading.len() + CHROME_ROWS + self.edit_rows(area.width))
+            .max(usize::from(self.edit.is_none()));
+        let total = wrapped.body.len();
+        let rows = total.min(MAX_BODY_ROWS).min(room);
+        let scroll = self.scroll.min(total - rows);
+
+        let mut lines = wrapped.heading.clone();
+        lines.push(Line::default());
+        lines.extend_from_slice(&wrapped.body[scroll..scroll + rows]);
+        BodyWindow {
+            lines,
+            scroll,
+            rows,
+            total,
+            body_shown: wrapped.heading.len() + 1 < usize::from(area.height),
+        }
+    }
+
     fn footer_hint(&self) -> &'static str {
         match (&self.edit, &self.grant) {
             (Some(edit), _) => edit.footer_hint(),
@@ -327,32 +360,25 @@ impl ApprovalModal {
 
 impl Modal for ApprovalModal {
     fn height(&self, width: u16, max_height: u16) -> u16 {
-        let rows = self.with_layout(width, None, |layout| {
-            layout.heading.len()
+        let rows = self.with_wrapped(width, None, |wrapped| {
+            wrapped.heading.len()
                 + CHROME_ROWS
                 + self.edit_rows(width)
-                + layout.body.len().min(MAX_BODY_ROWS)
+                + wrapped.body.len().min(MAX_BODY_ROWS)
         });
-        u16::try_from(rows).unwrap_or(u16::MAX).min(max_height)
+        saturating_u16(rows).min(max_height)
     }
 
     fn render(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
-        let edit = self.edit.as_ref();
-        let (mut lines, total, rows, scroll, body_shown) =
-            self.with_layout(area.width, Some(Palette::new(theme)), |layout| {
-                // The edit step claims its rows first, so the body yields to the answer being typed.
-                let room = usize::from(area.height)
-                    .saturating_sub(layout.heading.len() + CHROME_ROWS + self.edit_rows(area.width))
-                    .max(usize::from(edit.is_none()));
-                let total = layout.body.len();
-                let rows = total.min(MAX_BODY_ROWS).min(room);
-                let scroll = self.scroll.min(total - rows);
-                let mut lines = layout.heading.clone();
-                lines.push(Line::default());
-                lines.extend_from_slice(&layout.body[scroll..scroll + rows]);
-                let body_shown = layout.heading.len() + 1 < usize::from(area.height);
-                (lines, total, rows, scroll, body_shown)
-            });
+        let BodyWindow {
+            mut lines,
+            scroll,
+            rows,
+            total,
+            body_shown,
+        } = self.with_wrapped(area.width, Some(Palette::new(theme)), |wrapped| {
+            self.body_window(wrapped, area)
+        });
         let max_scroll = total - rows;
 
         if max_scroll > 0 && rows > 0 {
@@ -365,6 +391,7 @@ impl Modal for ApprovalModal {
         } else {
             lines.push(Line::default());
         }
+        let edit = self.edit.as_ref();
         let mut editor_row = None;
         if let Some(edit) = edit {
             lines.push(Line::from(Span::styled(edit.label(), theme.text())));
@@ -389,9 +416,7 @@ impl Modal for ApprovalModal {
 
         frame.render_widget(Paragraph::new(lines).style(theme.surface()), area);
         if let (Some(edit), Some(row), true) = (edit, editor_row, editor_shown) {
-            let y = area
-                .y
-                .saturating_add(u16::try_from(row).unwrap_or(u16::MAX));
+            let y = area.y.saturating_add(saturating_u16(row));
             edit.editor.place_cursor(frame, area, y);
         }
     }
@@ -454,10 +479,6 @@ impl Modal for ApprovalModal {
     }
 }
 
-fn is_plain_char(event: &KeyEvent) -> bool {
-    event.modifiers.is_empty() || event.modifiers == KeyModifiers::SHIFT
-}
-
 // ── Body ──
 
 /// A preview row before wrapping. Diff text has its tabs expanded.
@@ -488,8 +509,8 @@ impl BodyLine {
     }
 }
 
-/// Theme styles a preview row needs. The default is unstyled and serves
-/// [`ApprovalModal::height`], where only the row count matters.
+/// Theme styles a preview row needs. The default is unstyled and serves [`ApprovalModal::height`],
+/// where only the row count matters.
 #[derive(Clone, Copy, Default, PartialEq)]
 struct Palette {
     title: Style,
@@ -604,6 +625,7 @@ fn flush(spans: &mut Vec<Span<'static>>, plain: &mut String, style: Style) {
 mod tests {
     use std::path::Path;
 
+    use crossterm::event::KeyModifiers;
     use indoc::{formatdoc, indoc};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -1215,7 +1237,7 @@ mod tests {
             let choice = render_to_string(&modal, 80, modal.height(80, 40));
             assert!(choice.contains("[A] allow for session"), "{choice}");
 
-            let mut stack = crate::tui::modal::ModalStack::new();
+            let mut stack = crate::tui::modal::ModalStack::default();
             modal.expire_guard();
             modal.handle_key(&key(KeyCode::Char(opener)));
             stack.push(Box::new(modal));

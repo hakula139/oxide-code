@@ -109,25 +109,36 @@ impl LineEditor {
     /// scrolls as little as possible to keep the cursor in view.
     fn visible(&self, width: u16) -> (String, usize) {
         let budget = usize::from(width.saturating_sub(PROMPT_WIDTH + 1));
-        let chars: Vec<char> = self.text().chars().collect();
-        let widths: Vec<usize> = chars.iter().map(|c| c.width().unwrap_or(0)).collect();
-        let span = |from: usize, to: usize| -> usize { widths[from..to].iter().sum() };
+        let text = self.text();
+        // The byte offset and starting column of each char, then of the end of the text.
+        let mut stops = Vec::with_capacity(text.len() + 1);
+        let mut column = 0;
+        for (byte, c) in text.char_indices() {
+            stops.push((byte, column));
+            column += c.width().unwrap_or(0);
+        }
+        stops.push((text.len(), column));
+        let span = |from: usize, to: usize| stops[to].1 - stops[from].1;
+        let len = stops.len() - 1;
         let cursor = self.textarea.cursor().1;
 
         let mut start = self.scroll.get().min(cursor);
         while span(start, cursor) > budget {
             start += 1;
         }
-        while start > 0 && span(start - 1, chars.len()) <= budget {
+        while start > 0 && span(start - 1, len) <= budget {
             start -= 1;
         }
         self.scroll.set(start);
 
         let mut end = start;
-        while end < chars.len() && span(start, end + 1) <= budget {
+        while end < len && span(start, end + 1) <= budget {
             end += 1;
         }
-        (chars[start..end].iter().collect(), span(start, cursor))
+        (
+            text[stops[start].0..stops[end].0].to_owned(),
+            span(start, cursor),
+        )
     }
 }
 
@@ -145,6 +156,7 @@ mod tests {
     // cspell:ignore bcdefghij cdefg mnopqrstu rstuvwxyz
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use unicode_width::UnicodeWidthStr;
 
     use super::*;
 
@@ -160,6 +172,13 @@ mod tests {
         for c in text.chars() {
             editor.handle_key(&key(KeyCode::Char(c)));
         }
+    }
+
+    // ── PROMPT_WIDTH ──
+
+    #[test]
+    fn prompt_width_matches_display_width() {
+        assert_eq!(PROMPT.width(), usize::from(PROMPT_WIDTH));
     }
 
     // ── new ──
@@ -331,6 +350,15 @@ mod tests {
             editor.handle_key(&key(KeyCode::Backspace));
         }
         assert_eq!(shown(&editor), ("/ mnopqrstu".to_owned(), 11));
+    }
+
+    #[test]
+    fn line_slices_wide_text_by_display_width() {
+        let editor = LineEditor::new("日本語テキスト");
+
+        let row = shown(&editor);
+
+        assert_eq!(row, ("/ テキスト".to_owned(), 10));
     }
 
     // ── place_cursor ──

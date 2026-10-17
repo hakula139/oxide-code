@@ -14,7 +14,7 @@ use crate::util::text::truncate_to_width;
 // ── Constants ──
 
 pub(crate) const HINT_SEPARATOR: &str = "  ·  ";
-pub(crate) const KEY_UP_DOWN: &str = "↑ / ↓";
+pub(super) const KEY_UP_DOWN: &str = "↑ / ↓";
 pub(crate) const KEY_LEFT_RIGHT: &str = "← / →";
 
 /// Footer hints for pickers that commit on Enter.
@@ -22,6 +22,9 @@ pub(crate) const CONFIRM_HINTS: [&str; 2] = ["Enter to confirm", "Esc to cancel"
 
 /// Rows [`render_footer`] occupies: a blank gap above the hint line.
 pub(crate) const FOOTER_HEIGHT: u16 = 2;
+
+/// Blank columns between two text columns of a modal row.
+pub(super) const COLUMN_GAP: usize = 2;
 
 // ── Header ──
 
@@ -50,17 +53,6 @@ impl Header {
 
     /// Appends the header rows, each truncated to `width`.
     pub(crate) fn push_lines(&self, lines: &mut Vec<Line<'static>>, width: u16, theme: &Theme) {
-        self.push_title_lines(lines, width, theme);
-        lines.push(Line::default());
-    }
-
-    /// Appends the title and description rows without the gap, for a body that needs the room.
-    pub(crate) fn push_title_lines(
-        &self,
-        lines: &mut Vec<Line<'static>>,
-        width: u16,
-        theme: &Theme,
-    ) {
         let width = usize::from(width);
         lines.push(Line::from(Span::styled(
             truncate_to_width(&self.title, width),
@@ -72,6 +64,7 @@ impl Header {
                 theme.dim(),
             )));
         }
+        lines.push(Line::default());
     }
 }
 

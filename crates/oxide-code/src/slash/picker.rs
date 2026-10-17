@@ -86,7 +86,7 @@ impl ModelEffortPicker {
             "Switch the active model for this session. Restarting returns to your config.",
         );
         let initial = model.info().map_or(DEFAULT_MODEL, |row| row.id);
-        list.select_initial(|row| row.info.id == initial);
+        list.cursor_to(|row| row.info.id == initial);
 
         Self {
             list,
