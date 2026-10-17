@@ -672,6 +672,44 @@ mod tests {
     }
 
     #[test]
+    fn walk_transcript_hides_server_tool_results() {
+        let messages = [Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::ServerToolUse {
+                    id: "srv1".to_owned(),
+                    name: "web_search".to_owned(),
+                    input: serde_json::json!({"query": "rust"}),
+                },
+                ContentBlock::ServerToolResult {
+                    tool_use_id: "srv1".to_owned(),
+                    kind: "web_search_tool_result".to_owned(),
+                    fields: serde_json::Map::from_iter([(
+                        "content".to_owned(),
+                        serde_json::json!([{"type": "web_search_result"}]),
+                    )]),
+                },
+                ContentBlock::Text {
+                    text: "Found it".to_owned(),
+                },
+            ],
+        }];
+        assert_eq!(
+            walk(&messages),
+            [
+                call(
+                    "srv1",
+                    "web_search",
+                    serde_json::json!({"query": "rust"}),
+                    DEFAULT_TOOL_ICON,
+                    "web_search",
+                ),
+                Interaction::AssistantText("Found it".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
     fn walk_transcript_flushes_text_before_tool_call() {
         let messages = [Message {
             role: Role::Assistant,

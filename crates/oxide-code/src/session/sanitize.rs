@@ -1,6 +1,6 @@
-//! Resume-time transcript repair. Drops unresolved `tool_use` / orphan `tool_result` blocks,
-//! collapses same-role neighbors, and patches head / tail edges the API would reject. File-tracker
-//! snapshots follow the repaired transcript.
+//! Resume-time transcript repair. Drops unresolved tool calls and orphan tool results, collapses
+//! same-role neighbors, and patches head / tail edges the API would reject. File-tracker snapshots
+//! follow the repaired transcript.
 
 use std::collections::HashSet;
 
@@ -37,14 +37,16 @@ pub(super) fn retain_visible_file_snapshots(
     snapshots: &mut Vec<FileSnapshot>,
     messages: &[Message],
 ) {
-    let visible = tool_result_ids(messages);
+    let visible = tool_result_ids(messages).client;
     snapshots.retain(|snap| visible.contains(snap.state.tool_use_id.as_str()));
 }
 
 // ── Passes ──
 
-/// Drops assistant `tool_use` blocks whose id has no matching `tool_result`. Ids are owned
-/// because the `HashSet` is built from a shared borrow before mutating below.
+/// Drops assistant tool calls with no result anywhere in the transcript. That includes a server
+/// call a `pause_turn` left waiting, because the next prompt closes the turn and the API rejects a
+/// server call left without its result. Ids are owned because the sets are built from a shared
+/// borrow before mutating below.
 fn drop_unresolved_tool_uses(messages: &mut [Message]) {
     let resolved = tool_result_ids(messages);
 
@@ -53,25 +55,24 @@ fn drop_unresolved_tool_uses(messages: &mut [Message]) {
             continue;
         }
         msg.content.retain(|b| match b {
-            ContentBlock::ToolUse { id, .. } | ContentBlock::ServerToolUse { id, .. } => {
-                resolved.contains(id)
-            }
+            ContentBlock::ToolUse { id, .. } => resolved.client.contains(id),
+            ContentBlock::ServerToolUse { id, .. } => resolved.server.contains(id),
             _ => true,
         });
     }
 }
 
-/// Drops user `tool_result` blocks with no surviving assistant `tool_use`, then strips
-/// messages that prior passes emptied so role-collapse sees no stubs.
+/// Drops tool results with no surviving call, then strips messages that prior passes emptied so
+/// role-collapse sees no stubs.
 fn drop_orphan_tool_results(messages: &mut Vec<Message>) {
     let surviving = tool_use_ids(messages);
 
     for msg in &mut *messages {
-        if msg.role != Role::User {
-            continue;
-        }
         msg.content.retain(|b| match b {
-            ContentBlock::ToolResult { tool_use_id, .. } => surviving.contains(tool_use_id),
+            ContentBlock::ToolResult { tool_use_id, .. } => surviving.client.contains(tool_use_id),
+            ContentBlock::ServerToolResult { tool_use_id, .. } => {
+                surviving.server.contains(tool_use_id)
+            }
             _ => true,
         });
     }
@@ -112,28 +113,39 @@ fn insert_resume_sentinels(messages: &mut Vec<Message>) {
     }
 }
 
-fn tool_result_ids(messages: &[Message]) -> HashSet<String> {
-    messages
-        .iter()
-        .flat_map(|m| &m.content)
-        .filter_map(|block| match block {
-            ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.clone()),
-            _ => None,
-        })
-        .collect()
+/// Tool-use ids by where the call ran, since ids pair only on their own side. A client call's
+/// result comes back in a user `tool_result`. A server call's comes back in an assistant reply,
+/// the next one when a `pause_turn` or a client call in the same reply deferred it.
+#[derive(Default)]
+struct ToolIds {
+    client: HashSet<String>,
+    server: HashSet<String>,
 }
 
-fn tool_use_ids(messages: &[Message]) -> HashSet<String> {
-    messages
-        .iter()
-        .flat_map(|m| &m.content)
-        .filter_map(|block| match block {
-            ContentBlock::ToolUse { id, .. } | ContentBlock::ServerToolUse { id, .. } => {
-                Some(id.clone())
-            }
-            _ => None,
-        })
-        .collect()
+fn tool_result_ids(messages: &[Message]) -> ToolIds {
+    let mut ids = ToolIds::default();
+    for block in messages.iter().flat_map(|m| &m.content) {
+        let (side, id) = match block {
+            ContentBlock::ToolResult { tool_use_id, .. } => (&mut ids.client, tool_use_id),
+            ContentBlock::ServerToolResult { tool_use_id, .. } => (&mut ids.server, tool_use_id),
+            _ => continue,
+        };
+        side.insert(id.clone());
+    }
+    ids
+}
+
+fn tool_use_ids(messages: &[Message]) -> ToolIds {
+    let mut ids = ToolIds::default();
+    for block in messages.iter().flat_map(|m| &m.content) {
+        let (side, id) = match block {
+            ContentBlock::ToolUse { id, .. } => (&mut ids.client, id),
+            ContentBlock::ServerToolUse { id, .. } => (&mut ids.server, id),
+            _ => continue,
+        };
+        side.insert(id.clone());
+    }
+    ids
 }
 
 #[cfg(test)]
@@ -158,6 +170,14 @@ mod tests {
             id: id.to_owned(),
             name: "web_search".to_owned(),
             input: serde_json::Value::Null,
+        }
+    }
+
+    fn server_tool_result(id: &str) -> ContentBlock {
+        ContentBlock::ServerToolResult {
+            tool_use_id: id.to_owned(),
+            kind: "web_search_tool_result".to_owned(),
+            fields: serde_json::Map::new(),
         }
     }
 
@@ -330,6 +350,44 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_resumed_messages_keeps_answered_server_calls_and_drops_a_paused_one() {
+        let mut messages = vec![
+            Message::user("research X"),
+            Message {
+                role: Role::Assistant,
+                content: vec![text("Searching."), server_tool_use("s1")],
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    server_tool_result("s1"),
+                    text("Found X."),
+                    server_tool_use("s2"),
+                ],
+            },
+        ];
+
+        sanitize_resumed_messages(&mut messages);
+
+        // `s1` paused and its continuation answered it, while `s2` paused when the session ended.
+        assert_eq!(
+            messages,
+            [
+                Message::user("research X"),
+                Message {
+                    role: Role::Assistant,
+                    content: vec![
+                        text("Searching."),
+                        server_tool_use("s1"),
+                        server_tool_result("s1"),
+                        text("Found X."),
+                    ],
+                },
+            ],
+        );
+    }
+
+    #[test]
     fn sanitize_resumed_messages_prepends_head_sentinel_when_leading_user_is_dropped() {
         let mut messages = vec![
             Message {
@@ -407,23 +465,46 @@ mod tests {
     }
 
     #[test]
-    fn drop_unresolved_tool_uses_treats_server_tool_use_like_tool_use() {
-        // Both `ToolUse` and `ServerToolUse` arms must match, covering the OR in the filter.
+    fn drop_unresolved_tool_uses_pairs_server_calls_only_with_results_in_replies() {
+        // The API ran `deferred` only after client call `t1` returned, so its result opens the next
+        // reply. `misplaced` has only a user `tool_result`, which never answers a server call.
         let mut messages = vec![
             Message {
                 role: Role::Assistant,
-                content: vec![server_tool_use("kept"), server_tool_use("ghost")],
+                content: vec![
+                    server_tool_use("deferred"),
+                    unresolved_tool_use("t1"),
+                    server_tool_use("misplaced"),
+                ],
             },
             Message {
                 role: Role::User,
-                content: vec![tool_result("kept", "ok")],
+                content: vec![tool_result("t1", "ok"), tool_result("misplaced", "stale")],
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    server_tool_result("deferred"),
+                    server_tool_use("same"),
+                    server_tool_result("same"),
+                    server_tool_use("ghost"),
+                ],
             },
         ];
+
         drop_unresolved_tool_uses(&mut messages);
 
-        assert_eq!(messages[0].content.len(), 1);
-        assert!(
-            matches!(&messages[0].content[0], ContentBlock::ServerToolUse { id, .. } if id == "kept")
+        assert_eq!(
+            messages[0].content,
+            [server_tool_use("deferred"), unresolved_tool_use("t1")],
+        );
+        assert_eq!(
+            messages[2].content,
+            [
+                server_tool_result("deferred"),
+                server_tool_use("same"),
+                server_tool_result("same"),
+            ],
         );
     }
 
@@ -468,21 +549,31 @@ mod tests {
     }
 
     #[test]
-    fn drop_orphan_tool_results_keeps_results_paired_to_server_tool_use() {
-        // Surviving-id set must include `ServerToolUse` ids, else its result would be orphaned.
+    fn drop_orphan_tool_results_pairs_server_results_only_with_server_calls() {
         let mut messages = vec![
             Message {
                 role: Role::Assistant,
-                content: vec![server_tool_use("srv_1")],
+                content: vec![
+                    server_tool_use("srv_1"),
+                    server_tool_result("srv_1"),
+                    server_tool_result("ghost"),
+                ],
             },
             Message {
                 role: Role::User,
-                content: vec![tool_result("srv_1", "ok")],
+                content: vec![tool_result("srv_1", "stale")],
             },
         ];
+
         drop_orphan_tool_results(&mut messages);
 
-        assert_eq!(messages[1].content.len(), 1);
+        assert_eq!(
+            messages,
+            [Message {
+                role: Role::Assistant,
+                content: vec![server_tool_use("srv_1"), server_tool_result("srv_1")],
+            }],
+        );
     }
 
     #[test]

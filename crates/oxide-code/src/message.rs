@@ -32,6 +32,15 @@ pub(crate) enum ContentBlock {
         name: String,
         input: serde_json::Value,
     },
+    /// A server tool's result, which the API returns in a reply and expects back unchanged.
+    ServerToolResult {
+        tool_use_id: String,
+        /// The API's block type, such as `web_search_tool_result`.
+        kind: String,
+        /// The block's other fields, such as `content`, which only the API reads.
+        #[serde(flatten)]
+        fields: serde_json::Map<String, serde_json::Value>,
+    },
     ToolResult {
         tool_use_id: String,
         content: String,
@@ -169,6 +178,35 @@ mod tests {
         assert_eq!(id, "stu_01");
         assert_eq!(name, "advisor");
         assert_eq!(input["query"], "test");
+    }
+
+    // ── ContentBlock::ServerToolResult ──
+
+    #[test]
+    fn server_tool_result_stores_its_api_type_beside_the_fields_it_keeps() {
+        let fields = serde_json::json!({
+            "caller": {"type": "direct"},
+            "content": [{"type": "web_search_result", "encrypted_content": "opaque"}],
+        });
+        let block = ContentBlock::ServerToolResult {
+            tool_use_id: "stu_01".to_owned(),
+            kind: "web_search_tool_result".to_owned(),
+            fields: fields.as_object().unwrap().clone(),
+        };
+
+        let json = serde_json::to_value(&block).unwrap();
+
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "type": "server_tool_result",
+                "tool_use_id": "stu_01",
+                "kind": "web_search_tool_result",
+                "caller": {"type": "direct"},
+                "content": [{"type": "web_search_result", "encrypted_content": "opaque"}],
+            }),
+        );
+        assert_eq!(serde_json::from_value::<ContentBlock>(json).unwrap(), block);
     }
 
     // ── ContentBlock::ToolResult ──

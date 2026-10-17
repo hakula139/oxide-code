@@ -1930,6 +1930,17 @@ mod tests {
                     name: "advisor".to_owned(),
                     input: serde_json::json!({}),
                 },
+                ContentBlock::ServerToolResult {
+                    tool_use_id: "s1".to_owned(),
+                    kind: "advisor_tool_result".to_owned(),
+                    fields: serde_json::Map::from_iter([(
+                        "content".to_owned(),
+                        serde_json::json!({
+                            "type": "advisor_redacted_result",
+                            "encrypted_content": "opaque",
+                        }),
+                    )]),
+                },
                 ContentBlock::Text {
                     text: "Renaming main.".to_owned(),
                 },
