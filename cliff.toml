@@ -19,6 +19,8 @@ body = """
     ## [Unreleased]
 {% endif %}
 {% if message %}
+    ### Highlights
+
     {{ message | trim }}
 {% endif %}
 {% for group, commits in commits | group_by(attribute="group") %}
@@ -60,8 +62,8 @@ commit_preprocessors = [
   { pattern = '\(#([0-9]+)\)', replace = '([#$1](https://github.com/hakula139/oxide-code/pull/$1))' },
   # Early PR titles joined clauses with a spaced em-dash.
   { pattern = ' — ', replace = ': ' },
-  # Advisory bumps from before the `fix(deps)` convention (#17, #94).
-  { pattern = '^chore\(deps\): (bump rustls-webpki and rand for Dependabot alerts|refresh dependencies and patch DoS advisories)', replace = 'fix(deps): $1' },
+  # An advisory bump from before the `fix(deps)` convention (#17).
+  { pattern = '^chore\(deps\): (bump rustls-webpki and rand for Dependabot alerts)', replace = 'fix(deps): $1' },
 ]
 
 # `<!-- N -->` prefixes (stripped in the body template) order sections by priority.

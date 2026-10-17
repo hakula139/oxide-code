@@ -4,8 +4,7 @@
 #
 #   ./scripts/prepare-release.sh vX.Y.Z [highlights.md]
 #
-# A highlights file renders at the top of the changelog section. Annotate the tag with the same
-# file (`git tag -a --cleanup=verbatim -F highlights.md vX.Y.Z`).
+# A highlights file lists bullets, which render under a Highlights heading atop the section.
 
 set -euo pipefail
 
