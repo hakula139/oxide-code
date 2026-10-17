@@ -45,7 +45,8 @@ Segment render rules:
 - When the row is too narrow, omit lower-utility segments before truncating the last remaining segment. Run state and model have the highest utility.
 - The `model` and `model-with-effort` segments drop the `Claude` family prefix to save width (e.g., `Opus 5.5 (xhigh)`). Other surfaces (welcome screen, prompt environment, error blocks) keep the full `Claude Opus 5.5` label.
 - The pull request checks and review segments color their state with the theme's `success`, `warning`, `error`, and `muted` slots, and link the PR's checks and changed-files pages.
-- The review segment shows only where branch protection requires a review, since GitHub reports no review decision otherwise.
+- The review segment appears only when branch protection requires a review, because GitHub otherwise reports no review decision.
+- The context and usage-limit segments use the `text` slot, switch to `warning` at 70 percent, and use `error` from 90. Session cost stays `muted` because there is no limit to approach.
 - `task-progress` counts the completed tasks on the session's [task list](../tools/tasks.md) and shows only while the list holds a task.
 
 ## Usage Data
@@ -95,7 +96,8 @@ The default order tracks reading flow: location and branch orient the user, mode
 4. **Segment omission.** Missing usage, unknown pricing, absent branch, and blank titles disappear cleanly with no placeholder.
 5. **Background probes.** `git-branch` and the pull request segments re-probe as background child processes, 5 s and 60 s respectively after the previous probe finishes, with at most one run of each in flight. One `gh pr view` call serves all three PR segments. It reads the checks and review state only when the roster shows them, since those fields add every check on the head commit to the query. The bar stays current after `git checkout` or `gh pr create`, and a slow `gh` network round-trip never stalls input or rendering.
 6. **Checks like `gh pr checks`.** The checks segment buckets each check's state the way the GitHub CLI does and counts only the latest run of a re-run check, so a passing re-run clears an earlier failure. Cancelled checks get their own bucket, below failing and pending. A workflow that failed to start counts as failing, where `gh` leaves it pending even though it will never run.
-7. **Usage limits from response headers.** Every response already reports the account's utilization, so the segments cost no extra request and refresh with each turn.
+7. **Usage limits from response headers.** Every response already reports the account's utilization, so the segments add no extra request and refresh with each turn.
+8. **Escalate usage by the percent shown.** The context and limit segments share a pair of thresholds and compare the floored percentage shown in their labels, so `69%` and `70%` always use different colors. The default auto-compaction trigger is near 97% of the window, so a context at 90% is about as close to the end as a limit at 90%. oh-my-pi colors its quota windows at 50% and 80%, and its context at 150k tokens on large windows, which would flag most of a long session on a 1M window.
 
 ## Related Issues
 

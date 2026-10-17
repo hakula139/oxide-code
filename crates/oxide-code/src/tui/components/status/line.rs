@@ -24,6 +24,11 @@ const STATUS_LINE_MARGIN: u16 = 2;
 const STATUS_LINE_MARGIN_STR: &str = "  ";
 const _: () = assert!(STATUS_LINE_MARGIN_STR.len() == STATUS_LINE_MARGIN as usize);
 
+/// Shown percent from which the context and usage-limit segments take the warning style.
+const USAGE_WARNING_PERCENT: f64 = 70.0;
+/// Shown percent from which those segments take the error style.
+const USAGE_ERROR_PERCENT: f64 = 90.0;
+
 /// Ordered segment roster for one status-line render.
 #[derive(Debug, Clone)]
 pub(super) struct StatusLine {
@@ -139,19 +144,19 @@ impl StatusLine {
             StatusLineSegment::ContextUsed => state
                 .usage
                 .and_then(context_label)
-                .map(|label| Span::styled(label, Self::segment_style(theme, SegmentStyle::Dim))),
+                .map(|(label, style)| Span::styled(label, Self::segment_style(theme, style))),
             StatusLineSegment::SessionCost => state
                 .usage
                 .and_then(session_cost_label)
-                .map(|label| Span::styled(label, Self::segment_style(theme, SegmentStyle::Dim))),
+                .map(|label| Span::styled(label, Self::segment_style(theme, SegmentStyle::Muted))),
             StatusLineSegment::FiveHourLimit => state
                 .rate_limits
                 .and_then(|limits| rate_limit_label("5h", limits.five_hour))
-                .map(|label| Span::styled(label, Self::segment_style(theme, SegmentStyle::Dim))),
+                .map(|(label, style)| Span::styled(label, Self::segment_style(theme, style))),
             StatusLineSegment::WeeklyLimit => state
                 .rate_limits
                 .and_then(|limits| rate_limit_label("7d", limits.seven_day))
-                .map(|label| Span::styled(label, Self::segment_style(theme, SegmentStyle::Dim))),
+                .map(|(label, style)| Span::styled(label, Self::segment_style(theme, style))),
             StatusLineSegment::RunState => Some(state.status_span.clone()),
             StatusLineSegment::QueuedPrompts => (state.queued_prompts > 0).then(|| {
                 Span::styled(
@@ -323,18 +328,22 @@ fn model_with_effort(model: &str, effort: Option<Effort>) -> String {
     }
 }
 
-fn context_label(usage: UsageSnapshot) -> Option<String> {
+fn context_label(usage: UsageSnapshot) -> Option<(String, SegmentStyle)> {
     let tokens = usage.context_tokens?;
     Some(match usage.context_window {
         Some(window) if window > 0 => {
             let percent = tokens.saturating_mul(100) / window;
-            format!(
+            let label = format!(
                 "Ctx: {percent}% ({}/{})",
                 compact_tokens(tokens),
                 compact_tokens(window),
-            )
+            );
+            (label, usage_style(f64::from(percent)))
         }
-        _ => format!("Ctx: {}", compact_tokens(tokens)),
+        _ => (
+            format!("Ctx: {}", compact_tokens(tokens)),
+            SegmentStyle::Text,
+        ),
     })
 }
 
@@ -344,10 +353,21 @@ fn session_cost_label(usage: UsageSnapshot) -> Option<String> {
         .map(|cost| format!("Sess: {}", format_cost(cost)))
 }
 
-fn rate_limit_label(name: &str, window: Option<RateLimitWindow>) -> Option<String> {
+fn rate_limit_label(name: &str, window: Option<RateLimitWindow>) -> Option<(String, SegmentStyle)> {
     // Rounds to basis points before flooring, since `0.29 * 100.0` is `28.999...` in binary64.
     let percent = ((window?.utilization * 10_000.0).round() / 100.0).floor();
-    Some(format!("{name}: {percent:.0}%"))
+    Some((format!("{name}: {percent:.0}%"), usage_style(percent)))
+}
+
+/// The style for a shown spent share, which escalates as the context or a limit nears its end.
+fn usage_style(percent: f64) -> SegmentStyle {
+    if percent >= USAGE_ERROR_PERCENT {
+        SegmentStyle::Error
+    } else if percent >= USAGE_WARNING_PERCENT {
+        SegmentStyle::Warning
+    } else {
+        SegmentStyle::Text
+    }
 }
 
 fn checks_label(checks: Checks) -> (String, SegmentStyle) {
@@ -666,6 +686,109 @@ mod tests {
     }
 
     #[test]
+    fn render_context_used_escalates_from_text_to_warning_and_error() {
+        let theme = Theme::default();
+        let rendered = |context_tokens, context_window| {
+            render(
+                vec![StatusLineSegment::ContextUsed],
+                &StatusLineState {
+                    usage: Some(UsageSnapshot {
+                        context_tokens: Some(context_tokens),
+                        context_window,
+                        estimated_cost_usd: None,
+                    }),
+                    ..bare_state()
+                },
+            )
+        };
+
+        for (tokens, window, label, style) in [
+            (23_000, Some(1_000_000), "Ctx: 2% (23k/1M)", theme.text()),
+            (699_999, Some(1_000_000), "Ctx: 69% (699k/1M)", theme.text()),
+            (
+                700_000,
+                Some(1_000_000),
+                "Ctx: 70% (700k/1M)",
+                theme.warning(),
+            ),
+            (
+                899_999,
+                Some(1_000_000),
+                "Ctx: 89% (899k/1M)",
+                theme.warning(),
+            ),
+            (
+                900_000,
+                Some(1_000_000),
+                "Ctx: 90% (900k/1M)",
+                theme.error(),
+            ),
+            (987, None, "Ctx: 987", theme.text()),
+        ] {
+            let rendered = rendered(tokens, window);
+
+            assert_eq!(text_of(&rendered), format!("  {label}"));
+            assert_eq!(rendered.line.spans[1].style, style, "{label}");
+        }
+    }
+
+    #[test]
+    fn render_session_cost_reads_in_the_muted_style() {
+        let rendered = render(
+            vec![StatusLineSegment::SessionCost],
+            &StatusLineState {
+                usage: Some(UsageSnapshot {
+                    context_tokens: None,
+                    context_window: None,
+                    estimated_cost_usd: Some(0.5385),
+                }),
+                ..bare_state()
+            },
+        );
+
+        assert_eq!(text_of(&rendered), "  Sess: $0.5385");
+        assert_eq!(rendered.line.spans[1].style, Theme::default().muted());
+    }
+
+    #[test]
+    fn render_rate_limits_escalate_from_text_to_warning_and_error_by_the_shown_percent() {
+        let theme = Theme::default();
+        for (utilization, percent, style) in [
+            (0.05, "5%", theme.text()),
+            (0.6999, "69%", theme.text()),
+            (0.70, "70%", theme.warning()),
+            (0.8999, "89%", theme.warning()),
+            (0.90, "90%", theme.error()),
+            (1.0, "100%", theme.error()),
+        ] {
+            let window = Some(RateLimitWindow {
+                utilization,
+                resets_at: FUTURE_RESET,
+            });
+            let rendered = render(
+                vec![
+                    StatusLineSegment::FiveHourLimit,
+                    StatusLineSegment::WeeklyLimit,
+                ],
+                &StatusLineState {
+                    rate_limits: Some(RateLimits {
+                        five_hour: window,
+                        seven_day: window,
+                    }),
+                    ..bare_state()
+                },
+            );
+
+            assert_eq!(
+                text_of(&rendered),
+                format!("  5h: {percent} │ 7d: {percent}")
+            );
+            assert_eq!(rendered.line.spans[1].style, style, "5h at {percent}");
+            assert_eq!(rendered.line.spans[3].style, style, "7d at {percent}");
+        }
+    }
+
+    #[test]
     fn render_rate_limits_floor_the_spent_share_to_a_whole_percent() {
         let window = |utilization| {
             Some(RateLimitWindow {
@@ -822,28 +945,14 @@ mod tests {
     // ── context_label ──
 
     #[test]
-    fn context_label_omits_unknown_context_window() {
-        assert_eq!(
-            context_label(UsageSnapshot {
-                context_tokens: Some(987),
-                context_window: None,
-                estimated_cost_usd: None,
-            })
-            .as_deref(),
-            Some("Ctx: 987"),
-        );
-    }
-
-    #[test]
     fn context_label_hides_context_a_compaction_cleared() {
-        assert_eq!(
-            context_label(UsageSnapshot {
-                context_tokens: None,
-                context_window: Some(200_000),
-                estimated_cost_usd: Some(1.0),
-            }),
-            None,
-        );
+        let label = context_label(UsageSnapshot {
+            context_tokens: None,
+            context_window: Some(200_000),
+            estimated_cost_usd: Some(1.0),
+        });
+
+        assert!(label.is_none(), "{label:?}");
     }
 
     // ── format_cost ──

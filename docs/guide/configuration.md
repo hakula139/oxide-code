@@ -182,7 +182,7 @@ If automatic compaction fails, oxide-code does not send the prompt, and the TUI 
 | `theme`               | `Theme: mocha`, or a theme file's name                        | On `/theme`     |
 | `current-time`        | `HH:MM` in the local timezone                                 | Per minute      |
 
-The usage limits come from Claude subscription sign-ins, which report how much of each window is spent with every response. A window disappears once it resets, until the next response reports it again.
+The usage limits come from Claude subscription sign-ins, which report how much of each window is spent with every response. A window disappears when it resets and stays gone until the next response reports it again. As listed in the [theming guide](theming.md#status-line-segments), the context and usage-limit segments turn to the theme's warning color at 70% and error color at 90%.
 
 When the row is too narrow to fit every configured segment, low-utility ones drop in this order before the remaining content gets truncated: `theme` → `session-id` → `thread-title` → `current-time` → `pull-request-review` → `pull-request-checks` → `pull-request` → `git-branch` → `current-dir` → `task-progress` → `queued-prompts` → `session-cost` → `weekly-limit` → `five-hour-limit` → `context-used` → `model` → `model-with-effort` → `run-state`. Run state, the model labels, and the bar's last surviving segment are always preserved.
 
