@@ -4,6 +4,64 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-alpha.3] - 2026-10-17
+
+### Breaking changes
+
+- _(model)_ Support only the Claude 5.5 models (#183)
+- _(install)_ Gate releases on CI, attest archives, and drop the Intel Mac build (#210)
+
+### Added
+
+- _(permission)_ Tiered tool-permission system with approval gate (#95)
+- _(prompt)_ Send the model identity in the session context (#189)
+- _(config)_ Authenticate with gateway tokens, OAuth tokens, and custom headers (#197)
+- _(session)_ Archive and unarchive sessions (#216)
+- _(session)_ Open the session picker from the shell with ox --resume (#218)
+- _(session)_ Restore the session cost estimate on resume (#226)
+- _(config)_ Add config.d drop-ins, .ox/config.toml, and per-value provenance (#229)
+- _(config)_ Name the setting and the fix in startup errors (#235)
+- _(driver)_ Print headless runs as a JSON result or event stream (#236)
+- _(permission)_ Remember approvals for the rest of the session (#233)
+- _(permission)_ Answer approvals in every frontend (#243)
+- _(slash)_ Add /login and /logout (#242)
+- _(compaction)_ Stream the summary into the chat as it generates (#252)
+- _(permission)_ Parse shell commands for permission analysis (#250)
+- _(tui)_ Add opt-in status line segments for limits, PR state, and more (#259)
+- _(slash)_ Ask which instruction file /init creates, and diff updates (#263)
+
+### Fixed
+
+- _(deps)_ Refresh dependencies and patch DoS advisories (#94)
+- _(oauth)_ Write refreshed tokens back to their source (#103)
+- _(util)_ Run git probes off the event loop and harden env and log handling (#104)
+- _(main)_ Finalize the live session, share one turn driver, and freeze the prompt context (#108)
+- _(tui)_ Render code, diffs, HTML, and CJK wrapping faithfully (#112)
+- _(permission)_ Close symlink, protected-path, and glob bypasses (#113)
+- _(tool)_ Align tool semantics with what the model sees (#114)
+- _(tui)_ Route scroll keys to the chat and handle bracketed paste (#115)
+- _(tui)_ Emit OSC 8 natively in tmux and scope the panic hook (#116)
+- _(session)_ Keep transcripts intact across crashes and failed flushes (#179)
+- _(agent)_ Handle stop reasons, retries, and truncated streams (#194)
+- _(agent)_ Keep completed tool results and kill process groups on cancel (#195)
+- _(compaction)_ Summarize the full transcript and count its usage (#196)
+- _(session)_ Replay the resumed branch's prompt context (#213)
+- _(oxide-code)_ Run the test suite on Windows and fix what it found (#211)
+- _(permission)_ Compare Windows 8.3 short names as their long names (#223)
+- _(permission)_ Keep hard-linked files out of the Windows workspace zone (#224)
+- _(tool)_ Withhold read-denied files from grep and glob results (#227)
+- _(tool)_ Refuse a symlink swapped into the final component on Windows (#225)
+- _(nix)_ Keep the pre-commit hooks path absolute so linked worktrees run the hooks (#234)
+- _(engine)_ Tell the model when the user interrupted the previous prompt (#260)
+- _(compaction)_ Compact tool-heavy sessions and hold the prompt when auto-compaction fails (#265)
+
+### Changed
+
+- _(client)_ Cache the conversation and keep the request prefix stable (#107)
+- _(tui)_ Cache rendered chat blocks and paint only the visible slice (#111)
+- _(session)_ Resolve resume targets without reading every transcript (#182)
+- _(tui)_ Render only chat blocks near the viewport (#244)
+
 ## [0.1.0-alpha.2] - 2026-06-25
 
 ### Added
@@ -87,5 +145,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - _(deps)_ Bump rustls-webpki and rand for Dependabot alerts (#17)
 - _(deps)_ Bump rustls-webpki from 0.103.12 to 0.103.13 (#34)
 
+[0.1.0-alpha.3]: https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.2..v0.1.0-alpha.3
 [0.1.0-alpha.2]: https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.1..v0.1.0-alpha.2
 [0.1.0-alpha.1]: https://github.com/hakula139/oxide-code/releases/tag/v0.1.0-alpha.1
