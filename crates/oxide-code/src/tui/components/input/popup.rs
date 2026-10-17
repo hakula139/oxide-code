@@ -52,7 +52,7 @@ pub(super) struct PopupRow {
 }
 
 /// Slash-command autocomplete overlay. Empty `rows` means hidden.
-pub(crate) struct SlashPopup {
+pub(super) struct SlashPopup {
     theme: Theme,
     /// `Some` when visible.
     mode: Option<PopupMode>,
@@ -61,7 +61,7 @@ pub(crate) struct SlashPopup {
 }
 
 impl SlashPopup {
-    pub(crate) fn new(theme: &Theme) -> Self {
+    pub(super) fn new(theme: &Theme) -> Self {
         Self {
             theme: theme.clone(),
             mode: None,
@@ -70,11 +70,11 @@ impl SlashPopup {
         }
     }
 
-    pub(crate) fn set_theme(&mut self, theme: &Theme) {
+    pub(super) fn set_theme(&mut self, theme: &Theme) {
         self.theme = theme.clone();
     }
 
-    pub(crate) fn set_state(&mut self, state: Option<&PopupState<'_>>) {
+    pub(super) fn set_state(&mut self, state: Option<&PopupState<'_>>) {
         let (mode, rows) = match state {
             None => (None, Vec::new()),
             Some(PopupState::Name(query)) => (
@@ -123,26 +123,26 @@ impl SlashPopup {
         };
     }
 
-    pub(crate) fn is_visible(&self) -> bool {
+    pub(super) fn is_visible(&self) -> bool {
         !self.rows.is_empty()
     }
 
-    pub(crate) fn mode(&self) -> Option<&PopupMode> {
+    pub(super) fn mode(&self) -> Option<&PopupMode> {
         self.mode.as_ref()
     }
 
-    pub(crate) fn selected(&self) -> Option<&PopupRow> {
+    pub(super) fn selected(&self) -> Option<&PopupRow> {
         self.rows.get(self.selected)
     }
 
-    pub(crate) fn select_next(&mut self) {
+    pub(super) fn select_next(&mut self) {
         if self.rows.is_empty() {
             return;
         }
         self.selected = wrap_next(self.selected, self.rows.len());
     }
 
-    pub(crate) fn select_prev(&mut self) {
+    pub(super) fn select_prev(&mut self) {
         if self.rows.is_empty() {
             return;
         }
@@ -150,7 +150,7 @@ impl SlashPopup {
     }
 
     /// Rows the layout needs, zero when hidden and capped at [`MAX_VISIBLE_ROWS`] plus chrome.
-    pub(crate) fn height(&self) -> u16 {
+    pub(super) fn height(&self) -> u16 {
         let visible = self.rows.len().min(MAX_VISIBLE_ROWS);
         let body = saturating_u16(visible);
         if body == 0 {
@@ -160,7 +160,7 @@ impl SlashPopup {
         }
     }
 
-    pub(crate) fn render(&self, frame: &mut Frame, area: Rect) {
+    pub(super) fn render(&self, frame: &mut Frame<'_>, area: Rect) {
         if self.rows.is_empty() {
             return;
         }
@@ -227,11 +227,11 @@ impl SlashPopup {
         let desc_budget = width.saturating_sub(label_width + COLUMN_GAP);
         let desc = truncate_to_width(&row.description, desc_budget);
 
-        let mut spans = vec![Span::styled(label_text, row_style)];
-        let gap = " ".repeat(pad + COLUMN_GAP);
-        spans.push(Span::raw(gap));
-        spans.push(Span::styled(desc, row_style));
-        Line::from(spans)
+        Line::from(vec![
+            Span::styled(label_text, row_style),
+            Span::raw(" ".repeat(pad + COLUMN_GAP)),
+            Span::styled(desc, row_style),
+        ])
     }
 }
 

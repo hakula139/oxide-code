@@ -74,13 +74,13 @@ const STARTERS_MIN_HEIGHT: u16 = 13;
 /// Projection of [`LiveSessionInfo`] consumed by [`paint`]; randomized fields are stable per
 /// construction.
 pub(crate) struct WelcomeSnapshot {
-    pub(crate) version: &'static str,
-    pub(crate) model_label: String,
-    pub(crate) effort_label: String,
-    pub(crate) auth_label: &'static str,
-    pub(crate) cwd: String,
-    pub(crate) starters: [Starter; STARTER_PICK],
-    pub(crate) tip: &'static str,
+    version: &'static str,
+    model_label: String,
+    effort_label: String,
+    auth_label: &'static str,
+    cwd: String,
+    starters: [Starter; STARTER_PICK],
+    tip: &'static str,
 }
 
 impl WelcomeSnapshot {
@@ -233,7 +233,7 @@ fn starter_rows(picked: &[Starter; STARTER_PICK]) -> Vec<(String, String)> {
 
 fn starter_row_width(rows: &[(String, String)]) -> usize {
     rows.iter()
-        .map(|(name, desc)| name.width() + STARTER_GAP.len() + desc.width())
+        .map(|(name, desc)| name.width() + STARTER_GAP.width() + desc.width())
         .max()
         .unwrap_or(0)
 }
@@ -271,7 +271,7 @@ fn push_starter_row(
     theme: &Theme,
     column_width: usize,
 ) {
-    let prefix_width = name.width() + STARTER_GAP.len();
+    let prefix_width = name.width() + STARTER_GAP.width();
     let desc_budget = column_width.saturating_sub(prefix_width);
     let desc = truncate_to_width(desc, desc_budget);
     let pad = column_width.saturating_sub(prefix_width + desc.width());

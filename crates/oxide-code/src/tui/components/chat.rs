@@ -28,6 +28,9 @@ use crate::tui::theme::Theme;
 /// Rows one wheel notch scrolls, the common terminal default.
 const WHEEL_SCROLL_ROWS: usize = 3;
 
+/// Rows a page scroll keeps from the previous page.
+const PAGE_OVERLAP: u16 = 2;
+
 /// Scrollable chat message list with auto-scroll.
 pub(crate) struct ChatView {
     settings: RenderSettings,
@@ -174,7 +177,7 @@ impl ChatView {
             self.bump_paused_counter();
         }
         self.streaming
-            .get_or_insert_with(StreamingAssistant::new)
+            .get_or_insert_with(StreamingAssistant::default)
             .append(token);
         self.advance_streaming_cache();
     }
@@ -190,8 +193,7 @@ impl ChatView {
     /// Appends a token to the compaction summary in flight.
     pub(crate) fn append_summary_token(&mut self, token: &str) {
         if self.summary_buffer.is_empty() {
-            self.bump_paused_counter();
-            self.summary_counted = !self.auto_scroll;
+            self.summary_counted = self.bump_paused_counter();
         }
         self.summary_buffer.push_str(token);
     }
@@ -362,7 +364,7 @@ impl ChatView {
 
 impl ChatView {
     pub(crate) fn handle_event(&mut self, event: &Event) {
-        let page = usize::from(self.viewport.height.saturating_sub(2));
+        let page = usize::from(self.viewport.height.saturating_sub(PAGE_OVERLAP).max(1));
         match event {
             Event::Key(KeyEvent {
                 code: KeyCode::Up, ..
@@ -413,7 +415,7 @@ impl ChatView {
     /// the stale block nearest the pinned row and places the paint again. Painting waits until
     /// every block within reach is current, so estimated heights stay off the screen, and the
     /// anchor keeps the visible rows in place while blocks above them change height.
-    pub(crate) fn render(&mut self, frame: &mut Frame, area: Rect) {
+    pub(crate) fn render(&mut self, frame: &mut Frame<'_>, area: Rect) {
         self.set_viewport(area);
         let live = self.render_live(area.width);
         let anchor = (!self.auto_scroll).then(|| self.painted.anchor_at(self.scroll_offset));
@@ -441,7 +443,7 @@ impl ChatView {
     }
 
     /// Re-arms auto-scroll, so the next frame shows the latest content.
-    pub(crate) fn jump_to_bottom(&mut self) {
+    fn jump_to_bottom(&mut self) {
         self.rearm_auto_scroll();
         self.pending_scroll = 0;
     }
@@ -548,10 +550,13 @@ impl ChatView {
         self.summary_counted = false;
     }
 
-    fn bump_paused_counter(&mut self) {
-        if !self.auto_scroll {
-            self.new_content_since_pause = self.new_content_since_pause.saturating_add(1);
+    /// Counts one new item while the user is scrolled up, and returns whether it counted.
+    fn bump_paused_counter(&mut self) -> bool {
+        if self.auto_scroll {
+            return false;
         }
+        self.new_content_since_pause = self.new_content_since_pause.saturating_add(1);
+        true
     }
 
     fn render_live(&self, width: u16) -> LiveLines {
@@ -1168,7 +1173,7 @@ mod tests {
     fn append_stream_token_after_committed_assistant_omits_duplicate_icon() {
         let mut chat = test_chat();
         chat.push_block(AssistantText::new("committed"));
-        let mut s = StreamingAssistant::new();
+        let mut s = StreamingAssistant::default();
         s.append("streaming");
         chat.streaming = Some(s);
 
@@ -2262,6 +2267,16 @@ mod tests {
         chat.handle_event(&key_event(KeyCode::PageDown));
         chat.handle_event(&key_event(KeyCode::PageDown));
         assert_eq!(chat.pending_scroll, 18);
+    }
+
+    #[test]
+    fn handle_event_pages_scroll_one_row_in_a_chat_no_taller_than_the_overlap() {
+        let mut chat = test_chat();
+        chat.viewport.height = PAGE_OVERLAP;
+
+        chat.handle_event(&key_event(KeyCode::PageUp));
+
+        assert_eq!(chat.pending_scroll, -1);
     }
 
     #[test]

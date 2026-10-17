@@ -120,7 +120,7 @@ impl InputArea {
         self.popup.height()
     }
 
-    pub(crate) fn render_popup(&self, frame: &mut Frame, area: Rect) {
+    pub(crate) fn render_popup(&self, frame: &mut Frame<'_>, area: Rect) {
         self.popup.render(frame, area);
     }
 }
@@ -139,7 +139,7 @@ impl InputArea {
         }
     }
 
-    pub(crate) fn render(&self, frame: &mut Frame, area: Rect) {
+    pub(crate) fn render(&self, frame: &mut Frame<'_>, area: Rect) {
         let block = Block::default()
             .borders(Borders::TOP | Borders::BOTTOM)
             .border_style(self.theme.border_focused())
@@ -368,16 +368,25 @@ impl InputArea {
         if self.is_empty() {
             return None;
         }
-        let trimmed = self.textarea.lines().join("\n").trim().to_owned();
+        let submission = trim_blank_edges(&self.textarea.lines().join("\n")).to_owned();
 
         self.set_text("");
         self.popup.set_state(None);
 
-        Some(Action::Submit(trimmed))
+        Some(Action::Submit(submission))
     }
 }
 
-// ── Free Functions ──
+// ── Helpers ──
+
+/// Drops `text`'s trailing whitespace and leading blank lines, keeping the first line's indent.
+fn trim_blank_edges(text: &str) -> &str {
+    let text = text.trim_end();
+    let start = text.find(|c: char| !c.is_whitespace()).map_or(0, |first| {
+        text[..first].rfind('\n').map_or(0, |newline| newline + 1)
+    });
+    &text[start..]
+}
 
 fn format_completion(mode: &PopupMode, value: &str) -> String {
     match mode {
@@ -1129,25 +1138,15 @@ mod tests {
     }
 
     #[test]
-    fn submit_trims_whitespace() {
+    fn submit_trims_blank_edges_and_keeps_the_first_line_indent() {
         let mut input = test_input();
-        input.textarea.input(Event::Key(KeyEvent::new(
-            KeyCode::Char(' '),
-            KeyModifiers::NONE,
-        )));
-        input.textarea.input(Event::Key(KeyEvent::new(
-            KeyCode::Char('a'),
-            KeyModifiers::NONE,
-        )));
-        input.textarea.input(Event::Key(KeyEvent::new(
-            KeyCode::Char(' '),
-            KeyModifiers::NONE,
-        )));
+        input.set_text("\n  \n    fn main() {}\n  done  \n\n");
 
         let outcome = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
+
         assert_eq!(
             outcome,
-            InputOutcome::Action(Action::Submit("a".to_owned())),
+            InputOutcome::Action(Action::Submit("    fn main() {}\n  done".to_owned())),
         );
     }
 

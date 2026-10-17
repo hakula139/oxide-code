@@ -118,7 +118,7 @@ pub(super) struct ClickCounter {
 impl ClickCounter {
     /// A cell for one press, a word for a double click, and a row for a triple click, after which
     /// the count starts over.
-    fn press(&mut self, now: Instant, cell: (u16, u16)) -> Unit {
+    fn press(&mut self, cell: (u16, u16), now: Instant) -> Unit {
         let repeat = self.last.is_some_and(|(at, last_cell)| {
             last_cell == cell && now.duration_since(at) <= MULTI_CLICK_WINDOW
         });
@@ -227,7 +227,7 @@ impl ChatView {
         if !self.viewport.contains(Position::from(cell)) {
             return;
         }
-        let unit = self.clicks.press(now, cell);
+        let unit = self.clicks.press(cell, now);
         let Some(origin) = self.unit_at(cell, unit) else {
             return;
         };
@@ -354,7 +354,7 @@ impl ChatView {
         if !self.auto_scroll {
             return false;
         }
-        self.scroll_up(0);
+        self.auto_scroll = false;
         true
     }
 }
@@ -555,12 +555,12 @@ mod tests {
 
         let units: Vec<Unit> = [0, 100, 200, 300]
             .into_iter()
-            .map(|ms| clicks.press(at(ms), (3, 1)))
+            .map(|ms| clicks.press((3, 1), at(ms)))
             .collect();
 
         assert_eq!(units, [Unit::Cell, Unit::Word, Unit::Row, Unit::Cell]);
-        assert_eq!(clicks.press(at(1000), (3, 1)), Unit::Cell, "too slow");
-        assert_eq!(clicks.press(at(1100), (4, 1)), Unit::Cell, "another cell");
+        assert_eq!(clicks.press((3, 1), at(1000)), Unit::Cell, "too slow");
+        assert_eq!(clicks.press((4, 1), at(1100)), Unit::Cell, "another cell");
     }
 
     // ── handle_mouse ──

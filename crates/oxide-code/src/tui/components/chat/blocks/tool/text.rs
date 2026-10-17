@@ -17,37 +17,32 @@ pub(super) fn render(
     label: &str,
     is_error: bool,
 ) {
-    if content.trim().is_empty() {
+    let lines: Vec<&str> = content.lines().collect();
+    let has_text = |line: &&str| !line.trim().is_empty();
+    let (Some(first), Some(last)) = (
+        lines.iter().position(has_text),
+        lines.iter().rposition(has_text),
+    ) else {
+        return;
+    };
+    let mut output_lines = &lines[first..=last];
+    if output_lines
+        .first()
+        .is_some_and(|l| l.trim() == label.trim())
+    {
+        output_lines = &output_lines[1..];
+    }
+    if output_lines.is_empty() {
         return;
     }
 
     let border_style = border_style_for(ctx.theme, is_error);
     let text_style = ctx.theme.dim();
-
-    // Strip surrounding blank lines but preserve per-line leading whitespace.
-    let mut output_lines: Vec<&str> = content.lines().collect();
-    while output_lines.first().is_some_and(|l| l.trim().is_empty()) {
-        output_lines.remove(0);
-    }
-    while output_lines.last().is_some_and(|l| l.trim().is_empty()) {
-        output_lines.pop();
-    }
-
-    // Deduplicate when the first body line matches the status-line label.
-    if output_lines
-        .first()
-        .is_some_and(|l| l.trim() == label.trim())
-    {
-        output_lines.remove(0);
-    }
-    if output_lines.is_empty() {
-        return;
-    }
     let truncated = output_lines.len() > MAX_TOOL_OUTPUT_LINES;
     let visible = if truncated {
         &output_lines[..MAX_TOOL_OUTPUT_LINES]
     } else {
-        &output_lines
+        output_lines
     };
 
     for text_line in visible {

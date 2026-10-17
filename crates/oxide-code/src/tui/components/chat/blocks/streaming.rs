@@ -11,6 +11,7 @@ use crate::tui::markdown::{complete_blocks_len, render_markdown_chunk};
 ///
 /// Complete top-level markdown blocks are pre-rendered into `rendered`, so each frame only
 /// re-parses the tail from the last block start. The cache is keyed by viewport width.
+#[derive(Default)]
 pub(crate) struct StreamingAssistant {
     buffer: String,
     /// Rendered lines for the complete blocks before `rendered_boundary`.
@@ -23,16 +24,6 @@ pub(crate) struct StreamingAssistant {
 }
 
 impl StreamingAssistant {
-    pub(crate) fn new() -> Self {
-        Self {
-            buffer: String::new(),
-            rendered: Vec::new(),
-            rendered_boundary: 0,
-            after_block: false,
-            cached_width: 0,
-        }
-    }
-
     pub(crate) fn append(&mut self, token: &str) {
         self.buffer.push_str(token);
     }

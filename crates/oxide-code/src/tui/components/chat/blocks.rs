@@ -98,7 +98,7 @@ pub(super) trait ChatBlock {
 // ── Shared Helpers ──
 
 /// Icon-prefixed line with continuation indent aligned to text start.
-pub(super) fn push_icon_wrapped(
+fn push_icon_wrapped(
     out: &mut Vec<Line<'static>>,
     prefix: &str,
     prefix_style: Style,
@@ -114,7 +114,7 @@ pub(super) fn push_icon_wrapped(
 }
 
 /// Prepends a styled prefix span, keeping the line's style and alignment.
-pub(super) fn prepend_markdown_prefix(
+fn prepend_markdown_prefix(
     mut line: Line<'static>,
     prefix: &str,
     prefix_style: Style,
@@ -125,7 +125,7 @@ pub(super) fn prepend_markdown_prefix(
 }
 
 /// Continuation prefix that keeps the shared left bar styled after wrapping.
-pub(super) fn bar_continuation_prefix(prefix: &str, bar_style: Style) -> Vec<Span<'static>> {
+fn bar_continuation_prefix(prefix: &str, bar_style: Style) -> Vec<Span<'static>> {
     let bar_pos = prefix.find(BAR).expect("prefix must contain bar glyph");
     let left = &prefix[..bar_pos];
     let right = &prefix[bar_pos + BAR.len()..];

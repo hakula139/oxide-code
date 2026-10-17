@@ -2,6 +2,7 @@
 
 mod line;
 
+use std::borrow::Cow;
 use std::time::Instant;
 
 use ratatui::Frame;
@@ -20,7 +21,7 @@ use crate::tui::glyphs::SPINNER_FRAMES;
 use crate::tui::theme::Theme;
 use crate::util::git;
 
-pub(in crate::tui) const TICKS_PER_FRAME: usize = 5;
+pub(crate) const TICKS_PER_FRAME: usize = 5;
 
 /// A status-bar segment that should be re-emitted as an OSC 8 hyperlink.
 #[derive(Debug, Clone)]
@@ -71,6 +72,34 @@ pub(crate) enum Status {
     Resuming,
     Cancelling,
     ExitArmed { until: Instant },
+}
+
+impl Status {
+    /// Whether work is in flight, which the bar marks with an animated spinner.
+    const fn is_busy(&self) -> bool {
+        matches!(
+            self,
+            Self::Streaming
+                | Self::ToolRunning { .. }
+                | Self::Compacting
+                | Self::SigningIn
+                | Self::Resuming
+                | Self::Cancelling,
+        )
+    }
+
+    fn label(&self) -> Cow<'static, str> {
+        match self {
+            Self::Idle => "Ready".into(),
+            Self::Streaming => "Streaming · Esc to interrupt".into(),
+            Self::ToolRunning { name } => format!("Running {name} · Esc to interrupt").into(),
+            Self::Compacting => "Compacting · Esc to interrupt".into(),
+            Self::SigningIn => "Signing in · Esc to cancel".into(),
+            Self::Resuming => "Resuming".into(),
+            Self::Cancelling => "Cancelling".into(),
+            Self::ExitArmed { .. } => "Press Ctrl+C again to exit".into(),
+        }
+    }
 }
 
 impl StatusBar {
@@ -220,7 +249,7 @@ impl StatusBar {
     pub(crate) fn tick(&mut self) -> bool {
         let mut dirty = self.refresh_current_time();
         dirty |= self.expire_rate_limits();
-        if is_animated(&self.status) {
+        if self.status.is_busy() {
             self.tick_counter += 1;
             if self.tick_counter >= TICKS_PER_FRAME {
                 self.tick_counter = 0;
@@ -259,24 +288,21 @@ impl StatusBar {
 }
 
 impl StatusBar {
-    pub(crate) fn render(&mut self, frame: &mut Frame, area: Rect) {
+    pub(crate) fn render(&mut self, frame: &mut Frame<'_>, area: Rect) {
         let block = Block::default()
             .borders(Borders::BOTTOM)
             .border_style(self.theme.border_unfocused())
             .style(self.theme.surface());
         let rendered = self.render_line(area.width);
-        let content_y = area.y;
-        let content_x = area.x;
         self.pending_hyperlinks.clear();
         let mut hyperlink_rects = Vec::with_capacity(rendered.hyperlinks.len());
         for link in &rendered.hyperlinks {
-            let link_x = content_x.saturating_add(link.col);
-            let max_width = area.x.saturating_add(area.width).saturating_sub(link_x);
-            let width = link.width.min(max_width);
+            let link_x = area.x.saturating_add(link.col);
+            let width = link.width.min(area.right().saturating_sub(link_x));
             if width == 0 {
                 continue;
             }
-            hyperlink_rects.push((Rect::new(link_x, content_y, width, 1), link.url.clone()));
+            hyperlink_rects.push((Rect::new(link_x, area.y, width, 1), link.url.clone()));
         }
         frame.render_widget(Paragraph::new(rendered.line).block(block), area);
         // Snapshot link cells after the paint so emit_status_hyperlinks can replay them.
@@ -306,25 +332,17 @@ impl StatusBar {
 
 impl StatusBar {
     fn status_span(&self) -> Span<'static> {
-        match &self.status {
-            Status::Idle => Span::styled("Ready", self.theme.success()),
-            Status::Streaming => self.busy_span("Streaming · Esc to interrupt"),
-            Status::ToolRunning { name } => {
-                self.busy_span(&format!("Running {name} · Esc to interrupt"))
-            }
-            Status::Compacting => self.busy_span("Compacting · Esc to interrupt"),
-            Status::SigningIn => self.busy_span("Signing in · Esc to cancel"),
-            Status::Resuming => self.busy_span("Resuming"),
-            Status::Cancelling => self.busy_span("Cancelling"),
-            Status::ExitArmed { .. } => {
-                Span::styled("Press Ctrl+C again to exit", self.theme.warning())
-            }
+        let label = self.status.label();
+        if self.status.is_busy() {
+            let spinner = SPINNER_FRAMES[self.spinner_frame];
+            return Span::styled(format!("{spinner} {label}"), self.theme.info());
         }
-    }
-
-    fn busy_span(&self, label: &str) -> Span<'static> {
-        let spinner = SPINNER_FRAMES[self.spinner_frame];
-        Span::styled(format!("{spinner} {label}"), self.theme.info())
+        let style = if matches!(self.status, Status::ExitArmed { .. }) {
+            self.theme.warning()
+        } else {
+            self.theme.success()
+        };
+        Span::styled(label, style)
     }
 
     fn render_line(&self, width: u16) -> RenderedStatusLine {
@@ -349,18 +367,6 @@ impl StatusBar {
             width,
         )
     }
-}
-
-fn is_animated(status: &Status) -> bool {
-    matches!(
-        status,
-        Status::Streaming
-            | Status::ToolRunning { .. }
-            | Status::Compacting
-            | Status::SigningIn
-            | Status::Resuming
-            | Status::Cancelling,
-    )
 }
 
 fn current_time_minute() -> u16 {
