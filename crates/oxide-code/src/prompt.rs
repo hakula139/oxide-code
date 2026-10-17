@@ -25,8 +25,8 @@ pub(crate) const SYSTEM_PROMPT_DYNAMIC_BOUNDARY: &str = "__SYSTEM_PROMPT_DYNAMIC
 /// `system_sections` is ordered: cacheable static sections, then [`SYSTEM_PROMPT_DYNAMIC_BOUNDARY`]
 /// as its own element, then per-session dynamic sections. The client splits on the marker to apply
 /// `cache_control` to the static prefix only. `user_context` is the CLAUDE.md / AGENTS.md, current
-/// date, and model identity reminder. It rides as the first user message, since some gateways cap
-/// the size of `system` blocks and a `/model` swap must leave the system prompt byte-identical.
+/// date, and model identity reminder. It rides as the first user message, since a `/model` swap
+/// must leave the system prompt byte-identical.
 #[cfg_attr(test, derive(Default))]
 pub(crate) struct PromptParts {
     environment: Environment,

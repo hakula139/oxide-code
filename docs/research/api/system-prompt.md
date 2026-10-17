@@ -52,7 +52,7 @@ Features:
 
 ## Context Injection Channels
 
-Claude Code splits dynamic context across two API surfaces. This is critical for prompt caching efficiency and compatibility with third-party gateways that impose body size limits on system blocks.
+Claude Code splits dynamic context across two API surfaces. This is critical for prompt caching efficiency.
 
 ### System parameter → static content
 
@@ -82,8 +82,7 @@ This message is marked `isMeta: true` (hidden from the UI, visible to the model)
 Why this split matters:
 
 1. **Prompt caching**: Static system blocks stay identical across turns and sessions → server reuses the cached prefix. If CLAUDE.md were in `system`, any edit would bust the cache for the entire prompt (~20K+ tokens).
-2. **Gateway compatibility**: Some third-party gateways reject requests where any `system` text block exceeds ~2700 characters. Moving CLAUDE.md to a user message sidesteps this limit entirely.
-3. **Per-conversation memoization**: `getUserContext()` is memoized once per conversation (not per turn), so the CLAUDE.md walk and date computation happen once.
+2. **Per-conversation memoization**: `getUserContext()` is memoized once per conversation (not per turn), so the CLAUDE.md walk and date computation happen once.
 
 ### Context sources
 
@@ -140,8 +139,8 @@ Tool schemas are sent via the API `tools` parameter, **not** in the system promp
 
 The API supports prompt caching via `cache_control` on `TextBlockParam` blocks. Cache scopes:
 
-- `global`: Static instructions identical across all sessions. **First-party only** because 3P gateways reject a `scope: "global"` block downstream of tool definitions (they render before `system` and taint the cache prefix). See [Anthropic API § Prompt Caching Scope](anthropic.md#prompt-caching-scope) for the full invariance rule.
-- _(absent)_: Default org-scoped ephemeral cache. Universally accepted.
+- `global`: Static instructions identical across all sessions, cached across every user of the first-party API. See [Anthropic API § Prompt Caching Scope](anthropic.md#prompt-caching-scope) for the invariance rule.
+- _(absent)_: Default org-scoped ephemeral cache.
 - `null` (no `cache_control`): Dynamic content excluded from caching.
 
 The `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` marker separates cacheable from non-cacheable content. Effective caching requires the static prefix to be identical across requests.
@@ -150,7 +149,7 @@ oxide-code ships `scope: "global"` only when the configured base URL points at t
 
 ## System Block Layout
 
-The flat sections array gets transformed into the block layout actually sent to the API. The boundary marker is consumed and never appears in the request. Agentic streaming emits the same 4-block shape (billing / attribution + identity + static + dynamic). The billing block is unconditional for gateway compatibility, and only the `cache_control` on the static block varies by base URL.
+The flat sections array gets transformed into the block layout actually sent to the API. The boundary marker is consumed and never appears in the request. Agentic streaming emits the same 4-block shape (billing / attribution + identity + static + dynamic). The billing block ships on every base URL, and only the `cache_control` on the static block varies by base URL.
 
 **First-party base URL** (`api.anthropic.com`), global cache active:
 
@@ -170,7 +169,7 @@ The flat sections array gets transformed into the block layout actually sent to 
 | 2 | Static sections joined (`\n\n`)  | `{ type: "ephemeral" }` |
 | 3 | Dynamic sections joined (`\n\n`) | -                       |
 
-Omitting the `scope` field is deliberate: org is the absent-field default, the resulting wire shape is what the Anthropic SDK ships for non-global ephemeral caches, and every gateway accepts it.
+Omitting the `scope` field is deliberate: org is the absent-field default, and the resulting wire shape is what the Anthropic SDK ships for non-global ephemeral caches.
 
 Static sections (before boundary): intro, system, doing tasks, actions, tools, tone / style, output efficiency. Dynamic sections (after boundary): session guidance, environment, language, MCP instructions, etc.
 
@@ -206,16 +205,6 @@ prompt-caching-scope-2026-01-05
 Additional betas are added conditionally: `oauth-2025-04-20` for subscribers, tool-search headers when tool search is enabled, `redact-thinking-*` for thinking redaction, etc.
 
 The URL includes a `?beta=true` query parameter.
-
-## Third-Party Gateway Validation
-
-Third-party gateways validate the system-block layout in addition to wire-shape signals. Empirically, prompt-content checks are content-similarity-based and treat the static prefix as load-bearing:
-
-- The identity prefix block (`"You are Claude Code..."` and friends, see [Anthropic API § System prompt prefix](anthropic.md#2-system-prompt-prefix-as-a-separate-block)) must occupy its own block. Concatenating it into the prompt body fails the same way 1P fails non-Haiku OAuth.
-- Static section text is accepted when it closely matches the known Claude Code prompt content shipped with this version. Heavily customized static prompts can trip the verifier even when every header is correct.
-- Dynamic sections (after the `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` marker) are accepted alongside valid static content. The boundary itself is consumed by `splitSysPromptPrefix()` and never reaches the wire.
-
-For the wire-shape side of the check (Stainless headers, billing attestation, beta header set, `metadata.user_id` shape, `User-Agent`), see [Anthropic API § Third-Party Gateway Validation](anthropic.md#third-party-gateway-validation).
 
 ## Sources
 
