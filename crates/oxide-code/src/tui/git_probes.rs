@@ -24,6 +24,15 @@ pub(crate) enum GitUpdate {
     PullRequest(Option<PullRequest>),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Probe {
+    Branch,
+    PullRequest,
+}
+
+/// One probe run's end, with no update when the run panicked.
+type Finished = (Probe, Option<GitUpdate>);
+
 /// Schedules the probes and collects their results. At most one run per probe is in flight.
 pub(crate) struct GitProbes {
     /// `None` disables every probe.
@@ -32,8 +41,8 @@ pub(crate) struct GitProbes {
     /// `None` when no status line segment reads the pull request.
     pull_request: Option<Schedule>,
     pull_request_detail: PullRequestDetail,
-    tx: mpsc::UnboundedSender<GitUpdate>,
-    rx: mpsc::UnboundedReceiver<GitUpdate>,
+    tx: mpsc::UnboundedSender<Finished>,
+    rx: mpsc::UnboundedReceiver<Finished>,
 }
 
 impl GitProbes {
@@ -69,7 +78,7 @@ impl GitProbes {
         };
         if self.branch.start(now) {
             let cwd = cwd.to_path_buf();
-            spawn_probe(&self.tx, async move {
+            spawn_probe(&self.tx, Probe::Branch, async move {
                 GitUpdate::Branch(git::current_branch_async(&cwd).await)
             });
         }
@@ -78,39 +87,51 @@ impl GitProbes {
         {
             let cwd = cwd.to_path_buf();
             let detail = self.pull_request_detail;
-            spawn_probe(&self.tx, async move {
+            spawn_probe(&self.tx, Probe::PullRequest, async move {
                 GitUpdate::PullRequest(git::current_pull_request(&cwd, detail).await)
             });
         }
     }
 
-    /// Waits for the next finished probe and schedules that probe's next run one interval out.
+    /// Waits for the next probe update, scheduling each finished probe's next run one interval out.
     /// Cancel-safe, so it can sit in a `tokio::select!` arm.
     pub(crate) async fn recv(&mut self) -> Option<GitUpdate> {
-        let update = self.rx.recv().await?;
-        let schedule = match update {
-            GitUpdate::Branch(_) => Some(&mut self.branch),
-            GitUpdate::PullRequest(_) => self.pull_request.as_mut(),
-        };
-        if let Some(schedule) = schedule {
-            schedule.finish(Instant::now());
+        loop {
+            let (probe, update) = self.rx.recv().await?;
+            let schedule = match probe {
+                Probe::Branch => Some(&mut self.branch),
+                Probe::PullRequest => self.pull_request.as_mut(),
+            };
+            if let Some(schedule) = schedule {
+                schedule.finish(Instant::now());
+            }
+            if update.is_some() {
+                return update;
+            }
         }
-        Some(update)
     }
 
     #[cfg(test)]
     pub(crate) fn inject(&self, update: GitUpdate) {
-        self.tx.send(update).unwrap();
+        let probe = match update {
+            GitUpdate::Branch(_) => Probe::Branch,
+            GitUpdate::PullRequest(_) => Probe::PullRequest,
+        };
+        self.tx.send((probe, Some(update))).unwrap();
     }
 }
 
+/// Runs `run` on its own task and reports its end to `tx`, so a run that panics still frees its
+/// probe's schedule.
 fn spawn_probe(
-    tx: &mpsc::UnboundedSender<GitUpdate>,
-    probe: impl Future<Output = GitUpdate> + Send + 'static,
+    tx: &mpsc::UnboundedSender<Finished>,
+    probe: Probe,
+    run: impl Future<Output = GitUpdate> + Send + 'static,
 ) {
     let tx = tx.clone();
+    let run = tokio::spawn(run);
     tokio::spawn(async move {
-        _ = tx.send(probe.await);
+        _ = tx.send((probe, run.await.ok()));
     });
 }
 
@@ -261,6 +282,35 @@ mod tests {
         assert!(before + PULL_REQUEST_REFRESH_INTERVAL <= due);
         assert!(due <= Instant::now() + PULL_REQUEST_REFRESH_INTERVAL);
         assert_eq!(probes.branch.next_due, Some(branch_due));
+    }
+
+    #[tokio::test]
+    async fn recv_reschedules_a_panicked_run_and_returns_the_next_update() {
+        let now = Instant::now();
+        let mut probes = GitProbes::new(None, PULL_REQUEST, now);
+        assert!(probes.branch.start(now + BRANCH_REFRESH_INTERVAL));
+        probes.tx.send((Probe::Branch, None)).unwrap();
+        probes.inject(GitUpdate::PullRequest(None));
+
+        let update = probes.recv().await;
+
+        assert_eq!(update, Some(GitUpdate::PullRequest(None)));
+        assert!(
+            probes.branch.next_due.is_some(),
+            "branch probe stuck in flight"
+        );
+    }
+
+    // ── spawn_probe ──
+
+    #[tokio::test]
+    async fn spawn_probe_reports_a_panicked_run_without_an_update() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        spawn_probe(&tx, Probe::Branch, async { panic!("probe failed") });
+        drop(tx);
+
+        assert_eq!(rx.recv().await, Some((Probe::Branch, None)));
     }
 
     // ── Schedule::start ──

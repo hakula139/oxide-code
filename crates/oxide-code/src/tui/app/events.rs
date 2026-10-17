@@ -519,8 +519,8 @@ mod tests {
 
     #[test]
     fn handle_session_title_updated_drops_event_for_stale_session_id() {
-        // Title task spawned before `/clear` finishes after the roll;
-        // its event must not paint the old session's title onto the current one.
+        // A title task spawned before `/clear` can finish after the roll, so its event must not
+        // paint the old session's title onto the current one.
         let (mut app, _rx, _event_tx) = test_app(Some("First prompt"));
         app.handle_engine_event(Event::SessionTitleUpdated {
             session_id: "different-session".to_owned(),
@@ -582,8 +582,8 @@ mod tests {
 
     #[test]
     fn handle_config_changed_effort_only_keeps_status_bar_model_label() {
-        // Effort-only swap leaves the cached model label alone; only
-        // the snapshot effort and chat confirmation update.
+        // An effort-only swap leaves the cached model label alone, so only the snapshot effort and
+        // chat confirmation update.
         let (mut app, _rx, _event_tx) = test_app(None);
         let original_model = app.status_bar.model().to_owned();
         app.handle_engine_event(Event::ConfigChanged {
@@ -1209,9 +1209,8 @@ mod tests {
 
     #[test]
     fn handle_thinking_token_routes_to_chat_and_marks_streaming() {
-        // Thinking tokens land in the chat view as a separate block
-        // (not interleaved with assistant text) and must flip the bar
-        // to Streaming so the user sees the engine is working even before any visible text arrives.
+        // Thinking tokens land in the chat view as their own block and must flip the bar to
+        // Streaming, so the user sees the engine working before any visible text arrives.
         let (mut app, _rx, _event_tx) = test_app(None);
         app.handle_engine_event(Event::ThinkingToken("planning...".to_owned()));
         assert_eq!(app.status_bar.status(), &Status::Streaming);
@@ -1256,9 +1255,8 @@ mod tests {
 
         assert_eq!(app.status_bar.status(), &Status::Idle);
         assert!(app.input.is_enabled());
-        // commit_streaming pushes the partial text as an AssistantText
-        // block; push_interrupted_marker pushes the marker — two new
-        // entries on top of whatever was there.
+        // commit_streaming pushes the partial text as an AssistantText block, and
+        // push_interrupted_marker pushes the marker, adding two entries to whatever was there.
         assert_eq!(
             app.chat.entry_count(),
             entries_before + 2,
@@ -1271,11 +1269,10 @@ mod tests {
 
     #[test]
     fn cancelling_status_is_sticky_against_late_buffered_events() {
-        // After the user dispatches Interrupt, the event channel may still
-        // have queued StreamToken / ToolCallStart events the engine emitted
-        // before its select arm dropped the turn future. Those buffered
-        // events must not flip the bar back to Streaming / ToolRunning —
-        // otherwise the cancel acknowledgment flickers off until `Cancelled` finally arrives.
+        // After the user dispatches Interrupt, the event channel may still hold StreamToken /
+        // ToolCallStart events the engine emitted before its select arm dropped the turn future.
+        // Those buffered events must not flip the bar back to Streaming / ToolRunning, or the
+        // cancel acknowledgment flickers off until `Cancelled` finally arrives.
         let (mut app, _rx, _event_tx) = test_app(None);
         app.dispatch_action(Action::Submit("hi".to_owned()));
         app.dispatch_action(Action::Op(Op::Interrupt));
@@ -1310,12 +1307,10 @@ mod tests {
 
     #[test]
     fn handle_tool_call_end_without_title_falls_back_to_call_label() {
-        // `title: None` means the tool didn't set a result header —
-        // typically a failure path (timeout, invalid input) that
-        // aborted before `.with_title(...)`. The result must still be
-        // pushed (silent swallow would hide the error body) and the
-        // header must render the tool-call label stashed at
-        // `ToolCallStart`, not a blank string or the generic `(result)` fallback.
+        // `title: None` means the tool didn't set a result header, typically on a failure path
+        // (timeout, invalid input) that aborted before `.with_title(...)`. The result must still be
+        // pushed, since a silent swallow would hide the error body, and its header must show the
+        // call label stashed at `ToolCallStart`, not a blank or the generic `(result)` fallback.
         let (mut app, _rx, _event_tx) = test_app(None);
         app.handle_engine_event(bash_call_start("t1", "distinctive_label_xyz"));
         let before = app.chat.entry_count();
@@ -1330,10 +1325,9 @@ mod tests {
             before + 1,
             "result must render even when the tool did not set a title",
         );
-        // The result header must be the stashed call label (the bash
-        // command). It appears twice in the rendered view — once for
-        // the tool call line, once for the result header — which is
-        // what we want to confirm: both the call row and the result row carry the same label.
+        // The result header must be the stashed call label (the bash command). It appears twice in
+        // the rendered view, once on the tool call line and once in the result header, which shows
+        // that both rows carry the same label.
         let text = rendered_text(&mut app, 60, 8);
         let occurrences = text.matches("distinctive_label_xyz").count();
         assert_eq!(
@@ -1483,9 +1477,8 @@ mod tests {
 
     #[test]
     fn handle_cancelled_with_no_stream_still_pushes_marker() {
-        // Cancel during a tool call (or before any stream tokens) —
-        // commit_streaming is a no-op, but the marker still lands so
-        // the user sees where the cancel hit.
+        // A cancel during a tool call (or before any stream tokens) makes commit_streaming a no-op,
+        // but the marker still lands so the user sees where the cancel hit.
         let (mut app, _rx, _event_tx) = test_app(None);
         app.dispatch_action(Action::Submit("hi".to_owned()));
         let entries_before = app.chat.entry_count();
@@ -1748,10 +1741,9 @@ mod tests {
 
     #[test]
     fn finish_turn_evicts_orphaned_pending_calls() {
-        // `ToolCallStart` without a matching `ToolCallEnd` by turn-end
-        // is an orphan (crashed tool, agent-loop bug, mid-turn abort).
-        // The pending entry must be discarded so long sessions don't
-        // accumulate stale ids across turns.
+        // A `ToolCallStart` without a matching `ToolCallEnd` by the turn's end is an orphan
+        // (crashed tool, agent-loop bug, mid-turn abort). The pending entry must be discarded so
+        // long sessions don't accumulate stale ids across turns.
         let (mut app, _rx, _event_tx) = test_app(None);
         app.handle_engine_event(bash_call_start("orphan", "ls"));
         assert_eq!(app.chat.pending_call_count(), 1);
@@ -1788,8 +1780,7 @@ mod tests {
 
     #[test]
     fn format_config_change_swap_both_none_omits_effort_clause() {
-        // Pin: no `effort` substring at all, never a stray "none"
-        // word. Mutation that prints `effort none.` would surface here.
+        // No `effort` substring at all, so a mutation that prints `effort none.` fails here.
         let s = format_config_change(
             &spec("custom-model"),
             true,
@@ -1804,9 +1795,8 @@ mod tests {
 
     #[test]
     fn format_config_change_swap_to_no_tier_model_surfaces_requested_effort() {
-        // Model swap onto a no-tier model with an explicit effort ask. The user needs to know
-        // the requested tier didn't apply, otherwise a silent drop reads as a config change
-        // landing.
+        // Model swap onto a no-tier model with an explicit effort ask. The user needs to know the
+        // requested tier didn't apply, or else a silent drop reads as a landed config change.
         let s = format_config_change(
             &spec("custom-model"),
             true,
@@ -1825,8 +1815,8 @@ mod tests {
 
     #[test]
     fn format_config_change_swap_clears_effort_when_new_model_drops_it() {
-        // User had a tier; new model has none. Surface the change so
-        // the user knows their effort just disappeared.
+        // The user had a tier, and the new model has none. Surface the change so the user knows
+        // their effort just disappeared.
         let s = format_config_change(
             &spec("custom-model"),
             true,
@@ -1844,9 +1834,8 @@ mod tests {
 
     #[test]
     fn format_config_change_swap_marks_default_when_previous_was_none() {
-        // None → Some means the new model's default kicked in;
-        // distinguishing this from "user's pick survived" prevents
-        // the user from thinking they chose this tier.
+        // None → Some means the new model's default kicked in. Distinguishing this from "user's
+        // pick survived" keeps the user from thinking they chose this tier.
         let s = format_config_change(
             &spec("claude-opus-5-5"),
             true,
@@ -1902,8 +1891,7 @@ mod tests {
 
     #[test]
     fn format_config_change_effort_pick_on_no_tier_model_surfaces_loss() {
-        // The slash command preflight stops this through /effort, but
-        // client-driven flows could still emit it.
+        // The `/effort` preflight stops this, but client-driven flows could still emit it.
         let s = format_config_change(
             &spec("custom-model"),
             false,
