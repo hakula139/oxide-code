@@ -141,7 +141,7 @@ struct SessionDataBuilder {
 impl SessionDataBuilder {
     fn new() -> Self {
         Self {
-            chain: ChainBuilder::new(),
+            chain: ChainBuilder::default(),
             pending_context: None,
             compact: None,
             pending_compact: None,
@@ -270,7 +270,7 @@ impl SessionDataBuilder {
     }
 
     fn reset_at_compact(&mut self, compact: CompactInfo) {
-        self.chain = ChainBuilder::new();
+        self.chain = ChainBuilder::default();
         self.compact = Some(compact);
         self.compact_tail_uuids = Some(HashSet::new());
         self.compact_tail_accepts_sidecars = false;

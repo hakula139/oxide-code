@@ -1,8 +1,8 @@
-//! Session actor that owns [`SessionState`] and its writer, drains [`SessionCmd`]s, and batches
-//! one flush per `recv()` wakeup. Receive-and-drain coalesces a turn's queued cmds before the first
-//! flush, except `/compact` and `/archive`. Each ends its batch so a failed one can be unqueued.
-//! Cmds after a compact see its committed synthetic root. Isolated writes flush immediately
-//! because no interval timer holds them. See `docs/design/session/persistence.md`.
+//! Session actor that owns [`SessionState`] and its writer. Each `recv()` wakeup drains the queued
+//! [`SessionCmd`]s into one batch and appends it in one write, so an isolated write flushes at once
+//! with no interval timer. `/compact` and `/archive` end their batch so a failed one can be
+//! unqueued, and cmds after a compact see its committed synthetic root. See
+//! `docs/design/session/persistence.md`.
 
 use std::sync::Arc;
 
@@ -42,7 +42,7 @@ pub(super) enum SessionCmd {
         title: String,
         ack: oneshot::Sender<Outcome>,
     },
-    /// User-supplied title from `/rename`. Latches `manual_title_set` to suppress AI titles.
+    /// User-supplied title from `/rename`.
     SetManualTitle {
         title: String,
         ack: oneshot::Sender<Outcome>,
@@ -95,9 +95,7 @@ enum BatchFlow {
     FlushNow,
 }
 
-/// Actor task body. Owns [`SessionState`], which owns the writer, appends each `recv`-and-drain
-/// batch in one write, then fires its acks. Exits when the channel closes or a
-/// [`SessionCmd::Shutdown`] is absorbed.
+/// Actor task body. Exits when the channel closes or a [`SessionCmd::Shutdown`] is absorbed.
 pub(super) async fn run(
     mut state: SessionState,
     mut rx: mpsc::Receiver<SessionCmd>,
@@ -106,8 +104,8 @@ pub(super) async fn run(
     while let Some(first) = rx.recv().await {
         let mut batch = Batch::default();
         let mut flow = batch.absorb(first, &mut state, &shared);
-        // Compact and archive are batch barriers. If either fails, its entries stay at the queue
-        // tail for `settle_barriers` to drop. Records after a compact see its synthetic root.
+        // A failed compact or archive leaves its entries at the queue tail for `settle_barriers`
+        // to drop, which works only because each one ends its batch.
         while matches!(flow, BatchFlow::Continue)
             && let Ok(next) = rx.try_recv()
         {
@@ -179,7 +177,6 @@ impl Batch {
                 BatchFlow::Continue
             }
             SessionCmd::AppendAiTitle { title, ack } => {
-                // Re-check: a `/rename` can flip the latch after the generator already queued this.
                 if shared.manual_title_set() {
                     _ = ack.send(Outcome { failure: None });
                     return BatchFlow::Continue;
@@ -193,7 +190,6 @@ impl Batch {
                 BatchFlow::Continue
             }
             SessionCmd::SetManualTitle { title, ack } => {
-                shared.mark_manual_title_set();
                 match state.try_defer_title(title) {
                     None => _ = ack.send(Outcome { failure: None }),
                     Some(title) => {
@@ -309,11 +305,7 @@ fn deliver_acks(acks: Vec<PendingAck>, failure: Option<&str>, stopped: bool, sha
                     failure: failure.map(str::to_owned),
                 });
             }
-            PendingAck::Compact {
-                ack,
-                pre_count,
-                synthetic_uuid: _,
-            } => {
+            PendingAck::Compact { ack, pre_count, .. } => {
                 // Every compact failure reaches the agent, which keeps its old transcript only when
                 // told the write failed.
                 _ = ack.send(CompactOutcome {
@@ -321,10 +313,7 @@ fn deliver_acks(acks: Vec<PendingAck>, failure: Option<&str>, stopped: bool, sha
                     failure: failure.map(str::to_owned),
                 });
             }
-            PendingAck::Shutdown(ack) => {
-                // Best-effort exit signal that carries no failure.
-                _ = ack.send(());
-            }
+            PendingAck::Shutdown(ack) => _ = ack.send(()),
         }
     }
 }
@@ -354,13 +343,23 @@ mod tests {
     /// returning `SharedState` so callers can assert flush-failure flags.
     async fn drive(state: SessionState, cmds: Vec<SessionCmd>) -> Arc<SharedState> {
         let shared = Arc::new(SharedState::default());
+        drive_with(state, Arc::clone(&shared), cmds).await;
+        shared
+    }
+
+    async fn drive_with(state: SessionState, shared: Arc<SharedState>, cmds: Vec<SessionCmd>) {
         let (tx, rx) = mpsc::channel(cmds.len().max(1));
         for cmd in cmds {
             tx.send(cmd).await.unwrap();
         }
         drop(tx);
-        let actor_shared = Arc::clone(&shared);
-        run(state, rx, actor_shared).await;
+        run(state, rx, shared).await;
+    }
+
+    /// Shared state with the manual-title latch that `SessionHandle::set_manual_title` sets.
+    fn renamed() -> Arc<SharedState> {
+        let shared = Arc::new(SharedState::default());
+        shared.mark_manual_title_set();
         shared
     }
 
@@ -558,7 +557,7 @@ mod tests {
         let (rec, _rec_rx) = record_cmd("hello");
         let (fin, _fin_rx) = finish_cmd();
 
-        drive(state, vec![manual_cmd, rec, fin]).await;
+        drive_with(state, renamed(), vec![manual_cmd, rec, fin]).await;
 
         let path = test_session_file(dir.path(), &session_id);
         let content = std::fs::read_to_string(path).unwrap();
@@ -614,7 +613,7 @@ mod tests {
         let (rec, _rec_rx) = record_cmd("trigger");
         let (fin, _fin_rx) = finish_cmd();
 
-        drive(state, vec![a, b, rec, fin]).await;
+        drive_with(state, renamed(), vec![a, b, rec, fin]).await;
 
         let path = test_session_file(dir.path(), &session_id);
         let content = std::fs::read_to_string(path).unwrap();
@@ -641,9 +640,15 @@ mod tests {
     async fn run_set_manual_title_after_record_blocks_ai_title() {
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
-        let state = SessionState::fresh(store.clone(), "m");
+        let state = SessionState::fresh(store, "m");
         let session_id = state.session_id.to_string();
-        let (rec, _rec_rx) = record_cmd("Fix login");
+        let shared = Arc::new(SharedState::default());
+        let (tx, rx) = mpsc::channel(4);
+        let actor = tokio::spawn(run(state, rx, Arc::clone(&shared)));
+        let (rec, rec_rx) = record_cmd("Fix login");
+        tx.send(rec).await.unwrap();
+        rec_rx.await.unwrap();
+        shared.mark_manual_title_set();
         let (manual_ack, _manual_rx) = oneshot::channel();
         let manual_cmd = SessionCmd::SetManualTitle {
             title: "User-picked title".to_owned(),
@@ -656,7 +661,11 @@ mod tests {
         };
         let (fin, _fin_rx) = finish_cmd();
 
-        drive(state, vec![rec, manual_cmd, ai_cmd, fin]).await;
+        for cmd in [manual_cmd, ai_cmd, fin] {
+            tx.send(cmd).await.unwrap();
+        }
+        drop(tx);
+        actor.await.unwrap();
 
         let path = test_session_file(dir.path(), &session_id);
         let content = std::fs::read_to_string(path).unwrap();

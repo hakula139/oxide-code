@@ -50,19 +50,15 @@ const SYSTEM_PROMPT: &str = indoc! {r#"
 
 // ── Public API ──
 
-/// Fire-and-forget: spawns a detached tokio task and returns immediately. The task asks Haiku
-/// for a title, appends it to `session`, and emits `SessionTitleUpdated` through `sink`. All
-/// failures (HTTP, parse, write) warn-log and drop. The first-prompt title persists, so the
-/// session is never left without a title. `first_prompt` is tail-truncated to
-/// [`MAX_PROMPT_CHARS`] to keep cost bounded on long pasted code.
+/// Spawns a detached task that asks Haiku for a title, appends it to `session`, and emits
+/// `SessionTitleUpdated` through `sink`. A failure only warns, so the first-prompt title stays.
 pub(crate) fn spawn<S>(client: Client, session: SessionHandle, sink: S, first_prompt: String)
 where
     S: EventSink + Clone + Send + 'static,
 {
     tokio::spawn(async move {
         if let Err(e) = generate_and_record(&client, &session, &sink, &first_prompt).await {
-            // Expected: network hiccup, rate-limit, or non-JSON reply. First-prompt title stays.
-            warn!("AI title generation failed: {e}");
+            warn!("AI title generation failed: {e:#}");
         }
     });
 }
@@ -213,8 +209,7 @@ mod tests {
         )
     }
 
-    /// Sink backed by an mpsc channel so tests can wait on `recv()` with a timeout instead of
-    /// polling `CapturingSink`.
+    /// Sink backed by an mpsc channel, so tests can await `recv()` with a timeout.
     #[derive(Clone)]
     struct ChannelSink(tokio::sync::mpsc::UnboundedSender<Event>);
 
@@ -225,8 +220,7 @@ mod tests {
         }
     }
 
-    /// Session handle with one recorded message so the file is materialized when `append_ai_title`
-    /// runs.
+    /// Session handle with one recorded message, so `append_ai_title` writes to an existing file.
     async fn prepared_session(dir: &Path) -> SessionHandle {
         let store = test_store(dir);
         let handle = crate::session::handle::start(&store, HAIKU_MODEL);
@@ -395,7 +389,7 @@ mod tests {
 
     #[tokio::test]
     async fn generate_and_record_conversational_reply_bails_without_updating_title() {
-        // Haiku sometimes answers the prompt instead of titling it. The bail keeps the first-prompt
+        // Haiku sometimes answers the prompt conversationally. The bail keeps the first-prompt
         // title on disk and out of the UI.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -426,9 +420,8 @@ mod tests {
 
     #[tokio::test]
     async fn generate_and_record_alive_session_writer_failure_surfaces_as_error() {
-        // Counterpart to the post-finalize-silent test below: when the actor is still alive but
-        // its append_ai_title ack carries a `failure`, the user IS seeing the live session, so the
-        // failure must be surfaced as a normal session-write error.
+        // While the actor is alive, a `failure` on the `append_ai_title` ack concerns the session
+        // the user is looking at, so it surfaces as a session-write error.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(wm_path("/v1/messages"))
@@ -659,8 +652,6 @@ mod tests {
 
     #[test]
     fn truncate_prompt_respects_char_boundaries_for_multibyte() {
-        // 1000 é followed by "tail": truncating to 4 chars should give just "tail", not broken
-        // bytes from an é midpoint.
         let s: String = "\u{00e9}".repeat(1_000) + "tail";
         let out = truncate_prompt(&s, 4);
         assert_eq!(out, "tail");

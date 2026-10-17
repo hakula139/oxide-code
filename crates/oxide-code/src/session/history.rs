@@ -180,7 +180,7 @@ impl TranscriptWalker<'_> {
         }));
     }
 
-    /// Flushes `text_buf` as a role-tagged text interaction. No-op on empty.
+    /// Flushes `text_buf` as a role-tagged text interaction.
     fn flush_text(&mut self, text_buf: &mut String, role: Role) {
         if text_buf.is_empty() {
             return;

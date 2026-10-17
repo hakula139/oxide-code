@@ -45,8 +45,7 @@ pub(super) fn retain_visible_file_snapshots(
 
 /// Drops assistant tool calls with no result anywhere in the transcript. That includes a server
 /// call a `pause_turn` left waiting, because the next prompt closes the turn and the API rejects a
-/// server call left without its result. Ids are owned because the sets are built from a shared
-/// borrow before mutating below.
+/// server call left without its result.
 fn drop_unresolved_tool_uses(messages: &mut [Message]) {
     let resolved = tool_result_ids(messages);
 

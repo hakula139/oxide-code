@@ -33,8 +33,8 @@ const CHANNEL_CAPACITY: usize = 1024;
 
 // ── SessionHandle ──
 
-/// Cheap to clone because clones share one actor task. All methods are async
-/// and return after the batch flush this cmd lands in.
+/// Cheap to clone because clones share one actor task. Every write method returns after the
+/// batch flush that its cmd lands in.
 #[derive(Clone)]
 pub(crate) struct SessionHandle {
     cmd_tx: mpsc::Sender<SessionCmd>,
@@ -44,15 +44,16 @@ pub(crate) struct SessionHandle {
     actor_join: Arc<std::sync::Mutex<Option<JoinHandle<()>>>>,
 }
 
-/// Sticky-once failure flags shared between actor and handle clones.
+/// State the actor and every handle clone share. Each `surface_first_*` method returns `true` on
+/// its first call and `false` after.
 #[derive(Default)]
 pub(super) struct SharedState {
     flush_failure_surfaced: AtomicBool,
     persistence_stop_surfaced: AtomicBool,
     actor_gone_surfaced: AtomicBool,
-    /// Set when the user has run `/rename`, suppressing AI titles and the next `FirstPrompt`.
-    /// Latched by [`SessionHandle::set_manual_title`] before dispatch so the title generator's
-    /// pre-check observes it without an actor round-trip.
+    /// Set by [`SessionHandle::set_manual_title`] before it sends the title, so no AI title or
+    /// `FirstPrompt` title follows a `/rename`. The title generator checks it before appending,
+    /// and the actor checks again on arrival, since a `/rename` can land in between.
     manual_title_set: AtomicBool,
     /// Most recent flush error, threaded into actor-gone messages so the user sees the I/O cause.
     last_flush_failure: std::sync::Mutex<Option<String>>,
@@ -63,19 +64,16 @@ impl SharedState {
         *lock_or_recover(&self.last_flush_failure, "last_flush_failure") = Some(msg.to_owned());
     }
 
-    /// `true` on the first call after [`Self::record_flush_failure`], then sticky `false`.
     pub(super) fn surface_first_flush_failure(&self) -> bool {
-        !self.flush_failure_surfaced.swap(true, Ordering::AcqRel)
+        surface_once(&self.flush_failure_surfaced)
     }
 
-    /// Sticky-once: `true` on first call, `false` after.
     pub(super) fn surface_first_persistence_stop(&self) -> bool {
-        !self.persistence_stop_surfaced.swap(true, Ordering::AcqRel)
+        surface_once(&self.persistence_stop_surfaced)
     }
 
-    /// Sticky-once: `true` on first call, `false` after.
     pub(super) fn surface_first_actor_gone(&self) -> bool {
-        !self.actor_gone_surfaced.swap(true, Ordering::AcqRel)
+        surface_once(&self.actor_gone_surfaced)
     }
 
     pub(super) fn mark_manual_title_set(&self) {
@@ -86,10 +84,13 @@ impl SharedState {
         self.manual_title_set.load(Ordering::Acquire)
     }
 
-    /// Most recent flush error, threaded into actor-gone messages.
     pub(super) fn last_flush_failure(&self) -> Option<String> {
         lock_or_recover(&self.last_flush_failure, "last_flush_failure").clone()
     }
+}
+
+fn surface_once(surfaced: &AtomicBool) -> bool {
+    !surfaced.swap(true, Ordering::AcqRel)
 }
 
 /// Combined ack from `record_message`: AI-title seed and first-failure surface in one round-trip.
@@ -106,9 +107,8 @@ pub(crate) struct Outcome {
     pub(crate) failure: Option<String>,
 }
 
-/// Ack from `SessionHandle::compact`. `pre_count` is the message count at the moment the
-/// compact request landed in the actor. The post-compact UI line uses it for the
-/// "compacted N messages → 1 summary" header.
+/// Ack from `SessionHandle::compact`. `pre_count` is the message count when the compact request
+/// landed in the actor, which the post-compact line shows as "compacted N messages → 1 summary".
 pub(crate) struct CompactOutcome {
     pub(crate) pre_count: u32,
     pub(crate) failure: Option<String>,
@@ -170,8 +170,7 @@ impl SessionHandle {
             .await
     }
 
-    /// Persists a user-supplied title. The flag flips in `SharedState` *before* dispatch so the
-    /// title generator's pre-check sees it even if the actor hasn't drained its channel yet.
+    /// Persists a user-supplied title, suppressing AI titles for the rest of the session.
     pub(crate) async fn set_manual_title(&self, title: String) -> Outcome {
         self.shared.mark_manual_title_set();
         let (ack, rx) = oneshot::channel();
@@ -393,7 +392,7 @@ pub(crate) async fn roll_into(
     if read_session_id_from_path(target)? == session.session_id() {
         bail!("already resumed: target id matches the live session");
     }
-    // Load and sanitize FIRST so a target-load error leaves the live session untouched.
+    // Load and sanitize first so a target-load error leaves the live session untouched.
     let ResumedSession {
         handle: target_handle,
         transcript,
@@ -438,7 +437,7 @@ fn from_resumed_data(
     // `last_message_uuid` would corrupt the chain. A title-only file is fine because the next
     // message starts a fresh chain.
     if pre_sanitize_len > 0 && data.messages.is_empty() {
-        bail!("session {session_id}: sanitize dropped all messages");
+        bail!("session {session_id} has no messages left after repair");
     }
     retain_visible_file_snapshots(&mut data.file_snapshots, &data.messages);
     if data.archived {
@@ -1532,9 +1531,10 @@ mod tests {
         let err = resume_id(&store, &session_id)
             .err()
             .expect("all messages sanitized must be an error");
-        assert!(
-            format!("{err:#}").contains("sanitize dropped all messages"),
-            "error explains why: {err:#}",
+
+        assert_eq!(
+            format!("{err:#}"),
+            format!("session {session_id} has no messages left after repair"),
         );
     }
 

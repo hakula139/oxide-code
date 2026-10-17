@@ -1,5 +1,5 @@
-//! UUID-DAG message chain reconstruction. Forks form when concurrent resumes append in
-//! parallel. [`ChainBuilder::resolve`] picks the chain ending at the newest leaf.
+//! UUID-DAG message chain reconstruction. [`ChainBuilder::resolve`] picks the chain ending at the
+//! newest leaf.
 
 use std::collections::{HashMap, HashSet};
 
@@ -39,10 +39,6 @@ pub(super) struct Chain {
 }
 
 impl ChainBuilder {
-    pub(super) fn new() -> Self {
-        Self::default()
-    }
-
     /// Last-append-wins on duplicate UUIDs (retry / partial-write replay). `context` is the prompt
     /// context recorded with the message, if any.
     pub(super) fn insert(
@@ -71,9 +67,10 @@ impl ChainBuilder {
     ///
     /// Tip selection is fork-aware: the leaf (UUID never referenced as a parent) with the
     /// newest timestamp wins, with UUID order breaking ties so two callers loading the same
-    /// file always pick the same branch. Walks back via `parent_uuid`. Cycles trip the seen-set
-    /// and orphan parents terminate the walk, so corrupted on-disk state cannot hang the loader.
-    /// Returns an empty chain when no leaf exists, as in a pure cycle.
+    /// file always pick the same branch. Walks back via `parent_uuid`, taking each node out of
+    /// the map, so a cycle or an orphan parent ends the walk at a missing node and corrupted
+    /// on-disk state cannot hang the loader. Returns an empty chain when no leaf exists, as in a
+    /// pure cycle.
     pub(super) fn resolve(mut self) -> Chain {
         let tip = self
             .nodes
@@ -91,15 +88,11 @@ impl ChainBuilder {
 
         let mut messages: Vec<Message> = Vec::new();
         let mut context = None;
-        let mut seen: HashSet<Uuid> = HashSet::new();
         let mut cursor = Some(tip_uuid);
         while let Some(uuid) = cursor {
-            if !seen.insert(uuid) {
-                warn!("session chain walk hit a cycle at {uuid}, truncating");
-                break;
-            }
             let Some(node) = self.nodes.remove(&uuid) else {
-                break; // orphan parent
+                warn!("session chain walk stopped at missing or revisited message {uuid}");
+                break;
             };
             messages.push(node.message);
             context = context.or(node.context);
@@ -139,14 +132,14 @@ mod tests {
 
     #[test]
     fn resolve_empty_builder_yields_no_chain() {
-        let chain = ChainBuilder::new().resolve();
+        let chain = ChainBuilder::default().resolve();
         assert_eq!(chain.messages, []);
         assert!(chain.tip.is_none());
     }
 
     #[test]
     fn resolve_single_message_is_self_as_tip() {
-        let mut b = ChainBuilder::new();
+        let mut b = ChainBuilder::default();
         let u = Uuid::new_v4();
         b.insert(
             u,
@@ -164,7 +157,7 @@ mod tests {
 
     #[test]
     fn resolve_linear_chain_preserves_root_to_tip_order() {
-        let mut b = ChainBuilder::new();
+        let mut b = ChainBuilder::default();
         let u1 = Uuid::new_v4();
         let u2 = Uuid::new_v4();
         let u3 = Uuid::new_v4();
@@ -197,7 +190,7 @@ mod tests {
 
     #[test]
     fn resolve_fork_picks_newest_leaf() {
-        let mut b = ChainBuilder::new();
+        let mut b = ChainBuilder::default();
         let root = Uuid::new_v4();
         let older = Uuid::new_v4();
         let newer = Uuid::new_v4();
@@ -235,7 +228,7 @@ mod tests {
             date.clone_into(&mut prompt.seen.date);
             Some(Box::new(prompt.session_context()))
         };
-        let mut b = ChainBuilder::new();
+        let mut b = ChainBuilder::default();
         let root = Uuid::new_v4();
         b.insert(
             root,
@@ -266,7 +259,7 @@ mod tests {
 
     #[test]
     fn resolve_fork_breaks_timestamp_tie_by_uuid_order() {
-        let mut b = ChainBuilder::new();
+        let mut b = ChainBuilder::default();
         let root = Uuid::new_v4();
         let lo = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
         let hi = Uuid::parse_str("99999999-9999-9999-9999-999999999999").unwrap();
@@ -291,7 +284,7 @@ mod tests {
 
     #[test]
     fn resolve_orphan_parent_terminates_chain_at_dangling_node() {
-        let mut b = ChainBuilder::new();
+        let mut b = ChainBuilder::default();
         let only = Uuid::new_v4();
         b.insert(
             only,
@@ -309,9 +302,8 @@ mod tests {
 
     #[test]
     fn resolve_walk_breaks_when_leaf_chain_re_enters_cycle() {
-        // leaf → mid → tail → mid: leaf survives as tip, then the walker re-enters mid and trips
-        // the seen-set. Covers the cycle-break branch the no-leaf case doesn't reach.
-        let mut b = ChainBuilder::new();
+        // leaf → mid → tail → mid: leaf is the tip, and the walk stops when it returns to mid.
+        let mut b = ChainBuilder::default();
         let leaf = Uuid::new_v4();
         let mid = Uuid::new_v4();
         let tail = Uuid::new_v4();
@@ -348,7 +340,7 @@ mod tests {
 
     #[test]
     fn resolve_cycle_truncates_chain_without_looping() {
-        let mut b = ChainBuilder::new();
+        let mut b = ChainBuilder::default();
         let a = Uuid::new_v4();
         let bb = Uuid::new_v4();
         b.insert(
@@ -373,7 +365,7 @@ mod tests {
 
     #[test]
     fn resolve_duplicate_uuid_keeps_latest_insertion() {
-        let mut b = ChainBuilder::new();
+        let mut b = ChainBuilder::default();
         let u = Uuid::new_v4();
         b.insert(
             u,
