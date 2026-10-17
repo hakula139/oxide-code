@@ -137,9 +137,10 @@ x-anthropic-billing-header: cc_version=<VERSION>.<FINGERPRINT>; cc_entrypoint=<E
 
 A 3-character hex value derived from conversation content:
 
-1. Extract characters at indices `[4, 7, 20]` from the text of the first user message that is not meta (use `"0"` if index is out of bounds). Indices count UTF-16 code units. In 2.1.301 this skips the context message and reads the user's first prompt. 2.1.87 read the first user message of any kind, and oxide-code still does ([#257](https://github.com/hakula139/oxide-code/issues/257)).
-2. Compute `SHA256(SALT + chars + VERSION)`, take the first 3 hex characters.
-3. Salt: `59cf53e54c78` (hardcoded in `claude-code/src/utils/fingerprint.ts`, must match server).
+1. Select the first user message that is not meta, and take its string content or its first text block, or `""` when it has neither. Claude Code 2.1.301 selects from the messages before normalization merges adjacent user messages, so it skips the context message, which is meta, and reads the user's first prompt. 2.1.87 took the first user message after normalization, which began with the context message. oxide-code skips the user context it prepends and reads the first user message of the transcript.
+2. Extract the characters at indices `[4, 7, 20]` of that text, using `"0"` for an index out of bounds. Indices count UTF-16 code units. An index inside a surrogate pair picks a lone surrogate, which the hash input's UTF-8 encoding turns into U+FFFD under both Bun and Node.
+3. Compute `SHA256(SALT + chars + VERSION)`, take the first 3 hex characters.
+4. Salt: `59cf53e54c78` (hardcoded in `claude-code/src/utils/fingerprint.ts`, must match server).
 
 The entrypoint is `cli` for interactive sessions.
 
