@@ -1960,7 +1960,7 @@ mod tests {
             assert_eq!(
                 engine.auto_compaction_failures,
                 AutoCompactFailures::default(),
-                "a success resets the breaker"
+                "a success resets the failure count"
             );
             let requests = request_bodies(&server).await;
             assert_eq!(requests.len(), 2);
@@ -2781,7 +2781,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_model_resets_auto_compaction_breaker() {
+    async fn set_model_resumes_paused_auto_compaction() {
         with_pinned_home(async {
             let server = MockServer::start().await;
             let dir = tempfile::tempdir().unwrap();

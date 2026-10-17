@@ -112,10 +112,10 @@ pub(super) struct AutoCompact<'a> {
     pub(super) spent: &'a mut Vec<TokenUsage>,
 }
 
-/// Compacts `messages` when `usage` crosses the threshold and the breaker allows, returning
-/// whether it did. Skips without auto state or usage, below the threshold, once the breaker has
-/// tripped, or when the transcript is too short for a summary to shrink it. A failed summary or
-/// boundary write counts toward the breaker and fails the prompt before it is sent.
+/// Compacts `messages` when `usage` crosses the threshold, returning whether it did. Skips without
+/// auto state or usage, below the threshold, while [`AutoCompactFailures`] has paused
+/// auto-compaction, or when the transcript is too short for a summary to shrink it. A failed
+/// summary or boundary write counts as a failure and fails the prompt before it is sent.
 #[expect(
     clippy::too_many_arguments,
     reason = "auto-compaction needs the same live turn state as manual compaction"

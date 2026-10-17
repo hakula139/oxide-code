@@ -49,7 +49,7 @@ pub(crate) mod testing {
     use crate::config::compaction::CompactionConfig;
     use crate::config::{ConfigSnapshot, Effort, PromptCacheTtl};
 
-    /// Fully-populated `LiveSessionInfo` for per-command tests.
+    /// Fully-populated `LiveSessionInfo` that the slash command, welcome, and TUI app tests share.
     pub(crate) fn test_session_info() -> LiveSessionInfo {
         // Real MODELS row so the display name resolves to a known label.
         LiveSessionInfo {
