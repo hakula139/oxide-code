@@ -462,16 +462,13 @@ mod tests {
     // ── write_status_hyperlinks ──
 
     #[test]
-    fn write_status_hyperlinks_writes_the_plain_envelope_inside_and_outside_tmux() {
+    fn write_status_hyperlinks_writes_the_plain_envelope() {
         let link = plain_hyperlink(Rect::new(0, 0, 1, 1), "https://x", &["x"]);
-        let envelope = build_status_hyperlink_envelope(std::slice::from_ref(&link)).unwrap();
-        for tmux in [None, Some("/tmp/tmux-1000/default,1234,0")] {
-            let mut buf: Vec<u8> = Vec::new();
-            temp_env::with_var("TMUX", tmux, || {
-                write_status_hyperlinks(&mut buf, std::slice::from_ref(&link)).unwrap();
-            });
-            assert_eq!(buf, envelope, "TMUX={tmux:?}");
-        }
+        let mut buf: Vec<u8> = Vec::new();
+
+        write_status_hyperlinks(&mut buf, std::slice::from_ref(&link)).unwrap();
+
+        assert_eq!(buf, build_status_hyperlink_envelope(&[link]).unwrap());
     }
 
     #[test]

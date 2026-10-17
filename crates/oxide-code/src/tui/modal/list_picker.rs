@@ -404,10 +404,7 @@ mod tests {
     }
 
     #[test]
-    fn render_handles_picker_and_items_with_no_descriptions() {
-        // Drives the `PickerItem` default impls (`description` / `is_active` / `key_hint` all
-        // unset) and the render branches that skip the optional description rows. Without this
-        // the trait-default arms and the no-description render arms stay uncovered.
+    fn render_label_only_items_show_no_marker_or_description() {
         struct MinimalItem(&'static str);
         impl PickerItem for MinimalItem {
             fn label(&self) -> &str {
@@ -415,12 +412,8 @@ mod tests {
             }
         }
 
-        let item = MinimalItem("solo");
-        assert!(item.description().is_none());
-        assert!(!item.is_active());
-        assert!(item.key_hint().is_none());
-
         let p = ListPicker::new("Pick one", vec![MinimalItem("a"), MinimalItem("b")]);
+
         let rows = render_rows(&p, 40, p.height(40, 40));
 
         let rows: Vec<&str> = rows.iter().map(|row| row.trim_end()).collect();

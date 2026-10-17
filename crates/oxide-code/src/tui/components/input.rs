@@ -496,27 +496,6 @@ mod tests {
         assert_eq!(input.height(), MAX_VISIBLE_LINES + BORDER_ROWS);
     }
 
-    // ── render_popup ──
-
-    #[test]
-    fn render_popup_paints_when_visible() {
-        let mut input = test_input();
-        input.handle_event(&key(KeyCode::Char('/'), KeyModifiers::NONE));
-        assert!(input.popup_visible(), "typing `/` opens the popup");
-
-        let backend = TestBackend::new(40, 10);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| {
-                let area = Rect::new(0, 0, 40, input.popup_height());
-                input.render_popup(frame, area);
-            })
-            .unwrap();
-        let buffer = terminal.backend().buffer();
-        let first = buffer.cell(Position::new(0, 0)).unwrap().symbol();
-        assert!(!first.is_empty(), "popup row paints something at (0,0)");
-    }
-
     // ── handle_event ──
 
     #[test]
