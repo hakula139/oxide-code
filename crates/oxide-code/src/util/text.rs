@@ -137,7 +137,7 @@ mod tests {
 
     #[test]
     fn truncate_to_width_accounts_for_cjk_double_width() {
-        // 测试文本 = 4 chars × 2 cols = 8 cols; budget = 5 − 3 (ellipsis) = 2 cols → one char fits.
+        // 测试文本 = 4 chars × 2 cols = 8 cols. Budget = 5 − 3 (ellipsis) = 2 cols → one char fits.
         assert_eq!(truncate_to_width("测试文本", 5), "测...");
     }
 
@@ -148,7 +148,7 @@ mod tests {
 
     #[test]
     fn truncate_to_width_drops_ellipsis_when_budget_below_ellipsis_width() {
-        // Drop the marker — emitting "..." into a 1- or 2-col slot would overflow the budget.
+        // Emitting "..." into a 1- or 2-col slot would overflow the budget, so the marker drops.
         assert_eq!(truncate_to_width("abc", 1), "a");
         assert_eq!(truncate_to_width("abc", 2), "ab");
     }
@@ -178,7 +178,7 @@ mod tests {
 
     #[test]
     fn center_truncate_to_width_falls_back_to_right_truncation_when_budget_too_small() {
-        // Below the ellipsis floor center-truncate would underflow the budget split; the
+        // Below the ellipsis floor, center-truncate would underflow the budget split, so the
         // right-truncate fallback returns whatever fits.
         assert_eq!(center_truncate_to_width("abcdef", 2), "ab");
         assert_eq!(center_truncate_to_width("abcdef", 1), "a");
@@ -186,14 +186,14 @@ mod tests {
 
     #[test]
     fn center_truncate_to_width_accounts_for_cjk_double_width() {
-        // 测试文本编辑 = 6 chars × 2 cols = 12 cols; budget 9 = 3 head + 3 tail around `...`. Only
-        // one CJK char fits each side at 2 cols.
+        // 测试文本编辑 = 6 chars × 2 cols = 12 cols. Width 9 = 3 head + `...` + 3 tail, so only one
+        // 2-col CJK char fits each side.
         assert_eq!(center_truncate_to_width("测试文本编辑", 9), "测...辑");
     }
 
     #[test]
     fn center_truncate_to_width_falls_back_to_right_truncate_when_cjk_overflows_both_halves() {
-        // 中文测试 = 8 cols; max=5 → budget=2, half=1 — neither side fits a 2-col char. Centering
+        // 中文测试 = 8 cols. max=5 → budget=2, half=1, so neither side fits a 2-col char. Centering
         // would yield bare "..." (3 cols of 5), so fall back to right-truncate ("中...", 5 cols).
         assert_eq!(center_truncate_to_width("中文测试", 5), "中...");
     }

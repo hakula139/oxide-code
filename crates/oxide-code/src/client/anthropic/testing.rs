@@ -72,7 +72,7 @@ pub(super) fn messages_request(url: impl Into<String>) -> MessagesRequest {
     }
 }
 
-/// Non-streaming response body with the given text. Model is hardcoded; tests assert request side.
+/// Non-streaming response body with the given text and a fixed model, since tests check requests.
 pub(crate) fn completion_body(text: &str) -> String {
     serde_json::json!({
         "id": "msg_1",
@@ -147,8 +147,8 @@ pub(crate) fn oauth() -> Auth {
     Auth::new(AuthSource::ClaudeCodeLogin, "t")
 }
 
-/// Slot for data captured by a wiremock responder. `Fn` capture + cross-await inspection require
-/// the full `Arc<Mutex<Option<T>>>` triple.
+/// Slot for data captured by a wiremock responder. Capturing it in an `Fn` and inspecting it
+/// across awaits takes the full `Arc<Mutex<Option<T>>>`.
 pub(crate) type Captured<T> = Arc<Mutex<Option<T>>>;
 
 pub(crate) fn captured<T>() -> Captured<T> {

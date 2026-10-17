@@ -1,6 +1,5 @@
 //! Per-machine `device_id` (64 lowercase hex chars) stored at `$XDG_DATA_HOME/ox/user-id`.
-//! The id is minted lazily. Filesystem failures fall back to an ephemeral id and do not block
-//! startup.
+//! A filesystem failure falls back to an ephemeral id, so storage problems do not block startup.
 
 use std::fmt::Write as _;
 use std::fs;

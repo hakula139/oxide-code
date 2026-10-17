@@ -57,9 +57,8 @@ pub(crate) fn tildify(path: &Path) -> String {
         )
 }
 
-/// Expands a leading `~` or `~/` (or `~\` on Windows) to the user's home directory. Bare `~`
-/// resolves to `$HOME`, and `~/foo/bar` resolves to `$HOME/foo/bar`. Per-user forms like
-/// `~alice/...` pass through unchanged (no passwd lookup) and non-tilde paths pass through as well.
+/// Expands a leading `~` or `~/` (or `~\` on Windows) to the user's home directory. Per-user
+/// forms like `~alice/...` (no passwd lookup) and paths without a tilde pass through unchanged.
 /// Errors when the input starts with `~` but [`std::env::home_dir`] yields no value, since a
 /// literal `~`-prefixed path would otherwise fail downstream with a misleading filesystem error.
 pub(crate) fn expand_user(raw: &str) -> Result<PathBuf> {

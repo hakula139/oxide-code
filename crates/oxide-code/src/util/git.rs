@@ -1,6 +1,6 @@
 //! Git probes for the session's repository: its root, current branch, and pull request.
 //! Best-effort: every probe collapses to `None` on missing git, non-repo cwd, detached HEAD, or
-//! non-UTF-8 output. Failures log at `debug` so they're recoverable when the status bar misbehaves.
+//! non-UTF-8 output. Failures log at `debug` to help diagnose a misbehaving status bar.
 
 use std::collections::HashSet;
 use std::io;
@@ -12,8 +12,7 @@ use tracing::debug;
 
 use crate::util::text::truncate_to_width;
 
-/// Probe the current branch via `git branch --show-current`. Detached HEAD comes back as empty
-/// stdout, which we collapse to `None`.
+/// Probes the current branch via `git branch --show-current`, `None` on a detached HEAD.
 pub(crate) fn current_branch(cwd: &Path) -> Option<String> {
     let cwd_str = cwd_to_str(cwd, "git branch")?;
     let output = check_output("git branch", cwd_str, branch_command(cwd_str).output())?;
@@ -37,7 +36,7 @@ fn branch_command(cwd: &str) -> Command {
     command
 }
 
-/// Probe the top-level directory of the repository containing `cwd` via
+/// Probes the top-level directory of the repository containing `cwd` via
 /// `git rev-parse --show-toplevel`. Dropping the future kills the child process.
 pub(crate) async fn repo_root(cwd: &Path) -> Option<PathBuf> {
     let mut command = Command::new("git");
@@ -109,7 +108,7 @@ impl PullRequestDetail {
     }
 }
 
-/// Probe the open pull request for `cwd`'s current branch via `gh pr view`, reading `detail`.
+/// Probes the open pull request for `cwd`'s current branch via `gh pr view`, reading `detail`.
 /// Returns `None` when `gh` is missing, the user is unauthenticated, or no PR is open. Dropping
 /// the future kills the child process.
 pub(crate) async fn current_pull_request(
@@ -313,8 +312,7 @@ pub(crate) mod testing {
     }
 
     /// Runs `f` under [`ISOLATED_GIT_ENV`], so production probes under test see only the fixture.
-    /// `git rebase --exec` exports `GIT_DIR`, which would otherwise aim them at the caller's
-    /// repository.
+    /// `git rebase --exec` exports `GIT_DIR`, which would otherwise aim them at the caller's repo.
     pub(crate) fn with_isolated_git_env<R>(f: impl FnOnce() -> R) -> R {
         temp_env::with_vars(ISOLATED_GIT_ENV, f)
     }
@@ -360,8 +358,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn current_branch_with_non_utf8_cwd_is_absent() {
-        // Linux paths are bytes; embedding a non-UTF-8 byte hits the cwd_to_str failure branch
-        // without ever spawning git.
+        // Linux paths are bytes, so a non-UTF-8 one fails `cwd_to_str` before git spawns.
         let cwd = PathBuf::from(OsStr::from_bytes(b"/tmp/\xff"));
         assert_eq!(current_branch(&cwd), None);
     }

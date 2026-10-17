@@ -21,8 +21,7 @@ pub(crate) const MAX_TRACKED_FILE_SIZE: u64 = 10 * 1024 * 1024;
 ///
 /// The gate enforces three invariants before mutation:
 ///
-/// - **Read-before-Edit**: every Edit / Write must follow a `Read` of the same path within the
-///   session.
+/// - **Read-before-Edit**: every Edit / Write must follow a `Read` of the same path in the session.
 /// - **Full coverage for Write**: overwriting a file needs every line of its current content read,
 ///   in one Read or across several. An Edit accepts any Read of the current content.
 /// - **Freshness**: mutating tools must pass the current bytes through

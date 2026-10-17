@@ -1,5 +1,4 @@
-//! Pure data wire types for the Anthropic Messages API. Builders / interpreters live in sibling
-//! modules.
+//! Serde types for Anthropic Messages API requests, streamed response frames, and error bodies.
 
 use serde::ser::SerializeSeq;
 use serde::{Deserialize, Serialize, Serializer};
@@ -10,26 +9,23 @@ use crate::message::{ContentBlock, Message, Role, WireKind};
 use crate::model::ThinkingConfig;
 use crate::tool::ToolDefinition;
 
-// ── Request types ──
+// ── Request Types ──
 
-/// Body for `POST /v1/messages`. Field declaration order is the wire JSON order and is
-/// load-bearing: the billing `cch=00000` placeholder must appear before user-controlled
-/// `messages` content so [`super::billing::inject_cch`]'s single-occurrence replacement targets
-/// the system block, not a user echo.
+/// Body for `POST /v1/messages`, whose fields serialize in declaration order (see `system`).
 #[derive(Serialize)]
 pub(super) struct CreateMessageRequest<'a> {
     pub(super) model: &'a str,
     pub(super) max_tokens: u32,
     pub(super) stream: bool,
     pub(super) metadata: RequestMetadata,
-    /// Before `messages` so the billing `cch=00000` placeholder appears first. Required by
-    /// [`super::billing::inject_cch`]'s single-occurrence replacement.
+    /// Precedes `messages` because [`super::billing::inject_cch`] replaces only the first
+    /// `cch=00000`, which must be the billing placeholder even when user content echoes it.
     pub(super) system: Vec<SystemBlock<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) tools: Option<&'a [ToolDefinition]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) thinking: Option<&'a ThinkingConfig>,
-    /// `format` (JSON schema for one-shots) + `effort`. `None` omits the field entirely.
+    /// The one-shot JSON-schema `format` and the `effort`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) output_config: Option<OutputConfig<'a>>,
     /// Partners the `context-management-2025-06-27` beta on streaming requests for known models.
@@ -172,7 +168,7 @@ pub(super) struct OutputConfig<'a> {
 }
 
 impl<'a> OutputConfig<'a> {
-    /// Returns `None` when both fields are empty and `Some(_)` otherwise.
+    /// `None` when neither field is set.
     pub(super) fn new(format: Option<&'a OutputFormat>, effort: Option<Effort>) -> Option<Self> {
         (format.is_some() || effort.is_some()).then_some(Self { format, effort })
     }
@@ -244,7 +240,7 @@ pub(super) struct CacheControl {
     pub(super) ttl: Option<&'static str>,
 }
 
-// ── SSE response types ──
+// ── SSE Response Types ──
 
 #[cfg_attr(
     not(test),

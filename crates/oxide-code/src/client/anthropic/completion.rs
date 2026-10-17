@@ -116,7 +116,6 @@ fn build_completion_body(
 
 // ── Response Handling ──
 
-/// Concatenates text blocks; drops tool-use / thinking.
 fn join_text_blocks(content: Vec<ContentBlock>) -> String {
     content
         .into_iter()
@@ -159,7 +158,7 @@ mod tests {
 
     #[tokio::test]
     async fn complete_sends_x_claude_code_session_id_header() {
-        // `/clear` rolls the id without rebuilding the client; the non-streaming path must follow.
+        // `/clear` rolls the id without rebuilding the client, so `complete` must send the new one.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/messages"))
