@@ -31,7 +31,6 @@ use crate::tui::wrap::{
 /// Block boundaries set `needs_newline = true` so the next block opener emits a separator
 /// without producing trailing blanks.
 pub(super) struct MarkdownRenderer<I> {
-    // Core
     iter: I,
     theme: Theme,
     width: usize,

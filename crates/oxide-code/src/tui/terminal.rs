@@ -182,9 +182,9 @@ static DEFERRED_PANICS: Mutex<DeferredPanics> = Mutex::new(DeferredPanics {
 /// What the panic hook does with one panic.
 #[derive(Debug, PartialEq, Eq)]
 enum PanicRoute {
-    /// Restore the terminal, then print through the original hook.
+    /// Restores the terminal, then prints through the original hook.
     RestoreThenPrint,
-    /// Print through the original hook, since the terminal is already restored.
+    /// Prints through the original hook, since the terminal is already restored.
     Print,
     /// Held for [`restore`] to print.
     Deferred,

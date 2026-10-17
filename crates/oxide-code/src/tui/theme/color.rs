@@ -19,7 +19,7 @@ pub(super) fn parse_color(input: &str) -> Result<Color> {
         bail!("empty color value");
     }
 
-    // Lowercase once so `ANSI:5` and `#FFAABB` route to their parsers instead of the named lookup.
+    // Lowercases once so `ANSI:5` and `#FFAABB` match the prefixes their parsers check.
     let s = trimmed.to_ascii_lowercase();
 
     if let Some(hex) = s.strip_prefix('#') {
@@ -170,8 +170,6 @@ mod tests {
         );
     }
 
-    // Module doc claims `ansi:N` is case-insensitive; pin it so a regression that drops the
-    // lowercase pass and fails on `"ANSI:5"` shows up here.
     #[test]
     fn parse_color_indexed_prefix_is_case_insensitive() {
         assert_eq!(parse_color("ANSI:5").unwrap(), Color::Indexed(5));

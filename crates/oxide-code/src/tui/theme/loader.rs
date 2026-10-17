@@ -9,10 +9,6 @@
 //!
 //! Every slot must be present. `deny_unknown_fields` catches typos. Per-slot parse errors are
 //! wrapped with the slot name.
-//!
-//! [`resolve_theme`] applies a base + per-slot overrides from the raw `[tui.theme]` config.
-//! Selection errors (unknown name, missing file) hard-fail. Per-slot errors, including a malformed
-//! patch, warn and fall back to base so the TUI still launches.
 
 use std::sync::LazyLock;
 
@@ -27,8 +23,9 @@ use crate::config::ThemeConfig;
 
 // ── Resolution ──
 
-/// Resolves the configured base + per-slot overrides. Unknown / unreadable bases hard-fail.
-/// Per-slot override errors warn via `tracing` and keep the base value.
+/// Resolves the `[tui.theme]` base and applies its per-slot overrides. An unknown or unreadable
+/// base is an error, while a bad override, including a malformed patch, warns and keeps the base
+/// value so the TUI still launches.
 pub(crate) fn resolve_theme(config: &ThemeConfig) -> Result<Theme> {
     let base_name = config.base.as_str();
     let body = load_base_body(base_name)?;
@@ -356,8 +353,6 @@ mod tests {
         assert_eq!(t.error.fg, Some(Color::Rgb(0xff, 0x00, 0x00)));
     }
 
-    // Pin: file loads but body fails to parse — error must name the base so the user sees which
-    // theme is broken instead of an opaque slot diagnostic.
     #[test]
     fn resolve_theme_file_path_with_bad_body_wraps_with_base_name() {
         let dir = tempfile::tempdir().unwrap();
@@ -379,7 +374,7 @@ mod tests {
 
     #[test]
     fn resolve_theme_bare_string_override_patches_only_fg() {
-        // mocha's accent is bold blue; bare-string override replaces fg, keeps bold.
+        // Mocha's accent is bold blue, so the override must replace the fg and keep the bold.
         let t = resolve_theme(&config("mocha", r##"accent = "#ff0000""##)).unwrap();
         assert_eq!(t.accent.fg, Some(Color::Rgb(0xff, 0x00, 0x00)));
         assert_eq!(t.accent.bg, None);
@@ -411,9 +406,6 @@ mod tests {
         assert_eq!(t.error.fg, Some(Color::Rgb(0xf3, 0x8b, 0xa8)));
     }
 
-    // Pin the warn-and-fallback path actually emits a `tracing::warn!` naming the slot. A
-    // regression to `if let Err(_) = ... {}` would suppress the warning while every other warn-path
-    // test still passed.
     #[test]
     fn resolve_theme_unknown_slot_emits_tracing_warn_with_slot_name() {
         use std::io;
@@ -500,7 +492,6 @@ mod tests {
         );
     }
 
-    /// Sibling to the inline-fg test for the `bg` parse path.
     #[test]
     fn resolve_theme_inline_override_with_bad_bg_warns_and_keeps_base() {
         install_permissive_global_subscriber();
@@ -523,12 +514,10 @@ mod tests {
         assert_eq!(t.success.fg, Some(Color::Rgb(0x00, 0xff, 0x00)));
     }
 
-    /// Install a permissive global tracing subscriber so the warn
-    /// callsite in `resolve_theme` registers as `Interest::Always`
-    /// regardless of which warn-firing test fires it first. Without
-    /// this, parallel tests racing the default noop subscriber lock
-    /// the per-callsite Interest cache to `Never`, after which any
-    /// per-test `with_default` capture sees nothing.
+    /// Installs a permissive global tracing subscriber so the warn callsite in `resolve_theme`
+    /// registers as `Interest::Always`, whichever test fires it first. Without it, parallel tests
+    /// racing the default no-op subscriber lock the callsite's `Interest` cache to `Never`, after
+    /// which a per-test `with_default` capture sees nothing.
     fn install_permissive_global_subscriber() {
         use std::sync::OnceLock;
 
@@ -568,11 +557,6 @@ mod tests {
 
     // ── slot_for_name ──
 
-    /// Every slot name must route to a unique slot. Catches the
-    /// "typo in match arm" class of bug — e.g.,
-    /// `"tool_icon" => &mut theme.tool_border` would compile and
-    /// pass a happy-path override test, but this assertion fails
-    /// because patching `tool_icon` would visibly alter `tool_border`.
     #[test]
     fn slot_for_name_each_name_resolves_to_a_unique_slot() {
         let sentinel = Slot {
@@ -681,7 +665,6 @@ mod tests {
 
     // ── parse_theme: built-ins ──
 
-    /// All four vendored Catppuccin TOMLs must parse without error.
     #[test]
     fn parse_theme_all_builtins() {
         for builtin::BuiltinTheme { name, body, .. } in builtin::BUILT_IN {
@@ -715,9 +698,6 @@ mod tests {
         }
     }
 
-    /// Pin a representative subset of Catppuccin Mocha's hex codes
-    /// so an accidental palette edit in `mocha.toml` surfaces as a
-    /// failing test rather than a silent visual regression.
     #[test]
     fn parse_theme_mocha_matches_known_palette() {
         let t = parse_theme(builtin::MOCHA).unwrap();
@@ -771,7 +751,6 @@ mod tests {
         assert!(t.heading_h1.modifiers.contains(Modifier::BOLD));
         assert!(t.heading_h1.modifiers.contains(Modifier::UNDERLINED));
         assert!(t.link.modifiers.contains(Modifier::UNDERLINED));
-        // Status colors carry no modifiers by default.
         assert!(t.success.modifiers.is_empty());
         assert!(t.error.modifiers.is_empty());
     }
@@ -911,18 +890,15 @@ mod tests {
 
     #[test]
     fn parse_theme_inline_rejects_unknown_modifier_key() {
-        // `sparkle = true` is not a recognized modifier; the
-        // section's `deny_unknown_fields` rejects it.
+        // `sparkle` is not a modifier, so `deny_unknown_fields` rejects it.
         let body = mocha_with_slot_replacement(
             r##"accent = { fg = "#89b4fa", bold = true }"##,
             r##"accent = { fg = "#89b4fa", sparkle = true }"##,
         );
         let err = parse_theme(&body).expect_err("unknown modifier rejected");
         let msg = format!("{err:#}");
-        // serde's `untagged` enum reports a generic "did not match
-        // any variant" rather than the inner `unknown field`
-        // diagnostic, but the offending line (with `sparkle`) is
-        // included in the rendered TOML error context.
+        // The untagged enum reports a generic "did not match any variant" error, but the rendered
+        // TOML context still quotes the offending line.
         assert!(msg.contains("sparkle"), "{msg}");
     }
 
@@ -930,14 +906,17 @@ mod tests {
 
     #[test]
     fn parse_theme_builtins_pick_syntax_theme_for_their_background() {
-        for (name, body, expected) in [
-            ("mocha", builtin::MOCHA, "base16-ocean.dark"),
-            ("macchiato", builtin::MACCHIATO, "base16-ocean.dark"),
-            ("frappe", builtin::FRAPPE, "base16-ocean.dark"),
-            ("latte", builtin::LATTE, "InspiredGitHub"),
-            ("material", builtin::MATERIAL, "base16-ocean.dark"),
+        for (name, expected) in [
+            ("mocha", "base16-ocean.dark"),
+            ("macchiato", "base16-ocean.dark"),
+            ("frappe", "base16-ocean.dark"),
+            ("latte", "InspiredGitHub"),
+            ("material", "base16-ocean.dark"),
         ] {
+            let body = builtin::lookup(name).unwrap();
+
             let t = parse_theme(body).unwrap_or_else(|e| panic!("{name} parse: {e:#}"));
+
             assert_eq!(
                 t.syntax.name, SYNTAX_THEMES.themes[expected].name,
                 "{name} should use {expected}",
