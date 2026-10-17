@@ -23,8 +23,7 @@ const THINKING_TOKEN_COUNT_BETA_HEADER: &str = "thinking-token-count-2026-05-13"
 ///
 /// Agentic turns on catalog models send the sequence Claude Code [`super::CLAUDE_CLI_VERSION`]
 /// sends for them, captured from `claude -p` with an API key, so it includes betas for features
-/// this client leaves unused. Fable 5.1 reuses the Opus 5.5 sequence, inferred from Claude Code
-/// 2.1.301 sending both models identical betas, so the next version bump must capture Fable too.
+/// this client leaves unused. Fable 5.1, which that capture lacks, sends the Opus 5.5 sequence.
 /// `oauth` takes the slot Claude Code's `getAllModelBetas` gives it. One-shots carry at most the
 /// claude-code tag and the auth extension. The thinking betas derive from the request body's
 /// `thinking` field, so they always match it.
