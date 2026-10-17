@@ -68,11 +68,11 @@ Explicit thresholds snap into a usable range. Token values below `50_000` rise t
 6. On success, `compact_boundary` persists the compact boundary, clears the file tracker, replaces `messages` with the synthetic post-compact message, and emits `SessionCompacted`.
 7. On failure, the streamed summary is discarded, `auto_compact_if_needed` increments the failure counter, and `submit_prompt` ends with `TurnFailed` without recording or sending the new prompt.
 
-The failure counter lives on `Engine`. Three consecutive automatic failures pause further automatic attempts until a successful compaction, a model or effort change, `/clear`, or `/resume` resets the counter. Manual `/compact` does not consult it.
+The failure counter lives on `Engine`. Three consecutive automatic failures pause further automatic attempts until a successful compaction, a model or effort change, `/clear`, `/archive`, or `/resume` resets the counter. Manual `/compact` does not consult it. The failure that pauses it emits `AutoCompactionPaused` with the failure count, and a reset of the paused counter emits `AutoCompactionResumed`, which the TUI follows to show the pause in `/status`.
 
 ## User Experience
 
-Manual and automatic compaction use the same visible `CompactedBlock`. When an automatic attempt fails, the prompt is not sent, and chat shows why. A summarizer failure reads `Auto-compaction failed: ...`, and a failed boundary write shows a `Session write failed: ...` notice followed by `Auto-compaction was not saved`. The TUI puts the prompt back in the input, or at the head of the queue when other prompts are waiting or the input holds a draft, and leaves the queue for the user to start. Sending the prompt again retries the compaction. The third consecutive failure pauses automatic attempts, so the next send goes out without compaction until a `/model` or `/effort` swap, `/clear`, `/resume`, or a successful `/compact` resets the counter. Each reset allows three more attempts.
+Manual and automatic compaction use the same visible `CompactedBlock`. When an automatic attempt fails, the prompt is not sent, and chat shows why. A summarizer failure reads `Auto-compaction failed: ...`, and a failed boundary write shows a `Session write failed: ...` notice followed by `Auto-compaction was not saved`. The TUI puts the prompt back in the input, or at the head of the queue when other prompts are waiting or the input holds a draft, and leaves the queue for the user to start. Sending the prompt again retries the compaction. The third consecutive failure pauses automatic attempts, so the next send goes out without compaction until a `/model` or `/effort` swap, `/clear`, `/archive`, `/resume`, or a successful `/compact` resets the counter. Until then, `/status` shows auto-compaction as paused and points to `/compact`. Each reset allows three more attempts.
 
 During TUI auto-compaction, the status bar uses the existing `Compacting` state. Automatic `SessionCompacted` events keep the TUI busy until the queued prompt drains or the prompt submission finishes. In the bare REPL, `driver::stdio::StdioSink` renders `SessionCompacted` as a stderr boundary line.
 
@@ -88,7 +88,7 @@ During TUI auto-compaction, the status bar uses the existing `Compacting` state.
 
 5. **Same persistence boundary as `/compact`.** Auto-compaction should not create a second session format.
 
-6. **Failure circuit breaker.** A too-large or malformed compact request can be unrecoverable. After 3 consecutive automatic failures, the loop stops trying until a successful manual compaction, a model or effort change, `/clear`, or `/resume` resets it.
+6. **Failure circuit breaker.** A too-large or malformed compact request can be unrecoverable. After 3 consecutive automatic failures, the loop stops trying until a successful manual compaction, a model or effort change, `/clear`, `/archive`, or `/resume` resets it.
 
 7. **No automatic continue prompt.** If the user queued input, it drains after compaction. Otherwise the assistant waits. Synthetic "continue" prompts make the agent act without fresh user intent.
 

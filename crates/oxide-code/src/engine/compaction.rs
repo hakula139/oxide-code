@@ -129,6 +129,7 @@ pub(super) async fn auto_compact_if_needed(
             warn!("auto-compaction failed: {e:#}");
             return Err(record_auto_compact_failure(
                 auto,
+                sink,
                 &format!("Auto-compaction failed: {e:#}"),
             ));
         }
@@ -146,19 +147,31 @@ pub(super) async fn auto_compact_if_needed(
     if !compacted {
         return Err(record_auto_compact_failure(
             auto,
+            sink,
             "Auto-compaction was not saved",
         ));
     }
     Ok(true)
 }
 
-/// Counts a failed attempt and returns the abort that fails the unsent prompt. `headline` can end
-/// on a cause's own sentence, so its period is dropped before the sentences on what to do next.
-fn record_auto_compact_failure(auto: &mut AutoCompact<'_>, headline: &str) -> TurnAbort {
+/// Counts a failed attempt and returns the abort that fails the unsent prompt, reporting
+/// [`Event::AutoCompactionPaused`] when the attempt trips the breaker. `headline` can end on a
+/// cause's own sentence, so its period is dropped before the sentences on what to do next.
+fn record_auto_compact_failure(
+    auto: &mut AutoCompact<'_>,
+    sink: &dyn EventSink,
+    headline: &str,
+) -> TurnAbort {
     *auto.failures += 1;
     let next = if *auto.failures < MAX_AUTO_COMPACT_FAILURES {
         "The prompt was not sent, so send it again to retry.".to_owned()
     } else {
+        sink.emit(
+            Event::AutoCompactionPaused {
+                failures: MAX_AUTO_COMPACT_FAILURES,
+            },
+            "auto-compaction-paused",
+        );
         format!(
             "The prompt was not sent, and auto-compaction is paused after \
              {MAX_AUTO_COMPACT_FAILURES} failures in a row. Send the prompt again to run it \
@@ -166,6 +179,13 @@ fn record_auto_compact_failure(auto: &mut AutoCompact<'_>, headline: &str) -> Tu
         )
     };
     TurnAbort::Failed(anyhow!("{}. {next}", headline.trim_end_matches('.')))
+}
+
+/// Clears the failure count and reports [`Event::AutoCompactionResumed`] if the breaker tripped.
+pub(super) fn reset_auto_compact_failures(failures: &mut u8, sink: &dyn EventSink) {
+    if std::mem::take(failures) >= MAX_AUTO_COMPACT_FAILURES {
+        sink.emit(Event::AutoCompactionResumed, "auto-compaction-resumed");
+    }
 }
 
 /// Drives the summarization request and returns the trimmed summary. `prompt` and `tools` must be
@@ -825,6 +845,13 @@ mod tests {
         );
         assert_eq!(failures, MAX_AUTO_COMPACT_FAILURES);
         assert_eq!(client.calls(), 1);
+        assert_eq!(
+            sink.events(),
+            [
+                Event::AutoCompactionStarted,
+                Event::AutoCompactionPaused { failures: 3 },
+            ],
+        );
     }
 
     #[tokio::test]
@@ -980,6 +1007,23 @@ mod tests {
             ),
             "the overflowed summary is discarded before the retry streams: {events:?}",
         );
+    }
+
+    // ── reset_auto_compact_failures ──
+
+    #[test]
+    fn reset_auto_compact_failures_reports_a_resume_only_from_a_pause() {
+        let sink = CapturingSink::new();
+        let mut counting = MAX_AUTO_COMPACT_FAILURES - 1;
+        let mut paused = MAX_AUTO_COMPACT_FAILURES;
+
+        reset_auto_compact_failures(&mut counting, &sink);
+        let after_counting = sink.events();
+        reset_auto_compact_failures(&mut paused, &sink);
+
+        assert_eq!((counting, paused), (0, 0));
+        assert_eq!(after_counting, []);
+        assert_eq!(sink.events(), [Event::AutoCompactionResumed]);
     }
 
     // ── compact_session ──
