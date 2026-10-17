@@ -18,7 +18,7 @@ use super::dispatch::GateContext;
 use super::{Engine, EngineHandle, EngineTask};
 use crate::client::anthropic::Client;
 use crate::client::anthropic::testing::{
-    api_key, sse_response, test_config, text_stream_body, tool_use_stream_body,
+    DEVICE_ID, api_key, sse_response, test_config, text_stream_body, tool_use_stream_body,
 };
 use crate::client::{Response, ResponseEvent, StopDetails, StopReason, Wire};
 use crate::file_tracker::FileTracker;
@@ -48,7 +48,12 @@ pub(crate) async fn engine(base_url: String, store: &SessionStore, cwd: &Path) -
     let config = test_config(base_url, api_key(), MODEL);
     let session = handle::start(store, MODEL);
     Engine {
-        client: Client::new(&config, Some(session.session_id().to_owned())).unwrap(),
+        client: Client::new(
+            &config,
+            Some(session.session_id().to_owned()),
+            DEVICE_ID.to_owned(),
+        )
+        .unwrap(),
         oauth_token_url: "http://127.0.0.1:9/token".to_owned(),
         tools: Arc::new(ToolRegistry::new(Vec::new())),
         store: store.clone(),
