@@ -22,10 +22,10 @@ const MAX_SSE_FRAME_BYTES: usize = 4 * 1024;
 /// [`ResponseEvent::Retrying`] notice first. `model` is the id the request names, which the
 /// reply's reasoning blocks record.
 ///
-/// Returns `Ok(())` once the completed reply is forwarded, or when the receiver drops (consumer
-/// cancellation is not an error). Returns `Err` for transport / HTTP failures, an in-band `error`
-/// event, a stream that ends before `message_stop`, and the frame-size guard. Single malformed
-/// frames are logged and skipped so they do not poison the rest of the turn.
+/// Returns `Ok(())` once the completed reply is forwarded or the receiver drops. Returns `Err`
+/// for transport / HTTP failures, an in-band `error` event, a stream that ends before
+/// `message_stop`, and the frame-size guard. Single malformed frames are logged and skipped so
+/// they do not poison the rest of the turn.
 pub(super) async fn stream_sse(
     http: &reqwest::Client,
     request: &MessagesRequest,
@@ -565,7 +565,7 @@ mod tests {
 
     #[tokio::test]
     async fn stream_sse_succeeds_when_receiver_drops_before_send() {
-        // Consumer cancellation must surface as graceful Ok(()), not an Err on the stream.
+        // Consumer cancellation must end the stream with a graceful Ok(()).
         for response in [
             sse_response(MESSAGE_START.repeat(8)),
             rate_limited(sse_response(MESSAGE_START)),
@@ -710,7 +710,7 @@ mod tests {
 
     #[test]
     fn parse_sse_frame_concatenates_multiple_data_lines_with_newline() {
-        // Multiple `data:` lines join with `\n`; JSON treats it as whitespace, so this round-trips.
+        // `data:` lines join with `\n`, which JSON reads as whitespace, so this round-trips.
         let frame = indoc! {r#"
             event: ping
             data: {"type":

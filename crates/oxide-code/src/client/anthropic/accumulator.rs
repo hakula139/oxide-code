@@ -281,8 +281,8 @@ impl BlockAccumulator {
     }
 }
 
-/// Returns empty object + error string on failure. An empty buffer is a call that streamed no
-/// input, which reads as `{}`.
+/// Returns an empty object and the parse error on failure. An empty buffer is a call that
+/// streamed no input, which reads as `{}`.
 fn parse_tool_json(json_buf: &str) -> (serde_json::Value, Option<String>) {
     if json_buf.is_empty() {
         return (serde_json::Value::Object(serde_json::Map::new()), None);

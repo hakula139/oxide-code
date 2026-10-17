@@ -22,7 +22,7 @@ pub(super) struct Environment {
 }
 
 impl Environment {
-    /// Best-effort detection; failures produce fallback values.
+    /// Best-effort detection, with a fallback value for each probe that fails.
     pub(super) fn detect(cwd: &Path, git_root: Option<&Path>) -> Self {
         let is_git = git_root.is_some();
         let platform = normalize_node_platform(std::env::consts::OS).to_owned();

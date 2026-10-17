@@ -158,7 +158,7 @@ impl Message {
 /// files store it and resume matches it verbatim, so new text would show older markers as prompts.
 pub(crate) const INTERRUPTION_MARKER: &str = "[Request interrupted by user]";
 
-// ── Progress updates ──
+// ── Progress Updates ──
 
 /// The progress note introducing the tool use at `blocks[index]`. See [`progress_note`].
 pub(crate) fn progress_update_before(blocks: &[ContentBlock], index: usize) -> Option<&str> {

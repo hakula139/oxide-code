@@ -156,8 +156,7 @@ pub(crate) struct RateLimitWindow {
 
 // ── Errors ──
 
-/// A request rejected because its prompt exceeds the context window. Displays as the wire's
-/// diagnostic.
+/// A request rejected for a prompt over the context window. Displays as the wire's diagnostic.
 #[derive(Debug, thiserror::Error)]
 #[error("{diagnostic}")]
 pub(crate) struct PromptTooLong {

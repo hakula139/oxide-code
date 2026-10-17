@@ -10,7 +10,7 @@ use tracing::warn;
 
 static LOCAL_OFFSET: OnceLock<UtcOffset> = OnceLock::new();
 
-/// Captures the local offset on the calling thread. Safe only before tokio spawns workers; the
+/// Captures the local offset on the calling thread. Safe only before tokio spawns workers, so the
 /// binary calls this once at startup.
 pub(crate) fn init_local_offset() {
     _ = LOCAL_OFFSET.set(resolve_offset(UtcOffset::current_local_offset()));
@@ -43,8 +43,8 @@ mod tests {
 
     #[test]
     fn resolve_offset_falls_back_to_utc_on_err() {
-        // `IndeterminateOffset` is the only error variant — used here as a stand-in for any host
-        // TZ-database failure. The fallback path must not propagate the error.
+        // `IndeterminateOffset` is the only error variant, so it stands in for any host TZ-database
+        // failure. The fallback path must not propagate the error.
         let err = Err(time::error::IndeterminateOffset);
         assert_eq!(resolve_offset(err), UtcOffset::UTC);
     }

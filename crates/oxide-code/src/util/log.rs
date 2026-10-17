@@ -22,7 +22,7 @@ const MAX_LOG_BYTES: u64 = 10 * 1024 * 1024;
 /// Initializes the global tracing subscriber.
 ///
 /// The returned `WorkerGuard` (TUI mode only) flushes the non-blocking appender on drop and must
-/// be held for the program lifetime; dropping it early truncates buffered log lines.
+/// be held for the program lifetime, because dropping it early truncates buffered log lines.
 pub(crate) fn init_tracing(tui_mode: bool) -> Result<Option<WorkerGuard>> {
     let filter = make_filter();
     Ok(if let Some((writer, guard)) = build_log_target(tui_mode)? {
@@ -114,8 +114,7 @@ impl Write for RotatingFile {
     }
 }
 
-/// Opens `path` for appending with 0o600 perms on Unix, tightening a file an older build left
-/// world-readable.
+/// Opens `path` for appending with 0o600 perms on Unix, also tightening an existing file's mode.
 fn open_private_append(path: &Path) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options.append(true).create(true);

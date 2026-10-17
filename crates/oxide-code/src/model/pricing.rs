@@ -1,6 +1,6 @@
 //! Token cost rates and per-million USD pricing.
 //!
-//! Rates are quoted in USD per million tokens for first-party Anthropic API. Values exclude
+//! Rates are quoted in USD per million tokens for the first-party Anthropic API. Values exclude
 //! account discounts, marketplace billing, data-residency multipliers, fast-mode adjustments,
 //! and server-side tool surcharges. Update both this table and `MODELS` in lockstep when a row
 //! changes pricing.
