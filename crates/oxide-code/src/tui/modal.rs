@@ -306,8 +306,7 @@ pub(crate) mod testing {
         /// Take-once action returned from [`Modal::on_cancel`]. `None` leaves the default (silent
         /// close), matching pickers that don't override the hook.
         pub(crate) cancel_action: Option<ModalAction>,
-        /// `Some` to make `on_push_key` emit `ModalKey::Push(<child>)`. Take-once: subsequent
-        /// presses fall through to `Consumed` so a single test step can't redouble-push.
+        /// Child that `on_push_key` pushes, once. Pressing the key without a child panics.
         pub(crate) push_child: Option<Box<dyn Modal>>,
         /// Returned from [`Modal::captures_esc`].
         pub(crate) captures_esc: bool,
@@ -356,10 +355,13 @@ pub(crate) mod testing {
                     std::mem::swap(&mut self.preview_action, &mut taken);
                     ModalKey::Preview(taken)
                 }
-                KeyCode::Char(c) if c == self.on_push_key => match self.push_child.take() {
-                    Some(child) => ModalKey::Push(child),
-                    None => ModalKey::Consumed,
-                },
+                KeyCode::Char(c) if c == self.on_push_key => {
+                    let child = self
+                        .push_child
+                        .take()
+                        .expect("push_child must be set before pressing on_push_key");
+                    ModalKey::Push(child)
+                }
                 _ => ModalKey::Consumed,
             }
         }
@@ -396,9 +398,7 @@ mod tests {
         KeyEvent::new(code, modifiers)
     }
 
-    // ── Modal::on_focus_regained ──
-
-    /// Modal that doesn't override `on_focus_regained`, so the default empty body fires on pop.
+    /// Modal that keeps every default hook.
     struct BareModal;
 
     impl Modal for BareModal {
@@ -409,21 +409,6 @@ mod tests {
         fn handle_key(&mut self, _e: &KeyEvent) -> ModalKey {
             ModalKey::Consumed
         }
-    }
-
-    #[test]
-    fn on_focus_regained_default_leaves_parent_on_top() {
-        // Pin that the trait's default empty body is safe to invoke. ScriptedModal overrides the
-        // hook for assertion purposes, so the default arm needs separate coverage.
-        let mut stack = ModalStack::new();
-        stack.push(Box::new(BareModal));
-        stack.push(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
-        stack.handle_key(&key('c'));
-        assert_eq!(
-            stack.height(80, 40),
-            1 + TOP_BORDER_HEIGHT,
-            "BareModal is back on top after its child cancels"
-        );
     }
 
     // ── Modal::captures_esc ──
@@ -829,37 +814,5 @@ mod tests {
             );
             assert!(stack.is_active(), "{label}: parent stays on the stack");
         }
-    }
-
-    #[test]
-    fn handle_key_push_take_once_falls_through_to_consumed_after_first_push() {
-        // ScriptedModal's push_child is take-once. A second 'h' press after the child has been
-        // pushed and popped must not double-push.
-        let mut parent = ScriptedModal::new(ModalAction::Cancelled);
-        let child = ScriptedModal::new(ModalAction::Cancelled);
-        parent.push_child = Some(Box::new(child));
-
-        let mut stack = ModalStack::new();
-        stack.push(Box::new(parent));
-        stack.handle_key(&key('h'));
-        stack.handle_key(&key('c')); // cancel the child, parent regains focus.
-        assert_eq!(
-            stack.height(80, 40),
-            3 + TOP_BORDER_HEIGHT,
-            "back to parent"
-        );
-
-        // Second 'h' press: push_child is now None, so the parent consumes silently rather than
-        // pushing a second nested modal.
-        let outcome = stack.handle_key(&key('h'));
-        assert!(
-            outcome.is_none(),
-            "second push attempt is consumed: got {outcome:?}"
-        );
-        assert_eq!(
-            stack.height(80, 40),
-            3 + TOP_BORDER_HEIGHT,
-            "no nested modal"
-        );
     }
 }

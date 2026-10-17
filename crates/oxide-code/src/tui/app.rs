@@ -248,8 +248,9 @@ mod tests {
 
     use super::testing::{crossterm_test_terminal, rendered_text, test_app, test_session_info};
     use super::*;
-    use crate::tui::components::status::Status;
+    use crate::tui::components::status::{Status, TICKS_PER_FRAME};
     use crate::tui::git_probes::GitUpdate;
+    use crate::tui::glyphs::SPINNER_FRAMES;
 
     // ── App::new ──
 
@@ -338,16 +339,17 @@ mod tests {
         assert!(app.should_quit);
     }
 
-    #[tokio::test]
-    async fn run_with_events_marks_dirty_when_spinner_frame_advances() {
+    #[tokio::test(start_paused = true)]
+    async fn run_with_events_repaints_when_the_spinner_frame_advances() {
         // Sleep past the spinner interval so `tick()` reports a visible frame change.
         let (mut app, _rx, event_tx) = test_app(None);
         app.status_bar.set_status(Status::Streaming);
         app.dirty = false;
 
-        let (mut terminal, _buf) = crossterm_test_terminal(60, 8);
+        let (mut terminal, buf) = crossterm_test_terminal(60, 8);
+        let frame = TICK_INTERVAL * u32::try_from(TICKS_PER_FRAME).unwrap();
         let driver = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(150)).await;
+            tokio::time::sleep(frame).await;
             drop(event_tx);
         });
 
@@ -359,7 +361,8 @@ mod tests {
         .unwrap();
         driver.await.unwrap();
 
-        assert!(app.should_quit);
+        let painted = String::from_utf8_lossy(&buf.lock().unwrap()).into_owned();
+        assert!(painted.contains(SPINNER_FRAMES[1]), "{painted:?}");
     }
 
     #[tokio::test]

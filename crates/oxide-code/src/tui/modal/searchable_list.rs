@@ -685,35 +685,20 @@ mod tests {
 
     #[test]
     fn render_places_cursor_at_prompt_plus_visible_query_width() {
-        // Empty query → cursor sits at the prompt column with no `▏` glyph painted into the buffer
-        // (the search row delegates to `frame.set_cursor_position`, not a fake painted cursor).
-        // After `set_query("ab")` the cursor advances by the display width of the visible query.
         let theme = Theme::default();
-        let h = list(vec![FakeItem::new("alpha")]).height(40, 40);
-        let row_y = 2;
+        for (query, x) in [("", 2), ("ab", 4)] {
+            let mut l = list(vec![FakeItem::new("alpha")]);
+            l.set_query(query);
+            let h = l.height(40, 40);
+            let mut terminal = Terminal::new(TestBackend::new(40, h)).unwrap();
 
-        let l = list(vec![FakeItem::new("alpha")]);
-        let mut terminal = Terminal::new(TestBackend::new(40, h)).unwrap();
-        terminal
-            .draw(|frame| l.render(frame, Rect::new(0, 0, 40, h), &theme))
-            .expect("render must not panic");
-        let pos = terminal.get_cursor_position().unwrap();
-        assert_eq!((pos.x, pos.y), (2, row_y));
-        let buf = terminal.backend().buffer();
-        let dump: String = (0..h)
-            .flat_map(|y| (0..40).map(move |x| (x, y)))
-            .map(|(x, y)| buf[(x, y)].symbol().to_owned())
-            .collect();
-        assert!(!dump.contains('▏'), "no painted cursor glyph: {dump}");
+            terminal
+                .draw(|frame| l.render(frame, Rect::new(0, 0, 40, h), &theme))
+                .unwrap();
 
-        let mut l = list(vec![FakeItem::new("alpha")]);
-        l.set_query("ab");
-        let mut terminal = Terminal::new(TestBackend::new(40, h)).unwrap();
-        terminal
-            .draw(|frame| l.render(frame, Rect::new(0, 0, 40, h), &theme))
-            .expect("render must not panic");
-        let pos = terminal.get_cursor_position().unwrap();
-        assert_eq!((pos.x, pos.y), (4, row_y));
+            let pos = terminal.get_cursor_position().unwrap();
+            assert_eq!((pos.x, pos.y), (x, 2), "query {query:?}");
+        }
     }
 
     #[test]

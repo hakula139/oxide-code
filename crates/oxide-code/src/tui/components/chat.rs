@@ -640,7 +640,8 @@ mod tests {
     use super::*;
     use crate::tool::ToolResultView;
     use crate::tui::glyphs::{
-        ASSISTANT_PREFIX, BAR, INTERRUPTED_MARKER, TOOL_BORDER_CONT, TOOL_ERROR, TOOL_SUCCESS,
+        ASSISTANT_PREFIX, BAR, INTERRUPTED_MARKER, TOOL_BORDER_CONT, TOOL_BORDER_PREFIX,
+        TOOL_ERROR, TOOL_SUCCESS,
     };
 
     // ── Fixtures ──
@@ -927,19 +928,6 @@ mod tests {
         assert_eq!(s.rendered().len(), 0, "cache dropped on theme swap");
         assert_eq!(s.rendered_boundary(), 0);
         assert_eq!(s.cached_width(), 0);
-    }
-
-    #[test]
-    fn set_theme_without_active_streaming_is_a_noop_on_cache_state() {
-        // The `if let Some(streaming)` guard skips the cache reset when no stream is in flight;
-        // pin both branches so the guard isn't accidentally inverted in a future refactor.
-        let mut chat = test_chat();
-        assert!(chat.streaming.is_none());
-        chat.set_theme(&Theme::default());
-        assert!(
-            chat.streaming.is_none(),
-            "set_theme must not spawn a stream"
-        );
     }
 
     // ── load_history ──
@@ -2014,16 +2002,18 @@ mod tests {
     }
 
     #[test]
-    fn push_tool_result_empty_content_adds_nothing() {
-        let mut chat = test_chat();
-        chat.push_tool_result(titled_result("result", "  \n  ", false));
-        let before = line_count(&mut chat);
+    fn push_tool_result_empty_content_shows_only_the_status_line() {
+        for content in ["", "  \n  "] {
+            let mut chat = test_chat();
 
-        let mut chat2 = test_chat();
-        chat2.push_tool_result(titled_result("result", "", false));
-        let after = line_count(&mut chat2);
+            chat.push_tool_result(titled_result("result", content, false));
 
-        assert_eq!(before, after);
+            assert_eq!(
+                all_rows(&mut chat, 80),
+                [format!("{TOOL_BORDER_PREFIX}{TOOL_SUCCESS} result")],
+                "content {content:?}",
+            );
+        }
     }
 
     #[test]

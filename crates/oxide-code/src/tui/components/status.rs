@@ -20,7 +20,7 @@ use crate::tui::glyphs::SPINNER_FRAMES;
 use crate::tui::theme::Theme;
 use crate::util::git;
 
-const TICKS_PER_FRAME: usize = 5;
+pub(in crate::tui) const TICKS_PER_FRAME: usize = 5;
 
 /// A status-bar segment that should be re-emitted as an OSC 8 hyperlink.
 #[derive(Debug, Clone)]

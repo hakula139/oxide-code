@@ -151,8 +151,7 @@ mod tests {
     }
 
     #[test]
-    fn render_error_flag_swaps_border_style() {
-        // Pins `is_error` flowing into `border_style_for`.
+    fn render_error_flag_paints_the_bar_in_the_error_color() {
         let theme = Theme::default();
         let ctx = RenderCtx {
             width: 80,
@@ -161,16 +160,19 @@ mod tests {
         };
         let files = vec!["a.rs".to_owned()];
 
-        let mut ok = Vec::new();
-        render(&mut ok, &ctx, "**/*.rs", &files, 1, false);
-        let mut err = Vec::new();
-        render(&mut err, &ctx, "**/*.rs", &files, 1, true);
+        for (is_error, bar_style) in [(false, theme.tool_border()), (true, theme.error())] {
+            let mut out = Vec::new();
 
-        assert_eq!(ok.len(), err.len());
-        assert_ne!(
-            ok[0].spans[0].style, err[0].spans[0].style,
-            "is_error should swap the bar style",
-        );
+            render(&mut out, &ctx, "**/*.rs", &files, 1, is_error);
+
+            assert_eq!(out.len(), 2, "header and one path: {out:?}");
+            for line in &out {
+                assert_eq!(
+                    line.spans[0].style, bar_style,
+                    "is_error={is_error}: {line:?}"
+                );
+            }
+        }
     }
 
     #[test]
