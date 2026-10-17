@@ -1766,7 +1766,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_user_config(
             dir.path(),
-            indoc::indoc! {r"
+            indoc::indoc! {"
                 [tui]
                 status_line = []
             "},
@@ -1842,7 +1842,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let user = write_user_config(
             dir.path(),
-            indoc::indoc! {r"
+            indoc::indoc! {"
                 [client.compaction]
                 auto_enabled = false
             "},
@@ -1866,7 +1866,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_user_config(
             dir.path(),
-            indoc::indoc! {r"
+            indoc::indoc! {"
                 [client.compaction]
                 auto_enabled = false
             "},
@@ -1882,7 +1882,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_user_config(
             dir.path(),
-            indoc::indoc! {r"
+            indoc::indoc! {"
                 [client.compaction]
                 auto_threshold_tokens = 400000
             "},
@@ -1896,7 +1896,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_user_config(
             dir.path(),
-            indoc::indoc! {r"
+            indoc::indoc! {"
                 [client.compaction]
                 auto_threshold_tokens = 400000
                 auto_threshold_percent = 40

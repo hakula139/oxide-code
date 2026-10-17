@@ -9,7 +9,7 @@ use crate::tool::bash::background::BackgroundShell;
 use crate::tool::tasks::Task;
 
 /// Prefix for the synthetic post-compact user message.
-const SUMMARY_PREFIX: &str = indoc! {r"
+const SUMMARY_PREFIX: &str = indoc! {"
     This conversation has been compacted. The summary below covers the prior work. Continue from here
     without re-asking the engineer what to do.
 "};
@@ -21,11 +21,13 @@ pub(crate) fn synthesize_post_compact_message(
     tasks: &[Task],
     shells: &[BackgroundShell],
 ) -> Message {
+    let prefix = SUMMARY_PREFIX.trim();
+    let summary = summary.trim();
     let mut message = Message::user(formatdoc! {"
         {prefix}
 
         {summary}
-    ", prefix = SUMMARY_PREFIX.trim(), summary = summary.trim()});
+    "});
     message.content.extend(
         [task_reminder(tasks), shell_reminder(shells)]
             .into_iter()
@@ -192,11 +194,11 @@ mod tests {
 
     #[test]
     fn strip_synthetic_post_compact_prefix_leaves_assistant_messages() {
+        let prefix = SUMMARY_PREFIX.trim();
         let mut m = Message::assistant(formatdoc! {"
-            {}
+            {prefix}
 
-            not a synthetic user root",
-            SUMMARY_PREFIX.trim(),
+            not a synthetic user root"
         });
 
         assert!(!strip_synthetic_post_compact_prefix(&mut m));

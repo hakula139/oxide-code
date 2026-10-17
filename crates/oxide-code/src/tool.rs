@@ -2151,7 +2151,8 @@ mod tests {
                 formatdoc! {"
                     a.rs
 
-                    {note}"}
+                    {note}"
+                }
             );
             assert_eq!(strip_withheld_note(&content), "a.rs");
         }
@@ -2170,7 +2171,8 @@ mod tests {
             indoc! {"
                 a.rs
 
-                (Showing 100 of 120 matches. Use a more specific pattern.)"},
+                (Showing 100 of 120 matches. Use a more specific pattern.)"
+            },
         ] {
             assert_eq!(strip_withheld_note(content), content);
         }

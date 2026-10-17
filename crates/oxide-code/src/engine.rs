@@ -2620,13 +2620,13 @@ mod tests {
             serde_json::json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
             serde_json::json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": text}}),
         ]);
+        let declared = body.len() + 1;
         let response = formatdoc! {"
             HTTP/1.1 200 OK\r
             content-type: text/event-stream\r
             content-length: {declared}\r
             \r
-            {body}",
-            declared = body.len() + 1,
+            {body}"
         };
         tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();

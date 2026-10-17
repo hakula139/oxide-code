@@ -362,12 +362,12 @@ fn render_pipe(pipe: &PipeCapture, budget: usize) -> String {
         head = &head[..head.len() - split_char];
         tail = &tail[continuations..];
         omitted += split_char + continuations;
+        let head = String::from_utf8_lossy(head);
+        let tail = String::from_utf8_lossy(tail);
         formatdoc! {"
-            {}
+            {head}
             ... [{omitted} bytes omitted] ...
-            {}",
-            String::from_utf8_lossy(head),
-            String::from_utf8_lossy(tail),
+            {tail}"
         }
     };
 
@@ -661,7 +661,8 @@ mod tests {
             indoc! {"
                 started
 
-                Command timed out after 1000 ms"}
+                Command timed out after 1000 ms"
+            }
         );
     }
 
@@ -749,7 +750,8 @@ mod tests {
             indoc! {"
                 partial
 
-                (exit code 1)"}
+                (exit code 1)"
+            }
         );
     }
 
@@ -874,7 +876,8 @@ mod tests {
             indoc! {"
                 done
 
-                Command timed out after 1000 ms"}
+                Command timed out after 1000 ms"
+            }
         );
         assert!(
             start.elapsed() < Duration::from_secs(3),
@@ -892,7 +895,8 @@ mod tests {
             indoc! {"
                 before
 
-                (killed by signal 9)"}
+                (killed by signal 9)"
+            }
         );
     }
 
@@ -905,7 +909,7 @@ mod tests {
         // A shim outside any Git root, then the `mingw64\bin` and `cmd` copies a Git Bash session
         // puts on `PATH`.
         let [shims, mingw, cmd, bin] =
-            [r"shims", r"Git\mingw64\bin", r"Git\cmd", r"Git\bin"].map(|d| dir.path().join(d));
+            ["shims", r"Git\mingw64\bin", r"Git\cmd", r"Git\bin"].map(|d| dir.path().join(d));
         for d in [&shims, &mingw, &cmd, &bin] {
             std::fs::create_dir_all(d).unwrap();
         }
@@ -1000,7 +1004,8 @@ mod tests {
                 hello
 
                 ... [7 bytes omitted] ...
-                world"},
+                world"
+            },
         );
     }
 
@@ -1017,7 +1022,8 @@ mod tests {
             indoc! {"
                 ab
                 ... [10 bytes omitted] ...
-                cd"},
+                cd"
+            },
         );
     }
 
@@ -1029,7 +1035,8 @@ mod tests {
             indoc! {"
                 0123
                 ... [12 bytes omitted] ...
-                4321"},
+                4321"
+            },
         );
     }
 

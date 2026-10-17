@@ -832,7 +832,7 @@ mod tests {
             },
         ] {
             let forwarded = block.apply(Delta::InputJsonDelta {
-                partial_json: r":1}".to_owned(),
+                partial_json: ":1}".to_owned(),
             });
 
             assert_eq!(forwarded, None);

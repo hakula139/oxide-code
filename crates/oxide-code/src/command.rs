@@ -79,21 +79,21 @@ pub(crate) fn model(arg: &str) -> Result<Op, String> {
                 .map(|info| format!("`{}`", info.family.id_token()))
                 .collect::<Vec<_>>()
                 .join(", ");
+            let models = format_models(hits);
             return Err(formatdoc! {"
                 Model `{arg}` is ambiguous. Pick one or use a short alias ({aliases}):
 
-                {}",
-                format_models(hits),
+                {models}"
             });
         }
         [] => {
             let hint = replacement_for(&arg)
                 .map_or_else(String::new, |info| format!(" Did you mean `{}`?", info.id));
+            let models = format_models(MODELS);
             return Err(formatdoc! {"
                 Unknown model: `{arg}`.{hint} Supported models:
 
-                {}",
-                format_models(MODELS),
+                {models}"
             });
         }
     };

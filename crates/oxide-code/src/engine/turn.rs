@@ -1407,7 +1407,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let client = FakeClient::new(vec![with_usage(
-            tool_use_turn("tool_1", "gate", r"{}"),
+            tool_use_turn("tool_1", "gate", "{}"),
             7,
             3,
         )]);
@@ -1460,7 +1460,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let client = FakeClient::new(vec![
-            tool_use_turn("tool_1", "nonexistent", r"{}"),
+            tool_use_turn("tool_1", "nonexistent", "{}"),
             text_turn("fallback"),
         ]);
         let tools = ToolRegistry::new(vec![]);
@@ -1561,7 +1561,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let turns: Vec<Vec<ResponseEvent>> = (0..CAP)
-            .map(|i| tool_use_turn(&format!("tool_{i}"), "echo", r"{}"))
+            .map(|i| tool_use_turn(&format!("tool_{i}"), "echo", "{}"))
             .collect();
         let client = FakeClient::new(turns);
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
@@ -1597,7 +1597,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let turns: Vec<Vec<ResponseEvent>> = (0..CAP)
-            .map(|i| with_usage(tool_use_turn(&format!("tool_{i}"), "echo", r"{}"), 5, 2))
+            .map(|i| with_usage(tool_use_turn(&format!("tool_{i}"), "echo", "{}"), 5, 2))
             .collect();
         let client = FakeClient::new(turns);
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
@@ -1636,7 +1636,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let mut turns: Vec<Vec<ResponseEvent>> = (0..50)
-            .map(|i| tool_use_turn(&format!("tool_{i}"), "echo", r"{}"))
+            .map(|i| tool_use_turn(&format!("tool_{i}"), "echo", "{}"))
             .collect();
         turns.push(text_turn("done"));
         let client = FakeClient::new(turns);
@@ -1696,7 +1696,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let client = FakeClient::new(vec![with_usage(
-            tool_use_turn("tool_1", "echo", r"{}"),
+            tool_use_turn("tool_1", "echo", "{}"),
             9,
             4,
         )])

@@ -123,6 +123,7 @@ pub(crate) fn sse_response(body: String) -> ResponseTemplate {
 pub(crate) fn sse_body(frames: &[serde_json::Value]) -> String {
     let mut body = String::new();
     for frame in frames {
+        let event = frame["type"].as_str().unwrap();
         _ = writedoc!(
             body,
             "
@@ -130,7 +131,6 @@ pub(crate) fn sse_body(frames: &[serde_json::Value]) -> String {
             data: {frame}
 
             ",
-            event = frame["type"].as_str().unwrap(),
         );
     }
     body

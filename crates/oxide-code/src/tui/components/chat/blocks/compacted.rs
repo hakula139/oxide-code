@@ -180,9 +180,9 @@ mod tests {
             4,
             None,
             indoc! {"
-            - Done: shipped /compact
-            - Next: tests
-        "},
+                - Done: shipped /compact
+                - Next: tests
+            "},
         );
         let lines = block.render(&ctx_at(60, &theme));
         // Body lines start at index 2 (header + gutter).

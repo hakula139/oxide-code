@@ -54,7 +54,7 @@ const RETRY_TURN_CLOSE_MARKER: &str = "[Stopped here to summarize the conversati
 /// User-message rubric. Five short asks keep the summary compact without named sections. The
 /// request still carries the conversation's tools, so the last sentence keeps the model from
 /// calling one.
-const SUMMARIZATION_USER_RUBRIC: &str = indoc! {r"
+const SUMMARIZATION_USER_RUBRIC: &str = indoc! {"
     Summarize the conversation above so another instance of yourself can pick up where this one left
     off. Capture, in this order:
 
@@ -499,6 +499,7 @@ fn retry_request(kept: &[Message], rubric: &Message) -> Vec<Message> {
 
 /// Composes the rubric plus optional user-supplied focus instructions.
 fn build_user_message(instructions: Option<&str>) -> String {
+    let rubric = SUMMARIZATION_USER_RUBRIC.trim();
     match instructions.map(str::trim).filter(|s| !s.is_empty()) {
         Some(extra) => formatdoc! {"
             {rubric}
@@ -506,8 +507,8 @@ fn build_user_message(instructions: Option<&str>) -> String {
             Additional instructions from the engineer:
 
             {extra}
-        ", rubric = SUMMARIZATION_USER_RUBRIC.trim()},
-        None => SUMMARIZATION_USER_RUBRIC.trim().to_owned(),
+        "},
+        None => rubric.to_owned(),
     }
 }
 

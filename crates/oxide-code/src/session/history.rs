@@ -398,7 +398,8 @@ mod tests {
         let reminder = indoc! {"
             <system-reminder>
             Today's date is 2026-04-13.
-            </system-reminder>"};
+            </system-reminder>"
+        };
         let messages = [
             Message {
                 role: Role::User,

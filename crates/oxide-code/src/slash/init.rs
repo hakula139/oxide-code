@@ -87,7 +87,7 @@ fn prompt(text: String) -> Action {
 // ── Prompts ──
 
 /// What an instruction file should hold, shared by the create and update prompts.
-const RUBRIC: &str = indoc! {r"
+const RUBRIC: &str = indoc! {"
     An instruction file should include only what an agent would get wrong without it:
 
     1. Build / lint / test commands the agent can't infer from manifest files. Include any flags or

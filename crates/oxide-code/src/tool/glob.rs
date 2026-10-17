@@ -600,7 +600,8 @@ mod tests {
             indoc! {"
                 config.toml
 
-                (1 file withheld by read deny or ask rules)"}
+                (1 file withheld by read deny or ask rules)"
+            }
         );
         assert_eq!(result.truncated_total, None);
         assert_eq!(
@@ -622,7 +623,8 @@ mod tests {
             indoc! {"
                 No files found
 
-                (1 file withheld by read deny or ask rules)"}
+                (1 file withheld by read deny or ask rules)"
+            }
         );
     }
 
@@ -639,13 +641,13 @@ mod tests {
         let read_filter = deny_reads(&[".env"]);
 
         let result = glob_in("*", Some("config"), &cwd, &read_filter).unwrap();
+        let app = outside.join("app.toml").display().to_string();
         assert_eq!(
             result.content,
             formatdoc! {"
-                {}
+                {app}
 
-                (1 file withheld by read deny or ask rules)",
-                outside.join("app.toml").display()
+                (1 file withheld by read deny or ask rules)"
             }
         );
     }

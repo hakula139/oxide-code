@@ -42,6 +42,13 @@ impl Environment {
     }
 
     pub(super) fn render(&self) -> String {
+        let Self {
+            cwd,
+            is_git,
+            platform,
+            shell,
+            os_version,
+        } = self;
         formatdoc! {"
             # Environment
 
@@ -51,12 +58,7 @@ impl Environment {
               - Is a git repository: {is_git}
             - Platform: {platform}
             - Shell: {shell}
-            - OS Version: {os_version}",
-            cwd = self.cwd,
-            is_git = self.is_git,
-            platform = self.platform,
-            shell = self.shell,
-            os_version = self.os_version,
+            - OS Version: {os_version}"
         }
     }
 }
