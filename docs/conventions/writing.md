@@ -19,17 +19,21 @@ Conventions for comments, docstrings, documentation, commit and PR text, and str
 
 ## Prose
 
-These rules apply to comments, docs, commit messages, PR and issue text, and strings shown to users or the model. Many Rust comments predate these rules. Issue [#220](https://github.com/hakula139/oxide-code/issues/220) tracks updating them.
+These rules apply to comments, docs, commit messages, PR and issue text, `#[expect]` reasons, and strings shown to users or the model. Many Rust comments predate these rules. Issue [#220](https://github.com/hakula139/oxide-code/issues/220) tracks updating them.
 
 - State conclusions directly and match each claim's strength to its evidence. Describe what you checked, and avoid absolute claims such as "bug-free" or "guaranteed".
+- Say each thing once, using the fewest words that preserve its meaning. Give messages of the same kind a consistent shape, such as stating the cause followed by the step that fixes it.
 - Connect related thoughts with a period or a linking word such as `since`, `because`, `while`, `so`, or `but`. Use an em-dash only as a paired parenthetical or to separate a list label from its gloss.
 - Avoid semicolons in prose. They are fine in code and literal syntax, and between list items that contain commas.
 - Define things by what they are. Add a contrast with what they are not only when omitting it could lead to a materially wrong reading.
 - Avoid lists of three or more similarly structured phrases when they add rhythm without supporting the argument.
 - Use American spelling in prose and identifiers, such as `behavior`, `catalog`, and `recognize`. `cspell` uses an American English dictionary that also accepts some British forms, including `catalogue`. Keep the double l in `cancelled` and `cancelling` to match ecosystem names such as tokio-util's `is_cancelled` and `cancelled()`, and GitHub's `CANCELLED` check state.
+- In strings shown to users and in `#[expect]` reasons, terminal punctuation separates sentences. One-sentence text, such as a status line, label, notice, or error, takes no final period, whether or not it is grammatically complete, and a question keeps its `?`. Text with two or more sentences ends each sentence with terminal punctuation, including the last. Text the model reads, such as prompts, tool descriptions and schemas, tool results, and transcript markers, keeps its punctuation.
+- Text composed around variable external content, such as an API payload, an `{e:#}` cause, or a refusal explanation, may trim a trailing period from the inserted value so the sentence ends once. A raw payload is quoted as is, as in the `Details: {body}` tail of an API error.
+- Begin standalone text, such as a notice or slash-command error, with a capital letter. Begin a fragment that forms part of an error chain with a lowercase letter because it continues the headline before its colon. Keep identifiers and proper nouns in their original case wherever they appear, as in a message that starts with `macOS` or `old_string`.
+- Place commas and periods outside closing quotation marks.
 - Use straight quotes. Arrows and comparison operators (`→`, `≤`, `≠`) are welcome.
 - Put spaces around `/` and arrows when they separate words or phrases, as in `Read / Write` and `low → high`. Keep compound terms such as `I/O` tight.
-- Place commas and periods outside closing quotation marks.
 
 ## Markdown
 

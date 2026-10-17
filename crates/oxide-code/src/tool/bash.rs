@@ -263,7 +263,7 @@ fn timeout_output(timeout: Duration, stdout: &PipeCapture, stderr: &PipeCapture)
     let mut content = render_streams(stdout, stderr);
     push_footer(
         &mut content,
-        &format!("Command timed out after {}ms", timeout.as_millis()),
+        &format!("Command timed out after {} ms", timeout.as_millis()),
     );
     ToolOutput::error(content)
 }
@@ -292,7 +292,7 @@ fn bash() -> io::Result<&'static Path> {
     GIT_BASH.as_deref().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
-            "Git Bash not found. Install Git for Windows and put git.exe on PATH",
+            "Git Bash not found. Install Git for Windows and put git.exe on PATH.",
         )
     })
 }
@@ -661,7 +661,7 @@ mod tests {
             indoc! {"
                 started
 
-                Command timed out after 1000ms"}
+                Command timed out after 1000 ms"}
         );
     }
 
@@ -791,7 +791,7 @@ mod tests {
         let start = std::time::Instant::now();
         let output = execute(&command, Duration::from_millis(100), &temp_ctx()).await;
         assert!(output.is_error, "expected timeout");
-        assert_eq!(output.content, "Command timed out after 100ms");
+        assert_eq!(output.content, "Command timed out after 100 ms");
         assert!(
             start.elapsed() < Duration::from_millis(500),
             "timeout did not return promptly",
@@ -874,7 +874,7 @@ mod tests {
             indoc! {"
                 done
 
-                Command timed out after 1000ms"}
+                Command timed out after 1000 ms"}
         );
         assert!(
             start.elapsed() < Duration::from_secs(3),

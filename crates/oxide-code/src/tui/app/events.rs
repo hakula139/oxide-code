@@ -292,7 +292,7 @@ impl App {
     fn apply_mode_changed(&mut self, mode: Mode) {
         self.session_info.config.apply_mode(mode);
         self.chat
-            .push_system_message(format!("Switched to {mode} mode."));
+            .push_system_message(format!("Switched to {mode} mode"));
     }
 
     /// Opens `url` in the browser and prints it in case the browser does not open. The sign-in
@@ -407,40 +407,37 @@ fn format_config_change(
     prev_auto_compaction: AutoCompactionConfig,
     new_auto_compaction: AutoCompactionConfig,
 ) -> String {
-    let message = if model_changed {
-        let head = format!("Switched to {} ({})", model.display_name(), model.id());
-        match (requested_effort, prev_effort, new_effort) {
-            (Some(req), _, None) => format!("{head}. {}", req.unapplied_notice()),
-            (None, None, None) => format!("{head}."),
-            (None, Some(_), None) => format!("{head}. Effort cleared (model has no effort tier)."),
-            (None, None, Some(eff)) => format!("{head} · effort {eff} (model default)."),
-            (_, _, Some(eff)) => format!("{head} · effort {eff}."),
-        }
-    } else {
-        match (requested_effort, new_effort) {
+    if !model_changed {
+        return match (requested_effort, new_effort) {
             (Some(req), None) => req.unapplied_notice(),
-            (_, Some(eff)) => format!("Effort set to {eff}."),
+            (_, Some(eff)) => format!("Effort set to {eff}"),
             // Slash dispatch keeps this unreachable, but a clear fallback beats a panic.
-            (None, None) => "Config unchanged.".to_owned(),
-        }
+            (None, None) => "Config unchanged".to_owned(),
+        };
+    }
+    let switched = format!("Switched to {} ({})", model.display_name(), model.id());
+    let (head, effort) = match (requested_effort, prev_effort, new_effort) {
+        (Some(req), _, None) => (switched, Some(req.unapplied_notice())),
+        (None, None, None) => (switched, None),
+        (None, Some(_), None) => (
+            switched,
+            Some("Effort cleared (model has no effort tier)".to_owned()),
+        ),
+        (None, None, Some(eff)) => (format!("{switched} · effort {eff} (model default)"), None),
+        (_, _, Some(eff)) => (format!("{switched} · effort {eff}"), None),
     };
-    if model_changed && prev_auto_compaction != new_auto_compaction {
-        return append_sentence(
-            message,
-            &format!(
-                "Auto compaction {}",
-                display_auto_compaction(new_auto_compaction)
-            ),
-        );
+    let compaction = (prev_auto_compaction != new_auto_compaction).then(|| {
+        format!(
+            "Auto compaction {}",
+            display_auto_compaction(new_auto_compaction)
+        )
+    });
+    match (effort, compaction) {
+        (None, None) => head,
+        (Some(effort), None) => format!("{head}. {effort}."),
+        (None, Some(compaction)) => format!("{head}. {compaction}."),
+        (Some(effort), Some(compaction)) => format!("{head}. {effort}. {compaction}."),
     }
-    message
-}
-
-fn append_sentence(mut message: String, sentence: &str) -> String {
-    if message.ends_with('.') {
-        message.pop();
-    }
-    format!("{message}. {sentence}.")
 }
 
 #[cfg(test)]
@@ -595,7 +592,7 @@ mod tests {
         assert_eq!(app.session_info.config.effort, Some(Effort::Xhigh),);
         assert_eq!(app.status_bar.model(), original_model);
         let body = app.chat.last_system_text().expect("confirmation block");
-        assert_eq!(body, "Effort set to xhigh.");
+        assert_eq!(body, "Effort set to xhigh");
         assert!(app.dirty);
     }
 
@@ -610,7 +607,7 @@ mod tests {
             app.session_info.config.provenance.permission_mode,
             Source::Session
         );
-        assert_eq!(app.chat.last_system_text(), Some("Switched to plan mode."));
+        assert_eq!(app.chat.last_system_text(), Some("Switched to plan mode"));
         let text = rendered_text(&mut app, 120, 12);
         assert!(text.contains("Mode: plan"), "{text}");
     }
@@ -987,7 +984,7 @@ mod tests {
 
         assert_eq!(app.chat.entry_count(), 2);
         let text = rendered_text(&mut app, 80, 12);
-        assert!(text.contains("Unarchived session bbbb2222."), "{text}");
+        assert!(text.contains("Unarchived session bbbb2222"), "{text}");
     }
 
     #[test]
@@ -1552,7 +1549,7 @@ mod tests {
         rx.recv().await.expect("queued submit forwarded");
 
         app.handle_engine_event(Event::Retrying(
-            "HTTP 529 overloaded_error. Retrying in 1s (retry 1 of 5).".to_owned(),
+            "HTTP 529 overloaded_error. Retrying in 1 s (retry 1 of 5).".to_owned(),
         ));
         assert!(!app.chat.last_is_error(), "a retry is not an error block");
         app.handle_engine_event(Event::Error("Session write failed: disk full".to_owned()));
@@ -1790,7 +1787,7 @@ mod tests {
             base_auto_compaction(),
             base_auto_compaction(),
         );
-        assert_eq!(s, "Switched to custom-model (custom-model).");
+        assert_eq!(s, "Switched to custom-model (custom-model)");
     }
 
     #[test]
@@ -1809,7 +1806,7 @@ mod tests {
         assert_eq!(
             s,
             "Switched to custom-model (custom-model). \
-             Effort unchanged: model has no effort tier (asked for high).",
+             Effort unchanged (model has no effort tier, asked for high).",
         );
     }
 
@@ -1847,7 +1844,7 @@ mod tests {
         );
         assert_eq!(
             s,
-            "Switched to Claude Opus 5.5 (claude-opus-5-5) · effort medium (model default)."
+            "Switched to Claude Opus 5.5 (claude-opus-5-5) · effort medium (model default)"
         );
     }
 
@@ -1870,7 +1867,7 @@ mod tests {
             );
             assert_eq!(
                 s,
-                format!("Switched to Claude Opus 5.5 (claude-opus-5-5) · effort {new}."),
+                format!("Switched to Claude Opus 5.5 (claude-opus-5-5) · effort {new}"),
             );
         }
     }
@@ -1886,7 +1883,7 @@ mod tests {
             base_auto_compaction(),
             base_auto_compaction(),
         );
-        assert_eq!(s, "Effort set to xhigh.");
+        assert_eq!(s, "Effort set to xhigh");
     }
 
     #[test]
@@ -1903,7 +1900,7 @@ mod tests {
         );
         assert_eq!(
             s,
-            "Effort unchanged: model has no effort tier (asked for high)."
+            "Effort unchanged (model has no effort tier, asked for high)"
         );
     }
 
@@ -1918,7 +1915,7 @@ mod tests {
             base_auto_compaction(),
             base_auto_compaction(),
         );
-        assert_eq!(s, "Config unchanged.");
+        assert_eq!(s, "Config unchanged");
     }
 
     #[test]
@@ -1942,6 +1939,34 @@ mod tests {
             s,
             format!(
                 "Switched to Claude Sonnet 5.5 (claude-sonnet-5-5) · effort high. \
+                 Auto compaction at {} tokens.",
+                test_thresholds::WINDOW_1M,
+            ),
+        );
+    }
+
+    #[test]
+    fn format_config_change_model_swap_reports_lost_effort_and_compaction_change() {
+        let new_auto_compaction = AutoCompactionConfig {
+            enabled: true,
+            threshold_tokens: Some(test_thresholds::WINDOW_1M),
+        };
+
+        let s = format_config_change(
+            &spec("custom-model"),
+            true,
+            Some(Effort::High),
+            None,
+            Some(Effort::Max),
+            base_auto_compaction(),
+            new_auto_compaction,
+        );
+
+        assert_eq!(
+            s,
+            format!(
+                "Switched to custom-model (custom-model). \
+                 Effort unchanged (model has no effort tier, asked for max). \
                  Auto compaction at {} tokens.",
                 test_thresholds::WINDOW_1M,
             ),

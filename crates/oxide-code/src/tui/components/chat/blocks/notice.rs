@@ -33,7 +33,7 @@ mod tests {
     #[test]
     fn render_wraps_the_text_in_the_dim_style() {
         let theme = Theme::default();
-        let text = "HTTP 529 overloaded_error. Retrying in 4s (retry 2 of 5).";
+        let text = "HTTP 529 overloaded_error. Retrying in 4 s (retry 2 of 5).";
         let block = NoticeBlock::new(text);
 
         let lines = block.render(&RenderCtx {

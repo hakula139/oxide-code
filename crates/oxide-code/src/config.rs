@@ -150,7 +150,7 @@ impl Effort {
 
     /// Notes that the model has no effort tier, so this requested effort did not apply.
     pub(crate) fn unapplied_notice(self) -> String {
-        format!("Effort unchanged: model has no effort tier (asked for {self}).")
+        format!("Effort unchanged (model has no effort tier, asked for {self})")
     }
 }
 
@@ -1719,10 +1719,11 @@ mod tests {
         let err = load_with(&dir, &[("OX_STATUS_LINE", "model,,run-state")])
             .await
             .expect_err("stray comma must surface as a typo");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("OX_STATUS_LINE"), "{msg}");
-        assert!(msg.contains("empty segment"), "{msg}");
-        assert!(msg.contains("stray comma"), "{msg}");
+        assert_eq!(
+            format!("{err:#}"),
+            "invalid OX_STATUS_LINE \"model,,run-state\": empty segment between commas. Remove the \
+             stray comma.",
+        );
     }
 
     #[tokio::test]

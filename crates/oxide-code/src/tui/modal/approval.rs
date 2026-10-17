@@ -121,7 +121,7 @@ impl Edit {
                             rule: Box::new(rule),
                         }),
                         Err(e) => {
-                            self.error = Some(format!("{e:#}"));
+                            self.error = Some(format!("Rule rejected: {e:#}"));
                             EditStep::Stay
                         }
                     },
@@ -832,7 +832,7 @@ mod tests {
                 title: "Bash".to_owned(),
                 body: ApprovalBody::Command("git push".to_owned()),
             },
-            Some("Held by the `ask.exec` pattern `git push *`.".to_owned()),
+            Some("Held by the `ask.exec` pattern `git push *`".to_owned()),
             None,
         );
 
@@ -841,7 +841,7 @@ mod tests {
         let expected = indoc! {"
             Bash
             Held by the `ask.exec` pattern
-              `git push *`.
+              `git push *`
 
             git push
 
@@ -911,7 +911,7 @@ mod tests {
                 decision,
             }))) = outcome
             else {
-                panic!("{code:?} must Submit an Approve decision; got {outcome:?}");
+                panic!("{code:?} must Submit an Approve decision, got {outcome:?}");
             };
             assert_eq!(id, "call-1");
             assert_eq!(decision, Decision::Approve);
@@ -925,7 +925,7 @@ mod tests {
         let ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::Resolve { id, decision }))) =
             outcome
         else {
-            panic!("N must submit a Deny decision; got {outcome:?}");
+            panic!("N must submit a Deny decision, got {outcome:?}");
         };
         assert_eq!(id, "call-1");
         assert_eq!(decision, Decision::Deny);
@@ -1097,7 +1097,7 @@ mod tests {
         let ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::Resolve { id, decision }))) =
             outcome
         else {
-            panic!("Enter must submit the session rule; got {outcome:?}");
+            panic!("Enter must submit the session rule, got {outcome:?}");
         };
         assert_eq!(id, "call-1");
         let Decision::AllowForSession { rule } = decision else {
@@ -1188,8 +1188,8 @@ mod tests {
         assert!(
             error.windows(2).any(|lines| lines
                 == [
-                    r#"the word "$X" expands at run time. Quote it to match it as"#,
-                    "written.",
+                    r#"Rule rejected: the word "$X" expands at run time. Quote it"#,
+                    "to match it as written.",
                 ]),
             "{rejected}"
         );
@@ -1251,7 +1251,7 @@ mod tests {
         let ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::Resolve { id, decision }))) =
             outcome
         else {
-            panic!("Enter must submit the feedback; got {outcome:?}");
+            panic!("Enter must submit the feedback, got {outcome:?}");
         };
         assert_eq!(id, "call-1");
         assert_eq!(
@@ -1297,7 +1297,7 @@ mod tests {
             .on_cancel()
             .expect("approval cancel must resolve the call");
         let ModalAction::Dispatch(Action::Op(Op::Resolve { id, decision })) = action else {
-            panic!("on_cancel must resolve via Op::Resolve; got {action:?}");
+            panic!("on_cancel must resolve via Op::Resolve, got {action:?}");
         };
         assert_eq!(id, "call-1");
         assert_eq!(decision, Decision::Abort);

@@ -1,5 +1,5 @@
 //! Archive and delete for saved sessions, shared by the typed slash commands and the resume
-//! picker. Failures are complete sentences for the user.
+//! picker. Each failure is a message ready to show the user.
 
 use std::path::Path;
 

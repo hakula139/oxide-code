@@ -207,13 +207,13 @@ impl ModelSpec {
         }
         let mut notice = format!(
             "`{}` is not a supported model, so requests go without thinking, effort, and context \
-             management, and auto-compaction and cost tracking stay off.",
+             management, and auto-compaction and cost tracking stay off",
             self.id,
         );
         if let Some(info) = replacement_for(&self.id) {
             _ = write!(
                 notice,
-                " Did you mean `{}` ({})?",
+                ". Did you mean `{}` ({})?",
                 info.id, info.display_name
             );
         }
@@ -550,7 +550,7 @@ mod tests {
             spec("gateway-model").unsupported_notice().as_deref(),
             Some(
                 "`gateway-model` is not a supported model, so requests go without thinking, \
-                 effort, and context management, and auto-compaction and cost tracking stay off."
+                 effort, and context management, and auto-compaction and cost tracking stay off"
             ),
         );
     }

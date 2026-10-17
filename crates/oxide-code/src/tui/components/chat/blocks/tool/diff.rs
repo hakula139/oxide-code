@@ -494,7 +494,7 @@ mod tests {
         assert_eq!(
             render_entries(&entries),
             vec!["- a", "- b", "+ c", "+ d", "... +2", "+ g"],
-            "old fits in its budget; new uses head + ellipsis + tail",
+            "old fits in its budget, while new uses head + ellipsis + tail",
         );
     }
 

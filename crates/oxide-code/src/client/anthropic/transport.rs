@@ -141,7 +141,7 @@ impl fmt::Display for RetryNotice {
         let secs = self.delay.as_secs() + u64::from(self.delay.subsec_nanos() > 0);
         write!(
             f,
-            "{}. Retrying in {secs}s (retry {} of {MAX_RETRIES}).",
+            "{}. Retrying in {secs} s (retry {} of {MAX_RETRIES}).",
             self.cause, self.retry,
         )
     }
@@ -179,7 +179,10 @@ pub(super) async fn post_messages(
             if e.is_builder() {
                 AttemptError::Fatal(e.into())
             } else {
-                AttemptError::retryable("Connection failed", e.into())
+                AttemptError::retryable(
+                    "API connection failed",
+                    anyhow::Error::new(e).context("API connection failed"),
+                )
             }
         })?;
     error_for_status(response, request.auth).await
@@ -305,6 +308,13 @@ fn parse_retry_after(value: &str) -> Option<Duration> {
     value.trim().parse().ok().map(Duration::from_secs)
 }
 
+/// Headline of an overload, reported as HTTP 529 or an in-band `overloaded_error`.
+const OVERLOADED: &str = "Anthropic API overloaded";
+/// Headline of a server failure, reported as a 5xx status or an in-band `api_error`.
+const SERVER_ERROR: &str = "Anthropic API server error";
+/// Advice for an overload or a server failure, both of which usually pass.
+const TRANSIENT_ADVICE: &str = "Retry in a few seconds.";
+
 /// Renders a user-facing diagnostic for a non-2xx Anthropic response, with a per-status hint and
 /// any non-blank response body appended for debugging.
 fn format_api_error(
@@ -314,37 +324,62 @@ fn format_api_error(
     location: Option<&str>,
     body: &str,
 ) -> String {
-    let prefix = match status.as_u16() {
+    let (headline, advice) = match status.as_u16() {
         300..=399 => {
             let target = location
                 .and_then(|location| reqwest::Url::parse(location).ok())
                 .and_then(|url| url.host_str().map(|host| format!(" to {host}")))
                 .unwrap_or_default();
-            format!(
-                "Anthropic API endpoint redirected (HTTP {status}){target}. Redirects are not \
-                 followed, so point the base URL at the final endpoint."
+            (
+                format!("Anthropic API endpoint redirected (HTTP {status}){target}"),
+                Some(
+                    "Redirects are not followed, so point the base URL at the final endpoint."
+                        .to_owned(),
+                ),
             )
         }
-        401 => format!(
-            "Anthropic API rejected credentials (HTTP 401). {}",
-            auth.rejection_hint(),
+        401 => (
+            "Anthropic API rejected credentials (HTTP 401)".to_owned(),
+            Some(auth.rejection_hint().to_owned()),
         ),
-        429 => match retry_after {
-            Some(after) => format!(
-                "Anthropic API rate limited (HTTP 429). Retry after {} s.",
-                after.as_secs(),
-            ),
-            None => "Anthropic API rate limited (HTTP 429). Retry after a short delay.".to_owned(),
-        },
-        529 => "Anthropic API overloaded (HTTP 529). This is usually transient, so retry in a few seconds.".to_owned(),
-        s if (500..600).contains(&s) => {
-            format!("Anthropic API server error (HTTP {status}). This is usually transient, so retry.")
-        }
-        _ => format!("API error (HTTP {status})."),
+        429 => (
+            "Anthropic API rate limited (HTTP 429)".to_owned(),
+            Some(match retry_after {
+                Some(after) => format!("Retry after {} s.", after.as_secs()),
+                None => "Retry after a short delay.".to_owned(),
+            }),
+        ),
+        529 => (
+            format!("{OVERLOADED} (HTTP 529)"),
+            Some(TRANSIENT_ADVICE.to_owned()),
+        ),
+        s if (500..600).contains(&s) => (
+            format!("{SERVER_ERROR} (HTTP {status})"),
+            Some(TRANSIENT_ADVICE.to_owned()),
+        ),
+        _ => (format!("API error (HTTP {status})"), None),
     };
-    match body.trim() {
-        "" => prefix,
-        body => format!("{prefix} Details: {body}"),
+    with_details(&headline, advice.as_deref(), body)
+}
+
+/// Renders an in-band SSE `error` event in the shape of the HTTP diagnostic for the same failure,
+/// so an `overloaded_error` reads like HTTP 529 and an `api_error` like HTTP 500.
+pub(super) fn format_stream_error(error_type: &str, message: &str) -> String {
+    let (headline, advice) = match error_type {
+        "overloaded_error" => (OVERLOADED, Some(TRANSIENT_ADVICE)),
+        "api_error" => (SERVER_ERROR, Some(TRANSIENT_ADVICE)),
+        _ => ("API error", None),
+    };
+    with_details(&format!("{headline} ({error_type})"), advice, message)
+}
+
+/// Joins a diagnostic's headline and advice, then appends any non-blank server details as is.
+fn with_details(headline: &str, advice: Option<&str>, details: &str) -> String {
+    match (advice, details.trim()) {
+        (None, "") => headline.to_owned(),
+        (None, details) => format!("{headline}. Details: {details}"),
+        (Some(advice), "") => format!("{headline}. {advice}"),
+        (Some(advice), details) => format!("{headline}. {advice} Details: {details}"),
     }
 }
 
@@ -479,11 +514,11 @@ mod tests {
         };
         assert_eq!(
             notice(Duration::from_millis(3200)).to_string(),
-            "HTTP 529 overloaded_error. Retrying in 4s (retry 2 of 5).",
+            "HTTP 529 overloaded_error. Retrying in 4 s (retry 2 of 5).",
         );
         assert_eq!(
             notice(Duration::from_secs(8)).to_string(),
-            "HTTP 529 overloaded_error. Retrying in 8s (retry 2 of 5).",
+            "HTTP 529 overloaded_error. Retrying in 8 s (retry 2 of 5).",
         );
     }
 
@@ -548,7 +583,14 @@ mod tests {
         let err = post_messages(&reqwest::Client::new(), &req, 0)
             .await
             .expect_err("nothing listens on the discard port");
-        assert!(matches!(err, AttemptError::Retryable { .. }), "{err:?}");
+        let AttemptError::Retryable { error, cause, .. } = &err else {
+            panic!("expected a retryable error, got {err:?}");
+        };
+        assert_eq!(cause, "API connection failed");
+        assert!(
+            format!("{error:#}").starts_with("API connection failed: "),
+            "{error:#}"
+        );
     }
 
     #[tokio::test]
@@ -828,12 +870,12 @@ mod tests {
             (
                 529,
                 None,
-                "Anthropic API overloaded (HTTP 529). This is usually transient, so retry in a few seconds.",
+                "Anthropic API overloaded (HTTP 529). Retry in a few seconds.",
             ),
             (
                 502,
                 None,
-                "Anthropic API server error (HTTP 502 Bad Gateway). This is usually transient, so retry.",
+                "Anthropic API server error (HTTP 502 Bad Gateway). Retry in a few seconds.",
             ),
             (400, secs, "API error (HTTP 400 Bad Request)."),
         ] {
@@ -874,8 +916,8 @@ mod tests {
     #[test]
     fn format_api_error_trims_the_body_and_omits_a_blank_one() {
         for (body, expected) in [
-            ("", "API error (HTTP 400 Bad Request)."),
-            (" \r\n", "API error (HTTP 400 Bad Request)."),
+            ("", "API error (HTTP 400 Bad Request)"),
+            (" \r\n", "API error (HTTP 400 Bad Request)"),
             (
                 "\n  boom\n",
                 "API error (HTTP 400 Bad Request). Details: boom",
@@ -891,6 +933,34 @@ mod tests {
                 ),
                 expected,
                 "{body:?}",
+            );
+        }
+    }
+
+    // ── format_stream_error ──
+
+    #[test]
+    fn format_stream_error_matches_the_http_diagnostic_for_transient_failures() {
+        for (error_type, expected) in [
+            (
+                "overloaded_error",
+                "Anthropic API overloaded (overloaded_error). Retry in a few seconds. \
+                 Details: Overloaded",
+            ),
+            (
+                "api_error",
+                "Anthropic API server error (api_error). Retry in a few seconds. \
+                 Details: Overloaded",
+            ),
+            (
+                "invalid_request_error",
+                "API error (invalid_request_error). Details: Overloaded",
+            ),
+        ] {
+            assert_eq!(
+                format_stream_error(error_type, "Overloaded"),
+                expected,
+                "{error_type}"
             );
         }
     }

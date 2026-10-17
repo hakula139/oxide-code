@@ -150,9 +150,7 @@ impl Client {
 
     /// The credential used by requests, or an error while signed out.
     pub(crate) fn auth(&self) -> Result<&Auth> {
-        self.auth
-            .as_ref()
-            .context("Not signed in. Run /login to sign in.")
+        self.auth.as_ref().context("not signed in")
     }
 
     #[cfg(test)]
@@ -861,10 +859,7 @@ mod tests {
         );
         assert_eq!(request_header(&request, "x-api-key"), None);
         assert_eq!(client.auth_source(), None);
-        assert_eq!(
-            signed_out.to_string(),
-            "Not signed in. Run /login to sign in."
-        );
+        assert_eq!(signed_out.to_string(), "not signed in");
     }
 
     // ── Client::stream_message ──
@@ -1293,7 +1288,7 @@ mod tests {
 
         assert_eq!(
             format!("{err:#}"),
-            "API error (invalid_request_error): Bad block"
+            "API error (invalid_request_error). Details: Bad block"
         );
         assert_eq!(
             server.received_requests().await.unwrap().len(),

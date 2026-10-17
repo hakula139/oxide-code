@@ -119,11 +119,11 @@ impl PendingLogin {
                     };
                     match parse_callback(&target, &self.state) {
                         Callback::Elsewhere => {
-                            respond(&mut stream, &plain_text("404 Not Found", "Not found.")).await;
+                            respond(&mut stream, &plain_text("404 Not Found", "Not found")).await;
                         }
                         Callback::Foreign => {
                             debug!("refusing a callback from another sign-in attempt");
-                            let reply = plain_text("400 Bad Request", "Unknown sign-in attempt.");
+                            let reply = plain_text("400 Bad Request", "Unknown sign-in attempt");
                             respond(&mut stream, &reply).await;
                         }
                         Callback::Code(code) => return Ok((stream, code)),
@@ -499,7 +499,7 @@ mod tests {
             not_found.starts_with("HTTP/1.1 404 Not Found\r\n"),
             "{not_found}"
         );
-        assert!(not_found.ends_with("\r\n\r\nNot found."), "{not_found}");
+        assert!(not_found.ends_with("\r\n\r\nNot found"), "{not_found}");
         assert!(
             foreign.starts_with("HTTP/1.1 400 Bad Request\r\n"),
             "{foreign}"

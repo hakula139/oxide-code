@@ -95,17 +95,14 @@ mod tests {
         // {abort:#} must delegate to the inner anyhow Error's alternate form so the full cause
         // chain reaches the user. Plain {abort} surfaces only the outermost context.
         let inner = anyhow!("HTTP 503 from upstream");
-        let chained = inner.context("stream error");
+        let chained = inner.context("request failed");
         let abort = TurnAbort::Failed(chained);
 
         let plain = format!("{abort}");
         let alternate = format!("{abort:#}");
 
-        assert_eq!(plain, "stream error");
-        assert!(
-            alternate.contains("stream error") && alternate.contains("HTTP 503 from upstream"),
-            "alternate must include both layers: {alternate:?}",
-        );
+        assert_eq!(plain, "request failed");
+        assert_eq!(alternate, "request failed: HTTP 503 from upstream");
     }
 
     #[test]
