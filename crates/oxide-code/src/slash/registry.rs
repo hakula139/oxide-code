@@ -24,13 +24,13 @@ use crate::tui::modal::Modal;
 
 /// What a command hands back for the App to apply.
 pub(crate) enum SlashOutcome {
-    /// Dispatch a state-mutating action, applied locally or sent to the engine as an op.
+    /// Dispatches a state-mutating action, applied locally or sent to the engine as an op.
     Forward(Action),
-    /// Open a modal over the input. The modal is the command's whole response.
+    /// Opens a modal over the input. The modal is the command's whole response.
     Modal(Box<dyn Modal>),
-    /// Print a system message into chat.
+    /// Prints a system message into chat.
     SystemMessage(String),
-    /// Print a unified git diff into chat.
+    /// Prints a unified git diff into chat.
     GitDiff(String),
 }
 

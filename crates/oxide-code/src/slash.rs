@@ -42,7 +42,7 @@ pub(crate) use resume::ResumePicker;
 use crate::command;
 use crate::protocol::Op;
 
-/// Filter the built-in registry against a popup query (leading `/` stripped).
+/// Filters the built-in registry against a popup query (leading `/` stripped).
 pub(crate) fn filter_built_ins(query: &str) -> Vec<MatchedCommand> {
     matcher::filter_and_rank(query, registry::BUILT_INS)
 }
@@ -131,7 +131,7 @@ pub(crate) fn stamped_id(byte: u8) -> String {
     uuid::Uuid::from_bytes([byte; 16]).to_string()
 }
 
-/// Run `f` with a fresh `XDG_DATA_HOME` so `SessionStore::open` lands in a private tempdir.
+/// Runs `f` with a fresh `XDG_DATA_HOME` so `SessionStore::open` lands in a private tempdir.
 /// Hands the directory back so callers can layer extra stores beneath the same root.
 #[cfg(test)]
 pub(crate) fn with_isolated_xdg<R>(f: impl FnOnce(&std::path::Path) -> R) -> R {

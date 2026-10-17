@@ -122,7 +122,7 @@ impl ModelEffortPicker {
         self.picked_effort = Some(Effort::ALL[next]);
     }
 
-    /// Commit both axes through one atomic `SetModel`. Each axis is `Some` only when it differs
+    /// Commits both axes through one atomic `SetModel`. Each axis is `Some` only when it differs
     /// from the open-time state, so a no-touch Enter (or a pick that returns to the active effort)
     /// cancels without re-resolving config defaults.
     fn submit(&self) -> ModalKey {
