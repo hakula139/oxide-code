@@ -455,7 +455,7 @@ mod tests {
     };
     #[cfg(unix)]
     use crate::file_tracker::FileTracker;
-    use crate::message::Role;
+    use crate::message::{Replay, Role};
     use crate::model::ResolvedModelId;
     use crate::permission::GateTarget;
     use crate::protocol::{CapturingSink, Decision, ResumeTarget, ToolCall, ToolResult};
@@ -2421,7 +2421,7 @@ mod tests {
             role: Role::Assistant,
             content: vec![ContentBlock::Thinking {
                 thinking: INTERRUPTED_WORK_SENTINEL.to_owned(),
-                signature: "sig".to_owned(),
+                replay: Replay::without_model("sig"),
             }],
         };
         let events = |messages: &[Message]| {

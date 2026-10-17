@@ -491,7 +491,7 @@ mod tests {
         self, GateError, GatePurpose, LastView,
         testing::{record_tracked_file, seed_full_read},
     };
-    use crate::message::{ContentBlock, Role};
+    use crate::message::{ContentBlock, Replay, Role};
     use crate::prompt::PromptParts;
     use crate::session::entry::{Entry, SessionInfo};
     use crate::session::store::testing::{
@@ -1889,15 +1889,16 @@ mod tests {
     }
 
     fn assistant_with_every_block() -> Message {
+        let opus = |payload| Replay::with_model("claude-opus-5-5", payload);
         Message {
             role: Role::Assistant,
             content: vec![
                 ContentBlock::Thinking {
                     thinking: "Rename main.".to_owned(),
-                    signature: "signature".to_owned(),
+                    replay: opus("signature"),
                 },
                 ContentBlock::RedactedThinking {
-                    data: "redacted".to_owned(),
+                    replay: opus("redacted"),
                 },
                 ContentBlock::ServerToolUse {
                     id: "s1".to_owned(),

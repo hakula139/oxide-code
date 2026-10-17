@@ -244,11 +244,12 @@ impl Client {
         let http = self.http.clone();
         let betas = compute_betas(model, thinking.as_ref(), auth.kind(), true).join(",");
         let request = self.messages_request(betas, body, auth)?;
+        let model_id = model.id().to_owned();
 
         // Racing `closed` stops an in-flight request or retry backoff once the consumer is gone.
         tokio::spawn(async move {
             tokio::select! {
-                result = stream_sse(&http, &request, &tx) => {
+                result = stream_sse(&http, &request, &model_id, &tx) => {
                     if let Err(e) = result {
                         _ = tx.send(Err(e)).await;
                     }

@@ -21,7 +21,7 @@ use crate::client::anthropic::testing::{
 };
 use crate::client::{Response, ResponseEvent, StopDetails, StopReason, Wire};
 use crate::file_tracker::FileTracker;
-use crate::message::{ContentBlock, Message, Role};
+use crate::message::{ContentBlock, Message, Replay, Role};
 use crate::model::ModelSpec;
 use crate::permission::{Mode, PermissionClass, Policy};
 use crate::prompt::{self, PromptParts};
@@ -230,7 +230,7 @@ pub(super) fn text_block(text: &str) -> ContentBlock {
 pub(super) fn thinking_block(thinking: &str) -> ContentBlock {
     ContentBlock::Thinking {
         thinking: thinking.to_owned(),
-        signature: "sig".to_owned(),
+        replay: Replay::without_model("sig"),
     }
 }
 

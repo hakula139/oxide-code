@@ -860,7 +860,7 @@ mod tests {
     use crate::config::PromptCacheTtl;
     use crate::config::compaction::CompactionConfig;
     use crate::file_tracker::testing::seed_full_read;
-    use crate::message::Role;
+    use crate::message::{Replay, Role};
     use crate::permission::rule::Rule;
     use crate::protocol::CapturingSink;
     use crate::session::store::testing::test_store;
@@ -1084,7 +1084,7 @@ mod tests {
                     role: Role::Assistant,
                     content: vec![ContentBlock::Thinking {
                         thinking: turn::INTERRUPTED_WORK_SENTINEL.to_owned(),
-                        signature: String::new(),
+                        replay: Replay::without_model(""),
                     }],
                 },
             ];
@@ -2575,6 +2575,56 @@ mod tests {
                 "{reminder}"
             );
             assert!(!reminder.contains("# CLAUDE.md"), "{reminder}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn set_model_swap_keeps_sending_back_the_reasoning_of_the_previous_model() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            let reply = sse_body(&[
+                serde_json::json!({"type": "message_start", "message": {"id": "msg_1", "model": MODEL}}),
+                serde_json::json!({"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": "", "signature": ""}}),
+                serde_json::json!({"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "plan"}}),
+                serde_json::json!({"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "sig"}}),
+                serde_json::json!({"type": "content_block_start", "index": 1, "content_block": {"type": "text", "text": "reply"}}),
+                serde_json::json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}}),
+                serde_json::json!({"type": "message_stop"}),
+            ]);
+            Mock::given(method("POST"))
+                .and(path("/v1/messages"))
+                .respond_with(sse_response(reply))
+                .mount(&server)
+                .await;
+            let dir = tempfile::tempdir().unwrap();
+            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+            let sink = CapturingSink::new();
+            let (_ops_tx, mut ops) = crate::protocol::inert_op_channel();
+
+            engine.submit_prompt("first", &sink, &mut ops).await;
+            engine.set_model(
+                &sink,
+                Some(ResolvedModelId::new("claude-sonnet-5-5".to_owned())),
+                None,
+            );
+            engine.submit_prompt("second", &sink, &mut ops).await;
+
+            let turns = request_bodies(&server).await;
+            let assistant_turns: Vec<&serde_json::Value> = turns[1]["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|message| message["role"] == "assistant")
+                .collect();
+            assert_eq!(turns[1]["model"], "claude-sonnet-5-5");
+            assert_eq!(
+                assistant_turns,
+                [&serde_json::json!({"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "plan", "signature": "sig"},
+                    {"type": "text", "text": "reply"},
+                ]})],
+            );
         })
         .await;
     }
