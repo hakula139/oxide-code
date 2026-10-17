@@ -462,13 +462,20 @@ mod tests {
     // ── write_status_hyperlinks ──
 
     #[test]
-    fn write_status_hyperlinks_writes_the_plain_envelope() {
+    fn write_status_hyperlinks_writes_the_plain_envelope_inside_and_outside_tmux() {
         let link = plain_hyperlink(Rect::new(0, 0, 1, 1), "https://x", &["x"]);
-        let mut buf: Vec<u8> = Vec::new();
+        let envelope = build_status_hyperlink_envelope(std::slice::from_ref(&link)).unwrap();
 
-        write_status_hyperlinks(&mut buf, std::slice::from_ref(&link)).unwrap();
+        // CI never sets TMUX, so pin both cases against the old DCS passthrough returning.
+        for tmux in [None, Some("/tmp/tmux-1000/default,1234,0")] {
+            let mut buf: Vec<u8> = Vec::new();
 
-        assert_eq!(buf, build_status_hyperlink_envelope(&[link]).unwrap());
+            temp_env::with_var("TMUX", tmux, || {
+                write_status_hyperlinks(&mut buf, std::slice::from_ref(&link)).unwrap();
+            });
+
+            assert_eq!(buf, envelope, "TMUX={tmux:?}");
+        }
     }
 
     #[test]

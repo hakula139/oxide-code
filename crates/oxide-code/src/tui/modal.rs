@@ -306,7 +306,7 @@ pub(crate) mod testing {
         /// Take-once action returned from [`Modal::on_cancel`]. `None` leaves the default (silent
         /// close), matching pickers that don't override the hook.
         pub(crate) cancel_action: Option<ModalAction>,
-        /// Child that `on_push_key` emits once as `ModalKey::Push(<child>)`.
+        /// Child that `on_push_key` pushes, once. Pressing the key without a child panics.
         pub(crate) push_child: Option<Box<dyn Modal>>,
         /// Returned from [`Modal::captures_esc`].
         pub(crate) captures_esc: bool,
@@ -356,7 +356,10 @@ pub(crate) mod testing {
                     ModalKey::Preview(taken)
                 }
                 KeyCode::Char(c) if c == self.on_push_key => {
-                    let child = self.push_child.take().expect("push_child set");
+                    let child = self
+                        .push_child
+                        .take()
+                        .expect("push_child must be set before pressing on_push_key");
                     ModalKey::Push(child)
                 }
                 _ => ModalKey::Consumed,

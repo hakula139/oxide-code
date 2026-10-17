@@ -248,7 +248,7 @@ mod tests {
 
     use super::testing::{crossterm_test_terminal, rendered_text, test_app, test_session_info};
     use super::*;
-    use crate::tui::components::status::Status;
+    use crate::tui::components::status::{Status, TICKS_PER_FRAME};
     use crate::tui::git_probes::GitUpdate;
     use crate::tui::glyphs::SPINNER_FRAMES;
 
@@ -347,8 +347,9 @@ mod tests {
         app.dirty = false;
 
         let (mut terminal, buf) = crossterm_test_terminal(60, 8);
+        let frame = TICK_INTERVAL * u32::try_from(TICKS_PER_FRAME).unwrap();
         let driver = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(150)).await;
+            tokio::time::sleep(frame).await;
             drop(event_tx);
         });
 
