@@ -623,8 +623,14 @@ mod tests {
                     break;
                 }
             }
-            tls.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok")
-                .unwrap();
+            tls.write_all(indoc::indoc! {b"
+                HTTP/1.1 200 OK\r
+                content-length: 2\r
+                connection: close\r
+                \r
+                ok"
+            })
+            .unwrap();
         });
         addr
     }

@@ -281,8 +281,8 @@ mod tests {
         let m = KvOverview::new(
             "Config",
             vec![KvSection::annotated(vec![
-                ("中文".into(), "值".into(), "说明".into()),
-                ("a".into(), "abc".into(), "note".into()),
+                ("中文".to_owned(), "值".to_owned(), "说明".to_owned()),
+                ("a".to_owned(), "abc".to_owned(), "note".to_owned()),
             ])],
         );
         let text = |width| -> Vec<String> {

@@ -986,7 +986,7 @@ mod tests {
         );
         let queue_prompt = async {
             started.notified().await;
-            tx.send(Op::Queue("queued after summary".into()))
+            tx.send(Op::Queue("queued after summary".to_owned()))
                 .await
                 .unwrap();
             tokio::task::yield_now().await;

@@ -1007,7 +1007,7 @@ mod tests {
         let mut messages = vec![Message::user("kick off")];
         let (tx, mut rx) = mpsc::channel::<Op>(4);
         // Hold the sender so `recv()` stays pending after the queued submit.
-        tx.send(Op::Queue("follow up".into())).await.unwrap();
+        tx.send(Op::Queue("follow up".to_owned())).await.unwrap();
 
         agent_turn(
             &client,
@@ -1066,8 +1066,8 @@ mod tests {
         let sink = CapturingSink::new();
         let mut messages = vec![Message::user("kick off")];
         let (tx, mut rx) = mpsc::channel::<Op>(4);
-        tx.send(Op::Queue("first".into())).await.unwrap();
-        tx.send(Op::Queue("second".into())).await.unwrap();
+        tx.send(Op::Queue("first".to_owned())).await.unwrap();
+        tx.send(Op::Queue("second".to_owned())).await.unwrap();
 
         agent_turn(
             &client,

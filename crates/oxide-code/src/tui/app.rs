@@ -379,7 +379,7 @@ mod tests {
         let stream = futures::stream::iter(vec![key]).chain(futures::stream::pending());
 
         let driver = tokio::spawn(async move {
-            event_tx.send(Event::StreamToken("hi".into())).unwrap();
+            event_tx.send(Event::StreamToken("hi".to_owned())).unwrap();
             tokio::time::sleep(TICK_INTERVAL * 2).await;
             drop(event_tx);
         });

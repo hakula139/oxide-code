@@ -1064,10 +1064,12 @@ mod tests {
         let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", redirect.port().unwrap()))
             .await
             .unwrap();
-        let request = format!(
-            "GET /callback?{query}&state={} HTTP/1.1\r\nHost: localhost\r\n\r\n",
-            param("state"),
-        );
+        let state = param("state");
+        let request = formatdoc! {"
+            GET /callback?{query}&state={state} HTTP/1.1\r
+            Host: localhost\r
+            \r
+        "};
         stream.write_all(request.as_bytes()).await.unwrap();
         let mut reply = String::new();
         stream.read_to_string(&mut reply).await.unwrap();
