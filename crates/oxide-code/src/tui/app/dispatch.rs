@@ -1821,7 +1821,14 @@ mod tests {
         app.handle_esc();
         app.handle_engine_event(Event::Cancelled);
         let mut forwarded = || std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
-        assert_eq!(forwarded().len(), 3, "submit, queue, and cancel");
+        assert_eq!(
+            forwarded(),
+            [
+                Op::Prompt("active".to_owned()),
+                Op::Queue("held".to_owned()),
+                Op::Interrupt,
+            ],
+        );
 
         app.dispatch_action(Action::Submit("new".to_owned()));
 
