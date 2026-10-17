@@ -663,7 +663,7 @@ mod tests {
     #[tokio::test]
     async fn execute_cancelled_mid_run_kills_backgrounded_children() {
         // The shell either still runs or has exited while a descendant holds its pipes.
-        for tail in ["sleep 5", "echo done"] {
+        for tail in ["sleep 30", "echo done"] {
             let dir = tempfile::tempdir().unwrap();
             let started = dir.path().join("started");
             let leaked = dir.path().join("leaked");
@@ -675,10 +675,9 @@ mod tests {
 
             let ctx = temp_ctx();
             let mut call = Box::pin(execute(&command, DEFAULT_TIMEOUT, &ctx));
-            for _ in 0..100 {
-                if started.exists() {
-                    break;
-                }
+            // Spawning bash on a loaded Windows runner can take several seconds.
+            let deadline = std::time::Instant::now() + Duration::from_secs(20);
+            while !started.exists() && std::time::Instant::now() < deadline {
                 let still_running = tokio::time::timeout(Duration::from_millis(20), call.as_mut())
                     .await
                     .is_err();
