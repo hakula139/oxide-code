@@ -22,6 +22,7 @@ use tokio::sync::mpsc;
 use super::components::chat::ChatView;
 use super::components::input::InputArea;
 use super::components::status::StatusBar;
+use super::components::tasks::TaskPanel;
 use super::git_probes::GitProbes;
 use super::modal::{Modal, ModalStack};
 use super::terminal::Tui;
@@ -41,6 +42,7 @@ pub(crate) struct App {
     status_bar: StatusBar,
     git_probes: GitProbes,
     chat: ChatView,
+    tasks: TaskPanel,
     input: InputArea,
     session_info: LiveSessionInfo,
     events: mpsc::UnboundedReceiver<Event>,
@@ -105,6 +107,7 @@ impl App {
             status_bar,
             git_probes,
             chat,
+            tasks: TaskPanel::default(),
             input: InputArea::new(theme),
             session_info,
             events,

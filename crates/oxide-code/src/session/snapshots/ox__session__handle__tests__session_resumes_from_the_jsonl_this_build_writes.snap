@@ -6,7 +6,21 @@ expression: recovered
   "compact": {
     "instructions": "focus on f.rs",
     "pre_message_count": 2,
-    "summary": "Asked to edit f.rs."
+    "summary": "Asked to edit f.rs.",
+    "tasks": [
+      {
+        "content": "Read the config loader",
+        "status": "completed"
+      },
+      {
+        "content": "Add the entry type",
+        "status": "in_progress"
+      },
+      {
+        "content": "Write the tests",
+        "status": "pending"
+      }
+    ]
   },
   "context": {
     "environment": {
@@ -136,6 +150,23 @@ expression: recovered
           },
           "name": "bash",
           "type": "tool_use"
+        },
+        {
+          "id": "t5",
+          "input": {
+            "tasks": [
+              {
+                "content": "Rename main",
+                "status": "completed"
+              },
+              {
+                "content": "Fix the failing test",
+                "status": "in_progress"
+              }
+            ]
+          },
+          "name": "tasks",
+          "type": "tool_use"
         }
       ],
       "role": "assistant"
@@ -157,6 +188,11 @@ expression: recovered
           "is_error": true,
           "tool_use_id": "t4",
           "type": "tool_result"
+        },
+        {
+          "content": "Updated the task list: 1 of 2 completed.",
+          "tool_use_id": "t5",
+          "type": "tool_result"
         }
       ],
       "role": "user"
@@ -169,6 +205,16 @@ expression: recovered
         }
       ],
       "role": "assistant"
+    }
+  ],
+  "tasks": [
+    {
+      "content": "Rename main",
+      "status": "completed"
+    },
+    {
+      "content": "Fix the failing test",
+      "status": "in_progress"
     }
   ],
   "title": "Fix f.rs",

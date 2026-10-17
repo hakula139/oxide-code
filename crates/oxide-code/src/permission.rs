@@ -79,7 +79,8 @@ impl FromStr for Mode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum PermissionClass {
-    /// Never mutates (`read`, `grep`, `glob`), so it allows unless a deny rule matches.
+    /// Never mutates the workspace (`read`, `grep`, `glob`, `tasks`), so it allows unless a deny
+    /// rule matches.
     Read,
     /// Mutates the file the call names (`edit`, `write`).
     Edit,

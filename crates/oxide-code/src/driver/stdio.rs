@@ -1,5 +1,6 @@
 //! Stdio rendering of engine events for the `--no-tui` REPL and `--prompt` headless modes.
 
+use std::fmt::Write as _;
 use std::io::Write;
 
 use anyhow::Result;
@@ -13,7 +14,8 @@ use crate::permission::SessionGrant;
 use crate::protocol::{Decision, Event, EventSink, Op, ToolCall, ToolResult};
 use crate::session::display::{UNTITLED_MARKER, archive_notice, id_prefix};
 use crate::tool::ApprovalPreview;
-use crate::tui::glyphs::INTERRUPTED_MARKER;
+use crate::tool::tasks::Task;
+use crate::tui::glyphs::{INTERRUPTED_MARKER, task_marker};
 use crate::util::text::escape_controls;
 
 // ── Turn Rendering ──
@@ -144,6 +146,7 @@ impl StdioSink {
                 }
                 writeln!(stderr)?;
             }
+            Event::TasksUpdated(tasks) => write!(stderr, "{}", task_lines(&tasks))?,
             Event::SessionCompacted {
                 pre_count,
                 automatic,
@@ -221,6 +224,19 @@ impl EventSink for StdioSink {
     }
 }
 
+/// One marked line per task and a closing blank line, or nothing for a cleared list.
+fn task_lines(tasks: &[Task]) -> String {
+    let mut lines = String::new();
+    for task in tasks {
+        let content = escape_controls(&task.content);
+        _ = writeln!(lines, "  {} {content}", task_marker(task.status));
+    }
+    if !lines.is_empty() {
+        lines.push('\n');
+    }
+    lines
+}
+
 /// The session an [`Event::SessionResumed`] continues, then a note when resuming it unarchived it.
 fn resumed_notice(id: &str, title: Option<&str>, unarchived: bool) -> String {
     let title = title.map_or_else(|| UNTITLED_MARKER.to_owned(), escape_controls);
@@ -253,6 +269,7 @@ mod tests {
     use crate::config::compaction::AutoCompactionConfig;
     use crate::permission::{GateTarget, PermissionClass, Policy};
     use crate::protocol::{CapturingSink, FailingSink};
+    use crate::tool::tasks::testing::plan;
     use crate::tool::{ApprovalBody, ToolResultView};
 
     /// Answers every approval with its decision, recording what each request offered.
@@ -549,6 +566,27 @@ mod tests {
             Event::ToolCallEnd(text_result("t2", "   \n", true, None)),
         );
         assert_eq!(stderr, "\n");
+    }
+
+    #[test]
+    fn render_tasks_updated_marks_each_task_and_skips_a_cleared_list() {
+        let sink = test_sink(false);
+
+        let (stdout, stderr) = render_one(&sink, Event::TasksUpdated(plan()));
+        assert_eq!(stdout, "");
+        assert_eq!(
+            stderr,
+            [
+                "  ✓ Read the config loader\n",
+                "  ● Add the entry type\n",
+                "  ○ Write the tests\n",
+                "\n",
+            ]
+            .concat(),
+        );
+
+        let (stdout, stderr) = render_one(&sink, Event::TasksUpdated(Vec::new()));
+        assert_eq!((stdout.as_str(), stderr.as_str()), ("", ""));
     }
 
     #[test]

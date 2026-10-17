@@ -41,7 +41,7 @@ use session::store::listing::{DEFAULT_SESSION_LIST_LIMIT, ListScope};
 use slash::ResumePicker;
 use tool::{
     ToolRegistry, bash::BashTool, edit::EditTool, glob::GlobTool, grep::GrepTool, read::ReadTool,
-    write::WriteTool,
+    tasks::TasksTool, write::WriteTool,
 };
 
 #[derive(Parser)]
@@ -228,6 +228,7 @@ fn create_tool_registry(tracker: &Arc<FileTracker>, read_deny: &ReadDeny) -> Too
         Box::new(EditTool::new(Arc::clone(tracker))),
         Box::new(GlobTool::new(read_deny.clone())),
         Box::new(GrepTool::new(read_deny.clone())),
+        Box::new(TasksTool),
     ])
 }
 
@@ -370,7 +371,10 @@ mod tests {
         let tracker = Arc::new(FileTracker::default());
         let tools = create_tool_registry(&tracker, &ReadDeny::default());
         let names: Vec<_> = tools.definitions().iter().map(|tool| tool.name).collect();
-        assert_eq!(names, ["bash", "read", "write", "edit", "glob", "grep"]);
+        assert_eq!(
+            names,
+            ["bash", "read", "write", "edit", "glob", "grep", "tasks"]
+        );
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("example.txt");

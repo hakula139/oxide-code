@@ -10,6 +10,7 @@ use crate::client::{RateLimitWindow, RateLimits};
 use crate::config::{Effort, StatusLineSegment};
 use crate::protocol::UsageSnapshot;
 use crate::session::display::id_prefix;
+use crate::tool::tasks::Progress;
 use crate::tui::theme::Theme;
 use crate::util::git::{Checks, PullRequest, ReviewDecision};
 use crate::util::text::truncate_to_width;
@@ -158,7 +159,12 @@ impl StatusLine {
                     Self::segment_style(theme, SegmentStyle::Dim),
                 )
             }),
-            StatusLineSegment::TaskProgress => None,
+            StatusLineSegment::TaskProgress => state.task_progress.map(|progress| {
+                Span::styled(
+                    format!("Tasks: {}/{}", progress.completed, progress.total),
+                    Self::segment_style(theme, SegmentStyle::Dim),
+                )
+            }),
             StatusLineSegment::ThreadTitle => state.title.map(|title| {
                 Span::styled(
                     truncate_to_width(title, MAX_TITLE_WIDTH),
@@ -207,6 +213,8 @@ pub(super) struct StatusLineState<'a> {
     /// Pre-rendered run-state segment from the parent component.
     pub(super) status_span: Span<'static>,
     pub(super) queued_prompts: usize,
+    /// `None` while the session keeps no task list.
+    pub(super) task_progress: Option<Progress>,
     pub(super) session_id: &'a str,
     /// Built-in theme name or theme file path.
     pub(super) theme_name: &'a str,
@@ -409,6 +417,7 @@ mod tests {
             rate_limits: None,
             status_span: Span::raw("Ready"),
             queued_prompts: 0,
+            task_progress: None,
             session_id: "",
             theme_name: "",
         }
@@ -720,6 +729,28 @@ mod tests {
     }
 
     #[test]
+    fn render_task_progress_counts_completed_tasks_and_hides_without_a_list() {
+        let text = |task_progress| {
+            text_of(&render(
+                vec![StatusLineSegment::TaskProgress, StatusLineSegment::RunState],
+                &StatusLineState {
+                    task_progress,
+                    ..bare_state()
+                },
+            ))
+        };
+
+        assert_eq!(
+            text(Some(Progress {
+                completed: 2,
+                total: 5,
+            })),
+            "  Tasks: 2/5 │ Ready",
+        );
+        assert_eq!(text(None), "  Ready");
+    }
+
+    #[test]
     fn render_session_id_shows_the_resumable_prefix() {
         let text = |session_id| {
             text_of(&render(
@@ -757,8 +788,7 @@ mod tests {
 
     // ── segment_utility ──
 
-    /// The drop order the configuration guide documents, plus `task-progress`, which renders
-    /// nothing yet.
+    /// The drop order the configuration guide documents.
     #[test]
     fn segment_utility_follows_the_documented_drop_order() {
         let drop_order = [

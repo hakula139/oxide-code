@@ -12,6 +12,7 @@ use crate::message::ContentBlock;
 use crate::permission::SessionGrant;
 use crate::permission::rule::Rule;
 use crate::protocol::{Decision, Event, EventSink, Op, ToolCall, ToolResult};
+use crate::tool::tasks::Task;
 use crate::tool::{ToolMetadata, ToolOutput, ToolRegistry};
 
 /// Inputs the permission gate needs at each tool call: the policy, which gains the session allow
@@ -39,6 +40,8 @@ pub(super) fn collect_tool_uses(
 pub(super) struct ToolRound {
     pub(super) results: Vec<ContentBlock>,
     pub(super) sidecars: Vec<(String, ToolMetadata)>,
+    /// The task list the round's last `tasks` call left, if any call set one.
+    pub(super) tasks: Option<Vec<Task>>,
     pub(super) abort: Option<TurnAbort>,
 }
 
@@ -65,6 +68,7 @@ pub(super) async fn run_tool_round(
     let mut round = ToolRound {
         results: Vec::with_capacity(tool_uses.len()),
         sidecars: Vec::with_capacity(tool_uses.len()),
+        tasks: None,
         abort: None,
     };
     let mut calls = tool_uses.into_iter();
@@ -80,7 +84,7 @@ pub(super) async fn run_tool_round(
             "tool-call-start",
         );
 
-        let (output, abort) = dispatch_tool_call(
+        let (mut output, abort) = dispatch_tool_call(
             tools,
             &id,
             &name,
@@ -108,6 +112,10 @@ pub(super) async fn run_tool_round(
             }),
             "tool-call-end",
         );
+        if let Some(tasks) = output.tasks.take() {
+            sink.emit(Event::TasksUpdated(tasks.clone()), "tasks-updated");
+            round.tasks = Some(tasks);
+        }
         round.push(id, output);
         if abort.is_some() {
             round.abort = abort;
@@ -318,6 +326,60 @@ mod tests {
     use crate::file_tracker::FileTracker;
     use crate::protocol::CapturingSink;
     use crate::tool::ToolRegistry;
+    use crate::tool::tasks::TasksTool;
+    use crate::tool::tasks::testing::plan;
+
+    // ── run_tool_round ──
+
+    #[tokio::test]
+    async fn run_tool_round_reports_the_list_only_a_successful_tasks_call_sets() {
+        let tools = ToolRegistry::new(vec![Box::new(TasksTool)]);
+        let sink = CapturingSink::new();
+        let mut gate = gate_with(crate::permission::Mode::Auto, &[], &[]);
+        let both_in_progress = json!({"tasks": [
+            {"content": "Fix the parser", "status": "in_progress"},
+            {"content": "Fix the lexer", "status": "in_progress"},
+        ]});
+        let calls = vec![
+            (
+                "call-1".to_owned(),
+                "tasks".to_owned(),
+                json!({"tasks": plan()}),
+            ),
+            ("call-2".to_owned(), "tasks".to_owned(), both_in_progress),
+        ];
+
+        let round = run_tool_round(
+            &tools,
+            calls,
+            &HashMap::new(),
+            &sink,
+            &mut inert_ops(),
+            &mut Vec::new(),
+            &mut gate,
+        )
+        .await;
+
+        assert_eq!(round.tasks, Some(plan()));
+        assert!(
+            matches!(
+                &round.results[1],
+                ContentBlock::ToolResult { is_error: true, .. }
+            ),
+            "{:?}",
+            round.results,
+        );
+        let events = sink.events();
+        let updates: Vec<usize> = (0..events.len())
+            .filter(|&i| matches!(events[i], Event::TasksUpdated(_)))
+            .collect();
+        assert_eq!(updates, [2], "{events:?}");
+        assert!(
+            matches!(&events[1], Event::ToolCallEnd(result) if result.id == "call-1"),
+            "{events:?}",
+        );
+        assert_eq!(events[2], Event::TasksUpdated(plan()));
+    }
 
     // ── dispatch_tool_call ──
 

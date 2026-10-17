@@ -237,7 +237,6 @@ pub(crate) enum StatusLineSegment {
     WeeklyLimit,
     RunState,
     QueuedPrompts,
-    /// Hidden until oxide-code keeps a task list.
     TaskProgress,
     ThreadTitle,
     SessionId,

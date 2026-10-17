@@ -14,6 +14,7 @@ use self::line::{RenderedStatusLine, StatusLine, StatusLineState};
 use crate::client::RateLimits;
 use crate::config::{Effort, StatusLineSegment};
 use crate::protocol::UsageSnapshot;
+use crate::tool::tasks::Progress;
 use crate::tui::glyphs::SPINNER_FRAMES;
 use crate::tui::theme::Theme;
 use crate::util::git;
@@ -48,6 +49,7 @@ pub(crate) struct StatusBar {
     pull_request: Option<git::PullRequest>,
     rate_limits: Option<RateLimits>,
     queued_prompts: usize,
+    task_progress: Option<Progress>,
     session_id: String,
     theme_name: String,
     status: Status,
@@ -94,6 +96,7 @@ impl StatusBar {
             pull_request: None,
             rate_limits: None,
             queued_prompts: 0,
+            task_progress: None,
             session_id: String::new(),
             theme_name: String::new(),
             status: Status::Idle,
@@ -147,6 +150,10 @@ impl StatusBar {
 
     pub(crate) fn set_queued_prompts(&mut self, count: usize) {
         self.queued_prompts = count;
+    }
+
+    pub(crate) fn set_task_progress(&mut self, progress: Option<Progress>) {
+        self.task_progress = progress;
     }
 
     pub(crate) fn set_session_id(&mut self, session_id: &str) {
@@ -324,6 +331,7 @@ impl StatusBar {
                 rate_limits: self.rate_limits,
                 status_span: self.status_span(),
                 queued_prompts: self.queued_prompts,
+                task_progress: self.task_progress,
                 session_id: &self.session_id,
                 theme_name: &self.theme_name,
             },
@@ -943,6 +951,10 @@ mod tests {
     #[test]
     fn render_task_progress_at_wide_and_narrow_widths() {
         let mut bar = segment_bar(StatusLineSegment::TaskProgress);
+        bar.set_task_progress(Some(Progress {
+            completed: 2,
+            total: 5,
+        }));
         insta::assert_snapshot!(render_wide_and_narrow(&mut bar));
     }
 

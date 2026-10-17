@@ -174,7 +174,7 @@ If automatic compaction fails, oxide-code does not send the prompt, and the TUI 
 | `weekly-limit`        | `7d: 13%` of a subscription's weekly usage limit              | Per request     |
 | `run-state`           | `Ready` / spinner + label / Ctrl+C exit hint                  | On state change |
 | `queued-prompts`      | `Queued: 2` while prompts wait for the running turn           | On change       |
-| `task-progress`       | Nothing, since oxide-code keeps no task list                  | Never           |
+| `task-progress`       | `Tasks: 2/5` completed while the session keeps a task list    | On change       |
 | `thread-title`        | AI-generated session title                                    | After turn 1    |
 | `session-id`          | `ID: 3f2a9c1e`, the prefix `ox -c` resumes                    | On change       |
 | `theme`               | `Theme: mocha`, or a theme file's name                        | On `/theme`     |
@@ -182,7 +182,7 @@ If automatic compaction fails, oxide-code does not send the prompt, and the TUI 
 
 The usage limits come from Claude subscription sign-ins, which report how much of each window is spent with every response. A window disappears once it resets, until the next response reports it again.
 
-When the row is too narrow to fit every configured segment, low-utility ones drop in this order before the remaining content gets truncated: `theme` → `session-id` → `thread-title` → `current-time` → `pull-request-review` → `pull-request-checks` → `pull-request` → `git-branch` → `current-dir` → `queued-prompts` → `session-cost` → `weekly-limit` → `five-hour-limit` → `context-used` → `model` → `model-with-effort` → `run-state`. Run state, the model labels, and the bar's last surviving segment are always preserved.
+When the row is too narrow to fit every configured segment, low-utility ones drop in this order before the remaining content gets truncated: `theme` → `session-id` → `thread-title` → `current-time` → `pull-request-review` → `pull-request-checks` → `pull-request` → `git-branch` → `current-dir` → `task-progress` → `queued-prompts` → `session-cost` → `weekly-limit` → `five-hour-limit` → `context-used` → `model` → `model-with-effort` → `run-state`. Run state, the model labels, and the bar's last surviving segment are always preserved.
 
 `OX_STATUS_LINE` accepts the same segment names, comma-separated, with optional whitespace (`OX_STATUS_LINE="model, run-state"`). A value with no segments (`","`), an empty entry between commas (`"model,,run-state"`), or an unknown segment name fails startup with a parse error.
 

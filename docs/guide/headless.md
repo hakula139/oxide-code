@@ -71,11 +71,14 @@ Each `stream-json` line is an object with a `type` and, for most types, a `data`
 | `tool_call_end`       | The call's result: `id`, the `content` the model sees, `is_error`, a `title` or `null`, and `view` |
 | `usage_updated`       | The usage object described under [Result](#result)                                                 |
 | `rate_limits_updated` | A subscription's usage limits, described below                                                     |
+| `tasks_updated`       | The session's whole task list, described below                                                     |
 | `error`               | A problem that does not end the turn, such as a session write failure                              |
 | `turn_complete`       | No `data`. The turn finished with a reply                                                          |
 | `turn_failed`         | Why the turn failed, including a refused request                                                   |
 
 `rate_limits_updated` arrives with each response under a Claude subscription sign-in. Its `five_hour` and `seven_day` windows are each `null` when the response omits them, or an object with the spent share as `utilization`, from 0 to 1, and the reset time as `resets_at`, in Unix seconds.
+
+`tasks_updated` follows the `tool_call_end` of each successful `tasks` call, and also arrives before the turn starts when a resumed session restores a list. Its `data` is an array of tasks in order, each with its `content` and a `status` of `pending`, `in_progress`, or `completed`. An empty array means the list cleared, which happens once every task is completed.
 
 A denied call ends with a `tool_call_end` event whose `is_error` is `true` and whose `content` tells the model the call was denied, naming the allow rule that would permit it when one can.
 
@@ -86,6 +89,7 @@ A denied call ends with a `tool_call_end` event whose `is_error` is `true` and w
 - **`diff`**: `chunks` containing numbered `old` and `new` lines, `replace_all`, and the number of `replacements`.
 - **`grep_matches`**: per-file `groups` (`path`, `lines` with `number`, `text`, and `is_match`), and whether the matches were `truncated`.
 - **`glob_files`**: the `pattern`, the matched `files`, and their `total` count.
+- **`tasks`**: the `tasks` the call sent, each with its `content` and `status`.
 
 A run that lists files and then attempts a denied `bash` call streams lines like these:
 

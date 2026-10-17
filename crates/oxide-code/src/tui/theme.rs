@@ -6,6 +6,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
 use syntect::highlighting::Theme as SyntaxTheme;
 
+use crate::tool::tasks::TaskStatus;
 use crate::tui::glyphs::SEGMENT_SEPARATOR;
 
 pub(crate) mod builtin;
@@ -182,6 +183,15 @@ impl Theme {
     pub(crate) fn separator_span(&self) -> Span<'static> {
         Span::styled(SEGMENT_SEPARATOR, self.separator())
     }
+
+    /// Style of a task row, which marks the task in progress and dims the finished ones.
+    pub(crate) fn task_style(&self, status: TaskStatus) -> Style {
+        match status {
+            TaskStatus::Pending => self.text(),
+            TaskStatus::InProgress => self.accent(),
+            TaskStatus::Completed => self.dim(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -336,5 +346,15 @@ mod tests {
     fn separator_span_pads_a_pipe_in_the_separator_style() {
         let t = Theme::default();
         assert_eq!(t.separator_span(), Span::styled(" │ ", t.separator()));
+    }
+
+    // ── Theme::task_style ──
+
+    #[test]
+    fn task_style_accents_the_task_in_progress_and_dims_completed_ones() {
+        let t = Theme::default();
+        assert_eq!(t.task_style(TaskStatus::Pending), t.text());
+        assert_eq!(t.task_style(TaskStatus::InProgress), t.accent());
+        assert_eq!(t.task_style(TaskStatus::Completed), t.dim());
     }
 }

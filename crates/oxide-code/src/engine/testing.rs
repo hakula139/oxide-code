@@ -31,7 +31,7 @@ use crate::protocol::Op;
 use crate::session::handle::{self, SessionHandle};
 use crate::session::store::SessionStore;
 use crate::session::store::testing::test_store;
-use crate::tool::{Tool, ToolDefinition, ToolMetadata, ToolOutput, ToolRegistry};
+use crate::tool::{Tool, ToolDefinition, ToolOutput, ToolRegistry};
 use crate::util::path::testing::HOME_VAR;
 
 // ── Engine ──
@@ -57,6 +57,7 @@ pub(crate) async fn engine(base_url: String, store: &SessionStore, cwd: &Path) -
         messages: Vec::new(),
         compact: None,
         tool_metadata: HashMap::new(),
+        tasks: Vec::new(),
         prompt,
         prompt_unrecorded: true,
         file_tracker: Arc::new(FileTracker::default()),
@@ -306,16 +307,7 @@ impl Tool for EchoTool {
         &self,
         input: serde_json::Value,
     ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + '_>> {
-        Box::pin(async move {
-            ToolOutput {
-                content: input.to_string(),
-                is_error: false,
-                metadata: ToolMetadata {
-                    title: Some("echoed".into()),
-                    ..Default::default()
-                },
-            }
-        })
+        Box::pin(async move { ToolOutput::success(input.to_string()).with_title("echoed") })
     }
 }
 

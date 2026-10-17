@@ -18,6 +18,7 @@ use crate::file_tracker::FileSnapshot;
 use crate::message::Message;
 use crate::prompt::SessionContext;
 use crate::tool::ToolMetadata;
+use crate::tool::tasks::Task;
 
 /// Cross-task protocol for [`super::handle::SessionHandle`]. Acks fire after the batch flush.
 pub(super) enum SessionCmd {
@@ -60,6 +61,7 @@ pub(super) enum SessionCmd {
     Compact {
         summary: String,
         instructions: Option<String>,
+        tasks: Vec<Task>,
         synthetic_message: Message,
         ack: oneshot::Sender<CompactOutcome>,
     },
@@ -221,12 +223,13 @@ impl Batch {
             SessionCmd::Compact {
                 summary,
                 instructions,
+                tasks,
                 synthetic_message,
                 ack,
             } => {
                 let pre_count = state.message_count();
                 let (compact_entries, synthetic_uuid) =
-                    state.compact_entries(&summary, instructions, synthetic_message, now);
+                    state.compact_entries(&summary, instructions, tasks, synthetic_message, now);
                 self.entries.extend(compact_entries);
                 self.acks.push(PendingAck::Compact {
                     ack,
@@ -751,6 +754,7 @@ mod tests {
         let compact_cmd = SessionCmd::Compact {
             summary: "synth summary".to_owned(),
             instructions: Some("focus on auth".to_owned()),
+            tasks: Vec::new(),
             synthetic_message: Message::user("post"),
             ack: compact_ack,
         };
@@ -793,6 +797,7 @@ mod tests {
         let compact_cmd = SessionCmd::Compact {
             summary: "s".to_owned(),
             instructions: None,
+            tasks: Vec::new(),
             synthetic_message: Message::user("synth"),
             ack: compact_ack,
         };
@@ -818,6 +823,7 @@ mod tests {
         let compact_cmd = SessionCmd::Compact {
             summary: "s".to_owned(),
             instructions: None,
+            tasks: Vec::new(),
             synthetic_message: Message::user("synthetic summary"),
             ack: compact_ack,
         };
@@ -855,6 +861,7 @@ mod tests {
         tx.send(SessionCmd::Compact {
             summary: "s".to_owned(),
             instructions: None,
+            tasks: Vec::new(),
             synthetic_message: Message::user("synthetic summary"),
             ack: compact_ack,
         })

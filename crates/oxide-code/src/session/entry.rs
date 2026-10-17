@@ -12,6 +12,7 @@ use crate::file_tracker::FileSnapshot;
 use crate::message::Message;
 use crate::prompt::SessionContext;
 use crate::tool::ToolMetadata;
+use crate::tool::tasks::Task;
 
 /// On-disk schema version stamped into every `Header`.
 pub(crate) const CURRENT_VERSION: u32 = 1;
@@ -89,12 +90,15 @@ pub(crate) enum Entry {
     },
     /// Boundary written by `/compact` immediately before the synthetic post-compact `Message`.
     /// Carries the summary body and the pre-compact message count so listings can surface
-    /// "compacted N → 1" without rescanning the prior tail.
+    /// "compacted N → 1" without rescanning the prior tail, plus the task list the summarized
+    /// transcript left, which no call after the boundary has set yet.
     Compact {
         summary: String,
         pre_message_count: u32,
         #[serde(skip_serializing_if = "Option::is_none")]
         instructions: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tasks: Vec<Task>,
         #[serde(with = "time::serde::rfc3339")]
         timestamp: OffsetDateTime,
     },
@@ -126,6 +130,7 @@ pub(crate) struct CompactInfo {
     pub(crate) summary: String,
     pub(crate) pre_message_count: u32,
     pub(crate) instructions: Option<String>,
+    pub(crate) tasks: Vec<Task>,
 }
 
 /// One billed request's token usage, with the model and prompt-cache TTL that price it.
@@ -159,6 +164,7 @@ mod tests {
 
     use super::*;
     use crate::message::{ContentBlock, Role};
+    use crate::tool::tasks::testing::plan;
 
     // ── Entry::Header ──
 
@@ -442,11 +448,12 @@ mod tests {
     // ── Entry::Compact ──
 
     #[test]
-    fn compact_round_trips_with_instructions() {
+    fn compact_round_trips_with_instructions_and_tasks() {
         let entry = Entry::Compact {
             summary: "user wanted X, did Y, next step Z".to_owned(),
             pre_message_count: 42,
             instructions: Some("focus on the build error".to_owned()),
+            tasks: plan(),
             timestamp: datetime!(2026-04-16 13:00:00 UTC),
         };
         let json = serde_json::to_value(&entry).unwrap();
@@ -454,6 +461,7 @@ mod tests {
         assert_eq!(json["summary"], "user wanted X, did Y, next step Z");
         assert_eq!(json["pre_message_count"], 42);
         assert_eq!(json["instructions"], "focus on the build error");
+        assert_eq!(json["tasks"], serde_json::to_value(plan()).unwrap());
         assert_eq!(json["timestamp"], "2026-04-16T13:00:00Z");
 
         let parsed: Entry = serde_json::from_str(&json.to_string()).unwrap();
@@ -461,6 +469,7 @@ mod tests {
             summary,
             pre_message_count,
             instructions,
+            tasks,
             timestamp,
         } = parsed
         else {
@@ -469,22 +478,34 @@ mod tests {
         assert_eq!(summary, "user wanted X, did Y, next step Z");
         assert_eq!(pre_message_count, 42);
         assert_eq!(instructions.as_deref(), Some("focus on the build error"));
+        assert_eq!(tasks, plan());
         assert_eq!(timestamp, datetime!(2026-04-16 13:00:00 UTC));
     }
 
     #[test]
-    fn compact_omits_instructions_when_none() {
+    fn compact_omits_absent_instructions_and_tasks_and_reads_them_back_empty() {
         let entry = Entry::Compact {
             summary: "s".to_owned(),
             pre_message_count: 4,
             instructions: None,
+            tasks: Vec::new(),
             timestamp: datetime!(2026-04-16 13:00:00 UTC),
         };
         let json = serde_json::to_value(&entry).unwrap();
-        assert!(
-            json.get("instructions").is_none(),
-            "instructions should be omitted when None"
-        );
+        assert_eq!(json.get("instructions"), None);
+        assert_eq!(json.get("tasks"), None);
+
+        let parsed: Entry = serde_json::from_value(json).unwrap();
+        let Entry::Compact {
+            instructions,
+            tasks,
+            ..
+        } = parsed
+        else {
+            panic!("expected Compact");
+        };
+        assert_eq!(instructions, None);
+        assert_eq!(tasks, []);
     }
 
     // ── JSONL format ──

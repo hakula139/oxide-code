@@ -2,8 +2,8 @@
 source: crates/oxide-code/src/tui/components/status.rs
 expression: render_wide_and_narrow(&mut bar)
 ---
-"  ~/projects/demo │ Opus 5.5 (xhigh) │ Ready                                                        "
+"  ~/projects/demo │ Tasks: 2/5 │ Opus 5.5 (xhigh) │ Ready                                           "
 "────────────────────────────────────────────────────────────────────────────────────────────────────"
 
-"  Opus 5.5 (xhigh) │ Ready              "
+"  Tasks: 2/5 │ Opus 5.5 (xhigh) │ Ready "
 "────────────────────────────────────────"

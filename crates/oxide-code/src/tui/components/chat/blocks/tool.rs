@@ -3,7 +3,7 @@
 //! helpers live here rather than in the trait module.
 //!
 //! Result rendering is per-variant via [`ToolResultView`] — default is truncated text; structured
-//! tools (Edit, Read, Grep, Glob) get richer bodies in sibling modules under [`tool`].
+//! tools (Edit, Read, Grep, Glob, Tasks) get richer bodies in sibling modules under [`tool`].
 
 pub(super) mod bordered_row;
 mod diff;
@@ -11,6 +11,7 @@ mod glob;
 mod grep;
 pub(super) mod numbered_row;
 mod read_excerpt;
+mod tasks;
 mod text;
 
 use ratatui::style::Style;
@@ -130,6 +131,9 @@ impl ChatBlock for ToolResultBlock {
                 total,
             } => {
                 glob::render(&mut out, ctx, pattern, files, *total, self.is_error);
+            }
+            ToolResultView::Tasks { tasks } => {
+                tasks::render(&mut out, ctx, tasks, self.is_error);
             }
         }
         out

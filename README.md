@@ -22,6 +22,7 @@ Early development. What works today:
 - Agent loop with extended thinking and tool-use round-trip
 - Claude Opus 5.5, Sonnet 5.5, and Haiku 5.5, each with a 1M-token context window and adjustable effort
 - File and search tools: `read`, `write`, `edit`, `glob`, `grep`, `bash`
+- Task list the model keeps with the `tasks` tool for multi-step work, shown above the input and as status-line progress, and carried through resume and compaction
 - Tool permissions: `auto` (default), `plan`, and `yolo` modes, allow / deny rules that match each simple command of a parsed `bash` command line, read-only commands that run without approval, protected config paths whose edits need approval in `auto` mode even when an allow rule matches, and an approval prompt for gated calls in the TUI and REPL that can allow matching calls for the rest of the session or deny with feedback for the model
 - Turn interruption (Esc / Ctrl+C) plus mid-turn queued follow-up prompts that splice into the same turn between tool calls, with double-press Ctrl+C exit confirmation
 - Slash commands with `/`-triggered autocomplete (name and curated-arg modes): `/archive`, `/clear`, `/compact`, `/config`, `/delete`, `/diff`, `/effort`, `/help`, `/init`, `/login`, `/logout`, `/model`, `/rename`, `/resume`, `/status`, `/theme`, `/unarchive`, with the typed session and model commands also in the bare REPL

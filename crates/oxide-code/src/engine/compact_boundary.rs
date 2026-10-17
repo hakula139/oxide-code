@@ -5,6 +5,18 @@ use crate::message::Message;
 use crate::protocol::{Event, EventSink};
 use crate::session::handle::SessionHandle;
 use crate::session::post_compact::synthesize_post_compact_message;
+use crate::tool::tasks::Task;
+
+/// What a compaction leaves in place of the transcript it summarized.
+pub(super) struct Boundary {
+    pub(super) summary: String,
+    /// The `/compact` focus the summary followed.
+    pub(super) instructions: Option<String>,
+    /// The task list the summarized transcript left, which the summary message carries over.
+    pub(super) tasks: Vec<Task>,
+    /// The compaction ran on its own, ahead of a prompt.
+    pub(super) automatic: bool,
+}
 
 /// Persists a compact boundary and swaps the live transcript to the synthetic summary root. A
 /// failed write discards the streamed summary and leaves the transcript unchanged.
@@ -13,13 +25,22 @@ pub(super) async fn replace_session_with_summary(
     file_tracker: &FileTracker,
     messages: &mut Vec<Message>,
     sink: &dyn EventSink,
-    summary: String,
-    instructions: Option<String>,
-    automatic: bool,
+    boundary: Boundary,
 ) -> bool {
-    let synthetic = synthesize_post_compact_message(&summary);
+    let Boundary {
+        summary,
+        instructions,
+        tasks,
+        automatic,
+    } = boundary;
+    let synthetic = synthesize_post_compact_message(&summary, &tasks);
     let outcome = session
-        .compact(summary.clone(), instructions.clone(), synthetic.clone())
+        .compact(
+            summary.clone(),
+            instructions.clone(),
+            tasks,
+            synthetic.clone(),
+        )
         .await;
     if let Some(failure) = outcome.failure.as_deref() {
         sink.emit(Event::SummaryDiscarded, "summary-discarded");
@@ -49,6 +70,16 @@ mod tests {
     use crate::protocol::{CapturingSink, FailingSink};
     use crate::session::handle;
     use crate::session::store::testing::test_store;
+    use crate::tool::tasks::testing::plan;
+
+    fn boundary(tasks: Vec<Task>) -> Boundary {
+        Boundary {
+            summary: "fixed login bug".to_owned(),
+            instructions: None,
+            tasks,
+            automatic: true,
+        }
+    }
 
     fn fake_transcript() -> Vec<Message> {
         vec![
@@ -60,10 +91,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn replace_session_with_summary_clears_tracker_and_replaces_messages() {
+    async fn replace_session_with_summary_clears_tracker_and_carries_the_task_list_over() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let session = handle::start(&store, "claude-sonnet-5-5");
+        let session_id = session.session_id().to_owned();
         let tracker = FileTracker::default();
         tracker.record_read(
             std::path::Path::new("/tmp/example.rs"),
@@ -78,18 +110,20 @@ mod tests {
             &tracker,
             &mut messages,
             &sink,
-            "fixed login bug".to_owned(),
-            None,
-            true,
+            boundary(plan()),
         )
         .await;
 
         assert!(compacted);
         assert_eq!(tracker.snapshot_all(), []);
-        assert_eq!(messages.len(), 1);
-        assert!(
-            matches!(&messages[0].content[0], ContentBlock::Text { text } if text.contains("fixed login bug"))
+        assert_eq!(
+            messages,
+            [synthesize_post_compact_message("fixed login bug", &plan())]
         );
+        session.shutdown().await;
+        let saved = store.load_session_data(&session_id).unwrap();
+        assert_eq!(saved.compact.map(|compact| compact.tasks), Some(plan()));
+        assert_eq!(saved.messages, messages);
     }
 
     #[tokio::test]
@@ -107,9 +141,7 @@ mod tests {
             &tracker,
             &mut messages,
             &sink,
-            "fixed login bug".to_owned(),
-            None,
-            true,
+            boundary(Vec::new()),
         )
         .await;
 
@@ -151,9 +183,7 @@ mod tests {
             &tracker,
             &mut messages,
             &FailingSink,
-            "fixed login bug".to_owned(),
-            None,
-            true,
+            boundary(Vec::new()),
         )
         .await;
 

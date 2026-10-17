@@ -13,6 +13,7 @@ use super::entry::{CURRENT_VERSION, Entry, TitleSource};
 use super::store::{SessionStore, SessionWriter, encode_lines};
 use crate::file_tracker::FileSnapshot;
 use crate::message::{ContentBlock, Message, Role};
+use crate::tool::tasks::Task;
 use crate::util::git::current_branch;
 use crate::util::text::truncate_to_width;
 
@@ -169,6 +170,7 @@ impl SessionState {
         &self,
         summary: &str,
         instructions: Option<String>,
+        tasks: Vec<Task>,
         synthetic_message: Message,
         now: OffsetDateTime,
     ) -> (Vec<Entry>, Uuid) {
@@ -179,6 +181,7 @@ impl SessionState {
                 summary: summary.to_owned(),
                 pre_message_count: pre_count,
                 instructions,
+                tasks,
                 timestamp: now,
             },
             Entry::Message {
@@ -360,6 +363,7 @@ mod tests {
     use crate::file_tracker::{FileTracker, LastView};
     use crate::session::store::load_session_data_from_path;
     use crate::session::store::testing::{test_project_dir, test_session_file, test_store};
+    use crate::tool::tasks::testing::plan;
 
     // ── try_defer_title ──
 
@@ -501,6 +505,7 @@ mod tests {
         let (entries, synthetic_uuid) = state.compact_entries(
             "summary body",
             Some("focus on auth".to_owned()),
+            plan(),
             Message::user("post-compact"),
             now,
         );
@@ -513,10 +518,11 @@ mod tests {
                     summary,
                     pre_message_count: 2,
                     instructions: Some(i),
+                    tasks,
                     ..
-                } if summary == "summary body" && i == "focus on auth"
+                } if summary == "summary body" && i == "focus on auth" && *tasks == plan()
             ),
-            "boundary entry must carry summary, pre-count, and instructions verbatim: {:?}",
+            "boundary entry must carry summary, pre-count, instructions, and tasks verbatim: {:?}",
             entries[0],
         );
         assert!(
@@ -546,7 +552,8 @@ mod tests {
         let state = SessionState::fresh(store, "m");
         let now = OffsetDateTime::now_utc();
 
-        let (entries, _) = state.compact_entries("s", None, Message::user("synth"), now);
+        let (entries, _) =
+            state.compact_entries("s", None, Vec::new(), Message::user("synth"), now);
 
         assert!(matches!(
             &entries[0],
@@ -570,7 +577,8 @@ mod tests {
         let (rec, _) = state.queue_message_entries(&Message::assistant("reply"), now, false);
         state.flush_entries(rec).unwrap();
 
-        let (_, synthetic_uuid) = state.compact_entries("s", None, Message::user("synth"), now);
+        let (_, synthetic_uuid) =
+            state.compact_entries("s", None, Vec::new(), Message::user("synth"), now);
         state.commit_compact(synthetic_uuid);
 
         assert_eq!(state.last_message_uuid, Some(synthetic_uuid));
@@ -584,7 +592,8 @@ mod tests {
         let mut state = SessionState::fresh(store, "m");
         let now = OffsetDateTime::now_utc();
 
-        let (_, synthetic_uuid) = state.compact_entries("s", None, Message::user("synth"), now);
+        let (_, synthetic_uuid) =
+            state.compact_entries("s", None, Vec::new(), Message::user("synth"), now);
         state.commit_compact(synthetic_uuid);
 
         assert!(state.first_user_prompt_seen);
@@ -601,7 +610,8 @@ mod tests {
         state.message_count = 5;
         let now = OffsetDateTime::now_utc();
 
-        let (_, synthetic_uuid) = state.compact_entries("s", None, Message::user("synth"), now);
+        let (_, synthetic_uuid) =
+            state.compact_entries("s", None, Vec::new(), Message::user("synth"), now);
         state.commit_compact(synthetic_uuid);
 
         assert_eq!(state.initial_message_count, 0);

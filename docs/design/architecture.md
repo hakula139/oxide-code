@@ -23,7 +23,7 @@ Layers run from the foundation to the frontends.
 | Services   | `command`      | Typed slash-command forms parsed into the `Op` each one runs, shared by the TUI's slash commands and the bare REPL                        |
 | Services   | `protocol`     | The serializable `Op` / `Event` contract between the engine and its frontends, its payloads, and the `EventSink` trait                    |
 | Services   | `session`      | JSONL session persistence behind an actor task, plus listing, archiving, resume, transcript repair, and AI titles                         |
-| Services   | `tool`         | The `Tool` trait, the registry, and the built-in `bash`, `edit`, `glob`, `grep`, `read`, and `write` tools                                |
+| Services   | `tool`         | The `Tool` trait, the registry, and the built-in `bash`, `edit`, `glob`, `grep`, `read`, `tasks`, and `write` tools                       |
 | Engine     | `engine`       | The live conversation as a task that every frontend drives through `EngineHandle`, with its turn loop, tool dispatch, and compaction      |
 | Frontend   | `driver`       | The TUI, bare REPL, and headless drivers, which drive the `Engine` through `EngineHandle`, plus exit status and shutdown signals          |
 | Frontend   | `slash`        | Slash-command parser, registry, and built-in commands                                                                                     |

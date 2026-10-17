@@ -16,6 +16,7 @@ use crate::config::compaction::AutoCompactionConfig;
 use crate::model::{ModelSpec, ResolvedModelId};
 use crate::permission::SessionGrant;
 use crate::permission::rule::Rule;
+use crate::tool::tasks::Task;
 use crate::tool::{ApprovalPreview, ToolResultView};
 
 // ── Ops ──
@@ -227,6 +228,9 @@ pub(crate) enum Event {
     },
     /// The user granted a session allow rule. Carries every session allow rule now in force.
     SessionRulesUpdated(Vec<Rule>),
+    /// The session's task list changed, or a resumed session restored a non-empty one. Carries
+    /// the whole list, which an [`Self::SessionRolled`] or [`Self::SessionResumed`] empties first.
+    TasksUpdated(Vec<Task>),
 }
 
 // ── Tool Calls ──
@@ -366,6 +370,7 @@ mod tests {
     use super::*;
     use crate::client::RateLimitWindow;
     use crate::permission::{GateTarget, PermissionClass, Policy};
+    use crate::tool::tasks::testing::plan;
     use crate::tool::{
         ApprovalBody, DiffChunk, DiffLine, GrepFileGroup, GrepMatchLine, ReadExcerptLine,
     };
@@ -439,6 +444,7 @@ mod tests {
                 files: vec!["src/main.rs".to_owned()],
                 total: 1,
             },
+            ToolResultView::Tasks { tasks: plan() },
         ];
         let mut history = vec![
             Interaction::Compacted {
@@ -567,6 +573,7 @@ mod tests {
             Event::Error(_) => "error",
             Event::ApprovalRequested { .. } => "approval_requested",
             Event::SessionRulesUpdated(_) => "session_rules_updated",
+            Event::TasksUpdated(_) => "tasks_updated",
         }
     }
 
@@ -681,6 +688,7 @@ mod tests {
                 )),
             },
             Event::SessionRulesUpdated(vec![Rule::parse("bash(cargo test:*)").unwrap()]),
+            Event::TasksUpdated(plan()),
         ]
     }
 
@@ -781,6 +789,22 @@ mod tests {
                         },
                     },
                 },
+            }),
+        );
+    }
+
+    #[test]
+    fn event_carries_a_task_list_as_content_and_status_pairs() {
+        let event = Event::TasksUpdated(plan());
+        assert_eq!(
+            serde_json::to_value(event).unwrap(),
+            json!({
+                "type": "tasks_updated",
+                "data": [
+                    {"content": "Read the config loader", "status": "completed"},
+                    {"content": "Add the entry type", "status": "in_progress"},
+                    {"content": "Write the tests", "status": "pending"},
+                ],
             }),
         );
     }

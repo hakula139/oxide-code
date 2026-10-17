@@ -1,5 +1,5 @@
-//! Frame layout and drawing: the status bar, chat or welcome screen, queued-prompt preview, modal,
-//! and input bands, plus the jump-to-bottom overlay and status-line hyperlinks.
+//! Frame layout and drawing: the status bar, chat or welcome screen, task panel, queued-prompt
+//! preview, modal, and input bands, plus the jump-to-bottom overlay and status-line hyperlinks.
 
 use anyhow::Result;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -43,10 +43,14 @@ impl App {
 
     pub(super) fn draw_frame(&mut self, frame: &mut ratatui::Frame<'_>) {
         // The status bar and one chat row stay visible above a modal, which then outranks the
-        // queued-prompt preview.
+        // queued-prompt preview, and the preview the task panel.
         let modal_max = frame.area().height.saturating_sub(2 + 1);
         let modal_height = self.modals.height(frame.area().width, modal_max);
         let preview_height = self.preview_height().min(modal_max - modal_height);
+        let tasks_height = self
+            .tasks
+            .height()
+            .min(modal_max - modal_height - preview_height);
         // Modal owns focus, so input and popup bands collapse.
         let modal_active = self.modals.is_active();
         let popup_height = if modal_active {
@@ -63,6 +67,7 @@ impl App {
         let chunks = Layout::vertical([
             Constraint::Length(2),
             Constraint::Min(1),
+            Constraint::Length(tasks_height),
             Constraint::Length(preview_height),
             Constraint::Length(modal_height),
             Constraint::Length(popup_height),
@@ -72,6 +77,7 @@ impl App {
 
         self.status_bar
             .set_queued_prompts(self.pending_prompts.len());
+        self.status_bar.set_task_progress(self.tasks.progress());
         self.status_bar
             .set_session_id(&self.session_info.session_id);
         self.status_bar
@@ -84,16 +90,19 @@ impl App {
             self.chat.render(frame, chunks[1]);
             self.render_jump_overlay(frame, chunks[1]);
         }
+        if tasks_height > 0 {
+            self.tasks.render(frame, chunks[2], &self.theme);
+        }
         if preview_height > 0 {
-            self.render_preview(frame, chunks[2]);
+            self.render_preview(frame, chunks[3]);
         }
         if modal_active {
-            self.modals.render(frame, chunks[3], &self.theme);
+            self.modals.render(frame, chunks[4], &self.theme);
         } else {
             if popup_height > 0 {
-                self.input.render_popup(frame, chunks[4]);
+                self.input.render_popup(frame, chunks[5]);
             }
-            self.input.render(frame, chunks[5]);
+            self.input.render(frame, chunks[6]);
         }
     }
 
@@ -204,6 +213,7 @@ mod tests {
     use super::*;
     use crate::config::StatusLineSegment;
     use crate::protocol::{Decision, Event, Op, ToolCall, ToolResult};
+    use crate::tool::tasks::testing::plan;
     use crate::tool::{ApprovalBody, ApprovalPreview, ToolResultView};
     use crate::tui::action::Action;
     use crate::tui::app::testing::{
@@ -486,6 +496,25 @@ mod tests {
         for i in 0..5 {
             app.pending_prompts.push_back(format!("queued {i}"));
         }
+        insta::assert_snapshot!(render_app(&mut app, 60, 14));
+    }
+
+    #[test]
+    fn draw_frame_task_panel_sits_above_the_preview_and_feeds_the_status_progress() {
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.status_bar = StatusBar::new(
+            &app.theme,
+            vec![StatusLineSegment::Model, StatusLineSegment::TaskProgress],
+            "test-model".to_owned(),
+            None,
+            "~/test".to_owned(),
+            None,
+        );
+        app.dispatch_action(Action::Submit("active".into()));
+        app.pending_prompts.push_back("queued 0".to_owned());
+
+        app.handle_engine_event(Event::TasksUpdated(plan()));
+
         insta::assert_snapshot!(render_app(&mut app, 60, 14));
     }
 

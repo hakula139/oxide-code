@@ -6,6 +6,7 @@ pub(crate) mod edit;
 pub(crate) mod glob;
 pub(crate) mod grep;
 pub(crate) mod read;
+pub(crate) mod tasks;
 pub(crate) mod write;
 
 use std::borrow::Cow;
@@ -20,6 +21,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
+use self::tasks::Task;
 use crate::file_tracker::{FileTracker, TrackableFileError, validate_trackable_file};
 use crate::permission::{GateTarget, PermissionClass};
 use crate::util::path::{lexical_normalize, slash_separated};
@@ -42,6 +44,8 @@ pub(crate) struct ToolOutput {
     pub(crate) content: String,
     pub(crate) is_error: bool,
     pub(crate) metadata: ToolMetadata,
+    /// The task list a `tasks` call leaves, which the engine adopts in place of its own.
+    pub(crate) tasks: Option<Vec<Task>>,
 }
 
 /// Structured data for UI display and logging. The model never sees it.
@@ -67,6 +71,7 @@ impl ToolOutput {
             content: content.into(),
             is_error: false,
             metadata: ToolMetadata::default(),
+            tasks: None,
         }
     }
 
@@ -75,6 +80,7 @@ impl ToolOutput {
             content: content.into(),
             is_error: true,
             metadata: ToolMetadata::default(),
+            tasks: None,
         }
     }
 
@@ -96,6 +102,11 @@ impl ToolOutput {
     /// Records the unbounded match count for a truncated result.
     pub(crate) fn with_truncated_total(mut self, total: usize) -> Self {
         self.metadata.truncated_total = Some(total);
+        self
+    }
+
+    pub(crate) fn with_tasks(mut self, tasks: Vec<Task>) -> Self {
+        self.tasks = Some(tasks);
         self
     }
 }
@@ -127,6 +138,10 @@ pub(crate) enum ToolResultView {
         pattern: String,
         files: Vec<String>,
         total: usize,
+    },
+    /// The task list a `tasks` call sent, before a finished list clears.
+    Tasks {
+        tasks: Vec<Task>,
     },
 }
 
@@ -823,6 +838,7 @@ mod tests {
     use super::glob::GlobTool;
     use super::grep::GrepTool;
     use super::read::ReadTool;
+    use super::tasks::TasksTool;
     use super::testing::{canonical_tempdir, symlink_file};
     use super::write::WriteTool;
     use super::*;
@@ -837,6 +853,7 @@ mod tests {
             Box::new(GlobTool::default()),
             Box::new(GrepTool::default()),
             Box::new(ReadTool::new(Arc::clone(&tracker))),
+            Box::new(TasksTool),
             Box::new(WriteTool::new(tracker)),
         ]
     }
@@ -876,6 +893,7 @@ mod tests {
             ("glob", "✱"),
             ("grep", "⌕"),
             ("read", "→"),
+            ("tasks", "≡"),
             ("write", "←"),
         ];
         let tools = all_tools();
