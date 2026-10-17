@@ -306,7 +306,7 @@ fn parse_retry_after(value: &str) -> Option<Duration> {
 }
 
 /// Renders a user-facing diagnostic for a non-2xx Anthropic response, with a per-status hint and
-/// the response body appended for debugging.
+/// any non-blank response body appended for debugging.
 fn format_api_error(
     auth: AuthSource,
     status: StatusCode,
@@ -342,7 +342,10 @@ fn format_api_error(
         }
         _ => format!("API error (HTTP {status})."),
     };
-    format!("{prefix} Details: {body}")
+    match body.trim() {
+        "" => prefix,
+        body => format!("{prefix} Details: {body}"),
+    }
 }
 
 #[cfg(test)]
@@ -864,6 +867,30 @@ mod tests {
                 ),
                 format!("{redirected}{target}. {advice} Details: moved"),
                 "{location:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn format_api_error_trims_the_body_and_omits_a_blank_one() {
+        for (body, expected) in [
+            ("", "API error (HTTP 400 Bad Request)."),
+            (" \r\n", "API error (HTTP 400 Bad Request)."),
+            (
+                "\n  boom\n",
+                "API error (HTTP 400 Bad Request). Details: boom",
+            ),
+        ] {
+            assert_eq!(
+                format_api_error(
+                    AuthSource::ApiKeyEnv,
+                    StatusCode::BAD_REQUEST,
+                    None,
+                    None,
+                    body,
+                ),
+                expected,
+                "{body:?}",
             );
         }
     }
