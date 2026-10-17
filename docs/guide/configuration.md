@@ -125,6 +125,8 @@ extra_ca_certs = "~/.config/ox/corp-cachain.pem"
 
 Use an absolute or `~`-rooted path. Relative paths resolve from the launch cwd. The field is user-config only because a checked-in trust-anchor path could widen TLS trust for the process. Equivalent env var: `OX_EXTRA_CA_CERTS`, which wins over this field. `NODE_EXTRA_CA_CERTS` applies only when neither is set (see [LLM gateways](#llm-gateways)).
 
+On macOS, a server certificate valid for longer than Apple's 825-day limit is accepted when it chains to a CA in the bundle, even one already installed system-wide, unless that CA is one of Apple's built-in roots.
+
 #### `prompt_cache_ttl`: cache duration
 
 Accepted values: `"5m"` (matches the server default as of 2026-03-06) and `"1h"` (higher write premium, bigger hit-rate win on long sessions). oxide-code defaults to `"1h"` because Anthropic's silent 2026-03 TTL drop cut typical prompt-caching savings from 80 %+ to 40-55 %. See [Agentic Request Body Fields](../research/api/anthropic.md#agentic-request-body-fields) for the wire shape and cost analysis.
