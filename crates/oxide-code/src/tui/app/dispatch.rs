@@ -3,7 +3,9 @@
 
 use std::time::Instant;
 
-use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{
+    Event as CrosstermEvent, KeyCode, KeyEvent, KeyEventKind, MouseEvent, MouseEventKind,
+};
 use tokio::sync::mpsc;
 
 use super::{App, EXIT_WINDOW};
@@ -59,9 +61,10 @@ impl App {
                     InputOutcome::Ignored => self.chat.handle_event(event),
                 }
             }
-            CrosstermEvent::Mouse(_) => {
-                self.chat.handle_event(event);
-            }
+            CrosstermEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::ScrollUp | MouseEventKind::ScrollDown,
+                ..
+            }) => self.chat.handle_event(event),
             CrosstermEvent::Resize(..) => {}
             _ => return,
         }
@@ -313,7 +316,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use crossterm::event::{KeyModifiers, MouseEvent, MouseEventKind};
+    use crossterm::event::{KeyModifiers, MouseButton};
 
     use super::*;
     use crate::config::Effort;
@@ -379,7 +382,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_crossterm_event_mouse_is_forwarded_to_chat() {
+    fn handle_crossterm_event_wheel_scroll_is_forwarded_to_chat() {
         let (mut app, _rx, _event_tx) = test_app(None);
         app.chat.push_system_message(long_chat_block());
         _ = render_app(&mut app, 60, 10);
@@ -406,12 +409,29 @@ mod tests {
     }
 
     #[test]
-    fn handle_crossterm_unknown_event_is_a_noop() {
-        // The `_ => return` arm prevents FocusGained / FocusLost from forcing re-renders.
+    fn handle_crossterm_unhandled_events_skip_the_rerender() {
+        // Mouse capture reports every motion and click, which must not each force a frame.
         let (mut app, _rx, _event_tx) = test_app(None);
         app.dirty = false;
-        app.handle_crossterm_event(&CrosstermEvent::FocusGained);
-        assert!(!app.dirty);
+        let mouse = |kind| {
+            CrosstermEvent::Mouse(MouseEvent {
+                kind,
+                column: 0,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+
+        for event in [
+            CrosstermEvent::FocusGained,
+            mouse(MouseEventKind::Moved),
+            mouse(MouseEventKind::Down(MouseButton::Left)),
+            mouse(MouseEventKind::Drag(MouseButton::Left)),
+        ] {
+            app.handle_crossterm_event(&event);
+            assert!(!app.dirty, "{event:?}");
+        }
+        assert!(!app.chat.is_scrolled_up());
     }
 
     #[test]
