@@ -327,12 +327,12 @@ mod tests {
     // ── Entry::ToolResultMetadata ──
 
     #[test]
-    fn tool_result_metadata_round_trips_with_title_and_replacements() {
+    fn tool_result_metadata_round_trips_with_title_and_truncated_total() {
         let entry = Entry::ToolResultMetadata {
             tool_use_id: "edit1".to_owned(),
             metadata: ToolMetadata {
                 title: Some("Edited f.rs".to_owned()),
-                replacements: Some(3),
+                truncated_total: Some(3),
                 ..ToolMetadata::default()
             },
             timestamp: datetime!(2026-04-16 12:06:00 UTC),
@@ -341,7 +341,7 @@ mod tests {
         assert_eq!(json["type"], "tool_result_metadata");
         assert_eq!(json["tool_use_id"], "edit1");
         assert_eq!(json["metadata"]["title"], "Edited f.rs");
-        assert_eq!(json["metadata"]["replacements"], 3);
+        assert_eq!(json["metadata"]["truncated_total"], 3);
         assert_eq!(json["timestamp"], "2026-04-16T12:06:00Z");
 
         let parsed: Entry = serde_json::from_str(&json.to_string()).unwrap();
@@ -406,7 +406,7 @@ mod tests {
                 content_hash: 0xDEAD_BEEF,
                 last_view: LastView::Full,
                 recorded_at: datetime!(2026-04-29 12:34:56 UTC),
-                tool_use_id: None,
+                tool_use_id: "toolu_1".to_owned(),
             },
         };
         let entry = Entry::FileSnapshot {
@@ -424,6 +424,7 @@ mod tests {
                 "content_hash": 0xDEAD_BEEF_u64,
                 "last_view": {"kind": "full"},
                 "recorded_at": "2026-04-29T12:34:56Z",
+                "tool_use_id": "toolu_1",
             }),
         );
         let Entry::FileSnapshot { snapshot: parsed } = parsed else {
@@ -438,10 +439,9 @@ mod tests {
             "type": "file_snapshot",
             "path": "/tmp/a.rs",
             "content_hash": 1_u64,
-            "mtime": "2026-04-29T12:00:00Z",
-            "size": 5,
             "last_view": {"kind": "full"},
             "recorded_at": "2026-04-29T12:00:00Z",
+            "tool_use_id": "toolu_1",
             "future_field": "from a newer writer",
         });
 
@@ -458,7 +458,7 @@ mod tests {
                     content_hash: 1,
                     last_view: LastView::Full,
                     recorded_at: datetime!(2026-04-29 12:00:00 UTC),
-                    tool_use_id: None,
+                    tool_use_id: "toolu_1".to_owned(),
                 },
             },
         );

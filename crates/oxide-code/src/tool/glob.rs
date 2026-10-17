@@ -275,16 +275,12 @@ fn build_files_view(
     }
 
     let body = glob_output_body(trimmed)?;
-    let footer_total = glob_footer_total(trimmed);
 
     let files: Vec<String> = body.lines().map(str::to_owned).collect();
     if files.is_empty() {
         return None;
     }
-    let total = metadata
-        .truncated_total
-        .or(footer_total)
-        .unwrap_or(files.len());
+    let total = metadata.truncated_total.unwrap_or(files.len());
     if total < files.len() {
         return None;
     }
@@ -306,20 +302,6 @@ fn glob_output_body(content: &str) -> Option<&str> {
         Some(_) => None,
         None => Some(trimmed),
     }
-}
-
-fn glob_footer_total(content: &str) -> Option<usize> {
-    let (_, footer) = content.trim_end().rsplit_once("\n\n")?;
-    parse_total_from_footer(footer)
-}
-
-fn parse_total_from_footer(footer: &str) -> Option<usize> {
-    footer
-        .strip_prefix('(')?
-        .split_whitespace()
-        .nth(3)?
-        .parse()
-        .ok()
 }
 
 #[cfg(test)]
@@ -762,34 +744,6 @@ mod tests {
     }
 
     #[test]
-    fn result_view_recovers_total_from_prose_footer_for_legacy_sessions() {
-        let files: Vec<String> = (0..MAX_RESULTS).map(|i| format!("f{i:03}.rs")).collect();
-        let body = files.join("\n");
-        let content = formatdoc! {"
-            {body}
-
-            (Showing {MAX_RESULTS} of 1234 matches. Use a more specific pattern.)"
-        };
-        let view = GlobTool::default()
-            .result_view(
-                &serde_json::json!({"pattern": "**/*.rs"}),
-                &content,
-                &ToolMetadata::default(),
-                Path::new("/repo"),
-            )
-            .unwrap();
-
-        assert_eq!(
-            view,
-            ToolResultView::GlobFiles {
-                pattern: "**/*.rs".to_owned(),
-                files,
-                total: 1234,
-            },
-        );
-    }
-
-    #[test]
     fn result_view_handles_no_files_found() {
         let view = GlobTool::default()
             .result_view(
@@ -955,28 +909,5 @@ mod tests {
         assert!(!is_truncation_footer("(Some footer)"));
         assert!(!is_truncation_footer("Showing 100 of 250"));
         assert!(!is_truncation_footer(""));
-    }
-
-    // ── parse_total_from_footer ──
-
-    #[test]
-    fn parse_total_from_footer_extracts_y_from_glob_files_shape() {
-        assert_eq!(
-            parse_total_from_footer("(Showing 100 of 1234 matches. Use a more specific pattern.)"),
-            Some(1234),
-        );
-    }
-
-    #[test]
-    fn parse_total_from_footer_is_none_for_malformed_input() {
-        assert_eq!(
-            parse_total_from_footer("Showing 100 of 1234 matches."),
-            None,
-        );
-        assert_eq!(
-            parse_total_from_footer("(Showing 100 of many matches.)"),
-            None
-        );
-        assert_eq!(parse_total_from_footer("(Showing 100 of)"), None);
     }
 }

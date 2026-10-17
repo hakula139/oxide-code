@@ -16,8 +16,6 @@ pub(super) fn render(
     out: &mut Vec<Line<'static>>,
     ctx: &RenderCtx<'_>,
     chunks: &[DiffChunk],
-    replace_all: bool,
-    replacements: usize,
     is_error: bool,
 ) {
     let border_style = border_style_for(ctx.theme, is_error);
@@ -35,17 +33,6 @@ pub(super) fn render(
     if chunks.len() > 1 {
         let locations: Vec<usize> = chunks.iter().filter_map(chunk_anchor_line).collect();
         render_locations_footer(out, ctx, &locations, border_style);
-        return;
-    }
-
-    if replace_all && replacements > 1 {
-        out.push(Line::from(vec![
-            Span::styled(TOOL_BORDER_CONT.to_owned(), border_style),
-            Span::styled(
-                format!("{replacements} occurrences replaced"),
-                ctx.theme.dim(),
-            ),
-        ]));
     }
 }
 
@@ -266,14 +253,7 @@ mod tests {
     fn render_no_change_marker_when_all_chunks_empty_after_trim() {
         let theme = Theme::default();
         let mut out = Vec::new();
-        render(
-            &mut out,
-            &ctx(&theme),
-            &[chunk_of(&[], &[])],
-            false,
-            0,
-            false,
-        );
+        render(&mut out, &ctx(&theme), &[chunk_of(&[], &[])], false);
         assert_eq!(out.len(), 1);
         let text: String = out[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.ends_with("(no change)"), "unexpected body: {text:?}");
@@ -287,8 +267,6 @@ mod tests {
             &mut out,
             &ctx(&theme),
             &[chunk_of(&["foo"], &["bar"])],
-            false,
-            1,
             false,
         );
         let texts = rendered_texts(&out);
@@ -330,7 +308,7 @@ mod tests {
             }],
         };
         let mut out = Vec::new();
-        render(&mut out, &ctx(&theme), &[chunk_a, chunk_b], true, 2, false);
+        render(&mut out, &ctx(&theme), &[chunk_a, chunk_b], false);
         let texts = rendered_texts(&out);
         assert_eq!(
             texts.iter().filter(|t| t.contains("12 - foo")).count(),
@@ -349,29 +327,6 @@ mod tests {
         assert!(
             texts.iter().any(|t| t.contains("applied at lines 12, 47")),
             "missing locations footer: {texts:?}",
-        );
-        assert!(
-            !texts.iter().any(|t| t.contains("occurrences replaced")),
-            "multi-chunk render replaces the legacy count footer: {texts:?}",
-        );
-    }
-
-    #[test]
-    fn render_single_chunk_replace_all_keeps_legacy_count_footer() {
-        let theme = Theme::default();
-        let mut out = Vec::new();
-        render(
-            &mut out,
-            &ctx(&theme),
-            &[chunk_of(&["a"], &["b"])],
-            true,
-            7,
-            false,
-        );
-        let texts = rendered_texts(&out);
-        assert!(
-            texts.iter().any(|t| t.contains("7 occurrences replaced")),
-            "missing legacy count footer: {texts:?}",
         );
     }
 

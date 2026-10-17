@@ -6,10 +6,12 @@ use tracing::debug;
 
 use super::betas::compute_betas;
 use super::transport::{post_messages, with_retry};
-use super::wire::{CreateMessageRequest, OutputConfig, OutputFormat, RequestMessages};
+use super::wire::{
+    ContentBlockInfo, CreateMessageRequest, OutputConfig, OutputFormat, RequestMessages,
+};
 use super::{Client, attribution_text, billing, build_metadata, build_system_blocks};
 use crate::config::Effort;
-use crate::message::{ContentBlock, Message};
+use crate::message::Message;
 use crate::model::ModelSpec;
 
 // ── Client::complete ──
@@ -116,11 +118,11 @@ fn build_completion_body(
 
 // ── Response Handling ──
 
-fn join_text_blocks(content: Vec<ContentBlock>) -> String {
+fn join_text_blocks(content: Vec<ContentBlockInfo>) -> String {
     content
         .into_iter()
         .filter_map(|b| match b {
-            ContentBlock::Text { text } => Some(text),
+            ContentBlockInfo::Text { text } => Some(text),
             _ => None,
         })
         .collect()
@@ -128,7 +130,7 @@ fn join_text_blocks(content: Vec<ContentBlock>) -> String {
 
 #[derive(Deserialize)]
 struct CompletionResponse {
-    content: Vec<ContentBlock>,
+    content: Vec<ContentBlockInfo>,
 }
 
 #[cfg(test)]
@@ -591,10 +593,9 @@ mod tests {
     #[test]
     fn join_text_blocks_is_empty_for_tool_only_response() {
         // Empty signals "parse failure, keep fallback" to the title caller.
-        let blocks = vec![ContentBlock::ToolUse {
+        let blocks = vec![ContentBlockInfo::ToolUse {
             id: "t1".to_owned(),
             name: "noop".to_owned(),
-            input: serde_json::Value::Null,
         }];
         assert_eq!(join_text_blocks(blocks), "");
     }

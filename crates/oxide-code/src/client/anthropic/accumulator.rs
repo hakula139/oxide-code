@@ -242,7 +242,7 @@ impl BlockAccumulator {
     fn into_content_block(self, model: &str) -> (Option<ContentBlock>, Option<(String, String)>) {
         let replay = |payload| Replay {
             wire: WireKind::Anthropic,
-            model: Some(model.to_owned()),
+            model: model.to_owned(),
             payload,
         };
         match self {

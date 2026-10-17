@@ -108,8 +108,6 @@ pub(crate) struct ToolMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) replacements: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) diff_chunks: Option<Vec<DiffChunk>>,
     /// Unbounded match count when a tool capped returned rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -140,11 +138,6 @@ impl ToolOutput {
 
     pub(crate) fn with_title(mut self, title: impl Into<String>) -> Self {
         self.metadata.title = Some(title.into());
-        self
-    }
-
-    pub(crate) fn with_replacements(mut self, count: usize) -> Self {
-        self.metadata.replacements = Some(count);
         self
     }
 

@@ -1,7 +1,6 @@
 //! Conversation message types shared by the API client, session transcript, and TUI renderer.
 
-use serde::ser::SerializeStruct;
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 
 // ── Role ──
 
@@ -42,12 +41,12 @@ pub(crate) enum ContentBlock {
     /// Reasoning the model shows, empty when the request omits it.
     Thinking {
         thinking: String,
-        #[serde(flatten, serialize_with = "replay_as_signature")]
+        #[serde(flatten)]
         replay: Replay,
     },
     /// Reasoning the provider withheld, kept only for its wire to send back.
     RedactedThinking {
-        #[serde(flatten, serialize_with = "replay_as_data")]
+        #[serde(flatten)]
         replay: Replay,
     },
 }
@@ -59,69 +58,32 @@ fn is_default<T: Default + PartialEq>(v: &T) -> bool {
 // ── Replay ──
 
 /// The provider wire a content block came from.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum WireKind {
-    /// The Anthropic Messages API, which every block saved without a wire came from.
-    #[default]
+    /// The Anthropic Messages API.
     Anthropic,
 }
 
-/// What a wire needs to send a reasoning block back. `payload` is opaque to all but `wire`. A
-/// session file flattens it into its block with `payload` under the Anthropic key of the block
-/// type, the shape that earlier releases read and write.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+/// What a wire needs to send a reasoning block back. `payload` is opaque to all but `wire`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Replay {
-    #[serde(default)]
     pub(crate) wire: WireKind,
-    /// The model that produced the block, `None` for a block saved before blocks recorded it.
-    #[serde(default)]
-    pub(crate) model: Option<String>,
-    #[serde(alias = "signature", alias = "data")]
+    /// The model that produced the block.
+    pub(crate) model: String,
     pub(crate) payload: String,
 }
 
 #[cfg(test)]
 impl Replay {
-    /// An Anthropic replay saved without its model, as blocks from earlier releases load.
-    pub(crate) fn without_model(payload: &str) -> Self {
-        Self {
-            wire: WireKind::Anthropic,
-            model: None,
-            payload: payload.to_owned(),
-        }
-    }
-
     /// An Anthropic replay that `model` produced.
     pub(crate) fn with_model(model: &str, payload: &str) -> Self {
         Self {
-            model: Some(model.to_owned()),
-            ..Self::without_model(payload)
+            wire: WireKind::Anthropic,
+            model: model.to_owned(),
+            payload: payload.to_owned(),
         }
     }
-}
-
-fn replay_as_signature<S: Serializer>(replay: &Replay, serializer: S) -> Result<S::Ok, S::Error> {
-    serialize_replay(replay, "signature", serializer)
-}
-
-fn replay_as_data<S: Serializer>(replay: &Replay, serializer: S) -> Result<S::Ok, S::Error> {
-    serialize_replay(replay, "data", serializer)
-}
-
-fn serialize_replay<S: Serializer>(
-    replay: &Replay,
-    payload_key: &'static str,
-    serializer: S,
-) -> Result<S::Ok, S::Error> {
-    let mut fields = serializer.serialize_struct("Replay", 3)?;
-    fields.serialize_field(payload_key, &replay.payload)?;
-    fields.serialize_field("wire", &replay.wire)?;
-    match &replay.model {
-        Some(model) => fields.serialize_field("model", model)?,
-        None => fields.skip_field("model")?,
-    }
-    fields.end()
 }
 
 // ── Message ──
@@ -262,7 +224,7 @@ mod tests {
     const MODEL: &str = "claude-opus-5-5";
 
     #[test]
-    fn thinking_stores_the_payload_as_its_signature_beside_the_wire_and_model() {
+    fn thinking_stores_its_replay_beside_the_thinking_text() {
         let block = ContentBlock::Thinking {
             thinking: "reasoning".to_owned(),
             replay: Replay::with_model(MODEL, "sig_abc"),
@@ -275,33 +237,53 @@ mod tests {
             serde_json::json!({
                 "type": "thinking",
                 "thinking": "reasoning",
-                "signature": "sig_abc",
                 "wire": "anthropic",
                 "model": "claude-opus-5-5",
+                "payload": "sig_abc",
             }),
         );
         assert_eq!(serde_json::from_value::<ContentBlock>(json).unwrap(), block);
     }
 
     #[test]
-    fn thinking_saved_without_a_wire_or_model_loads_as_anthropic_without_a_model() {
-        let json = serde_json::json!({"type": "thinking", "thinking": "r", "signature": "sig"});
+    fn thinking_without_a_full_replay_fails_to_load() {
+        let cases = [
+            (
+                serde_json::json!({"type": "thinking", "thinking": "r", "signature": "sig"}),
+                "missing field `wire`",
+            ),
+            (
+                serde_json::json!({
+                    "type": "thinking",
+                    "thinking": "r",
+                    "wire": "anthropic",
+                    "payload": "sig",
+                }),
+                "missing field `model`",
+            ),
+            (
+                serde_json::json!({
+                    "type": "thinking",
+                    "thinking": "r",
+                    "signature": "sig",
+                    "wire": "anthropic",
+                    "model": MODEL,
+                }),
+                "missing field `payload`",
+            ),
+        ];
 
-        let block: ContentBlock = serde_json::from_value(json).unwrap();
+        for (json, expected) in cases {
+            let err = serde_json::from_value::<ContentBlock>(json.clone()).unwrap_err();
 
-        assert_eq!(
-            block,
-            ContentBlock::Thinking {
-                thinking: "r".to_owned(),
-                replay: Replay::without_model("sig"),
-            },
-        );
+            assert_eq!(err.to_string(), expected, "{json}");
+        }
     }
 
     // ── ContentBlock::RedactedThinking ──
 
     #[test]
-    fn redacted_thinking_stores_the_payload_as_its_data_beside_the_wire_and_model() {
+    fn redacted_thinking_stores_its_replay_alone() {
         let block = ContentBlock::RedactedThinking {
             replay: Replay::with_model(MODEL, "base64data=="),
         };
@@ -312,26 +294,12 @@ mod tests {
             json,
             serde_json::json!({
                 "type": "redacted_thinking",
-                "data": "base64data==",
                 "wire": "anthropic",
                 "model": "claude-opus-5-5",
+                "payload": "base64data==",
             }),
         );
         assert_eq!(serde_json::from_value::<ContentBlock>(json).unwrap(), block);
-    }
-
-    #[test]
-    fn redacted_thinking_saved_without_a_wire_or_model_loads_as_anthropic_without_a_model() {
-        let json = serde_json::json!({"type": "redacted_thinking", "data": "base64data=="});
-
-        let block: ContentBlock = serde_json::from_value(json).unwrap();
-
-        assert_eq!(
-            block,
-            ContentBlock::RedactedThinking {
-                replay: Replay::without_model("base64data=="),
-            },
-        );
     }
 
     // ── Message::user ──
@@ -359,7 +327,7 @@ mod tests {
     fn thinking(text: &str) -> ContentBlock {
         ContentBlock::Thinking {
             thinking: text.to_owned(),
-            replay: Replay::without_model("sig"),
+            replay: Replay::with_model(MODEL, "sig"),
         }
     }
 
@@ -406,7 +374,7 @@ mod tests {
         let blocks = [
             thinking("note"),
             ContentBlock::RedactedThinking {
-                replay: Replay::without_model("opaque"),
+                replay: Replay::with_model(MODEL, "opaque"),
             },
             tool_use(),
         ];

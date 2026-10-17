@@ -459,8 +459,8 @@ mod tests {
     use crate::config::auth::{Auth, AuthSource};
     use crate::engine::dispatch::NOT_RUN;
     use crate::engine::testing::{
-        EchoTool, FakeClient, dead_test_session, dispatch_with, empty_prompt, inert_ops, reply_of,
-        reply_turn, test_session, text_block, text_turn, thinking_block, with_stop,
+        EchoTool, FakeClient, MODEL, dead_test_session, dispatch_with, empty_prompt, inert_ops,
+        reply_of, reply_turn, test_session, text_block, text_turn, thinking_block, with_stop,
     };
     use crate::message::{Replay, Role};
     use crate::model::ResolvedModelId;
@@ -2498,7 +2498,7 @@ mod tests {
             role: Role::Assistant,
             content: vec![ContentBlock::Thinking {
                 thinking: INTERRUPTED_WORK_SENTINEL.to_owned(),
-                replay: Replay::without_model("sig"),
+                replay: Replay::with_model(MODEL, "sig"),
             }],
         };
         let events = |messages: &[Message]| {

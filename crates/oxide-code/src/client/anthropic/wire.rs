@@ -500,10 +500,6 @@ mod tests {
                     ContentBlock::RedactedThinking {
                         replay: Replay::with_model("claude-haiku-5-5", "blob"),
                     },
-                    ContentBlock::Thinking {
-                        thinking: "older".to_owned(),
-                        replay: Replay::without_model("legacy"),
-                    },
                     ContentBlock::Text {
                         text: "answer".to_owned(),
                     },
@@ -525,7 +521,6 @@ mod tests {
                 {"role": "assistant", "content": [
                     {"type": "thinking", "thinking": "plan", "signature": "sig"},
                     {"type": "redacted_thinking", "data": "blob"},
-                    {"type": "thinking", "thinking": "older", "signature": "legacy"},
                     {"type": "text", "text": "answer"},
                 ]},
                 {"role": "user", "content": [{"type": "text", "text": "next"}]},

@@ -43,8 +43,7 @@ pub(crate) struct FileState {
     pub(crate) recorded_at: OffsetDateTime,
     /// The tool call that recorded this state. Resume restores the state only while the
     /// transcript still holds that call's result.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) tool_use_id: Option<String>,
+    pub(crate) tool_use_id: String,
 }
 
 impl FileTracker {
@@ -72,7 +71,7 @@ impl FileTracker {
             let seen = std::mem::replace(&mut state.last_view, LastView::Full);
             state.last_view = seen.union(view);
             if outcome == RecordRead::Inserted {
-                state.tool_use_id = Some(tool_use_id.to_owned());
+                tool_use_id.clone_into(&mut state.tool_use_id);
             }
             return outcome;
         }
@@ -83,7 +82,7 @@ impl FileTracker {
                 content_hash,
                 last_view: view,
                 recorded_at: OffsetDateTime::now_utc(),
-                tool_use_id: Some(tool_use_id.to_owned()),
+                tool_use_id: tool_use_id.to_owned(),
             },
         );
         RecordRead::Inserted
@@ -131,7 +130,7 @@ impl FileTracker {
         W: Future<Output = std::io::Result<(PathBuf, Vec<u8>)>> + Send + 'static,
     {
         let tracker = Arc::clone(self);
-        let tool_use_id = Some(tool_use_id.to_owned());
+        let tool_use_id = tool_use_id.to_owned();
         tokio::spawn(async move {
             let (key, bytes) = write.await?;
             tracker.record_modify(key, &bytes, tool_use_id);
@@ -143,7 +142,7 @@ impl FileTracker {
 
     /// Records bytes the agent just wrote. Always lands as [`LastView::Full`] so a subsequent Edit
     /// passes the gate without requiring a fresh Read.
-    fn record_modify(&self, path: PathBuf, bytes: &[u8], tool_use_id: Option<String>) {
+    fn record_modify(&self, path: PathBuf, bytes: &[u8], tool_use_id: String) {
         let content_hash = xxh64(bytes, HASH_SEED);
         let now = OffsetDateTime::now_utc();
         self.lock().insert(
@@ -395,10 +394,10 @@ pub(crate) mod testing {
         tracker: &FileTracker,
         path: &Path,
         bytes: &[u8],
-        tool_use_id: Option<&str>,
+        tool_use_id: &str,
     ) {
         std::fs::write(path, bytes).unwrap();
-        tracker.record_modify(path.to_path_buf(), bytes, tool_use_id.map(str::to_owned));
+        tracker.record_modify(path.to_path_buf(), bytes, tool_use_id.to_owned());
     }
 }
 
@@ -419,7 +418,7 @@ mod tests {
                 content_hash: xxh64(content, HASH_SEED),
                 last_view: LastView::Full,
                 recorded_at,
-                tool_use_id: None,
+                tool_use_id: "toolu_1".to_owned(),
             },
         }
     }
@@ -444,7 +443,7 @@ mod tests {
         let reread = tracker.record_read(read, b"r", LastView::Full, "toolu_reread");
 
         assert_eq!(reread, RecordRead::CacheHit);
-        let origins: BTreeMap<PathBuf, Option<String>> = tracker
+        let origins: BTreeMap<PathBuf, String> = tracker
             .snapshot_all()
             .into_iter()
             .map(|snap| (snap.path, snap.state.tool_use_id))
@@ -452,9 +451,9 @@ mod tests {
         assert_eq!(
             origins,
             BTreeMap::from([
-                (paged.to_path_buf(), Some("toolu_page_2".to_owned())),
-                (read.to_path_buf(), Some("toolu_read".to_owned())),
-                (written, Some("toolu_write".to_owned())),
+                (paged.to_path_buf(), "toolu_page_2".to_owned()),
+                (read.to_path_buf(), "toolu_read".to_owned()),
+                (written, "toolu_write".to_owned()),
             ]),
             "the newest read that returned content owns the state, and a cache hit keeps it",
         );
@@ -698,7 +697,7 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"w");
         let stored = tracker.lock().get(&path).cloned().unwrap();
         assert_eq!(stored.content_hash, xxh64(b"w", HASH_SEED));
-        assert_eq!(stored.tool_use_id.as_deref(), Some("toolu_write"));
+        assert_eq!(stored.tool_use_id, "toolu_write");
     }
 
     #[tokio::test]
@@ -1057,7 +1056,7 @@ mod tests {
                     total_lines: 9,
                 },
                 recorded_at: time::macros::datetime!(2026-04-29 12:34:56 UTC),
-                tool_use_id: Some("toolu_1".to_owned()),
+                tool_use_id: "toolu_1".to_owned(),
             },
         };
 

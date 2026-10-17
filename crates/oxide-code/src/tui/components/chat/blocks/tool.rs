@@ -108,19 +108,8 @@ impl ChatBlock for ToolResultBlock {
             } => {
                 read_excerpt::render(&mut out, ctx, path, lines, *total_lines, self.is_error);
             }
-            ToolResultView::Diff {
-                chunks,
-                replace_all,
-                replacements,
-            } => {
-                diff::render(
-                    &mut out,
-                    ctx,
-                    chunks,
-                    *replace_all,
-                    *replacements,
-                    self.is_error,
-                );
+            ToolResultView::Diff { chunks, .. } => {
+                diff::render(&mut out, ctx, chunks, self.is_error);
             }
             ToolResultView::GrepMatches { groups, truncated } => {
                 grep::render(&mut out, ctx, groups, *truncated, self.is_error);

@@ -1697,26 +1697,6 @@ mod tests {
             !text.contains("Successfully edited"),
             "diff should replace the raw content body: {text}",
         );
-        assert!(
-            !text.contains("occurrences replaced"),
-            "replace_all=false should suppress the match-count footer: {text}",
-        );
-    }
-
-    #[test]
-    fn push_tool_result_view_edit_replace_all_shows_match_count() {
-        let mut chat = test_chat();
-        let view = crate::tool::ToolResultView::Diff {
-            chunks: vec![crate::tool::edit::synthesize_chunk("a", "b")],
-            replace_all: true,
-            replacements: 3,
-        };
-        chat.push_tool_result_view("Edited file.rs", view, false);
-        let text = all_text(&mut chat);
-        assert!(
-            text.contains("3 occurrences replaced"),
-            "replace-all footer missing: {text}",
-        );
     }
 
     #[test]
@@ -1745,30 +1725,6 @@ mod tests {
         assert!(
             text.contains("applied at lines 12, 47, 200"),
             "locations footer missing: {text}",
-        );
-        assert!(
-            !text.contains("3 occurrences replaced"),
-            "legacy count footer must not duplicate the locations footer: {text}",
-        );
-    }
-
-    #[test]
-    fn push_tool_result_view_edit_single_replacement_hides_count_footer() {
-        let mut chat = test_chat();
-        let view = crate::tool::ToolResultView::Diff {
-            chunks: vec![crate::tool::edit::synthesize_chunk("a", "b")],
-            replace_all: true,
-            replacements: 1,
-        };
-        chat.push_tool_result_view("Edited file.rs", view, false);
-        let text = all_text(&mut chat);
-        assert!(
-            !text.contains("occurrences replaced"),
-            "single-replacement count footer should be suppressed: {text}",
-        );
-        assert!(
-            !text.contains("applied at"),
-            "single-replacement locations footer should be suppressed: {text}",
         );
     }
 
