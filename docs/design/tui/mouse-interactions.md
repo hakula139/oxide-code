@@ -7,16 +7,16 @@ Design policy for mouse behavior in the TUI.
 Three user-visible features:
 
 1. **Scroll the chat with the mouse wheel**, in a bare terminal and inside tmux.
-2. **Click `#NN` in the status bar to open the pull request in the browser**, even though no app code routes the click.
+2. **Click `#NN` in the status bar to open the pull request in the browser**, with a plain click or the terminal's own Ctrl / Cmd-click.
 3. **Select chat content with the mouse and paste it elsewhere**, in any terminal the user runs `ox` in (iTerm2, WezTerm, kitty, Alacritty, Terminal.app, GNOME Terminal, Konsole, Ghostty, Windows Terminal, VS Code's integrated terminal, Cursor's integrated terminal).
 
-The TUI captures the mouse so wheel events reach it everywhere. The status-bar PR segments are wrapped in an OSC 8 hyperlink envelope that every modern terminal already knows how to make Ctrl-clickable. Selection goes through the terminal's bypass modifier until in-app selection lands ([#289](https://github.com/hakula139/oxide-code/issues/289)).
+The TUI captures the mouse so wheel events reach it everywhere. The status-bar PR segments are wrapped in an OSC 8 hyperlink envelope, which terminals open on Ctrl / Cmd-click, and `ox` opens them itself on a plain click. Selection goes through the terminal's bypass modifier until in-app selection lands ([#289](https://github.com/hakula139/oxide-code/issues/289)).
 
 ## Decision
 
-`enter_tui_mode` enables raw mode, the alternate screen, bracketed paste, and, outside Windows, Kitty keyboard disambiguation and crossterm's `EnableMouseCapture`. crossterm captures the Windows mouse through the console API, so `init` enables it there after `enter_tui_mode`. Pairs unwind on `leave_tui_mode`, or in `restore` for the Windows mouse.
+`init` enables raw mode, then `enter_tui_mode` enables the alternate screen, bracketed paste, and, outside Windows, Kitty keyboard disambiguation and crossterm's `EnableMouseCapture`. crossterm captures the Windows mouse through the console API, so `init` enables it there after `enter_tui_mode` and also requests SGR mouse reports (`?1006h`), which some Windows terminals need before ConPTY delivers mouse records. Pairs unwind on `leave_tui_mode`, or in `restore` for the Windows mouse.
 
-`App::handle_crossterm_event` forwards wheel events to `ChatView::handle_event`, which scrolls three rows per notch without moving the input cursor. While a modal is open, each notch reaches the modal as one Up or Down key instead, so the wheel steps a picker's selection or scrolls an overview. Other mouse events return early so the motion reports that capture enables don't each force a frame.
+`App::handle_crossterm_event` forwards wheel events to `ChatView::handle_event`, which scrolls three rows per notch without moving the input cursor. While a modal or the slash-command popup is open, each notch reaches it as one Up or Down key instead, so the wheel steps a list's selection or scrolls an overview. A plain left press on a status-bar link opens it, as [below](#osc-8-hyperlinks-on-the-pr-status-segments) describes. Other mouse events return early so the motion reports that capture enables don't each force a frame.
 
 ## Mouse capture
 
@@ -46,7 +46,7 @@ Three mechanics worth surfacing:
 - **BEL (`\x07`) terminator.** Some xterm.js-based terminals (VS Code's and Cursor's integrated terminals) misparse self-contained per-cell ST (`\x1b\\`) closers, leaking visible bytes into the next cells of the line. BEL is one byte and every modern emulator parses it identically.
 - **Plain OSC 8 inside tmux.** tmux 3.4 and later parse OSC 8, place the link in pane coordinates, and forward it to outer terminals that have the `hyperlinks` terminal feature. For an outer terminal tmux does not detect, add `set -as terminal-features ',<TERM>:hyperlinks'` to `tmux.conf`, where `<TERM>` matches the outer terminal's `$TERM`. Older tmux drops the OSC and keeps the visible text.
 
-Terminals with OSC 8 support make these segments Ctrl-clickable (Cmd-click on macOS in some terminals). Terminals that ignore OSC control strings leave the visible text intact. Terminals that print raw OSC bytes may show escape text, which is the legacy fallback.
+Mouse capture hands plain clicks to `ox`, and some terminals, such as kitty and WezTerm, also deliver clicks on links to an app that captures the mouse. `App::emit_status_hyperlinks` therefore keeps the frame's link rects, and a left press without modifiers inside one opens its URL through `App::open_browser`. A press with modifiers is left to the terminal, so a terminal that opens OSC 8 links on Ctrl / Cmd-click itself doesn't open the page twice. Terminals that ignore OSC control strings leave the visible text intact. Terminals that print raw OSC bytes may show escape text, which is the legacy fallback.
 
 URLs are sanitized: every control char is filtered out before the envelope is built, so a malformed value can't break out of the OSC 8 sequence.
 
@@ -63,8 +63,8 @@ Manual verification across terminals:
 2. Page up. Confirm the jump-to-bottom pill appears.
 3. Press Ctrl+End. Confirm chat snaps to bottom and re-arms auto-scroll.
 4. Hold the terminal's bypass modifier and drag-select a chat region. Confirm the highlight uses the terminal's native selection style. Mouse up. Paste somewhere external. Confirm bytes round-trip.
-5. With the `pull-request`, `pull-request-checks`, and `pull-request-review` status segments configured, Ctrl-click (Cmd-click on iTerm2 / Terminal.app) on each. Confirm the browser opens the PR, its checks page, and its changed-files page.
+5. With the `pull-request`, `pull-request-checks`, and `pull-request-review` status segments configured, click each, then Ctrl-click each (Cmd-click on iTerm2 / Terminal.app). Confirm the browser opens the PR, its checks page, and its changed-files page once per click.
 6. Wheel scroll, both in a bare terminal and inside tmux with `mouse on`. Confirm chat scrolls and tmux stays out of copy mode.
 7. Quit. Confirm alt-screen restored.
 
-Automated coverage pins the mouse-capture enter / leave bytes, wheel scroll steps, ignored non-wheel mouse events, OSC 8 replay bytes, URL sanitization, the unwrapped envelope inside tmux, and status-bar hyperlink capture.
+Automated coverage pins the mouse-capture enter / leave bytes, the Windows SGR request bytes, wheel scroll steps, wheel routing to modals and the slash popup, plain-click link opening, ignored mouse events, OSC 8 replay bytes, URL sanitization, the unwrapped envelope inside tmux, and status-bar hyperlink capture.

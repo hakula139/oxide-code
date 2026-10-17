@@ -112,7 +112,7 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 
 - **Persistent modals in chat scroll.** Modals are ephemeral. `/diff` stays a chat-pushed printer because the diff genuinely earns scrollback, and modal cropping would lose value.
 
-- **Mouse interaction.** The TUI leaves mouse capture off to keep the terminal's native drag-select ([mouse interactions](../tui/mouse-interactions.md)), which means modals never receive clicks and stay keyboard-driven.
+- **Mouse interaction.** The TUI captures the mouse ([mouse interactions](../tui/mouse-interactions.md)), but a modal receives only the wheel, as Up / Down keys. It ignores clicks and stays keyboard-driven.
 
 - **Concurrent modals on different layers** (e.g. toast over modal). The chat error-block path already covers what toasts would.
 

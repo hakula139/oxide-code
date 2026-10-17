@@ -243,8 +243,7 @@ impl InputArea {
                 self.submit()
                     .map_or(InputOutcome::Consumed, InputOutcome::Action)
             }
-            // Alternate-scroll delivers wheel ticks as Up / Down, so an unmovable cursor yields
-            // the key to chat scroll.
+            // An Up / Down the cursor can't follow scrolls the chat instead.
             KeyCode::Up | KeyCode::Down => {
                 let before = self.textarea.cursor();
                 self.input_key(*key);

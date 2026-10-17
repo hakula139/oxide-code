@@ -28,7 +28,10 @@ pub(crate) fn init() -> Result<Tui> {
     let mut stdout = io::stdout();
     enter_tui_mode(&mut stdout)?;
     #[cfg(windows)]
-    execute!(stdout, EnableMouseCapture)?;
+    {
+        execute!(stdout, EnableMouseCapture)?;
+        write_sgr_mouse(&mut stdout, true)?;
+    }
 
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
@@ -62,6 +65,7 @@ pub(crate) fn restore() {
     #[cfg(windows)]
     {
         _ = execute!(stdout, DisableMouseCapture);
+        _ = write_sgr_mouse(&mut stdout, false);
     }
     _ = leave_tui_mode(&mut stdout);
     _ = disable_raw_mode();
@@ -78,6 +82,18 @@ fn leave_tui_mode(stdout: &mut impl Write) -> Result<()> {
     )?;
     execute!(stdout, LeaveAlternateScreen, crossterm::cursor::Show)?;
     Ok(())
+}
+
+/// Requests or releases SGR mouse reports (DEC mode 1006). Some Windows terminals otherwise send
+/// mouse reports as key records, and `ConPTY` translates only SGR reports into mouse records.
+#[cfg(any(windows, test))]
+fn write_sgr_mouse(out: &mut impl Write, enable: bool) -> io::Result<()> {
+    out.write_all(if enable {
+        b"\x1b[?1006h"
+    } else {
+        b"\x1b[?1006l"
+    })?;
+    out.flush()
 }
 
 /// Marks the terminal restored and drains the deferred panic reports into `out`, one per line.
@@ -315,6 +331,21 @@ mod tests {
         assert_eq!(
             error.downcast_ref::<io::Error>().unwrap().kind(),
             io::ErrorKind::WriteZero,
+        );
+    }
+
+    // ── write_sgr_mouse ──
+
+    #[test]
+    fn write_sgr_mouse_toggles_dec_mode_1006() {
+        let (mut enable, mut disable) = (Vec::new(), Vec::new());
+
+        write_sgr_mouse(&mut enable, true).unwrap();
+        write_sgr_mouse(&mut disable, false).unwrap();
+
+        assert_eq!(
+            (enable.as_slice(), disable.as_slice()),
+            (&b"\x1b[?1006h"[..], &b"\x1b[?1006l"[..])
         );
     }
 

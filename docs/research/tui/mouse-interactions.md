@@ -20,9 +20,9 @@ Codex's Rust TUI captures the mouse while it owns the alternate screen. `Alterna
 
 `codex-rs/tui/src/tui/tmux.rs` probes `#{mouse}` with one `tmux display-message` call and skips capture only when the session reports mouse off. Inside tmux with `mouse on`, tmux owns the wheel, so 1007 never takes effect there.
 
-Click on URLs is handled via OSC 8: `set_status_line_hyperlink(url)` at `chatwidget.rs:1684` and `bottom_pane/mod.rs:1584` wrap the open-PR URL on the status line. `mark_url_hyperlink(buf, area, url)` is the helper that overlays OSC 8 cells across a ratatui buffer rect. The terminal's own Ctrl-click handler opens the URL, with no app-side click routing.
+Transcript links open in the app under capture. `transcript_view/input.rs` resolves the link under a press, and a single plain click on it opens the URL on release, while a click with modifiers or a drag stays a selection. The status line still goes through OSC 8: `set_status_line_hyperlink(url)` at `chatwidget.rs:1684` and `bottom_pane/mod.rs:1584` wrap the open-PR URL, and `mark_url_hyperlink(buf, area, url)` overlays OSC 8 cells across a ratatui buffer rect, so the terminal's own Ctrl-click handler opens it.
 
-URL opening fallback uses the `webbrowser = "1.0"` crate via `webbrowser::open(&url)` at `app/history_ui.rs`. Triggered by an internal `AppEvent::OpenUrlInBrowser { url }` event for plugin auth and app-link views, but not for the OSC 8 hyperlinks (those go through the terminal).
+URL opening fallback uses the `webbrowser = "1.0"` crate via `webbrowser::open(&url)` at `app/history_ui.rs`. `open_url_in_browser` serves the internal `AppEvent::OpenUrlInBrowser { url }` event for plugin auth and app-link views, and transcript link clicks call it directly. The status-line OSC 8 hyperlinks still go through the terminal.
 
 Selection is app-side. `rendered_selection.rs` handles left-button press, drag, and release over regions each widget registers during render, and `transcript_view` adds keyboard selection. `clipboard_copy.rs` copies through the native clipboard (`arboard`) locally, also forwards to the attached terminal in tmux, and sends OSC 52 directly over SSH without a multiplexer.
 
