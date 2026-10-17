@@ -152,9 +152,9 @@ pub(crate) enum Event {
     /// Automatic compaction started before the submitted prompt runs. The frontend shows compacting
     /// status while the summarizer request streams.
     AutoCompactionStarted,
-    /// Automatic compaction failed too many times in a row, so later prompts go out without it
+    /// Automatic compaction failed `failures` times in a row, so later prompts go out without it
     /// until [`Self::AutoCompactionResumed`].
-    AutoCompactionPaused,
+    AutoCompactionPaused { failures: u8 },
     /// Automatic compaction runs again after [`Self::AutoCompactionPaused`], because a compaction
     /// succeeded, the model or effort changed, or a new or resumed session started.
     AutoCompactionResumed,
@@ -551,7 +551,7 @@ mod tests {
             Event::RateLimitsUpdated(_) => "rate_limits_updated",
             Event::Cancelled => "cancelled",
             Event::AutoCompactionStarted => "auto_compaction_started",
-            Event::AutoCompactionPaused => "auto_compaction_paused",
+            Event::AutoCompactionPaused { .. } => "auto_compaction_paused",
             Event::AutoCompactionResumed => "auto_compaction_resumed",
             Event::SummaryToken(_) => "summary_token",
             Event::SummaryDiscarded => "summary_discarded",
@@ -606,7 +606,7 @@ mod tests {
             Event::RateLimitsUpdated(five_hour_limit()),
             Event::Cancelled,
             Event::AutoCompactionStarted,
-            Event::AutoCompactionPaused,
+            Event::AutoCompactionPaused { failures: 3 },
             Event::AutoCompactionResumed,
             Event::SummaryToken("Recap".to_owned()),
             Event::SummaryDiscarded,

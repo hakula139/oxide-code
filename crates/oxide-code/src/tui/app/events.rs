@@ -56,8 +56,10 @@ impl App {
                 self.set_active_status(Status::Compacting);
                 self.input.set_enabled(false);
             }
-            Event::AutoCompactionPaused => self.session_info.auto_compaction_paused = true,
-            Event::AutoCompactionResumed => self.session_info.auto_compaction_paused = false,
+            Event::AutoCompactionPaused { failures } => {
+                self.session_info.auto_compaction_paused_after = Some(failures);
+            }
+            Event::AutoCompactionResumed => self.session_info.auto_compaction_paused_after = None,
             Event::SummaryToken(token) => self.chat.append_summary_token(&token),
             Event::SummaryDiscarded => self.chat.discard_summary(),
             Event::SessionTitleUpdated { session_id, title } => {
@@ -1069,13 +1071,12 @@ mod tests {
     fn handle_auto_compaction_paused_until_resumed_marks_the_status_pause() {
         let (mut app, _rx, _event_tx) = test_app(None);
 
-        app.handle_engine_event(Event::AutoCompactionPaused);
-        let paused = app.session_info.auto_compaction_paused;
+        app.handle_engine_event(Event::AutoCompactionPaused { failures: 3 });
+        let paused = app.session_info.auto_compaction_paused_after;
         app.handle_engine_event(Event::AutoCompactionResumed);
 
-        assert!(paused);
-        assert!(!app.session_info.auto_compaction_paused);
-        assert!(app.dirty);
+        assert_eq!(paused, Some(3));
+        assert_eq!(app.session_info.auto_compaction_paused_after, None);
     }
 
     #[tokio::test]

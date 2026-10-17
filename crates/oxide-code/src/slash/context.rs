@@ -7,8 +7,8 @@ use crate::config::ConfigSnapshot;
 use crate::permission::rule::Rule;
 
 /// Live snapshot of the running session handed to every slash command. Built at TUI startup and
-/// rebound by `SessionRolled` / `ConfigChanged` so commands always see the current model, effort,
-/// session id, and theme. Distinct from [`crate::session::entry::SessionInfo`], which is the
+/// kept current from engine events, so commands always see the current model, effort, session id,
+/// and theme. Distinct from [`crate::session::entry::SessionInfo`], which is the
 /// persisted JSONL record consumed by `--list`.
 pub(crate) struct LiveSessionInfo {
     pub(crate) cwd: String,
@@ -22,8 +22,8 @@ pub(crate) struct LiveSessionInfo {
     pub(crate) session_id: String,
     /// Rules granted from approvals for the rest of this session.
     pub(crate) session_allow: Vec<Rule>,
-    /// Repeated failures paused automatic compaction, until the engine reports that it resumed.
-    pub(crate) auto_compaction_paused: bool,
+    /// Failures in a row that paused automatic compaction, until the engine reports a resume.
+    pub(crate) auto_compaction_paused_after: Option<u8>,
     pub(crate) config: ConfigSnapshot,
 }
 
@@ -60,7 +60,7 @@ pub(crate) mod testing {
             version: "0.0.0-test",
             session_id: "test-session".to_owned(),
             session_allow: Vec::new(),
-            auto_compaction_paused: false,
+            auto_compaction_paused_after: None,
             config: ConfigSnapshot {
                 auth: Some(crate::config::auth::AuthSource::ApiKeyEnv),
                 signed_out_notice: None,

@@ -3,7 +3,6 @@
 
 use super::context::{LiveSessionInfo, SlashContext};
 use super::registry::{SlashCommand, SlashOutcome};
-use crate::config::compaction::MAX_AUTO_COMPACTION_FAILURES;
 use crate::config::{display_auth, display_auto_compaction, display_bool, display_effort};
 use crate::tui::modal::kv_overview::{KvOverview, KvSection};
 
@@ -32,12 +31,11 @@ impl SlashCommand for StatusCmd {
 fn build_modal(info: &LiveSessionInfo) -> KvOverview {
     let model = &info.config.model;
     let model = format!("{} ({})", model.display_name(), model.id());
-    let auto_compaction = if info.auto_compaction_paused {
-        format!(
-            "paused after {MAX_AUTO_COMPACTION_FAILURES} failures in a row (run /compact to resume)"
-        )
-    } else {
-        display_auto_compaction(info.config.compaction.auto)
+    let auto_compaction = match info.auto_compaction_paused_after {
+        Some(failures) => {
+            format!("paused after {failures} failures in a row (run /compact to resume)")
+        }
+        None => display_auto_compaction(info.config.compaction.auto),
     };
     let rows = vec![
         ("Model".to_owned(), model),
@@ -146,7 +144,7 @@ mod tests {
         };
 
         let threshold = auto_compaction_row(&info);
-        info.auto_compaction_paused = true;
+        info.auto_compaction_paused_after = Some(3);
         let paused = auto_compaction_row(&info);
 
         assert_eq!(

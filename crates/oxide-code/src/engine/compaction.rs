@@ -21,13 +21,15 @@ use super::abort::{AbortResult, TurnAbort, await_unless_aborted};
 use super::compact_boundary;
 use super::turn::collect_response;
 use crate::client::{PromptTooLong, Response, ResponseEvent, StopReason, TokenUsage, Wire};
-use crate::config::compaction::{AutoCompactionConfig, MAX_AUTO_COMPACTION_FAILURES};
+use crate::config::compaction::AutoCompactionConfig;
 use crate::file_tracker::FileTracker;
 use crate::message::{ContentBlock, Message, Role};
 use crate::prompt::PromptParts;
 use crate::protocol::{Event, EventSink, Op};
 use crate::session::handle::SessionHandle;
 use crate::tool::ToolDefinition;
+
+const MAX_AUTO_COMPACT_FAILURES: u8 = 3;
 
 /// Rough transcript size below which compaction is refused, since the summary would be about as
 /// long as the transcript.
@@ -99,7 +101,7 @@ pub(super) async fn auto_compact_if_needed(
     let Some(usage) = usage else {
         return Ok(false);
     };
-    if *auto.failures >= MAX_AUTO_COMPACTION_FAILURES
+    if *auto.failures >= MAX_AUTO_COMPACT_FAILURES
         || !auto.config.should_trigger(usage.total_tokens())
         || transcript_tokens(messages) < MIN_TOKENS_FOR_COMPACT
     {
@@ -161,13 +163,18 @@ fn record_auto_compact_failure(
     headline: &str,
 ) -> TurnAbort {
     *auto.failures += 1;
-    let next = if *auto.failures < MAX_AUTO_COMPACTION_FAILURES {
+    let next = if *auto.failures < MAX_AUTO_COMPACT_FAILURES {
         "The prompt was not sent, so send it again to retry.".to_owned()
     } else {
-        sink.emit(Event::AutoCompactionPaused, "auto-compaction-paused");
+        sink.emit(
+            Event::AutoCompactionPaused {
+                failures: MAX_AUTO_COMPACT_FAILURES,
+            },
+            "auto-compaction-paused",
+        );
         format!(
             "The prompt was not sent, and auto-compaction is paused after \
-             {MAX_AUTO_COMPACTION_FAILURES} failures in a row. Send the prompt again to run it \
+             {MAX_AUTO_COMPACT_FAILURES} failures in a row. Send the prompt again to run it \
              without compaction, or run /compact to retry compaction first."
         )
     };
@@ -176,7 +183,7 @@ fn record_auto_compact_failure(
 
 /// Clears the failure count and reports [`Event::AutoCompactionResumed`] if the breaker tripped.
 pub(super) fn reset_auto_compact_failures(failures: &mut u8, sink: &dyn EventSink) {
-    if std::mem::take(failures) >= MAX_AUTO_COMPACTION_FAILURES {
+    if std::mem::take(failures) >= MAX_AUTO_COMPACT_FAILURES {
         sink.emit(Event::AutoCompactionResumed, "auto-compaction-resumed");
     }
 }
@@ -788,7 +795,7 @@ mod tests {
         let tracker = FileTracker::default();
         let mut messages = tool_heavy_transcript();
         let mut pending = Vec::new();
-        let mut failures = MAX_AUTO_COMPACTION_FAILURES - 1;
+        let mut failures = MAX_AUTO_COMPACT_FAILURES - 1;
         let usage = Some(TokenUsage {
             input_tokens: 50_000,
             cache_creation_input_tokens: 0,
@@ -836,11 +843,14 @@ mod tests {
             matches!(fourth, Ok(false)),
             "the next prompt goes out without compaction: {fourth:?}"
         );
-        assert_eq!(failures, MAX_AUTO_COMPACTION_FAILURES);
+        assert_eq!(failures, MAX_AUTO_COMPACT_FAILURES);
         assert_eq!(client.calls(), 1);
         assert_eq!(
             sink.events(),
-            [Event::AutoCompactionStarted, Event::AutoCompactionPaused],
+            [
+                Event::AutoCompactionStarted,
+                Event::AutoCompactionPaused { failures: 3 },
+            ],
         );
     }
 
@@ -1004,8 +1014,8 @@ mod tests {
     #[test]
     fn reset_auto_compact_failures_reports_a_resume_only_from_a_pause() {
         let sink = CapturingSink::new();
-        let mut counting = MAX_AUTO_COMPACTION_FAILURES - 1;
-        let mut paused = MAX_AUTO_COMPACTION_FAILURES;
+        let mut counting = MAX_AUTO_COMPACT_FAILURES - 1;
+        let mut paused = MAX_AUTO_COMPACT_FAILURES;
 
         reset_auto_compact_failures(&mut counting, &sink);
         let after_counting = sink.events();

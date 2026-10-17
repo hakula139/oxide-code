@@ -68,7 +68,7 @@ Explicit thresholds snap into a usable range. Token values below `50_000` rise t
 6. On success, `compact_boundary` persists the compact boundary, clears the file tracker, replaces `messages` with the synthetic post-compact message, and emits `SessionCompacted`.
 7. On failure, the streamed summary is discarded, `auto_compact_if_needed` increments the failure counter, and `submit_prompt` ends with `TurnFailed` without recording or sending the new prompt.
 
-The failure counter lives on `Engine`. Three consecutive automatic failures pause further automatic attempts until a successful compaction, a model or effort change, `/clear`, `/archive`, or `/resume` resets the counter. Manual `/compact` does not consult it. The failure that pauses it emits `AutoCompactionPaused`, and a reset of the paused counter emits `AutoCompactionResumed`, which the TUI follows to show the pause in `/status`.
+The failure counter lives on `Engine`. Three consecutive automatic failures pause further automatic attempts until a successful compaction, a model or effort change, `/clear`, `/archive`, or `/resume` resets the counter. Manual `/compact` does not consult it. The failure that pauses it emits `AutoCompactionPaused` with the failure count, and a reset of the paused counter emits `AutoCompactionResumed`, which the TUI follows to show the pause in `/status`.
 
 ## User Experience
 

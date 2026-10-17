@@ -2330,6 +2330,54 @@ mod tests {
         .await;
     }
 
+    #[tokio::test]
+    async fn clear_and_resume_end_a_paused_auto_compaction() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let mut engine = engine(server.uri(), &store, dir.path()).await;
+            let target_id = finished_session(&store).await;
+            let target_path = store.find_session_path(&target_id).unwrap();
+            let clear_sink = CapturingSink::new();
+            let resume_sink = CapturingSink::new();
+
+            engine.auto_compaction_failures = 3;
+            engine.clear(&clear_sink).await;
+            let after_clear = engine.auto_compaction_failures;
+            engine.auto_compaction_failures = 3;
+            engine
+                .resume(&resume_sink, ResumeTarget::Path(target_path))
+                .await;
+
+            assert_eq!((after_clear, engine.auto_compaction_failures), (0, 0));
+            let cleared = clear_sink.events();
+            assert!(
+                matches!(
+                    cleared.as_slice(),
+                    [
+                        Event::AutoCompactionResumed,
+                        Event::SessionRolled {
+                            archived: false,
+                            ..
+                        },
+                    ]
+                ),
+                "{cleared:?}",
+            );
+            let resumed = resume_sink.events();
+            assert!(
+                matches!(
+                    resumed.as_slice(),
+                    [Event::AutoCompactionResumed, Event::SessionResumed { id, .. }]
+                        if *id == target_id
+                ),
+                "{resumed:?}",
+            );
+        })
+        .await;
+    }
+
     // ── archive ──
 
     #[tokio::test]
