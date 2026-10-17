@@ -25,13 +25,26 @@ The TUI layout, prompt text, slash-command output wording, and log format are ou
 
 ## Changelog
 
-[git-cliff](https://git-cliff.org) generates `CHANGELOG.md` from `cliff.toml`, so never edit the file by hand.
+[git-cliff](https://git-cliff.org) drafts each release's `CHANGELOG.md` section from `cliff.toml`, and the release PR curates the draft into the published notes. Curate a section only in its release PR, after the script runs, and never regenerate an older section. The GitHub Release keeps its own copy of the notes, so a later PR that corrects a published section also needs `gh release edit vX.Y.Z --notes-file <(parse-changelog CHANGELOG.md X.Y.Z)` once it merges. `cargo install parse-changelog` provides the parser `release.yml` uses.
 
-- Each squash-merged PR title becomes one entry, so write PR titles for users.
-- `feat`, `fix`, `perf`, and `revert` titles land under Added, Fixed, Changed, and Removed, and `!` titles land under Breaking changes. Every other type is skipped, including routine `chore(deps)` and `chore(flake)` bumps. Title a bump that fixes an advisory or changes behavior as `fix(deps): ...`.
-- A stable section rolls up every change since the previous stable release. A prerelease section lists only the changes since the previous tag.
-- Highlights come from the annotated tag message, so regenerating a section reproduces them.
-- `--prepend` adds one section and keeps the rest. Avoid `--output CHANGELOG.md`, which regenerates the whole file with a single tag pattern, so it drops either the prerelease sections or the stable roll-ups, along with every compare link.
+- Each squash-merged PR title becomes one draft entry, so write titles for users.
+- `feat`, `fix`, `perf`, and `revert` titles appear under Added, Fixed, Changed, and Removed, respectively. Titles with `!` appear under Breaking changes. All other types are skipped, including routine `chore(deps)` and `chore(flake)` bumps. Title a bump that fixes an advisory or changes behavior as `fix(deps): ...`.
+- Within each group, the draft lists unscoped entries first, then the rest sorted by scope in merge order, so related entries sit together. Each `(#N)` links to its PR.
+- A stable section includes every change since the previous stable release. A prerelease section includes only changes since the previous tag.
+- A highlights file passed to the script holds only bullets, which render under `### Highlights` at the top of the section. The merged section is their only source, and the [tag](#tag) annotation is extracted from it.
+- `--prepend` adds one section while preserving the rest. Avoid `--output CHANGELOG.md`, which regenerates the whole file with a single tag pattern, so it drops every curated section and compare link, along with either the prerelease sections or the stable roll-ups.
+
+### Curate the section
+
+The draft lists PR titles, which are short and written for reviewers at merge time. Before opening the release PR, rewrite the draft for users, reading a PR's description wherever its title leaves the effect unclear. Follow these rules:
+
+- Describe what users can now do, what no longer breaks, and what now works differently, such as a check that now fails or a value that is now rejected. Omit implementation details.
+- Merge entries that describe the same user-visible change, keeping every PR link, as in `([#223](...), [#224](...))`. Fold a fix to a feature that is new in the same section into that feature's entries, and describe the feature as it now works. A merged entry takes the scope of the feature or main change it describes, and a PR with unrelated effects may be split across entries.
+- Move each entry to the group that matches its effect. For example, move a `fix` that adds a capability to Added. Keep entries under Breaking changes there.
+- Drop entries with no user-visible effect, such as a CI-only or test-only change titled `fix`.
+- Within each group, order entries by user impact and keep their scope labels.
+- Describe only what the PRs changed.
+- Lead with the highlights when the release has any, and curate them like the entries.
 
 ## Prepare a release
 
@@ -42,24 +55,25 @@ The TUI layout, prompt text, slash-command output wording, and log format are ou
    ./scripts/prepare-release.sh vX.Y.Z [highlights.md]
    ```
 
-   The script sets `workspace.package.version`, refreshes `Cargo.lock`, prepends the changelog section with its compare link, and points the `VERSION=` install snippets in `README.md` and `docs/guide/install.md` at the tag. It also adds the release's [session resume fixture](docs/design/session/persistence.md#compatibility) and records how it resumes, failing if an earlier release's fixture now resumes differently. For a notable release, pass a Markdown file of highlights and keep it for tagging.
+   The script sets `workspace.package.version`, refreshes `Cargo.lock`, prepends the changelog section with its compare link, and points the `VERSION=` install snippets in `README.md` and `docs/guide/install.md` at the tag. It also adds the release's [session resume fixture](docs/design/session/persistence.md#compatibility) and records how it resumes, failing if an earlier release's fixture now resumes differently. For a notable release, pass a Markdown file that lists the highlights as bullets.
 
-3. Review the new section. Merged PR titles cannot change on `main`, so reword a misleading entry with a `commit_preprocessors` rule in `cliff.toml`, discard the script's changes, and run it again. The script refuses to run over uncommitted changes to the files it edits, or when the tag's fixture or its snapshot already exists, so delete both when discarding.
-4. Run the [verification block](AGENTS.md#verification). `cspell` scans `CHANGELOG.md`, so add any unknown word from a title to `.cspell/words.txt`.
-5. Commit, then open a PR titled `chore(release): vX.Y.Z`, which becomes the squash commit on `main`, and record the checks in its Test plan. The diff touches only `Cargo.toml`, `Cargo.lock`, `CHANGELOG.md`, `README.md`, `docs/guide/install.md`, the new fixture under `crates/oxide-code/src/session/fixtures/` with its snapshot, and possibly `cliff.toml` or `.cspell/words.txt`.
-6. Merge it after CI passes and review approves. If another PR merges first, recreate the branch from `main` and run the script again, since updating the branch keeps a section that misses the new commit.
+3. [Curate the section](#curate-the-section) that the script prepended.
+4. Run the [verification block](AGENTS.md#verification). Because `cspell` scans `CHANGELOG.md`, add any unknown words from the section to `.cspell/words.txt`.
+5. Commit, then open a PR titled `chore(release): vX.Y.Z`. Its title becomes the squash commit on `main`. Record the checks in the PR's Test plan. The diff should touch only `Cargo.toml`, `Cargo.lock`, `CHANGELOG.md`, `README.md`, `docs/guide/install.md`, the new fixture under `crates/oxide-code/src/session/fixtures/` and its snapshot, and possibly `.cspell/words.txt`.
+6. Merge after CI passes and the review is approved. If another PR merges first, recreate the branch from `main` and run the script again because updating the branch leaves a section that misses the new commit. Carry the curated entries over from the old branch, then curate the new ones.
 
 ## Tag
 
 Pushing the tag starts the Release workflow and is hard to undo, so get approval for it separately from the release PR. Push it soon after the merge, because the pinned install snippets on `main` return 404 until the release publishes.
 
-Tag the release PR's squash commit by its SHA, since a later PR may already sit on top of `main`. Annotate the tag with the highlights file when there is one, and keep every line with `--cleanup=verbatim`, which stops Git from stripping lines that start with `#`:
+Tag the release PR's squash commit by its SHA, since a later PR may already sit on top of `main`. When the merged section has highlights, annotate the tag with them. The `awk` filter prints the `### Highlights` block of the commit's newest section, and `--cleanup=whitespace` trims the blank lines around it without stripping lines that start with `#`:
 
 ```bash
 git fetch origin
 sha=$(gh pr view <release-pr> --json mergeCommit --jq .mergeCommit.oid)
-git tag vX.Y.Z "$sha"                                            # without highlights
-git tag -a --cleanup=verbatim -F highlights.md vX.Y.Z "$sha"    # with highlights
+git show "$sha:CHANGELOG.md" | awk '/^## / { n++ } /^#/ { h = n == 1 && $0 == "### Highlights"; next } h' >highlights.md
+git tag vX.Y.Z "$sha"                                               # without highlights
+git tag -a --cleanup=whitespace -F highlights.md vX.Y.Z "$sha"      # with highlights
 git push origin vX.Y.Z
 ```
 
@@ -75,12 +89,12 @@ The workflow then opens a `chore(release): refresh Homebrew formula for vX.Y.Z` 
 
 ## Re-cut an existing tag
 
-The PR-based flow tags only reviewed, CI-green commits, so re-cutting should be rare. If a release still needs to be redone (e.g., bad assets), let any in-flight release run finish first. To rebuild the same commit, delete only the release with `gh release delete vX.Y.Z --yes` and run the release workflow from the Actions tab against the tag. To release a different commit, delete the release and its tag, then move and push the tag. Recreate an annotated tag with the same highlights file, or its highlights are lost:
+The PR-based flow tags only reviewed, CI-green commits, so re-cutting should be rare. If a release still needs to be redone (e.g., bad assets), let any in-flight release run finish first. To rebuild the same commit, delete only the release with `gh release delete vX.Y.Z --yes` and run the release workflow from the Actions tab against the tag. To release a different commit, delete the release and its tag, then move and push the tag. Extract the highlights from `<commit>` with the [Tag](#tag) filter first, so the new tag keeps them:
 
 ```bash
 gh release delete vX.Y.Z --cleanup-tag --yes
-git tag -f vX.Y.Z <commit>                                           # without highlights
-git tag -f -a --cleanup=verbatim -F highlights.md vX.Y.Z <commit>    # with highlights
+git tag -f vX.Y.Z <commit>                                             # without highlights
+git tag -f -a --cleanup=whitespace -F highlights.md vX.Y.Z <commit>    # with highlights
 git push origin vX.Y.Z
 ```
 
