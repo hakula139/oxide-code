@@ -21,6 +21,7 @@ pub(crate) const TEST_PROJECT: &str = "test-project";
 // ── SessionStore ──
 
 impl SessionStore {
+    /// Opens `project_name` under `sessions_dir`, recording `/work/<project_name>` as the cwd.
     pub(crate) fn open_at(sessions_dir: PathBuf, project_name: &str) -> Result<Self> {
         fs::create_dir_all(&sessions_dir)?;
         let project_dir = sessions_dir.join(project_name);
@@ -28,6 +29,7 @@ impl SessionStore {
         Ok(Self {
             sessions_dir,
             project_dir,
+            cwd: Path::new("/work").join(project_name),
         })
     }
 

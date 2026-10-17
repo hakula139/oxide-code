@@ -7,12 +7,13 @@ use std::pin::Pin;
 
 use indoc::formatdoc;
 use serde::Deserialize;
+use tokio_util::sync::CancellationToken;
 
 use super::{
-    GrepFileGroup, GrepMatchLine, Tool, ToolMetadata, ToolOutput, ToolResultView,
-    extract_input_field,
+    GrepFileGroup, GrepMatchLine, Prepared, SearchRoot, Tool, ToolCtx, ToolMetadata, ToolOutput,
+    ToolResultView, ToolSpec, extract_input_field,
 };
-use crate::permission::{GateTarget, PermissionClass, ReadDeny, WalkDeny};
+use crate::permission::{PermissionClass, ReadDeny, WalkDeny};
 use crate::util::text::plural;
 
 const NO_MATCHES_FOUND: &str = "No matches found";
@@ -37,58 +38,18 @@ impl GrepTool {
 }
 
 impl Tool for GrepTool {
-    fn name(&self) -> &'static str {
-        "grep"
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "grep".to_owned(),
+            description: "Search file contents using a regular expression.".to_owned(),
+            input_schema: input_schema(),
+            class: PermissionClass::Read,
+            parallel_safe: true,
+        }
     }
 
-    fn description(&self) -> &'static str {
-        "Search file contents using a regular expression."
-    }
-
-    fn permission_class(&self) -> PermissionClass {
-        PermissionClass::Read
-    }
-
-    fn gate_target(&self, input: &serde_json::Value, cwd: &Path) -> GateTarget {
-        super::search_root_target(input, cwd)
-    }
-
-    fn input_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "pattern": {
-                    "type": "string",
-                    "description": "The regular expression pattern to search for"
-                },
-                "path": {
-                    "type": "string",
-                    "description": "File or directory to search in (default: current working directory)"
-                },
-                "include": {
-                    "type": "string",
-                    "description": r#"Glob pattern to filter by filename (e.g. "*.rs", "*.{ts,tsx}"). Matches the basename only, not the full path."#
-                },
-                "output_mode": {
-                    "type": "string",
-                    "enum": ["content", "files_with_matches", "count"],
-                    "description": r#"Output mode: "content" shows matching lines (default), "files_with_matches" shows file paths only, "count" shows match counts per file"#
-                },
-                "context": {
-                    "type": "integer",
-                    "description": "Number of context lines to show before and after each match (content mode only)"
-                },
-                "case_insensitive": {
-                    "type": "boolean",
-                    "description": "Case-insensitive search (default: false)"
-                },
-                "head_limit": {
-                    "type": "integer",
-                    "description": "Limit output to first N entries (default: 250, 0 for unlimited)"
-                }
-            },
-            "required": ["pattern"]
-        })
+    fn prepare(&self, input: serde_json::Value, ctx: &ToolCtx) -> Prepared {
+        super::prepare_search_root(input, ctx)
     }
 
     fn icon(&self) -> &'static str {
@@ -104,6 +65,7 @@ impl Tool for GrepTool {
         input: &serde_json::Value,
         content: &str,
         _metadata: &ToolMetadata,
+        _cwd: &Path,
     ) -> Option<ToolResultView> {
         // Only content mode produces line-numbered rows, so the other modes fall through and keep
         // their summary header visible.
@@ -117,15 +79,54 @@ impl Tool for GrepTool {
         parse_content_view(content)
     }
 
-    fn run(
-        &self,
-        input: serde_json::Value,
-    ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + '_>> {
-        Box::pin(run(input, self.read_deny.clone()))
+    fn run<'a>(
+        &'a self,
+        prepared: Prepared,
+        ctx: &'a ToolCtx,
+    ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + 'a>> {
+        Box::pin(run(prepared, ctx, self.read_deny.clone()))
     }
 }
 
 // ── Input ──
+
+fn input_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "pattern": {
+                "type": "string",
+                "description": "The regular expression pattern to search for"
+            },
+            "path": {
+                "type": "string",
+                "description": "File or directory to search in (default: current working directory)"
+            },
+            "include": {
+                "type": "string",
+                "description": r#"Glob pattern to filter by filename (e.g. "*.rs", "*.{ts,tsx}"). Matches the basename only, not the full path."#
+            },
+            "output_mode": {
+                "type": "string",
+                "enum": ["content", "files_with_matches", "count"],
+                "description": r#"Output mode: "content" shows matching lines (default), "files_with_matches" shows file paths only, "count" shows match counts per file"#
+            },
+            "context": {
+                "type": "integer",
+                "description": "Number of context lines to show before and after each match (content mode only)"
+            },
+            "case_insensitive": {
+                "type": "boolean",
+                "description": "Case-insensitive search (default: false)"
+            },
+            "head_limit": {
+                "type": "integer",
+                "description": "Limit output to first N entries (default: 250, 0 for unlimited)"
+            }
+        },
+        "required": ["pattern"]
+    })
+}
 
 #[derive(Clone, Copy, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -155,7 +156,8 @@ struct Input {
 
 // ── Execution ──
 
-async fn run(raw: serde_json::Value, read_deny: ReadDeny) -> ToolOutput {
+async fn run(prepared: Prepared, ctx: &ToolCtx, read_deny: ReadDeny) -> ToolOutput {
+    let Prepared { input: raw, access } = prepared;
     let input: Input = match super::parse_input(raw) {
         Ok(v) => v,
         Err(e) => return e,
@@ -171,18 +173,19 @@ async fn run(raw: serde_json::Value, read_deny: ReadDeny) -> ToolOutput {
         head_limit,
     } = input;
 
+    let cwd = ctx.cwd().to_path_buf();
+    let cancel = ctx.cancel.clone();
     match tokio::task::spawn_blocking(move || {
-        let cwd = super::working_dir()?;
         grep_files(&GrepParams {
             pattern: &pattern,
-            cwd: &cwd,
-            search_path: path.as_deref(),
+            root: SearchRoot::new(&access, path.as_deref(), &cwd)?,
             include_glob: include.as_deref(),
             output_mode,
             context: context.unwrap_or(0),
             case_insensitive,
             head_limit,
             read_deny,
+            cancel,
         })
     })
     .await
@@ -217,16 +220,16 @@ fn grep_title(output: &str) -> String {
 
 struct GrepParams<'a> {
     pattern: &'a str,
-    /// Canonical working directory. A relative `search_path` resolves against it, and result
-    /// paths render relative to it.
-    cwd: &'a Path,
-    search_path: Option<&'a str>,
+    /// The resolved file or directory to search. Result paths render relative to its `cwd`.
+    root: SearchRoot,
     include_glob: Option<&'a str>,
     output_mode: OutputMode,
     context: usize,
     case_insensitive: bool,
     head_limit: Option<usize>,
     read_deny: ReadDeny,
+    /// Stops the walk and the file reads once the call is interrupted.
+    cancel: CancellationToken,
 }
 
 fn grep_files(params: &GrepParams<'_>) -> Result<String, String> {
@@ -240,8 +243,6 @@ fn grep_files(params: &GrepParams<'_>) -> Result<String, String> {
         .build()
         .map_err(|e| format!("Invalid regex: {e}"))?;
 
-    let base = super::resolve_base_dir(params.search_path, params.cwd)?;
-
     let include_matcher = params
         .include_glob
         .map(|g| globset::Glob::new(g).map(|g| g.compile_matcher()))
@@ -254,22 +255,21 @@ fn grep_files(params: &GrepParams<'_>) -> Result<String, String> {
         None => DEFAULT_HEAD_LIMIT,
     };
 
-    let read_deny = params.read_deny.walk(
-        &base,
-        Path::new(params.search_path.unwrap_or(".")),
-        params.cwd,
+    let root = &params.root;
+    let read_deny = params.read_deny.walk(&root.base, &root.spelled, &root.cwd);
+    let collected = collect_files(
+        &root.base,
+        include_matcher.as_ref(),
+        &read_deny,
+        &params.cancel,
     );
-    let collected = collect_files(&base, include_matcher.as_ref(), &read_deny);
 
-    let cwd = params.cwd;
+    let cwd = &root.cwd;
+    let texts = texts(&collected.files, &params.cancel);
     let mut result = match params.output_mode {
-        OutputMode::FilesWithMatches => {
-            format_files_with_matches(&collected.files, cwd, &re, head_limit)
-        }
-        OutputMode::Count => format_count(&collected.files, cwd, &re, head_limit),
-        OutputMode::Content => {
-            format_content(&collected.files, cwd, &re, params.context, head_limit)
-        }
+        OutputMode::FilesWithMatches => format_files_with_matches(texts, cwd, &re, head_limit),
+        OutputMode::Count => format_count(texts, cwd, &re, head_limit),
+        OutputMode::Content => format_content(texts, cwd, &re, params.context, head_limit),
     };
 
     append_skipped_warnings(&mut result, &collected.skipped_large, cwd);
@@ -291,6 +291,7 @@ fn collect_files(
     base: &Path,
     include_matcher: Option<&globset::GlobMatcher>,
     read_deny: &WalkDeny<'_>,
+    cancel: &CancellationToken,
 ) -> CollectedFiles {
     if base.is_file() {
         let mut files = Vec::new();
@@ -311,32 +312,33 @@ fn collect_files(
 
     let mut skipped_large = Vec::new();
     let mut withheld = 0;
-    let mut files_with_mtime: Vec<(PathBuf, std::time::SystemTime)> = super::walk_files(base)
-        .filter(|entry| {
-            include_matcher.is_none_or(|m| {
-                let name = entry.file_name().to_string_lossy();
-                m.is_match(name.as_ref())
+    let mut files_with_mtime: Vec<(PathBuf, std::time::SystemTime)> =
+        super::walk_files(base, cancel)
+            .filter(|entry| {
+                include_matcher.is_none_or(|m| {
+                    let name = entry.file_name().to_string_lossy();
+                    m.is_match(name.as_ref())
+                })
             })
-        })
-        .filter(|entry| {
-            let denied = read_deny.denies(entry.path());
-            withheld += usize::from(denied);
-            !denied
-        })
-        .filter(|entry| {
-            if let Ok(meta) = entry.metadata()
-                && meta.len() > MAX_GREP_FILE_SIZE
-            {
-                skipped_large.push((entry.path().to_path_buf(), meta.len()));
-                return false;
-            }
-            true
-        })
-        .map(|entry| {
-            let mtime = super::entry_mtime(&entry);
-            (entry.into_path(), mtime)
-        })
-        .collect();
+            .filter(|entry| {
+                let denied = read_deny.denies(entry.path());
+                withheld += usize::from(denied);
+                !denied
+            })
+            .filter(|entry| {
+                if let Ok(meta) = entry.metadata()
+                    && meta.len() > MAX_GREP_FILE_SIZE
+                {
+                    skipped_large.push((entry.path().to_path_buf(), meta.len()));
+                    return false;
+                }
+                true
+            })
+            .map(|entry| {
+                let mtime = super::entry_mtime(&entry);
+                (entry.into_path(), mtime)
+            })
+            .collect();
 
     files_with_mtime.sort_by_key(|entry| std::cmp::Reverse(entry.1));
 
@@ -345,6 +347,17 @@ fn collect_files(
         skipped_large,
         withheld,
     }
+}
+
+/// Each of `files` that reads as text, with its content, until `cancel` fires.
+fn texts<'a>(
+    files: &'a [PathBuf],
+    cancel: &'a CancellationToken,
+) -> impl Iterator<Item = (&'a Path, String)> + 'a {
+    files
+        .iter()
+        .take_while(|_| !cancel.is_cancelled())
+        .filter_map(|path| Some((path.as_path(), read_text(path)?)))
 }
 
 fn read_text(path: &Path) -> Option<String> {
@@ -370,8 +383,8 @@ fn append_skipped_warnings(output: &mut String, skipped: &[(PathBuf, u64)], cwd:
 
 // ── Content Mode ──
 
-fn format_content(
-    files: &[PathBuf],
+fn format_content<'a>(
+    texts: impl Iterator<Item = (&'a Path, String)>,
     cwd: &Path,
     re: &regex::Regex,
     context: usize,
@@ -382,14 +395,10 @@ fn format_content(
     let capacity = head_limit.saturating_add(1);
     let mut output_lines: Vec<String> = Vec::new();
 
-    for path in files {
+    for (path, text) in texts {
         if output_lines.len() >= capacity {
             break;
         }
-
-        let Some(text) = read_text(path) else {
-            continue;
-        };
 
         let display_path = super::display_path(path, cwd);
 
@@ -497,22 +506,18 @@ fn search_with_context(
 
 // ── Files-with-Matches Mode ──
 
-fn format_files_with_matches(
-    files: &[PathBuf],
+fn format_files_with_matches<'a>(
+    texts: impl Iterator<Item = (&'a Path, String)>,
     cwd: &Path,
     re: &regex::Regex,
     head_limit: usize,
 ) -> String {
     let mut matching_files: Vec<String> = Vec::new();
 
-    for path in files {
+    for (path, text) in texts {
         if matching_files.len() > head_limit {
             break;
         }
-
-        let Some(text) = read_text(path) else {
-            continue;
-        };
 
         if text.lines().any(|line| re.is_match(line)) {
             matching_files.push(super::display_path(path, cwd));
@@ -543,15 +548,16 @@ fn format_files_with_matches(
 
 // ── Count Mode ──
 
-fn format_count(files: &[PathBuf], cwd: &Path, re: &regex::Regex, head_limit: usize) -> String {
+fn format_count<'a>(
+    texts: impl Iterator<Item = (&'a Path, String)>,
+    cwd: &Path,
+    re: &regex::Regex,
+    head_limit: usize,
+) -> String {
     let mut counts: Vec<(String, usize)> = Vec::new();
     let mut total_matches: usize = 0;
 
-    for path in files {
-        let Some(text) = read_text(path) else {
-            continue;
-        };
-
+    for (path, text) in texts {
         let count = text.lines().filter(|line| re.is_match(line)).count();
         if count > 0 {
             total_matches += count;
@@ -666,37 +672,44 @@ mod tests {
     use indoc::indoc;
 
     use super::*;
-    use crate::permission::{Mode, Policy};
-    use crate::tool::testing::canonical_tempdir;
+    use crate::permission::{Access, Mode, Policy};
+    use crate::tool::testing::{self, canonical_tempdir, ctx, search_root, temp_ctx};
     use crate::util::path::slash_separated;
 
     /// Content-mode params searching all of `cwd`, so result paths render relative to it.
-    fn params<'a>(pattern: &'a str, cwd: &'a Path) -> GrepParams<'a> {
+    fn params<'a>(pattern: &'a str, cwd: &Path) -> GrepParams<'a> {
         GrepParams {
             pattern,
-            cwd,
-            search_path: None,
+            root: search_root(cwd, None).unwrap(),
             include_glob: None,
             output_mode: OutputMode::Content,
             context: 0,
             case_insensitive: false,
             head_limit: None,
             read_deny: ReadDeny::default(),
+            cancel: CancellationToken::new(),
         }
     }
 
-    // ── gate_target ──
+    // ── prepare ──
 
     #[test]
-    fn gate_target_defaults_the_search_root_to_cwd() {
+    fn prepare_defaults_the_search_root_to_cwd() {
         // A deny scoped to the project root must apply when `path` is omitted.
-        let dir = tempfile::tempdir().unwrap();
-        let cwd = dunce::canonicalize(dir.path()).unwrap();
+        let dir = canonical_tempdir();
 
-        let target = GrepTool::default().gate_target(&serde_json::json!({"pattern": "x"}), &cwd);
-        let GateTarget::Path { relative, .. } = target else {
+        let prepared =
+            GrepTool::default().prepare(serde_json::json!({"pattern": "x"}), &ctx(dir.path()));
+
+        let Access::Path {
+            canonical,
+            relative,
+            ..
+        } = prepared.access
+        else {
             panic!("expected a path target");
         };
+        assert_eq!(canonical, dir.path().to_str().unwrap());
         assert_eq!(relative.as_deref(), Some(""));
     }
 
@@ -714,29 +727,26 @@ mod tests {
         )
         .unwrap();
 
-        let output = GrepTool::default()
-            .run(serde_json::json!({
-                "pattern": "fn main",
-                "path": dir.path().to_str().unwrap()
-            }))
-            .await;
+        let input = serde_json::json!({"pattern": "fn main"});
 
-        assert!(!output.is_error);
-        assert!(output.content.contains("test.rs:1:fn main()"));
+        let output = testing::run(&GrepTool::default(), input, &ctx(dir.path())).await;
+
+        assert!(!output.is_error, "{}", output.content);
+        assert_eq!(output.content, "test.rs:1:fn main() {}");
     }
 
     #[tokio::test]
     async fn run_missing_pattern_reports_input_error() {
-        let output = GrepTool::default().run(serde_json::json!({})).await;
+        let output = testing::run(&GrepTool::default(), serde_json::json!({}), &temp_ctx()).await;
         assert!(output.is_error);
         assert!(output.content.contains("Invalid input"));
     }
 
     #[tokio::test]
     async fn run_invalid_regex_omits_title() {
-        let output = GrepTool::default()
-            .run(serde_json::json!({"pattern": "(unclosed"}))
-            .await;
+        let input = serde_json::json!({"pattern": "(unclosed"});
+
+        let output = testing::run(&GrepTool::default(), input, &temp_ctx()).await;
         assert!(output.is_error);
         assert!(
             output.content.contains("Invalid regex"),
@@ -1006,7 +1016,7 @@ mod tests {
         .unwrap();
 
         let mut p = params("beta", dir.path());
-        p.search_path = Some("test.txt");
+        p.root = search_root(dir.path(), Some("test.txt")).unwrap();
         let result = grep_files(&p).unwrap();
         assert_eq!(result, "test.txt:2:beta");
     }
@@ -1021,13 +1031,13 @@ mod tests {
         std::fs::write(&outside, "hit\n").unwrap();
 
         let mut p = params("hit", &cwd);
-        p.search_path = Some("src");
+        p.root = search_root(&cwd, Some("src")).unwrap();
         assert_eq!(grep_files(&p).unwrap(), "src/lib.rs:1:hit");
 
-        p.search_path = Some("src/lib.rs");
+        p.root = search_root(&cwd, Some("src/lib.rs")).unwrap();
         assert_eq!(grep_files(&p).unwrap(), "src/lib.rs:1:hit");
 
-        p.search_path = Some("../outside.txt");
+        p.root = search_root(&cwd, Some("../outside.txt")).unwrap();
         assert_eq!(
             grep_files(&p).unwrap(),
             format!("{}:1:hit", slash_separated(&outside)),
@@ -1117,7 +1127,12 @@ mod tests {
         assert_eq!(title, "No matches found");
         // The structured view would drop the note, so the text view shows it.
         let input = serde_json::json!({"pattern": "secret"});
-        let view = GrepTool::default().result_view(&input, &result, &ToolMetadata::default());
+        let view = GrepTool::default().result_view(
+            &input,
+            &result,
+            &ToolMetadata::default(),
+            Path::new("/repo"),
+        );
         assert_eq!(view, None);
     }
 
@@ -1135,7 +1150,7 @@ mod tests {
         let policy = Policy::resolve(Mode::Auto, &[], &deny, &cwd).unwrap();
 
         let mut p = params("TOKEN", &cwd);
-        p.search_path = Some("config");
+        p.root = search_root(&cwd, Some("config")).unwrap();
         p.read_deny = policy.read_deny();
         assert_eq!(
             grep_files(&p).unwrap(),
@@ -1164,15 +1179,6 @@ mod tests {
     }
 
     #[test]
-    fn grep_files_nonexistent_path_reports_error() {
-        let dir = canonical_tempdir();
-        let mut p = params("test", dir.path());
-        p.search_path = Some("missing");
-        let err = grep_files(&p).unwrap_err();
-        assert!(err.starts_with("Cannot access missing: "), "{err}");
-    }
-
-    #[test]
     fn grep_files_invalid_include_pattern() {
         let dir = canonical_tempdir();
         let mut p = params("test", dir.path());
@@ -1189,7 +1195,7 @@ mod tests {
         f.set_len(MAX_GREP_FILE_SIZE + 1).unwrap();
 
         let mut p = params("match", dir.path());
-        p.search_path = Some("large.txt");
+        p.root = search_root(dir.path(), Some("large.txt")).unwrap();
         let result = grep_files(&p).unwrap();
         assert!(result.contains("Skipped"));
         assert!(result.contains("large.txt"));
@@ -1414,7 +1420,12 @@ mod tests {
     fn result_view_content_mode_groups_by_file() {
         let input = serde_json::json!({"pattern": "fn"});
         let view = GrepTool::default()
-            .result_view(&input, "src/main.rs:10:fn main()", &ToolMetadata::default())
+            .result_view(
+                &input,
+                "src/main.rs:10:fn main()",
+                &ToolMetadata::default(),
+                Path::new("/repo"),
+            )
             .unwrap();
         assert_eq!(
             view,
@@ -1438,8 +1449,12 @@ mod tests {
         // text fallback keeps the "Found N ..." line visible.
         for mode in ["files_with_matches", "count"] {
             let input = serde_json::json!({"pattern": "fn", "output_mode": mode});
-            let view =
-                GrepTool::default().result_view(&input, "irrelevant", &ToolMetadata::default());
+            let view = GrepTool::default().result_view(
+                &input,
+                "irrelevant",
+                &ToolMetadata::default(),
+                Path::new("/repo"),
+            );
             assert!(view.is_none(), "mode {mode}: expected None to fall back");
         }
     }

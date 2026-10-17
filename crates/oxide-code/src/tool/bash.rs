@@ -14,12 +14,16 @@ use serde::Deserialize;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::{ChildStderr, ChildStdout};
 
-use super::{Tool, ToolOutput, extract_input_field, title_case};
-use crate::permission::{GateTarget, PermissionClass};
+use super::{Prepared, Tool, ToolCtx, ToolOutput, ToolSpec, extract_input_field, title_case};
+use crate::permission::{Access, PermissionClass};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_mins(2);
 const MAX_TIMEOUT: Duration = Duration::from_mins(10);
 const KILL_DRAIN_GRACE: Duration = Duration::from_millis(250);
+
+/// The variable each command's environment carries the session ID in, so a script it runs can tell
+/// which session started it.
+const SESSION_ID_VAR: &str = "OX_SESSION_ID";
 
 /// Bytes of pipe output one call renders. The reserve below the dispatcher cap holds the omission
 /// markers, the stream separator, and the footer, so the dispatcher never re-truncates bash output.
@@ -33,43 +37,21 @@ const NO_OUTPUT_MARKER: &str = "(no output)";
 pub(crate) struct BashTool;
 
 impl Tool for BashTool {
-    fn name(&self) -> &'static str {
-        "bash"
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "bash".to_owned(),
+            description: "Execute a shell command and return its output.".to_owned(),
+            input_schema: input_schema(),
+            class: PermissionClass::Bash,
+            parallel_safe: false,
+        }
     }
 
-    fn description(&self) -> &'static str {
-        "Execute a shell command and return its output."
-    }
-
-    fn permission_class(&self) -> PermissionClass {
-        PermissionClass::Bash
-    }
-
-    fn gate_target(&self, input: &serde_json::Value, cwd: &Path) -> GateTarget {
-        extract_input_field(input, "command")
-            .map(|command| GateTarget::for_command(command, cwd))
-            .unwrap_or_default()
-    }
-
-    fn input_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "command": {
-                    "type": "string",
-                    "description": "The shell command to execute"
-                },
-                "description": {
-                    "type": "string",
-                    "description": "A concise (5-10 word) description of what this command does"
-                },
-                "timeout": {
-                    "type": "integer",
-                    "description": "Timeout in milliseconds, at most 600000. Omit or pass 0 for the default of 120000."
-                }
-            },
-            "required": ["command"]
-        })
+    fn prepare(&self, input: serde_json::Value, ctx: &ToolCtx) -> Prepared {
+        let access = extract_input_field(&input, "command")
+            .map(|command| Access::for_command(command, &ctx.workspace))
+            .unwrap_or_default();
+        Prepared { input, access }
     }
 
     fn icon(&self) -> &'static str {
@@ -80,19 +62,41 @@ impl Tool for BashTool {
         extract_input_field(input, "command")
     }
 
-    fn summarize_call(&self, input: &serde_json::Value) -> String {
-        extract_input_field(input, "command").map_or_else(|| title_case(self.name()), str::to_owned)
+    fn summarize_call(&self, name: &str, input: &serde_json::Value, _cwd: &Path) -> String {
+        extract_input_field(input, "command").map_or_else(|| title_case(name), str::to_owned)
     }
 
-    fn run(
-        &self,
-        input: serde_json::Value,
-    ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + '_>> {
-        Box::pin(run(input))
+    fn run<'a>(
+        &'a self,
+        prepared: Prepared,
+        ctx: &'a ToolCtx,
+    ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + 'a>> {
+        Box::pin(run(prepared.input, ctx))
     }
 }
 
 // ── Input ──
+
+fn input_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "command": {
+                "type": "string",
+                "description": "The shell command to execute"
+            },
+            "description": {
+                "type": "string",
+                "description": "A concise (5-10 word) description of what this command does"
+            },
+            "timeout": {
+                "type": "integer",
+                "description": "Timeout in milliseconds, at most 600000. Omit or pass 0 for the default of 120000."
+            }
+        },
+        "required": ["command"]
+    })
+}
 
 #[derive(Deserialize)]
 struct Input {
@@ -105,7 +109,7 @@ struct Input {
 
 // ── Execution ──
 
-async fn run(raw: serde_json::Value) -> ToolOutput {
+async fn run(raw: serde_json::Value, ctx: &ToolCtx) -> ToolOutput {
     let input: Input = match super::parse_input(raw) {
         Ok(v) => v,
         Err(e) => return e,
@@ -113,7 +117,7 @@ async fn run(raw: serde_json::Value) -> ToolOutput {
 
     let timeout = resolve_timeout(input.timeout);
 
-    let mut output = execute(&input.command, timeout).await;
+    let mut output = execute(&input.command, timeout, ctx).await;
 
     if let Some(desc) = input.description {
         output.metadata.title = Some(desc);
@@ -129,11 +133,15 @@ fn resolve_timeout(millis: Option<u64>) -> Duration {
     }
 }
 
-async fn execute(command: &str, timeout: Duration) -> ToolOutput {
-    let mut shell = match ShellTree::spawn(command) {
+/// Runs `command` in the context's cwd, with [`SESSION_ID_VAR`] set to its session ID.
+async fn execute(command: &str, timeout: Duration, ctx: &ToolCtx) -> ToolOutput {
+    let mut shell = match ShellTree::spawn(command, ctx) {
         Ok(shell) => shell,
         Err(e) => {
-            return ToolOutput::error(format!("Failed to execute command: {e}"));
+            return ToolOutput::error(format!(
+                "Failed to execute command in {}: {e}",
+                ctx.cwd().display()
+            ));
         }
     };
 
@@ -370,10 +378,12 @@ struct ShellTree {
 }
 
 impl ShellTree {
-    fn spawn(command: &str) -> io::Result<Self> {
+    fn spawn(command: &str, ctx: &ToolCtx) -> io::Result<Self> {
         let mut cmd = CommandWrap::with_new(bash()?, |cmd| {
             cmd.arg("-c")
                 .arg(command)
+                .current_dir(ctx.cwd())
+                .env(SESSION_ID_VAR, &ctx.session_id)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
@@ -439,49 +449,48 @@ mod tests {
 
     use super::*;
     use crate::tool::MAX_OUTPUT_BYTES;
+    use crate::tool::testing::{self, canonical_tempdir, ctx, temp_ctx};
 
-    // ── gate_target ──
+    // ── prepare ──
 
     #[test]
-    fn gate_target_extracts_the_command() {
-        let target =
-            BashTool.gate_target(&serde_json::json!({"command": "ls -la"}), Path::new("/"));
-        assert!(matches!(target, GateTarget::Command(c) if c.command() == "ls -la"));
+    fn prepare_extracts_the_command() {
+        let prepared = BashTool.prepare(serde_json::json!({"command": "ls -la"}), &temp_ctx());
+        assert!(matches!(prepared.access, Access::Command(c) if c.command() == "ls -la"));
     }
 
     #[test]
-    fn gate_target_missing_command_is_none() {
+    fn prepare_missing_command_is_none() {
         // A call with no `command` field falls to `None`, which only a tool-wide rule matches, so a
         // malformed bash call cannot slip past a command-specific allow.
-        let target = BashTool.gate_target(&serde_json::json!({}), Path::new("/"));
-        assert!(matches!(target, GateTarget::None));
+        let prepared = BashTool.prepare(serde_json::json!({}), &temp_ctx());
+        assert!(matches!(prepared.access, Access::None));
     }
 
     // ── run ──
 
     #[tokio::test]
     async fn run_valid_command_executes_successfully() {
-        let output = run(serde_json::json!({"command": "echo hello"})).await;
+        let output = run(serde_json::json!({"command": "echo hello"}), &temp_ctx()).await;
         assert!(!output.is_error);
         assert_eq!(output.content, "hello");
     }
 
     #[tokio::test]
     async fn run_missing_command_field_reports_input_error() {
-        let output = run(serde_json::json!({})).await;
+        let output = run(serde_json::json!({}), &temp_ctx()).await;
         assert!(output.is_error);
         assert!(output.content.contains("Invalid input"));
     }
 
     #[tokio::test]
     async fn run_attaches_description_to_metadata_title() {
-        let tool = BashTool;
-        let output = tool
-            .run(serde_json::json!({
-                "command": "echo hello",
-                "description": "Print greeting",
-            }))
-            .await;
+        let input = serde_json::json!({
+            "command": "echo hello",
+            "description": "Print greeting",
+        });
+
+        let output = testing::run(&BashTool, input, &temp_ctx()).await;
 
         assert!(!output.is_error);
         assert_eq!(output.content, "hello");
@@ -491,10 +500,13 @@ mod tests {
     #[tokio::test]
     async fn run_timeout_keeps_partial_output() {
         // The timeout leaves bash ample time to print before the kill, even under parallel load.
-        let output = run(serde_json::json!({
-            "command": "echo started; sleep 10",
-            "timeout": 1_000
-        }))
+        let output = run(
+            serde_json::json!({
+                "command": "echo started; sleep 10",
+                "timeout": 1_000
+            }),
+            &temp_ctx(),
+        )
         .await;
         assert!(output.is_error);
         assert_eq!(
@@ -519,7 +531,45 @@ mod tests {
     // ── execute ──
 
     async fn run_default(cmd: &str) -> ToolOutput {
-        execute(cmd, DEFAULT_TIMEOUT).await
+        execute(cmd, DEFAULT_TIMEOUT, &temp_ctx()).await
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn execute_runs_in_the_ctx_cwd_with_the_session_id_exported() {
+        let dir = canonical_tempdir();
+        assert_ne!(std::env::current_dir().unwrap(), dir.path());
+
+        let output = execute(
+            r#"pwd -P; printf %s "$OX_SESSION_ID""#,
+            DEFAULT_TIMEOUT,
+            &ctx(dir.path()),
+        )
+        .await;
+
+        assert!(!output.is_error, "{}", output.content);
+        assert_eq!(
+            output.content,
+            format!("{}\ntest-session", dir.path().display()),
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn execute_in_a_removed_cwd_names_it_in_the_error() {
+        let dir = canonical_tempdir();
+        let gone = dir.path().join("gone");
+
+        let output = execute("true", DEFAULT_TIMEOUT, &ctx(&gone)).await;
+
+        assert!(output.is_error);
+        assert_eq!(
+            output.content,
+            format!(
+                "Failed to execute command in {}: No such file or directory (os error 2)",
+                gone.display()
+            ),
+        );
     }
 
     #[tokio::test]
@@ -592,7 +642,7 @@ mod tests {
 
         let command = format!("(sleep 1 && touch '{marker_str}') & sleep 5");
         let start = std::time::Instant::now();
-        let output = execute(&command, Duration::from_millis(100)).await;
+        let output = execute(&command, Duration::from_millis(100), &temp_ctx()).await;
         assert!(output.is_error, "expected timeout");
         assert_eq!(output.content, "Command timed out after 100ms");
         assert!(
@@ -621,7 +671,8 @@ mod tests {
                 leaked = leaked.display(),
             );
 
-            let mut call = Box::pin(execute(&command, DEFAULT_TIMEOUT));
+            let ctx = temp_ctx();
+            let mut call = Box::pin(execute(&command, DEFAULT_TIMEOUT, &ctx));
             for _ in 0..100 {
                 if started.exists() {
                     break;
@@ -664,7 +715,12 @@ mod tests {
         // The backgrounded `sleep` holds the pipes open past bash's exit. The timeout leaves bash
         // ample time to print first, even under parallel load.
         let start = std::time::Instant::now();
-        let output = execute("sleep 5 & echo done", Duration::from_millis(1_000)).await;
+        let output = execute(
+            "sleep 5 & echo done",
+            Duration::from_millis(1_000),
+            &temp_ctx(),
+        )
+        .await;
 
         assert!(output.is_error, "expected timeout");
         assert_eq!(

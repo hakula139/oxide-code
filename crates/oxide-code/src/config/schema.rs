@@ -49,14 +49,15 @@ pub(super) struct CompactionTable {
     pub(super) threshold_percent: Option<u8>,
 }
 
-/// `allow` and `deny` hold raw rule strings that `Config::load` parses, so a malformed rule fails
-/// at startup.
+/// `allow` and `deny` hold raw rule strings and `extra_roots` raw paths, which `Config::load`
+/// parses, so a malformed entry fails at startup.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(super) struct PermissionTable {
     pub(super) mode: Option<Mode>,
     pub(super) allow: Option<Vec<String>>,
     pub(super) deny: Option<Vec<String>>,
+    pub(super) extra_roots: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Deserialize)]

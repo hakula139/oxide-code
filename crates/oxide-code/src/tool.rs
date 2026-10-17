@@ -20,21 +20,75 @@ use std::time::SystemTime;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio_util::sync::CancellationToken;
 
 use self::tasks::Task;
 use crate::file_tracker::{FileTracker, TrackableFileError, validate_trackable_file};
-use crate::permission::{GateTarget, PermissionClass};
+use crate::permission::{Access, PermissionClass, Workspace};
 use crate::util::path::{lexical_normalize, slash_separated};
 use crate::util::text::{ELLIPSIS, plural};
 
-// ── Tool Definition ──
+// ── Tool Spec ──
+
+/// What the model and the gate know of a tool. The registry takes it once, when the tool registers.
+#[derive(Debug, Clone)]
+pub(crate) struct ToolSpec {
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) input_schema: serde_json::Value,
+    /// The permission class the gate files the tool's calls under.
+    pub(crate) class: PermissionClass,
+    /// Whether a call may run alongside the other parallel-safe calls of its round, since it
+    /// changes nothing another call reads.
+    pub(crate) parallel_safe: bool,
+}
+
+impl ToolSpec {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name.clone(),
+            description: self.description.clone(),
+            input_schema: self.input_schema.clone(),
+        }
+    }
+}
 
 /// Tool schema exposed to the Anthropic API.
 #[derive(Clone, Serialize)]
 pub(crate) struct ToolDefinition {
-    pub(crate) name: &'static str,
-    pub(crate) description: &'static str,
+    pub(crate) name: String,
+    pub(crate) description: String,
     pub(crate) input_schema: serde_json::Value,
+}
+
+// ── Tool Context ──
+
+/// The context a call prepares and runs in. Its workspace, session ID, and tracker are shared with
+/// the session's other calls.
+#[derive(Clone)]
+pub(crate) struct ToolCtx {
+    pub(crate) workspace: Arc<Workspace>,
+    pub(crate) session_id: String,
+    pub(crate) tracker: Arc<FileTracker>,
+    /// The tool-use ID the model gave the call, which the tracker attributes the call's records to.
+    pub(crate) call_id: String,
+    /// Cancelled when the user interrupts the call, so work its dropped future leaves behind, such
+    /// as a blocking file walk, stops early.
+    pub(crate) cancel: CancellationToken,
+}
+
+impl ToolCtx {
+    pub(crate) fn cwd(&self) -> &Path {
+        self.workspace.cwd()
+    }
+}
+
+/// A call resolved for the gate and its run: the input with any path pinned to where it resolves,
+/// and what the call accesses.
+#[derive(Debug, Clone)]
+pub(crate) struct Prepared {
+    pub(crate) input: serde_json::Value,
+    pub(crate) access: Access,
 }
 
 // ── Tool Output ──
@@ -208,41 +262,36 @@ pub(crate) enum ApprovalBody {
 
 /// A tool that the agent can invoke.
 ///
-/// Per-instance metadata (name, icon, schema, input summary) lives on the trait, so adding a tool
-/// means editing only its module.
+/// Per-instance metadata (spec, icon, input summary) lives on the trait, so adding a tool means
+/// editing only its module.
 pub(crate) trait Tool: Send + Sync {
-    fn name(&self) -> &'static str;
-    fn description(&self) -> &'static str;
-    fn input_schema(&self) -> serde_json::Value;
+    /// The tool's name, description, schema, permission class, and parallel safety. The class has
+    /// no default, so a new tool cannot silently inherit a permissive one.
+    fn spec(&self) -> ToolSpec;
 
-    /// The permission class the gate files this tool's calls under. No default, so a new tool
-    /// cannot silently inherit a permissive class.
-    fn permission_class(&self) -> PermissionClass;
-
-    /// The input field naming the file this call acts on, if any. [`Self::gate_target`] resolves it
-    /// by default, and [`Self::pin_target`] rewrites it to the resolved path.
+    /// The input field naming the file this call acts on, if any, which the default
+    /// [`Self::prepare`] resolves.
     fn path_field(&self) -> Option<&'static str> {
         None
     }
 
-    /// Extracts what the permission gate matches rules against from this call's `input`, resolving
-    /// any path against `cwd`. Defaults to the resolved [`Self::path_field`], or
-    /// [`GateTarget::None`] without one, so only a class-wide rule matches.
-    fn gate_target(&self, input: &serde_json::Value, cwd: &Path) -> GateTarget {
-        self.path_field()
-            .and_then(|field| extract_input_field(input, field))
-            .map(|path| GateTarget::for_path(path, cwd))
-            .unwrap_or_default()
-    }
-
-    /// Rewrites [`Self::path_field`] in `input` to the resolved path so the tool opens what the
-    /// gate checked. A symlink swapped into an intermediate directory afterwards is not covered.
-    fn pin_target(&self, input: &mut serde_json::Value, target: &GateTarget) {
-        if let (Some(field), GateTarget::Path { canonical, .. }) = (self.path_field(), target)
+    /// Resolves what the call accesses from `input`, once, in the context's workspace. The default
+    /// resolves [`Self::path_field`] and pins it in the input to the resolved path, so the tool
+    /// opens what the gate checked, though not past a symlink swapped into an intermediate
+    /// directory afterwards. Without a path field the call accesses [`Access::None`], which only a
+    /// class-wide rule matches.
+    fn prepare(&self, mut input: serde_json::Value, ctx: &ToolCtx) -> Prepared {
+        let access = self
+            .path_field()
+            .and_then(|field| extract_input_field(&input, field))
+            .map(|path| Access::for_path(path, &ctx.workspace))
+            .unwrap_or_default();
+        if let (Some(field), Access::Path { canonical, .. }) = (self.path_field(), &access)
             && let Some(value) = input.get_mut(field)
         {
             *value = serde_json::Value::String(canonical.clone());
         }
+        Prepared { input, access }
     }
 
     fn icon(&self) -> &'static str {
@@ -255,49 +304,52 @@ pub(crate) trait Tool: Send + Sync {
         None
     }
 
-    fn summarize_call(&self, input: &serde_json::Value) -> String {
-        let label = title_case(self.name());
+    /// The label the UI shows for a call of the tool registered as `name`, with a path argument
+    /// shown relative to `cwd`.
+    fn summarize_call(&self, name: &str, input: &serde_json::Value, _cwd: &Path) -> String {
+        let label = title_case(name);
         match self.summarize_input(input) {
             Some(arg) => format!("{label}({arg})"),
             None => label,
         }
     }
 
-    /// Returns the structured shape of a successful tool result for richer UI rendering, or `None`
-    /// to fall back to [`ToolResultView::Text`]. Errors short-circuit to text in the registry.
+    /// Returns the structured shape of a successful tool result for richer UI rendering, with
+    /// paths shown relative to `cwd`, or `None` to fall back to [`ToolResultView::Text`]. Errors
+    /// short-circuit to text in the registry.
     fn result_view(
         &self,
         _input: &serde_json::Value,
         _content: &str,
         _metadata: &ToolMetadata,
+        _cwd: &Path,
     ) -> Option<ToolResultView> {
         None
     }
 
-    /// Builds what the approval modal shows when the gate asks. Defaults to the tool name over the
-    /// `summarize_call` label. Edit and write override it with a diff.
-    fn approval_preview(&self, input: &serde_json::Value) -> ApprovalPreview {
-        ApprovalPreview {
-            title: title_case(self.name()),
-            body: ApprovalBody::Command(self.summarize_call(input)),
-        }
-    }
-
-    /// Executes the call. A user cancel can drop the future at any await, so work it started must
-    /// either stop with the drop, as a bash process tree does, or finish together with its
-    /// bookkeeping, as a file write and its tracker record do.
-    fn run(
+    /// Builds the approval modal's preview of the prepared `input`: the tool name over the
+    /// [`Self::summarize_call`] label by default, or a diff for edit and write.
+    fn approval_preview(
         &self,
-        input: serde_json::Value,
-    ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + '_>>;
-
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: self.name(),
-            description: self.description(),
-            input_schema: self.input_schema(),
+        name: &str,
+        input: &serde_json::Value,
+        cwd: &Path,
+    ) -> ApprovalPreview {
+        ApprovalPreview {
+            title: title_case(name),
+            body: ApprovalBody::Command(self.summarize_call(name, input, cwd)),
         }
     }
+
+    /// Executes the prepared call. A user cancel can drop the future at any await and cancels
+    /// [`ToolCtx::cancel`], so work it started must either stop with the drop, as a bash process
+    /// tree does, stop on the cancel, as a blocking walk does, or finish together with its
+    /// bookkeeping, as a file write and its tracker record do.
+    fn run<'a>(
+        &'a self,
+        prepared: Prepared,
+        ctx: &'a ToolCtx,
+    ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + 'a>>;
 }
 
 pub(crate) const DEFAULT_TOOL_ICON: &str = "⟡";
@@ -316,59 +368,52 @@ pub(crate) fn title_case(s: &str) -> String {
 
 // ── Tool Registry ──
 
-/// Owns the set of [`Tool`]s available to the agent and dispatches calls by name.
+/// Owns the set of [`Tool`]s available to the agent, each with the spec it registered with, and
+/// dispatches calls by name.
 ///
 /// The registry is built once at session start with the tools the model is allowed to invoke.
 /// Lookups are linear over a small `Vec` (registry size is fixed at < 10), so no map is needed.
 pub(crate) struct ToolRegistry {
-    tools: Vec<Box<dyn Tool>>,
+    tools: Vec<(ToolSpec, Box<dyn Tool>)>,
 }
 
 impl ToolRegistry {
     pub(crate) fn new(tools: Vec<Box<dyn Tool>>) -> Self {
-        Self { tools }
+        Self {
+            tools: tools.into_iter().map(|tool| (tool.spec(), tool)).collect(),
+        }
     }
 
-    pub(crate) fn get(&self, name: &str) -> Option<&dyn Tool> {
+    pub(crate) fn get(&self, name: &str) -> Option<(&ToolSpec, &dyn Tool)> {
         self.tools
             .iter()
-            .find(|t| t.name() == name)
-            .map(AsRef::as_ref)
+            .find(|(spec, _)| spec.name == name)
+            .map(|(spec, tool)| (spec, tool.as_ref()))
     }
 
     pub(crate) fn definitions(&self) -> Vec<ToolDefinition> {
-        self.tools.iter().map(|t| t.definition()).collect()
+        self.tools
+            .iter()
+            .map(|(spec, _)| spec.definition())
+            .collect()
     }
 
     pub(crate) fn icon(&self, name: &str) -> &'static str {
-        self.get(name).map_or(DEFAULT_TOOL_ICON, Tool::icon)
-    }
-
-    pub(crate) fn label(&self, name: &str, input: &serde_json::Value) -> String {
         self.get(name)
-            .map_or_else(|| name.to_owned(), |t| t.summarize_call(input))
+            .map_or(DEFAULT_TOOL_ICON, |(_, tool)| tool.icon())
     }
 
-    /// Dispatches to the named tool and enforces the `MAX_OUTPUT_BYTES` byte safety net on the
-    /// returned content, recording the pre-cap length on `metadata.truncated_bytes` if trimming
-    /// fired. Per-tool row caps run inside each tool, so this is the last-line defense against
-    /// pathological output sizes.
-    pub(crate) async fn run(&self, name: &str, input: serde_json::Value) -> ToolOutput {
-        let Some(tool) = self.get(name) else {
-            return ToolOutput::error(format!("Unknown tool: {name}"));
-        };
-        let mut output = tool.run(input).await;
-        let (content, original_len) = cap_output(output.content);
-        output.content = content;
-        if let Some(len) = original_len {
-            output.metadata.truncated_bytes = Some(len);
-        }
-        output
+    /// The label a call shows, with a path argument relative to `cwd`.
+    pub(crate) fn label(&self, name: &str, input: &serde_json::Value, cwd: &Path) -> String {
+        self.get(name).map_or_else(
+            || name.to_owned(),
+            |(_, tool)| tool.summarize_call(name, input, cwd),
+        )
     }
 
-    /// Resolves the structured result view for a tool call. Errors short-circuit to
-    /// [`ToolResultView::Text`] regardless of the tool's preference, so failure messages render
-    /// consistently across the chat. Unknown tool names also fall back to text.
+    /// Resolves the structured result view for a tool call, with paths relative to `cwd`. Errors
+    /// short-circuit to [`ToolResultView::Text`] regardless of the tool's preference, so failure
+    /// messages render consistently across the chat. Unknown tool names also fall back to text.
     pub(crate) fn result_view(
         &self,
         name: &str,
@@ -376,6 +421,7 @@ impl ToolRegistry {
         content: &str,
         metadata: &ToolMetadata,
         is_error: bool,
+        cwd: &Path,
     ) -> ToolResultView {
         if is_error {
             return ToolResultView::Text {
@@ -383,7 +429,7 @@ impl ToolRegistry {
             };
         }
         self.get(name)
-            .and_then(|t| t.result_view(input, content, metadata))
+            .and_then(|(_, tool)| tool.result_view(input, content, metadata, cwd))
             .unwrap_or_else(|| ToolResultView::Text {
                 content: content.to_owned(),
             })
@@ -395,6 +441,19 @@ impl ToolRegistry {
 pub(crate) const MAX_OUTPUT_BYTES: usize = 128 * 1024;
 
 const TRUNCATION_OVERHEAD: usize = 80;
+
+/// Runs the prepared call on `tool` and enforces the [`MAX_OUTPUT_BYTES`] byte safety net on its
+/// content, recording the pre-cap length on `metadata.truncated_bytes` if trimming fired. Per-tool
+/// row caps run inside each tool, so this is the last-line defense against pathological output.
+pub(crate) async fn run_capped(tool: &dyn Tool, prepared: Prepared, ctx: &ToolCtx) -> ToolOutput {
+    let mut output = tool.run(prepared, ctx).await;
+    let (content, original_len) = cap_output(output.content);
+    output.content = content;
+    if let Some(len) = original_len {
+        output.metadata.truncated_bytes = Some(len);
+    }
+    output
+}
 
 /// Trims `content` to fit under [`MAX_OUTPUT_BYTES`], keeping the head and tail and replacing the
 /// middle with a `[N bytes truncated]` marker.
@@ -448,62 +507,72 @@ fn invalid_input(error: &serde_json::Error) -> String {
 
 // ── Path Utilities ──
 
-fn search_root_target(input: &serde_json::Value, cwd: &Path) -> GateTarget {
-    let path = extract_input_field(input, "path").unwrap_or(".");
-    GateTarget::for_path(path, cwd)
+/// Prepares a search tool's call, resolving its `path` argument, the cwd by default, as the root
+/// the gate checks and the walk covers.
+fn prepare_search_root(input: serde_json::Value, ctx: &ToolCtx) -> Prepared {
+    let path = extract_input_field(&input, "path").unwrap_or(".");
+    let access = Access::for_path(path, &ctx.workspace);
+    Prepared { input, access }
 }
 
-/// The canonical working directory, so hits under a canonical search base render relative to it.
-pub(crate) fn working_dir() -> Result<PathBuf, String> {
-    std::env::current_dir()
-        .and_then(dunce::canonicalize)
-        .map_err(|e| format!("Failed to get working directory: {e}"))
+/// Where a search tool's walk starts, which its prepared call resolved.
+struct SearchRoot {
+    /// The resolved root, which exists.
+    base: PathBuf,
+    /// The root as the call spells it, for the read deny rules each found file faces.
+    spelled: PathBuf,
+    /// The canonical working directory, so hits under the canonical base render relative to it.
+    cwd: PathBuf,
 }
 
-/// Resolves a search tool's `path` argument against `cwd`, defaulting to `cwd` itself. The base
-/// must exist, and it is canonical so the walk covers the directory the permission gate resolved.
-pub(crate) fn resolve_base_dir(search_path: Option<&str>, cwd: &Path) -> Result<PathBuf, String> {
-    let base = search_path.map_or_else(|| cwd.to_path_buf(), |p| cwd.join(p));
-    dunce::canonicalize(&base)
-        .map_err(|e| format!("Cannot access {}: {e}", display_path(&base, cwd)))
-}
-
-pub(crate) fn display_cwd_path(path: &str) -> String {
-    let cwd = std::env::current_dir().ok();
-    display_cwd_path_from(path, cwd.as_deref())
-}
-
-fn display_cwd_path_from(path: &str, cwd: Option<&Path>) -> String {
-    match cwd {
-        Some(cwd) => display_path(Path::new(path), cwd),
-        None => path.to_owned(),
+impl SearchRoot {
+    /// The root `access` resolved for a search in `cwd` whose call spells it as `path`, the cwd by
+    /// default. The root must exist.
+    fn new(access: &Access, path: Option<&str>, cwd: &Path) -> Result<Self, String> {
+        let spelled = PathBuf::from(path.unwrap_or("."));
+        let Some(base) = access.resolved() else {
+            return Err(format!(
+                "Cannot access {}: the search root was not resolved.",
+                display_path(&spelled, cwd)
+            ));
+        };
+        if let Err(e) = std::fs::metadata(&base) {
+            return Err(format!(
+                "Cannot access {}: {e}",
+                display_path(&cwd.join(&spelled), cwd)
+            ));
+        }
+        let cwd = dunce::canonicalize(cwd)
+            .map_err(|e| format!("Failed to get working directory: {e}"))?;
+        Ok(Self { base, spelled, cwd })
     }
 }
 
-/// The [`FileTracker`](crate::file_tracker::FileTracker) key for a file tool's `file_path`. An
-/// existing path canonicalizes, so relative, dotted, and symlinked spellings of one file share an
-/// entry. A missing path falls back to its lexically clean absolute form.
-pub(crate) async fn tracker_key(path: &str) -> PathBuf {
-    let absolute = std::env::current_dir().unwrap_or_default().join(path);
-    tokio::fs::canonicalize(&absolute).await.map_or_else(
-        |_| lexical_normalize(&absolute),
+/// The [`FileTracker`] key for the absolute `path` a file tool acts on. An existing path
+/// canonicalizes, so dotted and symlinked spellings of one file share an entry. A missing path
+/// falls back to its lexically clean form.
+async fn tracker_key(path: &Path) -> PathBuf {
+    tokio::fs::canonicalize(path).await.map_or_else(
+        |_| lexical_normalize(path),
         |path| dunce::simplified(&path).to_path_buf(),
     )
 }
 
-/// Renders a `Name(path)` summary for a tool call whose primary argument is a filesystem path.
+/// Renders a `Name(path)` summary for a call of the tool registered as `name` whose primary
+/// argument is a filesystem path.
 ///
 /// `path_key` names the JSON field to extract from `input` (e.g. `"file_path"`, `"path"`).
-/// Falls back to the bare title-cased tool name when the field is absent or non-string. Path
-/// is rendered through [`display_cwd_path`] so it appears relative to cwd.
-pub(crate) fn summarize_path_call(
-    tool_name: &str,
+/// Falls back to the bare title-cased tool name when the field is absent or non-string. The path
+/// renders through [`display_path`] so it appears relative to `cwd`.
+fn summarize_path_call(
+    name: &str,
     input: &serde_json::Value,
     path_key: &str,
+    cwd: &Path,
 ) -> String {
-    let label = title_case(tool_name);
+    let label = title_case(name);
     match extract_input_field(input, path_key) {
-        Some(path) => format!("{label}({})", display_cwd_path(path)),
+        Some(path) => format!("{label}({})", display_path(Path::new(path), cwd)),
         None => label,
     }
 }
@@ -574,19 +643,19 @@ pub(crate) fn is_binary(bytes: &[u8]) -> bool {
 
 /// Reads `path` once `validate` accepts its metadata, checked by path before the open and again on
 /// the opened file, so a file swapped in between cannot skip the check. The open refuses a symlink
-/// at the final component and never blocks on a fifo, as [`open_no_follow`] describes.
-pub(crate) async fn read_validated(
-    path: &str,
+/// at the final component and never blocks on a fifo, as [`open_no_follow`] describes. Errors name
+/// the file as `shown`.
+async fn read_validated(
+    path: &Path,
+    shown: &str,
     validate: impl Fn(&std::fs::Metadata) -> Result<(), String>,
 ) -> Result<(std::fs::Metadata, Vec<u8>), String> {
-    let error = |e: std::io::Error| format!("Error reading {path}: {e}");
+    let error = |e: std::io::Error| format!("Error reading {shown}: {e}");
     validate(&tokio::fs::metadata(path).await.map_err(error)?)?;
 
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
-    let mut file = open_no_follow(Path::new(path), options)
-        .await
-        .map_err(error)?;
+    let mut file = open_no_follow(path, options).await.map_err(error)?;
     let metadata = file.metadata().await.map_err(error)?;
     validate(&metadata)?;
 
@@ -619,18 +688,19 @@ async fn write_no_follow(path: &Path, bytes: &[u8], mode: WriteMode) -> std::io:
     file.flush().await
 }
 
-/// Writes `bytes` like [`write_no_follow`] and records them under the path's [`tracker_key`] as one
-/// unit, so a caller dropped mid-write cannot leave the file written but unrecorded.
+/// Writes `bytes` to the absolute `path` like [`write_no_follow`] and records them in the context's
+/// tracker under the path's [`tracker_key`] as one unit, so a caller dropped mid-write cannot leave
+/// the file written but unrecorded.
 async fn write_tracked(
-    tracker: &Arc<FileTracker>,
-    path: &str,
+    ctx: &ToolCtx,
+    path: &Path,
     bytes: Vec<u8>,
     mode: WriteMode,
 ) -> std::io::Result<()> {
     let path = path.to_owned();
-    tracker
-        .write_and_record(async move {
-            write_no_follow(Path::new(&path), &bytes, mode).await?;
+    ctx.tracker
+        .write_and_record(&ctx.call_id, async move {
+            write_no_follow(&path, &bytes, mode).await?;
             Ok((tracker_key(&path).await, bytes))
         })
         .await
@@ -715,18 +785,22 @@ const MAX_WALK_DEPTH: usize = 64;
 
 const VCS_DIRS: &[&str] = &[".bzr", ".git", ".hg", ".jj", ".sl", ".svn"];
 
-/// Recursively walks `base`, yielding regular files only.
+/// Recursively walks `base`, yielding regular files only, until `cancel` fires.
 ///
 /// Honors `.gitignore` and global ignore files, includes hidden entries such as `.github/` so
 /// dotfile config stays searchable, skips VCS metadata directories below `base`, and pins the walk
 /// to the starting filesystem so symlinked mounts don't escape.
-pub(crate) fn walk_files(base: &Path) -> impl Iterator<Item = ignore::DirEntry> {
+fn walk_files<'a>(
+    base: &Path,
+    cancel: &'a CancellationToken,
+) -> impl Iterator<Item = ignore::DirEntry> + 'a {
     ignore::WalkBuilder::new(base)
         .hidden(false)
         .filter_entry(|e| e.depth() == 0 || !VCS_DIRS.iter().any(|d| e.file_name() == *d))
         .same_file_system(true)
         .max_depth(Some(MAX_WALK_DEPTH))
         .build()
+        .take_while(|_| !cancel.is_cancelled())
         .filter_map(Result::ok)
         .filter(|e| e.file_type().is_some_and(|ft| ft.is_file()))
 }
@@ -799,10 +873,66 @@ pub(crate) fn strip_withheld_note(content: &str) -> &str {
 #[cfg(test)]
 pub(crate) mod testing {
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
 
     use tempfile::TempDir;
+    use tokio_util::sync::CancellationToken;
 
-    /// A temp dir with a canonical path, matching the cwd [`super::working_dir`] returns.
+    use super::{SearchRoot, Tool, ToolCtx, ToolOutput, ToolRegistry, run_capped};
+    use crate::file_tracker::FileTracker;
+    use crate::permission::{Access, Workspace};
+
+    /// A fresh tracker's context in `cwd`, for call `toolu_test` of session `test-session`.
+    pub(crate) fn ctx(cwd: &Path) -> ToolCtx {
+        ctx_with(cwd, Arc::new(FileTracker::default()))
+    }
+
+    /// [`ctx`] in the system temp dir, for calls that name absolute paths.
+    pub(crate) fn temp_ctx() -> ToolCtx {
+        ctx(&std::env::temp_dir())
+    }
+
+    /// [`ctx`] with `tracker` as the session's tracker.
+    pub(crate) fn ctx_with(cwd: &Path, tracker: Arc<FileTracker>) -> ToolCtx {
+        ToolCtx {
+            workspace: Arc::new(Workspace::new(cwd)),
+            session_id: "test-session".to_owned(),
+            tracker,
+            call_id: "toolu_test".to_owned(),
+            cancel: CancellationToken::new(),
+        }
+    }
+
+    /// Prepares `input` for `tool` and runs it in `ctx`, the way dispatch does past the gate.
+    pub(crate) async fn run(
+        tool: &dyn Tool,
+        input: serde_json::Value,
+        ctx: &ToolCtx,
+    ) -> ToolOutput {
+        tool.run(tool.prepare(input, ctx), ctx).await
+    }
+
+    /// The root a search call in `cwd` that names `path` walks, resolved the way the search tools'
+    /// `prepare` resolves it.
+    pub(super) fn search_root(cwd: &Path, path: Option<&str>) -> Result<SearchRoot, String> {
+        let access = Access::for_path(path.unwrap_or("."), &Workspace::new(cwd));
+        SearchRoot::new(&access, path, cwd)
+    }
+
+    impl ToolRegistry {
+        /// [`run`] for the tool registered as `name`, through the output cap.
+        pub(crate) async fn run_input(
+            &self,
+            name: &str,
+            input: serde_json::Value,
+            ctx: &ToolCtx,
+        ) -> ToolOutput {
+            let (_, tool) = self.get(name).expect("tool is registered");
+            run_capped(tool, tool.prepare(input, ctx), ctx).await
+        }
+    }
+
+    /// A temp dir with a canonical path, the form a resolved workspace path takes.
     pub(crate) struct CanonicalTempDir {
         _dir: TempDir,
         path: PathBuf,
@@ -833,7 +963,6 @@ pub(crate) mod testing {
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
-    use std::sync::Arc;
 
     use indoc::{formatdoc, indoc};
 
@@ -843,23 +972,29 @@ mod tests {
     use super::grep::GrepTool;
     use super::read::ReadTool;
     use super::tasks::TasksTool;
-    use super::testing::{canonical_tempdir, symlink_file};
+    use super::testing::{canonical_tempdir, ctx, search_root, symlink_file, temp_ctx};
     use super::write::WriteTool;
     use super::*;
-    use crate::file_tracker::testing::tracker;
     use crate::permission::{Decision, Mode, Policy, Zone};
 
     fn all_tools() -> Vec<Box<dyn Tool>> {
-        let tracker = tracker();
         vec![
             Box::new(BashTool),
-            Box::new(EditTool::new(Arc::clone(&tracker))),
+            Box::new(EditTool),
             Box::new(GlobTool::default()),
             Box::new(GrepTool::default()),
-            Box::new(ReadTool::new(Arc::clone(&tracker))),
+            Box::new(ReadTool),
             Box::new(TasksTool),
-            Box::new(WriteTool::new(tracker)),
+            Box::new(WriteTool),
         ]
+    }
+
+    fn find<'a>(tools: &'a [Box<dyn Tool>], name: &str) -> &'a dyn Tool {
+        tools
+            .iter()
+            .find(|t| t.spec().name == name)
+            .unwrap_or_else(|| panic!("tool {name} missing from catalog"))
+            .as_ref()
     }
 
     // ── Tool trait contract (all tools) ──
@@ -867,23 +1002,54 @@ mod tests {
     #[test]
     fn every_tool_exposes_non_empty_name_description_and_object_schema() {
         for t in all_tools() {
-            let name = t.name();
+            let ToolSpec {
+                name,
+                description,
+                input_schema,
+                ..
+            } = t.spec();
             assert!(!name.is_empty(), "tool with empty name in catalog");
-            assert!(!t.description().is_empty(), "{name}: empty description");
-            let schema = t.input_schema();
-            assert_eq!(schema["type"], "object", "{name}: schema type");
+            assert!(!description.is_empty(), "{name}: empty description");
+            assert_eq!(input_schema["type"], "object", "{name}: schema type");
             assert!(
-                schema["properties"].is_object(),
+                input_schema["properties"].is_object(),
                 "{name}: schema.properties"
             );
-            assert!(schema["required"].is_array(), "{name}: schema.required");
+            assert!(
+                input_schema["required"].is_array(),
+                "{name}: schema.required"
+            );
         }
+    }
+
+    #[test]
+    fn tool_catalog_classes_and_parallel_safety_match_each_tool() {
+        // Only the file reads and searches may run alongside each other.
+        let catalog: Vec<_> = all_tools()
+            .iter()
+            .map(|t| {
+                let spec = t.spec();
+                (spec.name, spec.class, spec.parallel_safe)
+            })
+            .collect();
+        assert_eq!(
+            catalog,
+            [
+                ("bash".to_owned(), PermissionClass::Bash, false),
+                ("edit".to_owned(), PermissionClass::Edit, false),
+                ("glob".to_owned(), PermissionClass::Read, true),
+                ("grep".to_owned(), PermissionClass::Read, true),
+                ("read".to_owned(), PermissionClass::Read, true),
+                ("tasks".to_owned(), PermissionClass::Read, false),
+                ("write".to_owned(), PermissionClass::Edit, false),
+            ],
+        );
     }
 
     #[test]
     fn tool_catalog_names_and_icons_are_unique() {
         let tools = all_tools();
-        let names: HashSet<_> = tools.iter().map(|t| t.name()).collect();
+        let names: HashSet<_> = tools.iter().map(|t| t.spec().name).collect();
         assert_eq!(names.len(), tools.len(), "duplicate name");
         let icons: HashSet<_> = tools.iter().map(|t| t.icon()).collect();
         assert_eq!(icons.len(), tools.len(), "duplicate icon");
@@ -902,11 +1068,7 @@ mod tests {
         ];
         let tools = all_tools();
         for (name, icon) in expected {
-            let t = tools
-                .iter()
-                .find(|t| t.name() == name)
-                .unwrap_or_else(|| panic!("tool {name} missing from catalog"));
-            assert_eq!(t.icon(), icon, "tool {name}: expected icon {icon}");
+            assert_eq!(find(&tools, name).icon(), icon, "tool {name}");
         }
     }
 
@@ -942,19 +1104,18 @@ mod tests {
         ];
         let tools = all_tools();
         for (name, input, expected) in &cases {
-            let t = tools.iter().find(|t| t.name() == *name).unwrap();
+            let t = find(&tools, name);
             assert_eq!(t.summarize_input(input), *expected, "tool {name}");
         }
     }
 
     #[test]
     fn tool_summarize_input_is_none_when_primary_field_missing() {
-        let tools = all_tools();
-        for t in &tools {
+        for t in all_tools() {
             assert!(
                 t.summarize_input(&serde_json::json!({})).is_none(),
                 "tool {} returned Some on empty input",
-                t.name(),
+                t.spec().name,
             );
         }
     }
@@ -987,25 +1148,27 @@ mod tests {
         ];
         let tools = all_tools();
         for (name, input, expected) in &cases {
-            let t = tools.iter().find(|t| t.name() == *name).unwrap();
-            assert_eq!(t.summarize_call(input), *expected, "tool {name}");
+            let t = find(&tools, name);
+            assert_eq!(
+                t.summarize_call(name, input, Path::new("/repo")),
+                *expected,
+                "tool {name}",
+            );
         }
     }
 
     #[test]
     fn tool_summarize_call_falls_back_to_bare_name_when_arg_missing() {
-        let tools = all_tools();
-        for t in &tools {
-            let got = t.summarize_call(&serde_json::json!({}));
-            assert_eq!(got, title_case(t.name()), "tool {}", t.name());
+        for t in all_tools() {
+            let name = t.spec().name;
+            let got = t.summarize_call(&name, &serde_json::json!({}), Path::new("/repo"));
+            assert_eq!(got, title_case(&name), "tool {name}");
         }
     }
 
     #[test]
     fn tool_summarize_call_shortens_file_paths_inside_cwd() {
-        let cwd = std::env::current_dir().unwrap();
-        let path = cwd.join("crates/oxide-code/src/tool/read.rs");
-        let path = path.to_str().unwrap();
+        let path = "/repo/crates/oxide-code/src/tool/read.rs";
         let cases = [
             (
                 "edit",
@@ -1025,26 +1188,29 @@ mod tests {
         ];
         let tools = all_tools();
         for (name, input, expected) in &cases {
-            let t = tools.iter().find(|t| t.name() == *name).unwrap();
-            assert_eq!(t.summarize_call(input), *expected, "tool {name}");
+            let t = find(&tools, name);
+            assert_eq!(
+                t.summarize_call(name, input, Path::new("/repo")),
+                *expected,
+                "tool {name}",
+            );
         }
     }
 
-    // ── Tool::permission_class ──
+    // ── ToolSpec::class ──
 
     #[test]
-    fn permission_class_rules_cover_every_tool_in_the_class() {
+    fn spec_class_rules_cover_every_tool_in_the_class() {
         // Rules address classes: a `read(...)` deny must stop grep and glob from dumping the file
         // it names, and an `edit(...)` deny must stop write as well as edit.
-        let dir = tempfile::tempdir().unwrap();
-        let cwd = dunce::canonicalize(dir.path()).unwrap();
-        std::fs::write(cwd.join(".env"), "SECRET=1").unwrap();
+        let dir = canonical_tempdir();
+        std::fs::write(dir.path().join(".env"), "SECRET=1").unwrap();
         let deny = [
             "read(.env)".to_owned(),
             "edit(.env)".to_owned(),
             "bash(cat .env)".to_owned(),
         ];
-        let policy = Policy::resolve(Mode::Auto, &[], &deny, &cwd).unwrap();
+        let policy = Policy::resolve(Mode::Auto, &[], &deny, dir.path()).unwrap();
         let cases = [
             ("read", serde_json::json!({"file_path": ".env"})),
             ("grep", serde_json::json!({"pattern": ".", "path": ".env"})),
@@ -1060,68 +1226,103 @@ mod tests {
             ("bash", serde_json::json!({"command": "cat .env"})),
         ];
         let tools = all_tools();
+        let ctx = ctx(dir.path());
         for (name, input) in &cases {
-            let t = tools.iter().find(|t| t.name() == *name).unwrap();
-            let target = t.gate_target(input, &cwd);
+            let t = find(&tools, name);
+            let prepared = t.prepare(input.clone(), &ctx);
             assert_eq!(
-                policy.decide(t.permission_class(), &target.as_target()),
+                policy.decide(t.spec().class, &prepared.access.as_target()),
                 Decision::Deny,
                 "tool {name}",
             );
         }
     }
 
-    // ── Tool::gate_target ──
+    // ── Tool::prepare ──
 
     #[test]
-    fn gate_target_resolves_the_path_field_of_each_path_tool() {
-        let dir = tempfile::tempdir().unwrap();
-        let cwd = dunce::canonicalize(dir.path()).unwrap();
+    fn prepare_resolves_and_pins_the_path_field_of_each_path_tool() {
+        let dir = canonical_tempdir();
+        let ctx = ctx(dir.path());
+        let resolved = dir.path().join("a.rs");
         let tools = all_tools();
         for name in ["read", "edit", "write"] {
-            let t = tools.iter().find(|t| t.name() == name).unwrap();
-            let target = t.gate_target(&serde_json::json!({"file_path": "a.rs"}), &cwd);
-            let GateTarget::Path { relative, .. } = target else {
-                panic!("tool {name}: expected a path target, got {target:?}");
-            };
-            assert_eq!(relative.as_deref(), Some("a.rs"), "tool {name}");
+            let t = find(&tools, name);
 
-            let missing = t.gate_target(&serde_json::json!({}), &cwd);
-            assert!(matches!(missing, GateTarget::None), "tool {name}");
+            let prepared = t.prepare(
+                serde_json::json!({"file_path": "a.rs", "content": "a.rs"}),
+                &ctx,
+            );
+
+            let Access::Path {
+                canonical,
+                relative,
+                zone,
+                ..
+            } = &prepared.access
+            else {
+                panic!("tool {name}: expected a path target, got {prepared:?}");
+            };
+            assert_eq!(canonical, resolved.to_str().unwrap(), "tool {name}");
+            assert_eq!(relative.as_deref(), Some("a.rs"), "tool {name}");
+            assert_eq!(*zone, Zone::Workspace, "tool {name}");
+            assert_eq!(
+                prepared.input,
+                serde_json::json!({"file_path": resolved, "content": "a.rs"}),
+                "tool {name}: only the path field is pinned",
+            );
+
+            let missing = t.prepare(serde_json::json!({}), &ctx);
+            assert_eq!(missing.access, Access::None, "tool {name}");
+            assert_eq!(missing.input, serde_json::json!({}), "tool {name}");
         }
     }
 
-    // ── Tool::pin_target ──
-
+    #[cfg(unix)]
     #[test]
-    fn pin_target_rewrites_only_the_path_field() {
-        let resolved = GateTarget::Path {
-            canonical: "/repo/real.rs".to_owned(),
-            relative: Some("real.rs".to_owned()),
-            requested: "/repo/link.rs".to_owned(),
-            deny_relative: vec!["real.rs".to_owned(), "link.rs".to_owned()],
-            zone: Zone::Workspace,
-        };
-        let mut input = serde_json::json!({"file_path": "link.rs", "content": "link.rs"});
-        WriteTool::new(tracker()).pin_target(&mut input, &resolved);
-        assert_eq!(
-            input,
-            serde_json::json!({"file_path": "/repo/real.rs", "content": "link.rs"}),
+    fn prepare_follows_a_symlink_out_of_the_workspace_to_its_target() {
+        // A link inside the cwd that points elsewhere must resolve to where the call lands, so the
+        // edit gate sees an outside path and the tool opens that same path.
+        let dir = canonical_tempdir();
+        let (cwd, outside) = (dir.path().join("repo"), dir.path().join("outside"));
+        std::fs::create_dir(&cwd).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::os::unix::fs::symlink("../outside/notes.md", cwd.join("notes.md")).unwrap();
+        let target = outside.join("notes.md");
+
+        let prepared = WriteTool.prepare(
+            serde_json::json!({"file_path": "notes.md", "content": "x"}),
+            &ctx(&cwd),
         );
+
+        let Access::Path {
+            canonical,
+            relative,
+            zone,
+            ..
+        } = &prepared.access
+        else {
+            panic!("expected a path target, got {prepared:?}");
+        };
+        assert_eq!(canonical, target.to_str().unwrap());
+        assert_eq!(*relative, None);
+        assert_eq!(*zone, Zone::Outside);
+        assert_eq!(prepared.input["file_path"], serde_json::json!(target));
     }
 
     #[test]
-    fn pin_target_leaves_tools_without_a_path_field_untouched() {
-        let resolved = GateTarget::Path {
-            canonical: "/repo".to_owned(),
-            relative: Some(String::new()),
-            requested: "/repo".to_owned(),
-            deny_relative: vec![String::new()],
-            zone: Zone::Workspace,
+    fn prepare_resolves_a_search_root_but_leaves_its_spelling_in_the_input() {
+        // The read deny rules a search's hits face match against the root as the call spells it.
+        let dir = canonical_tempdir();
+        let input = serde_json::json!({"pattern": "x", "path": "."});
+
+        let prepared = GrepTool::default().prepare(input.clone(), &ctx(dir.path()));
+
+        let Access::Path { canonical, .. } = &prepared.access else {
+            panic!("expected a path target, got {prepared:?}");
         };
-        let mut input = serde_json::json!({"pattern": "x", "path": "."});
-        GrepTool::default().pin_target(&mut input, &resolved);
-        assert_eq!(input, serde_json::json!({"pattern": "x", "path": "."}));
+        assert_eq!(canonical, dir.path().to_str().unwrap());
+        assert_eq!(prepared.input, input);
     }
 
     // ── Tool::approval_preview ──
@@ -1129,7 +1330,11 @@ mod tests {
     #[test]
     fn approval_preview_default_titles_with_the_tool_name() {
         // The body carries the full command, wrapped, so the title only names the tool.
-        let preview = BashTool.approval_preview(&serde_json::json!({"command": "cargo test"}));
+        let preview = BashTool.approval_preview(
+            "bash",
+            &serde_json::json!({"command": "cargo test"}),
+            Path::new("/repo"),
+        );
         assert_eq!(preview.title, "Bash");
         assert_eq!(preview.body, ApprovalBody::Command("cargo test".to_owned()));
     }
@@ -1150,7 +1355,7 @@ mod tests {
     #[test]
     fn get_finds_registered_tool() {
         let registry = ToolRegistry::new(vec![Box::new(BashTool)]);
-        assert_eq!(registry.get("bash").unwrap().name(), "bash");
+        assert_eq!(registry.get("bash").unwrap().0.name, "bash");
     }
 
     #[test]
@@ -1193,11 +1398,19 @@ mod tests {
     fn label_delegates_to_registered_tool() {
         let registry = ToolRegistry::new(vec![Box::new(BashTool), Box::new(GrepTool::default())]);
         assert_eq!(
-            registry.label("bash", &serde_json::json!({"command": "echo hi"})),
+            registry.label(
+                "bash",
+                &serde_json::json!({"command": "echo hi"}),
+                Path::new("/repo")
+            ),
             "echo hi",
         );
         assert_eq!(
-            registry.label("grep", &serde_json::json!({"pattern": "fn "})),
+            registry.label(
+                "grep",
+                &serde_json::json!({"pattern": "fn "}),
+                Path::new("/repo")
+            ),
             "Grep(fn )",
         );
     }
@@ -1206,10 +1419,13 @@ mod tests {
     fn label_unknown_tool_falls_back_to_raw_name() {
         let registry = ToolRegistry::new(vec![Box::new(BashTool)]);
         let input = serde_json::json!({"command": "echo hi"});
-        assert_eq!(registry.label("nonexistent", &input), "nonexistent");
+        assert_eq!(
+            registry.label("nonexistent", &input, Path::new("/repo")),
+            "nonexistent"
+        );
     }
 
-    // ── ToolRegistry::run ──
+    // ── run_capped ──
 
     fn oversize_grep_input() -> (tempfile::TempDir, serde_json::Value) {
         let dir = tempfile::tempdir().unwrap();
@@ -1221,10 +1437,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_dispatches_and_caps_byte_overflow() {
+    async fn run_capped_caps_byte_overflow() {
         let (_dir, input) = oversize_grep_input();
         let registry = ToolRegistry::new(vec![Box::new(GrepTool::default())]);
-        let output = registry.run("grep", input).await;
+        let output = registry.run_input("grep", input, &temp_ctx()).await;
 
         assert!(!output.is_error);
         assert!(output.content.len() <= MAX_OUTPUT_BYTES + TRUNCATION_OVERHEAD);
@@ -1234,16 +1450,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_within_cap_leaves_content_and_metadata_untouched() {
+    async fn run_capped_within_cap_leaves_content_and_metadata_untouched() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("small.txt");
         std::fs::write(&path, "hello\nworld\n").unwrap();
 
-        let registry = ToolRegistry::new(vec![Box::new(ReadTool::new(tracker()))]);
+        let registry = ToolRegistry::new(vec![Box::new(ReadTool)]);
         let output = registry
-            .run(
+            .run_input(
                 "read",
                 serde_json::json!({"file_path": path.to_str().unwrap()}),
+                &temp_ctx(),
             )
             .await;
 
@@ -1253,10 +1470,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_byte_cap_on_grep_falls_through_to_text_view() {
+    async fn run_capped_byte_cap_on_grep_falls_through_to_text_view() {
         let (_dir, input) = oversize_grep_input();
         let registry = ToolRegistry::new(vec![Box::new(GrepTool::default())]);
-        let output = registry.run("grep", input.clone()).await;
+        let output = registry.run_input("grep", input.clone(), &temp_ctx()).await;
         assert!(output.metadata.truncated_bytes.is_some());
 
         let view = registry.result_view(
@@ -1265,24 +1482,16 @@ mod tests {
             &output.content,
             &output.metadata,
             output.is_error,
+            Path::new("/repo"),
         );
         assert!(matches!(view, ToolResultView::Text { .. }));
-    }
-
-    #[tokio::test]
-    async fn run_unknown_tool_errors() {
-        let registry = ToolRegistry::new(vec![Box::new(BashTool)]);
-        let output = registry.run("nonexistent", serde_json::json!({})).await;
-        assert!(output.is_error);
-        assert_eq!(output.content, "Unknown tool: nonexistent");
-        assert!(output.metadata.truncated_bytes.is_none());
     }
 
     // ── ToolRegistry::result_view ──
 
     #[test]
     fn result_view_delegates_to_tool_for_structured_output() {
-        let registry = ToolRegistry::new(vec![Box::new(EditTool::new(tracker()))]);
+        let registry = ToolRegistry::new(vec![Box::new(EditTool)]);
         let input = serde_json::json!({
             "file_path": "/tmp/f.rs",
             "old_string": "a",
@@ -1295,6 +1504,7 @@ mod tests {
             "Successfully edited /tmp/f.rs.",
             &metadata,
             false,
+            Path::new("/repo"),
         );
         assert_eq!(
             view,
@@ -1320,8 +1530,14 @@ mod tests {
         let registry = ToolRegistry::new(vec![Box::new(GrepTool::default())]);
         let input = serde_json::json!({"pattern": "fn"});
         let metadata = ToolMetadata::default();
-        let view =
-            registry.result_view("grep", &input, "src/main.rs:10:fn main()", &metadata, false);
+        let view = registry.result_view(
+            "grep",
+            &input,
+            "src/main.rs:10:fn main()",
+            &metadata,
+            false,
+            Path::new("/repo"),
+        );
         assert_eq!(
             view,
             ToolResultView::GrepMatches {
@@ -1340,10 +1556,17 @@ mod tests {
 
     #[test]
     fn result_view_delegates_read_excerpt() {
-        let registry = ToolRegistry::new(vec![Box::new(ReadTool::new(tracker()))]);
+        let registry = ToolRegistry::new(vec![Box::new(ReadTool)]);
         let input = serde_json::json!({"file_path": "/tmp/lib.rs"});
         let metadata = ToolMetadata::default();
-        let view = registry.result_view("read", &input, "1\tmod foo;", &metadata, false);
+        let view = registry.result_view(
+            "read",
+            &input,
+            "1\tmod foo;",
+            &metadata,
+            false,
+            Path::new("/repo"),
+        );
         assert_eq!(
             view,
             ToolResultView::ReadExcerpt {
@@ -1362,8 +1585,14 @@ mod tests {
         let registry = ToolRegistry::new(vec![Box::new(GlobTool::default())]);
         let input = serde_json::json!({"pattern": "*.rs"});
         let metadata = ToolMetadata::default();
-        let view =
-            registry.result_view("glob", &input, "src/main.rs\nsrc/lib.rs", &metadata, false);
+        let view = registry.result_view(
+            "glob",
+            &input,
+            "src/main.rs\nsrc/lib.rs",
+            &metadata,
+            false,
+            Path::new("/repo"),
+        );
         assert_eq!(
             view,
             ToolResultView::GlobFiles {
@@ -1376,14 +1605,21 @@ mod tests {
 
     #[test]
     fn result_view_short_circuits_errors_to_text() {
-        let registry = ToolRegistry::new(vec![Box::new(EditTool::new(tracker()))]);
+        let registry = ToolRegistry::new(vec![Box::new(EditTool)]);
         let input = serde_json::json!({
             "file_path": "/tmp/f.rs",
             "old_string": "a",
             "new_string": "b",
         });
         let metadata = ToolMetadata::default();
-        let view = registry.result_view("edit", &input, "old_string not found", &metadata, true);
+        let view = registry.result_view(
+            "edit",
+            &input,
+            "old_string not found",
+            &metadata,
+            true,
+            Path::new("/repo"),
+        );
         assert_eq!(
             view,
             ToolResultView::Text {
@@ -1402,6 +1638,7 @@ mod tests {
             "anything",
             &metadata,
             false,
+            Path::new("/repo"),
         );
         assert_eq!(
             view,
@@ -1421,6 +1658,7 @@ mod tests {
             "file1\nfile2",
             &metadata,
             false,
+            Path::new("/repo"),
         );
         assert_eq!(
             view,
@@ -1491,74 +1729,97 @@ mod tests {
         assert!(original_len.is_none());
     }
 
-    // ── resolve_base_dir ──
+    // ── SearchRoot::new ──
 
     #[test]
-    fn resolve_base_dir_canonicalizes_relative_and_absolute_paths() {
+    fn search_root_resolves_relative_and_absolute_paths_and_keeps_their_spelling() {
         let dir = canonical_tempdir();
         std::fs::create_dir(dir.path().join("src")).unwrap();
         std::fs::create_dir(dir.path().join("lib")).unwrap();
         let lib = dir.path().join("lib");
 
+        let relative = search_root(dir.path(), Some("./src/../lib")).unwrap();
+        let absolute = search_root(Path::new("/"), Some(lib.to_str().unwrap())).unwrap();
+
         assert_eq!(
-            resolve_base_dir(Some("./src/../lib"), dir.path()),
-            Ok(lib.clone())
+            (relative.base, relative.spelled, relative.cwd),
+            (
+                lib.clone(),
+                PathBuf::from("./src/../lib"),
+                dir.path().to_owned()
+            ),
         );
-        assert_eq!(
-            resolve_base_dir(Some(lib.to_str().unwrap()), Path::new("/")),
-            Ok(lib)
-        );
+        assert_eq!(absolute.base, lib);
     }
 
     #[cfg(unix)]
     #[test]
-    fn resolve_base_dir_resolves_dot_dot_after_a_symlink_physically() {
+    fn search_root_resolves_dot_dot_after_a_symlink_physically() {
         let dir = canonical_tempdir();
         std::fs::create_dir_all(dir.path().join("real/target")).unwrap();
         let cwd = dir.path().join("cwd");
         std::fs::create_dir(&cwd).unwrap();
         std::os::unix::fs::symlink(dir.path().join("real/target"), cwd.join("link")).unwrap();
 
+        let root = search_root(&cwd, Some("link/..")).unwrap();
+
+        assert_eq!(root.base, dir.path().join("real"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn search_root_walks_from_a_root_whose_name_is_not_utf8() {
+        use std::os::unix::ffi::OsStrExt as _;
+        let dir = canonical_tempdir();
+        let cwd = dir.path().join(std::ffi::OsStr::from_bytes(b"caf\xe9"));
+        std::fs::create_dir(&cwd).unwrap();
+
+        let root = search_root(&cwd, None).unwrap();
+
+        assert_eq!(root.base, cwd);
+    }
+
+    #[test]
+    fn search_root_none_uses_cwd() {
+        let dir = canonical_tempdir();
+
+        let root = search_root(dir.path(), None).unwrap();
+
         assert_eq!(
-            resolve_base_dir(Some("link/.."), &cwd),
-            Ok(dir.path().join("real"))
+            (root.base, root.spelled),
+            (dir.path().to_owned(), PathBuf::from(".")),
         );
     }
 
     #[test]
-    fn resolve_base_dir_none_uses_cwd() {
+    fn search_root_missing_path_is_named_relative_to_cwd() {
         let dir = canonical_tempdir();
-        assert_eq!(
-            resolve_base_dir(None, dir.path()),
-            Ok(dir.path().to_path_buf())
-        );
-    }
-
-    #[test]
-    fn resolve_base_dir_missing_path_is_named_relative_to_cwd() {
-        let dir = canonical_tempdir();
-        let err = resolve_base_dir(Some("missing"), dir.path()).unwrap_err();
+        let err = search_root(dir.path(), Some("missing")).err().unwrap();
         assert!(err.starts_with("Cannot access missing: "), "{err}");
     }
 
-    // ── display_cwd_path_from ──
-
     #[test]
-    fn display_cwd_path_from_without_cwd_falls_back_to_original_path() {
-        assert_eq!(
-            display_cwd_path_from("/tmp/example.rs", None),
-            "/tmp/example.rs"
-        );
+    fn search_root_refuses_an_access_that_is_not_a_path() {
+        let err = SearchRoot::new(&Access::None, Some("src"), Path::new("/repo"))
+            .err()
+            .unwrap();
+        assert_eq!(err, "Cannot access src: the search root was not resolved.");
     }
 
     // ── tracker_key ──
 
     #[tokio::test]
-    async fn tracker_key_resolves_relative_and_dotted_spellings_to_one_key() {
-        let absolute = std::env::current_dir().unwrap().join("src/main.rs");
-        assert_eq!(tracker_key("src/main.rs").await, absolute);
-        assert_eq!(tracker_key("./src/../src/main.rs").await, absolute);
-        assert_eq!(tracker_key(absolute.to_str().unwrap()).await, absolute);
+    async fn tracker_key_resolves_dotted_spellings_to_one_key() {
+        let dir = canonical_tempdir();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        let file = dir.path().join("src/main.rs");
+        std::fs::write(&file, "").unwrap();
+
+        assert_eq!(tracker_key(&file).await, file);
+        assert_eq!(
+            tracker_key(&dir.path().join("./src/../src/main.rs")).await,
+            file
+        );
     }
 
     #[cfg(unix)]
@@ -1569,17 +1830,19 @@ mod tests {
         std::fs::write(dir.path().join("real/a.rs"), "").unwrap();
         std::os::unix::fs::symlink(dir.path().join("real"), dir.path().join("link")).unwrap();
 
-        let via_link = dir.path().join("link/a.rs");
         assert_eq!(
-            tracker_key(via_link.to_str().unwrap()).await,
+            tracker_key(&dir.path().join("link/a.rs")).await,
             dir.path().join("real/a.rs"),
         );
     }
 
     #[tokio::test]
-    async fn tracker_key_missing_path_falls_back_to_a_lexically_clean_absolute_path() {
-        let cwd = std::env::current_dir().unwrap();
-        assert_eq!(tracker_key("missing/../a.rs").await, cwd.join("a.rs"));
+    async fn tracker_key_missing_path_falls_back_to_its_lexically_clean_form() {
+        let dir = canonical_tempdir();
+        assert_eq!(
+            tracker_key(&dir.path().join("missing/../a.rs")).await,
+            dir.path().join("a.rs")
+        );
     }
 
     // ── display_path ──
@@ -1628,20 +1891,13 @@ mod tests {
         symlink_file(&target, &link);
 
         let accept = |_: &std::fs::Metadata| Ok(());
-        let (metadata, bytes) = read_validated(target.to_str().unwrap(), accept)
-            .await
-            .unwrap();
+        let (metadata, bytes) = read_validated(&target, "target.txt", accept).await.unwrap();
         assert_eq!(
             (metadata.len(), bytes.as_slice()),
             (8, b"original".as_slice())
         );
-        let err = read_validated(link.to_str().unwrap(), accept)
-            .await
-            .unwrap_err();
-        assert!(
-            err.starts_with(&format!("Error reading {}: ", link.display())),
-            "{err}"
-        );
+        let err = read_validated(&link, "link.txt", accept).await.unwrap_err();
+        assert!(err.starts_with("Error reading link.txt: "), "{err}");
         #[cfg(windows)]
         assert!(
             err.ends_with("the final path component is a symlink"),
@@ -1678,7 +1934,7 @@ mod tests {
                 }
                 Ok(())
             };
-            let err = read_validated(path.to_str().unwrap(), validate)
+            let err = read_validated(&path, "notes.md", validate)
                 .await
                 .unwrap_err();
             assert_eq!(err, "rejected");
@@ -1773,14 +2029,30 @@ mod tests {
         }
 
         let accept = |_: &std::fs::Metadata| Ok(());
-        let (_, bytes) = read_validated(path.to_str().unwrap(), accept)
-            .await
-            .unwrap();
+        let (_, bytes) = read_validated(&path, "notes.txt", accept).await.unwrap();
         assert_eq!(bytes, content.as_bytes());
         write_no_follow(&path, b"rewritten", WriteMode::Overwrite)
             .await
             .unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"rewritten");
+    }
+
+    // ── walk_files ──
+
+    #[test]
+    fn walk_files_stops_once_cancelled() {
+        let dir = canonical_tempdir();
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            std::fs::write(dir.path().join(name), "").unwrap();
+        }
+        let cancel = CancellationToken::new();
+        let mut walk = walk_files(dir.path(), &cancel);
+
+        let first = walk.next();
+        cancel.cancel();
+
+        assert!(first.is_some(), "an uncancelled walk yields files");
+        assert_eq!(walk.count(), 0, "the walk stops at the cancel");
     }
 
     // ── truncate_line ──

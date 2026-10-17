@@ -1,25 +1,46 @@
 //! One round's tool calls: the permission gate, approvals, and each call's result.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use anyhow::Context;
+use futures::StreamExt as _;
+use futures::stream::FuturesUnordered;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use super::abort::{AbortResult, TurnAbort, await_unless_aborted};
-use crate::file_tracker;
+use crate::file_tracker::FileTracker;
 use crate::message::ContentBlock;
-use crate::permission::SessionGrant;
 use crate::permission::rule::Rule;
+use crate::permission::{Policy, SessionGrant, Workspace};
 use crate::protocol::{Decision, Event, EventSink, Op, ToolCall, ToolResult};
 use crate::tool::tasks::Task;
-use crate::tool::{ToolMetadata, ToolOutput, ToolRegistry};
+use crate::tool::{
+    Prepared, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolRegistry, ToolSpec, run_capped,
+};
 
-/// Inputs the permission gate needs at each tool call: the policy, which gains the session allow
-/// rules the user grants, and the working directory to resolve path targets against.
-pub(super) struct GateContext<'a> {
-    pub(super) policy: &'a mut crate::permission::Policy,
-    pub(super) cwd: &'a std::path::Path,
+/// What each call of a round runs against: the policy that gates it, which gains the session allow
+/// rules the user grants, and the session-wide parts of its [`ToolCtx`].
+pub(super) struct DispatchContext<'a> {
+    pub(super) policy: &'a mut Policy,
+    pub(super) workspace: Arc<Workspace>,
+    pub(super) session_id: String,
+    pub(super) tracker: Arc<FileTracker>,
+}
+
+impl DispatchContext<'_> {
+    /// The context the call `call_id` prepares and runs in.
+    fn tool_ctx(&self, call_id: &str) -> ToolCtx {
+        ToolCtx {
+            workspace: Arc::clone(&self.workspace),
+            session_id: self.session_id.clone(),
+            tracker: Arc::clone(&self.tracker),
+            call_id: call_id.to_owned(),
+            cancel: CancellationToken::new(),
+        }
+    }
 }
 
 pub(super) fn collect_tool_uses(
@@ -56,6 +77,9 @@ impl ToolRound {
     }
 }
 
+/// Runs a round's calls in order. Consecutive parallel-safe calls form one batch, whose calls each
+/// pass the gate in turn before the allowed ones run together, so an approval never waits on a
+/// running call. Any other call is a batch of its own.
 pub(super) async fn run_tool_round(
     tools: &ToolRegistry,
     tool_uses: Vec<(String, String, serde_json::Value)>,
@@ -63,7 +87,7 @@ pub(super) async fn run_tool_round(
     sink: &dyn EventSink,
     ops: &mut mpsc::Receiver<Op>,
     pending: &mut Vec<String>,
-    gate: &mut GateContext<'_>,
+    dispatch_ctx: &mut DispatchContext<'_>,
 ) -> ToolRound {
     let mut round = ToolRound {
         results: Vec::with_capacity(tool_uses.len()),
@@ -71,54 +95,25 @@ pub(super) async fn run_tool_round(
         tasks: None,
         abort: None,
     };
-    let mut calls = tool_uses.into_iter();
-    for (id, name, input) in calls.by_ref() {
-        sink.emit(
-            Event::ToolCallStart(ToolCall {
-                id: id.clone(),
-                name: name.clone(),
-                input: input.clone(),
-                icon: tools.icon(&name).to_owned(),
-                label: tools.label(&name, &input),
-            }),
-            "tool-call-start",
-        );
-
-        let (mut output, abort) = dispatch_tool_call(
-            tools,
-            &id,
-            &name,
-            input.clone(),
-            parse_errors.get(&id),
-            sink,
-            ops,
-            pending,
-            gate,
-        )
-        .await;
-        sink.emit(
-            Event::ToolCallEnd(ToolResult {
-                id: id.clone(),
-                content: output.content.clone(),
-                is_error: output.is_error,
-                title: output.metadata.title.clone(),
-                view: tools.result_view(
-                    &name,
-                    &input,
-                    &output.content,
-                    &output.metadata,
-                    output.is_error,
-                ),
-            }),
-            "tool-call-end",
-        );
-        if let Some(tasks) = output.tasks.take() {
-            sink.emit(Event::TasksUpdated(tasks.clone()), "tasks-updated");
-            round.tasks = Some(tasks);
+    let mut dispatcher = Dispatcher {
+        tools,
+        parse_errors,
+        sink,
+        ops,
+        pending,
+        dispatch_ctx,
+    };
+    let parallel_safe = |name: &str| tools.get(name).is_some_and(|(spec, _)| spec.parallel_safe);
+    let mut calls = tool_uses.into_iter().peekable();
+    while let Some(first) = calls.next() {
+        let mut batch = vec![first];
+        if parallel_safe(&batch[0].1) {
+            batch.extend(std::iter::from_fn(|| {
+                calls.next_if(|(_, name, _)| parallel_safe(name))
+            }));
         }
-        round.push(id, output);
-        if abort.is_some() {
-            round.abort = abort;
+        if let Some(abort) = dispatcher.run_batch(batch, &mut round).await {
+            round.abort = Some(abort);
             break;
         }
     }
@@ -131,148 +126,292 @@ pub(super) async fn run_tool_round(
 /// Result of a call the user interrupted before its tool started.
 pub(super) const NOT_RUN: &str = "Not run, because the user interrupted the turn.";
 
-/// Runs one call through the permission gate and its tool. A user abort still yields a result for
-/// the call, which says whether the tool had started.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "dispatch threads the per-call gate inputs (id, sink, gate) alongside the run state"
-)]
-async fn dispatch_tool_call(
-    tools: &ToolRegistry,
-    id: &str,
-    name: &str,
-    mut input: serde_json::Value,
-    parse_error: Option<&String>,
-    sink: &dyn EventSink,
-    ops: &mut mpsc::Receiver<Op>,
-    pending: &mut Vec<String>,
-    gate: &mut GateContext<'_>,
-) -> (ToolOutput, Option<TurnAbort>) {
-    if let Some(err) = parse_error {
-        return (
-            ToolOutput::error(format!(
-                "Tool input JSON failed to parse: {err}. Retry with a valid JSON object."
-            )),
-            None,
-        );
-    }
+/// Result of a call the user interrupted while its tool ran.
+const INTERRUPTED: &str =
+    "The user interrupted this call before it finished, so it may have run partially.";
 
-    match check_permission(tools, id, name, &mut input, sink, ops, pending, gate).await {
-        Ok(None) => {}
-        Ok(Some(denial)) => return (denial, None),
-        Err(abort) => return (ToolOutput::error(NOT_RUN), Some(abort)),
-    }
-
-    match await_unless_aborted(
-        file_tracker::attribute_to(id, tools.run(name, input)),
-        ops,
-        pending,
-    )
-    .await
-    {
-        Ok(output) => (output, None),
-        Err(abort) => {
-            let output = ToolOutput::error(
-                "The user interrupted this call before it finished, so it may have run partially.",
-            );
-            (output, Some(abort))
-        }
-    }
+/// The state one round's calls share.
+struct Dispatcher<'r, 'd> {
+    tools: &'r ToolRegistry,
+    parse_errors: &'r HashMap<String, String>,
+    sink: &'r dyn EventSink,
+    ops: &'r mut mpsc::Receiver<Op>,
+    pending: &'r mut Vec<String>,
+    dispatch_ctx: &'r mut DispatchContext<'d>,
 }
 
-/// Runs the permission gate for one call, first pinning a path tool's `input` to the path the gate
-/// resolves so the preview and the run act on what was checked. Returns `Ok(None)` to proceed,
-/// `Ok(Some(output))` with a synthetic denial, or an abort on an interrupt, a shutdown, or an
-/// [`Decision::Abort`] during an outstanding approval. An `ask` emits [`Event::ApprovalRequested`]
-/// and blocks on the matching [`Op::Resolve`], which every frontend answers in its own way. An
-/// allow-for-session answer adds its rule to the policy once the call's own grant admits it. It
-/// denies at once when no frontend can receive the request.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the gate threads the same per-call inputs dispatch already carries"
-)]
-async fn check_permission(
-    tools: &ToolRegistry,
-    id: &str,
-    name: &str,
-    input: &mut serde_json::Value,
-    sink: &dyn EventSink,
-    ops: &mut mpsc::Receiver<Op>,
-    pending: &mut Vec<String>,
-    gate: &mut GateContext<'_>,
-) -> AbortResult<Option<ToolOutput>> {
-    let Some(tool) = tools.get(name) else {
-        // Unknown tool: let `tools.run` produce its own "unknown tool" error rather than denying.
-        return Ok(None);
-    };
+/// A call of a batch that passed the gate, and the slot its output fills.
+struct Ready<'r> {
+    slot: usize,
+    tool: &'r dyn Tool,
+    prepared: Prepared,
+    ctx: ToolCtx,
+}
 
-    let class = tool.permission_class();
-    let gate_target = tool.gate_target(input, gate.cwd);
-    tool.pin_target(input, &gate_target);
-    let decision = gate.policy.decide(class, &gate_target.as_target());
+/// A call of a batch the round started, with its output once it has one.
+struct Started {
+    id: String,
+    name: String,
+    input: serde_json::Value,
+    output: Option<ToolOutput>,
+}
 
-    match decision {
-        crate::permission::Decision::Allow => Ok(None),
-        crate::permission::Decision::Deny => Ok(Some(denied_output(name))),
-        crate::permission::Decision::Ask => {
-            // The approval request is a control-plane event: if it can't be delivered, no frontend
-            // can answer it and `await_approval` would block forever. Fail closed on a send
-            // error, so the turn is not stranded.
-            let grant = gate.policy.session_grant(class, &gate_target);
-            if sink
-                .send(Event::ApprovalRequested {
-                    id: id.to_owned(),
-                    preview: tool.approval_preview(input),
-                    grant: grant.clone().map(Box::new),
-                })
-                .is_err()
-            {
-                return Ok(Some(denied_output(name)));
-            }
-            match await_approval(id, ops, pending).await? {
-                Decision::Approve => Ok(None),
-                Decision::AllowForSession { rule } => {
-                    Ok(allow_for_session(gate, grant.as_ref(), *rule, name, sink))
+/// How the gate settled one call.
+enum Gate<'r> {
+    Ready {
+        tool: &'r dyn Tool,
+        prepared: Prepared,
+        ctx: ToolCtx,
+    },
+    /// Not run, since the input failed to parse, the tool is unknown, or the gate denied the call.
+    Settled(ToolOutput),
+}
+
+impl<'r> Dispatcher<'r, '_> {
+    /// Starts each call of `batch` and gates it, runs the allowed ones together, then ends each
+    /// started call with its result. Returns the abort that stopped the batch, once every call in
+    /// it has a result.
+    async fn run_batch(
+        &mut self,
+        batch: Vec<(String, String, serde_json::Value)>,
+        round: &mut ToolRound,
+    ) -> Option<TurnAbort> {
+        let cwd = self.dispatch_ctx.workspace.cwd().to_path_buf();
+        let mut started = Vec::with_capacity(batch.len());
+        let mut ready = Vec::new();
+        let mut abort = None;
+        let mut calls = batch.into_iter();
+        for (id, name, input) in calls.by_ref() {
+            self.sink.emit(
+                Event::ToolCallStart(ToolCall {
+                    id: id.clone(),
+                    name: name.clone(),
+                    input: input.clone(),
+                    icon: self.tools.icon(&name).to_owned(),
+                    label: self.tools.label(&name, &input, &cwd),
+                }),
+                "tool-call-start",
+            );
+            let output = match self.gate(&id, &name, input.clone()).await {
+                Ok(Gate::Ready {
+                    tool,
+                    prepared,
+                    ctx,
+                }) => {
+                    ready.push(Ready {
+                        slot: started.len(),
+                        tool,
+                        prepared,
+                        ctx,
+                    });
+                    None
                 }
-                Decision::Deny => Ok(Some(denied_output(name))),
-                Decision::DenyWithFeedback { feedback } => Ok(Some(ToolOutput::error(format!(
-                    "The {name} call was denied with this feedback: {feedback}"
-                )))),
-                Decision::Abort => Err(TurnAbort::Cancelled),
+                Ok(Gate::Settled(output)) => Some(output),
+                Err(stop) => {
+                    abort = Some(stop);
+                    None
+                }
+            };
+            started.push(Started {
+                id,
+                name,
+                input,
+                output,
+            });
+            if abort.is_some() {
+                break;
+            }
+        }
+
+        if abort.is_none() {
+            abort = self.run_ready(ready, &mut started).await;
+        }
+        for call in started {
+            let mut output = call.output.unwrap_or_else(|| ToolOutput::error(NOT_RUN));
+            self.sink.emit(
+                Event::ToolCallEnd(ToolResult {
+                    id: call.id.clone(),
+                    content: output.content.clone(),
+                    is_error: output.is_error,
+                    title: output.metadata.title.clone(),
+                    view: self.tools.result_view(
+                        &call.name,
+                        &call.input,
+                        &output.content,
+                        &output.metadata,
+                        output.is_error,
+                        &cwd,
+                    ),
+                }),
+                "tool-call-end",
+            );
+            if let Some(tasks) = output.tasks.take() {
+                self.sink
+                    .emit(Event::TasksUpdated(tasks.clone()), "tasks-updated");
+                round.tasks = Some(tasks);
+            }
+            round.push(call.id, output);
+        }
+        for (id, ..) in calls {
+            round.push(id, ToolOutput::error(NOT_RUN));
+        }
+        abort
+    }
+
+    /// Runs the `ready` calls together, filling each one's slot in `started` as it finishes. On an
+    /// interrupt or shutdown it cancels and marks the unfinished ones, then returns the abort.
+    async fn run_ready(
+        &mut self,
+        ready: Vec<Ready<'_>>,
+        started: &mut [Started],
+    ) -> Option<TurnAbort> {
+        let cancels: Vec<CancellationToken> =
+            ready.iter().map(|call| call.ctx.cancel.clone()).collect();
+        let mut runs: FuturesUnordered<_> = ready
+            .into_iter()
+            .map(|call| async move {
+                let output = run_capped(call.tool, call.prepared, &call.ctx).await;
+                (call.slot, output)
+            })
+            .collect();
+        while !runs.is_empty() {
+            match await_unless_aborted(runs.select_next_some(), self.ops, self.pending).await {
+                Ok((slot, output)) => started[slot].output = Some(output),
+                Err(abort) => {
+                    drop(runs);
+                    for cancel in &cancels {
+                        cancel.cancel();
+                    }
+                    for call in started.iter_mut().filter(|call| call.output.is_none()) {
+                        call.output = Some(ToolOutput::error(INTERRUPTED));
+                    }
+                    return Some(abort);
+                }
+            }
+        }
+        None
+    }
+
+    /// Prepares one call and runs it through the permission gate. Returns the call ready to run,
+    /// a synthetic output for one that does not run, or an abort on an interrupt, a shutdown, or a
+    /// [`Decision::Abort`] while an approval is outstanding.
+    async fn gate(
+        &mut self,
+        id: &str,
+        name: &str,
+        input: serde_json::Value,
+    ) -> AbortResult<Gate<'r>> {
+        if let Some(err) = self.parse_errors.get(id) {
+            return Ok(Gate::Settled(ToolOutput::error(format!(
+                "Tool input JSON failed to parse: {err}. Retry with a valid JSON object."
+            ))));
+        }
+        let Some((spec, tool)) = self.tools.get(name) else {
+            return Ok(Gate::Settled(ToolOutput::error(format!(
+                "Unknown tool: {name}"
+            ))));
+        };
+
+        let ctx = self.dispatch_ctx.tool_ctx(id);
+        let prepared = tool.prepare(input, &ctx);
+        Ok(
+            match self.check_permission(spec, tool, id, &prepared).await? {
+                None => Gate::Ready {
+                    tool,
+                    prepared,
+                    ctx,
+                },
+                Some(denial) => Gate::Settled(denial),
+            },
+        )
+    }
+
+    /// Runs the permission gate on a prepared call. Returns `None` to proceed or a synthetic
+    /// denial. An `ask` emits [`Event::ApprovalRequested`] and blocks on the matching
+    /// [`Op::Resolve`], which every frontend answers in its own way. An allow-for-session answer
+    /// adds its rule to the policy once the call's own grant admits it. It denies at once when no
+    /// frontend can receive the request.
+    async fn check_permission(
+        &mut self,
+        spec: &ToolSpec,
+        tool: &dyn Tool,
+        id: &str,
+        prepared: &Prepared,
+    ) -> AbortResult<Option<ToolOutput>> {
+        let name = spec.name.as_str();
+        let class = spec.class;
+        match self
+            .dispatch_ctx
+            .policy
+            .decide(class, &prepared.access.as_target())
+        {
+            crate::permission::Decision::Allow => Ok(None),
+            crate::permission::Decision::Deny => Ok(Some(denied_output(name))),
+            crate::permission::Decision::Ask => {
+                // The approval request is a control-plane event: if it can't be delivered, no
+                // frontend can answer it and `await_approval` would block forever. Fail closed on
+                // a send error, so the turn is not stranded.
+                let grant = self
+                    .dispatch_ctx
+                    .policy
+                    .session_grant(class, &prepared.access);
+                let preview =
+                    tool.approval_preview(name, &prepared.input, self.dispatch_ctx.workspace.cwd());
+                if self
+                    .sink
+                    .send(Event::ApprovalRequested {
+                        id: id.to_owned(),
+                        preview,
+                        grant: grant.clone().map(Box::new),
+                    })
+                    .is_err()
+                {
+                    return Ok(Some(denied_output(name)));
+                }
+                match await_approval(id, self.ops, self.pending).await? {
+                    Decision::Approve => Ok(None),
+                    Decision::AllowForSession { rule } => {
+                        Ok(self.allow_for_session(grant.as_ref(), *rule, name))
+                    }
+                    Decision::Deny => Ok(Some(denied_output(name))),
+                    Decision::DenyWithFeedback { feedback } => Ok(Some(ToolOutput::error(
+                        format!("The {name} call was denied with this feedback: {feedback}"),
+                    ))),
+                    Decision::Abort => Err(TurnAbort::Cancelled),
+                }
             }
         }
     }
-}
 
-/// Adds the frontend's `rule` to the session allow rules once the call's own `grant` admits it,
-/// since the frontend's check is advisory. Returns a denial when it does not.
-fn allow_for_session(
-    gate: &mut GateContext<'_>,
-    grant: Option<&SessionGrant>,
-    rule: Rule,
-    name: &str,
-    sink: &dyn EventSink,
-) -> Option<ToolOutput> {
-    let admitted = grant
-        .context("this call offers no session rule")
-        .and_then(|grant| grant.admit(rule));
-    match admitted {
-        Ok(rule) => {
-            gate.policy.allow_for_session(rule);
-            sink.emit(
-                Event::SessionRulesUpdated(gate.policy.session_allow().to_vec()),
-                "session-rules-updated",
-            );
-            None
-        }
-        Err(e) => {
-            sink.emit(
-                Event::Error(format!(
-                    "Session rule refused, so the {name} call was denied: {e:#}"
-                )),
-                "session-rule-refused",
-            );
-            Some(denied_output(name))
+    /// Adds the frontend's `rule` to the session allow rules once the call's own `grant` admits it,
+    /// since the frontend's check is advisory. Returns a denial when it does not.
+    fn allow_for_session(
+        &mut self,
+        grant: Option<&SessionGrant>,
+        rule: Rule,
+        name: &str,
+    ) -> Option<ToolOutput> {
+        let admitted = grant
+            .context("this call offers no session rule")
+            .and_then(|grant| grant.admit(rule));
+        match admitted {
+            Ok(rule) => {
+                self.dispatch_ctx.policy.allow_for_session(rule);
+                self.sink.emit(
+                    Event::SessionRulesUpdated(self.dispatch_ctx.policy.session_allow().to_vec()),
+                    "session-rules-updated",
+                );
+                None
+            }
+            Err(e) => {
+                self.sink.emit(
+                    Event::Error(format!(
+                        "Session rule refused, so the {name} call was denied: {e:#}"
+                    )),
+                    "session-rule-refused",
+                );
+                Some(denied_output(name))
+            }
         }
     }
 }
@@ -315,27 +454,360 @@ async fn await_approval(
 
 #[cfg(test)]
 mod tests {
-    #[cfg(unix)]
-    use std::sync::Arc;
+    use std::future::Future;
+    use std::path::Path;
+    use std::pin::Pin;
+    use std::time::Duration;
 
     use serde_json::json;
+    use tokio::sync::Barrier;
 
     use super::*;
-    use crate::engine::testing::{EchoTool, gate_with, inert_ops};
-    #[cfg(unix)]
-    use crate::file_tracker::FileTracker;
+    use crate::engine::testing::{EchoTool, dispatch_with, inert_ops};
+    use crate::permission::{Mode, PermissionClass};
     use crate::protocol::CapturingSink;
-    use crate::tool::ToolRegistry;
+    use crate::tool::bash::BashTool;
+    #[cfg(unix)]
+    use crate::tool::read::ReadTool;
     use crate::tool::tasks::TasksTool;
     use crate::tool::tasks::testing::plan;
+    #[cfg(unix)]
+    use crate::tool::write::WriteTool;
+
+    fn call(id: &str, name: &str, input: serde_json::Value) -> (String, String, serde_json::Value) {
+        (id.to_owned(), name.to_owned(), input)
+    }
+
+    /// Each result of `round` as `(id, content, is_error)`, in order.
+    fn results(round: &ToolRound) -> Vec<(&str, &str, bool)> {
+        round
+            .results
+            .iter()
+            .map(|block| match block {
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error,
+                } => (tool_use_id.as_str(), content.as_str(), *is_error),
+                other => panic!("expected a tool result, got {other:?}"),
+            })
+            .collect()
+    }
+
+    fn approval_ids(sink: &CapturingSink) -> Vec<String> {
+        sink.events()
+            .into_iter()
+            .filter_map(|e| match e {
+                Event::ApprovalRequested { id, .. } => Some(id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// How [`gate_call`] settled a call, without the tool a ready call borrows.
+    enum Gated {
+        Ready(Prepared),
+        Settled(ToolOutput),
+    }
+
+    impl Gated {
+        fn prepared(self) -> Prepared {
+            match self {
+                Self::Ready(prepared) => prepared,
+                Self::Settled(output) => panic!("the call was settled: {}", output.content),
+            }
+        }
+
+        fn output(self) -> ToolOutput {
+            match self {
+                Self::Settled(output) => output,
+                Self::Ready(prepared) => panic!("the call is ready to run: {prepared:?}"),
+            }
+        }
+    }
+
+    /// Gates the call `id` to `name` the way a round does.
+    async fn gate_call(
+        tools: &ToolRegistry,
+        id: &str,
+        name: &str,
+        input: serde_json::Value,
+        sink: &dyn EventSink,
+        ops: &mut mpsc::Receiver<Op>,
+        dispatch_ctx: &mut DispatchContext<'_>,
+    ) -> AbortResult<Gated> {
+        let parse_errors = HashMap::new();
+        let mut pending = Vec::new();
+        let mut dispatcher = Dispatcher {
+            tools,
+            parse_errors: &parse_errors,
+            sink,
+            ops,
+            pending: &mut pending,
+            dispatch_ctx,
+        };
+        Ok(match dispatcher.gate(id, name, input).await? {
+            Gate::Ready { prepared, .. } => Gated::Ready(prepared),
+            Gate::Settled(output) => Gated::Settled(output),
+        })
+    }
+
+    fn parallel_spec(name: &str, class: PermissionClass) -> ToolSpec {
+        ToolSpec {
+            name: name.to_owned(),
+            description: format!("the {name} fixture"),
+            input_schema: json!({"type": "object"}),
+            class,
+            parallel_safe: true,
+        }
+    }
+
+    /// Parallel-safe tool in the `bash` class, so `auto` asks before each of its calls.
+    struct AskingTool;
+
+    impl Tool for AskingTool {
+        fn spec(&self) -> ToolSpec {
+            parallel_spec("probe", PermissionClass::Bash)
+        }
+
+        fn run<'a>(
+            &'a self,
+            _prepared: Prepared,
+            _ctx: &'a ToolCtx,
+        ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + 'a>> {
+            Box::pin(async { ToolOutput::success("probed") })
+        }
+    }
+
+    /// Parallel-safe tool whose call echoes `v` once every call sharing its barrier is running,
+    /// so a round that runs them one at a time never finishes.
+    struct RendezvousTool(Arc<Barrier>);
+
+    impl Tool for RendezvousTool {
+        fn spec(&self) -> ToolSpec {
+            parallel_spec("meet", PermissionClass::Read)
+        }
+
+        fn run<'a>(
+            &'a self,
+            prepared: Prepared,
+            _ctx: &'a ToolCtx,
+        ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + 'a>> {
+            Box::pin(async move {
+                self.0.wait().await;
+                ToolOutput::success(prepared.input["v"].to_string())
+            })
+        }
+    }
+
+    /// Parallel-safe tool whose call hands its cancel token to the test, then never finishes.
+    struct HangTool(mpsc::UnboundedSender<CancellationToken>);
+
+    impl Tool for HangTool {
+        fn spec(&self) -> ToolSpec {
+            parallel_spec("hang", PermissionClass::Read)
+        }
+
+        fn run<'a>(
+            &'a self,
+            _prepared: Prepared,
+            ctx: &'a ToolCtx,
+        ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + 'a>> {
+            Box::pin(async move {
+                self.0.send(ctx.cancel.clone()).unwrap();
+                std::future::pending().await
+            })
+        }
+    }
 
     // ── run_tool_round ──
+
+    #[tokio::test]
+    async fn run_tool_round_interrupt_during_approval_reports_every_call_not_run() {
+        // The first call passes the gate but never runs, since the interrupt lands while the
+        // second awaits approval. The rest of the round never starts.
+        let tools = ToolRegistry::new(vec![
+            Box::new(RendezvousTool(Arc::new(Barrier::new(1)))),
+            Box::new(AskingTool),
+            Box::new(EchoTool),
+        ]);
+        let sink = CapturingSink::new();
+        let mut dispatch_ctx = dispatch_with(Mode::Auto, &[], &[], Path::new("/repo"));
+        let (tx, mut rx) = mpsc::channel::<Op>(1);
+        tx.try_send(Op::Interrupt).unwrap();
+        let calls = vec![
+            call("tool_1", "meet", json!({"v": 1})),
+            call("tool_2", "probe", json!({})),
+            call("tool_3", "probe", json!({})),
+            call("tool_4", "echo", json!({})),
+        ];
+
+        let round = run_tool_round(
+            &tools,
+            calls,
+            &HashMap::new(),
+            &sink,
+            &mut rx,
+            &mut Vec::new(),
+            &mut dispatch_ctx,
+        )
+        .await;
+
+        assert!(
+            matches!(round.abort, Some(TurnAbort::Cancelled)),
+            "got {:?}",
+            round.abort,
+        );
+        assert_eq!(approval_ids(&sink), ["tool_2"]);
+        let started: Vec<String> = sink
+            .events()
+            .into_iter()
+            .filter_map(|e| match e {
+                Event::ToolCallStart(call) => Some(call.id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(started, ["tool_1", "tool_2"]);
+        assert_eq!(
+            results(&round),
+            [
+                ("tool_1", NOT_RUN, true),
+                ("tool_2", NOT_RUN, true),
+                ("tool_3", NOT_RUN, true),
+                ("tool_4", NOT_RUN, true),
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn run_tool_round_runs_consecutive_parallel_safe_calls_together() {
+        // A parse failure in the middle of the batch must not shift the results after it.
+        let tools = ToolRegistry::new(vec![
+            Box::new(RendezvousTool(Arc::new(Barrier::new(2)))),
+            Box::new(EchoTool),
+        ]);
+        let sink = CapturingSink::new();
+        let mut dispatch_ctx = dispatch_with(Mode::Auto, &["bash"], &[], Path::new("/repo"));
+        let calls = vec![
+            call("tool_1", "meet", json!({"v": 1})),
+            call("tool_2", "meet", json!({})),
+            call("tool_3", "meet", json!({"v": 3})),
+            call("tool_4", "echo", json!({"v": 4})),
+        ];
+        let parse_errors = HashMap::from([("tool_2".to_owned(), "EOF".to_owned())]);
+
+        let round = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_tool_round(
+                &tools,
+                calls,
+                &parse_errors,
+                &sink,
+                &mut inert_ops(),
+                &mut Vec::new(),
+                &mut dispatch_ctx,
+            ),
+        )
+        .await
+        .expect("the meet calls must run together");
+
+        assert!(round.abort.is_none(), "{:?}", round.abort);
+        assert_eq!(
+            results(&round),
+            [
+                ("tool_1", "1", false),
+                (
+                    "tool_2",
+                    "Tool input JSON failed to parse: EOF. Retry with a valid JSON object.",
+                    true,
+                ),
+                ("tool_3", "3", false),
+                ("tool_4", r#"{"v":4}"#, false),
+            ],
+        );
+        let order: Vec<String> = sink
+            .events()
+            .into_iter()
+            .filter_map(|e| match e {
+                Event::ToolCallStart(call) => Some(format!("start {}", call.id)),
+                Event::ToolCallEnd(result) => Some(format!("end {}", result.id)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            order,
+            [
+                "start tool_1",
+                "start tool_2",
+                "start tool_3",
+                "end tool_1",
+                "end tool_2",
+                "end tool_3",
+                "start tool_4",
+                "end tool_4",
+            ],
+            "the echo call waits for the batch before it",
+        );
+    }
+
+    #[tokio::test]
+    async fn run_tool_round_interrupt_while_calls_run_keeps_finished_results_and_cancels_the_rest()
+    {
+        let (started_tx, mut started) = mpsc::unbounded_channel();
+        let tools = ToolRegistry::new(vec![
+            Box::new(RendezvousTool(Arc::new(Barrier::new(1)))),
+            Box::new(HangTool(started_tx)),
+        ]);
+        let sink = CapturingSink::new();
+        let mut dispatch_ctx = dispatch_with(Mode::Auto, &[], &[], Path::new("/repo"));
+        let (tx, mut rx) = mpsc::channel::<Op>(1);
+        let calls = vec![
+            call("tool_1", "meet", json!({"v": 1})),
+            call("tool_2", "hang", json!({})),
+            call("tool_3", "hang", json!({})),
+        ];
+        let (parse_errors, mut pending) = (HashMap::new(), Vec::new());
+        let interrupt = async {
+            let tokens = [started.recv().await.unwrap(), started.recv().await.unwrap()];
+            assert!(tokens.iter().all(|token| !token.is_cancelled()));
+            tx.send(Op::Interrupt).await.unwrap();
+            tokens
+        };
+
+        let (round, tokens) = tokio::join!(
+            run_tool_round(
+                &tools,
+                calls,
+                &parse_errors,
+                &sink,
+                &mut rx,
+                &mut pending,
+                &mut dispatch_ctx,
+            ),
+            interrupt,
+        );
+
+        assert!(
+            matches!(round.abort, Some(TurnAbort::Cancelled)),
+            "got {:?}",
+            round.abort,
+        );
+        assert_eq!(
+            results(&round),
+            [
+                ("tool_1", "1", false),
+                ("tool_2", INTERRUPTED, true),
+                ("tool_3", INTERRUPTED, true),
+            ],
+        );
+        assert!(tokens.iter().all(CancellationToken::is_cancelled));
+    }
 
     #[tokio::test]
     async fn run_tool_round_reports_the_list_only_a_successful_tasks_call_sets() {
         let tools = ToolRegistry::new(vec![Box::new(TasksTool)]);
         let sink = CapturingSink::new();
-        let mut gate = gate_with(crate::permission::Mode::Auto, &[], &[]);
+        let mut dispatch_ctx = dispatch_with(Mode::Auto, &[], &[], Path::new("/repo"));
         let both_in_progress = json!({"tasks": [
             {"content": "Fix the parser", "status": "in_progress"},
             {"content": "Fix the lexer", "status": "in_progress"},
@@ -356,7 +828,7 @@ mod tests {
             &sink,
             &mut inert_ops(),
             &mut Vec::new(),
-            &mut gate,
+            &mut dispatch_ctx,
         )
         .await;
 
@@ -384,113 +856,64 @@ mod tests {
         assert_eq!(events[2], Event::TasksUpdated(plan()));
     }
 
-    // ── dispatch_tool_call ──
+    // ── Dispatcher::gate ──
 
     #[tokio::test]
-    async fn dispatch_tool_call_interrupt_during_approval_reports_the_call_not_run() {
+    async fn gate_allow_proceeds_without_an_approval_event() {
+        // `echo` is a bash-class tool, so `auto` asks by default, and a class-wide allow clears it.
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
         let sink = CapturingSink::new();
-        let mut gate = gate_with(crate::permission::Mode::Auto, &[], &[]);
-        let (tx, mut rx) = mpsc::channel::<Op>(1);
-        tx.try_send(Op::Interrupt).unwrap();
+        let mut dispatch_ctx = dispatch_with(Mode::Auto, &["bash"], &[], Path::new("/repo"));
 
-        let (output, abort) = dispatch_tool_call(
+        let gate = gate_call(
             &tools,
             "tool_1",
             "echo",
             json!({"v": 1}),
-            None,
-            &sink,
-            &mut rx,
-            &mut Vec::new(),
-            &mut gate,
-        )
-        .await;
-
-        assert!(matches!(abort, Some(TurnAbort::Cancelled)), "got {abort:?}");
-        assert!(
-            sink.events()
-                .iter()
-                .any(|e| matches!(e, Event::ApprovalRequested { id, .. } if id == "tool_1")),
-            "the cancel lands while the approval is pending",
-        );
-        assert_eq!(
-            (output.content.as_str(), output.is_error),
-            ("Not run, because the user interrupted the turn.", true),
-        );
-    }
-
-    // ── check_permission ──
-
-    #[tokio::test]
-    async fn check_permission_allow_proceeds_without_an_approval_event() {
-        // `echo` is a bash-class tool, so `auto` asks by default, and a class-wide allow clears it.
-        let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
-        let sink = CapturingSink::new();
-        let mut gate = gate_with(crate::permission::Mode::Auto, &["bash"], &[]);
-
-        let denial = check_permission(
-            &tools,
-            "tool_1",
-            "echo",
-            &mut json!({}),
             &sink,
             &mut inert_ops(),
-            &mut Vec::new(),
-            &mut gate,
+            &mut dispatch_ctx,
         )
         .await
         .expect("allow must not abort");
 
-        assert!(denial.is_none(), "an allowed call proceeds");
-        assert!(
-            !sink
-                .events()
-                .iter()
-                .any(|e| matches!(e, Event::ApprovalRequested { .. })),
-            "allow must not surface an approval prompt",
-        );
+        assert_eq!(gate.prepared().input, json!({"v": 1}));
+        assert_eq!(approval_ids(&sink), [] as [&str; 0]);
     }
 
     #[tokio::test]
-    async fn check_permission_deny_rule_short_circuits_to_a_synthetic_denial() {
+    async fn gate_deny_rule_short_circuits_to_a_synthetic_denial() {
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
         let sink = CapturingSink::new();
-        let mut gate = gate_with(crate::permission::Mode::Auto, &[], &["bash"]);
+        let mut dispatch_ctx = dispatch_with(Mode::Auto, &[], &["bash"], Path::new("/repo"));
 
-        let denial = check_permission(
+        let denial = gate_call(
             &tools,
             "tool_1",
             "echo",
-            &mut json!({}),
+            json!({}),
             &sink,
             &mut inert_ops(),
-            &mut Vec::new(),
-            &mut gate,
+            &mut dispatch_ctx,
         )
         .await
         .expect("deny resolves without abort")
-        .expect("a deny rule must yield a synthetic denial");
+        .output();
 
-        assert!(
-            denial.is_error,
-            "denial is surfaced as a failed tool result"
-        );
-        assert!(denial.content.contains("denied by the permission policy"));
-        assert!(
-            !sink
-                .events()
-                .iter()
-                .any(|e| matches!(e, Event::ApprovalRequested { .. })),
-            "a deny rule never prompts",
+        assert!(denial.is_error);
+        assert_eq!(denial.content, denied_output("echo").content);
+        assert_eq!(
+            approval_ids(&sink),
+            [] as [&str; 0],
+            "a deny rule never prompts"
         );
     }
 
     #[tokio::test]
-    async fn check_permission_ask_emits_event_and_approve_proceeds() {
+    async fn gate_ask_emits_event_and_approve_proceeds() {
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
         let sink = CapturingSink::new();
-        let mut gate = gate_with(crate::permission::Mode::Auto, &[], &[]);
+        let mut dispatch_ctx = dispatch_with(Mode::Auto, &[], &[], Path::new("/repo"));
         let (tx, mut rx) = mpsc::channel::<Op>(1);
         tx.try_send(Op::Resolve {
             id: "tool_1".to_owned(),
@@ -498,20 +921,19 @@ mod tests {
         })
         .unwrap();
 
-        let denial = check_permission(
+        let gate = gate_call(
             &tools,
             "tool_1",
             "echo",
-            &mut json!({}),
+            json!({}),
             &sink,
             &mut rx,
-            &mut Vec::new(),
-            &mut gate,
+            &mut dispatch_ctx,
         )
         .await
         .expect("approve resolves without abort");
 
-        assert!(denial.is_none(), "an approved call proceeds");
+        assert_eq!(gate.prepared().input, json!({}));
         assert!(
             matches!(
                 sink.events().as_slice(),
@@ -523,10 +945,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn check_permission_allow_for_session_runs_later_calls_the_rule_covers_unasked() {
-        let tools = ToolRegistry::new(vec![Box::new(crate::tool::bash::BashTool)]);
+    async fn gate_allow_for_session_runs_later_calls_the_rule_covers_unasked() {
+        let tools = ToolRegistry::new(vec![Box::new(BashTool)]);
         let sink = CapturingSink::new();
-        let mut gate = gate_with(crate::permission::Mode::Auto, &[], &[]);
+        let mut dispatch_ctx = dispatch_with(Mode::Auto, &[], &[], Path::new("/repo"));
         let rule = Rule::parse("bash(cargo test:*)").unwrap();
         let (tx, mut rx) = mpsc::channel::<Op>(1);
         tx.try_send(Op::Resolve {
@@ -539,19 +961,18 @@ mod tests {
         drop(tx);
 
         for (id, command) in [("tool_1", "cargo test"), ("tool_2", "cargo test --release")] {
-            let denial = check_permission(
+            let gate = gate_call(
                 &tools,
                 id,
                 "bash",
-                &mut json!({ "command": command }),
+                json!({ "command": command }),
                 &sink,
                 &mut rx,
-                &mut Vec::new(),
-                &mut gate,
+                &mut dispatch_ctx,
             )
             .await
             .expect("the granted rule settles the second call without waiting");
-            assert!(denial.is_none(), "{command} proceeds");
+            assert_eq!(gate.prepared().input, json!({ "command": command }));
         }
 
         let events = sink.events();
@@ -575,17 +996,14 @@ mod tests {
             ),
             "{events:?}",
         );
-        assert_eq!(gate.policy.session_allow(), [rule]);
+        assert_eq!(dispatch_ctx.policy.session_allow(), [rule]);
     }
 
     #[tokio::test]
-    async fn check_permission_allow_for_session_denies_a_rule_the_call_grant_does_not_admit() {
+    async fn gate_allow_for_session_denies_a_rule_the_call_grant_does_not_admit() {
         // The engine re-checks the frontend's rule against its own grant: a rule that misses the
         // call, one in another class, and any rule for a call that offered no grant all deny.
-        let tools = ToolRegistry::new(vec![
-            Box::new(crate::tool::bash::BashTool),
-            Box::new(EchoTool),
-        ]);
+        let tools = ToolRegistry::new(vec![Box::new(BashTool), Box::new(EchoTool)]);
         for (name, input, rule) in [
             (
                 "bash",
@@ -596,7 +1014,7 @@ mod tests {
             ("echo", json!({}), "bash"),
         ] {
             let sink = CapturingSink::new();
-            let mut gate = gate_with(crate::permission::Mode::Auto, &[], &[]);
+            let mut dispatch_ctx = dispatch_with(Mode::Auto, &[], &[], Path::new("/repo"));
             let (tx, mut rx) = mpsc::channel::<Op>(1);
             tx.try_send(Op::Resolve {
                 id: "tool_1".to_owned(),
@@ -606,22 +1024,21 @@ mod tests {
             })
             .unwrap();
 
-            let denial = check_permission(
+            let denial = gate_call(
                 &tools,
                 "tool_1",
                 name,
-                &mut input.clone(),
+                input,
                 &sink,
                 &mut rx,
-                &mut Vec::new(),
-                &mut gate,
+                &mut dispatch_ctx,
             )
             .await
             .expect("a refused rule resolves without abort")
-            .unwrap_or_else(|| panic!("{rule} must not let the {name} call run"));
+            .output();
 
-            assert!(denial.content.contains("denied by the permission policy"));
-            assert_eq!(gate.policy.session_allow(), [], "{rule}");
+            assert_eq!(denial.content, denied_output(name).content, "{rule}");
+            assert_eq!(dispatch_ctx.policy.session_allow(), [], "{rule}");
             let events = sink.events();
             assert!(
                 events.iter().any(|e| matches!(
@@ -640,37 +1057,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn check_permission_ask_undeliverable_event_fails_closed() {
+    async fn gate_ask_undeliverable_event_fails_closed() {
         // If the approval event can't be delivered, no modal can answer it, so the gate must deny
         // before `await_approval` blocks forever. An inert receiver would hang on a regression.
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
-        let sink = crate::protocol::FailingSink;
-        let mut gate = gate_with(crate::permission::Mode::Auto, &[], &[]);
+        let mut dispatch_ctx = dispatch_with(Mode::Auto, &[], &[], Path::new("/repo"));
         let (_tx, mut rx) = mpsc::channel::<Op>(1);
 
-        let denial = check_permission(
+        let denial = gate_call(
             &tools,
             "tool_1",
             "echo",
-            &mut json!({}),
-            &sink,
+            json!({}),
+            &crate::protocol::FailingSink,
             &mut rx,
-            &mut Vec::new(),
-            &mut gate,
+            &mut dispatch_ctx,
         )
         .await
         .expect("an undeliverable approval resolves without abort")
-        .expect("an undeliverable approval yields a synthetic denial");
+        .output();
 
-        assert!(denial.is_error);
-        assert!(denial.content.contains("denied by the permission policy"));
+        assert_eq!(denial.content, denied_output("echo").content);
     }
 
     #[tokio::test]
-    async fn check_permission_ask_deny_decision_yields_a_synthetic_denial() {
+    async fn gate_ask_deny_decision_yields_a_synthetic_denial() {
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
         let sink = CapturingSink::new();
-        let mut gate = gate_with(crate::permission::Mode::Auto, &[], &[]);
+        let mut dispatch_ctx = dispatch_with(Mode::Auto, &[], &[], Path::new("/repo"));
         let (tx, mut rx) = mpsc::channel::<Op>(1);
         tx.try_send(Op::Resolve {
             id: "tool_1".to_owned(),
@@ -678,80 +1092,135 @@ mod tests {
         })
         .unwrap();
 
-        let denial = check_permission(
+        let denial = gate_call(
             &tools,
             "tool_1",
             "echo",
-            &mut json!({}),
+            json!({}),
             &sink,
             &mut rx,
-            &mut Vec::new(),
-            &mut gate,
+            &mut dispatch_ctx,
         )
         .await
         .expect("deny decision resolves without abort")
-        .expect("a deny decision yields a synthetic denial");
+        .output();
 
         assert!(denial.is_error);
-        assert!(denial.content.contains("denied by the permission policy"));
+        assert_eq!(denial.content, denied_output("echo").content);
     }
 
     #[tokio::test]
-    async fn check_permission_unknown_tool_proceeds_so_run_can_report_it() {
-        // An unknown tool has no permission class, so the gate steps aside and lets `tools.run`
-        // emit its own "unknown tool" error. A class-wide deny must not catch it.
+    async fn gate_unknown_tool_settles_without_consulting_the_policy() {
+        // An unknown tool has no permission class, so a class-wide deny must not catch it, and
+        // the model reads why the call failed.
         let tools = ToolRegistry::new(vec![]);
         let sink = CapturingSink::new();
-        let mut gate = gate_with(crate::permission::Mode::Auto, &[], &["bash"]);
-        let denial = check_permission(
+        let mut dispatch_ctx = dispatch_with(Mode::Auto, &[], &["bash"], Path::new("/repo"));
+
+        let output = gate_call(
             &tools,
             "tool_1",
             "mystery",
-            &mut json!({}),
+            json!({}),
             &sink,
             &mut inert_ops(),
-            &mut Vec::new(),
-            &mut gate,
+            &mut dispatch_ctx,
         )
         .await
-        .expect("unknown tool resolves without abort");
+        .expect("unknown tool resolves without abort")
+        .output();
 
-        assert!(denial.is_none(), "unknown tool bypasses the gate");
+        assert_eq!(
+            (output.content.as_str(), output.is_error),
+            ("Unknown tool: mystery", true),
+        );
+        assert_eq!(approval_ids(&sink), [] as [&str; 0]);
     }
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn check_permission_pins_a_path_input_to_the_resolved_target() {
+    async fn gate_pins_a_path_input_to_the_resolved_target() {
         // The tool must act on the file the gate checked, so a relative or symlinked `file_path` is
         // rewritten to the resolved location before the preview and the run see it.
         let dir = tempfile::tempdir().unwrap();
         let cwd = dunce::canonicalize(dir.path()).unwrap();
         std::fs::write(cwd.join("real.txt"), "x").unwrap();
         std::os::unix::fs::symlink("real.txt", cwd.join("link.txt")).unwrap();
-        let tools = ToolRegistry::new(vec![Box::new(crate::tool::read::ReadTool::new(Arc::new(
-            FileTracker::default(),
-        )))]);
-        let mut gate = GateContext {
-            cwd: &cwd,
-            ..gate_with(crate::permission::Mode::Auto, &[], &[])
-        };
-        let mut input = json!({"file_path": "link.txt"});
+        let tools = ToolRegistry::new(vec![Box::new(ReadTool)]);
+        let mut dispatch_ctx = dispatch_with(Mode::Auto, &[], &[], &cwd);
 
-        let denial = check_permission(
+        let gate = gate_call(
             &tools,
             "tool_1",
             "read",
-            &mut input,
+            json!({"file_path": "link.txt"}),
             &CapturingSink::new(),
             &mut inert_ops(),
-            &mut Vec::new(),
-            &mut gate,
+            &mut dispatch_ctx,
         )
         .await
         .expect("a read resolves without abort");
 
-        assert!(denial.is_none(), "a read-class call proceeds");
-        assert_eq!(input["file_path"], json!(cwd.join("real.txt")));
+        assert_eq!(
+            gate.prepared().input,
+            json!({"file_path": cwd.join("real.txt")}),
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn gate_allows_edits_inside_every_root_and_asks_past_a_symlink_out_of_them() {
+        // The cwd and the extra root form one set of roots: a link from one into the other stays
+        // inside, and a link from either to anywhere else asks.
+        let dir = tempfile::tempdir().unwrap();
+        let base = dunce::canonicalize(dir.path()).unwrap();
+        let (repo, extra, outside) = (base.join("repo"), base.join("extra"), base.join("outside"));
+        for root in [&repo, &extra, &outside] {
+            std::fs::create_dir(root).unwrap();
+        }
+        std::os::unix::fs::symlink("../extra/notes.md", repo.join("to-extra.md")).unwrap();
+        std::os::unix::fs::symlink("../outside/notes.md", extra.join("to-outside.md")).unwrap();
+        let workspace = Workspace::resolve(&repo, &[extra.to_str().unwrap().to_owned()]).unwrap();
+        let tools = ToolRegistry::new(vec![Box::new(WriteTool)]);
+        let mut dispatch_ctx = DispatchContext {
+            workspace: Arc::new(workspace),
+            ..dispatch_with(Mode::Auto, &[], &[], &repo)
+        };
+
+        for (id, path, asks) in [
+            ("in_cwd", repo.join("plain.md"), false),
+            ("in_extra", extra.join("new.md"), false),
+            ("into_extra", repo.join("to-extra.md"), false),
+            ("out_of_extra", extra.join("to-outside.md"), true),
+            ("outside", outside.join("new.md"), true),
+        ] {
+            let sink = CapturingSink::new();
+            let (tx, mut rx) = mpsc::channel::<Op>(1);
+            tx.try_send(Op::Resolve {
+                id: id.to_owned(),
+                decision: Decision::Deny,
+            })
+            .unwrap();
+
+            let gate = gate_call(
+                &tools,
+                id,
+                "write",
+                json!({"file_path": path, "content": "x"}),
+                &sink,
+                &mut rx,
+                &mut dispatch_ctx,
+            )
+            .await
+            .expect("a write resolves without abort");
+
+            assert_eq!(
+                approval_ids(&sink),
+                if asks { vec![id] } else { vec![] },
+                "{id}"
+            );
+            assert_eq!(matches!(gate, Gated::Ready(_)), !asks, "{id}");
+        }
     }
 
     // ── await_approval ──

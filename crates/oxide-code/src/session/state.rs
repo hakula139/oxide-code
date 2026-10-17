@@ -6,7 +6,6 @@ use std::sync::Arc;
 
 use anyhow::{Result, bail};
 use time::OffsetDateTime;
-use tracing::warn;
 use uuid::Uuid;
 
 use super::entry::{CURRENT_VERSION, Entry, TitleSource};
@@ -62,7 +61,7 @@ enum WriterStatus {
 
 impl SessionState {
     pub(super) fn fresh(store: SessionStore, model: &str) -> Self {
-        let (session_id, header) = new_header(model);
+        let (session_id, header) = new_header(store.cwd(), model);
         Self {
             session_id: Arc::from(session_id),
             store,
@@ -305,40 +304,25 @@ impl SessionState {
 
 // ── Helpers ──
 
-fn new_header(model: &str) -> (String, Entry) {
+fn new_header(cwd: &Path, model: &str) -> (String, Entry) {
     let session_id = Uuid::new_v4().to_string();
-    let cwd = current_dir_string();
     // Skipped under `cfg(test)` so byte-compatible JSONL snapshots and seeded fixtures don't
     // depend on the working tree's branch. Tests that need a branch supply it in the fixture or
     // through `SessionState::on_branch`.
     let git_branch = if cfg!(test) {
         None
     } else {
-        current_branch(Path::new(&cwd))
+        current_branch(cwd)
     };
     let header = Entry::Header {
         session_id: session_id.clone(),
-        cwd,
+        cwd: cwd.display().to_string(),
         model: model.to_owned(),
         created_at: OffsetDateTime::now_utc(),
         version: CURRENT_VERSION,
         git_branch,
     };
     (session_id, header)
-}
-
-fn current_dir_string() -> String {
-    format_current_dir(std::env::current_dir())
-}
-
-fn format_current_dir(result: std::io::Result<std::path::PathBuf>) -> String {
-    match result {
-        Ok(p) => p.display().to_string(),
-        Err(e) => {
-            warn!("failed to read current directory: {e}");
-            "<unknown>".to_owned()
-        }
-    }
 }
 
 /// Extracts the first non-empty text content from a user message.
@@ -661,7 +645,12 @@ mod tests {
         state.flush_entries(msgs).unwrap();
 
         for name in ["/tmp/a", "/tmp/b", "/tmp/c"] {
-            _ = tracker.record_read(std::path::Path::new(name), name.as_bytes(), LastView::Full);
+            _ = tracker.record_read(
+                std::path::Path::new(name),
+                name.as_bytes(),
+                LastView::Full,
+                "toolu_test",
+            );
         }
 
         let entries = state.finish_entries(tracker.snapshot_all(), now);
@@ -835,20 +824,6 @@ mod tests {
             before,
             "a stopped session writes nothing"
         );
-    }
-
-    // ── format_current_dir ──
-
-    #[test]
-    fn format_current_dir_ok_renders_path() {
-        let path = std::path::PathBuf::from("/tmp/x");
-        assert_eq!(format_current_dir(Ok(path)), "/tmp/x");
-    }
-
-    #[test]
-    fn format_current_dir_err_falls_back_to_unknown() {
-        let err = std::io::Error::new(std::io::ErrorKind::NotFound, "gone");
-        assert_eq!(format_current_dir(Err(err)), "<unknown>");
     }
 
     // ── extract_user_text ──

@@ -15,7 +15,7 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer};
 
 use super::compaction::AutoCompactFailures;
-use super::dispatch::GateContext;
+use super::dispatch::DispatchContext;
 use super::{Engine, EngineHandle, EngineTask};
 use crate::client::anthropic::Client;
 use crate::client::anthropic::testing::{
@@ -25,13 +25,13 @@ use crate::client::{Response, ResponseEvent, StopDetails, StopReason, Wire};
 use crate::file_tracker::FileTracker;
 use crate::message::{ContentBlock, Message, Replay, Role};
 use crate::model::ModelSpec;
-use crate::permission::{Mode, PermissionClass, Policy};
+use crate::permission::{Mode, PermissionClass, Policy, Workspace};
 use crate::prompt::{self, PromptParts};
 use crate::protocol::Op;
 use crate::session::handle::{self, SessionHandle};
 use crate::session::store::SessionStore;
 use crate::session::store::testing::test_store;
-use crate::tool::{Tool, ToolDefinition, ToolOutput, ToolRegistry};
+use crate::tool::{Prepared, Tool, ToolCtx, ToolDefinition, ToolOutput, ToolRegistry, ToolSpec};
 use crate::util::path::testing::HOME_VAR;
 
 // ── Engine ──
@@ -69,7 +69,7 @@ pub(crate) async fn engine(base_url: String, store: &SessionStore, cwd: &Path) -
         policy: config.permission,
         max_tool_rounds: config.max_tool_rounds,
         compaction: config.compaction,
-        cwd: cwd.to_owned(),
+        workspace: Arc::new(Workspace::new(cwd)),
         interactive: false,
         auto_compaction_failures: AutoCompactFailures::default(),
         last_usage: None,
@@ -292,27 +292,24 @@ pub(super) fn with_stop(
 pub(super) struct EchoTool;
 
 impl Tool for EchoTool {
-    fn name(&self) -> &'static str {
-        "echo"
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "echo".to_owned(),
+            description: "echo the input".to_owned(),
+            input_schema: json!({"type": "object"}),
+            class: PermissionClass::Bash,
+            parallel_safe: false,
+        }
     }
 
-    fn description(&self) -> &'static str {
-        "echo the input"
-    }
-
-    fn permission_class(&self) -> PermissionClass {
-        PermissionClass::Bash
-    }
-
-    fn input_schema(&self) -> serde_json::Value {
-        json!({"type": "object"})
-    }
-
-    fn run(
-        &self,
-        input: serde_json::Value,
-    ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + '_>> {
-        Box::pin(async move { ToolOutput::success(input.to_string()).with_title("echoed") })
+    fn run<'a>(
+        &'a self,
+        prepared: Prepared,
+        _ctx: &'a ToolCtx,
+    ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + 'a>> {
+        Box::pin(
+            async move { ToolOutput::success(prepared.input.to_string()).with_title("echoed") },
+        )
     }
 }
 
@@ -328,16 +325,24 @@ pub(super) fn empty_prompt() -> PromptParts {
     PromptParts::default()
 }
 
-/// Gate over allow / deny rule sets, leaking the policy so the gate can borrow it for `'static`.
-/// `echo` is a `bash`-class tool with no gate target, so only a class-wide rule matches it.
-pub(super) fn gate_with(mode: Mode, allow: &[&str], deny: &[&str]) -> GateContext<'static> {
+/// Dispatch context in `cwd` over allow / deny rule sets, leaking the policy so the context can
+/// borrow it for `'static`. `echo` is a `bash`-class tool that accesses nothing, so only a
+/// class-wide rule matches it.
+pub(super) fn dispatch_with(
+    mode: Mode,
+    allow: &[&str],
+    deny: &[&str],
+    cwd: &Path,
+) -> DispatchContext<'static> {
     let owned = |rules: &[&str]| rules.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
     let policy = Box::leak(Box::new(
-        Policy::resolve(mode, &owned(allow), &owned(deny), Path::new(".")).expect("rules parse"),
+        Policy::resolve(mode, &owned(allow), &owned(deny), cwd).expect("rules parse"),
     ));
-    GateContext {
+    DispatchContext {
         policy,
-        cwd: Path::new("."),
+        workspace: Arc::new(Workspace::new(cwd)),
+        session_id: "test-session".to_owned(),
+        tracker: Arc::new(FileTracker::default()),
     }
 }
 

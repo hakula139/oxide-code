@@ -2,16 +2,16 @@
 
 use std::fmt::Write as _;
 use std::future::Future;
+use std::path::Path;
 use std::pin::Pin;
-use std::sync::Arc;
 
 use serde::Deserialize;
 
 use super::{
-    ReadExcerptLine, Tool, ToolMetadata, ToolOutput, ToolResultView, display_cwd_path,
-    extract_input_field, summarize_path_call,
+    Prepared, ReadExcerptLine, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolResultView, ToolSpec,
+    display_path, extract_input_field, summarize_path_call,
 };
-use crate::file_tracker::{CACHE_HIT_STUB, FileTracker, LastView, RecordRead};
+use crate::file_tracker::{CACHE_HIT_STUB, LastView, RecordRead};
 use crate::permission::PermissionClass;
 
 const DEFAULT_LINE_LIMIT: usize = 2000;
@@ -22,52 +22,21 @@ const OUTPUT_BUDGET: usize = super::MAX_OUTPUT_BYTES - 128;
 
 const EMPTY_FILE_MARKER: &str = "(empty file)";
 
-pub(crate) struct ReadTool {
-    tracker: Arc<FileTracker>,
-}
-
-impl ReadTool {
-    pub(crate) fn new(tracker: Arc<FileTracker>) -> Self {
-        Self { tracker }
-    }
-}
+pub(crate) struct ReadTool;
 
 impl Tool for ReadTool {
-    fn name(&self) -> &'static str {
-        "read"
-    }
-
-    fn description(&self) -> &'static str {
-        "Read the contents of a file with line numbers."
-    }
-
-    fn permission_class(&self) -> PermissionClass {
-        PermissionClass::Read
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "read".to_owned(),
+            description: "Read the contents of a file with line numbers.".to_owned(),
+            input_schema: input_schema(),
+            class: PermissionClass::Read,
+            parallel_safe: true,
+        }
     }
 
     fn path_field(&self) -> Option<&'static str> {
         Some("file_path")
-    }
-
-    fn input_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "file_path": {
-                    "type": "string",
-                    "description": "The absolute path to the file to read"
-                },
-                "offset": {
-                    "type": "integer",
-                    "description": "The line number to start reading from (1-indexed, default: 1)"
-                },
-                "limit": {
-                    "type": "integer",
-                    "description": "The number of lines to read (default: 2000)"
-                }
-            },
-            "required": ["file_path"]
-        })
     }
 
     fn icon(&self) -> &'static str {
@@ -78,8 +47,8 @@ impl Tool for ReadTool {
         extract_input_field(input, "file_path")
     }
 
-    fn summarize_call(&self, input: &serde_json::Value) -> String {
-        summarize_path_call(self.name(), input, "file_path")
+    fn summarize_call(&self, name: &str, input: &serde_json::Value, cwd: &Path) -> String {
+        summarize_path_call(name, input, "file_path", cwd)
     }
 
     fn result_view(
@@ -87,21 +56,43 @@ impl Tool for ReadTool {
         input: &serde_json::Value,
         content: &str,
         _metadata: &ToolMetadata,
+        cwd: &Path,
     ) -> Option<ToolResultView> {
-        let path = display_cwd_path(extract_input_field(input, "file_path")?);
+        let path = display_path(Path::new(extract_input_field(input, "file_path")?), cwd);
         read_excerpt_view(path, content)
     }
 
-    fn run(
-        &self,
-        input: serde_json::Value,
-    ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + '_>> {
-        let tracker = Arc::clone(&self.tracker);
-        Box::pin(run(input, tracker))
+    fn run<'a>(
+        &'a self,
+        prepared: Prepared,
+        ctx: &'a ToolCtx,
+    ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + 'a>> {
+        Box::pin(run(prepared.input, ctx))
     }
 }
 
 // ── Input ──
+
+fn input_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "file_path": {
+                "type": "string",
+                "description": "The absolute path to the file to read"
+            },
+            "offset": {
+                "type": "integer",
+                "description": "The line number to start reading from (1-indexed, default: 1)"
+            },
+            "limit": {
+                "type": "integer",
+                "description": "The number of lines to read (default: 2000)"
+            }
+        },
+        "required": ["file_path"]
+    })
+}
 
 #[derive(Deserialize)]
 struct Input {
@@ -114,13 +105,13 @@ struct Input {
 
 // ── Execution ──
 
-async fn run(raw: serde_json::Value, tracker: Arc<FileTracker>) -> ToolOutput {
+async fn run(raw: serde_json::Value, ctx: &ToolCtx) -> ToolOutput {
     let input: Input = match super::parse_input(raw) {
         Ok(v) => v,
         Err(e) => return e,
     };
 
-    match read_file(&input.file_path, input.offset, input.limit, &tracker).await {
+    match read_file(&input.file_path, input.offset, input.limit, ctx).await {
         Ok(content) => ToolOutput::success(content)
             .with_title(format!("Read {}", super::file_name(&input.file_path))),
         Err(msg) => ToolOutput::error(msg),
@@ -134,14 +125,17 @@ async fn run(raw: serde_json::Value, tracker: Arc<FileTracker>) -> ToolOutput {
 /// with a NUL byte in the first 8 KiB. A leading UTF-8 BOM is stripped before line splitting.
 ///
 /// The excerpt stops after `limit` lines or before `OUTPUT_BUDGET` bytes, and its footer names the
-/// lines shown. Those lines are recorded with the [`FileTracker`] for the Read-before-Edit gate.
+/// lines shown. Those lines are recorded with the context's
+/// [`FileTracker`](crate::file_tracker::FileTracker) for the Read-before-Edit gate. A relative
+/// `path` resolves against the context's cwd.
 async fn read_file(
     path: &str,
     offset: Option<usize>,
     limit: Option<usize>,
-    tracker: &FileTracker,
+    ctx: &ToolCtx,
 ) -> Result<String, String> {
-    let (_, bytes) = super::read_validated(path, |metadata| {
+    let file_path = ctx.cwd().join(path);
+    let (_, bytes) = super::read_validated(&file_path, path, |metadata| {
         super::validate_file_target(path, metadata, "read")
     })
     .await?;
@@ -150,7 +144,7 @@ async fn read_file(
         return Err("File appears to be binary. Use the bash tool to inspect binary files.".into());
     }
 
-    let key = super::tracker_key(path).await;
+    let key = super::tracker_key(&file_path).await;
 
     let text = String::from_utf8_lossy(&bytes);
     let text = strip_bom(&text);
@@ -158,7 +152,9 @@ async fn read_file(
     let lines: Vec<&str> = text.lines().collect();
     let total_lines = lines.len();
     if total_lines == 0 {
-        let outcome = tracker.record_read(&key, &bytes, LastView::Full);
+        let outcome = ctx
+            .tracker
+            .record_read(&key, &bytes, LastView::Full, &ctx.call_id);
         return Ok(stub_or(outcome, EMPTY_FILE_MARKER).to_owned());
     }
 
@@ -200,7 +196,7 @@ async fn read_file(
     }
 
     let view = LastView::lines(offset_n, last_shown, total_lines);
-    let outcome = tracker.record_read(&key, &bytes, view);
+    let outcome = ctx.tracker.record_read(&key, &bytes, view, &ctx.call_id);
     Ok(stub_or(outcome, &output).to_owned())
 }
 
@@ -267,9 +263,9 @@ mod tests {
     use indoc::indoc;
 
     use super::*;
-    use crate::file_tracker::{GateError, GatePurpose, MAX_TRACKED_FILE_SIZE, testing::tracker};
+    use crate::file_tracker::{GateError, GatePurpose, MAX_TRACKED_FILE_SIZE};
     use crate::tool::MAX_OUTPUT_BYTES;
-    use crate::tool::testing::{canonical_tempdir, symlink_file};
+    use crate::tool::testing::{canonical_tempdir, ctx, symlink_file, temp_ctx};
 
     // ── run ──
 
@@ -281,7 +277,7 @@ mod tests {
 
         let output = run(
             serde_json::json!({"file_path": path.to_str().unwrap()}),
-            tracker(),
+            &temp_ctx(),
         )
         .await;
 
@@ -295,16 +291,18 @@ mod tests {
         let dir = canonical_tempdir();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello\n").unwrap();
-        let tracker = tracker();
+        let ctx = temp_ctx();
 
         let output = run(
             serde_json::json!({"file_path": path.to_str().unwrap()}),
-            Arc::clone(&tracker),
+            &ctx,
         )
         .await;
         assert!(!output.is_error);
 
-        let result = tracker.verify_current_content(&path, b"hello\n", GatePurpose::Edit);
+        let result = ctx
+            .tracker
+            .verify_current_content(&path, b"hello\n", GatePurpose::Edit);
         assert_eq!(result, Ok(()));
     }
 
@@ -313,18 +311,18 @@ mod tests {
         let dir = canonical_tempdir();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello\nworld\n").unwrap();
-        let tracker = tracker();
+        let ctx = temp_ctx();
 
         let first = run(
             serde_json::json!({"file_path": path.to_str().unwrap()}),
-            Arc::clone(&tracker),
+            &ctx,
         )
         .await;
         assert_eq!(first.content, "1\thello\n2\tworld");
 
         let second = run(
             serde_json::json!({"file_path": path.to_str().unwrap()}),
-            tracker,
+            &ctx,
         )
         .await;
         assert!(!second.is_error);
@@ -345,22 +343,40 @@ mod tests {
             "},
         )
         .unwrap();
-        let tracker = tracker();
+        let ctx = temp_ctx();
 
         let json = serde_json::json!({
             "file_path": path.to_str().unwrap(),
             "offset": 1,
             "limit": 2,
         });
-        let first = run(json.clone(), Arc::clone(&tracker)).await;
-        let second = run(json, tracker).await;
+        let first = run(json.clone(), &ctx).await;
+        let second = run(json, &ctx).await;
         assert_ne!(second.content, CACHE_HIT_STUB);
         assert_eq!(first.content, second.content);
     }
 
     #[tokio::test]
+    async fn run_resolves_a_relative_path_against_the_ctx_cwd() {
+        let dir = canonical_tempdir();
+        std::fs::write(dir.path().join("notes.txt"), "in the ctx cwd\n").unwrap();
+        let ctx = ctx(dir.path());
+
+        let output = run(serde_json::json!({"file_path": "notes.txt"}), &ctx).await;
+
+        assert!(!output.is_error, "{}", output.content);
+        assert_eq!(output.content, "1\tin the ctx cwd");
+        let recorded = ctx.tracker.verify_current_content(
+            &dir.path().join("notes.txt"),
+            b"in the ctx cwd\n",
+            GatePurpose::Edit,
+        );
+        assert_eq!(recorded, Ok(()));
+    }
+
+    #[tokio::test]
     async fn run_missing_file_path_reports_input_error() {
-        let output = run(serde_json::json!({}), tracker()).await;
+        let output = run(serde_json::json!({}), &temp_ctx()).await;
         assert!(output.is_error);
         assert!(output.content.contains("Invalid input"));
     }
@@ -369,7 +385,7 @@ mod tests {
     async fn run_read_error_omits_title() {
         let output = run(
             serde_json::json!({"file_path": "/nonexistent/path.txt"}),
-            tracker(),
+            &temp_ctx(),
         )
         .await;
         assert!(output.is_error);
@@ -395,7 +411,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = read_file(path.to_str().unwrap(), None, None, &FileTracker::default())
+        let result = read_file(path.to_str().unwrap(), None, None, &temp_ctx())
             .await
             .unwrap();
         assert_eq!(
@@ -423,14 +439,9 @@ mod tests {
         )
         .unwrap();
 
-        let result = read_file(
-            path.to_str().unwrap(),
-            Some(2),
-            Some(2),
-            &FileTracker::default(),
-        )
-        .await
-        .unwrap();
+        let result = read_file(path.to_str().unwrap(), Some(2), Some(2), &temp_ctx())
+            .await
+            .unwrap();
         assert_eq!(
             result,
             indoc! {"
@@ -446,13 +457,15 @@ mod tests {
         let dir = canonical_tempdir();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "a\nb\n").unwrap();
-        let tracker = FileTracker::default();
+        let ctx = temp_ctx();
 
-        read_file(path.to_str().unwrap(), Some(1), Some(10), &tracker)
+        read_file(path.to_str().unwrap(), Some(1), Some(10), &ctx)
             .await
             .unwrap();
 
-        let result = tracker.verify_current_content(&path, b"a\nb\n", GatePurpose::Edit);
+        let result = ctx
+            .tracker
+            .verify_current_content(&path, b"a\nb\n", GatePurpose::Edit);
         assert_eq!(result, Ok(()));
     }
 
@@ -462,16 +475,20 @@ mod tests {
         let path = dir.path().join("long.txt");
         let content = "x\n".repeat(DEFAULT_LINE_LIMIT + 1);
         std::fs::write(&path, &content).unwrap();
-        let tracker = FileTracker::default();
+        let ctx = temp_ctx();
 
-        let output = read_file(path.to_str().unwrap(), None, None, &tracker)
+        let output = read_file(path.to_str().unwrap(), None, None, &ctx)
             .await
             .unwrap();
         assert!(output.ends_with(&format!("of {} total)", DEFAULT_LINE_LIMIT + 1)));
 
-        let edit = tracker.verify_current_content(&path, content.as_bytes(), GatePurpose::Edit);
+        let edit = ctx
+            .tracker
+            .verify_current_content(&path, content.as_bytes(), GatePurpose::Edit);
         assert_eq!(edit, Ok(()), "any Read of the current content clears Edit");
-        let write = tracker.verify_current_content(&path, content.as_bytes(), GatePurpose::Write);
+        let write =
+            ctx.tracker
+                .verify_current_content(&path, content.as_bytes(), GatePurpose::Write);
         assert!(
             matches!(write, Err(GateError::PartialRead { .. })),
             "unseen lines keep Write closed: {write:?}",
@@ -484,9 +501,9 @@ mod tests {
         let path = dir.path().join("wide.txt");
         let content = format!("{}\n", "x".repeat(199)).repeat(1000);
         std::fs::write(&path, &content).unwrap();
-        let tracker = FileTracker::default();
+        let ctx = temp_ctx();
 
-        let output = read_file(path.to_str().unwrap(), None, None, &tracker)
+        let output = read_file(path.to_str().unwrap(), None, None, &ctx)
             .await
             .unwrap();
 
@@ -499,7 +516,9 @@ mod tests {
         );
         let shown = body.lines().count();
         assert_eq!(footer, format!("(Showing lines 1–{shown} of 1000 total)"));
-        let write = tracker.verify_current_content(&path, content.as_bytes(), GatePurpose::Write);
+        let write =
+            ctx.tracker
+                .verify_current_content(&path, content.as_bytes(), GatePurpose::Write);
         assert!(
             matches!(write, Err(GateError::PartialRead { .. })),
             "lines past the budget keep Write closed: {write:?}",
@@ -514,7 +533,7 @@ mod tests {
         let over = "b".repeat(2001);
         std::fs::write(&path, format!("{fits}\n{over}\n")).unwrap();
 
-        let output = read_file(path.to_str().unwrap(), None, None, &FileTracker::default())
+        let output = read_file(path.to_str().unwrap(), None, None, &temp_ctx())
             .await
             .unwrap();
         assert_eq!(
@@ -529,14 +548,9 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "first\nsecond\n").unwrap();
 
-        let result = read_file(
-            path.to_str().unwrap(),
-            Some(0),
-            None,
-            &FileTracker::default(),
-        )
-        .await
-        .unwrap();
+        let result = read_file(path.to_str().unwrap(), Some(0), None, &temp_ctx())
+            .await
+            .unwrap();
         assert_eq!(result, "1\tfirst\n2\tsecond");
     }
 
@@ -546,7 +560,7 @@ mod tests {
         let path = dir.path().join("bom.txt");
         std::fs::write(&path, "\u{feff}hello\n").unwrap();
 
-        let result = read_file(path.to_str().unwrap(), None, None, &FileTracker::default())
+        let result = read_file(path.to_str().unwrap(), None, None, &temp_ctx())
             .await
             .unwrap();
         assert!(result.contains("1\thello"));
@@ -559,7 +573,7 @@ mod tests {
         let path = dir.path().join("empty.txt");
         std::fs::write(&path, "").unwrap();
 
-        let result = read_file(path.to_str().unwrap(), None, None, &FileTracker::default())
+        let result = read_file(path.to_str().unwrap(), None, None, &temp_ctx())
             .await
             .unwrap();
         assert_eq!(result, "(empty file)");
@@ -567,7 +581,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_file_missing_file_reports_error() {
-        let err = read_file("/nonexistent/path.txt", None, None, &FileTracker::default())
+        let err = read_file("/nonexistent/path.txt", None, None, &temp_ctx())
             .await
             .unwrap_err();
         assert!(err.contains("Error reading"));
@@ -576,14 +590,9 @@ mod tests {
     #[tokio::test]
     async fn read_file_directory_reports_error() {
         let dir = canonical_tempdir();
-        let err = read_file(
-            dir.path().to_str().unwrap(),
-            None,
-            None,
-            &FileTracker::default(),
-        )
-        .await
-        .unwrap_err();
+        let err = read_file(dir.path().to_str().unwrap(), None, None, &temp_ctx())
+            .await
+            .unwrap_err();
         assert!(err.contains("is a directory"));
     }
 
@@ -594,7 +603,7 @@ mod tests {
         let f = std::fs::File::create(&path).unwrap();
         f.set_len(MAX_TRACKED_FILE_SIZE + 1).unwrap();
 
-        let err = read_file(path.to_str().unwrap(), None, None, &FileTracker::default())
+        let err = read_file(path.to_str().unwrap(), None, None, &temp_ctx())
             .await
             .unwrap_err();
         assert!(
@@ -611,7 +620,7 @@ mod tests {
         let path = dir.path().join("sock");
         let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
 
-        let err = read_file(path.to_str().unwrap(), None, None, &FileTracker::default())
+        let err = read_file(path.to_str().unwrap(), None, None, &temp_ctx())
             .await
             .unwrap_err();
         assert!(
@@ -626,7 +635,7 @@ mod tests {
         let path = dir.path().join("binary.bin");
         std::fs::write(&path, b"hello\x00world").unwrap();
 
-        let err = read_file(path.to_str().unwrap(), None, None, &FileTracker::default())
+        let err = read_file(path.to_str().unwrap(), None, None, &temp_ctx())
             .await
             .unwrap_err();
         assert!(err.contains("binary"));
@@ -638,14 +647,9 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "a\nb\n").unwrap();
 
-        let err = read_file(
-            path.to_str().unwrap(),
-            Some(100),
-            None,
-            &FileTracker::default(),
-        )
-        .await
-        .unwrap_err();
+        let err = read_file(path.to_str().unwrap(), Some(100), None, &temp_ctx())
+            .await
+            .unwrap_err();
         assert!(err.contains("beyond the end"));
     }
 
@@ -659,7 +663,7 @@ mod tests {
         let path = dir.path().join("notes.md");
         symlink_file(&secret, &path);
 
-        let err = read_file(path.to_str().unwrap(), None, None, &FileTracker::default())
+        let err = read_file(path.to_str().unwrap(), None, None, &temp_ctx())
             .await
             .unwrap_err();
         assert!(!err.contains("SECRET"), "{err}");
@@ -669,11 +673,14 @@ mod tests {
 
     #[test]
     fn result_view_builds_read_excerpt() {
-        let cwd = std::env::current_dir().unwrap();
-        let path = cwd.join("example.rs");
-        let input = serde_json::json!({"file_path": path});
-        let view = ReadTool::new(tracker())
-            .result_view(&input, "10\tfn main() {}\n11\t}", &ToolMetadata::default())
+        let input = serde_json::json!({"file_path": "/repo/example.rs"});
+        let view = ReadTool
+            .result_view(
+                &input,
+                "10\tfn main() {}\n11\t}",
+                &ToolMetadata::default(),
+                Path::new("/repo"),
+            )
             .unwrap();
 
         assert_eq!(
@@ -698,7 +705,7 @@ mod tests {
     #[test]
     fn result_view_preserves_total_lines_from_footer() {
         let input = serde_json::json!({"file_path": "/tmp/example.rs"});
-        let view = ReadTool::new(tracker())
+        let view = ReadTool
             .result_view(
                 &input,
                 indoc! { "\
@@ -707,6 +714,7 @@ mod tests {
 
                     (Showing lines 2–3 of 5 total)" },
                 &ToolMetadata::default(),
+                Path::new("/repo"),
             )
             .unwrap();
 
@@ -732,8 +740,13 @@ mod tests {
     #[test]
     fn result_view_handles_empty_file() {
         let input = serde_json::json!({"file_path": "/tmp/empty.rs"});
-        let view = ReadTool::new(tracker())
-            .result_view(&input, "(empty file)", &ToolMetadata::default())
+        let view = ReadTool
+            .result_view(
+                &input,
+                "(empty file)",
+                &ToolMetadata::default(),
+                Path::new("/repo"),
+            )
             .unwrap();
 
         assert_eq!(
@@ -750,8 +763,13 @@ mod tests {
     fn result_view_falls_back_for_malformed_output() {
         let input = serde_json::json!({"file_path": "/tmp/example.rs"});
         assert!(
-            ReadTool::new(tracker())
-                .result_view(&input, "not line-numbered", &ToolMetadata::default())
+            ReadTool
+                .result_view(
+                    &input,
+                    "not line-numbered",
+                    &ToolMetadata::default(),
+                    Path::new("/repo"),
+                )
                 .is_none()
         );
     }
@@ -760,8 +778,13 @@ mod tests {
     fn result_view_falls_back_for_missing_file_path() {
         let input = serde_json::json!({});
         assert!(
-            ReadTool::new(tracker())
-                .result_view(&input, "1\tline", &ToolMetadata::default())
+            ReadTool
+                .result_view(
+                    &input,
+                    "1\tline",
+                    &ToolMetadata::default(),
+                    Path::new("/repo"),
+                )
                 .is_none()
         );
     }

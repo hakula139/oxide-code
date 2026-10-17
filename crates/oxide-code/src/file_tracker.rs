@@ -2,7 +2,6 @@
 
 use std::collections::HashMap;
 use std::fs::Metadata;
-use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -15,21 +14,6 @@ use crate::util::sync::lock_or_recover;
 
 const HASH_SEED: u64 = 0;
 pub(crate) const MAX_TRACKED_FILE_SIZE: u64 = 10 * 1024 * 1024;
-
-// ── Attribution ──
-
-tokio::task_local! {
-    static TOOL_USE_ID: String;
-}
-
-/// Runs `fut` with every tracker record it makes attributed to the tool call `tool_use_id`.
-pub(crate) async fn attribute_to<F: Future>(tool_use_id: &str, fut: F) -> F::Output {
-    TOOL_USE_ID.scope(tool_use_id.to_owned(), fut).await
-}
-
-fn current_tool_use_id() -> Option<String> {
-    TOOL_USE_ID.try_with(Clone::clone).ok()
-}
 
 // ── FileTracker ──
 
@@ -62,8 +46,14 @@ struct FileState {
 impl FileTracker {
     /// Returns `CacheHit` when a file already tracked as `Full` is read in full again unchanged.
     /// Reads of unchanged content accumulate their line windows, and changed content starts over.
-    /// A read that returns content attributes the state to its tool call.
-    pub(crate) fn record_read(&self, path: &Path, bytes: &[u8], view: LastView) -> RecordRead {
+    /// A read that returns content attributes the state to its tool call, `tool_use_id`.
+    pub(crate) fn record_read(
+        &self,
+        path: &Path,
+        bytes: &[u8],
+        view: LastView,
+        tool_use_id: &str,
+    ) -> RecordRead {
         let content_hash = xxh64(bytes, HASH_SEED);
         let mut by_path = self.lock();
 
@@ -78,7 +68,7 @@ impl FileTracker {
             let seen = std::mem::replace(&mut state.last_view, LastView::Full);
             state.last_view = seen.union(view);
             if outcome == RecordRead::Inserted {
-                state.tool_use_id = current_tool_use_id();
+                state.tool_use_id = Some(tool_use_id.to_owned());
             }
             return outcome;
         }
@@ -89,7 +79,7 @@ impl FileTracker {
                 content_hash,
                 last_view: view,
                 recorded_at: OffsetDateTime::now_utc(),
-                tool_use_id: current_tool_use_id(),
+                tool_use_id: Some(tool_use_id.to_owned()),
             },
         );
         RecordRead::Inserted
@@ -126,13 +116,18 @@ impl FileTracker {
     }
 
     /// Drives `write` in a task of its own, then records the bytes it wrote under the tracker key
-    /// it returns, so the record lands with the write even when the caller is dropped mid-write.
-    pub(crate) async fn write_and_record<W>(self: &Arc<Self>, write: W) -> std::io::Result<()>
+    /// it returns, attributed to the tool call `tool_use_id`, so the record lands with the write
+    /// even when the caller is dropped mid-write.
+    pub(crate) async fn write_and_record<W>(
+        self: &Arc<Self>,
+        tool_use_id: &str,
+        write: W,
+    ) -> std::io::Result<()>
     where
         W: Future<Output = std::io::Result<(PathBuf, Vec<u8>)>> + Send + 'static,
     {
         let tracker = Arc::clone(self);
-        let tool_use_id = current_tool_use_id();
+        let tool_use_id = Some(tool_use_id.to_owned());
         tokio::spawn(async move {
             let (key, bytes) = write.await?;
             tracker.record_modify(key, &bytes, tool_use_id);
@@ -401,7 +396,7 @@ pub(crate) mod testing {
 
     pub(crate) fn seed_full_read(tracker: &FileTracker, path: &Path) {
         let bytes = std::fs::read(path).unwrap();
-        tracker.record_read(path, &bytes, LastView::Full);
+        tracker.record_read(path, &bytes, LastView::Full, "toolu_seed");
     }
 
     pub(crate) fn tracker_seeded(path: &Path) -> Arc<FileTracker> {
@@ -410,9 +405,14 @@ pub(crate) mod testing {
         tracker
     }
 
-    pub(crate) fn record_tracked_file(tracker: &FileTracker, path: &Path, bytes: &[u8]) {
+    pub(crate) fn record_tracked_file(
+        tracker: &FileTracker,
+        path: &Path,
+        bytes: &[u8],
+        tool_use_id: Option<&str>,
+    ) {
         std::fs::write(path, bytes).unwrap();
-        tracker.record_modify(path.to_path_buf(), bytes, super::current_tool_use_id());
+        tracker.record_modify(path.to_path_buf(), bytes, tool_use_id.map(str::to_owned));
     }
 }
 
@@ -436,40 +436,24 @@ mod tests {
         }
     }
 
-    // ── attribute_to ──
+    // ── record_read: attribution ──
 
     #[tokio::test]
-    async fn attribute_to_stamps_records_with_the_calling_tool_use() {
+    async fn record_read_and_write_and_record_attribute_each_state_to_its_call() {
         let dir = tempfile::tempdir().unwrap();
         let tracker = Arc::new(FileTracker::default());
         let read = Path::new("/tmp/read.rs");
         let paged = Path::new("/tmp/paged.rs");
         let written = dir.path().join("written.rs");
-        let outside = Path::new("/tmp/outside.rs");
 
-        attribute_to("toolu_read", async {
-            tracker.record_read(read, b"r", LastView::Full)
-        })
-        .await;
-        attribute_to("toolu_page_1", async {
-            tracker.record_read(paged, b"p", LastView::lines(1, 1, 2))
-        })
-        .await;
-        attribute_to("toolu_page_2", async {
-            tracker.record_read(paged, b"p", LastView::lines(2, 2, 2))
-        })
-        .await;
-        attribute_to(
-            "toolu_write",
-            tracker.write_and_record(write_file(written.clone(), b"w")),
-        )
-        .await
-        .unwrap();
-        let reread = attribute_to("toolu_reread", async {
-            tracker.record_read(read, b"r", LastView::Full)
-        })
-        .await;
-        tracker.record_read(outside, b"o", LastView::Full);
+        tracker.record_read(read, b"r", LastView::Full, "toolu_read");
+        tracker.record_read(paged, b"p", LastView::lines(1, 1, 2), "toolu_page_1");
+        tracker.record_read(paged, b"p", LastView::lines(2, 2, 2), "toolu_page_2");
+        tracker
+            .write_and_record("toolu_write", write_file(written.clone(), b"w"))
+            .await
+            .unwrap();
+        let reread = tracker.record_read(read, b"r", LastView::Full, "toolu_reread");
 
         assert_eq!(reread, RecordRead::CacheHit);
         let origins: BTreeMap<PathBuf, Option<String>> = tracker
@@ -480,7 +464,6 @@ mod tests {
         assert_eq!(
             origins,
             BTreeMap::from([
-                (outside.to_path_buf(), None),
                 (paged.to_path_buf(), Some("toolu_page_2".to_owned())),
                 (read.to_path_buf(), Some("toolu_read".to_owned())),
                 (written, Some("toolu_write".to_owned())),
@@ -501,7 +484,7 @@ mod tests {
     fn record_read_first_full_read_inserts() {
         let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
-        let outcome = tracker.record_read(path, b"hello", LastView::Full);
+        let outcome = tracker.record_read(path, b"hello", LastView::Full, "toolu_test");
         assert_eq!(outcome, RecordRead::Inserted);
         let stored = tracker.lock().get(path).cloned().unwrap();
         assert_eq!(stored.content_hash, xxh64(b"hello", HASH_SEED));
@@ -512,9 +495,9 @@ mod tests {
     fn record_read_cache_hit_preserves_recorded_at() {
         let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
-        _ = tracker.record_read(path, b"hello", LastView::Full);
+        _ = tracker.record_read(path, b"hello", LastView::Full, "toolu_test");
         let first = tracker.lock().get(path).cloned().unwrap();
-        let outcome = tracker.record_read(path, b"hello", LastView::Full);
+        let outcome = tracker.record_read(path, b"hello", LastView::Full, "toolu_test");
         let second = tracker.lock().get(path).cloned().unwrap();
         assert_eq!(outcome, RecordRead::CacheHit);
         assert_eq!(first.recorded_at, second.recorded_at);
@@ -524,8 +507,8 @@ mod tests {
     fn record_read_changed_content_inserts_not_cache_hit() {
         let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
-        _ = tracker.record_read(path, b"hello", LastView::Full);
-        let outcome = tracker.record_read(path, b"world", LastView::Full);
+        _ = tracker.record_read(path, b"hello", LastView::Full, "toolu_test");
+        let outcome = tracker.record_read(path, b"world", LastView::Full, "toolu_test");
         assert_eq!(outcome, RecordRead::Inserted);
     }
 
@@ -534,8 +517,8 @@ mod tests {
         let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
         let view = LastView::lines(1, 1, 5);
-        _ = tracker.record_read(path, b"hello", view.clone());
-        let outcome = tracker.record_read(path, b"hello", view);
+        _ = tracker.record_read(path, b"hello", view.clone(), "toolu_test");
+        let outcome = tracker.record_read(path, b"hello", view, "toolu_test");
         assert_eq!(outcome, RecordRead::Inserted);
     }
 
@@ -543,10 +526,10 @@ mod tests {
     fn record_read_full_after_partial_does_not_cache_hit() {
         let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
-        _ = tracker.record_read(path, b"hello", LastView::lines(1, 1, 5));
-        let outcome = tracker.record_read(path, b"hello", LastView::Full);
+        _ = tracker.record_read(path, b"hello", LastView::lines(1, 1, 5), "toolu_test");
+        let outcome = tracker.record_read(path, b"hello", LastView::Full, "toolu_test");
         assert_eq!(outcome, RecordRead::Inserted);
-        let next = tracker.record_read(path, b"hello", LastView::Full);
+        let next = tracker.record_read(path, b"hello", LastView::Full, "toolu_test");
         assert_eq!(next, RecordRead::CacheHit);
     }
 
@@ -554,9 +537,9 @@ mod tests {
     fn record_read_partial_after_full_keeps_full_for_unchanged_content() {
         let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
-        _ = tracker.record_read(path, b"hello", LastView::Full);
+        _ = tracker.record_read(path, b"hello", LastView::Full, "toolu_test");
 
-        let outcome = tracker.record_read(path, b"hello", LastView::lines(2, 2, 5));
+        let outcome = tracker.record_read(path, b"hello", LastView::lines(2, 2, 5), "toolu_test");
         assert_eq!(
             outcome,
             RecordRead::Inserted,
@@ -569,10 +552,10 @@ mod tests {
     fn record_read_paging_unchanged_content_accumulates_to_full() {
         let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
-        _ = tracker.record_read(path, b"hello", LastView::lines(1, 2, 4));
+        _ = tracker.record_read(path, b"hello", LastView::lines(1, 2, 4), "toolu_test");
         let first = tracker.lock()[path].clone();
 
-        let outcome = tracker.record_read(path, b"hello", LastView::lines(3, 4, 4));
+        let outcome = tracker.record_read(path, b"hello", LastView::lines(3, 4, 4), "toolu_test");
         assert_eq!(
             outcome,
             RecordRead::Inserted,
@@ -582,7 +565,7 @@ mod tests {
         assert_eq!(paged.last_view, LastView::Full);
         assert_eq!(paged.recorded_at, first.recorded_at);
 
-        _ = tracker.record_read(path, b"world", LastView::lines(3, 4, 4));
+        _ = tracker.record_read(path, b"world", LastView::lines(3, 4, 4), "toolu_test");
         assert_eq!(
             tracker.lock()[path].last_view,
             LastView::lines(3, 4, 4),
@@ -599,7 +582,12 @@ mod tests {
                 s.spawn(move || {
                     for i in 0..100u32 {
                         let path = PathBuf::from(format!("/tmp/t{t}/p{i}"));
-                        _ = tracker.record_read(&path, &t.to_le_bytes(), LastView::Full);
+                        _ = tracker.record_read(
+                            &path,
+                            &t.to_le_bytes(),
+                            LastView::Full,
+                            "toolu_test",
+                        );
                     }
                 });
             }
@@ -613,7 +601,7 @@ mod tests {
     fn verify_current_content_full_match_passes() {
         let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
-        _ = tracker.record_read(path, b"hello", LastView::Full);
+        _ = tracker.record_read(path, b"hello", LastView::Full, "toolu_test");
 
         let result = tracker.verify_current_content(path, b"hello", GatePurpose::Edit);
 
@@ -639,7 +627,7 @@ mod tests {
     fn verify_current_content_partial_view_blocks_write_but_not_edit() {
         let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
-        _ = tracker.record_read(path, b"hello", LastView::lines(1, 1, 2));
+        _ = tracker.record_read(path, b"hello", LastView::lines(1, 1, 2), "toolu_test");
 
         let edit = tracker.verify_current_content(path, b"hello", GatePurpose::Edit);
         assert_eq!(edit, Ok(()));
@@ -664,7 +652,7 @@ mod tests {
     fn verify_current_content_divergent_bytes_rejects_content_drift() {
         let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
-        _ = tracker.record_read(path, b"hello", LastView::Full);
+        _ = tracker.record_read(path, b"hello", LastView::Full, "toolu_test");
 
         let result = tracker.verify_current_content(path, b"world", GatePurpose::Edit);
 
@@ -685,10 +673,10 @@ mod tests {
         let path = dir.path().join("a.rs");
         let key = Path::new("/key/a.rs");
         let tracker = Arc::new(FileTracker::default());
-        _ = tracker.record_read(key, b"hello", LastView::lines(1, 1, 2));
+        _ = tracker.record_read(key, b"hello", LastView::lines(1, 1, 2), "toolu_test");
 
         tracker
-            .write_and_record({
+            .write_and_record("toolu_test", {
                 let path = path.clone();
                 async move {
                     tokio::fs::write(&path, b"world").await?;
@@ -710,10 +698,7 @@ mod tests {
         let path = dir.path().join("a.rs");
         let tracker = Arc::new(FileTracker::default());
 
-        let write = attribute_to(
-            "toolu_write",
-            tracker.write_and_record(write_file(path.clone(), b"w")),
-        );
+        let write = tracker.write_and_record("toolu_write", write_file(path.clone(), b"w"));
         _ = tokio::time::timeout(Duration::ZERO, write).await;
         for _ in 0..200 {
             if tracker.lock().contains_key(&path) {
@@ -733,10 +718,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("missing").join("a.rs");
         let tracker = Arc::new(FileTracker::default());
-        _ = tracker.record_read(&path, b"hello", LastView::Full);
+        _ = tracker.record_read(&path, b"hello", LastView::Full, "toolu_test");
 
         let result = tracker
-            .write_and_record(write_file(path.clone(), b"world"))
+            .write_and_record("toolu_test", write_file(path.clone(), b"world"))
             .await;
 
         assert_eq!(
@@ -753,8 +738,13 @@ mod tests {
     #[test]
     fn snapshot_all_collects_every_tracked_file() {
         let tracker = FileTracker::default();
-        _ = tracker.record_read(Path::new("/tmp/a"), b"a", LastView::Full);
-        _ = tracker.record_read(Path::new("/tmp/b"), b"bbb", LastView::lines(1, 2, 3));
+        _ = tracker.record_read(Path::new("/tmp/a"), b"a", LastView::Full, "toolu_test");
+        _ = tracker.record_read(
+            Path::new("/tmp/b"),
+            b"bbb",
+            LastView::lines(1, 2, 3),
+            "toolu_test",
+        );
 
         let mut snaps = tracker.snapshot_all();
         snaps.sort_by(|a, b| a.path.cmp(&b.path));
@@ -779,8 +769,8 @@ mod tests {
     #[test]
     fn clear_drops_recorded_reads_so_subsequent_snapshot_is_empty() {
         let tracker = FileTracker::default();
-        _ = tracker.record_read(Path::new("/tmp/a"), b"a", LastView::Full);
-        _ = tracker.record_read(Path::new("/tmp/b"), b"b", LastView::Full);
+        _ = tracker.record_read(Path::new("/tmp/a"), b"a", LastView::Full, "toolu_test");
+        _ = tracker.record_read(Path::new("/tmp/b"), b"b", LastView::Full, "toolu_test");
         assert_eq!(tracker.snapshot_all().len(), 2);
 
         tracker.clear();

@@ -594,7 +594,7 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use super::*;
-    use crate::permission::{GateTarget, PermissionClass, Policy};
+    use crate::permission::{Access, PermissionClass, Policy, Workspace};
     use crate::tool::DiffLine;
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -632,7 +632,7 @@ mod tests {
 
     /// A shown modal that offers the session rule [`Policy::session_grant`] suggests for `command`.
     fn granted_modal(command: &str) -> ApprovalModal {
-        let target = GateTarget::for_command(command, Path::new("/repo"));
+        let target = Access::for_command(command, &Workspace::new(Path::new("/repo")));
         let grant = Policy::default().session_grant(PermissionClass::Bash, &target);
         let mut modal = ApprovalModal::new(
             "call-1".to_owned(),

@@ -4,6 +4,7 @@
 //! tool call's presentation, so a frontend renders the result without a tool registry.
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use super::entry::CompactInfo;
 use super::post_compact::strip_synthetic_post_compact_prefix;
@@ -13,15 +14,17 @@ use crate::protocol::{Interaction, ToolCall, ToolResult};
 use crate::tool::{ToolMetadata, ToolRegistry, ToolResultView};
 
 /// Projects a resumed transcript for display, opening with its compaction boundary when `compact`
-/// is set. `tool_metadata` holds the per-call metadata the session persisted, keyed by tool-use id.
+/// is set. `tool_metadata` holds the per-call metadata the session persisted, keyed by tool-use id,
+/// and path arguments show relative to `cwd`.
 pub(crate) fn interactions(
     messages: &[Message],
     compact: Option<&CompactInfo>,
     tool_metadata: &HashMap<String, ToolMetadata>,
     tools: &ToolRegistry,
+    cwd: &Path,
 ) -> Vec<Interaction> {
     let Some(info) = compact else {
-        return walk_transcript(messages, tool_metadata, tools);
+        return walk_transcript(messages, tool_metadata, tools, cwd);
     };
     let mut out = vec![Interaction::Compacted {
         summary: info.summary.clone(),
@@ -32,6 +35,7 @@ pub(crate) fn interactions(
         &post_compact_messages(messages),
         tool_metadata,
         tools,
+        cwd,
     ));
     out
 }
@@ -55,6 +59,7 @@ fn walk_transcript(
     messages: &[Message],
     tool_metadata: &HashMap<String, ToolMetadata>,
     tools: &ToolRegistry,
+    cwd: &Path,
 ) -> Vec<Interaction> {
     let pairs: HashMap<&str, (&str, bool)> = messages
         .iter()
@@ -71,6 +76,7 @@ fn walk_transcript(
 
     let mut walker = TranscriptWalker {
         tools,
+        cwd,
         tool_metadata,
         pairs,
         out: Vec::new(),
@@ -83,6 +89,7 @@ fn walk_transcript(
 
 struct TranscriptWalker<'a> {
     tools: &'a ToolRegistry,
+    cwd: &'a Path,
     tool_metadata: &'a HashMap<String, ToolMetadata>,
     pairs: HashMap<&'a str, (&'a str, bool)>,
     out: Vec<Interaction>,
@@ -118,7 +125,7 @@ impl TranscriptWalker<'_> {
                         name: name.clone(),
                         input: input.clone(),
                         icon: self.tools.icon(name).to_owned(),
-                        label: self.tools.label(name, input),
+                        label: self.tools.label(name, input, self.cwd),
                     }));
                     if let Some((content, is_error)) = self.pairs.remove(id.as_str()) {
                         let call = Some((name.as_str(), input));
@@ -159,7 +166,7 @@ impl TranscriptWalker<'_> {
         let view = match call {
             Some((name, input)) => self
                 .tools
-                .result_view(name, input, content, metadata, is_error),
+                .result_view(name, input, content, metadata, is_error, self.cwd),
             None => ToolResultView::Text {
                 content: content.to_owned(),
             },
@@ -191,7 +198,6 @@ mod tests {
     use indoc::indoc;
 
     use super::*;
-    use crate::file_tracker::testing::tracker;
     use crate::message::Replay;
     use crate::session::post_compact::synthesize_post_compact_message;
     use crate::tool::bash::BashTool;
@@ -200,11 +206,11 @@ mod tests {
     use crate::tool::{DEFAULT_TOOL_ICON, DiffChunk, DiffLine};
 
     fn tools() -> ToolRegistry {
-        ToolRegistry::new(vec![Box::new(BashTool), Box::new(EditTool::new(tracker()))])
+        ToolRegistry::new(vec![Box::new(BashTool), Box::new(EditTool)])
     }
 
     fn walk(messages: &[Message]) -> Vec<Interaction> {
-        walk_transcript(messages, &HashMap::new(), &tools())
+        walk_transcript(messages, &HashMap::new(), &tools(), Path::new("/repo"))
     }
 
     fn tool_use(id: &str, name: &str, input: serde_json::Value) -> ContentBlock {
@@ -287,7 +293,13 @@ mod tests {
             Message::assistant("post-compact reply"),
         ];
 
-        let out = interactions(&messages, Some(&compact_info()), &HashMap::new(), &tools());
+        let out = interactions(
+            &messages,
+            Some(&compact_info()),
+            &HashMap::new(),
+            &tools(),
+            Path::new("/repo"),
+        );
 
         assert_eq!(
             out,
@@ -310,6 +322,7 @@ mod tests {
             Some(&compact_info()),
             &HashMap::new(),
             &tools(),
+            Path::new("/repo"),
         );
 
         assert_eq!(
@@ -326,7 +339,7 @@ mod tests {
     fn interactions_without_compaction_keeps_the_first_message_whole() {
         let root = synthesize_post_compact_message("internal summary", &[]);
 
-        let out = interactions(&[root], None, &HashMap::new(), &tools());
+        let out = interactions(&[root], None, &HashMap::new(), &tools(), Path::new("/repo"));
 
         assert!(
             matches!(&out[..], [Interaction::UserText(text)] if text.contains("internal summary")),
@@ -546,7 +559,7 @@ mod tests {
             },
         )]);
 
-        let out = walk_transcript(&messages, &metadata, &tools());
+        let out = walk_transcript(&messages, &metadata, &tools(), Path::new("/repo"));
 
         assert_eq!(
             out[1],
@@ -606,7 +619,7 @@ mod tests {
             },
         )]);
 
-        let out = walk_transcript(&messages, &metadata, &tools());
+        let out = walk_transcript(&messages, &metadata, &tools(), Path::new("/repo"));
 
         assert_eq!(
             out,

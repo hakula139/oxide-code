@@ -29,7 +29,7 @@ impl SlashCommand for DiffCmd {
     fn execute(&self, _args: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
         let cwd = ctx
             .info
-            .git_cwd
+            .working_dir
             .as_deref()
             .ok_or("No working directory for this session.")?;
         let text = collect_diff_in(cwd)
@@ -238,7 +238,7 @@ mod tests {
 
     fn execute_at(cwd: Option<&Path>) -> Result<SlashOutcome, String> {
         let mut info = test_session_info();
-        info.git_cwd = cwd.map(Path::to_owned);
+        info.working_dir = cwd.map(Path::to_owned);
         with_isolated_git_env(|| DiffCmd.execute("", &SlashContext::new(&info, None)))
     }
 

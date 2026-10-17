@@ -6,7 +6,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use tokio::sync::mpsc;
 
 use super::abort::{AbortResult, TurnAbort, await_unless_aborted};
-use super::dispatch::{self, GateContext};
+use super::dispatch::{self, DispatchContext};
 use crate::client::{Response, ResponseEvent, StopDetails, StopReason, TokenUsage, Wire};
 use crate::message::{ContentBlock, Message, Role};
 use crate::prompt::PromptParts;
@@ -110,7 +110,7 @@ pub(super) async fn agent_turn(
     session: &SessionHandle,
     ops: &mut mpsc::Receiver<Op>,
     max_tool_rounds: Option<u32>,
-    gate: &mut GateContext<'_>,
+    dispatch_ctx: &mut DispatchContext<'_>,
 ) -> TurnOutcome {
     let tool_defs = tools.definitions();
     let mut pending_prompts: Vec<String> = Vec::new();
@@ -170,7 +170,7 @@ pub(super) async fn agent_turn(
             sink,
             ops,
             &mut pending_prompts,
-            gate,
+            dispatch_ctx,
         )
         .await;
         if round.tasks.is_some() {
@@ -457,18 +457,15 @@ mod tests {
     use crate::config::auth::{Auth, AuthSource};
     use crate::engine::dispatch::NOT_RUN;
     use crate::engine::testing::{
-        EchoTool, FakeClient, dead_test_session, empty_prompt, gate_with, inert_ops, reply_of,
+        EchoTool, FakeClient, dead_test_session, dispatch_with, empty_prompt, inert_ops, reply_of,
         reply_turn, test_session, text_block, text_turn, thinking_block, with_stop,
     };
-    #[cfg(unix)]
-    use crate::file_tracker::FileTracker;
     use crate::message::{Replay, Role};
     use crate::model::ResolvedModelId;
-    use crate::permission::GateTarget;
     use crate::protocol::{CapturingSink, Decision, ResumeTarget, ToolCall, ToolResult};
     use crate::tool::{
-        DEFAULT_TOOL_ICON, ReadExcerptLine, Tool, ToolMetadata, ToolOutput, ToolRegistry,
-        ToolResultView,
+        DEFAULT_TOOL_ICON, Prepared, ReadExcerptLine, Tool, ToolCtx, ToolMetadata, ToolOutput,
+        ToolRegistry, ToolResultView, ToolSpec,
     };
 
     // ── Fixtures ──
@@ -511,31 +508,27 @@ mod tests {
     struct PathViewTool;
 
     impl Tool for PathViewTool {
-        fn name(&self) -> &'static str {
-            "path_view"
-        }
-
-        fn description(&self) -> &'static str {
-            "view a path"
-        }
-
-        fn permission_class(&self) -> crate::permission::PermissionClass {
-            crate::permission::PermissionClass::Read
-        }
-
-        fn input_schema(&self) -> serde_json::Value {
-            json!({"type": "object"})
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: "path_view".to_owned(),
+                description: "view a path".to_owned(),
+                input_schema: json!({"type": "object"}),
+                class: crate::permission::PermissionClass::Read,
+                parallel_safe: true,
+            }
         }
 
         fn path_field(&self) -> Option<&'static str> {
             Some("file_path")
         }
 
-        fn run(
-            &self,
-            input: serde_json::Value,
-        ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + '_>> {
+        fn run<'a>(
+            &'a self,
+            prepared: Prepared,
+            _ctx: &'a ToolCtx,
+        ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + 'a>> {
             Box::pin(async move {
+                let input = prepared.input;
                 if input.get("fail").is_some() {
                     return ToolOutput::error("cannot view notes");
                 }
@@ -549,6 +542,7 @@ mod tests {
             input: &serde_json::Value,
             _content: &str,
             metadata: &ToolMetadata,
+            _cwd: &Path,
         ) -> Option<ToolResultView> {
             Some(ToolResultView::ReadExcerpt {
                 path: input["file_path"].as_str().unwrap_or_default().to_owned(),
@@ -587,26 +581,21 @@ mod tests {
     }
 
     impl Tool for GateTool {
-        fn name(&self) -> &'static str {
-            "gate"
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: "gate".to_owned(),
+                description: "blocks until the turn is cancelled".to_owned(),
+                input_schema: json!({"type": "object"}),
+                class: crate::permission::PermissionClass::Bash,
+                parallel_safe: false,
+            }
         }
 
-        fn description(&self) -> &'static str {
-            "blocks until the turn is cancelled"
-        }
-
-        fn permission_class(&self) -> crate::permission::PermissionClass {
-            crate::permission::PermissionClass::Bash
-        }
-
-        fn input_schema(&self) -> serde_json::Value {
-            json!({"type": "object"})
-        }
-
-        fn run(
-            &self,
-            _input: serde_json::Value,
-        ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + '_>> {
+        fn run<'a>(
+            &'a self,
+            _prepared: Prepared,
+            _ctx: &'a ToolCtx,
+        ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + 'a>> {
             let started = self.started.clone();
             Box::pin(async move {
                 started.notify_one();
@@ -637,17 +626,16 @@ mod tests {
             .collect()
     }
 
-    /// Gate that bypasses every rule (`yolo`), so the turn tests exercise the loop without the
-    /// permission layer interceding. The `dispatch` and `permission` tests cover the gate itself.
-    fn yolo_gate() -> GateContext<'static> {
-        GateContext {
-            policy: Box::leak(Box::new(crate::permission::Policy::new(
-                crate::permission::Mode::Yolo,
-                vec![],
-                vec![],
-            ))),
-            cwd: std::path::Path::new("."),
-        }
+    /// Dispatch context in `cwd` whose gate bypasses every rule (`yolo`), so the turn tests
+    /// exercise the loop without the permission layer interceding. The `dispatch` and
+    /// `permission` tests cover the gate itself.
+    fn yolo_in(cwd: &Path) -> DispatchContext<'static> {
+        dispatch_with(crate::permission::Mode::Yolo, &[], &[], cwd)
+    }
+
+    /// [`yolo_in`] for a turn whose tools touch no files.
+    fn yolo_dispatch() -> DispatchContext<'static> {
+        yolo_in(Path::new("/repo"))
     }
 
     /// Answers every approval request with `decision` over the agent's own `ops`, the way the
@@ -692,7 +680,7 @@ mod tests {
             &session,
             &mut inert_ops(),
             None,
-            &mut yolo_gate(),
+            &mut yolo_dispatch(),
         )
         .await
         .unwrap();
@@ -731,7 +719,7 @@ mod tests {
             &session,
             &mut inert_ops(),
             None,
-            &mut yolo_gate(),
+            &mut yolo_dispatch(),
         )
         .await
         .unwrap();
@@ -766,7 +754,7 @@ mod tests {
             &session,
             &mut inert_ops(),
             None,
-            &mut yolo_gate(),
+            &mut yolo_dispatch(),
         )
         .await
         .unwrap();
@@ -806,7 +794,7 @@ mod tests {
             &session,
             &mut inert_ops(),
             None,
-            &mut yolo_gate(),
+            &mut yolo_dispatch(),
         )
         .await
         .unwrap();
@@ -836,7 +824,7 @@ mod tests {
             &session,
             &mut inert_ops(),
             None,
-            &mut yolo_gate(),
+            &mut yolo_dispatch(),
         )
         .await
         .unwrap();
@@ -892,6 +880,7 @@ mod tests {
     async fn agent_turn_resolves_result_views_from_the_unpinned_input_and_tool_metadata() {
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
+        let cwd = tempfile::tempdir().unwrap();
         let client = FakeClient::new(vec![
             tool_use_turn("tool_1", "path_view", r#"{"file_path":"notes.txt"}"#),
             tool_use_turn(
@@ -914,21 +903,13 @@ mod tests {
             &session,
             &mut inert_ops(),
             None,
-            &mut yolo_gate(),
+            &mut yolo_in(cwd.path()),
         )
         .await
         .unwrap();
 
-        let mut pinned = json!({"file_path": "notes.txt"});
-        PathViewTool.pin_target(
-            &mut pinned,
-            &GateTarget::for_path("notes.txt", Path::new(".")),
-        );
-        let pinned = pinned["file_path"].as_str().unwrap();
-        assert_ne!(
-            pinned, "notes.txt",
-            "the gate must pin the path the tool runs on"
-        );
+        let pinned = dunce::canonicalize(cwd.path()).unwrap().join("notes.txt");
+        let pinned = pinned.to_str().unwrap();
         let (_, results) = tool_events(&sink.events());
         assert_eq!(
             results,
@@ -985,7 +966,7 @@ mod tests {
             &session,
             &mut inert_ops(),
             None,
-            &mut yolo_gate(),
+            &mut yolo_dispatch(),
         )
         .await
         .unwrap();
@@ -1028,7 +1009,7 @@ mod tests {
             &session,
             &mut rx,
             None,
-            &mut yolo_gate(),
+            &mut yolo_dispatch(),
         )
         .await
         .expect("turn must complete");
@@ -1087,7 +1068,7 @@ mod tests {
             &session,
             &mut rx,
             None,
-            &mut yolo_gate(),
+            &mut yolo_dispatch(),
         )
         .await
         .expect("turn must complete");
@@ -1138,7 +1119,7 @@ mod tests {
             &session,
             &mut rx,
             None,
-            &mut yolo_gate(),
+            &mut yolo_dispatch(),
         )
         .await
         .expect_err("cancel must surface as Err(Cancelled)");
@@ -1158,7 +1139,7 @@ mod tests {
         let mut messages = vec![Message::user("write a story")];
         let (tx, mut rx) = mpsc::channel::<Op>(1);
         let prompt = empty_prompt();
-        let mut gate = yolo_gate();
+        let mut dispatch_ctx = yolo_dispatch();
 
         let (outcome, ()) = tokio::join!(
             agent_turn(
@@ -1170,7 +1151,7 @@ mod tests {
                 &session,
                 &mut rx,
                 None,
-                &mut gate,
+                &mut dispatch_ctx,
             ),
             async {
                 while sink.events().is_empty() {
@@ -1213,7 +1194,7 @@ mod tests {
             &session,
             &mut rx,
             None,
-            &mut yolo_gate(),
+            &mut yolo_dispatch(),
         )
         .await
         .expect_err("shutdown must surface as Err(Shutdown)");
@@ -1244,7 +1225,7 @@ mod tests {
             &session,
             &mut rx,
             None,
-            &mut yolo_gate(),
+            &mut yolo_dispatch(),
         )
         .await
         .expect_err("dead channel must surface as Err(Shutdown)");
@@ -1294,7 +1275,7 @@ mod tests {
                 &session,
                 &mut rx,
                 None,
-                &mut yolo_gate(),
+                &mut yolo_dispatch(),
             )
             .await;
             assert!(outcome.result.is_ok(), "turn must complete despite {op:?}");
@@ -1326,7 +1307,7 @@ mod tests {
         let mut messages = vec![Message::user("kick off")];
         let (tx, mut rx) = mpsc::channel::<Op>(1);
         let prompt = empty_prompt();
-        let mut gate = yolo_gate();
+        let mut dispatch_ctx = yolo_dispatch();
 
         let (turn_result, ()) = tokio::join!(
             agent_turn(
@@ -1338,7 +1319,7 @@ mod tests {
                 &session,
                 &mut rx,
                 None,
-                &mut gate,
+                &mut dispatch_ctx,
             ),
             async {
                 started.notified().await;
@@ -1419,7 +1400,7 @@ mod tests {
         let mut messages = vec![Message::user("kick off")];
         let (tx, mut rx) = mpsc::channel::<Op>(1);
         let prompt = empty_prompt();
-        let mut gate = yolo_gate();
+        let mut dispatch_ctx = yolo_dispatch();
 
         let (outcome, ()) = tokio::join!(
             agent_turn(
@@ -1431,7 +1412,7 @@ mod tests {
                 &session,
                 &mut rx,
                 None,
-                &mut gate,
+                &mut dispatch_ctx,
             ),
             async {
                 started.notified().await;
@@ -1474,7 +1455,7 @@ mod tests {
             &session,
             &mut inert_ops(),
             None,
-            &mut yolo_gate(),
+            &mut yolo_dispatch(),
         )
         .await
         .unwrap();
@@ -1517,7 +1498,7 @@ mod tests {
             &session,
             &mut inert_ops(),
             None,
-            &mut yolo_gate(),
+            &mut yolo_dispatch(),
         )
         .await
         .unwrap();
@@ -1573,7 +1554,7 @@ mod tests {
             &session,
             &mut inert_ops(),
             Some(CAP),
-            &mut yolo_gate(),
+            &mut yolo_dispatch(),
         )
         .await
         .expect_err("cap must trip");
@@ -1608,7 +1589,7 @@ mod tests {
             &session,
             &mut inert_ops(),
             Some(CAP),
-            &mut yolo_gate(),
+            &mut yolo_dispatch(),
         )
         .await;
 
@@ -1647,7 +1628,7 @@ mod tests {
             &session,
             &mut inert_ops(),
             None,
-            &mut yolo_gate(),
+            &mut yolo_dispatch(),
         )
         .await
         .expect("unbounded loop must reach the text-only round");
@@ -1673,7 +1654,7 @@ mod tests {
             &session,
             &mut inert_ops(),
             None,
-            &mut yolo_gate(),
+            &mut yolo_dispatch(),
         )
         .await
         .expect_err("api error must propagate");
@@ -1709,7 +1690,7 @@ mod tests {
             &session,
             &mut inert_ops(),
             None,
-            &mut yolo_gate(),
+            &mut yolo_dispatch(),
         )
         .await;
 
@@ -1750,7 +1731,7 @@ mod tests {
             &session,
             &mut inert_ops(),
             None,
-            &mut yolo_gate(),
+            &mut yolo_dispatch(),
         )
         .await
         .unwrap();
@@ -1786,7 +1767,7 @@ mod tests {
             &session,
             &mut inert_ops(),
             None,
-            &mut yolo_gate(),
+            &mut yolo_dispatch(),
         )
         .await
         .unwrap();
@@ -1820,7 +1801,7 @@ mod tests {
             &session,
             &mut inert_ops(),
             None,
-            &mut yolo_gate(),
+            &mut yolo_dispatch(),
         )
         .await
         .unwrap();
@@ -1869,7 +1850,7 @@ mod tests {
             &session,
             &mut inert_ops(),
             None,
-            &mut yolo_gate(),
+            &mut yolo_dispatch(),
         )
         .await
         .expect_err("a truncated reply fails the turn");
@@ -1914,7 +1895,7 @@ mod tests {
             &session,
             &mut inert_ops(),
             None,
-            &mut yolo_gate(),
+            &mut yolo_dispatch(),
         )
         .await
         .unwrap();
@@ -1942,7 +1923,7 @@ mod tests {
             &session,
             &mut inert_ops(),
             None,
-            &mut yolo_gate(),
+            &mut yolo_dispatch(),
         )
         .await
         .expect_err("a cut stream fails the turn");
@@ -2016,7 +1997,7 @@ mod tests {
             &session,
             &mut inert_ops(),
             None,
-            &mut yolo_gate(),
+            &mut yolo_dispatch(),
         )
         .await;
         (outcome, messages, sink)
@@ -2191,7 +2172,12 @@ mod tests {
             &session,
             &mut inert_ops(),
             None,
-            &mut gate_with(crate::permission::Mode::Auto, &[], &["bash"]),
+            &mut dispatch_with(
+                crate::permission::Mode::Auto,
+                &[],
+                &["bash"],
+                Path::new("/repo"),
+            ),
         )
         .await
         .unwrap();
@@ -2264,7 +2250,7 @@ mod tests {
                 &session,
                 &mut ops,
                 None,
-                &mut gate_with(crate::permission::Mode::Auto, &[], &[]),
+                &mut dispatch_with(crate::permission::Mode::Auto, &[], &[], Path::new("/repo")),
             )
             .await;
 
@@ -2316,13 +2302,8 @@ mod tests {
             tool_use_turn("tool_1", "write", &input),
             text_turn("Done"),
         ]);
-        let tools = ToolRegistry::new(vec![Box::new(crate::tool::write::WriteTool::new(
-            Arc::new(FileTracker::default()),
-        ))]);
-        let mut gate = GateContext {
-            cwd: &cwd,
-            ..gate_with(crate::permission::Mode::Auto, &[], &[])
-        };
+        let tools = ToolRegistry::new(vec![Box::new(crate::tool::write::WriteTool)]);
+        let mut dispatch_ctx = dispatch_with(crate::permission::Mode::Auto, &[], &[], &cwd);
         let mut messages = vec![Message::user("take notes")];
         let (op_tx, mut ops) = mpsc::channel(4);
         let sink = ReplyingSink {
@@ -2340,7 +2321,7 @@ mod tests {
             &session,
             &mut ops,
             None,
-            &mut gate,
+            &mut dispatch_ctx,
         )
         .await
         .unwrap();

@@ -10,7 +10,7 @@ use tracing::debug;
 use super::merge::{Origins, merge};
 use super::provenance::Layer;
 use super::schema::FileConfig;
-use crate::permission::parse_rules;
+use crate::permission::{extra_root, parse_rules};
 use crate::util::path::{XdgBase, app_dir};
 
 const CONFIG_FILE: &str = "config.toml";
@@ -128,7 +128,7 @@ pub(crate) fn user_config_path() -> Option<PathBuf> {
 
 /// Parses one layer. `Ok(None)` when the user file is missing, and `Err` when a file is unreadable,
 /// including a drop-in symlink whose target is gone, fails the schema, holds a malformed
-/// permission rule, or is a project file setting a user-only key.
+/// permission rule or extra root, or is a project file setting a user-only key.
 fn read_layer(layer: &Layer) -> Result<Option<Table>> {
     let path = layer.path();
     let content = match std::fs::read_to_string(path) {
@@ -142,7 +142,7 @@ fn read_layer(layer: &Layer) -> Result<Option<Table>> {
     };
 
     // The typed parse reports unknown keys and bad values with their line and column, and the
-    // rules parse here so a malformed one names its file before the lists concatenate.
+    // rules and roots resolve here so a malformed one names its file before the lists concatenate.
     let invalid = || format!("invalid config at {}", path.display());
     let config: FileConfig = toml::from_str(&content).with_context(invalid)?;
     for rules in [&config.permission.allow, &config.permission.deny]
@@ -154,6 +154,9 @@ fn read_layer(layer: &Layer) -> Result<Option<Table>> {
     if layer.is_project() {
         reject_project_secrets(&config, path)?;
         reject_project_permissions(&config, path)?;
+    }
+    for raw in config.permission.extra_roots.iter().flatten() {
+        extra_root(raw).with_context(invalid)?;
     }
     let table = content.parse().with_context(invalid)?;
     debug!("loaded config from {}", path.display());
@@ -174,8 +177,8 @@ fn reject_project_secrets(config: &FileConfig, path: &Path) -> Result<()> {
     )
 }
 
-/// A project file is untrusted, so it may only add `deny` rules. Setting `mode` or `allow` there
-/// is a hard error so the user learns the setting did not take effect.
+/// A project file is untrusted, so it may only add `deny` rules. Setting `mode`, `allow`, or
+/// `extra_roots` there is a hard error so the user learns the setting did not take effect.
 fn reject_project_permissions(config: &FileConfig, path: &Path) -> Result<()> {
     let permission = &config.permission;
     reject_project_keys(
@@ -183,8 +186,9 @@ fn reject_project_permissions(config: &FileConfig, path: &Path) -> Result<()> {
         &[
             (permission.mode.is_some(), "permission.mode"),
             (permission.allow.is_some(), "permission.allow"),
+            (permission.extra_roots.is_some(), "permission.extra_roots"),
         ],
-        "A project file may only add permission.deny. Set mode and allow in \
+        "A project file may only add permission.deny. Set mode, allow, and extra_roots in \
          ~/.config/ox/config.toml (or mode via OX_PERMISSION_MODE).",
     )
 }
@@ -689,8 +693,9 @@ mod tests {
     }
 
     #[test]
-    fn read_layer_rejects_permission_mode_and_allow_in_a_project() {
-        // A project file may tighten (deny) but never widen (mode / allow), so both are blocked.
+    fn read_layer_rejects_permission_mode_allow_and_extra_roots_in_a_project() {
+        // A project file may tighten (deny) but never widen (mode, allow, extra roots), so each
+        // widening key is blocked.
         let dir = tempfile::tempdir().unwrap();
         let path = write(
             &dir.path().join(".ox/config.toml"),
@@ -698,13 +703,19 @@ mod tests {
                 [permission]
                 mode = "yolo"
                 allow = ["bash(rm -rf:*)"]
+                extra_roots = ["~/"]
             "#},
         );
 
         let err = read_layer(&Layer::Project(path)).expect_err("project widening must be blocked");
         let msg = format!("{err:#}");
-        assert!(msg.contains("permission.mode, permission.allow"), "{msg}");
-        assert!(msg.contains("only add permission.deny"), "{msg}");
+        assert!(
+            msg.contains(
+                "cannot set permission.mode, permission.allow, permission.extra_roots. A project \
+                 file may only add permission.deny."
+            ),
+            "{msg}"
+        );
     }
 
     #[test]

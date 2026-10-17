@@ -1,10 +1,16 @@
 //! Session-store access shared by the commands that act on saved sessions.
 
+use super::context::LiveSessionInfo;
 use crate::session::resolver::ResolveError;
 use crate::session::store::SessionStore;
 
-pub(super) fn open_store() -> Result<SessionStore, String> {
-    SessionStore::open().map_err(|e| format!("Session store unavailable: {e:#}"))
+/// Opens the store scoped to the session's working directory.
+pub(super) fn open_store(info: &LiveSessionInfo) -> Result<SessionStore, String> {
+    let cwd = info
+        .working_dir
+        .as_deref()
+        .ok_or("No working directory for this session.")?;
+    SessionStore::open(cwd).map_err(|e| format!("Session store unavailable: {e:#}"))
 }
 
 pub(super) fn resolve_error_message(error: ResolveError) -> String {
@@ -24,6 +30,7 @@ pub(super) fn resolve_error_message(error: ResolveError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::slash::test_session_info;
 
     // ── open_store ──
 
@@ -36,7 +43,7 @@ mod tests {
         let cause = std::fs::create_dir_all(&sessions_dir).unwrap_err();
 
         let err = temp_env::with_var("XDG_DATA_HOME", Some(data_home.as_os_str()), || {
-            open_store().err().unwrap()
+            open_store(&test_session_info()).err().unwrap()
         });
         assert_eq!(
             err,

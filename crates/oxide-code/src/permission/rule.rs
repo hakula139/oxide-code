@@ -392,11 +392,11 @@ fn glob_to_regex(glob: &str) -> Regex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::permission::{GateTarget, Zone};
+    use crate::permission::{Access, Workspace, Zone};
     use crate::util::path::testing::{HOME_VAR, abs};
 
-    fn cmd(s: &str) -> GateTarget {
-        GateTarget::for_command(s, Path::new("/repo"))
+    fn cmd(s: &str) -> Access {
+        Access::for_command(s, &Workspace::new(Path::new("/repo")))
     }
 
     fn path<'a>(canonical: &'a str, relative: Option<&'a str>) -> Target<'a> {

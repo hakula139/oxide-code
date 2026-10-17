@@ -20,7 +20,6 @@ use self::blocks::{
 };
 use self::stack::{Anchor, CachedBlock, SlotTops, Stack};
 use crate::protocol::{Interaction, ToolCall, ToolResult};
-use crate::tool::ToolResultView;
 use crate::tui::pending_calls::{PendingCalls, result_header};
 use crate::tui::theme::Theme;
 
@@ -221,19 +220,22 @@ impl ChatView {
     pub(crate) fn push_tool_call(&mut self, call: ToolCall) {
         self.commit_streaming();
         self.bump_paused_counter();
-        self.pending_calls.insert(call.id, call.label.clone());
+        self.pending_calls
+            .insert(call.id, call.label.clone(), self.blocks.len());
         self.push_block(ToolCallBlock::new(call.icon, call.label));
     }
 
-    /// Appends a tool result under the header [`result_header`] picks.
+    /// Adds a tool result under the header [`result_header`] picks. It goes right below its call,
+    /// even when calls that ran alongside it came after, so the chat reads like a resumed one.
     pub(crate) fn push_tool_result(&mut self, result: ToolResult) {
-        let header = result_header(result.title, self.pending_calls.remove(&result.id));
-        self.push_tool_result_view(&header, result.view, result.is_error);
-    }
-
-    fn push_tool_result_view(&mut self, header: &str, view: ToolResultView, is_error: bool) {
+        let (label, call_block) = self.pending_calls.remove(&result.id).unzip();
+        let header = result_header(result.title, label);
+        let block = ToolResultBlock::new(&header, result.view, result.is_error);
         self.bump_paused_counter();
-        self.push_block(ToolResultBlock::new(header, view, is_error));
+        match call_block.map(|call_block| call_block + 1) {
+            Some(at) if at < self.blocks.len() => self.insert_block(at, block),
+            _ => self.push_block(block),
+        }
     }
 
     /// Forgets calls whose results never arrived, such as those of a cancelled turn.
@@ -430,6 +432,15 @@ impl ChatView {
         self.blocks.push(CachedBlock::new(Box::new(block), &ctx));
     }
 
+    /// Inserts `block` at index `at`, so a paused view stays anchored on the block it showed.
+    fn insert_block(&mut self, at: usize, block: impl ChatBlock + 'static) {
+        let ctx = self.settings.ctx(self.viewport_width);
+        self.blocks
+            .insert(at, CachedBlock::new(Box::new(block), &ctx));
+        self.pending_calls.shift_from(at);
+        self.painted.insert_empty(at);
+    }
+
     /// Adopts the chat area, dropping the streaming prefix cache on a width change.
     fn set_viewport(&mut self, area: Rect) {
         self.viewport_height = area.height;
@@ -590,6 +601,7 @@ mod tests {
     use unicode_width::UnicodeWidthStr;
 
     use super::*;
+    use crate::tool::ToolResultView;
     use crate::tui::glyphs::{
         ASSISTANT_PREFIX, BAR, INTERRUPTED_MARKER, TOOL_BORDER_CONT, TOOL_ERROR, TOOL_SUCCESS,
     };
@@ -598,6 +610,13 @@ mod tests {
 
     fn test_chat() -> ChatView {
         ChatView::new(&Theme::default(), true)
+    }
+
+    impl ChatView {
+        fn push_tool_result_view(&mut self, header: &str, view: ToolResultView, is_error: bool) {
+            self.bump_paused_counter();
+            self.push_block(ToolResultBlock::new(header, view, is_error));
+        }
     }
 
     /// A call keyed by its label.
@@ -1820,6 +1839,47 @@ mod tests {
     }
 
     // ── push_tool_result ──
+
+    #[test]
+    fn push_tool_result_of_calls_that_ran_together_reads_like_the_resumed_chat() {
+        let mut live = test_chat();
+        live.push_tool_call(call("*", "Grep(a)"));
+        live.push_tool_call(call("*", "Grep(b)"));
+        live.push_tool_result(text_result("Grep(a)", "a hits", false, None));
+        live.push_tool_result(text_result("Grep(b)", "b hits", false, None));
+        let mut resumed = test_chat();
+
+        resumed.load_history(vec![
+            Interaction::ToolCall(call("*", "Grep(a)")),
+            Interaction::ToolResult(text_result("Grep(a)", "a hits", false, None)),
+            Interaction::ToolCall(call("*", "Grep(b)")),
+            Interaction::ToolResult(text_result("Grep(b)", "b hits", false, None)),
+        ]);
+
+        let rows = all_rows(&mut live, 40);
+        assert_eq!(rows, all_rows(&mut resumed, 40));
+        let order = ["* Grep(a)", "a hits", "* Grep(b)", "b hits"]
+            .map(|needle| rows.iter().position(|row| row.contains(needle)));
+        assert_eq!(order, [Some(0), Some(2), Some(4), Some(6)], "{rows:?}");
+    }
+
+    #[test]
+    fn push_tool_result_placed_above_a_paused_view_keeps_it_in_place() {
+        let mut chat = test_chat();
+        chat.push_tool_call(call("*", "Grep(a)"));
+        chat.push_tool_call(call("*", "Grep(b)"));
+        push_counting_block(&mut chat, 30);
+        render_chat(&mut chat, 20, 5);
+        chat.auto_scroll = false;
+        chat.scroll_offset = 12;
+        let before = screen_rows(&render_chat(&mut chat, 20, 5));
+
+        chat.push_tool_result(text_result("Grep(a)", "a hits", false, None));
+
+        let after = screen_rows(&render_chat(&mut chat, 20, 5));
+        assert_eq!(after, before);
+        assert_eq!(before[0], "row 10");
+    }
 
     #[test]
     fn push_tool_result_success() {

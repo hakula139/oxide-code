@@ -50,7 +50,7 @@ impl SlashCommand for DeleteCmd {
                     .to_owned(),
             );
         }
-        let store = open_store()?;
+        let store = open_store(ctx.info)?;
         let live_id = ctx.info.session_id.as_str();
         let info = resolve_saved_prefix(&store, arg, live_id)
             .map_err(resolve_error_message)?
@@ -153,7 +153,7 @@ mod tests {
     #[test]
     fn execute_typed_arg_unique_match_pushes_confirm_modal() {
         with_isolated_xdg(|_| {
-            let store = SessionStore::open().unwrap();
+            let store = open_store(&test_session_info()).unwrap();
             let target_id = stamped_id(0xab);
             seed_test_session(
                 &store,
@@ -203,7 +203,7 @@ mod tests {
         // A renamed file keeps its header id, so deleting by that id would unlink whichever file
         // is named after it.
         with_isolated_xdg(|_| {
-            let store = SessionStore::open().unwrap();
+            let store = open_store(&test_session_info()).unwrap();
             let header_id = stamped_id(0xab);
             seed_test_session(
                 &store,
@@ -244,7 +244,7 @@ mod tests {
         // The resolver drops the live id from its matches, so a prefix that matches only the live
         // session gets its own explanation.
         with_isolated_xdg(|_| {
-            let store = SessionStore::open().unwrap();
+            let store = open_store(&test_session_info()).unwrap();
             let live_id = "test-session";
             seed_test_session(
                 &store,
@@ -268,7 +268,7 @@ mod tests {
     fn execute_with_live_id_prefix_returns_other_match_when_one_exists() {
         // Live + a non-live session both match the prefix. The non-live one wins, no error.
         with_isolated_xdg(|_| {
-            let store = SessionStore::open().unwrap();
+            let store = open_store(&test_session_info()).unwrap();
             let live_id = "test-session";
             seed_test_session(
                 &store,
@@ -295,7 +295,7 @@ mod tests {
     #[test]
     fn execute_ambiguous_prefix_lists_short_ids_and_counts_the_rest() {
         with_isolated_xdg(|_| {
-            let store = SessionStore::open().unwrap();
+            let store = open_store(&test_session_info()).unwrap();
             for byte in 0xa0..=0xa5 {
                 seed_test_session(
                     &store,

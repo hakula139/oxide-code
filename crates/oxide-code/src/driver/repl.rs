@@ -269,7 +269,7 @@ mod tests {
     use crate::engine::testing::{
         engine, mount_reply, mount_tool_call_once, request_bodies, stopped_engine, with_pinned_home,
     };
-    use crate::permission::{GateTarget, PermissionClass, Policy};
+    use crate::permission::{Access, PermissionClass, Policy, Workspace};
     use crate::protocol::CapturingSink;
     use crate::session::store::testing::test_store;
     use crate::tool::bash::BashTool;
@@ -286,7 +286,7 @@ mod tests {
         Policy::default()
             .session_grant(
                 PermissionClass::Bash,
-                &GateTarget::for_command(command, Path::new("/repo")),
+                &Access::for_command(command, &Workspace::new(Path::new("/repo"))),
             )
             .unwrap()
     }

@@ -1,7 +1,9 @@
 //! Stdio rendering of engine events for the `--no-tui` REPL and `--prompt` headless modes.
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::io::Write;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use anyhow::Result;
 use tokio::sync::mpsc;
@@ -104,11 +106,23 @@ impl Approver for Unattended {
 /// [`escape_controls`], so it cannot redraw the terminal around a REPL approval prompt.
 pub(super) struct StdioSink {
     show_thinking: bool,
+    calls: Mutex<StartedCalls>,
+}
+
+/// The started calls awaiting a result, so a result printed after another call's header can repeat
+/// its own.
+#[derive(Default)]
+struct StartedCalls {
+    headers: HashMap<String, String>,
+    last: Option<String>,
 }
 
 impl StdioSink {
     pub(super) fn new(show_thinking: bool) -> Self {
-        Self { show_thinking }
+        Self {
+            show_thinking,
+            calls: Mutex::default(),
+        }
     }
 
     pub(super) fn render<W1: Write, W2: Write>(
@@ -133,19 +147,14 @@ impl StdioSink {
                     writeln!(stderr, "{}", escape_controls(text.trim()))?;
                 }
             }
-            Event::ToolCallStart(ToolCall { icon, label, .. }) => {
-                writeln!(stderr, "{icon} {}", escape_controls(&label))?;
+            Event::ToolCallStart(ToolCall {
+                id, icon, label, ..
+            }) => {
+                let header = format!("{icon} {}", escape_controls(&label));
+                writeln!(stderr, "{header}")?;
+                self.calls().start(id, header);
             }
-            Event::ToolCallEnd(ToolResult { content, title, .. }) => {
-                if let Some(title) = title {
-                    writeln!(stderr, "  {}", escape_controls(&title))?;
-                }
-                let trimmed = content.trim();
-                if !trimmed.is_empty() {
-                    writeln!(stderr, "{}", escape_controls(trimmed))?;
-                }
-                writeln!(stderr)?;
-            }
+            Event::ToolCallEnd(result) => self.render_result(result, stderr)?,
             Event::TasksUpdated(tasks) => write!(stderr, "{}", task_lines(&tasks))?,
             Event::SessionCompacted {
                 pre_count,
@@ -216,6 +225,46 @@ impl StdioSink {
     }
 }
 
+impl StdioSink {
+    fn calls(&self) -> MutexGuard<'_, StartedCalls> {
+        self.calls.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Writes a call's result under its title, after its call's header again when another call's
+    /// header came after it.
+    fn render_result(&self, result: ToolResult, stderr: &mut impl Write) -> Result<()> {
+        let ToolResult {
+            id, content, title, ..
+        } = result;
+        if let Some(header) = self.calls().end(&id) {
+            writeln!(stderr, "{header}")?;
+        }
+        if let Some(title) = title {
+            writeln!(stderr, "  {}", escape_controls(&title))?;
+        }
+        let trimmed = content.trim();
+        if !trimmed.is_empty() {
+            writeln!(stderr, "{}", escape_controls(trimmed))?;
+        }
+        writeln!(stderr)?;
+        Ok(())
+    }
+}
+
+impl StartedCalls {
+    fn start(&mut self, id: String, header: String) {
+        self.headers.insert(id.clone(), header);
+        self.last = Some(id);
+    }
+
+    /// The header to repeat above the result of the call `id`, when another call's header was
+    /// printed after its own.
+    fn end(&mut self, id: &str) -> Option<String> {
+        let repeat = self.last.take().as_deref() != Some(id);
+        self.headers.remove(id).filter(|_| repeat)
+    }
+}
+
 impl EventSink for StdioSink {
     fn send(&self, event: Event) -> Result<()> {
         let stdout = std::io::stdout();
@@ -269,7 +318,7 @@ mod tests {
     use super::*;
     use crate::client::{RateLimitWindow, RateLimits};
     use crate::config::compaction::AutoCompactionConfig;
-    use crate::permission::{GateTarget, PermissionClass, Policy};
+    use crate::permission::{Access, PermissionClass, Policy, Workspace};
     use crate::protocol::{CapturingSink, FailingSink};
     use crate::tool::tasks::TaskStatus;
     use crate::tool::tasks::testing::{plan, task};
@@ -315,7 +364,7 @@ mod tests {
         Policy::default()
             .session_grant(
                 PermissionClass::Bash,
-                &GateTarget::for_command(command, Path::new("/repo")),
+                &Access::for_command(command, &Workspace::new(Path::new("/repo"))),
             )
             .unwrap()
     }
@@ -565,6 +614,42 @@ mod tests {
                 file2
 
             "}
+        );
+    }
+
+    #[test]
+    fn render_tool_call_end_after_another_call_started_repeats_its_header() {
+        let sink = test_sink(false);
+        let start = |id: &str| {
+            Event::ToolCallStart(ToolCall {
+                id: id.to_owned(),
+                name: "grep".to_owned(),
+                input: serde_json::json!({}),
+                icon: "*".to_owned(),
+                label: format!("Grep({id})"),
+            })
+        };
+
+        let rendered = [
+            start("a"),
+            start("b"),
+            Event::ToolCallEnd(text_result("a", "a hits", false, None)),
+            Event::ToolCallEnd(text_result("b", "b hits", false, None)),
+            start("c"),
+            Event::ToolCallEnd(text_result("c", "c hits", false, None)),
+        ]
+        .map(|event| render_one(&sink, event).1);
+
+        assert_eq!(
+            rendered,
+            [
+                "* Grep(a)\n",
+                "* Grep(b)\n",
+                "* Grep(a)\na hits\n\n",
+                "* Grep(b)\nb hits\n\n",
+                "* Grep(c)\n",
+                "c hits\n\n",
+            ],
         );
     }
 

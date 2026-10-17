@@ -1215,8 +1215,8 @@ mod tests {
         let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
         let prompt = parent_prompt();
         let tools = [ToolDefinition {
-            name: "read",
-            description: "Read a file.",
+            name: "read".to_owned(),
+            description: "Read a file.".to_owned(),
             input_schema: json!({"type": "object"}),
         }];
         let transcript = tool_heavy_transcript();

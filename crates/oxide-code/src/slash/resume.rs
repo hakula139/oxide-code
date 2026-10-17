@@ -78,7 +78,7 @@ impl SlashCommand for ResumeCmd {
             return Ok(SlashOutcome::Forward(Action::Op(command::resume(args)?)));
         }
         Ok(SlashOutcome::Modal(Box::new(ResumePicker::new(
-            open_store()?,
+            open_store(ctx.info)?,
             ctx.info.session_id.clone(),
         ))))
     }

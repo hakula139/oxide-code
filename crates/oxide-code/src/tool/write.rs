@@ -3,63 +3,37 @@
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::Arc;
 
 use serde::Deserialize;
 
 use super::{
-    ApprovalBody, ApprovalPreview, Tool, ToolOutput, WriteMode, extract_input_field,
-    summarize_path_call,
+    ApprovalBody, ApprovalPreview, Prepared, Tool, ToolCtx, ToolOutput, ToolSpec, WriteMode,
+    extract_input_field, summarize_path_call,
 };
 use crate::file_tracker::{FileTracker, GatePurpose};
 use crate::permission::PermissionClass;
 
-pub(crate) struct WriteTool {
-    tracker: Arc<FileTracker>,
-}
-
-impl WriteTool {
-    pub(crate) fn new(tracker: Arc<FileTracker>) -> Self {
-        Self { tracker }
-    }
-}
+pub(crate) struct WriteTool;
 
 impl Tool for WriteTool {
-    fn name(&self) -> &'static str {
-        "write"
-    }
-
-    fn description(&self) -> &'static str {
-        "Write content to a file, creating it if it does not exist or overwriting it if it does. \
-         Before overwriting an existing file, Read all of it in this session, in one Read or \
-         by paging with offset and limit. \
-         The Read-before-Edit gate shared with the Edit tool also refuses files that changed \
-         externally since the last Read. Creating a new file skips the gate."
-    }
-
-    fn permission_class(&self) -> PermissionClass {
-        PermissionClass::Edit
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "write".to_owned(),
+            description: "Write content to a file, creating it if it does not exist or \
+                          overwriting it if it does. Before overwriting an existing file, Read \
+                          all of it in this session, in one Read or by paging with offset and \
+                          limit. The Read-before-Edit gate shared with the Edit tool also refuses \
+                          files that changed externally since the last Read. Creating a new file \
+                          skips the gate."
+                .to_owned(),
+            input_schema: input_schema(),
+            class: PermissionClass::Edit,
+            parallel_safe: false,
+        }
     }
 
     fn path_field(&self) -> Option<&'static str> {
         Some("file_path")
-    }
-
-    fn input_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "file_path": {
-                    "type": "string",
-                    "description": "The absolute path to the file to write"
-                },
-                "content": {
-                    "type": "string",
-                    "description": "The content to write to the file"
-                }
-            },
-            "required": ["file_path", "content"]
-        })
     }
 
     fn icon(&self) -> &'static str {
@@ -70,35 +44,40 @@ impl Tool for WriteTool {
         extract_input_field(input, "file_path")
     }
 
-    fn summarize_call(&self, input: &serde_json::Value) -> String {
-        summarize_path_call(self.name(), input, "file_path")
+    fn summarize_call(&self, name: &str, input: &serde_json::Value, cwd: &Path) -> String {
+        summarize_path_call(name, input, "file_path", cwd)
     }
 
-    fn approval_preview(&self, input: &serde_json::Value) -> ApprovalPreview {
+    fn approval_preview(
+        &self,
+        name: &str,
+        input: &serde_json::Value,
+        cwd: &Path,
+    ) -> ApprovalPreview {
         let content = extract_input_field(input, "content").unwrap_or_default();
         let current = extract_input_field(input, "file_path")
-            .map(current_text)
+            .map(|path| current_text(&cwd.join(path), path))
             .unwrap_or_default();
         ApprovalPreview {
-            title: self.summarize_call(input),
+            title: self.summarize_call(name, input, cwd),
             body: ApprovalBody::Diff(vec![super::edit::synthesize_chunk(&current, content)]),
         }
     }
 
-    fn run(
-        &self,
-        input: serde_json::Value,
-    ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + '_>> {
-        let tracker = Arc::clone(&self.tracker);
-        Box::pin(run(input, tracker))
+    fn run<'a>(
+        &'a self,
+        prepared: Prepared,
+        ctx: &'a ToolCtx,
+    ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + 'a>> {
+        Box::pin(run(prepared.input, ctx))
     }
 }
 
-/// The text an overwrite would replace. A missing file, or one the write refuses (a symlink, a
-/// non-regular or oversized file), previews as empty.
-fn current_text(path: &str) -> String {
+/// The text an overwrite of `path`, spelled `shown`, would replace. A missing file, or one the write
+/// refuses (a symlink, a non-regular or oversized file), previews as empty.
+fn current_text(path: &Path, shown: &str) -> String {
     let writable = std::fs::symlink_metadata(path)
-        .is_ok_and(|meta| validate_write_target(path, &meta).is_ok());
+        .is_ok_and(|meta| validate_write_target(shown, &meta).is_ok());
     if !writable {
         return String::new();
     }
@@ -109,6 +88,23 @@ fn current_text(path: &str) -> String {
 
 // ── Input ──
 
+fn input_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "file_path": {
+                "type": "string",
+                "description": "The absolute path to the file to write"
+            },
+            "content": {
+                "type": "string",
+                "description": "The content to write to the file"
+            }
+        },
+        "required": ["file_path", "content"]
+    })
+}
+
 #[derive(Deserialize)]
 struct Input {
     file_path: String,
@@ -117,13 +113,13 @@ struct Input {
 
 // ── Execution ──
 
-async fn run(raw: serde_json::Value, tracker: Arc<FileTracker>) -> ToolOutput {
+async fn run(raw: serde_json::Value, ctx: &ToolCtx) -> ToolOutput {
     let input: Input = match super::parse_input(raw) {
         Ok(v) => v,
         Err(e) => return e,
     };
 
-    match write_file(&input.file_path, &input.content, &tracker).await {
+    match write_file(&input.file_path, &input.content, ctx).await {
         Ok((content, is_new)) => {
             let verb = if is_new { "Created" } else { "Updated" };
             ToolOutput::success(content)
@@ -133,14 +129,11 @@ async fn run(raw: serde_json::Value, tracker: Arc<FileTracker>) -> ToolOutput {
     }
 }
 
-/// Returns `(message, is_new)` on success, where `is_new` means the write created the file.
-async fn write_file(
-    path: &str,
-    content: &str,
-    tracker: &Arc<FileTracker>,
-) -> Result<(String, bool), String> {
-    let file_path = Path::new(path);
-    let pre_meta = match tokio::fs::symlink_metadata(path).await {
+/// Returns `(message, is_new)` on success, where `is_new` means the write created the file. A
+/// relative `path` resolves against the context's cwd.
+async fn write_file(path: &str, content: &str, ctx: &ToolCtx) -> Result<(String, bool), String> {
+    let file_path = ctx.cwd().join(path);
+    let pre_meta = match tokio::fs::symlink_metadata(&file_path).await {
         Ok(meta) => Some(meta),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(format!("Error reading {path}: {e}")),
@@ -149,7 +142,7 @@ async fn write_file(
 
     if let Some(meta) = &pre_meta {
         validate_write_target(path, meta)?;
-        check_gate(&super::tracker_key(path).await, path, tracker).await?;
+        check_gate(&file_path, path, &ctx.tracker).await?;
     }
 
     if let Some(parent) = file_path.parent() {
@@ -163,7 +156,7 @@ async fn write_file(
     } else {
         WriteMode::Overwrite
     };
-    super::write_tracked(tracker, path, content.as_bytes().to_vec(), mode)
+    super::write_tracked(ctx, &file_path, content.as_bytes().to_vec(), mode)
         .await
         .map_err(|e| format!("Failed to write file: {e}"))?;
 
@@ -186,12 +179,12 @@ fn validate_write_target(path: &str, metadata: &std::fs::Metadata) -> Result<(),
     super::validate_file_target(path, metadata, "write")
 }
 
-async fn check_gate(key: &Path, path: &str, tracker: &FileTracker) -> Result<(), String> {
+async fn check_gate(path: &Path, shown: &str, tracker: &FileTracker) -> Result<(), String> {
     let bytes = tokio::fs::read(path)
         .await
-        .map_err(|e| format!("Error reading {path}: {e}"))?;
+        .map_err(|e| format!("Error reading {shown}: {e}"))?;
     tracker
-        .verify_current_content(key, &bytes, GatePurpose::Write)
+        .verify_current_content(&super::tracker_key(path).await, &bytes, GatePurpose::Write)
         .map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -199,24 +192,26 @@ async fn check_gate(key: &Path, path: &str, tracker: &FileTracker) -> Result<(),
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::file_tracker::{
-        MAX_TRACKED_FILE_SIZE,
-        testing::{seed_full_read, tracker},
-    };
+    use crate::file_tracker::MAX_TRACKED_FILE_SIZE;
+    use crate::file_tracker::testing::seed_full_read;
     use crate::tool::read::ReadTool;
-    use crate::tool::testing::{canonical_tempdir, symlink_file};
+    use crate::tool::testing::{self, canonical_tempdir, ctx, symlink_file, temp_ctx};
 
     // ── approval_preview ──
 
     #[test]
     fn approval_preview_renders_content_as_an_all_added_diff() {
-        let tool = WriteTool::new(Arc::new(FileTracker::default()));
-        let preview = tool.approval_preview(&serde_json::json!({
-            "file_path": "src/new.rs",
-            "content": "fn main() {}",
-        }));
+        let tool = WriteTool;
+        let preview = tool.approval_preview(
+            "write",
+            &serde_json::json!({
+                "file_path": "/repo/src/new.rs",
+                "content": "fn main() {}",
+            }),
+            Path::new("/repo"),
+        );
 
-        assert!(preview.title.contains("src/new.rs"));
+        assert_eq!(preview.title, "Write(src/new.rs)");
         let ApprovalBody::Diff(chunks) = preview.body else {
             panic!("write preview should be a diff");
         };
@@ -230,12 +225,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("notes.txt");
         std::fs::write(&path, "keep\nold line\n").unwrap();
-        let tool = WriteTool::new(Arc::new(FileTracker::default()));
+        let tool = WriteTool;
 
-        let preview = tool.approval_preview(&serde_json::json!({
-            "file_path": path,
-            "content": "keep\nnew line\n",
-        }));
+        let preview = tool.approval_preview(
+            "write",
+            &serde_json::json!({
+                "file_path": path,
+                "content": "keep\nnew line\n",
+            }),
+            dir.path(),
+        );
         let ApprovalBody::Diff(chunks) = preview.body else {
             panic!("write preview should be a diff");
         };
@@ -252,12 +251,16 @@ mod tests {
         std::fs::write(&secret, "token").unwrap();
         let link = dir.path().join("link.txt");
         symlink_file(&secret, &link);
-        let tool = WriteTool::new(Arc::new(FileTracker::default()));
+        let tool = WriteTool;
 
-        let preview = tool.approval_preview(&serde_json::json!({
-            "file_path": link,
-            "content": "new",
-        }));
+        let preview = tool.approval_preview(
+            "write",
+            &serde_json::json!({
+                "file_path": link,
+                "content": "new",
+            }),
+            dir.path(),
+        );
         let ApprovalBody::Diff(chunks) = preview.body else {
             panic!("write preview should be a diff");
         };
@@ -274,12 +277,12 @@ mod tests {
         let dir = canonical_tempdir();
         let path = dir.path().join("new.txt");
 
-        let output = WriteTool::new(tracker())
-            .run(serde_json::json!({
-                "file_path": path.to_str().unwrap(),
-                "content": "hello world"
-            }))
-            .await;
+        let input = serde_json::json!({
+            "file_path": path.to_str().unwrap(),
+            "content": "hello world"
+        });
+
+        let output = testing::run(&WriteTool, input, &ctx(dir.path())).await;
 
         assert!(!output.is_error);
         assert!(output.content.contains("created"));
@@ -289,7 +292,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_missing_required_fields_reports_input_error() {
-        let output = run(serde_json::json!({"file_path": "/tmp/x"}), tracker()).await;
+        let output = run(serde_json::json!({"file_path": "/tmp/x"}), &temp_ctx()).await;
         assert!(output.is_error);
         assert!(output.content.contains("Invalid input"));
     }
@@ -300,15 +303,15 @@ mod tests {
         let dir = canonical_tempdir();
         let path = dir.path().join("existing.txt");
         std::fs::write(&path, "old").unwrap();
-        let tracker_arc = Arc::new(FileTracker::default());
-        seed_full_read(&tracker_arc, &path);
+        let ctx = temp_ctx();
+        seed_full_read(&ctx.tracker, &path);
 
         let output = run(
             serde_json::json!({
                 "file_path": path.to_str().unwrap(),
                 "content": "new",
             }),
-            tracker_arc,
+            &ctx,
         )
         .await;
 
@@ -332,7 +335,7 @@ mod tests {
                 "file_path": path.to_str().unwrap(),
                 "content": "new",
             }),
-            tracker(),
+            &temp_ctx(),
         )
         .await;
 
@@ -350,7 +353,7 @@ mod tests {
         let dir = canonical_tempdir();
         let path = dir.path().join("new.txt");
 
-        let (msg, is_new) = write_file(path.to_str().unwrap(), "content", &tracker())
+        let (msg, is_new) = write_file(path.to_str().unwrap(), "content", &temp_ctx())
             .await
             .unwrap();
         assert!(msg.contains("created"));
@@ -359,12 +362,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn write_file_resolves_a_relative_path_against_the_ctx_cwd() {
+        let dir = canonical_tempdir();
+        let ctx = ctx(dir.path());
+
+        let (msg, is_new) = write_file("notes/new.txt", "content", &ctx).await.unwrap();
+
+        assert_eq!(msg, "Successfully created notes/new.txt.");
+        assert!(is_new);
+        let path = dir.path().join("notes/new.txt");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "content");
+        assert_eq!(
+            ctx.tracker
+                .verify_current_content(&path, b"content", GatePurpose::Write),
+            Ok(()),
+        );
+    }
+
+    #[tokio::test]
     async fn write_file_existing_without_read_is_rejected() {
         let dir = canonical_tempdir();
         let path = dir.path().join("existing.txt");
         std::fs::write(&path, "old content").unwrap();
 
-        let err = write_file(path.to_str().unwrap(), "new content", &tracker())
+        let err = write_file(path.to_str().unwrap(), "new content", &temp_ctx())
             .await
             .unwrap_err();
         assert!(
@@ -380,10 +401,10 @@ mod tests {
         let path = dir.path().join("existing.txt");
         std::fs::write(&path, "old content").unwrap();
 
-        let tracker = tracker();
-        seed_full_read(&tracker, &path);
+        let ctx = temp_ctx();
+        seed_full_read(&ctx.tracker, &path);
 
-        let (msg, is_new) = write_file(path.to_str().unwrap(), "new content", &tracker)
+        let (msg, is_new) = write_file(path.to_str().unwrap(), "new content", &ctx)
             .await
             .unwrap();
         assert!(msg.contains("updated"));
@@ -396,23 +417,29 @@ mod tests {
         let dir = canonical_tempdir();
         let path = dir.path().join("existing.txt");
         std::fs::write(&path, "one\ntwo\nthree\n").unwrap();
-        let tracker = tracker();
-        let read = ReadTool::new(Arc::clone(&tracker));
+        let ctx = temp_ctx();
+        let read = ReadTool;
 
-        let first = read
-            .run(serde_json::json!({"file_path": path, "limit": 2}))
-            .await;
+        let first = testing::run(
+            &read,
+            serde_json::json!({"file_path": path, "limit": 2}),
+            &ctx,
+        )
+        .await;
         assert!(!first.is_error, "{}", first.content);
-        let err = write_file(path.to_str().unwrap(), "new", &tracker)
+        let err = write_file(path.to_str().unwrap(), "new", &ctx)
             .await
             .unwrap_err();
         assert!(err.contains("only been read in part"), "{err}");
 
-        let rest = read
-            .run(serde_json::json!({"file_path": path, "offset": 3}))
-            .await;
+        let rest = testing::run(
+            &read,
+            serde_json::json!({"file_path": path, "offset": 3}),
+            &ctx,
+        )
+        .await;
         assert!(!rest.is_error, "{}", rest.content);
-        write_file(path.to_str().unwrap(), "new", &tracker)
+        write_file(path.to_str().unwrap(), "new", &ctx)
             .await
             .unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
@@ -425,11 +452,11 @@ mod tests {
         let path = dir.path().join("existing.txt");
         std::fs::write(&path, "old content").unwrap();
 
-        let tracker = tracker();
-        seed_full_read(&tracker, &path);
+        let ctx = temp_ctx();
+        seed_full_read(&ctx.tracker, &path);
         std::fs::write(&path, "external edit").unwrap();
 
-        let err = write_file(path.to_str().unwrap(), "our edit", &tracker)
+        let err = write_file(path.to_str().unwrap(), "our edit", &ctx)
             .await
             .unwrap_err();
         assert!(
@@ -445,15 +472,17 @@ mod tests {
         let dir = canonical_tempdir();
         std::fs::create_dir(dir.path().join("real")).unwrap();
         std::os::unix::fs::symlink(dir.path().join("real"), dir.path().join("link")).unwrap();
-        let tracker = tracker();
+        let ctx = temp_ctx();
 
         let via_link = dir.path().join("link/new.txt");
-        write_file(via_link.to_str().unwrap(), "fresh", &tracker)
+        write_file(via_link.to_str().unwrap(), "fresh", &ctx)
             .await
             .unwrap();
 
         let real = dir.path().join("real/new.txt");
-        let result = tracker.verify_current_content(&real, b"fresh", GatePurpose::Write);
+        let result = ctx
+            .tracker
+            .verify_current_content(&real, b"fresh", GatePurpose::Write);
         assert_eq!(result, Ok(()));
     }
 
@@ -462,7 +491,7 @@ mod tests {
         let dir = canonical_tempdir();
         let path = dir.path().join("a").join("b").join("c.txt");
 
-        write_file(path.to_str().unwrap(), "deep", &tracker())
+        write_file(path.to_str().unwrap(), "deep", &temp_ctx())
             .await
             .unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "deep");
@@ -473,7 +502,7 @@ mod tests {
         let dir = canonical_tempdir();
         let path = dir.path().join("empty.txt");
 
-        write_file(path.to_str().unwrap(), "", &tracker())
+        write_file(path.to_str().unwrap(), "", &temp_ctx())
             .await
             .unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
@@ -488,7 +517,7 @@ mod tests {
         std::fs::write(&blocker, "I am a file").unwrap();
 
         let path = blocker.join("child.txt");
-        let err = write_file(path.to_str().unwrap(), "content", &tracker())
+        let err = write_file(path.to_str().unwrap(), "content", &temp_ctx())
             .await
             .unwrap_err();
         assert!(
@@ -501,7 +530,7 @@ mod tests {
     #[tokio::test]
     async fn write_file_rejects_directory_before_gate() {
         let dir = canonical_tempdir();
-        let err = write_file(dir.path().to_str().unwrap(), "content", &tracker())
+        let err = write_file(dir.path().to_str().unwrap(), "content", &temp_ctx())
             .await
             .unwrap_err();
         assert!(
@@ -517,7 +546,7 @@ mod tests {
         let f = std::fs::File::create(&path).unwrap();
         f.set_len(MAX_TRACKED_FILE_SIZE + 1).unwrap();
 
-        let err = write_file(path.to_str().unwrap(), "content", &tracker())
+        let err = write_file(path.to_str().unwrap(), "content", &temp_ctx())
             .await
             .unwrap_err();
         assert!(
@@ -534,7 +563,7 @@ mod tests {
         let link = dir.path().join("notes.md");
         symlink_file(&target, &link);
 
-        let err = write_file(link.to_str().unwrap(), "payload", &tracker())
+        let err = write_file(link.to_str().unwrap(), "payload", &temp_ctx())
             .await
             .unwrap_err();
         assert!(
@@ -551,7 +580,7 @@ mod tests {
         let path = dir.path().join("socket");
         let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
 
-        let err = write_file(path.to_str().unwrap(), "content", &tracker())
+        let err = write_file(path.to_str().unwrap(), "content", &temp_ctx())
             .await
             .unwrap_err();
         assert!(
@@ -568,11 +597,11 @@ mod tests {
         let dir = canonical_tempdir();
         let path = dir.path().join("locked.txt");
         std::fs::write(&path, "original").unwrap();
-        let tracker = tracker();
-        seed_full_read(&tracker, &path);
+        let ctx = temp_ctx();
+        seed_full_read(&ctx.tracker, &path);
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
 
-        let err = write_file(path.to_str().unwrap(), "overwrite", &tracker)
+        let err = write_file(path.to_str().unwrap(), "overwrite", &ctx)
             .await
             .unwrap_err();
         assert!(
@@ -595,7 +624,7 @@ mod tests {
         let path = readonly.join("nested").join("file.txt");
         std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o555)).unwrap();
 
-        let err = write_file(path.to_str().unwrap(), "content", &tracker())
+        let err = write_file(path.to_str().unwrap(), "content", &temp_ctx())
             .await
             .unwrap_err();
         let expected = format!(

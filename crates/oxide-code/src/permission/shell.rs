@@ -11,7 +11,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tree_sitter::{Node, Parser};
 
-use crate::permission::GateTarget;
+use crate::permission::{Access, Workspace};
 use crate::util::path::expand_user;
 
 /// Shells, whose `-c` script, script file, or stdin is code the analysis does not see.
@@ -201,16 +201,16 @@ pub(crate) struct CommandTarget {
     /// `eval` scripts.
     segments: Vec<Segment>,
     /// The files its output redirections write, resolved like an edit's path.
-    writes: Vec<GateTarget>,
+    writes: Vec<Access>,
     /// Whether it runs code the analysis does not see or cannot place.
     opaque: bool,
 }
 
 impl CommandTarget {
-    /// Parses `command`, resolving the files it reads and writes against `cwd`.
-    pub(crate) fn parse(command: &str, cwd: &Path) -> Self {
+    /// Parses `command`, resolving the files it reads and writes in `workspace`.
+    pub(crate) fn parse(command: &str, workspace: &Workspace) -> Self {
         let mut walk = Walk {
-            cwd,
+            workspace,
             segments: Vec::new(),
             writes: Vec::new(),
             opaque: false,
@@ -234,7 +234,7 @@ impl CommandTarget {
         &self.segments
     }
 
-    pub(super) fn writes(&self) -> &[GateTarget] {
+    pub(super) fn writes(&self) -> &[Access] {
         &self.writes
     }
 
@@ -255,7 +255,7 @@ pub(super) struct Segment {
     words: Vec<String>,
     /// The files a shipped known-safe read-only command reads, resolved like a read's path, or
     /// `None` for any other command.
-    safe_reads: Option<Vec<GateTarget>>,
+    safe_reads: Option<Vec<Access>>,
 }
 
 impl Segment {
@@ -267,7 +267,7 @@ impl Segment {
         &self.words
     }
 
-    pub(super) fn safe_reads(&self) -> Option<&[GateTarget]> {
+    pub(super) fn safe_reads(&self) -> Option<&[Access]> {
         self.safe_reads.as_deref()
     }
 }
@@ -276,9 +276,9 @@ impl Segment {
 
 /// What one command and the scripts nested in it run and write, gathered over its syntax tree.
 struct Walk<'a> {
-    cwd: &'a Path,
+    workspace: &'a Workspace,
     segments: Vec<Segment>,
-    writes: Vec<GateTarget>,
+    writes: Vec<Access>,
     opaque: bool,
     /// Whether some segment changes the working directory.
     changes_dir: bool,
@@ -390,7 +390,7 @@ impl Walk<'_> {
                 self.relative_path |= operands.iter().any(|path| Path::new(path).is_relative());
                 operands
                     .iter()
-                    .map(|operand| GateTarget::for_path(operand, self.cwd))
+                    .map(|operand| Access::for_path(operand, self.workspace))
                     .collect()
             });
         let start = unsafe_assignment.unwrap_or(named[0].node).start_byte();
@@ -491,7 +491,7 @@ impl Walk<'_> {
             return;
         }
         self.relative_path |= Path::new(&path).is_relative();
-        self.writes.push(GateTarget::for_path(&path, self.cwd));
+        self.writes.push(Access::for_path(&path, self.workspace));
     }
 }
 
@@ -865,7 +865,7 @@ mod tests {
     }
 
     fn parse(command: &str) -> CommandTarget {
-        CommandTarget::parse(command, Path::new("/repo"))
+        CommandTarget::parse(command, &Workspace::new(Path::new("/repo")))
     }
 
     fn texts(command: &str) -> Vec<String> {
@@ -882,11 +882,11 @@ mod tests {
 
     /// Each write's path relative to `cwd`, or as requested outside it.
     fn writes(command: &str, cwd: &Path) -> Vec<String> {
-        CommandTarget::parse(command, cwd)
+        CommandTarget::parse(command, &Workspace::new(cwd))
             .writes
             .into_iter()
             .map(|write| match write {
-                GateTarget::Path {
+                Access::Path {
                     relative,
                     requested,
                     ..
@@ -1109,8 +1109,8 @@ mod tests {
         );
         let outside = abs("/etc/hosts");
         assert_eq!(
-            CommandTarget::parse(&format!("echo a > {outside}"), &cwd).writes,
-            [GateTarget::for_path(&outside, &cwd)]
+            CommandTarget::parse(&format!("echo a > {outside}"), &Workspace::new(&cwd)).writes,
+            [Access::for_path(&outside, &Workspace::new(&cwd))]
         );
     }
 
@@ -1126,7 +1126,7 @@ mod tests {
         ] {
             assert!(writes(command, &cwd).is_empty(), "{command:?}");
             assert!(
-                !CommandTarget::parse(command, &cwd).is_opaque(),
+                !CommandTarget::parse(command, &Workspace::new(&cwd)).is_opaque(),
                 "{command:?}"
             );
         }
@@ -1143,9 +1143,11 @@ mod tests {
 
     #[test]
     fn safe_operands_names_every_word_that_may_be_a_file() {
-        let command =
-            CommandTarget::parse("grep -fpats --file=more -e x -- -y src", Path::new("/repo"));
-        let at = |name: &str| GateTarget::for_path(name, Path::new("/repo"));
+        let command = CommandTarget::parse(
+            "grep -fpats --file=more -e x -- -y src",
+            &Workspace::new(Path::new("/repo")),
+        );
+        let at = |name: &str| Access::for_path(name, &Workspace::new(Path::new("/repo")));
         assert_eq!(
             command.segments[0].safe_reads,
             Some(vec![at("pats"), at("more"), at("x"), at("-y"), at("src")])
@@ -1252,7 +1254,10 @@ mod tests {
             let reads = parse(command).segments[0].safe_reads.clone().unwrap();
             assert_eq!(
                 reads,
-                [GateTarget::for_path("a.rs", Path::new("/repo"))],
+                [Access::for_path(
+                    "a.rs",
+                    &Workspace::new(Path::new("/repo"))
+                )],
                 "{command:?}"
             );
         }

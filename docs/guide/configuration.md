@@ -16,7 +16,7 @@ Run `/config` to see each resolved value next to the layer that set it: `default
 
 Each file sets only the keys it names, and a later layer wins key by key, so a drop-in that sets `client.effort` keeps the `client.model` from `config.toml`. Tables merge recursively, including `[tui.theme.overrides]`.
 
-- **`permission.allow` and `permission.deny`** concatenate, so the rules from every layer apply.
+- **`permission.allow`, `permission.deny`, and `permission.extra_roots`** concatenate, so the entries from every layer apply.
 - **Other arrays**, such as `tui.status_line`, come whole from the last layer that sets them.
 - **`auto_threshold_tokens` and `auto_threshold_percent`** act as one setting, so a layer that sets either replaces both.
 
@@ -24,7 +24,7 @@ Each file sets only the keys it names, and a later layer wins key by key, so a d
 
 `config.d/` lets a dotfile manager, a Nix module, or a team script own one file without editing your `config.toml`. Drop-ins load after `config.toml`, sorted by file name byte by byte, so a numeric prefix such as `10-team.toml` or `50-nix.toml` sets their order. Hidden files, subdirectories, and files without a `.toml` extension are skipped, and a symlink loads its target.
 
-Drop-ins share the `config.toml` schema and count as user config. An invalid drop-in, including a symlink whose target is missing, stops startup with an error that names the file. A malformed permission rule names the file that holds it in the same way.
+Drop-ins share the `config.toml` schema and count as user config. An invalid drop-in, including a symlink whose target is missing, stops startup with an error that names the file. A malformed permission rule or extra root names the file that holds it in the same way.
 
 ### Project config
 
@@ -208,17 +208,18 @@ See [Theming](theming.md) for the full slot reference, color value formats (hex,
 
 ### `[permission]`: Tool approval
 
-Every tool call passes a permission check before running. In the default `auto` mode, reads anywhere and edits inside the working directory run without asking, and other edits and `bash` calls open an approval prompt. Press `y` to approve, `a` to approve and allow matching calls for the rest of the session, `n` to deny, `f` to deny and tell the model why, or Esc to deny and end the turn. With `f`, type the feedback and press Enter, and the model receives it as the call's result. Enter does nothing at the choice, and the prompt ignores keys until you pause typing for 300 ms, so keystrokes or a paste meant for the input box cannot answer it.
+Every tool call passes a permission check before running. In the default `auto` mode, reads anywhere and edits inside the working directory or an `extra_roots` directory run without asking, and other edits and `bash` calls open an approval prompt. Press `y` to approve, `a` to approve and allow matching calls for the rest of the session, `n` to deny, `f` to deny and tell the model why, or Esc to deny and end the turn. With `f`, type the feedback and press Enter, and the model receives it as the call's result. Enter does nothing at the choice, and the prompt ignores keys until you pause typing for 300 ms, so keystrokes or a paste meant for the input box cannot answer it.
 
 The `--no-tui` REPL asks on stderr with the same choices and reads the answer from the next input line, using `x` to end the turn. It asks only when stdin is a terminal. A REPL reading piped input and a headless run (`-p`) cannot ask, so they deny the call and tell the model which rule to add to the `allow` list, such as `"bash(cargo test)"`.
 
 The `a` key opens the allow rule it will add, in the syntax below, so you can widen or narrow it before pressing Enter. The rule must still cover the call being approved. The prompt offers `a` only when such a rule would let the call run, so a protected path, a chained command such as `cargo test | tail`, or a command containing `*` or an invisible character offers none. The rule lives in memory until you exit, `/clear`, `/archive`, or `/resume` another session, `/status` lists it, and deny rules and protected paths still take precedence over it.
 
-| Key     | Type   | Default  | Description                                                    |
-| ------- | ------ | -------- | -------------------------------------------------------------- |
-| `mode`  | string | `"auto"` | `"auto"`, `"plan"` (read-only), or `"yolo"` (user config only) |
-| `allow` | array  | `[]`     | Rules that run without asking (user config only)               |
-| `deny`  | array  | `[]`     | Rules that never run, in every mode                            |
+| Key           | Type   | Default  | Description                                                        |
+| ------------- | ------ | -------- | ------------------------------------------------------------------ |
+| `mode`        | string | `"auto"` | `"auto"`, `"plan"` (read-only), or `"yolo"` (user config only)     |
+| `allow`       | array  | `[]`     | Rules that run without asking (user config only)                   |
+| `deny`        | array  | `[]`     | Rules that never run, in every mode                                |
+| `extra_roots` | array  | `[]`     | More directories whose edits run without asking (user config only) |
 
 ```toml
 [permission]
@@ -228,7 +229,7 @@ deny = ["read(**/.env)", "bash(git push:*)"]
 
 Rules follow the format `class(specifier)`. The class is `read` (read, grep, glob, and tasks tools), `edit` (edit and write), or `bash`, and a bare class name or `class(*)` matches every call in that class. A path-scoped `read` rule never matches a `tasks` call, so only a class-wide `read` deny turns off the task list.
 
-- **`bash`** specifiers match commands exactly (`bash(git status)`), by prefix (`bash(cargo test:*)`), or by wildcard (`bash(git *)`). Each specifier matches one simple command after wrappers such as `env`, `nice`, and `timeout` and redirections are set aside, so `bash(cargo test:*)` covers `nice cargo test 2>&1`. A leading `VAR=value` assignment is set aside too when it only changes output, as `RUST_LOG`, `LANG`, and `NO_COLOR` do. Any other assignment stays part of the command, so `CARGO_TARGET_DIR=/tmp cargo test` needs a rule that names it. A command chained with `;`, `&&`, `||`, or `|` is allowed only when every part is, and writing a file with `>` also needs that file to be inside the working directory or allowed by an `edit` rule. A deny rule matches when any part matches, including a quoted or full-path command name such as `/bin/rm`. A command that hides what it runs, such as `$(...)`, `eval`, or `sh -c`, is never allowed by a rule, so it asks unless a deny rule matches. Read-only commands such as `ls`, `cat`, `grep`, `find` without `-exec` or `-delete`, and `sed` without `-i` run without asking.
+- **`bash`** specifiers match commands exactly (`bash(git status)`), by prefix (`bash(cargo test:*)`), or by wildcard (`bash(git *)`). Each specifier matches one simple command after wrappers such as `env`, `nice`, and `timeout` and redirections are set aside, so `bash(cargo test:*)` covers `nice cargo test 2>&1`. A leading `VAR=value` assignment is set aside too when it only changes output, as `RUST_LOG`, `LANG`, and `NO_COLOR` do. Any other assignment stays part of the command, so `CARGO_TARGET_DIR=/tmp cargo test` needs a rule that names it. A command chained with `;`, `&&`, `||`, or `|` is allowed only when every part is, and writing a file with `>` also needs that file to be inside the working directory or an extra root, or allowed by an `edit` rule. A deny rule matches when any part matches, including a quoted or full-path command name such as `/bin/rm`. A command that hides what it runs, such as `$(...)`, `eval`, or `sh -c`, is never allowed by a rule, so it asks unless a deny rule matches. Read-only commands such as `ls`, `cat`, `grep`, `find` without `-exec` or `-delete`, and `sed` without `-i` run without asking.
 - **`read` and `edit`** specifiers are path globs where `*` and `?` match within one path segment and `**` spans segments. A relative glob matches paths inside the working directory, so `edit(*.json)` covers `package.json` but not `src/a.json`. A glob starting with `/` or `~/` matches the absolute path after symlinks resolve.
 - **Deny and allow** match paths differently. An allow rule matches only the resolved path, with exact case and spelling. A deny rule also matches the path as the call writes it and, when the rule's literal leading directories run through a symlink at startup, the location they resolve to. It treats names that differ only in case, Unicode normalization, invisible characters, or trailing dots as the same name, so `read(**/.env)` also blocks `.ENV`. A `read` deny rule also hides the files it matches from a `grep` or `glob` over their directory, and the output counts the hidden files without naming them.
 
@@ -239,11 +240,13 @@ In `auto` mode, edits to these paths need approval even when an allow rule match
 - **Parent / file pairs.** `.cargo/config`, `.cargo/config.toml`, `.claude/settings.json`, and `.claude/settings.local.json`.
 - **Application directories.** oxide-code's own config, data, and state directories.
 
-Their names compare the way deny rules compare names, in the path as written and as resolved, and a symlinked protected name in the launch directory protects its target as well. A `deny` rule still denies such an edit, and the built-in deny list blocks edits under the launch directory's own `.git`.
+Their names compare the way deny rules compare names, in the path as written and as resolved, and a symlinked protected name in the launch directory or an extra root protects its target as well. A `deny` rule still denies such an edit, and the built-in deny list blocks edits under the launch directory's own `.git`.
 
-Launching from `/` or your home directory turns off the auto-allow for edits inside it, so those edits need an allow rule or an approval. So does an edit to a file with more than one hard link.
+Each `extra_roots` entry is an absolute or `~/` path, such as `"~/src/shared-lib"`, and the user config and drop-ins add to one list. Symlinks in it resolve at startup, and a relative entry, `/`, your home directory, or a parent of it fails the config load. Protected paths inside an extra root still need approval.
 
-`plan` mode denies all edit and `bash` calls. `yolo` mode never asks and skips the built-in deny list (`rm -rf`, `curl | sh`, and similar), but it still honors your `deny` rules. A project config can only add `deny` rules, and setting `mode` or `allow` there fails the config load, so a repository can restrict what runs but never widen it. The environment variable `OX_PERMISSION_MODE` overrides `mode`.
+Launching from `/`, your home directory, or a parent of it turns off the auto-allow for every edit, `extra_roots` included, so those edits need an allow rule or an approval. So does an edit to a file with more than one hard link.
+
+`plan` mode denies all edit and `bash` calls. `yolo` mode never asks and skips the built-in deny list (`rm -rf`, `curl | sh`, and similar), but it still honors your `deny` rules. A project config can only add `deny` rules, and setting `mode`, `allow`, or `extra_roots` there fails the config load, so a repository can restrict what runs but never widen it. The environment variable `OX_PERMISSION_MODE` overrides `mode`.
 
 ## Authentication
 

@@ -36,6 +36,7 @@ pub(crate) fn test_config(base_url: impl Into<String>, auth: Auth, model: &str) 
         prompt_cache_ttl: PromptCacheTtl::OneHour,
         compaction: CompactionConfig::disabled(),
         permission: crate::permission::Policy::default(),
+        workspace: crate::permission::Workspace::new(std::path::Path::new("/repo")),
         show_thinking: false,
         show_welcome: true,
         status_line: StatusLineSegment::DEFAULT.to_vec(),
