@@ -12,7 +12,10 @@ use crate::tui::glyphs::task_marker;
 use crate::tui::theme::Theme;
 use crate::util::text::truncate_to_width;
 
-/// Rows the panel takes at most, the last one summarizing the tasks a longer list hides.
+/// Blank rows that set the panel apart from the chat above it.
+const GAP_ROWS: u16 = 1;
+
+/// Task rows the panel shows at most, the last one summarizing the tasks a longer list hides.
 const MAX_ROWS: usize = 6;
 
 /// Left margin that lines rows up with the chat blocks above.
@@ -41,12 +44,24 @@ impl TaskPanel {
         &self.tasks
     }
 
+    /// The gap plus a row per task up to the cap, or 0 for an empty list.
     pub(crate) fn height(&self) -> u16 {
-        u16::try_from(self.tasks.len().min(MAX_ROWS)).unwrap_or(u16::MAX)
+        if self.tasks.is_empty() {
+            return 0;
+        }
+        let rows = u16::try_from(self.tasks.len().min(MAX_ROWS)).unwrap_or(u16::MAX);
+        GAP_ROWS + rows
     }
 
-    /// Fills `area` with tasks, giving its last row to a summary of the rest when they don't fit.
+    /// Fills `area` with tasks below the gap, giving its last row to a summary of the rest when
+    /// they don't fit. A single-row area drops the gap so the row still shows a task or summary.
     pub(crate) fn render(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+        let gap = GAP_ROWS.min(area.height.saturating_sub(1));
+        let area = Rect {
+            y: area.y + gap,
+            height: area.height - gap,
+            ..area
+        };
         let rows = usize::from(area.height);
         let shown = if self.tasks.len() > rows {
             window(&self.tasks, rows.saturating_sub(1))
@@ -184,15 +199,15 @@ mod tests {
     // ── TaskPanel::height ──
 
     #[test]
-    fn height_counts_each_task_up_to_the_row_cap() {
+    fn height_counts_the_gap_and_each_task_up_to_the_row_cap() {
         let mut panel = TaskPanel::default();
         assert_eq!(panel.height(), 0);
 
         panel.set(plan());
-        assert_eq!(panel.height(), 3);
+        assert_eq!(panel.height(), 4);
 
         panel.set(long_plan());
-        assert_eq!(panel.height(), 6);
+        assert_eq!(panel.height(), 7);
     }
 
     // ── TaskPanel::render ──
@@ -204,10 +219,11 @@ mod tests {
         let mut panel = TaskPanel::default();
         panel.set(plan());
 
-        let rows = render_rows(&panel, 40, 3);
+        let rows = render_rows(&panel, 40, panel.height());
 
+        assert_eq!(rows[0].0, "");
         assert_eq!(
-            rows,
+            rows[1..],
             [
                 (
                     "  ✓ Read the config loader".to_owned(),
@@ -232,6 +248,7 @@ mod tests {
         assert_eq!(
             texts(render_rows(&panel, 26, panel.height())),
             [
+                "",
                 "  ✓ Step 3",
                 "  ● Step 4",
                 "  ○ Step 5 needs a very...",
@@ -243,13 +260,24 @@ mod tests {
     }
 
     #[test]
-    fn render_keeps_the_summary_row_when_the_area_is_shorter() {
+    fn render_keeps_the_gap_and_summary_row_when_the_area_is_shorter() {
         let mut panel = TaskPanel::default();
         panel.set(long_plan());
 
         assert_eq!(
-            texts(render_rows(&panel, 40, 3)),
-            ["  ✓ Step 3", "  ● Step 4", "  +4 pending, 2 completed"],
+            texts(render_rows(&panel, 40, 4)),
+            ["", "  ✓ Step 3", "  ● Step 4", "  +4 pending, 2 completed"],
+        );
+    }
+
+    #[test]
+    fn render_drops_the_gap_when_the_area_holds_one_row() {
+        let mut panel = TaskPanel::default();
+        panel.set(long_plan());
+
+        assert_eq!(
+            texts(render_rows(&panel, 40, 1)),
+            ["  +1 in progress, 4 pending, 3 completed"],
         );
     }
 

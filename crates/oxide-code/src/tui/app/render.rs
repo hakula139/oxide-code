@@ -331,10 +331,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn draw_frame_with_conversation_and_tool_call() {
-        let (mut app, _rx, _event_tx) = test_app(None);
-        app.chat.push_user_message("what files are here?".into());
+    /// Pushes a finished `ls` call listing two files.
+    fn push_ls_call(app: &mut App) {
         app.chat.push_tool_call(ToolCall {
             id: "t1".to_owned(),
             name: "bash".to_owned(),
@@ -351,6 +349,13 @@ mod tests {
                 content: "README.md\nCargo.toml".to_owned(),
             },
         });
+    }
+
+    #[test]
+    fn draw_frame_with_conversation_and_tool_call() {
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.chat.push_user_message("what files are here?".into());
+        push_ls_call(&mut app);
         app.chat.append_stream_token("Two files.");
         app.chat.commit_streaming();
         insta::assert_snapshot!(render_app(&mut app, 60, 12));
@@ -517,20 +522,28 @@ mod tests {
     }
 
     #[test]
+    fn draw_frame_leaves_a_blank_row_between_tool_output_and_the_task_panel() {
+        let (mut app, _rx, _event_tx) = test_app(None);
+        push_ls_call(&mut app);
+        app.handle_engine_event(Event::TasksUpdated(plan()));
+        insta::assert_snapshot!(render_app(&mut app, 60, 12));
+    }
+
+    #[test]
     fn draw_frame_gives_the_input_its_rows_before_the_task_panel() {
         let (mut app, _rx, _event_tx) = test_app(None);
-        app.input.set_text("one\ntwo\nthree\nfour\nfive");
+        app.input.set_text("one\ntwo\nthree\nfour");
         app.handle_engine_event(Event::TasksUpdated(plan()));
 
         let text = rendered_text(&mut app, 40, 12);
         let rows: Vec<&str> = text.lines().map(str::trim_end).collect();
 
         assert_eq!(
-            rows[3..5],
-            ["  ● Add the entry type", "  +1 pending, 1 completed"]
+            rows[3..6],
+            ["", "  ● Add the entry type", "  +1 pending, 1 completed"]
         );
-        assert_eq!(rows[5], "─".repeat(40));
-        assert!(rows[6].ends_with("one"), "{text}");
+        assert_eq!(rows[6], "─".repeat(40));
+        assert!(rows[7].ends_with("one"), "{text}");
     }
 
     #[test]
