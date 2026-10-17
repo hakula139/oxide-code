@@ -48,6 +48,7 @@ pub(crate) async fn run(
         version: env!("CARGO_PKG_VERSION"),
         session_id: engine.session_id().to_owned(),
         session_allow: Vec::new(),
+        auto_compaction_paused_after: None,
         config,
     };
     let interactions = engine.take_history();

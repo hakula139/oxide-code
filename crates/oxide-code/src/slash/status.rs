@@ -31,6 +31,12 @@ impl SlashCommand for StatusCmd {
 fn build_modal(info: &LiveSessionInfo) -> KvOverview {
     let model = &info.config.model;
     let model = format!("{} ({})", model.display_name(), model.id());
+    let auto_compaction = match info.auto_compaction_paused_after {
+        Some(failures) => {
+            format!("paused after {failures} failures in a row (run /compact to resume)")
+        }
+        None => display_auto_compaction(info.config.compaction.auto),
+    };
     let rows = vec![
         ("Model".to_owned(), model),
         ("Effort".to_owned(), display_effort(info.config.effort)),
@@ -42,10 +48,7 @@ fn build_modal(info: &LiveSessionInfo) -> KvOverview {
             "Prompt Cache TTL".to_owned(),
             info.config.prompt_cache_ttl.to_string(),
         ),
-        (
-            "Auto Compaction".to_owned(),
-            display_auto_compaction(info.config.compaction.auto),
-        ),
+        ("Auto Compaction".to_owned(), auto_compaction),
         (
             "Show Thinking".to_owned(),
             display_bool(info.config.show_thinking).to_owned(),
@@ -130,12 +133,27 @@ mod tests {
     }
 
     #[test]
-    fn build_modal_renders_resolved_auto_compaction() {
-        let info = test_session_info();
-        let m = build_modal(&info);
-        let rendered = render_modal(&m, 80);
+    fn build_modal_renders_the_auto_compaction_threshold_until_paused() {
+        let mut info = test_session_info();
+        let auto_compaction_row = |info: &LiveSessionInfo| {
+            let rendered = render_modal(&build_modal(info), 80);
+            rendered
+                .lines()
+                .find(|line| line.contains("Auto Compaction"))
+                .map(|line| line.trim().to_owned())
+        };
 
-        assert!(rendered.contains("Auto Compaction"), "{rendered}");
-        assert!(rendered.contains("at 155000 tokens"), "{rendered}");
+        let threshold = auto_compaction_row(&info);
+        info.auto_compaction_paused_after = Some(3);
+        let paused = auto_compaction_row(&info);
+
+        assert_eq!(
+            threshold.as_deref(),
+            Some("Auto Compaction    at 155000 tokens"),
+        );
+        assert_eq!(
+            paused.as_deref(),
+            Some("Auto Compaction    paused after 3 failures in a row (run /compact to resume)"),
+        );
     }
 }

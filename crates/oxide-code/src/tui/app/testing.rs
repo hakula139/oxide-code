@@ -56,6 +56,7 @@ pub(super) fn test_session_info() -> LiveSessionInfo {
         version: "0.0.0-test",
         session_id: "test-session".to_owned(),
         session_allow: Vec::new(),
+        auto_compaction_paused_after: None,
         config: ConfigSnapshot {
             auth: Some(crate::config::auth::AuthSource::ApiKeyEnv),
             signed_out_notice: None,
