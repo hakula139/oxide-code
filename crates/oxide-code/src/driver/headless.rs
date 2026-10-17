@@ -7,7 +7,7 @@ use anyhow::Result;
 use clap::ValueEnum;
 use serde::Serialize;
 
-use super::stdio::{StdioSink, Unattended, render_turn};
+use super::stdio::{StdioSink, Unattended, render_op};
 use super::{Exit, shutdown_signal};
 use crate::engine::{Engine, EngineHandle, TurnEnd};
 use crate::protocol::{Event, EventSink, Op, UsageSnapshot};
@@ -37,12 +37,19 @@ where
     O: Write + Send,
     E: Write + Send,
 {
-    let prompt = slash::unescape_literal(prompt).to_owned();
-    // A send fails only once the engine has stopped, which `render_turn` then reports.
-    _ = handle.ops.send(Op::Prompt(prompt)).await;
+    let prompt = Op::Prompt(slash::unescape_literal(prompt).to_owned());
+    // A send fails only once the engine has stopped, which `render_op` then reports.
+    _ = handle.ops.send(prompt.clone()).await;
     let mut approver = Unattended;
+    let rendered = render_op(
+        &mut handle.events,
+        printer,
+        &handle.ops,
+        &prompt,
+        &mut approver,
+    );
     let (end, exit) = tokio::select! {
-        end = render_turn(&mut handle.events, printer, &handle.ops, &mut approver) => match end {
+        end = rendered => match end {
             Some(TurnEnd::Completed) => (TurnEnd::Completed, Exit::Success),
             Some(end) => (end, Exit::Failure),
             None => {

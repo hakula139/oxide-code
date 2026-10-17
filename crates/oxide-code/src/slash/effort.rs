@@ -7,9 +7,9 @@ use super::context::SlashContext;
 use super::effort_slider::EffortSlider;
 use super::matcher::rank_by_prefix;
 use super::registry::{ArgCompletion, SlashCommand, SlashKind, SlashOutcome};
+use crate::command;
 use crate::config::Effort;
 use crate::model::ModelSpec;
-use crate::protocol::Op;
 use crate::tui::action::Action;
 
 // ── EffortCmd ──
@@ -57,14 +57,11 @@ impl SlashCommand for EffortCmd {
             };
             return Ok(SlashOutcome::Modal(Box::new(slider)));
         }
-        let pick = parse_effort_arg(arg)?;
+        let op = command::effort(arg)?;
         if ctx.info.config.model.info().is_none() {
             return Err(no_effort_tier_msg(&ctx.info.config.model));
         }
-        Ok(SlashOutcome::Forward(Action::Op(Op::SetModel {
-            model: None,
-            effort: Some(pick),
-        })))
+        Ok(SlashOutcome::Forward(Action::Op(op)))
     }
 }
 
@@ -76,16 +73,10 @@ fn no_effort_tier_msg(model: &ModelSpec) -> String {
     )
 }
 
-fn parse_effort_arg(arg: &str) -> Result<Effort, String> {
-    let lower = arg.to_ascii_lowercase();
-    lower
-        .parse()
-        .map_err(|_| format!("Unknown effort: `{arg}`. Valid: {}.", Effort::VALID_VALUES))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::Op;
     use crate::slash::test_session_info;
 
     // ── EffortCmd::name ──
@@ -171,35 +162,18 @@ mod tests {
 
     #[test]
     fn execute_with_level_forwards_set_model_with_effort_only() {
-        for (arg, level) in [
-            ("low", Effort::Low),
-            ("medium", Effort::Medium),
-            ("high", Effort::High),
-            ("xhigh", Effort::Xhigh),
-            ("max", Effort::Max),
-        ] {
-            assert_eq!(
-                run_execute(arg).unwrap().into_forward(),
-                Action::Op(Op::SetModel {
-                    model: None,
-                    effort: Some(level),
-                }),
-                "`{arg}` should forward SetModel {{ effort: Some({level:?}) }}",
-            );
-        }
+        assert_eq!(
+            run_execute("xhigh").unwrap().into_forward(),
+            Action::Op(Op::SetModel {
+                model: None,
+                effort: Some(Effort::Xhigh),
+            }),
+        );
     }
 
     #[test]
-    fn execute_explicit_level_on_no_tier_model_errors_with_recovery_hint() {
-        // Without this, the pick silently resolves to None and confuses the user.
-        let err = run_execute_with_model("custom-model", "xhigh").unwrap_err();
-
-        assert_eq!(err, NO_TIER_ERROR);
-    }
-
-    #[test]
-    fn execute_unknown_level_errors_listing_valid_options() {
-        let err = run_execute("turbo").unwrap_err();
+    fn execute_unknown_level_errors_before_the_tier_check() {
+        let err = run_execute_with_model("custom-model", "turbo").unwrap_err();
 
         assert_eq!(
             err,
@@ -208,20 +182,10 @@ mod tests {
     }
 
     #[test]
-    fn execute_auto_is_unknown() {
-        let err = run_execute("auto").unwrap_err();
+    fn execute_explicit_level_on_no_tier_model_errors_with_recovery_hint() {
+        // Without this, the pick silently resolves to None and confuses the user.
+        let err = run_execute_with_model("custom-model", "xhigh").unwrap_err();
 
-        assert_eq!(
-            err,
-            "Unknown effort: `auto`. Valid: low, medium, high, xhigh, max."
-        );
-    }
-
-    // ── parse_effort_arg ──
-
-    #[test]
-    fn parse_effort_arg_is_case_insensitive() {
-        assert_eq!(parse_effort_arg("XHIGH"), Ok(Effort::Xhigh));
-        assert_eq!(parse_effort_arg("MaX"), Ok(Effort::Max));
+        assert_eq!(err, NO_TIER_ERROR);
     }
 }

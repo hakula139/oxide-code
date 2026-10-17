@@ -1,4 +1,4 @@
-//! Bare REPL driver for `--no-tui`: prompts from stdin, replies streamed to stdout.
+//! Bare REPL driver for `--no-tui`: prompts and slash commands from stdin, replies on stdout.
 
 use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
@@ -6,19 +6,20 @@ use std::path::PathBuf;
 use anyhow::{Result, bail};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, BufReader, Lines};
 
-use super::stdio::{Approver, StdioSink, Unattended, render_queued, render_turn};
+use super::stdio::{Approver, StdioSink, Unattended, render_op, render_queued};
 use super::{Exit, shutdown_signal};
+use crate::command;
 use crate::engine::{Engine, EngineHandle, TurnEnd};
 use crate::permission::SessionGrant;
 use crate::permission::rule::Rule;
 use crate::protocol::{Decision, Event, EventSink, Op};
-use crate::slash;
+use crate::slash::{self, Parsed};
 use crate::tool::{ApprovalBody, ApprovalPreview};
 use crate::util::text::is_hidden;
 
-/// Reads prompts until EOF or a signal, then finalizes the session. EOF after a failed turn exits
-/// with failure. Approvals are asked only when stdin is a terminal, so a piped line is never taken
-/// as an answer.
+/// Reads prompts and slash commands until EOF or a signal, then finalizes the session. EOF after
+/// an operation failed or a command was rejected exits with failure. Approvals are asked only when
+/// stdin is a terminal, so a piped line is never taken as an answer.
 pub(crate) async fn run(engine: Engine, show_thinking: bool, drifted: &[PathBuf]) -> Result<Exit> {
     let sink = StdioSink::new(show_thinking);
     let attended = io::stdin().is_terminal();
@@ -61,30 +62,32 @@ where
             if input.is_empty() {
                 continue;
             }
-            if let Some(parsed) = slash::parse_slash(input) {
-                sink.emit(
-                    Event::Error(format!(
-                        "Slash commands are available only in the TUI. Use //{} to send the \
-                         literal text.",
-                        parsed.name,
-                    )),
-                    "slash-command-rejected",
-                );
-                continue;
-            }
+            let op = match slash::parse_slash(input) {
+                Some(parsed) => match command_op(&parsed) {
+                    Ok(op) => op,
+                    Err(message) => {
+                        sink.emit(Event::Error(message), "slash-command-rejected");
+                        failed = true;
+                        continue;
+                    }
+                },
+                None => Op::Prompt(slash::unescape_literal(input).to_owned()),
+            };
 
-            let prompt = slash::unescape_literal(input).to_owned();
-            // A send fails only once the engine has stopped, which `render_turn` then reports.
-            _ = handle.ops.send(Op::Prompt(prompt)).await;
+            // A send fails only once the engine has stopped, which `render_op` then reports.
+            _ = handle.ops.send(op.clone()).await;
             let mut prompter = Prompter {
                 lines: &mut lines,
                 out: io::stderr(),
                 attended,
             };
+            let rendered = render_op(&mut handle.events, sink, &handle.ops, &op, &mut prompter);
             tokio::select! {
-                end = render_turn(&mut handle.events, sink, &handle.ops, &mut prompter) => match end {
+                end = rendered => match end {
                     Some(TurnEnd::Failed) => {
-                        println!();
+                        if matches!(op, Op::Prompt(_)) {
+                            println!();
+                        }
                         failed = true;
                     }
                     Some(_) => {}
@@ -108,6 +111,22 @@ where
         Some(signal) => Exit::Signal(signal),
         None if failed => Exit::Failure,
         None => Exit::Success,
+    })
+}
+
+/// The op a slash command runs in the REPL, or the message saying why it cannot run here.
+fn command_op(parsed: &Parsed) -> Result<Op, String> {
+    slash::typed_op(parsed).unwrap_or_else(|| {
+        let names: Vec<String> = command::NAMES
+            .iter()
+            .map(|name| format!("/{name}"))
+            .collect();
+        Err(format!(
+            "/{name} is not a REPL command. The REPL runs {names}. Use //{name} to send the \
+             literal text.",
+            name = parsed.name,
+            names = names.join(", "),
+        ))
     })
 }
 
@@ -242,7 +261,7 @@ fn shown(text: &str) -> String {
 mod tests {
     use std::path::Path;
 
-    use indoc::indoc;
+    use indoc::{formatdoc, indoc};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -327,7 +346,7 @@ mod tests {
             let sink = CapturingSink::new();
             let input: &[u8] = indoc! {b"
                 first
-                /clear
+                /resume zzzz
                 //literal
             "};
 
@@ -342,7 +361,7 @@ mod tests {
 
             assert_eq!(exit, Exit::Failure);
             let requests = request_bodies(&server).await;
-            assert_eq!(requests.len(), 2, "/clear must not reach the model");
+            assert_eq!(requests.len(), 2, "/resume must not reach the model");
             let last = requests[1]["messages"].as_array().unwrap().last().unwrap();
             assert_eq!(last["content"][0]["text"], "/literal");
             let reports: Vec<String> = sink
@@ -356,9 +375,11 @@ mod tests {
             assert_eq!(reports.len(), 3, "{reports:?}");
             assert!(reports[0].ends_with(": drifted.rs"), "{reports:?}");
             assert!(reports[1].contains("HTTP 400"), "{reports:?}");
-            assert!(
-                reports[2].contains("only in the TUI. Use //clear"),
-                "{reports:?}"
+            assert_eq!(
+                reports[2],
+                format!(
+                    "Resume failed (still on session {session_id}): no session matching `zzzz`"
+                ),
             );
             assert!(matches!(sink.events().last(), Some(Event::TurnComplete)));
             let data = store.load_session_data(&session_id).unwrap();
@@ -366,6 +387,123 @@ mod tests {
                 data.messages.len(),
                 3,
                 "the failed prompt, the literal, and its reply are saved",
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn drive_runs_each_typed_command_as_its_op() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            mount_reply(&server, "reply").await;
+            let dir = tempfile::tempdir().unwrap();
+            let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+            let first_id = engine.session_id().to_owned();
+            let sink = CapturingSink::new();
+            let input = formatdoc! {"
+                first
+                second
+                /compact focus on login
+                /rename Fix login
+                /model sonnet
+                /effort low
+                /clear
+                /resume {prefix}
+                ",
+                prefix = &first_id[..8],
+            };
+
+            let exit = Box::pin(drive(engine.spawn(&[]), &sink, input.as_bytes(), true))
+                .await
+                .unwrap();
+
+            assert_eq!(exit, Exit::Success);
+            let requests = request_bodies(&server).await;
+            assert_eq!(
+                requests.len(),
+                3,
+                "only the prompts and the summary reach the model"
+            );
+            assert!(
+                requests[2].to_string().contains("focus on login"),
+                "{}",
+                requests[2]
+            );
+            let confirmations: Vec<String> = sink
+                .events()
+                .into_iter()
+                .filter_map(|event| match event {
+                    Event::SessionCompacted { instructions, .. } => {
+                        Some(format!("compacted with {instructions:?}"))
+                    }
+                    Event::SessionTitleUpdated { title, .. } => Some(format!("renamed to {title}")),
+                    Event::ConfigChanged { model, effort, .. } => {
+                        Some(format!("using {} at {effort:?}", model.id()))
+                    }
+                    Event::SessionRolled { .. } => Some("rolled".to_owned()),
+                    Event::SessionResumed { id, title, .. } => {
+                        Some(format!("resumed {id} titled {title:?}"))
+                    }
+                    _ => None,
+                })
+                .collect();
+            let resumed = format!("resumed {first_id} titled Some(\"Fix login\")");
+            assert_eq!(
+                confirmations,
+                [
+                    "compacted with Some(\"focus on login\")",
+                    "renamed to Fix login",
+                    "using claude-sonnet-5-5 at Some(High)",
+                    "using claude-sonnet-5-5 at Some(Low)",
+                    "rolled",
+                    resumed.as_str(),
+                ],
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn drive_rejects_a_command_it_cannot_run_and_exits_with_failure() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            let dir = tempfile::tempdir().unwrap();
+            let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+            let sink = CapturingSink::new();
+            let input: &[u8] = indoc! {b"
+                /model gpt-4
+                /model
+                /help
+            "};
+
+            let exit = Box::pin(drive(engine.spawn(&[]), &sink, input, true))
+                .await
+                .unwrap();
+
+            assert_eq!(exit, Exit::Failure);
+            assert_eq!(request_bodies(&server).await, [] as [serde_json::Value; 0]);
+            let reports: Vec<String> = sink
+                .events()
+                .into_iter()
+                .filter_map(|event| match event {
+                    Event::Error(msg) => Some(msg),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(reports.len(), 3, "{reports:?}");
+            assert!(
+                reports[0].starts_with("/model: Unknown model: `gpt-4`."),
+                "{reports:?}"
+            );
+            assert_eq!(
+                reports[1],
+                "/model: Missing model id. Usage: `/model <id>`."
+            );
+            assert_eq!(
+                reports[2],
+                "/help is not a REPL command. The REPL runs /clear, /compact, /effort, /model, \
+                 /rename, /resume. Use //help to send the literal text.",
             );
         })
         .await;

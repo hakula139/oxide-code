@@ -6,27 +6,31 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 use tracing::debug;
 
+use crate::config::Effort;
 use crate::engine::TurnEnd;
+use crate::model::ModelSpec;
 use crate::permission::SessionGrant;
 use crate::protocol::{Decision, Event, EventSink, Op, ToolCall, ToolResult};
+use crate::session::display::{UNTITLED_MARKER, archive_notice, id_prefix};
 use crate::tool::ApprovalPreview;
 use crate::tui::glyphs::INTERRUPTED_MARKER;
 use crate::util::text::escape_controls;
 
 // ── Turn Rendering ──
 
-/// Renders `events` on `sink` until the prompt in flight ends, returning how it ended, or `None`
+/// Renders `events` on `sink` until `op`, already sent, ends, returning how it ended, or `None`
 /// once the engine has stopped. Approval requests go to `approver` in place of `sink`, and its
 /// answer goes back on `ops`.
-pub(super) async fn render_turn(
+pub(super) async fn render_op(
     events: &mut mpsc::UnboundedReceiver<Event>,
     sink: &dyn EventSink,
     ops: &mpsc::Sender<Op>,
+    op: &Op,
     approver: &mut impl Approver,
 ) -> Option<TurnEnd> {
     while let Some(event) = events.recv().await {
         let Event::ApprovalRequested { id, preview, grant } = event else {
-            let end = TurnEnd::of_prompt(&event);
+            let end = TurnEnd::of(op, &event);
             render(sink, event);
             if end.is_some() {
                 return end;
@@ -152,6 +156,31 @@ impl StdioSink {
                 };
                 writeln!(stderr, "{label} {pre_count} messages into summary")?;
             }
+            Event::SessionTitleUpdated { title, .. } => {
+                let title = escape_controls(&title);
+                writeln!(stderr, "Renamed the session to {title}.")?;
+            }
+            Event::SessionRolled { id, .. } => {
+                writeln!(stderr, "Started session {}.", id_prefix(&id))?;
+            }
+            Event::SessionResumed {
+                id,
+                title,
+                unarchived,
+                ..
+            } => {
+                let notice = resumed_notice(&id, title.as_deref(), unarchived);
+                writeln!(stderr, "{notice}")?;
+            }
+            Event::ConfigChanged {
+                model,
+                effort,
+                requested_effort,
+                ..
+            } => {
+                let notice = config_change(&model, effort, requested_effort);
+                writeln!(stderr, "{notice}")?;
+            }
             // TUI-only events have no stdio surface to update.
             Event::PromptDrained(_)
             | Event::UsageUpdated(_)
@@ -159,10 +188,6 @@ impl StdioSink {
             | Event::AutoCompactionStarted
             | Event::SummaryToken(_)
             | Event::SummaryDiscarded
-            | Event::SessionTitleUpdated { .. }
-            | Event::SessionRolled { .. }
-            | Event::SessionResumed { .. }
-            | Event::ConfigChanged { .. }
             | Event::LoginStarted { .. }
             | Event::SignedIn { .. }
             | Event::SignedOut { .. }
@@ -178,7 +203,7 @@ impl StdioSink {
             Event::Retrying(msg) => {
                 writeln!(stderr, "{}", escape_controls(&msg))?;
             }
-            Event::Error(msg) | Event::TurnFailed(msg) => {
+            Event::Error(msg) | Event::TurnFailed(msg) | Event::RenameFailed(msg) => {
                 writeln!(stderr, "Error: {}", escape_controls(&msg))?;
             }
         }
@@ -194,6 +219,27 @@ impl EventSink for StdioSink {
     }
 }
 
+/// The session an [`Event::SessionResumed`] continues, then a note when resuming it unarchived it.
+fn resumed_notice(id: &str, title: Option<&str>, unarchived: bool) -> String {
+    let title = title.map_or_else(|| UNTITLED_MARKER.to_owned(), escape_controls);
+    let resumed = format!("Resumed session {}: {title}.", id_prefix(id));
+    if unarchived {
+        return format!("{resumed}\n{}", archive_notice(id, false));
+    }
+    resumed
+}
+
+/// The model and effort an [`Event::ConfigChanged`] leaves in use, noting a requested effort that
+/// `model` has no tier for.
+fn config_change(model: &ModelSpec, effort: Option<Effort>, requested: Option<Effort>) -> String {
+    let model = format!("{} ({})", model.display_name(), model.id());
+    match (effort, requested) {
+        (Some(effort), _) => format!("Using {model} at {effort} effort."),
+        (None, Some(requested)) => format!("Using {model}. {}", requested.unapplied_notice()),
+        (None, None) => format!("Using {model}."),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -202,9 +248,7 @@ mod tests {
 
     use super::*;
     use crate::client::{RateLimitWindow, RateLimits};
-    use crate::config::Effort;
     use crate::config::compaction::AutoCompactionConfig;
-    use crate::model::ModelSpec;
     use crate::permission::{GateTarget, PermissionClass, Policy};
     use crate::protocol::{CapturingSink, FailingSink};
     use crate::tool::{ApprovalBody, ToolResultView};
@@ -234,6 +278,10 @@ mod tests {
         }
     }
 
+    fn prompt() -> Op {
+        Op::Prompt("hi".to_owned())
+    }
+
     fn bash_preview(command: &str) -> ApprovalPreview {
         ApprovalPreview {
             title: "Bash".to_owned(),
@@ -250,10 +298,10 @@ mod tests {
             .unwrap()
     }
 
-    // ── render_turn ──
+    // ── render_op ──
 
     #[tokio::test]
-    async fn render_turn_answers_each_approval_on_ops() {
+    async fn render_op_answers_each_approval_on_ops() {
         let (tx, mut events) = mpsc::unbounded_channel();
         let approval = Event::ApprovalRequested {
             id: "t1".to_owned(),
@@ -267,7 +315,7 @@ mod tests {
         let sink = CapturingSink::new();
         let mut approver = fixed(Decision::Deny);
 
-        let end = render_turn(&mut events, &sink, &ops_tx, &mut approver).await;
+        let end = render_op(&mut events, &sink, &ops_tx, &prompt(), &mut approver).await;
 
         assert_eq!(end, Some(TurnEnd::Completed));
         assert_eq!(
@@ -285,7 +333,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn render_turn_stops_at_the_terminal_event_even_when_rendering_fails() {
+    async fn render_op_stops_at_the_terminal_event_even_when_rendering_fails() {
         let (tx, mut events) = mpsc::unbounded_channel();
         for event in [
             Event::StreamToken("reply".to_owned()),
@@ -296,21 +344,46 @@ mod tests {
         }
 
         let (ops, _) = mpsc::channel(1);
-        let end = render_turn(&mut events, &FailingSink, &ops, &mut fixed(Decision::Deny)).await;
+        let mut approver = fixed(Decision::Deny);
+        let end = render_op(&mut events, &FailingSink, &ops, &prompt(), &mut approver).await;
 
         assert_eq!(end, Some(TurnEnd::Cancelled));
         assert_eq!(events.try_recv().ok(), Some(Event::TurnComplete));
     }
 
     #[tokio::test]
-    async fn render_turn_reports_a_stopped_engine() {
+    async fn render_op_waits_for_the_terminal_event_of_its_own_op() {
+        let (tx, mut events) = mpsc::unbounded_channel();
+        let notice = Event::Error("Session write failed".to_owned());
+        let rolled = Event::SessionRolled {
+            id: "next".to_owned(),
+            archived: false,
+        };
+        for event in [notice.clone(), rolled.clone(), Event::TurnComplete] {
+            tx.send(event).unwrap();
+        }
+        drop(tx);
+        let sink = CapturingSink::new();
+
+        let (ops, _) = mpsc::channel(1);
+        let mut approver = fixed(Decision::Deny);
+        let end = render_op(&mut events, &sink, &ops, &Op::Clear, &mut approver).await;
+
+        assert_eq!(end, Some(TurnEnd::Completed));
+        assert_eq!(sink.events(), [notice, rolled]);
+        assert_eq!(events.try_recv().ok(), Some(Event::TurnComplete));
+    }
+
+    #[tokio::test]
+    async fn render_op_reports_a_stopped_engine() {
         let (tx, mut events) = mpsc::unbounded_channel();
         tx.send(Event::StreamToken("partial".to_owned())).unwrap();
         drop(tx);
         let sink = CapturingSink::new();
 
         let (ops, _) = mpsc::channel(1);
-        let end = render_turn(&mut events, &sink, &ops, &mut fixed(Decision::Deny)).await;
+        let mut approver = fixed(Decision::Deny);
+        let end = render_op(&mut events, &sink, &ops, &prompt(), &mut approver).await;
 
         assert_eq!(end, None);
         assert_eq!(sink.events(), [Event::StreamToken("partial".to_owned())]);
@@ -490,24 +563,87 @@ mod tests {
             Event::AutoCompactionStarted,
             Event::SummaryToken("Recap".to_owned()),
             Event::SummaryDiscarded,
-            Event::SessionTitleUpdated {
-                session_id: "sid".to_owned(),
-                title: "New title".to_owned(),
-            },
-            Event::SessionRolled {
-                id: "rolled".to_owned(),
-                archived: true,
-            },
-            Event::ConfigChanged {
-                model: ModelSpec::resolve("claude-opus-5-5".to_owned()),
-                effort: Some(Effort::Xhigh),
-                requested_effort: Some(Effort::Xhigh),
-                auto_compaction: AutoCompactionConfig::disabled(),
-            },
         ] {
             let (stdout, stderr) = render_one(&test_sink(false), event);
             assert!(stdout.is_empty(), "stdout must stay empty: {stdout:?}");
             assert!(stderr.is_empty(), "stderr must stay empty: {stderr:?}");
+        }
+    }
+
+    #[test]
+    fn render_session_confirmations_write_to_stderr() {
+        let cases = [
+            (
+                Event::SessionTitleUpdated {
+                    session_id: "sid".to_owned(),
+                    title: "Fix login\u{1b}[2J".to_owned(),
+                },
+                "Renamed the session to Fix login\\u{1b}[2J.\n",
+            ),
+            (
+                Event::SessionRolled {
+                    id: "0123456789abcdef".to_owned(),
+                    archived: false,
+                },
+                "Started session 01234567.\n",
+            ),
+            (
+                Event::SessionResumed {
+                    id: "89abcdef01234567".to_owned(),
+                    title: Some("Fix login".to_owned()),
+                    unarchived: false,
+                    history: Vec::new(),
+                },
+                "Resumed session 89abcdef: Fix login.\n",
+            ),
+            (
+                Event::SessionResumed {
+                    id: "89abcdef01234567".to_owned(),
+                    title: None,
+                    unarchived: true,
+                    history: Vec::new(),
+                },
+                "Resumed session 89abcdef: (untitled).\nUnarchived session 89abcdef.\n",
+            ),
+        ];
+
+        for (event, expected) in cases {
+            let (stdout, stderr) = render_one(&test_sink(false), event);
+
+            assert!(stdout.is_empty(), "stdout must stay empty: {stdout:?}");
+            assert_eq!(stderr, expected);
+        }
+    }
+
+    #[test]
+    fn render_config_changed_names_the_model_and_the_effort_in_use() {
+        let config_changed = |id: &str, effort, requested_effort| Event::ConfigChanged {
+            model: ModelSpec::resolve(id.to_owned()),
+            effort,
+            requested_effort,
+            auto_compaction: AutoCompactionConfig::disabled(),
+        };
+        let cases = [
+            (
+                config_changed("claude-opus-5-5", Some(Effort::Low), Some(Effort::Low)),
+                "Using Claude Opus 5.5 (claude-opus-5-5) at low effort.\n",
+            ),
+            (
+                config_changed("custom-model", None, Some(Effort::High)),
+                "Using custom-model (custom-model). Effort unchanged: model has no effort tier \
+                 (asked for high).\n",
+            ),
+            (
+                config_changed("custom-model", None, None),
+                "Using custom-model (custom-model).\n",
+            ),
+        ];
+
+        for (event, expected) in cases {
+            let (stdout, stderr) = render_one(&test_sink(false), event);
+
+            assert!(stdout.is_empty(), "stdout must stay empty: {stdout:?}");
+            assert_eq!(stderr, expected);
         }
     }
 
@@ -559,10 +695,12 @@ mod tests {
     }
 
     #[test]
-    fn render_error_and_turn_failure_prefix_with_error_label() {
+    fn render_errors_and_failures_prefix_with_error_label() {
         let (_, stderr) = render_one(&test_sink(false), Event::Error("boom".to_owned()));
         assert_eq!(stderr, "Error: boom\n");
         let (_, stderr) = render_one(&test_sink(false), Event::TurnFailed("bust".to_owned()));
         assert_eq!(stderr, "Error: bust\n");
+        let (_, stderr) = render_one(&test_sink(false), Event::RenameFailed("lost".to_owned()));
+        assert_eq!(stderr, "Error: lost\n");
     }
 }

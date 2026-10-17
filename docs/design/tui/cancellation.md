@@ -24,20 +24,20 @@ The picks lean toward the Codex precedent on most surfaces, since it is the one 
 
 3. **Mid-turn drain at round boundary, raw consecutive User messages on the wire.** Each queued prompt becomes its own `User` message with one `Text` block. Anthropic accepts consecutive same-role messages. oxide-code deliberately drops the `<system-reminder>` envelope that Claude Code and opencode wrap with, which keeps persistence trivial.
 
-4. **The TUI owns the queue.** A queued prompt leaves `App::pending_prompts` only when a matching `PromptDrained` arrives or when it starts a turn of its own. `App::forwarded_prompts` counts the leading entries the in-flight turn holds, and a drain pops the head only when it names that head. While `Status::Compacting` or `Status::Cancelling`, no turn may be left to splice prompts in, so the TUI holds new submits and forwards them in order once a turn resumes streaming. The idle engine discards a late `Op::Queue`, since the TUI submits it again.
+4. **The TUI owns the queue.** A queued prompt leaves `App::pending_prompts` only when a matching `PromptDrained` arrives or when it starts a turn of its own. `App::forwarded_prompts` counts the leading entries the in-flight turn holds, and a drain pops the head only when it names that head. While `Status::Compacting`, `Status::SigningIn`, `Status::Resuming`, or `Status::Cancelling`, no turn may be left to splice prompts in, so the TUI holds new submits and forwards them in order once a turn resumes streaming. The idle engine discards a late `Op::Queue`, since the TUI submits it again.
 
 5. **A cancel leaves the queue to the user.** After a cancel the TUI goes idle without submitting the queue head, even when the turn completed before the cancel landed. Esc on idle pops the most recent queued prompt into the textarea for editing, gated on the buffer being empty so a draft is never silently overwritten. The next submit joins the back of the queue and starts a turn with its head, so prompts keep the order they were typed in.
 
-6. **`Status` is projected from `App` state.** The variants (`Idle | Streaming | ToolRunning { name } | Cancelling | ExitArmed { until }`) derive from app fields, so `set_active_status` can short-circuit while `Cancelling` / `ExitArmed` without a parallel state to keep in sync.
+6. **`Status` is projected from `App` state.** The variants (`Idle | Streaming | ToolRunning { name } | Compacting | SigningIn | Resuming | Cancelling | ExitArmed { until }`) derive from app fields, so `set_active_status` can short-circuit while `Cancelling` / `ExitArmed` without a parallel state to keep in sync.
 
 7. **Cancellation rides the existing `Event` channel.** `Event::Cancelled` covers both the TUI and `StdioSink`. No new event channel.
 
-8. **One terminal event per operation.** A prompt ends with exactly one of `TurnComplete`, `TurnFailed`, or `Cancelled`. `/compact` ends with `SessionCompacted`, `TurnFailed`, or `Cancelled`, and `/resume` with `SessionResumed` or `TurnFailed`. Only these run the TUI teardown that submits the queue head. `Error` is a notice for failures that leave the operation running, such as a failed session write or automatic compaction, and `Retrying` is a dim notice for a request the client sends again.
+8. **One terminal event per operation.** A prompt ends with exactly one of `TurnComplete`, `TurnFailed`, or `Cancelled`. `/compact` ends with `SessionCompacted`, `TurnFailed`, or `Cancelled`, and `/resume` with `SessionResumed` or `TurnFailed`. Only these run the TUI teardown that submits the queue head. `/clear` ends with `SessionRolled`, `/rename` with `SessionTitleUpdated` or `RenameFailed`, and `/model` and `/effort` with `ConfigChanged`, which counts as a failure when the model has no tier for an `/effort` pick. `TurnEnd::of` maps an op and an event to how the op ended, so the REPL and headless drivers stop rendering at the end of the op they sent. `Error` is a notice for failures that leave the operation running, such as a failed session write or automatic compaction, and `Retrying` is a dim notice for a request the client sends again.
 
 ## Sources
 
-- `crates/oxide-code/src/driver/stdio.rs`: `StdioSink::render`.
-- `crates/oxide-code/src/engine.rs`: `Engine::run`, which ignores an `Op::Queue` that arrives between turns, plus `Engine::submit_prompt` and `report_abort`, shared by the TUI, REPL, and headless drivers.
+- `crates/oxide-code/src/driver/stdio.rs`: `StdioSink::render`, and `render_op`, which renders until the op it sent ends.
+- `crates/oxide-code/src/engine.rs`: `Engine::run`, which ignores an `Op::Queue` that arrives between turns, plus `Engine::submit_prompt`, `report_abort`, and `TurnEnd::of`, shared by the TUI, REPL, and headless drivers.
 - `crates/oxide-code/src/engine/abort.rs`: `TurnAbort` enum, `await_unless_aborted`.
 - `crates/oxide-code/src/engine/dispatch.rs`: `run_tool_round` / `ToolRound`, `dispatch_tool_call`.
 - `crates/oxide-code/src/engine/turn.rs`: `agent_turn` round loop, `interrupt_turn`, `record_drained_prompts`.

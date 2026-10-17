@@ -49,8 +49,10 @@ pub(crate) enum Op {
     Clear,
     /// Archives the live session, then continues in a fresh one like [`Self::Clear`].
     Archive,
-    /// Finalizes the live session and continues the session file at `path` in place.
-    Resume { path: PathBuf },
+    /// Finalizes the live session and continues the saved session `target` names in place.
+    /// Confirms with [`Event::SessionResumed`], or reports a target it cannot load with
+    /// [`Event::TurnFailed`].
+    Resume { target: ResumeTarget },
     /// Sets the session title by hand, which stops AI title generation for this session.
     Rename { title: String },
     /// Starts a browser sign-in for the oxide-code login, announced with [`Event::LoginStarted`].
@@ -63,6 +65,17 @@ pub(crate) enum Op {
     /// Ends any running operation without a terminal event, finalizes the live session, and stops
     /// the engine. Closing the op channel does the same.
     Shutdown,
+}
+
+/// The saved session an [`Op::Resume`] continues.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+pub(crate) enum ResumeTarget {
+    /// The session file at this path.
+    Path(PathBuf),
+    /// The one saved session other than the live one whose id starts with this prefix, searched
+    /// for in the current project first and then in every project.
+    Prefix(String),
 }
 
 /// The user's verdict on a pending approval, carried back on [`Op::Resolve`].
@@ -147,6 +160,9 @@ pub(crate) enum Event {
     SummaryDiscarded,
     /// The session title changed, from the background generator or an [`Op::Rename`].
     SessionTitleUpdated { session_id: String, title: String },
+    /// An [`Op::Rename`] could not record its title, so the title stays. Ends the rename as
+    /// [`Self::SessionTitleUpdated`] does.
+    RenameFailed(String),
     /// An [`Op::Clear`] or [`Op::Archive`] rolled the session, making a new session UUID active.
     /// `archived` marks an archive roll, so the frontend can name the session it archived.
     SessionRolled { id: String, archived: bool },
@@ -498,7 +514,10 @@ mod tests {
             Op::Clear,
             Op::Archive,
             Op::Resume {
-                path: PathBuf::from("/repo/session.jsonl"),
+                target: ResumeTarget::Path(PathBuf::from("/repo/session.jsonl")),
+            },
+            Op::Resume {
+                target: ResumeTarget::Prefix("1a2b".to_owned()),
             },
             Op::Rename {
                 title: "Title".to_owned(),
@@ -529,6 +548,7 @@ mod tests {
             Event::SummaryToken(_) => "summary_token",
             Event::SummaryDiscarded => "summary_discarded",
             Event::SessionTitleUpdated { .. } => "session_title_updated",
+            Event::RenameFailed(_) => "rename_failed",
             Event::SessionRolled { .. } => "session_rolled",
             Event::SessionResumed { .. } => "session_resumed",
             Event::SessionCompacted { .. } => "session_compacted",
@@ -584,6 +604,7 @@ mod tests {
                 session_id: "s1".to_owned(),
                 title: "Title".to_owned(),
             },
+            Event::RenameFailed("Session write failed: disk full".to_owned()),
             Event::SessionRolled {
                 id: "s2".to_owned(),
                 archived: true,
@@ -691,6 +712,13 @@ mod tests {
             })
             .unwrap(),
             json!({"type": "deny_with_feedback", "data": {"feedback": "Use rg instead."}}),
+        );
+        assert_eq!(
+            serde_json::to_value(Op::Resume {
+                target: ResumeTarget::Prefix("1a2b".to_owned()),
+            })
+            .unwrap(),
+            json!({"type": "resume", "data": {"target": {"type": "prefix", "data": "1a2b"}}}),
         );
         assert_eq!(
             serde_json::to_value(Op::Interrupt).unwrap(),

@@ -107,7 +107,7 @@ impl App {
                 self.chat.push_error(&msg);
                 self.finish_turn();
             }
-            Event::Error(msg) => self.chat.push_error(&msg),
+            Event::Error(msg) | Event::RenameFailed(msg) => self.chat.push_error(&msg),
             Event::ApprovalRequested { id, preview, grant } => {
                 self.push_approval_modal(id, preview, grant);
             }
@@ -146,8 +146,12 @@ impl App {
     fn finish_turn(&mut self) {
         self.chat.commit_streaming();
         self.active_prompt = None;
-        // A cancel that lost the race to the turn's end still leaves the next step to the user.
-        if matches!(self.status_bar.status(), Status::Cancelling) {
+        // A cancel that lost the race to the turn's end, or a failed resume, still leaves the next
+        // step to the user.
+        if matches!(
+            self.status_bar.status(),
+            Status::Cancelling | Status::Resuming
+        ) {
             self.enter_idle();
         } else {
             self.finalize_idle();
@@ -355,9 +359,7 @@ fn format_config_change(
     let message = if model_changed {
         let head = format!("Switched to {} ({})", model.display_name(), model.id());
         match (requested_effort, prev_effort, new_effort) {
-            (Some(req), _, None) => {
-                format!("{head}. Effort unchanged: model has no effort tier (asked for {req}).")
-            }
+            (Some(req), _, None) => format!("{head}. {}", req.unapplied_notice()),
             (None, None, None) => format!("{head}."),
             (None, Some(_), None) => format!("{head}. Effort cleared (model has no effort tier)."),
             (None, None, Some(eff)) => format!("{head} · effort {eff} (model default)."),
@@ -365,9 +367,7 @@ fn format_config_change(
         }
     } else {
         match (requested_effort, new_effort) {
-            (Some(req), None) => {
-                format!("Effort unchanged: model has no effort tier (asked for {req}).")
-            }
+            (Some(req), None) => req.unapplied_notice(),
             (_, Some(eff)) => format!("Effort set to {eff}."),
             // Slash dispatch keeps this unreachable, but a clear fallback beats a panic.
             (None, None) => "Config unchanged.".to_owned(),
@@ -401,7 +401,7 @@ mod tests {
     use crate::config::compaction::test_thresholds;
     use crate::permission::rule::Rule;
     use crate::permission::{GateTarget, PermissionClass, Policy};
-    use crate::protocol::{ToolCall, ToolResult, UsageSnapshot};
+    use crate::protocol::{ResumeTarget, ToolCall, ToolResult, UsageSnapshot};
     use crate::tool::{ApprovalBody, ToolResultView};
     use crate::tui::action::Action;
     use crate::tui::app::testing::{five_hour_limit, rendered_text, test_app};
@@ -475,6 +475,19 @@ mod tests {
             Some("First prompt"),
             "current-session title must survive a stale event",
         );
+    }
+
+    #[test]
+    fn handle_rename_failed_shows_the_error_and_keeps_the_title() {
+        let (mut app, _rx, _event_tx) = test_app(Some("First prompt"));
+
+        app.handle_engine_event(Event::RenameFailed(
+            "Session write failed: disk full".to_owned(),
+        ));
+
+        assert!(app.chat.last_is_error());
+        assert_eq!(app.status_bar.title(), Some("First prompt"));
+        assert!(app.input.is_enabled());
     }
 
     #[test]
@@ -1365,6 +1378,39 @@ mod tests {
         app.handle_esc();
         assert_eq!(app.input.lines(), ["second".to_owned()]);
         assert!(app.pending_prompts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn failed_resume_goes_idle_and_keeps_the_prompts_a_cancel_held() {
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("first".to_owned()));
+        rx.recv().await.expect("first submit forwarded");
+        app.handle_engine_event(Event::StreamToken("x".to_owned()));
+        app.dispatch_action(Action::Submit("second".to_owned()));
+        rx.recv().await.expect("second submit forwarded");
+        app.handle_esc();
+        assert_eq!(rx.recv().await, Some(Op::Interrupt));
+        app.handle_engine_event(Event::Cancelled);
+        app.dispatch_action(Action::Submit("/resume zzzz".to_owned()));
+        assert_eq!(
+            rx.recv().await,
+            Some(Op::Resume {
+                target: ResumeTarget::Prefix("zzzz".to_owned()),
+            }),
+        );
+        app.dispatch_action(Action::Submit("third".to_owned()));
+
+        app.handle_engine_event(Event::TurnFailed(
+            "Resume failed (still on session x): no session matching `zzzz`".to_owned(),
+        ));
+
+        assert!(rx.try_recv().is_err(), "nothing runs after a failed resume");
+        assert_eq!(app.status_bar.status(), &Status::Idle);
+        assert!(app.input.is_enabled());
+        assert_eq!(
+            app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
+            ["second".to_owned(), "third".to_owned()],
+        );
     }
 
     #[tokio::test]
