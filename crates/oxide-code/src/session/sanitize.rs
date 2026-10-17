@@ -14,8 +14,8 @@ use crate::message::{ContentBlock, Message, Role};
 pub(super) const RESUME_CONTINUATION_SENTINEL: &str =
     "[Previous turn was interrupted; continuing.]";
 
-/// Stub prepended when sanitization leaves an assistant as the first message — the API rejects
-/// transcripts that start with assistant.
+/// Stub prepended when sanitization leaves an assistant as the first message, since the API
+/// rejects transcripts that start with assistant.
 pub(super) const RESUME_HEAD_SENTINEL: &str = "[Previous session prefix lost in recovery.]";
 
 // ── Entry Point ──
@@ -95,8 +95,8 @@ fn collapse_consecutive_roles(messages: &mut Vec<Message>) {
     });
 }
 
-/// Patches head / tail edges the API rejects: prepends a user stub on leading-assistant,
-/// appends an assistant stub on trailing tool-results-only user.
+/// Patches head / tail edges the API rejects. Prepends a user stub before a leading assistant and
+/// appends an assistant stub after a trailing tool-results-only user.
 fn insert_resume_sentinels(messages: &mut Vec<Message>) {
     if messages
         .first()
@@ -216,7 +216,7 @@ mod tests {
         ];
         sanitize_resumed_messages(&mut messages);
 
-        // Assistant: text + t1 (resolved) — t2 dropped as unresolved.
+        // Assistant keeps the text and the resolved t1, and t2 drops as unresolved.
         let assistant_blocks = &messages[1].content;
         assert_eq!(assistant_blocks.len(), 2);
         assert!(matches!(&assistant_blocks[0], ContentBlock::Text { .. }));
@@ -310,8 +310,8 @@ mod tests {
 
     #[test]
     fn sanitize_resumed_messages_drops_orphan_when_assistant_tool_use_was_dropped() {
-        // Mismatched ids: pass 1 strips the assistant's unresolved t1,
-        // leaving no surviving ids, so pass 2 drops the user's t2.
+        // Mismatched ids: pass 1 strips the assistant's unresolved t1, leaving no surviving ids, so
+        // pass 2 drops the user's t2.
         let mut messages = vec![
             Message::user("do X"),
             Message {
@@ -414,7 +414,7 @@ mod tests {
 
     #[test]
     fn drop_unresolved_tool_uses_treats_server_tool_use_like_tool_use() {
-        // Both `ToolUse` and `ServerToolUse` arms must match — covers the OR in the filter.
+        // Both `ToolUse` and `ServerToolUse` arms must match, covering the OR in the filter.
         let mut messages = vec![
             Message {
                 role: Role::Assistant,
@@ -572,7 +572,7 @@ mod tests {
 
     #[test]
     fn insert_resume_sentinels_skips_append_when_trailing_user_has_text() {
-        // Mixed text + tool_result is a normal follow-up, not the post-crash shape — no sentinel.
+        // Mixed text and tool_result is a normal follow-up, so it gets no sentinel.
         let mut messages = vec![
             Message::user("do X"),
             Message {

@@ -140,7 +140,7 @@ impl SessionState {
         {
             // Latch before queueing anything. A flush failure must not replay this branch.
             self.first_user_prompt_seen = true;
-            // `/rename` already queued the UserProvided title. Skip the FirstPrompt + AI seed.
+            // `/rename` already queued the UserProvided title. Skip FirstPrompt and the AI seed.
             if !manual_title_set {
                 ai_title_seed = Some(text.to_owned());
                 entries.push(Entry::Title {
@@ -229,7 +229,7 @@ impl SessionState {
         self.persistence_stopped
     }
 
-    /// Builds snapshot + summary closing entries, or empty vec for no-op finish.
+    /// Builds snapshot and summary closing entries, or empty vec for no-op finish.
     pub(super) fn finish_entries(
         &mut self,
         snapshots: Vec<FileSnapshot>,

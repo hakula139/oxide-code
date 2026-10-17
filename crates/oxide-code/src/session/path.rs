@@ -6,7 +6,7 @@ use std::path::Path;
 
 use xxhash_rust::xxh64::xxh64;
 
-/// Char-length cap before truncate + hash. 80 stays well under filesystem `NAME_MAX` (255).
+/// Char-length cap before truncating and hashing. 80 stays well under filesystem `NAME_MAX` (255).
 const MAX_PROJECT_DIR_LEN: usize = 80;
 
 /// Hex chars in the truncation hash suffix.
@@ -15,7 +15,7 @@ const HASH_SUFFIX_HEX_LEN: usize = 16;
 /// The subdir for a cwd with no safe characters to keep, such as `/`.
 const UNKNOWN_PROJECT_DIR: &str = "_unknown_";
 
-/// Derives a filesystem-safe subdir name. Non-`[A-Za-z0-9._-]` chars become `-`; long names get
+/// Derives a filesystem-safe subdir name. Non-`[A-Za-z0-9._-]` chars become `-`, and long names get
 /// a 16-char xxh64 suffix over the raw path bytes (so non-UTF8 paths whose lossy forms collide
 /// still hash apart).
 pub(crate) fn sanitize_cwd(path: &Path) -> String {
@@ -115,7 +115,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn sanitize_cwd_distinguishes_non_utf8_paths_with_same_lossy_form() {
-        // Different invalid bytes both lossy-render as U+FFFD; raw-byte hash must disambiguate.
+        // Both invalid bytes lossy-render as U+FFFD, so the raw-byte hash must disambiguate.
         use std::ffi::OsStr;
         use std::os::unix::ffi::OsStrExt;
         use std::path::PathBuf;

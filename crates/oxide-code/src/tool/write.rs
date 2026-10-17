@@ -73,8 +73,8 @@ impl Tool for WriteTool {
     }
 }
 
-/// The text an overwrite of `path`, spelled `shown`, would replace. A missing file, or one the write
-/// refuses (a symlink, a non-regular or oversized file), previews as empty.
+/// The text an overwrite of `path`, spelled `shown`, would replace. A missing file, or one the
+/// write refuses (a symlink, a non-regular or oversized file), previews as empty.
 fn current_text(path: &Path, shown: &str) -> String {
     let writable = std::fs::symlink_metadata(path)
         .is_ok_and(|meta| validate_write_target(shown, &meta).is_ok());

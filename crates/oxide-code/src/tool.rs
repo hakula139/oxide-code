@@ -956,8 +956,7 @@ pub(crate) mod testing {
         CanonicalTempDir { _dir: dir, path }
     }
 
-    /// A symlink to a file. Windows needs Developer Mode or admin rights for it, which CI runners
-    /// have.
+    /// A symlink to a file. Windows needs Developer Mode or admin rights for it, which CI has.
     pub(crate) fn symlink_file(target: &Path, link: &Path) {
         #[cfg(unix)]
         std::os::unix::fs::symlink(target, link).unwrap();
@@ -1006,7 +1005,7 @@ mod tests {
             .as_ref()
     }
 
-    // ── Tool trait contract (all tools) ──
+    // ── Tool: trait contract ──
 
     #[test]
     fn every_tool_exposes_non_empty_name_description_and_object_schema() {
