@@ -107,7 +107,7 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 
 - **`/status` overview**: `KvOverview` of session descriptors (model, effort, cwd, session id, auth, version, cache TTL, auto compaction, show-thinking, show-welcome), plus a Session Rules section listing the session allow rules once any is granted and a Background Shells section listing each open shell with its state and the first line of its command. Constructed in `slash/status`.
 
-- **`/config` overview**: Two-section `KvOverview`. "Resolved" pairs each effective value with a dim note naming its source, while "Source Files" lists the config files loaded at startup, lowest precedence first, each labeled User, Drop-in, Legacy Project, or Project. Constructed in `slash/config`.
+- **`/config` overview**: Two-section `KvOverview`. "Resolved" pairs each effective value with a dim note naming its source, while "Source Files" lists the config files loaded at startup, lowest precedence first, each labeled User, Drop-in, or Project. Constructed in `slash/config`.
 
 - **`/help` overview**: Single-section `KvOverview` of every registered command. Aliases parenthesize after the canonical name, and the `usage()` placeholder appends. Constructed in `slash/help`.
 

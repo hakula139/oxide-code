@@ -51,7 +51,7 @@ impl Tool for EditTool {
     fn result_view(
         &self,
         input: &serde_json::Value,
-        content: &str,
+        _content: &str,
         metadata: &ToolMetadata,
         _cwd: &Path,
     ) -> Option<ToolResultView> {
@@ -61,15 +61,12 @@ impl Tool for EditTool {
             .get("replace_all")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
-        let live_chunks = metadata.diff_chunks.as_ref().filter(|c| !c.is_empty());
-        let chunks = live_chunks
-            .cloned()
+        let chunks = metadata
+            .diff_chunks
+            .clone()
+            .filter(|c| !c.is_empty())
             .unwrap_or_else(|| vec![synthesize_chunk(old, new)]);
-        let replacements = live_chunks
-            .map(Vec::len)
-            .or(metadata.replacements)
-            .or_else(|| parse_replacement_count(content))
-            .unwrap_or(1);
+        let replacements = chunks.len();
         Some(ToolResultView::Diff {
             chunks,
             replace_all,
@@ -154,9 +151,8 @@ async fn run(raw: serde_json::Value, ctx: &ToolCtx) -> ToolOutput {
     )
     .await
     {
-        Ok((content, replacements, chunks)) => ToolOutput::success(content)
+        Ok((content, chunks)) => ToolOutput::success(content)
             .with_title(format!("Edited {name}"))
-            .with_replacements(replacements)
             .with_diff_chunks(chunks),
         Err(msg) => ToolOutput::error(msg),
     }
@@ -172,8 +168,8 @@ async fn run(raw: serde_json::Value, ctx: &ToolCtx) -> ToolOutput {
 ///   content changed since that Read.
 /// - CRLF is preserved: the file is normalized to LF for matching, and the dominant EOL is restored
 ///   on write so we don't flip line endings just because the caller used `\n` in `old_string`.
-/// - Returns `(message, match_count, diff_chunks)` on success. The chunks carry real post-edit line
-///   numbers, shifted by the cumulative delta of earlier replacements.
+/// - Returns `(message, diff_chunks)` on success, with one chunk per replaced match. The chunks carry
+///   real post-edit line numbers, shifted by the cumulative delta of earlier replacements.
 /// - A relative `path` resolves against the context's cwd.
 async fn edit_file(
     path: &str,
@@ -181,7 +177,7 @@ async fn edit_file(
     new_string: &str,
     replace_all: bool,
     ctx: &ToolCtx,
-) -> Result<(String, usize, Vec<DiffChunk>), String> {
+) -> Result<(String, Vec<DiffChunk>), String> {
     if old_string.is_empty() {
         return Err("old_string must not be empty.".into());
     }
@@ -247,7 +243,7 @@ async fn edit_file(
     } else {
         format!("Successfully edited {path}.")
     };
-    Ok((message, match_count, chunks))
+    Ok((message, chunks))
 }
 
 // ── Diff Production ──
@@ -364,15 +360,6 @@ fn apply_eol(content: String, eol: &str) -> String {
 
 // ── Result View ──
 
-fn parse_replacement_count(content: &str) -> Option<usize> {
-    content
-        .strip_prefix("Replaced ")?
-        .split_ascii_whitespace()
-        .next()?
-        .parse()
-        .ok()
-}
-
 pub(crate) fn synthesize_chunk(old: &str, new: &str) -> DiffChunk {
     let mut chunk = DiffChunk {
         old: split_into_diff_lines(old, 1),
@@ -430,7 +417,6 @@ mod tests {
         ];
         let metadata = ToolMetadata {
             diff_chunks: Some(chunks.clone()),
-            replacements: Some(99),
             ..ToolMetadata::default()
         };
         let view = EditTool.result_view(
@@ -476,72 +462,6 @@ mod tests {
                     }],
                 }],
                 replace_all: false,
-                replacements: 1,
-            }),
-        );
-    }
-
-    #[test]
-    fn result_view_falls_back_to_parsing_content_when_metadata_is_empty() {
-        let input = serde_json::json!({
-            "file_path": "/tmp/f.rs",
-            "old_string": "a",
-            "new_string": "b",
-            "replace_all": true,
-        });
-        let view = EditTool.result_view(
-            &input,
-            "Replaced 7 occurrences in /tmp/f.rs.",
-            &ToolMetadata::default(),
-            Path::new("/repo"),
-        );
-        assert_eq!(
-            view,
-            Some(ToolResultView::Diff {
-                chunks: vec![DiffChunk {
-                    old: vec![DiffLine {
-                        number: 1,
-                        text: "a".to_owned()
-                    }],
-                    new: vec![DiffLine {
-                        number: 1,
-                        text: "b".to_owned()
-                    }],
-                }],
-                replace_all: true,
-                replacements: 7,
-            }),
-        );
-    }
-
-    #[test]
-    fn result_view_defaults_to_one_replacement_when_count_missing() {
-        let input = serde_json::json!({
-            "file_path": "/tmp/f.rs",
-            "old_string": "a",
-            "new_string": "b",
-            "replace_all": true,
-        });
-        let view = EditTool.result_view(
-            &input,
-            "Successfully edited /tmp/f.rs.",
-            &ToolMetadata::default(),
-            Path::new("/repo"),
-        );
-        assert_eq!(
-            view,
-            Some(ToolResultView::Diff {
-                chunks: vec![DiffChunk {
-                    old: vec![DiffLine {
-                        number: 1,
-                        text: "a".to_owned()
-                    }],
-                    new: vec![DiffLine {
-                        number: 1,
-                        text: "b".to_owned()
-                    }],
-                }],
-                replace_all: true,
                 replacements: 1,
             }),
         );
@@ -702,7 +622,7 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "aaa bbb aaa").unwrap();
 
-        let (msg, replacements, chunks) = edit_file(
+        let (msg, chunks) = edit_file(
             path.to_str().unwrap(),
             "aaa",
             "ccc",
@@ -716,7 +636,6 @@ mod tests {
             msg,
             format!("Replaced 2 occurrences in {}.", path.display())
         );
-        assert_eq!(replacements, 2);
         assert_eq!(chunks.len(), 2, "replace_all emits one chunk per match");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "ccc bbb ccc");
     }
@@ -727,7 +646,7 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello world").unwrap();
 
-        let (msg, replacements, chunks) = edit_file(
+        let (msg, chunks) = edit_file(
             path.to_str().unwrap(),
             "hello",
             "goodbye",
@@ -739,10 +658,10 @@ mod tests {
 
         assert!(msg.contains("Successfully edited"));
         assert_eq!(
-            replacements, 1,
+            chunks.len(),
+            1,
             "single-match replace_all still replaces once"
         );
-        assert_eq!(chunks.len(), 1);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "goodbye world");
     }
 
@@ -1089,12 +1008,10 @@ mod tests {
         )
         .unwrap();
 
-        let (_, replacements, chunks) =
-            edit_file(path.to_str().unwrap(), "B", "X", true, &seeded_ctx(&path))
-                .await
-                .unwrap();
+        let (_, chunks) = edit_file(path.to_str().unwrap(), "B", "X", true, &seeded_ctx(&path))
+            .await
+            .unwrap();
 
-        assert_eq!(replacements, 2);
         assert_eq!(chunks.len(), 2);
         assert_eq!(
             chunks[0].old,
@@ -1141,7 +1058,7 @@ mod tests {
         )
         .unwrap();
 
-        let (_, _, chunks) = edit_file(
+        let (_, chunks) = edit_file(
             path.to_str().unwrap(),
             "B",
             "X\nY",
@@ -1202,7 +1119,7 @@ mod tests {
         )
         .unwrap();
 
-        let (_, _, chunks) = edit_file(
+        let (_, chunks) = edit_file(
             path.to_str().unwrap(),
             "X\nY",
             "Z",
@@ -1547,32 +1464,6 @@ mod tests {
     #[test]
     fn apply_eol_lf_preserves_content() {
         assert_eq!(apply_eol("a\nb\n".into(), "\n"), "a\nb\n");
-    }
-
-    // ── parse_replacement_count ──
-
-    #[test]
-    fn parse_replacement_count_extracts_leading_integer() {
-        assert_eq!(
-            parse_replacement_count("Replaced 3 occurrences in /tmp/x."),
-            Some(3),
-        );
-    }
-
-    #[test]
-    fn parse_replacement_count_is_none_for_unrelated_messages() {
-        assert_eq!(parse_replacement_count("Successfully edited /tmp/x."), None);
-        assert_eq!(parse_replacement_count(""), None);
-    }
-
-    #[test]
-    fn parse_replacement_count_requires_space_after_replaced() {
-        assert_eq!(parse_replacement_count("Replaced7 occurrences in x."), None);
-    }
-
-    #[test]
-    fn parse_replacement_count_is_none_when_only_prefix_present() {
-        assert_eq!(parse_replacement_count("Replaced "), None);
     }
 
     // ── synthesize_chunk ──

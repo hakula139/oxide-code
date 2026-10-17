@@ -17,7 +17,7 @@ The maintainer acknowledges a report within 7 days and shares an assessment with
 
 ## Trust model
 
-`ox` runs locally with the permissions of the user who starts it and has no OS-level sandbox. Its [permission gate](docs/guide/configuration.md#permission-tool-approval) determines which tool calls run, require approval, or are denied. In `auto` and `plan` modes, read, grep, and glob calls run without approval on any path you can read unless a `deny` rule matches. In `auto` mode, edits inside the working directory also run without approval.
+`ox` runs locally with the permissions of the user who starts it and has no OS-level sandbox. Its [permission gate](docs/guide/configuration.md#permission-tool-approval) determines which tool calls run, require approval, or are denied. In `manual` and `plan` modes, read, grep, and glob calls run without approval on any path you can read unless a `deny` rule matches. In `manual` mode, edits inside the working directory also run without approval.
 
 In scope:
 

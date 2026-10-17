@@ -205,6 +205,8 @@ mod tests {
     use crate::tool::tasks::testing::plan;
     use crate::tool::{DEFAULT_TOOL_ICON, DiffChunk, DiffLine};
 
+    const MODEL: &str = "claude-opus-5-5";
+
     fn tools() -> ToolRegistry {
         ToolRegistry::new(vec![Box::new(BashTool::default()), Box::new(EditTool)])
     }
@@ -700,10 +702,10 @@ mod tests {
             content: vec![
                 ContentBlock::Thinking {
                     thinking: "reasoning".to_owned(),
-                    replay: Replay::without_model("sig"),
+                    replay: Replay::with_model(MODEL, "sig"),
                 },
                 ContentBlock::RedactedThinking {
-                    replay: Replay::without_model("opaque"),
+                    replay: Replay::with_model(MODEL, "opaque"),
                 },
                 ContentBlock::Text {
                     text: "answer".to_owned(),
@@ -726,7 +728,7 @@ mod tests {
             content: vec![
                 ContentBlock::Thinking {
                     thinking: "  \n  ".to_owned(),
-                    replay: Replay::without_model("sig"),
+                    replay: Replay::with_model(MODEL, "sig"),
                 },
                 ContentBlock::Text {
                     text: "reply".to_owned(),
@@ -746,7 +748,7 @@ mod tests {
             content: vec![
                 ContentBlock::Thinking {
                     thinking: "Running the suite.".to_owned(),
-                    replay: Replay::without_model("sig"),
+                    replay: Replay::with_model(MODEL, "sig"),
                 },
                 tool_use("t1", "bash", serde_json::json!({"command": "cargo test"})),
             ],

@@ -669,7 +669,7 @@ mod tests {
                     content_hash: 42,
                     last_view: LastView::Full,
                     recorded_at: datetime!(2026-04-16 12:00:01 UTC),
-                    tool_use_id: None,
+                    tool_use_id: "toolu_1".to_owned(),
                 },
             },
         }
@@ -1462,7 +1462,7 @@ mod tests {
     }
 
     #[test]
-    fn load_session_data_skips_corrupt_empty_and_unknown_lines() {
+    fn load_session_data_skips_corrupt_empty_unknown_and_old_shape_lines() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let created_at = datetime!(2026-01-01 00:00:00 UTC);
@@ -1475,6 +1475,7 @@ mod tests {
                 {"type":"new_fancy_type","data":"something"}
 
                 {"type":"message","uuid":"a1b2c3d4-e5f6-7890-abcd-1234567890ef","message":{"role":"user","content":[{"type":"text","text":"ok"}]},"timestamp":"2026-01-01T00:00:01Z"}
+                {"type":"message","uuid":"b2c3d4e5-f6a7-8901-bcde-234567890abc","parent_uuid":"a1b2c3d4-e5f6-7890-abcd-1234567890ef","message":{"role":"assistant","content":[{"type":"thinking","thinking":"r","signature":"sig"},{"type":"text","text":"hi"}]},"timestamp":"2026-01-01T00:00:02Z"}
             "#},
         )
         .unwrap();

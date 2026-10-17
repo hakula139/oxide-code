@@ -534,7 +534,7 @@ mod tests {
                 }],
             })
             .await;
-        record_tracked_file(tracker, path, b"alpha", Some(tool_use_id));
+        record_tracked_file(tracker, path, b"alpha", tool_use_id);
         if answered {
             handle
                 .record_message(Message {
@@ -669,7 +669,7 @@ mod tests {
                 (
                     "t3".to_owned(),
                     ToolMetadata {
-                        replacements: Some(2),
+                        truncated_total: Some(2),
                         ..ToolMetadata::default()
                     },
                 ),
@@ -694,7 +694,7 @@ mod tests {
             Some("Edited a.rs"),
         );
         assert_eq!(
-            data.tool_result_metadata.get("t3").unwrap().replacements,
+            data.tool_result_metadata.get("t3").unwrap().truncated_total,
             Some(2),
         );
     }
@@ -1068,7 +1068,7 @@ mod tests {
                 .into_iter()
                 .map(|name| {
                     let path = files_dir.path().join(name);
-                    record_tracked_file(&tracker, &path, name.as_bytes(), None);
+                    record_tracked_file(&tracker, &path, name.as_bytes(), "toolu_1");
                     path
                 })
                 .collect();
@@ -1723,10 +1723,13 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        insta::glob!("fixtures/*.jsonl", |fixture| {
-            let fixture = std::fs::read_to_string(fixture).unwrap();
-            let recovered = runtime.block_on(resume_and_continue(&fixture));
-            insta::assert_snapshot!(recovered);
+        // Fixtures start at v0.1.0, so none exist before that release.
+        insta::with_settings!({ allow_empty_glob => true }, {
+            insta::glob!("fixtures/*.jsonl", |fixture| {
+                let fixture = std::fs::read_to_string(fixture).unwrap();
+                let recovered = runtime.block_on(resume_and_continue(&fixture));
+                insta::assert_snapshot!(recovered);
+            });
         });
     }
 
@@ -1787,7 +1790,7 @@ mod tests {
                         content_hash: 42,
                         last_view: LastView::Full,
                         recorded_at: datetime!(2026-01-01 00:00:01 UTC),
-                        tool_use_id: Some("t1".to_owned()),
+                        tool_use_id: "t1".to_owned(),
                     },
                 },
                 FileSnapshot {
@@ -1799,7 +1802,7 @@ mod tests {
                             total_lines: 40,
                         },
                         recorded_at: datetime!(2026-01-01 00:00:02 UTC),
-                        tool_use_id: Some("t2".to_owned()),
+                        tool_use_id: "t2".to_owned(),
                     },
                 },
             ])
@@ -1835,7 +1838,6 @@ mod tests {
                 "t1".to_owned(),
                 ToolMetadata {
                     title: Some("Edited f.rs".to_owned()),
-                    replacements: Some(1),
                     diff_chunks: Some(vec![DiffChunk {
                         old: vec![DiffLine {
                             number: 1,

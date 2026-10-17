@@ -243,7 +243,7 @@ pub(super) fn text_block(text: &str) -> ContentBlock {
 pub(super) fn thinking_block(thinking: &str) -> ContentBlock {
     ContentBlock::Thinking {
         thinking: thinking.to_owned(),
-        replay: Replay::without_model("sig"),
+        replay: Replay::with_model(MODEL, "sig"),
     }
 }
 

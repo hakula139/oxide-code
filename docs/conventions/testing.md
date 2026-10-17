@@ -29,7 +29,7 @@ Conventions for tests, coverage, mutation testing, and live tests.
 
 `insta` snapshot tests compare TUI renders, session JSONL, and headless output against baselines in the module's `snapshots/` directory. When output changes, the test fails and writes a `.snap.new` file beside the baseline. Review the difference, then accept it with `INSTA_UPDATE=always cargo test <filter>` or `cargo insta review` if cargo-insta is installed, and commit the updated `.snap`. Delete baselines left behind by renamed or removed tests.
 
-The session fixtures in `crates/oxide-code/src/session/fixtures/` are frozen release output, so never edit them. A changed `session_resumes_from_every_release_fixture@<tag>` snapshot means an older release's sessions now resume differently, so accept it only as [Compatibility](../design/session/persistence.md#compatibility) allows.
+The session fixtures in `crates/oxide-code/src/session/fixtures/` are frozen release output, with one fixture per stable release starting at `v0.1.0`. Never edit them. A changed `session_resumes_from_every_release_fixture@<tag>` snapshot means an older release's sessions now resume differently, so accept it only as [Compatibility](../design/session/persistence.md#compatibility) allows.
 
 ## Coverage
 
@@ -56,7 +56,7 @@ A surviving mutant usually means an assertion is too loose, so tighten it. If a 
 OX_LIVE=1 cargo test --test live -- --ignored
 ```
 
-Each test runs `ox` with a scratch directory as its home and for its config, sessions, and logs. `ox` loads no global instructions, config file, or stored login there, so the endpoint and credentials come only from the [environment variables](../guide/configuration.md#environment-variables), and one credential variable must be set. The harness also drops inherited `OX_*` settings other than `OX_EXTRA_CA_CERTS`, along with `ANTHROPIC_EFFORT` and `ANTHROPIC_MAX_TOKENS`, so they cannot change what the tests observe. `OX_LIVE_MODEL` picks the model, `claude-haiku-5-5` by default, and `OX_LIVE_THINKING_MODEL` picks the one for the thinking test, `claude-opus-5-5` by default.
+Each test runs `ox` with a scratch directory as its home and for its config, sessions, and logs. `ox` loads no global instructions, config file, or stored login there, so the endpoint and credentials come only from the [environment variables](../guide/configuration.md#environment-variables), and one credential variable must be set. The harness also drops inherited `OX_*` settings other than `OX_EXTRA_CA_CERTS`, so they cannot change what the tests observe. `OX_LIVE_MODEL` picks the model, `claude-haiku-5-5` by default, and `OX_LIVE_THINKING_MODEL` picks the one for the thinking test, `claude-opus-5-5` by default.
 
 After each run, a test fails when the value of `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, or `CLAUDE_CODE_OAUTH_TOKEN`, or an `ANTHROPIC_CUSTOM_HEADERS` value of 8 or more characters, appears in the run's output or in any file under the scratch directory. The failure names the variable without printing the value.
 

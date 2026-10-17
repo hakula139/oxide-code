@@ -8,7 +8,7 @@ oxide-code loads configuration from multiple sources, merged in order of increas
 4. **Project config file**: `.ox/config.toml` in the nearest directory at or above the current one that has one.
 5. **Environment variables**: always win.
 
-Run `/config` to see each resolved value next to the layer that set it: `default`, `user`, `config.d/<name>`, `project` (or `ox.toml` for a legacy project file), an environment variable such as `$ANTHROPIC_MODEL`, or `session` after a `/model` or `/effort` change.
+Run `/config` to see each resolved value next to the layer that set it: `default`, `user`, `config.d/<name>`, `project`, an environment variable such as `$ANTHROPIC_MODEL`, or `session` after a `/model` or `/effort` change.
 
 ## Layers
 
@@ -29,8 +29,6 @@ Drop-ins share the `config.toml` schema and count as user config. An invalid dro
 ### Project config
 
 A project file comes from the checkout, so it cannot set `client.api_key`, `client.base_url`, `client.extra_ca_certs`, or any `[permission]` key other than `deny` and `ask`. Setting one fails the config load. This keeps a repository from redirecting your credentials or widening what runs without asking.
-
-A legacy `ox.toml` still loads when it sits in the nearest directory at or above the current one that has either file, below `.ox/config.toml` when that directory has both, and startup warns with the path to move it to. In the TUI the warning appears in the chat, and in `-p` and `--no-tui` runs it goes to stderr.
 
 ## Config file
 
@@ -284,7 +282,7 @@ oxide-code ships the rules below. The ones that ask about edits protect their pa
 | `cargo`       | Edits to `.cargo/config`, `.cargo/config.toml`, `rust-toolchain`, and `rust-toolchain.toml` ask                                                   |
 | `shell`       | Edits to shell startup files such as `.bashrc` and `.zshrc` ask                                                                                   |
 | `agents`      | Edits to `.codex` at any depth, `.claude/settings.json`, `.claude/settings.local.json`, and `.claude/hooks` ask                                   |
-| `ox`          | Edits to `.ox` at any depth, a legacy `ox.toml`, and oxide-code's own config, data, and state directories ask                                     |
+| `ox`          | Edits to `.ox` at any depth and oxide-code's own config, data, and state directories ask                                                          |
 | `devices`     | Edits under `/dev` ask on Unix, as does a `bash` redirection to any device there except `/dev/null`, `/dev/stdout`, `/dev/stderr`, and `/dev/tty` |
 | `rm`          | An `rm` with both its recursive and force options asks in any spelling, such as `rm -rf x`, `rm -r --force x`, and `rm x -Rf`                     |
 | `ssh`         | Reads of `~/.ssh` and everything in it are denied, and edits to `~/.ssh/config` and `~/.ssh/authorized_keys` ask                                  |
@@ -303,11 +301,9 @@ Each `extra_roots` entry is an absolute or `~/` path, such as `"~/src/shared-lib
 
 Launching from `/`, your home directory, or a parent of it turns off the auto-allow for every edit, `extra_roots` included, so those edits need an allow pattern or an approval. So does an edit to a file with more than one hard link.
 
-#### Project files and old configs
+#### Project files
 
 A project config can only add `deny` and `ask` patterns. Setting `mode`, `allow`, `extra_roots`, `defaults`, or any other key under `[permission]` there fails the config load, so a repository can restrict what runs but never widen it.
-
-A config that still uses the earlier `class(specifier)` lists, such as `allow = ["bash(cargo test:*)"]`, fails to load with the tables that replace them, and `mode = "auto"` fails in the same message with a note that the mode is now `manual`. Delete each old list and add its table at the end of the file. A rule the patterns cannot express, such as `bash(git * --force)`, whose `*` used to match any run of characters, appears in the table as a comment that says why.
 
 ## Authentication
 
@@ -380,7 +376,5 @@ Environment variables override all config file values.
 | `OX_SHOW_THINKING`                       | `tui.show_thinking`                        | `false`                     | Show extended thinking       |
 | `OX_SHOW_WELCOME`                        | `tui.show_welcome`                         | `true`                      | Paint the welcome splash     |
 | `OX_STATUS_LINE`                         | `tui.status_line`                          | see `[tui]`                 | Comma-separated segments     |
-
-`ANTHROPIC_EFFORT` and `ANTHROPIC_MAX_TOKENS` still work as aliases for `OX_EFFORT` and `OX_MAX_TOKENS`, which win when both are set.
 
 Every variable treats an empty value as unset. Boolean variables accept `1`, `true`, `yes`, or `on` to enable and `0`, `false`, `no`, or `off` to disable, in any letter case. Numeric variables take a whole number: at least `1` for `OX_MAX_TOKENS` and `OX_MAX_TOOL_ROUNDS`, at least `0` for `OX_COMPACTION_AUTO_THRESHOLD_TOKENS`, and `1` to `100` for `OX_COMPACTION_AUTO_THRESHOLD_PERCENT`. Any other value makes `ox` exit at startup with an error naming the variable and the values it accepts. The matching config keys accept the same ranges, and an out-of-range value there names its file and line.

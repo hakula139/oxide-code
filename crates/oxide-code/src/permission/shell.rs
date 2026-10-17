@@ -1031,19 +1031,11 @@ pub(super) fn pattern_words(pattern: &str) -> Result<Vec<PatternWord>> {
             bail!("the word {written:?} expands at run time. Quote it to match it as written.");
         };
         if word.glob {
-            match written.strip_suffix(":*") {
-                Some(prefix) => bail!(
-                    "the word {written:?} ends in the old `:*` prefix form. Write the `*` as a \
-                     word of its own, as in `{}{prefix} *{}`.",
-                    &pattern[..node.start_byte()],
-                    &pattern[node.end_byte()..]
-                ),
-                None => bail!(
-                    "the word {written:?} holds a glob, but only a `*` standing alone as a word \
-                     is a wildcard. Write a pattern for each command it should cover, or quote \
-                     the word to match it as written."
-                ),
-            }
+            bail!(
+                "the word {written:?} holds a glob, but only a `*` standing alone as a word is a \
+                 wildcard. Write a pattern for each command it should cover, or quote the word \
+                 to match it as written."
+            );
         }
         words.push(PatternWord::Literal(value));
     }

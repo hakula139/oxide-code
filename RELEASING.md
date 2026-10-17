@@ -23,6 +23,8 @@ Within a minor version, stable releases keep these compatible:
 
 The TUI layout, prompt text, slash-command output wording, and log format are outside the surface.
 
+Before 0.1.0, config, environment variable, and session format changes may freely break earlier setups and files, with no migration hints, legacy fallbacks, or compatibility shims.
+
 ## Changelog
 
 [git-cliff](https://git-cliff.org) drafts each release's `CHANGELOG.md` section from `cliff.toml`, and the release PR curates the draft into the published notes. Curate a section only in its release PR, after the script runs, and never regenerate an older section. The GitHub Release keeps its own copy of the notes, so a later PR that corrects a published section also needs `gh release edit vX.Y.Z --notes-file <(parse-changelog CHANGELOG.md X.Y.Z)` once it merges. `cargo install parse-changelog` provides the parser `release.yml` uses.
@@ -55,11 +57,11 @@ The draft lists PR titles, which are short and written for reviewers at merge ti
    ./scripts/prepare-release.sh vX.Y.Z [highlights.md]
    ```
 
-   The script sets `workspace.package.version`, refreshes `Cargo.lock`, prepends the changelog section with its compare link, and points the `VERSION=` install snippets in `README.md` and `docs/guide/install.md` at the tag. It also adds the release's [session resume fixture](docs/design/session/persistence.md#compatibility) and records how it resumes, failing if an earlier release's fixture now resumes differently. For a notable release, pass a Markdown file that lists the highlights as bullets.
+   The script sets `workspace.package.version`, refreshes `Cargo.lock`, prepends the changelog section with its compare link, and points the `VERSION=` install snippets in `README.md` and `docs/guide/install.md` at the tag. For a stable tag, it also adds the release's [session resume fixture](docs/design/session/persistence.md#compatibility), records how the fixture resumes, and fails if an earlier release's fixture now resumes differently. For a notable release, pass a Markdown file that lists the highlights as bullets.
 
 3. [Curate the section](#curate-the-section) that the script prepended.
 4. Run the [verification block](AGENTS.md#verification). Because `cspell` scans `CHANGELOG.md`, add any unknown words from the section to `.cspell/words.txt`.
-5. Commit, then open a PR titled `chore(release): vX.Y.Z`. Its title becomes the squash commit on `main`. Record the checks in the PR's Test plan. The diff should touch only `Cargo.toml`, `Cargo.lock`, `CHANGELOG.md`, `README.md`, `docs/guide/install.md`, the new fixture under `crates/oxide-code/src/session/fixtures/` and its snapshot, and possibly `.cspell/words.txt`.
+5. Commit, then open a PR titled `chore(release): vX.Y.Z`. Its title becomes the squash commit on `main`. Record the checks in the PR's Test plan. The diff should touch only `Cargo.toml`, `Cargo.lock`, `CHANGELOG.md`, `README.md`, `docs/guide/install.md`, and possibly `.cspell/words.txt`, plus, for a stable tag, the new fixture under `crates/oxide-code/src/session/fixtures/` and its snapshot.
 6. Merge after CI passes and the review is approved. If another PR merges first, recreate the branch from `main` and run the script again because updating the branch leaves a section that misses the new commit. Carry the curated entries over from the old branch, then curate the new ones.
 
 ## Tag
@@ -107,7 +109,7 @@ Before tagging `v0.1.0-rc.1`:
 - The [`v0.1.0` milestone](https://github.com/hakula139/oxide-code/milestone/1) holds no open issue except the release work for these gates.
 - CI on `main` passes the full test suite on Linux, macOS, and Windows ([#127](https://github.com/hakula139/oxide-code/issues/127)).
 - Each auth mode works live in a TUI turn that calls a tool, a `-p` run, and a `--no-tui` run: Claude Code OAuth login, a long-lived OAuth token ([#121](https://github.com/hakula139/oxide-code/issues/121)), an API key, and a gateway with a bearer token and custom headers ([#122](https://github.com/hakula139/oxide-code/issues/122)). Every Claude 5.5 model answers at least one turn. Record the matrix in the rc PR's Test plan.
-- The persisted formats are documented: session JSONL in [`docs/design/session/persistence.md`](docs/design/session/persistence.md), config keys in [`docs/guide/configuration.md`](docs/guide/configuration.md), and theme TOML in [`docs/guide/theming.md`](docs/guide/theming.md). Tests resume a transcript written by every earlier prerelease, as [Compatibility](docs/design/session/persistence.md#compatibility) describes.
+- The persisted formats are documented: session JSONL in [`docs/design/session/persistence.md`](docs/design/session/persistence.md), config keys in [`docs/guide/configuration.md`](docs/guide/configuration.md), and the theme TOML in [`docs/guide/theming.md`](docs/guide/theming.md).
 - `SECURITY.md` exists ([#200](https://github.com/hakula139/oxide-code/issues/200)), and every archive ships `THIRD-PARTY-NOTICES` ([#207](https://github.com/hakula139/oxide-code/issues/207)).
 
 Before tagging `v0.1.0`:
@@ -116,7 +118,7 @@ Before tagging `v0.1.0`:
 - A whole-repo review at the rc commit has no open findings. Fix each finding or file it into the milestone.
 - The rc serves as the daily driver for the full soak without a new bug.
 
-The `v0.1.0` release PR also switches the install snippets to `releases/latest/download/`, then removes the `VERSION=` lines and the step in `scripts/prepare-release.sh` that rewrites them.
+The `v0.1.0` release PR also switches the install snippets to `releases/latest/download/`, then removes the `VERSION=` lines and the step in `scripts/prepare-release.sh` that rewrites them. Because it adds the first session resume fixture, it also drops `allow_empty_glob` from the fixture test in `crates/oxide-code/src/session/handle.rs`, so the test fails again when no fixture matches.
 
 ## Targets
 

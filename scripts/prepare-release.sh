@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Prepare the release PR for a tag: prepend the draft changelog section with its compare link, bump
-# the version, pin the install snippets to the tag, and add the tag's session resume fixture.
+# the version, pin the install snippets to the tag, and add a stable tag's session resume fixture.
 #
 #   ./scripts/prepare-release.sh vX.Y.Z [highlights.md]
 #
@@ -27,7 +27,8 @@ fi
 cd "$(git rev-parse --show-toplevel)"
 snapshots=crates/oxide-code/src/session/snapshots
 written="$snapshots/ox__session__handle__tests__session_writes_every_entry_type_as_byte_compatible_jsonl.snap"
-fixture="crates/oxide-code/src/session/fixtures/$tag.jsonl"
+fixtures=crates/oxide-code/src/session/fixtures
+fixture="$fixtures/$tag.jsonl"
 resumed="$snapshots/ox__session__handle__tests__session_resumes_from_every_release_fixture@$tag.jsonl.snap"
 files=(CHANGELOG.md Cargo.toml Cargo.lock README.md docs/guide/install.md "$written")
 if ! git diff --quiet HEAD -- "${files[@]}"; then
@@ -81,9 +82,13 @@ cargo update --workspace --quiet
 
 perl -pi -e "s/^VERSION=v.*/VERSION=$tag/" README.md docs/guide/install.md
 
-# The fixture is the byte-compat snapshot without its insta header. `unseen` records the new
-# fixture's resume snapshot and still fails when an earlier fixture resumes differently.
-awk 'header == 2 { print } /^---$/ { header++ }' "$written" >"$fixture"
-INSTA_UPDATE=unseen cargo test --quiet --bin ox session_resumes_from_every_release_fixture
+# Session compatibility covers stable releases only, so only a stable tag adds a fixture: the
+# byte-compat snapshot without its insta header. `unseen` records the new fixture's resume
+# snapshot and still fails when an earlier fixture resumes differently.
+if [[ "$version" != *-* ]]; then
+  mkdir -p "$fixtures"
+  awk 'header == 2 { print } /^---$/ { header++ }' "$written" >"$fixture"
+  INSTA_UPDATE=unseen cargo test --quiet --bin ox session_resumes_from_every_release_fixture
+fi
 
 printf 'Prepared %s. Curate the new CHANGELOG.md section, then commit as chore(release): %s.\n' "$tag" "$tag"

@@ -38,12 +38,7 @@ pub(super) fn retain_visible_file_snapshots(
     messages: &[Message],
 ) {
     let visible = tool_result_ids(messages);
-    snapshots.retain(|snap| {
-        snap.state
-            .tool_use_id
-            .as_deref()
-            .is_some_and(|id| visible.contains(id))
-    });
+    snapshots.retain(|snap| visible.contains(snap.state.tool_use_id.as_str()));
 }
 
 // ── Passes ──
@@ -357,14 +352,14 @@ mod tests {
 
     // ── retain_visible_file_snapshots ──
 
-    fn snapshot(path: &str, tool_use_id: Option<&str>) -> FileSnapshot {
+    fn snapshot(path: &str, tool_use_id: &str) -> FileSnapshot {
         FileSnapshot {
             path: PathBuf::from(path),
             state: FileState {
                 content_hash: 1,
                 last_view: LastView::Full,
                 recorded_at: OffsetDateTime::UNIX_EPOCH,
-                tool_use_id: tool_use_id.map(str::to_owned),
+                tool_use_id: tool_use_id.to_owned(),
             },
         }
     }
@@ -383,16 +378,12 @@ mod tests {
             },
             Message::assistant("done"),
         ];
-        let mut snapshots = vec![
-            snapshot("/a", Some("seen")),
-            snapshot("/b", Some("lost")),
-            snapshot("/c", None),
-        ];
+        let mut snapshots = vec![snapshot("/a", "seen"), snapshot("/b", "lost")];
 
         sanitize_resumed_messages(&mut messages);
         retain_visible_file_snapshots(&mut snapshots, &messages);
 
-        assert_eq!(snapshots, [snapshot("/a", Some("seen"))]);
+        assert_eq!(snapshots, [snapshot("/a", "seen")]);
     }
 
     // ── drop_unresolved_tool_uses ──

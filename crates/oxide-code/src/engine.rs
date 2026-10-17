@@ -1217,7 +1217,7 @@ mod tests {
                     role: Role::Assistant,
                     content: vec![ContentBlock::Thinking {
                         thinking: turn::INTERRUPTED_WORK_SENTINEL.to_owned(),
-                        replay: Replay::without_model(""),
+                        replay: Replay::with_model(MODEL, ""),
                     }],
                 },
             ];

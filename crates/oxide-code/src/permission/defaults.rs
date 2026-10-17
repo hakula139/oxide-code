@@ -233,11 +233,11 @@ const AGENTS: Names = Names {
     ],
 };
 
-/// oxide-code's project config and the legacy `ox.toml`. [`protected_roots`] adds its own
-/// directories, where an edit could rewrite its config or session history.
+/// oxide-code's project config. [`protected_roots`] adds its own directories, where an edit could
+/// rewrite its config or session history.
 const OX: Names = Names {
     dirs: &[".ox"],
-    files: &["ox.toml"],
+    files: &[],
     nested_dirs: &[],
     nested_files: &[],
 };
@@ -506,7 +506,6 @@ mod tests {
             ("/repo/.claude/settings.local.json", Shipped::Agents),
             ("/repo/.claude/hooks/format.sh", Shipped::Agents),
             ("/home/u/.claude/settings.json", Shipped::Agents),
-            ("/repo/sub/OX.toml", Shipped::Ox),
             ("/repo/sub/.OX/config.toml", Shipped::Ox),
             ("/repo/.cargo/con\u{fb01}g.toml", Shipped::Cargo),
             ("/repo/.v\u{17f}code/tasks.json", Shipped::Editors),
@@ -532,7 +531,6 @@ mod tests {
             "/repo/cargo/config.toml",
             "/repo/.cargo/registry/x.rs",
             "/repo/docs/.zshrc.md",
-            "/repo/ox.toml.bak",
             "/repo/box/config.toml",
             "/repo/.claude/worktrees/feat/src/main.rs",
             "/repo/.claude/plans/next.md",

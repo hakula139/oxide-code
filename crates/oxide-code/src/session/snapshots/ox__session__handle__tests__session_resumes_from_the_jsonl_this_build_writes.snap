@@ -88,14 +88,14 @@ expression: recovered
       "content": [
         {
           "model": "claude-opus-5-5",
-          "signature": "signature",
+          "payload": "signature",
           "thinking": "Rename main.",
           "type": "thinking",
           "wire": "anthropic"
         },
         {
-          "data": "redacted",
           "model": "claude-opus-5-5",
+          "payload": "redacted",
           "type": "redacted_thinking",
           "wire": "anthropic"
         },
@@ -236,7 +236,6 @@ expression: recovered
           ]
         }
       ],
-      "replacements": 1,
       "title": "Edited f.rs"
     },
     "t2": {

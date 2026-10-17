@@ -145,7 +145,6 @@ fn layer_kind(layer: &Layer) -> &'static str {
     match layer {
         Layer::User(_) => "User",
         Layer::DropIn(_) => "Drop-in",
-        Layer::LegacyProject(_) => "Legacy Project",
         Layer::Project(_) => "Project",
     }
 }
@@ -314,7 +313,6 @@ mod tests {
             let layers = [
                 Layer::User(PathBuf::from("/home/user/.config/ox/config.toml")),
                 Layer::DropIn(PathBuf::from("/home/user/.config/ox/config.d/10-nix.toml")),
-                Layer::LegacyProject(PathBuf::from("/repo/ox.toml")),
                 Layer::Project(PathBuf::from("/repo/.ox/config.toml")),
             ];
             let user = PathBuf::from("/home/user/.config/ox/config.toml");
@@ -324,7 +322,6 @@ mod tests {
                 [
                     pair("User", "~/.config/ox/config.toml"),
                     pair("Drop-in", "~/.config/ox/config.d/10-nix.toml"),
-                    pair("Legacy Project", "/repo/ox.toml"),
                     pair("Project", "/repo/.ox/config.toml"),
                 ],
             );

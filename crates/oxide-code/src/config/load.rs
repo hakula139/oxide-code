@@ -3,21 +3,19 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, bail};
 use toml::{Table, Value};
 use tracing::debug;
 
 use super::merge::{Origins, merge};
 use super::provenance::Layer;
 use super::schema::FileConfig;
-use crate::permission::legacy::migration_error;
-use crate::permission::{Mode, Tier, extra_root};
+use crate::permission::{Tier, extra_root};
 use crate::util::path::{XdgBase, app_dir};
 
 const CONFIG_FILE: &str = "config.toml";
 const DROP_IN_DIR: &str = "config.d";
 const PROJECT_DIR: &str = ".ox";
-const LEGACY_PROJECT_FILE: &str = "ox.toml";
 
 // ── Loading ──
 
@@ -64,7 +62,7 @@ fn discover(user_dir: Option<&Path>, cwd: Option<&Path>) -> Result<Vec<Layer>> {
         );
     }
     if let Some(cwd) = cwd {
-        layers.extend(project_layers(cwd));
+        layers.extend(project_layer(cwd));
     }
     Ok(layers)
 }
@@ -97,28 +95,12 @@ fn drop_ins(dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
-/// The project layers of the nearest directory at or above `cwd` that holds `.ox/config.toml` or
-/// a legacy `ox.toml`. When both exist, both load with `.ox/config.toml` above.
-fn project_layers(cwd: &Path) -> Vec<Layer> {
-    for dir in cwd.ancestors() {
-        let legacy = dir.join(LEGACY_PROJECT_FILE);
-        let current = project_config_path(dir);
-        let layers: Vec<Layer> = [
-            legacy.is_file().then_some(Layer::LegacyProject(legacy)),
-            current.is_file().then_some(Layer::Project(current)),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
-        if !layers.is_empty() {
-            return layers;
-        }
-    }
-    Vec::new()
-}
-
-pub(super) fn project_config_path(dir: &Path) -> PathBuf {
-    dir.join(PROJECT_DIR).join(CONFIG_FILE)
+/// The `.ox/config.toml` in the nearest directory at or above `cwd` that has one.
+fn project_layer(cwd: &Path) -> Option<Layer> {
+    cwd.ancestors()
+        .map(|dir| dir.join(PROJECT_DIR).join(CONFIG_FILE))
+        .find(|path| path.is_file())
+        .map(Layer::Project)
 }
 
 pub(crate) fn user_config_path() -> Option<PathBuf> {
@@ -129,7 +111,7 @@ pub(crate) fn user_config_path() -> Option<PathBuf> {
 
 /// Parses one layer. `Ok(None)` when the user file is missing, and `Err` when a file is unreadable,
 /// including a drop-in symlink whose target is gone, is a project file setting a user-only key,
-/// holds an old permission form, fails the schema, or holds a malformed pattern or extra root.
+/// fails the schema, or holds a malformed pattern or extra root.
 fn read_layer(layer: &Layer) -> Result<Option<Table>> {
     let path = layer.path();
     let content = match std::fs::read_to_string(path) {
@@ -149,7 +131,6 @@ fn read_layer(layer: &Layer) -> Result<Option<Table>> {
     if layer.is_project() {
         reject_project_permissions(&table, path)?;
     }
-    reject_old_permissions(&table).with_context(invalid)?;
     let config: FileConfig = toml::from_str(&content).with_context(invalid)?;
     let permission = &config.permission;
     for (tier, table) in [
@@ -169,32 +150,6 @@ fn read_layer(layer: &Layer) -> Result<Option<Table>> {
     }
     debug!("loaded config from {}", path.display());
     Ok(Some(table))
-}
-
-/// Fails on the permission forms this version replaced: a tier set to a flat list of
-/// `class(specifier)` rules, and `mode = "auto"`. One error names the replacement of each, so a
-/// config migrates in one pass.
-fn reject_old_permissions(table: &Table) -> Result<()> {
-    let Some(permission) = table.get("permission").and_then(Value::as_table) else {
-        return Ok(());
-    };
-    let mut errors: Vec<String> = [Tier::Deny, Tier::Ask, Tier::Allow]
-        .into_iter()
-        .filter_map(|tier| match permission.get(&tier.to_string()) {
-            Some(Value::Array(rules)) => Some(migration_error(tier, rules)),
-            _ => None,
-        })
-        .collect();
-    if permission.get("mode").and_then(Value::as_str) == Some("auto") {
-        errors.extend(
-            "auto"
-                .parse::<Mode>()
-                .err()
-                .map(|e| format!("permission.mode = \"auto\": {e}")),
-        );
-    }
-    ensure!(errors.is_empty(), "{}", errors.join("\n\n"));
-    Ok(())
 }
 
 fn reject_project_secrets(config: &FileConfig, path: &Path) -> Result<()> {
@@ -464,7 +419,7 @@ mod tests {
     }
 
     #[test]
-    fn discover_appends_the_project_layers() {
+    fn discover_appends_the_project_layer() {
         let dir = tempfile::tempdir().unwrap();
         let project = write(&dir.path().join("repo/.ox/config.toml"), "");
 
@@ -486,55 +441,39 @@ mod tests {
         );
     }
 
-    // ── project_layers ──
+    // ── project_layer ──
 
     #[test]
-    fn project_layers_walk_up_to_the_nearest_project() {
+    fn project_layer_walks_up_to_the_nearest_project() {
         let dir = tempfile::tempdir().unwrap();
         let project = write(&dir.path().join(".ox/config.toml"), "");
         let child = dir.path().join("sub/deep");
         std::fs::create_dir_all(&child).unwrap();
 
-        assert_eq!(project_layers(&child), [Layer::Project(project)]);
+        assert_eq!(project_layer(&child), Some(Layer::Project(project)));
     }
 
     #[test]
-    fn project_layers_load_a_legacy_file_below_the_current_one() {
+    fn project_layer_stops_at_the_nearest_directory() {
         let dir = tempfile::tempdir().unwrap();
-        let legacy = write(&dir.path().join("ox.toml"), "");
-        assert_eq!(
-            project_layers(dir.path()),
-            [Layer::LegacyProject(legacy.clone())]
-        );
-
-        let current = write(&dir.path().join(".ox/config.toml"), "");
-        assert_eq!(
-            project_layers(dir.path()),
-            [Layer::LegacyProject(legacy), Layer::Project(current)],
-        );
-    }
-
-    #[test]
-    fn project_layers_stop_at_the_nearest_directory() {
-        let dir = tempfile::tempdir().unwrap();
-        write(&dir.path().join("ox.toml"), "");
+        write(&dir.path().join(".ox/config.toml"), "");
         let nested = write(&dir.path().join("sub/.ox/config.toml"), "");
 
         assert_eq!(
-            project_layers(&dir.path().join("sub")),
-            [Layer::Project(nested)]
+            project_layer(&dir.path().join("sub")),
+            Some(Layer::Project(nested))
         );
     }
 
     #[test]
-    fn project_layers_ignore_an_ox_directory_without_config() {
+    fn project_layer_ignores_an_ox_directory_without_config() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("sub/.ox")).unwrap();
         let outer = write(&dir.path().join(".ox/config.toml"), "");
 
         assert_eq!(
-            project_layers(&dir.path().join("sub")),
-            [Layer::Project(outer)]
+            project_layer(&dir.path().join("sub")),
+            Some(Layer::Project(outer))
         );
     }
 
@@ -699,40 +638,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn read_layer_rejects_every_old_permission_form_in_one_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write(
-            &dir.path().join("config.toml"),
-            indoc! {r#"
-                [permission]
-                mode = "auto"
-                allow = ["bash(cargo test:*)"]
-                deny = ["bash(git push:*)", "read(.env)"]
-            "#},
-        );
-
-        let err = read_layer(&Layer::User(path.clone())).expect_err("old permission forms");
-        assert_eq!(
-            format!("{err:#}"),
-            formatdoc! {r#"
-                invalid config at {}: permission.deny is an old `class(specifier)` rule list, which oxide-code no longer reads. Remove it and add this table at the end of the file:
-
-                [permission.deny]
-                read = ["./.env"]
-                exec = ["git push *"]
-
-                permission.allow is an old `class(specifier)` rule list, which oxide-code no longer reads. Remove it and add this table at the end of the file:
-
-                [permission.allow]
-                exec = ["cargo test *"]
-
-                permission.mode = "auto": expected one of manual, plan, yolo. The asking mode "auto" is now "manual", the default, so use "manual" or leave the mode unset"#,
-                path.display()
-            }
-        );
-    }
-
     /// Non-`NotFound` IO errors (e.g. directory → `IsADirectory`) must surface with the path.
     #[test]
     fn read_layer_unreadable_path_propagates_io_error() {
@@ -772,6 +677,32 @@ mod tests {
                 format!("{err:#}").contains(&format!("unknown field `{key}`")),
                 "{err:#}"
             );
+        }
+    }
+
+    #[test]
+    fn read_layer_rejects_old_permission_shapes_as_invalid_values() {
+        let dir = tempfile::tempdir().unwrap();
+        for (body, error) in [
+            (
+                r#"permission.mode = "auto""#,
+                "unknown variant `auto`, expected one of `manual`, `plan`, `yolo`",
+            ),
+            (
+                r#"permission.allow = ["bash(ls)"]"#,
+                r#"invalid type: string "bash(ls)", expected a sequence"#,
+            ),
+        ] {
+            let path = write(&dir.path().join("config.toml"), body);
+
+            let err = read_layer(&Layer::User(path.clone())).expect_err(body);
+
+            let msg = format!("{err:#}");
+            assert!(
+                msg.starts_with(&format!("invalid config at {}: ", path.display())),
+                "{msg}"
+            );
+            assert!(msg.trim_end().ends_with(error), "{msg}");
         }
     }
 
@@ -823,26 +754,22 @@ mod tests {
             extra_ca_certs = "./attacker-ca.pem"
         "#};
         let path = write(&dir.path().join(".ox/config.toml"), body);
-        let legacy = write(&dir.path().join("ox.toml"), body);
         let config_home = dir.path().join("config-home");
         let user_config = config_home.join("ox").join("config.toml");
 
-        for layer in [Layer::Project(path), Layer::LegacyProject(legacy)] {
-            let err = temp_env::with_var("XDG_CONFIG_HOME", Some(&config_home), || {
-                read_layer(&layer).expect_err("project secrets must be blocked")
-            });
-            let msg = format!("{err:#}");
-            assert!(msg.contains(&layer.path().display().to_string()), "{msg}");
-            assert!(
-                msg.contains("client.api_key, client.base_url, client.extra_ca_certs"),
-                "{msg}"
-            );
-            assert!(msg.contains(&user_config.display().to_string()), "{msg}");
-        }
+        let err = temp_env::with_var("XDG_CONFIG_HOME", Some(&config_home), || {
+            read_layer(&Layer::Project(path.clone())).expect_err("project secrets must be blocked")
+        });
+
+        let msg = format!("{err:#}");
+        assert!(msg.contains(&path.display().to_string()), "{msg}");
         assert!(
-            read_layer(&Layer::User(dir.path().join("ox.toml")))
-                .unwrap()
-                .is_some(),
+            msg.contains("client.api_key, client.base_url, client.extra_ca_certs"),
+            "{msg}"
+        );
+        assert!(msg.contains(&user_config.display().to_string()), "{msg}");
+        assert!(
+            read_layer(&Layer::User(path)).unwrap().is_some(),
             "the user file may set them"
         );
     }
@@ -850,46 +777,34 @@ mod tests {
     #[test]
     fn read_layer_rejects_every_permission_key_but_deny_and_ask_in_a_project() {
         let dir = tempfile::tempdir().unwrap();
-        for (body, blocked) in [
-            (
-                indoc! {r#"
-                    [permission]
-                    mode = "yolo"
-                    extra_roots = ["~/"]
-                    allow.exec = ["rm -rf *"]
-                    defaults.git = false
-                    later_key = true
-                "#},
-                "permission.allow, permission.defaults, permission.extra_roots, \
-                 permission.later_key, permission.mode",
-            ),
-            (
-                indoc! {r#"
-                    [permission]
-                    allow = ["bash(ls)"]
-                    deny = ["bash(rm:*)"]
-                "#},
-                "permission.allow",
-            ),
-        ] {
-            let path = write(&dir.path().join(".ox/config.toml"), body);
-            let config_home = dir.path().join("config-home");
+        let path = write(
+            &dir.path().join(".ox/config.toml"),
+            indoc! {r#"
+                [permission]
+                mode = "yolo"
+                extra_roots = ["~/"]
+                allow.exec = ["rm -rf *"]
+                defaults.git = false
+                later_key = true
+            "#},
+        );
+        let config_home = dir.path().join("config-home");
 
-            let err = temp_env::with_var("XDG_CONFIG_HOME", Some(&config_home), || {
-                read_layer(&Layer::Project(path.clone())).expect_err(body)
-            });
+        let err = temp_env::with_var("XDG_CONFIG_HOME", Some(&config_home), || {
+            read_layer(&Layer::Project(path.clone())).expect_err("user-only permission keys")
+        });
 
-            assert_eq!(
-                format!("{err:#}"),
-                format!(
-                    "{} cannot set {blocked}. Within [permission], a project file may only add \
-                     deny and ask rules. Set mode, allow, extra_roots, and defaults in {} or a \
-                     config.d drop-in, or the mode with OX_PERMISSION_MODE.",
-                    path.display(),
-                    config_home.join("ox").join("config.toml").display()
-                )
-            );
-        }
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "{} cannot set permission.allow, permission.defaults, permission.extra_roots, \
+                 permission.later_key, permission.mode. Within [permission], a project file may \
+                 only add deny and ask rules. Set mode, allow, extra_roots, and defaults in {} or \
+                 a config.d drop-in, or the mode with OX_PERMISSION_MODE.",
+                path.display(),
+                config_home.join("ox").join("config.toml").display()
+            )
+        );
     }
 
     #[test]

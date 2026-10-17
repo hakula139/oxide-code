@@ -12,7 +12,7 @@ The `FileTracker` is a per-session `Arc<Mutex<HashMap>>` shared across tool call
 
 2. **Content hash is the gate.** Mutating tools always rehash the current bytes before writing. The tracker keeps only the hash, since same-size writes can preserve timestamps and only the content proves a file is unchanged.
 
-3. **Persist the tracker on session finish, verify on resume.** `Entry::FileSnapshot` stores the tracker state in JSONL, and each snapshot names the tool call that recorded it. On resume, a snapshot is discarded when its call has no result left in the repaired transcript, or names no call at all, since the model cannot see that content. Of the rest, the newest snapshot per path is selected, regular files at or below the tracked-file size cap are rehashed, survivors restore into the in-memory tracker, and paths that fail the rehash are surfaced so the user can re-Read before mutating.
+3. **Persist the tracker on session finish, verify on resume.** `Entry::FileSnapshot` stores the tracker state in JSONL, and each snapshot names the tool call that recorded it. On resume, a snapshot is discarded when its call has no result left in the repaired transcript, since the model cannot see that content. Of the rest, the newest snapshot per path is selected, regular files at or below the tracked-file size cap are rehashed, survivors restore into the in-memory tracker, and paths that fail the rehash are surfaced so the user can re-Read before mutating.
 
 4. **Per-session scope.** Tracker created with the session, dropped on finish. No cross-process sharing.
 

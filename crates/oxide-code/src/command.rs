@@ -254,19 +254,10 @@ mod tests {
     }
 
     #[test]
-    fn mode_unknown_mode_lists_the_valid_ones_and_names_the_replacement_for_auto() {
+    fn mode_unknown_mode_lists_the_valid_ones() {
         assert_eq!(
             mode("Turbo"),
             Err("Unknown mode `Turbo`: expected one of manual, plan, yolo.".to_owned()),
-        );
-        assert_eq!(
-            mode("AUTO"),
-            Err(
-                "Unknown mode `AUTO`: expected one of manual, plan, yolo. The asking mode \
-                 \"auto\" is now \"manual\", the default, so use \"manual\" or leave the mode \
-                 unset."
-                    .to_owned()
-            ),
         );
     }
 

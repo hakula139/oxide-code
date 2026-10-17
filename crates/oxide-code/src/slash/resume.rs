@@ -95,7 +95,7 @@ struct SessionRow {
     last_active_at: time::OffsetDateTime,
     local_offset: UtcOffset,
     title: String,
-    /// `0` when no `Summary` line was found (older sessions or sessions that never finalized).
+    /// `0` when no `Summary` line was found, as in a session that never finalized.
     /// Rendered as "N msgs" so the user can see session weight at a glance.
     message_count: u32,
     git_branch: Option<String>,
