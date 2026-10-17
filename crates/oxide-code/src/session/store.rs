@@ -624,6 +624,7 @@ mod tests {
     };
     use super::*;
     use crate::config::PromptCacheTtl;
+    use crate::file_tracker::{FileState, LastView};
     use crate::message::ContentBlock;
     use crate::prompt::PromptParts;
     use crate::tool::tasks::testing::plan;
@@ -664,10 +665,12 @@ mod tests {
         Entry::FileSnapshot {
             snapshot: FileSnapshot {
                 path: PathBuf::from(path),
-                content_hash: 42,
-                last_view: crate::file_tracker::LastView::Full,
-                recorded_at: datetime!(2026-04-16 12:00:01 UTC),
-                tool_use_id: None,
+                state: FileState {
+                    content_hash: 42,
+                    last_view: LastView::Full,
+                    recorded_at: datetime!(2026-04-16 12:00:01 UTC),
+                    tool_use_id: None,
+                },
             },
         }
     }

@@ -163,6 +163,7 @@ mod tests {
     use time::macros::datetime;
 
     use super::*;
+    use crate::file_tracker::{FileState, LastView};
     use crate::message::{ContentBlock, Role};
     use crate::tool::tasks::testing::plan;
 
@@ -401,10 +402,12 @@ mod tests {
     fn file_snapshot_round_trips_with_inlined_payload_fields() {
         let snapshot = FileSnapshot {
             path: std::path::PathBuf::from("/tmp/a.rs"),
-            content_hash: 0xDEAD_BEEF,
-            last_view: crate::file_tracker::LastView::Full,
-            recorded_at: datetime!(2026-04-29 12:34:56 UTC),
-            tool_use_id: None,
+            state: FileState {
+                content_hash: 0xDEAD_BEEF,
+                last_view: LastView::Full,
+                recorded_at: datetime!(2026-04-29 12:34:56 UTC),
+                tool_use_id: None,
+            },
         };
         let entry = Entry::FileSnapshot {
             snapshot: snapshot.clone(),
@@ -442,7 +445,7 @@ mod tests {
             panic!("expected FileSnapshot, got {parsed:?}");
         };
         assert_eq!(snapshot.path, std::path::PathBuf::from("/tmp/a.rs"));
-        assert_eq!(snapshot.content_hash, 1);
+        assert_eq!(snapshot.state.content_hash, 1);
     }
 
     // ── Entry::Compact ──

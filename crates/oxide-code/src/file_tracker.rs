@@ -34,12 +34,17 @@ pub(crate) struct FileTracker {
     by_path: Mutex<HashMap<PathBuf, FileState>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct FileState {
-    content_hash: u64,
-    last_view: LastView,
-    recorded_at: OffsetDateTime,
-    tool_use_id: Option<String>,
+/// What the tracker knows about one file's content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct FileState {
+    pub(crate) content_hash: u64,
+    pub(crate) last_view: LastView,
+    #[serde(with = "time::serde::rfc3339")]
+    pub(crate) recorded_at: OffsetDateTime,
+    /// The tool call that recorded this state. Resume restores the state only while the
+    /// transcript still holds that call's result.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) tool_use_id: Option<String>,
 }
 
 impl FileTracker {
@@ -157,10 +162,7 @@ impl FileTracker {
             .iter()
             .map(|(path, state)| FileSnapshot {
                 path: path.clone(),
-                content_hash: state.content_hash,
-                last_view: state.last_view.clone(),
-                recorded_at: state.recorded_at,
-                tool_use_id: state.tool_use_id.clone(),
+                state: state.clone(),
             })
             .collect()
     }
@@ -180,7 +182,7 @@ impl FileTracker {
         for snap in snapshots {
             let replace = latest
                 .get(&snap.path)
-                .is_none_or(|cur| snap.recorded_at >= cur.recorded_at);
+                .is_none_or(|cur| snap.state.recorded_at >= cur.state.recorded_at);
             if replace {
                 latest.insert(snap.path.clone(), snap);
             }
@@ -197,17 +199,9 @@ impl FileTracker {
             }
             let keep = by_path
                 .get(&snap.path)
-                .is_none_or(|cur| snap.recorded_at >= cur.recorded_at);
+                .is_none_or(|cur| snap.state.recorded_at >= cur.recorded_at);
             if keep {
-                by_path.insert(
-                    snap.path,
-                    FileState {
-                        content_hash: snap.content_hash,
-                        last_view: snap.last_view,
-                        recorded_at: snap.recorded_at,
-                        tool_use_id: snap.tool_use_id,
-                    },
-                );
+                by_path.insert(snap.path, snap.state);
             }
         }
         dropped.sort();
@@ -224,7 +218,7 @@ fn verify_on_disk(snapshot: &FileSnapshot) -> Result<(), String> {
         std::fs::metadata(&snapshot.path).map_err(|error| format!("stat failed: {error}"))?;
     validate_trackable_file(&metadata).map_err(|error| error.to_string())?;
     let bytes = std::fs::read(&snapshot.path).map_err(|error| format!("read failed: {error}"))?;
-    if xxh64(&bytes, HASH_SEED) != snapshot.content_hash {
+    if xxh64(&bytes, HASH_SEED) != snapshot.state.content_hash {
         return Err("content drift".to_owned());
     }
     Ok(())
@@ -341,14 +335,8 @@ pub(crate) fn validate_trackable_file(metadata: &Metadata) -> Result<(), Trackab
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct FileSnapshot {
     pub(crate) path: PathBuf,
-    pub(crate) content_hash: u64,
-    pub(crate) last_view: LastView,
-    #[serde(with = "time::serde::rfc3339")]
-    pub(crate) recorded_at: OffsetDateTime,
-    /// The tool call that recorded this state. Resume keeps the snapshot only while the
-    /// transcript still holds that call's result.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) tool_use_id: Option<String>,
+    #[serde(flatten)]
+    pub(crate) state: FileState,
 }
 
 // ── Outcomes ──
@@ -364,7 +352,7 @@ pub(crate) enum RecordRead {
 }
 
 /// Reasons the Read-before-Edit / Write gate refuses a tool call. Each variant's `#[error]`
-/// message tells the model exactly how to recover (Read first / Read the rest / re-Read).
+/// message tells the model how to recover (Read first / Read the rest / re-Read).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum GateError {
     #[error("File {} has not been read in this session. Read it before {} it.", .path.display(), .purpose.verb())]
@@ -428,10 +416,12 @@ mod tests {
     fn snapshot(path: &Path, content: &[u8], recorded_at: OffsetDateTime) -> FileSnapshot {
         FileSnapshot {
             path: path.to_path_buf(),
-            content_hash: xxh64(content, HASH_SEED),
-            last_view: LastView::Full,
-            recorded_at,
-            tool_use_id: None,
+            state: FileState {
+                content_hash: xxh64(content, HASH_SEED),
+                last_view: LastView::Full,
+                recorded_at,
+                tool_use_id: None,
+            },
         }
     }
 
@@ -458,7 +448,7 @@ mod tests {
         let origins: BTreeMap<PathBuf, Option<String>> = tracker
             .snapshot_all()
             .into_iter()
-            .map(|snap| (snap.path, snap.tool_use_id))
+            .map(|snap| (snap.path, snap.state.tool_use_id))
             .collect();
         assert_eq!(
             origins,
@@ -750,11 +740,11 @@ mod tests {
 
         assert_eq!(snaps.len(), 2);
         assert_eq!(snaps[0].path, Path::new("/tmp/a"));
-        assert_eq!(snaps[0].content_hash, xxh64(b"a", HASH_SEED));
-        assert_eq!(snaps[0].last_view, LastView::Full);
+        assert_eq!(snaps[0].state.content_hash, xxh64(b"a", HASH_SEED));
+        assert_eq!(snaps[0].state.last_view, LastView::Full);
         assert_eq!(snaps[1].path, Path::new("/tmp/b"));
-        assert_eq!(snaps[1].content_hash, xxh64(b"bbb", HASH_SEED));
-        assert_eq!(snaps[1].last_view, LastView::lines(1, 2, 3));
+        assert_eq!(snaps[1].state.content_hash, xxh64(b"bbb", HASH_SEED));
+        assert_eq!(snaps[1].state.last_view, LastView::lines(1, 2, 3));
     }
 
     #[test]
@@ -790,10 +780,7 @@ mod tests {
         let tracker = FileTracker::default();
         tracker.restore_verified(vec![snap.clone()]);
 
-        let stored = tracker.lock().get(&path).cloned();
-        let stored = stored.expect("matching content restores the entry");
-        assert_eq!(stored.content_hash, snap.content_hash);
-        assert_eq!(stored.last_view, LastView::Full);
+        assert_eq!(tracker.lock().get(&path), Some(&snap.state));
     }
 
     #[test]
@@ -872,10 +859,8 @@ mod tests {
         let path = dir.path().join("a.rs");
         std::fs::write(&path, b"x").unwrap();
 
-        let older = FileSnapshot {
-            last_view: LastView::lines(1, 1, 2),
-            ..snapshot(&path, b"stale", OffsetDateTime::UNIX_EPOCH)
-        };
+        let mut older = snapshot(&path, b"stale", OffsetDateTime::UNIX_EPOCH);
+        older.state.last_view = LastView::lines(1, 1, 2);
         let newer = snapshot(
             &path,
             b"x",
@@ -1066,25 +1051,30 @@ mod tests {
     fn file_snapshot_round_trips_through_json() {
         let snap = FileSnapshot {
             path: PathBuf::from("/tmp/a.rs"),
-            content_hash: 0xDEAD_BEEF,
-            last_view: LastView::Partial {
-                ranges: vec![(1, 2), (4, 5)],
-                total_lines: 9,
+            state: FileState {
+                content_hash: 0xDEAD_BEEF,
+                last_view: LastView::Partial {
+                    ranges: vec![(1, 2), (4, 5)],
+                    total_lines: 9,
+                },
+                recorded_at: time::macros::datetime!(2026-04-29 12:34:56 UTC),
+                tool_use_id: Some("toolu_1".to_owned()),
             },
-            recorded_at: time::macros::datetime!(2026-04-29 12:34:56 UTC),
-            tool_use_id: Some("toolu_1".to_owned()),
         };
-        let json = serde_json::to_value(&snap).unwrap();
-        assert_eq!(json["path"], "/tmp/a.rs");
-        assert_eq!(json["content_hash"], 0xDEAD_BEEF_u64);
-        assert_eq!(
-            json["last_view"],
-            serde_json::json!({"kind": "partial", "ranges": [[1, 2], [4, 5]], "total_lines": 9}),
-        );
-        assert_eq!(json["recorded_at"], "2026-04-29T12:34:56Z");
-        assert_eq!(json["tool_use_id"], "toolu_1");
 
-        let parsed: FileSnapshot = serde_json::from_value(json).unwrap();
+        let json = serde_json::to_value(&snap).unwrap();
+        let parsed: FileSnapshot = serde_json::from_value(json.clone()).unwrap();
+
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "path": "/tmp/a.rs",
+                "content_hash": 0xDEAD_BEEF_u64,
+                "last_view": {"kind": "partial", "ranges": [[1, 2], [4, 5]], "total_lines": 9},
+                "recorded_at": "2026-04-29T12:34:56Z",
+                "tool_use_id": "toolu_1",
+            }),
+        );
         assert_eq!(parsed, snap);
     }
 

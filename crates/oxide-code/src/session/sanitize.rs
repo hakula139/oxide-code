@@ -39,7 +39,8 @@ pub(super) fn retain_visible_file_snapshots(
 ) {
     let visible = tool_result_ids(messages);
     snapshots.retain(|snap| {
-        snap.tool_use_id
+        snap.state
+            .tool_use_id
             .as_deref()
             .is_some_and(|id| visible.contains(id))
     });
@@ -147,7 +148,7 @@ mod tests {
     use time::OffsetDateTime;
 
     use super::*;
-    use crate::file_tracker::LastView;
+    use crate::file_tracker::{FileState, LastView};
 
     fn unresolved_tool_use(id: &str) -> ContentBlock {
         ContentBlock::ToolUse {
@@ -359,10 +360,12 @@ mod tests {
     fn snapshot(path: &str, tool_use_id: Option<&str>) -> FileSnapshot {
         FileSnapshot {
             path: PathBuf::from(path),
-            content_hash: 1,
-            last_view: LastView::Full,
-            recorded_at: OffsetDateTime::UNIX_EPOCH,
-            tool_use_id: tool_use_id.map(str::to_owned),
+            state: FileState {
+                content_hash: 1,
+                last_view: LastView::Full,
+                recorded_at: OffsetDateTime::UNIX_EPOCH,
+                tool_use_id: tool_use_id.map(str::to_owned),
+            },
         }
     }
 
