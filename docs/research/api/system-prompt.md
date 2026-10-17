@@ -120,13 +120,13 @@ Each API request includes a `metadata` field with a `user_id` containing a strin
 ```json
 {
   "metadata": {
-    "user_id": "{\"device_id\":\"<device-uuid>\",\"account_uuid\":\"<oauth-uuid>\",\"session_id\":\"<session-uuid>\"}"
+    "user_id": "{\"device_id\":\"<device-id>\",\"account_uuid\":\"<oauth-uuid>\",\"session_id\":\"<session-uuid>\"}"
   }
 }
 ```
 
 - `session_id`: UUID v4, generated once per session via `randomUUID()`. Regenerated on conversation clear.
-- `device_id`: Persistent UUID stored in `~/.claude/.user-id` (created once, reused across sessions).
+- `device_id`: 64 hex characters from `randomBytes(32)`, created once and saved as `userID` in `~/.claude.json` by `getOrCreateUserID()` (2.1.87).
 - `account_uuid`: OAuth account UUID when using OAuth auth. Empty string for API key auth.
 
 The `user_id` value is `JSON.stringify()`'d, so the API receives it as a string.
@@ -217,6 +217,7 @@ The URL includes a `?beta=true` query parameter.
 - `claude-code/src/services/api/claude.ts`: `queryModel`, `buildSystemPromptBlocks`, `getAPIMetadata()`, `getCacheControl()`
 - `claude-code/src/utils/api.ts`: `splitSysPromptPrefix`, `prependUserContext`, `appendSystemContext`, cache scope assignment
 - `claude-code/src/utils/claudemd.ts`: `getMemoryFiles`, `@include`, conditional rules
+- `claude-code/src/utils/config.ts`: `getOrCreateUserID()` (`device_id`)
 - `claude-code/src/utils/context.ts`: token budgeting, `getUserContext`
 - `claude-code/src/utils/betas.ts`: `getAllModelBetas`, `getMergedBetas`, `shouldUseGlobalCacheScope`
 - `claude-code/src/utils/http.ts`: `getUserAgent()` (`claude-cli/VERSION (USER_TYPE, ENTRYPOINT)`)

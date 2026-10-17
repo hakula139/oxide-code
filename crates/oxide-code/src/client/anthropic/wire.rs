@@ -213,8 +213,7 @@ impl OutputFormat {
     }
 }
 
-/// `user_id` is a stringified JSON object `{device_id, account_uuid, session_id}`. Field order is
-/// part of the wire fingerprint.
+/// `user_id` is a stringified JSON object `{device_id, account_uuid, session_id}`.
 #[derive(Serialize)]
 pub(super) struct RequestMetadata {
     pub(super) user_id: String,

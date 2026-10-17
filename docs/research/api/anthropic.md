@@ -74,7 +74,7 @@ The accepted beta set differs per model family and call type (agentic chat vs on
 
 Rows are grouped by role: identity / auth → universal agentic → model-tier-gated. Within each group the broadest support comes first.
 
-Cell legend: `✓` always on, `-` not supported (or stripped), `[1m]` opt-in via the model suffix, `*` caller opt-in (body field + beta ship together, see rules below).
+Cell legend: `✓` always on, `-` not supported (or stripped), `[1m]` opt-in via the model suffix, `*` caller opt-in (body field + beta ship together, see rules below), `1P` on the first-party API and Foundry only (2.1.87 `modelSupportsISP` returns false for Haiku on Bedrock and Vertex).
 
 | Beta                              | Opus 4 (base) | Opus 4.1 / 4.5 | Opus 4.6+ | Sonnet 4 (base) | Sonnet 4.5 | Sonnet 4.6+ | Haiku 4 (base) | Haiku 4.5 (agentic) | Haiku 4.5 (one-shot) |
 | --------------------------------- | ------------- | -------------- | --------- | --------------- | ---------- | ----------- | -------------- | ------------------- | -------------------- |
@@ -82,7 +82,7 @@ Cell legend: `✓` always on, `-` not supported (or stripped), `[1m]` opt-in via
 | `oauth-2025-04-20` (OAuth only)   | ✓             | ✓              | ✓         | ✓               | ✓          | ✓           | ✓              | ✓                   | ✓                    |
 | `context-management-2025-06-27`   | ✓             | ✓              | ✓         | ✓               | ✓          | ✓           | ✓              | ✓                   | -                    |
 | `prompt-caching-scope-2026-01-05` | ✓             | ✓              | ✓         | ✓               | ✓          | ✓           | ✓              | ✓                   | -                    |
-| `interleaved-thinking-2025-05-14` | ✓             | ✓              | ✓         | ✓               | ✓          | ✓           | -              | -                   | -                    |
+| `interleaved-thinking-2025-05-14` | ✓             | ✓              | ✓         | ✓               | ✓          | ✓           | `1P`           | `1P`                | `1P`                 |
 | `context-1m-2025-08-07`           | -             | -              | `[1m]`    | `[1m]`          | `[1m]`     | `[1m]`      | -              | -                   | -                    |
 | `effort-2025-11-24`               | -             | -              | ✓         | -               | -          | ✓           | -              | -                   | -                    |
 | `structured-outputs-2025-12-15`   | -             | `*`            | `*`       | -               | `*`        | `*`         | -              | `*`                 | `*`                  |
@@ -205,17 +205,17 @@ Blocks in the `system` array can carry `cache_control` for prompt caching. The `
 
 ### Prefix invariance
 
-`scope: "global"` is only valid when **every preceding request element is also globally scoped or unscoped**. The order the server sees is:
+The server sees request elements in this order:
 
 ```text
 [tool definitions] → [system blocks...] → [messages...]
 ```
 
-Tool definitions render before system blocks. If any earlier block carries a narrower cache scope, the server rejects the global block with HTTP 400:
+On 2026-04-23, a third-party gateway rejected agentic requests whose static system block carried `scope: "global"` after tool definitions, with HTTP 400 ([#23](https://github.com/hakula139/oxide-code/pull/23)):
 
 > `cache_control.scope: "global"` is only valid when every preceding block is also globally scoped. A block with `scope: "global"` was found after content with a narrower cache scope.
 
-The Anthropic API accepts `scope: "global"` on the static system block even when tools are present.
+Other servers accept the same layout. The Anthropic API accepted `scope: "global"` after tool definitions in [#123](https://github.com/hakula139/oxide-code/issues/123)'s live run on 2026-10-17 with oxide-code at 01b4823, and so did the relay gateway probed that day (see [Third-Party Gateway Validation](#third-party-gateway-validation)).
 
 ### oxide-code gating
 
