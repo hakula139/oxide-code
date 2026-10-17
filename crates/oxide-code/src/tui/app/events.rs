@@ -301,12 +301,14 @@ impl App {
         let message = match (self.open_browser)(url) {
             Ok(()) => formatdoc! {"
                 Opened the browser to sign in. If it did not open, visit this URL in a browser on this machine:
-                {url}"},
+                {url}"
+            },
             Err(e) => {
                 tracing::debug!("failed to open the browser: {e}");
                 formatdoc! {"
                     Could not open the browser. Sign in at this URL in a browser on this machine:
-                    {url}"}
+                    {url}"
+                }
             }
         };
         self.chat.push_system_message(message);
@@ -629,7 +631,8 @@ mod tests {
             app.chat.last_system_text(),
             Some(indoc::indoc! {"
                 Opened the browser to sign in. If it did not open, visit this URL in a browser on this machine:
-                https://example.com/authorize"}),
+                https://example.com/authorize"
+            }),
         );
 
         app.open_browser = |_| Err(io::Error::other("no browser"));
@@ -638,7 +641,8 @@ mod tests {
             app.chat.last_system_text(),
             Some(indoc::indoc! {"
                 Could not open the browser. Sign in at this URL in a browser on this machine:
-                https://example.com/authorize"}),
+                https://example.com/authorize"
+            }),
         );
     }
 
