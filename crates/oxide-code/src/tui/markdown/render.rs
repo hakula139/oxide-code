@@ -85,15 +85,24 @@ struct TableState {
 }
 
 impl TableState {
-    /// Ends the open cell's current line, as a `<br>` does.
+    /// Ends the open cell's current line, as a `<br>` does, trimming the whitespace around the
+    /// break.
     fn break_cell_line(&mut self) {
-        let spans = std::mem::take(&mut self.cell_buf);
-        self.cell_lines.push(Line::from(spans));
+        let mut line = Line::from(std::mem::take(&mut self.cell_buf));
+        if !self.cell_lines.is_empty() {
+            trim_line_start(&mut line);
+        }
+        trim_line_end(&mut line);
+        self.cell_lines.push(line);
     }
 
+    /// Ends the open cell, dropping the empty lines that trailing `<br>` tags leave.
     fn end_cell(&mut self) {
         self.break_cell_line();
-        let cell = std::mem::take(&mut self.cell_lines);
+        let mut cell = std::mem::take(&mut self.cell_lines);
+        while cell.len() > 1 && cell.last().is_some_and(|line| line.width() == 0) {
+            cell.pop();
+        }
         self.current_row.push(cell);
     }
 }
@@ -675,6 +684,34 @@ fn is_line_break_tag(html: &str) -> bool {
         .is_some_and(|rest| matches!(rest.trim(), "" | "/"))
 }
 
+fn trim_line_start(line: &mut Line<'_>) {
+    while let Some(span) = line.spans.first_mut() {
+        let lead = span.content.len() - span.content.trim_start().len();
+        if lead == span.content.len() {
+            line.spans.remove(0);
+            continue;
+        }
+        if lead > 0 {
+            span.content.to_mut().drain(..lead);
+        }
+        return;
+    }
+}
+
+fn trim_line_end(line: &mut Line<'_>) {
+    while let Some(span) = line.spans.last_mut() {
+        let kept = span.content.trim_end().len();
+        if kept == 0 {
+            line.spans.pop();
+            continue;
+        }
+        if kept < span.content.len() {
+            span.content.to_mut().truncate(kept);
+        }
+        return;
+    }
+}
+
 /// Computes the max display width for each column across all rows.
 fn compute_column_widths(rows: &[Vec<Cell>], col_count: usize) -> Vec<usize> {
     let mut widths = vec![0_usize; col_count];
@@ -739,13 +776,7 @@ fn wrap_cell(cell: &[Line<'static>], target_width: usize) -> Vec<Line<'static>> 
         return vec![Line::default()];
     }
     cell.iter()
-        .flat_map(|line| {
-            if line.spans.is_empty() || target_width == 0 {
-                vec![line.clone()]
-            } else {
-                wrap_line(line.clone(), target_width, 0, None)
-            }
-        })
+        .flat_map(|line| wrap_line(line.clone(), target_width, 0, None))
         .collect()
 }
 
@@ -1385,33 +1416,37 @@ mod tests {
     fn render_markdown_table_fits_width_budget_and_rules_off_a_wrapped_row() {
         let lines = rendered_text_at_width(
             indoc! {"
-                | Check | Result |
-                |-------|--------|
-                | Build | passed |
-                | Tests | 2798 passed after the flaky one was retried |
-                | Lint  | clean  |
+                | Check  | Result |
+                |--------|--------|
+                | Build  | passed |
+                | Tests  | 2798 passed after the flaky one was retried |
+                | Lint   | clean  |
+                | 格式化 | 通过   |
             "},
             40,
         );
+
         assert_eq!(
             lines,
             [
-                "┌───────┬──────────────────────────────┐",
-                "│ Check │ Result                       │",
-                "├───────┼──────────────────────────────┤",
-                "│ Build │ passed                       │",
-                "├───────┼──────────────────────────────┤",
-                "│ Tests │ 2798 passed after the flaky  │",
-                "│       │ one was retried              │",
-                "├───────┼──────────────────────────────┤",
-                "│ Lint  │ clean                        │",
-                "└───────┴──────────────────────────────┘",
+                "┌────────┬─────────────────────────────┐",
+                "│ Check  │ Result                      │",
+                "├────────┼─────────────────────────────┤",
+                "│ Build  │ passed                      │",
+                "├────────┼─────────────────────────────┤",
+                "│ Tests  │ 2798 passed after the flaky │",
+                "│        │ one was retried             │",
+                "├────────┼─────────────────────────────┤",
+                "│ Lint   │ clean                       │",
+                "├────────┼─────────────────────────────┤",
+                "│ 格式化 │ 通过                        │",
+                "└────────┴─────────────────────────────┘",
             ]
         );
     }
 
     #[test]
-    fn render_markdown_table_narrow_width_shrinks_every_column_and_keeps_the_rules_aligned() {
+    fn render_markdown_table_narrow_width_shrinks_the_wide_columns_and_keeps_the_rules_aligned() {
         let lines = rendered_text_at_width(
             indoc! {"
                 | Step | Run         | Note             |
@@ -1421,6 +1456,7 @@ mod tests {
             "},
             26,
         );
+
         assert_eq!(
             lines,
             [
@@ -1446,45 +1482,27 @@ mod tests {
 
             | A | B |
             |---|---|
-            | one<br>two | x |
-            | <b>bold</b> | y |
+            | one <br> two three four | `x` <br> y |
+            | five<br> | <br> |
+            | <b>bold</b><br><br> | w <br> `z` |
         "});
+
         assert_eq!(
             lines,
             [
                 "Intro.",
                 "",
-                "┌─────────────┬───┐",
-                "│ A           │ B │",
-                "├─────────────┼───┤",
-                "│ one         │ x │",
-                "│ two         │   │",
-                "├─────────────┼───┤",
-                "│ <b>bold</b> │ y │",
-                "└─────────────┴───┘",
-            ]
-        );
-    }
-
-    #[test]
-    fn render_markdown_table_wrapped_cell_keeps_alignment_in_other_columns() {
-        let lines = rendered_text_at_width(
-            indoc! {"
-                | ID | Note                               |
-                |----|------------------------------------|
-                | 42 | enough words here to force a wrap  |
-            "},
-            30,
-        );
-        assert_eq!(
-            lines,
-            [
-                "┌────┬───────────────────────┐",
-                "│ ID │ Note                  │",
-                "├────┼───────────────────────┤",
-                "│ 42 │ enough words here to  │",
-                "│    │ force a wrap          │",
-                "└────┴───────────────────────┘",
+                "┌────────────────┬───┐",
+                "│ A              │ B │",
+                "├────────────────┼───┤",
+                "│ one            │ x │",
+                "│ two three four │ y │",
+                "├────────────────┼───┤",
+                "│ five           │   │",
+                "├────────────────┼───┤",
+                "│ <b>bold</b>    │ w │",
+                "│                │ z │",
+                "└────────────────┴───┘",
             ]
         );
     }
@@ -1795,11 +1813,5 @@ mod tests {
     #[test]
     fn wrap_cell_missing_cell_produces_single_empty_sub_line() {
         assert_eq!(wrap_cell(&[], 10), [Line::default()]);
-    }
-
-    #[test]
-    fn wrap_cell_zero_target_width_preserves_cell() {
-        let cell = [Line::from("hello")];
-        assert_eq!(wrap_cell(&cell, 0), cell);
     }
 }
