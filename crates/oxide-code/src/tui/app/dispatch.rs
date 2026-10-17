@@ -4,16 +4,17 @@
 use std::time::Instant;
 
 use crossterm::event::{
-    Event as CrosstermEvent, KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEvent,
-    MouseEventKind,
+    Event as CrosstermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton,
+    MouseEvent, MouseEventKind,
 };
 use ratatui::layout::Position;
 use tokio::sync::mpsc;
 
-use super::{App, EXIT_WINDOW};
+use super::{App, COPY_NOTICE_DURATION, CopyNotice, EXIT_WINDOW};
 use crate::protocol::Op;
 use crate::slash::{self, Parsed, SlashContext, SlashKind, SlashOutcome};
 use crate::tui::action::Action;
+use crate::tui::clipboard::{CopyReport, Delivery};
 use crate::tui::components::input::InputOutcome;
 use crate::tui::components::status::Status;
 use crate::tui::modal::ModalAction;
@@ -27,8 +28,14 @@ impl App {
         {
             return;
         }
+        if let CrosstermEvent::Key(key) = event
+            && self.release_selection(key)
+        {
+            return;
+        }
         // The top overlay owns keyboard input, pastes, and the wheel, which steps its selection or
-        // scroll like Up / Down. Resize events still reach chat.
+        // scroll like Up / Down. Clicks and drags still reach chat and the status bar, and resize
+        // events still reach chat.
         if self.modals.is_active() {
             match event {
                 CrosstermEvent::Key(key) => {
@@ -74,7 +81,17 @@ impl App {
                         self.chat.handle_event(event);
                     }
                 } else if !self.open_status_link(*mouse) {
-                    return;
+                    if !matches!(
+                        mouse.kind,
+                        MouseEventKind::Down(MouseButton::Left)
+                            | MouseEventKind::Drag(MouseButton::Left)
+                            | MouseEventKind::Up(MouseButton::Left)
+                    ) {
+                        return;
+                    }
+                    if let Some(text) = self.chat.handle_mouse(*mouse, Instant::now()) {
+                        self.clipboard.copy(text);
+                    }
                 }
             }
             CrosstermEvent::Resize(..) => {}
@@ -113,6 +130,48 @@ impl App {
             self.apply_modal_action(action);
         }
         self.dirty = true;
+    }
+
+    /// Clears the chat selection on a keystroke, copying it first on Ctrl+C. Returns whether the
+    /// key was spent, which only a Ctrl+C that copied is, so it neither interrupts nor exits.
+    fn release_selection(&mut self, key: &KeyEvent) -> bool {
+        if !self.chat.has_selection() {
+            return false;
+        }
+        self.dirty = true;
+        let ctrl_c = key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL;
+        let Some(text) = self.chat.take_selection().filter(|_| ctrl_c) else {
+            return false;
+        };
+        self.clipboard.copy(text);
+        true
+    }
+
+    /// Notes how a copy went, queueing its OSC 52 write for the next frame.
+    pub(super) fn apply_copy_report(&mut self, report: CopyReport) {
+        let (text, failed) = report.notice();
+        if let Ok(Delivery::Osc52 { sequence, .. }) = report.outcome {
+            self.pending_clipboard = Some(sequence);
+        }
+        self.copy_notice = Some(CopyNotice {
+            text,
+            failed,
+            until: Instant::now() + COPY_NOTICE_DURATION,
+        });
+        self.dirty = true;
+    }
+
+    /// Clears the copy notice once it has been shown long enough. Returns whether it cleared.
+    pub(super) fn expire_copy_notice(&mut self, now: Instant) -> bool {
+        if self
+            .copy_notice
+            .as_ref()
+            .is_some_and(|notice| now >= notice.until)
+        {
+            self.copy_notice = None;
+            return true;
+        }
+        false
     }
 
     fn apply_modal_action(&mut self, action: ModalAction) {
@@ -369,12 +428,11 @@ fn wheel_arrow(kind: MouseEventKind) -> Option<KeyEvent> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
-
-    use crossterm::event::{KeyModifiers, MouseButton};
-
     use std::io;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
+    use base64::Engine as _;
     use ratatui::layout::Rect;
 
     use super::*;
@@ -382,11 +440,40 @@ mod tests {
     use crate::protocol::{Decision, Event, ResumeTarget};
     use crate::tool::{ApprovalBody, ApprovalPreview};
     use crate::tui::app::testing::{
-        FakeModal, KeyLogModal, key_event, long_chat_block, mouse_event, push_answerable_approval,
-        render_app, rendered_text, test_app,
+        FakeModal, KeyLogModal, key_event, long_chat_block, mouse_event, mouse_event_at,
+        push_answerable_approval, render_app, rendered_text, test_app,
     };
+    use crate::tui::clipboard::CopyError;
     use crate::tui::components::status::StatusHyperlink;
     use crate::tui::modal::testing::ScriptedModal;
+
+    // ── Fixtures ──
+
+    /// Screen cell where `needle` first shows in a 60x10 frame.
+    fn cell_of(app: &mut App, needle: &str) -> (u16, u16) {
+        let text = rendered_text(app, 60, 10);
+        let (row, line) = text
+            .lines()
+            .enumerate()
+            .find(|(_, line)| line.contains(needle))
+            .unwrap();
+        let x = line[..line.find(needle).unwrap()].chars().count();
+        (u16::try_from(x).unwrap(), u16::try_from(row).unwrap())
+    }
+
+    /// Double-clicks the word `needle`, which selects and copies it.
+    async fn select_word(app: &mut App, needle: &str) {
+        let (x, y) = cell_of(app, needle);
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ]
+        .repeat(2)
+        {
+            app.handle_crossterm_event(&mouse_event_at(kind, x, y));
+        }
+        app.clipboard.recv().await.expect("the release copied");
+    }
 
     // ── handle_crossterm_event ──
 
@@ -522,6 +609,66 @@ mod tests {
         assert!(!by_wheel.chat.is_scrolled_up(), "the popup took the wheel");
     }
 
+    #[tokio::test]
+    async fn handle_crossterm_event_drag_release_copies_the_selection() {
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.chat.push_system_message("copy this word");
+        let (x, y) = cell_of(&mut app, "this");
+
+        for (kind, column) in [
+            (MouseEventKind::Down(MouseButton::Left), x),
+            (MouseEventKind::Drag(MouseButton::Left), x + 3),
+            (MouseEventKind::Up(MouseButton::Left), x + 3),
+        ] {
+            app.handle_crossterm_event(&mouse_event_at(kind, column, y));
+        }
+        let report = app.clipboard.recv().await.expect("the copy reports back");
+        app.apply_copy_report(report);
+
+        let encoded = base64::engine::general_purpose::STANDARD.encode("this");
+        assert_eq!(
+            app.pending_clipboard,
+            Some(format!("\x1b]52;c;{encoded}\x07")),
+        );
+        let notice = app.copy_notice.as_ref().expect("copy noted");
+        assert_eq!(
+            (notice.text.as_str(), notice.failed),
+            ("Copied 4 characters", false)
+        );
+        assert!(app.dirty);
+    }
+
+    #[tokio::test]
+    async fn handle_crossterm_event_ctrl_c_copies_the_selection_without_interrupting() {
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.chat.push_system_message("copy this word");
+        app.handle_engine_event(Event::StreamToken("partial".into()));
+        select_word(&mut app, "this").await;
+
+        app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        let report = app.clipboard.recv().await.expect("Ctrl+C copied");
+
+        assert_eq!(report.chars, 4);
+        assert!(!app.chat.has_selection(), "the copy clears the selection");
+        assert!(
+            rx.try_recv().is_err(),
+            "a copying Ctrl+C must not interrupt"
+        );
+        assert_eq!(app.status_bar.status(), &Status::Streaming);
+    }
+
+    #[tokio::test]
+    async fn handle_crossterm_event_any_other_key_clears_the_selection_and_still_acts() {
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.chat.push_system_message("copy this word");
+        select_word(&mut app, "this").await;
+
+        app.handle_crossterm_event(&key_event(KeyCode::Char('x'), KeyModifiers::NONE));
+
+        assert!(!app.chat.has_selection());
+        assert_eq!(app.input.lines(), vec!["x"]);
+    }
+
     #[test]
     fn handle_crossterm_resize_schedules_dirty_for_relayout() {
         // Resize falls through to `dirty = true` so the next tick re-splits with the new area.
@@ -533,15 +680,14 @@ mod tests {
 
     #[test]
     fn handle_crossterm_unhandled_events_skip_the_rerender() {
-        // Mouse capture reports every motion and click, which must not each force a frame.
         let (mut app, _rx, _event_tx) = test_app(None);
         app.dirty = false;
 
         for event in [
             CrosstermEvent::FocusGained,
             mouse_event(MouseEventKind::Moved),
-            mouse_event(MouseEventKind::Down(MouseButton::Left)),
-            mouse_event(MouseEventKind::Drag(MouseButton::Left)),
+            mouse_event(MouseEventKind::Down(MouseButton::Right)),
+            mouse_event(MouseEventKind::Up(MouseButton::Middle)),
         ] {
             app.handle_crossterm_event(&event);
             assert!(!app.dirty, "{event:?}");
@@ -792,6 +938,53 @@ mod tests {
                 decision: Decision::Abort,
             } if id == "call-1"
         ));
+    }
+
+    // ── apply_copy_report ──
+
+    #[test]
+    fn apply_copy_report_queues_only_osc52_and_notes_failures() {
+        let (mut app, _rx, _event_tx) = test_app(None);
+
+        app.apply_copy_report(CopyReport {
+            chars: 4,
+            outcome: Ok(Delivery::Copied),
+        });
+        let copied = app.copy_notice.take().unwrap();
+        app.apply_copy_report(CopyReport {
+            chars: 4,
+            outcome: Err(CopyError::TimedOut),
+        });
+        let failed = app.copy_notice.take().unwrap();
+
+        assert_eq!(app.pending_clipboard, None);
+        assert_eq!(
+            (copied.text.as_str(), copied.failed),
+            ("Copied 4 characters", false)
+        );
+        assert_eq!(
+            (failed.text.as_str(), failed.failed),
+            ("Not copied: the clipboard did not answer within 2 s", true),
+        );
+    }
+
+    // ── expire_copy_notice ──
+
+    #[test]
+    fn expire_copy_notice_clears_the_notice_once_its_time_is_up() {
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.apply_copy_report(CopyReport {
+            chars: 4,
+            outcome: Ok(Delivery::Copied),
+        });
+        let until = app.copy_notice.as_ref().unwrap().until;
+
+        let before = until.checked_sub(Duration::from_millis(1)).unwrap();
+        assert!(!app.expire_copy_notice(before));
+        assert!(app.copy_notice.is_some());
+        assert!(app.expire_copy_notice(until));
+        assert!(app.copy_notice.is_none());
+        assert!(!app.expire_copy_notice(until), "nothing left to clear");
     }
 
     // ── handle_esc ──

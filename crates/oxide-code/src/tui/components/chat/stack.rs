@@ -86,16 +86,28 @@ impl CachedBlock {
 /// A stack row named by the block slot that holds it, so a later stack can find the same row
 /// after blocks change height.
 #[derive(Clone, Copy)]
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 pub(super) struct Anchor {
     /// Index of the block, or the block count for rows past the last block.
     block: usize,
-    /// Row within the slot, counting its leading separator.
+    /// Row within the slot, from the block's first row.
     row: usize,
     /// Height of the slot when named, or `None` past the last block. Never zero.
     slot_height: Option<usize>,
 }
 
-/// First row of each block's slot in a stack, then the row after the last block.
+impl Anchor {
+    /// Keeps naming the same block after a block is inserted at index `at`.
+    pub(super) fn shift_from(&mut self, at: usize) {
+        if self.block >= at {
+            self.block += 1;
+        }
+    }
+}
+
+/// First row of each block's slot in a stack, then the first row past the last block. A slot starts
+/// at the block's first row, so the separator above a block belongs to the slot before it, and an
+/// insert that adds or drops that separator leaves the rows of the block's own slot in place.
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 pub(super) struct SlotTops(Vec<usize>);
 
@@ -187,8 +199,14 @@ impl<'a> Stack<'a> {
         }
     }
 
+    /// Stacks a separator row. One that opens the next slot, or the rows past the last block,
+    /// joins the slot before it.
     pub(super) fn push_blank(&mut self) {
+        let top = self.height;
         self.push(&BLANK);
+        for slot_top in self.tops.0[1..].iter_mut().rev().take_while(|t| **t == top) {
+            *slot_top = self.height;
+        }
     }
 
     /// Stacks live rows a blank row below any content above them.
@@ -217,6 +235,18 @@ impl<'a> Stack<'a> {
 
     pub(super) fn into_tops(self) -> SlotTops {
         self.tops
+    }
+
+    /// Row `index`, or `None` past the bottom.
+    pub(super) fn row(&self, index: usize) -> Option<&Line<'static>> {
+        let mut skip = index;
+        for run in &self.runs {
+            if let Some(line) = run.get(skip) {
+                return Some(line);
+            }
+            skip -= run.len();
+        }
+        None
     }
 
     /// Clones up to `height` rows starting at row `offset`, skipping whole runs above it.
@@ -394,6 +424,26 @@ mod tests {
         assert_eq!(painted.offset_of(in_slot), 6);
     }
 
+    // ── Anchor::shift_from ──
+
+    #[test]
+    fn shift_from_keeps_naming_the_block_moved_by_an_insert() {
+        let painted = SlotTops(vec![0, 2, 4]);
+        let mut above = painted.anchor_at(1);
+        let mut below = painted.anchor_at(3);
+
+        above.shift_from(1);
+        below.shift_from(1);
+
+        let inserted = SlotTops(vec![0, 2, 3, 5]);
+        assert_eq!(inserted.offset_of(above), 1);
+        assert_eq!(
+            inserted.offset_of(below),
+            4,
+            "row 1 of the block now at index 2"
+        );
+    }
+
     // ── SlotTops::blocks_within ──
 
     #[test]
@@ -409,7 +459,7 @@ mod tests {
     // ── Stack::push_block ──
 
     #[test]
-    fn push_block_separates_standalone_blocks_and_records_slot_tops() {
+    fn push_block_separates_standalone_blocks_and_starts_each_slot_at_its_first_row() {
         let mut blocks = [
             standalone(&["user"]),
             hidden(&["thought"]),
@@ -422,7 +472,11 @@ mod tests {
             texts(&stack.slice(0, stack.height())),
             ["user", "", "call", "", "reply", ""],
         );
-        assert_eq!(stack.into_tops(), SlotTops(vec![0, 2, 2, 3, 6]));
+        assert_eq!(
+            stack.into_tops(),
+            SlotTops(vec![0, 2, 2, 4, 6]),
+            "the blank above the reply ends the call's slot",
+        );
     }
 
     // ── Stack::last_has_width ──
@@ -442,6 +496,24 @@ mod tests {
 
         stack.push_blank();
         assert!(!stack.last_has_width());
+    }
+
+    // ── Stack::row ──
+
+    #[test]
+    fn row_reads_across_run_boundaries() {
+        let a = [Line::raw("a0")];
+        let b = [Line::raw("b0"), Line::raw("b1")];
+        let mut stack = Stack::default();
+        stack.push(&a);
+        stack.push_blank();
+        stack.push(&b);
+
+        let row = |index| stack.row(index).map(ToString::to_string);
+        assert_eq!(row(0).as_deref(), Some("a0"));
+        assert_eq!(row(1).as_deref(), Some(""));
+        assert_eq!(row(3).as_deref(), Some("b1"));
+        assert_eq!(row(4), None);
     }
 
     // ── Stack::slice ──

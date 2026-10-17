@@ -57,3 +57,4 @@ tool_icon = "#bb86fc"
 border_focused = "#bb86fc"
 border_unfocused = "#424242"
 separator = "#424242"
+selection = { bg = "#2c3a40" }

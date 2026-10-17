@@ -19,6 +19,7 @@ use crate::model::ModelSpec;
 use crate::protocol::{Event, Op};
 use crate::slash::{self, LiveSessionInfo};
 use crate::tool::{ApprovalBody, ApprovalPreview};
+use crate::tui::clipboard::{self, Clipboard, Environment};
 use crate::tui::theme::Theme;
 
 /// Idle `App` plus the `ops` consumer and an `event_tx` kept alive so `events` stays open.
@@ -40,6 +41,14 @@ pub(super) fn test_app(
         },
     );
     app.open_browser = |_| Ok(());
+    // A remote session outside tmux copies only through OSC 52, leaving the system clipboard and
+    // tmux alone.
+    app.clipboard = Clipboard::new(Environment {
+        local: false,
+        tmux: false,
+        screen: false,
+        terminal: clipboard::Terminal::Other,
+    });
     (app, op_rx, event_tx)
 }
 
@@ -67,10 +76,14 @@ pub(super) fn key_event(code: KeyCode, modifiers: KeyModifiers) -> CrosstermEven
 }
 
 pub(super) fn mouse_event(kind: MouseEventKind) -> CrosstermEvent {
+    mouse_event_at(kind, 0, 0)
+}
+
+pub(super) fn mouse_event_at(kind: MouseEventKind, column: u16, row: u16) -> CrosstermEvent {
     CrosstermEvent::Mouse(MouseEvent {
         kind,
-        column: 0,
-        row: 0,
+        column,
+        row,
         modifiers: KeyModifiers::NONE,
     })
 }
