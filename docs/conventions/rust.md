@@ -35,12 +35,13 @@ Conventions for Rust code under `crates/`. Tooling enforces some style rules, so
 
 `anyhow` formats a chain as `headline: cause` with `{:#}` and puts the outermost headline first in a startup error, so each message in the chain should read as one clause of that sentence.
 
-- Start with a lowercase headline that says what failed and identifies the variable, key, file, or value involved, as in `invalid OX_MAX_TOKENS "32k": expected a whole number from 1 to 4294967295`. Keep identifiers and proper nouns in their original case, and quote user-supplied text with `{:?}`.
+- Start with a headline that says what failed and identifies the variable, key, file, or value involved, as in `invalid OX_MAX_TOKENS "32k": expected a whole number from 1 to 4294967295`. Quote user-supplied text with `{:?}`.
+- A message that composes into a chain is a fragment of that sentence, as the example above is. [Writing](writing.md#prose) owns the casing and punctuation of fragments and of messages shown on their own.
+- Where a surface shows a chain on its own, give it a capitalized headline at the display site, as in `Rule rejected: {e:#}`, so the fragments inside stay lowercase. `main` prints a startup chain after `Error:`, so its outermost headline is lowercase too.
 - Explain what is accepted or what went wrong in the user's terms. A raw library message such as `invalid digit found in string` does not explain the accepted range.
-- If the user can fix the problem, follow the headline with a separate sentence giving the recovery step, as in ``Claude Code login has expired. Run `claude` to sign in again.`` Otherwise, end the headline without a period. When such an error wraps a cause, format the cause into the headline so the recovery step stays last.
-- Include units with numbers, as in `Retry after 12 s.`
+- If the user can fix the problem, end the message with a separate sentence giving the recovery step, as in `Not signed in. Run /login to sign in.` In a chain, that sentence follows the innermost cause, which renders last, as in `invalid OX_STATUS_LINE "a,,b": empty segment between commas. Remove the stray comma.` A short hint may qualify a fragment in parentheses, as in `no sessions to resume in this project (use --all to search every project)`. When such an error wraps a cause, format the cause into the headline so the recovery step stays last.
+- Include units with numbers, as in `Retrying in 1 s`.
 - Name the variable or store that holds a secret, never its value.
-- Messages shown on their own, such as chat notices or slash-command `Err(String)` values, should be complete sentences that start with a capital letter.
 
 ## Visibility
 
@@ -68,6 +69,7 @@ Conventions for Rust code under `crates/`. Tooling enforces some style rules, so
 - Prefer raw strings (`r"..."`) when a literal contains characters that would otherwise need escaping.
 - Use `indoc!` for literals and `formatdoc!` for formatted text whenever prose or a structured document, such as a prompt, message, Markdown, diff, or file fixture, spans a paragraph break or three or more lines. This applies to production code and tests. Use `writedoc!` with a writer. Indent content with the surrounding code, inline it when used once, and name a constant only when shared or very large.
 - Keep `\n` escapes for separators, separators around a single line, a single trailing newline, tiny non-prose fixtures, and tests or operations concerned with the newlines themselves. One- or two-line fixtures without paragraph breaks may stay inline when clear. Keep content whose meaning depends on trailing spaces or whitespace-only lines in an escaped literal, since the trailing-whitespace hook strips them.
+- Keep each clap flag's `///` help to one sentence, since clap drops the final period of a flag's help.
 
 ## Dependencies
 
