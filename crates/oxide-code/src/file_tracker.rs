@@ -178,30 +178,30 @@ impl FileTracker {
         let mut by_path = self.lock();
         let mut dropped = Vec::new();
 
-        let mut latest = HashMap::<PathBuf, FileSnapshot>::new();
-        for snap in snapshots {
+        let mut latest = HashMap::<PathBuf, FileState>::new();
+        for FileSnapshot { path, state } in snapshots {
             let replace = latest
-                .get(&snap.path)
-                .is_none_or(|cur| snap.state.recorded_at >= cur.state.recorded_at);
+                .get(&path)
+                .is_none_or(|cur| state.recorded_at >= cur.recorded_at);
             if replace {
-                latest.insert(snap.path.clone(), snap);
+                latest.insert(path, state);
             }
         }
 
-        for snap in latest.into_values() {
-            if let Err(reason) = verify_on_disk(&snap) {
+        for (path, state) in latest {
+            if let Err(reason) = verify_on_disk(&path, state.content_hash) {
                 warn!(
                     "dropping tracked file {} ({reason}, will require fresh Read)",
-                    snap.path.display()
+                    path.display()
                 );
-                dropped.push(snap.path);
+                dropped.push(path);
                 continue;
             }
             let keep = by_path
-                .get(&snap.path)
-                .is_none_or(|cur| snap.state.recorded_at >= cur.recorded_at);
+                .get(&path)
+                .is_none_or(|cur| state.recorded_at >= cur.recorded_at);
             if keep {
-                by_path.insert(snap.path, snap.state);
+                by_path.insert(path, state);
             }
         }
         dropped.sort();
@@ -213,12 +213,11 @@ impl FileTracker {
     }
 }
 
-fn verify_on_disk(snapshot: &FileSnapshot) -> Result<(), String> {
-    let metadata =
-        std::fs::metadata(&snapshot.path).map_err(|error| format!("stat failed: {error}"))?;
+fn verify_on_disk(path: &Path, content_hash: u64) -> Result<(), String> {
+    let metadata = std::fs::metadata(path).map_err(|error| format!("stat failed: {error}"))?;
     validate_trackable_file(&metadata).map_err(|error| error.to_string())?;
-    let bytes = std::fs::read(&snapshot.path).map_err(|error| format!("read failed: {error}"))?;
-    if xxh64(&bytes, HASH_SEED) != snapshot.state.content_hash {
+    let bytes = std::fs::read(path).map_err(|error| format!("read failed: {error}"))?;
+    if xxh64(&bytes, HASH_SEED) != content_hash {
         return Err("content drift".to_owned());
     }
     Ok(())
