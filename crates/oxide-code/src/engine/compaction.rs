@@ -66,9 +66,44 @@ const SUMMARIZATION_USER_RUBRIC: &str = indoc! {r"
     questions. Do not call any tools while writing this summary. Respond with text only.
 "};
 
+/// Automatic compaction failures in a row. Auto-compaction pauses at [`MAX_AUTO_COMPACT_FAILURES`]
+/// until a reset.
+#[derive(Clone, Copy, Default)]
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+pub(super) struct AutoCompactFailures(u8);
+
+impl AutoCompactFailures {
+    #[cfg(test)]
+    pub(super) const fn new(count: u8) -> Self {
+        Self(count)
+    }
+
+    fn is_paused(self) -> bool {
+        self.0 >= MAX_AUTO_COMPACT_FAILURES
+    }
+
+    /// Counts a failure and reports [`Event::AutoCompactionPaused`] if it pauses auto-compaction.
+    fn record(&mut self, sink: &dyn EventSink) {
+        self.0 += 1;
+        if self.is_paused() {
+            sink.emit(
+                Event::AutoCompactionPaused { failures: self.0 },
+                "auto-compaction-paused",
+            );
+        }
+    }
+
+    /// Clears the count and reports [`Event::AutoCompactionResumed`] if auto-compaction was paused.
+    pub(super) fn reset(&mut self, sink: &dyn EventSink) {
+        if std::mem::take(self).is_paused() {
+            sink.emit(Event::AutoCompactionResumed, "auto-compaction-resumed");
+        }
+    }
+}
+
 pub(super) struct AutoCompact<'a> {
     pub(super) config: AutoCompactionConfig,
-    pub(super) failures: &'a mut u8,
+    pub(super) failures: &'a mut AutoCompactFailures,
     pub(super) file_tracker: &'a FileTracker,
     /// The conversation's request prefix, which the summarizer reuses to read its prompt cache.
     pub(super) prompt: &'a PromptParts,
@@ -101,7 +136,7 @@ pub(super) async fn auto_compact_if_needed(
     let Some(usage) = usage else {
         return Ok(false);
     };
-    if *auto.failures >= MAX_AUTO_COMPACT_FAILURES
+    if auto.failures.is_paused()
         || !auto.config.should_trigger(usage.total_tokens())
         || transcript_tokens(messages) < MIN_TOKENS_FOR_COMPACT
     {
@@ -154,38 +189,24 @@ pub(super) async fn auto_compact_if_needed(
     Ok(true)
 }
 
-/// Counts a failed attempt and returns the abort that fails the unsent prompt, reporting
-/// [`Event::AutoCompactionPaused`] when the attempt trips the breaker. `headline` can end on a
-/// cause's own sentence, so its period is dropped before the sentences on what to do next.
+/// Counts a failed attempt and returns the abort that fails the unsent prompt. `headline` can end
+/// on a cause's own sentence, so its period is dropped before the sentences on what to do next.
 fn record_auto_compact_failure(
     auto: &mut AutoCompact<'_>,
     sink: &dyn EventSink,
     headline: &str,
 ) -> TurnAbort {
-    *auto.failures += 1;
-    let next = if *auto.failures < MAX_AUTO_COMPACT_FAILURES {
-        "The prompt was not sent, so send it again to retry.".to_owned()
-    } else {
-        sink.emit(
-            Event::AutoCompactionPaused {
-                failures: MAX_AUTO_COMPACT_FAILURES,
-            },
-            "auto-compaction-paused",
-        );
+    auto.failures.record(sink);
+    let next = if auto.failures.is_paused() {
         format!(
             "The prompt was not sent, and auto-compaction is paused after \
              {MAX_AUTO_COMPACT_FAILURES} failures in a row. Send the prompt again to run it \
              without compaction, or run /compact to retry compaction first."
         )
+    } else {
+        "The prompt was not sent, so send it again to retry.".to_owned()
     };
     TurnAbort::Failed(anyhow!("{}. {next}", headline.trim_end_matches('.')))
-}
-
-/// Clears the failure count and reports [`Event::AutoCompactionResumed`] if the breaker tripped.
-pub(super) fn reset_auto_compact_failures(failures: &mut u8, sink: &dyn EventSink) {
-    if std::mem::take(failures) >= MAX_AUTO_COMPACT_FAILURES {
-        sink.emit(Event::AutoCompactionResumed, "auto-compaction-resumed");
-    }
 }
 
 /// Drives the summarization request and returns the trimmed summary. `prompt` and `tools` must be
@@ -483,6 +504,24 @@ mod tests {
     use crate::message::Replay;
     use crate::protocol::CapturingSink;
 
+    // ── AutoCompactFailures::reset ──
+
+    #[test]
+    fn reset_reports_a_resume_only_from_a_pause() {
+        let sink = CapturingSink::new();
+        let mut counting = AutoCompactFailures::new(MAX_AUTO_COMPACT_FAILURES - 1);
+        let mut paused = AutoCompactFailures::new(MAX_AUTO_COMPACT_FAILURES);
+
+        counting.reset(&sink);
+        let after_counting = sink.events();
+        paused.reset(&sink);
+
+        assert_eq!(counting, AutoCompactFailures::default());
+        assert_eq!(paused, AutoCompactFailures::default());
+        assert_eq!(after_counting, []);
+        assert_eq!(sink.events(), [Event::AutoCompactionResumed]);
+    }
+
     // ── auto_compact_if_needed ──
 
     struct CountingFailingClient {
@@ -550,7 +589,7 @@ mod tests {
         let tracker = FileTracker::default();
         let mut messages = tool_heavy_transcript();
         let mut pending = Vec::new();
-        let mut failures = 0;
+        let mut failures = AutoCompactFailures::default();
 
         let absent = auto_compact_if_needed(
             &client,
@@ -624,7 +663,7 @@ mod tests {
         .unwrap();
         assert!(!below_threshold);
         assert_eq!(messages, tool_heavy_transcript());
-        assert_eq!(failures, 0);
+        assert_eq!(failures, AutoCompactFailures::default());
     }
 
     #[tokio::test]
@@ -636,7 +675,7 @@ mod tests {
         let tracker = FileTracker::default();
         let short = vec![Message::user("hi"), Message::assistant("hello")];
         let mut messages = short.clone();
-        let mut failures = 0;
+        let mut failures = AutoCompactFailures::default();
 
         let compacted = auto_compact_if_needed(
             &client,
@@ -670,7 +709,7 @@ mod tests {
             "a prefix-heavy context goes out without compaction: {compacted:?}"
         );
         assert_eq!(messages, short);
-        assert_eq!(failures, 0);
+        assert_eq!(failures, AutoCompactFailures::default());
         assert_eq!(sink.events(), []);
         assert_eq!(client.requests(), [] as [Vec<Message>; 0]);
     }
@@ -683,7 +722,7 @@ mod tests {
         let tracker = FileTracker::default();
         let mut messages = tool_heavy_transcript();
         let mut pending = Vec::new();
-        let mut failures = 0;
+        let mut failures = AutoCompactFailures::default();
 
         let compacted = auto_compact_if_needed(
             &CountingFailingClient::new(),
@@ -720,7 +759,7 @@ mod tests {
             "Auto-compaction failed: the summarizer is unavailable. Retry in a minute. The prompt \
              was not sent, so send it again to retry.",
         );
-        assert_eq!(failures, 1);
+        assert_eq!(failures, AutoCompactFailures::new(1));
         assert_eq!(messages, tool_heavy_transcript());
         assert_eq!(sink.events(), [Event::AutoCompactionStarted]);
     }
@@ -733,7 +772,7 @@ mod tests {
         let tracker = FileTracker::default();
         let mut messages = tool_heavy_transcript();
         let mut pending = Vec::new();
-        let mut failures = 0;
+        let mut failures = AutoCompactFailures::default();
 
         let compacted = auto_compact_if_needed(
             &client,
@@ -769,7 +808,7 @@ mod tests {
             format!("{error:#}"),
             "Auto-compaction was not saved. The prompt was not sent, so send it again to retry.",
         );
-        assert_eq!(failures, 1);
+        assert_eq!(failures, AutoCompactFailures::new(1));
         assert_eq!(messages, tool_heavy_transcript());
         let events = sink.events();
         assert!(
@@ -795,7 +834,7 @@ mod tests {
         let tracker = FileTracker::default();
         let mut messages = tool_heavy_transcript();
         let mut pending = Vec::new();
-        let mut failures = MAX_AUTO_COMPACT_FAILURES - 1;
+        let mut failures = AutoCompactFailures::new(MAX_AUTO_COMPACT_FAILURES - 1);
         let usage = Some(TokenUsage {
             input_tokens: 50_000,
             cache_creation_input_tokens: 0,
@@ -843,7 +882,10 @@ mod tests {
             matches!(fourth, Ok(false)),
             "the next prompt goes out without compaction: {fourth:?}"
         );
-        assert_eq!(failures, MAX_AUTO_COMPACT_FAILURES);
+        assert_eq!(
+            failures,
+            AutoCompactFailures::new(MAX_AUTO_COMPACT_FAILURES)
+        );
         assert_eq!(client.calls(), 1);
         assert_eq!(
             sink.events(),
@@ -868,7 +910,7 @@ mod tests {
         let tracker = FileTracker::default();
         let mut messages = tool_heavy_transcript();
         let mut pending = Vec::new();
-        let mut failures = 0;
+        let mut failures = AutoCompactFailures::default();
         let (tx, mut rx) = mpsc::channel::<Op>(1);
         let mut auto = AutoCompact {
             config: AutoCompactionConfig {
@@ -910,7 +952,7 @@ mod tests {
 
         assert!(compacted);
         assert_eq!(pending, vec!["queued after summary"]);
-        assert_eq!(*auto.failures, 0);
+        assert_eq!(*auto.failures, AutoCompactFailures::default());
         assert_eq!(
             sink.events()
                 .iter()
@@ -946,7 +988,7 @@ mod tests {
         let sink = CapturingSink::new();
         let tracker = FileTracker::default();
         let mut messages = tool_heavy_transcript();
-        let mut failures = 0;
+        let mut failures = AutoCompactFailures::default();
 
         let compacted = auto_compact_if_needed(
             &client,
@@ -1007,23 +1049,6 @@ mod tests {
             ),
             "the overflowed summary is discarded before the retry streams: {events:?}",
         );
-    }
-
-    // ── reset_auto_compact_failures ──
-
-    #[test]
-    fn reset_auto_compact_failures_reports_a_resume_only_from_a_pause() {
-        let sink = CapturingSink::new();
-        let mut counting = MAX_AUTO_COMPACT_FAILURES - 1;
-        let mut paused = MAX_AUTO_COMPACT_FAILURES;
-
-        reset_auto_compact_failures(&mut counting, &sink);
-        let after_counting = sink.events();
-        reset_auto_compact_failures(&mut paused, &sink);
-
-        assert_eq!((counting, paused), (0, 0));
-        assert_eq!(after_counting, []);
-        assert_eq!(sink.events(), [Event::AutoCompactionResumed]);
     }
 
     // ── compact_session ──
