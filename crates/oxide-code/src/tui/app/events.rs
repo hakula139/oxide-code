@@ -1552,6 +1552,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handle_turn_failed_during_auto_compaction_holds_the_queue_after_an_untyped_prompt() {
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_op(Op::Prompt(
+            "Create AGENTS.md for this repository.".to_owned(),
+        ));
+        rx.recv().await.expect("prompt forwarded");
+        app.handle_engine_event(Event::AutoCompactionStarted);
+        app.pending_prompts.push_back("queued".to_owned());
+
+        app.handle_engine_event(Event::TurnFailed(
+            "Auto-compaction failed: summarizer down. The prompt was not sent.".to_owned(),
+        ));
+
+        assert!(app.input.is_empty(), "a command's prompt was never typed");
+        assert_eq!(
+            app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
+            ["queued".to_owned()],
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
     async fn handle_turn_failed_after_auto_compaction_succeeded_starts_the_queue_head() {
         let (mut app, mut rx, _event_tx) = test_app(None);
         app.dispatch_action(Action::Submit("active".to_owned()));

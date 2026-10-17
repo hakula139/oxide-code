@@ -401,8 +401,11 @@ mod tests {
             let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
             let first_id = engine.session_id().to_owned();
             let sink = CapturingSink::new();
+            let log: Vec<String> = (1..=150)
+                .map(|n| format!("request {n} served in 12 ms."))
+                .collect();
             let input = formatdoc! {"
-                first
+                Why does the login service log stop here? {log}
                 second
                 /compact focus on login
                 /rename Fix login
@@ -411,6 +414,7 @@ mod tests {
                 /clear
                 /resume {prefix}
                 ",
+                log = log.join(" "),
                 prefix = &first_id[..8],
             };
 
