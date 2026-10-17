@@ -10,6 +10,8 @@ use std::pin::Pin;
 use std::process::{ExitStatus, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
+#[cfg(target_os = "macos")]
+use std::time::Instant;
 
 use indoc::formatdoc;
 use process_wrap::tokio::{ChildWrapper, CommandWrap};
@@ -467,18 +469,27 @@ impl ShellTree {
         self.child.inner_mut().wait().await
     }
 
-    /// Unix signals the group until no live member is left (`ESRCH`), since XNU can miss a child
-    /// forked during a `killpg`. The attempts are bounded because Linux counts the unreaped `bash`
-    /// zombie as a member. Terminating a Job Object takes one call.
+    /// One call reaches every member, since Linux makes a group signal atomic with a fork and
+    /// terminating a Job Object ends all of its processes.
+    #[cfg(not(target_os = "macos"))]
     fn kill(&mut self) {
-        const ATTEMPTS: usize = if cfg!(unix) { 5 } else { 1 };
+        self.armed = false;
+        _ = self.child.start_kill();
+    }
+
+    /// Signals the group until the call fails, since XNU can miss a child forked during a
+    /// `killpg`. The call fails once no member is left alive to fork: `EPERM` when only zombies
+    /// remain and `ESRCH` when none do.
+    #[cfg(target_os = "macos")]
+    fn kill(&mut self) {
+        /// How long a member that `SIGKILL` cannot end yet, such as one in an uninterruptible
+        /// read, can hold up the kill.
+        const LIMIT: Duration = Duration::from_secs(1);
         const RETRY_DELAY: Duration = Duration::from_millis(1);
 
         self.armed = false;
-        for _ in 0..ATTEMPTS {
-            if self.child.start_kill().is_err() {
-                return;
-            }
+        let deadline = Instant::now() + LIMIT;
+        while self.child.start_kill().is_ok() && Instant::now() < deadline {
             std::thread::sleep(RETRY_DELAY);
         }
     }
