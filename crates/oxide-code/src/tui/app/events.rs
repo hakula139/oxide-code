@@ -56,6 +56,8 @@ impl App {
                 self.set_active_status(Status::Compacting);
                 self.input.set_enabled(false);
             }
+            Event::AutoCompactionPaused => self.session_info.auto_compaction_paused = true,
+            Event::AutoCompactionResumed => self.session_info.auto_compaction_paused = false,
             Event::SummaryToken(token) => self.chat.append_summary_token(&token),
             Event::SummaryDiscarded => self.chat.discard_summary(),
             Event::SessionTitleUpdated { session_id, title } => {
@@ -63,17 +65,7 @@ impl App {
                     self.status_bar.set_title(Some(title));
                 }
             }
-            Event::SessionRolled { id, archived } => {
-                let old_id = std::mem::replace(&mut self.session_info.session_id, id);
-                self.session_info.session_allow.clear();
-                self.status_bar.set_title(None);
-                self.status_bar.set_usage(None);
-                self.chat.clear_history();
-                self.active_prompt = None;
-                if archived {
-                    self.chat.push_system_message(archive_notice(&old_id, true));
-                }
-            }
+            Event::SessionRolled { id, archived } => self.apply_session_rolled(id, archived),
             Event::SessionResumed {
                 id,
                 title,
@@ -175,6 +167,19 @@ impl App {
             }
         }
         self.enter_idle();
+    }
+
+    /// `/clear` or `/archive`: rebinds the session and empties chat for the fresh one.
+    fn apply_session_rolled(&mut self, id: String, archived: bool) {
+        let old_id = std::mem::replace(&mut self.session_info.session_id, id);
+        self.session_info.session_allow.clear();
+        self.status_bar.set_title(None);
+        self.status_bar.set_usage(None);
+        self.chat.clear_history();
+        self.active_prompt = None;
+        if archived {
+            self.chat.push_system_message(archive_notice(&old_id, true));
+        }
     }
 
     /// Mid-session resume: rebinds the session and rebuilds chat from the target transcript.
@@ -1058,6 +1063,19 @@ mod tests {
 
         assert_eq!(app.status_bar.status(), &Status::Compacting);
         assert!(!app.input.is_enabled());
+    }
+
+    #[test]
+    fn handle_auto_compaction_paused_until_resumed_marks_the_status_pause() {
+        let (mut app, _rx, _event_tx) = test_app(None);
+
+        app.handle_engine_event(Event::AutoCompactionPaused);
+        let paused = app.session_info.auto_compaction_paused;
+        app.handle_engine_event(Event::AutoCompactionResumed);
+
+        assert!(paused);
+        assert!(!app.session_info.auto_compaction_paused);
+        assert!(app.dirty);
     }
 
     #[tokio::test]

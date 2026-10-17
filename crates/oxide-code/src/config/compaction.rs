@@ -17,6 +17,9 @@ const AUTO_COMPACTION_OUTPUT_RESERVE_CAP: u32 = 20_000;
 const AUTO_COMPACTION_BUFFER_TOKENS: u32 = 13_000;
 const MIN_AUTO_COMPACTION_THRESHOLD_TOKENS: u32 = 50_000;
 
+/// Automatic compaction failures in a row that pause auto-compaction until a reset.
+pub(crate) const MAX_AUTO_COMPACTION_FAILURES: u8 = 3;
+
 // ── CompactionConfig ──
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

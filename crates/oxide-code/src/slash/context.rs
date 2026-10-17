@@ -22,6 +22,8 @@ pub(crate) struct LiveSessionInfo {
     pub(crate) session_id: String,
     /// Rules granted from approvals for the rest of this session.
     pub(crate) session_allow: Vec<Rule>,
+    /// Repeated failures paused automatic compaction, until the engine reports that it resumed.
+    pub(crate) auto_compaction_paused: bool,
     pub(crate) config: ConfigSnapshot,
 }
 
@@ -58,6 +60,7 @@ pub(crate) mod testing {
             version: "0.0.0-test",
             session_id: "test-session".to_owned(),
             session_allow: Vec::new(),
+            auto_compaction_paused: false,
             config: ConfigSnapshot {
                 auth: Some(crate::config::auth::AuthSource::ApiKeyEnv),
                 signed_out_notice: None,
