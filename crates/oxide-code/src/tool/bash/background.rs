@@ -345,7 +345,7 @@ async fn supervise(
         }
     }
 
-    tree.kill();
+    tree.kill().await;
     _ = tokio::time::timeout(DRAIN_GRACE, &mut pumps).await;
     pumps.abort();
 }

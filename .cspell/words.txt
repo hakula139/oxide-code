@@ -35,6 +35,7 @@ ELOOP
 ENOENT
 ENOTDIR
 envrc
+EPERM
 ESRCH
 fcntl
 feff
