@@ -43,7 +43,7 @@ impl Client {
             attribution.as_deref(),
             &self.device_id,
             &self.session_id,
-            output_format.filter(|_| self.config.gateway.structured_outputs),
+            output_format.filter(|_| self.gateway.structured_outputs),
         )?;
 
         debug!(
@@ -166,7 +166,7 @@ mod tests {
             .await;
 
         let client = Client::new(
-            test_config(server.uri(), api_key(), "claude-haiku-5-5"),
+            &test_config(server.uri(), api_key(), "claude-haiku-5-5"),
             Some("sid-complete".to_owned()),
         )
         .unwrap();
@@ -188,7 +188,7 @@ mod tests {
             .await;
 
         let client = Client::new(
-            test_config(server.uri(), api_key(), "claude-haiku-5-5"),
+            &test_config(server.uri(), api_key(), "claude-haiku-5-5"),
             Some("sid".to_owned()),
         )
         .unwrap();
@@ -203,7 +203,7 @@ mod tests {
     async fn complete_while_signed_out_fails_without_a_request() {
         let mut config = test_config("https://example.invalid", api_key(), "claude-haiku-5-5");
         config.auth = None;
-        let client = Client::new(config, None).unwrap();
+        let client = Client::new(&config, None).unwrap();
 
         let err = client
             .complete(&haiku(), "", "u", 40, None, None)
@@ -226,7 +226,7 @@ mod tests {
             .await;
 
         let client = Client::new(
-            test_config(server.uri(), api_key(), "claude-haiku-5-5"),
+            &test_config(server.uri(), api_key(), "claude-haiku-5-5"),
             Some("sid".to_owned()),
         )
         .unwrap();
@@ -253,7 +253,7 @@ mod tests {
             .await;
 
         let client = Client::new(
-            test_config(server.uri(), api_key(), "claude-haiku-5-5"),
+            &test_config(server.uri(), api_key(), "claude-haiku-5-5"),
             Some("sid".to_owned()),
         )
         .unwrap();
@@ -278,7 +278,7 @@ mod tests {
             .await;
 
         let client = Client::new(
-            test_config(server.uri(), auth_token(), "claude-haiku-5-5"),
+            &test_config(server.uri(), auth_token(), "claude-haiku-5-5"),
             Some("sid".to_owned()),
         )
         .unwrap();
@@ -303,7 +303,7 @@ mod tests {
             .await;
 
         let client = Client::new(
-            test_config(server.uri(), api_key(), "claude-haiku-5-5"),
+            &test_config(server.uri(), api_key(), "claude-haiku-5-5"),
             Some("sid".to_owned()),
         )
         .unwrap();
@@ -348,7 +348,7 @@ mod tests {
 
             let mut config = test_config(server.uri(), oauth(), "claude-haiku-5-5");
             config.gateway.structured_outputs = structured_outputs;
-            let client = Client::new(config, Some("sid".to_owned())).unwrap();
+            let client = Client::new(&config, Some("sid".to_owned())).unwrap();
             _ = client
                 .complete(&haiku(), "sys", "prompt", 40, Some(Effort::Low), Some(&fmt))
                 .await
@@ -389,7 +389,7 @@ mod tests {
             .await;
 
         let client = Client::new(
-            test_config(
+            &test_config(
                 server.uri(),
                 Auth::new(AuthSource::ClaudeCodeLogin, "tok"),
                 "claude-haiku-5-5",
@@ -431,7 +431,7 @@ mod tests {
             .await;
 
         let client = Client::new(
-            test_config(server.uri(), api_key(), "claude-haiku-5-5"),
+            &test_config(server.uri(), api_key(), "claude-haiku-5-5"),
             Some("sid".to_owned()),
         )
         .unwrap();

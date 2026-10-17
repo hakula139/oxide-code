@@ -17,7 +17,7 @@ pub(crate) mod wire;
 #[cfg(test)]
 pub(crate) mod testing;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -28,8 +28,8 @@ use uuid::Uuid;
 
 use crate::client::{ResponseEvent, Wire};
 use crate::config::auth::{Auth, AuthKind, AuthSource};
-use crate::config::compaction::CompactionConfig;
-use crate::config::{Config, Effort, is_first_party_base_url};
+use crate::config::gateway::GatewayCompat;
+use crate::config::{Config, Effort, PromptCacheTtl, is_first_party_base_url};
 use crate::message::{ContentBlock, Message, Role};
 use crate::model::ModelSpec;
 use crate::prompt::SYSTEM_PROMPT_DYNAMIC_BOUNDARY;
@@ -59,13 +59,25 @@ const SYSTEM_PROMPT_PREFIX: &str = "You are Claude Code, Anthropic's official CL
 
 // ── Client ──
 
-/// Shareable HTTP client for the Anthropic Messages API. `Clone` is cheap because
-/// `reqwest::Client` shares its connection pool. Callers can keep one per session and update
-/// `session_id` / `model` / `effort` / `auth` via the `set_*` methods.
+/// Shareable HTTP client for the Anthropic Messages API, holding the endpoint and what each
+/// request sends. `Clone` is cheap because `reqwest::Client` shares its connection pool. Callers
+/// keep one per session and swap `session_id` / `model` / `effort` / `auth` via `set_*`.
 #[derive(Clone)]
 pub(crate) struct Client {
     http: reqwest::Client,
-    config: Config,
+    model: ModelSpec,
+    /// `None` for models outside the catalogue.
+    effort: Option<Effort>,
+    /// `None` while signed out.
+    auth: Option<Auth>,
+    base_url: String,
+    extra_ca_certs: Option<PathBuf>,
+    gateway: GatewayCompat,
+    /// User-set output cap. `None` defers to [`ModelSpec::resolve_max_tokens`].
+    max_tokens: Option<u32>,
+    prompt_cache_ttl: PromptCacheTtl,
+    /// Opts adaptive thinking into summarized text.
+    show_thinking: bool,
     session_id: String,
     device_id: String,
     /// Gates `scope: "global"` in `cache_control`, which 3P gateways reject.
@@ -73,60 +85,67 @@ pub(crate) struct Client {
 }
 
 impl Client {
-    pub(crate) fn new(config: Config, session_id: Option<String>) -> Result<Self> {
-        let session_id = session_id.unwrap_or_else(|| Uuid::new_v4().to_string());
-        let device_id = identity::load_or_create_device_id();
-        let is_first_party = is_first_party_base_url(&config.base_url);
-        let http = build_http(&config)?;
+    /// Builds a client for the endpoint, credential, and request settings in `config`.
+    pub(crate) fn new(config: &Config, session_id: Option<String>) -> Result<Self> {
+        let Config {
+            model,
+            effort,
+            auth,
+            base_url,
+            extra_ca_certs,
+            gateway,
+            max_tokens,
+            prompt_cache_ttl,
+            show_thinking,
+            ..
+        } = config;
         Ok(Self {
-            http,
-            config,
-            session_id,
-            device_id,
-            is_first_party,
+            http: build_http(gateway, extra_ca_certs.as_deref())?,
+            model: model.clone(),
+            effort: *effort,
+            auth: auth.clone(),
+            base_url: base_url.clone(),
+            extra_ca_certs: extra_ca_certs.clone(),
+            gateway: gateway.clone(),
+            max_tokens: *max_tokens,
+            prompt_cache_ttl: *prompt_cache_ttl,
+            show_thinking: *show_thinking,
+            session_id: session_id.unwrap_or_else(|| Uuid::new_v4().to_string()),
+            device_id: identity::load_or_create_device_id(),
+            is_first_party: is_first_party_base_url(base_url),
         })
     }
 
     pub(crate) fn model(&self) -> &ModelSpec {
-        &self.config.model
+        &self.model
     }
 
     pub(crate) fn effort(&self) -> Option<Effort> {
-        self.config.effort
+        self.effort
     }
 
-    pub(crate) fn compaction(&self) -> CompactionConfig {
-        self.config.compaction
+    /// The output cap that requests to the active model carry.
+    pub(crate) fn max_tokens(&self) -> u32 {
+        self.model.resolve_max_tokens(self.max_tokens)
     }
 
-    pub(crate) fn prompt_cache_ttl(&self) -> crate::config::PromptCacheTtl {
-        self.config.prompt_cache_ttl
-    }
-
-    /// `None` means the agent loop runs without a per-turn round cap.
-    pub(crate) fn max_tool_rounds(&self) -> Option<u32> {
-        self.config.max_tool_rounds
-    }
-
-    /// The policy resolved from config, which seeds the engine's live policy.
-    pub(crate) fn permission(&self) -> &crate::permission::Policy {
-        &self.config.permission
+    pub(crate) fn prompt_cache_ttl(&self) -> PromptCacheTtl {
+        self.prompt_cache_ttl
     }
 
     /// Where the credential came from, `None` while signed out.
     pub(crate) fn auth_source(&self) -> Option<AuthSource> {
-        self.config.auth.as_ref().map(Auth::source)
+        self.auth.as_ref().map(Auth::source)
     }
 
     /// PEM bundle appended to the platform trust roots, which stored-login refreshes also trust.
     pub(crate) fn extra_ca_certs(&self) -> Option<&Path> {
-        self.config.extra_ca_certs.as_deref()
+        self.extra_ca_certs.as_deref()
     }
 
     /// The credential used by requests, or an error while signed out.
     pub(crate) fn auth(&self) -> Result<&Auth> {
-        self.config
-            .auth
+        self.auth
             .as_ref()
             .context("Not signed in. Run /login to sign in.")
     }
@@ -145,30 +164,25 @@ impl Client {
         self.session_id = id;
     }
 
-    /// Swaps the active model and re-resolves effort and the compaction threshold. Thinking,
-    /// betas, context management, and the default `max_tokens` derive from the model per request.
+    /// Swaps the active model and re-resolves effort. Thinking, betas, context management, and
+    /// the default `max_tokens` derive from the model per request.
     pub(crate) fn set_model(&mut self, id: String) {
         let model = ModelSpec::resolve(id);
-        self.config.compaction = self
-            .config
-            .compaction
-            .for_model(&model, model.resolve_max_tokens(self.config.max_tokens));
-        self.config.effort = model.resolve_effort(self.config.effort);
-        self.config.model = model;
+        self.effort = model.resolve_effort(self.effort);
+        self.model = model;
     }
 
     /// Swaps the active effort. Stays `None` on unknown models.
     pub(crate) fn set_effort(&mut self, pick: Effort) -> Option<Effort> {
-        let effort = self.config.model.resolve_effort(Some(pick));
-        self.config.effort = effort;
-        effort
+        self.effort = self.model.resolve_effort(Some(pick));
+        self.effort
     }
 
     /// Swaps the credential for later requests, `None` to sign out. Callers install a stored login
     /// only in place of another stored login or none, which `Config::load` allows only for a
     /// first-party base URL.
     pub(crate) fn set_auth(&mut self, auth: Option<Auth>) {
-        self.config.auth = auth;
+        self.auth = auth;
     }
 
     /// Streams one request. The receiver closes when the stream ends, the receiver is dropped, or
@@ -203,7 +217,7 @@ impl Client {
         let dynamic_joined = dynamic_sections.join("\n\n");
 
         let static_cache_control =
-            static_prefix_cache_control(self.is_first_party, self.config.prompt_cache_ttl);
+            static_prefix_cache_control(self.is_first_party, self.prompt_cache_ttl);
         let system_blocks = build_system_blocks(
             attribution.as_deref(),
             [
@@ -212,17 +226,17 @@ impl Client {
             ],
         );
 
-        let model = &self.config.model;
-        let thinking = model.thinking(self.config.show_thinking);
+        let model = &self.model;
+        let thinking = model.thinking(self.show_thinking);
         let mut body = serde_json::to_string(&CreateMessageRequest {
             model: model.id(),
-            max_tokens: model.resolve_max_tokens(self.config.max_tokens),
+            max_tokens: self.max_tokens(),
             stream: true,
             metadata: build_metadata(&self.device_id, &self.session_id),
             system: system_blocks,
             tools: (!tools.is_empty()).then_some(tools),
             thinking: thinking.as_ref(),
-            output_config: OutputConfig::new(None, self.config.effort),
+            output_config: OutputConfig::new(None, self.effort),
             // Body must accompany the beta header, which `compute_betas` gates the same way.
             context_management: model
                 .info()
@@ -266,7 +280,7 @@ impl Client {
     /// without it under every credential kind. Non-streaming one-shots attribute only OAuth
     /// traffic, because gateways don't gate them on the block.
     fn attributes(&self, streaming: bool, auth: AuthKind) -> bool {
-        self.config.gateway.attribution && (streaming || auth == AuthKind::OAuth)
+        self.gateway.attribution && (streaming || auth == AuthKind::OAuth)
     }
 }
 
@@ -280,7 +294,7 @@ impl Wire for Client {
         user_context: Option<&str>,
         tools: &[ToolDefinition],
     ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
-        let breakpoint = conversation_cache_control(self.config.prompt_cache_ttl);
+        let breakpoint = conversation_cache_control(self.prompt_cache_ttl);
         self.stream(
             messages,
             system_sections,
@@ -304,7 +318,7 @@ impl Wire for Client {
 // ── HTTP Client ──
 
 /// The HTTP client with every header requests share. Each request adds its own credential.
-fn build_http(config: &Config) -> Result<reqwest::Client> {
+fn build_http(gateway: &GatewayCompat, extra_ca_certs: Option<&Path>) -> Result<reqwest::Client> {
     let mut headers = HeaderMap::new();
     headers.insert("anthropic-version", HeaderValue::from_static(API_VERSION));
     headers.insert(
@@ -343,7 +357,7 @@ fn build_http(config: &Config) -> Result<reqwest::Client> {
         HeaderValue::from_static(STAINLESS_TIMEOUT_SECS),
     );
 
-    headers.extend(config.gateway.custom_headers.clone());
+    headers.extend(gateway.custom_headers.clone());
 
     // No whole-request timeout because responses can run for minutes. The 60 s read timeout
     // catches slowloris dribble. Anthropic sends keepalives every ~15 s on healthy streams.
@@ -354,7 +368,7 @@ fn build_http(config: &Config) -> Result<reqwest::Client> {
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(15))
         .read_timeout(Duration::from_mins(1));
-    let builder = apply_extra_ca_certs(builder, config.extra_ca_certs.as_deref())?;
+    let builder = apply_extra_ca_certs(builder, extra_ca_certs)?;
     builder.build().context("failed to build HTTP client")
 }
 
@@ -494,7 +508,6 @@ mod tests {
     use super::*;
     use crate::client::{Response, StopReason, TokenUsage};
     use crate::config::auth::{Auth, AuthSource};
-    use crate::config::compaction::{CompactionConfig, test_thresholds};
     use crate::config::{Effort, PromptCacheTtl};
 
     // ── Fixtures ──
@@ -536,7 +549,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        client.config.base_url = server.uri();
+        client.base_url = server.uri();
         collect_events(
             client
                 .stream_message(&[Message::user("hi")], &[], None, &[])
@@ -559,7 +572,7 @@ mod tests {
     #[test]
     fn new_with_api_key_exposes_model() {
         let client = Client::new(
-            test_config(
+            &test_config(
                 OFFLINE_URL,
                 Auth::new(AuthSource::ApiKeyEnv, "sk-test"),
                 TEST_MODEL,
@@ -573,7 +586,7 @@ mod tests {
     #[test]
     fn new_with_oauth_token_exposes_model() {
         let client = Client::new(
-            test_config(
+            &test_config(
                 OFFLINE_URL,
                 Auth::new(AuthSource::ClaudeCodeLogin, "oauth-token"),
                 TEST_MODEL,
@@ -585,24 +598,22 @@ mod tests {
     }
 
     #[test]
-    fn new_exposes_compaction_config() {
+    fn new_exposes_the_prompt_cache_ttl() {
         let mut config = test_config(
             OFFLINE_URL,
             Auth::new(AuthSource::ApiKeyEnv, "sk-test"),
             TEST_MODEL,
         );
         config.prompt_cache_ttl = PromptCacheTtl::FiveMin;
-        config.compaction = CompactionConfig::with_threshold_for_test(123_456);
-        let client = Client::new(config, None).unwrap();
+        let client = Client::new(&config, None).unwrap();
 
         assert_eq!(client.prompt_cache_ttl(), PromptCacheTtl::FiveMin);
-        assert_eq!(client.compaction().auto.threshold_tokens, Some(123_456));
     }
 
     #[test]
     fn new_none_session_id_generates_uuid_v4() {
         let client = Client::new(
-            test_config(
+            &test_config(
                 OFFLINE_URL,
                 Auth::new(AuthSource::ApiKeyEnv, "k"),
                 TEST_MODEL,
@@ -620,7 +631,7 @@ mod tests {
     fn new_preserves_explicit_session_id() {
         let sid = "11111111-2222-4333-8444-555555555555".to_owned();
         let client = Client::new(
-            test_config(
+            &test_config(
                 OFFLINE_URL,
                 Auth::new(AuthSource::ApiKeyEnv, "k"),
                 TEST_MODEL,
@@ -640,7 +651,7 @@ mod tests {
             .unwrap();
         let mut cfg = test_config(OFFLINE_URL, api_key(), TEST_MODEL);
         cfg.extra_ca_certs = Some(pem.path().to_path_buf());
-        Client::new(cfg, None).expect("valid CA bundle must build a client");
+        Client::new(&cfg, None).expect("valid CA bundle must build a client");
     }
 
     #[test]
@@ -649,10 +660,26 @@ mod tests {
         // the user can debug it without inspecting TLS internals.
         let mut cfg = test_config(OFFLINE_URL, api_key(), TEST_MODEL);
         cfg.extra_ca_certs = Some(std::path::PathBuf::from("/no/such/bundle.pem"));
-        let err = Client::new(cfg, None).err().expect("missing CA must error");
+        let err = Client::new(&cfg, None)
+            .err()
+            .expect("missing CA must error");
         let msg = format!("{err:#}");
         assert!(msg.contains("failed to read extra CA bundle"), "{msg}");
         assert!(msg.contains("/no/such/bundle.pem"), "{msg}");
+    }
+
+    // ── Client::max_tokens ──
+
+    #[tokio::test]
+    async fn max_tokens_sends_the_user_cap_over_the_model_default() {
+        let mut cfg = test_config(OFFLINE_URL, api_key(), "claude-opus-5-5");
+        cfg.max_tokens = Some(4_096);
+        let client = Client::new(&cfg, Some("sid".to_owned())).unwrap();
+
+        let (body, _) = capture_stream_turn(client.clone()).await;
+
+        assert_eq!(client.max_tokens(), 4_096);
+        assert_eq!(body["max_tokens"], 4_096);
     }
 
     // ── Client::set_session_id ──
@@ -674,7 +701,7 @@ mod tests {
             .await;
 
         let mut client = Client::new(
-            test_config(
+            &test_config(
                 server.uri(),
                 Auth::new(AuthSource::ApiKeyEnv, "k"),
                 TEST_MODEL,
@@ -713,7 +740,7 @@ mod tests {
     fn client_with(model: &str, effort: Option<Effort>) -> Client {
         let mut cfg = test_config(OFFLINE_URL, api_key(), model);
         cfg.effort = effort;
-        Client::new(cfg, Some("sid".to_owned())).unwrap()
+        Client::new(&cfg, Some("sid".to_owned())).unwrap()
     }
 
     #[test]
@@ -736,7 +763,7 @@ mod tests {
             let mut client = client_with(from_model, from_effort);
             client.set_model(swap_to.to_owned());
             assert_eq!(
-                client.config.effort, expect,
+                client.effort, expect,
                 "{from_model} → {swap_to}: stored effort",
             );
             assert_eq!(client.model().id(), swap_to, "{swap_to}: stored id");
@@ -748,7 +775,7 @@ mod tests {
         let mut cfg = test_config(OFFLINE_URL, api_key(), "custom-model");
         cfg.max_tokens = None;
         cfg.show_thinking = true;
-        let mut client = Client::new(cfg, Some("sid".to_owned())).unwrap();
+        let mut client = Client::new(&cfg, Some("sid".to_owned())).unwrap();
 
         let (unknown, unknown_betas) = capture_stream_turn(client.clone()).await;
         for field in ["thinking", "output_config", "context_management"] {
@@ -782,36 +809,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn set_model_enables_compaction_threshold_from_new_context_window() {
-        let mut config = test_config(OFFLINE_URL, api_key(), "custom-model");
-        config.max_tokens = None;
-        config.compaction = CompactionConfig::default_for_test(&config.model, 16_000);
-        assert!(!config.compaction.auto.enabled, "precondition: no window");
-        let mut client = Client::new(config, Some("sid".to_owned())).unwrap();
-
-        client.set_model("claude-sonnet-5-5".to_owned());
-
-        assert_eq!(
-            client.compaction().auto.threshold_tokens,
-            Some(test_thresholds::WINDOW_1M),
-        );
-    }
-
-    #[test]
-    fn set_model_clamps_threshold_above_new_context_window() {
-        let mut config = test_config(OFFLINE_URL, api_key(), "custom-model");
-        config.max_tokens = None;
-        config.compaction = CompactionConfig::with_threshold_for_test(1_500_000);
-        let mut client = Client::new(config, Some("sid".to_owned())).unwrap();
-
-        client.set_model("claude-sonnet-5-5".to_owned());
-        assert_eq!(
-            client.compaction().auto.threshold_tokens,
-            Some(test_thresholds::WINDOW_1M),
-        );
-    }
-
     // ── Client::set_effort ──
 
     #[test]
@@ -828,7 +825,7 @@ mod tests {
             let mut client = client_with(model, initial);
             assert_eq!(client.set_effort(pick), expect, "{model} pick={pick:?}");
             assert_eq!(
-                client.config.effort, expect,
+                client.effort, expect,
                 "{model} pick={pick:?}: stored effort",
             );
         }
@@ -839,7 +836,7 @@ mod tests {
     #[tokio::test]
     async fn set_auth_sends_the_new_credential_and_signing_out_stops_requests() {
         let mut client =
-            Client::new(test_config(OFFLINE_URL, api_key(), TEST_MODEL), None).unwrap();
+            Client::new(&test_config(OFFLINE_URL, api_key(), TEST_MODEL), None).unwrap();
 
         client.set_auth(Some(Auth::new(AuthSource::OxLogin, "ox-token")));
         let request = capture_stream_request(client.clone()).await;
@@ -877,7 +874,7 @@ mod tests {
             let kind = auth.kind();
             let mut config = test_config(OFFLINE_URL, auth, TEST_MODEL);
             config.gateway.attribution = enabled;
-            let client = Client::new(config, None).unwrap();
+            let client = Client::new(&config, None).unwrap();
             assert_eq!(
                 client.attributes(streaming, kind),
                 expected,
@@ -903,7 +900,7 @@ mod tests {
             .await;
 
         let client = Client::new(
-            test_config(server.uri(), api_key(), TEST_MODEL),
+            &test_config(server.uri(), api_key(), TEST_MODEL),
             Some("sid".to_owned()),
         )
         .unwrap();
@@ -956,7 +953,7 @@ mod tests {
             .await;
 
         let client = Client::new(
-            test_config(server.uri(), api_key(), TEST_MODEL),
+            &test_config(server.uri(), api_key(), TEST_MODEL),
             Some("sid".to_owned()),
         )
         .unwrap();
@@ -996,7 +993,7 @@ mod tests {
         ] {
             let source = auth.source();
             let client = Client::new(
-                test_config(OFFLINE_URL, auth, TEST_MODEL),
+                &test_config(OFFLINE_URL, auth, TEST_MODEL),
                 Some("sid".to_owned()),
             )
             .unwrap();
@@ -1044,7 +1041,7 @@ mod tests {
                 .insert(name, HeaderValue::from_static(value));
         }
         let request =
-            capture_stream_request(Client::new(config, Some("sid".to_owned())).unwrap()).await;
+            capture_stream_request(Client::new(&config, Some("sid".to_owned())).unwrap()).await;
         assert_eq!(request_header(&request, "x-team"), Some("platform"));
         assert_eq!(
             request
@@ -1065,7 +1062,7 @@ mod tests {
     async fn stream_message_billing_block_hashes_only_first_party_requests() {
         for is_first_party in [true, false] {
             let mut client = Client::new(
-                test_config(OFFLINE_URL, api_key(), TEST_MODEL),
+                &test_config(OFFLINE_URL, api_key(), TEST_MODEL),
                 Some("sid".to_owned()),
             )
             .unwrap();
@@ -1111,7 +1108,7 @@ mod tests {
             .await;
 
         let client = Client::new(
-            test_config(server.uri(), api_key(), TEST_MODEL),
+            &test_config(server.uri(), api_key(), TEST_MODEL),
             Some("sid".to_owned()),
         )
         .unwrap();
@@ -1167,7 +1164,7 @@ mod tests {
             .await;
 
         let client = Client::new(
-            test_config(server.uri(), api_key(), TEST_MODEL),
+            &test_config(server.uri(), api_key(), TEST_MODEL),
             Some("sid".to_owned()),
         )
         .unwrap();
@@ -1222,11 +1219,11 @@ mod tests {
             .await;
 
         let mut client = Client::new(
-            test_config(server.uri(), api_key(), "claude-sonnet-5-5"),
+            &test_config(server.uri(), api_key(), "claude-sonnet-5-5"),
             Some("sid".to_owned()),
         )
         .unwrap();
-        // Pins that the conversation breakpoint omits `scope` even where the system prefix is global.
+        // The conversation breakpoint omits `scope` even where the system prefix is global.
         client.is_first_party = true;
         let messages = [
             Message::user("question"),
@@ -1298,7 +1295,7 @@ mod tests {
             .await;
 
         let client = Client::new(
-            test_config(server.uri(), api_key(), TEST_MODEL),
+            &test_config(server.uri(), api_key(), TEST_MODEL),
             Some("sid".to_owned()),
         )
         .unwrap();
@@ -1334,7 +1331,7 @@ mod tests {
             .await;
 
         let client = Client::new(
-            test_config(server.uri(), api_key(), TEST_MODEL),
+            &test_config(server.uri(), api_key(), TEST_MODEL),
             Some("sid".to_owned()),
         )
         .unwrap();
@@ -1376,7 +1373,7 @@ mod tests {
             .await;
 
         let client = Client::new(
-            test_config(server.uri(), api_key(), TEST_MODEL),
+            &test_config(server.uri(), api_key(), TEST_MODEL),
             Some("sid".to_owned()),
         )
         .unwrap();
@@ -1408,7 +1405,7 @@ mod tests {
                 .await;
 
             let client = Client::new(
-                test_config(server.uri(), api_key(), TEST_MODEL),
+                &test_config(server.uri(), api_key(), TEST_MODEL),
                 Some("sid".to_owned()),
             )
             .unwrap();
@@ -1435,7 +1432,7 @@ mod tests {
             .await;
 
         let client = Client::new(
-            test_config(
+            &test_config(
                 server.uri(),
                 Auth::new(AuthSource::OAuthTokenEnv, "oat-env"),
                 TEST_MODEL,
@@ -1470,7 +1467,7 @@ mod tests {
             .await;
 
         let client = Client::new(
-            test_config(server.uri(), api_key(), TEST_MODEL),
+            &test_config(server.uri(), api_key(), TEST_MODEL),
             Some("sid".to_owned()),
         )
         .unwrap();
@@ -1500,7 +1497,7 @@ mod tests {
             .await;
 
         let client = Client::new(
-            test_config(server.uri(), api_key(), TEST_MODEL),
+            &test_config(server.uri(), api_key(), TEST_MODEL),
             Some("sid".to_owned()),
         )
         .unwrap();
@@ -1551,7 +1548,7 @@ mod tests {
     }
 
     async fn capture_stream_body(config: Config) -> serde_json::Value {
-        capture_stream_turn(Client::new(config, Some("sid".to_owned())).unwrap())
+        capture_stream_turn(Client::new(&config, Some("sid".to_owned())).unwrap())
             .await
             .0
     }
@@ -1598,7 +1595,7 @@ mod tests {
             ("claude-haiku-5-5", None, false),
         ] {
             let client = Client::new(
-                test_config(OFFLINE_URL, api_key(), id),
+                &test_config(OFFLINE_URL, api_key(), id),
                 Some("sid".to_owned()),
             )
             .unwrap();
@@ -1620,7 +1617,7 @@ mod tests {
     async fn stream_message_known_model_drops_stale_thinking_blocks_under_binding_beta() {
         for info in crate::model::MODELS {
             let client = Client::new(
-                test_config(OFFLINE_URL, api_key(), info.id),
+                &test_config(OFFLINE_URL, api_key(), info.id),
                 Some("sid".to_owned()),
             )
             .unwrap();

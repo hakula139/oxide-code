@@ -8,7 +8,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 - `/clear` rolls the session UUID and clears chat + file tracker.
 - `/compact` compresses the visible transcript into a summary and resets the continuation chain.
-- `/model` swaps the active model mid-session via `Client::set_model`.
+- `/model` swaps the active model mid-session via `Engine::set_model`.
 - `/effort` sets an explicit effort tier.
 - `/theme` swaps the TUI palette mid-session, with bare opening a live-preview list picker.
 - `/init` asks the model to create the project's AGENTS.md or CLAUDE.md, picking the file first when neither exists, or to propose changes to the existing ones as a diff. Full design: [init.md](init.md).
@@ -28,7 +28,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 4. **Two-column popup, plain rows.** Name left, description right. Filter ranks name-prefix > alias-prefix > name-substring > alias-substring, alphabetical within each tier. Names accept `:` and `.`, so namespaced names such as `/plugin:cmd` parse.
 
-5. **Mid-session model + effort swap via `&mut Client`.** Both `/model <id>` and `/effort <level>` return `Forward(Action::Op(Op::SetModel { model, effort }))`, the same payload both modals emit, so the typed-arg path and the modals share one resolver. Per-request paths re-read config every call so betas and `output_config` pick up the swap. Bare `/model` (combined picker) and bare `/effort` (slider) are also mutating because their submit path emits `Op::SetModel`, so both forms refuse mid-turn. See [modals.md](modals.md).
+5. **Mid-session model + effort swap via `&mut Client`.** Both `/model <id>` and `/effort <level>` return `Forward(Action::Op(Op::SetModel { model, effort }))`, the same payload both modals emit, so the typed-arg path and the modals share one resolver. Each request reads the client's active model and effort, so betas and `output_config` pick up the swap. `Engine::set_model` also re-resolves the compaction threshold for the new model. Bare `/model` (combined picker) and bare `/effort` (slider) are also mutating because their submit path emits `Op::SetModel`, so both forms refuse mid-turn. See [modals.md](modals.md).
 
 6. **Slash commands never write user config files.** State is session-only, so a restart reverts to the configured values. Session commands should feel reversible, and any write that outlives the session requires an explicit user action.
 
@@ -87,7 +87,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 - `crates/oxide-code/src/command.rs`: `parse` and the typed forms of `/clear`, `/compact`, `/effort`, `/model`, `/rename`, and `/resume`, plus the model resolver.
 - `crates/oxide-code/src/driver/repl.rs`: `command_op`, which runs typed slash commands in the bare REPL.
 - `crates/oxide-code/src/driver/stdio.rs`: `render_op`, plus the `StdioSink` confirmations for the session and config events.
-- `crates/oxide-code/src/engine.rs`: `Engine::run` arms for `Op::Clear` and `Op::SetModel`, `Engine::archive`, which waits for the archive entry to reach disk before rolling the session, and `TurnEnd::of`.
+- `crates/oxide-code/src/engine.rs`: `Engine::run` arms for `Op::Clear` and `Op::SetModel`, `Engine::set_model`, which re-resolves the compaction threshold for the new model, `Engine::archive`, which waits for the archive entry to reach disk before rolling the session, and `TurnEnd::of`.
 - `crates/oxide-code/src/session/display.rs`: shared `id_prefix`, `display_title`, and `format_metadata_line` for the picker row and delete confirm modal, plus `archive_notice`.
 - `crates/oxide-code/src/session/resolver.rs`: `resolve_prefix_to_info` checks the current project first, widens the search on a miss, and returns a typed `ResolveError` that the CLI prints as is and slash commands rephrase. `resolve_saved_prefix` distinguishes live-only matches for `/archive`, `/unarchive`, and `/delete`.
 - `crates/oxide-code/src/session/store.rs`: `delete_at`, which refuses to delete the live session at the filesystem boundary, and `set_archived_at`.

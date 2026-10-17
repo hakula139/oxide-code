@@ -47,7 +47,7 @@ pub(crate) fn test_config(base_url: impl Into<String>, auth: Auth, model: &str) 
 
 /// Fixed session id so wire headers carry a deterministic `x-claude-code-session-id`.
 pub(crate) fn test_client(base_url: impl Into<String>, auth: Auth, model: &str) -> Client {
-    Client::new(test_config(base_url, auth, model), Some("sid".to_owned())).unwrap()
+    Client::new(&test_config(base_url, auth, model), Some("sid".to_owned())).unwrap()
 }
 
 /// A `/v1/messages` call to `url` with an empty body and an API key.

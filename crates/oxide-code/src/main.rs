@@ -25,7 +25,6 @@ use anyhow::{Context, Result, bail};
 use clap::{ArgGroup, Parser};
 use tracing::warn;
 
-use client::anthropic::Client;
 use config::Config;
 use driver::Exit;
 use driver::headless::OutputFormat;
@@ -173,10 +172,9 @@ async fn async_main() -> Result<Exit> {
         .then(|| ResumePicker::at_startup(store.clone(), handle.session_id().to_owned(), cli.all));
 
     let read_deny = config.permission.read_deny();
-    let client = Client::new(config, Some(handle.session_id().to_owned()))?;
     let tools = Arc::new(create_tool_registry(&file_tracker, &read_deny));
     let engine = Engine::new(
-        client,
+        &config,
         tools,
         store,
         handle,
@@ -185,7 +183,7 @@ async fn async_main() -> Result<Exit> {
         cwd,
         tui_mode,
     )
-    .await;
+    .await?;
 
     if let Some(prompt) = cli.prompt {
         return Ok(driver::headless::run(engine, show_thinking, &prompt, cli.output).await);
