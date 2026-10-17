@@ -1,7 +1,6 @@
 //! Test-only [`App`] fixtures shared by the app, dispatch, event, and render tests.
 
 use std::io::{self, Write};
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers};
@@ -16,7 +15,7 @@ use super::{App, AppHistory};
 use crate::client::{RateLimitWindow, RateLimits};
 use crate::model::ModelSpec;
 use crate::protocol::{Event, Op};
-use crate::slash::LiveSessionInfo;
+use crate::slash::{self, LiveSessionInfo};
 use crate::tool::{ApprovalBody, ApprovalPreview};
 use crate::tui::theme::Theme;
 
@@ -42,45 +41,12 @@ pub(super) fn test_app(
     (app, op_rx, event_tx)
 }
 
+/// The slash fixture on `test-model`, an unknown id whose display name falls back to the literal
+/// id, keeping insta snapshots stable.
 pub(super) fn test_session_info() -> LiveSessionInfo {
-    // `test-model` is intentionally unknown so `display_name` falls back to the literal
-    // id, keeping insta snapshots stable.
-    use crate::config::compaction::CompactionConfig;
-    use crate::config::{ConfigSnapshot, Effort, PromptCacheTtl};
-
-    LiveSessionInfo {
-        cwd: "~/test".to_owned(),
-        git_cwd: None,
-        project_root: PathBuf::from("/repo"),
-        git_branch: Some("main".to_owned()),
-        version: "0.0.0-test",
-        session_id: "test-session".to_owned(),
-        session_allow: Vec::new(),
-        auto_compaction_paused_after: None,
-        config: ConfigSnapshot {
-            auth: Some(crate::config::auth::AuthSource::ApiKeyEnv),
-            signed_out_notice: None,
-            base_url: "https://api.test.invalid".to_owned(),
-            extra_ca_certs: None,
-            gateway: crate::config::gateway::GatewaySnapshot {
-                custom_header_names: Vec::new(),
-                attribution: true,
-                structured_outputs: true,
-            },
-            model: ModelSpec::resolve("test-model".to_owned()),
-            effort: Some(Effort::High),
-            max_tokens: None,
-            max_tool_rounds: None,
-            prompt_cache_ttl: PromptCacheTtl::OneHour,
-            compaction: CompactionConfig::with_threshold_for_test(155_000),
-            permission_mode: crate::permission::Mode::Auto,
-            show_thinking: false,
-            show_welcome: true,
-            status_line: crate::config::StatusLineSegment::DEFAULT.to_vec(),
-            theme_name: "mocha".to_owned(),
-            provenance: crate::config::provenance::Provenance::default(),
-        },
-    }
+    let mut info = slash::test_session_info();
+    info.config.model = ModelSpec::resolve("test-model".to_owned());
+    info
 }
 
 /// A five-hour window 42% spent that resets in 2100.
