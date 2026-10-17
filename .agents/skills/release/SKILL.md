@@ -5,6 +5,11 @@ description: Cut an oxide-code release tag. Use whenever the user asks to releas
 
 # Cut an oxide-code release
 
-Read the root `RELEASING.md` and follow its release procedure step by step. It is the source of truth for releases.
+Read the root `RELEASING.md` and follow its release procedure step by step. It is the source of truth for releases, and these steps are the easiest to skip:
 
-After the tag is pushed, watch the workflow with `gh run watch`, then report the release URL and the Homebrew formula PR, if the workflow opened one.
+- Before opening the release PR, curate the changelog section drafted by the script, following [Curate the section](../../../RELEASING.md#curate-the-section).
+- Ask for approval to push the tag separately from approval of the release PR.
+- Tag the release PR's squash commit by its SHA.
+- Watch the Release workflow with `gh run watch` until it finishes, then run the publication checks.
+- Merge the Homebrew formula PR opened by the workflow, since that is the final release step.
+- Report the URLs of the release PR, the GitHub Release, and the formula PR.

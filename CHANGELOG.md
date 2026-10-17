@@ -6,61 +6,65 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [0.1.0-alpha.3] - 2026-10-17
 
+### Highlights
+
+- Claude 5.5 only: the catalogue drops older models, and thinking blocks replay across model swaps.
+- A tiered permission system with an approval gate in every frontend, session-wide approvals, and shell commands parsed into segments before rules match.
+- Gateway and OAuth token authentication with custom headers, plus /login and /logout.
+- Layered config through config.d drop-ins and .ox/config.toml, with per-value provenance and startup errors that name the setting and the fix.
+- Headless runs print a JSON result or an event stream.
+- Sessions can be archived, resumed from the shell with ox --resume, and keep their cost estimate.
+- Compaction streams its summary, handles tool-heavy sessions, and holds the prompt when auto-compaction fails.
+- A cancelled prompt is marked as interrupted, so the next reply answers only the new prompt.
+- A guided /init and opt-in status line segments for usage limits and PR state.
+- The test suite runs on Windows, and releases are gated on CI with attested archives.
+
 ### Breaking changes
 
-- _(model)_ Support only the Claude 5.5 models (#183)
-- _(install)_ Gate releases on CI, attest archives, and drop the Intel Mac build (#210)
+- _(model)_ Support only Claude Opus 5.5, Sonnet 5.5, and Haiku 5.5, with Opus 5.5 as the default. Other model IDs still pass through, without thinking, effort, or a cost estimate ([#183](https://github.com/hakula139/oxide-code/pull/183))
+- _(install)_ Stop publishing an Intel Mac archive so Intel Macs build from source or install through Nix. Every release archive now includes a build provenance attestation ([#210](https://github.com/hakula139/oxide-code/pull/210))
 
 ### Added
 
-- _(permission)_ Tiered tool-permission system with approval gate (#95)
-- _(prompt)_ Send the model identity in the session context (#189)
-- _(config)_ Authenticate with gateway tokens, OAuth tokens, and custom headers (#197)
-- _(session)_ Archive and unarchive sessions (#216)
-- _(session)_ Open the session picker from the shell with ox --resume (#218)
-- _(session)_ Restore the session cost estimate on resume (#226)
-- _(config)_ Add config.d drop-ins, .ox/config.toml, and per-value provenance (#229)
-- _(config)_ Name the setting and the fix in startup errors (#235)
-- _(driver)_ Print headless runs as a JSON result or event stream (#236)
-- _(permission)_ Remember approvals for the rest of the session (#233)
-- _(permission)_ Answer approvals in every frontend (#243)
-- _(slash)_ Add /login and /logout (#242)
-- _(compaction)_ Stream the summary into the chat as it generates (#252)
-- _(permission)_ Parse shell commands for permission analysis (#250)
-- _(tui)_ Add opt-in status line segments for limits, PR state, and more (#259)
-- _(slash)_ Ask which instruction file /init creates, and diff updates (#263)
+- _(permission)_ Check every tool call before it runs. Read-only calls and edits within the working directory run without asking. Built-in deny rules block dangerous commands, edits to protected paths such as `.git/hooks` always require approval, and any call not settled by a rule prompts for approval. `plan` mode denies edits and `bash`, while `yolo` never asks ([#95](https://github.com/hakula139/oxide-code/pull/95), [#113](https://github.com/hakula139/oxide-code/pull/113))
+- _(permission)_ Respond to approval prompts in the TUI and REPL by allowing a call once or for the rest of the session, denying it, or denying it with feedback for the model. Headless runs deny calls with feedback naming the allow rule to add ([#233](https://github.com/hakula139/oxide-code/pull/233), [#243](https://github.com/hakula139/oxide-code/pull/243))
+- _(permission)_ Judge a `bash` command by each simple command it runs and each file it writes. This lets chained and piped commands match allow rules, while preventing quoting or a full program path from bypassing a deny rule ([#250](https://github.com/hakula139/oxide-code/pull/250))
+- _(permission)_ On Windows, resolve 8.3 short names, NTFS stream suffixes, and hard links as the file system does, and reject a symlink swapped in after the check. These paths can no longer bypass the rules ([#223](https://github.com/hakula139/oxide-code/pull/223), [#224](https://github.com/hakula139/oxide-code/pull/224), [#225](https://github.com/hakula139/oxide-code/pull/225))
+- _(tool)_ Exclude files blocked by `read` deny rules from `grep` and `glob` results, and report only how many files were withheld ([#227](https://github.com/hakula139/oxide-code/pull/227))
+- _(config)_ Authenticate using `ANTHROPIC_AUTH_TOKEN`, an API key, or a long-lived `CLAUDE_CODE_OAUTH_TOKEN`, following Claude Code's order. Send gateway headers from `ANTHROPIC_CUSTOM_HEADERS` ([#197](https://github.com/hakula139/oxide-code/pull/197))
+- _(slash)_ Sign in to a Claude account with `/login`, independently of Claude Code's login, and remove that login with `/logout` ([#242](https://github.com/hakula139/oxide-code/pull/242))
+- _(config)_ Layer config from `config.d/*.toml` drop-ins and a project `.ox/config.toml`, and show in `/config` which file set each value. A legacy `ox.toml` still loads with a notice to move it ([#229](https://github.com/hakula139/oxide-code/pull/229))
+- _(config)_ Name the setting and the fix in startup errors ([#235](https://github.com/hakula139/oxide-code/pull/235))
+- _(driver)_ Print headless runs as a single JSON result with `--output json` or as an event stream with `--output stream-json` ([#236](https://github.com/hakula139/oxide-code/pull/236))
+- _(session)_ Archive a session with `/archive` to hide it from `ox --list`, the `/resume` picker, and `ox -c` while keeping it resumable. Restore it with `/unarchive` ([#216](https://github.com/hakula139/oxide-code/pull/216))
+- _(session)_ Open the session picker from the shell with `ox --resume` ([#218](https://github.com/hakula139/oxide-code/pull/218))
+- _(session)_ Restore the session cost estimate when resuming ([#226](https://github.com/hakula139/oxide-code/pull/226))
+- _(compaction)_ Stream the summary into the chat as it is generated ([#252](https://github.com/hakula139/oxide-code/pull/252))
+- _(tui)_ Add opt-in status line segments for usage limits, PR checks and review, queued prompts, the session ID, and the theme ([#259](https://github.com/hakula139/oxide-code/pull/259))
+- _(slash)_ Have `/init` ask which instruction file to create and propose a diff before changing an existing one ([#263](https://github.com/hakula139/oxide-code/pull/263))
 
 ### Fixed
 
-- _(deps)_ Refresh dependencies and patch DoS advisories (#94)
-- _(oauth)_ Write refreshed tokens back to their source (#103)
-- _(util)_ Run git probes off the event loop and harden env and log handling (#104)
-- _(main)_ Finalize the live session, share one turn driver, and freeze the prompt context (#108)
-- _(tui)_ Render code, diffs, HTML, and CJK wrapping faithfully (#112)
-- _(permission)_ Close symlink, protected-path, and glob bypasses (#113)
-- _(tool)_ Align tool semantics with what the model sees (#114)
-- _(tui)_ Route scroll keys to the chat and handle bracketed paste (#115)
-- _(tui)_ Emit OSC 8 natively in tmux and scope the panic hook (#116)
-- _(session)_ Keep transcripts intact across crashes and failed flushes (#179)
-- _(agent)_ Handle stop reasons, retries, and truncated streams (#194)
-- _(agent)_ Keep completed tool results and kill process groups on cancel (#195)
-- _(compaction)_ Summarize the full transcript and count its usage (#196)
-- _(session)_ Replay the resumed branch's prompt context (#213)
-- _(oxide-code)_ Run the test suite on Windows and fix what it found (#211)
-- _(permission)_ Compare Windows 8.3 short names as their long names (#223)
-- _(permission)_ Keep hard-linked files out of the Windows workspace zone (#224)
-- _(tool)_ Withhold read-denied files from grep and glob results (#227)
-- _(tool)_ Refuse a symlink swapped into the final component on Windows (#225)
-- _(nix)_ Keep the pre-commit hooks path absolute so linked worktrees run the hooks (#234)
-- _(engine)_ Tell the model when the user interrupted the previous prompt (#260)
-- _(compaction)_ Compact tool-heavy sessions and hold the prompt when auto-compaction fails (#265)
+- _(session)_ Keep transcripts intact if ox crashes mid-write or a write fails, so resuming no longer drops later history ([#179](https://github.com/hakula139/oxide-code/pull/179))
+- _(agent)_ Retry transient API failures with backoff, and end replies cut off by the output limit or a dropped stream without running unfinished tool calls ([#194](https://github.com/hakula139/oxide-code/pull/194))
+- _(agent)_ Keep results from tool calls that finished before cancellation, and stop a cancelled `bash` command along with its background children ([#195](https://github.com/hakula139/oxide-code/pull/195))
+- _(oauth)_ Save refreshed login tokens to the Keychain entry or file they came from, so token refresh no longer fails on macOS with "no credentials available" ([#103](https://github.com/hakula139/oxide-code/pull/103))
+- _(compaction)_ Compact sessions made mostly of tool output, and hold the prompt if auto-compaction fails so it is never sent against the oversized transcript ([#265](https://github.com/hakula139/oxide-code/pull/265))
+- _(compaction)_ Summarize the full conversation through the prompt cache, fail a cut-off summary without replacing the transcript, and count summary requests toward the session cost ([#196](https://github.com/hakula139/oxide-code/pull/196))
+- _(engine)_ Mark a cancelled prompt as interrupted, so the next reply answers only the new prompt ([#260](https://github.com/hakula139/oxide-code/pull/260))
+- _(oxide-code)_ On Windows, start the TUI, run `bash` through Git for Windows, end the whole process tree on timeout or cancellation, and match permission globs across path separators ([#211](https://github.com/hakula139/oxide-code/pull/211))
+- _(tool)_ Keep the head and tail of long `bash` output and partial output from timed-out commands. Let `glob` and `grep` search dotfiles and return paths that a later read can open ([#114](https://github.com/hakula139/oxide-code/pull/114))
+- _(main)_ Save the live session's file-tracking state on exit after `/clear` or `/resume`, and keep the REPL running after a failed turn ([#108](https://github.com/hakula139/oxide-code/pull/108))
+- _(util)_ Refresh the status line's branch and PR in the background so they no longer block input, and read boolean environment variables in any letter case, failing on an unknown value ([#104](https://github.com/hakula139/oxide-code/pull/104))
+- _(tui)_ Render fenced code, diffs, and HTML blocks faithfully, and wrap CJK text between characters ([#112](https://github.com/hakula139/oxide-code/pull/112))
+- _(tui)_ Scroll an idle chat with PageUp, PageDown, Ctrl+Home, and Ctrl+End, and paste multi-line text as a single input ([#115](https://github.com/hakula139/oxide-code/pull/115))
+- _(tui)_ Emit status-line hyperlinks that tmux 3.4 and later forward without `allow-passthrough`, and keep the terminal intact if a background task panics ([#116](https://github.com/hakula139/oxide-code/pull/116))
 
 ### Changed
 
-- _(client)_ Cache the conversation and keep the request prefix stable (#107)
-- _(tui)_ Cache rendered chat blocks and paint only the visible slice (#111)
-- _(session)_ Resolve resume targets without reading every transcript (#182)
-- _(tui)_ Render only chat blocks near the viewport (#244)
+- _(client)_ Cache the whole conversation and keep each session's request prefix fixed across resumes and model swaps. Send instruction, date, and model changes as reminders so later turns can reuse the prompt cache and earlier thinking ([#107](https://github.com/hakula139/oxide-code/pull/107), [#108](https://github.com/hakula139/oxide-code/pull/108), [#189](https://github.com/hakula139/oxide-code/pull/189), [#213](https://github.com/hakula139/oxide-code/pull/213))
+- _(tui)_ Keep long chats responsive while streaming, scrolling, resizing, and changing themes by caching rendered blocks and rendering only those near the viewport ([#111](https://github.com/hakula139/oxide-code/pull/111), [#244](https://github.com/hakula139/oxide-code/pull/244))
+- _(session)_ Find the session targeted by `ox -c`, `/resume`, and `/delete` without parsing every transcript ([#182](https://github.com/hakula139/oxide-code/pull/182))
 
 ## [0.1.0-alpha.2] - 2026-06-25
 

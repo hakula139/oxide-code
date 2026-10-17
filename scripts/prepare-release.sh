@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
-# Prepare the release PR for a tag: prepend the changelog section with its compare link, bump the
-# version, pin the install snippets to the tag, and add the tag's session resume fixture.
+# Prepare the release PR for a tag: prepend the draft changelog section with its compare link, bump
+# the version, pin the install snippets to the tag, and add the tag's session resume fixture.
 #
 #   ./scripts/prepare-release.sh vX.Y.Z [highlights.md]
 #
 # A highlights file renders at the top of the changelog section. Annotate the tag with the same
-# file (`git tag -a --cleanup=verbatim -F highlights.md vX.Y.Z`) so regenerating the section
-# reproduces it.
+# file (`git tag -a --cleanup=verbatim -F highlights.md vX.Y.Z`).
 
 set -euo pipefail
 
@@ -88,4 +87,4 @@ perl -pi -e "s/^VERSION=v.*/VERSION=$tag/" README.md docs/guide/install.md
 awk 'header == 2 { print } /^---$/ { header++ }' "$written" >"$fixture"
 INSTA_UPDATE=unseen cargo test --quiet --bin ox session_resumes_from_every_release_fixture
 
-printf 'Prepared %s. Review the diff, then commit it as chore(release): %s.\n' "$tag" "$tag"
+printf 'Prepared %s. Curate the new CHANGELOG.md section, then commit as chore(release): %s.\n' "$tag" "$tag"

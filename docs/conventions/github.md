@@ -12,7 +12,7 @@ Conventions for commits, branches, pull requests, and issues.
 
 ## Pull Requests
 
-- Merge into `main` only with squash merges. The squash commit uses the PR title, which becomes the PR's [changelog](../../RELEASING.md#changelog) entry, so write the title for users.
+- Merge into `main` only with squash merges. The squash commit uses the PR title, which becomes the PR's draft [changelog](../../RELEASING.md#changelog) entry, so write the title for users.
 - Fill in `.github/pull_request_template.md`. Start the Summary with prose describing the problem and resulting behavior, then cover each part of the change in a bullet with a bold label. In the Test plan, list the checks actually run and note any verification limits.
 - Add `Closes #N` for each resolved issue.
 - Do not request a review from the PR author because GitHub rejects the request.

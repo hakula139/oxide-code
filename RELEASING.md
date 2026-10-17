@@ -25,13 +25,26 @@ The TUI layout, prompt text, slash-command output wording, and log format are ou
 
 ## Changelog
 
-[git-cliff](https://git-cliff.org) generates `CHANGELOG.md` from `cliff.toml`, so never edit the file by hand.
+[git-cliff](https://git-cliff.org) drafts a section for each release in `CHANGELOG.md` from `cliff.toml`. The release PR edits that draft into the published notes. After the script runs, edit only the section being prepared in its release PR. Never regenerate or edit an older section.
 
-- Each squash-merged PR title becomes one entry, so write PR titles for users.
-- `feat`, `fix`, `perf`, and `revert` titles land under Added, Fixed, Changed, and Removed, and `!` titles land under Breaking changes. Every other type is skipped, including routine `chore(deps)` and `chore(flake)` bumps. Title a bump that fixes an advisory or changes behavior as `fix(deps): ...`.
-- A stable section rolls up every change since the previous stable release. A prerelease section lists only the changes since the previous tag.
-- Highlights come from the annotated tag message, so regenerating a section reproduces them.
-- `--prepend` adds one section and keeps the rest. Avoid `--output CHANGELOG.md`, which regenerates the whole file with a single tag pattern, so it drops either the prerelease sections or the stable roll-ups, along with every compare link.
+- Each squash-merged PR title becomes one draft entry, so write titles for users.
+- `feat`, `fix`, `perf`, and `revert` titles appear under Added, Fixed, Changed, and Removed, respectively. Titles with `!` appear under Breaking changes. All other types are skipped, including routine `chore(deps)` and `chore(flake)` bumps. Title a bump that fixes an advisory or changes behavior as `fix(deps): ...`.
+- Within each group, the draft sorts entries by scope and preserves their merge order, keeping related entries together. Each `(#N)` links to its PR.
+- A stable section includes every change since the previous stable release. A prerelease section includes only changes since the previous tag.
+- A highlights file passed to the script appears at the top of the section, and the [tag](#tag) carries the same file as its annotation.
+- `--prepend` adds one section while preserving the rest. Avoid `--output CHANGELOG.md`: it regenerates the whole file with a single tag pattern, dropping the curation, either the prerelease sections or stable roll-ups, and every compare link.
+
+### Curate the section
+
+The draft lists PR titles written for reviewers. Before opening the release PR, rewrite it for users. If a title leaves the effect unclear, read the PR description:
+
+- Write each entry to describe what users can now do or what no longer breaks, and omit implementation details.
+- Merge entries that describe the same user-visible change, keeping every PR link, as in `([#223](...), [#224](...))`. If a feature is new in the same section, include fixes to it in that feature's entry.
+- Move each entry to the group that matches its effect. For example, move a `fix` that adds a capability to Added. Keep entries under Breaking changes there.
+- Drop entries with no user-visible effect, such as a CI-only or test-only change titled `fix`.
+- Within each group, order entries by user impact and keep their scope labels.
+- Describe only changes made by the PRs, and keep the PR link for every entry that remains.
+- Lead with the highlights when the release has any. If you edit them, update the highlights file to match, since the tag annotation uses it.
 
 ## Prepare a release
 
@@ -44,10 +57,10 @@ The TUI layout, prompt text, slash-command output wording, and log format are ou
 
    The script sets `workspace.package.version`, refreshes `Cargo.lock`, prepends the changelog section with its compare link, and points the `VERSION=` install snippets in `README.md` and `docs/guide/install.md` at the tag. It also adds the release's [session resume fixture](docs/design/session/persistence.md#compatibility) and records how it resumes, failing if an earlier release's fixture now resumes differently. For a notable release, pass a Markdown file of highlights and keep it for tagging.
 
-3. Review the new section. Merged PR titles cannot change on `main`, so reword a misleading entry with a `commit_preprocessors` rule in `cliff.toml`, discard the script's changes, and run it again. The script refuses to run over uncommitted changes to the files it edits, or when the tag's fixture or its snapshot already exists, so delete both when discarding.
-4. Run the [verification block](AGENTS.md#verification). `cspell` scans `CHANGELOG.md`, so add any unknown word from a title to `.cspell/words.txt`.
-5. Commit, then open a PR titled `chore(release): vX.Y.Z`, which becomes the squash commit on `main`, and record the checks in its Test plan. The diff touches only `Cargo.toml`, `Cargo.lock`, `CHANGELOG.md`, `README.md`, `docs/guide/install.md`, the new fixture under `crates/oxide-code/src/session/fixtures/` with its snapshot, and possibly `cliff.toml` or `.cspell/words.txt`.
-6. Merge it after CI passes and review approves. If another PR merges first, recreate the branch from `main` and run the script again, since updating the branch keeps a section that misses the new commit.
+3. [Curate the section](#curate-the-section) that the script prepended.
+4. Run the [verification block](AGENTS.md#verification). Because `cspell` scans `CHANGELOG.md`, add any unknown words from the section to `.cspell/words.txt`.
+5. Commit, then open a PR titled `chore(release): vX.Y.Z`. Its title becomes the squash commit on `main`. Record the checks in the PR's Test plan. The diff should touch only `Cargo.toml`, `Cargo.lock`, `CHANGELOG.md`, `README.md`, `docs/guide/install.md`, the new fixture under `crates/oxide-code/src/session/fixtures/` and its snapshot, and possibly `.cspell/words.txt`.
+6. Merge after CI passes and the review is approved. If another PR merges first, recreate the branch from `main` and run the script again because updating the branch leaves a section that misses the new commit. Carry the curated entries over from the old branch, then curate the new ones.
 
 ## Tag
 
