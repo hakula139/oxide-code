@@ -367,6 +367,8 @@ pub(super) struct Usage {
     pub(super) output_tokens: u32,
 }
 
+// ── Error Types ──
+
 #[derive(Debug, Clone, Deserialize)]
 pub(super) struct ApiError {
     #[serde(rename = "type")]

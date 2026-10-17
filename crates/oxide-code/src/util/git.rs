@@ -12,7 +12,7 @@ use tracing::debug;
 
 use crate::util::text::truncate_to_width;
 
-/// Probes the current branch via `git branch --show-current`, `None` on a detached HEAD.
+/// Probes the current branch via `git branch --show-current`, returning `None` on a detached HEAD.
 pub(crate) fn current_branch(cwd: &Path) -> Option<String> {
     let cwd_str = cwd_to_str(cwd, "git branch")?;
     let output = check_output("git branch", cwd_str, branch_command(cwd_str).output())?;
@@ -358,7 +358,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn current_branch_with_non_utf8_cwd_is_absent() {
-        // Linux paths are bytes, so a non-UTF-8 one fails `cwd_to_str` before git spawns.
+        // Unix paths are bytes, so a non-UTF-8 one fails `cwd_to_str` before git spawns.
         let cwd = PathBuf::from(OsStr::from_bytes(b"/tmp/\xff"));
         assert_eq!(current_branch(&cwd), None);
     }

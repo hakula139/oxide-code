@@ -72,7 +72,8 @@ pub(super) fn messages_request(url: impl Into<String>) -> MessagesRequest {
     }
 }
 
-/// Non-streaming response body with the given text and a fixed model, since tests check requests.
+/// Non-streaming response body with the given text. The model is fixed because `CompletionResponse`
+/// deserializes only `content`.
 pub(crate) fn completion_body(text: &str) -> String {
     serde_json::json!({
         "id": "msg_1",

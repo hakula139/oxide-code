@@ -193,8 +193,8 @@ mod tests {
 
     #[test]
     fn center_truncate_to_width_falls_back_to_right_truncate_when_cjk_overflows_both_halves() {
-        // 中文测试 = 8 cols. max=5 → budget=2, half=1, so neither side fits a 2-col char. Centering
-        // would yield bare "..." (3 cols of 5), so fall back to right-truncate ("中...", 5 cols).
+        // 中文测试 = 8 cols. Width 5 leaves a budget of 2, so each half gets 1 and neither side
+        // fits a 2-col char. Centering would yield a bare "...", so it right-truncates instead.
         assert_eq!(center_truncate_to_width("中文测试", 5), "中...");
     }
 
