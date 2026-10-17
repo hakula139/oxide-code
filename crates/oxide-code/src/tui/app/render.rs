@@ -1,10 +1,13 @@
 //! Frame layout and drawing: the status bar, chat or welcome screen, task panel, queued-prompt
-//! preview, modal, and input bands, plus the jump-to-bottom overlay and status-line hyperlinks.
+//! preview, modal, and input bands, plus the copy and jump-to-bottom overlays, status-line
+//! hyperlinks, and OSC 52 clipboard writes.
+
+use std::io::Write as _;
 
 use anyhow::Result;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph};
+use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr;
 
 use super::App;
@@ -24,8 +27,20 @@ impl App {
     ) -> Result<()> {
         synchronized_update(terminal, |terminal| {
             terminal.draw(|frame| self.draw_frame(frame))?;
-            self.emit_status_hyperlinks(terminal)
+            self.emit_status_hyperlinks(terminal)?;
+            self.emit_pending_clipboard(terminal)
         })
+    }
+
+    /// Writes a queued OSC 52 copy, which the terminal applies to the system clipboard.
+    fn emit_pending_clipboard<W: std::io::Write>(
+        &mut self,
+        terminal: &mut ratatui::Terminal<ratatui::prelude::CrosstermBackend<W>>,
+    ) -> Result<()> {
+        if let Some(sequence) = self.pending_clipboard.take() {
+            terminal.backend_mut().write_all(sequence.as_bytes())?;
+        }
+        Ok(())
     }
 
     /// Replays captured status links as OSC 8 envelopes over the drawn frame.
@@ -86,7 +101,12 @@ impl App {
             welcome::paint(frame, chunks[1], &self.theme, &snap);
         } else {
             self.chat.render(frame, chunks[1]);
-            self.render_jump_overlay(frame, chunks[1]);
+            let jump = self.jump_pill(chunks[1]);
+            let jump_width = jump.as_ref().map_or(0, |(pill, _)| pill.width);
+            self.render_copy_notice(frame, chunks[1], jump_width);
+            if let Some((pill, line)) = jump {
+                frame.render_widget(Paragraph::new(line).style(self.theme.surface()), pill);
+            }
         }
         if tasks_height > 0 {
             self.tasks.render(frame, chunks[2], &self.theme);
@@ -136,9 +156,45 @@ impl App {
         );
     }
 
-    fn render_jump_overlay(&self, frame: &mut ratatui::Frame<'_>, area: Rect) {
-        if !self.chat.is_scrolled_up() || area.width < 25 || area.height == 0 {
+    /// Shows the outcome of the last copy at the chat's bottom-left corner, in the width the
+    /// jump-to-bottom pill of `jump_width` cells leaves, keeping a cell between them.
+    fn render_copy_notice(&self, frame: &mut ratatui::Frame<'_>, area: Rect, jump_width: u16) {
+        let Some(notice) = &self.copy_notice else {
             return;
+        };
+        let room = match jump_width {
+            0 => area.width,
+            width => area.width.saturating_sub(width + 1),
+        };
+        if area.height == 0 || room <= 2 {
+            return;
+        }
+        let label = truncate_to_width(&notice.text, usize::from(room - 2));
+        let style = if notice.failed {
+            self.theme.warning()
+        } else {
+            self.theme.success()
+        };
+        let width = u16::try_from(label.width() + 2).unwrap_or(u16::MAX);
+        let pill = Rect {
+            x: area.x,
+            y: area.bottom() - 1,
+            width: width.min(room),
+            height: 1,
+        };
+        let line = Line::from(vec![
+            Span::raw(" "),
+            Span::styled(label, style),
+            Span::raw(" "),
+        ]);
+        frame.render_widget(Paragraph::new(line).style(self.theme.surface()), pill);
+    }
+
+    /// The jump-to-bottom pill at the chat's bottom-right corner while scrolled up, sized to its
+    /// label plus a cell of padding per side.
+    fn jump_pill(&self, area: Rect) -> Option<(Rect, Line<'static>)> {
+        if !self.chat.is_scrolled_up() || area.width < 25 || area.height == 0 {
+            return None;
         }
 
         let new_count = self.chat.new_content_since_pause();
@@ -148,11 +204,9 @@ impl App {
         } else {
             self.theme.accent()
         };
-        // Pill sized to label + 1-cell padding per side, anchored at the right edge with an
-        // opaque surface bg so the chat content underneath stays readable.
         let pill_width = u16::try_from(label.width().saturating_add(2)).unwrap_or(u16::MAX);
         if pill_width > area.width {
-            return;
+            return None;
         }
         let pill = Rect {
             x: area.x + area.width.saturating_sub(pill_width),
@@ -160,17 +214,12 @@ impl App {
             width: pill_width,
             height: 1,
         };
-        let block = Block::default().style(self.theme.surface());
-        let inner = block.inner(pill);
-        frame.render_widget(block, pill);
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::raw(" "),
-                Span::styled(label, style),
-                Span::raw(" "),
-            ])),
-            inner,
-        );
+        let line = Line::from(vec![
+            Span::raw(" "),
+            Span::styled(label, style),
+            Span::raw(" "),
+        ]);
+        Some((pill, line))
     }
 }
 
@@ -214,6 +263,7 @@ mod tests {
     use crate::tool::tasks::testing::plan;
     use crate::tool::{ApprovalBody, ApprovalPreview, ToolResultView};
     use crate::tui::action::Action;
+    use crate::tui::app::CopyNotice;
     use crate::tui::app::testing::{
         FakeModal, crossterm_test_terminal, five_hour_limit, key_event, long_chat_block,
         push_answerable_approval, render_app, rendered_text, test_app,
@@ -262,6 +312,26 @@ mod tests {
         let link = index_of(&bytes, b"\x1b]8;;https://example.com/pull/7").expect("OSC 8 emitted");
         let end = index_of(&bytes, END_SYNC).expect("EndSynchronizedUpdate emitted");
         assert!(link < end, "sync update must bracket the status links");
+    }
+
+    #[test]
+    fn render_writes_a_queued_clipboard_copy_once_inside_the_synchronized_update() {
+        let (mut app, _rx, _event_tx) = test_app(None);
+        let (mut terminal, buf) = crossterm_test_terminal(60, 8);
+        app.pending_clipboard = Some("\x1b]52;c;eA==\x07".to_owned());
+
+        app.render(&mut terminal).unwrap();
+        let first = std::mem::take(&mut *buf.lock().unwrap());
+        app.render(&mut terminal).unwrap();
+
+        let copy = index_of(&first, b"\x1b]52;c;eA==\x07").expect("OSC 52 written");
+        let end = index_of(&first, END_SYNC).expect("EndSynchronizedUpdate emitted");
+        assert!(copy < end, "sync update must bracket the copy");
+        assert_eq!(
+            index_of(&buf.lock().unwrap(), b"\x1b]52"),
+            None,
+            "written once"
+        );
     }
 
     #[test]
@@ -432,6 +502,64 @@ mod tests {
         assert!(!text.contains("Summarizing"), "{text}");
         assert!(!text.contains("Recap"), "{text}");
         assert!(text.contains("Fixed the token refresh."), "{text}");
+    }
+
+    #[test]
+    fn draw_frame_shows_the_copy_notice_in_the_chat_bottom_left_corner() {
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.chat.push_system_message("hello");
+
+        for (text, failed, fg) in [
+            ("Copied 5 characters", false, app.theme.success.fg),
+            (
+                "Not copied: no clipboard is reachable",
+                true,
+                app.theme.warning.fg,
+            ),
+        ] {
+            app.copy_notice = Some(CopyNotice {
+                text: text.to_owned(),
+                failed,
+                until: std::time::Instant::now(),
+            });
+            let backend = render_app(&mut app, 60, 10);
+
+            let buffer = backend.buffer();
+            let rows: Vec<String> = (0..10)
+                .map(|y| (0..60).map(|x| buffer[(x, y)].symbol()).collect())
+                .collect();
+            let y = rows
+                .iter()
+                .position(|row| row.contains(text))
+                .expect("notice shown");
+            assert!(rows[y].starts_with(&format!(" {text} ")), "{rows:?}");
+            assert!(rows[y + 1].starts_with('─'), "the last chat row: {rows:?}");
+            assert_eq!(buffer[(1, u16::try_from(y).unwrap())].fg, fg.unwrap());
+        }
+    }
+
+    #[test]
+    fn draw_frame_truncates_the_copy_notice_left_of_the_jump_pill() {
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.chat.push_system_message(long_chat_block());
+        _ = render_app(&mut app, 60, 10);
+        app.chat
+            .handle_event(&key_event(KeyCode::PageUp, KeyModifiers::NONE));
+        app.copy_notice = Some(CopyNotice {
+            text: "Not copied: Terminal.app ignores OSC 52. Fn-drag to select".to_owned(),
+            failed: true,
+            until: std::time::Instant::now(),
+        });
+
+        let text = rendered_text(&mut app, 60, 10);
+
+        let row = text
+            .lines()
+            .find(|row| row.contains("Jump to bottom"))
+            .expect("pill shown");
+        let pill = row.find(" Jump to bottom").unwrap();
+        assert!(row.starts_with(" Not copied: Terminal"), "{row}");
+        assert!(row[..pill].trim_end().ends_with("..."), "{row}");
     }
 
     #[test]

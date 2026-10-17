@@ -3,6 +3,7 @@
 //! separator lines, rendering only the blocks near the viewport.
 
 mod blocks;
+mod selection;
 mod stack;
 
 use std::ops::Range;
@@ -18,6 +19,7 @@ use self::blocks::{
     InterruptedMarker, NoticeBlock, ProgressUpdate, RenderCtx, StreamingAssistant,
     SystemMessageBlock, ToolCallBlock, ToolResultBlock, UserMessage,
 };
+use self::selection::{ClickCounter, Selection};
 use self::stack::{Anchor, CachedBlock, SlotTops, Stack};
 use crate::protocol::{Interaction, ToolCall, ToolResult};
 use crate::tui::pending_calls::{PendingCalls, result_header};
@@ -38,14 +40,21 @@ pub(crate) struct ChatView {
 
     /// Top row of the last paint.
     scroll_offset: usize,
+    /// Top row of a paint that reaches the bottom, as of the last paint.
+    max_offset: usize,
     /// Rows scrolled since the last paint, positive downward. The next frame applies them.
     pending_scroll: isize,
-    viewport_height: u16,
-    viewport_width: u16,
+    /// Chat area of the last paint.
+    viewport: Rect,
     auto_scroll: bool,
     new_content_since_pause: u32,
     /// Slot tops of the last paint, which the next frame anchors the scroll offset on.
     painted: SlotTops,
+    /// Rows of the last paint, which a double click finds its word in.
+    painted_rows: Vec<Line<'static>>,
+
+    selection: Option<Selection>,
+    clicks: ClickCounter,
 
     pending_calls: PendingCalls,
 }
@@ -99,12 +108,15 @@ impl ChatView {
             thinking_buffer: String::new(),
             summary_buffer: String::new(),
             scroll_offset: 0,
+            max_offset: 0,
             pending_scroll: 0,
-            viewport_height: 0,
-            viewport_width: 0,
+            viewport: Rect::default(),
             auto_scroll: true,
             new_content_since_pause: 0,
             painted: SlotTops::default(),
+            painted_rows: Vec::new(),
+            selection: None,
+            clicks: ClickCounter::default(),
             pending_calls: PendingCalls::new(),
         }
     }
@@ -293,17 +305,20 @@ impl ChatView {
         self.push_block(InterruptedMarker);
     }
 
-    /// Resets transient state, preserving terminal-tied fields.
+    /// Drops the transcript and the last paint, keeping the render settings and the chat area.
     pub(crate) fn clear_history(&mut self) {
         self.blocks.clear();
         self.streaming = None;
         self.thinking_buffer.clear();
         self.summary_buffer.clear();
         self.scroll_offset = 0;
+        self.max_offset = 0;
         self.pending_scroll = 0;
         self.auto_scroll = true;
         self.new_content_since_pause = 0;
         self.painted = SlotTops::default();
+        self.painted_rows.clear();
+        self.selection = None;
         self.pending_calls.clear();
     }
 
@@ -344,7 +359,7 @@ impl ChatView {
 
 impl ChatView {
     pub(crate) fn handle_event(&mut self, event: &Event) {
-        let page = usize::from(self.viewport_height.saturating_sub(2));
+        let page = usize::from(self.viewport.height.saturating_sub(2));
         match event {
             Event::Key(KeyEvent {
                 code: KeyCode::Up, ..
@@ -413,8 +428,11 @@ impl ChatView {
             let lines = stack.slice(placement.offset, usize::from(area.height));
             self.painted = stack.into_tops();
             self.settle_scroll(&placement);
+            self.painted_rows.clone_from(&lines);
+            self.follow_pointer();
             let paragraph = Paragraph::new(lines).style(self.settings.theme.surface());
             frame.render_widget(paragraph, area);
+            self.paint_selection(frame.buffer_mut());
             return;
         }
     }
@@ -431,23 +449,29 @@ impl ChatView {
 
 impl ChatView {
     fn push_block(&mut self, block: impl ChatBlock + 'static) {
-        let ctx = self.settings.ctx(self.viewport_width);
+        let ctx = self.settings.ctx(self.viewport.width);
         self.blocks.push(CachedBlock::new(Box::new(block), &ctx));
     }
 
     /// Inserts `block` at index `at`, so a paused view stays anchored on the block it showed.
     fn insert_block(&mut self, at: usize, block: impl ChatBlock + 'static) {
-        let ctx = self.settings.ctx(self.viewport_width);
+        let ctx = self.settings.ctx(self.viewport.width);
         self.blocks
             .insert(at, CachedBlock::new(Box::new(block), &ctx));
         self.pending_calls.shift_from(at);
         self.painted.insert_empty(at);
+        if let Some(selection) = &mut self.selection {
+            selection.shift_from(at);
+        }
     }
 
-    /// Adopts the chat area, dropping the streaming prefix cache on a width change.
+    /// Adopts the chat area. A width change drops the streaming prefix cache and the selection,
+    /// whose columns no longer match the rewrapped rows.
     fn set_viewport(&mut self, area: Rect) {
-        self.viewport_height = area.height;
-        self.viewport_width = area.width;
+        if area.width != self.viewport.width {
+            self.selection = None;
+        }
+        self.viewport = area;
         if let Some(s) = &mut self.streaming {
             s.invalidate_cache_for_width(area.width);
         }
@@ -456,7 +480,7 @@ impl ChatView {
     /// Places the paint on `stack`: the tail under auto-scroll, else the anchored row moved by
     /// the pending scroll and clamped to the content.
     fn place(&self, stack: &Stack<'_>, anchor: Option<Anchor>) -> Placement {
-        let viewport = usize::from(self.viewport_height);
+        let viewport = usize::from(self.viewport.height);
         let max_offset = stack.height().saturating_sub(viewport);
         let Some(anchor) = anchor else {
             return Placement {
@@ -482,7 +506,7 @@ impl ChatView {
 
     /// The block within the placement's reach whose render is stale, nearest the pinned row.
     fn nearest_stale(&self, tops: &SlotTops, placement: &Placement) -> Option<usize> {
-        let (width, theme_epoch) = (self.viewport_width, self.settings.theme_epoch);
+        let (width, theme_epoch) = (self.viewport.width, self.settings.theme_epoch);
         tops.blocks_within(placement.reach.clone())
             .filter(|&block| !self.blocks[block].is_current(width, theme_epoch))
             .min_by_key(|&block| {
@@ -491,14 +515,17 @@ impl ChatView {
             })
     }
 
-    /// Adopts the painted offset, re-arming auto-scroll when a scroll down reached the bottom.
+    /// Adopts the painted offset, re-arming auto-scroll when a scroll down reached the bottom. A
+    /// held drag keeps the paint paused, so streamed rows do not slide under the pointer.
     fn settle_scroll(&mut self, placement: &Placement) {
-        if self.pending_scroll > 0 && placement.offset == placement.max_offset {
+        let dragging = self.selection.as_ref().is_some_and(Selection::held);
+        if self.pending_scroll > 0 && placement.offset == placement.max_offset && !dragging {
             self.auto_scroll = true;
             self.new_content_since_pause = 0;
         }
         self.pending_scroll = 0;
         self.scroll_offset = placement.offset;
+        self.max_offset = placement.max_offset;
     }
 
     fn scroll_up(&mut self, rows: usize) {
@@ -567,7 +594,7 @@ impl ChatView {
     fn advance_streaming_cache(&mut self) {
         let continues = self.streaming_continues_turn();
         if let Some(s) = &mut self.streaming {
-            s.advance_cache(&self.settings.ctx(self.viewport_width), continues);
+            s.advance_cache(&self.settings.ctx(self.viewport.width), continues);
         }
     }
 
@@ -1106,7 +1133,7 @@ mod tests {
     #[test]
     fn append_stream_token_cached_and_tail_both_visible() {
         let mut chat = test_chat();
-        chat.viewport_width = 80;
+        chat.viewport.width = 80;
         chat.append_stream_token("cached line\n");
         chat.append_stream_token("tail text");
 
@@ -1119,7 +1146,7 @@ mod tests {
     fn append_stream_token_uncommitted_newlines_all_render() {
         let mut chat = test_chat();
         chat.push_user_message("hi".to_owned());
-        chat.viewport_width = 80;
+        chat.viewport.width = 80;
         chat.append_stream_token("line1\nline2\npartial");
 
         let text = all_text(&mut chat);
@@ -1206,7 +1233,7 @@ mod tests {
     fn append_stream_token_trailing_newline_with_empty_tail() {
         let mut chat = test_chat();
         chat.push_user_message("hi".to_owned());
-        chat.viewport_width = 80;
+        chat.viewport.width = 80;
         chat.append_stream_token("line1\nline2\n");
 
         let text = all_text(&mut chat);
@@ -1217,7 +1244,7 @@ mod tests {
     #[test]
     fn append_stream_token_preserves_blank_between_committed_paragraphs() {
         let mut chat = test_chat();
-        chat.viewport_width = 80;
+        chat.viewport.width = 80;
         chat.append_stream_token("para1\n\n");
         chat.append_stream_token("para2\n\ntail\n");
 
@@ -1234,7 +1261,7 @@ mod tests {
     #[test]
     fn append_stream_token_no_spurious_blank_between_consecutive_list_items() {
         let mut chat = test_chat();
-        chat.viewport_width = 80;
+        chat.viewport.width = 80;
         chat.append_stream_token("- item 1\n- item 2");
 
         let text = all_text(&mut chat);
@@ -1250,7 +1277,7 @@ mod tests {
     #[test]
     fn append_stream_token_preserves_blank_before_partial_list_item_trailing() {
         let mut chat = test_chat();
-        chat.viewport_width = 80;
+        chat.viewport.width = 80;
         chat.append_stream_token("Here are items:\n- item 1");
 
         let text = all_text(&mut chat);
@@ -1269,7 +1296,7 @@ mod tests {
     #[test]
     fn append_stream_token_preserves_blank_between_cache_and_live_tail() {
         let mut chat = test_chat();
-        chat.viewport_width = 80;
+        chat.viewport.width = 80;
         chat.append_stream_token("committed paragraph\n\n");
         chat.append_stream_token("still streaming");
 
@@ -1434,7 +1461,7 @@ mod tests {
     #[test]
     fn commit_streaming_clears_state() {
         let mut chat = test_chat();
-        chat.viewport_width = 80;
+        chat.viewport.width = 80;
         chat.append_stream_token("line1\nline2\npartial");
         assert!(chat.streaming.is_some());
 
@@ -2126,9 +2153,10 @@ mod tests {
         assert_eq!(chat.summary_buffer, "");
         assert_eq!((chat.scroll_offset, chat.pending_scroll), (0, 0));
         assert_eq!(chat.painted, SlotTops::default());
+        assert_eq!(chat.painted_rows, Vec::<Line<'static>>::new());
         assert!(chat.auto_scroll);
-        assert_eq!(chat.viewport_height, 24);
-        assert_eq!(chat.viewport_width, 80);
+        assert_eq!(chat.viewport.height, 24);
+        assert_eq!(chat.viewport.width, 80);
     }
 
     // ── last_is_error ──
@@ -2247,7 +2275,7 @@ mod tests {
     #[test]
     fn handle_event_pages_scroll_two_rows_short_of_the_viewport() {
         let mut chat = test_chat();
-        chat.viewport_height = 20;
+        chat.viewport.height = 20;
         chat.handle_event(&key_event(KeyCode::PageUp));
         assert_eq!(chat.pending_scroll, -18);
 
@@ -2752,7 +2780,7 @@ mod tests {
     fn set_viewport_adopts_area_and_drops_streaming_cache_on_width_change() {
         let mut chat = test_chat();
         chat.set_viewport(Rect::new(0, 0, 80, 24));
-        assert_eq!((chat.viewport_width, chat.viewport_height), (80, 24));
+        assert_eq!((chat.viewport.width, chat.viewport.height), (80, 24));
         chat.append_stream_token("a complete paragraph\n\nnext\n");
         let s = chat.streaming.as_ref().unwrap();
         assert_ne!(s.rendered().len(), 0);
@@ -2813,7 +2841,7 @@ mod tests {
     #[test]
     fn advance_streaming_cache_no_newline_keeps_boundary_zero() {
         let mut chat = test_chat();
-        chat.viewport_width = 80;
+        chat.viewport.width = 80;
         chat.append_stream_token("no newline here");
         let s = chat.streaming.as_ref().unwrap();
         assert_eq!(s.rendered_boundary(), 0);
@@ -2823,7 +2851,7 @@ mod tests {
     #[test]
     fn advance_streaming_cache_line_boundary_does_not_commit() {
         let mut chat = test_chat();
-        chat.viewport_width = 80;
+        chat.viewport.width = 80;
         chat.append_stream_token("first line\nsecond line");
         let s = chat.streaming.as_ref().unwrap();
         assert_eq!(s.rendered_boundary(), 0);
@@ -2833,7 +2861,7 @@ mod tests {
     #[test]
     fn advance_streaming_cache_paragraph_boundary_commits_once_the_next_line_ends() {
         let mut chat = test_chat();
-        chat.viewport_width = 80;
+        chat.viewport.width = 80;
         chat.append_stream_token("para1\n\npartial");
         assert_eq!(chat.streaming.as_ref().unwrap().rendered_boundary(), 0);
 
@@ -2846,7 +2874,7 @@ mod tests {
     #[test]
     fn advance_streaming_cache_multiple_paragraphs_commit_to_last_block_start() {
         let mut chat = test_chat();
-        chat.viewport_width = 80;
+        chat.viewport.width = 80;
         chat.append_stream_token("p1\n\np2\n\np3\n\np4\n");
         let s = chat.streaming.as_ref().unwrap();
         assert_eq!(s.rendered_boundary(), "p1\n\np2\n\np3\n\n".len());
@@ -2855,7 +2883,7 @@ mod tests {
     #[test]
     fn advance_streaming_cache_incremental_inserts_paragraph_gaps() {
         let mut chat = test_chat();
-        chat.viewport_width = 80;
+        chat.viewport.width = 80;
 
         chat.append_stream_token("para1\n\npara2\n");
         let (first_boundary, first_len) = {
@@ -2879,7 +2907,7 @@ mod tests {
     fn advance_streaming_cache_waits_for_the_next_block() {
         // A loose list continues past a blank line, so no block is complete until another starts.
         let mut chat = test_chat();
-        chat.viewport_width = 80;
+        chat.viewport.width = 80;
         chat.append_stream_token("- item 1\n\n");
         assert_eq!(chat.streaming.as_ref().unwrap().rendered_boundary(), 0);
 

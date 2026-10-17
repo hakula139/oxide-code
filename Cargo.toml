@@ -24,6 +24,7 @@ unwrap_used = "warn"
 
 [workspace.dependencies]
 anyhow = "1"
+arboard = { version = "3.7", default-features = false, features = ["wayland-data-control"] }
 base64 = "0.23"
 caseless = "0.2"
 clap = { version = "4", features = ["derive"] }

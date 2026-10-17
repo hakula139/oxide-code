@@ -26,7 +26,8 @@ tokio::select! {
     event = crossterm_events.next()       => { /* keyboard, mouse, resize */ }
     event = self.events.recv()            => { /* Event: stream tokens, tool calls, session updates */ }
     Some(update) = self.git_probes.recv() => { /* branch / PR probe results for the status line */ }
-    _ = tick.tick()                       => { /* spinner frame, probe scheduling, exit-arm expiry, render when dirty */ }
+    Some(report) = self.clipboard.recv()  => { /* outcome of a copy, shown as a notice */ }
+    _ = tick.tick()                       => { /* spinner frame, probe scheduling, exit-arm expiry, selection edge scroll, copy-notice expiry, render when dirty */ }
 }
 ```
 

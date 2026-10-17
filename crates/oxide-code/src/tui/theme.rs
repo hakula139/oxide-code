@@ -104,6 +104,7 @@ macro_rules! for_each_slot {
             (border_focused, "Focused component border"),
             (border_unfocused, "Unfocused component border (default-aligned with `dim`)"),
             (separator, "Status-line segment separator"),
+            (selection, "Chat text selected with the mouse (bg-only)"),
         }
     };
 }

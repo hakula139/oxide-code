@@ -198,9 +198,44 @@ impl InlinePatch {
 
 // ── Parsing ──
 
+/// Where every slot is described, linked from a missing-slot error.
+const THEMING_GUIDE: &str =
+    "https://github.com/hakula139/oxide-code/blob/main/docs/guide/theming.md";
+
 pub(super) fn parse_theme(content: &str) -> Result<Theme> {
-    let file: ThemeFile = toml::from_str(content).context("invalid theme TOML")?;
+    let file: ThemeFile = match toml::from_str(content) {
+        Ok(file) => file,
+        Err(e) => {
+            if let Some(slot) = missing_slot(&e) {
+                bail!(
+                    "the theme has no `{slot}` slot. Add one, such as `{}`. {THEMING_GUIDE} \
+                     lists every slot",
+                    mocha_line(slot),
+                );
+            }
+            return Err(e).context("invalid theme TOML");
+        }
+    };
     file.into_theme()
+}
+
+/// The slot a theme body left out, when that is why it failed to parse.
+fn missing_slot(error: &toml::de::Error) -> Option<&str> {
+    error
+        .message()
+        .strip_prefix("missing field `")?
+        .strip_suffix('`')
+}
+
+/// The line that sets `slot` in the Mocha theme, which defines every slot.
+fn mocha_line(slot: &str) -> &'static str {
+    builtin::MOCHA
+        .lines()
+        .find(|line| {
+            line.strip_prefix(slot)
+                .is_some_and(|rest| rest.starts_with(" ="))
+        })
+        .unwrap_or_default()
 }
 
 /// `ThemeFile` deserialization and its `into_theme` converter, which wraps each slot's parse error
@@ -653,20 +688,20 @@ mod tests {
         }
     }
 
-    /// `surface` is the bg-only panel fill. A built-in that declared it as a bare string would set
-    /// `fg` instead and paint every panel's text in the surface color.
+    /// `surface` is the bg-only panel fill, and `selection` the bg-only highlight that keeps each
+    /// selected cell's own text color. A built-in that declared either as a bare string would set
+    /// `fg` instead and repaint the text it sits under.
     #[test]
-    fn parse_theme_surface_is_bg_only_in_every_builtin() {
+    fn parse_theme_surface_and_selection_are_bg_only_in_every_builtin() {
         for builtin::BuiltinTheme { name, body, .. } in builtin::BUILT_IN {
             let t = parse_theme(body).unwrap_or_else(|e| panic!("{name} parse: {e:#}"));
-            assert_eq!(
-                t.surface.fg, None,
-                "{name}: surface must be bg-only, never fg"
-            );
-            assert!(
-                t.surface.bg.is_some(),
-                r#"{name}: surface must declare a bg (use "reset" for terminal default)"#,
-            );
+            for (slot, style) in [("surface", t.surface), ("selection", t.selection)] {
+                assert_eq!(style.fg, None, "{name}: {slot} must be bg-only, never fg");
+                assert!(
+                    style.bg.is_some(),
+                    r#"{name}: {slot} must declare a bg (use "reset" for terminal default)"#,
+                );
+            }
         }
     }
 
@@ -750,13 +785,17 @@ mod tests {
     // ── parse_theme: error cases ──
 
     #[test]
-    fn parse_theme_missing_required_slot() {
-        // Drop `text` → serde reports "missing field `text`".
-        let body = builtin::MOCHA.replace(r##"text = "#cdd6f4""##, "");
+    fn parse_theme_missing_required_slot_names_it_with_a_value_to_add() {
+        let body = builtin::MOCHA.replace(r##"selection = { bg = "#313244" }"##, "");
+
         let err = parse_theme(&body).expect_err("missing required slot");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("missing field"), "{msg}");
-        assert!(msg.contains("text"), "{msg}");
+
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                r##"the theme has no `selection` slot. Add one, such as `selection = {{ bg = "#313244" }}`. {THEMING_GUIDE} lists every slot"##
+            ),
+        );
     }
 
     #[test]

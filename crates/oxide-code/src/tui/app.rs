@@ -1,9 +1,9 @@
 //! Root TUI application.
 //!
 //! [`App`] owns every component, holds the cross-task channels, and runs the `tokio::select!`
-//! loop multiplexing crossterm events, engine events, git probe results, and a 60 FPS render tick.
-//! A dirty flag coalesces redraws so each state change renders once. Terminal input, engine events,
-//! and drawing live in the `dispatch`, `events`, and `render` submodules.
+//! loop multiplexing crossterm events, engine events, git probe results, clipboard reports, and a
+//! 60 FPS render tick. A dirty flag coalesces redraws so each state change renders once. Terminal
+//! input, engine events, and drawing live in the `dispatch`, `events`, and `render` submodules.
 
 mod dispatch;
 mod events;
@@ -19,6 +19,7 @@ use crossterm::event::{Event as CrosstermEvent, EventStream};
 use futures::{Stream, StreamExt};
 use tokio::sync::mpsc;
 
+use super::clipboard::{Clipboard, Environment};
 use super::components::chat::ChatView;
 use super::components::input::InputArea;
 use super::components::status::{StatusBar, StatusHyperlink};
@@ -37,6 +38,9 @@ const TICK_INTERVAL: Duration = Duration::from_millis(16);
 /// Window in which a second Ctrl+C confirms exit.
 const EXIT_WINDOW: Duration = Duration::from_secs(1);
 
+/// How long the outcome of a copy stays over the chat.
+const COPY_NOTICE_DURATION: Duration = Duration::from_secs(3);
+
 pub(crate) struct App {
     theme: Theme,
     status_bar: StatusBar,
@@ -51,6 +55,10 @@ pub(crate) struct App {
     open_browser: fn(&str) -> std::io::Result<()>,
     /// Status-bar links of the last frame, which a plain left click opens.
     status_links: Vec<StatusHyperlink>,
+    clipboard: Clipboard,
+    /// OSC 52 sequence the next frame writes to the terminal.
+    pending_clipboard: Option<String>,
+    copy_notice: Option<CopyNotice>,
     /// Prompt already painted for the in-flight turn, kept as typed. Replayed if auto-compaction
     /// clears chat, and handed back if auto-compaction fails before the prompt is sent.
     active_prompt: Option<String>,
@@ -67,6 +75,13 @@ pub(crate) struct App {
     preview_theme_snapshot: Option<Theme>,
     should_quit: bool,
     dirty: bool,
+}
+
+/// Outcome of the last copy, shown over the chat until `until`.
+struct CopyNotice {
+    text: String,
+    failed: bool,
+    until: Instant,
 }
 
 pub(crate) struct AppHistory {
@@ -116,6 +131,9 @@ impl App {
             ops,
             open_browser: |url| open::that_detached(url),
             status_links: Vec::new(),
+            clipboard: Clipboard::new(Environment::detect()),
+            pending_clipboard: None,
+            copy_notice: None,
             active_prompt: None,
             auto_compacting: false,
             pending_prompts: VecDeque::new(),
@@ -158,7 +176,7 @@ impl App {
         self.render(terminal)?;
 
         loop {
-            // Four sources can wake the loop. The tick arm is the only renderer, so handlers only
+            // Five sources can wake the loop. The tick arm is the only renderer, so handlers only
             // mark `dirty` and render work stays paced by the 60 FPS clock.
             tokio::select! {
                 event = crossterm_events.next() => {
@@ -176,12 +194,20 @@ impl App {
                     }
                 }
                 Some(update) = self.git_probes.recv() => self.apply_git_update(update),
+                Some(report) = self.clipboard.recv() => self.apply_copy_report(report),
                 _ = tick.tick() => {
                     self.git_probes.poll(Instant::now());
                     if self.status_bar.tick() {
                         self.dirty = true;
                     }
                     if self.expire_armed_exit() {
+                        self.dirty = true;
+                    }
+                    let now = Instant::now();
+                    if self.chat.tick_selection(now) {
+                        self.dirty = true;
+                    }
+                    if self.expire_copy_notice(now) {
                         self.dirty = true;
                     }
                     if self.dirty {
