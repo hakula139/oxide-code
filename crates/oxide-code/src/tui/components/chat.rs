@@ -23,6 +23,9 @@ use crate::protocol::{Interaction, ToolCall, ToolResult};
 use crate::tui::pending_calls::{PendingCalls, result_header};
 use crate::tui::theme::Theme;
 
+/// Rows one wheel notch scrolls, the common terminal default.
+const WHEEL_SCROLL_ROWS: usize = 3;
+
 /// Scrollable chat message list with auto-scroll.
 pub(crate) struct ChatView {
     settings: RenderSettings,
@@ -345,19 +348,19 @@ impl ChatView {
         match event {
             Event::Key(KeyEvent {
                 code: KeyCode::Up, ..
-            })
-            | Event::Mouse(MouseEvent {
-                kind: MouseEventKind::ScrollUp,
-                ..
             }) => self.scroll_up(1),
             Event::Key(KeyEvent {
                 code: KeyCode::Down,
                 ..
-            })
-            | Event::Mouse(MouseEvent {
+            }) => self.scroll_down(1),
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                ..
+            }) => self.scroll_up(WHEEL_SCROLL_ROWS),
+            Event::Mouse(MouseEvent {
                 kind: MouseEventKind::ScrollDown,
                 ..
-            }) => self.scroll_down(1),
+            }) => self.scroll_down(WHEEL_SCROLL_ROWS),
             Event::Key(KeyEvent {
                 code: KeyCode::PageUp,
                 ..
@@ -2228,11 +2231,11 @@ mod tests {
     // ── handle_event ──
 
     #[test]
-    fn handle_event_arrows_and_wheel_scroll_one_row() {
+    fn handle_event_arrows_scroll_one_row_and_wheel_notches_three() {
         let mut chat = test_chat();
         chat.handle_event(&key_event(KeyCode::Up));
         chat.handle_event(&mouse_scroll(MouseEventKind::ScrollUp));
-        assert_eq!(chat.pending_scroll, -2);
+        assert_eq!(chat.pending_scroll, -4);
         assert!(!chat.auto_scroll);
 
         chat.handle_event(&key_event(KeyCode::Down));

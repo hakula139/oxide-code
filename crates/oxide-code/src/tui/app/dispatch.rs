@@ -3,7 +3,11 @@
 
 use std::time::Instant;
 
-use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{
+    Event as CrosstermEvent, KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEvent,
+    MouseEventKind,
+};
+use ratatui::layout::Position;
 use tokio::sync::mpsc;
 
 use super::{App, EXIT_WINDOW};
@@ -23,16 +27,19 @@ impl App {
         {
             return;
         }
-        // The top overlay owns keyboard input, including pastes. Mouse and resize events still
-        // reach chat.
+        // The top overlay owns keyboard input, pastes, and the wheel, which steps its selection or
+        // scroll like Up / Down. Resize events still reach chat.
         if self.modals.is_active() {
             match event {
                 CrosstermEvent::Key(key) => {
-                    if let Some(action) = self.modals.handle_key(key) {
-                        self.apply_modal_action(action);
-                    }
-                    self.dirty = true;
+                    self.handle_modal_key(key);
                     return;
+                }
+                CrosstermEvent::Mouse(mouse) => {
+                    if let Some(key) = wheel_arrow(mouse.kind) {
+                        self.handle_modal_key(&key);
+                        return;
+                    }
                 }
                 CrosstermEvent::Paste(text) => {
                     self.modals.handle_paste(text);
@@ -59,11 +66,51 @@ impl App {
                     InputOutcome::Ignored => self.chat.handle_event(event),
                 }
             }
-            CrosstermEvent::Mouse(_) => {
-                self.chat.handle_event(event);
+            CrosstermEvent::Mouse(mouse) => {
+                if let Some(key) = wheel_arrow(mouse.kind) {
+                    if self.input.popup_visible() {
+                        _ = self.input.handle_event(&CrosstermEvent::Key(key));
+                    } else {
+                        self.chat.handle_event(event);
+                    }
+                } else if !self.open_status_link(*mouse) {
+                    return;
+                }
             }
             CrosstermEvent::Resize(..) => {}
             _ => return,
+        }
+        self.dirty = true;
+    }
+
+    /// Opens the status-bar link under a plain left press, returning whether it hit one. A press
+    /// with modifiers stays with terminals that open OSC 8 links on Ctrl / Cmd-click themselves.
+    fn open_status_link(&mut self, mouse: MouseEvent) -> bool {
+        if mouse.kind != MouseEventKind::Down(MouseButton::Left) || !mouse.modifiers.is_empty() {
+            return false;
+        }
+        let position = Position::new(mouse.column, mouse.row);
+        let Some(link) = self
+            .status_links
+            .iter()
+            .find(|link| link.rect.contains(position))
+        else {
+            return false;
+        };
+        if let Err(e) = (self.open_browser)(&link.url) {
+            tracing::debug!("failed to open the browser: {e}");
+            let message = format!(
+                "Could not open the browser. Open {} in a browser.",
+                link.url
+            );
+            self.chat.push_system_message(message);
+        }
+        true
+    }
+
+    fn handle_modal_key(&mut self, key: &KeyEvent) {
+        if let Some(action) = self.modals.handle_key(key) {
+            self.apply_modal_action(action);
         }
         self.dirty = true;
     }
@@ -311,18 +358,34 @@ impl App {
     }
 }
 
+/// The arrow key a wheel notch stands in for where a list owns the selection.
+fn wheel_arrow(kind: MouseEventKind) -> Option<KeyEvent> {
+    match kind {
+        MouseEventKind::ScrollUp => Some(KeyEvent::from(KeyCode::Up)),
+        MouseEventKind::ScrollDown => Some(KeyEvent::from(KeyCode::Down)),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use crossterm::event::{KeyModifiers, MouseEvent, MouseEventKind};
+    use std::sync::{Arc, Mutex};
+
+    use crossterm::event::{KeyModifiers, MouseButton};
+
+    use std::io;
+
+    use ratatui::layout::Rect;
 
     use super::*;
     use crate::config::Effort;
     use crate::protocol::{Decision, Event, ResumeTarget};
     use crate::tool::{ApprovalBody, ApprovalPreview};
     use crate::tui::app::testing::{
-        FakeModal, key_event, long_chat_block, push_answerable_approval, render_app, rendered_text,
-        test_app,
+        FakeModal, KeyLogModal, key_event, long_chat_block, mouse_event, push_answerable_approval,
+        render_app, rendered_text, test_app,
     };
+    use crate::tui::components::status::StatusHyperlink;
     use crate::tui::modal::testing::ScriptedModal;
 
     // ── handle_crossterm_event ──
@@ -379,21 +442,84 @@ mod tests {
     }
 
     #[test]
-    fn handle_crossterm_event_mouse_is_forwarded_to_chat() {
+    fn handle_crossterm_event_wheel_scroll_is_forwarded_to_chat() {
         let (mut app, _rx, _event_tx) = test_app(None);
         app.chat.push_system_message(long_chat_block());
         _ = render_app(&mut app, 60, 10);
 
-        app.handle_crossterm_event(&CrosstermEvent::Mouse(MouseEvent {
-            kind: MouseEventKind::ScrollUp,
-            column: 0,
-            row: 0,
-            modifiers: KeyModifiers::NONE,
-        }));
+        app.handle_crossterm_event(&mouse_event(MouseEventKind::ScrollUp));
         let text = rendered_text(&mut app, 60, 10);
 
         assert!(text.contains("Jump to bottom"), "{text}");
         assert!(app.dirty);
+    }
+
+    #[test]
+    fn handle_crossterm_event_plain_click_opens_the_status_link_under_it() {
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.status_links = vec![StatusHyperlink {
+            rect: Rect::new(10, 0, 3, 1),
+            url: "https://example.com/pull/7".to_owned(),
+            cells: Vec::new(),
+        }];
+        let press = |column, modifiers| {
+            CrosstermEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column,
+                row: 0,
+                modifiers,
+            })
+        };
+
+        app.open_browser = |_| panic!("only a plain click on the link opens it");
+        app.handle_crossterm_event(&press(9, KeyModifiers::NONE));
+        app.handle_crossterm_event(&press(10, KeyModifiers::CONTROL));
+        app.handle_crossterm_event(&press(12, KeyModifiers::SUPER));
+        app.open_browser = |_| Ok(());
+        app.handle_crossterm_event(&press(10, KeyModifiers::NONE));
+        assert_eq!(
+            app.chat.last_system_text(),
+            None,
+            "an opened link needs no note"
+        );
+        app.open_browser = |url| {
+            assert_eq!(url, "https://example.com/pull/7");
+            Err(io::Error::other("no browser"))
+        };
+        app.handle_crossterm_event(&press(12, KeyModifiers::NONE));
+
+        assert_eq!(
+            app.chat.last_system_text(),
+            Some("Could not open the browser. Open https://example.com/pull/7 in a browser."),
+        );
+    }
+
+    #[test]
+    fn handle_crossterm_event_wheel_steps_the_slash_popup_like_arrows() {
+        let open_popup = |app: &mut App| {
+            app.chat.push_system_message(long_chat_block());
+            _ = render_app(app, 80, 20);
+            app.handle_crossterm_event(&key_event(KeyCode::Char('/'), KeyModifiers::NONE));
+            assert!(app.input.popup_visible());
+        };
+        let (mut by_key, _rx, _event_tx) = test_app(None);
+        let (mut by_wheel, _rx2, _event_tx2) = test_app(None);
+        open_popup(&mut by_key);
+        open_popup(&mut by_wheel);
+
+        by_key.handle_crossterm_event(&key_event(KeyCode::Down, KeyModifiers::NONE));
+        by_wheel.handle_crossterm_event(&mouse_event(MouseEventKind::ScrollDown));
+        for app in [&mut by_key, &mut by_wheel] {
+            app.handle_crossterm_event(&key_event(KeyCode::Tab, KeyModifiers::NONE));
+        }
+
+        assert_eq!(by_wheel.input.lines(), by_key.input.lines());
+        assert_ne!(
+            by_wheel.input.lines(),
+            vec!["/archive ".to_owned()],
+            "moved off the first"
+        );
+        assert!(!by_wheel.chat.is_scrolled_up(), "the popup took the wheel");
     }
 
     #[test]
@@ -406,12 +532,20 @@ mod tests {
     }
 
     #[test]
-    fn handle_crossterm_unknown_event_is_a_noop() {
-        // The `_ => return` arm prevents FocusGained / FocusLost from forcing re-renders.
+    fn handle_crossterm_unhandled_events_skip_the_rerender() {
+        // Mouse capture reports every motion and click, which must not each force a frame.
         let (mut app, _rx, _event_tx) = test_app(None);
         app.dirty = false;
-        app.handle_crossterm_event(&CrosstermEvent::FocusGained);
-        assert!(!app.dirty);
+
+        for event in [
+            CrosstermEvent::FocusGained,
+            mouse_event(MouseEventKind::Moved),
+            mouse_event(MouseEventKind::Down(MouseButton::Left)),
+            mouse_event(MouseEventKind::Drag(MouseButton::Left)),
+        ] {
+            app.handle_crossterm_event(&event);
+            assert!(!app.dirty, "{event:?}");
+        }
     }
 
     #[test]
@@ -451,7 +585,6 @@ mod tests {
 
     #[test]
     fn handle_crossterm_up_scrolls_chat_once_the_input_cursor_reaches_the_top() {
-        // Alternate-scroll turns wheel ticks into Up, so an idle prompt must still scroll chat.
         let (mut app, _rx, _event_tx) = test_app(None);
         app.chat.push_system_message(long_chat_block());
         _ = render_app(&mut app, 80, 20);
@@ -597,23 +730,23 @@ mod tests {
     }
 
     #[test]
-    fn modal_gate_lets_mouse_scrolls_reach_chat() {
+    fn modal_gate_steps_the_modal_with_the_wheel_instead_of_chat() {
+        let keys = Arc::new(Mutex::new(Vec::new()));
         let (mut app, _rx, _event_tx) = test_app(None);
         app.chat.push_system_message(long_chat_block());
-        app.push_modal(Box::new(FakeModal::new("Picker")));
+        app.push_modal(Box::new(KeyLogModal(Arc::clone(&keys))));
         _ = render_app(&mut app, 60, 20);
 
-        app.handle_crossterm_event(&CrosstermEvent::Mouse(MouseEvent {
-            kind: MouseEventKind::ScrollUp,
-            column: 0,
-            row: 0,
-            modifiers: KeyModifiers::NONE,
-        }));
+        for kind in [
+            MouseEventKind::ScrollUp,
+            MouseEventKind::ScrollDown,
+            MouseEventKind::Moved,
+        ] {
+            app.handle_crossterm_event(&mouse_event(kind));
+        }
 
-        assert!(
-            app.chat.is_scrolled_up(),
-            "a scroll reaches chat under a modal"
-        );
+        assert_eq!(*keys.lock().unwrap(), [KeyCode::Up, KeyCode::Down]);
+        assert!(!app.chat.is_scrolled_up(), "chat under the modal stays put");
         assert!(app.modals.is_active());
     }
 

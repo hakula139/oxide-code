@@ -34,10 +34,10 @@ impl App {
         terminal: &mut ratatui::Terminal<ratatui::prelude::CrosstermBackend<W>>,
     ) -> Result<()> {
         let links = self.status_bar.take_pending_hyperlinks();
-        if links.is_empty() {
-            return Ok(());
+        if !links.is_empty() {
+            write_status_hyperlinks(terminal.backend_mut(), &links)?;
         }
-        write_status_hyperlinks(terminal.backend_mut(), &links)?;
+        self.status_links = links;
         Ok(())
     }
 

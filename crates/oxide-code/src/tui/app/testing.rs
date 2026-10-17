@@ -3,7 +3,9 @@
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 
-use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{
+    Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind,
+};
 use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
 use ratatui::prelude::CrosstermBackend;
@@ -64,6 +66,15 @@ pub(super) fn key_event(code: KeyCode, modifiers: KeyModifiers) -> CrosstermEven
     CrosstermEvent::Key(KeyEvent::new(code, modifiers))
 }
 
+pub(super) fn mouse_event(kind: MouseEventKind) -> CrosstermEvent {
+    CrosstermEvent::Mouse(MouseEvent {
+        kind,
+        column: 0,
+        row: 0,
+        modifiers: KeyModifiers::NONE,
+    })
+}
+
 /// Minimal modal for layout tests: paints `title` on its only row, ignores keys.
 pub(super) struct FakeModal {
     title: String,
@@ -89,6 +100,22 @@ impl crate::tui::modal::Modal for FakeModal {
     }
 
     fn handle_key(&mut self, _event: &KeyEvent) -> crate::tui::modal::ModalKey {
+        crate::tui::modal::ModalKey::Consumed
+    }
+}
+
+/// Modal that records the code of every key it receives.
+pub(super) struct KeyLogModal(pub(super) Arc<Mutex<Vec<KeyCode>>>);
+
+impl crate::tui::modal::Modal for KeyLogModal {
+    fn height(&self, _width: u16, _max_height: u16) -> u16 {
+        1
+    }
+
+    fn render(&self, _frame: &mut ratatui::Frame<'_>, _area: Rect, _theme: &Theme) {}
+
+    fn handle_key(&mut self, event: &KeyEvent) -> crate::tui::modal::ModalKey {
+        self.0.lock().unwrap().push(event.code);
         crate::tui::modal::ModalKey::Consumed
     }
 }

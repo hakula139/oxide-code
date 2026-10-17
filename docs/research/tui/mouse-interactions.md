@@ -16,15 +16,15 @@ URL opening: `src/utils/browser.ts` validates the URL to `http:` / `https:` firs
 
 ## OpenAI Codex
 
-Codex's Rust TUI does **not** enable `EnableMouseCapture`. `set_modes()` in `codex-rs/tui/src/tui.rs` enables `EnableBracketedPaste`, `enable_raw_mode`, `KeyboardEnhancement`, and `EnableFocusChange`, but skips mouse. The event mapper at `event_stream.rs` explicitly drops mouse events with a doc comment "skipping events we don't use (mouse events, etc.)".
+Codex's Rust TUI captures the mouse while it owns the alternate screen. `AlternateScreen::configure_input` in `codex-rs/tui/src/tui/alternate_screen.rs` disables DECSET 1007, enables pointer capture, and requests SGR reports, which ConPTY needs to translate Windows mouse reports into mouse records. When it doesn't capture, it turns 1007 back on so the terminal sends wheel events as arrow keys.
 
-Wheel scroll uses DECSET `?1007` "alternate scroll" enabled in `tui.rs:621`, which tells the terminal emulator to translate physical wheel events into `\x1b[A` / `\x1b[B` arrow-key sequences. Codex receives them as keyboard events and never sees raw mouse. Trade-off: it works without claiming click / drag, but it loses every other mouse affordance.
+`codex-rs/tui/src/tui/tmux.rs` probes `#{mouse}` with one `tmux display-message` call and skips capture only when the session reports mouse off. Inside tmux with `mouse on`, tmux owns the wheel, so 1007 never takes effect there.
 
-Click on URLs is handled via OSC 8: `set_status_line_hyperlink(url)` at `chatwidget.rs:1684` and `bottom_pane/mod.rs:1584` wrap the open-PR URL on the status line. `mark_url_hyperlink(buf, area, url)` is the helper that overlays OSC 8 cells across a ratatui buffer rect. The terminal's own Ctrl-click handler opens the URL, with no app-side click routing.
+Transcript links open in the app under capture. `transcript_view/input.rs` resolves the link under a press, and a single plain click on it opens the URL on release, while a click with modifiers or a drag stays a selection. The status line still goes through OSC 8: `set_status_line_hyperlink(url)` at `chatwidget.rs:1684` and `bottom_pane/mod.rs:1584` wrap the open-PR URL, and `mark_url_hyperlink(buf, area, url)` overlays OSC 8 cells across a ratatui buffer rect, so the terminal's own Ctrl-click handler opens it.
 
-URL opening fallback uses the `webbrowser = "1.0"` crate via `webbrowser::open(&url)` at `app/history_ui.rs`. Triggered by an internal `AppEvent::OpenUrlInBrowser { url }` event for plugin auth and app-link views, but not for the OSC 8 hyperlinks (those go through the terminal).
+URL opening fallback uses the `webbrowser = "1.0"` crate via `webbrowser::open(&url)` at `app/history_ui.rs`. `open_url_in_browser` serves the internal `AppEvent::OpenUrlInBrowser { url }` event for plugin auth and app-link views, and transcript link clicks call it directly. The status-line OSC 8 hyperlinks still go through the terminal.
 
-No selection support, no copy-on-select. Native terminal selection works because mouse capture isn't on.
+Selection is app-side. `rendered_selection.rs` handles left-button press, drag, and release over regions each widget registers during render, and `transcript_view` adds keyboard selection. `clipboard_copy.rs` copies through the native clipboard (`arboard`) locally, also forwards to the attached terminal in tmux, and sends OSC 52 directly over SSH without a multiplexer.
 
 ## opencode
 
@@ -80,19 +80,16 @@ The clean workaround: emit the OSC 8 envelope **out-of-band**, after `terminal.d
 
 Some terminals skip `?1003` for performance. SGR (`?1006`) is the only encoding modern crossterm reads, but the others are needed for older terminals that don't speak SGR. There's no portable terminal primitive that delivers wheel only without click / drag, so claiming wheel implies claiming the rest.
 
+Terminal-side wheel translation through DECSET 1007 doesn't survive tmux. With `mouse on`, tmux receives the wheel itself and forwards it to a pane only when the pane reports the mouse (`#{mouse_any_flag}`). Otherwise tmux 3.6's default binding passes the event to a pane that drops it, and older defaults or custom bindings enter copy mode.
+
 ## User-environment signal
 
 The author's tmux config enables tmux mouse mode, vi copy-mode bindings, and `y` for yank. With `set -g set-clipboard on`, OSC 52 from an inner app passes through to the outer terminal. Wheel-up enters copy-mode when the pane isn't already receiving mouse events. An app that captures mouse intercepts those gestures. The author also runs `ox` inside VS Code's and Cursor's integrated terminals, which are xterm.js-based. Those have looser OSC parsing than xterm proper, so any per-cell escape sequence has to use the safest forms (BEL terminator, no relying on OSC 52 reaching the OS clipboard).
 
 ## Takeaway for oxide-code
 
-Two features are worth supporting: clicking the PR number to open it in the browser, and drag-selecting chat content to copy. The `EnableMouseCapture` + OSC 52 approach trades native drag-select for an app-side reimplementation that fights the terminal in every layer above (tmux behavior, OSC 52 acceptance, in-app highlight, payload caps). The author's terminals (Cursor's and VS Code's xterm.js, plus tmux without `set-clipboard on`) make that trade unfavorable.
+Wheel scrolling has to work inside tmux, which the author runs with `mouse on`, and DECSET 1007 can't deliver that. Claude Code and Codex both capture the mouse in fullscreen, so oxide-code does the same:
 
-For oxide-code, selection should stay terminal-owned:
-
-- **No mouse capture.** `enter_tui_mode` skips `EnableMouseCapture` so the terminal sees every drag itself. The terminal's native selection layer renders the highlight, decides what gets copied, and writes to the OS clipboard the way the user already expects.
-- **DECSET 1007 (alternate-scroll).** Wheel events arrive as arrow-key sequences in the alt-screen, so chat still scrolls without claiming the mouse. iTerm2, WezTerm, kitty, Alacritty, foot, Ghostty, Windows Terminal, recent GNOME Terminal, Konsole, and xterm.js-based terminals (VS Code, Cursor) implement 1007. Older terminals fall back to keyboard scroll.
+- **Mouse capture.** `enter_tui_mode` enables `EnableMouseCapture`, and the chat scrolls on wheel events. Clicks and drags reach the app, so native selection needs the terminal's bypass modifier until in-app selection lands ([#289](https://github.com/hakula139/oxide-code/issues/289)).
+- **App-side selection next.** Both peers keep selection usable under capture by implementing it in the app and copying through the native clipboard with OSC 52 for tmux and SSH. The xterm.js terminals the author uses parse OSC loosely, so the copy path should prefer the native clipboard over relying on OSC 52 alone.
 - **OSC 8 on the PR segment, emitted out-of-band after `terminal.draw()` flushes.** Capturing the link rect + visible cells at render time and writing the envelope directly to the crossterm backend avoids both ratatui traps: `Buffer::set_string` no longer filters our control chars, and `Buffer::diff` no longer sees a 30-byte URL as one cell symbol. BEL (`\x07`) avoids xterm.js ST parsing leaks in self-contained per-cell closers.
-- **No app-side selection.** The `Selection` state machine, OSC 52 encoder, `selection` theme slot, and `arboard` fallback all become unnecessary.
-
-The remaining trade-off is the same one Codex makes: app-side click affordances are out of reach because there are no mouse events to route. That's the right trade until concrete demand for click-to-expand or similar arrives.

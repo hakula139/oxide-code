@@ -5,9 +5,10 @@ use std::io::{self, Stdout, Write};
 use std::sync::{Mutex, PoisonError};
 
 use anyhow::Result;
-use crossterm::Command;
 use crossterm::cursor::{RestorePosition, SavePosition};
-use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
+use crossterm::event::{
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+};
 use crossterm::style::PrintStyledContent;
 use crossterm::terminal::{
     self, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -20,12 +21,17 @@ use super::components::status::StatusHyperlink;
 
 pub(crate) type Tui = Terminal<CrosstermBackend<Stdout>>;
 
-/// Enters raw mode + alt screen + alternate-scroll + bracketed paste + Kitty keyboard (outside
+/// Enters raw mode + alt screen + mouse capture + bracketed paste + Kitty keyboard (outside
 /// Windows). Caller must invoke [`restore`] on exit (including panics).
 pub(crate) fn init() -> Result<Tui> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     enter_tui_mode(&mut stdout)?;
+    #[cfg(windows)]
+    {
+        execute!(stdout, EnableMouseCapture)?;
+        write_sgr_mouse(&mut stdout, true)?;
+    }
 
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
@@ -33,18 +39,18 @@ pub(crate) fn init() -> Result<Tui> {
 }
 
 fn enter_tui_mode(stdout: &mut impl Write) -> Result<()> {
-    queue!(
-        stdout,
-        EnterAlternateScreen,
-        AlternateScroll { enable: true },
-        EnableBracketedPaste
-    )?;
+    queue!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
     // crossterm writes the Kitty keyboard commands only as escape codes and fails them on Windows.
+    // It captures the Windows mouse through the console API instead, so `init` enables it there.
     #[cfg(not(windows))]
     {
         use crossterm::event::{KeyboardEnhancementFlags, PushKeyboardEnhancementFlags};
         let flags = KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES;
-        queue!(stdout, PushKeyboardEnhancementFlags(flags))?;
+        queue!(
+            stdout,
+            PushKeyboardEnhancementFlags(flags),
+            EnableMouseCapture
+        )?;
     }
     execute!(stdout, terminal::Clear(terminal::ClearType::All))?;
     Ok(())
@@ -56,21 +62,38 @@ pub(crate) fn restore() {
     // Errors are swallowed because restore runs on the panic path, where surfacing one would mask
     // the original panic or abort cleanup with the terminal still in raw mode.
     let mut stdout = io::stdout();
+    #[cfg(windows)]
+    {
+        _ = execute!(stdout, DisableMouseCapture);
+        _ = write_sgr_mouse(&mut stdout, false);
+    }
     _ = leave_tui_mode(&mut stdout);
     _ = disable_raw_mode();
     _ = write_deferred_panics(&DEFERRED_PANICS, &mut io::stderr());
 }
 
 fn leave_tui_mode(stdout: &mut impl Write) -> Result<()> {
+    queue!(stdout, DisableBracketedPaste)?;
+    #[cfg(not(windows))]
     queue!(
         stdout,
-        AlternateScroll { enable: false },
-        DisableBracketedPaste
+        crossterm::event::PopKeyboardEnhancementFlags,
+        DisableMouseCapture
     )?;
-    #[cfg(not(windows))]
-    queue!(stdout, crossterm::event::PopKeyboardEnhancementFlags)?;
     execute!(stdout, LeaveAlternateScreen, crossterm::cursor::Show)?;
     Ok(())
+}
+
+/// Requests or releases SGR mouse reports (DEC mode 1006). Some Windows terminals otherwise send
+/// mouse reports as key records, and `ConPTY` translates only SGR reports into mouse records.
+#[cfg(any(windows, test))]
+fn write_sgr_mouse(out: &mut impl Write, enable: bool) -> io::Result<()> {
+    out.write_all(if enable {
+        b"\x1b[?1006h"
+    } else {
+        b"\x1b[?1006l"
+    })?;
+    out.flush()
 }
 
 /// Marks the terminal restored and drains the deferred panic reports into `out`, one per line.
@@ -84,31 +107,6 @@ fn write_deferred_panics(deferred: &Mutex<DeferredPanics>, out: &mut impl Write)
         writeln!(out, "{report}")?;
     }
     Ok(())
-}
-
-/// DEC mode 1007, which makes the terminal send wheel scrolls in the alternate screen as arrow
-/// keys. Wheel scrolling then works without mouse capture, so native drag selection stays usable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct AlternateScroll {
-    enable: bool,
-}
-
-impl Command for AlternateScroll {
-    fn write_ansi(&self, f: &mut impl fmt::Write) -> fmt::Result {
-        write!(f, "\x1b[?1007{}", if self.enable { 'h' } else { 'l' })
-    }
-
-    #[cfg(windows)]
-    fn execute_winapi(&self) -> std::io::Result<()> {
-        Err(std::io::Error::other(
-            "AlternateScroll requires ANSI sequences",
-        ))
-    }
-
-    #[cfg(windows)]
-    fn is_ansi_code_supported(&self) -> bool {
-        true
-    }
 }
 
 /// Runs `f` inside a DEC synchronized update (mode 2026), so the terminal presents everything it
@@ -247,11 +245,13 @@ mod tests {
 
     const ENTER_ALT_SCREEN: &[u8] = b"\x1b[?1049h";
     const CLEAR_SCREEN: &[u8] = b"\x1b[2J";
-    const ENABLE_ALT_SCROLL: &[u8] = b"\x1b[?1007h";
     const ENABLE_BRACKETED_PASTE: &[u8] = b"\x1b[?2004h";
-    const ENABLE_MOUSE_BASIC: &[u8] = b"\x1b[?1000h";
     #[cfg(not(windows))]
     const PUSH_KITTY_DISAMBIGUATE: &[u8] = b"\x1b[>1u";
+    #[cfg(not(windows))]
+    const ENABLE_MOUSE_BUTTONS: &[u8] = b"\x1b[?1000h";
+    #[cfg(not(windows))]
+    const ENABLE_MOUSE_SGR: &[u8] = b"\x1b[?1006h";
 
     #[test]
     fn enter_tui_mode_writes_setup_sequences() {
@@ -266,42 +266,32 @@ mod tests {
             "setup should enter alternate screen before clearing"
         );
         assert!(
-            index_of(&buf, ENABLE_ALT_SCROLL).is_some(),
-            "alternate-scroll must be enabled so wheel still scrolls without mouse capture"
-        );
-        assert!(
             index_of(&buf, ENABLE_BRACKETED_PASTE).is_some(),
             "bracketed paste must be enabled so pasted newlines do not submit"
         );
         #[cfg(not(windows))]
-        assert!(
-            index_of(&buf, PUSH_KITTY_DISAMBIGUATE).is_some(),
-            "Kitty keyboard disambiguation must be pushed outside Windows"
-        );
-    }
-
-    #[test]
-    fn enter_tui_mode_does_not_enable_mouse_capture() {
-        // Native drag-select-and-copy depends on the terminal seeing the mouse, so the TUI must
-        // never claim it. Pin the negative case so a future refactor can't silently re-enable it.
-        let mut buf = Vec::new();
-
-        enter_tui_mode(&mut buf).unwrap();
-
-        assert!(
-            index_of(&buf, ENABLE_MOUSE_BASIC).is_none(),
-            "EnableMouseCapture would suppress native terminal drag-select"
-        );
+        {
+            assert!(
+                index_of(&buf, PUSH_KITTY_DISAMBIGUATE).is_some(),
+                "Kitty keyboard disambiguation must be pushed outside Windows"
+            );
+            assert!(
+                index_of(&buf, ENABLE_MOUSE_BUTTONS).is_some()
+                    && index_of(&buf, ENABLE_MOUSE_SGR).is_some(),
+                "mouse reports must be enabled so the wheel scrolls chat inside tmux"
+            );
+        }
     }
 
     // ── leave_tui_mode ──
 
     const LEAVE_ALT_SCREEN: &[u8] = b"\x1b[?1049l";
     const SHOW_CURSOR: &[u8] = b"\x1b[?25h";
-    const DISABLE_ALT_SCROLL: &[u8] = b"\x1b[?1007l";
     const DISABLE_BRACKETED_PASTE: &[u8] = b"\x1b[?2004l";
     #[cfg(not(windows))]
     const POP_KITTY_FLAGS: &[u8] = b"\x1b[<1u";
+    #[cfg(not(windows))]
+    const DISABLE_MOUSE_BUTTONS: &[u8] = b"\x1b[?1000l";
 
     #[test]
     fn leave_tui_mode_writes_restore_sequences() {
@@ -316,18 +306,20 @@ mod tests {
             "restore should leave alternate screen before showing cursor"
         );
         assert!(
-            index_of(&buf, DISABLE_ALT_SCROLL).is_some(),
-            "alternate-scroll must be disabled when leaving the TUI"
-        );
-        assert!(
             index_of(&buf, DISABLE_BRACKETED_PASTE).is_some(),
             "bracketed paste must be disabled when leaving the TUI"
         );
         #[cfg(not(windows))]
-        assert!(
-            index_of(&buf, POP_KITTY_FLAGS).is_some(),
-            "Kitty keyboard flags must be popped outside Windows"
-        );
+        {
+            assert!(
+                index_of(&buf, POP_KITTY_FLAGS).is_some(),
+                "Kitty keyboard flags must be popped outside Windows"
+            );
+            assert!(
+                index_of(&buf, DISABLE_MOUSE_BUTTONS).is_some(),
+                "mouse reports must be disabled so the shell gets its selection back"
+            );
+        }
     }
 
     #[test]
@@ -339,6 +331,21 @@ mod tests {
         assert_eq!(
             error.downcast_ref::<io::Error>().unwrap().kind(),
             io::ErrorKind::WriteZero,
+        );
+    }
+
+    // ── write_sgr_mouse ──
+
+    #[test]
+    fn write_sgr_mouse_toggles_dec_mode_1006() {
+        let (mut enable, mut disable) = (Vec::new(), Vec::new());
+
+        write_sgr_mouse(&mut enable, true).unwrap();
+        write_sgr_mouse(&mut disable, false).unwrap();
+
+        assert_eq!(
+            (enable.as_slice(), disable.as_slice()),
+            (&b"\x1b[?1006h"[..], &b"\x1b[?1006l"[..])
         );
     }
 

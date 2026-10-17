@@ -4,24 +4,31 @@ Design policy for mouse behavior in the TUI.
 
 ## Goal
 
-Two user-visible features:
+Three user-visible features:
 
-1. **Click `#NN` in the status bar to open the pull request in the browser**, even though no app code routes the click.
-2. **Drag-select chat content with the mouse and paste it elsewhere**, in any terminal the user runs `ox` in (iTerm2, WezTerm, kitty, Alacritty, Terminal.app, GNOME Terminal, Konsole, Ghostty, Windows Terminal, VS Code's integrated terminal, Cursor's integrated terminal).
+1. **Scroll the chat with the mouse wheel**, in a bare terminal and inside tmux.
+2. **Click `#NN` in the status bar to open the pull request in the browser**, with a plain click or the terminal's own Ctrl / Cmd-click.
+3. **Select chat content with the mouse and paste it elsewhere**, in any terminal the user runs `ox` in (iTerm2, WezTerm, kitty, Alacritty, Terminal.app, GNOME Terminal, Konsole, Ghostty, Windows Terminal, VS Code's integrated terminal, Cursor's integrated terminal).
 
-The cleanest way to deliver both is to let the terminal do the work. The TUI does not enable mouse capture, so the terminal's own selection layer is intact. The status-bar PR segments are wrapped in an OSC 8 hyperlink envelope that every modern terminal already knows how to make Ctrl-clickable.
+The TUI captures the mouse so wheel events reach it everywhere. The status-bar PR segments are wrapped in an OSC 8 hyperlink envelope, which terminals open on Ctrl / Cmd-click, and `ox` opens them itself on a plain click. Selection goes through the terminal's bypass modifier until in-app selection lands ([#289](https://github.com/hakula139/oxide-code/issues/289)).
 
 ## Decision
 
-`enter_tui_mode` enables raw mode, the alternate screen, bracketed paste, Kitty keyboard disambiguation (outside Windows, where crossterm cannot send it), and DECSET 1007 (alternate-scroll). It does **not** enable `EnableMouseCapture`. Pairs unwind on `leave_tui_mode`.
+`init` enables raw mode, then `enter_tui_mode` enables the alternate screen, bracketed paste, and, outside Windows, Kitty keyboard disambiguation and crossterm's `EnableMouseCapture`. crossterm captures the Windows mouse through the console API, so `init` enables it there after `enter_tui_mode` and also requests SGR mouse reports (`?1006h`), which some Windows terminals need before ConPTY delivers mouse records. Pairs unwind on `leave_tui_mode`, or in `restore` for the Windows mouse.
 
-`App::handle_crossterm_event` still forwards any mouse event it receives to `ChatView::handle_event`, but real sessions rely on DECSET 1007 for wheel scroll because the TUI does not claim mouse capture.
+`App::handle_crossterm_event` forwards wheel events to `ChatView::handle_event`, which scrolls three rows per notch without moving the input cursor. While a modal or the slash-command popup is open, each notch reaches it as one Up or Down key instead, so the wheel steps a list's selection or scrolls an overview. A plain left press on a status-bar link opens it, as [below](#osc-8-hyperlinks-on-the-pr-status-segments) describes. Other mouse events return early so the motion reports that capture enables don't each force a frame.
 
-## DECSET 1007 (alternate-scroll)
+## Mouse capture
 
-`\x1b[?1007h` on enter, `\x1b[?1007l` on leave. While the alt-screen is active the terminal translates physical wheel events into `\x1b[A` / `\x1b[B` arrow-key sequences. The input moves its cursor while a multi-line draft allows it, and otherwise returns the key as ignored so `ChatView::handle_event` scrolls. The user's terminal handles the wheel without `EnableMouseCapture`, so native drag-select stays available.
+`EnableMouseCapture` writes `?1000h`, `?1002h`, `?1003h`, `?1015h`, and `?1006h`, and crossterm parses the SGR (`?1006`) reports into `MouseEvent`s. Only the wheel is handled today, but in-app selection needs the drag mode, and `?1000h` alone already makes the terminal hand clicks to the app, so a narrower set of modes would not keep native selection. On Windows, crossterm enables console mouse input, which has no wheel-only setting.
 
-Modern emulators (iTerm2, WezTerm, kitty, Alacritty, foot, Ghostty, Windows Terminal, VS Code / Cursor's xterm.js, recent GNOME Terminal, Konsole, Terminal.app via vim-mode) implement 1007. Older emulators ignore it with no fallback, so users there scroll with the keyboard (`PageUp` / `PageDown` / `Ctrl+End`).
+Terminal-side wheel translation can't cover tmux. DECSET 1007 (alternate scroll) makes a bare terminal send wheel events in the alternate screen as arrow keys, but under tmux with `mouse on`, tmux receives the wheel itself. Its default `WheelUpPane` binding passes the event to a pane only when the pane reports the mouse (`#{mouse_any_flag}`). Otherwise tmux drops the event or enters copy mode and scrolls tmux history over the TUI. With capture on, tmux forwards both wheel directions to `ox` under its default bindings.
+
+## Text selection
+
+With capture on, the terminal hands clicks and drags to `ox`, which ignores them. Holding the terminal's bypass modifier restores native selection: Shift in most terminals, Option in iTerm2, and Option in VS Code and Cursor on macOS with `terminal.integrated.macOptionClickForcesSelection` enabled. Inside tmux with `mouse on`, tmux's default `MouseDrag1Pane` binding also forwards drags to a pane that reports the mouse, so tmux's copy-mode selection needs the same bypass and selects across pane borders.
+
+In-app selection with copy-on-select ([#289](https://github.com/hakula139/oxide-code/issues/289)) will make a plain drag select chat text again.
 
 ## OSC 8 hyperlinks on the PR status segments
 
@@ -39,21 +46,14 @@ Three mechanics worth surfacing:
 - **BEL (`\x07`) terminator.** Some xterm.js-based terminals (VS Code's and Cursor's integrated terminals) misparse self-contained per-cell ST (`\x1b\\`) closers, leaking visible bytes into the next cells of the line. BEL is one byte and every modern emulator parses it identically.
 - **Plain OSC 8 inside tmux.** tmux 3.4 and later parse OSC 8, place the link in pane coordinates, and forward it to outer terminals that have the `hyperlinks` terminal feature. For an outer terminal tmux does not detect, add `set -as terminal-features ',<TERM>:hyperlinks'` to `tmux.conf`, where `<TERM>` matches the outer terminal's `$TERM`. Older tmux drops the OSC and keeps the visible text.
 
-Terminals with OSC 8 support make these segments Ctrl-clickable (Cmd-click on macOS in some terminals). Terminals that ignore OSC control strings leave the visible text intact. Terminals that print raw OSC bytes may show escape text, which is the legacy fallback.
+Mouse capture hands plain clicks to `ox`, and some terminals, such as kitty and WezTerm, also deliver clicks on links to an app that captures the mouse. `App::emit_status_hyperlinks` therefore keeps the frame's link rects, and a left press without modifiers inside one opens its URL through `App::open_browser`. A press with modifiers is left to the terminal, so a terminal that opens OSC 8 links on Ctrl / Cmd-click itself doesn't open the page twice. Terminals that ignore OSC control strings leave the visible text intact. Terminals that print raw OSC bytes may show escape text, which is the legacy fallback.
 
 URLs are sanitized: every control char is filtered out before the envelope is built, so a malformed value can't break out of the OSC 8 sequence.
-
-## Native drag-select-and-copy
-
-Without `EnableMouseCapture`, the terminal sees every mouse event itself. Drag-select uses the user's existing terminal selection model: which keys to hold, what the highlight looks like, what gets copied, and how it gets onto the clipboard are all the user's choice (or the user's terminal's defaults).
-
-The app therefore carries no selection state machine, highlight overlay, OSC 52 encoder, `selection` theme slot, or per-terminal drag modifier, and tmux users need no `set-clipboard` setting.
 
 ## Out of scope
 
 - Click-to-expand on tool-result blocks.
 - OSC 8 hyperlinks inside markdown body text (would require threading URLs through the markdown renderer).
-- App-driven copy-on-select with OSC 52 / arboard fallback. Native terminal selection covers the current need.
 
 ## Verification
 
@@ -62,9 +62,9 @@ Manual verification across terminals:
 1. Start `ox` and generate enough chat content to scroll.
 2. Page up. Confirm the jump-to-bottom pill appears.
 3. Press Ctrl+End. Confirm chat snaps to bottom and re-arms auto-scroll.
-4. Drag-select a chat region. Confirm the highlight uses the terminal's native selection style. Mouse up. Paste somewhere external. Confirm bytes round-trip.
-5. With the `pull-request`, `pull-request-checks`, and `pull-request-review` status segments configured, Ctrl-click (Cmd-click on iTerm2 / Terminal.app) on each. Confirm the browser opens the PR, its checks page, and its changed-files page.
-6. Wheel scroll. Confirm chat scrolls (DECSET 1007 in a supporting terminal).
+4. Hold the terminal's bypass modifier and drag-select a chat region. Confirm the highlight uses the terminal's native selection style. Mouse up. Paste somewhere external. Confirm bytes round-trip.
+5. With the `pull-request`, `pull-request-checks`, and `pull-request-review` status segments configured, click each, then Ctrl-click each (Cmd-click on iTerm2 / Terminal.app). Confirm the browser opens the PR, its checks page, and its changed-files page once per click.
+6. Wheel scroll, both in a bare terminal and inside tmux with `mouse on`. Confirm chat scrolls and tmux stays out of copy mode.
 7. Quit. Confirm alt-screen restored.
 
-Automated coverage pins DECSET 1007 enter / leave bytes, no `EnableMouseCapture`, OSC 8 replay bytes, URL sanitization, the unwrapped envelope inside tmux, and status-bar hyperlink capture.
+Automated coverage pins the mouse-capture enter / leave bytes, the Windows SGR request bytes, wheel scroll steps, wheel routing to modals and the slash popup, plain-click link opening, ignored mouse events, OSC 8 replay bytes, URL sanitization, the unwrapped envelope inside tmux, and status-bar hyperlink capture.
