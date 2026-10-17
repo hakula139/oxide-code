@@ -585,10 +585,12 @@ mod tests {
 
     #[tokio::test]
     async fn read_file_missing_file_reports_error() {
-        let err = read_file("/nonexistent/path.txt", None, None, &temp_ctx())
-            .await
-            .unwrap_err();
-        assert!(err.contains("Error reading"));
+        let path = "/nonexistent/path.txt";
+
+        let err = read_file(path, None, None, &temp_ctx()).await.unwrap_err();
+
+        let cause = std::fs::metadata(path).unwrap_err();
+        assert_eq!(err, format!("Failed to read {path}: {cause}"));
     }
 
     #[tokio::test]

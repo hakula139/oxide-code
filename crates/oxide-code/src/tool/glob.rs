@@ -561,7 +561,8 @@ mod tests {
         let dir = canonical_tempdir();
         let err =
             glob_in("*.txt", Some("missing"), dir.path(), &ReadFilter::default()).unwrap_err();
-        assert!(err.starts_with("Cannot access missing: "), "{err}");
+        let cause = std::fs::metadata(dir.path().join("missing")).unwrap_err();
+        assert_eq!(err, format!("Failed to access missing: {cause}"));
 
         std::fs::write(dir.path().join("a.txt"), "").unwrap();
         let err = glob_in("*.txt", Some("a.txt"), dir.path(), &ReadFilter::default()).unwrap_err();

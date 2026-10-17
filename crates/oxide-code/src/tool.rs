@@ -535,13 +535,13 @@ impl SearchRoot {
         let spelled = PathBuf::from(path.unwrap_or("."));
         let Some(base) = access.resolved() else {
             return Err(format!(
-                "Cannot access {}: the search root was not resolved.",
+                "Failed to access {}: the search root was not resolved.",
                 display_path(&spelled, cwd)
             ));
         };
         if let Err(e) = std::fs::metadata(&base) {
             return Err(format!(
-                "Cannot access {}: {e}",
+                "Failed to access {}: {e}",
                 display_path(&cwd.join(&spelled), cwd)
             ));
         }
@@ -658,7 +658,7 @@ async fn read_validated(
     shown: &str,
     validate: impl Fn(&std::fs::Metadata) -> Result<(), String>,
 ) -> Result<(std::fs::Metadata, Vec<u8>), String> {
-    let error = |e: std::io::Error| format!("Error reading {shown}: {e}");
+    let error = |e: std::io::Error| format!("Failed to read {shown}: {e}");
     validate(&tokio::fs::metadata(path).await.map_err(error)?)?;
 
     let mut options = std::fs::OpenOptions::new();
@@ -1836,8 +1836,11 @@ mod tests {
     #[test]
     fn search_root_missing_path_is_named_relative_to_cwd() {
         let dir = canonical_tempdir();
+
         let err = search_root(dir.path(), Some("missing")).err().unwrap();
-        assert!(err.starts_with("Cannot access missing: "), "{err}");
+
+        let cause = std::fs::metadata(dir.path().join("missing")).unwrap_err();
+        assert_eq!(err, format!("Failed to access missing: {cause}"));
     }
 
     #[test]
@@ -1846,7 +1849,10 @@ mod tests {
         let err = SearchRoot::new(&Access::None, Some("src"), workspace)
             .err()
             .unwrap();
-        assert_eq!(err, "Cannot access src: the search root was not resolved.");
+        assert_eq!(
+            err,
+            "Failed to access src: the search root was not resolved."
+        );
     }
 
     // ── tracker_key ──
@@ -1940,12 +1946,11 @@ mod tests {
             (8, b"original".as_slice())
         );
         let err = read_validated(&link, "link.txt", accept).await.unwrap_err();
-        assert!(err.starts_with("Error reading link.txt: "), "{err}");
+        #[cfg(unix)]
+        let cause = std::io::Error::from_raw_os_error(nix::errno::Errno::ELOOP as i32);
         #[cfg(windows)]
-        assert!(
-            err.ends_with("the final path component is a symlink"),
-            "{err}"
-        );
+        let cause = "the final path component is a symlink";
+        assert_eq!(err, format!("Failed to read link.txt: {cause}"));
     }
 
     #[cfg(unix)]

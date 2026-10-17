@@ -136,7 +136,7 @@ async fn write_file(path: &str, content: &str, ctx: &ToolCtx) -> Result<(String,
     let pre_meta = match tokio::fs::symlink_metadata(&file_path).await {
         Ok(meta) => Some(meta),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => return Err(format!("Error reading {path}: {e}")),
+        Err(e) => return Err(format!("Failed to access {path}: {e}")),
     };
     let is_new = pre_meta.is_none();
 
@@ -158,7 +158,7 @@ async fn write_file(path: &str, content: &str, ctx: &ToolCtx) -> Result<(String,
     };
     super::write_tracked(ctx, &file_path, content.as_bytes().to_vec(), mode)
         .await
-        .map_err(|e| format!("Failed to write file: {e}"))?;
+        .map_err(|e| format!("Failed to write {path}: {e}"))?;
 
     let msg = if is_new {
         format!("Successfully created {path}.")
@@ -627,10 +627,12 @@ mod tests {
         let err = write_file(path.to_str().unwrap(), "overwrite", &ctx)
             .await
             .unwrap_err();
-        assert!(
-            err.contains("Failed to write file"),
-            "expected write-failure error, got: {err}",
-        );
+
+        let cause = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap_err();
+        assert_eq!(err, format!("Failed to write {}: {cause}", path.display()));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "original");
     }
 

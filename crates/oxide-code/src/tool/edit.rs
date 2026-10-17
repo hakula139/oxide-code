@@ -198,7 +198,7 @@ async fn edit_file(
         .verify_current_content(&key, &content_bytes, GatePurpose::Edit)
         .map_err(|e| e.to_string())?;
     let content =
-        String::from_utf8(content_bytes).map_err(|e| format!("Error reading {path}: {e}"))?;
+        String::from_utf8(content_bytes).map_err(|e| format!("Failed to read {path}: {e}"))?;
 
     let eol = dominant_eol(&content);
     let content = normalize_eol(&content);
@@ -896,10 +896,14 @@ mod tests {
 
     #[tokio::test]
     async fn edit_file_rejects_nonexistent_file() {
-        let err = edit_file("/nonexistent/file.txt", "a", "b", false, &temp_ctx())
+        let path = "/nonexistent/file.txt";
+
+        let err = edit_file(path, "a", "b", false, &temp_ctx())
             .await
             .unwrap_err();
-        assert!(err.contains("Error reading"));
+
+        let cause = std::fs::metadata(path).unwrap_err();
+        assert_eq!(err, format!("Failed to read {path}: {cause}"));
     }
 
     #[tokio::test]
@@ -915,10 +919,9 @@ mod tests {
         let err = edit_file(path.to_str().unwrap(), "a", "b", false, &ctx)
             .await
             .unwrap_err();
-        assert!(
-            err.contains("Error reading") && err.contains("utf-8"),
-            "expected utf-8 decode failure, got: {err}",
-        );
+
+        let cause = String::from_utf8(bytes.to_vec()).unwrap_err();
+        assert_eq!(err, format!("Failed to read {}: {cause}", path.display()));
     }
 
     #[tokio::test]
