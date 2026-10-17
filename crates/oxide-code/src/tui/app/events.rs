@@ -349,7 +349,7 @@ impl App {
         let active = match (auth, fallback_error) {
             (Some(source), _) => format!("Requests use {source}."),
             (None, Some(e)) => format!("No credential is active: {e}"),
-            (None, None) => "No credential is active. Run /login to sign in.".to_owned(),
+            (None, None) => "No credential is active. Run `/login` to sign in.".to_owned(),
         };
         self.chat.push_system_message(format!("{outcome} {active}"));
     }
@@ -762,7 +762,7 @@ mod tests {
                 true,
                 None,
                 None,
-                "Signed out of oxide-code. No credential is active. Run /login to sign in.",
+                "Signed out of oxide-code. No credential is active. Run `/login` to sign in.",
             ),
             (
                 true,
