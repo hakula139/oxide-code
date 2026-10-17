@@ -1523,7 +1523,10 @@ mod tests {
             "Enter sends the prompt again as typed",
         );
         assert!(app.pending_prompts.is_empty());
-        assert!(rx.try_recv().is_err(), "nothing is sent for the user");
+        assert!(
+            rx.try_recv().is_err(),
+            "nothing reaches the engine until the user sends"
+        );
     }
 
     #[tokio::test]
