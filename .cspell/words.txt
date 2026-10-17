@@ -124,6 +124,7 @@ swatinem
 syntect
 sysname
 SYSPROMPT
+taiki
 taplo
 tcsh
 tengu
@@ -147,7 +148,7 @@ unwritable
 URXVT
 usize
 vſcode
-Waka
+WakaTime
 wakeup
 webpki
 writeln

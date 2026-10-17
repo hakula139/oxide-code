@@ -1232,7 +1232,7 @@ mod tests {
     #[tokio::test]
     async fn roll_persists_tracker_snapshots_into_old_session_then_clears_tracker() {
         // Snapshot-before-clear: snapshots from the live tracker must land in the OLD JSONL via
-        // finalize, and the tracker must be empty afterwards so the new session starts cold.
+        // finalize, and the tracker must be empty afterward so the new session starts cold.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let tracker = FileTracker::default();

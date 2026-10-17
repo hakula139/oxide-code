@@ -6,7 +6,7 @@
     "format:markdown": "dprint check",
     "format:toml": "taplo format --check",
     "lint": "markdownlint-cli2 \"**/*.md\"",
-    "spellcheck": "cspell --no-progress \"**/*\""
+    "spellcheck": "git ls-files | cspell --no-progress --file-list stdin"
   },
   "devDependencies": {
     "@taplo/cli": "^0.7.0",

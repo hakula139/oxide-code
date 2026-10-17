@@ -169,7 +169,7 @@ async fn write_file(path: &str, content: &str, ctx: &ToolCtx) -> Result<(String,
 }
 
 /// Validates the un-followed `metadata` of an existing target. The gate pinned the path to its
-/// resolved location, so a symlink here appeared afterwards and is refused.
+/// resolved location, so a symlink here appeared afterward and is refused.
 fn validate_write_target(path: &str, metadata: &std::fs::Metadata) -> Result<(), String> {
     if metadata.file_type().is_symlink() {
         return Err(format!(
