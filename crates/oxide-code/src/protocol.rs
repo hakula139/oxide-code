@@ -588,6 +588,15 @@ mod tests {
         }
     }
 
+    fn cargo_test_grant() -> SessionGrant {
+        Policy::default()
+            .session_grant(
+                PermissionClass::Bash,
+                &GateTarget::for_command("cargo test", Path::new("/repo")),
+            )
+            .unwrap()
+    }
+
     /// Every [`Event`] variant, plus one approval per [`ApprovalBody`] variant.
     fn every_event() -> Vec<Event> {
         vec![
@@ -679,14 +688,7 @@ mod tests {
                     title: "Bash".to_owned(),
                     body: ApprovalBody::Command("cargo test".to_owned()),
                 },
-                grant: Some(Box::new(
-                    Policy::default()
-                        .session_grant(
-                            PermissionClass::Bash,
-                            &GateTarget::for_command("cargo test", Path::new("/repo")),
-                        )
-                        .unwrap(),
-                )),
+                grant: Some(Box::new(cargo_test_grant())),
             },
             Event::SessionRulesUpdated(vec![Rule::parse("bash(cargo test:*)").unwrap()]),
             Event::TasksUpdated(plan()),
