@@ -101,12 +101,13 @@ pub(crate) struct StopDetails {
 
 // ── Token Usage ──
 
-/// Token counts one request reported.
+/// Token counts one request reported. A count the payload omits reads as zero.
 #[expect(
     clippy::struct_field_names,
     reason = "field names mirror Anthropic's usage payload, which session `usage` entries reuse"
 )]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub(crate) struct TokenUsage {
     pub(crate) input_tokens: u32,
     pub(crate) cache_creation_input_tokens: u32,

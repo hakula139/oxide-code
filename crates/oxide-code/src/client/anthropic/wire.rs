@@ -3,7 +3,7 @@
 use serde::ser::SerializeSeq;
 use serde::{Deserialize, Serialize, Serializer};
 
-use crate::client::{StopDetails, StopReason};
+use crate::client::{StopDetails, StopReason, TokenUsage};
 use crate::config::Effort;
 use crate::message::{ContentBlock, Message, Role, WireKind};
 use crate::model::ThinkingConfig;
@@ -285,7 +285,7 @@ pub(super) enum StreamEvent {
     },
     MessageDelta {
         delta: MessageDeltaBody,
-        usage: Option<Usage>,
+        usage: Option<TokenUsage>,
     },
     MessageStop,
     Ping,
@@ -307,7 +307,7 @@ pub(super) enum StreamEvent {
 pub(super) struct MessageResponse {
     pub(super) id: String,
     pub(super) model: String,
-    pub(super) usage: Option<Usage>,
+    pub(super) usage: Option<TokenUsage>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -382,22 +382,6 @@ pub(super) struct MessageDeltaBody {
     /// Populated only on `refusal`.
     #[serde(default)]
     pub(super) stop_details: Option<StopDetails>,
-}
-
-#[expect(
-    clippy::struct_field_names,
-    reason = "field names mirror Anthropic's usage payload"
-)]
-#[derive(Debug, Clone, Deserialize)]
-pub(super) struct Usage {
-    #[serde(default)]
-    pub(super) input_tokens: u32,
-    #[serde(default)]
-    pub(super) cache_creation_input_tokens: u32,
-    #[serde(default)]
-    pub(super) cache_read_input_tokens: u32,
-    #[serde(default)]
-    pub(super) output_tokens: u32,
 }
 
 // ── Error Types ──
@@ -684,7 +668,7 @@ mod tests {
                     stop_reason: Some(StopReason::EndTurn),
                     stop_details: None,
                 },
-                usage: Some(Usage {
+                usage: Some(TokenUsage {
                     input_tokens: 0,
                     cache_creation_input_tokens: 0,
                     cache_read_input_tokens: 0,

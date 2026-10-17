@@ -5,7 +5,7 @@ use std::mem;
 
 use tracing::{debug, warn};
 
-use super::wire::{ApiError, ContentBlockInfo, Delta, StreamEvent, Usage};
+use super::wire::{ApiError, ContentBlockInfo, Delta, StreamEvent};
 use crate::client::{Response, ResponseEvent, StopDetails, StopReason, TokenUsage};
 use crate::message::{ContentBlock, Replay, WireKind, progress_note};
 
@@ -47,7 +47,7 @@ impl ResponseAccumulator {
             StreamEvent::MessageStart { message } => {
                 self.usage = message
                     .usage
-                    .map(|reported| observe(TokenUsage::default(), &reported));
+                    .map(|reported| observe(TokenUsage::default(), reported));
                 self.usage.map(ResponseEvent::Usage)
             }
             StreamEvent::ContentBlockStart {
@@ -62,7 +62,7 @@ impl ResponseAccumulator {
                 self.stop_reason = delta.stop_reason;
                 self.stop_details = delta.stop_details;
                 usage.map(|reported| {
-                    let usage = observe(self.usage.unwrap_or_default(), &reported);
+                    let usage = observe(self.usage.unwrap_or_default(), reported);
                     self.usage = Some(usage);
                     ResponseEvent::Usage(usage)
                 })
@@ -118,7 +118,7 @@ impl ResponseAccumulator {
 /// Layers one usage report onto the snapshot so far. `message_start` reports the input and cache
 /// counts with `output_tokens = 0`, and `message_delta` reports `output_tokens` with the input
 /// counts zeroed, so zero means "not reported here".
-fn observe(usage: TokenUsage, reported: &Usage) -> TokenUsage {
+fn observe(usage: TokenUsage, reported: TokenUsage) -> TokenUsage {
     let layer = |reported: u32, current: u32| if reported > 0 { reported } else { current };
     TokenUsage {
         input_tokens: layer(reported.input_tokens, usage.input_tokens),

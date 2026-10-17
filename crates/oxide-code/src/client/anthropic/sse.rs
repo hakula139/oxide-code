@@ -656,7 +656,7 @@ mod tests {
                 message: super::super::wire::MessageResponse {
                     ref id,
                     ref model,
-                    usage: Some(super::super::wire::Usage {
+                    usage: Some(crate::client::TokenUsage {
                         input_tokens: 25,
                         cache_creation_input_tokens: 0,
                         cache_read_input_tokens: 0,
