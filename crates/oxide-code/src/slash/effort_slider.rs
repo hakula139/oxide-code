@@ -12,6 +12,8 @@ use super::context::LiveSessionInfo;
 use crate::config::Effort;
 use crate::protocol::Op;
 use crate::tui::action::Action;
+use crate::tui::glyphs::{HORIZONTAL_RULE, RADIO_SELECTED, RADIO_UNSELECTED};
+use crate::tui::modal::chrome::{CONFIRM_HINTS, HINT_SEPARATOR, KEY_LEFT_RIGHT};
 use crate::tui::modal::{Modal, ModalAction, ModalKey};
 use crate::tui::theme::Theme;
 
@@ -19,17 +21,17 @@ use crate::tui::theme::Theme;
 
 const SPEED_LABEL: &str = "Speed";
 const INTEL_LABEL: &str = "Intelligence";
-const TRACK_GLYPH: char = '─';
 
 const GLYPH_PREFIX_WIDTH: usize = 2;
 /// Fixed inter-tier spacing — slot-based widths drifted by half a col on even-length labels.
 const TIER_GAP: usize = 3;
 
 const TITLE: &str = "Select effort";
-const FOOTER: &str = "←/→ to change effort  ·  Enter to confirm  ·  Esc to cancel";
 
 /// Title + blank + speed / intel + track + tier labels + blank + footer.
 const BODY_HEIGHT: u16 = 7;
+
+// ── Tier Colors ──
 
 /// Per-tier color (Low blue → Max red). Magenta — not yellow — at Xhigh keeps High and Xhigh
 /// distinct on pastel palettes where green and yellow read close.
@@ -81,7 +83,7 @@ impl EffortSlider {
     fn slider_width() -> usize {
         let units: usize = Effort::ALL
             .iter()
-            .map(|e| GLYPH_PREFIX_WIDTH + format!("{e}").len())
+            .map(|e| GLYPH_PREFIX_WIDTH + e.as_str().len())
             .sum();
         units + (Effort::ALL.len() - 1) * TIER_GAP
     }
@@ -97,7 +99,7 @@ impl EffortSlider {
 
     fn line_track(theme: &Theme) -> Line<'static> {
         let total = Self::slider_width();
-        let buf: String = std::iter::repeat_n(TRACK_GLYPH, total).collect();
+        let buf: String = HORIZONTAL_RULE.repeat(total);
         Line::from(Span::styled(buf, theme.dim()))
     }
 
@@ -108,7 +110,11 @@ impl EffortSlider {
                 spans.push(Span::raw(" ".repeat(TIER_GAP)));
             }
             let active = idx == self.selected;
-            let glyph = if active { '●' } else { '○' };
+            let glyph = if active {
+                RADIO_SELECTED
+            } else {
+                RADIO_UNSELECTED
+            };
             let mut style = Style::default().fg(tier_color(*level));
             if active {
                 style = style.add_modifier(Modifier::BOLD);
@@ -116,6 +122,12 @@ impl EffortSlider {
             spans.push(Span::styled(format!("{glyph} {level}"), style));
         }
         Line::from(spans)
+    }
+
+    fn line_footer(theme: &Theme) -> Line<'static> {
+        let confirm = CONFIRM_HINTS.join(HINT_SEPARATOR);
+        let hints = format!("{KEY_LEFT_RIGHT} to change effort{HINT_SEPARATOR}{confirm}");
+        Line::from(Span::styled(hints, theme.dim()))
     }
 }
 
@@ -135,7 +147,7 @@ impl Modal for EffortSlider {
             Self::line_track(theme),
             self.line_tier_labels(),
             Line::default(),
-            Line::from(Span::styled(FOOTER, theme.dim())),
+            Self::line_footer(theme),
         ];
 
         frame.render_widget(
@@ -172,6 +184,7 @@ mod tests {
     use super::*;
     use crate::model::ModelSpec;
     use crate::slash::test_session_info;
+    use crate::tui::modal::testing::render_rows;
 
     fn slider_for(model_id: &str, effort: Option<Effort>) -> EffortSlider {
         let mut info = test_session_info();
@@ -188,7 +201,7 @@ mod tests {
         KeyEvent::from(code)
     }
 
-    // ── new ──
+    // ── EffortSlider::new ──
 
     #[test]
     fn new_is_absent_for_unknown_model() {
@@ -212,103 +225,27 @@ mod tests {
         assert_eq!(selected_level(&s), Effort::High);
     }
 
-    // ── handle_key ──
+    // ── EffortSlider::render ──
 
     #[test]
-    fn right_arrow_advances_selected_within_supported() {
-        let mut s = slider_for("claude-opus-5-5", Some(Effort::Low));
-        let before = s.selected;
-        s.handle_key(&key(KeyCode::Right));
-        assert_eq!(s.selected, before + 1);
-    }
-
-    #[test]
-    fn right_arrow_at_top_clamps_without_panicking() {
-        let mut s = slider_for("claude-opus-5-5", Some(Effort::Max));
-        s.handle_key(&key(KeyCode::Right));
-        assert_eq!(selected_level(&s), Effort::Max, "must stay clamped");
-    }
-
-    #[test]
-    fn left_arrow_retreats_selected_until_low() {
-        let mut s = slider_for("claude-opus-5-5", Some(Effort::Medium));
-        s.handle_key(&key(KeyCode::Left));
-        assert_eq!(selected_level(&s), Effort::Low);
-        s.handle_key(&key(KeyCode::Left));
-        assert_eq!(selected_level(&s), Effort::Low, "stays clamped");
-    }
-
-    #[test]
-    fn vim_keys_mirror_arrow_navigation() {
-        let mut s = slider_for("claude-opus-5-5", Some(Effort::Low));
-        s.handle_key(&key(KeyCode::Char('l')));
-        assert_eq!(selected_level(&s), Effort::Medium);
-        s.handle_key(&key(KeyCode::Char('h')));
-        assert_eq!(selected_level(&s), Effort::Low);
-    }
-
-    #[test]
-    fn enter_with_no_change_returns_cancelled() {
-        // Open + Enter without moving is the same shape as Esc — nothing to dispatch.
-        let mut s = slider_for("claude-opus-5-5", Some(Effort::High));
-        let outcome = s.handle_key(&key(KeyCode::Enter));
-        assert!(matches!(outcome, ModalKey::Cancelled));
-    }
-
-    #[test]
-    fn enter_after_change_emits_set_model_with_effort_only() {
-        let mut s = slider_for("claude-opus-5-5", Some(Effort::Low));
-        s.handle_key(&key(KeyCode::Right));
-        let outcome = s.handle_key(&key(KeyCode::Enter));
-        match outcome {
-            ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::SetModel {
-                model,
-                effort,
-            }))) => {
-                assert!(model.is_none(), "effort-only swap; model unchanged");
-                assert_eq!(effort, Some(Effort::Medium));
-            }
-            other => panic!("expected Submitted SetModel, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn unhandled_key_is_consumed_without_state_change() {
-        // Esc / Ctrl+C are intercepted at ModalStack; everything else (Up, Tab, letters other
-        // than h / l) must fall through to `Consumed` and leave the cursor put.
-        let mut s = slider_for("claude-opus-5-5", Some(Effort::Medium));
-        let before = s.selected;
-        for code in [KeyCode::Up, KeyCode::Down, KeyCode::Tab, KeyCode::Char('q')] {
-            let outcome = s.handle_key(&key(code));
-            assert!(
-                matches!(outcome, ModalKey::Consumed),
-                "{code:?} must be consumed"
-            );
-            assert_eq!(s.selected, before, "{code:?} must not move the cursor");
-        }
-    }
-
-    // ── render ──
-
-    #[test]
-    fn render_emits_title_at_typical_widths() {
-        let theme = Theme::default();
+    fn render_centers_the_track_between_title_and_footer() {
         let s = slider_for("claude-opus-5-5", Some(Effort::High));
-        for width in [40_u16, 80, 120] {
-            let h = s.height(width, u16::MAX);
-            let mut terminal = Terminal::new(TestBackend::new(width, h)).unwrap();
-            terminal
-                .draw(|frame| s.render(frame, Rect::new(0, 0, width, h), &theme))
-                .expect("render must not panic");
-            let buf = terminal.backend().buffer().clone();
-            let title_visible = (0..h).any(|y| {
-                (0..width)
-                    .map(|x| buf[(x, y)].symbol())
-                    .collect::<String>()
-                    .contains(TITLE)
-            });
-            assert!(title_visible, "width {width}: title `{TITLE}` must render");
-        }
+
+        let rows = render_rows(&s, 80, s.height(80, u16::MAX));
+
+        let rows: Vec<&str> = rows.iter().map(|row| row.trim_end()).collect();
+        assert_eq!(
+            rows,
+            [
+                "                                  Select effort",
+                "",
+                "                   Speed                          Intelligence",
+                "                   ───────────────────────────────────────────",
+                "                   ○ low   ○ medium   ● high   ○ xhigh   ○ max",
+                "",
+                "          ← / → to change effort  ·  Enter to confirm  ·  Esc to cancel",
+            ]
+        );
     }
 
     #[test]
@@ -340,5 +277,81 @@ mod tests {
             x_medium > x_low,
             "Right must shift active glyph to the right (low={x_low}, medium={x_medium})",
         );
+    }
+
+    // ── EffortSlider::handle_key ──
+
+    #[test]
+    fn handle_key_right_arrow_advances_selected_within_supported() {
+        let mut s = slider_for("claude-opus-5-5", Some(Effort::Low));
+        let before = s.selected;
+        s.handle_key(&key(KeyCode::Right));
+        assert_eq!(s.selected, before + 1);
+    }
+
+    #[test]
+    fn handle_key_right_arrow_at_top_clamps_without_panicking() {
+        let mut s = slider_for("claude-opus-5-5", Some(Effort::Max));
+        s.handle_key(&key(KeyCode::Right));
+        assert_eq!(selected_level(&s), Effort::Max, "must stay clamped");
+    }
+
+    #[test]
+    fn handle_key_left_arrow_retreats_selected_until_low() {
+        let mut s = slider_for("claude-opus-5-5", Some(Effort::Medium));
+        s.handle_key(&key(KeyCode::Left));
+        assert_eq!(selected_level(&s), Effort::Low);
+        s.handle_key(&key(KeyCode::Left));
+        assert_eq!(selected_level(&s), Effort::Low, "stays clamped");
+    }
+
+    #[test]
+    fn handle_key_vim_keys_mirror_arrow_navigation() {
+        let mut s = slider_for("claude-opus-5-5", Some(Effort::Low));
+        s.handle_key(&key(KeyCode::Char('l')));
+        assert_eq!(selected_level(&s), Effort::Medium);
+        s.handle_key(&key(KeyCode::Char('h')));
+        assert_eq!(selected_level(&s), Effort::Low);
+    }
+
+    #[test]
+    fn handle_key_enter_with_no_change_returns_cancelled() {
+        // Enter without moving behaves like Esc, since there is nothing to dispatch.
+        let mut s = slider_for("claude-opus-5-5", Some(Effort::High));
+        let outcome = s.handle_key(&key(KeyCode::Enter));
+        assert!(matches!(outcome, ModalKey::Cancelled));
+    }
+
+    #[test]
+    fn handle_key_enter_after_change_emits_set_model_with_effort_only() {
+        let mut s = slider_for("claude-opus-5-5", Some(Effort::Low));
+        s.handle_key(&key(KeyCode::Right));
+        let outcome = s.handle_key(&key(KeyCode::Enter));
+        match outcome {
+            ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::SetModel {
+                model,
+                effort,
+            }))) => {
+                assert!(model.is_none(), "an effort-only swap keeps the model");
+                assert_eq!(effort, Some(Effort::Medium));
+            }
+            other => panic!("expected Submitted SetModel, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn handle_key_unhandled_key_is_consumed_without_state_change() {
+        // ModalStack intercepts Esc and Ctrl+C. Every other key, such as Up, Tab, or a letter
+        // besides h / l, falls through to `Consumed` and leaves the cursor put.
+        let mut s = slider_for("claude-opus-5-5", Some(Effort::Medium));
+        let before = s.selected;
+        for code in [KeyCode::Up, KeyCode::Down, KeyCode::Tab, KeyCode::Char('q')] {
+            let outcome = s.handle_key(&key(code));
+            assert!(
+                matches!(outcome, ModalKey::Consumed),
+                "{code:?} must be consumed"
+            );
+            assert_eq!(s.selected, before, "{code:?} must not move the cursor");
+        }
     }
 }

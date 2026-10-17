@@ -37,12 +37,11 @@ fn parse_hex(hex: &str) -> Result<Color> {
     if hex.len() != 6 {
         bail!("expected 6-digit hex (e.g., #cdd6f4)");
     }
-    let n = u32::from_str_radix(hex, 16).context("non-hex characters in color")?;
-    let (r, g, b) = (
-        ((n >> 16) & 0xff) as u8,
-        ((n >> 8) & 0xff) as u8,
-        (n & 0xff) as u8,
-    );
+    if !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("non-hex characters in color");
+    }
+    let n = u32::from_str_radix(hex, 16).expect("six ASCII hex digits fit in u32");
+    let [_, r, g, b] = n.to_be_bytes();
     Ok(Color::Rgb(r, g, b))
 }
 
@@ -86,6 +85,13 @@ fn parse_named(s: &str) -> Result<Color> {
 mod tests {
     use super::*;
 
+    const FORMATS_HINT: &str = "expected hex (#rrggbb), ANSI name (red, bright_blue, ...), \
+                                indexed (ansi:0..255), or reset";
+
+    fn error_text(input: &str) -> String {
+        format!("{:#}", parse_color(input).unwrap_err())
+    }
+
     // ── parse_color: hex ──
 
     #[test]
@@ -109,24 +115,28 @@ mod tests {
 
     #[test]
     fn parse_color_hex_rejects_three_digit_shorthand() {
-        let err = parse_color("#fff").expect_err("3-digit hex rejected");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("#fff"), "{msg}");
-        assert!(msg.contains("6-digit"), "{msg}");
+        assert_eq!(
+            error_text("#fff"),
+            r##"invalid hex color "#fff": expected 6-digit hex (e.g., #cdd6f4)"##,
+        );
     }
 
     #[test]
     fn parse_color_hex_rejects_non_hex_chars() {
-        let err = parse_color("#zzzzzz").expect_err("invalid characters rejected");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("#zzzzzz"), "{msg}");
+        for input in ["#zzzzzz", "#+abcde"] {
+            assert_eq!(
+                error_text(input),
+                format!("invalid hex color {input:?}: non-hex characters in color"),
+            );
+        }
     }
 
     #[test]
     fn parse_color_hex_rejects_missing_hash_prefix() {
-        let err = parse_color("cdd6f4").expect_err("bare hex without # rejected");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("cdd6f4"), "{msg}");
+        assert_eq!(
+            error_text("cdd6f4"),
+            format!(r#"unknown color "cdd6f4": {FORMATS_HINT}"#),
+        );
     }
 
     // ── parse_color: indexed ──
@@ -144,16 +154,18 @@ mod tests {
 
     #[test]
     fn parse_color_indexed_rejects_out_of_range() {
-        let err = parse_color("ansi:256").expect_err("256 is out of u8 range");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("ansi:256"), "{msg}");
+        assert_eq!(
+            error_text("ansi:256"),
+            r#"invalid indexed color "ansi:256": expected 0-255 (e.g., ansi:174): number too large to fit in target type"#,
+        );
     }
 
     #[test]
     fn parse_color_indexed_rejects_non_numeric() {
-        let err = parse_color("ansi:abc").expect_err("non-numeric rejected");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("ansi:abc"), "{msg}");
+        assert_eq!(
+            error_text("ansi:abc"),
+            r#"invalid indexed color "ansi:abc": expected 0-255 (e.g., ansi:174): invalid digit found in string"#,
+        );
     }
 
     // Module doc claims `ansi:N` is case-insensitive; pin it so a regression that drops the
@@ -217,22 +229,17 @@ mod tests {
 
     #[test]
     fn parse_color_named_rejects_unknown_color() {
-        let err = parse_color("orange").expect_err("orange is not a 16-color name");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("orange"), "{msg}");
-        // Error must hint at every supported format so a typo is recoverable without the docs.
-        assert!(msg.contains("hex") || msg.contains("#rrggbb"), "{msg}");
-        assert!(msg.contains("ANSI") || msg.contains("ansi:"), "{msg}");
-        assert!(msg.contains("reset"), "{msg}");
+        assert_eq!(
+            error_text("orange"),
+            format!(r#"unknown color "orange": {FORMATS_HINT}"#),
+        );
     }
 
     // ── parse_color: edge cases ──
 
     #[test]
     fn parse_color_rejects_empty_string() {
-        let err = parse_color("").expect_err("empty string rejected");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("empty"), "{msg}");
+        assert_eq!(error_text(""), "empty color value");
     }
 
     #[test]

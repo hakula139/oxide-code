@@ -1,12 +1,12 @@
-//! Visual glyphs used across the TUI — single source of truth for iconography.
+//! Visual glyphs shared across the TUI.
 //!
 //! Conventions:
 //!
 //! - First-line prefix glyphs end with a trailing space (`"❯ "`, `"◉ "`, `"✗ "`).
 //! - Continuation indents (`*_CONT`) match the prefix's display width.
-//! - Tool status indicators (`✓` / `✗`) carry no trailing space; renderer handles the gap.
+//! - Tool status indicators (`✓` / `✗`) carry no trailing space. The renderer handles the gap.
 
-// ── User prompt ──
+// ── User Prompt ──
 
 /// First-line prefix for user-typed prompts.
 pub(crate) const USER_PROMPT_PREFIX: &str = "❯ ";
@@ -50,7 +50,40 @@ pub(crate) const TOOL_ERROR: &str = "✗";
 /// First-line prefix for error blocks.
 pub(crate) const ERROR_PREFIX: &str = "✗ ";
 
-// ── Inline markers ──
+/// Prefix for an error shown inside a modal, such as a failed delete or session load.
+pub(crate) const MODAL_ERROR_PREFIX: &str = "! ";
+
+// ── Pickers ──
+
+/// Prefix of the highlighted row in list and searchable pickers.
+pub(crate) const CURSOR_MARKER: &str = "> ";
+
+/// Display width of [`CURSOR_MARKER`] in terminal columns.
+pub(crate) const CURSOR_MARKER_WIDTH: u16 = 2;
+
+/// Marker after the label of a list picker's active row.
+pub(crate) const ACTIVE_MARKER: &str = "✓";
+
+/// Dot for the chosen effort level.
+pub(crate) const RADIO_SELECTED: char = '●';
+
+/// Dot for an effort level on the slider that is not chosen.
+pub(crate) const RADIO_UNSELECTED: char = '○';
+
+// ── Rules ──
+
+/// Horizontal line segment, repeated to draw rules and the effort slider track.
+pub(crate) const HORIZONTAL_RULE: &str = "─";
+
+// ── Separators ──
+
+/// Separator between status bar segments.
+pub(crate) const SEGMENT_SEPARATOR: &str = " │ ";
+
+/// Separator between items on one line of the welcome screen.
+pub(crate) const INLINE_SEPARATOR: &str = " · ";
+
+// ── Inline Markers ──
 
 /// Inline newline replacement for collapsed multi-line previews.
 pub(crate) const NEWLINE_GLYPH: &str = " ⏎ ";
@@ -59,9 +92,9 @@ pub(crate) const NEWLINE_GLYPH: &str = " ⏎ ";
 /// mode.
 pub(crate) const INTERRUPTED_MARKER: &str = "(interrupted)";
 
-// ── Status spinner ──
+// ── Status Spinner ──
 
-/// 8-dot Braille spinner (counterclockwise); cycle by modulo index.
+/// 8-dot Braille spinner, counterclockwise. Cycle by modulo index.
 pub(crate) const SPINNER_FRAMES: &[char] = &['⣷', '⣯', '⣟', '⡿', '⢿', '⣻', '⣽', '⣾'];
 
 #[cfg(test)]
@@ -70,10 +103,10 @@ mod tests {
 
     use super::*;
 
-    // ── Width invariants ──
+    // ── Width Invariants ──
 
     #[test]
-    fn user_prompt_prefix_width_matches_string_width() {
+    fn user_prompt_prefix_width_matches_display_width() {
         assert_eq!(
             USER_PROMPT_PREFIX.width(),
             usize::from(USER_PROMPT_PREFIX_WIDTH),
@@ -90,7 +123,12 @@ mod tests {
         assert_eq!(ASSISTANT_CONT.width(), ASSISTANT_PREFIX.width());
     }
 
-    // ── Cross-glyph consistency ──
+    #[test]
+    fn cursor_marker_width_matches_display_width() {
+        assert_eq!(CURSOR_MARKER.width(), usize::from(CURSOR_MARKER_WIDTH));
+    }
+
+    // ── Cross-Glyph Consistency ──
 
     #[test]
     fn thinking_prefix_starts_with_bar() {

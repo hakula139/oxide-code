@@ -5,6 +5,8 @@ use super::registry::{SlashCommand, SlashKind, SlashOutcome};
 use crate::protocol::Op;
 use crate::tui::action::Action;
 
+// ── ClearCmd ──
+
 pub(super) struct ClearCmd;
 
 impl SlashCommand for ClearCmd {
@@ -34,14 +36,16 @@ mod tests {
     use super::*;
     use crate::slash::test_session_info;
 
-    // ── ClearCmd metadata ──
+    // ── ClearCmd::name ──
 
     #[test]
-    fn metadata_matches_built_ins_contract() {
+    fn name_and_metadata_match_built_ins_contract() {
         assert_eq!(ClearCmd.name(), "clear");
         assert_eq!(ClearCmd.aliases(), &["new", "reset"]);
         assert_ne!(ClearCmd.description(), "");
     }
+
+    // ── ClearCmd::classify ──
 
     #[test]
     fn classify_is_mutating() {

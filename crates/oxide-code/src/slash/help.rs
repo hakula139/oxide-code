@@ -7,6 +7,8 @@ use super::context::SlashContext;
 use super::registry::{BUILT_INS, SlashCommand, SlashOutcome};
 use crate::tui::modal::kv_overview::{KvOverview, KvSection};
 
+// ── HelpCmd ──
+
 pub(super) struct HelpCmd;
 
 impl SlashCommand for HelpCmd {
@@ -57,10 +59,10 @@ mod tests {
     use crate::slash::resume::ResumeCmd;
     use crate::tui::modal::Modal;
 
-    // ── HelpCmd metadata ──
+    // ── HelpCmd::name ──
 
     #[test]
-    fn metadata_matches_built_ins_contract() {
+    fn name_and_metadata_match_built_ins_contract() {
         assert_eq!(HelpCmd.name(), "help");
         assert_eq!(HelpCmd.aliases(), [] as [&str; 0]);
         assert_ne!(HelpCmd.description(), "");

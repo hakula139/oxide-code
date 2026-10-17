@@ -24,16 +24,9 @@ enum Tier {
 
 /// Empty `query` returns the slice in declared order; non-empty matches by prefix or substring,
 /// sorted by tier.
-pub(crate) fn filter_and_rank(query: &str, commands: &[&dyn SlashCommand]) -> Vec<MatchedCommand> {
+pub(super) fn filter_and_rank(query: &str, commands: &[&dyn SlashCommand]) -> Vec<MatchedCommand> {
     if query.is_empty() {
-        return commands
-            .iter()
-            .map(|cmd| MatchedCommand {
-                name: cmd.name(),
-                description: cmd.description(),
-                matched_alias: None,
-            })
-            .collect();
+        return commands.iter().map(|cmd| on_name(*cmd)).collect();
     }
     let q = query.to_ascii_lowercase();
     let mut hits: Vec<(Tier, MatchedCommand)> = commands
@@ -112,50 +105,32 @@ pub(super) fn rank_by_prefix<'a, T>(
 
 #[cfg(test)]
 mod tests {
-    use super::super::context::SlashContext;
-    use super::super::registry::SlashOutcome;
     use super::*;
+    use crate::slash::registry::testing::FakeCmd;
 
-    struct Fake {
-        name: &'static str,
-        aliases: &'static [&'static str],
-        description: &'static str,
-    }
-
-    impl SlashCommand for Fake {
-        fn name(&self) -> &'static str {
-            self.name
-        }
-        fn aliases(&self) -> &'static [&'static str] {
-            self.aliases
-        }
-        fn description(&self) -> &'static str {
-            self.description
-        }
-        fn execute(&self, _: &str, _: &SlashContext<'_>) -> Result<SlashOutcome, String> {
-            Err("fake".to_owned())
-        }
-    }
-
-    const HELP: Fake = Fake {
+    const HELP: FakeCmd = FakeCmd {
         name: "help",
         aliases: &[],
         description: "list",
+        ..FakeCmd::DEFAULT
     };
-    const CLEAR: Fake = Fake {
+    const CLEAR: FakeCmd = FakeCmd {
         name: "clear",
         aliases: &["new", "reset"],
         description: "wipe",
+        ..FakeCmd::DEFAULT
     };
-    const STATUS: Fake = Fake {
+    const STATUS: FakeCmd = FakeCmd {
         name: "status",
         aliases: &[],
         description: "show",
+        ..FakeCmd::DEFAULT
     };
-    const COMPACT: Fake = Fake {
+    const COMPACT: FakeCmd = FakeCmd {
         name: "compact",
         aliases: &[],
         description: "fold",
+        ..FakeCmd::DEFAULT
     };
 
     fn registry() -> Vec<&'static dyn SlashCommand> {
@@ -177,10 +152,11 @@ mod tests {
 
     #[test]
     fn filter_and_rank_name_prefix_beats_substring_within_other_command() {
-        const FORCONFIG: Fake = Fake {
+        const FORCONFIG: FakeCmd = FakeCmd {
             name: "forconfig",
             aliases: &[],
             description: "fake",
+            ..FakeCmd::DEFAULT
         };
         let with_substring: Vec<&dyn SlashCommand> = vec![&COMPACT, &FORCONFIG];
         let rows = filter_and_rank("co", &with_substring);
@@ -189,10 +165,11 @@ mod tests {
 
     #[test]
     fn filter_and_rank_alias_prefix_beats_name_substring() {
-        const RENEW: Fake = Fake {
+        const RENEW: FakeCmd = FakeCmd {
             name: "renew",
             aliases: &[],
             description: "fake",
+            ..FakeCmd::DEFAULT
         };
         let with_substring: Vec<&dyn SlashCommand> = vec![&CLEAR, &RENEW];
         let rows = filter_and_rank("new", &with_substring);
@@ -203,10 +180,11 @@ mod tests {
 
     #[test]
     fn filter_and_rank_within_tier_sorts_alphabetically_on_canonical_name() {
-        const SELECT: Fake = Fake {
+        const SELECT: FakeCmd = FakeCmd {
             name: "select",
             aliases: &[],
             description: "fake",
+            ..FakeCmd::DEFAULT
         };
         let two_prefix: Vec<&dyn SlashCommand> = vec![&STATUS, &SELECT];
         let rows = filter_and_rank("s", &two_prefix);
@@ -246,10 +224,11 @@ mod tests {
 
     #[test]
     fn best_match_prefers_name_prefix_over_any_alias_branch() {
-        const ALSO: Fake = Fake {
+        const ALSO: FakeCmd = FakeCmd {
             name: "clearview",
             aliases: &["cl"],
             description: "fake",
+            ..FakeCmd::DEFAULT
         };
         let (tier, m) = best_match("cl", &ALSO).unwrap();
         assert_eq!(tier, Tier::NamePrefix);
@@ -294,15 +273,5 @@ mod tests {
     #[test]
     fn rank_by_prefix_unmatched_query_is_empty() {
         assert_eq!(ranked("zzz"), [] as [&str; 0]);
-    }
-
-    // ── Fake fixture ──
-
-    #[test]
-    fn fake_execute_errors_without_panicking() {
-        // Stub so registries containing Fake don't panic during dispatch.
-        let info = crate::slash::test_session_info();
-        let outcome = HELP.execute("anything", &SlashContext::new(&info, None));
-        assert_eq!(outcome.unwrap_err(), "fake");
     }
 }

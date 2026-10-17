@@ -7,17 +7,18 @@ use ratatui::layout::Rect;
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
+use unicode_width::UnicodeWidthStr;
 
-use super::chrome::{FOOTER_HEIGHT, Header, render_footer};
+use super::chrome::{FOOTER_HEIGHT, Header, KEY_UP_DOWN, render_footer};
 use super::{Modal, ModalKey};
+use crate::tui::saturating_u16;
 use crate::tui::theme::Theme;
 use crate::tui::viewport::Viewport;
 
 // ── Constants ──
 
 const COLUMN_GAP: usize = 2;
-const FOOTER: &str = "Esc to close";
-const SCROLL_FOOTER: &str = "↑ ↓ to scroll · Esc to close";
+const CLOSE_HINT: &str = "Esc to close";
 
 // ── KvSection ──
 
@@ -86,7 +87,7 @@ impl KvOverview {
         self.sections
             .iter()
             .flat_map(|s| s.rows.iter())
-            .map(|row| row.label.chars().count())
+            .map(|row| row.label.width())
             .max()
             .unwrap_or(0)
     }
@@ -122,12 +123,19 @@ impl KvOverview {
             let value_width = note_column(section, label_width, width);
             for row in &section.rows {
                 let mut spans = vec![
-                    Span::styled(format!("{:<label_width$}", row.label), theme.dim()),
+                    Span::styled(
+                        format!(
+                            "{}{}",
+                            row.label,
+                            " ".repeat(label_width - row.label.width())
+                        ),
+                        theme.dim(),
+                    ),
                     Span::styled(" ".repeat(COLUMN_GAP), theme.surface()),
                     Span::styled(row.value.clone(), theme.text()),
                 ];
                 if let Some(note) = &row.note {
-                    let pad = value_width.saturating_sub(row.value.chars().count());
+                    let pad = value_width.saturating_sub(row.value.width());
                     spans.push(Span::styled(" ".repeat(pad + COLUMN_GAP), theme.surface()));
                     spans.push(Span::styled(note.clone(), theme.dim()));
                 }
@@ -154,7 +162,7 @@ fn note_column(section: &KvSection, label_width: usize, width: usize) -> usize {
         .iter()
         .filter_map(|row| {
             let note = row.note.as_ref()?;
-            Some((row.value.chars().count(), note.chars().count()))
+            Some((row.value.width(), note.width()))
         })
         .fold((0, 0), |(values, notes), (value, note)| {
             (values.max(value), notes.max(note))
@@ -165,7 +173,7 @@ fn note_column(section: &KvSection, label_width: usize, width: usize) -> usize {
 
 impl Modal for KvOverview {
     fn height(&self, _width: u16, max_height: u16) -> u16 {
-        let body = u16::try_from(self.body_len()).unwrap_or(u16::MAX);
+        let body = saturating_u16(self.body_len());
         (self.header.height() + FOOTER_HEIGHT)
             .saturating_add(body)
             .min(max_height)
@@ -184,13 +192,13 @@ impl Modal for KvOverview {
         lines.extend(body.into_iter().skip(window.start).take(window.len()));
         frame.render_widget(Paragraph::new(lines).style(theme.surface()), area);
 
-        let hint = if scrollable { SCROLL_FOOTER } else { FOOTER };
-        render_footer(
-            frame,
-            area,
-            Line::from(Span::styled(hint, theme.dim())),
-            theme,
-        );
+        let scroll_hint = format!("{KEY_UP_DOWN} to scroll");
+        let hints: &[&str] = if scrollable {
+            &[&scroll_hint, CLOSE_HINT]
+        } else {
+            &[CLOSE_HINT]
+        };
+        render_footer(frame, area, hints, theme);
     }
 
     fn handle_key(&mut self, event: &KeyEvent) -> ModalKey {
@@ -211,6 +219,14 @@ impl Modal for KvOverview {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::modal::testing::render_rows;
+
+    fn trimmed_rows(modal: &KvOverview, width: u16, height: u16) -> Vec<String> {
+        render_rows(modal, width, height)
+            .into_iter()
+            .map(|row| row.trim_end().to_owned())
+            .collect()
+    }
 
     fn row(k: &str, v: &str) -> (String, String) {
         (k.to_owned(), v.to_owned())
@@ -257,6 +273,29 @@ mod tests {
         assert_eq!(m.label_width(), 0);
     }
 
+    // ── KvOverview::body_lines ──
+
+    #[test]
+    fn body_lines_aligns_cjk_labels_values_and_notes_by_display_width() {
+        let theme = Theme::default();
+        let m = KvOverview::new(
+            "Config",
+            vec![KvSection::annotated(vec![
+                ("中文".into(), "值".into(), "说明".into()),
+                ("a".into(), "abc".into(), "note".into()),
+            ])],
+        );
+        let text = |width| -> Vec<String> {
+            m.body_lines(&theme, width)
+                .iter()
+                .map(ToString::to_string)
+                .collect()
+        };
+
+        assert_eq!(text(15), ["中文  值   说明", "a     abc  note"]);
+        assert_eq!(text(14), ["中文  值  说明", "a     abc  note"]);
+    }
+
     // ── KvOverview::height ──
 
     #[test]
@@ -283,27 +322,10 @@ mod tests {
         KvOverview::new("Long", vec![KvSection::new(rows)])
     }
 
-    fn render_rows(m: &KvOverview, width: u16, height: u16) -> Vec<String> {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal
-            .draw(|frame| m.render(frame, Rect::new(0, 0, width, height), &Theme::default()))
-            .unwrap();
-        let buf = terminal.backend().buffer();
-        (0..height)
-            .map(|y| {
-                let row: String = (0..width).map(|x| buf[(x, y)].symbol()).collect();
-                row.trim_end().to_owned()
-            })
-            .collect()
-    }
-
     #[test]
     fn render_lays_out_every_row_with_a_close_hint_when_it_fits() {
         let m = flat_overview();
-        let rows = render_rows(&m, 40, m.height(40, 40));
+        let rows = trimmed_rows(&m, 40, m.height(40, 40));
         assert_eq!(
             rows,
             [
@@ -320,10 +342,18 @@ mod tests {
     #[test]
     fn render_clips_the_body_between_pinned_header_and_scroll_hint() {
         let m = long_overview();
-        let rows = render_rows(&m, 40, 7);
+        let rows = trimmed_rows(&m, 40, 7);
         assert_eq!(
             rows,
-            ["Long", "", "k0  v0", "k1  v1", "k2  v2", "", SCROLL_FOOTER]
+            [
+                "Long",
+                "",
+                "k0  v0",
+                "k1  v1",
+                "k2  v2",
+                "",
+                "↑ / ↓ to scroll  ·  Esc to close"
+            ]
         );
     }
 
@@ -345,7 +375,7 @@ mod tests {
     fn render_aligns_notes_in_a_column_when_they_fit() {
         // 42 columns is exactly label + gap + value + gap + note for this fixture.
         let m = annotated_overview();
-        let rows = render_rows(&m, 42, m.height(42, 40));
+        let rows = trimmed_rows(&m, 42, m.height(42, 40));
         assert_eq!(
             rows[2..6],
             [
@@ -360,7 +390,7 @@ mod tests {
     #[test]
     fn render_puts_notes_after_their_values_when_the_column_would_overflow() {
         let m = annotated_overview();
-        let rows = render_rows(&m, 41, m.height(41, 40));
+        let rows = trimmed_rows(&m, 41, m.height(41, 40));
         assert_eq!(
             rows[2..4],
             [
@@ -371,11 +401,27 @@ mod tests {
     }
 
     #[test]
-    fn render_runs_at_typical_widths_without_panicking() {
+    fn render_separates_headed_sections_with_blank_rows() {
         let m = sectioned_overview();
-        for width in [40_u16, 80, 120] {
-            render_rows(&m, width, m.height(width, 40));
-        }
+
+        let rows = trimmed_rows(&m, 40, m.height(40, 40));
+
+        assert_eq!(
+            rows,
+            [
+                "Config",
+                "",
+                "Resolved",
+                "",
+                "Model  Claude Opus",
+                "",
+                "Source Files",
+                "",
+                "User   ~/.config/ox/config.toml",
+                "",
+                "Esc to close",
+            ]
+        );
     }
 
     // ── KvOverview::handle_key ──
@@ -383,34 +429,38 @@ mod tests {
     #[test]
     fn handle_key_scrolls_the_clipped_body_within_its_bounds() {
         let mut m = long_overview();
-        render_rows(&m, 40, 7);
+        trimmed_rows(&m, 40, 7);
 
         m.handle_key(&KeyEvent::from(KeyCode::Down));
-        assert_eq!(render_rows(&m, 40, 7)[2], "k1  v1");
+        assert_eq!(trimmed_rows(&m, 40, 7)[2], "k1  v1");
         m.handle_key(&KeyEvent::from(KeyCode::PageDown));
         assert_eq!(
-            render_rows(&m, 40, 7)[2],
+            trimmed_rows(&m, 40, 7)[2],
             "k4  v4",
             "a page is the three body rows"
         );
         m.handle_key(&KeyEvent::from(KeyCode::End));
-        assert_eq!(render_rows(&m, 40, 7)[4], "k9  v9", "End pins the last row");
+        assert_eq!(
+            trimmed_rows(&m, 40, 7)[4],
+            "k9  v9",
+            "End pins the last row"
+        );
         m.handle_key(&KeyEvent::from(KeyCode::Down));
         assert_eq!(
-            render_rows(&m, 40, 7)[4],
+            trimmed_rows(&m, 40, 7)[4],
             "k9  v9",
             "no scrolling past the end"
         );
         m.handle_key(&KeyEvent::from(KeyCode::Char('k')));
-        assert_eq!(render_rows(&m, 40, 7)[4], "k8  v8");
+        assert_eq!(trimmed_rows(&m, 40, 7)[4], "k8  v8");
         m.handle_key(&KeyEvent::from(KeyCode::PageUp));
-        assert_eq!(render_rows(&m, 40, 7)[2], "k3  v3");
+        assert_eq!(trimmed_rows(&m, 40, 7)[2], "k3  v3");
         m.handle_key(&KeyEvent::from(KeyCode::Home));
-        assert_eq!(render_rows(&m, 40, 7)[2], "k0  v0");
+        assert_eq!(trimmed_rows(&m, 40, 7)[2], "k0  v0");
     }
 
     #[test]
-    fn every_key_is_consumed_so_only_universal_cancel_dismisses() {
+    fn handle_key_every_key_is_consumed_so_only_universal_cancel_dismisses() {
         // Esc / Ctrl+C close at the stack layer, so the modal itself never pops.
         let mut m = flat_overview();
         for code in [

@@ -6,6 +6,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
 use syntect::highlighting::Theme as SyntaxTheme;
 
+use crate::tui::glyphs::SEGMENT_SEPARATOR;
+
 pub(crate) mod builtin;
 mod color;
 mod loader;
@@ -19,12 +21,12 @@ pub(crate) fn load_builtin(name: &str) -> Option<Theme> {
     Some(loader::parse_theme(body).expect("vendored builtin theme TOML must parse"))
 }
 
-/// One theme slot — optional fg, bg, and modifiers composed into a [`Style`].
+/// One theme slot with optional fg, bg, and modifiers composed into a [`Style`].
 ///
 /// Each component is independently optional so an override can patch one axis (e.g., bg only)
 /// without forcing callers to also restate the other two. [`Slot::style`] folds the three into
 /// a ratatui `Style`, leaving unset axes as the terminal's default.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Slot {
     pub(crate) fg: Option<Color>,
     pub(crate) bg: Option<Color>,
@@ -52,7 +54,7 @@ macro_rules! for_each_slot {
         $callback! {
             // Text hierarchy
             (text, "Primary text"),
-            (muted, "Secondary text and labels — between text and dim"),
+            (muted, "Secondary text and labels, dimmer than text and brighter than dim"),
             (dim, "Dimmed metadata, timestamps"),
 
             // Surfaces
@@ -79,14 +81,14 @@ macro_rules! for_each_slot {
             (diff_del, "Background fill for deleted diff rows (Catppuccin Mocha minus-style)"),
 
             // Markdown headings
-            (heading_h1, "H1 — most prominent heading (bold + underlined)"),
-            (heading_h2, "H2 — bold section header"),
-            (heading_h3, "H3 — bold italic"),
-            (heading_minor, "H4–H6 — italic (demoted minor headings)"),
+            (heading_h1, "H1, most prominent heading (bold + underlined)"),
+            (heading_h2, "H2, bold section header"),
+            (heading_h3, "H3, bold italic"),
+            (heading_minor, "H4–H6, italic (demoted minor headings)"),
 
             // Markdown body
             (thinking, "Thinking text (dimmed italic)"),
-            (link, "Markdown links — underlined"),
+            (link, "Markdown links, underlined"),
             (blockquote, "Markdown blockquote marker (`> `)"),
             (list_marker, "List item bullet / number marker"),
 
@@ -130,7 +132,7 @@ for_each_slot!(define_theme_struct);
 impl Default for Theme {
     fn default() -> Self {
         // Cache the parsed Mocha palette in a `LazyLock` so the TOML parse runs at most once per
-        // process; clones are cheap (every `Slot` is `Copy`).
+        // process. Clones are cheap (every `Slot` is `Copy`).
         static MOCHA: LazyLock<Theme> = LazyLock::new(|| {
             loader::parse_theme(builtin::MOCHA).expect("vendored mocha.toml must parse")
         });
@@ -140,137 +142,45 @@ impl Default for Theme {
 
 // ── Style Helpers ──
 
+macro_rules! define_slot_accessor {
+    (diff_add) => {
+        pub(crate) fn diff_add_row(&self) -> Style {
+            Style::default().bg(self.diff_add.bg.unwrap_or(Color::Reset))
+        }
+    };
+    (diff_del) => {
+        pub(crate) fn diff_del_row(&self) -> Style {
+            Style::default().bg(self.diff_del.bg.unwrap_or(Color::Reset))
+        }
+    };
+    ($name:ident) => {
+        pub(crate) fn $name(&self) -> Style {
+            self.$name.style()
+        }
+    };
+}
+
+macro_rules! define_slot_accessors {
+    ( $( ($name:ident, $doc:literal), )* ) => {
+        impl Theme {
+            $( define_slot_accessor!($name); )*
+        }
+    };
+}
+
+for_each_slot!(define_slot_accessors);
+
 impl Theme {
-    pub(crate) fn text(&self) -> Style {
-        self.text.style()
-    }
-
-    pub(crate) fn muted(&self) -> Style {
-        self.muted.style()
-    }
-
-    pub(crate) fn dim(&self) -> Style {
-        self.dim.style()
-    }
-
-    pub(crate) fn surface(&self) -> Style {
-        self.surface.style()
-    }
-
-    pub(crate) fn accent(&self) -> Style {
-        self.accent.style()
-    }
-
-    pub(crate) fn user(&self) -> Style {
-        self.user.style()
-    }
-
-    pub(crate) fn queued(&self) -> Style {
-        self.queued.style()
-    }
-
-    pub(crate) fn assistant(&self) -> Style {
-        self.assistant.style()
-    }
-
-    pub(crate) fn info(&self) -> Style {
-        self.info.style()
-    }
-
-    pub(crate) fn success(&self) -> Style {
-        self.success.style()
-    }
-
-    pub(crate) fn warning(&self) -> Style {
-        self.warning.style()
-    }
-
-    pub(crate) fn error(&self) -> Style {
-        self.error.style()
-    }
-
-    pub(crate) fn diff_add_row(&self) -> Style {
-        Style::default().bg(self.diff_add.bg.unwrap_or(Color::Reset))
-    }
-
-    pub(crate) fn diff_del_row(&self) -> Style {
-        Style::default().bg(self.diff_del.bg.unwrap_or(Color::Reset))
-    }
-
-    pub(crate) fn tool_border(&self) -> Style {
-        self.tool_border.style()
-    }
-
-    pub(crate) fn tool_icon(&self) -> Style {
-        self.tool_icon.style()
-    }
-
-    pub(crate) fn thinking(&self) -> Style {
-        self.thinking.style()
+    pub(crate) fn row_style(&self, selected: bool) -> Style {
+        if selected {
+            self.text().add_modifier(Modifier::BOLD)
+        } else {
+            self.dim()
+        }
     }
 
     pub(crate) fn separator_span(&self) -> Span<'static> {
-        Span::styled(" │ ", self.separator())
-    }
-
-    pub(crate) fn separator(&self) -> Style {
-        self.separator.style()
-    }
-
-    pub(crate) fn border_focused(&self) -> Style {
-        self.border_focused.style()
-    }
-
-    pub(crate) fn border_unfocused(&self) -> Style {
-        self.border_unfocused.style()
-    }
-
-    pub(crate) fn heading_h1(&self) -> Style {
-        self.heading_h1.style()
-    }
-
-    pub(crate) fn heading_h2(&self) -> Style {
-        self.heading_h2.style()
-    }
-
-    pub(crate) fn heading_h3(&self) -> Style {
-        self.heading_h3.style()
-    }
-
-    pub(crate) fn heading_minor(&self) -> Style {
-        self.heading_minor.style()
-    }
-
-    pub(crate) fn inline_code(&self) -> Style {
-        self.inline_code.style()
-    }
-
-    pub(crate) fn code(&self) -> Style {
-        self.code.style()
-    }
-
-    pub(crate) fn link(&self) -> Style {
-        self.link.style()
-    }
-
-    pub(crate) fn blockquote(&self) -> Style {
-        self.blockquote.style()
-    }
-
-    pub(crate) fn list_marker(&self) -> Style {
-        self.list_marker.style()
-    }
-
-    pub(crate) fn horizontal_rule(&self) -> Style {
-        self.horizontal_rule.style()
-    }
-
-    pub(crate) fn table_header(&self) -> Style {
-        self.table_header.style()
-    }
-
-    pub(crate) fn table_border(&self) -> Style {
-        self.table_border.style()
+        Span::styled(SEGMENT_SEPARATOR, self.separator())
     }
 }
 
@@ -278,52 +188,48 @@ impl Theme {
 mod tests {
     use super::*;
 
-    // ── Slot ──
+    // ── Slot::style ──
 
     #[test]
-    fn slot_fg_only_sets_only_foreground() {
-        let s = Slot {
+    fn style_fg_only_sets_only_foreground() {
+        let slot = Slot {
             fg: Some(Color::Red),
-            bg: None,
-            modifiers: Modifier::empty(),
+            ..Slot::default()
         };
-        let style = s.style();
-        assert_eq!(style.fg, Some(Color::Red));
-        assert_eq!(style.bg, None);
-        assert!(style.add_modifier.is_empty());
+
+        assert_eq!(slot.style(), Style::default().fg(Color::Red));
     }
 
     #[test]
-    fn slot_bg_only_sets_only_background() {
-        let s = Slot {
-            fg: None,
+    fn style_bg_only_sets_only_background() {
+        let slot = Slot {
             bg: Some(Color::Blue),
-            modifiers: Modifier::empty(),
+            ..Slot::default()
         };
-        let style = s.style();
-        assert_eq!(style.fg, None);
-        assert_eq!(style.bg, Some(Color::Blue));
-        assert!(style.add_modifier.is_empty());
+
+        assert_eq!(slot.style(), Style::default().bg(Color::Blue));
     }
 
     #[test]
-    fn slot_style_carries_modifiers() {
-        let s = Slot {
+    fn style_carries_modifiers() {
+        let slot = Slot {
             fg: Some(Color::Green),
             bg: None,
-            modifiers: Modifier::BOLD.union(Modifier::ITALIC),
+            modifiers: Modifier::BOLD | Modifier::ITALIC,
         };
-        let style = s.style();
-        assert_eq!(style.fg, Some(Color::Green));
-        assert_eq!(style.bg, None);
-        assert!(style.add_modifier.contains(Modifier::BOLD));
-        assert!(style.add_modifier.contains(Modifier::ITALIC));
+
+        assert_eq!(
+            slot.style(),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD | Modifier::ITALIC)
+        );
     }
 
-    // ── Default ──
+    // ── Theme::default ──
 
     #[test]
-    fn default_theme_has_distinct_colors() {
+    fn default_has_distinct_colors() {
         let t = Theme::default();
         assert_ne!(t.text.fg, t.muted.fg);
         assert_ne!(t.muted.fg, t.dim.fg);
@@ -333,121 +239,54 @@ mod tests {
         assert_ne!(t.diff_add.bg, t.diff_del.bg);
     }
 
-    // ── Style helpers ──
-
     #[test]
-    fn style_helpers_return_expected_foreground() {
+    fn default_accent_is_bold() {
         let t = Theme::default();
-        assert_eq!(t.text().fg, t.text.fg);
-        assert_eq!(t.muted().fg, t.muted.fg);
-        assert_eq!(t.dim().fg, t.dim.fg);
-        assert_eq!(t.accent().fg, t.accent.fg);
-        assert_eq!(t.user().fg, t.user.fg);
-        assert_eq!(t.assistant().fg, t.assistant.fg);
-        assert_eq!(t.success().fg, t.success.fg);
-        assert_eq!(t.warning().fg, t.warning.fg);
-        assert_eq!(t.error().fg, t.error.fg);
-        assert_eq!(t.inline_code().fg, t.inline_code.fg);
-        assert_eq!(t.inline_code().bg, None);
-        assert_eq!(t.code().fg, t.code.fg);
-        assert_eq!(t.code().bg, None);
+        assert_eq!(t.accent.modifiers, Modifier::BOLD);
     }
 
     #[test]
-    fn diff_row_helpers_set_only_background() {
+    fn default_chrome_slots_reuse_accent_and_dim_colors() {
         let t = Theme::default();
-
-        let add = t.diff_add_row();
-        assert_eq!(add.bg, t.diff_add.bg);
-        assert_eq!(add.fg, None);
-
-        let del = t.diff_del_row();
-        assert_eq!(del.bg, t.diff_del.bg);
-        assert_eq!(del.fg, None);
+        assert_eq!(t.tool_icon.fg, t.accent.fg);
+        assert_eq!(t.border_focused.fg, t.accent.fg);
+        assert_eq!(t.border_unfocused.fg, t.dim.fg);
+        assert_eq!(t.list_marker.fg, t.accent.fg);
+        assert_eq!(t.blockquote.fg, t.success.fg);
     }
 
     #[test]
-    fn accent_is_bold() {
+    fn default_headings_step_down_from_bold_underlined_to_italic() {
         let t = Theme::default();
-        assert!(t.accent().add_modifier.contains(Modifier::BOLD));
-    }
-
-    // ── Composite helpers ──
-
-    #[test]
-    fn composite_helpers_route_to_expected_slot_foreground() {
-        let t = Theme::default();
-        assert_eq!(t.tool_border().fg, t.tool_border.fg);
-        assert_eq!(t.tool_icon().fg, t.accent.fg);
-        assert_eq!(t.border_focused().fg, t.accent.fg);
-        assert_eq!(t.border_unfocused().fg, t.dim.fg);
-    }
-
-    #[test]
-    fn thinking_is_italic() {
-        let t = Theme::default();
-        assert!(t.thinking().add_modifier.contains(Modifier::ITALIC));
+        let text = t.text();
+        assert_eq!(
+            t.heading_h1(),
+            text.add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+        );
+        assert_eq!(t.heading_h2(), text.add_modifier(Modifier::BOLD));
+        assert_eq!(
+            t.heading_h3(),
+            text.add_modifier(Modifier::BOLD | Modifier::ITALIC)
+        );
+        assert_eq!(t.heading_minor(), text.add_modifier(Modifier::ITALIC));
     }
 
     #[test]
-    fn separator_span_contains_pipe() {
+    fn default_link_is_underlined_accent() {
         let t = Theme::default();
-        assert!(t.separator_span().content.contains('│'));
-    }
-
-    // ── Markdown rendering ──
-
-    #[test]
-    fn heading_styles_use_fg_with_expected_modifiers() {
-        let t = Theme::default();
-
-        let h1 = t.heading_h1();
-        assert_eq!(h1.fg, t.text.fg);
-        assert!(h1.add_modifier.contains(Modifier::BOLD));
-        assert!(h1.add_modifier.contains(Modifier::UNDERLINED));
-
-        let h2 = t.heading_h2();
-        assert_eq!(h2.fg, t.text.fg);
-        assert!(h2.add_modifier.contains(Modifier::BOLD));
-        assert!(!h2.add_modifier.contains(Modifier::UNDERLINED));
-
-        let h3 = t.heading_h3();
-        assert_eq!(h3.fg, t.text.fg);
-        assert!(h3.add_modifier.contains(Modifier::BOLD));
-        assert!(h3.add_modifier.contains(Modifier::ITALIC));
-
-        let h4 = t.heading_minor();
-        assert_eq!(h4.fg, t.text.fg);
-        assert!(h4.add_modifier.contains(Modifier::ITALIC));
-        assert!(!h4.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(
+            t.link(),
+            Style::default()
+                .fg(t.accent.fg.unwrap())
+                .add_modifier(Modifier::UNDERLINED)
+        );
     }
 
     #[test]
-    fn link_uses_accent_with_underline() {
+    fn default_thinking_is_italic() {
         let t = Theme::default();
-        let link = t.link();
-        assert_eq!(link.fg, t.accent.fg);
-        assert!(link.add_modifier.contains(Modifier::UNDERLINED));
+        assert!(t.thinking.modifiers.contains(Modifier::ITALIC));
     }
-
-    #[test]
-    fn markdown_helpers_route_to_expected_slot_foreground() {
-        let t = Theme::default();
-        assert_eq!(t.blockquote().fg, t.success.fg);
-        assert_eq!(t.list_marker().fg, t.accent.fg);
-        assert_eq!(t.horizontal_rule().fg, t.dim.fg);
-        assert_eq!(t.table_border().fg, t.dim.fg);
-    }
-
-    #[test]
-    fn table_header_is_bold_fg() {
-        let t = Theme::default();
-        let style = t.table_header();
-        assert_eq!(style.fg, t.text.fg);
-        assert!(style.add_modifier.contains(Modifier::BOLD));
-    }
-
-    // ── Default theme cohesion ──
 
     #[test]
     fn default_dim_cluster_matches_dim() {
@@ -462,5 +301,40 @@ mod tests {
     fn default_table_header_matches_heading_h2() {
         let t = Theme::default();
         assert_eq!(t.table_header(), t.heading_h2());
+    }
+
+    // ── Theme::diff_add_row / Theme::diff_del_row ──
+
+    #[test]
+    fn diff_add_row_and_diff_del_row_set_only_background() {
+        let t = Theme::default();
+        assert_eq!(
+            t.diff_add_row(),
+            Style::default().bg(t.diff_add.bg.unwrap())
+        );
+        assert_eq!(
+            t.diff_del_row(),
+            Style::default().bg(t.diff_del.bg.unwrap())
+        );
+    }
+
+    // ── Theme::row_style ──
+
+    #[test]
+    fn row_style_selection_uses_bold_text_and_other_rows_are_dim() {
+        let theme = Theme::default();
+        assert_eq!(
+            theme.row_style(true),
+            theme.text().add_modifier(Modifier::BOLD)
+        );
+        assert_eq!(theme.row_style(false), theme.dim());
+    }
+
+    // ── Theme::separator_span ──
+
+    #[test]
+    fn separator_span_pads_a_pipe_in_the_separator_style() {
+        let t = Theme::default();
+        assert_eq!(t.separator_span(), Span::styled(" │ ", t.separator()));
     }
 }

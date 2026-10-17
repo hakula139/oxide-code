@@ -91,7 +91,7 @@ pub(crate) struct ArgCompletion {
 }
 
 /// Locally-dispatched `/name args` command. Each impl owns its display metadata.
-pub(crate) trait SlashCommand: Sync {
+pub(super) trait SlashCommand: Sync {
     fn name(&self) -> &'static str;
 
     fn aliases(&self) -> &'static [&'static str] {
@@ -157,32 +157,59 @@ pub(super) fn lookup_in<'a>(
 }
 
 #[cfg(test)]
+pub(super) mod testing {
+    use super::{SlashCommand, SlashContext, SlashOutcome};
+
+    pub(crate) struct FakeCmd {
+        pub(crate) name: &'static str,
+        pub(crate) aliases: &'static [&'static str],
+        pub(crate) description: &'static str,
+        pub(crate) error: &'static str,
+    }
+
+    impl FakeCmd {
+        pub(crate) const DEFAULT: Self = Self {
+            name: "fake",
+            aliases: &[],
+            description: "fake",
+            error: "Explicit failure.",
+        };
+    }
+
+    impl SlashCommand for FakeCmd {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+        fn aliases(&self) -> &'static [&'static str] {
+            self.aliases
+        }
+        fn description(&self) -> &'static str {
+            self.description
+        }
+        fn execute(&self, _: &str, _: &SlashContext<'_>) -> Result<SlashOutcome, String> {
+            Err(self.error.to_owned())
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use std::collections::HashSet;
 
     use super::*;
     use crate::protocol::Op;
-    use crate::slash::context::SlashContext;
+    use crate::slash::registry::testing::FakeCmd;
     use crate::tui::modal::ModalAction;
     use crate::tui::modal::testing::ScriptedModal;
-
-    fn run_execute(cmd: &dyn SlashCommand, args: &str) -> Result<SlashOutcome, String> {
-        let info = crate::slash::test_session_info();
-        cmd.execute(args, &SlashContext::new(&info, None))
-    }
 
     fn done() -> SlashOutcome {
         SlashOutcome::SystemMessage("done".to_owned())
     }
 
-    fn is_done(outcome: &Result<SlashOutcome, String>) -> bool {
-        matches!(outcome, Ok(SlashOutcome::SystemMessage(text)) if text == "done")
-    }
-
     // ── SlashOutcome::fmt ──
 
     #[test]
-    fn slash_outcome_debug_names_each_variant() {
+    fn fmt_slash_outcome_debug_names_each_variant() {
         let modal = SlashOutcome::Modal(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
         assert_eq!(
             format!("{:?}", SlashOutcome::Forward(Action::Op(Op::Clear))),
@@ -257,26 +284,14 @@ mod tests {
 
     #[test]
     fn alias_collisions_finds_a_synthetic_overlap() {
-        struct ColliderCmd;
-        impl SlashCommand for ColliderCmd {
-            fn name(&self) -> &'static str {
-                "collider"
-            }
-            fn aliases(&self) -> &'static [&'static str] {
-                &["help"]
-            }
-            fn description(&self) -> &'static str {
-                "collide"
-            }
-            fn execute(&self, _: &str, _: &SlashContext<'_>) -> Result<SlashOutcome, String> {
-                Ok(done())
-            }
-        }
-        let registry: &[&dyn SlashCommand] = &[&HelpCmd, &ColliderCmd];
+        let collider = FakeCmd {
+            name: "collider",
+            aliases: &["help"],
+            description: "collide",
+            ..FakeCmd::DEFAULT
+        };
+        let registry: &[&dyn SlashCommand] = &[&HelpCmd, &collider];
         assert_eq!(alias_collisions(registry), vec![("collider", "help")]);
-
-        assert_eq!(ColliderCmd.description(), "collide");
-        assert!(is_done(&run_execute(&ColliderCmd, "")));
     }
 
     #[test]
@@ -290,50 +305,21 @@ mod tests {
 
     #[test]
     fn empty_metadata_offenders_reports_command_with_empty_description() {
-        struct EmptyDescCmd;
-        impl SlashCommand for EmptyDescCmd {
-            fn name(&self) -> &'static str {
-                "no-desc"
-            }
-            fn description(&self) -> &'static str {
-                ""
-            }
-            fn execute(&self, _: &str, _: &SlashContext<'_>) -> Result<SlashOutcome, String> {
-                Ok(done())
-            }
-        }
-        assert_eq!(empty_metadata_offenders(&[&EmptyDescCmd]), vec!["no-desc"]);
-
-        assert!(is_done(&run_execute(&EmptyDescCmd, "")));
+        let empty = FakeCmd {
+            name: "no-desc",
+            description: "",
+            ..FakeCmd::DEFAULT
+        };
+        assert_eq!(empty_metadata_offenders(&[&empty]), vec!["no-desc"]);
     }
 
     // ── lookup_in ──
 
-    struct AliasedCmd;
-    impl SlashCommand for AliasedCmd {
-        fn name(&self) -> &'static str {
-            "primary"
-        }
-        fn aliases(&self) -> &'static [&'static str] {
-            &["alt", "shortcut"]
-        }
-        fn description(&self) -> &'static str {
-            "fake"
-        }
-        fn execute(&self, _: &str, _: &SlashContext<'_>) -> Result<SlashOutcome, String> {
-            Ok(done())
-        }
-    }
-
-    #[test]
-    fn aliased_cmd_fixture_satisfies_trait_contract() {
-        assert_eq!(AliasedCmd.name(), "primary");
-        assert_eq!(AliasedCmd.aliases(), &["alt", "shortcut"]);
-        assert_eq!(AliasedCmd.description(), "fake");
-        assert_eq!(AliasedCmd.classify(""), SlashKind::ReadOnly);
-        assert_eq!(AliasedCmd.classify("anything"), SlashKind::ReadOnly);
-        assert!(is_done(&run_execute(&AliasedCmd, "")));
-    }
+    const ALIASED: FakeCmd = FakeCmd {
+        name: "primary",
+        aliases: &["alt", "shortcut"],
+        ..FakeCmd::DEFAULT
+    };
 
     #[test]
     fn lookup_in_resolves_canonical_name() {
@@ -343,7 +329,7 @@ mod tests {
 
     #[test]
     fn lookup_in_resolves_each_alias_to_canonical_impl() {
-        let registry: &[&dyn SlashCommand] = &[&AliasedCmd];
+        let registry: &[&dyn SlashCommand] = &[&ALIASED];
         for alias in ["alt", "shortcut"] {
             let cmd = lookup_in(registry, alias).expect("alias must resolve");
             assert_eq!(cmd.name(), "primary");

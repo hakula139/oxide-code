@@ -5,7 +5,6 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use super::context::SlashContext;
@@ -17,8 +16,11 @@ use crate::tui::modal::line_editor::LineEditor;
 use crate::tui::modal::{Modal, ModalAction, ModalKey};
 use crate::tui::theme::Theme;
 
+// ── Constants ──
+
 const MODAL_TITLE: &str = "Rename session";
-const FOOTER_HINT: &str = "Enter to save · Esc to cancel";
+const FOOTER_HINTS: [&str; 2] = ["Enter to save", "Esc to cancel"];
+
 /// Mirrors the actor's first-prompt title cap so manual titles fit one `--list` row.
 const MAX_TITLE_CHARS: usize = 80;
 
@@ -60,7 +62,7 @@ impl SlashCommand for RenameCmd {
 
 // ── RenameModal ──
 
-pub(super) struct RenameModal {
+struct RenameModal {
     header: Header,
     editor: LineEditor,
 }
@@ -94,12 +96,7 @@ impl Modal for RenameModal {
         self.header.push_lines(&mut lines, area.width, theme);
         lines.push(self.editor.line(area.width, theme));
         frame.render_widget(Paragraph::new(lines).style(theme.surface()), area);
-        render_footer(
-            frame,
-            area,
-            Line::from(Span::styled(FOOTER_HINT, theme.dim())),
-            theme,
-        );
+        render_footer(frame, area, &FOOTER_HINTS, theme);
 
         let input_y = self.header.height();
         if input_y < area.height {
@@ -128,6 +125,7 @@ mod tests {
 
     use super::*;
     use crate::slash::context::SlashContext;
+    use crate::tui::modal::testing::render_rows;
 
     fn run_execute(args: &str, title: Option<&str>) -> SlashOutcome {
         let info = crate::slash::test_session_info();
@@ -136,21 +134,25 @@ mod tests {
             .unwrap()
     }
 
-    // ── RenameCmd metadata ──
+    // ── RenameCmd::name ──
 
     #[test]
-    fn metadata_matches_built_ins_contract() {
+    fn name_and_metadata_match_built_ins_contract() {
         assert_eq!(RenameCmd.name(), "rename");
         assert_eq!(RenameCmd.aliases(), [] as [&str; 0]);
         assert_ne!(RenameCmd.description(), "");
         assert_eq!(RenameCmd.usage(), Some("[<title>]"));
     }
 
+    // ── RenameCmd::classify ──
+
     #[test]
     fn classify_is_always_mutating() {
         assert_eq!(RenameCmd.classify(""), SlashKind::Mutating);
         assert_eq!(RenameCmd.classify("New Title"), SlashKind::Mutating);
     }
+
+    // ── RenameCmd::echoes_input ──
 
     #[test]
     fn echoes_input_only_for_typed_arg_form() {
@@ -190,6 +192,96 @@ mod tests {
             matches!(result, ModalKey::Consumed),
             "empty Enter must not submit; got {result:?}",
         );
+    }
+
+    // ── RenameModal::height ──
+
+    #[test]
+    fn height_sums_to_five_rows() {
+        // Title (1) + gap (1) + input (1) + gap (1) + footer (1) = 5. Render tests assume the
+        // input row sits at y=2.
+        assert_eq!(RenameModal::new(None).height(40, u16::MAX), 5);
+    }
+
+    // ── RenameModal::render ──
+
+    #[test]
+    fn render_lays_out_title_prompt_and_footer_in_order() {
+        let modal = RenameModal::new(Some("Fix auth"));
+        let width: u16 = 40;
+        let rows = render_rows(&modal, width, modal.height(width, u16::MAX));
+
+        let rows: Vec<&str> = rows.iter().map(|row| row.trim_end()).collect();
+        assert_eq!(
+            rows,
+            [
+                "Rename session",
+                "",
+                "/ Fix auth",
+                "",
+                "Enter to save  ·  Esc to cancel",
+            ]
+        );
+    }
+
+    #[test]
+    fn render_scrolls_a_title_wider_than_the_row_to_its_tail() {
+        let long = format!("{}tail", "x".repeat(60));
+        let modal = RenameModal::new(Some(&long));
+        let width: u16 = 20;
+        let rows = render_rows(&modal, width, modal.height(width, u16::MAX));
+
+        let input = &rows[2];
+        assert_eq!(input.trim_end(), format!("/ {}tail", "x".repeat(13)));
+    }
+
+    #[test]
+    fn render_places_cursor_after_visible_buffer_text() {
+        let theme = Theme::default();
+        let modal = RenameModal::new(Some("ab"));
+        let width: u16 = 40;
+        let h = modal.height(width, u16::MAX);
+        let mut terminal = Terminal::new(TestBackend::new(width, h)).unwrap();
+        terminal
+            .draw(|frame| modal.render(frame, Rect::new(0, 0, width, h), &theme))
+            .unwrap();
+        let pos = terminal.get_cursor_position().unwrap();
+
+        // The input row sits below the title and a gap, and the cursor lands after "/ ab".
+        assert_eq!(
+            (pos.x, pos.y),
+            (4, 2),
+            "cursor must land after the rendered buffer",
+        );
+    }
+
+    #[test]
+    fn render_clamps_cursor_when_buffer_overflows_visible_row() {
+        let theme = Theme::default();
+        let long: String = "x".repeat(100);
+        let modal = RenameModal::new(Some(&long));
+        let width: u16 = 20;
+        let h = modal.height(width, u16::MAX);
+        let mut terminal = Terminal::new(TestBackend::new(width, h)).unwrap();
+        terminal
+            .draw(|frame| modal.render(frame, Rect::new(0, 0, width, h), &theme))
+            .unwrap();
+        let pos = terminal.get_cursor_position().unwrap();
+
+        assert_eq!(pos.x, width - 1, "cursor must clamp to the right edge");
+    }
+
+    #[test]
+    fn render_skips_cursor_when_area_too_short_for_input_row() {
+        let theme = Theme::default();
+        let modal = RenameModal::new(Some("ab"));
+        let width: u16 = 40;
+        let mut terminal = Terminal::new(TestBackend::new(width, 5)).unwrap();
+        // Render the modal into an oversized terminal but pass a 1-row Rect so the input row is
+        // entirely off-screen. `place_cursor` should bail without panicking.
+        terminal
+            .draw(|frame| modal.render(frame, Rect::new(0, 0, width, 1), &theme))
+            .expect("short-area render must not panic");
     }
 
     // ── RenameModal::handle_key ──
@@ -245,8 +337,7 @@ mod tests {
         else {
             panic!("expected Submitted, got {outcome:?}");
         };
-        assert_eq!(title.chars().count(), MAX_TITLE_CHARS, "extra char dropped");
-        assert!(!title.contains('z'), "the dropped char must not appear");
+        assert_eq!(title, prefilled);
     }
 
     #[test]
@@ -291,113 +382,7 @@ mod tests {
     fn handle_paste_inserts_one_line_at_the_cursor() {
         let mut modal = RenameModal::new(Some("Fix"));
         modal.handle_paste(" auth\r\nflow");
-        let buf = rendered_buffer(&modal, 40);
-        assert_eq!(row_text(&buf, 2, 40).trim_end(), "/ Fix auth flow");
-    }
-
-    // ── Modal::render ──
-
-    fn rendered_buffer(modal: &RenameModal, width: u16) -> ratatui::buffer::Buffer {
-        let theme = Theme::default();
-        let h = modal.height(width, u16::MAX);
-        let mut terminal = Terminal::new(TestBackend::new(width, h)).unwrap();
-        terminal
-            .draw(|frame| modal.render(frame, Rect::new(0, 0, width, h), &theme))
-            .expect("render must not panic");
-        terminal.backend().buffer().clone()
-    }
-
-    fn row_text(buf: &ratatui::buffer::Buffer, y: u16, width: u16) -> String {
-        (0..width).map(|x| buf[(x, y)].symbol()).collect()
-    }
-
-    #[test]
-    fn render_lays_out_title_prompt_and_footer_in_order() {
-        let modal = RenameModal::new(Some("Fix auth"));
-        let width: u16 = 40;
-        let buf = rendered_buffer(&modal, width);
-
-        assert!(
-            row_text(&buf, 0, width).contains(MODAL_TITLE),
-            "title row missing: {:?}",
-            row_text(&buf, 0, width),
-        );
-        let input = row_text(&buf, 2, width);
-        assert!(
-            input.starts_with("/ Fix auth"),
-            "input row should show prompt + buffer; got {input:?}",
-        );
-        assert!(
-            row_text(&buf, 4, width).contains(FOOTER_HINT),
-            "footer hint missing: {:?}",
-            row_text(&buf, 4, width),
-        );
-    }
-
-    #[test]
-    fn render_scrolls_a_title_wider_than_the_row_to_its_tail() {
-        let long = format!("{}tail", "x".repeat(60));
-        let modal = RenameModal::new(Some(&long));
-        let width: u16 = 20;
-        let buf = rendered_buffer(&modal, width);
-
-        let input = row_text(&buf, 2, width);
-        assert_eq!(input.trim_end(), format!("/ {}tail", "x".repeat(13)));
-    }
-
-    #[test]
-    fn render_places_cursor_after_visible_buffer_text() {
-        let theme = Theme::default();
-        let modal = RenameModal::new(Some("ab"));
-        let width: u16 = 40;
-        let h = modal.height(width, u16::MAX);
-        let mut terminal = Terminal::new(TestBackend::new(width, h)).unwrap();
-        terminal
-            .draw(|frame| modal.render(frame, Rect::new(0, 0, width, h), &theme))
-            .unwrap();
-        let pos = terminal.get_cursor_position().unwrap();
-
-        // Input row sits at y = title (1) + gap (1) = 2; cursor lands after "/ ab" → x = 4.
-        assert_eq!(
-            (pos.x, pos.y),
-            (4, 2),
-            "cursor must land after the rendered buffer",
-        );
-    }
-
-    #[test]
-    fn render_clamps_cursor_when_buffer_overflows_visible_row() {
-        let theme = Theme::default();
-        let long: String = "x".repeat(100);
-        let modal = RenameModal::new(Some(&long));
-        let width: u16 = 20;
-        let h = modal.height(width, u16::MAX);
-        let mut terminal = Terminal::new(TestBackend::new(width, h)).unwrap();
-        terminal
-            .draw(|frame| modal.render(frame, Rect::new(0, 0, width, h), &theme))
-            .unwrap();
-        let pos = terminal.get_cursor_position().unwrap();
-
-        assert_eq!(pos.x, width - 1, "cursor must clamp to the right edge");
-    }
-
-    #[test]
-    fn render_skips_cursor_when_area_too_short_for_input_row() {
-        let theme = Theme::default();
-        let modal = RenameModal::new(Some("ab"));
-        let width: u16 = 40;
-        let mut terminal = Terminal::new(TestBackend::new(width, 5)).unwrap();
-        // Render the modal into an oversized terminal but pass a 1-row Rect so the input row is
-        // entirely off-screen. `place_cursor` should bail without panicking.
-        terminal
-            .draw(|frame| modal.render(frame, Rect::new(0, 0, width, 1), &theme))
-            .expect("short-area render must not panic");
-    }
-
-    #[test]
-    fn height_sums_to_five_rows() {
-        // Title (1) + gap (1) + input (1) + gap (1) + footer (1) = 5. Render tests assume the
-        // input row sits at y=2.
-        assert_eq!(RenameModal::new(None).height(40, u16::MAX), 5);
+        let rows = render_rows(&modal, 40, modal.height(40, u16::MAX));
+        assert_eq!(rows[2].trim_end(), "/ Fix auth flow");
     }
 }

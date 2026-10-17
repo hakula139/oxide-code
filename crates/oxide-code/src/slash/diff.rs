@@ -4,9 +4,9 @@
 
 use std::fmt::Write as _;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, anyhow, bail};
 
 use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashOutcome};
@@ -31,8 +31,9 @@ impl SlashCommand for DiffCmd {
             .info
             .git_cwd
             .as_deref()
-            .ok_or("no working directory for this session")?;
-        let text = collect_diff_in(cwd).map_err(|e| format!("{e:#}"))?;
+            .ok_or("No working directory for this session.")?;
+        let text = collect_diff_in(cwd)
+            .map_err(|e| format!("Failed to collect working-tree changes: {e:#}"))?;
         if text.trim().is_empty() {
             Ok(SlashOutcome::SystemMessage(
                 "Working tree clean.".to_owned(),
@@ -70,28 +71,24 @@ fn collect_diff_in(cwd: &Path) -> Result<String> {
 // ── Formatting ──
 
 fn format_diff(tracked: &str, untracked: &str) -> String {
-    let mut out = String::new();
-    // Strip only git's trailing newline; keep trailing whitespace on real diff lines.
-    let tracked = tracked.trim_end_matches('\n');
-    if !tracked.trim().is_empty() {
-        out.push_str(tracked);
-    }
     let untracked = untracked.trim();
-    if !untracked.is_empty() {
-        if !out.is_empty() {
-            out.push_str("\n\n");
-        }
-        out.push_str("Untracked files:");
-        for line in untracked.lines() {
-            _ = write!(out, "\n  {line}");
-        }
-    }
-    out
+    let untracked = if untracked.is_empty() {
+        String::new()
+    } else {
+        let lines = untracked
+            .lines()
+            .map(|line| format!("  {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("Untracked files:\n{lines}")
+    };
+    join_sections(&[tracked, &untracked])
 }
 
 fn join_sections(sections: &[&str]) -> String {
     sections
         .iter()
+        // Strip only git's trailing newline, since a diff line can end in meaningful whitespace.
         .map(|s| s.trim_end_matches('\n'))
         .filter(|s| !s.trim().is_empty())
         .collect::<Vec<_>>()
@@ -108,14 +105,9 @@ fn full_diff_hint(has_head: bool) -> &'static str {
 
 // ── Git Helpers ──
 
-/// `Ok(false)` outside a worktree; `Err` when git can't spawn.
+/// `Ok(false)` outside a worktree, and `Err` when git can't spawn.
 fn inside_git_repo(cwd: &Path) -> Result<bool> {
-    let out = Command::new("git")
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .output()
-        .context("failed to spawn git (is it installed and on PATH?)")?;
+    let out = git_output(cwd, &["rev-parse", "--is-inside-work-tree"])?;
     Ok(out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "true")
 }
 
@@ -137,16 +129,25 @@ fn run_git_diff_in(cwd: &Path, extra: &[&str]) -> Result<String> {
 }
 
 fn run_git_in(cwd: &Path, args: &[&str]) -> Result<String> {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .output()
-        .with_context(|| format!("failed to spawn git {}", args.join(" ")))?;
+    let out = git_output(cwd, args)?;
     if !out.status.success() {
         bail!("{}", git_failure_message(args, &out.stderr));
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+fn git_output(cwd: &Path, args: &[&str]) -> Result<Output> {
+    Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| {
+            anyhow!(
+                "failed to spawn git {}: {e}. Check that git is installed and on PATH.",
+                args.join(" "),
+            )
+        })
 }
 
 /// Trimmed stderr, or `git <args> failed` when stderr is blank.
@@ -163,23 +164,19 @@ fn git_failure_message(args: &[&str], stderr: &[u8]) -> String {
 // ── Truncation ──
 
 /// Cut on a UTF-8 boundary (≤ [`MAX_BYTES`]); footer names dropped size.
-fn truncate(s: String, full_hint: &str) -> String {
+fn truncate(mut s: String, full_hint: &str) -> String {
     if s.len() <= MAX_BYTES {
         return s;
     }
-    let cut = s
-        .char_indices()
-        .take_while(|(i, c)| i + c.len_utf8() <= MAX_BYTES)
-        .last()
-        .map_or(0, |(i, c)| i + c.len_utf8());
+    let cut = s.floor_char_boundary(MAX_BYTES);
     let dropped = s.len() - cut;
-    let mut t = s[..cut].to_owned();
+    s.truncate(cut);
     _ = write!(
-        t,
+        s,
         "\n\n(truncated: {} more. Run {full_hint} for the full output.)",
         format_size(dropped),
     );
-    t
+    s
 }
 
 /// `"N B"`, `"N.N KB"`, or `"N.N MB"` (integer-truncated decimal).
@@ -228,10 +225,10 @@ mod tests {
         (dir, path)
     }
 
-    // ── DiffCmd metadata ──
+    // ── DiffCmd::name ──
 
     #[test]
-    fn metadata_matches_built_ins_contract() {
+    fn name_and_metadata_match_built_ins_contract() {
         assert_eq!(DiffCmd.name(), "diff");
         assert_eq!(DiffCmd.aliases(), [] as [&str; 0]);
         assert_ne!(DiffCmd.description(), "");
@@ -261,7 +258,7 @@ mod tests {
         std::fs::write(repo.join("note.txt"), "hello\n").unwrap();
         let outcome = execute_at(Some(&repo)).expect("dirty repo execute is Ok");
         assert!(
-            matches!(&outcome, SlashOutcome::GitDiff(text) if text.contains("note.txt")),
+            matches!(&outcome, SlashOutcome::GitDiff(text) if text == "Untracked files:\n  note.txt"),
             "{outcome:?}",
         );
     }
@@ -270,13 +267,16 @@ mod tests {
     fn execute_outside_a_repo_errors() {
         let dir = tempfile::tempdir().unwrap();
         let err = execute_at(Some(dir.path())).expect_err("execute must error outside a repo");
-        assert!(err.contains("not inside a git repository"), "{err}");
+        assert_eq!(
+            err,
+            "Failed to collect working-tree changes: not inside a git repository"
+        );
     }
 
     #[test]
     fn execute_without_a_session_cwd_errors() {
         let err = execute_at(None).expect_err("execute needs the session cwd");
-        assert_eq!(err, "no working directory for this session");
+        assert_eq!(err, "No working directory for this session.");
     }
 
     // ── collect_diff_in ──
@@ -295,8 +295,7 @@ mod tests {
         let (_dir, repo) = fresh_repo();
         std::fs::write(repo.join("new.txt"), "hi\n").unwrap();
         let body = with_isolated_git_env(|| collect_diff_in(&repo)).unwrap();
-        assert!(body.contains("Untracked files:"), "{body}");
-        assert!(body.contains("new.txt"), "{body}");
+        assert_eq!(body, "Untracked files:\n  new.txt");
     }
 
     #[test]
@@ -336,16 +335,6 @@ mod tests {
         assert!(body.contains("+edit"), "{body}");
         assert!(body.contains("Untracked files:"), "{body}");
         assert!(body.contains("untracked.txt"), "{body}");
-    }
-
-    #[test]
-    fn collect_diff_in_errors_outside_a_repo() {
-        let dir = tempfile::tempdir().unwrap();
-        let err = with_isolated_git_env(|| collect_diff_in(dir.path())).unwrap_err();
-        assert!(
-            format!("{err:#}").contains("not inside a git repository"),
-            "{err:#}",
-        );
     }
 
     // ── format_diff ──
@@ -489,6 +478,26 @@ mod tests {
         assert!(
             has_sha || has_not_valid,
             "expected git error to surface, got: {msg}",
+        );
+    }
+
+    // ── git_output ──
+
+    #[test]
+    fn git_output_reports_a_spawn_failure_with_a_recovery_step() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing");
+        let cause = Command::new("git")
+            .current_dir(&missing)
+            .output()
+            .unwrap_err();
+
+        let err = git_output(&missing, &["status"]).unwrap_err();
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "failed to spawn git status: {cause}. Check that git is installed and on PATH."
+            ),
         );
     }
 
