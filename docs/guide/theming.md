@@ -191,25 +191,28 @@ Unset, it defaults to `base16-ocean.dark`, which the dark built-ins use. `latte`
 
 Each status-line segment routes to one of the slots above so re-skinning the slot re-skins everywhere it appears. To restyle one segment, override the slot it uses.
 
-| Segment             | Slot      |
-| ------------------- | --------- |
-| `current-dir`       | `muted`   |
-| `git-branch`        | `accent`  |
-| `pull-request`      | `accent`  |
-| `model`             | `text`    |
-| `model-with-effort` | `text`    |
-| `context-used`      | `dim`     |
-| `session-cost`      | `dim`     |
-| `five-hour-limit`   | `dim`     |
-| `weekly-limit`      | `dim`     |
-| `run-state` (idle)  | `success` |
-| `run-state` (busy)  | `info`    |
-| `run-state` (warn)  | `warning` |
-| `queued-prompts`    | `dim`     |
-| `thread-title`      | `muted`   |
-| `session-id`        | `muted`   |
-| `theme`             | `muted`   |
-| `current-time`      | `dim`     |
+| Segment             | Slot                         |
+| ------------------- | ---------------------------- |
+| `current-dir`       | `muted`                      |
+| `git-branch`        | `accent`                     |
+| `pull-request`      | `accent`                     |
+| `model`             | `text`                       |
+| `model-with-effort` | `text`                       |
+| `context-used`      | `text` / `warning` / `error` |
+| `session-cost`      | `muted`                      |
+| `five-hour-limit`   | `text` / `warning` / `error` |
+| `weekly-limit`      | `text` / `warning` / `error` |
+| `run-state` (idle)  | `success`                    |
+| `run-state` (busy)  | `info`                       |
+| `run-state` (warn)  | `warning`                    |
+| `queued-prompts`    | `muted`                      |
+| `task-progress`     | `muted`                      |
+| `thread-title`      | `muted`                      |
+| `session-id`        | `muted`                      |
+| `theme`             | `muted`                      |
+| `current-time`      | `dim`                        |
+
+`context-used`, `five-hour-limit`, and `weekly-limit` use `text` until the share they show reaches 70%, then `warning`, and `error` from 90%.
 
 `pull-request-checks` and `pull-request-review` take their slot from the state they show: `success` for passing checks or an approval, `warning` for pending checks or a required review, `error` for failing checks or requested changes, and `muted` for cancelled checks.
 

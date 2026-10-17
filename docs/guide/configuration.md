@@ -182,9 +182,9 @@ If automatic compaction fails, oxide-code does not send the prompt, and the TUI 
 | `theme`               | `Theme: mocha`, or a theme file's name                        | On `/theme`     |
 | `current-time`        | `HH:MM` in the local timezone                                 | Per minute      |
 
-The usage limits come from Claude subscription sign-ins, which report how much of each window is spent with every response. A window disappears once it resets, until the next response reports it again.
+The usage limits come from Claude subscription sign-ins, which report how much of each window is spent with every response. A window disappears when it resets and remains gone until the next response reports it again. The [theming guide](theming.md#status-line-segments) lists the colors used by the context and usage-limit segments as a window fills.
 
-When the row is too narrow to fit every configured segment, low-utility ones drop in this order before the remaining content gets truncated: `theme` → `session-id` → `thread-title` → `current-time` → `pull-request-review` → `pull-request-checks` → `pull-request` → `git-branch` → `current-dir` → `task-progress` → `queued-prompts` → `session-cost` → `weekly-limit` → `five-hour-limit` → `context-used` → `model` → `model-with-effort` → `run-state`. Run state, the model labels, and the bar's last surviving segment are always preserved.
+When the row is too narrow to fit every configured segment, low-utility ones drop in this order before the remaining content gets truncated: `theme` → `session-id` → `thread-title` → `current-time` → `pull-request-review` → `pull-request-checks` → `pull-request` → `git-branch` → `current-dir` → `task-progress` → `queued-prompts` → `session-cost` → `weekly-limit` → `five-hour-limit` → `context-used` → `model` → `model-with-effort` → `run-state`. Run state takes priority over every other segment. The last remaining segment is truncated to fit rather than dropped.
 
 `OX_STATUS_LINE` accepts the same segment names, comma-separated, with optional whitespace (`OX_STATUS_LINE="model, run-state"`). A value with no segments (`","`), an empty entry between commas (`"model,,run-state"`), or an unknown segment name fails startup with a parse error.
 
