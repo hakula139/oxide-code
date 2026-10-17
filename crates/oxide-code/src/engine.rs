@@ -24,10 +24,11 @@ use self::compaction::AutoCompact;
 use self::turn::{TurnOutcome, TurnReport};
 use crate::client::TokenUsage;
 use crate::client::anthropic::Client;
-use crate::config::Effort;
 use crate::config::auth::{self, Auth, AuthSource};
+use crate::config::compaction::CompactionConfig;
 use crate::config::login::PendingLogin;
 use crate::config::oauth;
+use crate::config::{Config, Effort};
 use crate::file_tracker::FileTracker;
 use crate::message::{ContentBlock, Message};
 use crate::model::{ModelSpec, ResolvedModelId};
@@ -116,6 +117,10 @@ pub(crate) struct Engine {
     file_tracker: Arc<FileTracker>,
     /// The configured policy plus the session allow rules granted since the live session began.
     policy: Policy,
+    /// `None` means the agent loop runs without a per-turn round cap.
+    max_tool_rounds: Option<u32>,
+    /// Compaction settings resolved for the active model.
+    compaction: CompactionConfig,
     cwd: PathBuf,
     /// A TUI is attached, so titles generate in the background.
     interactive: bool,
@@ -126,12 +131,14 @@ pub(crate) struct Engine {
 }
 
 impl Engine {
+    /// Continues `session` with a client and the agent settings from `config`. Fails when the
+    /// client cannot be built.
     #[expect(
         clippy::too_many_arguments,
         reason = "each part comes from a separate startup step in `main`"
     )]
     pub(crate) async fn new(
-        client: Client,
+        config: &Config,
         tools: Arc<ToolRegistry>,
         store: SessionStore,
         session: SessionHandle,
@@ -139,7 +146,8 @@ impl Engine {
         file_tracker: Arc<FileTracker>,
         cwd: PathBuf,
         interactive: bool,
-    ) -> Self {
+    ) -> Result<Self> {
+        let client = Client::new(config, Some(session.session_id().to_owned()))?;
         let LoadedTranscript {
             messages,
             context,
@@ -149,8 +157,7 @@ impl Engine {
         } = transcript;
         let prompt_unrecorded = context.is_none();
         let prompt = session_prompt(context, client.model(), &cwd).await;
-        let policy = client.permission().clone();
-        Self {
+        Ok(Self {
             client,
             oauth_token_url: oauth::OAUTH_TOKEN_URL.to_owned(),
             tools,
@@ -162,14 +169,16 @@ impl Engine {
             prompt,
             prompt_unrecorded,
             file_tracker,
-            policy,
+            policy: config.permission.clone(),
+            max_tool_rounds: config.max_tool_rounds,
+            compaction: config.compaction,
             cwd,
             interactive,
             auto_compaction_failures: 0,
             last_usage: None,
             displayed_usage: None,
             total_estimated_cost_usd: estimate_cost_usd(&usage),
-        }
+        })
     }
 
     pub(crate) fn session_id(&self) -> &str {
@@ -301,7 +310,7 @@ impl Engine {
             sink,
             &self.session,
             ops,
-            self.client.max_tool_rounds(),
+            self.max_tool_rounds,
             &mut gate,
         )
         .await;
@@ -331,7 +340,7 @@ impl Engine {
             ops,
             pending,
             Some(&mut AutoCompact {
-                config: self.client.compaction().auto,
+                config: self.compaction.auto,
                 failures: &mut self.auto_compaction_failures,
                 file_tracker: &self.file_tracker,
                 prompt: &self.prompt,
@@ -563,6 +572,9 @@ impl Engine {
     ) {
         if let Some(id) = model {
             self.client.set_model(id.into_inner());
+            self.compaction = self
+                .compaction
+                .for_model(self.client.model(), self.client.max_tokens());
         }
         let resolved = match effort {
             Some(pick) => self.client.set_effort(pick),
@@ -573,7 +585,7 @@ impl Engine {
                 model: self.client.model().clone(),
                 effort: resolved,
                 requested_effort: effort,
-                auto_compaction: self.client.compaction().auto,
+                auto_compaction: self.compaction.auto,
             },
             "config-changed",
         );
@@ -854,13 +866,13 @@ mod tests {
     };
     use super::*;
     use crate::client::anthropic::testing::{
-        api_key, completion_body, sse_body, sse_response, test_client, test_config,
-        text_stream_body,
+        api_key, completion_body, sse_body, sse_response, test_config, text_stream_body,
     };
     use crate::config::PromptCacheTtl;
-    use crate::config::compaction::CompactionConfig;
+    use crate::config::compaction::{CompactionConfig, test_thresholds};
     use crate::file_tracker::testing::seed_full_read;
     use crate::message::{Replay, Role};
+    use crate::permission::Mode;
     use crate::permission::rule::Rule;
     use crate::protocol::CapturingSink;
     use crate::session::store::testing::test_store;
@@ -915,12 +927,6 @@ mod tests {
             .iter()
             .map(|message| message["content"][0]["text"].as_str().unwrap_or_default())
             .collect()
-    }
-
-    fn auto_compacting_client(base_url: String) -> Client {
-        let mut config = test_config(base_url, api_key(), MODEL);
-        config.compaction = CompactionConfig::with_threshold_for_test(50_000);
-        Client::new(config, Some("sid".to_owned())).unwrap()
     }
 
     /// Stores an oxide-code login under `data`, standing in for `$XDG_DATA_HOME`.
@@ -1034,7 +1040,7 @@ mod tests {
 
             for (context, replayed) in [(Some(recorded), true), (None, false)] {
                 let engine = Engine::new(
-                    test_client(server.uri(), api_key(), "claude-sonnet-5-5"),
+                    &test_config(server.uri(), api_key(), "claude-sonnet-5-5"),
                     Arc::new(ToolRegistry::new(Vec::new())),
                     store.clone(),
                     handle::start(&store, "claude-sonnet-5-5"),
@@ -1047,7 +1053,8 @@ mod tests {
                     dir.path().to_owned(),
                     false,
                 )
-                .await;
+                .await
+                .unwrap();
 
                 assert!(
                     (engine.total_estimated_cost_usd - 0.006).abs() < 1e-12,
@@ -1066,6 +1073,38 @@ mod tests {
                     "replayed: {replayed}",
                 );
             }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn new_takes_the_agent_settings_from_config_and_binds_the_client_to_the_session() {
+        with_pinned_home(async {
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let session = handle::start(&store, MODEL);
+            let mut config = test_config("http://127.0.0.1:9", api_key(), MODEL);
+            config.max_tool_rounds = Some(3);
+            config.compaction = CompactionConfig::with_threshold_for_test(50_000);
+            config.permission = Policy::new(Mode::Plan, Vec::new(), Vec::new());
+
+            let engine = Engine::new(
+                &config,
+                Arc::new(ToolRegistry::new(Vec::new())),
+                store.clone(),
+                session.clone(),
+                LoadedTranscript::default(),
+                Arc::new(FileTracker::default()),
+                dir.path().to_owned(),
+                false,
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(engine.max_tool_rounds, Some(3));
+            assert_eq!(engine.compaction, config.compaction);
+            assert_eq!(engine.policy.mode(), Mode::Plan);
+            assert_eq!(engine.client.session_id(), session.session_id());
         })
         .await;
     }
@@ -1653,7 +1692,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
             let mut engine = engine(server.uri(), &store, dir.path()).await;
-            engine.client = auto_compacting_client(server.uri());
+            engine.compaction = CompactionConfig::with_threshold_for_test(50_000);
             engine.messages = tool_heavy_transcript();
             engine.last_usage = Some(TokenUsage::new(50_000, 1));
             let mut handle = engine.spawn(&[]);
@@ -1906,7 +1945,7 @@ mod tests {
             mount_reply(&server, "auto summary").await;
             let dir = tempfile::tempdir().unwrap();
             let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-            engine.client = auto_compacting_client(server.uri());
+            engine.compaction = CompactionConfig::with_threshold_for_test(50_000);
             engine.messages = tool_heavy_transcript();
             engine.last_usage = Some(TokenUsage::new(50_000, 1));
             engine.displayed_usage = engine.last_usage;
@@ -1982,7 +2021,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
             let mut engine = engine(server.uri(), &store, dir.path()).await;
-            engine.client = auto_compacting_client(server.uri());
+            engine.compaction = CompactionConfig::with_threshold_for_test(50_000);
             engine.messages = tool_heavy_transcript();
             engine.last_usage = Some(TokenUsage::new(50_000, 1));
             let sink = CapturingSink::new();
@@ -2625,6 +2664,59 @@ mod tests {
                     {"type": "text", "text": "reply"},
                 ]})],
             );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn set_model_resolves_the_compaction_threshold_for_the_new_model() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            let dir = tempfile::tempdir().unwrap();
+            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+            let mut config = test_config(server.uri(), api_key(), "custom-model");
+            let sink = CapturingSink::new();
+            let unwindowed = CompactionConfig::default_for_test(&config.model, 16_000);
+            assert!(!unwindowed.auto.enabled, "precondition: no window");
+            let mut resolved = Vec::new();
+
+            for (max_tokens, configured, threshold) in [
+                (None, unwindowed, test_thresholds::WINDOW_1M),
+                (
+                    None,
+                    CompactionConfig::with_threshold_for_test(1_500_000),
+                    test_thresholds::WINDOW_1M,
+                ),
+                (Some(8_000), unwindowed, 979_000),
+            ] {
+                config.max_tokens = max_tokens;
+                engine.client = Client::new(&config, Some("sid".to_owned())).unwrap();
+                engine.compaction = configured;
+
+                engine.set_model(
+                    &sink,
+                    Some(ResolvedModelId::new("claude-sonnet-5-5".to_owned())),
+                    None,
+                );
+
+                assert_eq!(
+                    engine.compaction.auto.threshold_tokens,
+                    Some(threshold),
+                    "{max_tokens:?}, {configured:?}",
+                );
+                resolved.push(engine.compaction.auto);
+            }
+            let announced: Vec<_> = sink
+                .events()
+                .into_iter()
+                .filter_map(|event| match event {
+                    Event::ConfigChanged {
+                        auto_compaction, ..
+                    } => Some(auto_compaction),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(announced, resolved);
         })
         .await;
     }
