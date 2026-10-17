@@ -9,7 +9,7 @@
 set -euo pipefail
 
 if [[ "$#" -lt 1 || "$#" -gt 2 ]]; then
-  echo "usage: $0 <vX.Y.Z> [highlights-file]" >&2
+  echo "Usage: $0 <vX.Y.Z> [highlights-file]" >&2
   exit 2
 fi
 
@@ -44,8 +44,8 @@ done
 version="${tag#v}"
 repo="https://github.com/hakula139/oxide-code"
 
-# A stable section rolls up every change since the previous stable (cliff.toml `tag_pattern`), so
-# it compares against that tag. A prerelease section lists only its increment.
+# A stable section rolls up every change since the previous stable (cliff.toml `tag_pattern`),
+# so it compares against that tag. A prerelease section lists only its increment.
 cliff_args=(--unreleased --tag "$tag")
 describe_args=(--tags --abbrev=0 --match 'v[0-9]*')
 if [[ "$version" == *-* ]]; then
