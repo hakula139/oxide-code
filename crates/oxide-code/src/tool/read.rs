@@ -141,7 +141,9 @@ async fn read_file(
     .await?;
 
     if super::is_binary(&bytes) {
-        return Err("File appears to be binary. Use the bash tool to inspect binary files.".into());
+        return Err(
+            "File appears to be binary. Use the bash tool to inspect binary files.".to_owned(),
+        );
     }
 
     let key = super::tracker_key(&file_path).await;

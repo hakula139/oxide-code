@@ -210,7 +210,7 @@ mod tests {
             .await
             .expect_err("a signed-out client must not send");
 
-        assert_eq!(err.to_string(), "Not signed in. Run /login to sign in.");
+        assert_eq!(err.to_string(), "not signed in");
     }
 
     #[tokio::test]

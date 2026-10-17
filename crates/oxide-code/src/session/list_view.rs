@@ -58,7 +58,7 @@ fn render_sessions(
     if sessions.is_empty() {
         let kind = if archived { "archived " } else { "" };
         let scope = if all { "" } else { " in this project" };
-        writeln!(out, "No {kind}sessions found{scope}.").context("write list output")?;
+        writeln!(out, "No {kind}sessions found{scope}").context("write list output")?;
         return Ok(());
     }
 
@@ -188,7 +188,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             String::from_utf8(buf).unwrap(),
-            "No sessions found in this project.\n",
+            "No sessions found in this project\n",
         );
 
         let mut buf = Vec::new();
@@ -204,7 +204,7 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(String::from_utf8(buf).unwrap(), "No sessions found.\n",);
+        assert_eq!(String::from_utf8(buf).unwrap(), "No sessions found\n",);
 
         let mut buf = Vec::new();
         render_list(
@@ -221,7 +221,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             String::from_utf8(buf).unwrap(),
-            "No archived sessions found in this project.\n",
+            "No archived sessions found in this project\n",
         );
     }
 
@@ -452,12 +452,12 @@ mod tests {
     #[test]
     fn render_sessions_empty_project_scope_mentions_project() {
         let out = render_to_string(&[], false);
-        assert_eq!(out, "No sessions found in this project.\n");
+        assert_eq!(out, "No sessions found in this project\n");
     }
 
     #[test]
     fn render_sessions_empty_all_scope_omits_project_qualifier() {
         let out = render_to_string(&[], true);
-        assert_eq!(out, "No sessions found.\n");
+        assert_eq!(out, "No sessions found\n");
     }
 }

@@ -46,7 +46,8 @@ impl SlashCommand for DeleteCmd {
         let arg = args.trim();
         if arg.is_empty() {
             return Err(
-                "Missing id. Use `/resume` then Ctrl+D, or `/delete <id-prefix>` for direct removal."
+                "Missing session id. Usage: `/delete <id-prefix>`, or press Ctrl+D in the \
+                 `/resume` picker."
                     .to_owned(),
             );
         }
@@ -55,7 +56,10 @@ impl SlashCommand for DeleteCmd {
         let info = resolve_saved_prefix(&store, arg, live_id)
             .map_err(resolve_error_message)?
             .ok_or_else(|| {
-                format!("Cannot delete the live session: `{arg}` matches the active session.")
+                format!(
+                    "Session prefix `{arg}` matches the live session. \
+                     Run `/clear` to start a new one, then delete it."
+                )
             })?;
         Ok(SlashOutcome::Modal(Box::new(
             ConfirmDeleteSessionModal::new(
@@ -136,7 +140,8 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             err,
-            "Missing id. Use `/resume` then Ctrl+D, or `/delete <id-prefix>` for direct removal.",
+            "Missing session id. Usage: `/delete <id-prefix>`, or press Ctrl+D in the `/resume` \
+             picker.",
         );
     }
 
@@ -146,7 +151,7 @@ mod tests {
             let info = test_session_info();
             let ctx = SlashContext::new(&info, None);
             let err = DeleteCmd.execute("zzz1234", &ctx).unwrap_err();
-            assert_eq!(err, "No session matching `zzz1234`.");
+            assert_eq!(err, "No session matching `zzz1234`");
         });
     }
 
@@ -259,7 +264,8 @@ mod tests {
             let err = DeleteCmd.execute(live_id, &ctx).unwrap_err();
             assert_eq!(
                 err,
-                "Cannot delete the live session: `test-session` matches the active session.",
+                "Session prefix `test-session` matches the live session. \
+                 Run `/clear` to start a new one, then delete it.",
             );
         });
     }
@@ -312,7 +318,7 @@ mod tests {
             assert_eq!(
                 err,
                 "Ambiguous prefix `aaaa` matches 6 sessions: aaaaa5a5, aaaaa4a4, aaaaa3a3, \
-                 aaaaa2a2, aaaaa1a1, and 1 more.",
+                 aaaaa2a2, aaaaa1a1, and 1 more",
             );
         });
     }

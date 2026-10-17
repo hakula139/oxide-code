@@ -481,7 +481,7 @@ fn cap_output(content: String) -> (String, Option<usize>) {
     truncated.push_str(&content[..head_end]);
     _ = write!(
         truncated,
-        "\n... [{omitted_bytes} bytes truncated; head + tail kept] ...\n"
+        "\n... [{omitted_bytes} bytes truncated, head + tail kept] ...\n"
     );
     truncated.push_str(&content[tail_start..]);
 
@@ -494,7 +494,7 @@ fn cap_output(content: String) -> (String, Option<usize>) {
 /// an "Invalid input: ..." error [`ToolOutput`] that callers hand back to the model as-is.
 #[expect(
     clippy::result_large_err,
-    reason = "ToolOutput carries the full tool result; the Err here is the cold input-validation path constructed at most once per tool call"
+    reason = "ToolOutput carries the full tool result, but the Err here is the cold input-validation path, built at most once per tool call"
 )]
 pub(crate) fn parse_input<T: DeserializeOwned>(raw: serde_json::Value) -> Result<T, ToolOutput> {
     serde_json::from_value(raw).map_err(|e| ToolOutput::error(invalid_input(&e)))
@@ -829,7 +829,7 @@ pub(crate) fn entry_mtime(entry: &ignore::DirEntry) -> SystemTime {
 
 #[expect(
     clippy::cast_precision_loss,
-    reason = "MB display tolerates minor precision loss at > 2^53 bytes; file size caps are nowhere near that"
+    reason = "MB display loses precision only above 2^53 bytes, far beyond any file size cap"
 )]
 pub(crate) fn bytes_to_mb(bytes: u64) -> f64 {
     bytes as f64 / (1024.0 * 1024.0)
@@ -1483,7 +1483,7 @@ mod tests {
 
         assert!(!output.is_error);
         assert!(output.content.len() <= MAX_OUTPUT_BYTES + TRUNCATION_OVERHEAD);
-        assert!(output.content.contains("bytes truncated; head + tail kept"));
+        assert!(output.content.contains("bytes truncated, head + tail kept"));
         assert!(output.metadata.truncated_bytes.is_some());
         assert!(output.metadata.truncated_total.is_none());
     }
@@ -1732,7 +1732,7 @@ mod tests {
 
         assert!(out.starts_with(head));
         assert!(out.ends_with(tail));
-        assert!(out.contains("bytes truncated; head + tail kept"));
+        assert!(out.contains("bytes truncated, head + tail kept"));
         assert!(out.len() <= MAX_OUTPUT_BYTES + TRUNCATION_OVERHEAD);
         let sep_pos = out.find("bytes truncated").unwrap();
         assert!(sep_pos > head.len());

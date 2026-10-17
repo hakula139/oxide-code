@@ -490,7 +490,7 @@ fn search_with_context(
             return;
         }
         if range_idx > 0 {
-            output_lines.push("--".into());
+            output_lines.push("--".to_owned());
         }
         for (i, line) in lines.iter().enumerate().take(end + 1).skip(start) {
             if output_lines.len() >= capacity {

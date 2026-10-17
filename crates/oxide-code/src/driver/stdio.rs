@@ -97,29 +97,28 @@ impl Approver for Unattended {
             (Some(grant), _) => {
                 let rule = grant.suggested();
                 format!(
-                    "This run cannot ask for approval. To allow this call, add `{}` to the `{}` \
-                     list in the `[permission.allow]` table of the user config.",
+                    "This run cannot ask for approval. To allow this call, add `{}` to \
+                     `permission.allow.{}` in the user config.",
                     toml::Value::from(rule.pattern()),
                     rule.class(),
                 )
             }
             (None, Basis::Builtin(group)) if group.tier() == ShippedTier::Ask => format!(
-                "This run cannot ask for approval, and {basis} holds this call. It runs only \
-                 after approval in an interactive session, or once `{group} = false` under \
-                 `[permission.defaults]` in the user config turns the rule off."
+                "This run cannot ask for approval, and {basis} holds this call. Approve it in an \
+                 interactive session, or set `permission.defaults.{group} = false` in the user \
+                 config."
             ),
             (None, Basis::Mode(_)) => {
-                "This run cannot ask for approval, and no exact allow pattern names this call. \
-                     In the `[permission.allow]` table of the user config, a chained command \
-                     needs a pattern for each of its commands, and a word that expands needs a \
-                     pattern ending in a `*` that covers it and every word after it. A command \
-                     that hides what it runs, such as `$(...)` or `sh -c`, runs only after \
-                     approval in an interactive session."
+                "This run cannot ask for approval, and no allow pattern matches this call. \
+                 Under `permission.allow` in the user config, a chained command needs a pattern \
+                 per command, and a word that expands needs a pattern ending in `*` at that word. \
+                 A command that hides what it runs, such as `$(...)` or `sh -c`, needs approval \
+                 in an interactive session."
                     .to_owned()
             }
             (None, basis) => format!(
-                "This run cannot ask for approval, and {basis} holds this call, so it runs only \
-                 after approval in an interactive session."
+                "This run cannot ask for approval, and {basis} holds this call. Approve it in an \
+                 interactive session."
             ),
         };
         std::future::ready(Decision::DenyWithFeedback { feedback })
@@ -198,10 +197,10 @@ impl StdioSink {
             }
             Event::SessionTitleUpdated { title, .. } => {
                 let title = escape_controls(&title);
-                writeln!(stderr, "Renamed the session to {title}.")?;
+                writeln!(stderr, "Renamed the session to {title}")?;
             }
             Event::SessionRolled { id, .. } => {
-                writeln!(stderr, "Started session {}.", id_prefix(&id))?;
+                writeln!(stderr, "Started session {}", id_prefix(&id))?;
             }
             Event::SessionResumed {
                 id,
@@ -221,7 +220,7 @@ impl StdioSink {
                 let notice = config_change(&model, effort, requested_effort);
                 writeln!(stderr, "{notice}")?;
             }
-            Event::ModeChanged(mode) => writeln!(stderr, "Using {mode} mode.")?,
+            Event::ModeChanged(mode) => writeln!(stderr, "Using {mode} mode")?,
             // TUI-only events have no stdio surface to update.
             Event::PromptDrained(_)
             | Event::UsageUpdated(_)
@@ -321,7 +320,7 @@ fn task_lines(tasks: &[Task]) -> String {
 /// The session an [`Event::SessionResumed`] continues, then a note when resuming it unarchived it.
 fn resumed_notice(id: &str, title: Option<&str>, unarchived: bool) -> String {
     let title = title.map_or_else(|| UNTITLED_MARKER.to_owned(), escape_controls);
-    let resumed = format!("Resumed session {}: {title}.", id_prefix(id));
+    let resumed = format!("Resumed session {}: {title}", id_prefix(id));
     if unarchived {
         return format!("{resumed}\n{}", archive_notice(id, false));
     }
@@ -333,9 +332,9 @@ fn resumed_notice(id: &str, title: Option<&str>, unarchived: bool) -> String {
 fn config_change(model: &ModelSpec, effort: Option<Effort>, requested: Option<Effort>) -> String {
     let model = format!("{} ({})", model.display_name(), model.id());
     match (effort, requested) {
-        (Some(effort), _) => format!("Using {model} at {effort} effort."),
-        (None, Some(requested)) => format!("Using {model}. {}", requested.unapplied_notice()),
-        (None, None) => format!("Using {model}."),
+        (Some(effort), _) => format!("Using {model} at {effort} effort"),
+        (None, Some(requested)) => format!("Using {model}. {}.", requested.unapplied_notice()),
+        (None, None) => format!("Using {model}"),
     }
 }
 
@@ -511,36 +510,35 @@ mod tests {
             (
                 &manual,
                 Some(&grant),
-                r"This run cannot ask for approval. To allow this call, add `'''echo 'a\b''''` to the `exec` list in the `[permission.allow]` table of the user config.",
+                r"This run cannot ask for approval. To allow this call, add `'''echo 'a\b''''` to `permission.allow.exec` in the user config.",
             ),
             (
                 &manual,
                 None,
-                "This run cannot ask for approval, and no exact allow pattern names this call. In \
-                 the `[permission.allow]` table of the user config, a chained command needs a \
-                 pattern for each of its commands, and a word that expands needs a pattern ending \
-                 in a `*` that covers it and every word after it. A command that hides what it \
-                 runs, such as `$(...)` or `sh -c`, runs only after approval in an interactive \
-                 session.",
+                "This run cannot ask for approval, and no allow pattern matches this call. \
+                 Under `permission.allow` in the user config, a chained command needs a pattern \
+                 per command, and a word that expands needs a pattern ending in `*` at that word. \
+                 A command that hides what it runs, such as `$(...)` or `sh -c`, needs approval \
+                 in an interactive session.",
             ),
             (
                 &Basis::Builtin(Shipped::Git),
                 None,
-                "This run cannot ask for approval, and the built-in `git` rule holds this call. It \
-                 runs only after approval in an interactive session, or once `git = false` under \
-                 `[permission.defaults]` in the user config turns the rule off.",
+                "This run cannot ask for approval, and the built-in `git` rule holds this call. \
+                 Approve it in an interactive session, or set `permission.defaults.git = false` in \
+                 the user config.",
             ),
             (
                 &Basis::Builtin(Shipped::Ssh),
                 None,
-                "This run cannot ask for approval, and the built-in `ssh` rule holds this call, so \
-                 it runs only after approval in an interactive session.",
+                "This run cannot ask for approval, and the built-in `ssh` rule holds this call. \
+                 Approve it in an interactive session.",
             ),
             (
                 &ask,
                 None,
                 "This run cannot ask for approval, and the `ask.exec` pattern `git push *` holds \
-                 this call, so it runs only after approval in an interactive session.",
+                 this call. Approve it in an interactive session.",
             ),
         ];
 
@@ -785,14 +783,14 @@ mod tests {
                     session_id: "sid".to_owned(),
                     title: "Fix login\u{1b}[2J".to_owned(),
                 },
-                "Renamed the session to Fix login\\u{1b}[2J.\n",
+                "Renamed the session to Fix login\\u{1b}[2J\n",
             ),
             (
                 Event::SessionRolled {
                     id: "0123456789abcdef".to_owned(),
                     archived: false,
                 },
-                "Started session 01234567.\n",
+                "Started session 01234567\n",
             ),
             (
                 Event::SessionResumed {
@@ -801,7 +799,7 @@ mod tests {
                     unarchived: false,
                     history: Vec::new(),
                 },
-                "Resumed session 89abcdef: Fix login.\n",
+                "Resumed session 89abcdef: Fix login\n",
             ),
             (
                 Event::SessionResumed {
@@ -810,7 +808,7 @@ mod tests {
                     unarchived: true,
                     history: Vec::new(),
                 },
-                "Resumed session 89abcdef: (untitled).\nUnarchived session 89abcdef.\n",
+                "Resumed session 89abcdef: (untitled)\nUnarchived session 89abcdef\n",
             ),
         ];
 
@@ -833,7 +831,7 @@ mod tests {
         let cases = [
             (
                 config_changed("claude-opus-5-5", Some(Effort::Low), Some(Effort::Low)),
-                "Using Claude Opus 5.5 (claude-opus-5-5) at low effort.\n",
+                "Using Claude Opus 5.5 (claude-opus-5-5) at low effort\n",
             ),
             (
                 config_changed("custom-model", None, Some(Effort::High)),
@@ -842,7 +840,7 @@ mod tests {
             ),
             (
                 config_changed("custom-model", None, None),
-                "Using custom-model (custom-model).\n",
+                "Using custom-model (custom-model)\n",
             ),
         ];
 
@@ -859,7 +857,7 @@ mod tests {
         let (stdout, stderr) = render_one(&test_sink(false), Event::ModeChanged(Mode::Plan));
 
         assert!(stdout.is_empty(), "stdout must stay empty: {stdout:?}");
-        assert_eq!(stderr, "Using plan mode.\n");
+        assert_eq!(stderr, "Using plan mode\n");
     }
 
     #[test]
@@ -903,7 +901,7 @@ mod tests {
 
     #[test]
     fn render_retrying_writes_the_notice_to_stderr() {
-        let notice = "HTTP 529 overloaded_error. Retrying in 1s (retry 1 of 5).";
+        let notice = "HTTP 529 overloaded_error. Retrying in 1 s (retry 1 of 5).";
         let (stdout, stderr) = render_one(&test_sink(false), Event::Retrying(notice.to_owned()));
         assert!(stdout.is_empty(), "{stdout:?}");
         assert_eq!(stderr, format!("{notice}\n"));

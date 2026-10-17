@@ -100,7 +100,7 @@ While the summary streams, the TUI shows it below the chat under a `Summarizing 
 
 - **`session::handle::compact`**: Async API. Sends `SessionCmd::Compact`, awaits the ack, and returns `CompactOutcome { pre_count, failure }`. Like `archive`, it reports a failure whenever the command or its ack cannot reach the writer task. The caller clears the file tracker only after the boundary flush succeeds.
 
-- **`CompactedBlock`**: Chat block with an accent-bar surface, a `Compacted N messages → 1 summary.` header (with a `(focus: ...)` suffix when instructions were given), and the rendered summary markdown body. No footer. Reuses the existing markdown renderer. `CompactedBlock::render_streaming` renders the summary in flight under a `Summarizing the conversation...` header.
+- **`CompactedBlock`**: Chat block with an accent-bar surface, a `Compacted N messages → 1 summary` header (with a `(focus: ...)` suffix when instructions were given), and the rendered summary markdown body. No footer. Reuses the existing markdown renderer. `CompactedBlock::render_streaming` renders the summary in flight under a `Summarizing the conversation...` header.
 
 - **`apply_session_compacted` (TUI)**: Clears the chat, pushes a single `CompactedBlock`, keeps queued prompts for the normal idle drain, clears the modal stack, and resumes idle unless the compaction was automatic.
 

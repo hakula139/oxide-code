@@ -250,7 +250,7 @@ mod tests {
     fn execute_unknown_mode_errors_listing_valid_options() {
         assert_eq!(
             run_execute("turbo").unwrap_err(),
-            "Unknown mode `turbo`: expected one of manual, plan, yolo."
+            "Unknown mode: `turbo`. Valid: manual, plan, yolo."
         );
     }
 
