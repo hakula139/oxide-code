@@ -54,9 +54,9 @@ impl TaskPanel {
     }
 
     /// Fills `area` with tasks below the gap, giving its last row to a summary of the rest when
-    /// they don't fit. A single-row area drops the gap so the row still shows a task or summary.
+    /// they don't fit.
     pub(crate) fn render(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
-        let gap = GAP_ROWS.min(area.height.saturating_sub(1));
+        let gap = self.gap(area.height);
         let area = Rect {
             y: area.y + gap,
             height: area.height - gap,
@@ -88,6 +88,17 @@ impl TaskPanel {
             )));
         }
         frame.render_widget(Paragraph::new(lines).style(theme.surface()), area);
+    }
+
+    /// The gap above a panel `height` rows tall. It stays while the rows below fit the whole list,
+    /// or one task and the summary row when the list is longer, so it never displaces every task.
+    fn gap(&self, height: u16) -> u16 {
+        let below = usize::from(height.saturating_sub(GAP_ROWS));
+        if self.tasks.len() <= below || below >= 2 {
+            GAP_ROWS
+        } else {
+            0
+        }
     }
 }
 
@@ -260,13 +271,29 @@ mod tests {
     }
 
     #[test]
-    fn render_keeps_the_gap_and_summary_row_when_the_area_is_shorter() {
+    fn render_keeps_the_gap_while_a_task_and_the_summary_fit_under_it() {
         let mut panel = TaskPanel::default();
         panel.set(long_plan());
 
         assert_eq!(
-            texts(render_rows(&panel, 40, 4)),
-            ["", "  ✓ Step 3", "  ● Step 4", "  +4 pending, 2 completed"],
+            texts(render_rows(&panel, 40, 3)),
+            ["", "  ● Step 4", "  +4 pending, 3 completed"],
+        );
+    }
+
+    #[test]
+    fn render_drops_the_gap_in_two_rows_unless_the_whole_list_fits_under_it() {
+        let mut panel = TaskPanel::default();
+        panel.set(long_plan());
+        assert_eq!(
+            texts(render_rows(&panel, 40, 2)),
+            ["  ● Step 4", "  +4 pending, 3 completed"],
+        );
+
+        panel.set(vec![task("Add the entry type", TaskStatus::InProgress)]);
+        assert_eq!(
+            texts(render_rows(&panel, 40, 2)),
+            ["", "  ● Add the entry type"],
         );
     }
 

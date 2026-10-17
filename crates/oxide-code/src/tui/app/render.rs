@@ -514,6 +514,7 @@ mod tests {
             None,
         );
         app.dispatch_action(Action::Submit("active".into()));
+        push_ls_call(&mut app);
         app.pending_prompts.push_back("queued 0".to_owned());
 
         app.handle_engine_event(Event::TasksUpdated(plan()));
@@ -522,28 +523,20 @@ mod tests {
     }
 
     #[test]
-    fn draw_frame_leaves_a_blank_row_between_tool_output_and_the_task_panel() {
-        let (mut app, _rx, _event_tx) = test_app(None);
-        push_ls_call(&mut app);
-        app.handle_engine_event(Event::TasksUpdated(plan()));
-        insta::assert_snapshot!(render_app(&mut app, 60, 12));
-    }
-
-    #[test]
     fn draw_frame_gives_the_input_its_rows_before_the_task_panel() {
         let (mut app, _rx, _event_tx) = test_app(None);
-        app.input.set_text("one\ntwo\nthree\nfour");
+        app.input.set_text("one\ntwo\nthree\nfour\nfive");
         app.handle_engine_event(Event::TasksUpdated(plan()));
 
         let text = rendered_text(&mut app, 40, 12);
         let rows: Vec<&str> = text.lines().map(str::trim_end).collect();
 
         assert_eq!(
-            rows[3..6],
-            ["", "  ● Add the entry type", "  +1 pending, 1 completed"]
+            rows[3..5],
+            ["  ● Add the entry type", "  +1 pending, 1 completed"]
         );
-        assert_eq!(rows[6], "─".repeat(40));
-        assert!(rows[7].ends_with("one"), "{text}");
+        assert_eq!(rows[5], "─".repeat(40));
+        assert!(rows[6].ends_with("one"), "{text}");
     }
 
     #[test]
