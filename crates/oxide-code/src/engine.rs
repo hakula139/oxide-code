@@ -354,7 +354,7 @@ impl Engine {
         self.bill(sink, &spent).await;
         if matches!(compacted, Ok(true)) {
             self.refresh_prompt().await;
-            self.reset_context_usage();
+            self.reset_context_usage(sink);
         }
         if !spent.is_empty() {
             self.emit_usage_update(sink);
@@ -412,7 +412,7 @@ impl Engine {
             return self.fail_compact(sink, abort);
         }
         self.refresh_prompt().await;
-        self.reset_context_usage();
+        self.reset_context_usage(sink);
         self.emit_usage_update(sink);
         TurnEnd::Completed
     }
@@ -463,7 +463,7 @@ impl Engine {
         )
         .await;
         sink.session_write_error(outcome.finalize_failure.as_deref());
-        self.adopt_session(LoadedTranscript::default()).await;
+        self.adopt_session(sink, LoadedTranscript::default()).await;
         sink.emit(
             Event::SessionRolled {
                 id: outcome.new_id,
@@ -488,7 +488,7 @@ impl Engine {
                 return;
             }
         };
-        self.adopt_session(outcome.transcript).await;
+        self.adopt_session(sink, outcome.transcript).await;
         sink.emit(
             Event::SessionResumed {
                 id: self.session.session_id().to_owned(),
@@ -526,7 +526,7 @@ impl Engine {
         handle::roll_into(&mut self.session, &self.store, &self.file_tracker, &path).await
     }
 
-    async fn adopt_session(&mut self, transcript: LoadedTranscript) {
+    async fn adopt_session(&mut self, sink: &dyn EventSink, transcript: LoadedTranscript) {
         let LoadedTranscript {
             messages,
             context,
@@ -542,7 +542,7 @@ impl Engine {
         self.prompt_unrecorded = context.is_none();
         self.prompt = session_prompt(context, self.client.model(), &self.cwd).await;
         self.policy.clear_session_allow();
-        self.reset_context_usage();
+        self.reset_context_usage(sink);
         self.total_estimated_cost_usd = estimate_cost_usd(&usage);
     }
 
@@ -590,7 +590,7 @@ impl Engine {
             },
             "config-changed",
         );
-        self.auto_compaction_failures = 0;
+        compaction::reset_auto_compact_failures(&mut self.auto_compaction_failures, sink);
         self.emit_usage_update(sink);
     }
 
@@ -698,9 +698,9 @@ impl Engine {
         sink.session_write_error(outcome.failure.as_deref());
     }
 
-    /// Forgets the context usage of a transcript the session no longer sends.
-    fn reset_context_usage(&mut self) {
-        self.auto_compaction_failures = 0;
+    /// Forgets the usage and auto-compaction failures of a transcript the session no longer sends.
+    fn reset_context_usage(&mut self, sink: &dyn EventSink) {
+        compaction::reset_auto_compact_failures(&mut self.auto_compaction_failures, sink);
         self.last_usage = None;
         self.displayed_usage = None;
     }
@@ -2094,7 +2094,7 @@ mod tests {
     // ── compact ──
 
     #[tokio::test]
-    async fn compact_replaces_the_transcript_and_bills_the_summary() {
+    async fn compact_replaces_the_transcript_bills_the_summary_and_resumes_auto_compaction() {
         with_pinned_home(async {
             let server = MockServer::start().await;
             mount_reply(&server, "manual summary").await;
@@ -2103,6 +2103,7 @@ mod tests {
             engine.messages = tool_heavy_transcript();
             engine.displayed_usage = Some(TokenUsage::new(90_000, 9));
             engine.total_estimated_cost_usd = 1.23;
+            engine.auto_compaction_failures = 3;
             let sink = CapturingSink::new();
             let (_ops_tx, mut ops) = crate::protocol::inert_op_channel();
 
@@ -2129,6 +2130,7 @@ mod tests {
                 "the compacted transcript starts from a fresh user context"
             );
             assert!(engine.prompt_unrecorded);
+            assert_eq!(engine.auto_compaction_failures, 0);
             let events = sink.events();
             let [
                 Event::SummaryToken(streamed),
@@ -2137,10 +2139,11 @@ mod tests {
                     instructions: Some(focus),
                     ..
                 },
+                Event::AutoCompactionResumed,
                 Event::UsageUpdated(usage),
             ] = events.as_slice()
             else {
-                panic!("expected the streamed summary, the compaction, then its cost: {events:?}");
+                panic!("expected the summary, compaction, resume, then cost: {events:?}");
             };
             assert_eq!(streamed, "manual summary");
             assert_eq!(focus, "focus");
@@ -2365,6 +2368,54 @@ mod tests {
             assert!(
                 engine.total_estimated_cost_usd.abs() < f64::EPSILON,
                 "a session that recorded no usage resumes at zero"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn clear_and_resume_end_a_paused_auto_compaction() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let mut engine = engine(server.uri(), &store, dir.path()).await;
+            let target_id = finished_session(&store).await;
+            let target_path = store.find_session_path(&target_id).unwrap();
+            let clear_sink = CapturingSink::new();
+            let resume_sink = CapturingSink::new();
+
+            engine.auto_compaction_failures = 3;
+            engine.clear(&clear_sink).await;
+            let after_clear = engine.auto_compaction_failures;
+            engine.auto_compaction_failures = 3;
+            engine
+                .resume(&resume_sink, ResumeTarget::Path(target_path))
+                .await;
+
+            assert_eq!((after_clear, engine.auto_compaction_failures), (0, 0));
+            let cleared = clear_sink.events();
+            assert!(
+                matches!(
+                    cleared.as_slice(),
+                    [
+                        Event::AutoCompactionResumed,
+                        Event::SessionRolled {
+                            archived: false,
+                            ..
+                        },
+                    ]
+                ),
+                "{cleared:?}",
+            );
+            let resumed = resume_sink.events();
+            assert!(
+                matches!(
+                    resumed.as_slice(),
+                    [Event::AutoCompactionResumed, Event::SessionResumed { id, .. }]
+                        if *id == target_id
+                ),
+                "{resumed:?}",
             );
         })
         .await;
@@ -2745,10 +2796,18 @@ mod tests {
                 "session cost must accumulate across swaps: {}",
                 engine.total_estimated_cost_usd,
             );
-            assert!(matches!(
-                sink.events().first(),
-                Some(Event::ConfigChanged { .. })
-            ));
+            let events = sink.events();
+            assert!(
+                matches!(
+                    events.as_slice(),
+                    [
+                        Event::ConfigChanged { .. },
+                        Event::AutoCompactionResumed,
+                        Event::UsageUpdated(_),
+                    ]
+                ),
+                "{events:?}",
+            );
         })
         .await;
     }

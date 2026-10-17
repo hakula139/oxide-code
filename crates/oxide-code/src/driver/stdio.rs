@@ -186,6 +186,8 @@ impl StdioSink {
             | Event::UsageUpdated(_)
             | Event::RateLimitsUpdated(_)
             | Event::AutoCompactionStarted
+            | Event::AutoCompactionPaused { .. }
+            | Event::AutoCompactionResumed
             | Event::SummaryToken(_)
             | Event::SummaryDiscarded
             | Event::LoginStarted { .. }
@@ -561,6 +563,8 @@ mod tests {
                 }),
             }),
             Event::AutoCompactionStarted,
+            Event::AutoCompactionPaused { failures: 3 },
+            Event::AutoCompactionResumed,
             Event::SummaryToken("Recap".to_owned()),
             Event::SummaryDiscarded,
         ] {
