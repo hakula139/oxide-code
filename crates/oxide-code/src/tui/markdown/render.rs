@@ -50,8 +50,8 @@ pub(super) struct MarkdownRenderer<I> {
     /// unordered (`- `).
     list_stack: Vec<Option<u64>>,
     /// List-item markers queued by `start_item`, each with the `indent_stack` depth of its item.
-    /// The next `push_line` prints every marker in place of the continuation indent at its depth,
-    /// so an item whose first child adds a prefix keeps its marker in front.
+    /// The next line built by `prefixed` prints every marker in place of the continuation indent
+    /// at its depth, so an item whose first child adds a prefix keeps its marker in front.
     pending_markers: Vec<(usize, Vec<Span<'static>>)>,
 
     inline_styles: Vec<Style>,
@@ -208,14 +208,7 @@ where
             TagEnd::HtmlBlock => self.needs_newline = true,
             TagEnd::CodeBlock => self.end_code_block(),
             TagEnd::List(_) => self.end_list(),
-            TagEnd::Item => {
-                // Tight list items bypass `end_paragraph`, so wrap here.
-                self.finish_line();
-                self.indent_stack.pop();
-                let depth = self.indent_stack.len();
-                self.pending_markers
-                    .retain(|&(marker_depth, _)| marker_depth < depth);
-            }
+            TagEnd::Item => self.end_item(),
             TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough => {
                 self.pop_inline_style();
             }
@@ -323,6 +316,15 @@ where
         self.pending_markers.push((self.indent_stack.len(), marker));
         self.indent_stack.push(continuation);
         self.needs_newline = false;
+    }
+
+    fn end_item(&mut self) {
+        // Tight list items bypass `end_paragraph`, so wrap here.
+        self.finish_line();
+        self.indent_stack.pop();
+        let depth = self.indent_stack.len();
+        self.pending_markers
+            .retain(|&(marker_depth, _)| marker_depth < depth);
     }
 
     // ── Code Blocks ──
@@ -525,9 +527,6 @@ where
                 .push(Span::styled(code.into_string(), style));
             return;
         }
-        if !self.pending_markers.is_empty() {
-            self.push_line(Line::default());
-        }
         self.push_span(Span::styled(code.into_string(), style));
     }
 
@@ -609,14 +608,13 @@ where
 
     // ── Line Building ──
 
-    /// Starts a new output line with indent prefixes and any pending list marker.
+    /// Starts a new output line with indent prefixes and any pending list markers.
     fn push_line(&mut self, line: Line<'static>) {
         let line = self.prefixed(line);
         self.wrap_and_push(line);
     }
 
-    /// Prepends the indent prefixes, with each pending list marker in place of the indent at its
-    /// depth.
+    /// Prepends the indent prefixes, each pending marker in place of the indent at its depth.
     fn prefixed(&mut self, line: Line<'static>) -> Line<'static> {
         let markers = std::mem::take(&mut self.pending_markers);
         let mut spans: Vec<Span<'static>> = Vec::new();
@@ -673,10 +671,9 @@ where
     }
 
     fn push_span(&mut self, span: Span<'static>) {
-        if let Some(line) = self.lines.last_mut() {
-            line.push_span(span);
-        } else {
-            self.push_line(Line::from(vec![span]));
+        match self.lines.last_mut() {
+            Some(line) if self.pending_markers.is_empty() => line.push_span(span),
+            _ => self.push_line(Line::from(vec![span])),
         }
         self.line_open = true;
     }
@@ -1134,14 +1131,36 @@ mod tests {
             - - inner
               - second
         "});
-        let empty_first_inner = rendered_text(indoc! {"
-            - -
-              - second
-        "});
 
         assert_eq!(quote, ["- > one two ", "  > three ", "  > four"]);
         assert_eq!(nested, ["- - inner", "  - second"]);
-        assert_eq!(empty_first_inner, ["- - second"]);
+    }
+
+    #[test]
+    fn render_markdown_empty_list_item_drops_only_its_own_marker() {
+        let empty_first_inner = rendered_text(indoc! {"
+            1. 1.
+               2. second
+        "});
+        let empty_then_quote = rendered_text(indoc! {"
+            -
+
+            > after
+        "});
+
+        assert_eq!(empty_first_inner, ["1. 2. second"]);
+        assert_eq!(empty_then_quote, ["", "> after"]);
+    }
+
+    #[test]
+    fn render_markdown_list_item_starting_with_inline_html_or_an_empty_link_keeps_its_marker() {
+        let kbd = rendered_text("- a\n- <kbd>Ctrl</kbd>+C");
+        let sup = rendered_text("- a\n- <sup>1</sup> note");
+        let empty_link = rendered_text("- a\n- [](https://x.io)");
+
+        assert_eq!(kbd, ["- a", "- <kbd>Ctrl</kbd>+C"]);
+        assert_eq!(sup, ["- a", "- <sup>1</sup> note"]);
+        assert_eq!(empty_link, ["- a", "-  (https://x.io)"]);
     }
 
     #[test]
@@ -1157,13 +1176,13 @@ mod tests {
     }
 
     #[test]
-    fn render_markdown_inline_code_leading_a_list_item_follows_the_marker_in_its_style() {
+    fn render_markdown_inline_code_leading_a_list_item_keeps_its_style_after_the_marker() {
         let t = theme();
 
-        let text = render_markdown("- `foo()` here", &t, 0);
+        let text = render_markdown("- a\n- `foo()` here", &t, 0);
 
         assert_eq!(
-            text.lines[0].spans,
+            text.lines[1].spans,
             [
                 Span::styled("- ", t.list_marker()),
                 Span::styled("foo()", t.inline_code()),
