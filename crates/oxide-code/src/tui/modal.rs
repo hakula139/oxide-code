@@ -4,6 +4,7 @@
 
 pub(crate) mod approval;
 pub(crate) mod chrome;
+pub(crate) mod keymap;
 pub(crate) mod kv_overview;
 pub(crate) mod line_editor;
 pub(crate) mod list_picker;
@@ -51,8 +52,9 @@ pub(crate) trait Modal: Send {
         None
     }
 
-    /// Whether Esc reaches [`Self::handle_key`] in place of the universal cancel, for a modal whose
-    /// current step backs out on Esc. Ctrl+C still cancels. Default false.
+    /// Whether Esc reaches [`Self::handle_key`] in place of the universal cancel, for a modal that
+    /// handles Esc itself, either backing out of its current step or dismissing through its own
+    /// key table. Ctrl+C still cancels. Default false.
     fn captures_esc(&self) -> bool {
         false
     }
@@ -422,6 +424,22 @@ mod tests {
             1 + TOP_BORDER_HEIGHT,
             "BareModal is back on top after its child cancels"
         );
+    }
+
+    // ── Modal::captures_esc ──
+
+    #[test]
+    fn captures_esc_default_leaves_esc_to_close_the_modal_silently() {
+        let mut stack = ModalStack::new();
+        stack.push(Box::new(BareModal));
+
+        let outcome = stack.handle_key(&key_with_mods(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert!(
+            matches!(outcome, Some(ModalAction::Cancelled)),
+            "{outcome:?}"
+        );
+        assert!(!stack.is_active());
     }
 
     // ── ModalKey::fmt ──

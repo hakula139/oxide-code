@@ -9,7 +9,7 @@ use crate::protocol::Op;
 use crate::session::display::{archive_notice, id_prefix};
 use crate::session::entry::SessionInfo;
 use crate::session::resolver::resolve_saved_prefix;
-use crate::session::store::set_archived_at;
+use crate::session::saved::{self, BARE_ARCHIVE_HINT};
 use crate::tui::action::Action;
 
 // ── ArchiveCmd ──
@@ -39,10 +39,9 @@ impl SlashCommand for ArchiveCmd {
             return Ok(SlashOutcome::Forward(Action::Op(Op::Archive)));
         }
         match resolve_saved(prefix, ctx.info)? {
-            Some(info) => set_archived(&info, true),
+            Some(info) => set_archived(&info, true, &ctx.info.session_id),
             None => Err(format!(
-                "Session prefix `{prefix}` matches the live session. Use bare `/archive` to archive \
-                 it and start a new one.",
+                "Session prefix `{prefix}` matches the live session. {BARE_ARCHIVE_HINT}"
             )),
         }
     }
@@ -77,13 +76,13 @@ impl SlashCommand for UnarchiveCmd {
         let prefix = args.trim();
         if prefix.is_empty() {
             return Err(
-                "Missing id. Use `/resume` then Ctrl+A to browse archived sessions, or \
-                 `/unarchive <id-prefix>`."
+                "Missing id. Use `/resume` then Ctrl+A to browse archived sessions, then Ctrl+X \
+                 to unarchive one. You can also use `/unarchive <id-prefix>`."
                     .to_owned(),
             );
         }
         match resolve_saved(prefix, ctx.info)? {
-            Some(info) => set_archived(&info, false),
+            Some(info) => set_archived(&info, false, &ctx.info.session_id),
             None => Ok(SlashOutcome::SystemMessage(
                 "The live session is not archived.".to_owned(),
             )),
@@ -98,8 +97,7 @@ fn resolve_saved(prefix: &str, info: &LiveSessionInfo) -> Result<Option<SessionI
     resolve_saved_prefix(&store, prefix, &info.session_id).map_err(resolve_error_message)
 }
 
-fn set_archived(info: &SessionInfo, archived: bool) -> Result<SlashOutcome, String> {
-    let id = id_prefix(&info.session_id);
+fn set_archived(info: &SessionInfo, archived: bool, live_id: &str) -> Result<SlashOutcome, String> {
     if info.archived == archived {
         let state = if archived {
             "already archived"
@@ -107,11 +105,11 @@ fn set_archived(info: &SessionInfo, archived: bool) -> Result<SlashOutcome, Stri
             "not archived"
         };
         return Ok(SlashOutcome::SystemMessage(format!(
-            "Session {id} is {state}."
+            "Session {} is {state}.",
+            id_prefix(&info.session_id),
         )));
     }
-    set_archived_at(&info.path, archived)
-        .map_err(|e| format!("Failed to update session {id}: {e:#}"))?;
+    saved::set_archived(&info.path, &info.session_id, archived, live_id)?;
     Ok(SlashOutcome::SystemMessage(archive_notice(
         &info.session_id,
         archived,
@@ -123,8 +121,8 @@ mod tests {
     use time::macros::datetime;
 
     use super::*;
-    use crate::session::store::SessionStore;
-    use crate::session::store::testing::seed_test_session;
+    use crate::session::store::testing::{listed_ids, seed_test_session};
+    use crate::session::store::{SessionStore, set_archived_at};
     use crate::slash::{stamped_id, test_session_info, with_isolated_xdg};
 
     fn seed_saved(store: &SessionStore, session_id: &str) {
@@ -135,11 +133,6 @@ mod tests {
             Some(1),
             datetime!(2026-04-18 09:00:00 UTC),
         );
-    }
-
-    fn listed_ids(store: &SessionStore) -> Vec<String> {
-        let sessions = store.list().unwrap();
-        sessions.into_iter().map(|s| s.session_id).collect()
     }
 
     // ── ArchiveCmd::name ──
@@ -181,7 +174,7 @@ mod tests {
 
             let note = ArchiveCmd.execute(&target_id[..4], &ctx).unwrap();
             assert_eq!(note.into_system_message(), archive_notice(&target_id, true));
-            assert_eq!(listed_ids(&store), [] as [String; 0]);
+            assert_eq!(listed_ids(&store, false), [] as [String; 0]);
 
             let again = ArchiveCmd.execute(&target_id[..4], &ctx).unwrap();
             assert_eq!(
@@ -205,7 +198,7 @@ mod tests {
                 "Session prefix `test-` matches the live session. Use bare `/archive` to archive \
                  it and start a new one.",
             );
-            assert_eq!(listed_ids(&store), ["test-session"]);
+            assert_eq!(listed_ids(&store, false), ["test-session"]);
         });
     }
 
@@ -275,8 +268,8 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             err,
-            "Missing id. Use `/resume` then Ctrl+A to browse archived sessions, or \
-             `/unarchive <id-prefix>`.",
+            "Missing id. Use `/resume` then Ctrl+A to browse archived sessions, then Ctrl+X to \
+             unarchive one. You can also use `/unarchive <id-prefix>`.",
         );
     }
 
@@ -295,7 +288,7 @@ mod tests {
                 note.into_system_message(),
                 archive_notice(&target_id, false)
             );
-            assert_eq!(listed_ids(&store), [target_id.as_str()]);
+            assert_eq!(listed_ids(&store, false), [target_id.as_str()]);
 
             let again = UnarchiveCmd.execute(&target_id[..4], &ctx).unwrap();
             assert_eq!(
