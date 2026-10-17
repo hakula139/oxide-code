@@ -61,7 +61,11 @@ An open code block stays in the tail until the next block starts. Its highlighte
 
 ## Markdown Tables
 
-A table renders as a box in the `table_border` slot, with one cell of padding inside each border and the header row in the `table_header` slot, a bold accent by default. A rule with `├ ┼ ┤` junctions separates every pair of rows. Columns keep their natural widths when the table fits. Otherwise the widest columns shrink to a shared cap, so narrow columns stay whole, and cells word-wrap within their columns. A `<br>` in a cell starts a new line in that cell, since a GFM cell has no other line break.
+A table renders as a box in the `table_border` slot, with one cell of padding inside each border and the header row in the `table_header` slot, a bold accent by default. A rule with `├ ┼ ┤` junctions separates every pair of rows. Inside a list item or blockquote, every row carries the item indent or the `>` marker, and the table fits in the width that remains.
+
+Columns keep their natural widths when the table fits. Otherwise each column gets the width of its longest word, up to 30 columns so a long path or URL still wraps, and the remaining width goes to the columns in proportion to how far each falls short of its natural width. Cells word-wrap within their columns. When even those minimum widths don't fit, each body row stacks into `header: value` lines, with a `table_border` rule between rows.
+
+A `<br>` in a cell starts a new line in that cell, since a GFM cell has no other line break.
 
 ## Design Decisions
 
@@ -75,3 +79,4 @@ A table renders as a box in the `table_border` slot, with one cell of padding in
 8. **Two-tier tool display.** Inline summary with per-tool icons, plus truncated output body.
 9. **Per-block render cache with viewport-scoped rendering.** Committed blocks render lazily near the viewport, and the scroll offset anchors on a block so blocks above it changing height leave the visible rows in place.
 10. **A rule between every table row.** Without one, the continuation lines of a wrapped row leave blank cells that read as spacing, so the single-line rows around it seem to run together. Claude Code and oh-my-pi rule off every row of their boxed tables, as Codex does in its borderless ones.
+11. **Table columns no narrower than their longest word.** A narrower column splits words mid-way, so a flag such as `--all-targets` breaks across rows. When the words can't all fit side by side, the rows stack as `header: value` lines. Claude Code and oh-my-pi also start each column at its longest word, and Claude Code stacks rows the same way once wrapped rows grow too tall.

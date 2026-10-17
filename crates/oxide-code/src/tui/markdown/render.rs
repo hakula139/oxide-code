@@ -1,5 +1,7 @@
 //! Markdown → [`ratatui::text::Text`] renderer. Walks the pulldown-cmark stream into styled
-//! lines wrapped to terminal width. Wrapped lines keep the enclosing block's continuation indent.
+//! lines wrapped to terminal width. Wrapped lines and table rows keep the enclosing block's
+//! continuation indent. Table columns shrink to their longest word, below which rows stack as
+//! `header: value` lines.
 
 use pulldown_cmark::{
     Alignment, CodeBlockKind, CowStr, Event, HeadingLevel, LinkType, Tag, TagEnd,
@@ -14,7 +16,9 @@ use crate::tui::glyphs::{
     HORIZONTAL_RULE, TABLE_BOTTOM, TABLE_MIDDLE, TABLE_TOP, TableRule, VERTICAL_RULE,
 };
 use crate::tui::theme::Theme;
-use crate::tui::wrap::{expand_tabs_in_spans, wrap_line, wrap_line_keeping_lead};
+use crate::tui::wrap::{
+    expand_tabs_in_spans, longest_word_width, wrap_line, wrap_line_keeping_lead,
+};
 
 // ── Renderer ──
 
@@ -358,6 +362,8 @@ where
     // ── Tables ──
 
     fn start_table(&mut self, alignments: Vec<Alignment>) {
+        // A table can interrupt a tight list item's text, which bypasses `end_paragraph`.
+        self.wrap_last_line();
         self.start_block();
         self.table = TableState {
             active: true,
@@ -373,7 +379,7 @@ where
 
     fn end_table(&mut self) {
         let TableState {
-            rows,
+            mut rows,
             alignments,
             head_rows,
             ..
@@ -383,49 +389,90 @@ where
             return;
         }
 
+        let header_style = self.theme.table_header();
+        for line in rows.iter_mut().take(head_rows).flatten().flatten() {
+            for span in &mut line.spans {
+                span.style = header_style.patch(span.style);
+            }
+        }
+
         let col_count = alignments
             .len()
             .max(rows.iter().map(Vec::len).max().unwrap_or(0));
-        let natural_widths = compute_column_widths(&rows, col_count);
+        let columns = measure_columns(&rows, col_count);
         let col_widths = if self.width == 0 {
-            natural_widths
+            Some(columns.iter().map(|column| column.natural).collect())
         } else {
-            fit_column_widths(&natural_widths, self.width)
+            fit_column_widths(&columns, self.width.saturating_sub(self.indent_width()))
         };
-
-        let border_style = self.theme.table_border();
-        let header_style = self.theme.table_header();
-        let row_rule = build_horizontal_rule(&col_widths, border_style, TABLE_MIDDLE);
-
-        self.lines
-            .push(build_horizontal_rule(&col_widths, border_style, TABLE_TOP));
-
-        for (row_idx, row) in rows.iter().enumerate() {
-            if row_idx > 0 {
-                self.lines.push(row_rule.clone());
-            }
-            let cell_style = if row_idx < head_rows {
-                header_style
-            } else {
-                Style::default()
-            };
-            self.lines.extend(build_data_rows(
-                row,
-                &col_widths,
-                &alignments,
-                col_count,
-                border_style,
-                cell_style,
-            ));
+        match col_widths {
+            Some(col_widths) => self.push_table_box(&rows, &alignments, &col_widths),
+            None => self.push_stacked_table(&rows, head_rows),
         }
 
-        self.lines.push(build_horizontal_rule(
-            &col_widths,
+        self.needs_newline = true;
+    }
+
+    fn push_table_box(
+        &mut self,
+        rows: &[Vec<Cell>],
+        alignments: &[Alignment],
+        col_widths: &[usize],
+    ) {
+        let border_style = self.theme.table_border();
+        let row_rule = build_horizontal_rule(col_widths, border_style, TABLE_MIDDLE);
+
+        self.push_line(build_horizontal_rule(col_widths, border_style, TABLE_TOP));
+        for (row_idx, row) in rows.iter().enumerate() {
+            if row_idx > 0 {
+                self.push_line(row_rule.clone());
+            }
+            for line in build_data_rows(row, col_widths, alignments, border_style) {
+                self.push_line(line);
+            }
+        }
+        self.push_line(build_horizontal_rule(
+            col_widths,
             border_style,
             TABLE_BOTTOM,
         ));
+    }
 
-        self.needs_newline = true;
+    /// Lays out each body row as `header: value` lines separated by rules. A table with no body
+    /// lists its header cells.
+    fn push_stacked_table(&mut self, rows: &[Vec<Cell>], head_rows: usize) {
+        let (head, body) = rows.split_at(head_rows);
+        let (labels, blocks) = if body.is_empty() {
+            (None, head)
+        } else {
+            (head.first(), body)
+        };
+        let label_style = self.theme.table_header();
+        let rule = Line::from(Span::styled(
+            HORIZONTAL_RULE.repeat(self.width.saturating_sub(self.indent_width())),
+            self.theme.table_border(),
+        ));
+
+        for (row_idx, row) in blocks.iter().enumerate() {
+            if row_idx > 0 {
+                self.push_line(rule.clone());
+            }
+            for (col, cell) in row.iter().enumerate() {
+                let label = labels
+                    .and_then(|labels| labels.get(col))
+                    .map(|label| joined_cell_spans(label))
+                    .filter(|label| !label.is_empty());
+                let mut spans = Vec::new();
+                if let Some(label) = label {
+                    spans.extend(label);
+                    spans.push(Span::styled(":", label_style));
+                    spans.push(Span::raw(" "));
+                }
+                spans.extend(joined_cell_spans(cell));
+                let line = self.prefixed(Line::from(spans));
+                self.wrap_and_push_hanging(line, TABLE_STACKED_HANG, 0);
+            }
+        }
     }
 
     // ── Inline Content ──
@@ -625,6 +672,10 @@ where
             .collect()
     }
 
+    fn indent_width(&self) -> usize {
+        self.indent_stack.iter().flatten().map(Span::width).sum()
+    }
+
     fn push_span(&mut self, span: Span<'static>) {
         if let Some(line) = self.lines.last_mut() {
             line.push_span(span);
@@ -675,6 +726,10 @@ fn leading_whitespace_width(line: &Line<'_>) -> usize {
 
 const TABLE_CELL_PADDING: usize = 1;
 const TABLE_COLUMN_OVERHEAD: usize = 2 * TABLE_CELL_PADDING + 1;
+const TABLE_STACKED_HANG: usize = 2;
+
+/// Widest word a column keeps whole, so a long path or URL wraps instead of stacking the table.
+const TABLE_MAX_WORD_WIDTH: usize = 30;
 
 /// Whether `html` is a `<br>` tag in any of its spellings, such as `<br/>` or `<BR />`.
 fn is_line_break_tag(html: &str) -> bool {
@@ -712,47 +767,55 @@ fn trim_line_end(line: &mut Line<'_>) {
     }
 }
 
-/// Computes the max display width for each column across all rows.
-fn compute_column_widths(rows: &[Vec<Cell>], col_count: usize) -> Vec<usize> {
-    let mut widths = vec![0_usize; col_count];
-    for row in rows {
-        for (col, cell) in row.iter().enumerate() {
-            let width = cell.iter().map(Line::width).max().unwrap_or(0);
-            widths[col] = widths[col].max(width);
-        }
-    }
-    widths
+#[derive(Clone, Copy, Default)]
+struct ColumnWidth {
+    natural: usize,
+    /// Longest word, up to [`TABLE_MAX_WORD_WIDTH`].
+    min: usize,
 }
 
-/// Shrink column widths so the rendered table fits within `width_budget`.
-fn fit_column_widths(natural: &[usize], width_budget: usize) -> Vec<usize> {
-    let n = natural.len();
-    if n == 0 {
-        return Vec::new();
-    }
-    let overhead = 1 + TABLE_COLUMN_OVERHEAD * n;
-    let available = width_budget.saturating_sub(overhead);
-    let total_natural: usize = natural.iter().sum();
-    if total_natural <= available {
-        return natural.to_vec();
-    }
-
-    let max_natural = *natural.iter().max().unwrap_or(&0);
-    let mut lo: usize = 0;
-    let mut hi: usize = max_natural;
-    while lo < hi {
-        let mid = lo + (hi - lo).div_ceil(2);
-        let sum: usize = natural.iter().map(|&w| w.min(mid)).sum();
-        if sum <= available {
-            lo = mid;
-        } else {
-            hi = mid - 1;
+fn measure_columns(rows: &[Vec<Cell>], col_count: usize) -> Vec<ColumnWidth> {
+    let mut columns = vec![ColumnWidth::default(); col_count];
+    for row in rows {
+        for (column, cell) in columns.iter_mut().zip(row) {
+            for line in cell {
+                let word = longest_word_width(line).min(TABLE_MAX_WORD_WIDTH);
+                column.min = column.min.max(word);
+                // Wrapping sums grapheme widths, which count some ligatures wider than
+                // `Line::width` does.
+                column.natural = column.natural.max(line.width().max(word));
+            }
         }
     }
-    natural
+    columns
+}
+
+/// Fits the columns into a table `width` wide, borders included, or returns `None` when even
+/// their minimums don't fit.
+fn fit_column_widths(columns: &[ColumnWidth], width: usize) -> Option<Vec<usize>> {
+    let budget = width.checked_sub(1 + TABLE_COLUMN_OVERHEAD * columns.len())?;
+    let natural: usize = columns.iter().map(|column| column.natural).sum();
+    if natural <= budget {
+        return Some(columns.iter().map(|column| column.natural).collect());
+    }
+
+    let min: usize = columns.iter().map(|column| column.min).sum();
+    let spare = budget.checked_sub(min)?;
+    let shortfall = natural - min;
+    let mut col_widths: Vec<usize> = columns
         .iter()
-        .map(|&w| if w > 0 { w.min(lo).max(1) } else { 0 })
-        .collect()
+        .map(|column| column.min + (column.natural - column.min) * spare / shortfall)
+        .collect();
+
+    // Rounding down loses under one cell of width per short column, so one pass hands out the rest.
+    let mut leftover = budget - col_widths.iter().sum::<usize>();
+    for (col_width, column) in col_widths.iter_mut().zip(columns) {
+        if leftover > 0 && *col_width < column.natural {
+            *col_width += 1;
+            leftover -= 1;
+        }
+    }
+    Some(col_widths)
 }
 
 /// Builds a horizontal rule line: e.g. `┌───┬───┐` or `├───┼───┤`.
@@ -770,13 +833,18 @@ fn build_horizontal_rule(col_widths: &[usize], style: Style, rule: TableRule) ->
     Line::from(Span::styled(buf, style))
 }
 
-/// Word-wraps each of a cell's lines, always returning at least one sub-line.
+/// Word-wraps each of a cell's lines, dropping the whitespace left at each break and always
+/// returning at least one sub-line.
 fn wrap_cell(cell: &[Line<'static>], target_width: usize) -> Vec<Line<'static>> {
     if cell.is_empty() {
         return vec![Line::default()];
     }
     cell.iter()
         .flat_map(|line| wrap_line(line.clone(), target_width, 0, None))
+        .map(|mut line| {
+            trim_line_end(&mut line);
+            line
+        })
         .collect()
 }
 
@@ -785,27 +853,26 @@ fn build_data_rows(
     row: &[Cell],
     col_widths: &[usize],
     alignments: &[Alignment],
-    col_count: usize,
     border_style: Style,
-    cell_style: Style,
 ) -> Vec<Line<'static>> {
     let empty = Line::default();
-    let cols: Vec<(Vec<Line<'static>>, usize)> = (0..col_count)
-        .map(|col| {
+    let cols: Vec<Vec<Line<'static>>> = col_widths
+        .iter()
+        .enumerate()
+        .map(|(col, &target_width)| {
             let cell = row.get(col).map_or(&[][..], Vec::as_slice);
-            let target_width = col_widths.get(col).copied().unwrap_or(0);
-            (wrap_cell(cell, target_width), target_width)
+            wrap_cell(cell, target_width)
         })
         .collect();
 
-    let sub_row_count = cols.iter().map(|(c, _)| c.len()).max().unwrap_or(1).max(1);
+    let sub_row_count = cols.iter().map(Vec::len).max().unwrap_or(1);
     let pipe = Span::styled(VERTICAL_RULE, border_style);
 
     (0..sub_row_count)
         .map(|sub_idx| {
-            let mut spans: Vec<Span<'static>> = Vec::with_capacity(col_count * 4 + 1);
+            let mut spans: Vec<Span<'static>> = Vec::with_capacity(col_widths.len() * 4 + 1);
             spans.push(pipe.clone());
-            for (col, (sub_lines, target_width)) in cols.iter().enumerate() {
+            for (col, (sub_lines, &target_width)) in cols.iter().zip(col_widths).enumerate() {
                 let sub_cell = sub_lines.get(sub_idx).unwrap_or(&empty);
                 let pad = target_width.saturating_sub(sub_cell.width());
 
@@ -817,22 +884,25 @@ fn build_data_rows(
                 };
 
                 spans.push(Span::raw(" ".repeat(TABLE_CELL_PADDING + pad_left)));
-
-                for span in &sub_cell.spans {
-                    let styled = if cell_style == Style::default() {
-                        span.clone()
-                    } else {
-                        Span::styled(span.content.clone(), span.style.patch(cell_style))
-                    };
-                    spans.push(styled);
-                }
-
+                spans.extend(sub_cell.spans.iter().cloned());
                 spans.push(Span::raw(" ".repeat(TABLE_CELL_PADDING + pad_right)));
                 spans.push(pipe.clone());
             }
             Line::from(spans)
         })
         .collect()
+}
+
+/// Joins a cell's lines with spaces, for the stacked layout.
+fn joined_cell_spans(cell: &[Line<'static>]) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    for line in cell.iter().filter(|line| line.width() > 0) {
+        if !spans.is_empty() {
+            spans.push(Span::raw(" "));
+        }
+        spans.extend(line.spans.iter().cloned());
+    }
+    spans
 }
 
 #[cfg(test)]
@@ -859,6 +929,14 @@ mod tests {
     /// Renders without wrapping.
     fn rendered_text(input: &str) -> Vec<String> {
         rendered_text_at_width(input, 0)
+    }
+
+    /// Builds columns from `(natural, min)` pairs.
+    fn column_widths(widths: &[(usize, usize)]) -> Vec<ColumnWidth> {
+        widths
+            .iter()
+            .map(|&(natural, min)| ColumnWidth { natural, min })
+            .collect()
     }
 
     // ── render_markdown ──
@@ -1318,50 +1396,58 @@ mod tests {
     #[test]
     fn render_markdown_table_styles_header_cells_and_borders_from_their_slots() {
         let t = theme();
+        let input = indoc! {"
+            | Name |
+            |------|
+            | a    |
+            | b    |
+        "};
 
-        let text = render_markdown(
-            indoc! {"
-                | Name |
-                |------|
-                | val  |
-            "},
-            &t,
-            0,
-        );
+        let boxed = render_markdown(input, &t, 0).lines;
+        let stacked = render_markdown(input, &t, 7).lines;
 
-        let lines = &text.lines;
-        assert_eq!(lines[1].spans[2], Span::styled("Name", t.table_header()));
-        assert_eq!(lines[3].spans[2], Span::raw("val"));
-        assert_eq!(lines[1].spans[0], Span::styled("│", t.table_border()));
-        for rule in [&lines[0], &lines[2], &lines[4]] {
+        assert_eq!(boxed[1].spans[2], Span::styled("Name", t.table_header()));
+        assert_eq!(boxed[3].spans[2], Span::raw("a"));
+        assert_eq!(boxed[1].spans[0], Span::styled("│", t.table_border()));
+        for rule in [&boxed[0], &boxed[2], &boxed[4], &boxed[6]] {
             assert_eq!(rule.spans[0].style, t.table_border(), "{rule}");
         }
+        assert_eq!(
+            stacked[0].spans,
+            [
+                Span::styled("Name", t.table_header()),
+                Span::styled(":", t.table_header()),
+                Span::raw(" "),
+                Span::raw("a"),
+            ]
+        );
+        assert_eq!(
+            stacked[1].spans,
+            [Span::styled("───────", t.table_border())]
+        );
     }
 
     #[test]
-    fn render_markdown_table_cell_keeps_inline_code_style() {
+    fn render_markdown_table_inline_code_keeps_its_color_in_header_and_body_cells() {
         let t = theme();
+
         let text = render_markdown(
             indoc! {"
-                | Header |
+                | `head` |
                 |--------|
-                | `code` |
+                | `body` |
             "},
             &t,
             0,
         );
-        let code_span = text
-            .lines
-            .iter()
-            .find_map(|line| line.spans.iter().find(|s| s.content.contains("code")))
-            .expect("inline code span missing inside table cell");
+
         assert_eq!(
-            code_span.style.fg, t.user.fg,
-            "inline code keeps peach fg inside table cells"
+            text.lines[1].spans[2],
+            Span::styled("head", t.table_header().patch(t.inline_code()))
         );
         assert_eq!(
-            code_span.style.bg, None,
-            "inline code is fg-only inside table cells"
+            text.lines[3].spans[2],
+            Span::styled("body", t.inline_code())
         );
     }
 
@@ -1476,6 +1562,135 @@ mod tests {
     }
 
     #[test]
+    fn render_markdown_table_narrow_width_keeps_each_column_as_wide_as_its_longest_word() {
+        let lines = rendered_text_at_width(
+            indoc! {"
+                | Command                    | Purpose            |
+                |----------------------------|--------------------|
+                | cargo clippy --all-targets | lints every target |
+            "},
+            30,
+        );
+
+        assert_eq!(
+            lines,
+            [
+                "┌─────────────────┬──────────┐",
+                "│ Command         │ Purpose  │",
+                "├─────────────────┼──────────┤",
+                "│ cargo clippy    │ lints    │",
+                "│ --all-targets   │ every    │",
+                "│                 │ target   │",
+                "└─────────────────┴──────────┘",
+            ]
+        );
+    }
+
+    #[test]
+    fn render_markdown_table_wide_and_ligature_characters_keep_every_row_as_wide_as_the_rules() {
+        let narrowest_tables = [
+            indoc! {"
+                | Note            | 级 |
+                |-----------------|----|
+                | runs every test | 高 |
+                | lints the code  | ✅ |
+            "},
+            indoc! {"
+                | A  | B             |
+                |----|---------------|
+                | لا | one two three |
+            "},
+        ];
+
+        for input in narrowest_tables {
+            let lines = render_markdown(input, &theme(), 14).lines;
+
+            assert_eq!(lines[0].width(), 14, "{lines:?}");
+            for line in &lines {
+                assert_eq!(line.width(), 14, "{line}");
+            }
+        }
+    }
+
+    #[test]
+    fn render_markdown_table_aligns_wrapped_lines_without_the_space_at_each_break() {
+        let lines = rendered_text_at_width(
+            indoc! {"
+                | C       | R       |
+                |:-------:|--------:|
+                | cc dddd | aa bbbb |
+            "},
+            18,
+        );
+
+        assert_eq!(
+            lines,
+            [
+                "┌────────┬───────┐",
+                "│   C    │     R │",
+                "├────────┼───────┤",
+                "│   cc   │    aa │",
+                "│  dddd  │  bbbb │",
+                "└────────┴───────┘",
+            ]
+        );
+    }
+
+    #[test]
+    fn render_markdown_table_narrower_than_its_longest_words_stacks_each_row_under_its_headers() {
+        let lines = rendered_text_at_width(
+            indoc! {"
+                | Command                    | Purpose            |
+                |----------------------------|--------------------|
+                | cargo clippy --all-targets | lints every target |
+                | cargo test                 | runs the tests     |
+            "},
+            20,
+        );
+
+        assert_eq!(
+            lines,
+            [
+                "Command: cargo ",
+                "  clippy ",
+                "  --all-targets",
+                "Purpose: lints every",
+                "  target",
+                "────────────────────",
+                "Command: cargo test",
+                "Purpose: runs the ",
+                "  tests",
+            ]
+        );
+    }
+
+    #[test]
+    fn render_markdown_table_narrower_than_its_borders_stacks_each_row() {
+        let body = rendered_text_at_width(
+            indoc! {"
+                |   | B        | C |
+                |---|----------|---|
+                | 1 | 2<br>two | 3 |
+                | 4 | 5        | 6 |
+            "},
+            8,
+        );
+        let head_only = rendered_text_at_width(
+            indoc! {"
+                | A | B | C |
+                |---|---|---|
+            "},
+            8,
+        );
+
+        assert_eq!(
+            body,
+            ["1", "B: 2 two", "C: 3", "────────", "4", "B: 5", "C: 6"]
+        );
+        assert_eq!(head_only, ["A", "B", "C"]);
+    }
+
+    #[test]
     fn render_markdown_table_br_breaks_a_cell_line_and_other_inline_html_stays_in_the_cell() {
         let lines = rendered_text(indoc! {"
             Intro.
@@ -1503,6 +1718,79 @@ mod tests {
                 "│ <b>bold</b>    │ w │",
                 "│                │ z │",
                 "└────────────────┴───┘",
+            ]
+        );
+    }
+
+    #[test]
+    fn render_markdown_table_in_list_item_keeps_the_item_indent_and_fits_inside_it() {
+        let lines = rendered_text_at_width(
+            indoc! {"
+                - The settings in this table:
+                  | Key  | Value     |
+                  |------|-----------|
+                  | mode | very fast |
+                - | A |
+                  |---|
+                  | 1 |
+            "},
+            21,
+        );
+
+        assert_eq!(
+            lines,
+            [
+                "- The settings in ",
+                "  this table:",
+                "  ┌──────┬──────────┐",
+                "  │ Key  │ Value    │",
+                "  ├──────┼──────────┤",
+                "  │ mode │ very     │",
+                "  │      │ fast     │",
+                "  └──────┴──────────┘",
+                "- ┌───┐",
+                "  │ A │",
+                "  ├───┤",
+                "  │ 1 │",
+                "  └───┘",
+            ]
+        );
+    }
+
+    #[test]
+    fn render_markdown_table_in_blockquote_keeps_the_marker_on_every_row() {
+        let input = indoc! {"
+            > | Key  | Value      |
+            > |------|------------|
+            > | mode | fast       |
+            > | size | very large |
+        "};
+
+        let boxed = rendered_text_at_width(input, 18);
+        let stacked = rendered_text_at_width(input, 14);
+
+        assert_eq!(
+            boxed,
+            [
+                "> ┌──────┬───────┐",
+                "> │ Key  │ Value │",
+                "> ├──────┼───────┤",
+                "> │ mode │ fast  │",
+                "> ├──────┼───────┤",
+                "> │ size │ very  │",
+                "> │      │ large │",
+                "> └──────┴───────┘",
+            ]
+        );
+        assert_eq!(
+            stacked,
+            [
+                "> Key: mode",
+                "> Value: fast",
+                "> ────────────",
+                "> Key: size",
+                "> Value: very ",
+                ">   large",
             ]
         );
     }
@@ -1763,39 +2051,36 @@ mod tests {
     // ── fit_column_widths ──
 
     #[test]
-    fn fit_column_widths_natural_fits_budget_unchanged() {
-        // Natural total (5 + 5 = 10) + overhead (1 + 3*2 = 7) = 17 ≤ 80.
-        let natural = vec![5, 5];
-        assert_eq!(fit_column_widths(&natural, 80), natural);
+    fn fit_column_widths_keeps_natural_widths_that_fit() {
+        let columns = column_widths(&[(5, 3), (5, 2)]);
+
+        assert_eq!(fit_column_widths(&columns, 17), Some(vec![5, 5]));
     }
 
     #[test]
-    fn fit_column_widths_shrinks_widest_column_first() {
-        // Budget = 20, overhead for 2 cols = 7, available = 13.
-        // Natural [3, 20] → sum 23 > 13. Cap should settle at 10 so
-        // sums to 3 + 10 = 13, leaving the narrow column untouched.
-        let out = fit_column_widths(&[3, 20], 20);
-        assert_eq!(out, vec![3, 10]);
+    fn fit_column_widths_shares_the_spare_width_by_how_far_each_column_falls_short() {
+        let columns = column_widths(&[(0, 0), (3, 3), (30, 6), (12, 6)]);
+
+        let col_widths = fit_column_widths(&columns, 34);
+
+        assert_eq!(col_widths, Some(vec![0, 3, 11, 7]));
     }
 
     #[test]
-    fn fit_column_widths_preserves_zero_width_columns() {
-        // An empty column (natural=0) stays at 0 even when shrinking;
-        // non-empty columns keep a minimum of 1 so wrapping stays viable.
-        let out = fit_column_widths(&[0, 40], 10);
-        assert_eq!(out[0], 0);
-        assert!(out[1] >= 1);
-    }
+    fn fit_column_widths_minimums_or_borders_that_do_not_fit_stack_the_table() {
+        let words = column_widths(&[(10, 8), (10, 8)]);
+        let empty = column_widths(&[(0, 0)]);
 
-    #[test]
-    fn fit_column_widths_empty_input_yields_empty() {
-        assert_eq!(fit_column_widths(&[], 80), Vec::<usize>::new());
+        assert_eq!(fit_column_widths(&words, 23), Some(vec![8, 8]));
+        assert_eq!(fit_column_widths(&words, 22), None);
+        assert_eq!(fit_column_widths(&empty, 4), Some(vec![0]));
+        assert_eq!(fit_column_widths(&empty, 3), None);
     }
 
     // ── wrap_cell ──
 
     #[test]
-    fn wrap_cell_wraps_each_line_to_target_width_in_order() {
+    fn wrap_cell_wraps_each_line_in_order_without_the_space_at_each_break() {
         let cell = [Line::from("one two three"), Line::from("four")];
 
         let out = wrap_cell(&cell, 8);
@@ -1803,7 +2088,7 @@ mod tests {
         assert_eq!(
             out,
             [
-                Line::from("one two "),
+                Line::from("one two"),
                 Line::from("three"),
                 Line::from("four")
             ]
