@@ -641,6 +641,7 @@ fn is_stale_lock(path: &Path) -> bool {
 mod tests {
     use std::sync::{Arc, Mutex};
 
+    use indoc::indoc;
     use wiremock::matchers::{method, path as wm_path};
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
@@ -1494,7 +1495,7 @@ mod tests {
 
         std::fs::write(
             &path,
-            indoc::indoc! {r#"
+            indoc! {r#"
                 {
                     "claudeAiOauth": {
                         "accessToken": "old-access",
@@ -1549,7 +1550,7 @@ mod tests {
 
         std::fs::write(
             &path,
-            indoc::indoc! {r#"
+            indoc! {r#"
                 {
                     "claudeAiOauth": {
                         "accessToken": "t",
@@ -1586,7 +1587,7 @@ mod tests {
 
         std::fs::write(
             &path,
-            indoc::indoc! {r#"
+            indoc! {r#"
                 {
                     "claudeAiOauth": {
                         "accessToken": "old",

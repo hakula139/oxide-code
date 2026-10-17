@@ -240,6 +240,7 @@ fn route_panic(
 mod tests {
     use std::sync::{Arc, Mutex};
 
+    use indoc::indoc;
     use ratatui::style::{Color, Modifier, Style};
     use ratatui::{TerminalOptions, Viewport, layout::Rect};
 
@@ -374,7 +375,7 @@ mod tests {
 
         assert_eq!(
             String::from_utf8(first).unwrap(),
-            indoc::indoc! {"
+            indoc! {"
                 thread 'a' panicked at x.rs:1:1:
                 first
                 thread 'b' panicked at y.rs:2:2:

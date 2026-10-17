@@ -465,6 +465,7 @@ mod tests {
     use std::time::Duration;
 
     use base64::Engine as _;
+    use indoc::indoc;
     use ratatui::layout::Rect;
 
     use super::*;
@@ -2000,7 +2001,7 @@ mod tests {
 
     #[test]
     fn apply_slash_outcome_shows_output_and_hands_back_forwards_whether_idle_or_busy() {
-        let diff = indoc::indoc! {"
+        let diff = indoc! {"
             diff --git a/src/lib.rs b/src/lib.rs
             --- a/src/lib.rs
             +++ b/src/lib.rs

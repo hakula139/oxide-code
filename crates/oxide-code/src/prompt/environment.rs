@@ -132,6 +132,8 @@ pub(super) fn model_identity(model: &ModelSpec) -> String {
 
 #[cfg(test)]
 mod tests {
+    use indoc::indoc;
+
     use super::*;
 
     fn spec(id: &str) -> ModelSpec {
@@ -172,7 +174,7 @@ mod tests {
 
         assert_eq!(
             env.render(),
-            indoc::indoc! {"
+            indoc! {"
                 # Environment
 
                 You have been invoked in the following environment:

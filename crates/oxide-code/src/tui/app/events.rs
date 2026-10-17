@@ -445,6 +445,8 @@ mod tests {
     use std::io;
     use std::path::Path;
 
+    use indoc::indoc;
+
     use super::*;
     use crate::config::compaction::test_thresholds;
     use crate::config::provenance::Source;
@@ -626,7 +628,7 @@ mod tests {
         app.handle_engine_event(started());
         assert_eq!(
             app.chat.last_system_text(),
-            Some(indoc::indoc! {"
+            Some(indoc! {"
                 Opened the browser to sign in. If it did not open, visit this URL in a browser on this machine:
                 https://example.com/authorize"
             }),
@@ -636,7 +638,7 @@ mod tests {
         app.handle_engine_event(started());
         assert_eq!(
             app.chat.last_system_text(),
-            Some(indoc::indoc! {"
+            Some(indoc! {"
                 Could not open the browser. Sign in at this URL in a browser on this machine:
                 https://example.com/authorize"
             }),

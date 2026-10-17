@@ -448,6 +448,7 @@ mod tests {
     use std::pin::Pin;
     use std::sync::Arc;
 
+    use indoc::indoc;
     use serde_json::json;
     use tokio::sync::Notify;
     use wiremock::matchers::{method, path as wm_path};
@@ -1968,7 +1969,7 @@ mod tests {
         assert_eq!(messages.len(), 1, "{messages:?}");
     }
 
-    const HELLO_SSE: &str = indoc::indoc! {r#"
+    const HELLO_SSE: &str = indoc! {r#"
         event: message_start
         data: {"type":"message_start","message":{"id":"msg_1","model":"claude-sonnet-5-5","usage":{"input_tokens":5,"output_tokens":0}}}
 
@@ -2093,7 +2094,7 @@ mod tests {
 
     #[tokio::test]
     async fn agent_turn_real_client_bills_only_the_attempt_that_answered() {
-        let failed = indoc::indoc! {r#"
+        let failed = indoc! {r#"
             event: message_start
             data: {"type":"message_start","message":{"id":"msg_1","model":"claude-sonnet-5-5","usage":{"input_tokens":5,"cache_creation_input_tokens":900,"output_tokens":0}}}
 
@@ -2101,7 +2102,7 @@ mod tests {
             data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}
 
         "#};
-        let answered = indoc::indoc! {r#"
+        let answered = indoc! {r#"
             event: message_start
             data: {"type":"message_start","message":{"id":"msg_2","model":"claude-sonnet-5-5","usage":{"input_tokens":5,"cache_read_input_tokens":900,"output_tokens":0}}}
 
@@ -2136,7 +2137,7 @@ mod tests {
 
     #[tokio::test]
     async fn agent_turn_real_client_refusal_discards_the_reply_and_names_the_policy() {
-        let body = indoc::indoc! {r#"
+        let body = indoc! {r#"
             event: message_start
             data: {"type":"message_start","message":{"id":"msg_1","model":"claude-sonnet-5-5","usage":{"input_tokens":5,"output_tokens":0}}}
 
