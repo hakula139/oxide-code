@@ -26,7 +26,7 @@ const _: () = assert!(STATUS_LINE_MARGIN_STR.len() == STATUS_LINE_MARGIN as usiz
 
 /// Shown percent from which the context and usage-limit segments take the warning style.
 const USAGE_WARNING_PERCENT: f64 = 70.0;
-/// Shown percent from which those segments take the error style.
+/// Shown percent from which the context and usage-limit segments take the error style.
 const USAGE_ERROR_PERCENT: f64 = 90.0;
 
 /// Ordered segment roster for one status-line render.
@@ -161,13 +161,13 @@ impl StatusLine {
             StatusLineSegment::QueuedPrompts => (state.queued_prompts > 0).then(|| {
                 Span::styled(
                     format!("Queued: {}", state.queued_prompts),
-                    Self::segment_style(theme, SegmentStyle::Dim),
+                    Self::segment_style(theme, SegmentStyle::Muted),
                 )
             }),
             StatusLineSegment::TaskProgress => state.task_progress.map(|progress| {
                 Span::styled(
                     format!("Tasks: {}/{}", progress.completed, progress.total),
-                    Self::segment_style(theme, SegmentStyle::Dim),
+                    Self::segment_style(theme, SegmentStyle::Muted),
                 )
             }),
             StatusLineSegment::ThreadTitle => state.title.map(|title| {
@@ -269,19 +269,16 @@ fn fit_segments(segments: &mut Vec<RenderedSegment>, max_width: usize, sep_width
     if total_width(segments, sep_width) <= max_width {
         return;
     }
-    // The drop loop only stops with `segments.len() <= 1`, so truncating the widest is the
-    // single-survivor truncation path even though the iterator wording suggests otherwise.
-    let content_width = max_width
-        .saturating_sub(2)
-        .saturating_sub(sep_width.saturating_mul(segments.len().saturating_sub(1)));
-    if let Some(segment) = segments.iter_mut().max_by_key(|segment| segment.width()) {
+    if let [segment] = segments.as_mut_slice() {
+        let content_width = max_width.saturating_sub(usize::from(STATUS_LINE_MARGIN));
         let label = truncate_to_width(segment.span.content.as_ref(), content_width);
         segment.span = Span::styled(label, segment.span.style);
     }
 }
 
 fn total_width(segments: &[RenderedSegment], sep_width: usize) -> usize {
-    2 + segments.iter().map(RenderedSegment::width).sum::<usize>()
+    usize::from(STATUS_LINE_MARGIN)
+        + segments.iter().map(RenderedSegment::width).sum::<usize>()
         + sep_width.saturating_mul(segments.len().saturating_sub(1))
 }
 
@@ -688,13 +685,13 @@ mod tests {
     #[test]
     fn render_context_used_escalates_from_text_to_warning_and_error() {
         let theme = Theme::default();
-        let rendered = |context_tokens, context_window| {
+        let render_context = |tokens| {
             render(
                 vec![StatusLineSegment::ContextUsed],
                 &StatusLineState {
                     usage: Some(UsageSnapshot {
-                        context_tokens: Some(context_tokens),
-                        context_window,
+                        context_tokens: Some(tokens),
+                        context_window: Some(1_000_000),
                         estimated_cost_usd: None,
                     }),
                     ..bare_state()
@@ -702,34 +699,36 @@ mod tests {
             )
         };
 
-        for (tokens, window, label, style) in [
-            (23_000, Some(1_000_000), "Ctx: 2% (23k/1M)", theme.text()),
-            (699_999, Some(1_000_000), "Ctx: 69% (699k/1M)", theme.text()),
-            (
-                700_000,
-                Some(1_000_000),
-                "Ctx: 70% (700k/1M)",
-                theme.warning(),
-            ),
-            (
-                899_999,
-                Some(1_000_000),
-                "Ctx: 89% (899k/1M)",
-                theme.warning(),
-            ),
-            (
-                900_000,
-                Some(1_000_000),
-                "Ctx: 90% (900k/1M)",
-                theme.error(),
-            ),
-            (987, None, "Ctx: 987", theme.text()),
+        for (tokens, label, style) in [
+            (23_000, "Ctx: 2% (23k/1M)", theme.text()),
+            (699_999, "Ctx: 69% (699k/1M)", theme.text()),
+            (700_000, "Ctx: 70% (700k/1M)", theme.warning()),
+            (899_999, "Ctx: 89% (899k/1M)", theme.warning()),
+            (900_000, "Ctx: 90% (900k/1M)", theme.error()),
         ] {
-            let rendered = rendered(tokens, window);
+            let rendered = render_context(tokens);
 
             assert_eq!(text_of(&rendered), format!("  {label}"));
             assert_eq!(rendered.line.spans[1].style, style, "{label}");
         }
+    }
+
+    #[test]
+    fn render_context_used_without_a_window_shows_tokens_in_the_text_style() {
+        let rendered = render(
+            vec![StatusLineSegment::ContextUsed],
+            &StatusLineState {
+                usage: Some(UsageSnapshot {
+                    context_tokens: Some(987),
+                    context_window: None,
+                    estimated_cost_usd: None,
+                }),
+                ..bare_state()
+            },
+        );
+
+        assert_eq!(text_of(&rendered), "  Ctx: 987");
+        assert_eq!(rendered.line.spans[1].style, Theme::default().text());
     }
 
     #[test]
@@ -748,44 +747,6 @@ mod tests {
 
         assert_eq!(text_of(&rendered), "  Sess: $0.5385");
         assert_eq!(rendered.line.spans[1].style, Theme::default().muted());
-    }
-
-    #[test]
-    fn render_rate_limits_escalate_from_text_to_warning_and_error_by_the_shown_percent() {
-        let theme = Theme::default();
-        for (utilization, percent, style) in [
-            (0.05, "5%", theme.text()),
-            (0.6999, "69%", theme.text()),
-            (0.70, "70%", theme.warning()),
-            (0.8999, "89%", theme.warning()),
-            (0.90, "90%", theme.error()),
-            (1.0, "100%", theme.error()),
-        ] {
-            let window = Some(RateLimitWindow {
-                utilization,
-                resets_at: FUTURE_RESET,
-            });
-            let rendered = render(
-                vec![
-                    StatusLineSegment::FiveHourLimit,
-                    StatusLineSegment::WeeklyLimit,
-                ],
-                &StatusLineState {
-                    rate_limits: Some(RateLimits {
-                        five_hour: window,
-                        seven_day: window,
-                    }),
-                    ..bare_state()
-                },
-            );
-
-            assert_eq!(
-                text_of(&rendered),
-                format!("  5h: {percent} │ 7d: {percent}")
-            );
-            assert_eq!(rendered.line.spans[1].style, style, "5h at {percent}");
-            assert_eq!(rendered.line.spans[3].style, style, "7d at {percent}");
-        }
     }
 
     #[test]
@@ -833,9 +794,47 @@ mod tests {
     }
 
     #[test]
-    fn render_queued_prompts_counts_the_queue_and_hides_an_empty_one() {
-        let text = |queued_prompts| {
-            text_of(&render(
+    fn render_rate_limits_escalate_from_text_to_warning_and_error_by_the_shown_percent() {
+        let theme = Theme::default();
+        for (utilization, percent, style) in [
+            (0.05, "5%", theme.text()),
+            (0.6999, "69%", theme.text()),
+            (0.70, "70%", theme.warning()),
+            (0.8999, "89%", theme.warning()),
+            (0.90, "90%", theme.error()),
+            (1.0, "100%", theme.error()),
+        ] {
+            let window = Some(RateLimitWindow {
+                utilization,
+                resets_at: FUTURE_RESET,
+            });
+            let rendered = render(
+                vec![
+                    StatusLineSegment::FiveHourLimit,
+                    StatusLineSegment::WeeklyLimit,
+                ],
+                &StatusLineState {
+                    rate_limits: Some(RateLimits {
+                        five_hour: window,
+                        seven_day: window,
+                    }),
+                    ..bare_state()
+                },
+            );
+
+            assert_eq!(
+                text_of(&rendered),
+                format!("  5h: {percent} │ 7d: {percent}")
+            );
+            assert_eq!(rendered.line.spans[1].style, style, "5h at {percent}");
+            assert_eq!(rendered.line.spans[3].style, style, "7d at {percent}");
+        }
+    }
+
+    #[test]
+    fn render_queued_prompts_counts_the_queue_in_the_muted_style_and_hides_an_empty_one() {
+        let rendered = |queued_prompts| {
+            render(
                 vec![
                     StatusLineSegment::QueuedPrompts,
                     StatusLineSegment::RunState,
@@ -844,33 +843,36 @@ mod tests {
                     queued_prompts,
                     ..bare_state()
                 },
-            ))
+            )
         };
 
-        assert_eq!(text(2), "  Queued: 2 │ Ready");
-        assert_eq!(text(0), "  Ready");
+        let queued = rendered(2);
+        assert_eq!(text_of(&queued), "  Queued: 2 │ Ready");
+        assert_eq!(queued.line.spans[1].style, Theme::default().muted());
+
+        assert_eq!(text_of(&rendered(0)), "  Ready");
     }
 
     #[test]
-    fn render_task_progress_counts_completed_tasks_and_hides_without_a_list() {
-        let text = |task_progress| {
-            text_of(&render(
+    fn render_task_progress_counts_completed_tasks_in_the_muted_style_and_hides_without_a_list() {
+        let rendered = |task_progress| {
+            render(
                 vec![StatusLineSegment::TaskProgress, StatusLineSegment::RunState],
                 &StatusLineState {
                     task_progress,
                     ..bare_state()
                 },
-            ))
+            )
         };
 
-        assert_eq!(
-            text(Some(Progress {
-                completed: 2,
-                total: 5,
-            })),
-            "  Tasks: 2/5 │ Ready",
-        );
-        assert_eq!(text(None), "  Ready");
+        let progress = rendered(Some(Progress {
+            completed: 2,
+            total: 5,
+        }));
+        assert_eq!(text_of(&progress), "  Tasks: 2/5 │ Ready");
+        assert_eq!(progress.line.spans[1].style, Theme::default().muted());
+
+        assert_eq!(text_of(&rendered(None)), "  Ready");
     }
 
     #[test]

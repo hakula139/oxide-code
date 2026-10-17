@@ -205,14 +205,14 @@ Each status-line segment routes to one of the slots above so re-skinning the slo
 | `run-state` (idle)  | `success`                    |
 | `run-state` (busy)  | `info`                       |
 | `run-state` (warn)  | `warning`                    |
-| `queued-prompts`    | `dim`                        |
-| `task-progress`     | `dim`                        |
+| `queued-prompts`    | `muted`                      |
+| `task-progress`     | `muted`                      |
 | `thread-title`      | `muted`                      |
 | `session-id`        | `muted`                      |
 | `theme`             | `muted`                      |
 | `current-time`      | `dim`                        |
 
-`context-used`, `five-hour-limit`, and `weekly-limit` use `text` until the share they show reaches 70%, then `warning`, and `error` from 90%, so a window close to running out stands out in any theme.
+`context-used`, `five-hour-limit`, and `weekly-limit` use `text` until the share they show reaches 70%, then `warning`, and `error` from 90%.
 
 `pull-request-checks` and `pull-request-review` take their slot from the state they show: `success` for passing checks or an approval, `warning` for pending checks or a required review, `error` for failing checks or requested changes, and `muted` for cancelled checks.
 
