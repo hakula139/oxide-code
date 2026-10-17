@@ -1161,8 +1161,9 @@ mod tests {
         assert_eq!(signals.load(Ordering::Relaxed), 3);
     }
 
+    // In real time, a late wakeup can fire the retry sleep before the zero timeout returns.
     #[cfg(all(unix, not(target_os = "linux")))]
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn kill_cut_short_finishes_in_drop() {
         let (mut tree, signals) = fake_tree(5);
 
