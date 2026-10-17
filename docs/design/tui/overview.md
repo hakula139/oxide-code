@@ -26,7 +26,8 @@ tokio::select! {
     event = crossterm_events.next()       => { /* keyboard, mouse, resize */ }
     event = self.events.recv()            => { /* Event: stream tokens, tool calls, session updates */ }
     Some(update) = self.git_probes.recv() => { /* branch / PR probe results for the status line */ }
-    _ = tick.tick()                       => { /* spinner frame, probe scheduling, exit-arm expiry, render when dirty */ }
+    Some(report) = self.clipboard.recv()  => { /* outcome of a copy, shown as a notice */ }
+    _ = tick.tick()                       => { /* spinner frame, probe scheduling, exit-arm expiry, selection edge scroll, copy-notice expiry, render when dirty */ }
 }
 ```
 
@@ -59,6 +60,14 @@ Streaming markdown uses a block-based stable-prefix cache:
 
 An open code block stays in the tail until the next block starts. Its highlighter resumes after the block's last complete line, so each frame highlights only the new lines, though it still wraps every row of the block.
 
+## Markdown Tables
+
+A table renders as a box in the `table_border` slot, with one cell of padding inside each border and the header row in the `table_header` slot, a bold accent by default. A rule with `├ ┼ ┤` junctions separates every pair of rows. Inside a list item or blockquote, every row carries the item indent or the `>` marker, and the table fits in the width that remains.
+
+Columns keep their natural widths when the table fits. Otherwise each column gets the width of its longest word, up to 30 columns so a long path or URL still wraps, and the remaining width goes to the columns in proportion to how far each falls short of its natural width. Cells word-wrap within their columns. When even those minimum widths don't fit, each body row stacks into `header: value` lines, with a `table_border` rule between rows.
+
+A `<br>` in a cell starts a new line in that cell, since a GFM cell has no other line break.
+
 ## Design Decisions
 
 1. **ratatui + crossterm + tokio.** No custom rendering engine.
@@ -70,3 +79,5 @@ An open code block stays in the tail until the next block starts. Its highlighte
 7. **Catppuccin Mocha dark theme by default** with named color slots covering text, surfaces, accents, status, code, diff, headings, body, and chrome. Transparent background.
 8. **Two-tier tool display.** Inline summary with per-tool icons, plus truncated output body.
 9. **Per-block render cache with viewport-scoped rendering.** Committed blocks render lazily near the viewport, and the scroll offset anchors on a block so blocks above it changing height leave the visible rows in place.
+10. **A rule between every table row.** Without one, the continuation lines of a wrapped row leave blank cells that read as spacing, so the single-line rows around it seem to run together. Claude Code and oh-my-pi rule off every row of their boxed tables, as Codex does in its borderless ones.
+11. **Table columns no narrower than their longest word.** A narrower column splits words mid-way, so a flag such as `--all-targets` breaks across rows. When the words can't all fit side by side, the rows stack as `header: value` lines. Claude Code and oh-my-pi also start each column at its longest word, and Claude Code stacks rows the same way once wrapped rows grow too tall.

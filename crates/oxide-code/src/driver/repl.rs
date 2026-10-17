@@ -207,11 +207,13 @@ impl<R: AsyncBufRead + Unpin, W: Write> Prompter<'_, R, W> {
         }
     }
 
-    /// Reads the session rule to grant, where an empty answer takes the suggested one, or `None`
-    /// once the input ends. An error says why the grant does not admit the rule.
+    /// Reads the pattern of the session rule to grant, where an empty answer takes the suggested
+    /// one, or `None` once the input ends. An error says why the grant does not admit the rule.
     async fn rule(&mut self, grant: &SessionGrant) -> Option<Result<Rule>> {
-        let suggested = grant.suggested().to_string();
-        let answer = self.ask(&format!("Rule to allow [{suggested}]: ")).await?;
+        let suggested = grant.suggested().pattern().to_owned();
+        let answer = self
+            .ask(&format!("Pattern to allow [{suggested}]: "))
+            .await?;
         let text = if answer.is_empty() {
             &suggested
         } else {
@@ -285,7 +287,7 @@ mod tests {
     fn bash_grant(command: &str) -> SessionGrant {
         Policy::default()
             .session_grant(
-                PermissionClass::Bash,
+                PermissionClass::Exec,
                 &Access::for_command(command, &Workspace::new(Path::new("/repo"))),
             )
             .unwrap()
@@ -650,25 +652,25 @@ mod tests {
     #[tokio::test]
     async fn decide_allows_the_suggested_or_an_edited_rule_for_the_session() {
         let grant = bash_grant("cargo test");
-        let allowed = |rule: &str| Decision::AllowForSession {
-            rule: Box::new(Rule::parse(rule).unwrap()),
+        let allowed = |pattern: &str| Decision::AllowForSession {
+            rule: Box::new(Rule::parse(PermissionClass::Exec, pattern).unwrap()),
         };
 
         let (decision, out) = decide("a\n\n", Some(&grant)).await;
-        assert_eq!(decision, allowed("bash(cargo test)"));
+        assert_eq!(decision, allowed("cargo test"));
         assert!(out.contains(GRANT_CHOICES), "{out}");
-        assert!(out.contains("Rule to allow [bash(cargo test)]: "), "{out}");
+        assert!(out.contains("Pattern to allow [cargo test]: "), "{out}");
 
         let input = indoc! {"
             a
-            bash(cargo build)
+            cargo build
             a
-            bash(cargo test:*)
+            cargo test *
         "};
         let (decision, out) = decide(input, Some(&grant)).await;
-        assert_eq!(decision, allowed("bash(cargo test:*)"));
+        assert_eq!(decision, allowed("cargo test *"));
         let (rejected, retried) = out
-            .split_once("the rule no longer covers this call")
+            .split_once("the pattern no longer covers this call")
             .unwrap();
         assert_eq!(rejected.matches(GRANT_CHOICES).count(), 1, "{out}");
         assert_eq!(

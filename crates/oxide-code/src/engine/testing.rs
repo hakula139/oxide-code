@@ -25,6 +25,7 @@ use crate::client::{Response, ResponseEvent, StopDetails, StopReason, Wire};
 use crate::file_tracker::FileTracker;
 use crate::message::{ContentBlock, Message, Replay, Role};
 use crate::model::ModelSpec;
+use crate::permission::rule::Rule;
 use crate::permission::{Mode, PermissionClass, Policy, Workspace};
 use crate::prompt::{self, PromptParts};
 use crate::protocol::Op;
@@ -298,7 +299,7 @@ impl Tool for EchoTool {
             name: "echo".to_owned(),
             description: "echo the input".to_owned(),
             input_schema: json!({"type": "object"}),
-            class: PermissionClass::Bash,
+            class: PermissionClass::Exec,
             parallel_safe: false,
         }
     }
@@ -326,22 +327,29 @@ pub(super) fn empty_prompt() -> PromptParts {
     PromptParts::default()
 }
 
-/// Dispatch context in `cwd` over allow / deny rule sets, leaking the policy so the context can
-/// borrow it for `'static`. `echo` is a `bash`-class tool that accesses nothing, so only a
-/// class-wide rule matches it.
+/// Dispatch context in `cwd` over `exec` deny / allow patterns and the shipped defaults, leaking
+/// the policy so the context can borrow it for `'static`. `echo` is an `exec`-class tool that
+/// accesses nothing, so only `*` matches it.
 pub(super) fn dispatch_with(
     mode: Mode,
-    allow: &[&str],
     deny: &[&str],
+    allow: &[&str],
     cwd: &Path,
 ) -> DispatchContext<'static> {
-    let owned = |rules: &[&str]| rules.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+    let rules = |patterns: &[&str]| {
+        patterns
+            .iter()
+            .map(|pattern| Rule::parse(PermissionClass::Exec, pattern).expect("pattern parses"))
+            .collect()
+    };
+    let workspace = Arc::new(Workspace::new(cwd));
     let policy = Box::leak(Box::new(
-        Policy::resolve(mode, &owned(allow), &owned(deny), cwd).expect("rules parse"),
+        Policy::resolve(mode, rules(deny), Vec::new(), rules(allow), &[], &workspace)
+            .expect("shipped defaults parse"),
     ));
     DispatchContext {
         policy,
-        workspace: Arc::new(Workspace::new(cwd)),
+        workspace,
         session_id: "test-session".to_owned(),
         tracker: Arc::new(FileTracker::default()),
     }

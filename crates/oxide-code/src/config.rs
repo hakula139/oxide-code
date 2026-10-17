@@ -29,9 +29,9 @@ use self::gateway::{GatewayCompat, GatewaySnapshot};
 use self::load::Loaded;
 use self::merge::Origins;
 use self::provenance::{Provenance, Source, Sourced};
-use self::schema::{FileConfig, PermissionTable};
+use self::schema::{FileConfig, PermissionTable, TierTable};
 use crate::model::ModelSpec;
-use crate::permission::{Mode, Policy, Workspace};
+use crate::permission::{Mode, Policy, Tier, Workspace};
 use crate::util::env;
 use crate::util::path::expand_user;
 use crate::util::tls::load_extra_ca_certs;
@@ -621,7 +621,8 @@ fn validate_status_line(segments: Vec<StatusLineSegment>) -> Result<Vec<StatusLi
 /// Resolves the permission policy and the workspace launched in `cwd` from the merged file config
 /// plus the `OX_PERMISSION_MODE` override, along with the source of the mode. The env mode wins
 /// over the file mode with the empty-is-absent and parse-error-propagates behavior `effort` uses,
-/// so a typo fails loudly. Deny prefixes resolve against `cwd`, as the gate's paths do.
+/// so a typo fails loudly. Deny and ask prefixes resolve from the workspace's anchor directories,
+/// as the gate's paths do.
 fn resolve_permission(
     file: PermissionTable,
     origins: &Origins,
@@ -632,9 +633,23 @@ fn resolve_permission(
         .or_else(|| origins.sourced("permission.mode", file.mode))
         .unwrap_or_else(|| Sourced::fallback(Mode::default()));
 
-    let allow = file.allow.unwrap_or_default();
-    let deny = file.deny.unwrap_or_default();
-    let policy = Policy::resolve(mode.value, &allow, &deny, cwd)?;
+    let rules = |table: Option<TierTable>, tier| {
+        table.map_or_else(|| Ok(Vec::new()), |table| table.rules(tier))
+    };
+    let disabled: Vec<_> = file
+        .defaults
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(group, on)| (!on).then_some(group))
+        .collect();
+    let policy = Policy::resolve(
+        mode.value,
+        rules(file.deny, Tier::Deny)?,
+        rules(file.ask, Tier::Ask)?,
+        rules(file.allow, Tier::Allow)?,
+        &disabled,
+        &workspace,
+    )?;
     Ok((policy, workspace, mode.source))
 }
 
@@ -748,6 +763,7 @@ mod tests {
     use super::compaction::test_thresholds;
     use super::provenance::Layer;
     use super::*;
+    use crate::permission::{Access, Decision, PermissionClass};
     use crate::util::path::testing::HOME_VAR;
     use crate::util::tls::TEST_CA_PEM;
 
@@ -773,7 +789,7 @@ mod tests {
             max_tool_rounds: Some(100),
             prompt_cache_ttl: PromptCacheTtl::FiveMin,
             compaction: CompactionConfig::with_threshold_for_test(42),
-            permission: Policy::resolve(Mode::Plan, &[], &[], Path::new("")).unwrap(),
+            permission: Policy::new(Mode::Plan, Vec::new(), Vec::new(), Vec::new()),
             workspace: Workspace::new(Path::new("/repo")),
             show_thinking: true,
             show_welcome: false,
@@ -1069,7 +1085,7 @@ mod tests {
         assert!(config.gateway.structured_outputs);
         assert_eq!(config.theme.base, DEFAULT_THEME);
         assert!(config.theme.overrides.is_empty());
-        assert_eq!(config.permission.mode(), Mode::Auto);
+        assert_eq!(config.permission.mode(), Mode::Manual);
         assert_eq!(
             config.provenance,
             Provenance {
@@ -1956,6 +1972,107 @@ mod tests {
     // ── Config::load: permission ──
 
     #[tokio::test]
+    async fn load_permission_resolves_each_tier_and_the_defaults_across_layers() {
+        let dir = tempfile::tempdir().unwrap();
+        write_user_config(
+            dir.path(),
+            indoc::indoc! {r#"
+                [permission.deny]
+                exec = ["git push *"]
+
+                [permission.ask]
+                exec = ["cargo publish *"]
+
+                [permission.allow]
+                exec = ["git *", "cargo *", "rm *"]
+
+                [permission.defaults]
+                git = false
+                rm = false
+            "#},
+        );
+        write_drop_in(dir.path(), "10-team.toml", "permission.defaults.git = true");
+
+        let config = load_with(&dir, &[]).await.unwrap();
+
+        let decide = |class, target: Access| config.permission.decide(class, &target.as_target());
+        let command = |command: &str| Access::for_command(command, &config.workspace);
+        assert_eq!(
+            decide(PermissionClass::Exec, command("git push origin")),
+            Decision::Deny
+        );
+        assert_eq!(
+            decide(PermissionClass::Exec, command("cargo publish")),
+            Decision::Ask
+        );
+        assert_eq!(
+            decide(PermissionClass::Exec, command("cargo build")),
+            Decision::Allow
+        );
+        assert_eq!(
+            decide(PermissionClass::Exec, command("rm -rf target")),
+            Decision::Allow,
+            "`rm = false` turns the shipped `rm` rule off"
+        );
+        assert_eq!(
+            decide(
+                PermissionClass::Edit,
+                Access::for_path(".git/config", &config.workspace)
+            ),
+            Decision::Ask,
+            "a later layer turns the `git` default back on"
+        );
+    }
+
+    #[tokio::test]
+    async fn load_permission_denies_ssh_reads_under_a_home_spelled_with_a_trailing_slash_or_dot() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dunce::canonicalize(dir.path()).unwrap().join("home");
+        std::fs::create_dir(&home).unwrap();
+        let key = home.join(".ssh").join("id_ed25519");
+
+        for spelling in [
+            format!("{}/", home.display()),
+            format!("{}/.", home.display()),
+        ] {
+            let config = Box::pin(temp_env::async_with_vars(
+                [(HOME_VAR, Some(spelling.as_str()))],
+                load_with(&dir, &[]),
+            ))
+            .await
+            .unwrap();
+
+            let target = Access::for_path(&key.to_string_lossy(), &config.workspace);
+            assert_eq!(
+                config
+                    .permission
+                    .decide(PermissionClass::Read, &target.as_target()),
+                Decision::Deny,
+                "{spelling}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn load_permission_invalid_built_in_pattern_errors() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let err = Box::pin(temp_env::async_with_vars(
+            [(HOME_VAR, Some("!home"))],
+            load_with(&dir, &[]),
+        ))
+        .await
+        .expect_err("a built-in pattern that fails to parse must fail the load");
+
+        assert_eq!(
+            format!("{err:#}"),
+            "invalid built-in `ssh` pattern \"!home/.ssh\": a pattern cannot start with `!`, since \
+             patterns have no negation. Write the paths to match instead, or turn off the built-in \
+             rule that covers them."
+        );
+    }
+
+    #[tokio::test]
     async fn load_permission_mode_env_beats_file() {
         let dir = tempfile::tempdir().unwrap();
         write_user_config(
@@ -1979,7 +2096,7 @@ mod tests {
             .expect_err("invalid mode must propagate");
         assert_eq!(
             format!("{err:#}"),
-            r#"invalid OX_PERMISSION_MODE "bypass": expected one of auto, plan, yolo"#,
+            r#"invalid OX_PERMISSION_MODE "bypass": expected one of manual, plan, yolo"#,
         );
     }
 
@@ -2037,14 +2154,17 @@ mod tests {
         write_user_config(
             dir.path(),
             indoc::indoc! {r#"
-                [permission]
-                allow = ["edit(src/**/[)"]
+                [permission.allow]
+                edit = ["src/**/["]
             "#},
         );
         let err = load_with(&dir, &[])
             .await
             .expect_err("malformed rule must propagate");
-        assert!(format!("{err:#}").contains("invalid path glob"));
+        assert!(
+            format!("{err:#}").contains(r#"invalid permission.allow.edit pattern "src/**/[": "#),
+            "{err:#}"
+        );
     }
 
     // ── Config::load: provenance ──

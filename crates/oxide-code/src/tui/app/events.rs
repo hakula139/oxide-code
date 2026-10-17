@@ -751,7 +751,7 @@ mod tests {
         let (mut app, _rx, _event_tx) = test_app(None);
         let grant = Policy::default()
             .session_grant(
-                PermissionClass::Bash,
+                PermissionClass::Exec,
                 &Access::for_command("cargo test", &Workspace::new(Path::new("/repo"))),
             )
             .unwrap();
@@ -771,7 +771,11 @@ mod tests {
     #[test]
     fn handle_session_rules_updated_replaces_the_rules_status_lists() {
         let (mut app, _rx, _event_tx) = test_app(None);
-        let rules = ["bash(cargo test:*)", "edit(out/**)"].map(|text| Rule::parse(text).unwrap());
+        let rules = [
+            (PermissionClass::Exec, "cargo test *"),
+            (PermissionClass::Edit, "./out/**"),
+        ]
+        .map(|(class, pattern)| Rule::parse(class, pattern).unwrap());
 
         app.handle_engine_event(Event::SessionRulesUpdated(vec![rules[0].clone()]));
         app.handle_engine_event(Event::SessionRulesUpdated(rules.to_vec()));
@@ -816,7 +820,7 @@ mod tests {
         app.chat.push_user_message("old prompt".to_owned());
         let original_id = app.session_info.session_id.clone();
         app.status_bar.set_usage(Some(usage_snapshot()));
-        app.session_info.session_allow = vec![Rule::parse("bash(ls)").unwrap()];
+        app.session_info.session_allow = vec![Rule::parse(PermissionClass::Exec, "ls").unwrap()];
         app.session_info.background_shells = shells_in_each_state();
         app.tasks.set(plan());
 
@@ -874,7 +878,7 @@ mod tests {
         app.status_bar.set_usage(Some(usage_snapshot()));
         app.pending_prompts.push_back("queued".to_owned());
         app.handle_engine_event(bash_call_start("pending-1", "ls"));
-        app.session_info.session_allow = vec![Rule::parse("bash(ls)").unwrap()];
+        app.session_info.session_allow = vec![Rule::parse(PermissionClass::Exec, "ls").unwrap()];
         app.session_info.background_shells = shells_in_each_state();
         app.tasks.set(plan());
         let original_id = app.session_info.session_id.clone();

@@ -17,12 +17,12 @@ oxide-code (`ox`) is a terminal agent for software engineering tasks. It runs Cl
 
 Early development. What works today:
 
-- **Terminal UI**: streaming Markdown, syntax-highlighted code blocks, a [configurable status line](docs/guide/configuration.md#tui-terminal-ui), and 5 built-in [themes](docs/guide/theming.md) with custom TOML overrides
+- **Terminal UI**: streaming Markdown, syntax-highlighted code blocks, mouse-wheel scrolling and drag-to-copy selection, a [configurable status line](docs/guide/configuration.md#tui-terminal-ui), and 5 built-in [themes](docs/guide/theming.md) with custom TOML overrides
 - **[Headless mode](docs/guide/headless.md)**: one-shot `-p` runs for scripts and pipelines, with output as text, a JSON result, or a JSON event stream, plus a bare REPL (`--no-tui`)
 - **Models**: Claude Opus 5.5, Sonnet 5.5, and Haiku 5.5, each with a 1M-token context window, adjustable effort, and extended thinking
 - **Tools**: `read`, `write`, `edit`, `glob`, `grep`, and `bash`, which can also keep dev servers, watchers, and long builds running in the background
 - **Task list**: the model tracks multi-step work in a list shown live and carried through resume and compaction
-- **[Tool permissions](docs/guide/configuration.md#permission-tool-approval)**: `auto` (default), `plan`, and `yolo` modes, allow / deny rules for each command in a `bash` command line, protected config paths that always ask in `auto` mode, and an approval prompt that can allow matching calls for the session
+- **[Tool permissions](docs/guide/configuration.md#permission-tool-approval)**: `manual` (default), read-only `plan`, and `yolo` modes, deny / ask / allow patterns for each tool class and each command in a `bash` command line, built-in rules that guard protected config paths, SSH keys, and credentials, and an approval prompt that can allow matching calls for the session
 - **Turn control**: interrupt with Esc or Ctrl+C, queue follow-up prompts that join the running turn between tool calls, and confirm exit with a second Ctrl+C
 - **[Slash commands](docs/guide/slash-commands.md)**: commands for sessions, models and effort, compaction, sign-in, themes, `/init`, and status and config views, with autocomplete
 - **Context compaction**: manual `/compact` and default-on auto-compaction

@@ -44,7 +44,7 @@ list_marker = "#8aadf4"
 
 # Markdown chrome
 horizontal_rule = "#5b6078"
-table_header = { fg = "#cad3f5", bold = true }
+table_header = { fg = "#8aadf4", bold = true }
 table_border = "#5b6078"
 
 # UI chrome
@@ -53,3 +53,4 @@ tool_icon = "#8aadf4"
 border_focused = "#8aadf4"
 border_unfocused = "#5b6078"
 separator = "#5b6078"
+selection = { bg = "#363a4f" }

@@ -39,16 +39,16 @@ The assistant uses its built-in tools to read files, run commands, and edit code
 In the chat:
 
 - **Scroll**: Use the mouse wheel or **PageUp** / **PageDown**, and press **Ctrl+End** to follow new output again.
-- **Select text**: Hold **Shift** while dragging, or **Option** in iTerm2 and in VS Code and Cursor on macOS once `terminal.integrated.macOptionClickForcesSelection` is enabled. Because ox captures the mouse to make the wheel work inside tmux, a plain drag doesn't reach the terminal's own selection.
+- **Select and copy**: Drag over chat text to select it, and release to copy it to the clipboard. Double-click selects a word and triple-click a row. The highlight stays until the next keystroke, and **Ctrl+C** copies it again without interrupting the turn. A notice in the chat's corner reports whether the copy landed and, if not, how to fix it for your terminal. Over SSH, copying goes through tmux 3.2 or later, or else through the terminal's OSC 52 support, which VS Code's Remote SSH terminal lacks. On Linux under X11, the copied text stays on the clipboard only while `ox` runs, unless a clipboard manager keeps it. To use the terminal's own selection instead, hold **Shift** while dragging, **Fn** in Terminal.app, or **Option** in iTerm2 and in VS Code and Cursor on macOS once `terminal.integrated.macOptionClickForcesSelection` is enabled.
 
 ## Approve tool calls
 
-In the default `auto` permission mode, tool calls fall into these groups:
+In the default `manual` permission mode, tool calls fall into these groups:
 
 - **Runs without asking**: reads, searches, read-only commands such as `ls`, `cat`, and `grep`, and edits within the working directory.
 - **Asks unless a rule decides**: other `bash` commands and edits outside the working directory.
-- **Asks even when an allow rule matches**: edits to protected config such as `.vscode` or `.envrc`.
-- **Denied**: destructive commands such as `rm -rf` and `curl ... | sh`, and edits under the project's own `.git`.
+- **Asks even when an allow pattern matches**: edits to protected config such as `.git`, `.vscode`, or `.envrc`, and forced recursive deletes such as `rm -rf`.
+- **Denied**: reads of SSH keys and credential files.
 
 The approval prompt takes these keys:
 
@@ -60,13 +60,13 @@ The approval prompt takes these keys:
 | **F**   | Deny with a note the model reads                              |
 | **Esc** | Deny and end the turn                                         |
 
-When a rule can name the call, pressing **A** opens the rule it will add, such as `bash(cargo test)`, which you can edit before pressing **Enter**, for example to widen it to `bash(cargo test:*)`.
+When a pattern can name the call, pressing **A** opens the pattern it will allow, such as `cargo test`, which you can edit before pressing **Enter**, for example to widen it to `cargo test *`.
 
 Enter does nothing in the prompt, so a keystroke meant for the input box cannot approve a call.
 
 Session rules last until you exit or start another session, and `/status` lists them.
 
-See [Tool approval](configuration.md#permission-tool-approval) for the other modes and instructions on writing rules.
+See [Tool approval](configuration.md#permission-tool-approval) for the other modes and instructions on writing patterns.
 
 ## What it can do
 

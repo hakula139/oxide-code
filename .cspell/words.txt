@@ -70,6 +70,7 @@ misparses
 mkfifo
 mksh
 MMIX
+mojibake
 mplan
 mpsc
 msvc
@@ -119,6 +120,7 @@ rustls
 serde
 serie
 sess
+shopt
 smol
 statix
 stdenv

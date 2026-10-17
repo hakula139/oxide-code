@@ -6,6 +6,7 @@
 
 pub(crate) mod action;
 pub(crate) mod app;
+mod clipboard;
 mod components;
 mod cursor;
 mod git_probes;

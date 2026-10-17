@@ -171,21 +171,24 @@ Unset, it defaults to `base16-ocean.dark`, which the dark built-ins use. `latte`
 
 ### Markdown chrome
 
-| Slot              | Role                |
-| ----------------- | ------------------- |
-| `horizontal_rule` | `---` rule          |
-| `table_header`    | Table header cell   |
-| `table_border`    | Table border glyphs |
+| Slot              | Role                                     |
+| ----------------- | ---------------------------------------- |
+| `horizontal_rule` | `---` rule                               |
+| `table_header`    | Table header cells (bold accent)         |
+| `table_border`    | Table borders and the rules between rows |
 
 ### UI chrome
 
-| Slot               | Role                                   |
-| ------------------ | -------------------------------------- |
-| `tool_border`      | Left border for tool call blocks       |
-| `tool_icon`        | Per-tool icon                          |
-| `border_focused`   | Focused component border (e.g., input) |
-| `border_unfocused` | Unfocused component border             |
-| `separator`        | Status-line segment separator (`│`)    |
+| Slot               | Role                                        |
+| ------------------ | ------------------------------------------- |
+| `tool_border`      | Left border for tool call blocks            |
+| `tool_icon`        | Per-tool icon                               |
+| `border_focused`   | Focused component border (e.g., input)      |
+| `border_unfocused` | Unfocused component border                  |
+| `separator`        | Status-line segment separator (`│`)         |
+| `selection`        | Chat text selected with the mouse (bg-only) |
+
+Declare `selection` as an inline table with `bg`, such as `selection = { bg = "#313244" }`, so selected text keeps its own colors. Pick a background that leaves `dim` and `thinking` text at a contrast of at least 3:1.
 
 ### Status-line segments
 

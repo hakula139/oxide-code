@@ -35,7 +35,7 @@ const STARTER_POOL: &[Starter] = &[
 
 const TIP_POOL: &[&str] = &[
     "click #NN in the status bar to open the PR",
-    "Shift-drag or Option-drag to copy text",
+    "drag chat text to select it",
     "ox --continue resumes your last session",
     "ox --list shows recent sessions",
     "ox -p \"<prompt>\" runs a one-shot prompt headless",

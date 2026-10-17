@@ -921,7 +921,7 @@ mod tests {
     use crate::file_tracker::testing::seed_full_read;
     use crate::message::{Replay, Role};
     use crate::permission::rule::Rule;
-    use crate::permission::{Mode, Workspace};
+    use crate::permission::{Mode, PermissionClass, Workspace};
     use crate::protocol::CapturingSink;
     use crate::session::post_compact::synthesize_post_compact_message;
     use crate::session::store::testing::test_store;
@@ -1149,7 +1149,7 @@ mod tests {
             let mut config = test_config("http://127.0.0.1:9", api_key(), MODEL);
             config.max_tool_rounds = Some(3);
             config.compaction = CompactionConfig::with_threshold_for_test(50_000);
-            config.permission = Policy::new(Mode::Plan, Vec::new(), Vec::new());
+            config.permission = Policy::new(Mode::Plan, Vec::new(), Vec::new(), Vec::new());
             config.workspace = Workspace::new(dir.path());
 
             let engine = Engine::new(
@@ -2591,7 +2591,7 @@ mod tests {
             let sink = CapturingSink::new();
             let target_id = finished_session(&store).await;
             engine.messages = vec![Message::user("before clear")];
-            let rule = Rule::parse("bash(cargo test:*)").unwrap();
+            let rule = Rule::parse(PermissionClass::Exec, "cargo test *").unwrap();
             engine.policy.allow_for_session(rule.clone());
 
             engine.clear(&sink).await;
@@ -2889,7 +2889,7 @@ mod tests {
             engine.last_usage = Some(last_usage);
             engine.displayed_usage = Some(displayed_usage);
             engine.total_estimated_cost_usd = 1.23;
-            let rule = Rule::parse("bash(cargo test:*)").unwrap();
+            let rule = Rule::parse(PermissionClass::Exec, "cargo test *").unwrap();
             engine.policy.allow_for_session(rule.clone());
             start_shell(&engine.shells, "sleep 30");
             let sink = CapturingSink::new();

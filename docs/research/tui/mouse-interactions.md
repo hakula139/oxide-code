@@ -44,12 +44,15 @@ No documented escape hatch for native terminal selection while mouse is captured
 
 Payload caps:
 
-- **xterm**: 8 KB pre-base64 (with `allowWindowOps` enabled). Default off. `~/.Xresources`: `XTerm*allowWindowOps: true`.
-- **kitty**: 64 KB. Enabled by default since 0.21 via `clipboard_control write-clipboard`.
-- **iTerm2**: ~74 KB. Enabled by default.
+- **xterm**: 100,000 bytes, the cap Codex also applies before encoding. Off by default. `~/.Xresources`: `XTerm*allowWindowOps: true`.
+- **kitty**: 512 MB. Enabled by default since 0.21 via `clipboard_control write-clipboard`.
+- **iTerm2**: off by default. "Applications in terminal may access clipboard" in Settings → General → Selection turns it on.
 - **WezTerm**, **Alacritty**, **foot**, **Ghostty**: enabled by default, multi-MB caps.
 - **Windows Terminal**: enabled by default.
-- **tmux**: `set -g set-clipboard on` (default in 3.2+) passes the OSC through to the outer terminal. tmux 2.6+ can also handle the OSC itself with `set-clipboard external`.
+- **tmux**: accepts OSC 52 from a pane only with `set -g set-clipboard on`, then forwards it to the outer terminal. The default, `external`, drops it. `tmux load-buffer -w` (tmux 3.2+) forwards a buffer to the outer clipboard under either setting.
+- **GNU screen**: forwards OSC 52 only inside its DCS passthrough (`ESC P` ... `ESC \`), and abandons any string longer than its 768-byte `MAXSTR` buffer, so long payloads go out as a run of DCS strings.
+- **VS Code**: the local integrated terminal applies OSC 52 through xterm.js's clipboard addon, which xterm.js added in 2024 ([xterm.js#3260](https://github.com/xtermjs/xterm.js/issues/3260)). Remote SSH sessions drop it ([vscode-remote-release#11475](https://github.com/microsoft/vscode-remote-release/issues/11475)).
+- **Cursor**: applies OSC 52 like VS Code, but its bundled `@xterm/addon-clipboard` decodes the payload with `atob()` and skips the UTF-8 decode, so every non-ASCII character pastes as Latin-1 mojibake while ASCII survives. Chat copies carry non-ASCII gutters such as `▎` and `│`, so nearly every copy through that path is affected. xterm.js fixed this in [xterm.js#6002](https://github.com/xtermjs/xterm.js/pull/6002), VS Code shipped the fix in 1.125, and Cursor [plans it for 3.14](https://forum.cursor.com/t/terminal-osc-52-clipboard-corrupts-multi-byte-utf-8-cjk-cyrillic-emoji-fixed-upstream-in-vs-code-1-125-cursor-still-ships-the-buggy-addon/166453).
 
 Failure modes: rejected payloads are silently dropped. The app cannot detect support, so the user gets no clipboard write and no error. Falling back to native clipboard requires a separate channel like the `arboard` crate.
 
@@ -84,12 +87,12 @@ Terminal-side wheel translation through DECSET 1007 doesn't survive tmux. With `
 
 ## User-environment signal
 
-The author's tmux config enables tmux mouse mode, vi copy-mode bindings, and `y` for yank. With `set -g set-clipboard on`, OSC 52 from an inner app passes through to the outer terminal. Wheel-up enters copy-mode when the pane isn't already receiving mouse events. An app that captures mouse intercepts those gestures. The author also runs `ox` inside VS Code's and Cursor's integrated terminals, which are xterm.js-based. Those have looser OSC parsing than xterm proper, so any per-cell escape sequence has to use the safest forms (BEL terminator, no relying on OSC 52 reaching the OS clipboard).
+The author's tmux config enables tmux mouse mode, vi copy-mode bindings, and `y` for yank. With `set -g set-clipboard on`, OSC 52 from an inner app passes through to the outer terminal. Wheel-up enters copy-mode when the pane isn't already receiving mouse events. An app that captures mouse intercepts those gestures. The author also runs `ox` inside VS Code's and Cursor's integrated terminals, which are xterm.js-based. Those have looser OSC parsing than xterm proper, so any per-cell escape sequence has to use the safest forms, such as the BEL terminator.
 
 ## Takeaway for oxide-code
 
 Wheel scrolling has to work inside tmux, which the author runs with `mouse on`, and DECSET 1007 can't deliver that. Claude Code and Codex both capture the mouse in fullscreen, so oxide-code does the same:
 
-- **Mouse capture.** `enter_tui_mode` enables `EnableMouseCapture`, and the chat scrolls on wheel events. Clicks and drags reach the app, so native selection needs the terminal's bypass modifier until in-app selection lands ([#289](https://github.com/hakula139/oxide-code/issues/289)).
-- **App-side selection next.** Both peers keep selection usable under capture by implementing it in the app and copying through the native clipboard with OSC 52 for tmux and SSH. The xterm.js terminals the author uses parse OSC loosely, so the copy path should prefer the native clipboard over relying on OSC 52 alone.
+- **Mouse capture.** `enter_tui_mode` enables `EnableMouseCapture`, and the chat scrolls on wheel events. Clicks and drags reach the app, and the terminal's bypass modifier still gives native selection.
+- **App-side selection.** Both peers keep selection usable under capture by implementing it in the app, so oxide-code selects chat text itself and copies on release. Like Codex, a local session writes the native clipboard through `arboard`, which works under iTerm2's and Terminal.app's default settings, where OSC 52 does not, and avoids Cursor's non-ASCII mangling. Inside tmux it also hands the text to `tmux load-buffer -w`, which works under the default `set-clipboard external`. A remote session outside tmux writes OSC 52.
 - **OSC 8 on the PR segment, emitted out-of-band after `terminal.draw()` flushes.** Capturing the link rect + visible cells at render time and writing the envelope directly to the crossterm backend avoids both ratatui traps: `Buffer::set_string` no longer filters our control chars, and `Buffer::diff` no longer sees a 30-byte URL as one cell symbol. BEL (`\x07`) avoids xterm.js ST parsing leaks in self-contained per-cell closers.

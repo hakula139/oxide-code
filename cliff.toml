@@ -10,6 +10,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 """
 
+# Tera's `sort` rejects a null key, so unscoped entries render first in their own loop.
 body = """
 
 {% if version -%}
@@ -18,14 +19,20 @@ body = """
     ## [Unreleased]
 {% endif %}
 {% if message %}
+    ### Highlights
+
     {{ message | trim }}
 {% endif %}
 {% for group, commits in commits | group_by(attribute="group") %}
     ### {{ group | split(pat="-->") | last | trim | upper_first }}
 
     {% for commit in commits -%}
-        - {% if commit.scope %}_({{ commit.scope }})_ {% endif -%}
-          {{ commit.message | upper_first | trim }}
+        {% if not commit.scope -%}
+            - {{ commit.message | upper_first | trim }}
+        {% endif -%}
+    {% endfor -%}
+    {% for commit in commits | filter(attribute="scope") | sort(attribute="scope") -%}
+        - _({{ commit.scope }})_ {{ commit.message | upper_first | trim }}
     {% endfor %}
 {%- endfor -%}
 """
@@ -51,10 +58,12 @@ commit_preprocessors = [
   # Backtick inline HTML in subjects so markdown renders it as code. `(^|[^`])`
   # is a lookbehind stand-in (Rust regex lacks one) skipping already-fenced spans.
   { pattern = '(^|[^`])(<\/?[a-zA-Z][^>]*>)', replace = '$1`$2`' },
+  # GitHub autolinks `#N` in release notes but not in rendered files.
+  { pattern = '\(#([0-9]+)\)', replace = '([#$1](https://github.com/hakula139/oxide-code/pull/$1))' },
   # Early PR titles joined clauses with a spaced em-dash.
   { pattern = ' — ', replace = ': ' },
-  # Advisory bumps from before the `fix(deps)` convention (#17, #94).
-  { pattern = '^chore\(deps\): (bump rustls-webpki and rand for Dependabot alerts|refresh dependencies and patch DoS advisories)', replace = 'fix(deps): $1' },
+  # An advisory bump from before the `fix(deps)` convention (#17).
+  { pattern = '^chore\(deps\): (bump rustls-webpki and rand for Dependabot alerts)', replace = 'fix(deps): $1' },
 ]
 
 # `<!-- N -->` prefixes (stripped in the body template) order sections by priority.

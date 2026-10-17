@@ -2,16 +2,18 @@
 //! simple commands it runs and the files its output redirections write, so rules weigh each simple
 //! command on its own. Leading assignments and transparent wrappers are stripped first. A command
 //! the analysis cannot vouch for is opaque: rules may deny it or leave it to ask, but never allow
-//! it. Design: `docs/design/tools/permissions.md`.
+//! it. `exec` patterns parse here too, so they read words the way commands do. Design:
+//! `docs/design/tools/permissions.md`.
 
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use std::sync::LazyLock;
 
+use anyhow::{Result, bail, ensure};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use tree_sitter::{Node, Parser};
+use tree_sitter::{Node, Parser, Tree};
 
-use crate::permission::{Access, Workspace};
+use crate::permission::{Access, Workspace, fold_name};
 use crate::util::path::expand_user;
 
 /// Shells, whose `-c` script, script file, or stdin is code the analysis does not see.
@@ -26,6 +28,13 @@ const CODE_BUILTINS: &[&str] = &[".", "eval", "let", "source", "trap"];
 /// Builtins that change the working directory, after which a relative redirection target no longer
 /// names the file the gate resolved.
 const DIRECTORY_CHANGERS: &[&str] = &["cd", "popd", "pushd"];
+
+/// Commands whose file operands the gate weighs against `read` rules, whether or not they run as
+/// [known-safe](safe_operands) reads.
+const READERS: &[&str] = &["cat", "find", "grep", "head", "ls", "sed", "tail", "wc"];
+
+/// Files one globbing word may match before the analysis gives up on listing them.
+const MAX_GLOB_MATCHES: usize = 1024;
 
 /// Variables a leading assignment may set without changing what a rule names, since none of them
 /// changes which program runs, what it loads, or where it writes.
@@ -83,7 +92,7 @@ const SHELL_VARIABLES: &[&str] = &[
 /// Redirection operators that write their target.
 const WRITE_OPERATORS: &[&str] = &[">", ">>", ">|", "&>", "&>>", ">&"];
 
-/// Redirection targets that are devices, so writing them edits no file.
+/// Redirection targets that are devices, so redirecting to or from them touches no file.
 const DEVICES: &[&str] = &["/dev/null", "/dev/stderr", "/dev/stdout", "/dev/tty"];
 
 /// Wrappers that run the command after their own options, so rules see through them.
@@ -195,13 +204,13 @@ static SAFE_SED_SCRIPT: LazyLock<Regex> = LazyLock::new(|| {
 /// A `bash` call's command and what the analysis found in it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct CommandTarget {
-    /// The command as the call passes it.
-    command: String,
     /// Each simple command it runs, including those inside substitutions and literal `sh -c` or
     /// `eval` scripts.
     segments: Vec<Segment>,
     /// The files its output redirections write, resolved like an edit's path.
     writes: Vec<Access>,
+    /// The files its input redirections read, resolved like a read's path.
+    reads: Vec<Access>,
     /// Whether it runs code the analysis does not see or cannot place.
     opaque: bool,
 }
@@ -213,21 +222,18 @@ impl CommandTarget {
             workspace,
             segments: Vec::new(),
             writes: Vec::new(),
+            reads: Vec::new(),
             opaque: false,
             changes_dir: false,
             relative_path: false,
         };
         walk.script(command);
         Self {
-            command: command.to_owned(),
             segments: walk.segments,
             writes: walk.writes,
+            reads: walk.reads,
             opaque: walk.opaque || (walk.changes_dir && walk.relative_path),
         }
-    }
-
-    pub(crate) fn command(&self) -> &str {
-        &self.command
     }
 
     pub(super) fn segments(&self) -> &[Segment] {
@@ -238,6 +244,10 @@ impl CommandTarget {
         &self.writes
     }
 
+    pub(super) fn reads(&self) -> &[Access] {
+        &self.reads
+    }
+
     pub(super) const fn is_opaque(&self) -> bool {
         self.opaque
     }
@@ -246,29 +256,107 @@ impl CommandTarget {
 /// One simple command.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct Segment {
-    /// The command as written, from where a rule must name it. Leading assignments of
+    /// The words an allow rule must name, without redirections. Leading assignments of
     /// [`SAFE_VARIABLES`] and transparent wrappers are left out, up to the first assignment of
-    /// another variable.
-    text: String,
-    /// The words of the program that runs, past every assignment and wrapper, unquoted, or as
-    /// written where a word expands.
-    words: Vec<String>,
-    /// The files a shipped known-safe read-only command reads, resolved like a read's path, or
-    /// `None` for any other command.
-    safe_reads: Option<Vec<Access>>,
+    /// another variable, which starts the list and keeps every word after it.
+    named: Vec<ShellWord>,
+    /// Where the program that runs starts in `named`, past every assignment and wrapper.
+    program: usize,
+    /// The files one of [`READERS`] may read, resolved like a read's path: each literal operand,
+    /// and each file a globbing one matches when the analysis runs. Empty for any other command.
+    reads: Vec<Access>,
+    /// Whether one of [`READERS`] takes a word whose files the analysis cannot list, such as one
+    /// that expands a variable, so it may read any file.
+    reads_anything: bool,
+    /// Whether it is a shipped known-safe read-only command, whose `reads` are all it reads.
+    safe: bool,
 }
 
 impl Segment {
+    pub(super) fn named(&self) -> &[ShellWord] {
+        &self.named
+    }
+
+    pub(super) fn program(&self) -> &[ShellWord] {
+        &self.named[self.program..]
+    }
+
+    /// The program words with the program's directory dropped, when its name has one, so
+    /// `/bin/rm -rf x` also reads as `rm -rf x`.
+    pub(super) fn bare_program(&self) -> Option<Vec<ShellWord>> {
+        let (name, args) = self.program().split_first()?;
+        let bare = basename(&name.text);
+        (bare != name.text).then(|| {
+            std::iter::once(ShellWord {
+                text: bare.to_owned(),
+                literal: name.literal,
+            })
+            .chain(args.iter().cloned())
+            .collect()
+        })
+    }
+
+    /// The files a known-safe read-only command reads, or `None` for any other command.
+    pub(super) fn safe_reads(&self) -> Option<&[Access]> {
+        self.safe.then_some(self.reads.as_slice())
+    }
+
+    pub(super) fn reads(&self) -> &[Access] {
+        &self.reads
+    }
+
+    pub(super) const fn reads_anything(&self) -> bool {
+        self.reads_anything
+    }
+
+    /// Whether this may run `rm` with both its recursive and force options before any `--`, in one
+    /// short cluster or two, such as `-rf` or `-R -f`, or as `--recursive` and `--force` or a
+    /// prefix GNU `rm` takes for either. A word that expands, the program name included, may become
+    /// any of them, and GNU `rm` reads options after operands too, so `rm / -rf` counts.
+    pub(super) fn removes_recursively_by_force(&self) -> bool {
+        let (name, args) = self
+            .program()
+            .split_first()
+            .expect("a simple command runs a program");
+        if name.literal && fold_name(basename(&name.text)) != "rm" {
+            return false;
+        }
+        let (mut recursive, mut force) = (false, false);
+        for arg in args {
+            if !arg.literal {
+                return true;
+            }
+            if arg.text == "--" {
+                break;
+            }
+            if let Some(long) = arg.text.strip_prefix("--") {
+                recursive |= !long.is_empty() && "recursive".starts_with(long);
+                force |= !long.is_empty() && "force".starts_with(long);
+            } else if let Some(cluster) = arg.text.strip_prefix('-') {
+                recursive |= cluster.contains(['r', 'R']);
+                force |= cluster.contains('f');
+            }
+        }
+        recursive && force
+    }
+}
+
+/// One word of a simple command as rules compare it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct ShellWord {
+    /// The word unquoted, or as written where part of it expands at run time.
+    text: String,
+    /// Whether `text` is the only value the word can take, since it neither expands nor globs.
+    literal: bool,
+}
+
+impl ShellWord {
     pub(super) fn text(&self) -> &str {
         &self.text
     }
 
-    pub(super) fn words(&self) -> &[String] {
-        &self.words
-    }
-
-    pub(super) fn safe_reads(&self) -> Option<&[Access]> {
-        self.safe_reads.as_deref()
+    pub(super) const fn is_literal(&self) -> bool {
+        self.literal
     }
 }
 
@@ -279,22 +367,17 @@ struct Walk<'a> {
     workspace: &'a Workspace,
     segments: Vec<Segment>,
     writes: Vec<Access>,
+    reads: Vec<Access>,
     opaque: bool,
     /// Whether some segment changes the working directory.
     changes_dir: bool,
-    /// Whether some write or known-safe read names a relative path.
+    /// Whether some redirection or known-safe read names a relative path.
     relative_path: bool,
 }
 
 impl Walk<'_> {
     fn script(&mut self, source: &str) {
-        let mut parser = Parser::new();
-        parser
-            .set_language(&tree_sitter_bash::LANGUAGE.into())
-            .expect("the bundled bash grammar matches the tree-sitter ABI");
-        let tree = parser
-            .parse(source, None)
-            .expect("parsing stops early only on a timeout or cancellation, and neither is set");
+        let tree = parse_tree(source);
         let root = tree.root_node();
         self.opaque |= root.has_error();
         self.visit(root, source);
@@ -354,57 +437,80 @@ impl Walk<'_> {
             })
             .map(|word| Word::new(word, src))
             .collect();
+        let mut assignments = Vec::new();
         let mut unsafe_assignment = None;
         for child in node.named_children(&mut cursor) {
             if child.kind() == "variable_assignment" {
                 if !SAFE_VARIABLES.contains(&assigned(&src[child.byte_range()])) {
-                    unsafe_assignment.get_or_insert(child);
+                    unsafe_assignment.get_or_insert(assignments.len());
                 }
+                assignments.push(assignment_word(child, src));
                 self.visit_children(child, src);
             } else {
                 self.visit(child, src);
             }
         }
 
-        let (words, named) = self.strip_wrappers(&words);
+        let all = &words;
+        let (words, named) = self.strip_wrappers(all);
         let Some((first, args)) = words.split_first() else {
             return;
         };
-        let name = first.value.as_deref();
+        let name = first.value.as_deref().filter(|_| !first.glob);
         match name {
             None => self.opaque = true,
             Some(name) => {
                 let base = basename(name);
-                if SHELLS.contains(&base) || CODE_BUILTINS.contains(&base) {
+                let folded = fold_name(base);
+                let runner = [base, folded.as_str()]
+                    .into_iter()
+                    .find(|runner| SHELLS.contains(runner) || CODE_BUILTINS.contains(runner));
+                if let Some(runner) = runner {
                     self.opaque = true;
-                    self.nested_script(base, args);
+                    self.nested_script(runner, args);
                 }
                 self.changes_dir |= DIRECTORY_CHANGERS.contains(&name);
+                // `shopt` can turn on `dotglob` or `globstar`, which change what a glob matches.
+                self.opaque |= name == "shopt";
             }
         }
         let pinned = unsafe_assignment.is_some() || named.len() > words.len();
-        let safe_reads = name
+        let safe = name
             .filter(|_| !pinned)
-            .and_then(|name| safe_operands(name, args))
-            .map(|operands| {
-                self.relative_path |= operands.iter().any(|path| Path::new(path).is_relative());
-                operands
-                    .iter()
-                    .map(|operand| Access::for_path(operand, self.workspace))
-                    .collect()
-            });
-        let start = unsafe_assignment.unwrap_or(named[0].node).start_byte();
+            .and_then(|name| safe_operands(name, args));
+        let reader = name.is_some_and(|name| READERS.contains(&fold_name(basename(name)).as_str()));
+        let (operands, reads_anything) = match (&safe, reader) {
+            (Some(operands), _) => (operands.clone(), false),
+            (None, true) => reader_operands(args, self.workspace.cwd()),
+            (None, false) => (Vec::new(), false),
+        };
+        self.relative_path |= operands.iter().any(|path| Path::new(path).is_relative());
+        let reads = operands
+            .iter()
+            .map(|operand| Access::for_path(operand, self.workspace))
+            .collect();
+        let named: Vec<ShellWord> = match unsafe_assignment {
+            Some(first) => assignments
+                .split_off(first)
+                .into_iter()
+                .chain(all.iter().map(|word| word.shell_word(src)))
+                .collect(),
+            None => named.iter().map(|word| word.shell_word(src)).collect(),
+        };
         self.segments.push(Segment {
-            text: src[start..node.end_byte()].to_owned(),
-            words: words.iter().map(|word| word.shell_value(src)).collect(),
-            safe_reads,
+            program: named.len() - words.len(),
+            named,
+            reads,
+            reads_anything,
+            safe: safe.is_some(),
         });
     }
 
     /// Strips the transparent wrappers that lead `words`, returning the words of the command that
     /// runs and the words a rule must name. The latter keep every wrapper from the first one that
-    /// sets a variable outside [`SAFE_VARIABLES`]. A wrapper option the analysis does not know
-    /// leaves the command where it cannot be found, so it turns the command opaque.
+    /// sets a variable outside [`SAFE_VARIABLES`] or is spelled with a directory, since
+    /// `./nice` may be any program. A wrapper option the analysis does not know leaves the command
+    /// where it cannot be found, so it turns the command opaque.
     fn strip_wrappers<'w, 't>(
         &mut self,
         words: &'w [Word<'t>],
@@ -424,7 +530,7 @@ impl Walk<'_> {
                         })
                     });
                     runs = &args[start..];
-                    pinned |= sets_unsafe;
+                    pinned |= sets_unsafe || name != wrapper.name;
                     if !pinned {
                         named = runs;
                     }
@@ -462,11 +568,15 @@ impl Walk<'_> {
     fn redirect(&mut self, node: Node<'_>, src: &str) {
         self.visit_children(node, src);
         let mut cursor = node.walk();
-        let operator = node
+        let Some(operator) = node
             .children(&mut cursor)
             .find(|child| !child.is_named())
-            .map(|child| child.kind());
-        if !operator.is_some_and(|op| WRITE_OPERATORS.contains(&op)) {
+            .map(|child| child.kind())
+        else {
+            return;
+        };
+        let reads = operator == "<";
+        if !reads && !WRITE_OPERATORS.contains(&operator) {
             return;
         }
         let destinations: Vec<Node<'_>> = node
@@ -484,14 +594,19 @@ impl Walk<'_> {
             self.opaque = true;
             return;
         };
-        if operator == Some(">&") && (destination.kind() == "number" || path == "-") {
+        if operator == ">&" && (destination.kind() == "number" || path == "-") {
             return;
         }
         if DEVICES.contains(&path.as_str()) {
             return;
         }
         self.relative_path |= Path::new(&path).is_relative();
-        self.writes.push(Access::for_path(&path, self.workspace));
+        let access = Access::for_path(&path, self.workspace);
+        if reads {
+            self.reads.push(access);
+        } else {
+            self.writes.push(access);
+        }
     }
 }
 
@@ -507,6 +622,16 @@ fn runs_hidden_code(node: Node<'_>) -> bool {
         "compound_statement" => node.child(0).is_some_and(|open| open.kind() == "(("),
         _ => false,
     }
+}
+
+fn parse_tree(source: &str) -> Tree {
+    let mut parser = Parser::new();
+    parser
+        .set_language(&tree_sitter_bash::LANGUAGE.into())
+        .expect("the bundled bash grammar matches the tree-sitter ABI");
+    parser
+        .parse(source, None)
+        .expect("parsing stops early only on a timeout or cancellation, and neither is set")
 }
 
 /// The last component of a command path, so `/bin/sh` counts as `sh`.
@@ -650,10 +775,43 @@ impl<'t> Word<'t> {
         }
     }
 
-    fn shell_value(&self, src: &str) -> String {
-        self.value
-            .clone()
-            .unwrap_or_else(|| src[self.node.byte_range()].to_owned())
+    fn shell_word(&self, src: &str) -> ShellWord {
+        ShellWord {
+            text: self
+                .value
+                .clone()
+                .unwrap_or_else(|| src[self.node.byte_range()].to_owned()),
+            literal: self.value.is_some() && !self.glob,
+        }
+    }
+}
+
+/// A leading `NAME=VALUE` assignment as a word, with its value unquoted and a leading `~`
+/// expanded. Neither pathname nor brace expansion applies to an assignment, so only a value or a
+/// subscript that expands keeps it from being literal.
+fn assignment_word(node: Node<'_>, src: &str) -> ShellWord {
+    let written = || ShellWord {
+        text: src[node.byte_range()].to_owned(),
+        literal: false,
+    };
+    if node
+        .child_by_field_name("name")
+        .is_none_or(|name| name.kind() != "variable_name")
+    {
+        return written();
+    }
+    let Some(value) = node.child_by_field_name("value") else {
+        return ShellWord {
+            text: src[node.byte_range()].to_owned(),
+            literal: true,
+        };
+    };
+    match unquote(value, src, true) {
+        Some((unquoted, _)) => ShellWord {
+            text: format!("{}{unquoted}", &src[node.start_byte()..value.start_byte()]),
+            literal: true,
+        },
+        None => written(),
     }
 }
 
@@ -665,6 +823,7 @@ fn unquote(node: Node<'_>, src: &str, leading: bool) -> Option<(String, bool)> {
         "word" => unquote_word(text, leading),
         "number" => Some((text.to_owned(), false)),
         "raw_string" => Some((text.get(1..text.len() - 1)?.to_owned(), false)),
+        "ansi_c_string" => Some((unquote_ansi_c(text.get(2..text.len() - 1)?)?, false)),
         "string" => {
             let mut cursor = node.walk();
             if !node
@@ -732,6 +891,166 @@ fn unquote_double(inner: &str) -> String {
     value
 }
 
+/// A `$'...'` string's value, with its escapes decoded as bash does, or `None` when an escape names
+/// no character, names a lone byte past ASCII, or names NUL, where bash cuts the word short.
+fn unquote_ansi_c(inner: &str) -> Option<String> {
+    let mut value = String::with_capacity(inner.len());
+    let mut chars = inner.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            value.push(c);
+            continue;
+        }
+        let escape = chars.next()?;
+        let decoded = match escape {
+            'a' => '\u{7}',
+            'b' => '\u{8}',
+            'e' | 'E' => '\u{1b}',
+            'f' => '\u{c}',
+            'n' => '\n',
+            'r' => '\r',
+            't' => '\t',
+            'v' => '\u{b}',
+            '\\' | '\'' | '"' | '?' => escape,
+            '0'..='7' => {
+                let first = escape.to_digit(8)?;
+                let code = take_digits(&mut chars, 8, 2)
+                    .map_or(first, |(rest, width)| first * 8_u32.pow(width) + rest);
+                char::from_u32(code & 0xff).filter(char::is_ascii)?
+            }
+            'x' => char::from_u32(take_digits(&mut chars, 16, 2)?.0).filter(char::is_ascii)?,
+            'u' => char::from_u32(take_digits(&mut chars, 16, 4)?.0)?,
+            'U' => char::from_u32(take_digits(&mut chars, 16, 8)?.0)?,
+            'c' => char::from_u32(u32::from(chars.next()?) & 0x1f)?,
+            other => {
+                value.push('\\');
+                other
+            }
+        };
+        if decoded == '\0' {
+            return None;
+        }
+        value.push(decoded);
+    }
+    Some(value)
+}
+
+/// Up to `max` digits in `radix` from the front of `chars`, as their value and their count, or
+/// `None` when none leads.
+fn take_digits(
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+    radix: u32,
+    max: usize,
+) -> Option<(u32, u32)> {
+    let mut taken = None;
+    for _ in 0..max {
+        let Some(digit) = chars.peek().and_then(|c| c.to_digit(radix)) else {
+            break;
+        };
+        chars.next();
+        let (value, count) = taken.unwrap_or((0, 0));
+        taken = Some((value * radix + digit, count + 1));
+    }
+    taken
+}
+
+// ── Patterns ──
+
+/// One word of an `exec` pattern.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum PatternWord {
+    Literal(String),
+    /// An unquoted `*` standing alone.
+    Any,
+}
+
+const NAMES_NO_COMMAND: &str = "it must name a command, such as `cargo test *`";
+
+const ONE_COMMAND: &str = "it must be one simple command, such as `cargo test *`. Write a \
+                           pattern for each command of a chain or pipeline.";
+
+const HOLDS_REDIRECTION: &str = "it holds a redirection. Leave it out, since a pattern matches a \
+                                 command with its redirections set aside, and an `edit` pattern \
+                                 covers the file it writes.";
+
+/// Parses an `exec` pattern into its words: one simple command, optionally led by assignments,
+/// whose words are each literal or a lone unquoted `*`.
+pub(super) fn pattern_words(pattern: &str) -> Result<Vec<PatternWord>> {
+    let tree = parse_tree(pattern);
+    let root = tree.root_node();
+    ensure!(!root.has_error(), "it does not parse as a shell command");
+    let mut cursor = root.walk();
+    let nodes: Vec<Node<'_>> = root.named_children(&mut cursor).collect();
+    let command = match nodes.as_slice() {
+        [] => bail!("{NAMES_NO_COMMAND}"),
+        [command] => *command,
+        [..] => bail!("{ONE_COMMAND}"),
+    };
+    match command.kind() {
+        "command" => {}
+        "redirected_statement" => bail!("{HOLDS_REDIRECTION}"),
+        "variable_assignment" => bail!("{NAMES_NO_COMMAND}"),
+        _ => bail!("{ONE_COMMAND}"),
+    }
+
+    let mut words = Vec::new();
+    let mut names_command = false;
+    let mut cursor = command.walk();
+    for child in command.named_children(&mut cursor) {
+        let node = match child.kind() {
+            "variable_assignment" => {
+                let word = assignment_word(child, pattern);
+                ensure!(
+                    word.literal,
+                    "the assignment {:?} expands at run time. Quote its value to match it as \
+                     written.",
+                    word.text
+                );
+                words.push(PatternWord::Literal(word.text));
+                continue;
+            }
+            "file_redirect" | "herestring_redirect" | "heredoc_redirect" => {
+                bail!("{HOLDS_REDIRECTION}");
+            }
+            "command_name" => {
+                names_command = true;
+                match child.named_child(0) {
+                    Some(name) => name,
+                    None => bail!("{NAMES_NO_COMMAND}"),
+                }
+            }
+            _ => child,
+        };
+        let written = &pattern[node.byte_range()];
+        if node.kind() == "word" && written == "*" {
+            words.push(PatternWord::Any);
+            continue;
+        }
+        let word = Word::new(node, pattern);
+        let Some(value) = word.value else {
+            bail!("the word {written:?} expands at run time. Quote it to match it as written.");
+        };
+        if word.glob {
+            match written.strip_suffix(":*") {
+                Some(prefix) => bail!(
+                    "the word {written:?} ends in the old `:*` prefix form. Write the `*` as a \
+                     word of its own, as in `{}{prefix} *{}`.",
+                    &pattern[..node.start_byte()],
+                    &pattern[node.end_byte()..]
+                ),
+                None => bail!(
+                    "the word {written:?} holds a glob, but only a `*` standing alone as a word \
+                     is a wildcard. Write a pattern for each command it should cover, or quote \
+                     the word to match it as written."
+                ),
+            }
+        }
+        words.push(PatternWord::Literal(value));
+    }
+    ensure!(names_command, "{NAMES_NO_COMMAND}");
+    Ok(words)
+}
+
 // ── Known-Safe Commands ──
 
 /// The words that may name a file read by the shipped known-safe read-only command `name`, or
@@ -745,23 +1064,28 @@ fn safe_operands(name: &str, args: &[Word<'_>]) -> Option<Vec<String>> {
         .iter()
         .map(|word| word.value.as_deref().filter(|_| !word.glob))
         .collect::<Option<Vec<_>>>()?;
+    let files = || {
+        operands(&values)
+            .into_iter()
+            .map(|(_, file)| file)
+            .collect()
+    };
     match name {
-        "cat" | "head" | "ls" | "tail" | "wc" => Some(operands(&values)),
-        "find" if !values.iter().any(|value| FIND_ACTIONS.contains(value)) => {
-            Some(operands(&values))
-        }
-        "grep" if !values.iter().any(|value| is_recursive_grep(value)) => Some(operands(&values)),
+        "cat" | "head" | "ls" | "tail" | "wc" => Some(files()),
+        "find" if !values.iter().any(|value| FIND_ACTIONS.contains(value)) => Some(files()),
+        "grep" if !values.iter().any(|value| is_recursive_grep(value)) => Some(files()),
         "sed" => sed_files(&values),
         _ => None,
     }
 }
 
-/// Every argument that may name a file: each word past the options, the value of a long option
-/// such as `--file=x`, and the rest of a short option cluster, which may hold an attached value.
-fn operands(values: &[&str]) -> Vec<String> {
+/// Every argument that may name a file, with the index of the value it comes from: each word past
+/// the options, the value of a long option such as `--file=x`, and the rest of a short option
+/// cluster, which may hold an attached value.
+fn operands(values: &[&str]) -> Vec<(usize, String)> {
     let mut operands = Vec::new();
     let mut options = true;
-    for &value in values {
+    for (index, &value) in values.iter().enumerate() {
         if options && value == "--" {
             options = false;
             continue;
@@ -776,7 +1100,7 @@ fn operands(values: &[&str]) -> Vec<String> {
             cluster.as_str()
         };
         if !operand.is_empty() && operand != "-" {
-            operands.push(operand.to_owned());
+            operands.push((index, operand.to_owned()));
         }
     }
     operands
@@ -849,13 +1173,85 @@ fn long_option(arg: &str) -> Option<&str> {
     (!name.is_empty()).then_some(name)
 }
 
+// ── Readers ──
+
+/// The files one of [`READERS`] that is no known-safe read may read, from `args`: every word that
+/// may name a file, with each globbing one also expanded in `cwd` as bash expands it. The second
+/// value is whether a word expands a variable or globs to files [`expand_glob`] cannot list, which
+/// leaves what it reads unknown.
+fn reader_operands(args: &[Word<'_>], cwd: &Path) -> (Vec<String>, bool) {
+    let known: Vec<(&str, bool)> = args
+        .iter()
+        .filter_map(|word| Some((word.value.as_deref()?, word.glob)))
+        .collect();
+    let mut anything = known.len() < args.len();
+    let values: Vec<&str> = known.iter().map(|(value, _)| *value).collect();
+    let mut files = Vec::new();
+    for (index, operand) in operands(&values) {
+        if known[index].1 {
+            match expand_glob(&operand, cwd) {
+                Some(matches) => files.extend(matches),
+                None => anything = true,
+            }
+        }
+        files.push(operand);
+    }
+    (files, anything)
+}
+
+/// The paths bash's brace and pathname expansion give `pattern` in `cwd`: each name with `*`, `?`,
+/// `[`, or `{` matches the entries of its directory, skipping those that start with `.` unless the
+/// name starts with `.` too or holds a brace, whose alternatives bash writes out before globbing.
+/// `None` when one name matches more than [`MAX_GLOB_MATCHES`] files, fails to compile, or meets a
+/// file whose name is not UTF-8.
+fn expand_glob(pattern: &str, cwd: &Path) -> Option<Vec<String>> {
+    let mut paths = vec![PathBuf::new()];
+    for component in Path::new(pattern).components() {
+        let name = component.as_os_str().to_string_lossy();
+        if !matches!(component, Component::Normal(_)) || !name.contains(['*', '?', '[', '{']) {
+            for path in &mut paths {
+                path.push(component);
+            }
+            continue;
+        }
+        let glob = globset::GlobBuilder::new(&name)
+            .literal_separator(true)
+            .build()
+            .ok()?
+            .compile_matcher();
+        let dotted = name.starts_with('.') || name.contains('{');
+        let mut matched = Vec::new();
+        for dir in &paths {
+            let Ok(entries) = std::fs::read_dir(cwd.join(dir)) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let entry_name = entry.file_name();
+                let entry_name = entry_name.to_str()?;
+                if (dotted || !entry_name.starts_with('.')) && glob.is_match(entry_name) {
+                    matched.push(dir.join(entry_name));
+                    if matched.len() > MAX_GLOB_MATCHES {
+                        return None;
+                    }
+                }
+            }
+        }
+        paths = matched;
+    }
+    Some(
+        paths
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use indoc::indoc;
 
     use super::*;
+    use crate::util::path::slash_separated;
     use crate::util::path::testing::{HOME_VAR, abs};
 
     fn temp_cwd() -> (tempfile::TempDir, PathBuf) {
@@ -868,36 +1264,65 @@ mod tests {
         CommandTarget::parse(command, &Workspace::new(Path::new("/repo")))
     }
 
+    fn joined(words: &[ShellWord]) -> String {
+        words
+            .iter()
+            .map(ShellWord::text)
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// Each simple command's named words, joined on spaces.
     fn texts(command: &str) -> Vec<String> {
         parse(command)
             .segments
-            .into_iter()
-            .map(|segment| segment.text)
+            .iter()
+            .map(|segment| joined(segment.named()))
             .collect()
     }
 
     fn words(command: &str) -> Vec<String> {
-        parse(command).segments.remove(0).words
+        parse(command).segments[0]
+            .program()
+            .iter()
+            .map(|word| word.text().to_owned())
+            .collect()
+    }
+
+    fn pattern(raw: &str) -> Vec<PatternWord> {
+        pattern_words(raw).unwrap()
+    }
+
+    fn literal(text: &str) -> PatternWord {
+        PatternWord::Literal(text.to_owned())
     }
 
     /// Each write's path relative to `cwd`, or as requested outside it.
     fn writes(command: &str, cwd: &Path) -> Vec<String> {
-        CommandTarget::parse(command, &Workspace::new(cwd))
-            .writes
+        spelled(CommandTarget::parse(command, &Workspace::new(cwd)).writes)
+    }
+
+    /// Each input redirection's path relative to `cwd`, or as requested outside it.
+    fn reads(command: &str, cwd: &Path) -> Vec<String> {
+        spelled(CommandTarget::parse(command, &Workspace::new(cwd)).reads)
+    }
+
+    fn spelled(targets: Vec<Access>) -> Vec<String> {
+        targets
             .into_iter()
-            .map(|write| match write {
+            .map(|target| match target {
                 Access::Path {
                     relative,
                     requested,
                     ..
                 } => relative.unwrap_or(requested),
-                other => panic!("a write is a path target, got {other:?}"),
+                other => panic!("a redirection target is a path, got {other:?}"),
             })
             .collect()
     }
 
     fn is_safe(command: &str) -> bool {
-        parse(command).segments[0].safe_reads.is_some()
+        parse(command).segments[0].safe_reads().is_some()
     }
 
     // ── CommandTarget::parse: segments ──
@@ -916,9 +1341,7 @@ mod tests {
         ] {
             assert_eq!(texts(command), expected, "{command:?}");
         }
-        let command = parse("cargo test --all");
-        assert_eq!(command.command(), "cargo test --all");
-        assert!(!command.is_opaque());
+        assert!(!parse("cargo test --all").is_opaque());
     }
 
     #[test]
@@ -951,9 +1374,9 @@ mod tests {
         ] {
             let command = parse(command);
             let segment = &command.segments[0];
-            assert_eq!(segment.text, text, "{command:?}");
-            assert_eq!(segment.words[0], name, "{command:?}");
-            assert!(segment.safe_reads.is_none(), "{command:?}");
+            assert_eq!(joined(segment.named()), text, "{command:?}");
+            assert_eq!(segment.program()[0].text(), name, "{command:?}");
+            assert!(segment.safe_reads().is_none(), "{command:?}");
             assert!(!command.is_opaque(), "{command:?}");
         }
         assert!(is_safe("LANG=C TZ=UTC env NO_COLOR=1 cat a"));
@@ -996,6 +1419,71 @@ mod tests {
         });
     }
 
+    #[test]
+    fn parse_marks_each_word_that_expands_or_globs_as_not_literal() {
+        let command = temp_env::with_var(HOME_VAR, Some(abs("/home/u")), || {
+            parse(r#"FOO="a b" BAR=$X EMPTY= a[$i]=1 cat 'x*' *.rs "$HOME" ~/n"#)
+        });
+        let segment = &command.segments[0];
+        let named: Vec<(&str, bool)> = segment
+            .named()
+            .iter()
+            .map(|word| (word.text(), word.is_literal()))
+            .collect();
+        let home = Path::new(&abs("/home/u"))
+            .join("n")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            named,
+            [
+                ("FOO=a b", true),
+                ("BAR=$X", false),
+                ("EMPTY=", true),
+                ("a[$i]=1", false),
+                ("cat", true),
+                ("x*", true),
+                ("*.rs", false),
+                ("\"$HOME\"", false),
+                (home.as_str(), true),
+            ]
+        );
+        assert_eq!(
+            joined(segment.program()),
+            format!("cat x* *.rs \"$HOME\" {home}")
+        );
+    }
+
+    #[test]
+    fn parse_reads_an_ansi_c_string_as_the_literal_word_it_decodes_to() {
+        let command = parse(r"$'rm' pu$'sh' $'\055rf' $'\x80'");
+
+        let program: Vec<(&str, bool)> = command.segments[0]
+            .program()
+            .iter()
+            .map(|word| (word.text(), word.is_literal()))
+            .collect();
+
+        assert_eq!(
+            program,
+            [
+                ("rm", true),
+                ("push", true),
+                ("-rf", true),
+                (r"$'\x80'", false)
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_drops_the_program_directory_for_the_bare_program_only() {
+        let command = parse("FOO=1 /usr/bin/rm -rf x");
+        let segment = &command.segments[0];
+        assert_eq!(joined(&segment.bare_program().unwrap()), "rm -rf x");
+        assert_eq!(joined(segment.named()), "FOO=1 /usr/bin/rm -rf x");
+        assert!(parse("rm -rf x").segments[0].bare_program().is_none());
+    }
+
     // ── CommandTarget::parse: wrappers ──
 
     #[test]
@@ -1009,14 +1497,43 @@ mod tests {
             "nohup rm -rf x",
             "time -p rm -rf x",
             "timeout -s KILL --preserve-status 5m rm -rf x",
-            "/usr/bin/nice nohup -- timeout 5 rm -rf x",
+            "nice nohup -- timeout 5 rm -rf x",
             "builtin rm -rf x",
             "command -p rm -rf x",
             "exec -a name rm -rf x",
         ] {
             let command = parse(command);
-            assert_eq!(command.segments[0].text, "rm -rf x", "{command:?}");
+            assert_eq!(
+                joined(command.segments[0].program()),
+                "rm -rf x",
+                "{command:?}"
+            );
+            assert_eq!(
+                joined(command.segments[0].named()),
+                "rm -rf x",
+                "{command:?}"
+            );
             assert!(!command.is_opaque(), "{command:?}");
+        }
+    }
+
+    #[test]
+    fn parse_keeps_a_wrapper_spelled_with_a_directory_in_the_named_words() {
+        for (command, named, program) in [
+            (
+                "/usr/bin/nice nohup -- timeout 5 rm -rf x",
+                "/usr/bin/nice nohup -- timeout 5 rm -rf x",
+                "rm -rf x",
+            ),
+            ("./nice cat a", "./nice cat a", "cat a"),
+            ("nice tools/env cat a", "tools/env cat a", "cat a"),
+        ] {
+            let command = parse(command);
+            let segment = &command.segments[0];
+
+            assert_eq!(joined(segment.named()), named, "{command:?}");
+            assert_eq!(joined(segment.program()), program, "{command:?}");
+            assert!(segment.safe_reads().is_none(), "{command:?}");
         }
     }
 
@@ -1066,6 +1583,11 @@ mod tests {
             "exec sh -c 'ls'",
             "command eval ls",
             "builtin . env.sh",
+            "/bin/s? -c ls",
+            "BASH -c ls",
+            "/bin/ZSH script.zsh",
+            "cat < $F",
+            "cat < *.txt",
         ] {
             assert!(parse(command).is_opaque(), "{command:?}");
         }
@@ -1098,6 +1620,48 @@ mod tests {
         }
     }
 
+    // ── Segment::removes_recursively_by_force ──
+
+    #[test]
+    fn removes_recursively_by_force_reads_both_options_in_every_spelling_before_a_double_dash() {
+        for command in [
+            "rm -rf /",
+            "rm -fr x",
+            "rm -rfv /",
+            "rm -Rf x",
+            "rm -f -R x",
+            "rm -r --force /",
+            "rm --recursive --force x",
+            "rm --rec --f x",
+            "rm / -rf",
+            "RM -Rf x",
+            "/bin/rm -rf x",
+            "nice -n 5 rm -rf x",
+            "rm $FLAGS x",
+            "$RM -rf x",
+        ] {
+            assert!(
+                parse(command).segments[0].removes_recursively_by_force(),
+                "{command:?}"
+            );
+        }
+        for command in [
+            "rm -r x",
+            "rm -f x",
+            "rm --recursive x",
+            "rm -- -rf",
+            "rm -f -- -r",
+            "rm --forced -r x",
+            "rmdir -rf x",
+            "$RM x",
+        ] {
+            assert!(
+                !parse(command).segments[0].removes_recursively_by_force(),
+                "{command:?}"
+            );
+        }
+    }
+
     // ── Walk::redirect ──
 
     #[test]
@@ -1115,16 +1679,34 @@ mod tests {
     }
 
     #[test]
-    fn redirect_skips_inputs_descriptors_and_devices() {
+    fn redirect_counts_each_file_an_input_redirection_reads() {
+        let (_dir, cwd) = temp_cwd();
+
+        let target =
+            CommandTarget::parse("sort < in.txt 3< more.txt > out.txt", &Workspace::new(&cwd));
+
+        assert_eq!(spelled(target.reads.clone()), ["in.txt", "more.txt"]);
+        assert_eq!(spelled(target.writes.clone()), ["out.txt"]);
+        assert!(!target.is_opaque());
+        assert!(
+            parse("cd x && cat < in.txt").is_opaque(),
+            "a relative input after a cd may name another file"
+        );
+    }
+
+    #[test]
+    fn redirect_skips_heredocs_descriptors_and_devices() {
         let (_dir, cwd) = temp_cwd();
         for command in [
-            "cat < in.txt",
             "cat <<< x",
+            "cat <<EOF\nx\nEOF",
             "make 2>&1",
             "make 3>&-",
-            "make > /dev/null 2> /dev/stderr",
+            "make <&3",
+            "make > /dev/null 2> /dev/stderr < /dev/null",
         ] {
             assert!(writes(command, &cwd).is_empty(), "{command:?}");
+            assert!(reads(command, &cwd).is_empty(), "{command:?}");
             assert!(
                 !CommandTarget::parse(command, &Workspace::new(&cwd)).is_opaque(),
                 "{command:?}"
@@ -1139,6 +1721,66 @@ mod tests {
         }
     }
 
+    // ── unquote_ansi_c ──
+
+    #[test]
+    fn unquote_ansi_c_decodes_each_escape_bash_does() {
+        for (inner, value) in [
+            ("push", "push"),
+            (r"pu\x73h", "push"),
+            (r"\162m", "rm"),
+            (r"\55rf", "-rf"),
+            (r"\0101", "\u{8}1"),
+            (r"\u002drf", "-rf"),
+            (r"\U0000002drf", "-rf"),
+            (r"\u00e9", "\u{e9}"),
+            (r"a\tb\n\r\v\f\a\b", "a\tb\n\r\u{b}\u{c}\u{7}\u{8}"),
+            (r"\e[0m\E", "\u{1b}[0m\u{1b}"),
+            (r#"\'\"\\\?"#, r#"'"\?"#),
+            (r"\cA", "\u{1}"),
+            (r"\q", r"\q"),
+        ] {
+            assert_eq!(unquote_ansi_c(inner).as_deref(), Some(value), "{inner:?}");
+        }
+    }
+
+    #[test]
+    fn unquote_ansi_c_declines_an_escape_that_names_no_ascii_character_or_nul() {
+        for inner in [
+            r"\x80", r"\200", r"\xZ", r"\0", r"\400", r"a\x00b", r"\c", "a\\",
+        ] {
+            assert_eq!(unquote_ansi_c(inner), None, "{inner:?}");
+        }
+    }
+
+    // ── pattern_words ──
+
+    #[test]
+    fn pattern_words_unquotes_each_word_and_reads_a_lone_star_as_a_wildcard() {
+        temp_env::with_var(HOME_VAR, Some(abs("/home/u")), || {
+            let home = PathBuf::from(abs("/home/u")).join("x");
+            assert_eq!(
+                pattern(r#"GIT_PAGER=cat git  commit -m "a b" '*' \* ~/x *"#),
+                [
+                    literal("GIT_PAGER=cat"),
+                    literal("git"),
+                    literal("commit"),
+                    literal("-m"),
+                    literal("a b"),
+                    literal("*"),
+                    literal("*"),
+                    literal(&home.to_string_lossy()),
+                    PatternWord::Any,
+                ]
+            );
+        });
+        assert_eq!(pattern("*"), [PatternWord::Any]);
+        assert_eq!(
+            pattern("git * --force"),
+            [literal("git"), PatternWord::Any, literal("--force")]
+        );
+    }
+
     // ── safe_operands ──
 
     #[test]
@@ -1149,12 +1791,12 @@ mod tests {
         );
         let at = |name: &str| Access::for_path(name, &Workspace::new(Path::new("/repo")));
         assert_eq!(
-            command.segments[0].safe_reads,
-            Some(vec![at("pats"), at("more"), at("x"), at("-y"), at("src")])
+            command.segments[0].safe_reads(),
+            Some(&[at("pats"), at("more"), at("x"), at("-y"), at("src")][..])
         );
         assert_eq!(
-            parse("echo $HOME *").segments[0].safe_reads,
-            Some(Vec::new())
+            parse("echo $HOME *").segments[0].safe_reads(),
+            Some(&[][..])
         );
     }
 
@@ -1251,7 +1893,7 @@ mod tests {
     #[test]
     fn sed_files_reads_the_files_past_the_script() {
         for command in ["sed -n 1p a.rs", "sed -e 1p -- a.rs"] {
-            let reads = parse(command).segments[0].safe_reads.clone().unwrap();
+            let reads = parse(command).segments[0].safe_reads().unwrap().to_vec();
             assert_eq!(
                 reads,
                 [Access::for_path(
@@ -1261,5 +1903,123 @@ mod tests {
                 "{command:?}"
             );
         }
+    }
+
+    // ── reader_operands ──
+
+    #[test]
+    fn reader_operands_flag_a_reader_word_whose_files_are_unknown() {
+        for command in [
+            "cat $F",
+            r#"cat "$HOME/.ssh/id_rsa""#,
+            "/bin/cat $F",
+            "grep -r x $DIR",
+            "head -n $N a",
+            "cat x[",
+        ] {
+            assert!(parse(command).segments[0].reads_anything(), "{command:?}");
+        }
+        for command in ["cat a", "cat *.rs", "echo $F", "cp $F b"] {
+            assert!(!parse(command).segments[0].reads_anything(), "{command:?}");
+        }
+    }
+
+    #[test]
+    fn reader_operands_read_each_literal_operand_and_each_file_a_glob_matches() {
+        let (_dir, cwd) = temp_cwd();
+        std::fs::create_dir(cwd.join("src")).unwrap();
+        std::fs::write(cwd.join("src/main.rs"), "").unwrap();
+        let workspace = Workspace::new(&cwd);
+
+        let command = CommandTarget::parse("grep -r x src/*.rs docs", &workspace);
+
+        let segment = &command.segments[0];
+        assert_eq!(segment.safe_reads(), None);
+        let at = |name: &str| Access::for_path(name, &workspace);
+        let main = Path::new("src").join("main.rs");
+        assert_eq!(
+            segment.reads(),
+            [
+                at("x"),
+                at(&main.to_string_lossy()),
+                at("src/*.rs"),
+                at("docs")
+            ]
+        );
+    }
+
+    // ── expand_glob ──
+
+    #[test]
+    fn expand_glob_lists_what_bash_would_and_skips_dot_names_unless_a_name_asks_for_them() {
+        let (_dir, cwd) = temp_cwd();
+        for dir in ["src/sub", ".ssh", "docs"] {
+            std::fs::create_dir_all(cwd.join(dir)).unwrap();
+        }
+        for file in [
+            "src/a.rs",
+            "src/b.rs",
+            "src/c.md",
+            "src/sub/d.rs",
+            ".ssh/id_rsa",
+            ".ssh/id_ed25519",
+            "docs/id_x",
+            ".env",
+        ] {
+            std::fs::write(cwd.join(file), "").unwrap();
+        }
+        let expand = |pattern: &str| {
+            let mut paths: Vec<String> = expand_glob(pattern, &cwd)
+                .unwrap()
+                .iter()
+                .map(|path| slash_separated(Path::new(path)))
+                .collect();
+            paths.sort();
+            paths
+        };
+        let root = slash_separated(&cwd);
+
+        assert_eq!(expand("src/*.rs"), ["src/a.rs", "src/b.rs"]);
+        assert_eq!(expand("./src/*/*.rs"), ["./src/sub/d.rs"]);
+        assert_eq!(expand("*/id_*"), ["docs/id_x"]);
+        assert_eq!(expand(".*/id_*"), [".ssh/id_ed25519", ".ssh/id_rsa"]);
+        assert_eq!(
+            expand("{.ssh,docs}/id_[er]*"),
+            [".ssh/id_ed25519", ".ssh/id_rsa"]
+        );
+        assert_eq!(expand("?env"), [""; 0]);
+        assert_eq!(expand("missing/*"), [""; 0]);
+        assert_eq!(
+            expand(&format!("{root}/.ss?/id_rsa")),
+            [format!("{root}/.ssh/id_rsa")]
+        );
+    }
+
+    #[test]
+    fn expand_glob_gives_up_past_the_match_cap_or_on_a_pattern_globset_rejects() {
+        let (_dir, cwd) = temp_cwd();
+        for i in 0..MAX_GLOB_MATCHES {
+            std::fs::write(cwd.join(format!("{i}.txt")), "").unwrap();
+        }
+        assert_eq!(
+            expand_glob("*.txt", &cwd).map(|paths| paths.len()),
+            Some(MAX_GLOB_MATCHES)
+        );
+
+        std::fs::write(cwd.join("last.txt"), "").unwrap();
+
+        assert_eq!(expand_glob("*.txt", &cwd), None);
+        assert_eq!(expand_glob("[", &cwd), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn expand_glob_gives_up_on_a_file_name_that_is_not_utf8() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let (_dir, cwd) = temp_cwd();
+        std::fs::write(cwd.join(std::ffi::OsStr::from_bytes(b"a\xff")), "").unwrap();
+
+        assert_eq!(expand_glob("*", &cwd), None);
     }
 }

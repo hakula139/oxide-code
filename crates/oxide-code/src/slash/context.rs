@@ -82,7 +82,7 @@ pub(crate) mod testing {
                 max_tool_rounds: None,
                 prompt_cache_ttl: PromptCacheTtl::OneHour,
                 compaction: CompactionConfig::with_threshold_for_test(155_000),
-                permission_mode: crate::permission::Mode::Auto,
+                permission_mode: crate::permission::Mode::Manual,
                 show_thinking: false,
                 show_welcome: true,
                 status_line: crate::config::StatusLineSegment::DEFAULT.to_vec(),
