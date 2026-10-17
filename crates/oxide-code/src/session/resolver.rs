@@ -13,13 +13,13 @@ use super::store::SessionStore;
 
 /// Normalized form of the CLI `--continue` argument.
 enum ResumeMode<'a> {
-    /// No `--continue` flag — start a new session.
+    /// Omitting `--continue` starts a new session.
     Fresh,
-    /// Bare `--continue` — resume the most recent unarchived session in scope.
+    /// Bare `--continue` resumes the most recent unarchived session in scope.
     Latest,
-    /// `--continue <prefix>` — resume the unique session whose ID starts with `prefix`.
+    /// `--continue <prefix>` resumes the unique session whose ID starts with `prefix`.
     Prefix(&'a str),
-    /// `--continue <path.jsonl>` — resume by filesystem path, bypassing the XDG lookup.
+    /// `--continue <path.jsonl>` resumes by filesystem path, bypassing the XDG lookup.
     Path(&'a Path),
 }
 
@@ -67,8 +67,8 @@ pub(crate) async fn resolve_session(
 }
 
 /// Trims and classifies a `--continue` argument into a [`ResumeMode`]. Empty / whitespace
-/// prefixes are rejected explicitly to avoid silently collapsing into "resume latest" — bare
-/// `--continue` already expresses that.
+/// prefixes are rejected explicitly to avoid silently collapsing into "resume latest", which bare
+/// `--continue` already expresses.
 fn normalize_resume_arg(resume: Option<&Option<String>>) -> Result<ResumeMode<'_>> {
     match resume {
         None => Ok(ResumeMode::Fresh),
@@ -518,7 +518,7 @@ mod tests {
 
     #[test]
     fn normalize_resume_arg_keeps_uuid_shaped_prefix_as_prefix() {
-        // UUID prefix has no `/` and no `.jsonl`; must not classify as path.
+        // A UUID prefix has no `/` or `.jsonl`, so it must not classify as a path.
         let arg = Some("a1b2c3d4-e5f6-7890".to_owned());
         let mode = normalize_resume_arg(Some(&arg)).unwrap();
         assert!(matches!(mode, ResumeMode::Prefix("a1b2c3d4-e5f6-7890")));

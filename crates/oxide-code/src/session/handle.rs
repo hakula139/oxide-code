@@ -119,9 +119,9 @@ impl SessionHandle {
         &self.session_id
     }
 
-    /// `true` once the actor has shut down (after `finalize` / `roll` / `roll_into`). Lets
+    /// `false` once the actor has shut down (after `finalize` / `roll` / `roll_into`). Lets
     /// background best-effort tasks (title generator) suppress actor-gone failures that follow a
-    /// session swap — those aren't real I/O errors the user needs to see.
+    /// session swap, since those aren't real I/O errors the user needs to see.
     pub(crate) fn is_actor_alive(&self) -> bool {
         !self.cmd_tx.is_closed()
     }
@@ -183,7 +183,7 @@ impl SessionHandle {
         self.shared.manual_title_set()
     }
 
-    /// Write the compact-boundary + synthetic post-compact message, reset the chain anchor.
+    /// Write the compact boundary and synthetic post-compact message, then reset the chain anchor.
     /// `tasks` is the task list the summarized transcript leaves. Returns `pre_count` for the
     /// post-compact UI plus every write failure, since the caller swaps in the summary only once
     /// the boundary is on disk.
@@ -245,8 +245,8 @@ impl SessionHandle {
             cmd_tx, actor_join, ..
         } = self;
         let (ack, rx) = oneshot::channel();
-        // If send fails the actor is already gone — proceed straight
-        // to awaiting the join handle (likely already finished).
+        // If send fails, the actor is already gone, so go straight to the join handle, which has
+        // likely finished.
         if cmd_tx.send(SessionCmd::Shutdown { ack }).await.is_ok() {
             _ = rx.await;
         }
@@ -343,8 +343,9 @@ pub(crate) struct RollOutcome {
     pub(crate) finalize_failure: Option<String>,
 }
 
-/// Rolls `session` to a fresh handle and finalizes the old one. Snapshot before clear (so they
-/// survive into the old JSONL), replace before finalize (so the new session is already in place).
+/// Rolls `session` to a fresh handle and finalizes the old one. Tracker snapshots are taken before
+/// the clear so they land in the old JSONL, and the swap precedes finalize so the new session is
+/// already in place.
 pub(crate) async fn roll(
     session: &mut SessionHandle,
     store: &SessionStore,
@@ -371,13 +372,13 @@ pub(crate) struct RollIntoOutcome {
     pub(crate) title: Option<String>,
     pub(crate) unarchived: bool,
     pub(crate) finalize_failure: Option<String>,
-    /// Tracker snapshots that drifted on disk between save and resume — caller surfaces these so
+    /// Tracker snapshots that drifted on disk between save and resume. The caller surfaces these so
     /// the user knows those files need a fresh Read before any Edit.
     pub(crate) drifted_paths: Vec<PathBuf>,
 }
 
 /// Mid-session re-init: load + sanitize the target session, swap the handle in place, then
-/// finalize the old. Same shape as [`roll`] but loading from disk instead of starting fresh.
+/// finalize the old. Same shape as [`roll`] but loading from disk.
 ///
 /// Bails _without swapping_ when the target id matches the live session (would race the
 /// in-flight append-writer) or can't be loaded (missing file, parse error, empty after sanitize,
@@ -433,8 +434,9 @@ fn from_resumed_data(
 ) -> Result<ResumedSession> {
     let pre_sanitize_len = data.messages.len();
     sanitize_resumed_messages(&mut data.messages);
-    // Bail only on sanitize wiping a non-empty list — chaining onto a dropped `last_message_uuid`
-    // would corrupt the chain. A title-only file is fine; next message starts a fresh chain.
+    // Bail only when sanitize wipes a non-empty list, since chaining onto a dropped
+    // `last_message_uuid` would corrupt the chain. A title-only file is fine because the next
+    // message starts a fresh chain.
     if pre_sanitize_len > 0 && data.messages.is_empty() {
         bail!("session {session_id}: sanitize dropped all messages");
     }
@@ -599,8 +601,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_message_actor_gone_carries_underlying_flush_error() {
-        // User should see the I/O cause, not the generic dropped-task fallback, when one is on
-        // record.
+        // When an I/O cause is on record, the actor-gone message must name it.
         let handle = testing::dead("dead");
         handle
             .shared
@@ -617,7 +618,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_message_actor_gone_surfaces_after_prior_flush_failure_was_surfaced() {
-        // The two sticky-once flags must be independent — a surfaced flush failure must not
+        // The two sticky-once flags must be independent: a surfaced flush failure must not
         // silence the actor-gone signal.
         let handle = testing::dead("dead");
         handle.shared.record_flush_failure("disk full");
@@ -648,7 +649,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_tool_metadata_batch_writes_all_non_default_in_one_cmd() {
-        // Default-metadata items are skipped at absorb; non-defaults each produce one line.
+        // Default-metadata items are skipped at absorb, and non-defaults each produce one line.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let handle = start(&store, "m");
@@ -780,8 +781,8 @@ mod tests {
             "dropped ack surfaces actor-gone",
         );
 
-        // Drain the actor task so its loop-exit is exercised — without shutdown, the test
-        // runtime tears the task down mid-recv.
+        // Drain the actor task so its loop exit is exercised. Without shutdown, the test runtime
+        // tears the task down mid-recv.
         handle.shutdown().await;
     }
 
@@ -853,8 +854,8 @@ mod tests {
 
     #[tokio::test]
     async fn set_manual_title_actor_gone_surfaces_failure_but_still_latches_flag() {
-        // The flag flips in SharedState *before* dispatch — even if the actor channel is dead,
-        // the title generator's pre-check must see the latch and skip its append.
+        // The flag flips in SharedState *before* dispatch, so even with a dead actor channel, the
+        // title generator's pre-check must see the latch and skip its append.
         let handle = testing::dead("dead");
 
         let outcome = handle.set_manual_title("User wins".to_owned()).await;
@@ -1185,7 +1186,7 @@ mod tests {
         );
 
         handle.record_message(Message::user("first")).await;
-        // The await means the batch flushed; the file is on disk.
+        // The await means the batch flushed, so the file is on disk.
         assert!(
             test_session_file(dir.path(), handle.session_id()).exists(),
             "first record_message should materialize the session file",
@@ -1277,7 +1278,7 @@ mod tests {
         target.finish(Vec::new()).await;
         drop(target);
 
-        // Live session — swap into target.
+        // Live session that swaps into the target.
         let mut session = start(&store, "test-model");
         let original_id = session.session_id().to_owned();
         session.record_message(Message::user("live")).await;
@@ -1342,7 +1343,7 @@ mod tests {
 
     #[tokio::test]
     async fn roll_into_rejects_resuming_into_live_session_id() {
-        // Same-id resume would race the in-flight append-writer; guard short-circuits.
+        // Same-id resume would race the in-flight append-writer, so the guard short-circuits.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let tracker = FileTracker::default();
@@ -1391,7 +1392,7 @@ mod tests {
             .await
             .expect("roll_into must succeed");
 
-        // Old (live) JSONL should carry the live snapshot; tracker should now reflect target's.
+        // The old JSONL should hold the live snapshot, and the tracker the target's.
         let old_jsonl = std::fs::read_to_string(test_session_file(dir.path(), &original_id))
             .expect("old session file persists");
         assert!(
@@ -1442,7 +1443,7 @@ mod tests {
         let original = start(&store, "m");
         let session_id = original.session_id().to_owned();
         original.record_message(Message::user("hello")).await;
-        // Skip finish — `shutdown` drains the queued record cmd anyway.
+        // Skip finish, since `shutdown` drains the queued record cmd anyway.
         original.shutdown().await;
 
         let ResumedSession { transcript, .. } = resume_id(&store, &session_id).unwrap();
@@ -1512,7 +1513,7 @@ mod tests {
 
     #[tokio::test]
     async fn resume_from_path_all_messages_sanitized_errors() {
-        // Sanitize drops the lone unresolved tool_use, leaving an empty chain — resume must bail.
+        // Sanitize drops the lone unresolved tool_use, so the empty chain makes resume bail.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let original = start(&store, "m");
@@ -1696,8 +1697,8 @@ mod tests {
 
         let resumed_tracker = FileTracker::default();
         let resumed = resume_id(&store, &session_id).unwrap();
-        // restore_verified must drop silently; the tracker should
-        // end up empty for this path rather than panic.
+        // restore_verified must drop the missing file's snapshot without panicking, leaving the
+        // tracker empty for this path.
         resumed_tracker.restore_verified(resumed.file_snapshots);
         let result = resumed_tracker.verify_current_content(&path_a, b"", GatePurpose::Edit);
         assert_eq!(

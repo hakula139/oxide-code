@@ -19,14 +19,14 @@ const LAST_ACTIVE_COL: usize = 19;
 const MSGS_COL: usize = 6;
 const FIXED_PREFIX_WIDTH: usize = ID_COL + 1 + LAST_ACTIVE_COL + 1 + MSGS_COL + 1;
 
-/// Skip title truncation under this width — wrap rather than chop everything to `F...`.
+/// Smallest title budget worth truncating to, since a narrower one chops titles to `F...`.
 const MIN_TITLE_BUDGET: usize = 12;
 
-/// Header "Project" is 7 chars; pad to 8 so the label always fits.
+/// Header "Project" is 7 chars, padded to 8 so the label always fits.
 const PROJECT_COL_MIN: usize = 8;
 
-/// Project column cap. Pathologically deep paths overflow the column rather than starve the
-/// title column for every row in the listing.
+/// Project column cap. A pathologically deep path overflows its own row so the title column
+/// keeps its width in every other row.
 const PROJECT_COL_MAX: usize = 40;
 
 /// Renders `--list` output to `out`. `scope.all` spans every project, and `scope.archived`
@@ -73,7 +73,7 @@ fn render_sessions(
         0
     };
 
-    // Title starts after this many cols; anything beyond truncates to keep rows single-line.
+    // Title starts after this many cols, and anything beyond truncates to keep rows single-line.
     let prefix_width = FIXED_PREFIX_WIDTH + if all { project_col_width + 1 } else { 0 };
     let title_budget = term_width.and_then(|w| {
         let budget = w.checked_sub(prefix_width)?;
@@ -390,8 +390,8 @@ mod tests {
         let title_pos = row
             .rfind("(untitled)")
             .expect("row must render the default title");
-        // cwd exceeds the 40-col cap; row should still render the full cwd (no data loss)
-        // even though the title slips past the header column.
+        // The cwd exceeds the 40-col cap, so the title slips past the header column, but the row
+        // must still render the full cwd.
         assert!(row.contains(&long_cwd), "cwd missing from row: {row:?}");
         assert!(title_pos > 0);
     }
@@ -441,7 +441,7 @@ mod tests {
             title: full_title.to_owned(),
             updated_at: datetime!(2026-04-18 09:05:00 UTC),
         });
-        // term_width 45 < prefix 38 + MIN_TITLE_BUDGET 12 → no truncation; terminal wraps.
+        // term_width 45 < prefix 38 + MIN_TITLE_BUDGET 12 → no truncation, so the terminal wraps.
         let out = render_with_width(&[s], false, Some(45));
         assert!(
             out.contains(full_title),

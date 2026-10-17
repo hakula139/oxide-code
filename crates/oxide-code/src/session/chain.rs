@@ -13,9 +13,8 @@ use crate::prompt::SessionContext;
 /// Accumulator for messages read off disk. Loader calls [`Self::insert`] per `Entry::Message`,
 /// then [`Self::resolve`] once to flatten the recorded UUID DAG into a linear chain.
 ///
-/// The DAG can fork when concurrent resumes (e.g. two `ox -c` processes pointed at the same
-/// session) each append their own follow-ups onto the same parent. `resolve` picks one tip
-/// deterministically rather than returning every branch.
+/// The DAG can fork when concurrent resumes, such as two `ox -c` processes on the same session,
+/// each append follow-ups onto the same parent. `resolve` picks one tip deterministically.
 #[derive(Default)]
 pub(super) struct ChainBuilder {
     nodes: HashMap<Uuid, ChainNode>,
@@ -72,9 +71,9 @@ impl ChainBuilder {
     ///
     /// Tip selection is fork-aware: the leaf (UUID never referenced as a parent) with the
     /// newest timestamp wins, with UUID order breaking ties so two callers loading the same
-    /// file always pick the same branch. Walks back via `parent_uuid`; cycles trip the seen-set
+    /// file always pick the same branch. Walks back via `parent_uuid`. Cycles trip the seen-set
     /// and orphan parents terminate the walk, so corrupted on-disk state cannot hang the loader.
-    /// Returns an empty chain when no leaf exists (every node referenced — pure cycle).
+    /// Returns an empty chain when no leaf exists, as in a pure cycle.
     pub(super) fn resolve(mut self) -> Chain {
         let tip = self
             .nodes
@@ -127,8 +126,8 @@ mod tests {
         Message::user(text)
     }
 
-    /// Asserts the chain holds single-Text messages with these texts,
-    /// in order. `matches!` returns `bool` — no panic arm to uncover.
+    /// Asserts the chain holds single-Text messages with these texts, in order.
+    /// `matches!` keeps the helper free of a panic arm that coverage would flag.
     fn assert_chain_texts(chain: &[Message], want: &[&str]) {
         assert_eq!(chain.len(), want.len());
         for (msg, want_text) in chain.iter().zip(want) {
@@ -310,9 +309,8 @@ mod tests {
 
     #[test]
     fn resolve_walk_breaks_when_leaf_chain_re_enters_cycle() {
-        // leaf → mid → tail → mid: leaf survives as tip, walker
-        // re-enters mid and the seen-set trips. Covers the
-        // cycle-break branch the no-leaf case doesn't reach.
+        // leaf → mid → tail → mid: leaf survives as tip, then the walker re-enters mid and trips
+        // the seen-set. Covers the cycle-break branch the no-leaf case doesn't reach.
         let mut b = ChainBuilder::new();
         let leaf = Uuid::new_v4();
         let mid = Uuid::new_v4();
@@ -350,8 +348,6 @@ mod tests {
 
     #[test]
     fn resolve_cycle_truncates_chain_without_looping() {
-        // Mutual cycle: every node is referenced, so no leaf and no
-        // tip — chain comes back empty without spinning forever.
         let mut b = ChainBuilder::new();
         let a = Uuid::new_v4();
         let bb = Uuid::new_v4();

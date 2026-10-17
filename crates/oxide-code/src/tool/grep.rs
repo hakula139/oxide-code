@@ -872,7 +872,7 @@ mod tests {
         let mut p = params("ccc", dir.path());
         p.context = 1;
         let result = grep_files(&p).unwrap();
-        // Context line uses `-` separator, match uses `:`.
+        // Context lines use the `-` separator, and the match uses `:`.
         assert!(result.contains("test.txt:2-bbb"));
         assert!(result.contains("test.txt:3:ccc"));
         assert!(result.contains("test.txt:4-ddd"));
@@ -1367,7 +1367,7 @@ mod tests {
         p.output_mode = OutputMode::Count;
         p.head_limit = Some(2);
         let result = grep_files(&p).unwrap();
-        // Summary should report all 5 files, not just the 2 shown.
+        // The summary counts all 5 files even though `head_limit` caps the listing at 2.
         assert!(result.contains("5 total occurrences across 5 files"));
         assert!(result.contains("Results limited to 2 files"));
         // Only 2 file lines shown.

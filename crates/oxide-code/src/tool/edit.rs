@@ -167,11 +167,10 @@ async fn run(raw: serde_json::Value, ctx: &ToolCtx) -> ToolOutput {
 /// Contract:
 ///
 /// - `old_string` must occur verbatim in the file (whitespace and indentation included). Without
-///   `replace_all`, ambiguous matches are rejected so the model cannot silently edit the wrong
-///   site.
+///   `replace_all`, ambiguous matches fail so the model cannot silently edit the wrong site.
 /// - The Read-before-Edit gate refuses files with no Read of their current content and files whose
 ///   content changed since that Read.
-/// - CRLF is preserved: the file is normalized to LF for matching, the dominant EOL is restored
+/// - CRLF is preserved: the file is normalized to LF for matching, and the dominant EOL is restored
 ///   on write so we don't flip line endings just because the caller used `\n` in `old_string`.
 /// - Returns `(message, match_count, diff_chunks)` on success. The chunks carry real post-edit line
 ///   numbers, shifted by the cumulative delta of earlier replacements.

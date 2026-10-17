@@ -1,5 +1,5 @@
-//! Test-only [`SessionHandle`] constructors. Child of `handle` so it can build the private
-//! fields directly; every item is `#[cfg(test)] pub(crate)`.
+//! Test-only [`SessionHandle`] constructors. A child of `handle`, so it can build the private
+//! fields directly.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -10,17 +10,16 @@ use tokio::task::JoinHandle;
 use super::{CompactOutcome, Outcome, RecordOutcome, SessionHandle, SharedState};
 use crate::session::actor::SessionCmd;
 
-/// Handle whose actor channel is already closed — every write surfaces actor-gone immediately,
-/// so failure surfacing can be asserted without a real actor.
+/// Handle whose actor channel is already closed, so every write surfaces actor-gone immediately
+/// and tests can assert failure surfacing without a real actor.
 pub(crate) fn dead(session_id: &str) -> SessionHandle {
     let (cmd_tx, _) = mpsc::channel(1);
     handle(session_id, cmd_tx, None)
 }
 
-/// Stand-in actor that fails every `AppendAiTitle` ack with `message` — exercises the
+/// Stand-in actor that fails every `AppendAiTitle` ack with `message`, exercising the
 /// alive-session-with-failure branch in background title-gen (`is_actor_alive` stays true because
-/// the channel is open). Other commands aren't sent in tests using this fixture, so we don't
-/// implement them.
+/// the channel is open). Any other cmd ends the actor, since tests using this fixture send none.
 pub(crate) fn acks_append_ai_title_with_failure(
     session_id: &str,
     message: &'static str,
@@ -38,7 +37,7 @@ pub(crate) fn acks_append_ai_title_with_failure(
 }
 
 /// Stand-in actor that acks the first `succeed` non-Shutdown cmds, then drops cmds without
-/// acking — exercises the rx-await fallback when the actor stalls between receive and ack.
+/// acking, which exercises the rx-await fallback when the actor stalls between receive and ack.
 /// Shutdown is always honoured so `handle.shutdown()` still returns.
 pub(crate) fn acks_then_drops(session_id: &str, succeed: usize) -> SessionHandle {
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<SessionCmd>(8);

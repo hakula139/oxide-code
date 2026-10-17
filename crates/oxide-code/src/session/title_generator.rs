@@ -461,7 +461,7 @@ mod tests {
     async fn generate_and_record_post_finalize_actor_gone_is_silent() {
         // Title-gen is best-effort: a session that finalized (`/clear`, `/resume`) before this
         // background task returned must not surface "Session write failed" into the UI of the
-        // *next* session. Warn-log only; no Error and no title event.
+        // *next* session. It only logs a warning, with no Error and no title event.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(wm_path("/v1/messages"))
@@ -638,7 +638,7 @@ mod tests {
 
     #[test]
     fn strip_code_fence_handles_no_opening_newline() {
-        // Single-line fenced block — no language tag, no newline.
+        // Single-line fenced block with no language tag or newline.
         assert_eq!(strip_code_fence("```body```"), "body");
     }
 

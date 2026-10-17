@@ -1,8 +1,8 @@
-//! Session actor — owns [`SessionState`] + writer, drains [`SessionCmd`]s, batches one flush
-//! per `recv()` wakeup. Receive-and-drain coalesces a turn's queued cmds before the first flush,
-//! except `/compact` and `/archive`. Each ends its batch so a failed one can be unqueued. Cmds
-//! after a compact see its committed synthetic root.
-//! Isolated writes flush immediately. No interval timer — see `docs/design/session/persistence.md`.
+//! Session actor that owns [`SessionState`] and its writer, drains [`SessionCmd`]s, and batches
+//! one flush per `recv()` wakeup. Receive-and-drain coalesces a turn's queued cmds before the first
+//! flush, except `/compact` and `/archive`. Each ends its batch so a failed one can be unqueued.
+//! Cmds after a compact see its committed synthetic root. Isolated writes flush immediately
+//! because no interval timer holds them. See `docs/design/session/persistence.md`.
 
 use std::sync::Arc;
 
@@ -51,7 +51,7 @@ pub(super) enum SessionCmd {
     /// its ack carries every write failure, since the driver rolls only once the entry is on disk.
     Archive { ack: oneshot::Sender<Outcome> },
     Finish {
-        /// Drained tracker snapshots; written as one `FileSnapshot` entry each plus a `Summary`.
+        /// Drained tracker snapshots, written as one `FileSnapshot` entry each plus a `Summary`.
         snapshots: Vec<FileSnapshot>,
         ack: oneshot::Sender<Outcome>,
     },
@@ -74,7 +74,7 @@ pub(super) enum SessionCmd {
     Panic,
 }
 
-/// Pending ack for one absorbed cmd; fires once the batch flush returns.
+/// Pending ack for one absorbed cmd, fired once the batch flush returns.
 enum PendingAck {
     Record {
         ack: oneshot::Sender<RecordOutcome>,
@@ -322,7 +322,7 @@ fn deliver_acks(acks: Vec<PendingAck>, failure: Option<&str>, stopped: bool, sha
                 });
             }
             PendingAck::Shutdown(ack) => {
-                // Best-effort exit signal — no failure surfacing.
+                // Best-effort exit signal that carries no failure.
                 _ = ack.send(());
             }
         }
@@ -503,7 +503,7 @@ mod tests {
 
         drive(state, vec![rec, ai_cmd, fin]).await;
 
-        // Tail scan picks the latest-updated_at title — AI wins over first-prompt.
+        // Tail scan picks the title with the latest `updated_at`, so the AI title wins.
         let title = store
             .list()
             .unwrap()
@@ -544,7 +544,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_set_manual_title_then_record_replaces_first_prompt_title() {
-        // `/rename` then send produces ONE title (UserProvided), not two: the deferred title
+        // `/rename` then send produces exactly one title (UserProvided). The deferred title
         // flushes ahead of the message, and `manual_title_set` suppresses the FirstPrompt push.
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
@@ -706,7 +706,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_shutdown_flushes_preceding_record_in_same_batch() {
-        // Pending writes ahead of Shutdown must reach disk; the actor only breaks after the
+        // Pending writes ahead of Shutdown must reach disk, since the actor breaks only after the
         // batch flush.
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
