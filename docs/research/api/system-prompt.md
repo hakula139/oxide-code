@@ -54,7 +54,7 @@ Features:
 
 Claude Code splits dynamic context across two API surfaces. This is critical for prompt caching efficiency.
 
-### System parameter → static content
+### System Parameter → Static Content
 
 The `system` field in the API request contains only **static, cacheable** content:
 
@@ -66,7 +66,7 @@ The `system` field in the API request contains only **static, cacheable** conten
 
 All of these are assembled from `getSystemPrompt()` sections and `getSystemContext()`. They receive `cache_control` with `global` or `org` scope via `buildSystemPromptBlocks()`.
 
-### Messages[0] → dynamic user context
+### Messages[0] → Dynamic User Context
 
 CLAUDE.md content, current date, and other user-facing context are **not** placed in the system prompt. Instead, Claude Code prepends a synthetic user message at the front of the `messages` array via `prependUserContext()`:
 
@@ -84,7 +84,7 @@ Why this split matters:
 1. **Prompt caching**: Static system blocks stay identical across turns and sessions → server reuses the cached prefix. If CLAUDE.md were in `system`, any edit would bust the cache for the entire prompt (~20K+ tokens).
 2. **Per-conversation memoization**: `getUserContext()` is memoized once per conversation (not per turn), so the CLAUDE.md walk and date computation happen once.
 
-### Context sources
+### Context Sources
 
 | Function             | Returns                     | Injected via                                 |
 | -------------------- | --------------------------- | -------------------------------------------- |

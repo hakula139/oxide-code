@@ -1,10 +1,10 @@
 # Security Policy
 
-## Supported versions
+## Supported Versions
 
 Security fixes go into `main` and ship with the next release. Report vulnerabilities against the latest release or current `main`. Before 0.1.0, the latest release means the latest prerelease.
 
-## Reporting a vulnerability
+## Reporting a Vulnerability
 
 Report vulnerabilities privately through a [GitHub security advisory](https://github.com/hakula139/oxide-code/security/advisories/new), not in public issues. Include:
 
@@ -15,7 +15,7 @@ Report vulnerabilities privately through a [GitHub security advisory](https://gi
 
 The maintainer acknowledges a report within 7 days and shares an assessment within 14 days. For a confirmed vulnerability, the maintainer aims to release a fix within 30 days, coordinates disclosure with the reporter, and publishes the advisory once the fix is released. oxide-code has a single maintainer, so these are targets, and the advisory thread reports any delay.
 
-## Trust model
+## Trust Model
 
 `ox` runs locally with the permissions of the user who starts it and has no OS-level sandbox. Its [permission gate](docs/guide/configuration.md#permission-tool-approval) determines which tool calls run, require approval, or are denied. In `manual` and `plan` modes, read, grep, and glob calls run without approval on any path you can read unless a `deny` rule matches. In `manual` mode, edits inside the working directory also run without approval.
 

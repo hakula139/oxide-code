@@ -39,7 +39,7 @@ As of 2026-10-17, Anthropic's [models overview](https://platform.claude.com/docs
 
 On supported models, interleaved thinking, where thinking blocks appear between tool calls, needs no beta header. oxide-code still sends `interleaved-thinking-2025-05-14` because Claude Code's agentic beta sequence includes it.
 
-### Display modes
+### Display Modes
 
 `thinking.display` accepts three wire values:
 

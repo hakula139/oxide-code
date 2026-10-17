@@ -34,11 +34,11 @@ Both backends store the same JSON structure:
 
 OAuth requests use `Authorization: Bearer <token>` (not `x-api-key`).
 
-### Long-lived OAuth token
+### Long-Lived OAuth Token
 
 `claude setup-token` issues a long-lived subscription token. Claude Code reads it from `CLAUDE_CODE_OAUTH_TOKEN`, sends it with the same OAuth request shape as a stored login, and never refreshes it. It ranks below `ANTHROPIC_API_KEY` and above the stored login ([authentication precedence](https://code.claude.com/docs/en/authentication#authentication-precedence)).
 
-### Auth token (LLM gateways)
+### Auth Token (LLM Gateways)
 
 `ANTHROPIC_AUTH_TOKEN` sends `Authorization: Bearer <token>` with the API-key request shape, so the `oauth-2025-04-20` beta stays off. It ranks above every other credential. Gateways may also require extra headers, which Claude Code reads from `ANTHROPIC_CUSTOM_HEADERS` as one `Name: value` per line.
 
@@ -46,7 +46,7 @@ OAuth requests use `Authorization: Bearer <token>` (not `x-api-key`).
 
 Four things make up the canonical Claude Code request shape. The first two are OAuth-load-bearing because their absence triggers 401 / 429 against `api.anthropic.com` on non-Haiku models (see [What Happens Without These](#what-happens-without-these)). The latter two ship on every request. At a third-party relay gateway, the attribution header can decide whether a request passes, while the identity headers have no effect on their own (see [Third-Party Gateway Validation](#third-party-gateway-validation)).
 
-### 1. Beta headers
+### 1. Beta Headers
 
 ```text
 anthropic-beta: claude-code-20250219,oauth-2025-04-20
@@ -68,7 +68,7 @@ Additional useful betas:
 | `advanced-tool-use-2025-11-20`    | Tool search (first-party only)                     |
 | `task-budgets-2026-03-13`         | Advisory token budget across an agentic loop       |
 
-#### Per-model beta sets
+#### Per-Model Beta Sets
 
 Haiku is the one family whose beta set differs: Claude Code moves `claude-code-20250219` later in the agentic sequence on Haiku and, per the frozen 2.1.87 source, leaves it off Haiku one-shots.
 
@@ -77,9 +77,9 @@ Haiku is the one family whose beta set differs: Claude Code moves `claude-code-2
 
 On agentic Opus 5.5 and Sonnet 5.5 requests, and by inference Fable 5.1, Claude Code 2.1.296 sends `claude-code-20250219, interleaved-thinking-2025-05-14, thinking-token-count-2026-05-13, context-management-2025-06-27, prompt-caching-scope-2026-01-05, mid-conversation-system-2026-04-07, per-turn-control-2026-07-01, advisor-tool-2026-03-01, effort-2025-11-24`. On Haiku 5.5 it moves `claude-code-20250219` to just after `mid-conversation-system-2026-04-07`. Both sequences were captured from `claude --bare -p` with an API key on 2026-10-15. Fable 5.1 was not captured on 2.1.296, but on Claude Code 2.1.301 `claude --bare -p` sent Fable 5.1 and Opus 5.5 identical betas against a local listener on 2026-10-17. Under OAuth, the frozen 2.1.87 source puts `oauth-2025-04-20` right after the leading `claude-code-20250219`, or first on Haiku. That slot was not captured.
 
-This client supports the Claude 5.5 models and Fable 5.1, where effort, interleaved thinking, the 1M window, and structured outputs are GA. On 2026-10-17, [What's new in Claude Fable 5.1](https://platform.claude.com/docs/en/models/fable-5-1/whats-new-fable-5-1) listed Fable 5.1 as available to all customers on the Claude API and partner platforms, but availability varies by account, and some third-party gateways serve it. On agentic turns, `client::anthropic::compute_betas` sends the sequence above, which includes betas for features this client leaves unused. Its test pins `CLAUDE_CLI_VERSION`, the release the user agent and billing block report, so a version bump fails until the sequence is recaptured for every model, Fable 5.1 included. It then appends `thinking-binding-controls-2026-08-01`, plus `thinking-display-updates-2026-08-18` when the request sets `thinking.display = "updates"`. Agentic turns on other model ids carry `claude-code-20250219`, `oauth-2025-04-20` (OAuth only), and `prompt-caching-scope-2026-01-05`, and go without effort, thinking, or context management. One-shots carry `claude-code-20250219` (skipped on Haiku) and `oauth-2025-04-20` (OAuth only). The body-side `cache_control.scope: "global"` stays gated on the base URL, as [Prompt Caching Scope](#prompt-caching-scope) describes.
+This client supports the Claude 5.5 models and Fable 5.1, where effort, interleaved thinking, the 1M window, and structured outputs are GA. On 2026-10-18, [What's new in Claude Fable 5.1](https://platform.claude.com/docs/en/models/fable-5-1/whats-new-fable-5-1) listed Fable 5.1 as available to all customers on the Claude API and partner platforms, except under zero data retention unless Anthropic expressly authorizes it. Claude Code's [model configuration docs](https://code.claude.com/docs/en/model-config), read the same day, add that organization admins can restrict which models members run, that Fable usage can bill to usage credits depending on the plan and seat tier, and that a gateway not configured to serve `claude-fable-5-1` rejects requests for it. On agentic turns, `client::anthropic::compute_betas` sends the sequence above, which includes betas for features this client leaves unused. Its test pins `CLAUDE_CLI_VERSION`, the release the user agent and billing block report, so a version bump fails until the sequence is recaptured for every model, Fable 5.1 included. It then appends `thinking-binding-controls-2026-08-01`, plus `thinking-display-updates-2026-08-18` when the request sets `thinking.display = "updates"`. Agentic turns on other model IDs carry `claude-code-20250219`, `oauth-2025-04-20` (OAuth only), and `prompt-caching-scope-2026-01-05`, and go without effort, thinking, or context management. One-shots carry `claude-code-20250219` (skipped on Haiku) and `oauth-2025-04-20` (OAuth only). The body-side `cache_control.scope: "global"` stays gated on the base URL, as [Prompt Caching Scope](#prompt-caching-scope) describes.
 
-### 2. System prompt prefix (as a separate block)
+### 2. System Prompt Prefix (as a Separate Block)
 
 The `system` parameter must be sent as an **array of text blocks**. A plain string is rejected, even with the same content. The identity prefix must occupy its own block:
 
@@ -98,7 +98,7 @@ The API validates that the **first non-attribution text block** matches one of t
 
 **Critical**: Concatenating the prefix into the prompt body as a single string causes the API to reject OAuth requests with 429, even though the same prefix content is present. The block-level separation is what the server checks.
 
-### 3. Attribution header
+### 3. Attribution Header
 
 Claude Code prepends an attribution header as the very first system block:
 
@@ -112,7 +112,7 @@ Format:
 x-anthropic-billing-header: cc_version=<VERSION>.<FINGERPRINT>; cc_entrypoint=<ENTRYPOINT>; cch=<HASH>;
 ```
 
-#### Fingerprint (3-char version suffix)
+#### Fingerprint (3-Char Version Suffix)
 
 A 3-character hex value derived from conversation content:
 
@@ -123,7 +123,7 @@ A 3-character hex value derived from conversation content:
 
 The entrypoint is `cli` for interactive sessions.
 
-#### cch (5-char request integrity hash)
+#### cch (5-Char Request Integrity Hash)
 
 The `cch` field is a request integrity hash used for feature gating (fast mode) and billing attribution. It was reverse-engineered from Anthropic's custom Bun binary in February 2026 ([a10k.co writeup](https://a10k.co/b/reverse-engineering-claude-code-cch.html)).
 
@@ -143,13 +143,13 @@ The hash covers the entire serialized body (messages, tools, metadata, model, th
 
 **JSON key ordering matters**: `system` must be serialized before `messages` so the placeholder in the billing header appears first in the JSON. If tool results contain the literal `cch=00000`, serializing `messages` first would cause the replacement to hit the wrong occurrence.
 
-#### Known bug: cch substitution breaks prompt cache
+#### Known Bug: cch Substitution Breaks Prompt Cache
 
 The Bun binary performs a global find-and-replace of `cch=` values across the entire serialized request body, including historical tool results. If any tool result in the conversation contains a `cch=XXXXX` string (e.g., from reading proxy logs or session JSONL files), the substitution rewrites those historical bytes on every turn, changing the conversation prefix and permanently invalidating the prompt cache. This wastes 30-50K+ tokens per turn and never self-heals. Tracked as [anthropics/claude-code#40652](https://github.com/anthropics/claude-code/issues/40652), partially mitigated in v2.1.90-91.
 
 oxide-code avoids this entirely: we serialize with `serde_json`, replace only the first occurrence via `str::replacen`, and never mutate historical message content.
 
-### 4. Client identity headers
+### 4. Client Identity Headers
 
 ```text
 User-Agent: claude-cli/<version> (external, cli)
@@ -181,7 +181,7 @@ Blocks in the `system` array can carry `cache_control` for prompt caching. The `
 | _(absent)_ | `{"type": "ephemeral"}`                    | The caller's organization |
 | `null`     | no `cache_control` at all                  | _(not cached)_            |
 
-### Prefix invariance
+### Prefix Invariance
 
 The server sees request elements in this order:
 
@@ -195,7 +195,7 @@ On 2026-04-23, a third-party gateway rejected agentic requests whose static syst
 
 Other servers accept the same layout. The Anthropic API accepted `scope: "global"` after tool definitions in [#123](https://github.com/hakula139/oxide-code/issues/123)'s live run on 2026-10-17 with oxide-code at 01b4823, and so did the relay gateway probed that day (see [Third-Party Gateway Validation](#third-party-gateway-validation)).
 
-### oxide-code gating
+### oxide-code Gating
 
 oxide-code ships `prompt-caching-scope-2026-01-05` on every agentic request, as Claude Code does, and gates only the body-side `cache_control.scope` on `is_first_party_base_url(&config.base_url)`:
 
@@ -223,7 +223,7 @@ Controls the intelligence-vs-latency tier of agentic turns via one of five token
 - **The body field does the work.** Anthropic's [effort docs](https://platform.claude.com/docs/en/build-with-claude/effort) list effort as GA with no beta header, and the `effort-2025-11-24` header alone is a no-op. Claude Code still sends the header, so oxide-code does too.
 - **Levels.** Every supported model accepts all five, per the effort docs on 2026-10-17.
 - **Per-model default.** The API defaults are `medium` on Opus 5.5 and Haiku 5.5 and `high` on Sonnet 5.5 and Fable 5.1, and oxide-code sends them explicitly. Claude Code 2.1.301 sends `medium` on Sonnet 5.5 instead.
-- **`max_tokens`.** Claude Code 2.1.301 sends 128K on the 5.5 models and 64K on Fable 5.1. oxide-code defaults to 64K on the supported models, since effort already steers thinking depth, and to 16K on other ids.
+- **`max_tokens`.** Claude Code 2.1.301 sends 128K on the 5.5 models and 64K on Fable 5.1. oxide-code defaults to 64K on the supported models, since effort already steers thinking depth, and to 16K on other IDs.
 
 ### `context_management.edits`
 
@@ -241,7 +241,7 @@ oxide-code applies the body-header coupling as an invariant: the body field is p
 
 ### `cache_control.ttl`
 
-Anthropic silently dropped the default ephemeral-cache TTL from 1 h to 5 m on 2026-03-06, a 40-55 % savings regression on any session longer than 5 min. The opt-in uses a body field:
+Anthropic silently dropped the default ephemeral-cache TTL from 1 hour to 5 minutes on 2026-03-06, a 40-55% savings regression on any session longer than 5 minutes. The opt-in uses a body field:
 
 ```json
 {
@@ -251,7 +251,7 @@ Anthropic silently dropped the default ephemeral-cache TTL from 1 h to 5 m on 20
 
 Accepted values: `"5m"` (server default, equivalent to omitting the field) and `"1h"` (opt-in at higher write premium). No beta header is required because the field is GA.
 
-**oxide-code default.** `prompt_cache_ttl = "1h"`. The hit-rate recovery on real agent sessions (tool-use loops, resumed conversations) dominates the write premium, so 1 h is the right safe default. Users opt down via `[client].prompt_cache_ttl = "5m"` or `OX_PROMPT_CACHE_TTL=5m`.
+**oxide-code default.** `prompt_cache_ttl = "1h"`. The hit-rate recovery on real agent sessions (tool-use loops, resumed conversations) dominates the write premium, so 1 hour is the right safe default. Users opt down via `[client].prompt_cache_ttl = "5m"` or `OX_PROMPT_CACHE_TTL=5m`.
 
 Invalidation order (from the Anthropic caching docs) is `tools → system → messages`: any change at a level busts that level and every level after it. oxide-code sends two breakpoints with the configured TTL. The first sits on the static system-prompt prefix block (scope-gated on 1 P / 3 P per the previous section). The second sits on the last content block of the final message, without `scope`, so each turn reads the previous turn's transcript from cache. The prompt context is built once per session, which keeps that prefix stable from turn to turn. Compaction summaries are one-off requests that no later request extends, so they skip the second breakpoint.
 
@@ -292,7 +292,7 @@ The `anthropic-version` header is `2023-06-01` across all Claude Code endpoints.
 
 ## Model IDs
 
-oxide-code sends the dateless ids `claude-fable-5-1`, `claude-opus-5-5`, `claude-sonnet-5-5`, and `claude-haiku-5-5`, which Anthropic's [models overview](https://platform.claude.com/docs/en/about-claude/models/overview) lists as pinned snapshots. All four have a 1M-token context window without the `context-1m-2025-08-07` beta. The `[1m]` suffix (e.g., `claude-opus-5-5[1m]`) is a client-side convention that Claude Code strips before sending to the API via `normalizeModelStringForAPI()`. oxide-code treats such an id as unknown and suggests the id without the suffix.
+oxide-code sends the dateless IDs `claude-fable-5-1`, `claude-opus-5-5`, `claude-sonnet-5-5`, and `claude-haiku-5-5`, which Anthropic's [models overview](https://platform.claude.com/docs/en/about-claude/models/overview) lists as pinned snapshots. All four have a 1M-token context window without the `context-1m-2025-08-07` beta. The `[1m]` suffix (e.g., `claude-opus-5-5[1m]`) is a client-side convention that Claude Code strips before sending to the API via `normalizeModelStringForAPI()`. oxide-code treats such an ID as unknown and suggests the ID without the suffix.
 
 ## SDK vs Raw HTTP
 

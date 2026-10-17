@@ -14,35 +14,35 @@ The welcome answers three questions:
 
 `tui/components/welcome` is a stateless renderer (`paint`) plus a small data snapshot (`WelcomeSnapshot`) derived from `&LiveSessionInfo`. Painted by `App::draw_frame` into the chat region when:
 
-- `chat.is_empty()` (no blocks, no streaming, no thinking buffer, no compaction summary), AND
+- `chat.is_empty()` (no blocks, no streaming, no thinking buffer, no compaction summary), and
 - `session_info.config.show_welcome` resolves to true (default: true).
 
-`ChatView` keeps its own empty-state branch, which returns an empty `Text`, and `App` paints the welcome into that space. The "is the chat empty?" predicate stays where the data lives.
+`App` paints the welcome in place of the chat render. With the welcome off, an empty `ChatView` paints only the surface background. The "is the chat empty?" predicate stays where the data lives.
 
 ## Layout
 
-At 80 cols with the test fixture (`claude-opus-5-5`, `xhigh` effort, OAuth), the render is:
+At 80 cols and 14 rows with the test fixture (`claude-opus-5-5`, `xhigh` effort, OAuth), the render is:
 
 ```text
                            ━━━━ oxide-code v0.1.0 ━━━━
 
-                  Claude Opus 5.5 · xhigh effort · OAuth
-                  ~/github/oxide-code
+               Claude Opus 5.5 · xhigh effort · OAuth
+               ~/github/oxide-code
 
-                  Try one of:
+               Try one of:
 
-                    /help     list commands
-                    /diff     show git changes
-                    /model    switch model
+                 /init      create or update AGENTS.md / CLAUDE.md
+                 /config    inspect resolved config
+                 /theme     switch theme
 
-                  Tip — ox --continue resumes your last session
+               Tip — click #NN in the status bar to open the PR
 ```
 
 Starter rows and the tip are sampled per session from `STARTER_POOL` and `TIP_POOL`, so a different launch shows different picks.
 
 Sections: identity ribbon above a body column (env, cwd, starter list, trailer). Body lines pad to one shared width so they keep one left edge under `Paragraph::alignment(Center)`. Without that pad, each line floats to its own visual center and the welcome reads as a "ransom note" stack. The ribbon centers as its own unit, and the body column centers on the same axis because every padded line has the same width.
 
-### Width ladder
+### Width Ladder
 
 | Cols  | Identity                    | Environment         | Cwd                         | Starter list | Trailer hint |
 | ----- | --------------------------- | ------------------- | --------------------------- | ------------ | ------------ |
@@ -51,9 +51,9 @@ Sections: identity ribbon above a body column (env, cwd, starter list, trailer).
 | 25-39 | wordmark                    | model + effort only | tildified, center-truncated | hidden       | hidden       |
 | <25   | suppressed                  | suppressed          | suppressed                  | suppressed   | suppressed   |
 
-Below 25 cols nothing paints, since the terminal is too narrow to read the welcome cleanly. The input field anchors the empty session instead.
+Below 25 cols nothing paints, since the terminal is too narrow to read the welcome cleanly. The input field anchors the empty session instead. The chat region also needs 13 rows for the starter list and trailer hint, so a shorter region hides them at any width and centers the environment and cwd lines on their own width.
 
-### Theme slots
+### Theme Slots
 
 `accent` (bold) paints the `oxide-code` wordmark. `accent` (non-bold) paints starter command names and the `Tip` label. `text` paints the environment line and tip body. `dim` paints the version, ribbon flanks, cwd, starter descriptions, starter header, and tip separator. No new theme slots are needed because the welcome reuses the palette `/status` already paints with.
 

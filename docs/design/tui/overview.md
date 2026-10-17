@@ -19,7 +19,7 @@ Core stack, rendering strategy, and streaming architecture.
 
 Components are concrete structs (`ChatView`, `InputArea`, `StatusBar`, modals) that the App composes directly, since there's no formal `Component` trait. Each owns its state, handles its events, and renders into a given area, while the root `App` dispatches events top-down and collects actions bottom-up.
 
-### Async event loop
+### Async Event Loop
 
 ```text
 tokio::select! {

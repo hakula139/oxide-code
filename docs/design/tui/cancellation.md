@@ -49,10 +49,10 @@ The picks lean toward the Codex precedent on most surfaces, since it is the one 
 - `crates/oxide-code/src/tool/bash.rs`: `ShellTree`, which kills the shell's process group (Unix) or Job Object (Windows) when a call times out or drops before finishing.
 - `crates/oxide-code/src/tui/action.rs`: `Action::ConfirmExit`.
 - `crates/oxide-code/src/tui/app.rs`: `App::pending_prompts` / `forwarded_prompts`, and `App::active_prompt` / `auto_compacting`.
-- `crates/oxide-code/src/tui/app/dispatch.rs`: `dispatch_op` / `start_turn` / `forward_queued_prompts`, `expire_armed_exit`.
+- `crates/oxide-code/src/tui/app/dispatch.rs`: `dispatch_op` / `start_turn` / `forward_queued_prompts`, `handle_esc`, `expire_armed_exit`.
 - `crates/oxide-code/src/tui/app/events.rs`: `finish_turn`, `return_unsent_prompt`, `finalize_idle` / `enter_idle` / `drain_pending_prompt`, `set_active_status`.
 - `crates/oxide-code/src/tui/components/chat.rs`: `ChatView::clear_pending_calls`, which evicts orphan tool calls at turn boundaries, and `ChatView::load_history`, which shows a resumed interruption as the `(interrupted)` line.
 - `crates/oxide-code/src/tui/components/chat/blocks/interrupted.rs`: `InterruptedMarker` block.
-- `crates/oxide-code/src/tui/components/input.rs`: Ctrl+D POSIX gate, Esc-pop, `set_text`.
+- `crates/oxide-code/src/tui/components/input.rs`: Ctrl+D POSIX gate, plus `set_text` and `is_empty`, which the idle Esc recall uses.
 - `crates/oxide-code/src/tui/components/status.rs`: `Status` variants, busy hints, spinner.
 - `crates/oxide-code/src/tui/glyphs.rs`: `INTERRUPTED_MARKER`.

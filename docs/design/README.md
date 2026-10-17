@@ -2,7 +2,7 @@
 
 Architecture decisions and implementation specs for oxide-code.
 
-Organized by topic. Each subdirectory mirrors the corresponding directory in [`docs/research/`](../research/), where the underlying research lives.
+Organized by topic. Each subdirectory shares its topic with a directory in [`docs/research/`](../research/), where the underlying research lives, although some specs, such as Background Shells and Task List, have no research note.
 
 ## Overview
 
@@ -39,8 +39,8 @@ Organized by topic. Each subdirectory mirrors the corresponding directory in [`d
 | Document                                        | Description                                            |
 | ----------------------------------------------- | ------------------------------------------------------ |
 | [Background Shells](tools/background-shells.md) | `bash` background runs, `bash_output`, and `bash_stop` |
-| [Output Truncation](tools/truncation.md)        | Per-tool view-shape caps + centralized byte-budget     |
-| [Permissions](tools/permissions.md)             | Tiered allow / ask / deny gate, modes, rule grammar    |
+| [Output Truncation](tools/truncation.md)        | Per-tool view-shape caps and a centralized byte budget |
+| [Permissions](tools/permissions.md)             | Tiered deny / ask / allow gate, modes, rule grammar    |
 | [Task List](tools/tasks.md)                     | `tasks` tool, task panel, resume and compaction        |
 
 ## Terminal UI

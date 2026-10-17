@@ -1,8 +1,8 @@
 # Mouse Interactions (Reference)
 
-Research on mouse handling in terminal AI CLIs: capture defaults, click affordances, wheel scroll, text selection, copy-on-select strategies, and URL openers.
+Research on mouse handling in terminal AI CLIs: capture defaults, click affordances, wheel scroll, text selection, copy-on-select strategies, and URL openers. Based on [Claude Code](https://github.com/hakula139/claude-code), [OpenAI Codex](https://github.com/openai/codex), and [opencode](https://github.com/anomalyco/opencode).
 
-## Claude Code
+## Claude Code (TypeScript)
 
 The most polished mouse layer of the three peers. Claude Code's `src/utils/fullscreen.ts` reads `CLAUDE_CODE_DISABLE_MOUSE` to gate the entire mouse pipeline, with a separate `CLAUDE_CODE_DISABLE_MOUSE_CLICKS` env var that lets wheel work while blocking click events.
 
@@ -14,19 +14,19 @@ Selection uses an in-process model in `src/ink/selection.ts`. Drag-start / updat
 
 URL opening: `src/utils/browser.ts` validates the URL to `http:` / `https:` first, then dispatches: `BROWSER` env override, else `rundll32 url,OpenURL` (Windows), `open` (macOS), `xdg-open` (Linux). Single-click on an OSC 8 hyperlink defers 500 ms so a second click within the window can start a word-selection drag instead.
 
-## OpenAI Codex
+## OpenAI Codex (Rust)
 
 Codex's Rust TUI captures the mouse while it owns the alternate screen. `AlternateScreen::configure_input` in `codex-rs/tui/src/tui/alternate_screen.rs` disables DECSET 1007, enables pointer capture, and requests SGR reports, which ConPTY needs to translate Windows mouse reports into mouse records. When it doesn't capture, it turns 1007 back on so the terminal sends wheel events as arrow keys.
 
 `codex-rs/tui/src/tui/tmux.rs` probes `#{mouse}` with one `tmux display-message` call and skips capture only when the session reports mouse off. Inside tmux with `mouse on`, tmux owns the wheel, so 1007 never takes effect there.
 
-Transcript links open in the app under capture. `transcript_view/input.rs` resolves the link under a press, and a single plain click on it opens the URL on release, while a click with modifiers or a drag stays a selection. The status line still goes through OSC 8: `set_status_line_hyperlink(url)` at `chatwidget.rs:1684` and `bottom_pane/mod.rs:1584` wrap the open-PR URL, and `mark_url_hyperlink(buf, area, url)` overlays OSC 8 cells across a ratatui buffer rect, so the terminal's own Ctrl-click handler opens it.
+Transcript links open in the app under capture. `transcript_view/input.rs` resolves the link under a press, and a single plain click on it opens the URL on release, while a click with modifiers or a drag stays a selection. The status line still goes through OSC 8: `set_status_line_hyperlink(url)` at `chatwidget.rs:1684` and `bottom_pane/mod.rs:1584` wrap the open-PR URL, and `mark_url_hyperlink(buf, area, url)` overlays OSC 8 cells across a ratatui buffer rect, so the terminal's own Ctrl+click handler opens it.
 
 URL opening fallback uses the `webbrowser = "1.0"` crate via `webbrowser::open(&url)` at `app/history_ui.rs`. `open_url_in_browser` serves the internal `AppEvent::OpenUrlInBrowser { url }` event for plugin auth and app-link views, and transcript link clicks call it directly. The status-line OSC 8 hyperlinks still go through the terminal.
 
 Selection is app-side. `rendered_selection.rs` handles left-button press, drag, and release over regions each widget registers during render, and `transcript_view` adds keyboard selection. `clipboard_copy.rs` copies through the native clipboard (`arboard`) locally, also forwards to the attached terminal in tmux, and sends OSC 52 directly over SSH without a multiplexer.
 
-## opencode
+## opencode (TypeScript)
 
 opencode is built on opentui (TypeScript / SolidJS). The `mouse` config field defaults to `true` and combines with `OPENCODE_DISABLE_MOUSE` (env var wins) to set `useMouse` on the opentui renderer config (`app.tsx:120-130`).
 
@@ -38,7 +38,7 @@ Wheel is handled inside opentui's `<scrollbox>` primitive with `stickyScroll={tr
 
 No documented escape hatch for native terminal selection while mouse is captured.
 
-## OSC 52 protocol
+## OSC 52 Protocol
 
 `\x1b]52;Pc;Pd\x07` where `Pc` is a clipboard selector (`c` = system clipboard, `p` = primary, `s` = selection, `q` = q-clipboard, `0`-`7` = numbered cut-buffers, with `c` being the most-supported choice) and `Pd` is base64-encoded text. The terminal decodes and writes to its OS-clipboard handler.
 
@@ -56,7 +56,7 @@ Payload caps:
 
 Failure modes: rejected payloads are silently dropped. The app cannot detect support, so the user gets no clipboard write and no error. Falling back to native clipboard requires a separate channel like the `arboard` crate.
 
-## OSC 8 protocol
+## OSC 8 Protocol
 
 `\x1b]8;params;URI<terminator><text>\x1b]8;;<terminator>` where `params` is `key=value:key=value` (often empty), `URI` is the link target, and `<terminator>` is either `\x1b\\` (ST, two bytes) or `\x07` (BEL, one byte). xterm.js-based terminals (VS Code's and Cursor's integrated terminals) misparse self-contained per-cell ST closers and leak visible bytes into adjacent cells, so the BEL form is the universally-safe choice.
 
@@ -71,7 +71,7 @@ Two ratatui-specific traps appear when embedding the envelope inside a frame buf
 
 The clean workaround: emit the OSC 8 envelope **out-of-band**, after `terminal.draw()` has flushed. Capture the link rect + visible cells at render time, then write CUP + `\x1b]8;;<URL>\x07` + replayed styled cells + `\x1b]8;;\x07` + SGR reset directly to the crossterm backend. Buffer cells stay plain (width 1) and the diff math behaves.
 
-## Mouse capture mode bundle
+## Mouse Capture Mode Bundle
 
 `crossterm::EnableMouseCapture` writes five DECSETs:
 
@@ -85,13 +85,13 @@ Some terminals skip `?1003` for performance. SGR (`?1006`) is the only encoding 
 
 Terminal-side wheel translation through DECSET 1007 doesn't survive tmux. With `mouse on`, tmux receives the wheel itself and forwards it to a pane only when the pane reports the mouse (`#{mouse_any_flag}`). Otherwise tmux 3.6's default binding passes the event to a pane that drops it, and older defaults or custom bindings enter copy mode.
 
-## User-environment signal
+## User-Environment Signal
 
-The author's tmux config enables tmux mouse mode, vi copy-mode bindings, and `y` for yank. With `set -g set-clipboard on`, OSC 52 from an inner app passes through to the outer terminal. Wheel-up enters copy-mode when the pane isn't already receiving mouse events. An app that captures mouse intercepts those gestures. The author also runs `ox` inside VS Code's and Cursor's integrated terminals, which are xterm.js-based. Those have looser OSC parsing than xterm proper, so any per-cell escape sequence has to use the safest forms, such as the BEL terminator.
+oxide-code has to work inside tmux with `mouse on`. With `set -g set-clipboard on`, OSC 52 from an inner app passes through to the outer terminal. Wheel-up enters copy-mode when the pane isn't already receiving mouse events. An app that captures mouse intercepts those gestures. It also has to work in VS Code's and Cursor's integrated terminals, which are xterm.js-based. Those have looser OSC parsing than xterm proper, so any per-cell escape sequence has to use the safest forms, such as the BEL terminator.
 
-## Takeaway for oxide-code
+## Patterns Worth Borrowing for oxide-code
 
-Wheel scrolling has to work inside tmux, which the author runs with `mouse on`, and DECSET 1007 can't deliver that. Claude Code and Codex both capture the mouse in fullscreen, so oxide-code does the same:
+Wheel scrolling has to work inside tmux with `mouse on`, and DECSET 1007 can't deliver that. Claude Code and Codex both capture the mouse in fullscreen, so oxide-code does the same:
 
 - **Mouse capture.** `enter_tui_mode` enables `EnableMouseCapture`, and the chat scrolls on wheel events. Clicks and drags reach the app, and the terminal's bypass modifier still gives native selection.
 - **App-side selection.** Both peers keep selection usable under capture by implementing it in the app, so oxide-code selects chat text itself and copies on release. Like Codex, a local session writes the native clipboard through `arboard`, which works under iTerm2's and Terminal.app's default settings, where OSC 52 does not, and avoids Cursor's non-ASCII mangling. Inside tmux it also hands the text to `tmux load-buffer -w`, which works under the default `set-clipboard external`. A remote session outside tmux writes OSC 52.

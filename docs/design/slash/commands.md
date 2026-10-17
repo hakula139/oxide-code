@@ -47,13 +47,13 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 13. **Commands read a borrowed `SlashContext` and write nothing.** The context carries `LiveSessionInfo` and the live session title. The App applies the returned outcome in one place on both the idle and busy paths, so no command reaches into `ChatView` or the modal stack. See [modals.md](modals.md) for the full modal design.
 
-14. **Modal-only commands suppress their own echo.** `SlashCommand::echoes_input(args) -> bool` defaults to true. Modal-only forms (`/status`, `/config`, `/help`, plus bare `/effort`, `/mode`, `/model`, `/rename`, `/resume`, and `/theme`) override to false, since the modal IS the response and the typed `> /foo` line would orphan in history once the modal closes. Typed forms keep echoing because the swap-confirmation system message anchors the pair.
+14. **A command suppresses its echo when its response stands alone.** `SlashCommand::echoes_input(args) -> bool` defaults to true. Modal-only forms (`/status`, `/config`, `/help`, plus bare `/effort`, `/mode`, `/model`, `/rename`, `/resume`, and `/theme`) override to false, since the modal is the response and the typed `> /foo` line would orphan in history once the modal closes. Bare `/unarchive` and `/delete` override to false too, so the error explaining the missing argument stands alone. Typed forms keep echoing because the swap-confirmation system message anchors the pair.
 
 15. **Typed forms parse in core, so the bare REPL runs them too.** `command::parse` turns the typed forms of `/clear`, `/compact`, `/effort`, `/mode`, `/model`, `/rename`, and `/resume` into the `Op` each one runs. The TUI commands call the same parsers and add what needs the TUI: the pickers and modals behind the bare forms, and a check that rejects `/effort` before sending it when the live model has no effort tier. `slash::typed_op` resolves aliases for the `--no-tui` REPL, which sends the op and renders until `TurnEnd::of` reads its terminal event, so an effort pick the model has no tier for fails there. The REPL rejects any other command with a message naming the commands it runs, and a bare form that needs an argument gets its usage.
 
 ## Per-Command Notes
 
-- **`/clear`**: Send-first ordering. Forward `Op::Clear` first, drop chat history only on success. `Event::SessionTitleUpdated` carries the originating session id so a slow Haiku title call straddling `/clear` doesn't repaint the cleared session.
+- **`/clear`**: Send-first ordering. Forward `Op::Clear` first, drop chat history only on success. `Event::SessionTitleUpdated` carries the originating session ID so a slow Haiku title call straddling `/clear` doesn't repaint the cleared session.
 
 - **`/compact`**: Refuses mid-turn, streams a summarization request, writes a compact boundary plus synthetic continuation message, resets the file tracker, and keeps queued prompts for the post-compact turn. Full design: [compact.md](compact.md).
 
@@ -61,7 +61,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 - **`/login`** / **`/logout`**: Forward `Op::Login` and `Op::Logout`. The engine runs the browser sign-in and swaps the client's credential, and the TUI opens the browser and reports the credential requests use afterward. Both are `Mutating`. Full design: [login.md](login.md).
 
-- **`/model`**: Bare opens the combined picker ([modals.md](modals.md)). `/model <arg>` resolves an exact catalog id first, then a unique substring, so `fable`, `opus`, `sonnet`, and `haiku` act as aliases. Both forms are mutating and idle-gated because they can emit `Op::SetModel`, which re-resolves the current effort against the new model.
+- **`/model`**: Bare opens the combined picker ([modals.md](modals.md)). `/model <arg>` resolves an exact catalog ID first, then a unique substring, so `fable`, `opus`, `sonnet`, and `haiku` act as aliases. Both forms are mutating and idle-gated because they can emit `Op::SetModel`, which re-resolves the current effort against the new model.
 
 - **`/effort`**: Bare opens the Speed ↔ Intelligence slider ([modals.md](modals.md)), since a two-axis picker would force users through models they didn't mean to change. `/effort <level>` accepts the five concrete tiers, with no `auto` state. Both forms are mutating and idle-gated because they can emit `Op::SetModel`.
 
@@ -77,7 +77,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 - **`/diff`**: The lone printer. Pushes uncommitted git changes plus untracked files into chat as a system message, capped at 64 KB on a UTF-8 boundary. After the first commit it uses `git diff HEAD`. Before the first commit it combines `git diff --cached` and `git diff` because `HEAD` does not exist yet. Modal output would crop without scrollback, so the diff earns its place in the transcript.
 
-- **`/rename`**: Bare opens a single-line title editor pre-filled with the current title (cap 80 chars, mirroring the actor's first-prompt cap), and `/rename <title>` applies directly. Both forms forward `Op::Rename` and lock out AI title generation for the rest of the session so a slow Haiku call can't overwrite the user's pick. `classify` is always `Mutating`. Bare suppresses echo because the modal IS the response, while typed-arg echoes since the swap-confirmation system message anchors the pair. See [modals.md](modals.md).
+- **`/rename`**: Bare opens a single-line title editor pre-filled with the current title (cap 80 chars, mirroring the actor's first-prompt cap), and `/rename <title>` applies directly. Both forms forward `Op::Rename` and lock out AI title generation for the rest of the session so a slow Haiku call can't overwrite the user's pick. `classify` is always `Mutating`. Bare suppresses echo because the modal is the response, while typed-arg echoes since the swap-confirmation system message anchors the pair. See [modals.md](modals.md).
 
 - **`/resume`** (alias `/continue`): Bare opens a searchable session picker ([modals.md](modals.md)), which forwards `Op::Resume` with the chosen session file. `/resume <id-prefix>` forwards the prefix, which the engine resolves through a current-project-first lookup that widens to all projects on a miss. Both forms refuse mid-turn. Bare suppresses echo while typed-arg echoes. Full design: [resume.md](resume.md).
 

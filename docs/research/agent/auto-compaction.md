@@ -1,8 +1,8 @@
 # Auto-Compaction (Reference)
 
-Research on automatic context compaction across Claude Code, OpenAI Codex, and opencode. Companion to [slash/compact.md](../slash/compact.md), which covers manual compaction and replacement strategy.
+Research on automatic context compaction. Based on [Claude Code](https://github.com/hakula139/claude-code), [OpenAI Codex](https://github.com/openai/codex), and [opencode](https://github.com/anomalyco/opencode). Companion to [slash/compact.md](../slash/compact.md), which covers manual compaction and replacement strategy.
 
-## Claude Code
+## Claude Code (TypeScript)
 
 Claude Code runs automatic compaction proactively before the model call. The query loop applies snip / microcompact / context-collapse transforms first, then calls `autoCompactIfNeeded` with the transformed messages. A successful compact replaces the message set for the rest of the same turn.
 
@@ -32,7 +32,7 @@ Key files:
 - `claude-code/src/components/Settings/Config.tsx`: `autoCompactEnabled` setting.
 - `claude-code/src/utils/context.ts`: context-window detection.
 
-## OpenAI Codex
+## OpenAI Codex (Rust)
 
 Codex drives auto-compaction from model metadata. `ModelInfo::auto_compact_token_limit()` defaults to 90% of the resolved context window, or to a configured limit clamped to that 90% ceiling. If no context window or explicit limit is known, the runtime uses `i64::MAX`, effectively disabling auto-compact.
 
@@ -53,7 +53,7 @@ Key files:
 - `codex-rs/core/src/compact.rs`: inline summarization and history replacement.
 - `codex-rs/config/src/config_toml.rs`: config surface.
 
-## opencode
+## opencode (TypeScript)
 
 opencode performs local app-level compaction through a hidden `compaction` agent. The compaction agent is tool-denied and receives prior context plus a strict Markdown summary template. It does not rely on provider-side automatic summarization.
 
@@ -77,7 +77,7 @@ Key files:
 - `packages/opencode/src/session/compaction.ts`: prompt, tail preservation, pruning.
 - `packages/opencode/src/agent/agent.ts`: hidden tool-denied compaction agent.
 
-## Patterns Worth Borrowing
+## Patterns Worth Borrowing for oxide-code
 
 1. **Default-on with explicit opt-out.** All three systems treat auto-compaction as normal context hygiene, while still giving users an escape hatch.
 
@@ -91,7 +91,7 @@ Key files:
 
 6. **Keep manual `/compact` independent.** Auto opt-out should not disable manual compaction.
 
-## Additional Patterns
+## Patterns Not Adopted
 
 1. **Mid-turn compaction.** Requires pausing a tool loop or assistant continuation, replacing history, and resuming the same logical turn. Tracked in [#184](https://github.com/hakula139/oxide-code/issues/184).
 

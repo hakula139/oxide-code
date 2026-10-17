@@ -8,18 +8,18 @@ Every session is a single append-only `.jsonl` file with one JSON object per lin
 
 ### Entry Types
 
-| Type                   | Position       | Purpose                                                             |
-| ---------------------- | -------------- | ------------------------------------------------------------------- |
-| `header`               | First line     | Session metadata: ID, CWD, model, created timestamp, format version |
-| `message`              | Middle lines   | Conversation message with `uuid`, optional `parent_uuid`, timestamp |
-| `title`                | Re-appended    | Session title + source. Latest wins                                 |
-| `tool_result_metadata` | Sidecar        | Display metadata for replaying tool results                         |
-| `file_snapshot`        | Sidecar        | File-tracker state restored on resume when disk state still matches |
-| `usage`                | After request  | One billed request's token usage, model, and prompt-cache TTL       |
-| `context`              | Before message | Prompt context of that message. Latest on the resolved chain wins   |
-| `compact`              | Boundary       | Summary, pre-compact count, and optional instructions and tasks     |
-| `archive`              | Re-appended    | Archive state: `archived` + `at`. Latest wins                       |
-| `summary`              | Last line      | Exit marker: `message_count` + `updated_at`. Latest wins            |
+| Type                   | Position       | Purpose                                                                           |
+| ---------------------- | -------------- | --------------------------------------------------------------------------------- |
+| `header`               | First line     | Session metadata: ID, working directory, model, created timestamp, format version |
+| `message`              | Middle lines   | Conversation message with `uuid`, optional `parent_uuid`, timestamp               |
+| `title`                | Re-appended    | Session title + source. Latest wins                                               |
+| `tool_result_metadata` | Sidecar        | Display metadata for replaying tool results                                       |
+| `file_snapshot`        | Sidecar        | File-tracker state restored on resume when disk state still matches               |
+| `usage`                | After request  | One billed request's token usage, model, and prompt-cache TTL                     |
+| `context`              | Before message | Prompt context of that message. Latest on the resolved chain wins                 |
+| `compact`              | Boundary       | Summary, pre-compact count, and optional instructions and tasks                   |
+| `archive`              | Re-appended    | Archive state: `archived` + `at`. Latest wins                                     |
+| `summary`              | Last line      | Exit marker: `message_count` + `updated_at`. Latest wins                          |
 
 ### Schema Invariants
 
@@ -57,17 +57,17 @@ Sessions live in `$XDG_DATA_HOME/ox/sessions/{project}/`. `{project}` is a files
 
 File naming: `{unix_timestamp}-{session_id}.jsonl`. Timestamp prefix gives chronological listings, while lookup by session ID uses the suffix.
 
-On Unix, session files are created with mode `0o600`.
+On Unix, session files are created with mode `0600`.
 
 ## Session Lifecycle
 
-### Actor + batched writes
+### Actor + Batched Writes
 
 The on-disk file is owned by a single `tokio::spawn`-ed actor task. The rest of the program holds a `SessionHandle` that forwards operations as `SessionCmd` over a bounded mpsc channel, with each cmd carrying a oneshot ack. The actor's loop awaits the first cmd, drains any queued commands with `try_recv()`, then appends the batch in one write.
 
 `agent_turn` queues a tool round's three writes through one `tokio::join!`, while the text-only branch records its single assistant message via the sequential path. The joined writes usually land in one append, and resume sanitization drops a tool call whose result was torn off.
 
-### Writer recovery on write error
+### Writer Recovery on Write Error
 
 Writer recovery follows these rules:
 
@@ -79,15 +79,15 @@ Writer recovery follows these rules:
 
 Every append first terminates a torn last line, so a crash mid-write loses only the batch it interrupted, none of which was acknowledged. A failed append truncates the bytes it wrote unless another process has appended since. When it cannot truncate, the retry repeats the lines that landed, and the loader keeps one copy of each message and `usage` entry by its `uuid`. A compact whose write fails is unqueued and never committed, matching the agent, which keeps its pre-compact transcript. The loader applies a compact boundary only once its post-compact root follows, so a boundary whose root never landed leaves the old chain in place.
 
-### Lazy materialization
+### Lazy Materialization
 
 Starting a session stages the header in memory. The on-disk file is created by the first batch flush carrying real content. A session that exits before any message leaves no artifact.
 
-### Resume and sanitization
+### Resume and Sanitization
 
 `ox -c` reopens the existing session file. The loader walks `Entry::Message` lines into a UUID-indexed DAG, picks the newest-timestamped leaf as the tip, and walks back via `parent_uuid` to produce a linear chain. The sanitization pipeline then drops tool calls without results and results without calls, merges adjacent same-role survivors, and injects head / tail sentinels. A client call pairs with a user `tool_result`, and a server call with the result block in the same or a later reply. A server call that a `pause_turn` left waiting is dropped, because the next prompt closes the turn and the API rejects a call without its result.
 
-### Prompt context
+### Prompt Context
 
 A session records its prompt context: the environment section, the first message's rendered instructions, date, model identity, and what the model has seen of them.
 
@@ -96,29 +96,29 @@ A session records its prompt context: the environment section, the first message
 - **Refresh changed context.** If the session resumes in another directory, the environment section is redetected. Any later instruction, date, or model change, including a `/model` swap, is attached to the next user message as a `<system-reminder>` block, which transcript displays omit, so the system prompt stays byte-identical across a swap.
 - **Rebuild missing context.** A transcript lacking a `context` entry, or one where no user message followed the last compaction, rebuilds the context and records it with the next message.
 
-### Task list
+### Task List
 
 The session's [task list](../tools/tasks.md) needs no entry of its own. On resume, the loader takes it from the last successful `tasks` call on the resolved chain, or else from the `tasks` field of the last `compact` entry, which records the list the summarized transcript left. The field is omitted when the list was empty.
 
 ### Archiving
 
-An `archive` entry sets whether default listings and bare `ox -c` skip the session, and the latest one wins. Bare `/archive` queues one through the actor before the roll that finalizes the session. Use `/archive <prefix>`, `/unarchive <prefix>`, or Ctrl+X. in the `/resume` picker append an entry to another session's file and restore its mtime, so toggling its archive status does not change its position in listings. Resuming an archived session appends an entry that unarchives it. Files never move, so path-based resume and every other reference to a session file keep working.
+An `archive` entry sets whether default listings and bare `ox -c` skip the session, and the latest one wins. Bare `/archive` queues one through the actor before the roll that finalizes the session. `/archive <prefix>`, `/unarchive <prefix>`, and Ctrl+X in the `/resume` picker append an entry to another session's file and restore its mtime, so toggling its archive status does not change its position in listings. Resuming an archived session appends an entry that unarchives it. Files never move, so path-based resume and every other reference to a session file keep working.
 
-### Fork-on-conflict concurrency
+### Fork-on-Conflict Concurrency
 
 There is no file-level lock: two processes resuming the same session both append, and the newest-leaf rule resolves forks deterministically. Each batch lands in one append write (`O_APPEND` on Unix, an end-of-file-offset write on Windows), so concurrent appends interleave only between batches.
 
-### AI-generated titles
+### AI-Generated Titles
 
 In the TUI, the first user prompt of a fresh session spawns a detached tokio task that asks Haiku through `Client::complete` for a 3-7 word sentence-case title, constrained by a structured-outputs JSON schema. Failures only log a warning.
 
-### Session cost
+### Session Cost
 
-Each request behind a turn, a `/compact` summary, or an auto-compaction summary appends a `usage` entry, while the background title request goes unrecorded. The entry holds a `uuid`, the request's `model` id and `cache_ttl` (`"5m"` or `"1h"`), the four provider counts `input_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`, and `output_tokens`, and a `timestamp`. The model and TTL let the engine price the request at the rates it ran with, even after a `/model` swap or a TTL change.
+Each request behind a turn, a `/compact` summary, or an auto-compaction summary appends a `usage` entry, while the background title request goes unrecorded. The entry holds a `uuid`, the request's `model` ID and `cache_ttl` (`"5m"` or `"1h"`), the four provider counts `input_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`, and `output_tokens`, and a `timestamp`. The model and TTL let the engine price the request at the rates it ran with, even after a `/model` swap or a TTL change.
 
 On resume, the loader collects every `usage` entry in the file, including those on abandoned branches and before compact boundaries, since the session paid for each. The engine sums their estimated cost into the session total, which `/clear` resets with the fresh session. A file without `usage` entries resumes with a cost of zero. Older binaries skip `usage` lines as unknown entries and still resume the transcript.
 
-### Write-error surfacing
+### Write-Error Surfacing
 
 Write failures surface through the session handle:
 
@@ -133,12 +133,14 @@ Write failures surface through the session handle:
 Session listing separates file discovery from metadata parsing:
 
 - **Scope.** `ox --list` walks the current project subdirectory by default, and `--all` widens to every project.
-- **Discovery.** The walk only stats files, so bare `ox -c` parses files only until it finds the newest readable unarchived one, and a prefix lookup parses only files whose name carries a matching id.
+- **Discovery.** The walk only stats files, so bare `ox -c` parses files only until it finds the newest readable unarchived one, and a prefix lookup parses only files whose name carries a matching ID.
 - **Metadata.** A parsed file yields its header, the latest `Entry::Title` and `Entry::Summary`, and the archive state. A prefix pre-filter on the `"type"` discriminator keeps message lines off the full-parse hot path.
 - **Archive view.** `--list` and the `/resume` picker show unarchived sessions, or only archived ones with `--list --archived` and the picker's Ctrl+A.
 - **Page budget.** Archive state is stored in each file, so a listing parses sessions in order until it finds one beyond the page, then reports only whether more sessions follow. When few sessions are archived, the archived view parses further.
 
-- Sessions without a title show `(untitled)`.
+Listings sort rows and render them as follows:
+
+- Sessions without a title are shown as `(untitled)`.
 - Sessions without a summary still list (`Msgs` displays `-`).
 - Sort by file mtime, with the file name breaking ties.
 - Under `--all`, a `Project` column shows the tildified stored `cwd`.

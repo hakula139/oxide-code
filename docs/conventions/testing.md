@@ -18,7 +18,7 @@ Conventions for tests, coverage, mutation testing, and live tests.
 
 - Use generic, fictional test data such as `example.com` and `/repo`. Use real names and branded content only when the code under test matches on them, as with model IDs.
 - Use established infrastructure: `wiremock` for HTTP, `temp-env` to isolate environment variables, `TestBackend` with `insta` for TUI snapshots, and extracted trait fakes for dependencies that are difficult to mock.
-- Tests share one process environment, and `temp-env` serializes only code inside its closures. A read outside a closure can therefore see another test's temporary value. If a test's result depends on a variable that other tests set, such as the home directory or `XDG_DATA_HOME`, run it inside a `temp-env` closure that pins the variable. Pin the home directory through `HOME_VAR` in `util::path::testing`, because Windows reads `USERPROFILE`. Types constructed by many tests should take environment-derived values as arguments, as `Client::new` does with the device id loaded by `main`.
+- Tests share one process environment, and `temp-env` serializes only code inside its closures. A read outside a closure can therefore see another test's temporary value. If a test's result depends on a variable that other tests set, such as the home directory or `XDG_DATA_HOME`, run it inside a `temp-env` closure that pins the variable. Pin the home directory through `HOME_VAR` in `util::path::testing`, because Windows reads `USERPROFILE`. Types constructed by many tests should take environment-derived values as arguments, as `Client::new` does with the device ID loaded by `main`.
 
 ## Assertions
 
@@ -68,7 +68,7 @@ The tests drive headless and REPL runs. Check the TUI-only paths by hand in a sc
 
 1. **`/compact`**: Read a few files, run `/compact`, then ask about them. The reply still knows the files, and in the session file the usage record after the `compact` entry reads the earlier prefix from the cache.
 2. **`/model` swap**: Send a prompt on Opus, switch to Haiku with `/model`, and send another. Then switch back to Opus and send a third. Every reply succeeds and remembers the earlier exchanges.
-3. **Cancellation**: Press Esc while a long reply streams, and check that the stream stops within a second. The next reply also answers the cancelled prompt, which [#256](https://github.com/hakula139/oxide-code/issues/256) tracks.
+3. **Cancellation**: Press Esc while a long reply streams, and check that the stream stops within a second. Then send a new prompt and verify that the reply answers only that prompt.
 4. **Leak check**: Search the logs and session files for each credential. Pass the value straight to `grep` so it never prints, and check the exit status: `1` means no match, `0` a match, and `2` an error such as a missing directory.
 
    ```bash

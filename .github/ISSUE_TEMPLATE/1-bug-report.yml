@@ -14,7 +14,7 @@ body:
     attributes:
       label: ox version
       description: Output of `ox --version`.
-      placeholder: ox 0.1.0-alpha.2
+      placeholder: ox X.Y.Z
     validations:
       required: true
 
@@ -31,28 +31,52 @@ body:
     id: auth
     attributes:
       label: Authentication
+      description: Credential source shown by `/status` in the TUI.
       options:
-        - Claude Code OAuth login
-        - Anthropic API key
-        - Custom base URL or gateway
+        - Auth token (ANTHROPIC_AUTH_TOKEN)
+        - API key (ANTHROPIC_API_KEY)
+        - API key (client.api_key)
+        - OAuth (CLAUDE_CODE_OAUTH_TOKEN)
+        - OAuth (oxide-code login)
+        - OAuth (Claude Code login)
+        - Not signed in
     validations:
       required: true
+
+  - type: input
+    id: base-url
+    attributes:
+      label: Base URL
+      description: Leave empty for the Anthropic API. Redact private hostnames.
+      placeholder: https://gateway.example.com/anthropic
 
   - type: input
     id: model
     attributes:
       label: Model
-      description: Model ID shown by `/status`.
+      description: Model ID shown by `/status` in the TUI.
       placeholder: claude-opus-5-5
 
   - type: dropdown
-    id: mode
+    id: frontend
     attributes:
-      label: Mode
+      label: Frontend
       options:
         - TUI
         - Bare REPL (`--no-tui`)
         - Headless (`-p`)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: permission-mode
+    attributes:
+      label: Permission mode
+      description: 'The mode when the problem occurred. The status line shows `Mode: plan` or `Mode: yolo`, and nothing in `manual`.'
+      options:
+        - manual
+        - plan
+        - yolo
     validations:
       required: true
 

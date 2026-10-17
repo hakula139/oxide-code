@@ -5,7 +5,7 @@ Conventions for commits, branches, pull requests, and issues.
 ## Commits and Branches
 
 - Keep each commit to one logical change. Use the imperative mood for its title, formatted as `type(scope): description`. For substantial changes, add a body explaining the problem, rationale, and tradeoffs.
-- Choose one of these types: `feat`, `fix`, `perf`, `refactor`, `docs`, `test`, `ci`, `build`, `chore`, or `style`.
+- Choose one of these types: `feat`, `fix`, `perf`, `refactor`, `docs`, `test`, `ci`, `build`, `chore`, `style`, or `revert`.
 - Use the most specific scope the change touches, such as a module (`client`, `config`, `oauth`) or a documentation target (`AGENTS`, `research`). Use the crate name only for changes that span modules.
 - If a change breaks the [stability surface](../../RELEASING.md#stability-surface), add `!` after the scope, as in `feat(config)!: ...`.
 - Name branches `<type>/<short-name>`, using the same types.
@@ -18,16 +18,17 @@ Conventions for commits, branches, pull requests, and issues.
 - Do not request a review from the PR author because GitHub rejects the request.
 - Maintainers with triage access assign the PR to `hakula139`, set its milestone to match the issue it closes, and add one type label plus the `area:` labels for the areas it changes:
 
-| Commit type               | Label           |
-| ------------------------- | --------------- |
-| `feat`                    | `enhancement`   |
-| `fix`                     | `bug`           |
-| `perf`                    | `performance`   |
-| `refactor`                | `refactor`      |
-| `docs`                    | `documentation` |
-| `test`                    | `test`          |
-| `ci`                      | `ci`            |
-| `build`, `chore`, `style` | `chore`         |
+| Commit type               | Label                            |
+| ------------------------- | -------------------------------- |
+| `feat`                    | `enhancement`                    |
+| `fix`                     | `bug`                            |
+| `perf`                    | `performance`                    |
+| `refactor`                | `refactor`                       |
+| `docs`                    | `documentation`                  |
+| `test`                    | `test`                           |
+| `ci`                      | `ci`                             |
+| `build`, `chore`, `style` | `chore`                          |
+| `revert`                  | The reverted change's type label |
 
 ## Issues
 

@@ -2,7 +2,7 @@
 
 Research on TUI patterns across reference projects. Based on [Claude Code](https://github.com/hakula139/claude-code), [OpenAI Codex](https://github.com/openai/codex), and [opencode](https://github.com/anomalyco/opencode).
 
-## Claude Code (TypeScript + Ink)
+## Claude Code (TypeScript)
 
 Custom fork of Ink, a React-based terminal rendering library with Yoga Flexbox layout.
 
@@ -18,17 +18,17 @@ Custom fork of Ink, a React-based terminal rendering library with Yoga Flexbox l
 
 - **Flickering**: Full-screen redraw on every state change causes severe flicker in long sessions (anthropics/claude-code#1913).
 
-## OpenAI Codex (Rust + Ratatui)
+## OpenAI Codex (Rust)
 
-Markdown renderer (`tui/markdown_render.rs`) was the primary reference for oxide-code's pulldown-cmark renderer.
+Built on Ratatui. Its Markdown renderer (`tui/markdown_render.rs`) was the primary reference for oxide-code's pulldown-cmark renderer.
 
 Key insight: **deferred list marker** (`pending_marker`) pattern. When `Start(Item)` arrives, store the marker and wait for the next content event to emit both on the same line. Solves the "loose list" problem where pulldown-cmark wraps content in `<p>` tags.
 
 State: `list_stack` (nesting + counters), `indent_stack`, `inline_styles` (style modifiers stack), `pending_marker` (consumed on next text event).
 
-## opencode (TypeScript + @opentui + Solid.js)
+## opencode (TypeScript)
 
-Fine-grained reactivity via Solid.js signals, so only the specific text node receiving a new token re-renders.
+Built on @opentui, with fine-grained reactivity via Solid.js signals, so only the specific text node receiving a new token re-renders.
 
 - **Markdown**: tree-sitter WASM parsers for highlighting (~20 languages). Two modes: `<code filetype="markdown">` and `<markdown>` (experimental). Concealment toggle hides syntax characters.
 - **Tools**: Two-tier. `InlineTool` is a one-liner with icon prefix, while `BlockTool` is a bordered panel with title and body. Bash capped at 10 lines, generic at 3.
