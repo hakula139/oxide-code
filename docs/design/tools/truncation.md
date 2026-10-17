@@ -24,7 +24,7 @@ Two-layer truncation: per-tool view-shape caps + centralized byte-budget safety 
 1. **Two truncation layers, separated by responsibility.** View-shape stays per-tool because it needs tool-specific knowledge. Byte-budget runs after `Tool::run` as the absolute safety net.
 2. **Head + tail strategy.** Keeps the command setup and final outcome, the two slices the model needs most. Tail-only would lose the prompt, and head-only would lose the result.
 3. **No spillover to disk.** Output past the 128 KB head and tail is dropped, which keeps enough for one-shot commands. A long-running background shell needs no spill either, because each `bash_output` read returns only what arrived since the previous one, so a model that reads before 128 KB piles up sees the whole stream.
-4. **Two distinct metadata fields.** `ToolMetadata::truncated_total` (unbounded match counts from per-tool caps) vs `ToolMetadata::truncated_bytes` (pre-cap byte count from the registry's safety net). Prevents glob's `(X of N matches)` from rendering bytes when both layers fire.
+4. **Two distinct metadata fields.** `ToolMetadata::truncated_total` (unbounded match counts from per-tool caps) vs `ToolMetadata::truncated_bytes` (pre-cap byte count from the registry's safety net). Keeps the glob view's `<pattern> (X of N)` header from counting bytes when both layers fire.
 5. **Per-tool line caps.** Read allows 2000 characters per line because Edit needs the exact text of the lines it targets. Grep lists many hits per call and stays at 500.
 
 ## Sources

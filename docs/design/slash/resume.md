@@ -116,7 +116,7 @@ The picker wraps [`SearchableList`](modals.md) and adds these controls and displ
 - `crates/oxide-code/src/session/handle.rs`: `roll_into`, `RollIntoOutcome`, `LoadedTranscript`.
 - `crates/oxide-code/src/session/history.rs`: `interactions`, the display projection `SessionResumed` carries.
 - `crates/oxide-code/src/session/list_view.rs`: `render_list` over `list_paged`.
-- `crates/oxide-code/src/session/resolver.rs`: `resolve_saved_prefix`, shared by `Engine::roll_into`, `/archive`, and `/delete`, and the `resolve_prefix_to_info` lookup it wraps.
+- `crates/oxide-code/src/session/resolver.rs`: `resolve_saved_prefix`, shared by `Engine::roll_into`, `/archive`, `/unarchive`, and `/delete`, and the `resolve_prefix_to_info` lookup it wraps.
 - `crates/oxide-code/src/session/saved.rs`: `set_archived` behind Ctrl+X, and `delete` behind the confirm-delete modal.
 - `crates/oxide-code/src/session/store/listing.rs`: `list_paged`, `latest`, `list_matching`, `ListPage`, `ListScope`.
 - `crates/oxide-code/src/slash/confirm.rs`: `ConfirmDeleteSessionModal` pushed by Ctrl+D.

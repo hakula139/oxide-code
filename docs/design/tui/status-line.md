@@ -87,7 +87,7 @@ status_line = [
 ]
 ```
 
-Unlike Claude Code's reference script, oxide-code stays one row because Ratatui owns the app chrome, and its cost segment is a local estimate.
+Claude Code's status line is a command you configure, and each line it prints becomes a row. oxide-code renders its built-in segments in one row because Ratatui owns the app chrome.
 
 The default order tracks reading flow: location and branch orient the user, model and usage describe cost and context pressure, the permission mode says what the next call may do, and run state sits near the end because it changes most often.
 

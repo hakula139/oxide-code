@@ -4,7 +4,7 @@ Type `/` to open the autocomplete popup. Use **Up / Down** to browse, **Tab** to
 
 After `/effort`, `/mode`, `/model`, or `/theme`, type a space to switch the popup to **arg mode**, which lists the valid values.
 
-## Built-in Commands
+## Built-In Commands
 
 | Command                                     | Description                                                                                                                                   |
 | ------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |

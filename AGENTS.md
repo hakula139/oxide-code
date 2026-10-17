@@ -18,7 +18,9 @@ ox -p "<prompt>"                            # Headless: run one turn and print t
 ├── .cspell/                                # Project spelling dictionary
 ├── .envrc                                  # Loads the dev shell through direnv
 ├── .github/                                # CI and release workflows, the shared Nix setup action, issue forms, PR template, and Renovate and Dependabot configs
+├── .gitignore                              # Build output and local tool state kept out of Git
 ├── .markdownlint-cli2.jsonc                # Markdown lint rules
+├── .prettierignore                         # Lockfiles and build output that Prettier skips
 ├── .prettierrc                             # Prettier settings for JSON and YAML
 ├── .taplo.toml                             # TOML formatter settings
 ├── .vscode/                                # Shared VS Code settings

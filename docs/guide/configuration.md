@@ -94,14 +94,14 @@ Per-model defaults when `effort` is unset, matching the API's own defaults:
 
 A `/model` swap carries the current effort over to the new model.
 
-This tier guide applies to Opus 5.5, Sonnet 5.5, and Haiku 5.5. It comes from Anthropic's [effort documentation](https://platform.claude.com/docs/en/build-with-claude/effort):
+This tier guide follows Anthropic's [effort documentation](https://platform.claude.com/docs/en/build-with-claude/effort) for Haiku 5.5, and for Sonnet 5.5 on agentic work:
 
 - `max` / `xhigh`: Only where you have measured a quality gain, since turns run much longer and cost more.
-- `high`: Knowledge work, long agent tasks, and strict instruction following.
-- `medium`: The starting point for most work, including agentic coding and multistep tool use.
+- `high`: Knowledge work, harder or longer agent tasks, and strict instruction following.
+- `medium`: The starting point for most work, including well-specified agentic coding and multistep tool use.
 - `low`: Chat and short, latency-sensitive tasks. At this level, long agent tasks are more likely to stop early or skip verifying a change.
 
-Fable 5.1 starts at its `high` default, one tier above the 5.5 models' `medium` starting point. The same documentation recommends `xhigh` or `max` for its most demanding agentic and coding work, and `medium` or `low` for routine or latency-sensitive work after you have confirmed that quality holds.
+For Opus 5.5, the documentation names no starting tier and recommends an effort sweep on your own evaluations. Fable 5.1's recommended start is its `high` default.
 
 #### `max_tokens`: Response Ceiling
 

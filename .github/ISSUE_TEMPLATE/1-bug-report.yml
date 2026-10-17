@@ -31,7 +31,7 @@ body:
     id: auth
     attributes:
       label: Authentication
-      description: Credential source shown by `/status`.
+      description: Credential source shown by `/status` in the TUI.
       options:
         - Auth token (ANTHROPIC_AUTH_TOKEN)
         - API key (ANTHROPIC_API_KEY)
@@ -39,6 +39,7 @@ body:
         - OAuth (CLAUDE_CODE_OAUTH_TOKEN)
         - OAuth (oxide-code login)
         - OAuth (Claude Code login)
+        - Not signed in
     validations:
       required: true
 
@@ -53,7 +54,7 @@ body:
     id: model
     attributes:
       label: Model
-      description: Model ID shown by `/status`.
+      description: Model ID shown by `/status` in the TUI.
       placeholder: claude-opus-5-5
 
   - type: dropdown
@@ -71,7 +72,7 @@ body:
     id: permission-mode
     attributes:
       label: Permission mode
-      description: The mode when the problem occurred. The status line shows `plan` or `yolo` and shows nothing in `manual`.
+      description: 'The mode when the problem occurred. The status line shows `Mode: plan` or `Mode: yolo`, and nothing in `manual`.'
       options:
         - manual
         - plan
