@@ -174,7 +174,7 @@ jobs:
           gh release create "$GITHUB_REF_NAME" release-assets/* "${options[@]}"
 
   homebrew:
-    name: Update Homebrew formula
+    name: Update Homebrew Formula
     needs: publish
     runs-on: ubuntu-latest
     permissions:

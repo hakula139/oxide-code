@@ -2,7 +2,7 @@
 
 Architecture decisions and implementation specs for oxide-code.
 
-Organized by topic. Each subdirectory mirrors the corresponding directory in [`docs/research/`](../research/), where the underlying research lives.
+Organized by topic. Each subdirectory shares its topic with a directory in [`docs/research/`](../research/), where the underlying research lives, although some specs, such as Background Shells and Task List, have no research note.
 
 ## Overview
 

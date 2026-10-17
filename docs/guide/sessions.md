@@ -10,10 +10,10 @@ Sessions are stored under `$XDG_DATA_HOME/ox/sessions/` (default: `~/.local/shar
 
 ```bash
 ox --list                # Shows the 30 most recent unarchived sessions in the current project
-ox -la                   # same, across every project
-ox --list --limit 100    # raise the cap for one run
-ox --list --limit 0      # unbounded
-ox --list --archived     # archived sessions only
+ox -la                   # Same, across every project
+ox --list --limit 100    # Raise the cap for one run
+ox --list --limit 0      # Unbounded
+ox --list --archived     # Archived sessions only
 ```
 
 Prints a table of recent sessions (most recently active first, local time):
@@ -41,8 +41,8 @@ By default, the listing shows at most 30 rows, so long-running projects don't du
 Resume the most recent unarchived session in the current project:
 
 ```bash
-ox -c              # short form
-ox --continue      # long form
+ox -c              # Short form
+ox --continue      # Long form
 ```
 
 Resume by ID prefix (searches the current project):
@@ -54,8 +54,8 @@ ox -c a1b2
 Widen the search to every project with `--all` / `-a`:
 
 ```bash
-ox -c --all        # latest unarchived session across all projects
-ox -c a1b2 -a      # prefix match across all projects
+ox -c --all        # Latest unarchived session across all projects
+ox -c a1b2 -a      # Prefix match across all projects
 ```
 
 Resume from an explicit file path, useful for sessions copied between machines or kept outside the store root:
@@ -68,11 +68,11 @@ ox -c /home/me/archive/2026-04/session.jsonl
 Pick a session from a list with `--resume` / `-r`:
 
 ```bash
-ox -r              # sessions in the current project
-ox -r --all        # sessions in every project
+ox -r              # Sessions in the current project
+ox -r --all        # Sessions in every project
 ```
 
-This opens the TUI to the same picker as [`/resume`](#mid-session-resume). Press Enter to resume the highlighted session, or Esc to quit `ox` without creating a session file. `--resume` cannot be combined with `--continue`, `--list`, `--no-tui`, or `-p`. The picker requires the TUI, so this also fails when stdout is not a terminal.
+This opens the TUI to the same picker as [`/resume`](#mid-session-resume). Press **Enter** to resume the highlighted session, or **Esc** to quit `ox` without creating a session file. `--resume` cannot be combined with `--continue`, `--list`, `--no-tui`, or `-p`. The picker requires the TUI, so this also fails when stdout is not a terminal.
 
 On resume, oxide-code loads the saved history and appends new messages to the same file, so the session keeps its original ID. The model's [task list](quickstart.md#what-it-can-do) returns as it was, while background shells do not, since they end with the run that started them. The status line's session cost continues from the requests the file recorded, or starts at zero for a file saved by a release that did not record them.
 
@@ -80,7 +80,7 @@ On resume, oxide-code loads the saved history and appends new messages to the sa
 
 Inside the TUI, `/resume` (alias `/continue`) opens a session picker without restarting the process.
 
-- Type to filter by ID, title, or project. Press Tab to toggle current-project / all-projects scope and Ctrl+A to toggle active / archived sessions. Press Enter to resume the highlighted session in place.
+- Type to filter by ID, title, or project. Press **Tab** to toggle current-project / all-projects scope and **Ctrl+A** to toggle active / archived sessions. Press **Enter** to resume the highlighted session in place.
 - To skip the picker, pass `/resume <id-prefix>` to jump directly, which also works in the `--no-tui` REPL. An ambiguous prefix lists the candidates. This form matches active and archived sessions, excluding the live session. It checks the current project first and searches all projects only when there is no match in the current project.
 - The picker loads the 30 most recent sessions in the selected scope and archive view, and notes in its footer when older ones are omitted.
 - Chat repopulates from the resumed transcript, and any queued prompts are discarded because they were typed for the previous session. The next prompt continues the resumed thread just as it would after `ox -c`.
@@ -114,7 +114,7 @@ Each `bash` command the agent runs sees the session's ID in `OX_SESSION_ID`, so 
 
 ## Security
 
-On Unix, session files are created with user-only permissions (`0o600`) because they contain verbatim tool output, which may include secrets from bash commands.
+On Unix, session files are created with user-only permissions (`0600`) because they contain verbatim tool output, which may include secrets from bash commands.
 
 ## Headless and REPL Modes
 

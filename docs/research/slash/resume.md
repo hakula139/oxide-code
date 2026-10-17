@@ -4,7 +4,7 @@ Research on session-resume UX: CLI flag plumbing, picker rendering, search and p
 
 Companion to [commands.md](commands.md) and [modals.md](modals.md). Storage-layer notes (JSONL shapes, `parent_uuid` chain, listing scans) live in [session/persistence.md](../session/persistence.md). This file focuses on the _user-facing_ resume surface.
 
-## Claude Code (TypeScript + Ink)
+## Claude Code (TypeScript)
 
 Two CLI entry points (direct and exploratory) plus a Ctrl-modifier-driven inline picker for mid-session resume.
 
@@ -24,7 +24,7 @@ Two CLI entry points (direct and exploratory) plus a Ctrl-modifier-driven inline
 
 - **Empty / single states**: Both show the picker, no auto-resume on a single match. Zero sessions surfaces "No conversations found to resume" and exits.
 
-## OpenAI Codex (Rust + Ratatui)
+## OpenAI Codex (Rust)
 
 Resume is a subcommand, with a full-screen alt-screen picker running before chat starts.
 
@@ -38,11 +38,11 @@ Resume is a subcommand, with a full-screen alt-screen picker running before chat
 
 - **Project scoping**: Cwd-filtered by default via `paths_match_after_normalization` (handles symlinks and trailing slashes). `--all` disables and surfaces the CWD column. No git-root detection, so "the project" is the cwd of invocation.
 
-- **Key bindings**: Up / Down / PgUp / PgDn / Tab / Enter / Esc plus emacs-style Ctrl-P / Ctrl-N / Ctrl-^P / Ctrl-^N. No vim keys, no numeric shortcuts. Backspace pops one char from search. No preview pane.
+- **Key bindings**: Up / Down / PgUp / PgDn / Tab / Enter / Esc plus emacs-style Ctrl+P / Ctrl+N / Ctrl-^P / Ctrl-^N. No vim keys, no numeric shortcuts. Backspace pops one char from search. No preview pane.
 
 - **Mid-session form**: `/resume` is available only while idle (`available_during_task() == false`), wired through the same picker and direct-ID paths as the launch-time resume flow.
 
-## opencode (TypeScript + Solid + Kobalte)
+## opencode (TypeScript)
 
 Three aliases for one overlay, plus a CLI-only listing subcommand.
 
@@ -95,7 +95,7 @@ Three aliases for one overlay, plus a CLI-only listing subcommand.
 
 8. **Footer key-hint line.** All three pickers use a one-row footer for discoverability. Stick to the `Enter to confirm  ·  Esc to cancel` shape and add `/ to search` etc.
 
-## Patterns to Reject
+## Patterns Not Adopted
 
 1. **Ctrl-modifier toggle clusters** (Claude Code's `Ctrl+A` / `Ctrl+W` / `Ctrl+B` / `Ctrl+V`). Undiscoverable without footer hints, and the toggle state isn't visible mid-list. A single `Tab` to widen scope (Codex's pattern) or a typed `--all` flag (oxide-code's convention) covers the same ground with less keymap churn.
 

@@ -1,6 +1,6 @@
 # Theming
 
-oxide-code's TUI palette is fully user-configurable. Pick one of the bundled Catppuccin or Material palettes, point at a TOML file you wrote yourself, or patch individual color slots on top of any base. No recompile.
+oxide-code's TUI palette is fully user-configurable. Pick one of the bundled Catppuccin or Material palettes, point at a TOML file you wrote yourself, or patch individual color slots on top of any base, all without rebuilding `ox`.
 
 ## Quick Start
 
@@ -124,7 +124,7 @@ Each slot maps to one role in the TUI. Override a slot by name to restyle that r
 | --------- | ----------------------------------------------- |
 | `info`    | In-progress / neutral signals (e.g., streaming) |
 | `success` | Successful tool results, ready status           |
-| `warning` | Caution status (e.g., the Ctrl+C exit hint)     |
+| `warning` | Caution status (e.g., the **Ctrl+C** exit hint) |
 | `error`   | Errors, failed tools, critical status           |
 
 ### Code
@@ -252,17 +252,12 @@ Overrides from every [config layer](configuration.md#layers) merge by slot name,
 
 ## Errors
 
-Bisected severity:
+Theme errors fall into two severities:
 
 - **Theme selection errors** are fatal when the TUI starts. An unknown built-in name with no matching file path, a path that is not a regular file of at most 64 KiB, a file that cannot be read, or a file with a parse error in the base body stops oxide-code at startup with a message identifying what went wrong. `-p` and `--no-tui` runs never load the theme, so a theme error does not stop them.
 - **Per-slot value errors** warn and fall back. If an override's color string can't be parsed, its slot name isn't recognized, its patch is neither a color string nor a table of `fg`, `bg`, and modifier flags, or an inline patch is empty, oxide-code logs a warning and uses the base slot's value for that role. The TUI still launches.
 
-The default tracing level is `warn`, so per-slot fallback messages surface without requiring `RUST_LOG`. Routing depends on mode:
-
-- **TUI**: Diagnostics go to `$XDG_STATE_HOME/ox/log/oxide-code.log` (default `~/.local/state/ox/log/oxide-code.log`). Routing to a file keeps `warn!` output off the alternate screen, where it would otherwise paint over the rendered frame. The file is readable only by your user. Once it passes 10 MiB it moves to `oxide-code.log.1`, replacing the previous backup, so the log directory holds at most two files.
-- **Bare REPL / headless / `--list`**: Diagnostics go to stderr, the natural CLI surface.
-
-Set `RUST_LOG=info` (or `debug`) for more detail.
+The default log level is `warn`, so per-slot fallback warnings appear in the [log](configuration.md#logs) even when `RUST_LOG` is unset.
 
 ## Examples
 

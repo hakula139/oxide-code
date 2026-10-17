@@ -77,7 +77,7 @@ jobs:
       - name: Clippy
         run: nix develop -c cargo clippy --locked --all-targets -- -D warnings
 
-  cargo-deny:
+  dependency-check:
     name: Dependency Check
     runs-on: ubuntu-latest
     steps:

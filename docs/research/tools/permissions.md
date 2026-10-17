@@ -58,7 +58,7 @@ The gate lives _inside_ each tool's `execute` via `ctx.ask(...)`, so the tool ca
 
 Persistence is the cautionary tale. Config rules are the durable "set and forget" surface, loaded fresh each run. Session-scoped rules merge into a `SessionTable.permission` column, and subagents inherit a filtered slice. But "allow always" at runtime, in this dev-branch revision, only pushes a new rule into an in-memory `state.approved` array (`permission/index.ts`): the UI literally says "until OpenCode is restarted". A project-keyed `PermissionTable` and an `Approval` schema _exist_ in the SQL layer and seed `approved` on init, yet no runtime write-back to that table is wired through the live ask / reply loop. The half-built table is schema without wiring, a reminder that "allow always → persist to disk" is the part that rots if it is reached for before it is needed.
 
-## Cross-Tool Comparison
+## Comparison
 
 | Axis                    | Claude Code                                          | Codex                                                  | opencode                                               |
 | ----------------------- | ---------------------------------------------------- | ------------------------------------------------------ | ------------------------------------------------------ |
@@ -105,7 +105,7 @@ Per-instance metadata lives on the `Tool` trait (AGENTS.md "Trait Design"), so a
 
 Two facts constrain bash matching specifically. The command is unparsed, so prefix or substring matching is best-effort UX and never a security boundary: `ls; rm -rf` and `$()` indirection defeat naive matching, which is why Claude Code's compound-split and env-strip discipline (`shellRuleMatching.ts`) is the real cost of treating bash rules as a boundary. The deny list is the dependable lever, conservatively matching the raw command string. Path-based keys for edit / write need canonicalization before any inside-cwd predicate, since `edit.rs` / `write.rs` resolved neither `..` nor symlinks at the time, so a raw-string cwd check is bypassable.
 
-## Implications for oxide-code
+## Patterns Worth Borrowing for oxide-code
 
 The prior art points at a small, sandbox-free core: a sync, pure rule engine producing `allow | ask | deny` with fixed precedence (deny first, before any mode auto-allow), a mode enum shaped like `Effort`, and Claude Code's `ToolName(specifier)` string grammar for interoperable muscle memory. Read-only tools auto-allow, `edit` / `write` and `bash` gate by mode, and only the "ask" resolution awaits the modal. Session-scoped "allow always" stays in memory, mirroring FileTracker, and persisted project allowlists wait for an explicit confirmed action per the slash-command persistence stance. The metadata-protection tier that both Claude Code and Codex apply to `.git/` and their own config directories is a cheap, pure path check worth carrying early.
 

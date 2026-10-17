@@ -10,11 +10,11 @@ At each location, oxide-code loads `CLAUDE.md`, or `AGENTS.md` if `CLAUDE.md` is
 
 Instruction files are loaded from three scopes:
 
-| Scope            | Path                                                                     | Purpose                                    |
-| ---------------- | ------------------------------------------------------------------------ | ------------------------------------------ |
-| User global      | `~/.claude/CLAUDE.md`                                                    | Personal preferences that apply everywhere |
-| Project          | `<dir>/CLAUDE.md`, every directory from the project root down to the CWD | Team-shared conventions                    |
-| Project (hidden) | `<dir>/.claude/CLAUDE.md`, same walk inside `.claude/`                   | Same as above, but out of the project root |
+| Scope            | Path                                                                                   | Purpose                                    |
+| ---------------- | -------------------------------------------------------------------------------------- | ------------------------------------------ |
+| User global      | `~/.claude/CLAUDE.md`                                                                  | Personal preferences that apply everywhere |
+| Project          | `<dir>/CLAUDE.md`, every directory from the project root down to the working directory | Team-shared conventions                    |
+| Project (hidden) | `<dir>/.claude/CLAUDE.md`, same walk inside `.claude/`                                 | Same as above, but out of the project root |
 
 The project root is the Git repository root, or the working directory if it is outside a repository. Files closer to the working directory appear later in the prompt and conventionally take precedence. For a working directory of `/repo/crates/core`, files load in this order:
 

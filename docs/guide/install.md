@@ -73,9 +73,9 @@ This builds the `main` branch and installs `ox` to `~/.cargo/bin`. To pin a rele
 The repo includes a flake that builds `ox` from source:
 
 ```bash
-nix run github:hakula139/oxide-code                     # one-shot
-nix profile install github:hakula139/oxide-code         # install to user profile
-nix profile install github:hakula139/oxide-code/vX.Y.Z  # install a specific release
+nix run github:hakula139/oxide-code                     # One-shot
+nix profile install github:hakula139/oxide-code         # Install to user profile
+nix profile install github:hakula139/oxide-code/vX.Y.Z  # Install a specific release
 ```
 
 Or as a flake input from another project:
@@ -119,7 +119,7 @@ This prints the version string. If you see `command not found`, the binary is no
 To also remove session data and config:
 
 ```bash
-rm -rf ${XDG_DATA_HOME:-$HOME/.local/share}/ox        # sessions, device ID, and the oxide-code login
-rm -rf ${XDG_STATE_HOME:-$HOME/.local/state}/ox       # log files
-rm -rf ${XDG_CONFIG_HOME:-$HOME/.config}/ox           # user config (if you wrote one)
+rm -rf ${XDG_DATA_HOME:-$HOME/.local/share}/ox        # Sessions, device ID, and the oxide-code login
+rm -rf ${XDG_STATE_HOME:-$HOME/.local/state}/ox       # Log files
+rm -rf ${XDG_CONFIG_HOME:-$HOME/.config}/ox           # User config (if you wrote one)
 ```

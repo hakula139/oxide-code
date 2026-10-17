@@ -9,7 +9,7 @@ Research on session storage patterns. Based on [Claude Code](https://github.com/
 - Head / tail extraction for listing. 32 concurrent reads, pagination.
 - Async write queue batched at 100 ms (`FLUSH_INTERVAL_MS`).
 - `parentUuid` chain for conversation forking (`--fork-session`).
-- File permissions `0o600`, parent dir `0o700`.
+- File permissions `0600`, parent dir `0700`.
 
 ## OpenAI Codex (Rust)
 

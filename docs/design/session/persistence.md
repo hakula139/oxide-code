@@ -8,18 +8,18 @@ Every session is a single append-only `.jsonl` file with one JSON object per lin
 
 ### Entry Types
 
-| Type                   | Position       | Purpose                                                             |
-| ---------------------- | -------------- | ------------------------------------------------------------------- |
-| `header`               | First line     | Session metadata: ID, CWD, model, created timestamp, format version |
-| `message`              | Middle lines   | Conversation message with `uuid`, optional `parent_uuid`, timestamp |
-| `title`                | Re-appended    | Session title + source. Latest wins                                 |
-| `tool_result_metadata` | Sidecar        | Display metadata for replaying tool results                         |
-| `file_snapshot`        | Sidecar        | File-tracker state restored on resume when disk state still matches |
-| `usage`                | After request  | One billed request's token usage, model, and prompt-cache TTL       |
-| `context`              | Before message | Prompt context of that message. Latest on the resolved chain wins   |
-| `compact`              | Boundary       | Summary, pre-compact count, and optional instructions and tasks     |
-| `archive`              | Re-appended    | Archive state: `archived` + `at`. Latest wins                       |
-| `summary`              | Last line      | Exit marker: `message_count` + `updated_at`. Latest wins            |
+| Type                   | Position       | Purpose                                                                           |
+| ---------------------- | -------------- | --------------------------------------------------------------------------------- |
+| `header`               | First line     | Session metadata: ID, working directory, model, created timestamp, format version |
+| `message`              | Middle lines   | Conversation message with `uuid`, optional `parent_uuid`, timestamp               |
+| `title`                | Re-appended    | Session title + source. Latest wins                                               |
+| `tool_result_metadata` | Sidecar        | Display metadata for replaying tool results                                       |
+| `file_snapshot`        | Sidecar        | File-tracker state restored on resume when disk state still matches               |
+| `usage`                | After request  | One billed request's token usage, model, and prompt-cache TTL                     |
+| `context`              | Before message | Prompt context of that message. Latest on the resolved chain wins                 |
+| `compact`              | Boundary       | Summary, pre-compact count, and optional instructions and tasks                   |
+| `archive`              | Re-appended    | Archive state: `archived` + `at`. Latest wins                                     |
+| `summary`              | Last line      | Exit marker: `message_count` + `updated_at`. Latest wins                          |
 
 ### Schema Invariants
 
@@ -57,7 +57,7 @@ Sessions live in `$XDG_DATA_HOME/ox/sessions/{project}/`. `{project}` is a files
 
 File naming: `{unix_timestamp}-{session_id}.jsonl`. Timestamp prefix gives chronological listings, while lookup by session ID uses the suffix.
 
-On Unix, session files are created with mode `0o600`.
+On Unix, session files are created with mode `0600`.
 
 ## Session Lifecycle
 

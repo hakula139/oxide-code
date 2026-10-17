@@ -1,5 +1,7 @@
 # Quickstart
 
+This guide walks through installing `ox`, signing in, and running a first session, including its tool approvals.
+
 ## Install
 
 On Apple Silicon macOS and x86_64 Linux, install with Homebrew:
@@ -28,7 +30,7 @@ You can also sign in with a Claude account:
 
 ## Start a Session
 
-Run `ox` to start an interactive terminal session, then type a task and press Enter:
+Run `ox` to start an interactive terminal session, then type a task and press **Enter**:
 
 ```text
 ❯ Read main.rs and explain the agent loop.
@@ -63,7 +65,7 @@ The approval prompt takes these keys:
 
 When a pattern can name the call, pressing **A** opens the pattern it will allow, such as `cargo test`, which you can edit before pressing **Enter**, for example to widen it to `cargo test *`.
 
-Enter does nothing in the prompt, so a keystroke meant for the input box cannot approve a call.
+**Enter** does nothing in the prompt, so a keystroke meant for the input box cannot approve a call.
 
 Session rules last until you exit or start another session, and `/status` lists them.
 
@@ -88,7 +90,7 @@ oxide-code has nine built-in tools:
 The assistant chooses tools based on your request, so specific requests work best. For example, "edit the function signature in `src/lib.rs`" is more useful than "fix the code".
 
 - **Task list**: For multi-step work, the assistant maintains a task list that the TUI displays above the input. It marks completed tasks with `✓`, the task in progress with `●`, and pending tasks with `○`. The list clears when all tasks are done and stays with the session through `/compact` and resume.
-- **Background shells**: For a dev server, watcher, or long build, the assistant can run a command in the background and read its output with `bash_output` while it continues working. `/status` lists open shells. They keep running if you interrupt a turn with Esc and end when you exit or start another session with `/clear`, `/archive`, or `/resume`. To stop one sooner, ask the assistant.
+- **Background shells**: For a dev server, watcher, or long build, the assistant can run a command in the background and read its output with `bash_output` while it continues working. `/status` lists open shells. They keep running if you interrupt a turn with **Esc** and end when you exit or start another session with `/clear`, `/archive`, or `/resume`. To stop one sooner, ask the assistant.
 
 ## Customize Behavior
 

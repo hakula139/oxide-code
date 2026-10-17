@@ -8,7 +8,7 @@ oxide-code loads configuration from multiple sources, merged in order of increas
 4. **Project config file**: `.ox/config.toml` in the nearest directory at or above the current one that has one.
 5. **Environment variables**: always win.
 
-Run `/config` to see each resolved value next to the layer that set it: `default`, `user`, `config.d/<name>`, `project`, an environment variable such as `$ANTHROPIC_MODEL`, or `session` after a `/model` or `/effort` change.
+Run `/config` to see each resolved value next to the layer that set it: `default`, `user`, `config.d/<name>`, `project`, an environment variable such as `$ANTHROPIC_MODEL`, `--mode` for the permission mode set by that flag, or `session` after a `/model`, `/effort`, or `/mode` change or a **Shift+Tab** mode switch.
 
 ## Layers
 
@@ -125,13 +125,13 @@ base_url = "https://gw.llm.corp.example/anthropic"
 extra_ca_certs = "~/.config/ox/corp-cachain.pem"
 ```
 
-Use an absolute or `~`-rooted path. Relative paths resolve from the launch cwd. The field is user-config only because a checked-in trust-anchor path could widen TLS trust for the process. Equivalent env var: `OX_EXTRA_CA_CERTS`, which wins over this field. `NODE_EXTRA_CA_CERTS` applies only when neither is set (see [LLM gateways](#llm-gateways)).
+Use an absolute or `~`-rooted path. Relative paths resolve from the working directory `ox` starts in. The field is user-config only because a checked-in trust-anchor path could widen TLS trust for the process. Equivalent env var: `OX_EXTRA_CA_CERTS`, which wins over this field. `NODE_EXTRA_CA_CERTS` applies only when neither is set (see [LLM gateways](#llm-gateways)).
 
 On macOS, a server certificate valid for longer than Apple's 825-day limit is accepted when it chains to a CA in the bundle, even one already installed system-wide, unless that CA is one of Apple's built-in roots.
 
 #### `prompt_cache_ttl`: Cache Duration
 
-Accepted values: `"5m"` (matches the server default as of 2026-03-06) and `"1h"` (higher write premium, bigger hit-rate win on long sessions). oxide-code defaults to `"1h"` because Anthropic's silent 2026-03 TTL drop cut typical prompt-caching savings from 80 %+ to 40-55 %. See [Agentic Request Body Fields](../research/api/anthropic.md#agentic-request-body-fields) for the wire shape and cost analysis.
+Accepted values: `"5m"` (matches the server default as of 2026-03-06) and `"1h"` (higher write premium, bigger hit-rate win on long sessions). oxide-code defaults to `"1h"` because Anthropic's silent 2026-03 TTL drop cut typical prompt-caching savings from 80%+ to 40-55%. See [Agentic Request Body Fields](../research/api/anthropic.md#agentic-request-body-fields) for the wire shape and cost analysis.
 
 ### `[client.compaction]`: Context Compression
 
@@ -161,7 +161,7 @@ If automatic compaction fails, oxide-code does not send the prompt, and the TUI 
 
 `show_welcome = false` blanks the chat region until you submit a prompt, which is useful when piping or screen-recording.
 
-`status_line` accepts these segment names: `current-dir`, `git-branch`, `pull-request`, `pull-request-checks`, `pull-request-review`, `model`, `model-with-effort`, `context-used`, `session-cost`, `five-hour-limit`, `weekly-limit`, `permission-mode`, `run-state`, `queued-prompts`, `task-progress`, `thread-title`, `session-id`, `theme`, `current-time`. The list must contain at least one segment. Segments with no data, such as a missing git branch, an unopened pull request, context usage before the first completed turn, or usage limits under an API key, are omitted. The three pull request segments shell out to `gh pr view` so they require the GitHub CLI on PATH. Click one of them to open the PR, its checks, or its changed files. Terminals that open links on Ctrl-click or Cmd-click do the same. `pull-request-review` shows only on repositories whose branch protection requires a review, since GitHub reports no review decision otherwise. The separator takes its style from the active theme's `separator` slot and has no setting of its own.
+`status_line` lists segments from the table below in display order and must contain at least one. Segments with no data, such as a missing git branch, an unopened pull request, context usage before the first completed turn, or usage limits under an API key, are omitted. The three pull request segments shell out to `gh pr view` so they require the GitHub CLI on PATH. Click one of them to open the PR, its checks, or its changed files. Terminals that open links on **Ctrl+click** or **Cmd+click** do the same. `pull-request-review` shows only on repositories whose branch protection requires a review, since GitHub reports no review decision otherwise. The separator takes its style from the active theme's `separator` slot and has no setting of its own.
 
 | Segment               | Renders                                                       | Refresh         |
 | --------------------- | ------------------------------------------------------------- | --------------- |
@@ -177,7 +177,7 @@ If automatic compaction fails, oxide-code does not send the prompt, and the TUI 
 | `five-hour-limit`     | `5h: 42%` of a subscription's five-hour usage limit           | Per request     |
 | `weekly-limit`        | `7d: 13%` of a subscription's weekly usage limit              | Per request     |
 | `permission-mode`     | `Mode: plan` or `Mode: yolo`, omitted in `manual`             | On switch       |
-| `run-state`           | `Ready` / spinner + label / Ctrl+C exit hint                  | On state change |
+| `run-state`           | `Ready` / spinner + label / **Ctrl+C** exit hint              | On state change |
 | `queued-prompts`      | `Queued: 2` while prompts wait for the running turn           | On change       |
 | `task-progress`       | `Tasks: 2/5` completed while the session keeps a task list    | On change       |
 | `thread-title`        | Session title, AI-generated or set by `/rename`               | On change       |
@@ -211,11 +211,11 @@ See [Theming](theming.md) for the full slot reference, color value formats (hex,
 
 ### `[permission]`: Tool Approval
 
-Every tool call passes a permission check before running. Reads anywhere except SSH keys and the credential files that the [built-in rules](#built-in-rules) deny, and edits inside the working directory or an `extra_roots` directory, run without asking. In the default `manual` mode, every other call opens an approval prompt unless a rule settles it. The prompt names the pattern or built-in rule that made the call ask, and a denied call tells the model which rule or mode denied it. Press `y` to approve, `a` to approve and add a session rule that allows matching calls, `n` to deny, `f` to deny and tell the model why, or Esc to deny and end the turn. With `f`, type the feedback and press Enter, and the model receives it as the call's result. Enter does nothing at the choice, and the prompt ignores keys until you pause typing for 300 ms, so keystrokes or a paste meant for the input box cannot answer it.
+Every tool call passes a permission check before running. Reads anywhere except SSH keys and the credential files that the [built-in rules](#built-in-rules) deny, and edits inside the working directory or an `extra_roots` directory, run without asking. In the default `manual` mode, every other call opens an approval prompt unless a rule settles it. The prompt names the pattern or built-in rule that made the call ask, and a denied call tells the model which rule or mode denied it. Press **Y** to approve, **A** to approve and add a session rule that allows matching calls, **N** to deny, **F** to deny and tell the model why, or **Esc** to deny and end the turn. With **F**, type the feedback and press **Enter**, and the model receives it as the call's result. **Enter** does nothing at the choice, and the prompt ignores keys until you pause typing for 300 ms, so keystrokes or a paste meant for the input box cannot answer it.
 
 The `--no-tui` REPL asks on stderr with the same choices and reads the answer from the next input line, using `x` to end the turn. It asks only when stdin is a terminal. A REPL reading piped input and a headless run (`-p`) cannot ask, so they deny the call and tell the model which pattern to add to which `[permission.allow]` list, such as `"cargo test"` under `exec`.
 
-The `a` key opens the pattern of the session rule it will add, in the syntax below, so you can widen or narrow it before pressing Enter. The pattern must still cover the call being approved. The prompt offers `a` only when such a pattern would let the call run, so a [protected path](#built-in-rules), a call an `ask` pattern matches, a chained command such as `cargo test | tail`, a word that expands or globs, as in `ls *.rs`, or an invisible character offers none. Session rules live in memory until you exit, `/clear`, `/archive`, or `/resume` another session, `/status` lists them, and deny patterns, ask patterns, and protected paths still take precedence over them.
+The **A** key opens the pattern of the session rule it will add, in the syntax below, so you can widen or narrow it before pressing **Enter**. The pattern must still cover the call being approved. The prompt offers **A** only when such a pattern would let the call run, so a [protected path](#built-in-rules), a call an `ask` pattern matches, a chained command such as `cargo test | tail`, a word that expands or globs, as in `ls *.rs`, or an invisible character offers none. Session rules live in memory until you exit, `/clear`, `/archive`, or `/resume` another session, `/status` lists them, and deny patterns, ask patterns, and protected paths still take precedence over them.
 
 | Key           | Type   | Default    | Description                                                           |
 | ------------- | ------ | ---------- | --------------------------------------------------------------------- |
@@ -380,3 +380,10 @@ Environment variables override all config file values.
 | `OX_STATUS_LINE`                         | `tui.status_line`                          | see `[tui]`                 | Comma-separated segments     |
 
 Every variable treats an empty value as unset. Boolean variables accept `1`, `true`, `yes`, or `on` to enable and `0`, `false`, `no`, or `off` to disable, in any letter case. Numeric variables take a whole number: at least `1` for `OX_MAX_TOKENS` and `OX_MAX_TOOL_ROUNDS`, at least `0` for `OX_COMPACTION_AUTO_THRESHOLD_TOKENS`, and `1` to `100` for `OX_COMPACTION_AUTO_THRESHOLD_PERCENT`. Any other value makes `ox` exit at startup with an error naming the variable and the values it accepts. The matching config keys accept the same ranges, and an out-of-range value there names its file and line.
+
+## Logs
+
+`ox` logs warnings and errors by default. Set `RUST_LOG=info` (or `debug`) for more detail. Where the log goes depends on the frontend:
+
+- **TUI**: `$XDG_STATE_HOME/ox/log/oxide-code.log` (default `~/.local/state/ox/log/oxide-code.log`), which keeps log lines from painting over the full-screen frame. The file is readable only by your user. Once it passes 10 MiB, it moves to `oxide-code.log.1`, replacing the previous backup, so the log directory holds at most two files.
+- **Bare REPL, headless runs, and `--list`**: stderr.

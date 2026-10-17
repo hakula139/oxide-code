@@ -2,7 +2,7 @@
 
 oxide-code is a terminal-based AI coding assistant written in Rust, inspired by [Claude Code](https://code.claude.com/docs). Its binary, `ox`, talks to LLM APIs to help developers with software engineering tasks from the terminal.
 
-This file holds the rules for every change and points to the conventions for each area. `README.md` covers features and scope for users, [`docs/`](docs/README.md) holds the user guides, conventions, design specs, and research notes, and open GitHub issues track planned work.
+This file holds the rules for every change and points to the conventions for each area. `README.md` covers features and scope for users, [`docs/`](docs/) holds the user guides, conventions, design specs, and research notes, and open GitHub issues track planned work.
 
 ```bash
 ox                                          # Start an interactive TUI session
@@ -16,15 +16,34 @@ ox -p "<prompt>"                            # Headless: run one turn and print t
 .
 ├── .agents/                                # Agent skills (release procedure)
 ├── .cspell/                                # Project spelling dictionary
-├── .github/                                # CI and release workflows, plus the shared Nix setup action
+├── .envrc                                  # Loads the dev shell through direnv
+├── .github/                                # CI and release workflows, the shared Nix setup action, issue forms, PR template, and Renovate and Dependabot configs
+├── .markdownlint-cli2.jsonc                # Markdown lint rules
+├── .prettierrc                             # Prettier settings for JSON and YAML
+├── .taplo.toml                             # TOML formatter settings
+├── .vscode/                                # Shared VS Code settings
 ├── about.hbs                               # Plain-text third-party notice template
 ├── about.toml                              # Release dependency license selection
+├── Cargo.toml                              # Workspace manifest for the MSRV, lints, shared dependencies, and build profiles
+├── CHANGELOG.md                            # Release notes drafted by git-cliff and curated for each release
+├── cliff.toml                              # Changelog configuration for git-cliff
+├── clippy.toml                             # Clippy settings
+├── codecov.yml                             # Codecov coverage targets
 ├── crates/oxide-code/                      # The `ox` crate, mapped in docs/design/architecture.md
+├── cspell.json                             # Spell checker settings
 ├── deny.toml                               # Dependency license, advisory, source, and ban policy
 ├── docs/                                   # User guides, conventions, design specs, and research notes
+├── dprint.json                             # Markdown formatter settings
+├── flake.nix                               # Nix flake for the dev shell, pre-commit hooks, checks, and packages
 ├── Formula/                                # Homebrew formula, served from this repo as a tap
 ├── licenses/                               # Licenses for bundled syntax definitions and themes
-└── scripts/                                # Release helpers and pre-commit checks
+├── package.json                            # Node formatters, linters, and spell checker run through pnpm
+├── package.nix                             # Nix package for `ox`
+├── pnpm-workspace.yaml                     # Build approvals and dependency overrides for pnpm
+├── RELEASING.md                            # Release procedure, versioning, and stability surface
+├── rust-toolchain.toml                     # Pinned Rust release
+├── scripts/                                # Release helpers and pre-commit checks
+└── SECURITY.md                             # Vulnerability reporting and trust model
 ```
 
 ## Read Before You Edit
@@ -51,14 +70,14 @@ ox -p "<prompt>"                            # Headless: run one turn and print t
 Run after implementation and before review:
 
 ```bash
-cargo fmt --all --check                            # Check formatting
-cargo build                                        # Build
-cargo clippy --all-targets -- -D warnings          # Lint (pedantic, zero warnings)
-cargo test                                         # Run tests
-cargo llvm-cov                                     # Check test coverage
-pnpm format                                        # Check Markdown, TOML, JSON, and YAML formatting
-pnpm lint                                          # Lint Markdown
-pnpm spellcheck                                    # Spell check
+cargo fmt --all --check                               # Check formatting
+cargo build                                           # Build
+cargo clippy --all-targets -- -D warnings             # Lint (pedantic, zero warnings)
+cargo llvm-cov                                        # Run tests and check coverage
+cargo deny check licenses advisories sources bans     # Check dependencies when they change
+pnpm format                                           # Check Markdown, TOML, JSON, and YAML formatting
+pnpm lint                                             # Lint Markdown
+pnpm spellcheck                                       # Spell check
 ```
 
 [Development](docs/conventions/development.md#ci) lists which CI job runs each check.

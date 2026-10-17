@@ -1,8 +1,8 @@
 # Research Notes
 
-External research and API reference for oxide-code development. The notes cover [Claude Code](https://github.com/hakula139/claude-code), [OpenAI Codex](https://github.com/openai/codex), [opencode](https://github.com/anomalyco/opencode), and the Anthropic API.
+External research and API reference for oxide-code development. The notes cite [Claude Code](https://github.com/hakula139/claude-code), [OpenAI Codex](https://github.com/openai/codex), [opencode](https://github.com/anomalyco/opencode), and [oh-my-pi](https://github.com/can1357/oh-my-pi) as reference implementations, along with Anthropic's API documentation. The terminal UI notes also cover terminal emulators and other TUI apps.
 
-Organized by topic. Each subdirectory mirrors the corresponding directory in [`docs/design/`](../design/), where shipped decisions live.
+Organized by topic. Each subdirectory except `api/` shares its topic with a directory in [`docs/design/`](../design/), where shipped decisions live.
 
 ## API References
 

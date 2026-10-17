@@ -74,8 +74,8 @@ Tag the release PR's squash commit by its SHA, since a later PR may already sit 
 git fetch origin
 sha=$(gh pr view <release-pr> --json mergeCommit --jq .mergeCommit.oid)
 git show "$sha:CHANGELOG.md" | awk '/^## / { n++ } /^#/ { h = n == 1 && $0 == "### Highlights"; next } h' >highlights.md
-git tag vX.Y.Z "$sha"                                               # without highlights
-git tag -a --cleanup=whitespace -F highlights.md vX.Y.Z "$sha"      # with highlights
+git tag vX.Y.Z "$sha"                                               # Without highlights
+git tag -a --cleanup=whitespace -F highlights.md vX.Y.Z "$sha"      # With highlights
 git push origin vX.Y.Z
 ```
 
@@ -95,8 +95,8 @@ The PR-based flow tags only reviewed, CI-green commits, so re-cutting should be 
 
 ```bash
 gh release delete vX.Y.Z --cleanup-tag --yes
-git tag -f vX.Y.Z <commit>                                             # without highlights
-git tag -f -a --cleanup=whitespace -F highlights.md vX.Y.Z <commit>    # with highlights
+git tag -f vX.Y.Z <commit>                                             # Without highlights
+git tag -f -a --cleanup=whitespace -F highlights.md vX.Y.Z <commit>    # With highlights
 git push origin vX.Y.Z
 ```
 
