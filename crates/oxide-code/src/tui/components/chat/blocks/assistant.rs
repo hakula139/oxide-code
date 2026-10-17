@@ -111,7 +111,7 @@ impl ChatBlock for AssistantThinking {
     }
 }
 
-/// Dims plain spans; leaves explicitly-colored spans at full color.
+/// Dims plain spans and leaves explicitly colored spans at full color.
 fn apply_thinking_style(mut line: Line<'static>, theme: &Theme) -> Line<'static> {
     if line.style.fg.is_some() {
         return line;
@@ -190,7 +190,7 @@ mod tests {
 
     #[test]
     fn render_empty_body_emits_header_only() {
-        // Exercised by the zero-delta frame before the first thinking chunk.
+        // Thinking that holds only whitespace renders as the bare header.
         let theme = Theme::default();
         let block = AssistantThinking::new("   \n  ");
         let lines = block.render(&ctx_at(60, &theme));

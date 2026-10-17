@@ -1,7 +1,6 @@
-//! Shared `[bar] [number] [separator] [text]` row renderer. Read / grep use the default pipe
-//! separator; Edit-tool diff sides and `/diff` pass `- ` / `+ ` plus a row bg via
-//! [`Renderer::with_style`]. Visibility widened to `pub(in super::super)` so `blocks::git_diff`
-//! can reuse it without relocating.
+//! Shared `[bar] [number] [separator] [text]` row renderer. Read and grep rows use the default
+//! pipe separator, while Edit-tool diff sides and `/diff` pass a `- ` or `+ ` sign and a row bg
+//! through [`Renderer::with_style`].
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -27,7 +26,7 @@ pub(in super::super) struct Renderer<'a> {
 }
 
 impl<'a> Renderer<'a> {
-    /// Plain numbered rows — pipe separator, no row bg. Used by read / grep.
+    /// Plain numbered rows with the pipe separator and no row bg, as read and grep draw them.
     pub(in super::super) fn new(
         ctx: &'a RenderCtx<'a>,
         border_style: Style,
@@ -43,8 +42,8 @@ impl<'a> Renderer<'a> {
         )
     }
 
-    /// Diff-side variant — caller passes the `- ` / `+ ` sign as separator and a row bg so the
-    /// tint extends across the full terminal width.
+    /// Diff-side rows, with the `- ` or `+ ` sign as the separator and a row bg whose tint spans
+    /// the full terminal width.
     pub(in super::super) fn with_style(
         ctx: &'a RenderCtx<'a>,
         border_style: Style,
@@ -213,8 +212,8 @@ mod tests {
 
     #[test]
     fn with_style_render_uses_custom_separator_in_place_of_pipe() {
-        // Diff path: separator carries `- ` / `+ ` instead of the pipe; text stays a separate
-        // span so the sign can take its own color.
+        // On the diff path the separator carries the `- ` or `+ ` sign, and the text stays a
+        // separate span so the sign can take its own color.
         let theme = Theme::default();
         let ctx = RenderCtx {
             width: 80,
@@ -242,8 +241,8 @@ mod tests {
 
     #[test]
     fn with_style_patches_row_bg_onto_content_spans() {
-        // Bar prefix stays transparent; number / separator / text inherit the row bg, so the
-        // chrome column never tints and the band has no holes.
+        // The bar prefix stays transparent while the number, separator, and text inherit the row
+        // bg, so the chrome column never tints and the band has no holes.
         let theme = Theme::default();
         let ctx = RenderCtx {
             width: 80,
@@ -325,8 +324,8 @@ mod tests {
 
     #[test]
     fn with_style_wrapped_continuation_keeps_bg_under_text_column() {
-        // Every wrapped line pads to `ctx.width` so the bg stays contiguous; the bar prefix
-        // on continuations stays transparent like the header line.
+        // Every wrapped line pads to `ctx.width` so the bg stays contiguous, and the bar prefix on
+        // continuations stays transparent like the header line.
         let theme = Theme::default();
         let ctx = RenderCtx {
             width: 20,

@@ -7,8 +7,7 @@ use ratatui::text::{Line, Span};
 use super::{ChatBlock, RenderCtx};
 use crate::tui::glyphs::INTERRUPTED_MARKER;
 
-/// Trails a cancelled turn's partial assistant block so the transcript shows where the cancel
-/// landed.
+/// Trails a cancelled turn's partial assistant block, marking where the cancel landed.
 pub(crate) struct InterruptedMarker;
 
 impl ChatBlock for InterruptedMarker {

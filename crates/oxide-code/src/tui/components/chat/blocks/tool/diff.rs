@@ -1,4 +1,4 @@
-//! Edit-tool diff body — `-` / `+` unified diff layout from [`DiffChunk`]s.
+//! Edit-tool diff body: a unified `-` / `+` layout of the [`DiffChunk`]s.
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -160,7 +160,7 @@ fn entries<'a>(
     out
 }
 
-/// Splits budget between sides; surplus flows from the smaller side to the larger.
+/// Splits the budget between the sides, and the smaller side's surplus goes to the larger one.
 fn split_budget(old_len: usize, new_len: usize, budget: usize) -> (usize, usize) {
     if old_len + new_len <= budget {
         return (old_len, new_len);

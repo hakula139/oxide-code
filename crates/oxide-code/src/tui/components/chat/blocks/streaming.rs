@@ -39,7 +39,7 @@ impl StreamingAssistant {
         }
     }
 
-    /// Drop the prefix cache so the next render re-parses the buffer with current styles.
+    /// Drops the prefix cache so the next render re-parses the buffer with current styles.
     pub(crate) fn invalidate_cache(&mut self) {
         self.rendered.clear();
         self.rendered_boundary = 0;

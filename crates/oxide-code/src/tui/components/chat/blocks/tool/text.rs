@@ -1,5 +1,4 @@
-//! Default tool-result body — truncated monospace text with a
-//! `+N lines` footer when output overflows.
+//! Default tool-result body: truncated text, with a `... +N lines` footer on overflow.
 
 use ratatui::text::Line;
 

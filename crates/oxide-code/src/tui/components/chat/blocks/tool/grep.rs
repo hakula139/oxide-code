@@ -1,5 +1,5 @@
-//! `grep` tool body (content mode) — per-file groups of line-numbered match rows; non-match
-//! context lines render dim.
+//! `grep` tool body in content mode: per-file groups of line-numbered match rows, where context
+//! lines render dim.
 
 use ratatui::text::Line;
 use unicode_width::UnicodeWidthStr;
@@ -26,7 +26,6 @@ pub(super) fn render(
     let visible_rows = total_rows.min(MAX_TOOL_OUTPUT_LINES);
     let hidden = total_rows.saturating_sub(visible_rows);
 
-    // Pad to the widest line number across all groups for column alignment.
     let line_number_width = groups
         .iter()
         .flat_map(|g| g.lines.iter())
@@ -68,7 +67,7 @@ pub(super) fn render(
     }
 }
 
-/// Footer combining TUI-side row hiding and grep's `head_limit` cap; `None` when neither applies.
+/// Footer combining TUI-side row hiding and grep's `head_limit` cap, if either applies.
 fn footer_text(hidden: usize, truncated: bool) -> Option<String> {
     match (hidden, truncated) {
         (0, false) => None,

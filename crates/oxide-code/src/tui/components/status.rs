@@ -203,7 +203,7 @@ impl StatusBar {
         theme_name.clone_into(&mut self.theme_name);
     }
 
-    /// Re-skin subsequent renders. The spinner / status state is unaffected.
+    /// Re-skins every subsequent render.
     pub(crate) fn set_theme(&mut self, theme: &Theme) {
         self.theme = theme.clone();
     }

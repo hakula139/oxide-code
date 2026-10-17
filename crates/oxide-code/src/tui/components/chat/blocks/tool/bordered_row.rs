@@ -1,6 +1,5 @@
-//! Shared `[bar] [text]` row primitive for unnumbered chat-block body rows. Numbered rows use the
-//! sibling [`super::numbered_row`]. Visibility is widened to `pub(in super::super)` so
-//! `blocks::git_diff` can reuse it for headers / hunk separators / truncation footers.
+//! Shared `[bar] [text]` row primitive for unnumbered chat-block body rows, such as the `/diff`
+//! headers and footers. Numbered rows use the sibling [`super::numbered_row`].
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -88,7 +87,7 @@ mod tests {
 
     #[test]
     fn render_carries_text_style_through_wrap() {
-        // Text style must apply across all wrapped fragments, not just the first.
+        // The text style applies to every wrapped fragment.
         let theme = Theme::default();
         let ctx = RenderCtx {
             width: 12,

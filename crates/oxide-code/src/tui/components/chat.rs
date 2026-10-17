@@ -269,7 +269,6 @@ impl ChatView {
         self.pending_calls.len()
     }
 
-    /// Appends an error message.
     pub(crate) fn push_error(&mut self, msg: &str) {
         self.bump_paused_counter();
         self.push_block(ErrorBlock::new(msg));
@@ -287,7 +286,7 @@ impl ChatView {
         self.push_block(SystemMessageBlock::new(body));
     }
 
-    /// Appends a compaction boundary block (`/compact` result).
+    /// Appends the boundary block of a manual, automatic, or resumed compaction.
     pub(crate) fn push_compacted_block(
         &mut self,
         pre_count: u32,
@@ -298,7 +297,6 @@ impl ChatView {
         self.push_block(CompactedBlock::new(pre_count, instructions, summary));
     }
 
-    /// Appends a unified diff body for display.
     pub(crate) fn push_git_diff(&mut self, text: impl Into<String>) {
         self.bump_paused_counter();
         self.push_block(GitDiffBlock::new(text));
@@ -618,7 +616,7 @@ impl ChatView {
             .is_some_and(|b| b.block().continues_assistant_turn())
     }
 
-    /// True when the chat shows nothing: no committed block, reply, thinking, or summary.
+    /// Whether the chat shows nothing: no committed block, reply, thinking, or summary.
     pub(crate) fn is_empty(&self) -> bool {
         self.blocks.is_empty()
             && self.streaming.is_none()
@@ -919,8 +917,8 @@ mod tests {
 
     #[test]
     fn set_theme_invalidates_streaming_cache_so_in_flight_tokens_repaint() {
-        // Bare `/theme` opens its picker mid-stream; without dropping the cache, committed
-        // prefix tokens would keep painting under the previous palette until commit_streaming.
+        // Bare `/theme` opens its picker mid-stream. Without dropping the cache, committed prefix
+        // tokens would keep painting under the previous palette until `commit_streaming`.
         let mut chat = test_chat();
         chat.set_viewport(Rect::new(0, 0, 80, 24));
         chat.append_stream_token("a complete paragraph\n\nnext\n");
@@ -2589,7 +2587,7 @@ mod tests {
 
     #[test]
     fn render_empty_paints_blank_chat_region() {
-        // ChatView paints only the surface background; App::draw_frame layers the welcome.
+        // ChatView paints only the surface background, and App::draw_frame layers the welcome.
         let mut chat = test_chat();
         let backend = render_chat(&mut chat, 60, 8);
         for cell in &backend.buffer().content {

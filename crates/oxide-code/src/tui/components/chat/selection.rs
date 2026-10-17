@@ -157,8 +157,8 @@ impl ChatView {
         text
     }
 
-    /// Scrolls one row toward the pointer while a drag holds it past the chat's top or bottom, until
-    /// the view reaches the content's end. Returns whether it scrolled.
+    /// Scrolls one row toward the pointer while a drag holds it past the chat's top or bottom,
+    /// until the view reaches the content's end. Returns whether it scrolled.
     pub(crate) fn tick_selection(&mut self, now: Instant) -> bool {
         let area = self.viewport;
         let (at_top, at_bottom) = (
@@ -308,8 +308,7 @@ impl ChatView {
     }
 
     /// The unit at a screen cell, or `None` when the last paint showed no rows. A cell above the
-    /// chat clamps to the start of its first row, and one below the painted rows to the end of the
-    /// last.
+    /// chat clamps to its first row's start, and one below the painted rows to the last row's end.
     fn unit_at(&self, (x, y): (u16, u16), unit: Unit) -> Option<[Point; 2]> {
         let area = self.viewport;
         let last_row = u16::try_from(self.painted_rows.len())
@@ -381,8 +380,7 @@ fn grapheme_bounds(line: &Line<'_>, col: u16) -> Range<u16> {
         })
 }
 
-/// Columns of the word at `col`, or of the single grapheme there when it is whitespace or a
-/// delimiter.
+/// Columns of the word at `col`, or of the grapheme there if it is whitespace or a delimiter.
 fn word_bounds(line: &Line<'_>, col: u16) -> Range<u16> {
     let cells: Vec<_> = cells(line).collect();
     let end_of = |(x, width, _): (u16, u16, &str)| x.saturating_add(width);

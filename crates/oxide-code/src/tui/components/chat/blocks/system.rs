@@ -1,5 +1,5 @@
-//! Slash-command output block — `▎` left-bar in `accent` + body in `text`. Errors use
-//! [`super::ErrorBlock`] so info output is visually distinct from failures.
+//! Slash-command output block: an `accent` `▎` bar beside the body in `text`. Errors use
+//! [`super::ErrorBlock`], which keeps failures visually distinct from this output.
 
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
@@ -40,7 +40,7 @@ impl ChatBlock for SystemMessageBlock {
             out.extend(wrap_line(line, width, indent, Some(&cont_prefix)));
         }
         if out.is_empty() {
-            // Empty content → bare bar so the block stays visible rather than silently dropped.
+            // Empty content renders a bare bar, so the block stays visible.
             out.push(Line::from(Span::styled(
                 TOOL_BORDER_PREFIX.to_owned(),
                 bar_style,
@@ -100,7 +100,7 @@ mod tests {
 
     #[test]
     fn render_trailing_newline_does_not_emit_extra_blank_row() {
-        // Pin `str::lines()` semantics — `split('\n')` would emit an extra empty trailing row.
+        // Pins `str::lines()` semantics, where `split('\n')` would emit an extra empty last row.
         let theme = Theme::default();
         let block = SystemMessageBlock::new(indoc! {"
             alpha

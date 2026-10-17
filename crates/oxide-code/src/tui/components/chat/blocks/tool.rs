@@ -1,9 +1,6 @@
-//! Tool call and result blocks. The left-edge bar visually couples a call to its output and
-//! color-codes success / error; this is the only chat block that keeps it, so the bar / border
-//! helpers live here rather than in the trait module.
-//!
-//! Result rendering is per-variant via [`ToolResultView`] — default is truncated text; structured
-//! tools (Edit, Read, Grep, Glob, Tasks) get richer bodies in sibling modules under [`tool`].
+//! Tool call and result blocks. A left-edge bar couples each call to its result and takes the
+//! error color when the tool fails. Each [`ToolResultView`] variant renders its body in a child
+//! module, and unstructured output renders as truncated text.
 
 pub(super) mod bordered_row;
 mod diff;
@@ -74,7 +71,7 @@ impl ChatBlock for ToolCallBlock {
 
 // ── Tool Result ──
 
-/// Tool-call outcome — indicator (✓ / ✗), label, and per-view body.
+/// Tool-call outcome: a ✓ or ✗ indicator, the label, and the per-view body.
 pub(crate) struct ToolResultBlock {
     label: String,
     view: ToolResultView,
@@ -95,8 +92,6 @@ impl ChatBlock for ToolResultBlock {
     fn render(&self, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
         let mut out = Vec::new();
         render_status_line(&mut out, ctx, &self.label, self.is_error);
-        // Per-variant body dispatch — each tool's structured renderer owns its own gutter sizing,
-        // truncation footer, and overflow rules. The `Text` arm is the catch-all fallback.
         match &self.view {
             ToolResultView::Text { content } => {
                 text::render(&mut out, ctx, content, &self.label, self.is_error);
@@ -200,7 +195,7 @@ mod tests {
 
     #[test]
     fn truncate_to_bytes_respects_char_boundary() {
-        // Each `中` is 3 bytes; cutting at byte 5 without `floor_char_boundary` would split a
+        // Each `中` is 3 bytes, so cutting at byte 5 without `floor_char_boundary` would split a
         // codepoint and panic on `&s[..5]`. Rounding down to byte 3 yields one `中` + `...`.
         let input = "中中中中";
         let result = truncate_to_bytes(input, 5);

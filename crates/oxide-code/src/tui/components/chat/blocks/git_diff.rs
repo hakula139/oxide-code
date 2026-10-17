@@ -1,5 +1,5 @@
-//! `git diff` block — Edit-tool diff aesthetic with line-number gutter. Reuses `numbered_row`
-//! / `bordered_row` from the tool tree; raw text parses lazily on `render`.
+//! `/diff` output block, drawn like an Edit-tool diff with a line-number gutter. It reuses the
+//! tool tree's `numbered_row` and `bordered_row`, and parses the raw text lazily on `render`.
 
 use ratatui::style::Modifier;
 use ratatui::text::Line;
@@ -9,6 +9,7 @@ use super::{BlockKind, ChatBlock, RenderCtx};
 
 // ── GitDiffBlock ──
 
+/// Output of `/diff`, kept as raw `git diff` text.
 pub(crate) struct GitDiffBlock {
     text: String,
 }
@@ -300,7 +301,7 @@ mod tests {
 
     #[test]
     fn render_skips_index_and_marker_lines() {
-        // `index`, `--- a/X`, `+++ b/X` are all skipped — the path header already names the file.
+        // `index`, `--- a/X`, and `+++ b/X` are skipped, since the path header names the file.
         let theme = Theme::default();
         let block = GitDiffBlock::new(indoc! {"
             diff --git a/foo.rs b/foo.rs
@@ -387,8 +388,8 @@ mod tests {
             +only added
         "});
         let lines = block.render(&ctx_at(80, &theme));
-        // Layout: [path header, hunk header, add row]. Inner spans
-        // (number, separator, text) carry the bg; the bar stays clear.
+        // Layout: [path header, hunk header, add row]. The number, separator, and text spans carry
+        // the bg, while the bar stays clear.
         let add_row = lines.last().expect("at least one row");
         let bgs: Vec<_> = add_row.spans.iter().map(|s| s.style.bg).collect();
         assert_eq!(bgs[0], None, "bar prefix must stay clear");
@@ -421,8 +422,7 @@ mod tests {
 
     #[test]
     fn render_untracked_section_outside_hunks_emits_plain_rows() {
-        // Indented untracked paths must not paint as context rows
-        // even though their leading spaces look like one.
+        // Indented untracked paths look like context rows but must not paint as one.
         let theme = Theme::default();
         let block = GitDiffBlock::new(indoc! {"
             Untracked files:
@@ -442,7 +442,7 @@ mod tests {
 
     #[test]
     fn render_truncation_footer_after_hunks_renders_dim() {
-        // Truncation footer must read as a dim row, not +/-/ctx.
+        // The truncation footer reads as a dim row, outside any hunk.
         let theme = Theme::default();
         let block = GitDiffBlock::new(indoc! {"
             diff --git a/x b/x
@@ -459,7 +459,7 @@ mod tests {
 
     #[test]
     fn render_walks_line_numbers_per_hunk_starts() {
-        // Numbers come from the `@@` header, not 1-based per chunk.
+        // Line numbers start from the `@@` header's line.
         let theme = Theme::default();
         let block = GitDiffBlock::new(indoc! {"
             diff --git a/x b/x
@@ -480,8 +480,8 @@ mod tests {
 
     #[test]
     fn render_advances_line_numbers_through_context_rows() {
-        // Pin both increments via one fixture: `+third` rides new_ln
-        // (bumped 2 → 3 by context), `-fourth` rides old_ln (1 → 2).
+        // One fixture pins both increments: `+third` takes new_ln (bumped 2 → 3 by the context
+        // row), and `-fourth` takes old_ln (1 → 2).
         let theme = Theme::default();
         let block = GitDiffBlock::new(indoc! {"
             diff --git a/x b/x
@@ -502,8 +502,8 @@ mod tests {
 
     #[test]
     fn render_corrupt_hunk_body_falls_through_to_defensive_row() {
-        // Corrupt body line → plain bordered row, no number, no bg,
-        // and no number-bump (else the rest of the hunk drifts).
+        // A corrupt body line renders as a plain bordered row with no number or bg, and it bumps
+        // no number, so the rest of the hunk keeps its numbering.
         let theme = Theme::default();
         let block = GitDiffBlock::new(indoc! {"
             diff --git a/x b/x
@@ -530,7 +530,7 @@ mod tests {
             );
         }
 
-        // Surrounding `+` rows keep 1 and 2 — corrupt line consumed no number slot on either side.
+        // The surrounding `+` rows keep 1 and 2, since the corrupt line takes no number.
         let plus_numbers: Vec<String> = [&body[0], &body[2]]
             .iter()
             .map(|line| line.spans[1].content.trim().to_owned())
@@ -542,7 +542,7 @@ mod tests {
 
     #[test]
     fn block_kind_is_other() {
-        // `Result` kind would force blank-before spacing; pin `Other`.
+        // A `Result` kind would hug a tool call above the diff, so the block stays `Other`.
         let block = GitDiffBlock::new("diff --git a/x b/x\n");
         assert!(matches!(block.block_kind(), BlockKind::Other));
     }

@@ -1,4 +1,4 @@
-//! `read` tool body — line-numbered excerpt with a path / range header.
+//! `read` tool body: a line-numbered excerpt under a path and range header.
 
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;

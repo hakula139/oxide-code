@@ -1,4 +1,4 @@
-//! Post-`/compact` boundary block, and the summary streaming in before it.
+//! Compaction boundary block, and the summary streaming in before it.
 
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
@@ -12,7 +12,7 @@ use crate::tui::wrap::wrap_line;
 /// Header over a summary still streaming in.
 const STREAMING_HEADER: &str = "Summarizing the conversation...";
 
-/// Boundary marker rendered after `/compact`.
+/// Boundary marker where a manual or automatic compaction replaced the earlier messages.
 pub(crate) struct CompactedBlock {
     header: String,
     summary: String,
@@ -146,7 +146,6 @@ mod tests {
             text.contains("Compacted 4 messages"),
             "header text: {text:?}"
         );
-        // Header span carries BOLD.
         let header_span = &head.spans[1];
         assert!(
             header_span.style.add_modifier.contains(Modifier::BOLD),

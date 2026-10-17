@@ -1,5 +1,5 @@
-//! `glob` body — `pattern (visible of total)` header + flat path
-//! list. Footer flags the producer's `MAX_RESULTS` cap when hit.
+//! `glob` body: a `pattern (visible of total)` header over a flat path list. The footer flags
+//! the tool's `MAX_RESULTS` cap when the search hits it.
 
 use ratatui::text::Line;
 
@@ -20,7 +20,7 @@ pub(super) fn render(
     let border_style = border_style_for(ctx.theme, is_error);
 
     if files.is_empty() {
-        // Skip the header — "No files found" already labels the result.
+        // "No files found" already labels the result, so the header is skipped.
         bordered_row::render(out, ctx, border_style, "No files found", ctx.theme.dim());
         return;
     }
@@ -48,7 +48,7 @@ pub(super) fn render(
 }
 
 /// Footer combining TUI-side row hiding with the tool's `MAX_RESULTS` cap. Counts live in the
-/// header; the footer flags the cap with grep's `(limit reached)` token.
+/// header, and the footer flags the cap with grep's `(limit reached)` token.
 fn footer_text(hidden: usize, truncated_by_tool: bool) -> Option<String> {
     let noun = |n: usize| if n == 1 { "file" } else { "files" };
     match (hidden, truncated_by_tool) {
@@ -76,7 +76,7 @@ mod tests {
 
     #[test]
     fn render_empty_files_shows_no_files_found_row() {
-        // Empty result still emits a body row; pattern header is suppressed.
+        // An empty result still emits a body row but drops the pattern header.
         let theme = Theme::default();
         let ctx = RenderCtx {
             width: 80,

@@ -236,8 +236,8 @@ impl App {
         old_id
     }
 
-    /// Repaints chat after `/compact` with one boundary block. Queued prompts survive because the
-    /// session identity stays the same.
+    /// Repaints chat with one boundary block after a manual or automatic compaction. Queued
+    /// prompts survive because the session identity stays the same.
     fn apply_session_compacted(
         &mut self,
         summary: &str,

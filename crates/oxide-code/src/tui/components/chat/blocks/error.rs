@@ -5,8 +5,8 @@ use ratatui::text::Line;
 use super::{ChatBlock, RenderCtx, push_icon_wrapped};
 use crate::tui::glyphs::{ERROR_CONT, ERROR_PREFIX};
 
-/// A fatal agent or API error. Multi-line messages render one logical line per row, the icon
-/// on the first and a width-aligned indent on the rest.
+/// An error shown in the chat, from the engine, a slash command, or the app. Multi-line messages
+/// render one logical line per row, the icon on the first and a width-aligned indent on the rest.
 pub(crate) struct ErrorBlock {
     message: String,
 }
@@ -77,7 +77,7 @@ mod tests {
         // Joining them at render time would collapse the bullets into one wrapped line.
         let theme = Theme::default();
         let block = ErrorBlock::new(indoc! {"
-            Unknown model: `gpt-4`. Supported models:
+            Unknown model: `gpt-4`. Valid:
 
             - `claude-opus-5-5` — Claude Opus 5.5
             - `claude-haiku-5-5` — Claude Haiku 5.5"
@@ -90,7 +90,7 @@ mod tests {
         assert_eq!(
             bodies,
             vec![
-                "Unknown model: `gpt-4`. Supported models:",
+                "Unknown model: `gpt-4`. Valid:",
                 "",
                 "- `claude-opus-5-5` — Claude Opus 5.5",
                 "- `claude-haiku-5-5` — Claude Haiku 5.5",

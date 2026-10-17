@@ -199,7 +199,7 @@ pub(super) struct StatusLineState<'a> {
     pub(super) effort: Option<Effort>,
     pub(super) title: Option<&'a str>,
     pub(super) usage: Option<UsageSnapshot>,
-    /// Already tilde-expanded, so the renderer must not substitute `~` again.
+    /// Already shortened with `~` by `tildify`, so the renderer must not substitute it again.
     pub(super) cwd: &'a str,
     pub(super) git_branch: Option<&'a str>,
     pub(super) pull_request: Option<&'a PullRequest>,
@@ -418,8 +418,7 @@ fn compact_tokens(tokens: u32) -> String {
 }
 
 fn format_cost(cost: f64) -> String {
-    // Switch to two-decimal display once `{cost:.2}` would round up to `$1.00` so the bar reads
-    // `$1.00` instead of `$0.9999` at the boundary.
+    // Two decimals take over once `{cost:.2}` rounds up to `$1.00`, so `$0.9999` reads `$1.00`.
     if cost >= 0.995 {
         format!("${cost:.2}")
     } else {
