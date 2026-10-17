@@ -52,6 +52,7 @@ impl App {
                 self.enter_idle();
             }
             Event::AutoCompactionStarted => {
+                self.auto_compacting = true;
                 self.set_active_status(Status::Compacting);
                 self.input.set_enabled(false);
             }
@@ -105,7 +106,11 @@ impl App {
             } => self.apply_signed_out(removed, auth, fallback_error),
             Event::TurnFailed(msg) => {
                 self.chat.push_error(&msg);
-                self.finish_turn();
+                if self.auto_compacting {
+                    self.return_unsent_prompt();
+                } else {
+                    self.finish_turn();
+                }
             }
             Event::Error(msg) | Event::RenameFailed(msg) => self.chat.push_error(&msg),
             Event::ApprovalRequested { id, preview, grant } => {
@@ -158,6 +163,20 @@ impl App {
         }
     }
 
+    /// Ends a prompt whose automatic compaction failed before it was sent. Goes idle without
+    /// starting the queue, and hands the prompt back: into the empty input when nothing else is
+    /// queued, so Enter sends it again, or else to the queue head, so it still runs first.
+    fn return_unsent_prompt(&mut self) {
+        if let Some(prompt) = self.active_prompt.take() {
+            if self.pending_prompts.is_empty() && self.input.is_empty() {
+                self.input.set_text(&prompt);
+            } else {
+                self.pending_prompts.push_front(prompt);
+            }
+        }
+        self.enter_idle();
+    }
+
     /// Mid-session resume: rebinds the session and rebuilds chat from the target transcript.
     fn apply_session_resumed(
         &mut self,
@@ -206,8 +225,10 @@ impl App {
         self.status_bar.set_usage(None);
         self.chat
             .push_compacted_block(pre_count, instructions, summary.to_owned());
+        self.auto_compacting = false;
         if automatic && let Some(prompt) = &self.active_prompt {
-            self.chat.push_user_message(prompt.clone());
+            self.chat
+                .push_user_message(slash::unescape_literal(prompt).to_owned());
         }
         self.clear_modals();
         if !automatic {
@@ -306,6 +327,7 @@ impl App {
     /// Resets to idle, clears orphan calls, and re-enables input. Queued prompts stay queued, and
     /// the ended turn no longer holds any of them.
     fn enter_idle(&mut self) {
+        self.auto_compacting = false;
         self.chat.clear_pending_calls();
         self.forwarded_prompts = 0;
         self.status_bar.set_status(Status::Idle);
@@ -317,7 +339,7 @@ impl App {
         if let Some(queued) = self.pending_prompts.pop_front() {
             let prompt = slash::unescape_literal(&queued).to_owned();
             self.chat.push_user_message(prompt.clone());
-            self.active_prompt = Some(prompt.clone());
+            self.active_prompt = Some(queued);
             self.start_turn(Op::Prompt(prompt));
         }
     }
@@ -1042,9 +1064,9 @@ mod tests {
     async fn handle_session_compacted_automatic_replays_active_prompt_after_summary() {
         let (mut app, mut rx, _event_tx) = test_app(None);
 
-        app.dispatch_action(Action::Submit("active question".to_owned()));
+        app.dispatch_action(Action::Submit("//etc/hosts".to_owned()));
         let forwarded = rx.recv().await.expect("prompt reaches the engine");
-        assert_eq!(forwarded, Op::Prompt("active question".to_owned()));
+        assert_eq!(forwarded, Op::Prompt("/etc/hosts".to_owned()));
         app.handle_engine_event(Event::AutoCompactionStarted);
 
         app.handle_engine_event(Event::SessionCompacted {
@@ -1059,7 +1081,10 @@ mod tests {
         assert!(!app.input.is_enabled());
         let text = rendered_text(&mut app, 80, 10);
         assert!(text.contains("auto summary"));
-        assert!(text.contains("active question"));
+        assert!(
+            text.contains("/etc/hosts") && !text.contains("//etc"),
+            "the replay shows the literal text: {text}"
+        );
     }
 
     #[test]
@@ -1476,6 +1501,99 @@ mod tests {
             app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
             vec!["second".to_owned()],
         );
+    }
+
+    #[tokio::test]
+    async fn handle_turn_failed_during_auto_compaction_returns_the_unsent_prompt_to_the_input() {
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("//etc/hosts".to_owned()));
+        rx.recv().await.expect("prompt forwarded");
+        app.handle_engine_event(Event::AutoCompactionStarted);
+
+        app.handle_engine_event(Event::TurnFailed(
+            "Auto-compaction failed: summarizer down. The prompt was not sent.".to_owned(),
+        ));
+
+        assert!(app.chat.last_is_error());
+        assert_eq!(app.status_bar.status(), &Status::Idle);
+        assert!(app.input.is_enabled());
+        assert_eq!(
+            app.input.lines(),
+            ["//etc/hosts".to_owned()],
+            "Enter sends the prompt again as typed",
+        );
+        assert!(app.pending_prompts.is_empty());
+        assert!(
+            rx.try_recv().is_err(),
+            "nothing reaches the engine until the user sends"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_turn_failed_during_auto_compaction_returns_the_prompt_to_the_held_queue_head() {
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("active".to_owned()));
+        rx.recv().await.expect("prompt forwarded");
+        app.handle_engine_event(Event::AutoCompactionStarted);
+        app.dispatch_action(Action::Submit("queued".to_owned()));
+
+        app.handle_engine_event(Event::TurnFailed(
+            "Auto-compaction failed: summarizer down. The prompt was not sent.".to_owned(),
+        ));
+
+        assert_eq!(app.status_bar.status(), &Status::Idle);
+        assert!(app.input.is_empty());
+        assert_eq!(
+            app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
+            ["active".to_owned(), "queued".to_owned()],
+            "the unsent prompt still runs first",
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "nothing retries compaction until the user sends again"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_turn_failed_during_auto_compaction_holds_the_queue_after_an_untyped_prompt() {
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_op(Op::Prompt(
+            "Create AGENTS.md for this repository.".to_owned(),
+        ));
+        rx.recv().await.expect("prompt forwarded");
+        app.handle_engine_event(Event::AutoCompactionStarted);
+        app.pending_prompts.push_back("queued".to_owned());
+
+        app.handle_engine_event(Event::TurnFailed(
+            "Auto-compaction failed: summarizer down. The prompt was not sent.".to_owned(),
+        ));
+
+        assert!(app.input.is_empty(), "a command's prompt was never typed");
+        assert_eq!(
+            app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
+            ["queued".to_owned()],
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn handle_turn_failed_after_auto_compaction_succeeded_starts_the_queue_head() {
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.dispatch_action(Action::Submit("active".to_owned()));
+        rx.recv().await.expect("prompt forwarded");
+        app.handle_engine_event(Event::AutoCompactionStarted);
+        app.handle_engine_event(Event::SessionCompacted {
+            summary: "auto summary".to_owned(),
+            pre_count: 4,
+            instructions: None,
+            automatic: true,
+        });
+        app.pending_prompts.push_back("queued".to_owned());
+
+        app.handle_engine_event(Event::TurnFailed("API failed".to_owned()));
+
+        assert_eq!(rx.try_recv().unwrap(), Op::Prompt("queued".to_owned()));
+        assert!(app.input.is_empty(), "the sent prompt is not handed back");
     }
 
     #[tokio::test]

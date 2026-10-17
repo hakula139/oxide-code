@@ -47,8 +47,12 @@ pub(crate) struct App {
     ops: mpsc::Sender<Op>,
     /// Opens a sign-in URL in the system browser. Tests replace it so they never launch one.
     open_browser: fn(&str) -> std::io::Result<()>,
-    /// Prompt already painted for the in-flight turn. Replayed if auto-compaction clears chat.
+    /// Prompt already painted for the in-flight turn, kept as typed. Replayed if auto-compaction
+    /// clears chat, and handed back if auto-compaction fails before the prompt is sent.
     active_prompt: Option<String>,
+    /// Whether an automatic compaction runs ahead of the active prompt, so a failure means the
+    /// engine never sent it.
+    auto_compacting: bool,
     /// FIFO of prompts submitted mid-turn, kept as typed so Esc restores a `//` escape. Each stays
     /// with the TUI until the engine confirms it with `PromptDrained` or it starts its own turn.
     pending_prompts: VecDeque<String>,
@@ -107,6 +111,7 @@ impl App {
             ops,
             open_browser: |url| open::that_detached(url),
             active_prompt: None,
+            auto_compacting: false,
             pending_prompts: VecDeque::new(),
             forwarded_prompts: 0,
             modals: ModalStack::new(),

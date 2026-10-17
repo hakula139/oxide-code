@@ -128,9 +128,8 @@ fn auto_compaction_summarizes_from_the_cached_conversation() {
     let output = live.send(
         repl,
         &[
-            "Read log-a.txt in full, then reply with only its final marker.",
-            "Read log-b.txt in full, then reply with only its final marker.",
-            "Which two final markers did you report so far?",
+            "Read log-a.txt and log-b.txt in full, then reply with only their final markers.",
+            "Which two final markers did you report?",
         ],
     );
 
@@ -139,7 +138,7 @@ fn auto_compaction_summarizes_from_the_cached_conversation() {
     let compact = session
         .iter()
         .position(|entry| entry["type"] == "compact")
-        .expect("the third prompt triggered auto-compaction");
+        .expect("the second prompt triggered auto-compaction");
     let before = usage_records(&session[..compact]);
     let after = usage_records(&session[compact..]);
     let (Some(last), [summary, next, ..]) = (before.last(), after.as_slice()) else {

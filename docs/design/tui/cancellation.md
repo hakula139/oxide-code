@@ -8,7 +8,7 @@ The TUI exposes these controls and behaviors:
 
 - **Cancel and exit.** Esc / Ctrl+C cancels active work. Dual-press Ctrl+C exits from idle, and Ctrl+D exits when idle with an empty input buffer.
 - **Queue input.** Enter while busy appends to `App::pending_prompts: VecDeque<String>`, rendered as a dim preview above the input, and forwards the prompt as `Op::Queue`.
-- **Drain input.** `agent_turn` splices each forwarded prompt into `messages` as a trailing User message at its next round boundary and confirms it with `Event::PromptDrained`, so the model sees new instructions in the next API request without aborting in-flight work. A turn that ends first drops the prompts it still holds, and once it completes or fails the TUI submits the queue head as the next turn.
+- **Drain input.** `agent_turn` splices each forwarded prompt into `messages` as a trailing User message at its next round boundary and confirms it with `Event::PromptDrained`, so the model sees new instructions in the next API request without aborting in-flight work. A turn that ends first drops the prompts it still holds, and once it completes or fails the TUI submits the queue head as the next turn. A prompt whose automatic compaction failed was never sent, so the TUI hands it back to the user and leaves the queue waiting.
 - **Interrupt work.** Cancellation drops the `agent_turn` future: reqwest closes the SSE stream, the bash tool kills the command's process tree, and a dim italic `(interrupted)` marker lands in chat. The transcript then ends on a `[Request interrupted by user]` user message, so the model knows the user abandoned that prompt.
 - **Show status.** The status bar colocates the active-key hint with the spinner: `Streaming · Esc to interrupt` / `Running {tool} · Esc to interrupt` / `Cancelling` / `Press Ctrl+C again to exit`.
 
@@ -32,7 +32,7 @@ The picks lean toward the Codex precedent on most surfaces, since it is the one 
 
 7. **Cancellation rides the existing `Event` channel.** `Event::Cancelled` covers both the TUI and `StdioSink`. No new event channel.
 
-8. **One terminal event per operation.** A prompt ends with exactly one of `TurnComplete`, `TurnFailed`, or `Cancelled`. `/compact` ends with `SessionCompacted`, `TurnFailed`, or `Cancelled`, and `/resume` with `SessionResumed` or `TurnFailed`. Only these run the TUI teardown that submits the queue head. `/clear` ends with `SessionRolled`, `/rename` with `SessionTitleUpdated` or `RenameFailed`, and `/model` and `/effort` with `ConfigChanged`, which counts as a failure when the model has no tier for an `/effort` pick. `TurnEnd::of` maps an op and an event to how the op ended, so the REPL and headless drivers stop rendering at the end of the op they sent. `Error` is a notice for failures that leave the operation running, such as a failed session write or automatic compaction, and `Retrying` is a dim notice for a request the client sends again.
+8. **One terminal event per operation.** A prompt ends with exactly one of `TurnComplete`, `TurnFailed`, or `Cancelled`. `/compact` ends with `SessionCompacted`, `TurnFailed`, or `Cancelled`, and `/resume` with `SessionResumed` or `TurnFailed`. Only these run the TUI teardown that submits the queue head. `/clear` ends with `SessionRolled`, `/rename` with `SessionTitleUpdated` or `RenameFailed`, and `/model` and `/effort` with `ConfigChanged`, which counts as a failure when the model has no tier for an `/effort` pick. `TurnEnd::of` maps an op and an event to how the op ended, so the REPL and headless drivers stop rendering at the end of the op they sent. `Error` is a notice for failures that leave the operation running, such as a failed session write, and `Retrying` is a dim notice for a request the client sends again.
 
 ## Sources
 
@@ -48,9 +48,9 @@ The picks lean toward the Codex precedent on most surfaces, since it is the one 
 - `crates/oxide-code/src/tool.rs`: `Tool::run` drop contract, `write_tracked`.
 - `crates/oxide-code/src/tool/bash.rs`: `ShellTree`, which kills the shell's process group (Unix) or Job Object (Windows) when a call times out or drops before finishing.
 - `crates/oxide-code/src/tui/action.rs`: `Action::ConfirmExit`.
-- `crates/oxide-code/src/tui/app.rs`: `App::pending_prompts` / `forwarded_prompts`.
+- `crates/oxide-code/src/tui/app.rs`: `App::pending_prompts` / `forwarded_prompts`, and `App::active_prompt` / `auto_compacting`.
 - `crates/oxide-code/src/tui/app/dispatch.rs`: `dispatch_op` / `start_turn` / `forward_queued_prompts`, `expire_armed_exit`.
-- `crates/oxide-code/src/tui/app/events.rs`: `finish_turn`, `finalize_idle` / `enter_idle` / `drain_pending_prompt`, `set_active_status`.
+- `crates/oxide-code/src/tui/app/events.rs`: `finish_turn`, `return_unsent_prompt`, `finalize_idle` / `enter_idle` / `drain_pending_prompt`, `set_active_status`.
 - `crates/oxide-code/src/tui/components/chat.rs`: `ChatView::clear_pending_calls`, which evicts orphan tool calls at turn boundaries, and `ChatView::load_history`, which shows a resumed interruption as the `(interrupted)` line.
 - `crates/oxide-code/src/tui/components/chat/blocks/interrupted.rs`: `InterruptedMarker` block.
 - `crates/oxide-code/src/tui/components/input.rs`: Ctrl+D POSIX gate, Esc-pop, `set_text`.

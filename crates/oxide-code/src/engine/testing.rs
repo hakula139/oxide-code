@@ -1,6 +1,6 @@
-//! Test-only engine fixtures: [`Engine`] builders and mocked replies, plus the turn fixtures the
-//! turn, dispatch, and compaction tests share. Child of `engine` so it can build the private
-//! fields.
+//! Test-only engine fixtures: [`Engine`] builders and mocked replies, the turn fixtures the turn,
+//! dispatch, and compaction tests share, and the transcripts large enough to compact. Child of
+//! `engine` so it can build the private fields.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
@@ -21,7 +21,7 @@ use crate::client::anthropic::testing::{
 };
 use crate::client::{Response, ResponseEvent, StopDetails, StopReason, Wire};
 use crate::file_tracker::FileTracker;
-use crate::message::{ContentBlock, Message};
+use crate::message::{ContentBlock, Message, Role};
 use crate::model::ModelSpec;
 use crate::permission::{Mode, PermissionClass, Policy};
 use crate::prompt::{self, PromptParts};
@@ -347,4 +347,45 @@ pub(super) fn test_session(dir: &Path) -> SessionHandle {
 /// Handle whose actor channel is closed. Every write returns actor-gone.
 pub(super) fn dead_test_session() -> SessionHandle {
     handle::testing::dead("dead-test-session")
+}
+
+// ── Compaction ──
+
+/// A log of 60 numbered lines ending on `{service}-end`, about 900 rough tokens.
+pub(super) fn service_log(service: &str) -> String {
+    (1..=60)
+        .map(|n| format!("{n:>6}\t2026-10-16 INFO {service} served request {n} in 12 ms\n"))
+        .chain([format!("{service}-end\n")])
+        .collect()
+}
+
+/// A session sized past the compaction floor by its tool results: one prompt, a round that reads
+/// two service logs, and one reply.
+pub(super) fn tool_heavy_transcript() -> Vec<Message> {
+    let read = |id: &str, file: &str| ContentBlock::ToolUse {
+        id: id.to_owned(),
+        name: "read".to_owned(),
+        input: json!({"file_path": format!("/repo/{file}")}),
+    };
+    let log = |id: &str, service: &str| ContentBlock::ToolResult {
+        tool_use_id: id.to_owned(),
+        content: service_log(service),
+        is_error: false,
+    };
+    vec![
+        Message::user("Read log-a.txt and log-b.txt, then reply with the final line of each."),
+        Message {
+            role: Role::Assistant,
+            content: vec![
+                thinking_block("Read both logs."),
+                read("t1", "log-a.txt"),
+                read("t2", "log-b.txt"),
+            ],
+        },
+        Message {
+            role: Role::User,
+            content: vec![log("t1", "alpha"), log("t2", "beta")],
+        },
+        Message::assistant("alpha-end, beta-end"),
+    ]
 }

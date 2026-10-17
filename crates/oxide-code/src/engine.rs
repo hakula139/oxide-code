@@ -849,7 +849,8 @@ mod tests {
 
     use super::testing::{
         MODEL, SESSION_CONTEXT, engine, mount_reply, mount_stalled_reply_once,
-        mount_tool_call_once, request_bodies, system_prompt, until_requested, with_pinned_home,
+        mount_tool_call_once, request_bodies, service_log, system_prompt, tool_heavy_transcript,
+        until_requested, with_pinned_home,
     };
     use super::*;
     use crate::client::anthropic::testing::{
@@ -891,6 +892,15 @@ mod tests {
         }
     }
 
+    /// A prompt that pastes two service logs, long enough that its exchange can compact.
+    fn pasted_logs() -> String {
+        format!(
+            "Why do these logs stop?\n{}{}",
+            service_log("alpha"),
+            service_log("beta")
+        )
+    }
+
     async fn submit(handle: &mut EngineHandle, text: &str) -> Vec<Event> {
         handle.ops.send(Op::Prompt(text.to_owned())).await.unwrap();
         turn_events(&mut handle.events).await
@@ -905,15 +915,6 @@ mod tests {
             .iter()
             .map(|message| message["content"][0]["text"].as_str().unwrap_or_default())
             .collect()
-    }
-
-    fn transcript() -> Vec<Message> {
-        vec![
-            Message::user("one"),
-            Message::assistant("two"),
-            Message::user("three"),
-            Message::assistant("four"),
-        ]
     }
 
     fn auto_compacting_client(base_url: String) -> Client {
@@ -1261,7 +1262,7 @@ mod tests {
             let session_id = engine.session_id().to_owned();
             let mut handle = engine.spawn(&[]);
 
-            submit(&mut handle, "one").await;
+            submit(&mut handle, &pasted_logs()).await;
             submit(&mut handle, "two").await;
             handle
                 .ops
@@ -1395,7 +1396,7 @@ mod tests {
             let session_id = engine.session_id().to_owned();
             let mut handle = engine.spawn(&[]);
 
-            submit(&mut handle, "one").await;
+            submit(&mut handle, &pasted_logs()).await;
             submit(&mut handle, "two").await;
             handle
                 .ops
@@ -1653,7 +1654,7 @@ mod tests {
             let store = test_store(dir.path());
             let mut engine = engine(server.uri(), &store, dir.path()).await;
             engine.client = auto_compacting_client(server.uri());
-            engine.messages = transcript();
+            engine.messages = tool_heavy_transcript();
             engine.last_usage = Some(TokenUsage::new(50_000, 1));
             let mut handle = engine.spawn(&[]);
 
@@ -1698,7 +1699,7 @@ mod tests {
                 mount_stalled_reply_once(&server).await;
                 let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                engine.messages = transcript();
+                engine.messages = tool_heavy_transcript();
                 let EngineHandle {
                     ops,
                     mut events,
@@ -1906,16 +1907,21 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
             engine.client = auto_compacting_client(server.uri());
-            engine.messages = transcript();
+            engine.messages = tool_heavy_transcript();
             engine.last_usage = Some(TokenUsage::new(50_000, 1));
             engine.displayed_usage = engine.last_usage;
             engine.total_estimated_cost_usd = 1.23;
+            engine.auto_compaction_failures = 2;
             let sink = CapturingSink::new();
             let (_ops_tx, mut ops) = crate::protocol::inert_op_channel();
 
             let end = engine.submit_prompt("five", &sink, &mut ops).await;
 
             assert_eq!(end, TurnEnd::Completed);
+            assert_eq!(
+                engine.auto_compaction_failures, 0,
+                "a success resets the breaker"
+            );
             let requests = request_bodies(&server).await;
             assert_eq!(requests.len(), 2);
             assert_eq!(
@@ -1969,6 +1975,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn submit_prompt_fails_without_sending_the_prompt_when_auto_compaction_fails() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            mount_reply(&server, "   ").await;
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let mut engine = engine(server.uri(), &store, dir.path()).await;
+            engine.client = auto_compacting_client(server.uri());
+            engine.messages = tool_heavy_transcript();
+            engine.last_usage = Some(TokenUsage::new(50_000, 1));
+            let sink = CapturingSink::new();
+            let (_ops_tx, mut ops) = crate::protocol::inert_op_channel();
+
+            let end = engine.submit_prompt("five", &sink, &mut ops).await;
+
+            assert_eq!(end, TurnEnd::Failed);
+            assert_eq!(engine.messages, tool_heavy_transcript());
+            assert_eq!(engine.auto_compaction_failures, 1);
+            assert_eq!(
+                request_bodies(&server).await.len(),
+                1,
+                "only the summary request goes out"
+            );
+            let data = store.load_session_data(engine.session_id()).unwrap();
+            assert_eq!(data.messages, [] as [Message; 0]);
+            let events = sink.events();
+            assert!(
+                matches!(
+                    events.as_slice(),
+                    [
+                        Event::AutoCompactionStarted,
+                        Event::SummaryToken(token),
+                        Event::SummaryDiscarded,
+                        Event::UsageUpdated(_),
+                        Event::TurnFailed(error),
+                    ] if token == "   "
+                        && error == "Auto-compaction failed: the model returned an empty summary. \
+                                     The prompt was not sent, so send it again to retry."
+                ),
+                "{events:?}"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn submit_prompt_fails_while_signed_out_without_sending_a_request() {
         with_pinned_home(async {
             let server = MockServer::start().await;
@@ -2005,7 +2057,7 @@ mod tests {
             mount_reply(&server, "manual summary").await;
             let dir = tempfile::tempdir().unwrap();
             let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-            engine.messages = transcript();
+            engine.messages = tool_heavy_transcript();
             engine.displayed_usage = Some(TokenUsage::new(90_000, 9));
             engine.total_estimated_cost_usd = 1.23;
             let sink = CapturingSink::new();
@@ -2068,13 +2120,13 @@ mod tests {
             engine.messages = vec![Message::user("too short")];
             let end = engine.compact(&sink, &mut ops, None).await;
             assert_eq!(end, TurnEnd::Failed);
-            assert_eq!(engine.messages.len(), 1);
+            assert_eq!(engine.messages, [Message::user("too short")]);
 
-            engine.messages = transcript();
+            engine.messages = tool_heavy_transcript();
             ops_tx.send(Op::Interrupt).await.unwrap();
             let end = engine.compact(&sink, &mut ops, None).await;
             assert_eq!(end, TurnEnd::Cancelled);
-            assert_eq!(engine.messages.len(), 4);
+            assert_eq!(engine.messages, tool_heavy_transcript());
 
             engine.session = handle::testing::dead("dead");
             let end = engine.compact(&sink, &mut ops, None).await;
@@ -2083,7 +2135,7 @@ mod tests {
                 TurnEnd::Failed,
                 "an unwritten boundary is a failed compaction"
             );
-            assert_eq!(engine.messages.len(), 4);
+            assert_eq!(engine.messages, tool_heavy_transcript());
 
             let events = sink.events();
             assert!(
@@ -2102,7 +2154,8 @@ mod tests {
                             ..
                         }),
                         Event::TurnFailed(unsaved),
-                    ] if short.starts_with("Compaction failed: session is too short")
+                    ] if short == "Compaction failed: the conversation has about 15 tokens, below \
+                                  the 1000-token minimum"
                         && usage_write.starts_with("Session write failed")
                         && boundary_write == "Session write failed: Session writer task has stopped."
                         && (cost - 0.006).abs() < 1e-12
@@ -2120,7 +2173,7 @@ mod tests {
             let base_url = serve_stalled_summary("partial").await;
             let dir = tempfile::tempdir().unwrap();
             let mut engine = engine(base_url, &test_store(dir.path()), dir.path()).await;
-            engine.messages = transcript();
+            engine.messages = tool_heavy_transcript();
             let sink = CapturingSink::new();
             let (ops_tx, mut ops) = mpsc::channel(1);
             let interrupt_once_streaming = async {
@@ -2136,7 +2189,7 @@ mod tests {
             );
 
             assert_eq!(end, TurnEnd::Cancelled);
-            assert_eq!(engine.messages.len(), 4);
+            assert_eq!(engine.messages, tool_heavy_transcript());
             let events = sink.events();
             assert!(
                 matches!(
@@ -2194,7 +2247,7 @@ mod tests {
                 .await;
             let dir = tempfile::tempdir().unwrap();
             let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-            engine.messages = transcript();
+            engine.messages = tool_heavy_transcript();
             engine.displayed_usage = Some(TokenUsage::new(50_000, 1));
             engine.total_estimated_cost_usd = 1.23;
             let sink = CapturingSink::new();
@@ -2203,7 +2256,7 @@ mod tests {
             let end = engine.compact(&sink, &mut ops, None).await;
 
             assert_eq!(end, TurnEnd::Failed);
-            assert_eq!(engine.messages.len(), 4);
+            assert_eq!(engine.messages, tool_heavy_transcript());
             assert_eq!(engine.displayed_usage, Some(TokenUsage::new(50_000, 1)));
             let expected = 1.23 + 0.006;
             assert!(

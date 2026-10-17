@@ -52,7 +52,7 @@ Bare `/model` and `/effort` open pickers. Both apply on Enter and cancel on Esc.
 
 The pre-compact transcript stays on disk, but resuming via `ox -c` starts from the compacted summary and post-compact tail. The file-change tracker resets on compact, so any `Edit` after `/compact` requires a fresh `Read`. Queued prompts survive the compaction.
 
-`/compact` refuses to run if fewer than 4 messages contain text or if the model returns an empty summary.
+`/compact` refuses a conversation shorter than about 1,000 tokens, counting messages, tool calls, and tool output but not instructions or tool definitions. An empty summary from the model also fails the compaction and leaves the conversation unchanged.
 
 ## Signing In
 
