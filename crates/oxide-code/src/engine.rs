@@ -20,7 +20,7 @@ use tokio::task::JoinHandle;
 use tracing::warn;
 
 use self::abort::TurnAbort;
-use self::compaction::AutoCompact;
+use self::compaction::{AutoCompact, AutoCompactFailures};
 use self::turn::{TurnOutcome, TurnReport};
 use crate::client::TokenUsage;
 use crate::client::anthropic::Client;
@@ -124,7 +124,7 @@ pub(crate) struct Engine {
     cwd: PathBuf,
     /// A TUI is attached, so titles generate in the background.
     interactive: bool,
-    auto_compaction_failures: u8,
+    auto_compaction_failures: AutoCompactFailures,
     last_usage: Option<TokenUsage>,
     displayed_usage: Option<TokenUsage>,
     total_estimated_cost_usd: f64,
@@ -175,7 +175,7 @@ impl Engine {
             compaction: config.compaction,
             cwd,
             interactive,
-            auto_compaction_failures: 0,
+            auto_compaction_failures: AutoCompactFailures::default(),
             last_usage: None,
             displayed_usage: None,
             total_estimated_cost_usd: estimate_cost_usd(&usage),
@@ -590,7 +590,7 @@ impl Engine {
             },
             "config-changed",
         );
-        compaction::reset_auto_compact_failures(&mut self.auto_compaction_failures, sink);
+        self.auto_compaction_failures.reset(sink);
         self.emit_usage_update(sink);
     }
 
@@ -700,7 +700,7 @@ impl Engine {
 
     /// Forgets the usage and auto-compaction failures of a transcript the session no longer sends.
     fn reset_context_usage(&mut self, sink: &dyn EventSink) {
-        compaction::reset_auto_compact_failures(&mut self.auto_compaction_failures, sink);
+        self.auto_compaction_failures.reset(sink);
         self.last_usage = None;
         self.displayed_usage = None;
     }
@@ -1954,7 +1954,7 @@ mod tests {
             engine.last_usage = Some(TokenUsage::new(50_000, 1));
             engine.displayed_usage = engine.last_usage;
             engine.total_estimated_cost_usd = 1.23;
-            engine.auto_compaction_failures = 2;
+            engine.auto_compaction_failures = AutoCompactFailures::new(2);
             let sink = CapturingSink::new();
             let (_ops_tx, mut ops) = crate::protocol::inert_op_channel();
 
@@ -1962,8 +1962,9 @@ mod tests {
 
             assert_eq!(end, TurnEnd::Completed);
             assert_eq!(
-                engine.auto_compaction_failures, 0,
-                "a success resets the breaker"
+                engine.auto_compaction_failures,
+                AutoCompactFailures::default(),
+                "a success resets the failure count"
             );
             let requests = request_bodies(&server).await;
             assert_eq!(requests.len(), 2);
@@ -2035,7 +2036,7 @@ mod tests {
 
             assert_eq!(end, TurnEnd::Failed);
             assert_eq!(engine.messages, tool_heavy_transcript());
-            assert_eq!(engine.auto_compaction_failures, 1);
+            assert_eq!(engine.auto_compaction_failures, AutoCompactFailures::new(1));
             assert_eq!(
                 request_bodies(&server).await.len(),
                 1,
@@ -2103,7 +2104,7 @@ mod tests {
             engine.messages = tool_heavy_transcript();
             engine.displayed_usage = Some(TokenUsage::new(90_000, 9));
             engine.total_estimated_cost_usd = 1.23;
-            engine.auto_compaction_failures = 3;
+            engine.auto_compaction_failures = AutoCompactFailures::new(3);
             let sink = CapturingSink::new();
             let (_ops_tx, mut ops) = crate::protocol::inert_op_channel();
 
@@ -2130,7 +2131,10 @@ mod tests {
                 "the compacted transcript starts from a fresh user context"
             );
             assert!(engine.prompt_unrecorded);
-            assert_eq!(engine.auto_compaction_failures, 0);
+            assert_eq!(
+                engine.auto_compaction_failures,
+                AutoCompactFailures::default()
+            );
             let events = sink.events();
             let [
                 Event::SummaryToken(streamed),
@@ -2385,15 +2389,19 @@ mod tests {
             let clear_sink = CapturingSink::new();
             let resume_sink = CapturingSink::new();
 
-            engine.auto_compaction_failures = 3;
+            engine.auto_compaction_failures = AutoCompactFailures::new(3);
             engine.clear(&clear_sink).await;
             let after_clear = engine.auto_compaction_failures;
-            engine.auto_compaction_failures = 3;
+            engine.auto_compaction_failures = AutoCompactFailures::new(3);
             engine
                 .resume(&resume_sink, ResumeTarget::Path(target_path))
                 .await;
 
-            assert_eq!((after_clear, engine.auto_compaction_failures), (0, 0));
+            assert_eq!(after_clear, AutoCompactFailures::default());
+            assert_eq!(
+                engine.auto_compaction_failures,
+                AutoCompactFailures::default()
+            );
             let cleared = clear_sink.events();
             assert!(
                 matches!(
@@ -2572,7 +2580,7 @@ mod tests {
             let last_usage = TokenUsage::new(100_000, 10);
             let displayed_usage = TokenUsage::new(90_000, 9);
             engine.messages = vec![Message::user("still here")];
-            engine.auto_compaction_failures = 2;
+            engine.auto_compaction_failures = AutoCompactFailures::new(2);
             engine.last_usage = Some(last_usage);
             engine.displayed_usage = Some(displayed_usage);
             engine.total_estimated_cost_usd = 1.23;
@@ -2586,7 +2594,7 @@ mod tests {
 
             assert_eq!(engine.session.session_id(), original_id);
             assert_eq!(engine.messages.len(), 1);
-            assert_eq!(engine.auto_compaction_failures, 2);
+            assert_eq!(engine.auto_compaction_failures, AutoCompactFailures::new(2));
             assert_eq!(engine.last_usage, Some(last_usage));
             assert_eq!(engine.displayed_usage, Some(displayed_usage));
             assert!((engine.total_estimated_cost_usd - 1.23).abs() < f64::EPSILON);
@@ -2777,19 +2785,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_model_resets_auto_compaction_breaker() {
+    async fn set_model_resumes_paused_auto_compaction() {
         with_pinned_home(async {
             let server = MockServer::start().await;
             let dir = tempfile::tempdir().unwrap();
             let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-            engine.auto_compaction_failures = 3;
+            engine.auto_compaction_failures = AutoCompactFailures::new(3);
             engine.last_usage = Some(TokenUsage::new(100_000, 1));
             engine.total_estimated_cost_usd = 1.23;
             let sink = CapturingSink::new();
 
             engine.set_model(&sink, None, Some(Effort::Xhigh));
 
-            assert_eq!(engine.auto_compaction_failures, 0);
+            assert_eq!(
+                engine.auto_compaction_failures,
+                AutoCompactFailures::default()
+            );
             assert_eq!(engine.last_usage, Some(TokenUsage::new(100_000, 1)));
             assert!(
                 (engine.total_estimated_cost_usd - 1.23).abs() < f64::EPSILON,

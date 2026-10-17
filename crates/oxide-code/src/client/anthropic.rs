@@ -212,9 +212,10 @@ impl Client {
             None => messages.to_vec(),
         };
 
+        // The fingerprint skips the user context, which Claude Code marks as a meta message.
         let attribution = self
             .attributes(true, auth.kind())
-            .then(|| attribution_text(first_user_text(&effective_messages), self.is_first_party));
+            .then(|| attribution_text(first_user_text(messages), self.is_first_party));
 
         let (static_sections, dynamic_sections) = split_at_boundary(system_sections);
         let static_joined = static_sections.join("\n\n");
@@ -1089,7 +1090,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_message_with_user_context_emits_leading_synthetic_user_message() {
+    async fn stream_message_with_user_context_prepends_it_and_fingerprints_the_prompt() {
+        let prompt = "Say 'hello' and nothing else.";
+        let context = "<system-reminder>CLAUDE.md content here</system-reminder>";
         let server = MockServer::start().await;
         let body_sink: Captured<String> = captured();
         let sink_clone = std::sync::Arc::clone(&body_sink);
@@ -1107,12 +1110,7 @@ mod tests {
         let client = test_client(server.uri(), api_key(), TEST_MODEL);
         collect_events(
             client
-                .stream_message(
-                    &[Message::user("user-question")],
-                    &[],
-                    Some("<system-reminder>CLAUDE.md content here</system-reminder>"),
-                    &[],
-                )
+                .stream_message(&[Message::user(prompt)], &[], Some(context), &[])
                 .unwrap(),
         )
         .await
@@ -1120,16 +1118,20 @@ mod tests {
 
         let body = body_sink.lock().unwrap().clone().expect("body captured");
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            v["system"][0]["text"],
+            format!(
+                "x-anthropic-billing-header: cc_version={CLAUDE_CLI_VERSION}.{}; cc_entrypoint=cli;",
+                billing::compute_fingerprint(prompt, CLAUDE_CLI_VERSION),
+            ),
+        );
         let messages = v["messages"].as_array().expect("messages array");
         assert_eq!(messages.len(), 2, "user_context prepends: {body}");
-        assert_eq!(messages[0]["role"], "user");
-        assert!(
-            messages[0]["content"][0]["text"]
-                .as_str()
-                .unwrap()
-                .contains("system-reminder"),
+        assert_eq!(
+            messages[0],
+            serde_json::json!({"role": "user", "content": [{"type": "text", "text": context}]}),
         );
-        assert_eq!(messages[1]["content"][0]["text"], "user-question");
+        assert_eq!(messages[1]["content"][0]["text"], prompt);
     }
 
     #[tokio::test]

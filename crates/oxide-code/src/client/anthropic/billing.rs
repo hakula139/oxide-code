@@ -14,10 +14,16 @@ const CCH_PLACEHOLDER: &str = "cch=00000";
 // ── Public API ──
 
 /// 3-char hex suffix for `cc_version`: first 3 hex of `SHA-256(salt + chars_at_indices + version)`.
-pub(super) fn compute_fingerprint(first_user_message: &str, version: &str) -> String {
+/// Indices count UTF-16 code units, as Claude Code's JavaScript string indexing does.
+pub(super) fn compute_fingerprint(first_prompt: &str, version: &str) -> String {
+    // An index inside a surrogate pair picks a lone surrogate, which Bun and Node hash as U+FFFD.
     let chars: String = FINGERPRINT_INDICES
         .iter()
-        .map(|&i| first_user_message.chars().nth(i).unwrap_or('0'))
+        .map(|&i| {
+            first_prompt.encode_utf16().nth(i).map_or('0', |unit| {
+                char::from_u32(unit.into()).unwrap_or(char::REPLACEMENT_CHARACTER)
+            })
+        })
         .collect();
 
     let input = format!("{FINGERPRINT_SALT}{chars}{version}");
@@ -88,15 +94,24 @@ mod tests {
 
     #[test]
     fn compute_fingerprint_partial_bounds() {
-        // "Hello" (len 5): index 4 = 'o'; 7 and 20 are out of bounds.
-        let fp = compute_fingerprint("Hello", "2.1.87");
-        let fp_all_zero = compute_fingerprint("", "2.1.87");
-        assert_eq!(fp.len(), 3);
-        assert!(fp.chars().all(|c| c.is_ascii_hexdigit()));
-        assert_ne!(
-            fp, fp_all_zero,
-            "partial in-bounds should differ from all-zero"
-        );
+        // Index 4 of "Hello" is `o`, and 7 and 20 are out of bounds.
+        assert_eq!(compute_fingerprint("Hello", "2.1.37"), "a74");
+    }
+
+    // Expected values in the UTF-16 tests come from Claude Code's fingerprint function run under
+    // both Bun and Node.
+    #[test]
+    fn compute_fingerprint_counts_utf16_code_units() {
+        // 📦 takes two code units, which puts the `t` of "to" at index 20.
+        let fp = compute_fingerprint("Rename the 📦 crate to 🦀", "2.1.296");
+        assert_eq!(fp, "0bf");
+    }
+
+    #[test]
+    fn compute_fingerprint_hashes_a_split_surrogate_pair_as_replacement_character() {
+        // Index 4 holds the high surrogate of 🦀.
+        let fp = compute_fingerprint("Fix 🦀 the parser, then test it", "2.1.296");
+        assert_eq!(fp, "070");
     }
 
     // ── build_billing_header ──

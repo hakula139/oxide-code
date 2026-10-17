@@ -14,6 +14,7 @@ use tokio::sync::mpsc;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer};
 
+use super::compaction::AutoCompactFailures;
 use super::dispatch::GateContext;
 use super::{Engine, EngineHandle, EngineTask};
 use crate::client::anthropic::Client;
@@ -69,7 +70,7 @@ pub(crate) async fn engine(base_url: String, store: &SessionStore, cwd: &Path) -
         compaction: config.compaction,
         cwd: cwd.to_owned(),
         interactive: false,
-        auto_compaction_failures: 0,
+        auto_compaction_failures: AutoCompactFailures::default(),
         last_usage: None,
         displayed_usage: None,
         total_estimated_cost_usd: 0.0,
