@@ -92,7 +92,7 @@ pub(crate) fn model(arg: &str) -> Result<Op, String> {
                 .map_or_else(String::new, |info| format!(" Did you mean `{}`?", info.id));
             let models = format_models(MODELS);
             return Err(formatdoc! {"
-                Unknown model: `{arg}`.{hint} Supported models:
+                Unknown model: `{arg}`.{hint} Valid:
 
                 {models}"
             });
@@ -292,7 +292,7 @@ mod tests {
             (
                 "gpt-4",
                 indoc! {"
-                    Unknown model: `gpt-4`. Supported models:
+                    Unknown model: `gpt-4`. Valid:
 
                     - `claude-fable-5-1` — Claude Fable 5.1
                     - `claude-opus-5-5` — Claude Opus 5.5
@@ -303,7 +303,7 @@ mod tests {
             (
                 "claude-opus-5-5-20261001",
                 indoc! {"
-                    Unknown model: `claude-opus-5-5-20261001`. Did you mean `claude-opus-5-5`? Supported models:
+                    Unknown model: `claude-opus-5-5-20261001`. Did you mean `claude-opus-5-5`? Valid:
 
                     - `claude-fable-5-1` — Claude Fable 5.1
                     - `claude-opus-5-5` — Claude Opus 5.5
@@ -314,7 +314,7 @@ mod tests {
             (
                 "sonnet[1m]",
                 indoc! {"
-                    Unknown model: `sonnet[1m]`. Did you mean `claude-sonnet-5-5`? Supported models:
+                    Unknown model: `sonnet[1m]`. Did you mean `claude-sonnet-5-5`? Valid:
 
                     - `claude-fable-5-1` — Claude Fable 5.1
                     - `claude-opus-5-5` — Claude Opus 5.5
