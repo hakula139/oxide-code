@@ -25,15 +25,23 @@ impl App {
         {
             return;
         }
-        // The top overlay owns keyboard input, including pastes. Mouse and resize events still
-        // reach chat.
+        // The top overlay owns keyboard input, pastes, and the wheel, which steps its selection or
+        // scroll like Up / Down. Resize events still reach chat.
         if self.modals.is_active() {
             match event {
                 CrosstermEvent::Key(key) => {
-                    if let Some(action) = self.modals.handle_key(key) {
-                        self.apply_modal_action(action);
-                    }
-                    self.dirty = true;
+                    self.handle_modal_key(key);
+                    return;
+                }
+                CrosstermEvent::Mouse(MouseEvent { kind, .. })
+                    if matches!(kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) =>
+                {
+                    let code = if *kind == MouseEventKind::ScrollUp {
+                        KeyCode::Up
+                    } else {
+                        KeyCode::Down
+                    };
+                    self.handle_modal_key(&KeyEvent::from(code));
                     return;
                 }
                 CrosstermEvent::Paste(text) => {
@@ -67,6 +75,13 @@ impl App {
             }) => self.chat.handle_event(event),
             CrosstermEvent::Resize(..) => {}
             _ => return,
+        }
+        self.dirty = true;
+    }
+
+    fn handle_modal_key(&mut self, key: &KeyEvent) {
+        if let Some(action) = self.modals.handle_key(key) {
+            self.apply_modal_action(action);
         }
         self.dirty = true;
     }
@@ -316,6 +331,8 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use crossterm::event::{KeyModifiers, MouseButton};
 
     use super::*;
@@ -323,8 +340,8 @@ mod tests {
     use crate::protocol::{Decision, Event, ResumeTarget};
     use crate::tool::{ApprovalBody, ApprovalPreview};
     use crate::tui::app::testing::{
-        FakeModal, key_event, long_chat_block, push_answerable_approval, render_app, rendered_text,
-        test_app,
+        FakeModal, KeyLogModal, key_event, long_chat_block, mouse_event, push_answerable_approval,
+        render_app, rendered_text, test_app,
     };
     use crate::tui::modal::testing::ScriptedModal;
 
@@ -387,12 +404,7 @@ mod tests {
         app.chat.push_system_message(long_chat_block());
         _ = render_app(&mut app, 60, 10);
 
-        app.handle_crossterm_event(&CrosstermEvent::Mouse(MouseEvent {
-            kind: MouseEventKind::ScrollUp,
-            column: 0,
-            row: 0,
-            modifiers: KeyModifiers::NONE,
-        }));
+        app.handle_crossterm_event(&mouse_event(MouseEventKind::ScrollUp));
         let text = rendered_text(&mut app, 60, 10);
 
         assert!(text.contains("Jump to bottom"), "{text}");
@@ -413,20 +425,12 @@ mod tests {
         // Mouse capture reports every motion and click, which must not each force a frame.
         let (mut app, _rx, _event_tx) = test_app(None);
         app.dirty = false;
-        let mouse = |kind| {
-            CrosstermEvent::Mouse(MouseEvent {
-                kind,
-                column: 0,
-                row: 0,
-                modifiers: KeyModifiers::NONE,
-            })
-        };
 
         for event in [
             CrosstermEvent::FocusGained,
-            mouse(MouseEventKind::Moved),
-            mouse(MouseEventKind::Down(MouseButton::Left)),
-            mouse(MouseEventKind::Drag(MouseButton::Left)),
+            mouse_event(MouseEventKind::Moved),
+            mouse_event(MouseEventKind::Down(MouseButton::Left)),
+            mouse_event(MouseEventKind::Drag(MouseButton::Left)),
         ] {
             app.handle_crossterm_event(&event);
             assert!(!app.dirty, "{event:?}");
@@ -617,23 +621,23 @@ mod tests {
     }
 
     #[test]
-    fn modal_gate_lets_mouse_scrolls_reach_chat() {
+    fn modal_gate_steps_the_modal_with_the_wheel_instead_of_chat() {
+        let keys = Arc::new(Mutex::new(Vec::new()));
         let (mut app, _rx, _event_tx) = test_app(None);
         app.chat.push_system_message(long_chat_block());
-        app.push_modal(Box::new(FakeModal::new("Picker")));
+        app.push_modal(Box::new(KeyLogModal(Arc::clone(&keys))));
         _ = render_app(&mut app, 60, 20);
 
-        app.handle_crossterm_event(&CrosstermEvent::Mouse(MouseEvent {
-            kind: MouseEventKind::ScrollUp,
-            column: 0,
-            row: 0,
-            modifiers: KeyModifiers::NONE,
-        }));
+        for kind in [
+            MouseEventKind::ScrollUp,
+            MouseEventKind::ScrollDown,
+            MouseEventKind::Moved,
+        ] {
+            app.handle_crossterm_event(&mouse_event(kind));
+        }
 
-        assert!(
-            app.chat.is_scrolled_up(),
-            "a scroll reaches chat under a modal"
-        );
+        assert_eq!(*keys.lock().unwrap(), [KeyCode::Up, KeyCode::Down]);
+        assert!(!app.chat.is_scrolled_up(), "chat under the modal stays put");
         assert!(app.modals.is_active());
     }
 

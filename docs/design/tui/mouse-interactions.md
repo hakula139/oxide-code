@@ -16,11 +16,11 @@ The TUI captures the mouse so wheel events reach it everywhere. The status-bar P
 
 `enter_tui_mode` enables raw mode, the alternate screen, bracketed paste, and, outside Windows, Kitty keyboard disambiguation and crossterm's `EnableMouseCapture`. crossterm captures the Windows mouse through the console API, so `init` enables it there after `enter_tui_mode`. Pairs unwind on `leave_tui_mode`, or in `restore` for the Windows mouse.
 
-`App::handle_crossterm_event` forwards wheel events to `ChatView::handle_event`, which scrolls three rows per notch. Wheel events reach the chat even under a modal and never move the input cursor. Other mouse events return early so the motion reports that capture enables don't each force a frame.
+`App::handle_crossterm_event` forwards wheel events to `ChatView::handle_event`, which scrolls three rows per notch without moving the input cursor. While a modal is open, each notch reaches the modal as one Up or Down key instead, so the wheel steps a picker's selection or scrolls an overview. Other mouse events return early so the motion reports that capture enables don't each force a frame.
 
 ## Mouse capture
 
-`EnableMouseCapture` writes `?1000h`, `?1002h`, `?1003h`, `?1015h`, and `?1006h`, and crossterm parses the SGR (`?1006`) reports into `MouseEvent`s. Only the wheel is handled today, but the drag and motion modes are what in-app selection will need.
+`EnableMouseCapture` writes `?1000h`, `?1002h`, `?1003h`, `?1015h`, and `?1006h`, and crossterm parses the SGR (`?1006`) reports into `MouseEvent`s. Only the wheel is handled today, but in-app selection needs the drag mode, and `?1000h` alone already makes the terminal hand clicks to the app, so a narrower set of modes would not keep native selection. On Windows, crossterm enables console mouse input, which has no wheel-only setting.
 
 Terminal-side wheel translation can't cover tmux. DECSET 1007 (alternate scroll) makes a bare terminal send wheel events in the alternate screen as arrow keys, but under tmux with `mouse on`, tmux receives the wheel itself. Its default `WheelUpPane` binding passes the event to a pane only when the pane reports the mouse (`#{mouse_any_flag}`). Otherwise tmux drops the event or enters copy mode and scrolls tmux history over the TUI. With capture on, tmux forwards both wheel directions to `ox` under its default bindings.
 

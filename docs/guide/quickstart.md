@@ -36,6 +36,11 @@ Run `ox` to start an interactive terminal session, then type a task and press En
 
 The assistant uses its built-in tools to read files, run commands, and edit code until it returns a final answer.
 
+In the chat:
+
+- **Scroll**: Use the mouse wheel or **PageUp** / **PageDown**, and press **Ctrl+End** to follow new output again.
+- **Select text**: Hold **Shift** while dragging, or **Option** in iTerm2 and in VS Code and Cursor on macOS once `terminal.integrated.macOptionClickForcesSelection` is enabled. Because ox captures the mouse to make the wheel work inside tmux, a plain drag doesn't reach the terminal's own selection.
+
 ## Approve tool calls
 
 In the default `auto` permission mode, tool calls fall into these groups:
