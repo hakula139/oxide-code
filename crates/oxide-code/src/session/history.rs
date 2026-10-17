@@ -192,6 +192,7 @@ mod tests {
 
     use super::*;
     use crate::file_tracker::testing::tracker;
+    use crate::message::Replay;
     use crate::session::post_compact::synthesize_post_compact_message;
     use crate::tool::bash::BashTool;
     use crate::tool::edit::EditTool;
@@ -684,10 +685,10 @@ mod tests {
             content: vec![
                 ContentBlock::Thinking {
                     thinking: "reasoning".to_owned(),
-                    signature: "sig".to_owned(),
+                    replay: Replay::without_model("sig"),
                 },
                 ContentBlock::RedactedThinking {
-                    data: "opaque".to_owned(),
+                    replay: Replay::without_model("opaque"),
                 },
                 ContentBlock::Text {
                     text: "answer".to_owned(),
@@ -710,7 +711,7 @@ mod tests {
             content: vec![
                 ContentBlock::Thinking {
                     thinking: "  \n  ".to_owned(),
-                    signature: "sig".to_owned(),
+                    replay: Replay::without_model("sig"),
                 },
                 ContentBlock::Text {
                     text: "reply".to_owned(),
@@ -730,7 +731,7 @@ mod tests {
             content: vec![
                 ContentBlock::Thinking {
                     thinking: "Running the suite.".to_owned(),
-                    signature: "sig".to_owned(),
+                    replay: Replay::without_model("sig"),
                 },
                 tool_use("t1", "bash", serde_json::json!({"command": "cargo test"})),
             ],

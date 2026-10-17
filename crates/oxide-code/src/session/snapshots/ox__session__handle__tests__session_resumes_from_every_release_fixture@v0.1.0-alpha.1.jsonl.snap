@@ -46,11 +46,13 @@ input_file: crates/oxide-code/src/session/fixtures/v0.1.0-alpha.1.jsonl
         {
           "signature": "signature",
           "thinking": "Rename main.",
-          "type": "thinking"
+          "type": "thinking",
+          "wire": "anthropic"
         },
         {
           "data": "redacted",
-          "type": "redacted_thinking"
+          "type": "redacted_thinking",
+          "wire": "anthropic"
         },
         {
           "text": "Renaming main.",

@@ -460,6 +460,7 @@ mod tests {
         FakeClient, dead_test_session, empty_prompt, inert_ops, test_session, text_turn,
         tool_heavy_transcript, with_stop,
     };
+    use crate::message::Replay;
     use crate::protocol::CapturingSink;
 
     // ── auto_compact_if_needed ──
@@ -1213,7 +1214,7 @@ mod tests {
                 content: vec![
                     ContentBlock::Thinking {
                         thinking: "the bug is in auth".to_owned(),
-                        signature: "sig".to_owned(),
+                        replay: Replay::without_model("sig"),
                     },
                     ContentBlock::Text {
                         text: "found it".to_owned(),
@@ -1400,7 +1401,7 @@ mod tests {
                     content: vec![
                         ContentBlock::Thinking {
                             thinking: "read it first".to_owned(),
-                            signature: "sig".to_owned(),
+                            replay: Replay::without_model("sig"),
                         },
                         ContentBlock::Text {
                             text: "reading".to_owned(),
@@ -1772,7 +1773,7 @@ mod tests {
             role: Role::Assistant,
             content: vec![ContentBlock::Thinking {
                 thinking: "hmm".to_owned(),
-                signature: "sig".to_owned(),
+                replay: Replay::without_model("sig"),
             }],
         };
 

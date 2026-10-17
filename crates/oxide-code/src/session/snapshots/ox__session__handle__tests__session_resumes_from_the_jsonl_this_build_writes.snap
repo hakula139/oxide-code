@@ -73,13 +73,17 @@ expression: recovered
     {
       "content": [
         {
+          "model": "claude-opus-5-5",
           "signature": "signature",
           "thinking": "Rename main.",
-          "type": "thinking"
+          "type": "thinking",
+          "wire": "anthropic"
         },
         {
           "data": "redacted",
-          "type": "redacted_thinking"
+          "model": "claude-opus-5-5",
+          "type": "redacted_thinking",
+          "wire": "anthropic"
         },
         {
           "text": "Renaming main.",

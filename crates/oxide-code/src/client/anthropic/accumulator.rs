@@ -7,13 +7,15 @@ use tracing::{debug, warn};
 
 use super::wire::{ApiError, ContentBlockInfo, Delta, StreamEvent, Usage};
 use crate::client::{Response, ResponseEvent, StopDetails, StopReason, TokenUsage};
-use crate::message::{ContentBlock, progress_note};
+use crate::message::{ContentBlock, Replay, WireKind, progress_note};
 
 // ── ResponseAccumulator ──
 
 /// One attempt's reply as it streams. A retried attempt starts a fresh one.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(super) struct ResponseAccumulator {
+    /// The model the request asked for, the only one its reasoning blocks replay to.
+    model: String,
     /// By stream index.
     blocks: Vec<BlockAccumulator>,
     usage: Option<TokenUsage>,
@@ -22,6 +24,16 @@ pub(super) struct ResponseAccumulator {
 }
 
 impl ResponseAccumulator {
+    pub(super) fn new(model: &str) -> Self {
+        Self {
+            model: model.to_owned(),
+            blocks: Vec::new(),
+            usage: None,
+            stop_reason: None,
+            stop_details: None,
+        }
+    }
+
     /// Whether a content block has started, after which a retry would repeat what the consumer
     /// already showed.
     pub(super) fn content_started(&self) -> bool {
@@ -95,7 +107,7 @@ impl ResponseAccumulator {
             ..Response::default()
         };
         for block in mem::take(&mut self.blocks) {
-            let (block, parse_error) = block.into_content_block();
+            let (block, parse_error) = block.into_content_block(&self.model);
             response.parse_errors.extend(parse_error);
             response.content.extend(block);
         }
@@ -225,8 +237,14 @@ impl BlockAccumulator {
         }
     }
 
-    /// Surfaces any tool-input parse error alongside the produced block.
-    fn into_content_block(self) -> (Option<ContentBlock>, Option<(String, String)>) {
+    /// Surfaces any tool-input parse error alongside the produced block, whose reasoning replays
+    /// only to `model`.
+    fn into_content_block(self, model: &str) -> (Option<ContentBlock>, Option<(String, String)>) {
+        let replay = |payload| Replay {
+            wire: WireKind::Anthropic,
+            model: Some(model.to_owned()),
+            payload,
+        };
         match self {
             Self::Text(text) => (Some(ContentBlock::Text { text }), None),
             Self::ToolUse { id, name, json_buf } => {
@@ -248,13 +266,16 @@ impl BlockAccumulator {
             } => (
                 Some(ContentBlock::Thinking {
                     thinking,
-                    signature,
+                    replay: replay(signature),
                 }),
                 None,
             ),
-            Self::RedactedThinking { data } => {
-                (Some(ContentBlock::RedactedThinking { data }), None)
-            }
+            Self::RedactedThinking { data } => (
+                Some(ContentBlock::RedactedThinking {
+                    replay: replay(data),
+                }),
+                None,
+            ),
             Self::Skipped => (None, None),
         }
     }
@@ -289,6 +310,8 @@ mod tests {
 
     // ── Fixtures ──
 
+    const MODEL: &str = "claude-sonnet-5-5";
+
     fn event(value: serde_json::Value) -> StreamEvent {
         serde_json::from_value(value).expect("fixture is a stream event")
     }
@@ -313,7 +336,7 @@ mod tests {
 
     #[test]
     fn content_started_once_a_block_starts() {
-        let mut reply = ResponseAccumulator::default();
+        let mut reply = ResponseAccumulator::new(MODEL);
 
         fold(
             &mut reply,
@@ -338,7 +361,7 @@ mod tests {
 
     #[test]
     fn apply_layers_usage_from_message_start_and_message_delta() {
-        let mut reply = ResponseAccumulator::default();
+        let mut reply = ResponseAccumulator::new(MODEL);
 
         let forwarded = fold(
             &mut reply,
@@ -385,7 +408,7 @@ mod tests {
 
     #[test]
     fn apply_streams_text_from_block_starts_and_deltas() {
-        let mut reply = ResponseAccumulator::default();
+        let mut reply = ResponseAccumulator::new(MODEL);
 
         let forwarded = fold(
             &mut reply,
@@ -451,7 +474,7 @@ mod tests {
             thinking("Summing up."),
             text("Checked."),
         ];
-        let mut reply = ResponseAccumulator::default();
+        let mut reply = ResponseAccumulator::new(MODEL);
 
         let forwarded = fold(
             &mut reply,
@@ -486,7 +509,7 @@ mod tests {
         );
         let thinking_block = |text: &str| ContentBlock::Thinking {
             thinking: text.to_owned(),
-            signature: "sig".to_owned(),
+            replay: Replay::with_model(MODEL, "sig"),
         };
         let text_block = |text: &str| ContentBlock::Text {
             text: text.to_owned(),
@@ -512,7 +535,7 @@ mod tests {
                     tool_block("t1"),
                     thinking_block("Now b."),
                     ContentBlock::RedactedThinking {
-                        data: "opaque".to_owned(),
+                        replay: Replay::with_model(MODEL, "opaque"),
                     },
                     tool_block("t2"),
                     thinking_block("Summing up."),
@@ -525,7 +548,7 @@ mod tests {
 
     #[test]
     fn apply_completes_the_reply_with_parse_errors_and_the_stop() {
-        let mut reply = ResponseAccumulator::default();
+        let mut reply = ResponseAccumulator::new(MODEL);
 
         let forwarded = fold(
             &mut reply,
@@ -574,7 +597,7 @@ mod tests {
 
     #[test]
     fn apply_skips_a_block_that_starts_out_of_order() {
-        let mut reply = ResponseAccumulator::default();
+        let mut reply = ResponseAccumulator::new(MODEL);
 
         let forwarded = fold(
             &mut reply,
@@ -610,7 +633,7 @@ mod tests {
 
     #[test]
     fn apply_in_band_error_fails_the_reply() {
-        let mut reply = ResponseAccumulator::default();
+        let mut reply = ResponseAccumulator::new(MODEL);
 
         let error = reply
             .apply(event(json!({
@@ -771,9 +794,9 @@ mod tests {
     // ── BlockAccumulator::into_content_block ──
 
     #[test]
-    fn into_content_block_yields_text_and_thinking_blocks_verbatim() {
+    fn into_content_block_yields_text_verbatim_and_reasoning_for_its_model() {
         assert_eq!(
-            BlockAccumulator::Text("hi".to_owned()).into_content_block(),
+            BlockAccumulator::Text("hi".to_owned()).into_content_block(MODEL),
             (
                 Some(ContentBlock::Text {
                     text: "hi".to_owned()
@@ -786,11 +809,11 @@ mod tests {
                 thinking: "step 1".to_owned(),
                 signature: "sig_abc".to_owned(),
             }
-            .into_content_block(),
+            .into_content_block(MODEL),
             (
                 Some(ContentBlock::Thinking {
                     thinking: "step 1".to_owned(),
-                    signature: "sig_abc".to_owned(),
+                    replay: Replay::with_model(MODEL, "sig_abc"),
                 }),
                 None,
             ),
@@ -799,15 +822,18 @@ mod tests {
             BlockAccumulator::RedactedThinking {
                 data: "opaque-blob".to_owned(),
             }
-            .into_content_block(),
+            .into_content_block(MODEL),
             (
                 Some(ContentBlock::RedactedThinking {
-                    data: "opaque-blob".to_owned(),
+                    replay: Replay::with_model(MODEL, "opaque-blob"),
                 }),
                 None,
             ),
         );
-        assert_eq!(BlockAccumulator::Skipped.into_content_block(), (None, None));
+        assert_eq!(
+            BlockAccumulator::Skipped.into_content_block(MODEL),
+            (None, None)
+        );
     }
 
     #[test]
@@ -817,7 +843,7 @@ mod tests {
             name: "bash".to_owned(),
             json_buf: r#"{"command": "ls"}"#.to_owned(),
         }
-        .into_content_block();
+        .into_content_block(MODEL);
         assert_eq!(
             tool,
             Some(ContentBlock::ToolUse {
@@ -833,7 +859,7 @@ mod tests {
             name: "web_search".to_owned(),
             json_buf: r#"{"query": "rust"}"#.to_owned(),
         }
-        .into_content_block();
+        .into_content_block(MODEL);
         assert_eq!(
             server,
             Some(ContentBlock::ServerToolUse {
@@ -859,7 +885,7 @@ mod tests {
                 json_buf: "{unclosed".to_owned(),
             },
         ] {
-            let (block, err) = block.into_content_block();
+            let (block, err) = block.into_content_block(MODEL);
 
             assert!(
                 matches!(

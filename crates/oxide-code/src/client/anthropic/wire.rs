@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize, Serializer};
 
 use crate::client::{StopDetails, StopReason};
 use crate::config::Effort;
-use crate::message::{ContentBlock, Message, Role};
+use crate::message::{ContentBlock, Message, Role, WireKind};
 use crate::model::ThinkingConfig;
 use crate::tool::ToolDefinition;
 
@@ -38,7 +38,7 @@ pub(super) struct CreateMessageRequest<'a> {
     pub(super) messages: RequestMessages<'a>,
 }
 
-/// Serializes `messages` verbatim, except that `breakpoint` (when set) is stamped onto the last
+/// Serializes `messages` in the request shape, with `breakpoint` (when set) stamped onto the last
 /// content block of the final message. The marker exists only on the wire, so in-memory
 /// [`Message`]s never carry cache state.
 pub(super) struct RequestMessages<'a> {
@@ -48,10 +48,12 @@ pub(super) struct RequestMessages<'a> {
 
 impl Serialize for RequestMessages<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let messages: Vec<RequestMessage<'_>> =
+            self.messages.iter().map(RequestMessage::of).collect();
         let Some(cache_control) = &self.breakpoint else {
-            return self.messages.serialize(serializer);
+            return messages.serialize(serializer);
         };
-        serialize_marking_last(serializer, self.messages, |message| MarkedMessage {
+        serialize_marking_last(serializer, &messages, |message| MarkedMessage {
             role: message.role,
             content: MarkedBlocks {
                 blocks: &message.content,
@@ -62,13 +64,65 @@ impl Serialize for RequestMessages<'_> {
 }
 
 #[derive(Serialize)]
+struct RequestMessage<'a> {
+    role: Role,
+    content: Vec<RequestBlock<'a>>,
+}
+
+impl<'a> RequestMessage<'a> {
+    fn of(message: &'a Message) -> Self {
+        Self {
+            role: message.role,
+            content: message.content.iter().map(RequestBlock::of).collect(),
+        }
+    }
+}
+
+/// A content block in the request shape, where reasoning carries its payload in the field the API
+/// returned it in.
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum RequestBlock<'a> {
+    Thinking {
+        thinking: &'a str,
+        signature: &'a str,
+    },
+    RedactedThinking {
+        data: &'a str,
+    },
+    #[serde(untagged)]
+    Verbatim(&'a ContentBlock),
+}
+
+impl<'a> RequestBlock<'a> {
+    /// The shape `block` takes in a request. Reasoning goes back unchanged whichever model
+    /// produced it, since the API drops or ignores the blocks the request's model cannot read.
+    fn of(block: &'a ContentBlock) -> Self {
+        match block {
+            ContentBlock::Thinking { thinking, replay } => match replay.wire {
+                WireKind::Anthropic => Self::Thinking {
+                    thinking,
+                    signature: &replay.payload,
+                },
+            },
+            ContentBlock::RedactedThinking { replay } => match replay.wire {
+                WireKind::Anthropic => Self::RedactedThinking {
+                    data: &replay.payload,
+                },
+            },
+            block => Self::Verbatim(block),
+        }
+    }
+}
+
+#[derive(Serialize)]
 struct MarkedMessage<'a> {
     role: Role,
     content: MarkedBlocks<'a>,
 }
 
 struct MarkedBlocks<'a> {
-    blocks: &'a [ContentBlock],
+    blocks: &'a [RequestBlock<'a>],
     cache_control: &'a CacheControl,
 }
 
@@ -84,7 +138,7 @@ impl Serialize for MarkedBlocks<'_> {
 #[derive(Serialize)]
 struct MarkedBlock<'a> {
     #[serde(flatten)]
-    block: &'a ContentBlock,
+    block: &'a RequestBlock<'a>,
     cache_control: &'a CacheControl,
 }
 
@@ -335,6 +389,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::message::Replay;
 
     // ── RequestMessages ──
 
@@ -432,6 +487,53 @@ mod tests {
         })
         .unwrap();
         assert_eq!(empty, json!([]));
+    }
+
+    #[test]
+    fn request_messages_send_reasoning_back_under_its_api_keys_whatever_model_wrote_it() {
+        let messages = [
+            Message::user("question"),
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Thinking {
+                        thinking: "plan".to_owned(),
+                        replay: Replay::with_model("claude-haiku-5-5", "sig"),
+                    },
+                    ContentBlock::RedactedThinking {
+                        replay: Replay::with_model("claude-haiku-5-5", "blob"),
+                    },
+                    ContentBlock::Thinking {
+                        thinking: "older".to_owned(),
+                        replay: Replay::without_model("legacy"),
+                    },
+                    ContentBlock::Text {
+                        text: "answer".to_owned(),
+                    },
+                ],
+            },
+            Message::user("next"),
+        ];
+
+        let v = serde_json::to_value(RequestMessages {
+            messages: &messages,
+            breakpoint: None,
+        })
+        .unwrap();
+
+        assert_eq!(
+            v,
+            json!([
+                {"role": "user", "content": [{"type": "text", "text": "question"}]},
+                {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "plan", "signature": "sig"},
+                    {"type": "redacted_thinking", "data": "blob"},
+                    {"type": "thinking", "thinking": "older", "signature": "legacy"},
+                    {"type": "text", "text": "answer"},
+                ]},
+                {"role": "user", "content": [{"type": "text", "text": "next"}]},
+            ]),
+        );
     }
 
     // ── ContextManagement ──

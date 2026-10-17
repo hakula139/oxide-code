@@ -19,7 +19,8 @@ const MAX_SSE_FRAME_BYTES: usize = 4 * 1024;
 
 /// Drives the streaming `/v1/messages` request and forwards its [`ResponseEvent`]s on `tx`,
 /// retrying an attempt that fails before any content block arrives. Each retry forwards a
-/// [`ResponseEvent::Retrying`] notice first.
+/// [`ResponseEvent::Retrying`] notice first. `model` is the id the request names, which the
+/// reply's reasoning blocks record.
 ///
 /// Returns `Ok(())` once the completed reply is forwarded, or when the receiver drops (consumer
 /// cancellation is not an error). Returns `Err` for transport / HTTP failures, an in-band `error`
@@ -28,12 +29,13 @@ const MAX_SSE_FRAME_BYTES: usize = 4 * 1024;
 pub(super) async fn stream_sse(
     http: &reqwest::Client,
     request: &MessagesRequest,
+    model: &str,
     tx: &mpsc::Sender<Result<ResponseEvent>>,
 ) -> Result<()> {
     with_retry(
         |retry| async move {
             let response = post_messages(http, request, retry).await?;
-            pump_events(response, tx).await
+            pump_events(response, model, tx).await
         },
         |notice| {
             _ = tx.try_send(Ok(ResponseEvent::Retrying(notice.to_string())));
@@ -47,6 +49,7 @@ pub(super) async fn stream_sse(
 /// would have to retract.
 async fn pump_events(
     response: reqwest::Response,
+    model: &str,
     tx: &mpsc::Sender<Result<ResponseEvent>>,
 ) -> Result<(), AttemptError> {
     if let Some(limits) = rate_limits(response.headers())
@@ -59,7 +62,7 @@ async fn pump_events(
     }
     let mut stream = response.bytes_stream();
     let mut frames = FrameDecoder::default();
-    let mut reply = ResponseAccumulator::default();
+    let mut reply = ResponseAccumulator::new(model);
     let fail = |cause: &str, error: anyhow::Error, retryable: bool| {
         if retryable {
             AttemptError::retryable(cause, error)
@@ -314,7 +317,7 @@ mod tests {
     async fn run_stream(base_url: &str) -> (Result<()>, Vec<ResponseEvent>) {
         let request = messages_request(format!("{base_url}/v1/messages"));
         let (tx, mut rx) = mpsc::channel(64);
-        let result = stream_sse(&reqwest::Client::new(), &request, &tx).await;
+        let result = stream_sse(&reqwest::Client::new(), &request, "claude-opus-5-5", &tx).await;
         drop(tx);
         let mut events = Vec::new();
         while let Some(event) = rx.recv().await {
@@ -572,7 +575,8 @@ mod tests {
             let (tx, rx) = mpsc::channel::<Result<ResponseEvent>>(1);
             drop(rx);
 
-            let result = stream_sse(&reqwest::Client::new(), &request, &tx).await;
+            let result =
+                stream_sse(&reqwest::Client::new(), &request, "claude-opus-5-5", &tx).await;
 
             assert!(matches!(result, Ok(())), "graceful shutdown: {result:?}");
         }

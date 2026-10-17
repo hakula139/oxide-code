@@ -39,6 +39,10 @@ A newer binary reads an older file as long as every change to the format is one 
 
 An older binary reading a newer file skips entry types it does not know as malformed lines and ignores unknown fields. Bump the header's `version` only when an older binary would misread a newer file, since an older binary refuses any file whose `version` is newer than it supports.
 
+Reasoning blocks are compatible in both directions. A `thinking` block keeps its `signature` and a `redacted_thinking` block keeps its `data`, as every release wrote them, and both add the `wire` and `model` that produced them, which older binaries ignore. A block saved without them loads as an Anthropic block with no model. The Anthropic wire sends every Anthropic block back unchanged whichever model produced it, as Anthropic's guide to [switching models](https://platform.claude.com/docs/en/build-with-claude/preserved-thinking#switching-models) asks, so the recorded `model` changes no request. Which blocks a model reads depends on the platform, and the API drops or ignores the rest, as the [research note](../../research/api/extended-thinking.md#constraints) details.
+
+A `wire` value that an older binary does not know fails to parse, and that binary skips the whole message as a malformed line, so adding a `wire` value needs a header `version` bump.
+
 Tests in `session/handle.rs` hold every release to this guarantee, using one fixture per release in `crates/oxide-code/src/session/fixtures/`, named after its tag:
 
 - **Fixture source.** One test writes a session holding every entry type and content block, with messages, prompt contexts, and sidecars after its compaction so that a resume reads them. It snapshots the file with its per-run UUIDs, timestamps, and working directory masked. `scripts/prepare-release.sh` copies that snapshot as the new release's fixture.
