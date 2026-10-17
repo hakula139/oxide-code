@@ -67,8 +67,8 @@ impl SlashCommand for EffortCmd {
 
 fn no_effort_tier_msg(model: &ModelSpec) -> String {
     format!(
-        "{} has no effort tier. Switch to a supported model first with `/model`, for example \
-         `/model opus`.",
+        "{} has no effort tier. \
+         Switch to a supported model first with `/model`, for example `/model opus`.",
         model.display_name(),
     )
 }
@@ -135,8 +135,9 @@ mod tests {
 
     // ── EffortCmd::execute ──
 
-    const NO_TIER_ERROR: &str = "custom-model has no effort tier. Switch to a supported model \
-                                 first with `/model`, for example `/model opus`.";
+    const NO_TIER_ERROR: &str = "custom-model has no effort tier. \
+                                 Switch to a supported model first with `/model`, \
+                                 for example `/model opus`.";
 
     fn run_execute(args: &str) -> Result<SlashOutcome, String> {
         run_execute_with_model(test_session_info().config.model.id(), args)

@@ -20,11 +20,12 @@ impl Tool for EditTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "edit".to_owned(),
-            description: "Perform exact string replacement in a file. The old_string must be \
-                          unique in the file unless replace_all is true. Read the file in this \
-                          session before editing it. A Read of the lines being changed is enough. \
-                          The Read-before-Edit gate refuses files that changed externally since \
-                          the last Read."
+            description: "Perform exact string replacement in a file. \
+                          The old_string must be unique in the file unless replace_all is true. \
+                          Read the file in this session before editing it. \
+                          A Read of the lines being changed is enough. \
+                          The Read-before-Edit gate refuses files that changed externally \
+                          since the last Read."
                 .to_owned(),
             input_schema: input_schema(),
             class: PermissionClass::Edit,
@@ -109,7 +110,8 @@ fn input_schema() -> serde_json::Value {
             },
             "old_string": {
                 "type": "string",
-                "description": "The exact text to replace (must be unique unless replace_all is true)"
+                "description": "The exact text to replace \
+                                (must be unique unless replace_all is true)"
             },
             "new_string": {
                 "type": "string",
@@ -206,15 +208,15 @@ async fn edit_file(
     let match_count = content.matches(old_string.as_ref()).count();
     if match_count == 0 {
         return Err(format!(
-            "Found no occurrence of old_string in {path}. Copy it exactly from the file, \
-             including whitespace and indentation."
+            "Found no occurrence of old_string in {path}. \
+             Copy it exactly from the file, including whitespace and indentation."
         ));
     }
 
     if match_count > 1 && !replace_all {
         return Err(format!(
-            "Found {match_count} occurrences of old_string in {path}. Set replace_all to true to \
-             replace them all, or add context to make old_string unique."
+            "Found {match_count} occurrences of old_string in {path}. \
+             Set replace_all to true to replace them all, or add context to make old_string unique."
         ));
     }
 
@@ -787,8 +789,8 @@ mod tests {
         assert_eq!(
             err,
             format!(
-                "Found no occurrence of old_string in {}. Copy it exactly from the file, \
-                 including whitespace and indentation.",
+                "Found no occurrence of old_string in {}. \
+                 Copy it exactly from the file, including whitespace and indentation.",
                 path.display(),
             ),
         );
@@ -935,8 +937,9 @@ mod tests {
         assert_eq!(
             err,
             format!(
-                "Found 2 occurrences of old_string in {}. Set replace_all to true to replace them \
-                 all, or add context to make old_string unique.",
+                "Found 2 occurrences of old_string in {}. \
+                 Set replace_all to true to replace them all, \
+                 or add context to make old_string unique.",
                 path.display(),
             ),
         );

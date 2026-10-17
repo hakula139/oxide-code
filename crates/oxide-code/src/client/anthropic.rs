@@ -1092,7 +1092,8 @@ mod tests {
         assert_eq!(
             v["system"][0]["text"],
             format!(
-                "x-anthropic-billing-header: cc_version={CLAUDE_CLI_VERSION}.{}; cc_entrypoint=cli;",
+                "x-anthropic-billing-header: \
+                 cc_version={CLAUDE_CLI_VERSION}.{}; cc_entrypoint=cli;",
                 billing::compute_fingerprint(prompt, CLAUDE_CLI_VERSION),
             ),
         );

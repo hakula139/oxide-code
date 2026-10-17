@@ -351,7 +351,8 @@ mod tests {
         let text = rendered_text(&mut app, 60, 12);
         assert!(
             text.contains("line 39"),
-            "tail of overflowing block must be in the viewport after the first render, got:\n{text}",
+            "tail of overflowing block must be in the viewport after the first render, \
+             got:\n{text}",
         );
     }
 

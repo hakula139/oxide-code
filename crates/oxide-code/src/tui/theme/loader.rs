@@ -208,8 +208,9 @@ pub(super) fn parse_theme(content: &str) -> Result<Theme> {
         Err(e) => {
             if let Some(slot) = missing_slot(&e) {
                 bail!(
-                    "the theme has no `{slot}` slot. Add one, such as `{}`. {THEMING_GUIDE} \
-                     lists every slot.",
+                    "the theme has no `{slot}` slot. \
+                     Add one, such as `{}`. \
+                     {THEMING_GUIDE} lists every slot.",
                     mocha_line(slot),
                 );
             }
@@ -338,8 +339,8 @@ mod tests {
         assert_eq!(
             format!("{err:#}"),
             format!(
-                "theme {path_str:?}: {path_str} is {len} bytes, over the \
-                 {MAX_THEME_FILE_BYTES}-byte theme file limit"
+                "theme {path_str:?}: {path_str} is {len} bytes, \
+                 over the {MAX_THEME_FILE_BYTES}-byte theme file limit"
             ),
         );
     }
@@ -793,7 +794,9 @@ mod tests {
         assert_eq!(
             format!("{err:#}"),
             format!(
-                r##"the theme has no `selection` slot. Add one, such as `selection = {{ bg = "#313244" }}`. {THEMING_GUIDE} lists every slot."##
+                "the theme has no `selection` slot. \
+                 Add one, such as `selection = {{ bg = \"#313244\" }}`. \
+                 {THEMING_GUIDE} lists every slot."
             ),
         );
     }

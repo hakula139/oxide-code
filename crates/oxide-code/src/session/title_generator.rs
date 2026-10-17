@@ -489,7 +489,8 @@ mod tests {
             !events
                 .iter()
                 .any(|e| matches!(e, Event::SessionTitleUpdated { .. })),
-            "post-finalize must skip SessionTitleUpdated because the title belongs to the dead session: {events:?}",
+            "post-finalize must skip SessionTitleUpdated \
+             because the title belongs to the dead session: {events:?}",
         );
     }
 

@@ -532,7 +532,8 @@ mod tests {
 
         assert_eq!(
             String::from_utf8(bytes).unwrap(),
-            "\x1b7\x1b[1;1H\x1b]8;;https://x\x07\x1b[48;5;4m\x1b[38;5;1m\x1b[1mA\x1b[0m\x1b[3mB\x1b[0m\
+            "\x1b7\x1b[1;1H\x1b]8;;https://x\x07\
+             \x1b[48;5;4m\x1b[38;5;1m\x1b[1mA\x1b[0m\x1b[3mB\x1b[0m\
              \x1b]8;;\x07\x1b[0m\x1b8",
         );
     }

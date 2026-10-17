@@ -494,7 +494,8 @@ fn cap_output(content: String) -> (String, Option<usize>) {
 /// an "Invalid input: ..." error [`ToolOutput`] that callers hand back to the model as-is.
 #[expect(
     clippy::result_large_err,
-    reason = "ToolOutput carries the full tool result, but the Err here is the cold input-validation path, built at most once per tool call"
+    reason = "ToolOutput carries the full tool result, \
+              but the Err here is the cold input-validation path, built at most once per tool call"
 )]
 pub(crate) fn parse_input<T: DeserializeOwned>(raw: serde_json::Value) -> Result<T, ToolOutput> {
     serde_json::from_value(raw).map_err(|e| ToolOutput::error(invalid_input(&e)))

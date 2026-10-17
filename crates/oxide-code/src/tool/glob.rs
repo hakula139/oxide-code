@@ -37,8 +37,8 @@ impl Tool for GlobTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "glob".to_owned(),
-            description: "Find files matching a glob pattern. Returns paths sorted by \
-                          modification time (newest first)."
+            description: "Find files matching a glob pattern. \
+                          Returns paths sorted by modification time (newest first)."
                 .to_owned(),
             input_schema: input_schema(),
             class: PermissionClass::Read,
@@ -85,7 +85,10 @@ fn input_schema() -> serde_json::Value {
         "properties": {
             "pattern": {
                 "type": "string",
-                "description": r#"The glob pattern to match, relative to `path` (e.g. "**/*.rs", "src/**/*.ts"). "*" and "?" stay within one directory, and a pattern without "/" matches file names at any depth."#
+                "description": "The glob pattern to match, relative to `path` \
+                                (e.g. \"**/*.rs\", \"src/**/*.ts\"). \
+                                \"*\" and \"?\" stay within one directory, \
+                                and a pattern without \"/\" matches file names at any depth."
             },
             "path": {
                 "type": "string",
@@ -242,7 +245,8 @@ fn glob_files(
 fn compile_glob(pattern: &str) -> Result<globset::GlobMatcher, String> {
     if Path::new(pattern).has_root() {
         return Err(format!(
-            "Pattern {pattern} is absolute. Set `path` to its directory and pass a pattern relative to it."
+            "Pattern {pattern} is absolute. \
+             Set `path` to its directory and pass a pattern relative to it."
         ));
     }
     let pattern = if pattern.contains('/') {
@@ -547,7 +551,8 @@ mod tests {
         assert_eq!(
             err,
             format!(
-                "Pattern {pattern} is absolute. Set `path` to its directory and pass a pattern relative to it."
+                "Pattern {pattern} is absolute. \
+                 Set `path` to its directory and pass a pattern relative to it."
             )
         );
     }

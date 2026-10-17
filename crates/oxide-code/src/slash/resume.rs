@@ -1222,8 +1222,9 @@ mod tests {
 
         assert_eq!(
             footer,
-            "Enter to resume  ·  Esc to cancel  ·  1 session  ·  scope: current project  ·  Ctrl+X to \
-             archive  ·  Ctrl+D to delete  ·  Tab for all projects  ·  Ctrl+A for archived",
+            "Enter to resume  ·  Esc to cancel  ·  1 session  ·  scope: current project  ·  \
+             Ctrl+X to archive  ·  Ctrl+D to delete  ·  Tab for all projects  ·  \
+             Ctrl+A for archived",
         );
     }
 
@@ -1767,8 +1768,8 @@ mod tests {
 
         assert_eq!(
             footer_row(&picker, 120),
-            "! Session 11111111 is the live session. Use bare `/archive` to archive it and start \
-             a new one.",
+            "! Session 11111111 is the live session. \
+             Use bare `/archive` to archive it and start a new one.",
         );
         assert_eq!(listed_ids(&store, false), [id.as_str()]);
         assert_eq!(picker.loaded, 1);

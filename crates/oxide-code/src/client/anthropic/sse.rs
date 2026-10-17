@@ -424,7 +424,8 @@ mod tests {
         for (body, expected) in [
             (
                 [MESSAGE_START, TEXT_DELTA, OVERLOADED].concat(),
-                "Anthropic API overloaded (overloaded_error). Retry in a few seconds. \
+                "Anthropic API overloaded (overloaded_error). \
+                 Retry in a few seconds. \
                  Details: Overloaded",
             ),
             (

@@ -441,8 +441,9 @@ impl<'r> Dispatcher<'r, '_> {
 /// another approach.
 fn denied_output(name: &str, reason: impl fmt::Display) -> ToolOutput {
     ToolOutput::error(format!(
-        "The {name} call was denied {reason}. Do not retry it. Choose a different approach or ask \
-         the user to adjust permissions."
+        "The {name} call was denied {reason}. \
+         Do not retry it. \
+         Choose a different approach or ask the user to adjust permissions."
     ))
 }
 
@@ -926,8 +927,9 @@ mod tests {
         assert!(denial.is_error);
         assert_eq!(
             denial.content,
-            "The echo call was denied by the `deny.exec` pattern `*`. Do not retry it. Choose a \
-             different approach or ask the user to adjust permissions."
+            "The echo call was denied by the `deny.exec` pattern `*`. \
+             Do not retry it. \
+             Choose a different approach or ask the user to adjust permissions."
         );
         assert_eq!(
             approval_ids(&sink),
@@ -1077,9 +1079,10 @@ mod tests {
             assert_eq!(
                 denial.content,
                 format!(
-                    "The {name} call was denied because the session rule chosen in its approval \
-                     does not cover it. Do not retry it. Choose a different approach or ask the \
-                     user to adjust permissions."
+                    "The {name} call was denied \
+                     because the session rule chosen in its approval does not cover it. \
+                     Do not retry it. \
+                     Choose a different approach or ask the user to adjust permissions."
                 ),
                 "{class} {pattern}"
             );
@@ -1124,8 +1127,9 @@ mod tests {
 
         assert_eq!(
             denial.content,
-            "The echo call was denied because its approval request could not reach the user. Do \
-             not retry it. Choose a different approach or ask the user to adjust permissions."
+            "The echo call was denied because its approval request could not reach the user. \
+             Do not retry it. \
+             Choose a different approach or ask the user to adjust permissions."
         );
     }
 
@@ -1157,8 +1161,9 @@ mod tests {
         assert!(denial.is_error);
         assert_eq!(
             denial.content,
-            "The echo call was denied by the user. Do not retry it. Choose a different approach \
-             or ask the user to adjust permissions."
+            "The echo call was denied by the user. \
+             Do not retry it. \
+             Choose a different approach or ask the user to adjust permissions."
         );
     }
 

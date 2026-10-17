@@ -123,8 +123,9 @@ pub(super) fn model_identity(model: &ModelSpec) -> String {
         return format!("You are powered by the model {id}.");
     };
     format!(
-        "You are powered by the model named {}. The exact model ID is {id}. Assistant knowledge \
-         cutoff is {}.",
+        "You are powered by the model named {}. \
+         The exact model ID is {id}. \
+         Assistant knowledge cutoff is {}.",
         info.display_name, info.cutoff,
     )
 }
@@ -260,8 +261,9 @@ mod tests {
     fn model_identity_names_a_catalog_model_with_its_cutoff() {
         assert_eq!(
             model_identity(&spec("claude-opus-5-5")),
-            "You are powered by the model named Claude Opus 5.5. The exact model ID is \
-             claude-opus-5-5. Assistant knowledge cutoff is June 2026.",
+            "You are powered by the model named Claude Opus 5.5. \
+             The exact model ID is claude-opus-5-5. \
+             Assistant knowledge cutoff is June 2026.",
         );
     }
 

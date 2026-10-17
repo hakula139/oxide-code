@@ -353,11 +353,24 @@ pub(crate) enum RecordRead {
 /// message tells the model how to recover (Read first / Read the rest / re-Read).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum GateError {
-    #[error("File {} has not been read in this session. Read it before {} it.", .path.display(), .purpose.verb())]
+    #[error(
+        "File {} has not been read in this session. Read it before {} it.",
+        .path.display(),
+        .purpose.verb(),
+    )]
     NeverRead { path: PathBuf, purpose: GatePurpose },
-    #[error("File {} has only been read in part. Read the remaining lines, paging with `offset` and `limit` if needed, before {} it.", .path.display(), .purpose.verb())]
+    #[error(
+        "File {} has only been read in part. \
+         Read the remaining lines, paging with `offset` and `limit` if needed, before {} it.",
+        .path.display(),
+        .purpose.verb(),
+    )]
     PartialRead { path: PathBuf, purpose: GatePurpose },
-    #[error("File {} has been modified externally since it was last read. Re-read it before {} it.", .path.display(), .purpose.verb())]
+    #[error(
+        "File {} has been modified externally since it was last read. Re-read it before {} it.",
+        .path.display(),
+        .purpose.verb(),
+    )]
     ContentDrifted { path: PathBuf, purpose: GatePurpose },
 }
 

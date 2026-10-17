@@ -105,16 +105,21 @@ fn input_schema() -> serde_json::Value {
             },
             "include": {
                 "type": "string",
-                "description": r#"Glob pattern to filter by filename (e.g. "*.rs", "*.{ts,tsx}"). Matches the basename only, not the full path."#
+                "description": "Glob pattern to filter by filename \
+                                (e.g. \"*.rs\", \"*.{ts,tsx}\"). \
+                                Matches the basename only, not the full path."
             },
             "output_mode": {
                 "type": "string",
                 "enum": ["content", "files_with_matches", "count"],
-                "description": r#"Output mode: "content" shows matching lines (default), "files_with_matches" shows file paths only, "count" shows match counts per file"#
+                "description": "Output mode: \"content\" shows matching lines (default), \
+                                \"files_with_matches\" shows file paths only, \
+                                \"count\" shows match counts per file"
             },
             "context": {
                 "type": "integer",
-                "description": "Number of context lines to show before and after each match (content mode only)"
+                "description": "Number of context lines to show before and after each match \
+                                (content mode only)"
             },
             "case_insensitive": {
                 "type": "boolean",

@@ -855,7 +855,9 @@ mod tests {
             (
                 401,
                 None,
-                "Anthropic API rejected credentials (HTTP 401). CLAUDE_CODE_OAUTH_TOKEN may be expired or revoked. Generate a new one with `claude setup-token`.",
+                "Anthropic API rejected credentials (HTTP 401). \
+                 CLAUDE_CODE_OAUTH_TOKEN may be expired or revoked. \
+                 Generate a new one with `claude setup-token`.",
             ),
             (
                 429,
@@ -944,12 +946,14 @@ mod tests {
         for (error_type, expected) in [
             (
                 "overloaded_error",
-                "Anthropic API overloaded (overloaded_error). Retry in a few seconds. \
+                "Anthropic API overloaded (overloaded_error). \
+                 Retry in a few seconds. \
                  Details: Overloaded",
             ),
             (
                 "api_error",
-                "Anthropic API server error (api_error). Retry in a few seconds. \
+                "Anthropic API server error (api_error). \
+                 Retry in a few seconds. \
                  Details: Overloaded",
             ),
             (

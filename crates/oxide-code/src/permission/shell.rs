@@ -966,12 +966,13 @@ pub(super) enum PatternWord {
 
 const NAMES_NO_COMMAND: &str = "it must name a command, such as `cargo test *`";
 
-const ONE_COMMAND: &str = "it must be one simple command, such as `cargo test *`. Write a \
-                           pattern for each command of a chain or pipeline.";
+const ONE_COMMAND: &str = "it must be one simple command, such as `cargo test *`. \
+                           Write a pattern for each command of a chain or pipeline.";
 
-const HOLDS_REDIRECTION: &str = "it holds a redirection. Leave it out, since a pattern matches a \
-                                 command with its redirections set aside, and an `edit` pattern \
-                                 covers the file it writes.";
+const HOLDS_REDIRECTION: &str = "it holds a redirection. \
+                                 Leave it out, since a pattern matches a command \
+                                 with its redirections set aside, \
+                                 and an `edit` pattern covers the file it writes.";
 
 /// Parses an `exec` pattern into its words: one simple command, optionally led by assignments,
 /// whose words are each literal or a lone unquoted `*`.
@@ -1002,8 +1003,8 @@ pub(super) fn pattern_words(pattern: &str) -> Result<Vec<PatternWord>> {
                 let word = assignment_word(child, pattern);
                 ensure!(
                     word.literal,
-                    "the assignment {:?} expands at run time. Quote its value to match it as \
-                     written.",
+                    "the assignment {:?} expands at run time. \
+                     Quote its value to match it as written.",
                     word.text
                 );
                 words.push(PatternWord::Literal(word.text));
@@ -1032,9 +1033,10 @@ pub(super) fn pattern_words(pattern: &str) -> Result<Vec<PatternWord>> {
         };
         if word.glob {
             bail!(
-                "the word {written:?} holds a glob, but only a `*` standing alone as a word is a \
-                 wildcard. Write a pattern for each command it should cover, or quote the word \
-                 to match it as written."
+                "the word {written:?} holds a glob, \
+                 but only a `*` standing alone as a word is a wildcard. \
+                 Write a pattern for each command it should cover, \
+                 or quote the word to match it as written."
             );
         }
         words.push(PatternWord::Literal(value));

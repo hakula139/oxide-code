@@ -122,8 +122,9 @@ fn command_op(parsed: &Parsed) -> Result<Op, String> {
             .map(|name| format!("/{name}"))
             .collect();
         Err(format!(
-            "/{name} is not a REPL command. Available: {names}. Use //{name} to send the \
-             literal text.",
+            "/{name} is not a REPL command. \
+             Available: {names}. \
+             Use //{name} to send the literal text.",
             name = parsed.name,
             names = names.join(", "),
         ))
@@ -505,8 +506,9 @@ mod tests {
             );
             assert_eq!(
                 reports[2],
-                "/help is not a REPL command. Available: /clear, /compact, /effort, /mode, \
-                 /model, /rename, /resume. Use //help to send the literal text.",
+                "/help is not a REPL command. \
+                 Available: /clear, /compact, /effort, /mode, /model, /rename, /resume. \
+                 Use //help to send the literal text.",
             );
         })
         .await;

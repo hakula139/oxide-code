@@ -97,28 +97,29 @@ impl Approver for Unattended {
             (Some(grant), _) => {
                 let rule = grant.suggested();
                 format!(
-                    "This run cannot ask for approval. To allow this call, add `{}` to \
-                     `permission.allow.{}` in the user config.",
+                    "This run cannot ask for approval. \
+                     To allow this call, add `{}` to `permission.allow.{}` in the user config.",
                     toml::Value::from(rule.pattern()),
                     rule.class(),
                 )
             }
             (None, Basis::Builtin(group)) if group.tier() == ShippedTier::Ask => format!(
-                "This run cannot ask for approval, and {basis} holds this call. Approve it in an \
-                 interactive session, or set `permission.defaults.{group} = false` in the user \
-                 config."
+                "This run cannot ask for approval, and {basis} holds this call. \
+                 Approve it in an interactive session, \
+                 or set `permission.defaults.{group} = false` in the user config."
             ),
             (None, Basis::Mode(_)) => {
                 "This run cannot ask for approval, and no allow pattern matches this call. \
-                 Under `permission.allow` in the user config, a chained command needs a pattern \
-                 per command, and a word that expands needs a pattern ending in `*` at that word. \
-                 A command that hides what it runs, such as `$(...)` or `sh -c`, needs approval \
-                 in an interactive session."
+                 Under `permission.allow` in the user config, \
+                 a chained command needs a pattern per command, \
+                 and a word that expands needs a pattern ending in `*` at that word. \
+                 A command that hides what it runs, \
+                 such as `$(...)` or `sh -c`, needs approval in an interactive session."
                     .to_owned()
             }
             (None, basis) => format!(
-                "This run cannot ask for approval, and {basis} holds this call. Approve it in an \
-                 interactive session."
+                "This run cannot ask for approval, and {basis} holds this call. \
+                 Approve it in an interactive session."
             ),
         };
         std::future::ready(Decision::DenyWithFeedback { feedback })
@@ -510,23 +511,26 @@ mod tests {
             (
                 &manual,
                 Some(&grant),
-                r"This run cannot ask for approval. To allow this call, add `'''echo 'a\b''''` to `permission.allow.exec` in the user config.",
+                "This run cannot ask for approval. \
+                 To allow this call, \
+                 add `'''echo 'a\\b''''` to `permission.allow.exec` in the user config.",
             ),
             (
                 &manual,
                 None,
                 "This run cannot ask for approval, and no allow pattern matches this call. \
-                 Under `permission.allow` in the user config, a chained command needs a pattern \
-                 per command, and a word that expands needs a pattern ending in `*` at that word. \
-                 A command that hides what it runs, such as `$(...)` or `sh -c`, needs approval \
-                 in an interactive session.",
+                 Under `permission.allow` in the user config, \
+                 a chained command needs a pattern per command, \
+                 and a word that expands needs a pattern ending in `*` at that word. \
+                 A command that hides what it runs, \
+                 such as `$(...)` or `sh -c`, needs approval in an interactive session.",
             ),
             (
                 &Basis::Builtin(Shipped::Git),
                 None,
                 "This run cannot ask for approval, and the built-in `git` rule holds this call. \
-                 Approve it in an interactive session, or set `permission.defaults.git = false` in \
-                 the user config.",
+                 Approve it in an interactive session, \
+                 or set `permission.defaults.git = false` in the user config.",
             ),
             (
                 &Basis::Builtin(Shipped::Ssh),
@@ -537,8 +541,9 @@ mod tests {
             (
                 &ask,
                 None,
-                "This run cannot ask for approval, and the `ask.exec` pattern `git push *` holds \
-                 this call. Approve it in an interactive session.",
+                "This run cannot ask for approval, \
+                 and the `ask.exec` pattern `git push *` holds this call. \
+                 Approve it in an interactive session.",
             ),
         ];
 

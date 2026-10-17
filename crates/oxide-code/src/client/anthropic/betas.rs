@@ -116,14 +116,24 @@ mod tests {
             CLAUDE_CLI_VERSION, "2.1.296",
             "the sequences below were captured from this release, so a bump needs a fresh capture",
         );
-        let claude_code = "claude-code-20250219,interleaved-thinking-2025-05-14,\
-            thinking-token-count-2026-05-13,context-management-2025-06-27,\
-            prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,\
-            per-turn-control-2026-07-01,advisor-tool-2026-03-01,effort-2025-11-24";
-        let haiku = "interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,\
-            context-management-2025-06-27,prompt-caching-scope-2026-01-05,\
-            mid-conversation-system-2026-04-07,claude-code-20250219,per-turn-control-2026-07-01,\
-            advisor-tool-2026-03-01,effort-2025-11-24";
+        let claude_code = "claude-code-20250219,\
+                           interleaved-thinking-2025-05-14,\
+                           thinking-token-count-2026-05-13,\
+                           context-management-2025-06-27,\
+                           prompt-caching-scope-2026-01-05,\
+                           mid-conversation-system-2026-04-07,\
+                           per-turn-control-2026-07-01,\
+                           advisor-tool-2026-03-01,\
+                           effort-2025-11-24";
+        let haiku = "interleaved-thinking-2025-05-14,\
+                     thinking-token-count-2026-05-13,\
+                     context-management-2025-06-27,\
+                     prompt-caching-scope-2026-01-05,\
+                     mid-conversation-system-2026-04-07,\
+                     claude-code-20250219,\
+                     per-turn-control-2026-07-01,\
+                     advisor-tool-2026-03-01,\
+                     effort-2025-11-24";
         for (id, captured) in [
             // Uncaptured on this release, so it reuses the Opus 5.5 sequence `compute_betas` cites.
             ("claude-fable-5-1", claude_code),
