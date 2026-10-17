@@ -1,10 +1,12 @@
-//! Text helpers: display-width-aware truncation and count-based pluralization.
+//! Text helpers: display-width-aware truncation, count-based pluralization, and escaping for
+//! terminal output.
 
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 pub(crate) const ELLIPSIS: &str = "...";
-pub(crate) const ELLIPSIS_WIDTH: usize = 3;
+/// Columns [`ELLIPSIS`] fills, one per byte since it is ASCII.
+pub(crate) const ELLIPSIS_WIDTH: usize = ELLIPSIS.len();
 
 #[expect(
     clippy::needless_pass_by_value,
@@ -92,14 +94,29 @@ pub(crate) fn is_hidden(c: char) -> bool {
     c.is_control() || c.width().is_none_or(|w| w == 0)
 }
 
-/// `text` with each control character other than a tab or a line break escaped as `\u{..}`, so
-/// writing it to a terminal cannot move the cursor or change the terminal's state.
+/// `text` with each control character other than a tab or a line break escaped by
+/// [`char::escape_default`], so writing it to a terminal cannot move the cursor or change the
+/// terminal's state.
 pub(crate) fn escape_controls(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
         let line_break = c == '\n' || (c == '\r' && chars.peek() == Some(&'\n'));
         if c.is_control() && c != '\t' && !line_break {
+            out.extend(c.escape_default());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// `text` with each [hidden](is_hidden) character other than a tab escaped by
+/// [`char::escape_default`], line breaks included, so no part of it can hide from a reader.
+pub(crate) fn escape_hidden(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c != '\t' && is_hidden(c) {
             out.extend(c.escape_default());
         } else {
             out.push(c);
@@ -222,6 +239,16 @@ mod tests {
         assert_eq!(
             escape_controls("a\tb\r\nc\n\u{1b}[2K\rd\u{7}\u{200b}"),
             "a\tb\r\nc\n\\u{1b}[2K\\rd\\u{7}\u{200b}",
+        );
+    }
+
+    // ── escape_hidden ──
+
+    #[test]
+    fn escape_hidden_escapes_controls_line_breaks_and_zero_width_characters_but_keeps_tabs() {
+        assert_eq!(
+            escape_hidden("a\tb\r\nc\u{1b}[2K\u{200b}d 中"),
+            "a\tb\\r\\nc\\u{1b}[2K\\u{200b}d 中",
         );
     }
 }

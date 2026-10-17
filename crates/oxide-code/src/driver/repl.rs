@@ -15,7 +15,7 @@ use crate::permission::{Basis, SessionGrant};
 use crate::protocol::{Decision, Event, EventSink, Op};
 use crate::slash::{self, Parsed};
 use crate::tool::{ApprovalBody, ApprovalPreview};
-use crate::util::text::is_hidden;
+use crate::util::text::escape_hidden;
 
 /// Reads prompts and slash commands until EOF or a signal, then finalizes the session. EOF after
 /// an operation failed or a command was rejected exits with failure. Approvals are asked only when
@@ -227,41 +227,28 @@ impl<R: AsyncBufRead + Unpin, W: Write> Prompter<'_, R, W> {
 /// Writes the call `preview` shows, one line per command line or diff row, then why `basis` made
 /// it ask when a rule holds it.
 fn write_preview(out: &mut impl Write, preview: &ApprovalPreview, basis: &Basis) -> io::Result<()> {
-    writeln!(out, "{} needs approval:", shown(&preview.title))?;
+    writeln!(out, "{} needs approval:", escape_hidden(&preview.title))?;
     match &preview.body {
         ApprovalBody::Command(command) => {
             for line in command.lines() {
-                writeln!(out, "  {}", shown(line))?;
+                writeln!(out, "  {}", escape_hidden(line))?;
             }
         }
         ApprovalBody::Diff(chunks) => {
             for chunk in chunks {
                 for line in &chunk.old {
-                    writeln!(out, "  - {}", shown(&line.text))?;
+                    writeln!(out, "  - {}", escape_hidden(&line.text))?;
                 }
                 for line in &chunk.new {
-                    writeln!(out, "  + {}", shown(&line.text))?;
+                    writeln!(out, "  + {}", escape_hidden(&line.text))?;
                 }
             }
         }
     }
     if let Some(reason) = basis.reason() {
-        writeln!(out, "{}", shown(&reason))?;
+        writeln!(out, "{}", escape_hidden(&reason))?;
     }
     Ok(())
-}
-
-/// `text` with control and zero-width characters escaped, so no part of a call can hide itself.
-fn shown(text: &str) -> String {
-    text.chars()
-        .map(|c| {
-            if c != '\t' && is_hidden(c) {
-                c.escape_default().to_string()
-            } else {
-                c.to_string()
-            }
-        })
-        .collect()
 }
 
 #[cfg(test)]
