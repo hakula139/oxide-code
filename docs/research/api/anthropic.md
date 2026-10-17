@@ -57,49 +57,27 @@ anthropic-beta: claude-code-20250219,oauth-2025-04-20
 
 Additional useful betas:
 
-| Header                            | Purpose                                                      |
-| --------------------------------- | ------------------------------------------------------------ |
-| `interleaved-thinking-2025-05-14` | Extended thinking support                                    |
-| `context-1m-2025-08-07`           | 1M context window                                            |
-| `context-management-2025-06-27`   | Context management                                           |
-| `prompt-caching-scope-2026-01-05` | Prompt caching                                               |
-| `effort-2025-11-24`               | Effort control                                               |
-| `structured-outputs-2025-12-15`   | JSON-schema-constrained responses (one-shot calls)           |
-| `advanced-tool-use-2025-11-20`    | Tool search (first-party only)                               |
-| `task-budgets-2026-03-13`         | Advisory token budget across an agentic loop (Opus 4.7 only) |
+| Header                            | Purpose                                            |
+| --------------------------------- | -------------------------------------------------- |
+| `interleaved-thinking-2025-05-14` | Extended thinking support                          |
+| `context-1m-2025-08-07`           | 1M context window                                  |
+| `context-management-2025-06-27`   | Context management                                 |
+| `prompt-caching-scope-2026-01-05` | Prompt caching                                     |
+| `effort-2025-11-24`               | Effort control                                     |
+| `structured-outputs-2025-12-15`   | JSON-schema-constrained responses (one-shot calls) |
+| `advanced-tool-use-2025-11-20`    | Tool search (first-party only)                     |
+| `task-budgets-2026-03-13`         | Advisory token budget across an agentic loop       |
 
 #### Per-model beta sets
 
-The accepted beta set differs per model family and call type (agentic chat vs one-shot utility). Claude Code applies this mapping in `claude-code/src/utils/betas.ts`:
+Haiku is the one family whose beta set differs: Claude Code moves `claude-code-20250219` later in the agentic sequence on Haiku and, per the frozen 2.1.87 source, leaves it off Haiku one-shots.
 
-Rows are grouped by role: identity / auth → universal agentic → model-tier-gated. Within each group the broadest support comes first.
-
-Cell legend: `✓` always on, `-` not supported (or stripped), `[1m]` opt-in via the model suffix, `*` caller opt-in (body field + beta ship together, see rules below), `1P` on the first-party API and Foundry only (2.1.87 `modelSupportsISP` returns false for Haiku on Bedrock and Vertex).
-
-| Beta                              | Opus 4 (base) | Opus 4.1 / 4.5 | Opus 4.6+ | Sonnet 4 (base) | Sonnet 4.5 | Sonnet 4.6+ | Haiku 4 (base) | Haiku 4.5 (agentic) | Haiku 4.5 (one-shot) |
-| --------------------------------- | ------------- | -------------- | --------- | --------------- | ---------- | ----------- | -------------- | ------------------- | -------------------- |
-| `claude-code-20250219`            | ✓             | ✓              | ✓         | ✓               | ✓          | ✓           | ✓              | ✓                   | -                    |
-| `oauth-2025-04-20` (OAuth only)   | ✓             | ✓              | ✓         | ✓               | ✓          | ✓           | ✓              | ✓                   | ✓                    |
-| `context-management-2025-06-27`   | ✓             | ✓              | ✓         | ✓               | ✓          | ✓           | ✓              | ✓                   | -                    |
-| `prompt-caching-scope-2026-01-05` | ✓             | ✓              | ✓         | ✓               | ✓          | ✓           | ✓              | ✓                   | -                    |
-| `interleaved-thinking-2025-05-14` | ✓             | ✓              | ✓         | ✓               | ✓          | ✓           | `1P`           | `1P`                | `1P`                 |
-| `context-1m-2025-08-07`           | -             | -              | `[1m]`    | `[1m]`          | `[1m]`     | `[1m]`      | -              | -                   | -                    |
-| `effort-2025-11-24`               | -             | -              | ✓         | -               | -          | ✓           | -              | -                   | -                    |
-| `structured-outputs-2025-12-15`   | -             | `*`            | `*`       | -               | `*`        | `*`         | -              | `*`                 | `*`                  |
-
-Claude Code applies these rules to 4.x models:
-
-- **Haiku + `context-1m`**: Rejected because Haiku has a 200K window. Claude Code silently strips the `[1m]` tag before sending.
-- **Haiku one-shots** (title generation, compaction classifier): Strip agentic markers entirely. `claude-code-20250219` is re-added only when the call is agentic.
 - **`prompt-caching-scope` ships unconditionally.** The header alone is a server-side no-op without a matching `cache_control.scope` field.
-- **`context-1m` is user opt-in via `[1m]`.** Appending `[1m]` to the model string (e.g., `claude-opus-4-8[1m]`) adds the 1M beta and strips the tag before the request hits the wire. Family-based auto-enable would 400 on subscriptions that do not carry 1M access.
-- **`effort` is Opus 4.6+ and Sonnet 4.6+ only.** Opus 4.5 and older, Sonnet 4.5 and older, and all Haiku variants reject it per upstream's `modelSupportsEffort`.
 - **`effort` and `context-management` betas need a body field.** Sending the header alone is a silent no-op: the request runs at the server default. See [Agentic Request Body Fields](#agentic-request-body-fields) for the matching `output_config.effort` and `context_management.edits` shapes.
-- **`structured-outputs` is per-version and caller-opt-in.** The upstream allowlist is Opus 4.1+, Sonnet 4.5+, Haiku 4.5. Claude Code ships the beta only when a caller supplies an `output_config.format`.
 
-On agentic Opus 5.5 and Sonnet 5.5 requests, Claude Code 2.1.296 sends `claude-code-20250219, interleaved-thinking-2025-05-14, thinking-token-count-2026-05-13, context-management-2025-06-27, prompt-caching-scope-2026-01-05, mid-conversation-system-2026-04-07, per-turn-control-2026-07-01, advisor-tool-2026-03-01, effort-2025-11-24`. On Haiku 5.5 it moves `claude-code-20250219` to just after `mid-conversation-system-2026-04-07`. Both sequences were captured from `claude --bare -p` with an API key on 2026-10-15. Under OAuth, the frozen 2.1.87 source puts `oauth-2025-04-20` right after the leading `claude-code-20250219`, or first on Haiku. That slot was not captured.
+On agentic Opus 5.5 and Sonnet 5.5 requests, and by inference Fable 5.1, Claude Code 2.1.296 sends `claude-code-20250219, interleaved-thinking-2025-05-14, thinking-token-count-2026-05-13, context-management-2025-06-27, prompt-caching-scope-2026-01-05, mid-conversation-system-2026-04-07, per-turn-control-2026-07-01, advisor-tool-2026-03-01, effort-2025-11-24`. On Haiku 5.5 it moves `claude-code-20250219` to just after `mid-conversation-system-2026-04-07`. Both sequences were captured from `claude --bare -p` with an API key on 2026-10-15. Fable 5.1 was not captured on 2.1.296, but on Claude Code 2.1.301 `claude --bare -p` sent Fable 5.1 and Opus 5.5 identical betas against a local listener on 2026-10-17. Under OAuth, the frozen 2.1.87 source puts `oauth-2025-04-20` right after the leading `claude-code-20250219`, or first on Haiku. That slot was not captured.
 
-This client supports only the Claude 5.5 models, where effort, interleaved thinking, the 1M window, and structured outputs are GA. On their agentic turns, `client::anthropic::compute_betas` sends the sequence above, which includes betas for features this client leaves unused. Its test pins `CLAUDE_CLI_VERSION`, the release the user agent and billing block report, so a version bump fails until the sequence is recaptured. It then appends `thinking-binding-controls-2026-08-01`, plus `thinking-display-updates-2026-08-18` when the request sets `thinking.display = "updates"`. Agentic turns on other model ids carry `claude-code-20250219`, `oauth-2025-04-20` (OAuth only), and `prompt-caching-scope-2026-01-05`, and go without effort, thinking, or context management. One-shots carry `claude-code-20250219` (skipped on Haiku) and `oauth-2025-04-20` (OAuth only). The body-side `cache_control.scope: "global"` stays gated on the base URL, as [Prompt Caching Scope](#prompt-caching-scope) describes.
+This client supports the Claude 5.5 models and Fable 5.1, where effort, interleaved thinking, the 1M window, and structured outputs are GA. On 2026-10-17, [What's new in Claude Fable 5.1](https://platform.claude.com/docs/en/models/fable-5-1/whats-new-fable-5-1) listed Fable 5.1 as available to all customers on the Claude API and partner platforms, but availability varies by account, and some third-party gateways serve it. On agentic turns, `client::anthropic::compute_betas` sends the sequence above, which includes betas for features this client leaves unused. Its test pins `CLAUDE_CLI_VERSION`, the release the user agent and billing block report, so a version bump fails until the sequence is recaptured for every model, Fable 5.1 included. It then appends `thinking-binding-controls-2026-08-01`, plus `thinking-display-updates-2026-08-18` when the request sets `thinking.display = "updates"`. Agentic turns on other model ids carry `claude-code-20250219`, `oauth-2025-04-20` (OAuth only), and `prompt-caching-scope-2026-01-05`, and go without effort, thinking, or context management. One-shots carry `claude-code-20250219` (skipped on Haiku) and `oauth-2025-04-20` (OAuth only). The body-side `cache_control.scope: "global"` stays gated on the base URL, as [Prompt Caching Scope](#prompt-caching-scope) describes.
 
 ### 2. System prompt prefix (as a separate block)
 
@@ -184,14 +162,14 @@ The Stainless TS SDK also emits `x-stainless-lang`, `-package-version`, `-runtim
 
 ## What Happens Without These
 
-| Missing                  | Haiku 4.5 | Sonnet / Opus |
-| ------------------------ | --------- | ------------- |
-| `claude-code-20250219`   | 200       | 429           |
-| `oauth-2025-04-20`       | 401       | 401           |
-| Prefix as separate block | 200       | 429           |
-| Prefix in body string    | 200       | 429           |
+| Missing                  | Status |
+| ------------------------ | ------ |
+| `claude-code-20250219`   | 429    |
+| `oauth-2025-04-20`       | 401    |
+| Prefix as separate block | 429    |
+| Prefix in body string    | 429    |
 
-The last two rows are the critical distinction: having the prefix present in a concatenated string is **not sufficient**. It must be a separate `{"type": "text", "text": "..."}` block in the system array.
+These OAuth statuses were measured on the Claude 4 Opus and Sonnet models and have not been rechecked on the 5.5 models. The last two rows are the critical distinction: having the prefix present in a concatenated string is **not sufficient**. It must be a separate `{"type": "text", "text": "..."}` block in the system array.
 
 ## Prompt Caching Scope
 
@@ -230,11 +208,11 @@ This mirrors the Claude Code 2.1.301 bundle, which, as read on 2026-10-17, sends
 
 ## Agentic Request Body Fields
 
-Some capabilities live in the request body alongside the `anthropic-beta` header that gates them. Shipping the header but omitting the body field is a silent no-op because the feature does not activate. All three fields below were captured live from Claude Code 2.1.119 and cross-checked against the official migration guide.
+Some capabilities live in the request body alongside the `anthropic-beta` header that gates them. Shipping the header but omitting the body field is a silent no-op because the feature does not activate. [Sources](#sources) records when each field was captured.
 
 ### `output_config.effort`
 
-GA as of Opus 4.6. Controls the intelligence-vs-latency tier of agentic turns via one of five tokens: `low`, `medium`, `high`, `xhigh`, `max`.
+Controls the intelligence-vs-latency tier of agentic turns via one of five tokens: `low`, `medium`, `high`, `xhigh`, `max`.
 
 ```json
 {
@@ -242,14 +220,14 @@ GA as of Opus 4.6. Controls the intelligence-vs-latency tier of agentic turns vi
 }
 ```
 
-- **The `effort-2025-11-24` beta header is necessary but not sufficient.** The header alone is a no-op, so the model runs at its default effort until the body carries `output_config.effort`.
-- **Per-model ceiling.** `max` is Opus-only, and Sonnet 4.6 400s on it. `xhigh` is Opus 4.7 / 4.8-only. Every Claude 5.5 model accepts all five.
-- **Per-model default.** On the 4.x models the raw API default was `high` for every effort-capable model (equivalent to omitting the field), and Claude Code bumped Opus 4.7 to `xhigh`. The Claude 5.5 API defaults are `medium` on Opus and Haiku and `high` on Sonnet, and oxide-code sends them explicitly.
-- **`max_tokens` should scale with effort.** Claude Code uses 64 K on Opus 4.7 at `xhigh`, 32 K on Sonnet 4.6 at `high`. oxide-code defaults to 64 K on the supported models, since effort already steers thinking depth, and to 16 K on other ids.
+- **The body field does the work.** Anthropic's [effort docs](https://platform.claude.com/docs/en/build-with-claude/effort) list effort as GA with no beta header, and the `effort-2025-11-24` header alone is a no-op. Claude Code still sends the header, so oxide-code does too.
+- **Levels.** Every supported model accepts all five, per the effort docs on 2026-10-17.
+- **Per-model default.** The API defaults are `medium` on Opus 5.5 and Haiku 5.5 and `high` on Sonnet 5.5 and Fable 5.1, and oxide-code sends them explicitly. Claude Code 2.1.301 sends `medium` on Sonnet 5.5 instead.
+- **`max_tokens`.** Claude Code 2.1.301 sends 128K on the 5.5 models and 64K on Fable 5.1. oxide-code defaults to 64K on the supported models, since effort already steers thinking depth, and to 16K on other ids.
 
 ### `context_management.edits`
 
-Partners the `context-management-2025-06-27` beta header. Claude Code ships the same directive on every 4.6+ request:
+Partners the `context-management-2025-06-27` beta header. Claude Code 2.1.301 ships the same directive on every agentic request to the supported models:
 
 ```json
 {
@@ -279,7 +257,7 @@ Invalidation order (from the Anthropic caching docs) is `tools → system → me
 
 ### `thinking.display`
 
-See [Extended Thinking § Display modes (Opus 4.7+)](extended-thinking.md#display-modes-opus-47). Opus 4.7 silently flipped the default to `"omitted"`. `show_thinking=true` in oxide-code opts back into `"summarized"`. With it off, Opus 5.5 and Sonnet 5.5 requests use `"updates"`.
+See [Extended Thinking § Display modes](extended-thinking.md#display-modes). The default is `"omitted"`. `show_thinking=true` in oxide-code opts into `"summarized"`. With it off, requests on every supported model except Haiku 5.5 use `"updates"`.
 
 ## Third-Party Tool Restrictions
 
@@ -314,7 +292,7 @@ The `anthropic-version` header is `2023-06-01` across all Claude Code endpoints.
 
 ## Model IDs
 
-The API model ID for Opus 4.6 is `claude-opus-4-6`. The `[1m]` suffix (e.g., `claude-opus-4-6[1m]`) is a client-side convention that Claude Code strips before sending to the API via `normalizeModelStringForAPI()`. The `context-1m-2025-08-07` beta header activates the 1M context window.
+oxide-code sends the dateless ids `claude-fable-5-1`, `claude-opus-5-5`, `claude-sonnet-5-5`, and `claude-haiku-5-5`, which Anthropic's [models overview](https://platform.claude.com/docs/en/about-claude/models/overview) lists as pinned snapshots. All four have a 1M-token context window without the `context-1m-2025-08-07` beta. The `[1m]` suffix (e.g., `claude-opus-5-5[1m]`) is a client-side convention that Claude Code strips before sending to the API via `normalizeModelStringForAPI()`. oxide-code treats such an id as unknown and suggests the id without the suffix.
 
 ## SDK vs Raw HTTP
 
@@ -351,4 +329,4 @@ oxide-code implements the same refresh flow: proactive refresh with the 5-minute
 - `claude-code/src/utils/secureStorage/macOsKeychainStorage.ts`: macOS Keychain backend
 - `claude-code/src/utils/secureStorage/plainTextStorage.ts`: credential file I/O
 
-Body-field research is empirical. The `output_config.effort`, `context_management.edits`, and `cache_control.ttl` wire shapes documented above were captured live from a `claude-code --bare -p --model claude-opus-4-7` session against a local SSE proxy on 2026-04-24 and cross-referenced with the [Opus 4.7 migration guide](https://platform.claude.com/docs/en/about-claude/models/migration-guide) and [Anthropic prompt-caching docs](https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching).
+Body-field research is empirical. The `cache_control.ttl` wire shape was captured live from a `claude-code --bare -p --model claude-opus-4-7` session against a local SSE proxy on 2026-04-24 and cross-referenced with [Anthropic prompt-caching docs](https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching). The `output_config.effort`, `context_management.edits`, and `max_tokens` values were captured from `claude --bare -p` on Claude Code 2.1.301 against a local listener on 2026-10-17, once per supported model, and cross-referenced with Anthropic's [effort docs](https://platform.claude.com/docs/en/build-with-claude/effort).

@@ -60,8 +60,8 @@ pub(crate) fn mode(arg: &str) -> Result<Op, String> {
     Ok(Op::SetMode(mode))
 }
 
-/// `/model <id>`. Matches an exact catalogue id, then a unique substring of one, so the family
-/// names `opus`, `sonnet`, and `haiku` work as aliases.
+/// `/model <id>`. Matches an exact catalogue id, then a unique substring of one, so family names
+/// such as `opus` work as aliases.
 pub(crate) fn model(arg: &str) -> Result<Op, String> {
     let arg = required(arg, "model id", "/model <id>")?.to_ascii_lowercase();
     let hits: Vec<&ModelInfo> = match MODELS.iter().find(|info| info.id == arg) {
@@ -74,8 +74,13 @@ pub(crate) fn model(arg: &str) -> Result<Op, String> {
     let info = match hits.as_slice() {
         [info] => info,
         [_, ..] => {
+            let aliases = MODELS
+                .iter()
+                .map(|info| format!("`{}`", info.family.id_token()))
+                .collect::<Vec<_>>()
+                .join(", ");
             return Err(formatdoc! {"
-                Model `{arg}` is ambiguous. Pick one or use a short alias (`opus`, `sonnet`, `haiku`):
+                Model `{arg}` is ambiguous. Pick one or use a short alias ({aliases}):
 
                 {}",
                 format_models(hits),
@@ -277,6 +282,7 @@ mod tests {
     #[test]
     fn model_resolves_family_aliases_ignoring_case_and_padding() {
         for (arg, id) in [
+            ("fable", "claude-fable-5-1"),
             ("opus", "claude-opus-5-5"),
             ("sonnet", "claude-sonnet-5-5"),
             ("haiku", "claude-haiku-5-5"),
@@ -288,34 +294,40 @@ mod tests {
 
     #[test]
     fn model_unknown_id_suggests_a_replacement_and_lists_the_catalogue() {
-        // Retired ids and a `[1m]` suffix also get the 5.5 model they name as a suggestion.
+        // Ids naming a family and a `[1m]` suffix also get the matching model as a suggestion.
         for (arg, expected) in [
             (
                 "gpt-4",
                 indoc! {"
                     Unknown model: `gpt-4`. Supported models:
 
+                    - `claude-fable-5-1` — Claude Fable 5.1
                     - `claude-opus-5-5` — Claude Opus 5.5
                     - `claude-sonnet-5-5` — Claude Sonnet 5.5
-                    - `claude-haiku-5-5` — Claude Haiku 5.5"},
+                    - `claude-haiku-5-5` — Claude Haiku 5.5"
+                },
             ),
             (
-                "claude-opus-4-8",
+                "claude-opus-5-5-20261001",
                 indoc! {"
-                    Unknown model: `claude-opus-4-8`. Did you mean `claude-opus-5-5`? Supported models:
+                    Unknown model: `claude-opus-5-5-20261001`. Did you mean `claude-opus-5-5`? Supported models:
 
+                    - `claude-fable-5-1` — Claude Fable 5.1
                     - `claude-opus-5-5` — Claude Opus 5.5
                     - `claude-sonnet-5-5` — Claude Sonnet 5.5
-                    - `claude-haiku-5-5` — Claude Haiku 5.5"},
+                    - `claude-haiku-5-5` — Claude Haiku 5.5"
+                },
             ),
             (
                 "sonnet[1m]",
                 indoc! {"
                     Unknown model: `sonnet[1m]`. Did you mean `claude-sonnet-5-5`? Supported models:
 
+                    - `claude-fable-5-1` — Claude Fable 5.1
                     - `claude-opus-5-5` — Claude Opus 5.5
                     - `claude-sonnet-5-5` — Claude Sonnet 5.5
-                    - `claude-haiku-5-5` — Claude Haiku 5.5"},
+                    - `claude-haiku-5-5` — Claude Haiku 5.5"
+                },
             ),
         ] {
             assert_eq!(model(arg), Err(expected.to_owned()), "{arg}");
@@ -327,10 +339,11 @@ mod tests {
         assert_eq!(
             model("o").expect_err("ambiguous arg must error"),
             indoc! {"
-                Model `o` is ambiguous. Pick one or use a short alias (`opus`, `sonnet`, `haiku`):
+                Model `o` is ambiguous. Pick one or use a short alias (`fable`, `opus`, `sonnet`, `haiku`):
 
                 - `claude-opus-5-5` — Claude Opus 5.5
-                - `claude-sonnet-5-5` — Claude Sonnet 5.5"},
+                - `claude-sonnet-5-5` — Claude Sonnet 5.5"
+            },
         );
     }
 

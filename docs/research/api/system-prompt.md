@@ -191,18 +191,7 @@ Claude Code sends these headers on every Messages API request:
 | `x-stainless-os`                            | `MacOS` / `Linux` / etc.               | Anthropic SDK auto-injected        |
 | `x-stainless-arch`                          | `arm64` / `x64` / etc.                 | Anthropic SDK auto-injected        |
 
-Beta headers for a standard non-Haiku first-party model (e.g. `claude-opus-4-6`):
-
-```text
-claude-code-20250219
-context-1m-2025-08-07
-context-management-2025-06-27
-effort-2025-11-24
-interleaved-thinking-2025-05-14
-prompt-caching-scope-2026-01-05
-```
-
-Additional betas are added conditionally: `oauth-2025-04-20` for subscribers, tool-search headers when tool search is enabled, `redact-thinking-*` for thinking redaction, etc.
+[Anthropic API § Per-model beta sets](anthropic.md#per-model-beta-sets) lists the beta sequence Claude Code sends on agentic Claude 5.5 requests. Additional betas are added conditionally: `oauth-2025-04-20` for subscribers, tool-search headers when tool search is enabled, `redact-thinking-*` for thinking redaction, etc.
 
 The URL includes a `?beta=true` query parameter.
 

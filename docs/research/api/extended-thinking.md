@@ -20,15 +20,7 @@ Server tool use blocks stream identically to client `tool_use`: `input_json_delt
 
 ## Thinking Configuration
 
-Extended thinking is controlled by a `thinking` field in the request body:
-
-```json
-{
-  "thinking": { "type": "enabled", "budget_tokens": 10000 }
-}
-```
-
-Claude 4.6+ models support an `adaptive` mode where the API decides the budget:
+The `thinking` field in the request body controls thinking. Every supported model uses adaptive thinking, deciding how much to think, while `output_config.effort` steers the depth:
 
 ```json
 {
@@ -36,24 +28,23 @@ Claude 4.6+ models support an `adaptive` mode where the API decides the budget:
 }
 ```
 
-When thinking is enabled, `temperature` must be omitted from the request (API rejects it).
+As of 2026-10-17, Anthropic's [models overview](https://platform.claude.com/docs/en/about-claude/models/overview) says the manual `{"type": "enabled", "budget_tokens": N}` mode is not accepted on the 5.5 models or Fable 5.1. Thinking is always on for Opus 5.5 and Fable 5.1.
 
 ### Beta Headers
 
-- `interleaved-thinking-2025-05-14`: Enables thinking blocks interleaved with text / tool_use.
-- Without this header, thinking blocks appear only at the start of the response.
+On supported models, interleaved thinking, where thinking blocks appear between tool calls, needs no beta header. oxide-code still sends `interleaved-thinking-2025-05-14` because Claude Code's agentic beta sequence includes it.
 
-### Display modes (Opus 4.7+)
+### Display modes
 
-`thinking.display`, added in Opus 4.7, takes three wire values:
+`thinking.display` accepts three wire values:
 
 | Value          | Meaning                                                      |
 | -------------- | ------------------------------------------------------------ |
 | `"summarized"` | Thinking blocks stream summarized reasoning text.            |
 | `"omitted"`    | Thinking blocks still ship but `thinking: ""` is empty.      |
-| `"updates"`    | Only progress notes stream as text (Opus / Sonnet 5.5, beta) |
+| `"updates"`    | Only progress notes stream as text (all but Haiku 5.5, beta) |
 
-**Silent default change.** On Opus 4.6, the server defaulted to `"summarized"`. On Opus 4.7 the default is `"omitted"`, so any UI that renders streaming reasoning (including oxide-code's `show_thinking` TUI mode) sees a long pause followed by the final answer unless it opts back in:
+Every supported model defaults to `"omitted"`. As a result, any UI that renders streaming reasoning, including oxide-code's `show_thinking` TUI mode, sees a long pause followed by the final answer unless it opts in:
 
 ```json
 {
@@ -61,13 +52,11 @@ When thinking is enabled, `temperature` must be omitted from the request (API re
 }
 ```
 
-Older models (4.6, 4.5) accept the field and ignore it, so sending it unconditionally is safe when the caller wants summarized output.
-
-Claude Opus 5.5 and Sonnet 5.5 return the notes the model writes between tool calls as progress-update thinking blocks, which are empty under `"omitted"`. Each note is its own thinking block directly before the tool call it introduces. A response that stops early (`max_tokens`, context window, stop sequence) can end with a note whose text is exactly `This part of the response was interrupted before it finished.`, and continuing means passing that turn back unchanged with a new user message.
+Claude Fable 5.1, Opus 5.5, and Sonnet 5.5 return the notes the model writes between tool calls as progress-update thinking blocks. These blocks are empty under `"omitted"`. Each note appears in its own thinking block immediately before the tool call it introduces. On Opus 5.5 and Sonnet 5.5, a response that stops early (`max_tokens`, context window, stop sequence) can end with a note whose text is exactly `This part of the response was interrupted before it finished.` To continue, pass that turn back unchanged with a new user message.
 
 oxide-code couples `display` to `config.show_thinking`: `"summarized"` when the TUI renders reasoning, otherwise `"updates"` on models that support it and no field on the rest.
 
-`"summarized"` and `"omitted"` are GA since Opus 4.7, and `"updates"` needs the `thinking-display-updates-2026-08-18` beta.
+`"summarized"` and `"omitted"` are GA. `"updates"` requires the `thinking-display-updates-2026-08-18` beta.
 
 ## Thinking Block Lifecycle
 
@@ -98,7 +87,7 @@ Order matters: trailing thinking must be stripped before whitespace filtering, o
 ### Constraints
 
 - **Trailing thinking**: A final assistant message must not end with a thinking block. Stripping can leave a thinking-only message empty, and Claude Code inserts a placeholder text block to keep the assistant turn. Deleting the message would merge the user messages around it into one turn, since the API [combines consecutive same-role turns](https://platform.claude.com/docs/en/api/messages/create).
-- **Model switches**: [Switching models mid-conversation](https://platform.claude.com/docs/en/build-with-claude/preserved-thinking#switching-models) asks clients to keep passing thinking blocks back unchanged, since the API drops or ignores the blocks the request's model can't read. Which blocks a model reads depends on the platform: Opus 5.5 reads Sonnet 5.5 and Haiku 5.5 blocks, and Sonnet 5.5 reads Haiku 5.5 blocks, only on the Claude API and Google Cloud. A dropped block is neither billed nor counted as input. The docs suggest stripping prior blocks only to save input tokens on the models that ignore them, but a client-side strip changes the messages that every later block is bound to, which invalidates those blocks too.
+- **Model switches**: [Switching models mid-conversation](https://platform.claude.com/docs/en/build-with-claude/preserved-thinking#switching-models) asks clients to keep passing thinking blocks back unchanged, since the API drops or ignores the blocks the request's model can't read. Opus 5.5 reads Sonnet 5.5 and Haiku 5.5 blocks, and Sonnet 5.5 reads Haiku 5.5 blocks, only on the Claude API and Google Cloud. Fable 5.1 reads blocks from earlier models, and only Fable 5.1 and Mythos 5.1 read its blocks, as [What's new in Claude Fable 5.1](https://platform.claude.com/docs/en/models/fable-5-1/whats-new-fable-5-1) described on 2026-10-17. A dropped block is neither billed nor counted as input. The docs suggest stripping prior blocks only to save input tokens on the models that ignore them, but a client-side strip changes the messages that every later block is bound to, which invalidates those blocks too.
 - **Account binding**: Thinking blocks from Sonnet 5.5 and Haiku 5.5 work only in the account that produced them or an account linked to it, as the guide on [account-bound thinking](https://platform.claude.com/docs/en/build-with-claude/preserved-thinking#account-bound-thinking) describes, and blocks from earlier models aren't affected. When another account sends one of these blocks, the API drops it before the model sees it, and the request succeeds. On the Claude API and Google Cloud, with the `thinking-binding-controls-2026-08-01` beta, the response lists each dropped block in `input_transformations` as a `thinking_dropped` entry with `reason: "organization_binding_mismatch"`. A signature that was tampered with or cannot be decrypted is a separate failure, which always gets a 400 whatever `prefix_mismatch_behavior` says. A client that strips thinking when the credential changes therefore loses the blocks the API would have kept: those sent back from the same or a linked account, and those from models that aren't bound to an account.
 
 ## Signatures

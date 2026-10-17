@@ -48,7 +48,7 @@ pub(super) const SONNET_5_5_RATES: TokenCostRates = TokenCostRates {
         input: 2.0,
         cache_write_5m: 2.50,
         cache_write_1h: 4.0,
-        cache_read: 0.20,
+        cache_read: 0.10,
         output: 10.0,
     },
     long_prompt: None,
@@ -72,6 +72,17 @@ pub(super) const HAIKU_5_5_RATES: TokenCostRates = TokenCostRates {
             output: 2.50,
         },
     }),
+};
+
+pub(super) const FABLE_5_1_RATES: TokenCostRates = TokenCostRates {
+    base: RateCard {
+        input: 10.0,
+        cache_write_5m: 12.50,
+        cache_write_1h: 20.0,
+        cache_read: 0.25,
+        output: 50.0,
+    },
+    long_prompt: None,
 };
 
 impl TokenCostRates {
