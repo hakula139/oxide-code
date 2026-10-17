@@ -2,11 +2,11 @@
 
 Instruction files are Markdown files that provide persistent, project-specific context for the assistant. oxide-code loads them when a session starts and includes them with every request.
 
-## Supported filenames
+## Supported Filenames
 
 At each location, oxide-code loads `CLAUDE.md`, or `AGENTS.md` if `CLAUDE.md` is missing or empty. Choose the filename your project prefers. Each file is read as written, without expanding Claude Code's `@path` imports.
 
-## Where instruction files can live
+## Where Instruction Files Can Live
 
 Instruction files are loaded from three scopes:
 
@@ -23,13 +23,13 @@ The project root is the Git repository root, or the working directory if it is o
 3. `/repo/crates/`, then `/repo/crates/.claude/`
 4. `/repo/crates/core/`, then `/repo/crates/core/.claude/`
 
-## When changes take effect
+## When Changes Take Effect
 
 - **Edits during a session** reach the model as a reminder with your next prompt. A date change since the session started arrives the same way.
 - **Resuming a session** with `/resume` or `ox -c` keeps the instructions and date from when the session started, so the cached prompt prefix stays reusable. Edits made since then arrive as a reminder with your next prompt.
 - **`/clear` and `/compact`** start from the current files and date.
 
-## Writing effective instructions
+## Writing Effective Instructions
 
 A typical file lists coding conventions and project-specific rules:
 

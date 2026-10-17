@@ -34,11 +34,11 @@ Both backends store the same JSON structure:
 
 OAuth requests use `Authorization: Bearer <token>` (not `x-api-key`).
 
-### Long-lived OAuth token
+### Long-Lived OAuth Token
 
 `claude setup-token` issues a long-lived subscription token. Claude Code reads it from `CLAUDE_CODE_OAUTH_TOKEN`, sends it with the same OAuth request shape as a stored login, and never refreshes it. It ranks below `ANTHROPIC_API_KEY` and above the stored login ([authentication precedence](https://code.claude.com/docs/en/authentication#authentication-precedence)).
 
-### Auth token (LLM gateways)
+### Auth Token (LLM Gateways)
 
 `ANTHROPIC_AUTH_TOKEN` sends `Authorization: Bearer <token>` with the API-key request shape, so the `oauth-2025-04-20` beta stays off. It ranks above every other credential. Gateways may also require extra headers, which Claude Code reads from `ANTHROPIC_CUSTOM_HEADERS` as one `Name: value` per line.
 
@@ -46,7 +46,7 @@ OAuth requests use `Authorization: Bearer <token>` (not `x-api-key`).
 
 Four things make up the canonical Claude Code request shape. The first two are OAuth-load-bearing because their absence triggers 401 / 429 against `api.anthropic.com` on non-Haiku models (see [What Happens Without These](#what-happens-without-these)). The latter two ship on every request. At a third-party relay gateway, the attribution header can decide whether a request passes, while the identity headers have no effect on their own (see [Third-Party Gateway Validation](#third-party-gateway-validation)).
 
-### 1. Beta headers
+### 1. Beta Headers
 
 ```text
 anthropic-beta: claude-code-20250219,oauth-2025-04-20
@@ -68,7 +68,7 @@ Additional useful betas:
 | `advanced-tool-use-2025-11-20`    | Tool search (first-party only)                     |
 | `task-budgets-2026-03-13`         | Advisory token budget across an agentic loop       |
 
-#### Per-model beta sets
+#### Per-Model Beta Sets
 
 Haiku is the one family whose beta set differs: Claude Code moves `claude-code-20250219` later in the agentic sequence on Haiku and, per the frozen 2.1.87 source, leaves it off Haiku one-shots.
 
@@ -79,7 +79,7 @@ On agentic Opus 5.5 and Sonnet 5.5 requests, and by inference Fable 5.1, Claude 
 
 This client supports the Claude 5.5 models and Fable 5.1, where effort, interleaved thinking, the 1M window, and structured outputs are GA. On 2026-10-17, [What's new in Claude Fable 5.1](https://platform.claude.com/docs/en/models/fable-5-1/whats-new-fable-5-1) listed Fable 5.1 as available to all customers on the Claude API and partner platforms, but availability varies by account, and some third-party gateways serve it. On agentic turns, `client::anthropic::compute_betas` sends the sequence above, which includes betas for features this client leaves unused. Its test pins `CLAUDE_CLI_VERSION`, the release the user agent and billing block report, so a version bump fails until the sequence is recaptured for every model, Fable 5.1 included. It then appends `thinking-binding-controls-2026-08-01`, plus `thinking-display-updates-2026-08-18` when the request sets `thinking.display = "updates"`. Agentic turns on other model ids carry `claude-code-20250219`, `oauth-2025-04-20` (OAuth only), and `prompt-caching-scope-2026-01-05`, and go without effort, thinking, or context management. One-shots carry `claude-code-20250219` (skipped on Haiku) and `oauth-2025-04-20` (OAuth only). The body-side `cache_control.scope: "global"` stays gated on the base URL, as [Prompt Caching Scope](#prompt-caching-scope) describes.
 
-### 2. System prompt prefix (as a separate block)
+### 2. System Prompt Prefix (as a Separate Block)
 
 The `system` parameter must be sent as an **array of text blocks**. A plain string is rejected, even with the same content. The identity prefix must occupy its own block:
 
@@ -98,7 +98,7 @@ The API validates that the **first non-attribution text block** matches one of t
 
 **Critical**: Concatenating the prefix into the prompt body as a single string causes the API to reject OAuth requests with 429, even though the same prefix content is present. The block-level separation is what the server checks.
 
-### 3. Attribution header
+### 3. Attribution Header
 
 Claude Code prepends an attribution header as the very first system block:
 
@@ -112,7 +112,7 @@ Format:
 x-anthropic-billing-header: cc_version=<VERSION>.<FINGERPRINT>; cc_entrypoint=<ENTRYPOINT>; cch=<HASH>;
 ```
 
-#### Fingerprint (3-char version suffix)
+#### Fingerprint (3-Char Version Suffix)
 
 A 3-character hex value derived from conversation content:
 
@@ -123,7 +123,7 @@ A 3-character hex value derived from conversation content:
 
 The entrypoint is `cli` for interactive sessions.
 
-#### cch (5-char request integrity hash)
+#### cch (5-Char Request Integrity Hash)
 
 The `cch` field is a request integrity hash used for feature gating (fast mode) and billing attribution. It was reverse-engineered from Anthropic's custom Bun binary in February 2026 ([a10k.co writeup](https://a10k.co/b/reverse-engineering-claude-code-cch.html)).
 
@@ -143,13 +143,13 @@ The hash covers the entire serialized body (messages, tools, metadata, model, th
 
 **JSON key ordering matters**: `system` must be serialized before `messages` so the placeholder in the billing header appears first in the JSON. If tool results contain the literal `cch=00000`, serializing `messages` first would cause the replacement to hit the wrong occurrence.
 
-#### Known bug: cch substitution breaks prompt cache
+#### Known Bug: cch Substitution Breaks Prompt Cache
 
 The Bun binary performs a global find-and-replace of `cch=` values across the entire serialized request body, including historical tool results. If any tool result in the conversation contains a `cch=XXXXX` string (e.g., from reading proxy logs or session JSONL files), the substitution rewrites those historical bytes on every turn, changing the conversation prefix and permanently invalidating the prompt cache. This wastes 30-50K+ tokens per turn and never self-heals. Tracked as [anthropics/claude-code#40652](https://github.com/anthropics/claude-code/issues/40652), partially mitigated in v2.1.90-91.
 
 oxide-code avoids this entirely: we serialize with `serde_json`, replace only the first occurrence via `str::replacen`, and never mutate historical message content.
 
-### 4. Client identity headers
+### 4. Client Identity Headers
 
 ```text
 User-Agent: claude-cli/<version> (external, cli)
@@ -181,7 +181,7 @@ Blocks in the `system` array can carry `cache_control` for prompt caching. The `
 | _(absent)_ | `{"type": "ephemeral"}`                    | The caller's organization |
 | `null`     | no `cache_control` at all                  | _(not cached)_            |
 
-### Prefix invariance
+### Prefix Invariance
 
 The server sees request elements in this order:
 
@@ -195,7 +195,7 @@ On 2026-04-23, a third-party gateway rejected agentic requests whose static syst
 
 Other servers accept the same layout. The Anthropic API accepted `scope: "global"` after tool definitions in [#123](https://github.com/hakula139/oxide-code/issues/123)'s live run on 2026-10-17 with oxide-code at 01b4823, and so did the relay gateway probed that day (see [Third-Party Gateway Validation](#third-party-gateway-validation)).
 
-### oxide-code gating
+### oxide-code Gating
 
 oxide-code ships `prompt-caching-scope-2026-01-05` on every agentic request, as Claude Code does, and gates only the body-side `cache_control.scope` on `is_first_party_base_url(&config.base_url)`:
 

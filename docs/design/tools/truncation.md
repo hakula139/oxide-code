@@ -4,14 +4,14 @@ Two-layer truncation: per-tool view-shape caps + centralized byte-budget safety 
 
 ## Implementation
 
-### Centralized dispatcher cap (`tool.rs`)
+### Centralized Dispatcher Cap (`tool.rs`)
 
 - `MAX_OUTPUT_BYTES = 128 KB`: enforced on every tool output via `cap_output()`.
 - `TRUNCATION_OVERHEAD = 80`: bytes reserved for the head-tail separator.
 - `cap_output(content) -> (String, Option<len>)`: head + tail strategy preserving setup context and final outcome.
 - `truncate_line(line, max_chars)`: per-line cap with a `[N chars]` suffix. Each caller picks its own limit.
 
-### Per-tool view-shape caps
+### Per-Tool View-Shape Caps
 
 - **bash**: Drains stdout / stderr while keeping the head and tail of each pipe, so large streams cannot block on a full OS pipe and a trailing error summary survives. Rendering splits one budget just under `MAX_OUTPUT_BYTES` across both pipes, so each `[N bytes omitted]` marker counts everything its pipe dropped and the dispatcher cap never fires on bash output. A timeout kills the shell's process tree and returns the output captured so far. A background shell's captures hold what arrived since the last `bash_output` read under the same bounds, and each read empties them.
 - **edit / tasks / write**: No output truncation because success messages are tiny.

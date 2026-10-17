@@ -18,13 +18,13 @@ The TUI captures the mouse so wheel events reach it everywhere, and selects and 
 
 `App::handle_crossterm_event` forwards wheel events to `ChatView::handle_event`, which scrolls three rows per notch without moving the input cursor. While a modal or the slash-command popup is open, each notch reaches it as one Up or Down key instead, so the wheel steps a list's selection or scrolls an overview. A plain left press on a status-bar link opens it, as [below](#osc-8-hyperlinks-on-the-pr-status-segments) describes. Other left-button presses, drags, and releases go to `ChatView::handle_mouse`, which selects text. Other mouse events return early so the motion reports that capture enables don't each force a frame.
 
-## Mouse capture
+## Mouse Capture
 
 `EnableMouseCapture` writes `?1000h`, `?1002h`, `?1003h`, `?1015h`, and `?1006h`, and crossterm parses the SGR (`?1006`) reports into `MouseEvent`s. Selection needs the drag mode, and `?1000h` alone already makes the terminal hand clicks to the app, so a narrower set of modes would not keep native selection. On Windows, crossterm enables console mouse input, which has no wheel-only setting.
 
 Terminal-side wheel translation can't cover tmux. DECSET 1007 (alternate scroll) makes a bare terminal send wheel events in the alternate screen as arrow keys, but under tmux with `mouse on`, tmux receives the wheel itself. Its default `WheelUpPane` binding passes the event to a pane only when the pane reports the mouse (`#{mouse_any_flag}`). Otherwise tmux drops the event or enters copy mode and scrolls tmux history over the TUI. With capture on, tmux forwards both wheel directions to `ox` under its default bindings.
 
-## Text selection
+## Text Selection
 
 Dragging with the left button over the chat selects text, and releasing the button copies it. A double click selects a word, which whitespace and bracket, quote, and separator characters bound, and a triple click selects a row. Dragging after a double or triple click extends the selection by words or rows. A press on the second cell of a wide character takes the whole character. A plain click selects nothing and clears the previous selection. Selection covers only the chat area, and a drag past the last row ends at that row's end.
 
@@ -56,7 +56,7 @@ The OSC 52 write goes out inside the next frame's synchronized update. Under GNU
 
 A pill at the chat's bottom-left corner reports the outcome for three seconds, truncated to the width the jump-to-bottom pill leaves. OSC 52 has no acknowledgment, so a terminal that blocks clipboard writes still shows the copy as done. VS Code's Remote SSH terminal drops OSC 52 this way, and since Cursor's remote terminal reports the same `TERM_PROGRAM` and applies it, `ox` cannot warn about it.
 
-## OSC 8 hyperlinks on the PR status segments
+## OSC 8 Hyperlinks on the PR Status Segments
 
 The `pull-request` status segment renders `#NN` as plain spans and links the PR, while `pull-request-checks` and `pull-request-review` link its checks and changed-files pages. After the frame buffer is painted, `StatusBar::render` records each hyperlink rect, URL, chars, and style. `App::render` drains that queue after `terminal.draw()` and replays OSC 8 directly to the crossterm backend inside the same synchronized update, so the linked cells present with the frame.
 
@@ -76,7 +76,7 @@ Mouse capture hands plain clicks to `ox`, and some terminals, such as kitty and 
 
 URLs are sanitized: every control char is filtered out before the envelope is built, so a malformed value can't break out of the OSC 8 sequence.
 
-## Out of scope
+## Out of Scope
 
 - Click-to-expand on tool-result blocks.
 - OSC 8 hyperlinks inside markdown body text (would require threading URLs through the markdown renderer).

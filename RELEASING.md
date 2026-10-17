@@ -11,7 +11,7 @@ Pushing a tag that matches `v[0-9]+.*` starts `.github/workflows/release.yml`, w
 - **Breaking changes:** put `!` in the title of every PR that breaks the stability surface, as in `feat(config)!: ...`, both before and after 0.1.0. Before 0.1.0, the version still advances within the prerelease sequence.
 - **MSRV:** the CI MSRV job checks `rust-version`. A bump affects only `cargo install` users, so it ships as a normal change that names the new floor in its PR title.
 
-### Stability surface
+### Stability Surface
 
 Within a minor version, stable releases keep these compatible:
 
@@ -36,7 +36,7 @@ Before 0.1.0, config, environment variable, and session format changes may freel
 - A highlights file passed to the script holds only bullets, which render under `### Highlights` at the top of the section. The merged section is their only source, and the [tag](#tag) annotation is extracted from it.
 - `--prepend` adds one section while preserving the rest. Avoid `--output CHANGELOG.md`, which regenerates the whole file with a single tag pattern, so it drops every curated section and compare link, along with either the prerelease sections or the stable roll-ups.
 
-### Curate the section
+### Curate the Section
 
 The draft lists PR titles, which are short and written for reviewers at merge time. Before opening the release PR, rewrite the draft for users, reading a PR's description wherever its title leaves the effect unclear. Follow these rules:
 
@@ -48,7 +48,7 @@ The draft lists PR titles, which are short and written for reviewers at merge ti
 - Describe only what the PRs changed.
 - Lead with the highlights when the release has any, and curate them like the entries.
 
-## Prepare a release
+## Prepare a Release
 
 1. Branch off `main` as `chore/release-vX.Y.Z`.
 2. Inside the Nix dev shell, which provides git-cliff, run:
@@ -79,7 +79,7 @@ git tag -a --cleanup=whitespace -F highlights.md vX.Y.Z "$sha"      # with highl
 git push origin vX.Y.Z
 ```
 
-## Verify publication
+## Verify Publication
 
 Watch the [Release workflow](https://github.com/hakula139/oxide-code/actions/workflows/release.yml) with `gh run watch` and check:
 
@@ -89,7 +89,7 @@ Watch the [Release workflow](https://github.com/hakula139/oxide-code/actions/wor
 
 The workflow then opens a `chore(release): refresh Homebrew formula for vX.Y.Z` PR and dispatches CI on it. Merging that PR is the final release step, so merge it like any other PR, then check that `brew upgrade oxide-code` installs the version. The formula follows the latest release, or the newest prerelease until the first stable release, so other tags skip this job. If the job fails, fix the cause and rerun it, since a rerun rebuilds the branch and reuses an open PR.
 
-## Re-cut an existing tag
+## Re-Cut an Existing Tag
 
 The PR-based flow tags only reviewed, CI-green commits, so re-cutting should be rare. If a release still needs to be redone (e.g., bad assets), let any in-flight release run finish first. To rebuild the same commit, delete only the release with `gh release delete vX.Y.Z --yes` and run the release workflow from the Actions tab against the tag. To release a different commit, delete the release and its tag, then move and push the tag. Extract the highlights from `<commit>` with the [Tag](#tag) filter first, so the new tag keeps them:
 
@@ -102,7 +102,7 @@ git push origin vX.Y.Z
 
 Either way, the new run updates the open formula PR with the new checksums, or opens a new one.
 
-## Stable gates for 0.1.0
+## Stable Gates for 0.1.0
 
 Before tagging `v0.1.0-rc.1`:
 

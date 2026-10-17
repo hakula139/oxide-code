@@ -2,7 +2,7 @@
 
 oxide-code's TUI palette is fully user-configurable. Pick one of the bundled Catppuccin or Material palettes, point at a TOML file you wrote yourself, or patch individual color slots on top of any base. No recompile.
 
-## Quick start
+## Quick Start
 
 ```toml
 # ~/.config/ox/config.toml or .ox/config.toml
@@ -19,7 +19,7 @@ accent = { bold = false }
 
 Both `[tui.theme]` keys are optional. Without them the default is `mocha` (Catppuccin Mocha) with no overrides.
 
-## Built-in themes
+## Built-In Themes
 
 | Name        | Family     | Variant               |
 | ----------- | ---------- | --------------------- |
@@ -33,7 +33,7 @@ Each ships as a vendored TOML file [in the source tree][themes-src] and doubles 
 
 [themes-src]: https://github.com/hakula139/oxide-code/tree/main/crates/oxide-code/themes
 
-## Custom theme files
+## Custom Theme Files
 
 `base` accepts any filesystem path to a TOML body using the same shape as the vendored themes. A leading `~/` expands to `$HOME`, but no other expansion happens: environment variables (`$HOME`, `${XDG_CONFIG_HOME}`) and Windows-style references (`%USERPROFILE%`) pass through literally and will fail to read. Relative paths resolve against the directory you launched `ox` from, so prefer absolute or `~/`-anchored paths.
 
@@ -44,7 +44,7 @@ base = "~/.config/ox/themes/dark-extra.toml"
 
 If the value isn't a built-in name AND can't be read as a regular file of at most 64 KiB, oxide-code refuses to start with an actionable error message.
 
-## Slot value formats
+## Slot Value Formats
 
 Every `fg` / `bg` value, and every bare-string slot, accepts:
 
@@ -64,7 +64,7 @@ See the [ANSI escape code reference][ansi] for what each name maps to in your te
 
 [ansi]: https://en.wikipedia.org/wiki/ANSI_escape_code#Colors
 
-## Slot definitions
+## Slot Definitions
 
 A custom theme file must define **every slot**. A missing slot is a parse error, so typos surface immediately. For partial customization on top of a base, use `[tui.theme.overrides]` instead (see [Overrides](#overrides) below).
 
@@ -93,7 +93,7 @@ Recognized modifier keys: `bold`, `italic`, `underlined`, `dim`, `reversed`. An 
 
 Each slot maps to one role in the TUI. Override a slot by name to restyle that role.
 
-### Text hierarchy
+### Text Hierarchy
 
 | Slot    | Role                                 |
 | ------- | ------------------------------------ |
@@ -109,7 +109,7 @@ Each slot maps to one role in the TUI. Override a slot by name to restyle that r
 
 > **Always declare `surface` as an inline table with `bg`**, e.g. `surface = { bg = "#1e1e2e" }` or `surface = { bg = "reset" }`. A bare-string `surface = "#1e1e2e"` would route to `fg` (per the slot-definition rules above) and silently repaint every panel's text in the surface color.
 
-### Semantic accents
+### Semantic Accents
 
 | Slot        | Role                                      |
 | ----------- | ----------------------------------------- |
@@ -118,7 +118,7 @@ Each slot maps to one role in the TUI. Override a slot by name to restyle that r
 | `queued`    | Queued user prompts in the preview ghosts |
 | `assistant` | Assistant message bar / icon              |
 
-### Status indicators
+### Status Indicators
 
 | Slot      | Role                                            |
 | --------- | ----------------------------------------------- |
@@ -144,14 +144,14 @@ Unset, it defaults to `base16-ocean.dark`, which the dark built-ins use. `latte`
 
 [syntect]: https://github.com/trishume/syntect
 
-### Diff backgrounds (bg-only)
+### Diff Backgrounds (Background Only)
 
 | Slot       | Role                                         |
 | ---------- | -------------------------------------------- |
 | `diff_add` | Background fill for added rows in Edit diffs |
 | `diff_del` | Background fill for deleted rows             |
 
-### Markdown headings
+### Markdown Headings
 
 | Slot            | Role                                   |
 | --------------- | -------------------------------------- |
@@ -160,7 +160,7 @@ Unset, it defaults to `base16-ocean.dark`, which the dark built-ins use. `latte`
 | `heading_h3`    | H3, bold italic                        |
 | `heading_minor` | H4-H6, italic                          |
 
-### Markdown body
+### Markdown Body
 
 | Slot          | Role                                 |
 | ------------- | ------------------------------------ |
@@ -169,7 +169,7 @@ Unset, it defaults to `base16-ocean.dark`, which the dark built-ins use. `latte`
 | `blockquote`  | Blockquote prefix marker             |
 | `list_marker` | Bullet / number marker on list items |
 
-### Markdown chrome
+### Markdown Chrome
 
 | Slot              | Role                                     |
 | ----------------- | ---------------------------------------- |
@@ -177,7 +177,7 @@ Unset, it defaults to `base16-ocean.dark`, which the dark built-ins use. `latte`
 | `table_header`    | Table header cells (bold accent)         |
 | `table_border`    | Table borders and the rules between rows |
 
-### UI chrome
+### UI Chrome
 
 | Slot               | Role                                        |
 | ------------------ | ------------------------------------------- |
@@ -190,7 +190,7 @@ Unset, it defaults to `base16-ocean.dark`, which the dark built-ins use. `latte`
 
 Declare `selection` as an inline table with `bg`, such as `selection = { bg = "#313244" }`, so selected text keeps its own colors. Pick a background that leaves `dim` and `thinking` text at a contrast of at least 3:1.
 
-### Status-line segments
+### Status-Line Segments
 
 Each status-line segment routes to one of the slots above so re-skinning the slot re-skins everywhere it appears. To restyle one segment, override the slot it uses.
 
@@ -266,7 +266,7 @@ Set `RUST_LOG=info` (or `debug`) for more detail.
 
 ## Examples
 
-### Mocha base + a brighter error color
+### Mocha Base + a Brighter Error Color
 
 ```toml
 [tui.theme.overrides]
@@ -275,7 +275,7 @@ error = "#ff5555"
 
 (`base` defaults to `mocha` when omitted.)
 
-### Custom theme file with a few overrides on top
+### Custom Theme File with a Few Overrides on Top
 
 ```toml
 [tui.theme]
@@ -286,7 +286,7 @@ accent = { fg = "#bd93f9", bold = true }
 link = { fg = "#8be9fd", underlined = true }
 ```
 
-### Use the terminal's foreground for primary text
+### Use the Terminal's Foreground for Primary Text
 
 ```toml
 [tui.theme.overrides]
@@ -295,7 +295,7 @@ text = "reset"
 
 Useful for transparent / non-truecolor terminals where forcing an RGB foreground fights the user's terminal scheme.
 
-### Tint the chat panel background
+### Tint the Chat Panel Background
 
 ```toml
 [tui.theme.overrides]

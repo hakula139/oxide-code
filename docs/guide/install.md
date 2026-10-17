@@ -2,7 +2,7 @@
 
 How to install `ox` on macOS, Linux, and Windows. For first-run setup once installed, see the [quickstart](quickstart.md).
 
-## System requirements
+## System Requirements
 
 - **macOS**: 12 or later on Apple Silicon.
 - **Linux**: x86_64 Linux with glibc 2.39 or later, such as Ubuntu 24.04, Debian 13, Fedora 40, or RHEL 10.
@@ -19,7 +19,7 @@ How to install `ox` on macOS, Linux, and Windows. For first-run setup once insta
 | [Cargo](#from-source-via-cargo)     | Any platform Rust supports                    | Yes                |
 | [Nix](#nix)                         | Linux and macOS                               | Yes                |
 
-### Prebuilt binary
+### Prebuilt Binary
 
 Download the archive for your platform from [Releases](https://github.com/hakula139/oxide-code/releases), extract it, and move the `ox` binary to a directory on your `PATH`. Set `VERSION` to the newest tag listed on that page:
 
@@ -58,7 +58,7 @@ brew tap hakula139/oxide-code https://github.com/hakula139/oxide-code
 brew install oxide-code
 ```
 
-### From source via Cargo
+### From Source via Cargo
 
 Requires [Rust](https://www.rust-lang.org/tools/install) 1.91 or later.
 
@@ -87,7 +87,7 @@ inputs.oxide-code.url = "github:hakula139/oxide-code";
 
 A ref without a tag builds the `main` branch. Tags from `v0.1.0-alpha.2` onward include the flake, so adding a `/vX.Y.Z` suffix to the flake input pins a release.
 
-## Verify your installation
+## Verify Your Installation
 
 ```bash
 ox --version
