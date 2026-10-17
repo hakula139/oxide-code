@@ -549,7 +549,7 @@ mod tests {
         app.chat
             .handle_event(&key_event(KeyCode::PageUp, KeyModifiers::NONE));
         app.copy_notice = Some(CopyNotice {
-            text: "Not copied: Terminal.app ignores OSC 52. Fn-drag to select".to_owned(),
+            text: "Not copied: Terminal.app ignores OSC 52. Fn-drag to select.".to_owned(),
             failed: true,
             until: std::time::Instant::now(),
         });

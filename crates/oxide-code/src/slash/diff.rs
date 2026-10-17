@@ -31,13 +31,11 @@ impl SlashCommand for DiffCmd {
             .info
             .working_dir
             .as_deref()
-            .ok_or("No working directory for this session.")?;
+            .ok_or("No working directory for this session")?;
         let text = collect_diff_in(cwd)
             .map_err(|e| format!("Failed to collect working-tree changes: {e:#}"))?;
         if text.trim().is_empty() {
-            Ok(SlashOutcome::SystemMessage(
-                "Working tree clean.".to_owned(),
-            ))
+            Ok(SlashOutcome::SystemMessage("Working tree clean".to_owned()))
         } else {
             Ok(SlashOutcome::GitDiff(text))
         }
@@ -173,7 +171,7 @@ fn truncate(mut s: String, full_hint: &str) -> String {
     s.truncate(cut);
     _ = write!(
         s,
-        "\n\n(truncated: {} more. Run {full_hint} for the full output.)",
+        "\n\n(Truncated {}. Run {full_hint} for the full output.)",
         format_size(dropped),
     );
     s
@@ -247,7 +245,7 @@ mod tests {
         let (_dir, repo) = fresh_repo();
         let outcome = execute_at(Some(&repo)).expect("clean repo execute is Ok");
         assert!(
-            matches!(&outcome, SlashOutcome::SystemMessage(text) if text == "Working tree clean."),
+            matches!(&outcome, SlashOutcome::SystemMessage(text) if text == "Working tree clean"),
             "{outcome:?}",
         );
     }
@@ -276,7 +274,7 @@ mod tests {
     #[test]
     fn execute_without_a_session_cwd_errors() {
         let err = execute_at(None).expect_err("execute needs the session cwd");
-        assert_eq!(err, "No working directory for this session.");
+        assert_eq!(err, "No working directory for this session");
     }
 
     // ── collect_diff_in ──
@@ -533,7 +531,7 @@ mod tests {
     fn truncate_oversized_input_appends_footer_with_human_size() {
         let s = "a".repeat(MAX_BYTES + 100);
         let got = truncate(s, "`git diff HEAD`");
-        let footer = "\n\n(truncated: 100 B more. Run `git diff HEAD` for the full output.)";
+        let footer = "\n\n(Truncated 100 B. Run `git diff HEAD` for the full output.)";
         assert_eq!(got.len(), MAX_BYTES + footer.len());
         assert_eq!(&got[..MAX_BYTES], &"a".repeat(MAX_BYTES));
         let tail = &got[got.len() - 80..];
@@ -546,7 +544,7 @@ mod tests {
         let prefix = "a".repeat(MAX_BYTES - 1);
         let s = format!("{prefix}€trailing"); // '€' is 3 bytes
         let got = truncate(s, "`git diff --cached` and `git diff`");
-        let footer_start = got.find("\n\n(truncated:").expect("footer present");
+        let footer_start = got.find("\n\n(Truncated ").expect("footer present");
         assert_eq!(footer_start, MAX_BYTES - 1);
         assert!(got.is_char_boundary(footer_start));
         assert!(got.contains("`git diff --cached` and `git diff`"));

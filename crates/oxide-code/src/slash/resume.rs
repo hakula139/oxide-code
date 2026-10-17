@@ -35,9 +35,9 @@ use crate::util::text::truncate_to_width;
 // ── Constants ──
 
 const PICKER_TITLE: &str = "Resume session";
-const PICKER_DESCRIPTION: &str = "Pick a session to resume in place.";
+const PICKER_DESCRIPTION: &str = "Pick a session to resume in place";
 const ARCHIVED_PICKER_TITLE: &str = "Resume archived session";
-const ARCHIVED_PICKER_DESCRIPTION: &str = "Pick a session to unarchive and resume in place.";
+const ARCHIVED_PICKER_DESCRIPTION: &str = "Pick a session to unarchive and resume in place";
 const VIEWPORT_HEIGHT: u16 = 6;
 /// Each row paints title + metadata + a trailing blank for breathing room between sessions.
 const ROW_HEIGHT: u16 = 3;
@@ -1576,7 +1576,7 @@ mod tests {
         let outcome = picker.handle_key(&ctrl_d);
 
         let ModalKey::Push(confirm) = outcome else {
-            panic!("Ctrl+D must push the confirm modal; got {outcome:?}");
+            panic!("Ctrl+D must push the confirm modal, got {outcome:?}");
         };
         let rows = render_rows(confirm.as_ref(), 60, confirm.height(60, u16::MAX));
         assert_eq!(rows[2].trim_end(), "11111111 — Fix auth");

@@ -177,7 +177,7 @@ mod tests {
         let result = modal.handle_key(&KeyEvent::from(KeyCode::Enter));
         let ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::Rename { title }))) = result
         else {
-            panic!("Enter on pre-filled buffer must submit; got {result:?}");
+            panic!("Enter on pre-filled buffer must submit, got {result:?}");
         };
         assert_eq!(title, "Existing title");
     }
@@ -188,7 +188,7 @@ mod tests {
         let result = modal.handle_key(&KeyEvent::from(KeyCode::Enter));
         assert!(
             matches!(result, ModalKey::Consumed),
-            "empty Enter must not submit; got {result:?}",
+            "empty Enter must not submit, got {result:?}",
         );
     }
 
@@ -296,7 +296,7 @@ mod tests {
         let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Enter));
         let ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::Rename { title }))) = outcome
         else {
-            panic!("trim happens at submit time; got {outcome:?}");
+            panic!("trim happens at submit time, got {outcome:?}");
         };
         assert_eq!(title, "Fix auth");
     }
@@ -356,7 +356,7 @@ mod tests {
         let submit = modal.handle_key(&KeyEvent::from(KeyCode::Enter));
         let ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::Rename { title }))) = submit
         else {
-            panic!("buffer should still submit cleanly; got {submit:?}");
+            panic!("buffer should still submit cleanly, got {submit:?}");
         };
         assert_eq!(title, "abc", "Tab and Ctrl+G must not edit the title");
     }
@@ -370,7 +370,7 @@ mod tests {
         let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Enter));
         assert!(
             matches!(outcome, ModalKey::Consumed),
-            "all-whitespace Enter must not submit; got {outcome:?}",
+            "all-whitespace Enter must not submit, got {outcome:?}",
         );
     }
 

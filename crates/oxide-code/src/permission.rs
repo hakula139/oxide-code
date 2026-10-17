@@ -688,7 +688,7 @@ impl Basis {
     pub(crate) fn reason(&self) -> Option<String> {
         match self {
             Self::Mode(_) => None,
-            basis => Some(format!("Held by {basis}.")),
+            basis => Some(format!("Held by {basis}")),
         }
     }
 }
@@ -2034,11 +2034,11 @@ mod tests {
             rule_basis(Tier::Ask, EXEC, "git push *")
                 .reason()
                 .as_deref(),
-            Some("Held by the `ask.exec` pattern `git push *`."),
+            Some("Held by the `ask.exec` pattern `git push *`"),
         );
         assert_eq!(
             Basis::Builtin(Shipped::Git).reason().as_deref(),
-            Some("Held by the built-in `git` rule."),
+            Some("Held by the built-in `git` rule"),
         );
         assert_eq!(Basis::Mode(Mode::Manual).reason(), None);
     }

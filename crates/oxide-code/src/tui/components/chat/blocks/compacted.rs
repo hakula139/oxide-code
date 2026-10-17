@@ -27,9 +27,9 @@ impl CompactedBlock {
         let plural = if pre_count == 1 { "" } else { "s" };
         let header = match instructions {
             Some(focus) => {
-                format!("Compacted {pre_count} message{plural} → 1 summary (focus: {focus}).")
+                format!("Compacted {pre_count} message{plural} → 1 summary (focus: {focus})")
             }
-            None => format!("Compacted {pre_count} message{plural} → 1 summary."),
+            None => format!("Compacted {pre_count} message{plural} → 1 summary"),
         };
         Self {
             header,

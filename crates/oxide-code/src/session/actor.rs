@@ -667,7 +667,7 @@ mod tests {
         assert_eq!(
             title_lines.len(),
             2,
-            "FirstPrompt + UserProvided; AI must not append a third: {content}",
+            "FirstPrompt + UserProvided, so AI must not append a third: {content}",
         );
         assert!(
             title_lines

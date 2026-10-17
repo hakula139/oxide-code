@@ -84,7 +84,7 @@ pub(crate) fn archive_notice(session_id: &str, archived: bool) -> String {
             "Archived session {id}. Press Ctrl+A in the /resume picker to list archived sessions."
         )
     } else {
-        format!("Unarchived session {id}.")
+        format!("Unarchived session {id}")
     }
 }
 
@@ -173,7 +173,7 @@ mod tests {
         assert_eq!(
             format_relative_time(now + time::Duration::seconds(30), now),
             "0 seconds ago",
-            "future stamps collapse to 0 rather than negative",
+            "future stamps collapse to 0",
         );
     }
 
@@ -239,7 +239,7 @@ mod tests {
         );
         assert_eq!(
             archive_notice("abcdefghij", false),
-            "Unarchived session abcdefgh."
+            "Unarchived session abcdefgh"
         );
     }
 }

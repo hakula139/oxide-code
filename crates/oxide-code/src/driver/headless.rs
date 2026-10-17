@@ -54,7 +54,7 @@ where
             Some(end) => (end, Exit::Failure),
             None => {
                 printer.emit(
-                    Event::TurnFailed("the engine stopped before the turn ended".to_owned()),
+                    Event::TurnFailed("The engine stopped before the turn ended".to_owned()),
                     "engine-stopped",
                 );
                 (TurnEnd::Failed, Exit::Failure)
@@ -373,8 +373,8 @@ mod tests {
             let (stdout, stderr) = printed(stopped);
             let result = result_data(&stdout);
             assert_eq!(result["stop_reason"], "failed");
-            assert_eq!(result["error"], "the engine stopped before the turn ended");
-            assert_eq!(stderr, "Error: the engine stopped before the turn ended\n");
+            assert_eq!(result["error"], "The engine stopped before the turn ended");
+            assert_eq!(stderr, "Error: The engine stopped before the turn ended\n");
         })
         .await;
     }

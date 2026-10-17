@@ -179,11 +179,11 @@ async fn edit_file(
     ctx: &ToolCtx,
 ) -> Result<(String, Vec<DiffChunk>), String> {
     if old_string.is_empty() {
-        return Err("old_string must not be empty.".into());
+        return Err("old_string must not be empty.".to_owned());
     }
 
     if old_string == new_string {
-        return Err("old_string and new_string are identical. No changes to make.".into());
+        return Err("old_string and new_string are identical. No changes to make.".to_owned());
     }
 
     let file_path = ctx.cwd().join(path);
@@ -206,16 +206,15 @@ async fn edit_file(
     let match_count = content.matches(old_string.as_ref()).count();
     if match_count == 0 {
         return Err(format!(
-            "old_string not found in {path}. Make sure the string matches exactly, \
+            "Found no occurrence of old_string in {path}. Copy it exactly from the file, \
              including whitespace and indentation."
         ));
     }
 
     if match_count > 1 && !replace_all {
         return Err(format!(
-            "Found {match_count} occurrences of old_string in {path}. \
-             Set replace_all to true to replace all, or provide more context \
-             to make old_string unique."
+            "Found {match_count} occurrences of old_string in {path}. Set replace_all to true to \
+             replace them all, or add context to make old_string unique."
         ));
     }
 
@@ -785,7 +784,14 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(err.contains("not found"));
+        assert_eq!(
+            err,
+            format!(
+                "Found no occurrence of old_string in {}. Copy it exactly from the file, \
+                 including whitespace and indentation.",
+                path.display(),
+            ),
+        );
     }
 
     #[tokio::test]
@@ -926,7 +932,14 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(err.contains("2 occurrences"));
+        assert_eq!(
+            err,
+            format!(
+                "Found 2 occurrences of old_string in {}. Set replace_all to true to replace them \
+                 all, or add context to make old_string unique.",
+                path.display(),
+            ),
+        );
     }
 
     #[tokio::test]
@@ -1458,12 +1471,12 @@ mod tests {
 
     #[test]
     fn apply_eol_inserts_cr_for_crlf() {
-        assert_eq!(apply_eol("a\nb\n".into(), "\r\n"), "a\r\nb\r\n");
+        assert_eq!(apply_eol("a\nb\n".to_owned(), "\r\n"), "a\r\nb\r\n");
     }
 
     #[test]
     fn apply_eol_lf_preserves_content() {
-        assert_eq!(apply_eol("a\nb\n".into(), "\n"), "a\nb\n");
+        assert_eq!(apply_eol("a\nb\n".to_owned(), "\n"), "a\nb\n");
     }
 
     // ── synthesize_chunk ──

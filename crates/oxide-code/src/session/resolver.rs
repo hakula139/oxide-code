@@ -76,7 +76,7 @@ fn normalize_resume_arg(resume: Option<&Option<String>>) -> Result<ResumeMode<'_
         Some(Some(raw)) => {
             let trimmed = raw.trim();
             if trimmed.is_empty() {
-                bail!("empty session ID prefix. Run bare `ox -c` to resume the latest session.");
+                bail!("empty session ID prefix (run bare `ox -c` to resume the latest session)");
             }
             if looks_like_path(trimmed) {
                 Ok(ResumeMode::Path(Path::new(trimmed)))
@@ -530,7 +530,7 @@ mod tests {
             let arg = Some(raw.to_owned());
             let err = normalize_resume_arg(Some(&arg)).err().unwrap().to_string();
             assert_eq!(
-                err, "empty session ID prefix. Run bare `ox -c` to resume the latest session.",
+                err, "empty session ID prefix (run bare `ox -c` to resume the latest session)",
                 "{raw:?}",
             );
         }

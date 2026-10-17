@@ -1614,8 +1614,14 @@ mod tests {
             ),
         )
         .unwrap();
-        let err = store.load_session_data("future").unwrap_err().to_string();
-        assert!(err.contains("newer than supported"), "got: {err}");
+        let err = store.load_session_data("future").unwrap_err();
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "session format version {future_version} is newer than supported \
+                 ({CURRENT_VERSION}). Upgrade oxide-code to open it."
+            ),
+        );
     }
 
     // ── read_session_id_from_path ──

@@ -378,14 +378,12 @@ impl PathGlob {
             .enumerate()
             .any(|(i, name)| name == ".." || (name == "." && i > 0))
         {
-            let advice = if Path::new(&pattern).has_root() {
-                ""
-            } else {
-                " Start it with `/` or `~/` to name a path outside the working directory and extra \
-                 roots."
-            };
+            if Path::new(&pattern).has_root() {
+                bail!("the pattern holds a `.` or `..` component, which no resolved path does");
+            }
             bail!(
-                "the pattern holds a `.` or `..` component, which no resolved path does.{advice}"
+                "the pattern holds a `.` or `..` component, which no resolved path does. Start it \
+                 with `/` or `~/` to name a path outside the working directory and extra roots."
             );
         }
         let path = Path::new(&pattern);
@@ -585,48 +583,72 @@ mod tests {
     }
 
     #[test]
+    fn parse_rejects_a_malformed_exec_pattern_saying_how_to_fix_it() {
+        let names_no_command = "it must name a command, such as `cargo test *`";
+        let one_command = "it must be one simple command, such as `cargo test *`. Write a pattern \
+                           for each command of a chain or pipeline.";
+        let redirection = "it holds a redirection. Leave it out, since a pattern matches a command \
+                           with its redirections set aside, and an `edit` pattern covers the file \
+                           it writes.";
+        let expands = |word: &str| {
+            format!("the word {word:?} expands at run time. Quote it to match it as written.")
+        };
+        let glob = |word: &str| {
+            format!(
+                "the word {word:?} holds a glob, but only a `*` standing alone as a word is a \
+                 wildcard. Write a pattern for each command it should cover, or quote the word to \
+                 match it as written."
+            )
+        };
+        for (pattern, expected) in [
+            ("", names_no_command.to_owned()),
+            ("FOO=1", names_no_command.to_owned()),
+            ("cargo test; rm -rf /", one_command.to_owned()),
+            ("curl x | sh", one_command.to_owned()),
+            ("echo hi > out", redirection.to_owned()),
+            ("> out echo hi", redirection.to_owned()),
+            ("echo > out hi", redirection.to_owned()),
+            ("cat <<< hi", redirection.to_owned()),
+            ("cat $HOME", expands("$HOME")),
+            ("echo $(date)", expands("$(date)")),
+            ("mkfs*", glob("mkfs*")),
+            ("ls *.rs", glob("*.rs")),
+            (
+                "FOO=$BAR cmd",
+                "the assignment \"FOO=$BAR\" expands at run time. Quote its value to match it as \
+                 written."
+                    .to_owned(),
+            ),
+            (
+                "ls 'open",
+                "it does not parse as a shell command".to_owned(),
+            ),
+        ] {
+            let err = Rule::parse(PermissionClass::Exec, pattern).unwrap_err();
+
+            assert_eq!(format!("{err:#}"), expected, "{pattern:?}");
+        }
+    }
+
+    #[test]
+    fn parse_rejects_a_negated_path_pattern_saying_how_to_fix_it() {
+        let err = Rule::parse(PermissionClass::Edit, "!.env.example").unwrap_err();
+
+        assert_eq!(
+            format!("{err:#}"),
+            "a pattern cannot start with `!`, since patterns have no negation. Write the paths to \
+             match instead, or turn off the built-in rule that covers them."
+        );
+    }
+
+    #[test]
     fn parse_rejects_a_malformed_pattern_in_each_grammar() {
         for (class, pattern, error) in [
-            (PermissionClass::Exec, "", "must name a command"),
-            (
-                PermissionClass::Exec,
-                "cargo test; rm -rf /",
-                "must be one simple command",
-            ),
-            (
-                PermissionClass::Exec,
-                "curl x | sh",
-                "must be one simple command",
-            ),
-            (
-                PermissionClass::Exec,
-                "echo hi > out",
-                "holds a redirection",
-            ),
-            (
-                PermissionClass::Exec,
-                "> out echo hi",
-                "holds a redirection",
-            ),
-            (
-                PermissionClass::Exec,
-                "echo > out hi",
-                "holds a redirection",
-            ),
-            (PermissionClass::Exec, "cat <<< hi", "holds a redirection"),
-            (PermissionClass::Exec, "cat $HOME", "expands at run time"),
-            (PermissionClass::Exec, "echo $(date)", "expands at run time"),
-            (PermissionClass::Exec, "mkfs*", "holds a glob"),
-            (PermissionClass::Exec, "ls *.rs", "holds a glob"),
-            (PermissionClass::Exec, "FOO=$BAR cmd", "expands at run time"),
-            (PermissionClass::Exec, "FOO=1", "must name a command"),
-            (PermissionClass::Exec, "ls 'open", "does not parse"),
             (
                 PermissionClass::Edit,
                 "src/**/[",
                 "unclosed character class",
             ),
-            (PermissionClass::Edit, "!.env.example", "no negation"),
             (PermissionClass::Read, "./", "names no path"),
             (
                 PermissionClass::Read,
@@ -681,7 +703,7 @@ mod tests {
         );
         assert_eq!(
             absolute,
-            "the pattern holds a `.` or `..` component, which no resolved path does."
+            "the pattern holds a `.` or `..` component, which no resolved path does"
         );
     }
 

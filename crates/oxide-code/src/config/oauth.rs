@@ -100,7 +100,7 @@ pub(super) enum LoginError {
     #[error("failed to refresh the expired {0}: {1:#}. {step}", step = .0.sign_in_step())]
     RefreshFailed(Login, anyhow::Error),
     /// The stored login exists but cannot be read or parsed.
-    #[error("{1:#}. {step}", step = .0.sign_in_step())]
+    #[error("failed to load the {0}: {1:#}. {step}", step = .0.sign_in_step())]
     Unreadable(Login, anyhow::Error),
 }
 
@@ -135,9 +135,9 @@ struct StoredCredentials<'a> {
 }
 
 impl<'a> StoredCredentials<'a> {
-    fn parse(login: Login, backend: Backend<'a>, json: String) -> Result<Self> {
+    fn parse(backend: Backend<'a>, json: String) -> Result<Self> {
         let file: CredentialsFile = serde_json::from_str(&json)
-            .with_context(|| format!("failed to parse the {login} in {backend}"))?;
+            .with_context(|| format!("failed to parse the credentials in {backend}"))?;
         Ok(Self {
             backend,
             json,
@@ -319,18 +319,16 @@ fn load_credentials<'a>(store: &'a Store<'a>) -> Result<StoredCredentials<'a>, L
     let mut keychain_failure = None;
     if let Some(keychain) = store.keychain {
         keychain_failure = match keychain.read() {
-            Ok(Some(json)) => {
-                match StoredCredentials::parse(login, Backend::Keychain(keychain), json) {
-                    Ok(creds) => return Ok(creds),
-                    Err(e) => Some(LoginError::Unreadable(login, e)),
-                }
-            }
+            Ok(Some(json)) => match StoredCredentials::parse(Backend::Keychain(keychain), json) {
+                Ok(creds) => return Ok(creds),
+                Err(e) => Some(LoginError::Unreadable(login, e)),
+            },
             Ok(None) => None,
             Err(denied) => Some(denied),
         };
     }
 
-    match read_credentials(login, &store.file) {
+    match read_credentials(&store.file) {
         Ok(Some(creds)) => Ok(creds),
         Ok(None) => Err(keychain_failure.unwrap_or(LoginError::Missing)),
         Err(e) => Err(LoginError::Unreadable(login, e)),
@@ -338,14 +336,14 @@ fn load_credentials<'a>(store: &'a Store<'a>) -> Result<StoredCredentials<'a>, L
 }
 
 /// `Ok(None)` when the file does not exist.
-fn read_credentials(login: Login, path: &Path) -> Result<Option<StoredCredentials<'_>>> {
+fn read_credentials(path: &Path) -> Result<Option<StoredCredentials<'_>>> {
     let json = match std::fs::read_to_string(path) {
         Ok(json) => json,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e).with_context(|| format!("failed to read {}", path.display())),
     };
     enforce_private_mode(path);
-    StoredCredentials::parse(login, Backend::File(path), json).map(Some)
+    StoredCredentials::parse(Backend::File(path), json).map(Some)
 }
 
 #[cfg(unix)]
@@ -529,7 +527,10 @@ async fn request_tokens(
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        bail!("{what} failed with {status}: {body}");
+        match body.trim() {
+            "" => bail!("{what} failed with {status}"),
+            body => bail!("{what} failed with {status}: {body}"),
+        }
     }
 
     response
@@ -1110,10 +1111,15 @@ mod tests {
         let err = load_token_from(&store(None, &creds, &lock), &server.uri(), None)
             .await
             .expect_err("expired + refresh down must bail");
-        let LoginError::RefreshFailed(Login::ClaudeCode, cause) = &err else {
-            panic!("expected RefreshFailed, got {err:?}");
-        };
-        assert!(format!("{cause:#}").contains("503"), "{cause:#}");
+        assert!(
+            matches!(err, LoginError::RefreshFailed(Login::ClaudeCode, _)),
+            "{err:?}"
+        );
+        assert_eq!(
+            format!("{err:#}"),
+            "failed to refresh the expired Claude Code login: token refresh failed with 503 \
+             Service Unavailable. Run `claude` to sign in again.",
+        );
     }
 
     #[tokio::test]
@@ -1131,12 +1137,14 @@ mod tests {
         )
         .await
         .expect_err("expired + lock held must bail");
-        let LoginError::RefreshFailed(Login::ClaudeCode, cause) = &err else {
-            panic!("expected RefreshFailed, got {err:?}");
-        };
         assert!(
-            format!("{cause:#}").contains("credentials lock"),
-            "{cause:#}"
+            matches!(err, LoginError::RefreshFailed(Login::ClaudeCode, _)),
+            "{err:?}"
+        );
+        assert_eq!(
+            format!("{err:#}"),
+            "failed to refresh the expired Claude Code login: failed to acquire credentials lock \
+             after 5 retries (another process may be refreshing). Run `claude` to sign in again.",
         );
     }
 
@@ -1235,12 +1243,11 @@ mod tests {
         )
         .await
         .expect_err("an unparsable Keychain entry and no file");
-        let msg = format!("{err:#}");
-        assert!(
-            msg.starts_with("failed to parse the Claude Code login in the macOS Keychain: "),
-            "{msg}"
+        assert_eq!(
+            format!("{err:#}"),
+            "failed to load the Claude Code login: failed to parse the credentials in the macOS \
+             Keychain: expected ident at line 1 column 2. Run `claude` to sign in again.",
         );
-        assert!(msg.ends_with(". Run `claude` to sign in again."), "{msg}");
 
         let unreadable = dir.path().join("directory.json");
         std::fs::create_dir(&unreadable).unwrap();
@@ -1253,7 +1260,10 @@ mod tests {
         .expect_err("an unreadable credentials file");
         let msg = format!("{err:#}");
         assert!(
-            msg.starts_with(&format!("failed to read {}: ", unreadable.display())),
+            msg.starts_with(&format!(
+                "failed to load the Claude Code login: failed to read {}: ",
+                unreadable.display()
+            )),
             "{msg}"
         );
         assert!(msg.ends_with(". Run `claude` to sign in again."), "{msg}");
@@ -1267,7 +1277,7 @@ mod tests {
         let path = dir.path().join("creds.json");
         write_creds(&path, "tok", Some("ref"), 9_999_999_999_999);
 
-        let creds = read_credentials(Login::ClaudeCode, &path).unwrap().unwrap();
+        let creds = read_credentials(&path).unwrap().unwrap();
         assert_eq!(creds.oauth.access_token, "tok");
         assert_eq!(creds.oauth.refresh_token.as_deref(), Some("ref"));
         assert_eq!(creds.oauth.expires_at, 9_999_999_999_999);
@@ -1279,7 +1289,7 @@ mod tests {
         let path = dir.path().join("creds.json");
         write_creds(&path, "tok", None, 9_999_999_999_999);
 
-        let creds = read_credentials(Login::ClaudeCode, &path).unwrap().unwrap();
+        let creds = read_credentials(&path).unwrap().unwrap();
         assert_eq!(creds.oauth.access_token, "tok");
         assert!(creds.oauth.refresh_token.is_none());
     }
@@ -1287,26 +1297,26 @@ mod tests {
     #[test]
     fn read_credentials_missing_file_is_absent() {
         assert!(
-            read_credentials(Login::ClaudeCode, Path::new("/nonexistent/creds.json"))
+            read_credentials(Path::new("/nonexistent/creds.json"))
                 .unwrap()
                 .is_none()
         );
     }
 
     #[test]
-    fn read_credentials_invalid_json_fails_naming_the_login_and_path() {
+    fn read_credentials_invalid_json_fails_naming_the_path() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("creds.json");
         std::fs::write(&path, "not json").unwrap();
-        let err = read_credentials(Login::ClaudeCode, &path)
+        let err = read_credentials(&path)
             .err()
             .expect("invalid JSON must fail");
-        assert!(
-            format!("{err:#}").starts_with(&format!(
-                "failed to parse the Claude Code login in {}",
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "failed to parse the credentials in {}: expected ident at line 1 column 2",
                 path.display()
-            )),
-            "{err:#}"
+            ),
         );
     }
 
@@ -1315,15 +1325,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("creds.json");
         std::fs::write(&path, r#"{"other": "data"}"#).unwrap();
-        let err = read_credentials(Login::ClaudeCode, &path)
+        let err = read_credentials(&path)
             .err()
             .expect("credentials without claudeAiOauth must fail");
-        assert!(
-            format!("{err:#}").starts_with(&format!(
-                "failed to parse the Claude Code login in {}: missing field `claudeAiOauth`",
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "failed to parse the credentials in {}: missing field `claudeAiOauth` at line 1 \
+                 column 17",
                 path.display()
-            )),
-            "{err:#}"
+            ),
         );
     }
 
@@ -1500,11 +1511,7 @@ mod tests {
             scope: Some("user:profile user:inference".to_owned()),
         };
 
-        write_refreshed_credentials(
-            &read_credentials(Login::ClaudeCode, &path).unwrap().unwrap(),
-            &response,
-        )
-        .unwrap();
+        write_refreshed_credentials(&read_credentials(&path).unwrap().unwrap(), &response).unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
         let json: serde_json::Value = serde_json::from_str(&content).unwrap();
@@ -1557,11 +1564,7 @@ mod tests {
             scope: Some("  user:profile   user:inference  ".to_owned()),
         };
 
-        write_refreshed_credentials(
-            &read_credentials(Login::ClaudeCode, &path).unwrap().unwrap(),
-            &response,
-        )
-        .unwrap();
+        write_refreshed_credentials(&read_credentials(&path).unwrap().unwrap(), &response).unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
         let json: serde_json::Value = serde_json::from_str(&content).unwrap();
@@ -1598,11 +1601,7 @@ mod tests {
             scope: None,
         };
 
-        write_refreshed_credentials(
-            &read_credentials(Login::ClaudeCode, &path).unwrap().unwrap(),
-            &response,
-        )
-        .unwrap();
+        write_refreshed_credentials(&read_credentials(&path).unwrap().unwrap(), &response).unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
         let json: serde_json::Value = serde_json::from_str(&content).unwrap();

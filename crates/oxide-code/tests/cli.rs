@@ -22,7 +22,7 @@ fn list_in_empty_project_reports_no_sessions() {
         .unwrap();
 
     assert!(output.status.success(), "{output:?}");
-    assert_eq!(output.stdout, b"No sessions found in this project.\n");
+    assert_eq!(output.stdout, b"No sessions found in this project\n");
     assert!(output.stderr.is_empty(), "{:?}", output.stderr);
 }
 
@@ -76,7 +76,7 @@ fn continue_in_the_repl_unarchives_the_session_with_a_note() {
 
     assert!(output.status.success(), "{output:?}");
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("Unarchived session abcdef01."), "{stderr}");
+    assert!(stderr.contains("Unarchived session abcdef01\n"), "{stderr}");
     let transcript = std::fs::read_to_string(&session).unwrap();
     let archive_state = transcript
         .lines()

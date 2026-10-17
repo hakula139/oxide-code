@@ -81,7 +81,7 @@ struct Cli {
     )]
     r#continue: Option<Option<String>>,
 
-    /// Cap `--list` to the N most-recent sessions. `0` disables the cap.
+    /// Cap `--list` to the N most-recent sessions, or `0` for no cap.
     #[arg(long, value_name = "N", requires = "list", default_value_t = DEFAULT_SESSION_LIST_LIMIT)]
     limit: usize,
 
@@ -111,7 +111,7 @@ struct Cli {
     #[arg(short, long, value_name = "PROMPT")]
     prompt: Option<String>,
 
-    /// Open the TUI on the session picker. Quitting the picker exits without starting a session.
+    /// Open the TUI on the session picker, and exit without a session if the picker is quit.
     #[arg(short, long, conflicts_with_all = ["continue", "list", "no_tui", "prompt"])]
     resume: bool,
 }

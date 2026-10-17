@@ -56,7 +56,7 @@ pub(crate) fn mode(arg: &str) -> Result<Op, String> {
     let mode = arg
         .to_ascii_lowercase()
         .parse::<Mode>()
-        .map_err(|e| format!("Unknown mode `{arg}`: {e}."))?;
+        .map_err(|_| format!("Unknown mode: `{arg}`. Valid: {}.", Mode::VALID_VALUES))?;
     Ok(Op::SetMode(mode))
 }
 
@@ -257,7 +257,7 @@ mod tests {
     fn mode_unknown_mode_lists_the_valid_ones() {
         assert_eq!(
             mode("Turbo"),
-            Err("Unknown mode `Turbo`: expected one of manual, plan, yolo.".to_owned()),
+            Err("Unknown mode: `Turbo`. Valid: manual, plan, yolo.".to_owned()),
         );
     }
 
@@ -336,6 +336,16 @@ mod tests {
                 - `claude-sonnet-5-5` — Claude Sonnet 5.5"
             },
         );
+    }
+
+    #[test]
+    fn model_ambiguous_suggests_every_catalog_alias() {
+        let err = model("o").expect_err("ambiguous arg must error");
+
+        for info in MODELS {
+            let alias = format!("`{}`", info.family.id_token());
+            assert!(err.contains(&alias), "missing {alias}: {err}");
+        }
     }
 
     // ── rename ──

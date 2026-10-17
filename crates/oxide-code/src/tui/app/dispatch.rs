@@ -282,7 +282,7 @@ impl App {
             }
             mpsc::error::TrySendError::Full(_) => {
                 self.chat
-                    .push_error("Op channel is full, so the request was dropped.");
+                    .push_error("Op channel is full, so the request was dropped");
             }
         }
     }
@@ -343,7 +343,7 @@ impl App {
             name.clone_into(&mut self.session_info.config.theme_name);
             self.apply_theme(&theme);
             self.chat
-                .push_system_message(format!("Theme set to {name}."));
+                .push_system_message(format!("Theme set to {name}"));
         } else {
             tracing::warn!(
                 name,
@@ -2014,9 +2014,9 @@ mod tests {
                 app.handle_engine_event(Event::StreamToken("partial".into()));
             }
 
-            let clean = SlashOutcome::SystemMessage("Working tree clean.".to_owned());
+            let clean = SlashOutcome::SystemMessage("Working tree clean".to_owned());
             assert_eq!(app.apply_slash_outcome(Ok(clean)), None);
-            assert_eq!(app.chat.last_system_text(), Some("Working tree clean."));
+            assert_eq!(app.chat.last_system_text(), Some("Working tree clean"));
 
             assert_eq!(
                 app.apply_slash_outcome(Ok(SlashOutcome::GitDiff(diff.to_owned()))),

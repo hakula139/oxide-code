@@ -646,7 +646,7 @@ mod tests {
             Event::StreamToken("hello".to_owned()),
             Event::ThinkingToken("hmm".to_owned()),
             Event::ProgressUpdate("Reading.".to_owned()),
-            Event::Retrying("Retrying in 1s.".to_owned()),
+            Event::Retrying("Retrying in 1 s.".to_owned()),
             Event::ToolCallStart(ls_call()),
             Event::ToolCallEnd(ToolResult {
                 is_error: true,

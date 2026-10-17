@@ -122,7 +122,7 @@ fn command_op(parsed: &Parsed) -> Result<Op, String> {
             .map(|name| format!("/{name}"))
             .collect();
         Err(format!(
-            "/{name} is not a REPL command. The REPL runs {names}. Use //{name} to send the \
+            "/{name} is not a REPL command. Available: {names}. Use //{name} to send the \
              literal text.",
             name = parsed.name,
             names = names.join(", "),
@@ -172,7 +172,7 @@ impl<R: AsyncBufRead + Unpin, W: Write> Approver for Prompter<'_, R, W> {
                             rule: Box::new(rule),
                         };
                     }
-                    Some(Err(e)) => _ = writeln!(self.out, "{e:#}"),
+                    Some(Err(e)) => _ = writeln!(self.out, "Rule rejected: {e:#}"),
                     None => return Decision::Abort,
                 },
                 ("n" | "no", _) => return Decision::Deny,
@@ -184,7 +184,7 @@ impl<R: AsyncBufRead + Unpin, W: Write> Approver for Prompter<'_, R, W> {
                     None => return Decision::Abort,
                 },
                 ("x", _) => return Decision::Abort,
-                _ => _ = writeln!(self.out, "Answer with one of the letters in brackets."),
+                _ => _ = writeln!(self.out, "Answer with one of the letters in brackets"),
             }
         }
     }
@@ -506,7 +506,7 @@ mod tests {
             );
             assert_eq!(
                 reports[2],
-                "/help is not a REPL command. The REPL runs /clear, /compact, /effort, /mode, \
+                "/help is not a REPL command. Available: /clear, /compact, /effort, /mode, \
                  /model, /rename, /resume. Use //help to send the literal text.",
             );
         })
@@ -738,7 +738,7 @@ mod tests {
                 Edit(src/a.rs) needs approval:
                   - let a = 1;
                   + let a = 2;\u{1b}[2K\u{200b}
-                Held by the `ask.edit` pattern `src/\u{200b}*.rs`.
+                Held by the `ask.edit` pattern `src/\u{200b}*.rs`
             "},
         );
     }

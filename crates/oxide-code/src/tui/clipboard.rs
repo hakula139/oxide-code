@@ -119,10 +119,10 @@ impl fmt::Display for CopyError {
             ),
             Self::Unsupported(Terminal::Apple) => f.write_str(
                 "Not copied: Terminal.app ignores OSC 52. Fn-drag to select, or press Cmd-R to \
-                 turn off mouse reporting",
+                 turn off mouse reporting.",
             ),
             Self::Unsupported(Terminal::LinuxConsole) => {
-                f.write_str("Not copied: the Linux console has no clipboard. Shift-drag to select")
+                f.write_str("Not copied: the Linux console has no clipboard. Shift-drag to select.")
             }
             Self::Unsupported(Terminal::ITerm2 | Terminal::Other) => {
                 f.write_str("Not copied: no clipboard is reachable")
@@ -163,7 +163,7 @@ impl CopyReport {
             Ok(Delivery::Copied | Delivery::Osc52 { .. }) => (copied, false),
             Ok(Delivery::TmuxBuffer) => (
                 format!(
-                    "{copied} to a tmux buffer. tmux 3.2 or later also copies to the clipboard"
+                    "{copied} to a tmux buffer. tmux 3.2 or later also copies to the clipboard."
                 ),
                 true,
             ),
@@ -420,7 +420,7 @@ mod tests {
         );
         assert_eq!(
             CopyError::Unsupported(Terminal::LinuxConsole).to_string(),
-            "Not copied: the Linux console has no clipboard. Shift-drag to select",
+            "Not copied: the Linux console has no clipboard. Shift-drag to select.",
         );
         assert_eq!(
             CopyError::TimedOut.to_string(),
@@ -458,14 +458,14 @@ mod tests {
         assert_eq!(
             notice(9, Ok(Delivery::TmuxBuffer)),
             (
-                "Copied 9 characters to a tmux buffer. tmux 3.2 or later also copies to the clipboard".to_owned(),
+                "Copied 9 characters to a tmux buffer. tmux 3.2 or later also copies to the clipboard.".to_owned(),
                 true,
             ),
         );
         assert_eq!(
             notice(9, Err(CopyError::Unsupported(Terminal::Apple))),
             (
-                "Not copied: Terminal.app ignores OSC 52. Fn-drag to select, or press Cmd-R to turn off mouse reporting".to_owned(),
+                "Not copied: Terminal.app ignores OSC 52. Fn-drag to select, or press Cmd-R to turn off mouse reporting.".to_owned(),
                 true,
             ),
         );

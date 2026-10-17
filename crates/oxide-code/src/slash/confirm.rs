@@ -229,7 +229,7 @@ mod tests {
 
         let outcome = modal.handle_key(&key(KeyCode::Char('y')));
         let ModalKey::Submitted(ModalAction::SystemMessage(msg)) = outcome else {
-            panic!("Y must Submit(SystemMessage); got {outcome:?}");
+            panic!("Y must Submit(SystemMessage), got {outcome:?}");
         };
         assert_eq!(msg, "Deleted session abcd1234: Fix auth flow");
         assert!(
@@ -296,7 +296,7 @@ mod tests {
         let outcome = modal.handle_key(&key(KeyCode::Char('n')));
         assert!(
             matches!(outcome, ModalKey::Cancelled),
-            "N must Cancel; got {outcome:?}"
+            "N must Cancel, got {outcome:?}"
         );
         assert!(
             store

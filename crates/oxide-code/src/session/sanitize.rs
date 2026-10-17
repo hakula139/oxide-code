@@ -12,7 +12,7 @@ use crate::message::{ContentBlock, Message, Role};
 /// Stub appended after a trailing tool-result-only user turn so the next API call has a
 /// valid assistant follow-up.
 pub(super) const RESUME_CONTINUATION_SENTINEL: &str =
-    "[Previous turn was interrupted; continuing.]";
+    "[Previous turn was interrupted. Continuing.]";
 
 /// Stub prepended when sanitization leaves an assistant as the first message, since the API
 /// rejects transcripts that start with assistant.
