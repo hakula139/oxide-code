@@ -522,7 +522,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let engine = engine(server.uri(), &test_store(dir.path()), dir.path())
                 .await
-                .with_tools(ToolRegistry::new(vec![Box::new(BashTool)]));
+                .with_tools(ToolRegistry::new(vec![Box::new(BashTool::default())]));
             let input = indoc! {"
                 list files
                 f
@@ -559,7 +559,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let engine = engine(server.uri(), &test_store(dir.path()), dir.path())
                 .await
-                .with_tools(ToolRegistry::new(vec![Box::new(BashTool)]));
+                .with_tools(ToolRegistry::new(vec![Box::new(BashTool::default())]));
             let input = indoc! {"
                 list files
                 y

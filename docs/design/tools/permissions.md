@@ -19,7 +19,7 @@ The gate evaluates each call in a fixed order and stops at the first match.
 1. **User or project deny match** → deny in every mode.
 2. **`yolo` mode** → allow.
 3. **Shipped dangerous-pattern default match** → deny.
-4. **Read-class call** (`read`, `glob`, `grep`, `tasks`) → allow.
+4. **Read-class call** (`read`, `glob`, `grep`, `tasks`, `bash_output`, `bash_stop`) → allow.
 5. **`plan` mode** → deny.
 6. **Edit-class call on a protected path** → ask, regardless of what the allow rules say.
 7. **Edit-class call inside the workspace** → allow.
@@ -74,7 +74,7 @@ Every argument that may name a file, such as each word past the options and a va
 
 ## Rule Grammar
 
-Rules use Claude Code's `name(specifier)` string form, where the name identifies a permission class: `read` (the `read`, `grep`, `glob`, and `tasks` tools), `edit` (`edit` and `write`), or `bash`. Class names are case-insensitive. An unknown name causes a load error, so `write(...)` fails loudly. `bash`, `bash()`, and `bash(*)` all become a class-wide rule.
+Rules use Claude Code's `name(specifier)` string form, where the name identifies a permission class: `read` (the `read`, `grep`, `glob`, `tasks`, `bash_output`, and `bash_stop` tools), `edit` (`edit` and `write`), or `bash`. Class names are case-insensitive. An unknown name causes a load error, so `write(...)` fails loudly. `bash`, `bash()`, and `bash(*)` all become a class-wide rule.
 
 Bash specifiers can be exact, prefix (`cargo test:*`), or wildcard (`git *`). Read and edit specifiers are path globs:
 

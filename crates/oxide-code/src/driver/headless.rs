@@ -306,7 +306,8 @@ mod tests {
                 mount_tool_call_once(&server, "call-2", "bash", r#"{"command":"git push"}"#).await;
                 mount_reply(&server, "Done.").await;
                 let dir = tempfile::tempdir().unwrap();
-                let tools = ToolRegistry::new(vec![Box::new(LookTool), Box::new(BashTool)]);
+                let tools =
+                    ToolRegistry::new(vec![Box::new(LookTool), Box::new(BashTool::default())]);
                 let engine = engine(server.uri(), &test_store(dir.path()), dir.path())
                     .await
                     .with_tools(tools);

@@ -31,7 +31,7 @@ use config::Config;
 use driver::Exit;
 use driver::headless::OutputFormat;
 use driver::tui::Startup;
-use engine::Engine;
+use engine::{Engine, Toolbox};
 use file_tracker::FileTracker;
 use permission::ReadDeny;
 use session::display::archive_notice;
@@ -41,6 +41,7 @@ use session::resolver::resolve_session;
 use session::store::SessionStore;
 use session::store::listing::{DEFAULT_SESSION_LIST_LIMIT, ListScope};
 use slash::ResumePicker;
+use tool::bash::background::{BackgroundShells, BashOutputTool, BashStopTool};
 use tool::{
     ToolRegistry, bash::BashTool, edit::EditTool, glob::GlobTool, grep::GrepTool, read::ReadTool,
     tasks::TasksTool, write::WriteTool,
@@ -174,12 +175,11 @@ async fn async_main() -> Result<Exit> {
         .resume
         .then(|| ResumePicker::at_startup(store.clone(), handle.session_id().to_owned(), cli.all));
 
-    let read_deny = config.permission.read_deny();
-    let tools = Arc::new(create_tool_registry(&read_deny));
+    let toolbox = create_toolbox(&config.permission.read_deny());
     let engine = Engine::new(
         &config,
         identity::load_or_create_device_id(),
-        tools,
+        toolbox,
         store,
         handle,
         transcript,
@@ -228,16 +228,24 @@ fn detect_terminal_width() -> Option<usize> {
         .map(|(cols, _)| usize::from(cols))
 }
 
-fn create_tool_registry(read_deny: &ReadDeny) -> ToolRegistry {
-    ToolRegistry::new(vec![
-        Box::new(BashTool),
+/// The built-in tools, with the background shells the `bash` tools share with the engine.
+fn create_toolbox(read_deny: &ReadDeny) -> Toolbox {
+    let shells = Arc::new(BackgroundShells::default());
+    let tools = ToolRegistry::new(vec![
+        Box::new(BashTool::new(Arc::clone(&shells))),
+        Box::new(BashOutputTool::new(Arc::clone(&shells))),
+        Box::new(BashStopTool::new(Arc::clone(&shells))),
         Box::new(ReadTool),
         Box::new(WriteTool),
         Box::new(EditTool),
         Box::new(GlobTool::new(read_deny.clone())),
         Box::new(GrepTool::new(read_deny.clone())),
         Box::new(TasksTool),
-    ])
+    ]);
+    Toolbox {
+        tools: Arc::new(tools),
+        shells,
+    }
 }
 
 #[cfg(test)]
@@ -249,7 +257,7 @@ mod tests {
     use crate::permission::{Mode, Policy};
     use crate::session::store::set_archived_at;
     use crate::session::store::testing::seed_test_session;
-    use crate::tool::testing::{canonical_tempdir, ctx, ctx_with};
+    use crate::tool::testing::{canonical_tempdir, ctx, ctx_with, temp_ctx};
 
     // ── Cli ──
 
@@ -378,11 +386,11 @@ mod tests {
         });
     }
 
-    // ── create_tool_registry ──
+    // ── create_toolbox ──
 
     #[tokio::test]
-    async fn create_tool_registry_tools_share_the_ctx_file_tracker() {
-        let tools = create_tool_registry(&ReadDeny::default());
+    async fn create_toolbox_tools_share_the_ctx_file_tracker() {
+        let tools = create_toolbox(&ReadDeny::default()).tools;
         let names: Vec<_> = tools
             .definitions()
             .into_iter()
@@ -390,7 +398,17 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            ["bash", "read", "write", "edit", "glob", "grep", "tasks"]
+            [
+                "bash",
+                "bash_output",
+                "bash_stop",
+                "read",
+                "write",
+                "edit",
+                "glob",
+                "grep",
+                "tasks",
+            ],
         );
 
         let dir = tempfile::tempdir().unwrap();
@@ -429,7 +447,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_tool_registry_hands_read_deny_to_the_search_tools() {
+    async fn create_toolbox_shares_its_background_shells_with_the_bash_tools() {
+        let toolbox = create_toolbox(&ReadDeny::default());
+        let tools = &toolbox.tools;
+        let ctx = temp_ctx();
+
+        let started = tools
+            .run_input(
+                "bash",
+                serde_json::json!({"command": "echo hi", "run_in_background": true}),
+                &ctx,
+            )
+            .await;
+        assert!(!started.is_error, "{}", started.content);
+        let listed: Vec<_> = toolbox.shells.list().into_iter().map(|s| s.id).collect();
+        let read = tools
+            .run_input(
+                "bash_output",
+                serde_json::json!({"shell_id": "shell-1", "timeout": 5_000}),
+                &ctx,
+            )
+            .await;
+        let stopped = tools
+            .run_input(
+                "bash_stop",
+                serde_json::json!({"shell_id": "shell-1"}),
+                &ctx,
+            )
+            .await;
+
+        assert_eq!(listed, ["shell-1"]);
+        assert_eq!(read.content, "hi\n\n(exit code 0)");
+        assert_eq!(
+            stopped.content,
+            "(no new output)\n\n(stopped after it exited with code 0)"
+        );
+        assert_eq!(toolbox.shells.list(), []);
+    }
+
+    #[tokio::test]
+    async fn create_toolbox_hands_read_deny_to_the_search_tools() {
         let dir = canonical_tempdir();
         std::fs::write(dir.path().join("notes.txt"), "token").unwrap();
         std::fs::write(dir.path().join("secret.txt"), "token").unwrap();
@@ -437,7 +494,7 @@ mod tests {
         let read_deny = Policy::resolve(Mode::Auto, &[], &deny, dir.path())
             .unwrap()
             .read_deny();
-        let tools = create_tool_registry(&read_deny);
+        let tools = create_toolbox(&read_deny).tools;
         let ctx = ctx(dir.path());
 
         for (tool, pattern) in [("glob", "*.txt"), ("grep", "token")] {

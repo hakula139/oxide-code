@@ -5,6 +5,7 @@ use crate::message::Message;
 use crate::protocol::{Event, EventSink};
 use crate::session::handle::SessionHandle;
 use crate::session::post_compact::synthesize_post_compact_message;
+use crate::tool::bash::background::BackgroundShell;
 use crate::tool::tasks::Task;
 
 /// A finished summary and what the boundary records beside it.
@@ -14,6 +15,8 @@ pub(super) struct Boundary {
     pub(super) instructions: Option<String>,
     /// The task list the summarized transcript left, which the summary message carries over.
     pub(super) tasks: Vec<Task>,
+    /// The open background shells, which the summary message lists.
+    pub(super) shells: Vec<BackgroundShell>,
     /// The compaction ran on its own, ahead of a prompt.
     pub(super) automatic: bool,
 }
@@ -31,9 +34,10 @@ pub(super) async fn replace_session_with_summary(
         summary,
         instructions,
         tasks,
+        shells,
         automatic,
     } = boundary;
-    let synthetic = synthesize_post_compact_message(&summary, &tasks);
+    let synthetic = synthesize_post_compact_message(&summary, &tasks, &shells);
     let outcome = session
         .compact(
             summary.clone(),
@@ -77,6 +81,7 @@ mod tests {
             summary: "fixed login bug".to_owned(),
             instructions: None,
             tasks,
+            shells: Vec::new(),
             automatic: true,
         }
     }
@@ -119,7 +124,11 @@ mod tests {
         assert_eq!(tracker.snapshot_all(), []);
         assert_eq!(
             messages,
-            [synthesize_post_compact_message("fixed login bug", &plan())]
+            [synthesize_post_compact_message(
+                "fixed login bug",
+                &plan(),
+                &[]
+            )]
         );
         session.shutdown().await;
         let saved = store.load_session_data(&session_id).unwrap();

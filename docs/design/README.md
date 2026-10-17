@@ -36,11 +36,12 @@ Organized by topic. Each subdirectory mirrors the corresponding directory in [`d
 
 ## Tools
 
-| Document                                 | Description                                         |
-| ---------------------------------------- | --------------------------------------------------- |
-| [Output Truncation](tools/truncation.md) | Per-tool view-shape caps + centralized byte-budget  |
-| [Permissions](tools/permissions.md)      | Tiered allow / ask / deny gate, modes, rule grammar |
-| [Task List](tools/tasks.md)              | `tasks` tool, task panel, resume and compaction     |
+| Document                                        | Description                                            |
+| ----------------------------------------------- | ------------------------------------------------------ |
+| [Background Shells](tools/background-shells.md) | `bash` background runs, `bash_output`, and `bash_stop` |
+| [Output Truncation](tools/truncation.md)        | Per-tool view-shape caps + centralized byte-budget     |
+| [Permissions](tools/permissions.md)             | Tiered allow / ask / deny gate, modes, rule grammar    |
+| [Task List](tools/tasks.md)                     | `tasks` tool, task panel, resume and compaction        |
 
 ## Terminal UI
 
