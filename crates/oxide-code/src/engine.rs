@@ -36,6 +36,7 @@ use crate::model::{ModelSpec, ResolvedModelId};
 use crate::permission::{Mode, Policy, Workspace};
 use crate::prompt::{self, PromptParts, SessionContext, UserContext};
 use crate::protocol::{Event, EventSink, Interaction, Op, ResumeTarget, UsageSnapshot};
+use crate::session::display::id_prefix;
 use crate::session::entry::{CompactInfo, UsageRecord};
 use crate::session::handle::{self, LoadedTranscript, RollIntoOutcome, SessionHandle};
 use crate::session::history;
@@ -142,7 +143,9 @@ pub(crate) struct Engine {
     /// A TUI is attached, so titles generate in the background.
     interactive: bool,
     auto_compaction_failures: AutoCompactFailures,
+    /// The latest turn's last round usage, `None` when that turn reported none.
     last_usage: Option<TokenUsage>,
+    /// The latest usage any turn reported, which the status line shows.
     displayed_usage: Option<TokenUsage>,
     total_estimated_cost_usd: f64,
 }
@@ -542,7 +545,7 @@ impl Engine {
                 sink.emit(
                     Event::TurnFailed(format!(
                         "Resume failed (still on session {}): {e:#}",
-                        self.session.session_id(),
+                        id_prefix(self.session.session_id()),
                     )),
                     "resume-failed",
                 );
@@ -689,8 +692,7 @@ impl Engine {
         }
     }
 
-    /// Sends requests with a new oxide-code login unless an env var or `client.api_key` outranks
-    /// it.
+    /// Uses a new oxide-code login for requests unless an env var or `client.api_key` outranks it.
     fn adopt_login(&mut self, sink: &dyn EventSink, auth: Auth) {
         let active = match self.client.auth_source() {
             Some(source) if !source.is_stored_login() => source,
@@ -916,7 +918,7 @@ fn signed_out() -> TurnAbort {
 }
 
 fn sign_in_failed(e: &anyhow::Error) -> TurnAbort {
-    TurnAbort::Failed(anyhow!("Sign-in failed: {e:#}. Run /login to try again."))
+    TurnAbort::Failed(anyhow!("Sign-in failed: {e:#}. Run `/login` to try again."))
 }
 
 /// Reports that the session a roll or resume left behind failed to finalize.
@@ -1566,9 +1568,9 @@ mod tests {
             assert_eq!(
                 failure,
                 format!(
-                    "Resume failed (still on session {live_id}): \
-                     session prefix `{}` matches the live session",
-                    &live_id[..8],
+                    "Resume failed (still on session {prefix}): \
+                     session prefix `{prefix}` matches the live session",
+                    prefix = &live_id[..8],
                 ),
             );
             let data = store.load_session_data(&live_id).unwrap();
@@ -3134,10 +3136,15 @@ mod tests {
                 engine.shells.list(),
                 [shell("shell-1", "sleep 30", ShellState::Running)]
             );
-            assert!(matches!(
-                sink.events().as_slice(),
-                [Event::TurnFailed(msg)] if msg.contains("still on session")
-            ));
+            assert_eq!(
+                sink.events(),
+                [Event::TurnFailed(format!(
+                    "Resume failed (still on session {}): \
+                     session not found: missing-target.jsonl: {}",
+                    id_prefix(&original_id),
+                    std::fs::metadata("missing-target.jsonl").unwrap_err(),
+                ))]
+            );
             engine.shells.stop_all().await;
         })
         .await;
@@ -3486,7 +3493,7 @@ mod tests {
                     &failed,
                     Some(Event::TurnFailed(msg))
                         if msg == "Sign-in failed: authorization was refused (access_denied). \
-                                   Run /login to try again."
+                                   Run `/login` to try again."
                 ),
                 "{failed:?}"
             );

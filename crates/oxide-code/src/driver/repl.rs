@@ -379,7 +379,8 @@ mod tests {
             assert_eq!(
                 reports[2],
                 format!(
-                    "Resume failed (still on session {session_id}): no session matching `zzzz`"
+                    "Resume failed (still on session {}): no session matching `zzzz`",
+                    &session_id[..8],
                 ),
             );
             assert!(matches!(sink.events().last(), Some(Event::TurnComplete)));

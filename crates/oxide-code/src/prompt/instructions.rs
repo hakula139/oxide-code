@@ -404,9 +404,7 @@ mod tests {
     async fn load_files_absent_yields_empty_without_warnings() {
         let dir = tempfile::tempdir().expect("failed to create tempdir");
         let regular = dir.path().join("regular");
-        fs::write(&regular, "a file, not a directory")
-            .await
-            .unwrap();
+        fs::write(&regular, "regular file contents").await.unwrap();
         let slots = vec![Slot {
             candidates: vec![dir.path().join("CLAUDE.md"), regular.join("CLAUDE.md")],
             label: "test",

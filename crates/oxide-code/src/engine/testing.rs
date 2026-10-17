@@ -185,8 +185,7 @@ pub(super) fn system_prompt(request: &serde_json::Value) -> Vec<&serde_json::Val
 
 // ── Turn ──
 
-/// In-process fake that scripts a [`ResponseEvent`] stream per turn and records each request's
-/// transcript.
+/// In-process fake that scripts a [`ResponseEvent`] stream per turn and records every request.
 pub(super) struct FakeClient {
     turns: StdMutex<VecDeque<Vec<Result<ResponseEvent>>>>,
     requests: StdMutex<Vec<Vec<Message>>>,

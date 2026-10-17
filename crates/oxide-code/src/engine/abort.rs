@@ -32,16 +32,44 @@ pub(super) struct Inbox {
 }
 
 impl Inbox {
-    /// Keeps `mode` for the next gated call and confirms it on `sink` at once, since no call is
-    /// weighed between the two.
-    pub(super) fn switch_mode(&mut self, mode: Mode, sink: &dyn EventSink) {
-        self.mode = Some(mode);
-        sink.emit(Event::ModeChanged(mode), "mode-changed");
+    /// Handles an op received while an operation runs, where `None` means the channel closed. Keeps
+    /// a queued prompt, and keeps a mode switch for the next gated call while confirming it on
+    /// `sink` at once, since no gated call runs between the two. An interrupt or shutdown returns
+    /// its abort, and any other op comes back for the caller.
+    pub(super) fn absorb(
+        &mut self,
+        op: Option<Op>,
+        sink: &dyn EventSink,
+    ) -> AbortResult<Option<Op>> {
+        match op {
+            Some(Op::Interrupt) => Err(TurnAbort::Cancelled),
+            Some(Op::Shutdown) | None => Err(TurnAbort::Shutdown),
+            Some(Op::Queue(text)) => {
+                self.prompts.push(text);
+                Ok(None)
+            }
+            Some(Op::SetMode(mode)) => {
+                self.mode = Some(mode);
+                sink.emit(Event::ModeChanged(mode), "mode-changed");
+                Ok(None)
+            }
+            Some(
+                op @ (Op::Prompt(_)
+                | Op::Clear
+                | Op::Archive
+                | Op::Resume { .. }
+                | Op::Compact { .. }
+                | Op::Rename { .. }
+                | Op::SetModel { .. }
+                | Op::Login
+                | Op::Logout
+                | Op::Resolve { .. }),
+            ) => Ok(Some(op)),
+        }
     }
 }
 
-/// Races `fut` against incoming ops. An interrupt or shutdown produces a `TurnAbort`, and a queued
-/// prompt or a mode switch goes to `inbox`. `fut` must be cancel-safe.
+/// Races `fut` against incoming ops, which [`Inbox::absorb`] takes in. `fut` must be cancel-safe.
 pub(super) async fn await_unless_aborted<F, T>(
     fut: F,
     ops: &mut mpsc::Receiver<Op>,
@@ -56,26 +84,13 @@ where
         tokio::select! {
             // Biased: ops observed before same-poll-ready futures.
             biased;
-            op = ops.recv() => match op {
-                Some(Op::Interrupt) => return Err(TurnAbort::Cancelled),
-                Some(Op::Shutdown) | None => return Err(TurnAbort::Shutdown),
-                Some(Op::Queue(text)) => inbox.prompts.push(text),
-                Some(Op::SetMode(mode)) => inbox.switch_mode(mode, sink),
-                // Unreachable under current wiring. Log so regressions surface. A `Resolve`
-                // here is a stale reply for an already-resolved call.
-                Some(
-                    op @ (Op::Prompt(_)
-                    | Op::Clear
-                    | Op::Archive
-                    | Op::Resume { .. }
-                    | Op::Compact { .. }
-                    | Op::Rename { .. }
-                    | Op::SetModel { .. }
-                    | Op::Login
-                    | Op::Logout
-                    | Op::Resolve { .. }),
-                ) => warn!("dropped mid-turn op: {op:?}"),
-            },
+            op = ops.recv() => {
+                // Unreachable under current wiring, and a `Resolve` here is a stale reply for an
+                // already-resolved call.
+                if let Some(op) = inbox.absorb(op, sink)? {
+                    warn!("dropped mid-turn op: {op:?}");
+                }
+            }
             output = &mut fut => return Ok(output),
         }
     }
@@ -92,11 +107,7 @@ mod tests {
 
     #[test]
     fn turn_abort_display_alternate_propagates_anyhow_cause_chain() {
-        // {abort:#} must delegate to the inner anyhow Error's alternate form so the full cause
-        // chain reaches the user. Plain {abort} surfaces only the outermost context.
-        let inner = anyhow!("HTTP 503 from upstream");
-        let chained = inner.context("request failed");
-        let abort = TurnAbort::Failed(chained);
+        let abort = TurnAbort::Failed(anyhow!("HTTP 503 from upstream").context("request failed"));
 
         let plain = format!("{abort}");
         let alternate = format!("{abort:#}");
@@ -109,6 +120,41 @@ mod tests {
     fn turn_abort_display_cancelled_and_shutdown_use_static_labels() {
         assert_eq!(format!("{}", TurnAbort::Cancelled), "turn cancelled");
         assert_eq!(format!("{}", TurnAbort::Shutdown), "engine shut down");
+    }
+
+    // ── Inbox::absorb ──
+
+    #[test]
+    fn absorb_aborts_on_interrupt_shutdown_or_a_closed_channel() {
+        let mut inbox = Inbox::default();
+        let sink = CapturingSink::new();
+
+        let interrupted = inbox.absorb(Some(Op::Interrupt), &sink);
+        let shut_down = inbox.absorb(Some(Op::Shutdown), &sink);
+        let closed = inbox.absorb(None, &sink);
+
+        assert!(
+            matches!(interrupted, Err(TurnAbort::Cancelled)),
+            "{interrupted:?}"
+        );
+        assert!(
+            matches!(shut_down, Err(TurnAbort::Shutdown)),
+            "{shut_down:?}"
+        );
+        assert!(matches!(closed, Err(TurnAbort::Shutdown)), "{closed:?}");
+    }
+
+    #[test]
+    fn absorb_hands_back_an_op_it_does_not_keep() {
+        let mut inbox = Inbox::default();
+        let sink = CapturingSink::new();
+
+        let op = inbox.absorb(Some(Op::Clear), &sink);
+
+        assert!(matches!(op, Ok(Some(Op::Clear))), "{op:?}");
+        assert_eq!(inbox.prompts, [] as [String; 0]);
+        assert_eq!(inbox.mode, None);
+        assert_eq!(sink.events(), []);
     }
 
     // ── await_unless_aborted ──
