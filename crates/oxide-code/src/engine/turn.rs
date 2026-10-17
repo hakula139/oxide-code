@@ -100,7 +100,8 @@ impl TurnOutcome {
 /// `max_tool_rounds = None` runs unbounded, and `Some(n)` bails after `n` rounds without a reply.
 #[expect(
     clippy::too_many_arguments,
-    reason = "agent_turn takes the full per-turn dependency set, since a bundle struct would obscure lifetimes"
+    reason = "agent_turn takes the full per-turn dependency set, \
+              since a bundle struct would obscure lifetimes"
 )]
 pub(super) async fn agent_turn(
     client: &dyn Wire,
@@ -200,8 +201,8 @@ pub(super) async fn agent_turn(
     TurnOutcome::aborted(
         report,
         TurnAbort::Failed(anyhow!(
-            "Agent stopped after {cap} tool rounds without a final response. Raise or unset \
-             client.max_tool_rounds (OX_MAX_TOOL_ROUNDS) to allow longer turns."
+            "Agent stopped after {cap} tool rounds without a final response. \
+             Raise or unset client.max_tool_rounds (OX_MAX_TOOL_ROUNDS) to allow longer turns."
         )),
     )
 }
@@ -295,8 +296,8 @@ fn refusal_message(details: Option<&StopDetails>) -> String {
         |e| format!(": {}.", e.trim().trim_end_matches('.')),
     );
     format!(
-        "The model declined this request{category}{explanation} Rephrase it, or run /clear to \
-         start over."
+        "The model declined this request{category}{explanation} \
+         Rephrase it, or run /clear to start over."
     )
 }
 
@@ -1007,7 +1008,7 @@ mod tests {
         let mut messages = vec![Message::user("kick off")];
         let (tx, mut rx) = mpsc::channel::<Op>(4);
         // Hold the sender so `recv()` stays pending after the queued submit.
-        tx.send(Op::Queue("follow up".into())).await.unwrap();
+        tx.send(Op::Queue("follow up".to_owned())).await.unwrap();
 
         agent_turn(
             &client,
@@ -1066,8 +1067,8 @@ mod tests {
         let sink = CapturingSink::new();
         let mut messages = vec![Message::user("kick off")];
         let (tx, mut rx) = mpsc::channel::<Op>(4);
-        tx.send(Op::Queue("first".into())).await.unwrap();
-        tx.send(Op::Queue("second".into())).await.unwrap();
+        tx.send(Op::Queue("first".to_owned())).await.unwrap();
+        tx.send(Op::Queue("second".to_owned())).await.unwrap();
 
         agent_turn(
             &client,
@@ -1379,8 +1380,8 @@ mod tests {
                 ("tool_1", r#"{"v":1}"#, false),
                 (
                     "tool_2",
-                    "The user interrupted this call before it finished, so it may have run \
-                     partially.",
+                    "The user interrupted this call before it finished, \
+                     so it may have run partially.",
                     true,
                 ),
                 (
@@ -1584,8 +1585,8 @@ mod tests {
         .expect_err("cap must trip");
         assert_eq!(
             format!("{err:#}"),
-            "Agent stopped after 3 tool rounds without a final response. Raise or unset \
-             client.max_tool_rounds (OX_MAX_TOOL_ROUNDS) to allow longer turns.",
+            "Agent stopped after 3 tool rounds without a final response. \
+             Raise or unset client.max_tool_rounds (OX_MAX_TOOL_ROUNDS) to allow longer turns.",
         );
     }
 
@@ -1886,8 +1887,9 @@ mod tests {
 
         assert_eq!(
             abort.to_string(),
-            "The response hit the max_tokens output limit while writing the `echo` call, so no \
-             tools ran. Ask for smaller steps, or raise `max_tokens`.",
+            "The response hit the max_tokens output limit while writing the `echo` call, \
+             so no tools ran. \
+             Ask for smaller steps, or raise `max_tokens`.",
         );
         assert!(
             matches!(&messages[1..], [reply] if matches!(&reply.content[..], [ContentBlock::Text { text }] if text == "Writing it now.")),
@@ -2164,8 +2166,8 @@ mod tests {
         let abort = outcome.expect_err("a refusal fails the turn");
         assert_eq!(
             abort.to_string(),
-            "The model declined this request (category: cyber): Exploit development. Rephrase it, \
-             or run /clear to start over.",
+            "The model declined this request (category: cyber): Exploit development. \
+             Rephrase it, or run /clear to start over.",
         );
         assert_eq!(
             messages.len(),
@@ -2457,8 +2459,8 @@ mod tests {
         };
         assert_eq!(
             refusal_message(Some(&explanation_only)),
-            "The model declined this request: Unsafe request. Rephrase it, or run /clear to start \
-             over.",
+            "The model declined this request: Unsafe request. \
+             Rephrase it, or run /clear to start over.",
         );
     }
 
@@ -2477,8 +2479,8 @@ mod tests {
 
         assert_eq!(
             truncation_error(StopReason::ModelContextWindowExceeded, &[text()]).to_string(),
-            "The conversation filled the model's context window before it finished. Run \
-             /compact, then continue.",
+            "The conversation filled the model's context window before it finished. \
+             Run /compact, then continue.",
         );
         assert_eq!(
             truncation_error(StopReason::MaxTokens, &[tool_use, text()]).to_string(),

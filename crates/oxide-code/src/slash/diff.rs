@@ -350,7 +350,8 @@ mod tests {
             body,
             indoc! {"
                 diff --git a/x b/x
-                +foo"}
+                +foo"
+            }
         );
     }
 

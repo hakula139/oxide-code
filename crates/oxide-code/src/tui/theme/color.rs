@@ -75,8 +75,8 @@ fn parse_named(s: &str) -> Result<Color> {
         "white" | "bright_white" | "light_white" => Color::White,
 
         _ => bail!(
-            "expected hex (#rrggbb), ANSI name (red, bright_blue, ...), \
-             indexed (ansi:0..255), or reset"
+            "expected hex (#rrggbb), \
+             ANSI name (red, bright_blue, ...), indexed (ansi:0..255), or reset"
         ),
     })
 }
@@ -85,8 +85,8 @@ fn parse_named(s: &str) -> Result<Color> {
 mod tests {
     use super::*;
 
-    const FORMATS_HINT: &str = "expected hex (#rrggbb), ANSI name (red, bright_blue, ...), \
-                                indexed (ansi:0..255), or reset";
+    const FORMATS_HINT: &str = "expected hex (#rrggbb), \
+                                ANSI name (red, bright_blue, ...), indexed (ansi:0..255), or reset";
 
     fn error_text(input: &str) -> String {
         format!("{:#}", parse_color(input).unwrap_err())

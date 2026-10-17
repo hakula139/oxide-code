@@ -234,8 +234,8 @@ mod tests {
     fn archive_notice_names_the_id_prefix_and_where_archived_sessions_list() {
         assert_eq!(
             archive_notice("abcdefghij", true),
-            "Archived session abcdefgh. Press Ctrl+A in the /resume picker to list archived \
-             sessions.",
+            "Archived session abcdefgh. \
+             Press Ctrl+A in the /resume picker to list archived sessions.",
         );
         assert_eq!(
             archive_notice("abcdefghij", false),

@@ -926,8 +926,8 @@ fn format_drift_warning(drifted: &[PathBuf]) -> String {
         String::new()
     };
     format!(
-        "{} tracked file(s) changed on disk since the resumed session read them and need a fresh \
-         Read before Edit: {}{suffix}",
+        "{} tracked file(s) changed on disk \
+         since the resumed session read them and need a fresh Read before Edit: {}{suffix}",
         drifted.len(),
         preview.join(", "),
     )
@@ -1064,10 +1064,12 @@ mod tests {
         let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", redirect.port().unwrap()))
             .await
             .unwrap();
-        let request = format!(
-            "GET /callback?{query}&state={} HTTP/1.1\r\nHost: localhost\r\n\r\n",
-            param("state"),
-        );
+        let state = param("state");
+        let request = formatdoc! {"
+            GET /callback?{query}&state={state} HTTP/1.1\r
+            Host: localhost\r
+            \r
+        "};
         stream.write_all(request.as_bytes()).await.unwrap();
         let mut reply = String::new();
         stream.read_to_string(&mut reply).await.unwrap();
@@ -1517,8 +1519,8 @@ mod tests {
             assert_eq!(
                 failure,
                 format!(
-                    "Resume failed (still on session {live_id}): session prefix `{}` matches the \
-                     live session",
+                    "Resume failed (still on session {live_id}): \
+                     session prefix `{}` matches the live session",
                     &live_id[..8],
                 ),
             );
@@ -2506,8 +2508,8 @@ mod tests {
                             ..
                         }),
                         Event::TurnFailed(unsaved),
-                    ] if short == "Compaction failed: the conversation has about 15 tokens, below \
-                                  the 1000-token minimum"
+                    ] if short == "Compaction failed: the conversation has about 15 tokens, \
+                                   below the 1000-token minimum"
                         && usage_write.starts_with("Session write failed")
                         && boundary_write == "Session write failed: session writer task has stopped"
                         && (cost - 0.006).abs() < 1e-12
@@ -3091,8 +3093,7 @@ mod tests {
                 reminder.contains(indoc! {"
                     # Model
 
-                    You are powered by the model named Claude Sonnet 5.5. The exact model ID is \
-                    claude-sonnet-5-5."
+                    You are powered by the model named Claude Sonnet 5.5. The exact model ID is claude-sonnet-5-5."
                 }),
                 "{reminder}"
             );
@@ -3370,7 +3371,8 @@ mod tests {
                 matches!(
                     &failed,
                     Some(Event::TurnFailed(msg))
-                        if msg == "Sign-in failed: authorization was refused (access_denied). Run /login to try again."
+                        if msg == "Sign-in failed: authorization was refused (access_denied). \
+                                   Run /login to try again."
                 ),
                 "{failed:?}"
             );

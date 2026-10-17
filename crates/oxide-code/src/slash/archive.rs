@@ -75,11 +75,10 @@ impl SlashCommand for UnarchiveCmd {
     fn execute(&self, args: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
         let prefix = args.trim();
         if prefix.is_empty() {
-            return Err(
-                "Missing session id. Usage: `/unarchive <id-prefix>`, or press Ctrl+A in the \
-                 `/resume` picker to list archived sessions and Ctrl+X to unarchive one."
-                    .to_owned(),
-            );
+            return Err("Missing session id. \
+                        Usage: `/unarchive <id-prefix>`, or press Ctrl+A in the `/resume` picker \
+                        to list archived sessions and Ctrl+X to unarchive one."
+                .to_owned());
         }
         match resolve_saved(prefix, ctx.info)? {
             Some(info) => set_archived(&info, false, &ctx.info.session_id),
@@ -195,8 +194,8 @@ mod tests {
             let err = ArchiveCmd.execute("test-", &ctx).unwrap_err();
             assert_eq!(
                 err,
-                "Session prefix `test-` matches the live session. Use bare `/archive` to archive \
-                 it and start a new one.",
+                "Session prefix `test-` matches the live session. \
+                 Use bare `/archive` to archive it and start a new one.",
             );
             assert_eq!(listed_ids(&store, false), ["test-session"]);
         });
@@ -268,8 +267,9 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             err,
-            "Missing session id. Usage: `/unarchive <id-prefix>`, or press Ctrl+A in the \
-             `/resume` picker to list archived sessions and Ctrl+X to unarchive one.",
+            "Missing session id. \
+             Usage: `/unarchive <id-prefix>`, or press Ctrl+A in the `/resume` picker \
+             to list archived sessions and Ctrl+X to unarchive one.",
         );
     }
 

@@ -338,8 +338,8 @@ mod tests {
             modal.error.as_deref(),
             Some(
                 format!(
-                    "Failed to delete session abcd1234: refusing to delete the live session: \
-                     {live_id}"
+                    "Failed to delete session abcd1234: \
+                     refusing to delete the live session: {live_id}"
                 )
                 .as_str()
             ),

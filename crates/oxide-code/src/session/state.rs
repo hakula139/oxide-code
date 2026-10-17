@@ -26,7 +26,8 @@ pub(super) const MAX_UNWRITTEN_BYTES: usize = MAX_UNWRITTEN_MIB << 20;
 
 fn persistence_stopped() -> String {
     format!(
-        "session persistence stopped after more than {MAX_UNWRITTEN_MIB} MiB of entries failed to write"
+        "session persistence stopped \
+         after more than {MAX_UNWRITTEN_MIB} MiB of entries failed to write"
     )
 }
 

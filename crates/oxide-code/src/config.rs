@@ -1721,8 +1721,8 @@ mod tests {
             .expect_err("stray comma must surface as a typo");
         assert_eq!(
             format!("{err:#}"),
-            "invalid OX_STATUS_LINE \"model,,run-state\": empty segment between commas. Remove the \
-             stray comma.",
+            "invalid OX_STATUS_LINE \"model,,run-state\": empty segment between commas. \
+             Remove the stray comma.",
         );
     }
 
@@ -1923,8 +1923,9 @@ mod tests {
         .expect_err("ambiguous env thresholds must fail config load");
         assert_eq!(
             format!("{err:#}"),
-            "both OX_COMPACTION_AUTO_THRESHOLD_TOKENS and OX_COMPACTION_AUTO_THRESHOLD_PERCENT \
-             are set. Set only one compaction threshold.",
+            "both OX_COMPACTION_AUTO_THRESHOLD_TOKENS \
+             and OX_COMPACTION_AUTO_THRESHOLD_PERCENT are set. \
+             Set only one compaction threshold.",
         );
     }
 
@@ -2025,9 +2026,9 @@ mod tests {
 
         assert_eq!(
             format!("{err:#}"),
-            "invalid built-in `ssh` pattern \"!home/.ssh\": a pattern cannot start with `!`, since \
-             patterns have no negation. Write the paths to match instead, or turn off the built-in \
-             rule that covers them."
+            "invalid built-in `ssh` pattern \"!home/.ssh\": a pattern cannot start with `!`, \
+             since patterns have no negation. \
+             Write the paths to match instead, or turn off the built-in rule that covers them."
         );
     }
 

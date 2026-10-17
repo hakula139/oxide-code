@@ -114,7 +114,8 @@ fn input_schema() -> serde_json::Value {
             },
             "context": {
                 "type": "integer",
-                "description": "Number of context lines to show before and after each match (content mode only)"
+                "description": "Number of context lines to show before and after each match \
+                                (content mode only)"
             },
             "case_insensitive": {
                 "type": "boolean",
@@ -789,7 +790,8 @@ mod tests {
         let count = indoc! {"
             Found 3 total occurrences across 2 files
             a.rs:2
-            b.rs:1"};
+            b.rs:1"
+        };
         assert_eq!(
             grep_title(count),
             "Found 3 total occurrences across 2 files"
@@ -1111,7 +1113,8 @@ mod tests {
             indoc! {"
                 a.rs:1:TOKEN=public
 
-                (1 file withheld by read deny or ask rules)"}
+                (1 file withheld by read deny or ask rules)"
+            }
         );
 
         p.pattern = "secret";
@@ -1121,7 +1124,8 @@ mod tests {
             indoc! {"
                 No matches found
 
-                (1 file withheld by read deny or ask rules)"}
+                (1 file withheld by read deny or ask rules)"
+            }
         );
         let title = grep_title(crate::tool::strip_withheld_note(&result));
         assert_eq!(title, "No matches found");
@@ -1231,7 +1235,8 @@ mod tests {
             indoc! {"
                 test.txt:1:match
                 test.txt:2:match
-                test.txt:3:match"},
+                test.txt:3:match"
+            },
             "no further match was dropped, so no limit footer",
         );
     }

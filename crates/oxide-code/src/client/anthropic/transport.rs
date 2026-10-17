@@ -832,7 +832,9 @@ mod tests {
             (
                 401,
                 None,
-                "Anthropic API rejected credentials (HTTP 401). CLAUDE_CODE_OAUTH_TOKEN may be expired or revoked. Generate a new one with `claude setup-token`.",
+                "Anthropic API rejected credentials (HTTP 401). \
+                 CLAUDE_CODE_OAUTH_TOKEN may be expired or revoked. \
+                 Generate a new one with `claude setup-token`.",
             ),
             (
                 429,

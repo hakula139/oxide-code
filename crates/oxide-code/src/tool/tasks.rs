@@ -77,15 +77,20 @@ impl Tool for TasksTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: NAME.to_owned(),
-            description: "Maintain the task list for this session, which the user sees while you \
-                 work. Use it for work that takes three or more steps or when the user asks for \
-                 several things at once, and skip it for a single straightforward step or a \
-                 conversational reply. Each call replaces the whole list, so send every task with \
-                 its current status each time. Mark a task in_progress just before starting it, \
-                 with at most one in_progress at a time, and completed only once it is fully done. \
-                 Remove tasks that no longer apply, and send an empty list when the user changes \
-                 course. Once every task is completed, the list clears. The user already sees the \
-                 list, so don't repeat it in your reply."
+            description: "Maintain the task list for this session, \
+                          which the user sees while you work. \
+                          Use it for work that takes three or more steps \
+                          or when the user asks for several things at once, \
+                          and skip it for a single straightforward step or a conversational reply. \
+                          Each call replaces the whole list, \
+                          so send every task with its current status each time. \
+                          Mark a task in_progress just before starting it, \
+                          with at most one in_progress at a time, \
+                          and completed only once it is fully done. \
+                          Remove tasks that no longer apply, \
+                          and send an empty list when the user changes course. \
+                          Once every task is completed, the list clears. \
+                          The user already sees the list, so don't repeat it in your reply."
                 .to_owned(),
             input_schema: input_schema(),
             class: PermissionClass::Read,
@@ -131,7 +136,8 @@ fn input_schema() -> serde_json::Value {
                     "properties": {
                         "content": {
                             "type": "string",
-                            "description": "The task as a short imperative phrase, such as \"Run the tests\""
+                            "description": "The task as a short imperative phrase, \
+                                            such as \"Run the tests\""
                         },
                         "status": {
                             "type": "string",
@@ -176,8 +182,8 @@ fn requested(input: &serde_json::Value) -> Result<Vec<Task>, String> {
     let in_progress = count(&tasks, TaskStatus::InProgress);
     if in_progress > 1 {
         return Err(format!(
-            "{in_progress} tasks are in_progress, but at most one can be at a time. Mark the \
-             others pending or completed."
+            "{in_progress} tasks are in_progress, but at most one can be at a time. \
+             Mark the others pending or completed."
         ));
     }
     Ok(tasks)
@@ -201,8 +207,8 @@ fn run(input: &serde_json::Value) -> ToolOutput {
                 ))
         }
         Some(Progress { completed, total }) => ToolOutput::success(format!(
-            "Updated the task list: {completed} of {total} completed. Carry on with the remaining \
-             tasks."
+            "Updated the task list: {completed} of {total} completed. \
+             Carry on with the remaining tasks."
         ))
         .with_title(format!(
             "Updated {total} {}, {completed} completed",
@@ -421,8 +427,8 @@ mod tests {
         assert!(output.is_error);
         assert_eq!(
             output.content,
-            "2 tasks are in_progress, but at most one can be at a time. Mark the others pending \
-             or completed."
+            "2 tasks are in_progress, but at most one can be at a time. \
+             Mark the others pending or completed."
         );
         assert_eq!(output.tasks, None);
     }
@@ -453,7 +459,8 @@ mod tests {
         assert!(output.is_error);
         assert_eq!(
             output.content,
-            "Invalid input: unknown variant `blocked`, expected one of `pending`, `in_progress`, `completed`",
+            "Invalid input: unknown variant `blocked`, \
+             expected one of `pending`, `in_progress`, `completed`",
         );
         assert_eq!(output.tasks, None);
     }

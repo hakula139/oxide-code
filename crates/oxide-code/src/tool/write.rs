@@ -19,12 +19,13 @@ impl Tool for WriteTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "write".to_owned(),
-            description: "Write content to a file, creating it if it does not exist or \
-                          overwriting it if it does. Before overwriting an existing file, Read \
-                          all of it in this session, in one Read or by paging with offset and \
-                          limit. The Read-before-Edit gate shared with the Edit tool also refuses \
-                          files that changed externally since the last Read. Creating a new file \
-                          skips the gate."
+            description: "Write content to a file, \
+                          creating it if it does not exist or overwriting it if it does. \
+                          Before overwriting an existing file, Read all of it in this session, \
+                          in one Read or by paging with offset and limit. \
+                          The Read-before-Edit gate shared with the Edit tool also refuses files \
+                          that changed externally since the last Read. \
+                          Creating a new file skips the gate."
                 .to_owned(),
             input_schema: input_schema(),
             class: PermissionClass::Edit,

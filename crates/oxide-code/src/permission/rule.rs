@@ -360,8 +360,8 @@ impl PathGlob {
     fn parse(raw: &str) -> Result<Self> {
         ensure!(
             !raw.starts_with('!'),
-            "a pattern cannot start with `!`, since patterns have no negation. Write the paths to \
-             match instead, or turn off the built-in rule that covers them."
+            "a pattern cannot start with `!`, since patterns have no negation. \
+             Write the paths to match instead, or turn off the built-in rule that covers them."
         );
         let mut pattern = slash_separated(Path::new(raw));
         if pattern == "~" || pattern.starts_with("~/") {
@@ -382,8 +382,9 @@ impl PathGlob {
                 bail!("the pattern holds a `.` or `..` component, which no resolved path does");
             }
             bail!(
-                "the pattern holds a `.` or `..` component, which no resolved path does. Start it \
-                 with `/` or `~/` to name a path outside the working directory and extra roots."
+                "the pattern holds a `.` or `..` component, which no resolved path does. \
+                 Start it with `/` or `~/` \
+                 to name a path outside the working directory and extra roots."
             );
         }
         let path = Path::new(&pattern);
@@ -585,19 +586,21 @@ mod tests {
     #[test]
     fn parse_rejects_a_malformed_exec_pattern_saying_how_to_fix_it() {
         let names_no_command = "it must name a command, such as `cargo test *`";
-        let one_command = "it must be one simple command, such as `cargo test *`. Write a pattern \
-                           for each command of a chain or pipeline.";
-        let redirection = "it holds a redirection. Leave it out, since a pattern matches a command \
-                           with its redirections set aside, and an `edit` pattern covers the file \
-                           it writes.";
+        let one_command = "it must be one simple command, such as `cargo test *`. \
+                           Write a pattern for each command of a chain or pipeline.";
+        let redirection = "it holds a redirection. \
+                           Leave it out, \
+                           since a pattern matches a command with its redirections set aside, \
+                           and an `edit` pattern covers the file it writes.";
         let expands = |word: &str| {
             format!("the word {word:?} expands at run time. Quote it to match it as written.")
         };
         let glob = |word: &str| {
             format!(
-                "the word {word:?} holds a glob, but only a `*` standing alone as a word is a \
-                 wildcard. Write a pattern for each command it should cover, or quote the word to \
-                 match it as written."
+                "the word {word:?} holds a glob, \
+                 but only a `*` standing alone as a word is a wildcard. \
+                 Write a pattern for each command it should cover, \
+                 or quote the word to match it as written."
             )
         };
         for (pattern, expected) in [
@@ -615,8 +618,8 @@ mod tests {
             ("ls *.rs", glob("*.rs")),
             (
                 "FOO=$BAR cmd",
-                "the assignment \"FOO=$BAR\" expands at run time. Quote its value to match it as \
-                 written."
+                "the assignment \"FOO=$BAR\" expands at run time. \
+                 Quote its value to match it as written."
                     .to_owned(),
             ),
             (
@@ -636,8 +639,8 @@ mod tests {
 
         assert_eq!(
             format!("{err:#}"),
-            "a pattern cannot start with `!`, since patterns have no negation. Write the paths to \
-             match instead, or turn off the built-in rule that covers them."
+            "a pattern cannot start with `!`, since patterns have no negation. \
+             Write the paths to match instead, or turn off the built-in rule that covers them."
         );
     }
 
@@ -698,8 +701,9 @@ mod tests {
 
         assert_eq!(
             relative,
-            "the pattern holds a `.` or `..` component, which no resolved path does. Start it with \
-             `/` or `~/` to name a path outside the working directory and extra roots."
+            "the pattern holds a `.` or `..` component, which no resolved path does. \
+             Start it with `/` or `~/` \
+             to name a path outside the working directory and extra roots."
         );
         assert_eq!(
             absolute,

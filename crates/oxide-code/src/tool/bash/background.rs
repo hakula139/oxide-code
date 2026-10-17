@@ -224,8 +224,8 @@ impl Registry {
     fn unknown(&self, id: &str) -> String {
         if self.shells.is_empty() {
             return format!(
-                "No background shell {id} is open, and none are. A shell closes when bash_stop \
-                 stops it, when the session ends, and when ox exits."
+                "No background shell {id} is open, and none are. \
+                 A shell closes when bash_stop stops it, when the session ends, and when ox exits."
             );
         }
         format!(
@@ -238,7 +238,8 @@ impl Registry {
     fn full(&self) -> String {
         format!(
             "A session keeps at most {MAX_SHELLS} background shells open, running or finished, \
-             and these are open: {}. Stop one you no longer need with bash_stop.",
+             and these are open: {}. \
+             Stop one you no longer need with bash_stop.",
             self.open_shells()
         )
     }
@@ -396,8 +397,9 @@ fn push_note(capture: &mut PipeCapture, note: &str) {
 pub(super) fn start(shells: &Arc<BackgroundShells>, command: &str, ctx: &ToolCtx) -> ToolOutput {
     match shells.start(command, ctx) {
         Ok(id) => ToolOutput::success(format!(
-            "Started background shell {id}. You are not notified when it finishes, so check its \
-             output and state with bash_output, and stop it with bash_stop."
+            "Started background shell {id}. \
+             You are not notified when it finishes, \
+             so check its output and state with bash_output, and stop it with bash_stop."
         )),
         Err(message) => ToolOutput::error(message),
     }
@@ -430,22 +432,28 @@ impl Tool for BashOutputTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "bash_output".to_owned(),
-            description: "Read what a background shell printed since the last read, and whether \
-                 it is still running. Pass a timeout to wait for the command to finish first, so \
-                 one call can wait out a build. The wait ends when the command exits or the \
-                 timeout passes, so for a command that keeps running, such as a server, it lasts \
-                 the whole timeout. An unknown ID lists the open shells."
+            description: "Read what a background shell printed since the last read, \
+                          and whether it is still running. \
+                          Pass a timeout to wait for the command to finish first, \
+                          so one call can wait out a build. \
+                          The wait ends when the command exits or the timeout passes, \
+                          so for a command that keeps running, \
+                          such as a server, it lasts the whole timeout. \
+                          An unknown ID lists the open shells."
                 .to_owned(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "shell_id": {
                         "type": "string",
-                        "description": "The ID bash returned when it started the shell, such as \"shell-1\""
+                        "description": "The ID bash returned when it started the shell, \
+                                        such as \"shell-1\""
                     },
                     "timeout": {
                         "type": "integer",
-                        "description": "Milliseconds to wait for the command to finish before reading, capped at 600000. Omit or pass 0 to read at once."
+                        "description": "Milliseconds to wait for the command to finish \
+                                        before reading, capped at 600000. \
+                                        Omit or pass 0 to read at once."
                     }
                 },
                 "required": ["shell_id"]
@@ -518,16 +526,18 @@ impl Tool for BashStopTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "bash_stop".to_owned(),
-            description: "Stop a background shell and every process it started, and return what \
-                 it printed since the last read. Stop a finished shell too once you no longer \
-                 need its output, since a session keeps only a limited number of shells open."
+            description: "Stop a background shell and every process it started, \
+                          and return what it printed since the last read. \
+                          Stop a finished shell too once you no longer need its output, \
+                          since a session keeps only a limited number of shells open."
                 .to_owned(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "shell_id": {
                         "type": "string",
-                        "description": "The ID bash returned when it started the shell, such as \"shell-1\""
+                        "description": "The ID bash returned when it started the shell, \
+                                        such as \"shell-1\""
                     }
                 },
                 "required": ["shell_id"]
@@ -731,8 +741,9 @@ mod tests {
         assert!(!started.is_error, "{}", started.content);
         assert_eq!(
             started.content,
-            "Started background shell shell-1. You are not notified when it finishes, so check \
-             its output and state with bash_output, and stop it with bash_stop.",
+            "Started background shell shell-1. \
+             You are not notified when it finishes, \
+             so check its output and state with bash_output, and stop it with bash_stop.",
         );
         assert_eq!(
             sink.events(),
@@ -761,8 +772,9 @@ mod tests {
         assert_eq!(
             refused.content,
             format!(
-                "A session keeps at most 16 background shells open, running or finished, and \
-                 these are open: {}. Stop one you no longer need with bash_stop.",
+                "A session keeps at most 16 background shells open, running or finished, \
+                 and these are open: {}. \
+                 Stop one you no longer need with bash_stop.",
                 open.join(", "),
             ),
         );
@@ -921,13 +933,13 @@ mod tests {
 
         assert_eq!(
             none_open,
-            "No background shell shell-9 is open, and none are. A shell closes when bash_stop \
-             stops it, when the session ends, and when ox exits.",
+            "No background shell shell-9 is open, and none are. \
+             A shell closes when bash_stop stops it, when the session ends, and when ox exits.",
         );
         assert_eq!(
             some_open,
-            "No background shell shell-9 is open. Open shells: shell-1 (running), shell-2 (exit \
-             code 3).",
+            "No background shell shell-9 is open. \
+             Open shells: shell-1 (running), shell-2 (exit code 3).",
         );
         shells.stop_all().await;
     }

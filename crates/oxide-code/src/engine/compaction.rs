@@ -211,9 +211,10 @@ fn record_auto_compact_failure(
     auto.failures.record(sink);
     let next = if auto.failures.is_paused() {
         format!(
-            "The prompt was not sent, and auto-compaction is paused after \
-             {MAX_AUTO_COMPACT_FAILURES} failures in a row. Send the prompt again to run it \
-             without compaction, or run /compact to retry compaction first."
+            "The prompt was not sent, \
+             and auto-compaction is paused after {MAX_AUTO_COMPACT_FAILURES} failures in a row. \
+             Send the prompt again to run it without compaction, \
+             or run /compact to retry compaction first."
         )
     } else {
         "The prompt was not sent, so send it again to retry.".to_owned()
@@ -247,8 +248,8 @@ pub(super) async fn compact_session(
     let tokens = transcript_tokens(transcript);
     if tokens < MIN_TOKENS_FOR_COMPACT {
         bail!(
-            "the conversation has about {tokens} tokens, below the \
-             {MIN_TOKENS_FOR_COMPACT}-token minimum"
+            "the conversation has about {tokens} tokens, \
+             below the {MIN_TOKENS_FOR_COMPACT}-token minimum"
         );
     }
 
@@ -499,6 +500,7 @@ fn retry_request(kept: &[Message], rubric: &Message) -> Vec<Message> {
 
 /// Composes the rubric plus optional user-supplied focus instructions.
 fn build_user_message(instructions: Option<&str>) -> String {
+    let rubric = SUMMARIZATION_USER_RUBRIC.trim();
     match instructions.map(str::trim).filter(|s| !s.is_empty()) {
         Some(extra) => formatdoc! {"
             {rubric}
@@ -506,8 +508,8 @@ fn build_user_message(instructions: Option<&str>) -> String {
             Additional instructions from the engineer:
 
             {extra}
-        ", rubric = SUMMARIZATION_USER_RUBRIC.trim()},
-        None => SUMMARIZATION_USER_RUBRIC.trim().to_owned(),
+        "},
+        None => rubric.to_owned(),
     }
 }
 
@@ -795,8 +797,9 @@ mod tests {
         };
         assert_eq!(
             format!("{error:#}"),
-            "Auto-compaction failed: the summarizer is unavailable. Retry in a minute. The prompt \
-             was not sent, so send it again to retry.",
+            "Auto-compaction failed: the summarizer is unavailable. \
+             Retry in a minute. \
+             The prompt was not sent, so send it again to retry.",
         );
         assert_eq!(failures, AutoCompactFailures::new(1));
         assert_eq!(messages, tool_heavy_transcript());
@@ -916,10 +919,11 @@ mod tests {
         };
         assert_eq!(
             format!("{error:#}"),
-            "Auto-compaction failed: the summarizer is unavailable. Retry in a minute. The prompt \
-             was not sent, and auto-compaction is paused after 3 failures in a row. Send the \
-             prompt again to run it without compaction, or run /compact to retry compaction \
-             first.",
+            "Auto-compaction failed: the summarizer is unavailable. \
+             Retry in a minute. \
+             The prompt was not sent, and auto-compaction is paused after 3 failures in a row. \
+             Send the prompt again to run it without compaction, \
+             or run /compact to retry compaction first.",
         );
         assert!(
             matches!(fourth, Ok(false)),
@@ -986,7 +990,7 @@ mod tests {
         );
         let queue_prompt = async {
             started.notified().await;
-            tx.send(Op::Queue("queued after summary".into()))
+            tx.send(Op::Queue("queued after summary".to_owned()))
                 .await
                 .unwrap();
             tokio::task::yield_now().await;

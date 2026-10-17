@@ -118,8 +118,8 @@ impl fmt::Display for CopyError {
                 MAX_TERMINAL_COPY_BYTES / 1000,
             ),
             Self::Unsupported(Terminal::Apple) => f.write_str(
-                "Not copied: Terminal.app ignores OSC 52. Fn-drag to select, or press Cmd-R to \
-                 turn off mouse reporting.",
+                "Not copied: Terminal.app ignores OSC 52. \
+                 Fn-drag to select, or press Cmd-R to turn off mouse reporting.",
             ),
             Self::Unsupported(Terminal::LinuxConsole) => {
                 f.write_str("Not copied: the Linux console has no clipboard. Shift-drag to select.")
@@ -451,21 +451,27 @@ mod tests {
         assert_eq!(
             notice(9, osc52(Terminal::ITerm2)),
             (
-                "Copied 9 characters if iTerm2's \"Applications in terminal may access clipboard\" is on".to_owned(),
+                "Copied 9 characters \
+                 if iTerm2's \"Applications in terminal may access clipboard\" is on"
+                    .to_owned(),
                 true,
             ),
         );
         assert_eq!(
             notice(9, Ok(Delivery::TmuxBuffer)),
             (
-                "Copied 9 characters to a tmux buffer. tmux 3.2 or later also copies to the clipboard.".to_owned(),
+                "Copied 9 characters to a tmux buffer. \
+                 tmux 3.2 or later also copies to the clipboard."
+                    .to_owned(),
                 true,
             ),
         );
         assert_eq!(
             notice(9, Err(CopyError::Unsupported(Terminal::Apple))),
             (
-                "Not copied: Terminal.app ignores OSC 52. Fn-drag to select, or press Cmd-R to turn off mouse reporting.".to_owned(),
+                "Not copied: Terminal.app ignores OSC 52. \
+                 Fn-drag to select, or press Cmd-R to turn off mouse reporting."
+                    .to_owned(),
                 true,
             ),
         );

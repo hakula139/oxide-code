@@ -169,17 +169,15 @@ fn render_user_context(context: &UserContext) -> String {
     sections.push(render_date(&context.date));
     sections.push(render_model(&context.model));
 
-    formatdoc! {"
-        <system-reminder>
+    let sections = sections.join("\n\n");
+    system_reminder(&formatdoc! {"
         As you answer the user's questions, you can use the following context:
 
         {sections}
 
         IMPORTANT: this context may or may not be relevant to your tasks. You should
-        not respond to this context unless it is highly relevant to your task.
-        </system-reminder>",
-        sections = sections.join("\n\n"),
-    }
+        not respond to this context unless it is highly relevant to your task."
+    })
 }
 
 /// Reminder carrying each part of `fresh` that differs from `seen`, appended to a user message.
@@ -200,14 +198,12 @@ fn render_reminder(seen: &UserContext, fresh: &UserContext) -> String {
         sections.push(render_model(&fresh.model));
     }
 
-    formatdoc! {"
-        <system-reminder>
+    let sections = sections.join("\n\n");
+    system_reminder(&formatdoc! {"
         The context from the start of this conversation has changed. Use these values from now on:
 
-        {sections}
-        </system-reminder>",
-        sections = sections.join("\n\n"),
-    }
+        {sections}"
+    })
 }
 
 fn render_instructions(instructions: &str) -> String {
@@ -231,6 +227,15 @@ fn render_model(model: &str) -> String {
         # Model
 
         {model}"
+    }
+}
+
+/// `body` wrapped in the `<system-reminder>` block that [`is_system_reminder`] detects.
+pub(crate) fn system_reminder(body: &str) -> String {
+    formatdoc! {"
+        <system-reminder>
+        {body}
+        </system-reminder>"
     }
 }
 
@@ -312,14 +317,16 @@ mod tests {
         assert!(reminder.contains(indoc! {"
             # Current date
 
-            Today's date is 2026-04-13."}));
+            Today's date is 2026-04-13."
+        }));
         assert!(!reminder.contains("# CLAUDE.md"), "{reminder}");
 
         let reminder = parts.catch_up(context("New rules.", "2026-04-13")).unwrap();
         assert!(reminder.contains(indoc! {"
             # CLAUDE.md
 
-            New rules."}));
+            New rules."
+        }));
         assert!(!reminder.contains("# Current date"), "{reminder}");
 
         let swapped = UserContext {
@@ -330,7 +337,8 @@ mod tests {
         assert!(reminder.contains(indoc! {"
             # Model
 
-            You are powered by the model other-model."}));
+            You are powered by the model other-model."
+        }));
         assert!(!reminder.contains("# CLAUDE.md"), "{reminder}");
 
         let reminder = parts.catch_up(context("", "2026-04-13")).unwrap();
@@ -371,7 +379,8 @@ mod tests {
             parts.user_context.contains(&formatdoc! {"
                 # Model
 
-                {identity}"}),
+                {identity}"
+            }),
             "{}",
             parts.user_context,
         );
@@ -514,7 +523,8 @@ mod tests {
 
                 IMPORTANT: this context may or may not be relevant to your tasks. You should
                 not respond to this context unless it is highly relevant to your task.
-                </system-reminder>"},
+                </system-reminder>"
+            },
         );
     }
 
@@ -536,7 +546,8 @@ mod tests {
 
                 IMPORTANT: this context may or may not be relevant to your tasks. You should
                 not respond to this context unless it is highly relevant to your task.
-                </system-reminder>"},
+                </system-reminder>"
+            },
         );
     }
 
@@ -564,7 +575,8 @@ mod tests {
                 # Model
 
                 You are powered by the model test-model.
-                </system-reminder>"},
+                </system-reminder>"
+            },
         );
     }
 
@@ -582,7 +594,8 @@ mod tests {
                 # CLAUDE.md
 
                 The instruction files were removed, so the earlier instructions no longer apply.
-                </system-reminder>"},
+                </system-reminder>"
+            },
         );
     }
 

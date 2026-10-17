@@ -56,7 +56,8 @@ pub(crate) fn load_extra_ca_certs(path: &Path) -> Result<Vec<CertificateDer<'sta
         .with_context(|| format!("failed to parse PEM bundle at {}", path.display()))?;
     if certs.is_empty() {
         bail!(
-            "no PEM certificates found in {} (expected one or more `-----BEGIN CERTIFICATE-----` blocks)",
+            "no PEM certificates found in {} \
+             (expected one or more `-----BEGIN CERTIFICATE-----` blocks)",
             path.display(),
         );
     }
@@ -623,8 +624,14 @@ mod tests {
                     break;
                 }
             }
-            tls.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok")
-                .unwrap();
+            tls.write_all(indoc::indoc! {b"
+                HTTP/1.1 200 OK\r
+                content-length: 2\r
+                connection: close\r
+                \r
+                ok"
+            })
+            .unwrap();
         });
         addr
     }
@@ -766,7 +773,8 @@ mod tests {
         assert_eq!(
             err.to_string(),
             format!(
-                "no PEM certificates found in {} (expected one or more `-----BEGIN CERTIFICATE-----` blocks)",
+                "no PEM certificates found in {} \
+                 (expected one or more `-----BEGIN CERTIFICATE-----` blocks)",
                 file.path().display(),
             ),
         );

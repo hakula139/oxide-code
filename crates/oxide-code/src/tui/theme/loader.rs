@@ -208,8 +208,9 @@ pub(super) fn parse_theme(content: &str) -> Result<Theme> {
         Err(e) => {
             if let Some(slot) = missing_slot(&e) {
                 bail!(
-                    "the theme has no `{slot}` slot. Add one, such as `{}`. {THEMING_GUIDE} \
-                     lists every slot.",
+                    "the theme has no `{slot}` slot. \
+                     Add one, such as `{}`. \
+                     {THEMING_GUIDE} lists every slot.",
                     mocha_line(slot),
                 );
             }
@@ -338,8 +339,8 @@ mod tests {
         assert_eq!(
             format!("{err:#}"),
             format!(
-                "theme {path_str:?}: {path_str} is {len} bytes, over the \
-                 {MAX_THEME_FILE_BYTES}-byte theme file limit"
+                "theme {path_str:?}: {path_str} is {len} bytes, \
+                 over the {MAX_THEME_FILE_BYTES}-byte theme file limit"
             ),
         );
     }
@@ -800,11 +801,12 @@ mod tests {
 
     #[test]
     fn parse_theme_unknown_slot_key() {
+        let mocha = builtin::MOCHA;
         let body = formatdoc! {r##"
             {mocha}
 
             unknown_slot = "#000000"
-        "##, mocha = builtin::MOCHA};
+        "##};
         let err = parse_theme(&body).expect_err("unknown slot rejected");
         let msg = format!("{err:#}");
         assert!(msg.contains("unknown field"), "{msg}");

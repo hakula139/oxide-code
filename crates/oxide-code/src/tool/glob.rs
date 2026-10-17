@@ -37,8 +37,8 @@ impl Tool for GlobTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "glob".to_owned(),
-            description: "Find files matching a glob pattern. Returns paths sorted by \
-                          modification time (newest first)."
+            description: "Find files matching a glob pattern. \
+                          Returns paths sorted by modification time (newest first)."
                 .to_owned(),
             input_schema: input_schema(),
             class: PermissionClass::Read,
@@ -242,7 +242,8 @@ fn glob_files(
 fn compile_glob(pattern: &str) -> Result<globset::GlobMatcher, String> {
     if Path::new(pattern).has_root() {
         return Err(format!(
-            "Pattern {pattern} is absolute. Set `path` to its directory and pass a pattern relative to it."
+            "Pattern {pattern} is absolute. \
+             Set `path` to its directory and pass a pattern relative to it."
         ));
     }
     let pattern = if pattern.contains('/') {
@@ -547,7 +548,8 @@ mod tests {
         assert_eq!(
             err,
             format!(
-                "Pattern {pattern} is absolute. Set `path` to its directory and pass a pattern relative to it."
+                "Pattern {pattern} is absolute. \
+                 Set `path` to its directory and pass a pattern relative to it."
             )
         );
     }
@@ -600,7 +602,8 @@ mod tests {
             indoc! {"
                 config.toml
 
-                (1 file withheld by read deny or ask rules)"}
+                (1 file withheld by read deny or ask rules)"
+            }
         );
         assert_eq!(result.truncated_total, None);
         assert_eq!(
@@ -622,7 +625,8 @@ mod tests {
             indoc! {"
                 No files found
 
-                (1 file withheld by read deny or ask rules)"}
+                (1 file withheld by read deny or ask rules)"
+            }
         );
     }
 

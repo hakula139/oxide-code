@@ -354,7 +354,8 @@ pub(super) enum ContentBlockInfo {
 
 #[expect(
     clippy::enum_variant_names,
-    reason = "variant names mirror Anthropic API delta type values (text_delta, input_json_delta, etc.)"
+    reason = "variant names mirror Anthropic API delta type values \
+              (text_delta, input_json_delta, etc.)"
 )]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

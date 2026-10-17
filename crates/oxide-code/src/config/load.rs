@@ -189,9 +189,9 @@ fn reject_project_permissions(table: &Table, path: &Path) -> Result<()> {
         path,
         &blocked,
         &format!(
-            "Within [permission], a project file may only add deny and ask rules. Set mode, \
-             allow, extra_roots, and defaults in {} or a config.d drop-in, or the mode with \
-             OX_PERMISSION_MODE.",
+            "Within [permission], a project file may only add deny and ask rules. \
+             Set mode, allow, extra_roots, and defaults in {} or a config.d drop-in, \
+             or the mode with OX_PERMISSION_MODE.",
             user_config_hint()
         ),
     )
@@ -601,9 +601,9 @@ mod tests {
         assert_eq!(
             format!("{err:#}"),
             format!(
-                "invalid config at {}: invalid permission.ask.exec pattern \"ls | sh\": it must be \
-                 one simple command, such as `cargo test *`. Write a pattern for each command of \
-                 a chain or pipeline.",
+                "invalid config at {}: invalid permission.ask.exec pattern \"ls | sh\": \
+                 it must be one simple command, such as `cargo test *`. \
+                 Write a pattern for each command of a chain or pipeline.",
                 path.display()
             )
         );
@@ -798,9 +798,10 @@ mod tests {
             format!("{err:#}"),
             format!(
                 "{} cannot set permission.allow, permission.defaults, permission.extra_roots, \
-                 permission.later_key, permission.mode. Within [permission], a project file may \
-                 only add deny and ask rules. Set mode, allow, extra_roots, and defaults in {} or \
-                 a config.d drop-in, or the mode with OX_PERMISSION_MODE.",
+                 permission.later_key, permission.mode. \
+                 Within [permission], a project file may only add deny and ask rules. \
+                 Set mode, allow, extra_roots, and defaults in {} or a config.d drop-in, \
+                 or the mode with OX_PERMISSION_MODE.",
                 path.display(),
                 config_home.join("ox").join("config.toml").display()
             )

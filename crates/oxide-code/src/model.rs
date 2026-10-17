@@ -206,8 +206,9 @@ impl ModelSpec {
             return None;
         }
         let mut notice = format!(
-            "`{}` is not a supported model, so requests go without thinking, effort, and context \
-             management, and auto-compaction and cost tracking stay off",
+            "`{}` is not a supported model, \
+             so requests go without thinking, effort, and context management, \
+             and auto-compaction and cost tracking stay off",
             self.id,
         );
         if let Some(info) = replacement_for(&self.id) {
@@ -541,16 +542,18 @@ mod tests {
                 .unsupported_notice()
                 .as_deref(),
             Some(
-                "`claude-opus-5-5-20261001` is not a supported model, so requests go without \
-                 thinking, effort, and context management, and auto-compaction and cost tracking \
-                 stay off. Did you mean `claude-opus-5-5` (Claude Opus 5.5)?"
+                "`claude-opus-5-5-20261001` is not a supported model, \
+                 so requests go without thinking, effort, and context management, \
+                 and auto-compaction and cost tracking stay off. \
+                 Did you mean `claude-opus-5-5` (Claude Opus 5.5)?"
             ),
         );
         assert_eq!(
             spec("gateway-model").unsupported_notice().as_deref(),
             Some(
-                "`gateway-model` is not a supported model, so requests go without thinking, \
-                 effort, and context management, and auto-compaction and cost tracking stay off"
+                "`gateway-model` is not a supported model, \
+                 so requests go without thinking, effort, and context management, \
+                 and auto-compaction and cost tracking stay off"
             ),
         );
     }

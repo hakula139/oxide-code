@@ -1588,7 +1588,8 @@ mod tests {
         let path = test_project_path(dir.path(), &session_filename("nonewline", created_at));
         let content = indoc! {r#"
             {"type":"header","session_id":"nonewline","cwd":"/","model":"m","created_at":"2026-01-01T00:00:00Z","version":1}
-            {"type":"message","uuid":"a1b2c3d4-e5f6-7890-abcd-1234567890ef","message":{"role":"user","content":[{"type":"text","text":"ok"}]},"timestamp":"2026-01-01T00:00:01Z"}"#};
+            {"type":"message","uuid":"a1b2c3d4-e5f6-7890-abcd-1234567890ef","message":{"role":"user","content":[{"type":"text","text":"ok"}]},"timestamp":"2026-01-01T00:00:01Z"}"#
+        };
         fs::write(&path, content).unwrap();
 
         let data = store.load_session_data("nonewline").unwrap();
@@ -1618,8 +1619,9 @@ mod tests {
         assert_eq!(
             format!("{err:#}"),
             format!(
-                "session format version {future_version} is newer than supported \
-                 ({CURRENT_VERSION}). Upgrade oxide-code to open it."
+                "session format version {future_version} is newer \
+                 than supported ({CURRENT_VERSION}). \
+                 Upgrade oxide-code to open it."
             ),
         );
     }
