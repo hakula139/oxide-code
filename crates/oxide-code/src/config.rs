@@ -65,8 +65,8 @@ pub(crate) struct ConfigSnapshot {
     pub(crate) show_thinking: bool,
     pub(crate) show_welcome: bool,
     pub(crate) status_line: Vec<StatusLineSegment>,
-    /// Resolved theme base name — built-in catalog key or filesystem path. `/theme` reads this
-    /// to mark the active row in the picker.
+    /// Resolved theme base name, either a built-in catalog key or a filesystem path. `/theme` reads
+    /// this to mark the active row in the picker.
     pub(crate) theme_name: String,
     pub(crate) provenance: Provenance,
 }

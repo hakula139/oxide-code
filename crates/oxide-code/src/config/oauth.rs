@@ -599,8 +599,8 @@ impl Drop for LockGuard {
 }
 
 /// Directory-based advisory lock around credential writes. `mkdir` is the cross-platform atomic
-/// primitive; the guard `rmdir`s on drop. A lock older than [`LOCK_STALE_THRESHOLD`] is treated
-/// as abandoned by a crashed sibling and cleared on the next retry.
+/// primitive, and the guard `rmdir`s on drop. A lock older than [`LOCK_STALE_THRESHOLD`] is
+/// treated as abandoned by a crashed sibling and cleared on the next retry.
 async fn acquire_lock(path: &Path) -> Result<LockGuard> {
     for attempt in 0..=LOCK_MAX_RETRIES {
         if attempt > 0 {
@@ -1476,7 +1476,7 @@ mod tests {
     #[tokio::test]
     async fn refresh_oauth_token_surfaces_extra_ca_certs_error_with_path() {
         // An unreadable bundle must fail before any network call, citing the path so the user
-        // can debug the configuration rather than chase a TLS error downstream.
+        // can fix the configuration.
         let missing = Path::new("/definitely/does/not/exist.pem");
         let err = refresh_oauth_token("http://unused.invalid/", "refresh", Some(missing))
             .await
