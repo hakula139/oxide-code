@@ -25,34 +25,31 @@ const MAX_LOG_BYTES: u64 = 10 * 1024 * 1024;
 /// be held for the program lifetime, because dropping it early truncates buffered log lines.
 pub(crate) fn init_tracing(tui_mode: bool) -> Result<Option<WorkerGuard>> {
     let filter = make_filter();
-    Ok(if let Some((writer, guard)) = build_log_target(tui_mode)? {
+    if tui_mode {
+        let (writer, guard) = open_file_appender(&log_dir()?)?;
         tracing_subscriber::fmt()
             .with_env_filter(filter)
             .with_writer(writer)
             .with_ansi(false)
             .init();
-        Some(guard)
+        Ok(Some(guard))
     } else {
         tracing_subscriber::fmt()
             .with_env_filter(filter)
             .with_writer(std::io::stderr)
             .init();
-        None
-    })
+        Ok(None)
+    }
 }
 
 fn make_filter() -> EnvFilter {
     EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"))
 }
 
-fn build_log_target(tui_mode: bool) -> Result<Option<(NonBlocking, WorkerGuard)>> {
-    if !tui_mode {
-        return Ok(None);
-    }
-    let dir = app_dir(XdgBase::State)
+fn log_dir() -> Result<PathBuf> {
+    app_dir(XdgBase::State)
         .map(|dir| dir.join(LOG_SUBDIR))
-        .context("cannot determine log directory")?;
-    Ok(Some(open_file_appender(&dir)?))
+        .context("cannot determine log directory")
 }
 
 fn open_file_appender(dir: &Path) -> Result<(NonBlocking, WorkerGuard)> {
@@ -138,7 +135,7 @@ mod tests {
     use std::io::Write;
 
     use super::*;
-    use crate::util::path::testing::HOME_VAR;
+    use crate::util::path::testing::abs;
 
     // ── make_filter ──
 
@@ -167,41 +164,19 @@ mod tests {
     #[test]
     fn make_filter_honors_rust_log_directive_language() {
         temp_env::with_var("RUST_LOG", Some("info,reqwest=warn"), || {
-            let rendered = make_filter().to_string();
-            assert!(rendered.contains("info"), "rendered={rendered}");
-            assert!(rendered.contains("reqwest=warn"), "rendered={rendered}");
+            assert_eq!(make_filter().to_string(), "reqwest=warn,info");
         });
     }
 
-    // ── build_log_target ──
+    // ── log_dir ──
 
     #[test]
-    fn build_log_target_is_none_when_tui_mode_false() {
-        assert!(build_log_target(false).unwrap().is_none());
-    }
+    fn log_dir_sits_in_the_app_state_directory() {
+        let state = abs("/state");
 
-    #[test]
-    fn build_log_target_writes_to_log_file_when_tui_mode_true() {
-        let tmp = tempfile::tempdir().unwrap();
-        let xdg = tmp.path().to_string_lossy().into_owned();
-        temp_env::with_vars(
-            [
-                ("XDG_STATE_HOME", Some(xdg.as_str())),
-                (HOME_VAR, Some("/home/u")),
-            ],
-            || {
-                let (mut writer, guard) =
-                    build_log_target(true).unwrap().expect("file mode in TUI");
-                let log_dir = tmp.path().join("ox").join("log");
-                assert!(log_dir.is_dir());
+        let dir = temp_env::with_var("XDG_STATE_HOME", Some(&state), log_dir);
 
-                writer.write_all(b"sentinel-line\n").unwrap();
-                drop(guard);
-
-                let written = std::fs::read_to_string(log_dir.join(LOG_FILE)).unwrap();
-                assert!(written.contains("sentinel-line"), "written={written}");
-            },
-        );
+        assert_eq!(dir.unwrap(), Path::new(&state).join("ox").join("log"));
     }
 
     // ── open_file_appender ──
@@ -237,9 +212,7 @@ mod tests {
             drop(guard);
         }
 
-        let written = std::fs::read_to_string(tmp.path().join(LOG_FILE)).unwrap();
-        assert!(written.contains("first"), "written={written}");
-        assert!(written.contains("second"), "written={written}");
+        assert_eq!(read_log(tmp.path(), LOG_FILE), "first\nsecond\n");
     }
 
     #[cfg(unix)]
@@ -253,9 +226,11 @@ mod tests {
 
         let err = open_file_appender(&dir)
             .expect_err("create_dir_all should fail under a regular-file parent");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("failed to create"), "msg={msg}");
-        assert!(msg.contains(&dir.display().to_string()), "msg={msg}");
+
+        assert_eq!(
+            err.to_string(),
+            format!("failed to create {}", dir.display()),
+        );
     }
 
     // ── RotatingFile::open ──
