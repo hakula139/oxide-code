@@ -422,7 +422,6 @@ impl BashOutputTool {
 #[derive(Deserialize)]
 struct OutputInput {
     shell_id: String,
-    #[serde(default)]
     timeout: Option<u64>,
 }
 

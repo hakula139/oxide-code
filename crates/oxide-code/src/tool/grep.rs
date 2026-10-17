@@ -146,17 +146,13 @@ enum OutputMode {
 #[derive(Deserialize)]
 struct Input {
     pattern: String,
-    #[serde(default)]
     path: Option<String>,
-    #[serde(default)]
     include: Option<String>,
     #[serde(default)]
     output_mode: OutputMode,
-    #[serde(default)]
     context: Option<usize>,
     #[serde(default)]
     case_insensitive: bool,
-    #[serde(default)]
     head_limit: Option<usize>,
 }
 

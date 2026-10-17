@@ -70,15 +70,15 @@ pub(crate) struct ToolCtx {
     pub(crate) workspace: Arc<Workspace>,
     pub(crate) session_id: String,
     pub(crate) tracker: Arc<FileTracker>,
-    /// The tool-use ID the model gave the call, which the tracker attributes the call's records to.
-    pub(crate) call_id: String,
+    /// The ID the model gave the call, which the tracker attributes the call's records to.
+    pub(crate) tool_use_id: String,
     /// Cancelled when the user interrupts the call, so work its dropped future leaves behind, such
     /// as a blocking file walk, stops early.
     pub(crate) cancel: CancellationToken,
 }
 
 impl ToolCtx {
-    pub(crate) fn cwd(&self) -> &Path {
+    fn cwd(&self) -> &Path {
         self.workspace.cwd()
     }
 }
@@ -141,18 +141,18 @@ impl ToolOutput {
         self
     }
 
-    pub(crate) fn with_diff_chunks(mut self, chunks: Vec<DiffChunk>) -> Self {
+    fn with_diff_chunks(mut self, chunks: Vec<DiffChunk>) -> Self {
         self.metadata.diff_chunks = Some(chunks);
         self
     }
 
     /// Records the unbounded match count for a truncated result.
-    pub(crate) fn with_truncated_total(mut self, total: usize) -> Self {
+    fn with_truncated_total(mut self, total: usize) -> Self {
         self.metadata.truncated_total = Some(total);
         self
     }
 
-    pub(crate) fn with_tasks(mut self, tasks: Vec<Task>) -> Self {
+    fn with_tasks(mut self, tasks: Vec<Task>) -> Self {
         self.tasks = Some(tasks);
         self
     }
@@ -348,7 +348,7 @@ pub(crate) trait Tool: Send + Sync {
 
 pub(crate) const DEFAULT_TOOL_ICON: &str = "⟡";
 
-pub(crate) fn extract_input_field<'a>(input: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+fn extract_input_field<'a>(input: &'a serde_json::Value, key: &str) -> Option<&'a str> {
     input.get(key).and_then(serde_json::Value::as_str)
 }
 
@@ -437,7 +437,7 @@ impl ToolRegistry {
 
 // ── Output Cap ──
 
-pub(crate) const MAX_OUTPUT_BYTES: usize = 128 * 1024;
+const MAX_OUTPUT_BYTES: usize = 128 * 1024;
 
 const TRUNCATION_OVERHEAD: usize = 80;
 
@@ -497,7 +497,7 @@ fn cap_output(content: String) -> (String, Option<usize>) {
     reason = "ToolOutput carries the full tool result, \
               but the Err here is the cold input-validation path, built at most once per tool call"
 )]
-pub(crate) fn parse_input<T: DeserializeOwned>(raw: serde_json::Value) -> Result<T, ToolOutput> {
+fn parse_input<T: DeserializeOwned>(raw: serde_json::Value) -> Result<T, ToolOutput> {
     serde_json::from_value(raw).map_err(|e| ToolOutput::error(invalid_input(&e)))
 }
 
@@ -590,7 +590,7 @@ fn summarize_path_call(
 /// Strips `base` if it's a prefix. When `path == base` the relative path is empty, so this returns
 /// the file name (`foo.rs`). Paths outside `base` render as their full string. Either form is
 /// [`slash_separated`], and lossy UTF-8 conversion is fine since the result is display-only.
-pub(crate) fn display_path(path: &Path, base: &Path) -> String {
+fn display_path(path: &Path, base: &Path) -> String {
     let shown = match path.strip_prefix(base) {
         Ok(rel) if rel.as_os_str().is_empty() => path.file_name().map_or(path, Path::new),
         Ok(rel) => rel,
@@ -602,7 +602,7 @@ pub(crate) fn display_path(path: &Path, base: &Path) -> String {
 /// Returns the trailing filename component, falling back to the input string when no component
 /// can be extracted (root path, non-UTF-8 component). The fallback is what makes this safe to
 /// call on user-supplied path strings.
-pub(crate) fn file_name(path: &str) -> &str {
+fn file_name(path: &str) -> &str {
     Path::new(path)
         .file_name()
         .and_then(|n| n.to_str())
@@ -611,9 +611,9 @@ pub(crate) fn file_name(path: &str) -> &str {
 
 // ── File Target Validation ──
 
-/// Rejects targets the [`FileTracker`](crate::file_tracker::FileTracker) cannot gate, phrasing each
-/// refusal for `verb` (`read`, `edit`, `write`).
-pub(crate) fn validate_file_target(
+/// Rejects targets the [`FileTracker`] cannot gate, phrasing each refusal for `verb` (`read`,
+/// `edit`, `write`).
+fn validate_file_target(
     path: &str,
     metadata: &std::fs::Metadata,
     verb: &str,
@@ -643,7 +643,7 @@ const BINARY_CHECK_SIZE: usize = 8192;
 
 /// Heuristic: a NUL byte in the first 8 KiB marks the file as binary. Git uses the same rule, and
 /// it is cheap enough to run before every text-mode read.
-pub(crate) fn is_binary(bytes: &[u8]) -> bool {
+fn is_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(BINARY_CHECK_SIZE).any(|&b| b == 0)
 }
 
@@ -707,7 +707,7 @@ async fn write_tracked(
 ) -> std::io::Result<()> {
     let path = path.to_owned();
     ctx.tracker
-        .write_and_record(&ctx.call_id, async move {
+        .write_and_record(&ctx.tool_use_id, async move {
             write_no_follow(&path, &bytes, mode).await?;
             Ok((tracker_key(&path).await, bytes))
         })
@@ -818,7 +818,7 @@ fn walk_files<'a>(
 /// Falls back to [`SystemTime::UNIX_EPOCH`] when stat fails (entry vanished, permission denied,
 /// platform without mtime). Callers use the result only for ordering, where the epoch sorts
 /// unreadable entries oldest.
-pub(crate) fn entry_mtime(entry: &ignore::DirEntry) -> SystemTime {
+fn entry_mtime(entry: &ignore::DirEntry) -> SystemTime {
     entry
         .metadata()
         .ok()
@@ -832,13 +832,13 @@ pub(crate) fn entry_mtime(entry: &ignore::DirEntry) -> SystemTime {
     clippy::cast_precision_loss,
     reason = "MB display loses precision only above 2^53 bytes, far beyond any file size cap"
 )]
-pub(crate) fn bytes_to_mb(bytes: u64) -> f64 {
+fn bytes_to_mb(bytes: u64) -> f64 {
     bytes as f64 / (1024.0 * 1024.0)
 }
 
 /// Caps a line at `max_chars` characters, appending `... [N chars]` with the original length so the
 /// model can decide whether to read more. Borrows when the line already fits.
-pub(crate) fn truncate_line(line: &str, max_chars: usize) -> Cow<'_, str> {
+fn truncate_line(line: &str, max_chars: usize) -> Cow<'_, str> {
     if line.len() <= max_chars {
         return Cow::Borrowed(line);
     }
@@ -860,7 +860,7 @@ const WITHHELD_NOTE_END: &str = "withheld by read deny or ask rules)";
 
 /// Appends the note a search tool adds when read deny or ask rules withheld `count` of the files
 /// it found. The note counts them without naming any.
-pub(crate) fn push_withheld_note(content: &mut String, count: usize) {
+fn push_withheld_note(content: &mut String, count: usize) {
     if count == 0 {
         return;
     }
@@ -869,7 +869,7 @@ pub(crate) fn push_withheld_note(content: &mut String, count: usize) {
 }
 
 /// `content` without the note [`push_withheld_note`] appended, for parsing the rest.
-pub(crate) fn strip_withheld_note(content: &str) -> &str {
+fn strip_withheld_note(content: &str) -> &str {
     match content.rsplit_once("\n\n") {
         Some((rest, note)) if note.starts_with('(') && note.ends_with(WITHHELD_NOTE_END) => rest,
         _ => content,
@@ -907,7 +907,7 @@ pub(crate) mod testing {
             workspace: Arc::new(Workspace::new(cwd)),
             session_id: "test-session".to_owned(),
             tracker,
-            call_id: "toolu_test".to_owned(),
+            tool_use_id: "toolu_test".to_owned(),
             cancel: CancellationToken::new(),
         }
     }

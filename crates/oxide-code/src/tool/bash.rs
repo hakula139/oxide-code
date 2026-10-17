@@ -157,9 +157,7 @@ fn input_schema() -> serde_json::Value {
 #[derive(Deserialize)]
 struct Input {
     command: String,
-    #[serde(default)]
     description: Option<String>,
-    #[serde(default)]
     timeout: Option<u64>,
     #[serde(default)]
     run_in_background: bool,

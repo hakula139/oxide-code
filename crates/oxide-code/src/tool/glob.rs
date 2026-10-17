@@ -102,7 +102,6 @@ fn input_schema() -> serde_json::Value {
 #[derive(Deserialize)]
 struct Input {
     pattern: String,
-    #[serde(default)]
     path: Option<String>,
 }
 

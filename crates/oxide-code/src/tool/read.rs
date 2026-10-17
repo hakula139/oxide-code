@@ -97,9 +97,7 @@ fn input_schema() -> serde_json::Value {
 #[derive(Deserialize)]
 struct Input {
     file_path: String,
-    #[serde(default)]
     offset: Option<usize>,
-    #[serde(default)]
     limit: Option<usize>,
 }
 
@@ -156,7 +154,7 @@ async fn read_file(
     if total_lines == 0 {
         let outcome = ctx
             .tracker
-            .record_read(&key, &bytes, LastView::Full, &ctx.call_id);
+            .record_read(&key, &bytes, LastView::Full, &ctx.tool_use_id);
         return Ok(stub_or(outcome, EMPTY_FILE_MARKER).to_owned());
     }
 
@@ -198,7 +196,9 @@ async fn read_file(
     }
 
     let view = LastView::lines(offset_n, last_shown, total_lines);
-    let outcome = ctx.tracker.record_read(&key, &bytes, view, &ctx.call_id);
+    let outcome = ctx
+        .tracker
+        .record_read(&key, &bytes, view, &ctx.tool_use_id);
     Ok(stub_or(outcome, &output).to_owned())
 }
 

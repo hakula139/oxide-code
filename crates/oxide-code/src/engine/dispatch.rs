@@ -32,13 +32,13 @@ pub(super) struct DispatchContext<'a> {
 }
 
 impl DispatchContext<'_> {
-    /// The context the call `call_id` prepares and runs in.
-    fn tool_ctx(&self, call_id: &str) -> ToolCtx {
+    /// The context the call `tool_use_id` prepares and runs in.
+    fn tool_ctx(&self, tool_use_id: &str) -> ToolCtx {
         ToolCtx {
             workspace: Arc::clone(&self.workspace),
             session_id: self.session_id.clone(),
             tracker: Arc::clone(&self.tracker),
-            call_id: call_id.to_owned(),
+            tool_use_id: tool_use_id.to_owned(),
             cancel: CancellationToken::new(),
         }
     }
