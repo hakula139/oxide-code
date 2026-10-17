@@ -1,5 +1,5 @@
-//! Layer merging. Tables merge by key, permission rule lists concatenate, and any other value a
-//! higher layer sets replaces the lower one. Records which layer set each key.
+//! Layer merging. Tables merge by key, permission lists concatenate, and any other value a higher
+//! layer sets replaces the lower one. Records which layer set each key.
 
 use std::collections::HashMap;
 
@@ -8,8 +8,12 @@ use toml::{Table, Value};
 use super::provenance::{Layer, Source, Sourced};
 
 /// Dotted keys whose arrays concatenate across layers, lowest layer first, so a higher layer adds
-/// rules without discarding the lower layer's.
-const APPENDED: &[&str] = &["permission.allow", "permission.deny"];
+/// rules and roots without discarding the lower layer's.
+const APPENDED: &[&str] = &[
+    "permission.allow",
+    "permission.deny",
+    "permission.extra_roots",
+];
 
 /// Keys under one table that replace each other: a layer that sets any of them clears the rest
 /// from lower layers, so a project's percent threshold takes precedence over a user's token

@@ -3,11 +3,14 @@
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::path::Path;
 use std::pin::Pin;
 
 use serde::{Deserialize, Serialize};
 
-use super::{Tool, ToolMetadata, ToolOutput, ToolResultView, invalid_input};
+use super::{
+    Prepared, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolResultView, ToolSpec, invalid_input,
+};
 use crate::message::{ContentBlock, Message};
 use crate::permission::PermissionClass;
 use crate::util::text::plural;
@@ -70,51 +73,24 @@ fn count(tasks: &[Task], status: TaskStatus) -> usize {
 pub(crate) struct TasksTool;
 
 impl Tool for TasksTool {
-    fn name(&self) -> &'static str {
-        NAME
-    }
-
-    fn description(&self) -> &'static str {
-        "Maintain the task list for this session, which the user sees while you work. Use it for \
-         work that takes three or more steps or when the user asks for several things at once, \
-         and skip it for a single straightforward step or a conversational reply. Each call \
-         replaces the whole list, so send every task with its current status each time. Mark a \
-         task in_progress just before starting it, with at most one in_progress at a time, and \
-         completed only once it is fully done. Remove tasks that no longer apply, and send an \
-         empty list when the user changes course. Once every task is completed, the list clears. \
-         The user already sees the list, so don't repeat it in your reply."
-    }
-
-    /// Touches only the session's own task list, so it never needs approval.
-    fn permission_class(&self) -> PermissionClass {
-        PermissionClass::Read
-    }
-
-    fn input_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "tasks": {
-                    "type": "array",
-                    "description": "The complete task list in order. An empty list clears it.",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "content": {
-                                "type": "string",
-                                "description": "The task as a short imperative phrase, such as \"Run the tests\""
-                            },
-                            "status": {
-                                "type": "string",
-                                "enum": ["pending", "in_progress", "completed"]
-                            }
-                        },
-                        "required": ["content", "status"]
-                    }
-                }
-            },
-            "required": ["tasks"]
-        })
+    /// Read class, since it touches only the session's own task list and so never needs approval.
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: NAME.to_owned(),
+            description: "Maintain the task list for this session, which the user sees while you \
+                 work. Use it for work that takes three or more steps or when the user asks for \
+                 several things at once, and skip it for a single straightforward step or a \
+                 conversational reply. Each call replaces the whole list, so send every task with \
+                 its current status each time. Mark a task in_progress just before starting it, \
+                 with at most one in_progress at a time, and completed only once it is fully done. \
+                 Remove tasks that no longer apply, and send an empty list when the user changes \
+                 course. Once every task is completed, the list clears. The user already sees the \
+                 list, so don't repeat it in your reply."
+                .to_owned(),
+            input_schema: input_schema(),
+            class: PermissionClass::Read,
+            parallel_safe: false,
+        }
     }
 
     fn icon(&self) -> &'static str {
@@ -126,20 +102,49 @@ impl Tool for TasksTool {
         input: &serde_json::Value,
         _content: &str,
         _metadata: &ToolMetadata,
+        _cwd: &Path,
     ) -> Option<ToolResultView> {
         let tasks = requested(input).ok()?;
         Some(ToolResultView::Tasks { tasks })
     }
 
-    fn run(
-        &self,
-        input: serde_json::Value,
-    ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + '_>> {
-        Box::pin(std::future::ready(run(&input)))
+    fn run<'a>(
+        &'a self,
+        prepared: Prepared,
+        _ctx: &'a ToolCtx,
+    ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + 'a>> {
+        Box::pin(std::future::ready(run(&prepared.input)))
     }
 }
 
 // ── Input ──
+
+fn input_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "tasks": {
+                "type": "array",
+                "description": "The complete task list in order. An empty list clears it.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "content": {
+                            "type": "string",
+                            "description": "The task as a short imperative phrase, such as \"Run the tests\""
+                        },
+                        "status": {
+                            "type": "string",
+                            "enum": ["pending", "in_progress", "completed"]
+                        }
+                    },
+                    "required": ["content", "status"]
+                }
+            }
+        },
+        "required": ["tasks"]
+    })
+}
 
 #[derive(Deserialize)]
 struct Input {
@@ -278,6 +283,7 @@ mod tests {
     use super::testing::{plan, task};
     use super::*;
     use crate::message::Role;
+    use crate::tool::testing::{self as tool_testing, temp_ctx};
 
     // ── Fixtures ──
 
@@ -327,7 +333,12 @@ mod tests {
     fn result_view_shows_the_list_as_sent_even_when_it_cleared() {
         let done = [task("Fix the parser", TaskStatus::Completed)];
 
-        let view = TasksTool.result_view(&input(&done), "", &ToolMetadata::default());
+        let view = TasksTool.result_view(
+            &input(&done),
+            "",
+            &ToolMetadata::default(),
+            Path::new("/repo"),
+        );
 
         assert_eq!(
             view,
@@ -341,7 +352,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_keeps_the_sent_list_and_reports_its_progress() {
-        let output = TasksTool.run(input(&plan())).await;
+        let output = tool_testing::run(&TasksTool, input(&plan()), &temp_ctx()).await;
 
         assert!(!output.is_error, "{}", output.content);
         assert_eq!(
@@ -362,7 +373,7 @@ mod tests {
             TaskStatus::Pending,
         )];
 
-        let output = TasksTool.run(input(&sent)).await;
+        let output = tool_testing::run(&TasksTool, input(&sent), &temp_ctx()).await;
 
         assert_eq!(
             output.tasks,
@@ -380,7 +391,7 @@ mod tests {
             task("Run the tests", TaskStatus::Completed),
         ];
 
-        let output = TasksTool.run(input(&done)).await;
+        let output = tool_testing::run(&TasksTool, input(&done), &temp_ctx()).await;
 
         assert_eq!(
             output.content,
@@ -392,7 +403,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_clears_the_list_for_an_empty_one() {
-        let output = TasksTool.run(input(&[])).await;
+        let output = tool_testing::run(&TasksTool, input(&[]), &temp_ctx()).await;
 
         assert_eq!(output.content, "Cleared the task list.");
         assert_eq!(output.tasks, Some(Vec::new()));
@@ -405,7 +416,7 @@ mod tests {
             task("Run the tests", TaskStatus::InProgress),
         ];
 
-        let output = TasksTool.run(input(&tasks)).await;
+        let output = tool_testing::run(&TasksTool, input(&tasks), &temp_ctx()).await;
 
         assert!(output.is_error);
         assert_eq!(
@@ -423,7 +434,7 @@ mod tests {
             task(" \n ", TaskStatus::Pending),
         ];
 
-        let output = TasksTool.run(input(&tasks)).await;
+        let output = tool_testing::run(&TasksTool, input(&tasks), &temp_ctx()).await;
 
         assert!(output.is_error);
         assert_eq!(
@@ -435,9 +446,9 @@ mod tests {
 
     #[tokio::test]
     async fn run_rejects_an_unknown_status() {
-        let output = TasksTool
-            .run(json!({"tasks": [{"content": "Fix the parser", "status": "blocked"}]}))
-            .await;
+        let raw = json!({"tasks": [{"content": "Fix the parser", "status": "blocked"}]});
+
+        let output = tool_testing::run(&TasksTool, raw, &temp_ctx()).await;
 
         assert!(output.is_error);
         assert_eq!(

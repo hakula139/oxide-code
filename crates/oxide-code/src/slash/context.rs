@@ -12,8 +12,9 @@ use crate::permission::rule::Rule;
 /// persisted JSONL record consumed by `--list`.
 pub(crate) struct LiveSessionInfo {
     pub(crate) cwd: String,
-    /// The real path behind the display `cwd`, for the status bar's git probes and `/diff`.
-    pub(crate) git_cwd: Option<PathBuf>,
+    /// The real path behind the display `cwd`, for the status bar's git probes, `/diff`, and the
+    /// session store.
+    pub(crate) working_dir: Option<PathBuf>,
     /// The root `/init` checks for instruction files: the git repository containing the session's
     /// working directory, or that directory itself outside a repository.
     pub(crate) project_root: PathBuf,
@@ -54,7 +55,7 @@ pub(crate) mod testing {
         // Real MODELS row so the display name resolves to a known label.
         LiveSessionInfo {
             cwd: "~/test".to_owned(),
-            git_cwd: None,
+            working_dir: Some(PathBuf::from("/repo")),
             project_root: PathBuf::from("/repo"),
             git_branch: Some("main".to_owned()),
             version: "0.0.0-test",

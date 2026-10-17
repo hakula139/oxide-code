@@ -2,7 +2,7 @@
 //! `--continue`. Bare `/archive` forwards [`Op::Archive`], which archives the live session and
 //! rolls to a fresh one. The typed-arg forms update a saved session's file directly.
 
-use super::context::SlashContext;
+use super::context::{LiveSessionInfo, SlashContext};
 use super::registry::{SlashCommand, SlashKind, SlashOutcome};
 use super::sessions::{open_store, resolve_error_message};
 use crate::protocol::Op;
@@ -38,7 +38,7 @@ impl SlashCommand for ArchiveCmd {
         if prefix.is_empty() {
             return Ok(SlashOutcome::Forward(Action::Op(Op::Archive)));
         }
-        match resolve_saved(prefix, &ctx.info.session_id)? {
+        match resolve_saved(prefix, ctx.info)? {
             Some(info) => set_archived(&info, true),
             None => Err(format!(
                 "Session prefix `{prefix}` matches the live session. Use bare `/archive` to archive \
@@ -82,7 +82,7 @@ impl SlashCommand for UnarchiveCmd {
                     .to_owned(),
             );
         }
-        match resolve_saved(prefix, &ctx.info.session_id)? {
+        match resolve_saved(prefix, ctx.info)? {
             Some(info) => set_archived(&info, false),
             None => Ok(SlashOutcome::SystemMessage(
                 "The live session is not archived.".to_owned(),
@@ -93,9 +93,9 @@ impl SlashCommand for UnarchiveCmd {
 
 // ── Helpers ──
 
-fn resolve_saved(prefix: &str, live_id: &str) -> Result<Option<SessionInfo>, String> {
-    let store = open_store()?;
-    resolve_saved_prefix(&store, prefix, live_id).map_err(resolve_error_message)
+fn resolve_saved(prefix: &str, info: &LiveSessionInfo) -> Result<Option<SessionInfo>, String> {
+    let store = open_store(info)?;
+    resolve_saved_prefix(&store, prefix, &info.session_id).map_err(resolve_error_message)
 }
 
 fn set_archived(info: &SessionInfo, archived: bool) -> Result<SlashOutcome, String> {
@@ -173,7 +173,7 @@ mod tests {
     #[test]
     fn execute_archive_prefix_hides_a_saved_session_from_listings_once() {
         with_isolated_xdg(|_| {
-            let store = SessionStore::open().unwrap();
+            let store = open_store(&test_session_info()).unwrap();
             let target_id = stamped_id(0xab);
             seed_saved(&store, &target_id);
             let info = test_session_info();
@@ -194,7 +194,7 @@ mod tests {
     #[test]
     fn execute_archive_prefix_matching_only_the_live_session_points_to_bare_archive() {
         with_isolated_xdg(|_| {
-            let store = SessionStore::open().unwrap();
+            let store = open_store(&test_session_info()).unwrap();
             seed_saved(&store, "test-session");
             let info = test_session_info();
             let ctx = SlashContext::new(&info, None);
@@ -226,7 +226,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         with_isolated_xdg(|_| {
-            let store = SessionStore::open().unwrap();
+            let store = open_store(&test_session_info()).unwrap();
             let target_id = stamped_id(0xab);
             seed_saved(&store, &target_id);
             let path = store.find_session_path(&target_id).unwrap();
@@ -283,7 +283,7 @@ mod tests {
     #[test]
     fn execute_unarchive_prefix_lists_an_archived_session_again_once() {
         with_isolated_xdg(|_| {
-            let store = SessionStore::open().unwrap();
+            let store = open_store(&test_session_info()).unwrap();
             let target_id = stamped_id(0xab);
             seed_saved(&store, &target_id);
             set_archived_at(&store.find_session_path(&target_id).unwrap(), true).unwrap();

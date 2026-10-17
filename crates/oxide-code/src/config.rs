@@ -31,7 +31,7 @@ use self::merge::Origins;
 use self::provenance::{Provenance, Source, Sourced};
 use self::schema::{FileConfig, PermissionTable};
 use crate::model::ModelSpec;
-use crate::permission::{Mode, Policy};
+use crate::permission::{Mode, Policy, Workspace};
 use crate::util::env;
 use crate::util::path::expand_user;
 use crate::util::tls::load_extra_ca_certs;
@@ -337,6 +337,8 @@ pub(crate) struct Config {
     pub(crate) prompt_cache_ttl: PromptCacheTtl,
     pub(crate) compaction: CompactionConfig,
     pub(crate) permission: Policy,
+    /// The launch directory and the workspace roots the tools run in.
+    pub(crate) workspace: Workspace,
     /// Opts adaptive thinking into summarized text. The request's `thinking` field derives from
     /// this plus the model.
     pub(crate) show_thinking: bool,
@@ -423,7 +425,8 @@ impl Config {
             model.resolve_max_tokens(max_tokens.value),
         )?;
 
-        let (permission, permission_mode) = resolve_permission(permission, &origins, cwd)?;
+        let (permission, workspace, permission_mode) =
+            resolve_permission(permission, &origins, cwd)?;
 
         let theme = ThemeConfig {
             base: tui.theme.base.unwrap_or_else(|| DEFAULT_THEME.to_owned()),
@@ -461,6 +464,7 @@ impl Config {
             prompt_cache_ttl: prompt_cache_ttl.value,
             compaction: compaction.value,
             permission,
+            workspace,
             show_thinking: show_thinking.value,
             show_welcome,
             status_line,
@@ -614,15 +618,16 @@ fn validate_status_line(segments: Vec<StatusLineSegment>) -> Result<Vec<StatusLi
     Ok(segments)
 }
 
-/// Resolves the permission policy from the merged file config plus the `OX_PERMISSION_MODE`
-/// override, along with the source of its mode. The env mode wins over the file mode with the
-/// empty-is-absent and parse-error-propagates behavior `effort` uses, so a typo fails loudly.
-/// Deny prefixes resolve against `cwd`, which the gate also resolves paths against.
+/// Resolves the permission policy and the workspace launched in `cwd` from the merged file config
+/// plus the `OX_PERMISSION_MODE` override, along with the source of the mode. The env mode wins
+/// over the file mode with the empty-is-absent and parse-error-propagates behavior `effort` uses,
+/// so a typo fails loudly. Deny prefixes resolve against `cwd`, as the gate's paths do.
 fn resolve_permission(
     file: PermissionTable,
     origins: &Origins,
     cwd: &Path,
-) -> Result<(Policy, Source)> {
+) -> Result<(Policy, Workspace, Source)> {
+    let workspace = Workspace::resolve(cwd, &file.extra_roots.unwrap_or_default())?;
     let mode = env_parse::<Mode>("OX_PERMISSION_MODE")?
         .or_else(|| origins.sourced("permission.mode", file.mode))
         .unwrap_or_else(|| Sourced::fallback(Mode::default()));
@@ -630,7 +635,7 @@ fn resolve_permission(
     let allow = file.allow.unwrap_or_default();
     let deny = file.deny.unwrap_or_default();
     let policy = Policy::resolve(mode.value, &allow, &deny, cwd)?;
-    Ok((policy, mode.source))
+    Ok((policy, workspace, mode.source))
 }
 
 // ── Env Overrides ──
@@ -769,6 +774,7 @@ mod tests {
             prompt_cache_ttl: PromptCacheTtl::FiveMin,
             compaction: CompactionConfig::with_threshold_for_test(42),
             permission: Policy::resolve(Mode::Plan, &[], &[], Path::new("")).unwrap(),
+            workspace: Workspace::new(Path::new("/repo")),
             show_thinking: true,
             show_welcome: false,
             status_line: vec![
@@ -1974,6 +1980,54 @@ mod tests {
         assert_eq!(
             format!("{err:#}"),
             r#"invalid OX_PERMISSION_MODE "bypass": expected one of auto, plan, yolo"#,
+        );
+    }
+
+    #[tokio::test]
+    async fn load_permission_extra_roots_join_the_cwd_across_layers() {
+        let dir = tempfile::tempdir().unwrap();
+        let (shared, docs) = (dir.path().join("shared"), dir.path().join("docs"));
+        std::fs::create_dir(&shared).unwrap();
+        std::fs::create_dir(&docs).unwrap();
+        let roots = |paths: &[&Path]| {
+            let quoted: Vec<String> = paths
+                .iter()
+                .map(|path| toml::Value::from(path.to_str().unwrap()).to_string())
+                .collect();
+            format!("permission.extra_roots = [{}]", quoted.join(", "))
+        };
+        write_user_config(dir.path(), &roots(&[&shared]));
+        write_drop_in(dir.path(), "10-docs.toml", &roots(&[&docs, &shared]));
+
+        let config = load_with(&dir, &[]).await.unwrap();
+
+        let canonical = |path: &Path| dunce::canonicalize(path).unwrap();
+        assert_eq!(config.workspace.cwd(), dir.path());
+        assert_eq!(
+            config.workspace.roots(),
+            [canonical(dir.path()), canonical(&shared), canonical(&docs)],
+        );
+    }
+
+    #[tokio::test]
+    async fn load_permission_invalid_extra_root_names_its_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let drop_in = write_drop_in(
+            dir.path(),
+            "10-roots.toml",
+            r#"permission.extra_roots = ["shared"]"#,
+        );
+
+        let err = load_with(&dir, &[])
+            .await
+            .expect_err("a relative extra root must propagate");
+
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                r#"invalid config at {}: invalid extra root "shared": expected an absolute or `~/` path"#,
+                drop_in.path().display()
+            ),
         );
     }
 

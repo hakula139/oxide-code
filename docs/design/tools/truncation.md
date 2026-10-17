@@ -30,7 +30,7 @@ Two-layer truncation: per-tool view-shape caps + centralized byte-budget safety 
 ## Sources
 
 - `crates/oxide-code/src/file_tracker.rs`: `MAX_TRACKED_FILE_SIZE`.
-- `crates/oxide-code/src/tool.rs`: `ToolRegistry::run`, `cap_output()`, `MAX_OUTPUT_BYTES`, `truncate_line()`.
+- `crates/oxide-code/src/tool.rs`: `run_capped`, `cap_output()`, `MAX_OUTPUT_BYTES`, `truncate_line()`.
 - `crates/oxide-code/src/tool/bash.rs`: `OUTPUT_BUDGET`, `PipeCapture`, `render_pipe()`.
 - `crates/oxide-code/src/tool/glob.rs`: `MAX_RESULTS`, `truncated_total` setter.
 - `crates/oxide-code/src/tool/grep.rs`: `DEFAULT_HEAD_LIMIT`, `MAX_GREP_FILE_SIZE`, `MAX_LINE_CHARS`.

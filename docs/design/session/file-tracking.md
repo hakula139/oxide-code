@@ -26,11 +26,11 @@ The `FileTracker` is a per-session `Arc<Mutex<HashMap>>` shared across tool call
 
 7. **xxh64 for change detection.** Cryptographic integrity isn't required, since the tracker only needs to spot drift, and xxh64 is already used elsewhere in the crate.
 
-8. **No tracker-managed file lock.** One agent runs tool calls one at a time, so the only concurrent writer is an external editor, which the staleness check catches. Subagents would add concurrent writers within one session ([#136](https://github.com/hakula139/oxide-code/issues/136)).
+8. **No tracker-managed file lock.** One agent runs its edit-class calls one at a time, and only read-only calls share a batch, so the only concurrent writer is an external editor, which the staleness check catches. Subagents would add concurrent writers within one session ([#136](https://github.com/hakula139/oxide-code/issues/136)).
 
 ## Sources
 
-- `crates/oxide-code/src/file_tracker.rs`: `FileTracker`, `LastView`, `FileSnapshot`, `attribute_to`, `write_and_record`, content verification, persist / restore.
+- `crates/oxide-code/src/file_tracker.rs`: `FileTracker`, `LastView`, `FileSnapshot`, `record_read` and `write_and_record`, which attribute each record to the call ID they take, content verification, persist / restore.
 - `crates/oxide-code/src/session/entry.rs`: `Entry::FileSnapshot`.
 - `crates/oxide-code/src/session/sanitize.rs`: `retain_visible_file_snapshots`, the resume-time provenance filter.
 - `crates/oxide-code/src/tool.rs`: `tracker_key`, `write_tracked`.

@@ -12,8 +12,8 @@ const MAX_PROJECT_DIR_LEN: usize = 80;
 /// Hex chars in the truncation hash suffix.
 const HASH_SUFFIX_HEX_LEN: usize = 16;
 
-/// Fallback when the cwd cannot be resolved (e.g. running from a deleted directory).
-pub(crate) const UNKNOWN_PROJECT_DIR: &str = "_unknown_";
+/// The subdir for a cwd with no safe characters to keep, such as `/`.
+const UNKNOWN_PROJECT_DIR: &str = "_unknown_";
 
 /// Derives a filesystem-safe subdir name. Non-`[A-Za-z0-9._-]` chars become `-`; long names get
 /// a 16-char xxh64 suffix over the raw path bytes (so non-UTF8 paths whose lossy forms collide

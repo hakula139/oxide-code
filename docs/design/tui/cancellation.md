@@ -16,7 +16,7 @@ The TUI exposes these controls and behaviors:
 
 The picks lean toward the Codex precedent on most surfaces, since it is the one Rust reference and its patterns map onto our async / actor architecture without reshaping. The wire-shape choice (3) is the deliberate exception.
 
-1. **Drop-the-future cancellation.** Esc / Ctrl+C drops the `agent_turn` future from the agent loop, which is simpler than Codex's protocol message. The `Tool::run` contract requires each tool to stop its work when the future drops, or to finish it together with its bookkeeping. reqwest closes the SSE stream on drop, and the bash tool's `ShellTree` kills the whole process tree, so backgrounded descendants stop with the shell. Edit and Write run each file write and its tracker record in one spawned task, so a write that lands after the cancel is still recorded.
+1. **Drop-the-future cancellation.** Esc / Ctrl+C drops the `agent_turn` future from the agent loop, which is simpler than Codex's protocol message. The `Tool::run` contract requires each tool to stop its work when the future drops, to stop on the call's `ToolCtx` cancel token, which the dispatcher cancels after the drop, or to finish the work together with its bookkeeping. The `grep` and `glob` walks run on a blocking thread the drop cannot stop, so they check the token. reqwest closes the SSE stream on drop, and the bash tool's `ShellTree` kills the whole process tree, so backgrounded descendants stop with the shell. Edit and Write run each file write and its tracker record in one spawned task, so a write that lands after the cancel is still recorded.
 
 2. **Commit only settled state on cancel.** A cancel mid-stream discards the partial assistant message, as Codex does. The TUI keeps the streamed prefix with an `(interrupted)` suffix. A cancel during a tool round commits the assistant message with a result for every call, because the finished calls already changed the workspace and the model must see them. Each unfinished call gets an `is_error` result saying the user interrupted it, so the transcript never holds an orphan `tool_use`. The result for a call stopped mid-run says it may have run partially, and the one for a call that never started, including one awaiting approval, says it did not run.
 
@@ -39,13 +39,13 @@ The picks lean toward the Codex precedent on most surfaces, since it is the one 
 - `crates/oxide-code/src/driver/stdio.rs`: `StdioSink::render`, and `render_op`, which renders until the op it sent ends.
 - `crates/oxide-code/src/engine.rs`: `Engine::run`, which ignores an `Op::Queue` that arrives between turns, plus `Engine::submit_prompt`, `report_abort`, and `TurnEnd::of`, shared by the TUI, REPL, and headless drivers.
 - `crates/oxide-code/src/engine/abort.rs`: `TurnAbort` enum, `await_unless_aborted`.
-- `crates/oxide-code/src/engine/dispatch.rs`: `run_tool_round` / `ToolRound`, `dispatch_tool_call`.
+- `crates/oxide-code/src/engine/dispatch.rs`: `run_tool_round` / `ToolRound`, `Dispatcher::run_ready`, which cancels the running calls on an abort.
 - `crates/oxide-code/src/engine/turn.rs`: `agent_turn` round loop, `interrupt_turn`, `record_drained_prompts`.
 - `crates/oxide-code/src/file_tracker.rs`: `FileTracker::write_and_record`.
 - `crates/oxide-code/src/message.rs`: `Message::interruption`, the marker a user abort records.
 - `crates/oxide-code/src/protocol.rs`: `Event::{Cancelled, PromptDrained, TurnFailed}`, `Interaction::Interrupted`, `Op::{Interrupt, Queue, Shutdown}`.
 - `crates/oxide-code/src/session/history.rs`: `walk_transcript`, which shows a resumed interruption marker as `Interaction::Interrupted`.
-- `crates/oxide-code/src/tool.rs`: `Tool::run` drop contract, `write_tracked`.
+- `crates/oxide-code/src/tool.rs`: `Tool::run` drop contract, `ToolCtx::cancel`, `walk_files`, `write_tracked`.
 - `crates/oxide-code/src/tool/bash.rs`: `ShellTree`, which kills the shell's process group (Unix) or Job Object (Windows) when a call times out or drops before finishing.
 - `crates/oxide-code/src/tui/action.rs`: `Action::ConfirmExit`.
 - `crates/oxide-code/src/tui/app.rs`: `App::pending_prompts` / `forwarded_prompts`, and `App::active_prompt` / `auto_compacting`.

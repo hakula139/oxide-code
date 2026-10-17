@@ -101,6 +101,7 @@ mod tests {
             std::path::Path::new("/tmp/example.rs"),
             b"old",
             LastView::Full,
+            "toolu_test",
         );
         let mut messages = fake_transcript();
         let sink = CapturingSink::new();
@@ -131,7 +132,7 @@ mod tests {
         let session = handle::testing::dead("dead-compact-session");
         let tracker = FileTracker::default();
         let path = std::path::PathBuf::from("/tmp/example.rs");
-        tracker.record_read(&path, b"old", LastView::Full);
+        tracker.record_read(&path, b"old", LastView::Full, "toolu_test");
         let original = fake_transcript();
         let mut messages = original.clone();
         let sink = CapturingSink::new();
@@ -175,6 +176,7 @@ mod tests {
             std::path::Path::new("/tmp/example.rs"),
             b"old",
             LastView::Full,
+            "toolu_test",
         );
         let mut messages = fake_transcript();
 

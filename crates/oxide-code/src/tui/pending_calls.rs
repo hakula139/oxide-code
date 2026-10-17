@@ -14,12 +14,12 @@ pub(crate) fn result_header(title: Option<String>, call_label: Option<String>) -
         .unwrap_or_else(|| FALLBACK_RESULT_HEADER.to_owned())
 }
 
-/// Labels of in-flight tool calls keyed by their id, kept so each result's header can fall back to
-/// its call's label. Cleared at turn boundaries so orphan starts from a cancelled or errored turn
-/// don't leak across turns.
+/// In-flight tool calls keyed by their id, each with its label and the index of its chat block, so
+/// its result can fall back to the label as its header and sit right under the call. Cleared at
+/// turn boundaries so orphan starts from a cancelled or errored turn don't leak across turns.
 #[derive(Debug, Default)]
 pub(crate) struct PendingCalls {
-    labels: HashMap<String, String>,
+    calls: HashMap<String, (String, usize)>,
 }
 
 impl PendingCalls {
@@ -27,21 +27,32 @@ impl PendingCalls {
         Self::default()
     }
 
-    pub(crate) fn insert(&mut self, id: String, label: String) {
-        self.labels.insert(id, label);
+    pub(crate) fn insert(&mut self, id: String, label: String, block: usize) {
+        self.calls.insert(id, (label, block));
     }
 
-    pub(crate) fn remove(&mut self, id: &str) -> Option<String> {
-        self.labels.remove(id)
+    /// Removes the call `id`, returning its label and block index.
+    pub(crate) fn remove(&mut self, id: &str) -> Option<(String, usize)> {
+        self.calls.remove(id)
+    }
+
+    /// Moves each call whose block sits at or after `at` one block down, after a block is inserted
+    /// at `at`.
+    pub(crate) fn shift_from(&mut self, at: usize) {
+        for (_, block) in self.calls.values_mut() {
+            if *block >= at {
+                *block += 1;
+            }
+        }
     }
 
     pub(crate) fn clear(&mut self) {
-        self.labels.clear();
+        self.calls.clear();
     }
 
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
-        self.labels.len()
+        self.calls.len()
     }
 }
 
@@ -80,9 +91,9 @@ mod tests {
     #[test]
     fn insert_overwrites_existing_entry() {
         let mut calls = PendingCalls::new();
-        calls.insert("t1".to_owned(), "Edit(/tmp/f.rs)".to_owned());
-        calls.insert("t1".to_owned(), "Edit(retry)".to_owned());
-        assert_eq!(calls.remove("t1").as_deref(), Some("Edit(retry)"));
+        calls.insert("t1".to_owned(), "Edit(/tmp/f.rs)".to_owned(), 0);
+        calls.insert("t1".to_owned(), "Edit(retry)".to_owned(), 3);
+        assert_eq!(calls.remove("t1"), Some(("Edit(retry)".to_owned(), 3)));
     }
 
     // ── PendingCalls::remove ──
@@ -90,8 +101,23 @@ mod tests {
     #[test]
     fn remove_drains_the_entry() {
         let mut calls = PendingCalls::new();
-        calls.insert("t1".to_owned(), "Edit(/tmp/f.rs)".to_owned());
-        assert_eq!(calls.remove("t1").as_deref(), Some("Edit(/tmp/f.rs)"));
+        calls.insert("t1".to_owned(), "Edit(/tmp/f.rs)".to_owned(), 0);
+        assert_eq!(calls.remove("t1"), Some(("Edit(/tmp/f.rs)".to_owned(), 0)));
         assert_eq!(calls.remove("t1"), None);
+    }
+
+    // ── PendingCalls::shift_from ──
+
+    #[test]
+    fn shift_from_moves_only_the_calls_at_or_after_the_insertion() {
+        let mut calls = PendingCalls::new();
+        for (id, block) in [("before", 1), ("at", 2), ("after", 4)] {
+            calls.insert(id.to_owned(), id.to_owned(), block);
+        }
+
+        calls.shift_from(2);
+
+        let blocks = ["before", "at", "after"].map(|id| calls.remove(id).map(|(_, block)| block));
+        assert_eq!(blocks, [Some(1), Some(3), Some(5)]);
     }
 }

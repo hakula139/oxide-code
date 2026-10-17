@@ -18,6 +18,7 @@ mod tui;
 mod util;
 
 use std::io::IsTerminal;
+use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -131,10 +132,12 @@ async fn async_main() -> Result<Exit> {
         bail!("--resume opens the session picker in the TUI, which needs a terminal on stdout");
     }
     let _log_guard = util::log::init_tracing(tui_mode)?;
+    let cwd = std::env::current_dir().context("failed to read the current working directory")?;
 
     if cli.list {
         list_sessions(
             &mut std::io::stdout().lock(),
+            &cwd,
             ListScope {
                 all: cli.all,
                 archived: cli.archived,
@@ -144,7 +147,6 @@ async fn async_main() -> Result<Exit> {
         return Ok(Exit::Success);
     }
 
-    let cwd = std::env::current_dir().context("failed to read the current working directory")?;
     let config = Config::load(&cwd, tui_mode).await?;
     let show_thinking = config.show_thinking;
     let theme = tui_mode
@@ -155,7 +157,7 @@ async fn async_main() -> Result<Exit> {
         warn!("{notice}");
     }
 
-    let store = SessionStore::open()?;
+    let store = SessionStore::open(&cwd)?;
     let file_tracker = Arc::new(FileTracker::default());
     let ResumedSession {
         handle,
@@ -173,7 +175,7 @@ async fn async_main() -> Result<Exit> {
         .then(|| ResumePicker::at_startup(store.clone(), handle.session_id().to_owned(), cli.all));
 
     let read_deny = config.permission.read_deny();
-    let tools = Arc::new(create_tool_registry(&file_tracker, &read_deny));
+    let tools = Arc::new(create_tool_registry(&read_deny));
     let engine = Engine::new(
         &config,
         identity::load_or_create_device_id(),
@@ -182,7 +184,6 @@ async fn async_main() -> Result<Exit> {
         handle,
         transcript,
         file_tracker,
-        cwd,
         tui_mode,
     )
     .await?;
@@ -205,8 +206,13 @@ async fn async_main() -> Result<Exit> {
 
 // ── Session Helpers ──
 
-fn list_sessions(out: &mut dyn std::io::Write, scope: ListScope, limit: usize) -> Result<()> {
-    let store = SessionStore::open()?;
+fn list_sessions(
+    out: &mut dyn std::io::Write,
+    cwd: &Path,
+    scope: ListScope,
+    limit: usize,
+) -> Result<()> {
+    let store = SessionStore::open(cwd)?;
     let local_offset = util::time::local_offset();
     let term_width = detect_terminal_width();
     let cap = (limit > 0).then_some(limit);
@@ -222,12 +228,12 @@ fn detect_terminal_width() -> Option<usize> {
         .map(|(cols, _)| usize::from(cols))
 }
 
-fn create_tool_registry(tracker: &Arc<FileTracker>, read_deny: &ReadDeny) -> ToolRegistry {
+fn create_tool_registry(read_deny: &ReadDeny) -> ToolRegistry {
     ToolRegistry::new(vec![
         Box::new(BashTool),
-        Box::new(ReadTool::new(Arc::clone(tracker))),
-        Box::new(WriteTool::new(Arc::clone(tracker))),
-        Box::new(EditTool::new(Arc::clone(tracker))),
+        Box::new(ReadTool),
+        Box::new(WriteTool),
+        Box::new(EditTool),
         Box::new(GlobTool::new(read_deny.clone())),
         Box::new(GrepTool::new(read_deny.clone())),
         Box::new(TasksTool),
@@ -243,8 +249,7 @@ mod tests {
     use crate::permission::{Mode, Policy};
     use crate::session::store::set_archived_at;
     use crate::session::store::testing::seed_test_session;
-    use crate::tool::testing::canonical_tempdir;
-    use crate::util::path::slash_separated;
+    use crate::tool::testing::{canonical_tempdir, ctx, ctx_with};
 
     // ── Cli ──
 
@@ -285,8 +290,9 @@ mod tests {
     #[test]
     fn list_sessions_scope_limit_and_archive_state() {
         let dir = tempfile::tempdir().unwrap();
+        let cwd = Path::new("/work/local");
         temp_env::with_var("XDG_DATA_HOME", Some(dir.path()), || {
-            let store = SessionStore::open().unwrap();
+            let store = SessionStore::open(cwd).unwrap();
             seed_test_session(
                 &store,
                 "local-session",
@@ -304,7 +310,7 @@ mod tests {
             );
 
             let mut output = Vec::new();
-            list_sessions(&mut output, ListScope::default(), 0).unwrap();
+            list_sessions(&mut output, cwd, ListScope::default(), 0).unwrap();
             let local = String::from_utf8(output).unwrap();
             assert!(local.contains("Local session"));
             assert!(!local.contains("Other session"));
@@ -313,6 +319,7 @@ mod tests {
             let mut output = Vec::new();
             list_sessions(
                 &mut output,
+                cwd,
                 ListScope {
                     all: true,
                     ..ListScope::default()
@@ -329,6 +336,7 @@ mod tests {
             let mut output = Vec::new();
             list_sessions(
                 &mut output,
+                cwd,
                 ListScope {
                     all: true,
                     ..ListScope::default()
@@ -345,6 +353,7 @@ mod tests {
             let mut output = Vec::new();
             list_sessions(
                 &mut output,
+                cwd,
                 ListScope {
                     all: true,
                     archived: true,
@@ -362,23 +371,30 @@ mod tests {
     fn list_sessions_storage_error() {
         let file = tempfile::NamedTempFile::new().unwrap();
         temp_env::with_var("XDG_DATA_HOME", Some(file.path()), || {
-            assert!(list_sessions(&mut Vec::new(), ListScope::default(), 0).is_err());
+            assert!(
+                list_sessions(&mut Vec::new(), Path::new("/work"), ListScope::default(), 0)
+                    .is_err()
+            );
         });
     }
 
     // ── create_tool_registry ──
 
     #[tokio::test]
-    async fn create_tool_registry_shares_file_tracking() {
-        let tracker = Arc::new(FileTracker::default());
-        let tools = create_tool_registry(&tracker, &ReadDeny::default());
-        let names: Vec<_> = tools.definitions().iter().map(|tool| tool.name).collect();
+    async fn create_tool_registry_tools_share_the_ctx_file_tracker() {
+        let tools = create_tool_registry(&ReadDeny::default());
+        let names: Vec<_> = tools
+            .definitions()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
         assert_eq!(
             names,
             ["bash", "read", "write", "edit", "glob", "grep", "tasks"]
         );
 
         let dir = tempfile::tempdir().unwrap();
+        let ctx = ctx_with(dir.path(), Arc::new(FileTracker::default()));
         let path = dir.path().join("example.txt");
         std::fs::write(&path, "original").unwrap();
         let edit = serde_json::json!({
@@ -386,25 +402,26 @@ mod tests {
             "old_string": "original",
             "new_string": "edited",
         });
-        let rejected = tools.run("edit", edit.clone()).await;
+        let rejected = tools.run_input("edit", edit.clone(), &ctx).await;
         assert!(rejected.is_error);
         assert!(rejected.content.contains("has not been read"));
 
         let read = tools
-            .run("read", serde_json::json!({ "file_path": path }))
+            .run_input("read", serde_json::json!({ "file_path": path }), &ctx)
             .await;
         assert!(!read.is_error, "{}", read.content);
-        let edited = tools.run("edit", edit).await;
+        let edited = tools.run_input("edit", edit, &ctx).await;
         assert!(!edited.is_error, "{}", edited.content);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "edited");
 
         let written = tools
-            .run(
+            .run_input(
                 "write",
                 serde_json::json!({
                     "file_path": path,
                     "content": "rewritten",
                 }),
+                &ctx,
             )
             .await;
         assert!(!written.is_error, "{}", written.content);
@@ -416,16 +433,16 @@ mod tests {
         let dir = canonical_tempdir();
         std::fs::write(dir.path().join("notes.txt"), "token").unwrap();
         std::fs::write(dir.path().join("secret.txt"), "token").unwrap();
-        // An absolute rule, since the tools search from the process cwd, which is outside the dir.
-        let deny = [format!("read({}/secret.txt)", slash_separated(dir.path()))];
+        let deny = ["read(secret.txt)".to_owned()];
         let read_deny = Policy::resolve(Mode::Auto, &[], &deny, dir.path())
             .unwrap()
             .read_deny();
-        let tools = create_tool_registry(&Arc::new(FileTracker::default()), &read_deny);
+        let tools = create_tool_registry(&read_deny);
+        let ctx = ctx(dir.path());
 
         for (tool, pattern) in [("glob", "*.txt"), ("grep", "token")] {
-            let input = serde_json::json!({"pattern": pattern, "path": dir.path()});
-            let output = tools.run(tool, input).await;
+            let input = serde_json::json!({"pattern": pattern});
+            let output = tools.run_input(tool, input, &ctx).await;
             assert!(!output.is_error, "{tool}: {}", output.content);
             assert!(
                 output.content.contains("notes.txt"),

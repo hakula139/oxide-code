@@ -138,6 +138,14 @@ impl SlotTops {
     pub(super) fn slot(&self, block: usize) -> Option<Range<usize>> {
         Some(self.0[block]..*self.0.get(block + 1)?)
     }
+
+    /// Adds an empty slot at block index `at`, for a block inserted there since these tops were
+    /// taken, so each later slot keeps naming the block it held.
+    pub(super) fn insert_empty(&mut self, at: usize) {
+        if let Some(&top) = self.0.get(at) {
+            self.0.insert(at, top);
+        }
+    }
 }
 
 // ── Stack ──

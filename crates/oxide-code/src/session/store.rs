@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use super::chain::{Chain, ChainBuilder};
 use super::entry::{CURRENT_VERSION, CompactInfo, Entry, TitleInfo, UsageRecord};
-use super::path::{UNKNOWN_PROJECT_DIR, sanitize_cwd};
+use super::path::sanitize_cwd;
 use crate::file_tracker::FileSnapshot;
 use crate::message::Message;
 use crate::prompt::SessionContext;
@@ -33,23 +33,19 @@ const SESSIONS_DIR: &str = "sessions";
 pub(crate) struct SessionStore {
     sessions_dir: PathBuf,
     project_dir: PathBuf,
+    cwd: PathBuf,
 }
 
 impl SessionStore {
-    pub(crate) fn open() -> Result<Self> {
+    /// Opens the store scoped to the project at `cwd`, which new session headers record.
+    pub(crate) fn open(cwd: &Path) -> Result<Self> {
         let sessions_dir = app_dir(XdgBase::Data)
             .map(|dir| dir.join(SESSIONS_DIR))
             .context("cannot determine session storage directory")?;
 
         create_private_dir_all(&sessions_dir)?;
 
-        let project_name = match std::env::current_dir() {
-            Ok(cwd) => sanitize_cwd(&cwd),
-            Err(e) => {
-                warn!("cannot resolve current directory for project scoping: {e}");
-                UNKNOWN_PROJECT_DIR.to_owned()
-            }
-        };
+        let project_name = sanitize_cwd(cwd);
         let project_dir = sessions_dir.join(&project_name);
         create_private_dir_all(&project_dir)?;
 
@@ -60,7 +56,12 @@ impl SessionStore {
         Ok(Self {
             sessions_dir,
             project_dir,
+            cwd: cwd.to_path_buf(),
         })
+    }
+
+    pub(super) fn cwd(&self) -> &Path {
+        &self.cwd
     }
 
     /// Creates the file (0o600, `O_EXCL`) and writes the header, then the JSONL `lines`, in one
@@ -680,7 +681,7 @@ mod tests {
                 ("XDG_DATA_HOME", Some(xdg.to_string_lossy().into_owned())),
                 (HOME_VAR, Some(home.path().to_string_lossy().into_owned())),
             ],
-            async { SessionStore::open() },
+            async { SessionStore::open(Path::new("/work/proj")) },
         )
         .await
         .unwrap()
@@ -692,12 +693,11 @@ mod tests {
         let store = open_in_isolated_env(xdg.path()).await;
         let sessions = xdg.path().join("ox").join(SESSIONS_DIR);
         assert_eq!(store.sessions_dir, sessions);
-        assert!(sessions.is_dir(), "sessions root created: {sessions:?}");
-        assert!(store.project_dir.is_dir(), "project dir created");
-        assert!(
-            store.project_dir.starts_with(&sessions),
-            "project dir lives under sessions root",
+        assert_eq!(
+            store.project_dir,
+            sessions.join(sanitize_cwd(Path::new("/work/proj")))
         );
+        assert!(store.project_dir.is_dir(), "project dir created");
     }
 
     #[cfg(unix)]
@@ -721,7 +721,7 @@ mod tests {
                 ("XDG_DATA_HOME", None),
                 (HOME_VAR, Some(home.path().to_string_lossy().into_owned())),
             ],
-            async { SessionStore::open() },
+            async { SessionStore::open(Path::new("/work/proj")) },
         )
         .await
         .unwrap();

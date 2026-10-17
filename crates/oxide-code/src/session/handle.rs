@@ -498,7 +498,7 @@ mod tests {
 
     use super::*;
     use crate::file_tracker::{
-        self, GateError, GatePurpose, LastView,
+        GateError, GatePurpose, LastView,
         testing::{record_tracked_file, seed_full_read},
     };
     use crate::message::{ContentBlock, Replay, Role};
@@ -532,10 +532,7 @@ mod tests {
                 }],
             })
             .await;
-        file_tracker::attribute_to(tool_use_id, async {
-            record_tracked_file(tracker, path, b"alpha");
-        })
-        .await;
+        record_tracked_file(tracker, path, b"alpha", Some(tool_use_id));
         if answered {
             handle
                 .record_message(Message {
@@ -1070,7 +1067,7 @@ mod tests {
                 .into_iter()
                 .map(|name| {
                     let path = files_dir.path().join(name);
-                    record_tracked_file(&tracker, &path, name.as_bytes());
+                    record_tracked_file(&tracker, &path, name.as_bytes(), None);
                     path
                 })
                 .collect();

@@ -40,7 +40,7 @@ pub(crate) async fn run(
     let notices = config.notices();
     let session_info = LiveSessionInfo {
         cwd: tildify(cwd),
-        git_cwd: Some(cwd.to_owned()),
+        working_dir: Some(cwd.to_owned()),
         project_root: util::git::repo_root(cwd)
             .await
             .unwrap_or_else(|| cwd.to_owned()),

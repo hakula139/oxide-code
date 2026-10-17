@@ -98,7 +98,7 @@ impl App {
         );
         status_bar.set_title(history.title);
         let git_probes = GitProbes::new(
-            session_info.git_cwd.clone(),
+            session_info.working_dir.clone(),
             &session_info.config.status_line,
             Instant::now(),
         );

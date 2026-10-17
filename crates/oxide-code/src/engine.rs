@@ -33,7 +33,7 @@ use crate::config::{Config, Effort};
 use crate::file_tracker::FileTracker;
 use crate::message::{ContentBlock, Message};
 use crate::model::{ModelSpec, ResolvedModelId};
-use crate::permission::Policy;
+use crate::permission::{Policy, Workspace};
 use crate::prompt::{self, PromptParts, SessionContext, UserContext};
 use crate::protocol::{Event, EventSink, Interaction, Op, ResumeTarget, UsageSnapshot};
 use crate::session::entry::{CompactInfo, UsageRecord};
@@ -125,7 +125,8 @@ pub(crate) struct Engine {
     max_tool_rounds: Option<u32>,
     /// Compaction settings resolved for the active model.
     compaction: CompactionConfig,
-    cwd: PathBuf,
+    /// The launch directory and the workspace roots every tool call runs in.
+    workspace: Arc<Workspace>,
     /// A TUI is attached, so titles generate in the background.
     interactive: bool,
     auto_compaction_failures: AutoCompactFailures,
@@ -149,7 +150,6 @@ impl Engine {
         session: SessionHandle,
         transcript: LoadedTranscript,
         file_tracker: Arc<FileTracker>,
-        cwd: PathBuf,
         interactive: bool,
     ) -> Result<Self> {
         let client = Client::new(config, Some(session.session_id().to_owned()), device_id)?;
@@ -162,7 +162,8 @@ impl Engine {
             tasks,
         } = transcript;
         let prompt_unrecorded = context.is_none();
-        let prompt = session_prompt(context, client.model(), &cwd).await;
+        let workspace = Arc::new(config.workspace.clone());
+        let prompt = session_prompt(context, client.model(), workspace.cwd()).await;
         Ok(Self {
             client,
             oauth_token_url: oauth::OAUTH_TOKEN_URL.to_owned(),
@@ -179,7 +180,7 @@ impl Engine {
             policy: config.permission.clone(),
             max_tool_rounds: config.max_tool_rounds,
             compaction: config.compaction,
-            cwd,
+            workspace,
             interactive,
             auto_compaction_failures: AutoCompactFailures::default(),
             last_usage: None,
@@ -193,7 +194,7 @@ impl Engine {
     }
 
     pub(crate) fn cwd(&self) -> &Path {
-        &self.cwd
+        self.workspace.cwd()
     }
 
     /// Projects the loaded transcript for a frontend to show. Takes the compaction boundary and
@@ -206,6 +207,7 @@ impl Engine {
             compact.as_ref(),
             &tool_metadata,
             &self.tools,
+            self.workspace.cwd(),
         )
     }
 
@@ -280,7 +282,7 @@ impl Engine {
         let mut user_msg = Message::user(text);
         if let Some(reminder) = self
             .prompt
-            .catch_up(UserContext::load(&self.cwd, self.client.model()).await)
+            .catch_up(UserContext::load(self.cwd(), self.client.model()).await)
         {
             user_msg.content.push(ContentBlock::Text { text: reminder });
             self.prompt_unrecorded = true;
@@ -306,9 +308,11 @@ impl Engine {
             );
         }
 
-        let mut gate = dispatch::GateContext {
+        let mut dispatch_ctx = dispatch::DispatchContext {
             policy: &mut self.policy,
-            cwd: &self.cwd,
+            workspace: Arc::clone(&self.workspace),
+            session_id: self.session.session_id().to_owned(),
+            tracker: Arc::clone(&self.file_tracker),
         };
         let TurnOutcome { mut report, result } = turn::agent_turn(
             &self.client,
@@ -319,7 +323,7 @@ impl Engine {
             &self.session,
             ops,
             self.max_tool_rounds,
-            &mut gate,
+            &mut dispatch_ctx,
         )
         .await;
         self.account_usage(sink, &report).await;
@@ -440,7 +444,7 @@ impl Engine {
     /// Starts the compacted transcript from the current instructions and date.
     async fn refresh_prompt(&mut self) {
         self.prompt
-            .refresh(UserContext::load(&self.cwd, self.client.model()).await);
+            .refresh(UserContext::load(self.cwd(), self.client.model()).await);
         self.prompt_unrecorded = true;
     }
 
@@ -557,7 +561,7 @@ impl Engine {
         self.tool_metadata = tool_metadata;
         self.tasks = tasks;
         self.prompt_unrecorded = context.is_none();
-        self.prompt = session_prompt(context, self.client.model(), &self.cwd).await;
+        self.prompt = session_prompt(context, self.client.model(), self.workspace.cwd()).await;
         self.policy.clear_session_allow();
         self.reset_context_usage(sink);
         self.total_estimated_cost_usd = estimate_cost_usd(&usage);
@@ -899,8 +903,8 @@ mod tests {
     use crate::config::compaction::{CompactionConfig, test_thresholds};
     use crate::file_tracker::testing::seed_full_read;
     use crate::message::{Replay, Role};
-    use crate::permission::Mode;
     use crate::permission::rule::Rule;
+    use crate::permission::{Mode, Workspace};
     use crate::protocol::CapturingSink;
     use crate::session::post_compact::synthesize_post_compact_message;
     use crate::session::store::testing::test_store;
@@ -1068,9 +1072,11 @@ mod tests {
                 tokens: TokenUsage::new(1_000, 100),
             }];
 
+            let mut config = test_config(server.uri(), api_key(), "claude-sonnet-5-5");
+            config.workspace = Workspace::new(dir.path());
             for (context, replayed) in [(Some(recorded), true), (None, false)] {
                 let engine = Engine::new(
-                    &test_config(server.uri(), api_key(), "claude-sonnet-5-5"),
+                    &config,
                     DEVICE_ID.to_owned(),
                     Arc::new(ToolRegistry::new(Vec::new())),
                     store.clone(),
@@ -1081,7 +1087,6 @@ mod tests {
                         ..LoadedTranscript::default()
                     },
                     Arc::new(FileTracker::default()),
-                    dir.path().to_owned(),
                     false,
                 )
                 .await
@@ -1118,6 +1123,7 @@ mod tests {
             config.max_tool_rounds = Some(3);
             config.compaction = CompactionConfig::with_threshold_for_test(50_000);
             config.permission = Policy::new(Mode::Plan, Vec::new(), Vec::new());
+            config.workspace = Workspace::new(dir.path());
 
             let engine = Engine::new(
                 &config,
@@ -1127,12 +1133,12 @@ mod tests {
                 session.clone(),
                 LoadedTranscript::default(),
                 Arc::new(FileTracker::default()),
-                dir.path().to_owned(),
                 false,
             )
             .await
             .unwrap();
 
+            assert_eq!(*engine.workspace, config.workspace);
             assert_eq!(engine.max_tool_rounds, Some(3));
             assert_eq!(engine.compaction, config.compaction);
             assert_eq!(engine.policy.mode(), Mode::Plan);

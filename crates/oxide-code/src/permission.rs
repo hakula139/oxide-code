@@ -22,7 +22,7 @@ use unicode_normalization::UnicodeNormalization;
 
 use crate::permission::rule::{MatchDiscipline, Rule};
 use crate::permission::shell::CommandTarget;
-use crate::util::path::{XdgBase, app_dir, lexical_normalize};
+use crate::util::path::{XdgBase, app_dir, expand_user, lexical_normalize};
 
 // ── Mode ──
 
@@ -75,7 +75,7 @@ impl FromStr for Mode {
 
 /// The rule namespace a tool's calls fall under, which also sets the pipeline's default treatment.
 /// Rules address classes, so one `read(...)` deny covers every tool that reads a file. Each tool
-/// declares its class through [`crate::tool::Tool::permission_class`].
+/// declares its class in its [`crate::tool::ToolSpec`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum PermissionClass {
@@ -190,23 +190,99 @@ const PROTECTED_NESTED_FILES: &[(&str, &str)] = &[
 /// Symlinks followed while resolving one path before it counts as a loop, Linux's `MAXSYMLINKS`.
 const MAX_SYMLINK_HOPS: usize = 40;
 
+// ── Workspace ──
+
+/// Where a session's tools run: the launch directory, which relative paths resolve against, and
+/// the roots inside which an edit needs no rule. The roots are the launch directory plus
+/// `permission.extra_roots`, each resolved the way a path target is, and there are none when the
+/// launch directory is `/`, `$HOME`, or an ancestor of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Workspace {
+    cwd: PathBuf,
+    roots: Vec<PathBuf>,
+}
+
+impl Workspace {
+    /// The workspace launched in `cwd` with no extra roots.
+    pub(crate) fn new(cwd: &Path) -> Self {
+        Self {
+            cwd: cwd.to_path_buf(),
+            roots: resolve(cwd)
+                .filter(|cwd| is_workspace(cwd))
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    /// The workspace launched in `cwd` plus the configured `extra_roots`, which config load
+    /// validates even when the launch directory leaves the workspace without roots.
+    pub(crate) fn resolve(cwd: &Path, extra_roots: &[String]) -> Result<Self> {
+        let extra_roots = extra_roots
+            .iter()
+            .map(|raw| extra_root(raw))
+            .collect::<Result<Vec<_>>>()?;
+        let mut workspace = Self::new(cwd);
+        if !workspace.roots.is_empty() {
+            for root in extra_roots {
+                if !workspace.roots.contains(&root) {
+                    workspace.roots.push(root);
+                }
+            }
+        }
+        Ok(workspace)
+    }
+
+    pub(crate) fn cwd(&self) -> &Path {
+        &self.cwd
+    }
+
+    pub(crate) fn roots(&self) -> &[PathBuf] {
+        &self.roots
+    }
+
+    /// Whether the resolved `path` sits inside one of the roots.
+    fn contains(&self, path: &Path) -> bool {
+        self.roots.iter().any(|root| path.starts_with(root))
+    }
+}
+
+/// Resolves the configured extra root `raw`, which must be absolute or `~/`-rooted, resolvable, and
+/// neither `/`, `$HOME`, nor an ancestor of it.
+pub(crate) fn extra_root(raw: &str) -> Result<PathBuf> {
+    let root = expand_user(raw)?;
+    ensure!(
+        root.is_absolute(),
+        "invalid extra root {raw:?}: expected an absolute or `~/` path"
+    );
+    let Some(root) = resolve(&root) else {
+        bail!(
+            "invalid extra root {raw:?}: it runs through a symlink loop or an unreadable directory"
+        );
+    };
+    ensure!(
+        is_workspace(&root),
+        "invalid extra root {raw:?}: `/`, the home directory, and their ancestors cannot be \
+         workspace roots"
+    );
+    Ok(root)
+}
+
 // ── Target ──
 
 /// Where a path target sits, which settles the edit-class steps of the pipeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Zone {
-    /// Inside a project working directory, so an edit allows without a rule.
+    /// Inside a [`Workspace`] root, so an edit allows without a rule.
     Workspace,
     /// A protected path, so an edit asks whatever the allow rules say.
     Protected,
-    /// Anywhere else, including every path when cwd is `/`, `$HOME`, or an ancestor of it, so an
-    /// edit needs an allow rule.
+    /// Anywhere else, so an edit needs an allow rule.
     Outside,
 }
 
 /// What a tool call acts on, matched against rule specifiers. `bash` carries its parsed command,
-/// and path tools carry the spellings described on [`GateTarget::Path`]. `None` is a call with no
+/// and path tools carry the spellings described on [`Access::Path`]. `None` is a call with no
 /// extractable specifier (a missing path argument): only a class-wide rule can match it.
 #[derive(Debug, Clone)]
 pub(crate) enum Target<'a> {
@@ -221,21 +297,25 @@ pub(crate) enum Target<'a> {
     },
 }
 
-/// Owned form of [`Target`] produced by [`crate::tool::Tool::gate_target`]. A tool parses the
-/// command or resolves the path in its input once, and the borrowing [`Self::as_target`] then feeds
-/// the allocation-free matcher. Owned because a resolved path is not a substring of the input.
+/// What a tool call accesses, which [`crate::tool::Tool::prepare`] resolves from its input once so
+/// the gate checks and the run acts on the same values. The borrowing [`Self::as_target`] feeds the
+/// allocation-free matcher. Owned because a resolved path is not a substring of the input.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
-pub(crate) enum GateTarget {
+pub(crate) enum Access {
     /// No extractable specifier, so only a class-wide rule matches.
     #[default]
     None,
     Command(CommandTarget),
     /// A path in two spellings plus their cwd-relative forms.
     Path {
-        /// Where the call lands with every symlink followed. Allow rules, the zone, and
-        /// [`crate::tool::Tool::pin_target`] use this spelling alone.
+        /// Where the call lands with every symlink followed. Allow rules, the zone, and the tool's
+        /// run use this spelling alone.
         canonical: String,
+        /// `canonical` as the file system names it, kept only when a name in it is not valid
+        /// UTF-8, which `canonical` spells with replacement characters.
+        #[serde(skip)]
+        exact: Option<PathBuf>,
         /// `canonical` under the resolved cwd, set only while it sits inside it.
         relative: Option<String>,
         /// The path as the call names it, lexically normalized. Deny rules and the protected check
@@ -248,16 +328,19 @@ pub(crate) enum GateTarget {
     },
 }
 
-impl GateTarget {
-    /// Parses a `bash` command, resolving the files it reads and writes against `cwd`.
-    pub(crate) fn for_command(command: &str, cwd: &Path) -> Self {
-        Self::Command(CommandTarget::parse(command, cwd))
+impl Access {
+    /// Parses a `bash` command, resolving the files it reads and writes in `workspace`.
+    pub(crate) fn for_command(command: &str, workspace: &Workspace) -> Self {
+        Self::Command(CommandTarget::parse(command, workspace))
     }
 
-    /// Builds a path target for the location the tool will touch, resolving `path` against `cwd`
-    /// with `resolve`. A path `resolve` cannot place keeps its joined spelling with no relative
-    /// form, so it never auto-allows and the tool fails on it where the kernel would.
-    pub(crate) fn for_path(path: &str, cwd: &Path) -> Self {
+    /// Builds a path target for the location the tool will touch, resolving `path` against the
+    /// workspace's cwd with `resolve`. A path `resolve` cannot place keeps its joined spelling with
+    /// no relative form, so it never auto-allows and the tool fails on it where the kernel would.
+    /// A resolved path that is not valid UTF-8 never auto-allows either, since the input a file
+    /// tool opens can only pin its lossy spelling.
+    pub(crate) fn for_path(path: &str, workspace: &Workspace) -> Self {
+        let cwd = workspace.cwd();
         let joined = cwd.join(path);
         let requested = lexical_normalize(&joined);
         let lexical_cwd = lexical_normalize(cwd);
@@ -270,22 +353,35 @@ impl GateTarget {
             .flat_map(|path| [&*cwd, &*lexical_cwd].map(|base| loose_relative_to(path, base)))
             .flatten()
             .collect();
+        let in_root = resolved.as_deref().is_some_and(|r| workspace.contains(r));
         let canonical = resolved.unwrap_or(joined);
 
-        let roots = protected_roots(&cwd);
+        let lossy = canonical.to_str().is_none();
+        let roots = protected_roots(&cwd, workspace.roots());
         let zone = if is_protected(&canonical, &roots) || is_protected(&requested, &roots) {
             Zone::Protected
-        } else if relative.is_some() && is_workspace(&cwd) && !is_hard_linked(&canonical) {
+        } else if in_root && !lossy && !is_hard_linked(&canonical) {
             Zone::Workspace
         } else {
             Zone::Outside
         };
         Self::Path {
             canonical: canonical.to_string_lossy().into_owned(),
+            exact: lossy.then_some(canonical),
             relative,
             requested: requested.to_string_lossy().into_owned(),
             deny_relative,
             zone,
+        }
+    }
+
+    /// Where a path target lands, exactly as the file system names it.
+    pub(crate) fn resolved(&self) -> Option<PathBuf> {
+        match self {
+            Self::Path {
+                canonical, exact, ..
+            } => Some(exact.clone().unwrap_or_else(|| PathBuf::from(canonical))),
+            Self::None | Self::Command(_) => None,
         }
     }
 
@@ -299,6 +395,7 @@ impl GateTarget {
                 requested,
                 deny_relative,
                 zone,
+                ..
             } => Target::Path {
                 canonical,
                 relative: relative.as_deref(),
@@ -498,10 +595,10 @@ fn fold_name(name: &str) -> String {
         .to_owned()
 }
 
-/// oxide-code's own `app_dirs`, plus where each protected name directly under `cwd` resolves, so
-/// a `.vscode` symlinked to `tools/vscode` protects its target too.
-fn protected_roots(cwd: &Path) -> Vec<PathBuf> {
-    let names = PROTECTED_DIRS
+/// oxide-code's own `app_dirs`, plus where each protected name directly under `cwd` or a workspace
+/// root resolves, so a `.vscode` symlinked to `tools/vscode` protects its target too.
+fn protected_roots(cwd: &Path, workspace_roots: &[PathBuf]) -> Vec<PathBuf> {
+    let names: Vec<PathBuf> = PROTECTED_DIRS
         .iter()
         .chain(PROTECTED_FILES)
         .map(PathBuf::from)
@@ -510,9 +607,13 @@ fn protected_roots(cwd: &Path) -> Vec<PathBuf> {
                 .iter()
                 .chain(PROTECTED_NESTED_FILES)
                 .map(|(parent, name)| Path::new(parent).join(name)),
-        );
+        )
+        .collect();
+    let extra = workspace_roots.iter().filter(|root| *root != cwd);
     let mut roots = app_dirs();
-    roots.extend(names.filter_map(|name| resolve(&cwd.join(name))));
+    for base in std::iter::once(cwd).chain(extra.map(PathBuf::as_path)) {
+        roots.extend(names.iter().filter_map(|name| resolve(&base.join(name))));
+    }
     roots
 }
 
@@ -526,11 +627,22 @@ fn app_dirs() -> Vec<PathBuf> {
         .collect()
 }
 
-/// Whether the resolved `cwd` is a project directory whose contents may auto-allow edits. `/`,
-/// `$HOME`, and its ancestors are not, since "inside cwd" there spans every dotfile and project.
-fn is_workspace(cwd: &Path) -> bool {
+/// Whether the resolved `dir` may be a workspace root, whose contents auto-allow edits. `/`,
+/// `$HOME`, and the ancestors of `$HOME` may not, since their insides span every dotfile.
+fn is_workspace(dir: &Path) -> bool {
     let home = std::env::home_dir().map(|home| resolve(&home).unwrap_or(home));
-    cwd.parent().is_some() && !home.is_some_and(|home| home.starts_with(cwd))
+    dir.parent().is_some() && !home.is_some_and(|home| holds(dir, &home))
+}
+
+/// Whether `dir` is `home` or an ancestor of it, compared by identity as well as by spelling. An
+/// alias that `resolve` keeps, such as macOS's case-insensitive `/users/<name>` or the
+/// `/System/Volumes/Data` firmlink, reaches `home` through the same trailing names.
+fn holds(dir: &Path, home: &Path) -> bool {
+    home.starts_with(dir)
+        || home.ancestors().any(|ancestor| {
+            home.strip_prefix(ancestor)
+                .is_ok_and(|rest| same_file::is_same_file(dir.join(rest), home).unwrap_or(false))
+        })
 }
 
 /// Whether `path` is a regular file with more than one hard link, one of which may sit outside the
@@ -637,7 +749,7 @@ impl Policy {
     pub(crate) fn session_grant(
         &self,
         class: PermissionClass,
-        target: &GateTarget,
+        target: &Access,
     ) -> Option<SessionGrant> {
         let suggested = Rule::for_call(class, &target.as_target())?;
         let mut trial = self.clone();
@@ -669,7 +781,7 @@ impl Policy {
     /// 4. A read-class call allows.
     /// 5. `plan` denies.
     /// 6. An edit-class call on a protected path asks.
-    /// 7. An edit-class call inside a project working directory allows.
+    /// 7. An edit-class call inside a workspace root allows.
     /// 8. An allow rule or a session allow rule allows.
     /// 9. Otherwise ask.
     ///
@@ -704,7 +816,7 @@ impl Policy {
                 Zone::Outside => {}
             },
             Target::Command(command) => {
-                let writes = || command.writes().iter().map(GateTarget::as_target);
+                let writes = || command.writes().iter().map(Access::as_target);
                 if writes().any(|write| {
                     matches!(
                         write,
@@ -742,10 +854,10 @@ impl Policy {
 
     /// Whether every part of a command is allowed: it is not opaque and runs at least one simple
     /// command, each simple command is allowed by a rule or is a known-safe read of no denied file,
-    /// and each file it writes is in a working directory or allowed for editing.
+    /// and each file it writes is inside a workspace root or allowed for editing.
     fn allows_command(&self, command: &CommandTarget) -> bool {
         let rules = || self.allow.iter().chain(&self.session_allow);
-        let safe = |reads: &[GateTarget]| {
+        let safe = |reads: &[Access]| {
             reads.iter().all(|read| {
                 let read = read.as_target();
                 !denies(&self.deny, PermissionClass::Read, &read)
@@ -785,7 +897,7 @@ fn denies(rules: &[Rule], class: PermissionClass, target: &Target<'_>) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct SessionGrant {
     class: PermissionClass,
-    target: GateTarget,
+    target: Access,
     suggested: Rule,
 }
 
@@ -907,8 +1019,8 @@ mod tests {
         )
     }
 
-    fn command(s: &str) -> GateTarget {
-        GateTarget::for_command(s, Path::new("/repo"))
+    fn command(s: &str) -> Access {
+        Access::for_command(s, &Workspace::new(Path::new("/repo")))
     }
 
     fn path<'a>(canonical: &'a str, relative: Option<&'a str>, zone: Zone) -> Target<'a> {
@@ -938,8 +1050,8 @@ mod tests {
     }
 
     /// The canonical and relative spellings as paths, which compare equal across separators.
-    fn resolved(target: &GateTarget) -> (&Path, Option<&Path>, Zone) {
-        let GateTarget::Path {
+    fn resolved(target: &Access) -> (&Path, Option<&Path>, Zone) {
+        let Access::Path {
             canonical,
             relative,
             zone,
@@ -986,14 +1098,159 @@ mod tests {
         }
     }
 
-    // ── GateTarget::for_path ──
+    // ── Workspace::resolve ──
+
+    #[test]
+    fn workspace_resolve_adds_each_extra_root_once_after_the_cwd() {
+        let (_dir, base) = temp_cwd();
+        let (repo, shared, home) = (base.join("repo"), base.join("shared"), base.join("home"));
+        for dir in [&repo, &shared, &home] {
+            std::fs::create_dir(dir).unwrap();
+        }
+        let extra = [
+            slash_separated(&shared),
+            format!("{}/../shared/", slash_separated(&shared)),
+            "~/notes".to_owned(),
+        ];
+
+        let workspace = temp_env::with_var(HOME_VAR, Some(&home), || {
+            Workspace::resolve(&repo, &extra).unwrap()
+        });
+
+        assert_eq!(workspace.cwd(), repo);
+        assert_eq!(workspace.roots(), [repo, shared, home.join("notes")]);
+    }
+
+    #[test]
+    fn workspace_resolve_rejects_a_relative_or_too_broad_extra_root() {
+        let (_dir, base) = temp_cwd();
+        let (repo, home) = (base.join("repo"), base.join("home"));
+        std::fs::create_dir(&repo).unwrap();
+        std::fs::create_dir(&home).unwrap();
+        let too_broad = |raw: &str| {
+            format!(
+                "invalid extra root {raw:?}: `/`, the home directory, and their ancestors cannot \
+                 be workspace roots"
+            )
+        };
+        let fs_root = slash_separated(base.ancestors().last().unwrap());
+        let base_raw = slash_separated(&base);
+
+        temp_env::with_var(HOME_VAR, Some(&home), || {
+            for (raw, expected) in [
+                (
+                    "shared",
+                    r#"invalid extra root "shared": expected an absolute or `~/` path"#.to_owned(),
+                ),
+                ("~", too_broad("~")),
+                (fs_root.as_str(), too_broad(&fs_root)),
+                (base_raw.as_str(), too_broad(&base_raw)),
+            ] {
+                let err = Workspace::resolve(&repo, &[raw.to_owned()]).unwrap_err();
+                assert_eq!(err.to_string(), expected, "{raw}");
+            }
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_resolve_rejects_an_extra_root_through_a_symlink_loop() {
+        let (_dir, base) = temp_cwd();
+        let looped = base.join("loop");
+        std::os::unix::fs::symlink(&looped, &looped).unwrap();
+        let raw = format!("{}/inner", looped.display());
+
+        let err = Workspace::resolve(&base, std::slice::from_ref(&raw)).unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "invalid extra root {raw:?}: it runs through a symlink loop or an unreadable \
+                 directory"
+            ),
+        );
+    }
+
+    #[test]
+    fn workspace_resolve_has_no_roots_when_launched_from_home() {
+        // A launch from `$HOME` drops every root, so a configured extra root cannot auto-allow
+        // edits for a session that is in no project. Each extra root still has to be valid.
+        let (_dir, base) = temp_cwd();
+        let (home, shared) = (base.join("home"), base.join("shared"));
+        std::fs::create_dir(&home).unwrap();
+        std::fs::create_dir(&shared).unwrap();
+
+        temp_env::with_var(HOME_VAR, Some(&home), || {
+            let workspace = Workspace::resolve(&home, &[slash_separated(&shared)]).unwrap();
+            assert_eq!(workspace.roots(), [] as [PathBuf; 0]);
+            let target = Access::for_path(shared.join("a.rs").to_str().unwrap(), &workspace);
+            assert_eq!(resolved(&target).2, Zone::Outside);
+
+            let err = Workspace::resolve(&home, &["shared".to_owned()]).unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                r#"invalid extra root "shared": expected an absolute or `~/` path"#,
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_resolve_rejects_home_and_its_parent_under_another_name() {
+        // A symlink to `$HOME` resolves to it. An alias that `resolve` keeps, as `up` stands in
+        // for one here, still reaches `$HOME` through the trailing names, so it is caught too.
+        let (_dir, base) = temp_cwd();
+        let (repo, home) = (base.join("repo"), base.join("home"));
+        std::fs::create_dir(&repo).unwrap();
+        std::fs::create_dir(&home).unwrap();
+        std::os::unix::fs::symlink(&home, base.join("home-link")).unwrap();
+        std::os::unix::fs::symlink(&base, base.join("up")).unwrap();
+        let link = slash_separated(&base.join("home-link"));
+
+        temp_env::with_var(HOME_VAR, Some(&home), || {
+            let err = Workspace::resolve(&repo, std::slice::from_ref(&link)).unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                format!(
+                    "invalid extra root {link:?}: `/`, the home directory, and their ancestors \
+                     cannot be workspace roots"
+                ),
+            );
+            assert!(!is_workspace(&base.join("up")));
+            assert!(!is_workspace(&base.join("up/home")));
+            assert!(is_workspace(&base.join("up/repo")));
+        });
+    }
+
+    // ── Access::for_path ──
+
+    #[test]
+    fn for_path_inside_an_extra_root_is_a_workspace_target_with_its_protected_names() {
+        let (_dir, base) = temp_cwd();
+        let (repo, shared) = (base.join("repo"), base.join("shared"));
+        std::fs::create_dir(&repo).unwrap();
+        std::fs::create_dir(&shared).unwrap();
+        let workspace = Workspace::resolve(&repo, &[slash_separated(&shared)]).unwrap();
+
+        for (raw, zone) in [
+            ("../shared/a.rs", Zone::Workspace),
+            ("../shared/.git/config", Zone::Protected),
+            ("../elsewhere/a.rs", Zone::Outside),
+        ] {
+            let target = Access::for_path(raw, &workspace);
+            let (canonical, relative, actual) = resolved(&target);
+            assert_eq!(canonical, lexical_normalize(&repo.join(raw)), "{raw}");
+            assert_eq!(relative, None, "{raw}: outside the cwd");
+            assert_eq!(actual, zone, "{raw}");
+        }
+    }
 
     #[test]
     fn for_path_inside_cwd_is_a_workspace_target() {
         let (_dir, cwd) = temp_cwd();
         std::fs::write(cwd.join("a.rs"), "x").unwrap();
 
-        let target = GateTarget::for_path("a.rs", &cwd);
+        let target = Access::for_path("a.rs", &Workspace::new(&cwd));
         let (canonical, relative, zone) = resolved(&target);
         assert_eq!(canonical, cwd.join("a.rs"));
         assert_eq!(relative, Some(Path::new("a.rs")));
@@ -1004,7 +1261,7 @@ mod tests {
     fn for_path_brand_new_file_is_still_a_workspace_target() {
         // A not-yet-created file cannot canonicalize, but its missing tail still lands inside cwd.
         let (_dir, cwd) = temp_cwd();
-        let target = GateTarget::for_path("new/file.rs", &cwd);
+        let target = Access::for_path("new/file.rs", &Workspace::new(&cwd));
         assert_eq!(
             resolved(&target),
             (
@@ -1018,7 +1275,7 @@ mod tests {
     #[test]
     fn for_path_outside_cwd_has_no_relative_component() {
         let (_dir, cwd) = temp_cwd();
-        let target = GateTarget::for_path("/etc/hosts", &cwd);
+        let target = Access::for_path("/etc/hosts", &Workspace::new(&cwd));
         let (_, relative, zone) = resolved(&target);
         assert_eq!((relative, zone), (None, Zone::Outside));
     }
@@ -1032,7 +1289,7 @@ mod tests {
         std::fs::create_dir(&cwd).unwrap();
 
         for raw in ["../escape.rs", "missing/../../escape.rs"] {
-            let target = GateTarget::for_path(raw, &cwd);
+            let target = Access::for_path(raw, &Workspace::new(&cwd));
             assert_eq!(
                 resolved(&target),
                 (root.join("escape.rs").as_path(), None, Zone::Outside),
@@ -1044,7 +1301,7 @@ mod tests {
     #[test]
     fn for_path_protected_name_inside_cwd_is_protected() {
         let (_dir, cwd) = temp_cwd();
-        let target = GateTarget::for_path(".vscode/tasks.json", &cwd);
+        let target = Access::for_path(".vscode/tasks.json", &Workspace::new(&cwd));
         let (_, relative, zone) = resolved(&target);
         assert_eq!(relative, Some(Path::new(".vscode/tasks.json")));
         assert_eq!(zone, Zone::Protected);
@@ -1065,10 +1322,10 @@ mod tests {
                     "data/ox/sessions/s.jsonl",
                     "state/ox/log/oxide-code.log",
                 ] {
-                    let target = GateTarget::for_path(raw, &root);
+                    let target = Access::for_path(raw, &Workspace::new(&root));
                     assert_eq!(resolved(&target).2, Zone::Protected, "{raw}");
                 }
-                let sibling = GateTarget::for_path("config/other/x.toml", &root);
+                let sibling = Access::for_path("config/other/x.toml", &Workspace::new(&root));
                 assert_eq!(resolved(&sibling).2, Zone::Workspace);
             },
         );
@@ -1085,7 +1342,7 @@ mod tests {
 
         temp_env::with_var(HOME_VAR, Some(&home), || {
             for cwd in [home.as_path(), root.as_path(), fs_root] {
-                let target = GateTarget::for_path("notes.md", cwd);
+                let target = Access::for_path("notes.md", &Workspace::new(cwd));
                 let (_, relative, zone) = resolved(&target);
                 assert_eq!(relative, Some(Path::new("notes.md")), "{cwd:?}");
                 assert_eq!(zone, Zone::Outside, "{cwd:?}");
@@ -1093,16 +1350,16 @@ mod tests {
 
             let project = home.join("project");
             std::fs::create_dir(&project).unwrap();
-            let target = GateTarget::for_path("notes.md", &project);
+            let target = Access::for_path("notes.md", &Workspace::new(&project));
             assert_eq!(resolved(&target).2, Zone::Workspace);
         });
     }
 
     #[test]
     fn for_path_with_a_non_absolute_cwd_is_not_a_workspace_target() {
-        // An empty cwd (the `current_dir` failure fallback) must not auto-allow every path.
-        // Without the absolute-cwd guard, `strip_prefix("")` would succeed for any target.
-        let target = GateTarget::for_path("a.rs", Path::new(""));
+        // An empty cwd has no root, and `strip_prefix("")` succeeds for any path, so the target
+        // must get no cwd-relative form either.
+        let target = Access::for_path("a.rs", &Workspace::new(Path::new("")));
         let (_, relative, zone) = resolved(&target);
         assert_eq!((relative, zone), (None, Zone::Outside));
     }
@@ -1116,8 +1373,8 @@ mod tests {
         temp_env::with_var(HOME_VAR, Some(&home), || {
             for cwd in ["..", "../..", "missing/../.."] {
                 for raw in ["notes.md", ".git/config"] {
-                    let target = GateTarget::for_path(raw, Path::new(cwd));
-                    let absolute = GateTarget::for_path(raw, &absolute_cwd.join(cwd));
+                    let target = Access::for_path(raw, &Workspace::new(Path::new(cwd)));
+                    let absolute = Access::for_path(raw, &Workspace::new(&absolute_cwd.join(cwd)));
                     let (_, relative, zone) = resolved(&target);
                     let (_, absolute_relative, absolute_zone) = resolved(&absolute);
                     assert_eq!(
@@ -1145,7 +1402,10 @@ mod tests {
         std::fs::write(cwd.join(&file), "").unwrap();
 
         assert_eq!(
-            resolved(&GateTarget::for_path(file.to_str().unwrap(), &cwd)),
+            resolved(&Access::for_path(
+                file.to_str().unwrap(),
+                &Workspace::new(&cwd)
+            )),
             (&*cwd.join(&file), Some(&*file), Zone::Workspace),
         );
     }
@@ -1160,7 +1420,7 @@ mod tests {
         std::fs::write(cwd.join("b.rs"), "x").unwrap();
 
         assert_eq!(
-            resolved(&GateTarget::for_path("a.rs", &cwd)),
+            resolved(&Access::for_path("a.rs", &Workspace::new(&cwd))),
             (
                 cwd.join("a.rs").as_path(),
                 Some(Path::new("a.rs")),
@@ -1168,7 +1428,7 @@ mod tests {
             ),
         );
         assert_eq!(
-            resolved(&GateTarget::for_path("b.rs", &cwd)).2,
+            resolved(&Access::for_path("b.rs", &Workspace::new(&cwd))).2,
             Zone::Workspace
         );
     }
@@ -1180,7 +1440,7 @@ mod tests {
         let (_outside_dir, outside) = temp_cwd();
         std::os::unix::fs::symlink(&outside, cwd.join("link")).unwrap();
 
-        let target = GateTarget::for_path("link/new.rs", &cwd);
+        let target = Access::for_path("link/new.rs", &Workspace::new(&cwd));
         assert_eq!(
             resolved(&target),
             (outside.join("new.rs").as_path(), None, Zone::Outside),
@@ -1197,7 +1457,7 @@ mod tests {
         std::fs::create_dir(&cwd).unwrap();
         std::os::unix::fs::symlink("../escape.txt", cwd.join("notes.md")).unwrap();
 
-        let target = GateTarget::for_path("notes.md", &cwd);
+        let target = Access::for_path("notes.md", &Workspace::new(&cwd));
         assert_eq!(
             resolved(&target),
             (root.join("escape.txt").as_path(), None, Zone::Outside),
@@ -1216,7 +1476,7 @@ mod tests {
         std::os::unix::fs::symlink("elsewhere", root.join("gone")).unwrap();
         std::os::unix::fs::symlink("../gone/dir", cwd.join("out")).unwrap();
 
-        let target = GateTarget::for_path("out/new.rs", &cwd);
+        let target = Access::for_path("out/new.rs", &Workspace::new(&cwd));
         assert_eq!(
             resolved(&target),
             (
@@ -1238,13 +1498,13 @@ mod tests {
         std::fs::create_dir_all(cwd.join(".git/hooks")).unwrap();
         std::os::unix::fs::symlink(cwd.join(".git/hooks"), cwd.join("tools")).unwrap();
 
-        let target = GateTarget::for_path("missing/../link/x", &cwd);
+        let target = Access::for_path("missing/../link/x", &Workspace::new(&cwd));
         assert_eq!(
             resolved(&target),
             (outside.join("x").as_path(), None, Zone::Outside),
         );
 
-        let target = GateTarget::for_path("x/../tools/pre-commit", &cwd);
+        let target = Access::for_path("x/../tools/pre-commit", &Workspace::new(&cwd));
         assert_eq!(resolved(&target).2, Zone::Protected);
         let p = Policy::resolve(Mode::Auto, &[], &[], &cwd).unwrap();
         assert_eq!(
@@ -1261,7 +1521,7 @@ mod tests {
         std::os::unix::fs::symlink(&outside, cwd.join("out")).unwrap();
         std::os::unix::fs::symlink("missing/../out/new", cwd.join("notes.md")).unwrap();
 
-        let target = GateTarget::for_path("notes.md", &cwd);
+        let target = Access::for_path("notes.md", &Workspace::new(&cwd));
         assert_eq!(
             resolved(&target),
             (outside.join("new").as_path(), None, Zone::Outside),
@@ -1285,11 +1545,49 @@ mod tests {
             "tools/vscode/tasks.json",
             "sub/.idea/workspace.xml",
         ] {
-            let target = GateTarget::for_path(raw, &cwd);
+            let target = Access::for_path(raw, &Workspace::new(&cwd));
             assert_eq!(resolved(&target).2, Zone::Protected, "{raw}");
         }
-        let sibling = GateTarget::for_path("tools/other.rs", &cwd);
+        let sibling = Access::for_path("tools/other.rs", &Workspace::new(&cwd));
         assert_eq!(resolved(&sibling).2, Zone::Workspace);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn for_path_symlinked_protected_name_in_an_extra_root_protects_its_target() {
+        let (_dir, base) = temp_cwd();
+        let (repo, shared) = (base.join("repo"), base.join("shared"));
+        std::fs::create_dir(&repo).unwrap();
+        std::fs::create_dir_all(shared.join("tools/vscode")).unwrap();
+        std::os::unix::fs::symlink("tools/vscode", shared.join(".vscode")).unwrap();
+        let workspace = Workspace::resolve(&repo, &[slash_separated(&shared)]).unwrap();
+
+        for (raw, zone) in [
+            ("../shared/.vscode/tasks.json", Zone::Protected),
+            ("../shared/tools/vscode/tasks.json", Zone::Protected),
+            ("../shared/tools/other.rs", Zone::Workspace),
+        ] {
+            let target = Access::for_path(raw, &workspace);
+            assert_eq!(resolved(&target).2, zone, "{raw}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn for_path_resolving_to_a_name_that_is_not_utf8_never_auto_allows() {
+        use std::os::unix::ffi::OsStrExt as _;
+        let (_dir, base) = temp_cwd();
+        let cwd = base.join(OsStr::from_bytes(b"caf\xe9"));
+
+        let target = Access::for_path("notes.md", &Workspace::new(&cwd));
+
+        assert_eq!(target.resolved(), Some(cwd.join("notes.md")));
+        let (canonical, _, zone) = resolved(&target);
+        assert_eq!(
+            canonical,
+            Path::new(&*cwd.join("notes.md").to_string_lossy())
+        );
+        assert_eq!(zone, Zone::Outside);
     }
 
     #[cfg(unix)]
@@ -1299,7 +1597,7 @@ mod tests {
         std::os::unix::fs::symlink("b", cwd.join("a")).unwrap();
         std::os::unix::fs::symlink("a", cwd.join("b")).unwrap();
 
-        let target = GateTarget::for_path("a/new.rs", &cwd);
+        let target = Access::for_path("a/new.rs", &Workspace::new(&cwd));
         let (_, relative, zone) = resolved(&target);
         assert_eq!((relative, zone), (None, Zone::Outside));
     }
@@ -1319,7 +1617,7 @@ mod tests {
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
         let enforced = std::fs::read_dir(&locked).is_err();
 
-        let target = GateTarget::for_path("locked/sub/../../link/x", &cwd);
+        let target = Access::for_path("locked/sub/../../link/x", &Workspace::new(&cwd));
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
         if !enforced {
             return;
@@ -1346,7 +1644,7 @@ mod tests {
             return;
         }
 
-        let target = GateTarget::for_path(r"GIT~1\config", &cwd);
+        let target = Access::for_path(r"GIT~1\config", &Workspace::new(&cwd));
         assert_eq!(
             resolved(&target),
             (
@@ -1360,7 +1658,7 @@ mod tests {
             p.decide(PermissionClass::Edit, &target.as_target()),
             Decision::Ask
         );
-        let target = GateTarget::for_path(r"SECRET~1\key", &cwd);
+        let target = Access::for_path(r"SECRET~1\key", &Workspace::new(&cwd));
         assert_eq!(
             p.decide(PermissionClass::Edit, &target.as_target()),
             Decision::Deny
@@ -1370,7 +1668,7 @@ mod tests {
         let home = cwd.join("home-directory");
         std::fs::create_dir(&home).unwrap();
         temp_env::with_var(HOME_VAR, Some(&home), || {
-            let target = GateTarget::for_path("notes.md", &cwd.join("HOME-D~1"));
+            let target = Access::for_path("notes.md", &Workspace::new(&cwd.join("HOME-D~1")));
             assert_eq!(resolved(&target).2, Zone::Outside);
         });
     }
@@ -1384,7 +1682,7 @@ mod tests {
         std::fs::create_dir(cwd.join("secrets-store")).unwrap();
         std::fs::write(cwd.join(r"secrets-store\key"), "").unwrap();
 
-        let target = GateTarget::for_path(r".git::$INDEX_ALLOCATION\config", &cwd);
+        let target = Access::for_path(r".git::$INDEX_ALLOCATION\config", &Workspace::new(&cwd));
         let (path, relative, zone) = resolved(&target);
         assert_eq!(path.as_os_str(), cwd.join(r".git\config").as_os_str());
         assert_eq!(
@@ -1392,7 +1690,7 @@ mod tests {
             (Some(Path::new(r".git\config")), Zone::Protected)
         );
         let p = policy(Mode::Auto, &[], &["edit(**/secrets-store/key)"]);
-        let target = GateTarget::for_path(r"secrets-store\key::$DATA", &cwd);
+        let target = Access::for_path(r"secrets-store\key::$DATA", &Workspace::new(&cwd));
         assert_eq!(
             p.decide(PermissionClass::Edit, &target.as_target()),
             Decision::Deny
@@ -1554,7 +1852,7 @@ mod tests {
             ("../real/x", Decision::Deny),
             ("../other/x", Decision::Allow),
         ] {
-            let target = GateTarget::for_path(raw, &cwd);
+            let target = Access::for_path(raw, &Workspace::new(&cwd));
             assert_eq!(
                 p.decide(PermissionClass::Read, &target.as_target()),
                 decision,
@@ -1652,7 +1950,7 @@ mod tests {
         std::fs::create_dir(cwd.join(".git")).unwrap();
         let p = policy(Mode::Auto, &[], &[]);
 
-        let protected = GateTarget::for_path(".git/config", &cwd);
+        let protected = Access::for_path(".git/config", &Workspace::new(&cwd));
         assert!(p.session_grant(PermissionClass::Edit, &protected).is_none());
         let wildcard = command("ls *.rs");
         assert!(p.session_grant(PermissionClass::Bash, &wildcard).is_none());
@@ -1680,7 +1978,7 @@ mod tests {
             ("src/main.rs", false),
         ] {
             let path = cwd.join(name);
-            let gate = GateTarget::for_path(name, &cwd);
+            let gate = Access::for_path(name, &Workspace::new(&cwd));
             assert_eq!(walk.denies(&path), denied, "{name}");
             assert_eq!(
                 p.decide(PermissionClass::Read, &gate.as_target()) == Decision::Deny,
@@ -1900,7 +2198,7 @@ mod tests {
             "CAF\u{c9}.TXT",
             &upper_cwd,
         ] {
-            let target = GateTarget::for_path(raw, &cwd);
+            let target = Access::for_path(raw, &Workspace::new(&cwd));
             assert_eq!(
                 p.decide(PermissionClass::Read, &target.as_target()),
                 Decision::Deny,
@@ -1929,7 +2227,7 @@ mod tests {
             &[],
             &["read(**/.env)", "edit(**/.env)", &secrets],
         );
-        let env = GateTarget::for_path(".env", &cwd);
+        let env = Access::for_path(".env", &Workspace::new(&cwd));
         assert_eq!(resolved(&env).1, None, "the link resolves outside cwd");
         for class in [PermissionClass::Read, PermissionClass::Edit] {
             assert_eq!(
@@ -1938,7 +2236,7 @@ mod tests {
                 "{class:?}"
             );
         }
-        let key = GateTarget::for_path("secrets/key", &cwd);
+        let key = Access::for_path("secrets/key", &Workspace::new(&cwd));
         assert_eq!(
             p.decide(PermissionClass::Read, &key.as_target()),
             Decision::Deny
@@ -2002,7 +2300,7 @@ mod tests {
         let decide = |case: &str| {
             p.decide(
                 PermissionClass::Bash,
-                &GateTarget::for_command(case, &cwd).as_target(),
+                &Access::for_command(case, &Workspace::new(&cwd)).as_target(),
             )
         };
         assert_eq!(decide("echo hi > out.txt 2>&1"), Decision::Allow);
@@ -2018,7 +2316,8 @@ mod tests {
         assert_eq!(
             allowed.decide(
                 PermissionClass::Bash,
-                &GateTarget::for_command(&format!("echo hi >> {notes}"), &cwd).as_target()
+                &Access::for_command(&format!("echo hi >> {notes}"), &Workspace::new(&cwd))
+                    .as_target()
             ),
             Decision::Allow
         );
@@ -2031,7 +2330,7 @@ mod tests {
         let decide = |case: &str| {
             p.decide(
                 PermissionClass::Bash,
-                &GateTarget::for_command(case, &cwd).as_target(),
+                &Access::for_command(case, &Workspace::new(&cwd)).as_target(),
             )
         };
         assert_eq!(decide("cat README.md"), Decision::Allow);
@@ -2079,7 +2378,7 @@ mod tests {
         let (_dir, root) = temp_cwd();
         let cwd = root.join("cwd");
         std::fs::create_dir(&cwd).unwrap();
-        let target = GateTarget::for_path("../notes.md", &cwd);
+        let target = Access::for_path("../notes.md", &Workspace::new(&cwd));
         let grant = policy(Mode::Auto, &[], &[])
             .session_grant(PermissionClass::Edit, &target)
             .unwrap();
@@ -2106,7 +2405,7 @@ mod tests {
         let policy = policy(Mode::Auto, &[], &[&absolute_rule]);
         let read_deny = policy.read_deny();
         let file = cwd.join("secret.txt");
-        let target = GateTarget::for_path(file.to_str().unwrap(), root);
+        let target = Access::for_path(file.to_str().unwrap(), &Workspace::new(root));
         assert_eq!(
             policy.decide(PermissionClass::Read, &target.as_target()),
             Decision::Deny,
@@ -2132,7 +2431,7 @@ mod tests {
         for (spelled, denied) in [("config", true), ("../outside", false)] {
             let walk = read_deny.walk(&outside, Path::new(spelled), &cwd);
             assert_eq!(walk.denies(&env), denied, "{spelled}");
-            let gate = GateTarget::for_path(&format!("{spelled}/.env"), &cwd);
+            let gate = Access::for_path(&format!("{spelled}/.env"), &Workspace::new(&cwd));
             assert_eq!(
                 p.decide(PermissionClass::Read, &gate.as_target()) == Decision::Deny,
                 denied,

@@ -6,9 +6,13 @@ use std::path::Path;
 use std::pin::Pin;
 
 use serde::Deserialize;
+use tokio_util::sync::CancellationToken;
 
-use super::{Tool, ToolMetadata, ToolOutput, ToolResultView, extract_input_field};
-use crate::permission::{GateTarget, PermissionClass, ReadDeny};
+use super::{
+    Prepared, SearchRoot, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolResultView, ToolSpec,
+    extract_input_field,
+};
+use crate::permission::{PermissionClass, ReadDeny};
 use crate::util::text::plural;
 
 const NO_FILES_FOUND: &str = "No files found";
@@ -29,37 +33,20 @@ impl GlobTool {
 }
 
 impl Tool for GlobTool {
-    fn name(&self) -> &'static str {
-        "glob"
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "glob".to_owned(),
+            description: "Find files matching a glob pattern. Returns paths sorted by \
+                          modification time (newest first)."
+                .to_owned(),
+            input_schema: input_schema(),
+            class: PermissionClass::Read,
+            parallel_safe: true,
+        }
     }
 
-    fn description(&self) -> &'static str {
-        "Find files matching a glob pattern. Returns paths sorted by modification time (newest first)."
-    }
-
-    fn permission_class(&self) -> PermissionClass {
-        PermissionClass::Read
-    }
-
-    fn gate_target(&self, input: &serde_json::Value, cwd: &Path) -> GateTarget {
-        super::search_root_target(input, cwd)
-    }
-
-    fn input_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "pattern": {
-                    "type": "string",
-                    "description": r#"The glob pattern to match, relative to `path` (e.g. "**/*.rs", "src/**/*.ts"). "*" and "?" stay within one directory, and a pattern without "/" matches file names at any depth."#
-                },
-                "path": {
-                    "type": "string",
-                    "description": "The directory to search in (default: current working directory)"
-                }
-            },
-            "required": ["pattern"]
-        })
+    fn prepare(&self, input: serde_json::Value, ctx: &ToolCtx) -> Prepared {
+        super::prepare_search_root(input, ctx)
     }
 
     fn icon(&self) -> &'static str {
@@ -75,19 +62,38 @@ impl Tool for GlobTool {
         input: &serde_json::Value,
         content: &str,
         metadata: &ToolMetadata,
+        _cwd: &Path,
     ) -> Option<ToolResultView> {
         build_files_view(input, content, metadata)
     }
 
-    fn run(
-        &self,
-        input: serde_json::Value,
-    ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + '_>> {
-        Box::pin(run(input, self.read_deny.clone()))
+    fn run<'a>(
+        &'a self,
+        prepared: Prepared,
+        ctx: &'a ToolCtx,
+    ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + 'a>> {
+        Box::pin(run(prepared, ctx, self.read_deny.clone()))
     }
 }
 
 // ── Input ──
+
+fn input_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "pattern": {
+                "type": "string",
+                "description": r#"The glob pattern to match, relative to `path` (e.g. "**/*.rs", "src/**/*.ts"). "*" and "?" stay within one directory, and a pattern without "/" matches file names at any depth."#
+            },
+            "path": {
+                "type": "string",
+                "description": "The directory to search in (default: current working directory)"
+            }
+        },
+        "required": ["pattern"]
+    })
+}
 
 #[derive(Deserialize)]
 struct Input {
@@ -98,7 +104,8 @@ struct Input {
 
 // ── Execution ──
 
-async fn run(raw: serde_json::Value, read_deny: ReadDeny) -> ToolOutput {
+async fn run(prepared: Prepared, ctx: &ToolCtx, read_deny: ReadDeny) -> ToolOutput {
+    let Prepared { input: raw, access } = prepared;
     let input: Input = match super::parse_input(raw) {
         Ok(v) => v,
         Err(e) => return e,
@@ -106,8 +113,11 @@ async fn run(raw: serde_json::Value, read_deny: ReadDeny) -> ToolOutput {
 
     let Input { pattern, path } = input;
 
+    let cwd = ctx.cwd().to_path_buf();
+    let cancel = ctx.cancel.clone();
     match tokio::task::spawn_blocking(move || {
-        super::working_dir().and_then(|cwd| glob_files(&pattern, path.as_deref(), &cwd, &read_deny))
+        let root = SearchRoot::new(&access, path.as_deref(), &cwd)?;
+        glob_files(&pattern, &root, &read_deny, &cancel)
     })
     .await
     {
@@ -143,34 +153,34 @@ struct GlobOutput {
     truncated_total: Option<usize>,
 }
 
-/// Walks `search_path` (resolved against `cwd`, defaulting to it), filters entries against
-/// `pattern`, and returns up to `MAX_RESULTS` matches sorted newest-first by mtime, rendered
-/// relative to the canonical `cwd`. Matches `read_deny` withholds are counted in a trailing note.
+/// Walks `root`, filters entries against `pattern`, and returns up to `MAX_RESULTS` matches sorted
+/// newest-first by mtime, rendered relative to the root's canonical cwd. Matches `read_deny`
+/// withholds are counted in a trailing note, and the walk stops once `cancel` fires.
 ///
 /// `walk_files` skips files matched by `.gitignore` or a global ignore file, so only non-ignored
 /// files reach the matcher. Truncation past `MAX_RESULTS` is announced inline and surfaced
 /// separately on `truncated_total` for the structured view.
 fn glob_files(
     pattern: &str,
-    search_path: Option<&str>,
-    cwd: &Path,
+    root: &SearchRoot,
     read_deny: &ReadDeny,
+    cancel: &CancellationToken,
 ) -> Result<GlobOutput, String> {
-    let base = super::resolve_base_dir(search_path, cwd)?;
+    let SearchRoot { base, spelled, cwd } = root;
     if !base.is_dir() {
         return Err(format!(
             "{} is not a directory",
-            super::display_path(&base, cwd)
+            super::display_path(base, cwd)
         ));
     }
 
     let glob = compile_glob(pattern)?;
 
-    let read_deny = read_deny.walk(&base, Path::new(search_path.unwrap_or(".")), cwd);
+    let read_deny = read_deny.walk(base, spelled, cwd);
     let mut withheld = 0;
-    let mut matches: Vec<(String, std::time::SystemTime)> = super::walk_files(&base)
+    let mut matches: Vec<(String, std::time::SystemTime)> = super::walk_files(base, cancel)
         .filter(|entry| {
-            let rel = entry.path().strip_prefix(&base).unwrap_or(entry.path());
+            let rel = entry.path().strip_prefix(base).unwrap_or(entry.path());
             glob.is_match(rel)
         })
         .filter(|entry| {
@@ -311,22 +321,39 @@ mod tests {
     use indoc::{formatdoc, indoc};
 
     use super::*;
-    use crate::permission::{Mode, Policy};
-    use crate::tool::testing::canonical_tempdir;
+    use crate::permission::{Access, Mode, Policy};
+    use crate::tool::testing::{self, canonical_tempdir, ctx, search_root, temp_ctx};
     use crate::util::path::slash_separated;
 
-    // ── gate_target ──
+    fn glob_in(
+        pattern: &str,
+        path: Option<&str>,
+        cwd: &Path,
+        read_deny: &ReadDeny,
+    ) -> Result<GlobOutput, String> {
+        let root = search_root(cwd, path)?;
+        glob_files(pattern, &root, read_deny, &CancellationToken::new())
+    }
+
+    // ── prepare ──
 
     #[test]
-    fn gate_target_defaults_the_search_root_to_cwd() {
+    fn prepare_defaults_the_search_root_to_cwd() {
         // A deny scoped to the project root must apply when `path` is omitted.
-        let dir = tempfile::tempdir().unwrap();
-        let cwd = dunce::canonicalize(dir.path()).unwrap();
+        let dir = canonical_tempdir();
 
-        let target = GlobTool::default().gate_target(&serde_json::json!({"pattern": "*.rs"}), &cwd);
-        let GateTarget::Path { relative, .. } = target else {
+        let prepared =
+            GlobTool::default().prepare(serde_json::json!({"pattern": "*.rs"}), &ctx(dir.path()));
+
+        let Access::Path {
+            canonical,
+            relative,
+            ..
+        } = prepared.access
+        else {
             panic!("expected a path target");
         };
+        assert_eq!(canonical, dir.path().to_str().unwrap());
         assert_eq!(relative.as_deref(), Some(""));
     }
 
@@ -338,12 +365,12 @@ mod tests {
         std::fs::write(dir.path().join("a.txt"), "").unwrap();
         std::fs::write(dir.path().join("b.rs"), "").unwrap();
 
-        let output = GlobTool::default()
-            .run(serde_json::json!({
-                "pattern": "*.txt",
-                "path": dir.path().to_str().unwrap()
-            }))
-            .await;
+        let input = serde_json::json!({
+            "pattern": "*.txt",
+            "path": dir.path().to_str().unwrap()
+        });
+
+        let output = testing::run(&GlobTool::default(), input, &temp_ctx()).await;
 
         assert!(!output.is_error);
         assert!(output.content.contains("a.txt"));
@@ -353,16 +380,16 @@ mod tests {
 
     #[tokio::test]
     async fn run_missing_pattern_reports_input_error() {
-        let output = GlobTool::default().run(serde_json::json!({})).await;
+        let output = testing::run(&GlobTool::default(), serde_json::json!({}), &temp_ctx()).await;
         assert!(output.is_error);
         assert!(output.content.contains("Invalid input"));
     }
 
     #[tokio::test]
     async fn run_invalid_pattern_omits_title() {
-        let output = GlobTool::default()
-            .run(serde_json::json!({"pattern": "[unclosed"}))
-            .await;
+        let input = serde_json::json!({"pattern": "[unclosed"});
+
+        let output = testing::run(&GlobTool::default(), input, &temp_ctx()).await;
         assert!(output.is_error);
         assert!(
             output.content.contains("Invalid glob pattern"),
@@ -380,12 +407,9 @@ mod tests {
             std::fs::write(dir.path().join(format!("{i:04}.txt")), "").unwrap();
         }
 
-        let output = GlobTool::default()
-            .run(serde_json::json!({
-                "pattern": "*.txt",
-                "path": dir.path().to_str().unwrap(),
-            }))
-            .await;
+        let input = serde_json::json!({"pattern": "*.txt"});
+
+        let output = testing::run(&GlobTool::default(), input, &ctx(dir.path())).await;
 
         assert!(!output.is_error);
         assert_eq!(output.metadata.truncated_total, Some(total));
@@ -419,7 +443,7 @@ mod tests {
         std::fs::write(dir.path().join("bar.txt"), "").unwrap();
         std::fs::write(dir.path().join("baz.rs"), "").unwrap();
 
-        let result = glob_files("*.txt", None, dir.path(), &ReadDeny::default()).unwrap();
+        let result = glob_in("*.txt", None, dir.path(), &ReadDeny::default()).unwrap();
         let mut files: Vec<&str> = result.content.lines().collect();
         files.sort_unstable();
         assert_eq!(files, ["bar.txt", "foo.txt"]);
@@ -434,7 +458,7 @@ mod tests {
         std::fs::write(dir.path().join("top.rs"), "").unwrap();
         std::fs::write(sub.join("nested.rs"), "").unwrap();
 
-        let result = glob_files("**/*.rs", None, dir.path(), &ReadDeny::default()).unwrap();
+        let result = glob_in("**/*.rs", None, dir.path(), &ReadDeny::default()).unwrap();
         assert!(result.content.lines().any(|l| l == "top.rs"));
         assert!(result.content.lines().any(|l| l == "sub/nested.rs"));
     }
@@ -447,11 +471,11 @@ mod tests {
         std::fs::write(dir.path().join("src/a.rs"), "").unwrap();
         std::fs::write(nested.join("b.rs"), "").unwrap();
 
-        let scoped = glob_files("src/*.rs", None, dir.path(), &ReadDeny::default()).unwrap();
+        let scoped = glob_in("src/*.rs", None, dir.path(), &ReadDeny::default()).unwrap();
         assert_eq!(scoped.content, "src/a.rs");
 
         // A pattern without `/` matches the file name at any depth.
-        let bare = glob_files("b.rs", None, dir.path(), &ReadDeny::default()).unwrap();
+        let bare = glob_in("b.rs", None, dir.path(), &ReadDeny::default()).unwrap();
         assert_eq!(bare.content, "src/nested/b.rs");
     }
 
@@ -463,13 +487,13 @@ mod tests {
         std::fs::write(dir.path().join("src/b.rs"), "").unwrap();
 
         assert_eq!(
-            glob_files("./*.rs", None, dir.path(), &ReadDeny::default())
+            glob_in("./*.rs", None, dir.path(), &ReadDeny::default())
                 .unwrap()
                 .content,
             "a.rs"
         );
         assert_eq!(
-            glob_files("././src/*.rs", None, dir.path(), &ReadDeny::default())
+            glob_in("././src/*.rs", None, dir.path(), &ReadDeny::default())
                 .unwrap()
                 .content,
             "src/b.rs"
@@ -486,11 +510,10 @@ mod tests {
         std::fs::create_dir(&outside).unwrap();
         std::fs::write(outside.join("x.rs"), "").unwrap();
 
-        let inside = glob_files("*.rs", Some("src"), &cwd, &ReadDeny::default()).unwrap();
+        let inside = glob_in("*.rs", Some("src"), &cwd, &ReadDeny::default()).unwrap();
         assert_eq!(inside.content, "src/lib.rs");
 
-        let outside_hit =
-            glob_files("*.rs", Some("../outside"), &cwd, &ReadDeny::default()).unwrap();
+        let outside_hit = glob_in("*.rs", Some("../outside"), &cwd, &ReadDeny::default()).unwrap();
         assert_eq!(
             outside_hit.content,
             slash_separated(&outside.join("x.rs")),
@@ -506,7 +529,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(50));
         std::fs::write(dir.path().join("new.txt"), "new").unwrap();
 
-        let result = glob_files("*.txt", None, dir.path(), &ReadDeny::default()).unwrap();
+        let result = glob_in("*.txt", None, dir.path(), &ReadDeny::default()).unwrap();
         assert_eq!(result.content, "new.txt\nold.txt");
     }
 
@@ -515,7 +538,7 @@ mod tests {
         let dir = canonical_tempdir();
         std::fs::write(dir.path().join("a.txt"), "").unwrap();
 
-        let result = glob_files("*.rs", None, dir.path(), &ReadDeny::default()).unwrap();
+        let result = glob_in("*.rs", None, dir.path(), &ReadDeny::default()).unwrap();
         assert_eq!(result.content, "No files found");
         assert!(result.truncated_total.is_none());
     }
@@ -523,7 +546,7 @@ mod tests {
     #[test]
     fn glob_files_invalid_pattern_reports_error() {
         let dir = canonical_tempdir();
-        let err = glob_files("[invalid", None, dir.path(), &ReadDeny::default()).unwrap_err();
+        let err = glob_in("[invalid", None, dir.path(), &ReadDeny::default()).unwrap_err();
         assert!(err.contains("Invalid glob pattern"));
     }
 
@@ -531,7 +554,7 @@ mod tests {
     fn glob_files_absolute_pattern_points_at_path() {
         let dir = canonical_tempdir();
         let pattern = format!("{}/*.rs", dir.path().display());
-        let err = glob_files(&pattern, None, dir.path(), &ReadDeny::default()).unwrap_err();
+        let err = glob_in(&pattern, None, dir.path(), &ReadDeny::default()).unwrap_err();
         assert_eq!(
             err,
             format!(
@@ -543,12 +566,11 @@ mod tests {
     #[test]
     fn glob_files_invalid_directory_reports_error() {
         let dir = canonical_tempdir();
-        let err =
-            glob_files("*.txt", Some("missing"), dir.path(), &ReadDeny::default()).unwrap_err();
+        let err = glob_in("*.txt", Some("missing"), dir.path(), &ReadDeny::default()).unwrap_err();
         assert!(err.starts_with("Cannot access missing: "), "{err}");
 
         std::fs::write(dir.path().join("a.txt"), "").unwrap();
-        let err = glob_files("*.txt", Some("a.txt"), dir.path(), &ReadDeny::default()).unwrap_err();
+        let err = glob_in("*.txt", Some("a.txt"), dir.path(), &ReadDeny::default()).unwrap_err();
         assert_eq!(err, "a.txt is not a directory");
     }
 
@@ -559,7 +581,7 @@ mod tests {
             std::fs::write(dir.path().join(format!("{i:04}.txt")), "").unwrap();
         }
 
-        let result = glob_files("*.txt", None, dir.path(), &ReadDeny::default()).unwrap();
+        let result = glob_in("*.txt", None, dir.path(), &ReadDeny::default()).unwrap();
         let file_count = result
             .content
             .lines()
@@ -585,7 +607,7 @@ mod tests {
             .unwrap()
             .read_deny();
 
-        let result = glob_files("*.toml", None, dir.path(), &read_deny).unwrap();
+        let result = glob_in("*.toml", None, dir.path(), &read_deny).unwrap();
         assert_eq!(
             result.content,
             indoc! {"
@@ -603,10 +625,11 @@ mod tests {
             &serde_json::json!({"pattern": "*.toml"}),
             &result.content,
             &ToolMetadata::default(),
+            Path::new("/repo"),
         );
         assert_eq!(view, None);
 
-        let result = glob_files("secrets/*", None, dir.path(), &read_deny).unwrap();
+        let result = glob_in("secrets/*", None, dir.path(), &read_deny).unwrap();
         assert_eq!(
             result.content,
             indoc! {"
@@ -631,7 +654,7 @@ mod tests {
             .unwrap()
             .read_deny();
 
-        let result = glob_files("*", Some("config"), &cwd, &read_deny).unwrap();
+        let result = glob_in("*", Some("config"), &cwd, &read_deny).unwrap();
         assert_eq!(
             result.content,
             formatdoc! {"
@@ -653,7 +676,7 @@ mod tests {
         std::fs::create_dir(&git).unwrap();
         std::fs::write(git.join("hook.yml"), "").unwrap();
 
-        let result = glob_files(
+        let result = glob_in(
             ".github/workflows/*.yml",
             None,
             dir.path(),
@@ -662,7 +685,7 @@ mod tests {
         .unwrap();
         assert_eq!(result.content, ".github/workflows/ci.yml");
 
-        let all = glob_files("*.yml", None, dir.path(), &ReadDeny::default()).unwrap();
+        let all = glob_in("*.yml", None, dir.path(), &ReadDeny::default()).unwrap();
         assert_eq!(all.content, ".github/workflows/ci.yml");
     }
 
@@ -674,7 +697,7 @@ mod tests {
         std::fs::write(dir.path().join("ignored.txt"), "").unwrap();
         std::fs::write(dir.path().join("tracked.txt"), "").unwrap();
 
-        let result = glob_files("*.txt", None, dir.path(), &ReadDeny::default()).unwrap();
+        let result = glob_in("*.txt", None, dir.path(), &ReadDeny::default()).unwrap();
         assert_eq!(result.content, "tracked.txt");
     }
 
@@ -690,6 +713,7 @@ mod tests {
                     src/lib.rs"
                 },
                 &ToolMetadata::default(),
+                Path::new("/repo"),
             )
             .unwrap();
 
@@ -721,6 +745,7 @@ mod tests {
                 &serde_json::json!({"pattern": "**/*.rs"}),
                 &content,
                 &metadata,
+                Path::new("/repo"),
             )
             .unwrap();
 
@@ -748,6 +773,7 @@ mod tests {
                 &serde_json::json!({"pattern": "**/*.rs"}),
                 &content,
                 &ToolMetadata::default(),
+                Path::new("/repo"),
             )
             .unwrap();
 
@@ -768,6 +794,7 @@ mod tests {
                 &serde_json::json!({"pattern": "*.nope"}),
                 "No files found",
                 &ToolMetadata::default(),
+                Path::new("/repo"),
             )
             .unwrap();
 
@@ -787,6 +814,7 @@ mod tests {
             &serde_json::json!({"pattern": "*.rs"}),
             "",
             &ToolMetadata::default(),
+            Path::new("/repo"),
         );
         assert!(view.is_none());
     }
@@ -797,6 +825,7 @@ mod tests {
             &serde_json::json!({}),
             "src/main.rs",
             &ToolMetadata::default(),
+            Path::new("/repo"),
         );
         assert!(view.is_none());
     }
@@ -808,6 +837,7 @@ mod tests {
                 &serde_json::json!({"pattern": "*.rs"}),
                 "src/only.rs",
                 &ToolMetadata::default(),
+                Path::new("/repo"),
             )
             .unwrap();
         assert_eq!(
@@ -827,6 +857,7 @@ mod tests {
                 &serde_json::json!({"pattern": "*.rs"}),
                 "a.rs\nb.rs\n",
                 &ToolMetadata::default(),
+                Path::new("/repo"),
             )
             .unwrap();
         assert_eq!(
@@ -850,6 +881,7 @@ mod tests {
                 &serde_json::json!({"pattern": "*.rs"}),
                 "a.rs\nb.rs",
                 &metadata,
+                Path::new("/repo"),
             )
             .unwrap();
         assert_eq!(
@@ -887,6 +919,7 @@ mod tests {
             &serde_json::json!({"pattern": "*.rs"}),
             "a.rs\nb.rs",
             &metadata,
+            Path::new("/repo"),
         );
         assert!(view.is_none());
     }
@@ -901,6 +934,7 @@ mod tests {
                 (Some other footer we don't recognise)"
             },
             &ToolMetadata::default(),
+            Path::new("/repo"),
         );
         assert!(view.is_none());
     }

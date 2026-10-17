@@ -370,7 +370,7 @@ mod tests {
 
     use super::*;
     use crate::client::RateLimitWindow;
-    use crate::permission::{GateTarget, PermissionClass, Policy};
+    use crate::permission::{Access, PermissionClass, Policy, Workspace};
     use crate::tool::tasks::testing::plan;
     use crate::tool::{
         ApprovalBody, DiffChunk, DiffLine, GrepFileGroup, GrepMatchLine, ReadExcerptLine,
@@ -592,7 +592,7 @@ mod tests {
         Policy::default()
             .session_grant(
                 PermissionClass::Bash,
-                &GateTarget::for_command("cargo test", Path::new("/repo")),
+                &Access::for_command("cargo test", &Workspace::new(Path::new("/repo"))),
             )
             .unwrap()
     }

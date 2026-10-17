@@ -432,7 +432,7 @@ mod tests {
     use super::*;
     use crate::config::compaction::test_thresholds;
     use crate::permission::rule::Rule;
-    use crate::permission::{GateTarget, PermissionClass, Policy};
+    use crate::permission::{Access, PermissionClass, Policy, Workspace};
     use crate::protocol::{ResumeTarget, ToolCall, ToolResult, UsageSnapshot};
     use crate::tool::tasks::TaskStatus;
     use crate::tool::tasks::testing::{plan, task};
@@ -747,7 +747,7 @@ mod tests {
         let grant = Policy::default()
             .session_grant(
                 PermissionClass::Bash,
-                &GateTarget::for_command("cargo test", Path::new("/repo")),
+                &Access::for_command("cargo test", &Workspace::new(Path::new("/repo"))),
             )
             .unwrap();
         app.handle_engine_event(Event::ApprovalRequested {

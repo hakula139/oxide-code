@@ -235,7 +235,7 @@ mod tests {
     use crate::protocol::ToolCall;
     use crate::session::store::testing::test_store;
     use crate::tool::bash::BashTool;
-    use crate::tool::{Tool, ToolOutput, ToolRegistry};
+    use crate::tool::{Prepared, Tool, ToolCtx, ToolOutput, ToolRegistry, ToolSpec};
 
     const SESSION_ID: &str = "session-1";
 
@@ -243,26 +243,21 @@ mod tests {
     struct LookTool;
 
     impl Tool for LookTool {
-        fn name(&self) -> &'static str {
-            "look"
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: "look".to_owned(),
+                description: "Looks around the project.".to_owned(),
+                input_schema: serde_json::json!({"type": "object"}),
+                class: PermissionClass::Read,
+                parallel_safe: true,
+            }
         }
 
-        fn description(&self) -> &'static str {
-            "Looks around the project."
-        }
-
-        fn input_schema(&self) -> serde_json::Value {
-            serde_json::json!({"type": "object"})
-        }
-
-        fn permission_class(&self) -> PermissionClass {
-            PermissionClass::Read
-        }
-
-        fn run(
-            &self,
-            _input: serde_json::Value,
-        ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + '_>> {
+        fn run<'a>(
+            &'a self,
+            _prepared: Prepared,
+            _ctx: &'a ToolCtx,
+        ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + 'a>> {
             Box::pin(async { ToolOutput::success("README.md") })
         }
     }

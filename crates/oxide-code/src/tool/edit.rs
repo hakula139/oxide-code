@@ -2,72 +2,38 @@
 
 use std::borrow::Cow;
 use std::future::Future;
+use std::path::Path;
 use std::pin::Pin;
-use std::sync::Arc;
 
 use serde::Deserialize;
 
 use super::{
-    ApprovalBody, ApprovalPreview, DiffChunk, DiffLine, Tool, ToolMetadata, ToolOutput,
-    ToolResultView, WriteMode, extract_input_field, summarize_path_call,
+    ApprovalBody, ApprovalPreview, DiffChunk, DiffLine, Prepared, Tool, ToolCtx, ToolMetadata,
+    ToolOutput, ToolResultView, ToolSpec, WriteMode, extract_input_field, summarize_path_call,
 };
-use crate::file_tracker::{FileTracker, GatePurpose};
+use crate::file_tracker::GatePurpose;
 use crate::permission::PermissionClass;
 
-pub(crate) struct EditTool {
-    tracker: Arc<FileTracker>,
-}
-
-impl EditTool {
-    pub(crate) fn new(tracker: Arc<FileTracker>) -> Self {
-        Self { tracker }
-    }
-}
+pub(crate) struct EditTool;
 
 impl Tool for EditTool {
-    fn name(&self) -> &'static str {
-        "edit"
-    }
-
-    fn description(&self) -> &'static str {
-        "Perform exact string replacement in a file. \
-         The old_string must be unique in the file unless replace_all is true. \
-         Read the file in this session before editing it. A Read of the lines being changed \
-         is enough. The Read-before-Edit gate refuses files that changed externally since the \
-         last Read."
-    }
-
-    fn permission_class(&self) -> PermissionClass {
-        PermissionClass::Edit
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "edit".to_owned(),
+            description: "Perform exact string replacement in a file. The old_string must be \
+                          unique in the file unless replace_all is true. Read the file in this \
+                          session before editing it. A Read of the lines being changed is enough. \
+                          The Read-before-Edit gate refuses files that changed externally since \
+                          the last Read."
+                .to_owned(),
+            input_schema: input_schema(),
+            class: PermissionClass::Edit,
+            parallel_safe: false,
+        }
     }
 
     fn path_field(&self) -> Option<&'static str> {
         Some("file_path")
-    }
-
-    fn input_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "file_path": {
-                    "type": "string",
-                    "description": "The absolute path to the file to modify"
-                },
-                "old_string": {
-                    "type": "string",
-                    "description": "The exact text to replace (must be unique unless replace_all is true)"
-                },
-                "new_string": {
-                    "type": "string",
-                    "description": "The text to replace it with (must differ from old_string)"
-                },
-                "replace_all": {
-                    "type": "boolean",
-                    "description": "Replace all occurrences (default: false)"
-                }
-            },
-            "required": ["file_path", "old_string", "new_string"]
-        })
     }
 
     fn icon(&self) -> &'static str {
@@ -78,8 +44,8 @@ impl Tool for EditTool {
         extract_input_field(input, "file_path")
     }
 
-    fn summarize_call(&self, input: &serde_json::Value) -> String {
-        summarize_path_call(self.name(), input, "file_path")
+    fn summarize_call(&self, name: &str, input: &serde_json::Value, cwd: &Path) -> String {
+        summarize_path_call(name, input, "file_path", cwd)
     }
 
     fn result_view(
@@ -87,6 +53,7 @@ impl Tool for EditTool {
         input: &serde_json::Value,
         content: &str,
         metadata: &ToolMetadata,
+        _cwd: &Path,
     ) -> Option<ToolResultView> {
         let old = input.get("old_string")?.as_str()?;
         let new = input.get("new_string")?.as_str()?;
@@ -110,25 +77,55 @@ impl Tool for EditTool {
         })
     }
 
-    fn approval_preview(&self, input: &serde_json::Value) -> ApprovalPreview {
+    fn approval_preview(
+        &self,
+        name: &str,
+        input: &serde_json::Value,
+        cwd: &Path,
+    ) -> ApprovalPreview {
         let old = extract_input_field(input, "old_string").unwrap_or_default();
         let new = extract_input_field(input, "new_string").unwrap_or_default();
         ApprovalPreview {
-            title: self.summarize_call(input),
+            title: self.summarize_call(name, input, cwd),
             body: ApprovalBody::Diff(vec![synthesize_chunk(old, new)]),
         }
     }
 
-    fn run(
-        &self,
-        input: serde_json::Value,
-    ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + '_>> {
-        let tracker = Arc::clone(&self.tracker);
-        Box::pin(run(input, tracker))
+    fn run<'a>(
+        &'a self,
+        prepared: Prepared,
+        ctx: &'a ToolCtx,
+    ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + 'a>> {
+        Box::pin(run(prepared.input, ctx))
     }
 }
 
 // ── Input ──
+
+fn input_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "file_path": {
+                "type": "string",
+                "description": "The absolute path to the file to modify"
+            },
+            "old_string": {
+                "type": "string",
+                "description": "The exact text to replace (must be unique unless replace_all is true)"
+            },
+            "new_string": {
+                "type": "string",
+                "description": "The text to replace it with (must differ from old_string)"
+            },
+            "replace_all": {
+                "type": "boolean",
+                "description": "Replace all occurrences (default: false)"
+            }
+        },
+        "required": ["file_path", "old_string", "new_string"]
+    })
+}
 
 #[derive(Deserialize)]
 struct Input {
@@ -141,7 +138,7 @@ struct Input {
 
 // ── Execution ──
 
-async fn run(raw: serde_json::Value, tracker: Arc<FileTracker>) -> ToolOutput {
+async fn run(raw: serde_json::Value, ctx: &ToolCtx) -> ToolOutput {
     let input: Input = match super::parse_input(raw) {
         Ok(v) => v,
         Err(e) => return e,
@@ -153,7 +150,7 @@ async fn run(raw: serde_json::Value, tracker: Arc<FileTracker>) -> ToolOutput {
         &input.old_string,
         &input.new_string,
         input.replace_all,
-        &tracker,
+        ctx,
     )
     .await
     {
@@ -178,12 +175,13 @@ async fn run(raw: serde_json::Value, tracker: Arc<FileTracker>) -> ToolOutput {
 ///   on write so we don't flip line endings just because the caller used `\n` in `old_string`.
 /// - Returns `(message, match_count, diff_chunks)` on success. The chunks carry real post-edit line
 ///   numbers, shifted by the cumulative delta of earlier replacements.
+/// - A relative `path` resolves against the context's cwd.
 async fn edit_file(
     path: &str,
     old_string: &str,
     new_string: &str,
     replace_all: bool,
-    tracker: &Arc<FileTracker>,
+    ctx: &ToolCtx,
 ) -> Result<(String, usize, Vec<DiffChunk>), String> {
     if old_string.is_empty() {
         return Err("old_string must not be empty.".into());
@@ -193,12 +191,13 @@ async fn edit_file(
         return Err("old_string and new_string are identical. No changes to make.".into());
     }
 
-    let (_, content_bytes) = super::read_validated(path, |metadata| {
+    let file_path = ctx.cwd().join(path);
+    let (_, content_bytes) = super::read_validated(&file_path, path, |metadata| {
         super::validate_file_target(path, metadata, "edit")
     })
     .await?;
-    let key = super::tracker_key(path).await;
-    tracker
+    let key = super::tracker_key(&file_path).await;
+    ctx.tracker
         .verify_current_content(&key, &content_bytes, GatePurpose::Edit)
         .map_err(|e| e.to_string())?;
     let content =
@@ -240,7 +239,7 @@ async fn edit_file(
     };
     let updated = apply_eol(updated, eol);
 
-    super::write_tracked(tracker, path, updated.into_bytes(), WriteMode::Overwrite)
+    super::write_tracked(ctx, &file_path, updated.into_bytes(), WriteMode::Overwrite)
         .await
         .map_err(|e| format!("Failed to write {path}: {e}"))?;
 
@@ -389,11 +388,14 @@ mod tests {
     use indoc::indoc;
 
     use super::*;
-    use crate::file_tracker::{
-        LastView, MAX_TRACKED_FILE_SIZE,
-        testing::{tracker, tracker_seeded},
-    };
-    use crate::tool::testing::canonical_tempdir;
+    use crate::file_tracker::testing::tracker_seeded;
+    use crate::file_tracker::{LastView, MAX_TRACKED_FILE_SIZE};
+    use crate::tool::read::ReadTool;
+    use crate::tool::testing::{self, canonical_tempdir, ctx_with, temp_ctx};
+
+    fn seeded_ctx(path: &Path) -> ToolCtx {
+        ctx_with(&std::env::temp_dir(), tracker_seeded(path))
+    }
 
     // ── result_view ──
 
@@ -432,10 +434,11 @@ mod tests {
             replacements: Some(99),
             ..ToolMetadata::default()
         };
-        let view = EditTool::new(tracker()).result_view(
+        let view = EditTool.result_view(
             &input,
             "Replaced 2 occurrences in /tmp/f.rs.",
             &metadata,
+            Path::new("/repo"),
         );
         assert_eq!(
             view,
@@ -454,10 +457,11 @@ mod tests {
             "old_string": "fn foo()",
             "new_string": "fn bar()",
         });
-        let view = EditTool::new(tracker()).result_view(
+        let view = EditTool.result_view(
             &input,
             "Successfully edited /tmp/f.rs.",
             &ToolMetadata::default(),
+            Path::new("/repo"),
         );
         assert_eq!(
             view,
@@ -486,10 +490,11 @@ mod tests {
             "new_string": "b",
             "replace_all": true,
         });
-        let view = EditTool::new(tracker()).result_view(
+        let view = EditTool.result_view(
             &input,
             "Replaced 7 occurrences in /tmp/f.rs.",
             &ToolMetadata::default(),
+            Path::new("/repo"),
         );
         assert_eq!(
             view,
@@ -518,10 +523,11 @@ mod tests {
             "new_string": "b",
             "replace_all": true,
         });
-        let view = EditTool::new(tracker()).result_view(
+        let view = EditTool.result_view(
             &input,
             "Successfully edited /tmp/f.rs.",
             &ToolMetadata::default(),
+            Path::new("/repo"),
         );
         assert_eq!(
             view,
@@ -551,7 +557,12 @@ mod tests {
             serde_json::json!({"file_path": "/tmp/x", "old_string": "a", "new_string": 42}),
         ] {
             assert_eq!(
-                EditTool::new(tracker()).result_view(&input, "edited", &ToolMetadata::default()),
+                EditTool.result_view(
+                    &input,
+                    "edited",
+                    &ToolMetadata::default(),
+                    Path::new("/repo")
+                ),
                 None,
                 "{input}",
             );
@@ -562,14 +573,18 @@ mod tests {
 
     #[test]
     fn approval_preview_renders_old_and_new_as_a_diff() {
-        let tool = EditTool::new(tracker());
-        let preview = tool.approval_preview(&serde_json::json!({
-            "file_path": "src/main.rs",
-            "old_string": "let a = 1;",
-            "new_string": "let a = 2;",
-        }));
+        let tool = EditTool;
+        let preview = tool.approval_preview(
+            "edit",
+            &serde_json::json!({
+                "file_path": "/repo/src/main.rs",
+                "old_string": "let a = 1;",
+                "new_string": "let a = 2;",
+            }),
+            Path::new("/repo"),
+        );
 
-        assert!(preview.title.contains("src/main.rs"));
+        assert_eq!(preview.title, "Edit(src/main.rs)");
         assert_eq!(
             preview.body,
             ApprovalBody::Diff(vec![DiffChunk {
@@ -593,13 +608,13 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello world").unwrap();
 
-        let output = EditTool::new(tracker_seeded(&path))
-            .run(serde_json::json!({
-                "file_path": path.to_str().unwrap(),
-                "old_string": "hello",
-                "new_string": "goodbye"
-            }))
-            .await;
+        let input = serde_json::json!({
+            "file_path": path.to_str().unwrap(),
+            "old_string": "hello",
+            "new_string": "goodbye"
+        });
+
+        let output = testing::run(&EditTool, input, &seeded_ctx(&path)).await;
 
         assert!(!output.is_error);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "goodbye world");
@@ -617,7 +632,7 @@ mod tests {
                 "file_path": "/tmp/x",
                 "old_string": "a"
             }),
-            tracker(),
+            &temp_ctx(),
         )
         .await;
         assert!(output.is_error);
@@ -636,7 +651,7 @@ mod tests {
                 "old_string": "not present",
                 "new_string": "x",
             }),
-            tracker_seeded(&path),
+            &seeded_ctx(&path),
         )
         .await;
 
@@ -667,7 +682,7 @@ mod tests {
             "fn foo() {}",
             "fn foo() -> i32 { 42 }",
             false,
-            &tracker_seeded(&path),
+            &seeded_ctx(&path),
         )
         .await
         .unwrap();
@@ -693,7 +708,7 @@ mod tests {
             "aaa",
             "ccc",
             true,
-            &tracker_seeded(&path),
+            &seeded_ctx(&path),
         )
         .await
         .unwrap();
@@ -718,7 +733,7 @@ mod tests {
             "hello",
             "goodbye",
             true,
-            &tracker_seeded(&path),
+            &seeded_ctx(&path),
         )
         .await
         .unwrap();
@@ -743,7 +758,7 @@ mod tests {
             "line1\nline2",
             "a\nb",
             false,
-            &tracker_seeded(&path),
+            &seeded_ctx(&path),
         )
         .await
         .unwrap();
@@ -763,7 +778,7 @@ mod tests {
             "aaa",
             "x\r\ny",
             false,
-            &tracker_seeded(&path),
+            &seeded_ctx(&path),
         )
         .await
         .unwrap();
@@ -783,7 +798,7 @@ mod tests {
             "replace_me",
             "replaced",
             false,
-            &tracker_seeded(&path),
+            &seeded_ctx(&path),
         )
         .await
         .unwrap();
@@ -803,7 +818,7 @@ mod tests {
             "foo\nbar",
             "a\nb",
             false,
-            &tracker_seeded(&path),
+            &seeded_ctx(&path),
         )
         .await
         .unwrap();
@@ -818,7 +833,7 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello").unwrap();
 
-        let err = edit_file(path.to_str().unwrap(), "", "x", false, &tracker())
+        let err = edit_file(path.to_str().unwrap(), "", "x", false, &temp_ctx())
             .await
             .unwrap_err();
         assert!(err.contains("must not be empty"));
@@ -831,7 +846,7 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello").unwrap();
 
-        let err = edit_file(path.to_str().unwrap(), "hello", "hello", false, &tracker())
+        let err = edit_file(path.to_str().unwrap(), "hello", "hello", false, &temp_ctx())
             .await
             .unwrap_err();
         assert!(err.contains("identical"));
@@ -848,7 +863,7 @@ mod tests {
             "nonexistent",
             "replacement",
             false,
-            &tracker_seeded(&path),
+            &seeded_ctx(&path),
         )
         .await
         .unwrap_err();
@@ -866,7 +881,7 @@ mod tests {
             "hello",
             "goodbye",
             false,
-            &tracker(),
+            &temp_ctx(),
         )
         .await
         .unwrap_err();
@@ -882,10 +897,10 @@ mod tests {
         let dir = canonical_tempdir();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello world").unwrap();
-        let tracker = tracker_seeded(&path);
+        let ctx = seeded_ctx(&path);
         std::fs::write(&path, "external edit").unwrap();
 
-        let err = edit_file(path.to_str().unwrap(), "external", "ours", false, &tracker)
+        let err = edit_file(path.to_str().unwrap(), "external", "ours", false, &ctx)
             .await
             .unwrap_err();
         assert!(
@@ -900,23 +915,15 @@ mod tests {
         std::fs::create_dir(dir.path().join("sub")).unwrap();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello world").unwrap();
-        let tracker = tracker();
+        let ctx = temp_ctx();
 
-        let read = crate::tool::read::ReadTool::new(Arc::clone(&tracker))
-            .run(serde_json::json!({"file_path": path}))
-            .await;
+        let read = testing::run(&ReadTool, serde_json::json!({"file_path": path}), &ctx).await;
         assert!(!read.is_error, "{}", read.content);
 
         let detour = dir.path().join("sub").join("..").join("test.txt");
-        edit_file(
-            detour.to_str().unwrap(),
-            "hello",
-            "goodbye",
-            false,
-            &tracker,
-        )
-        .await
-        .unwrap();
+        edit_file(detour.to_str().unwrap(), "hello", "goodbye", false, &ctx)
+            .await
+            .unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "goodbye world");
     }
 
@@ -928,15 +935,13 @@ mod tests {
         std::os::unix::fs::symlink(dir.path().join("real"), dir.path().join("link")).unwrap();
         let path = dir.path().join("real/test.txt");
         std::fs::write(&path, "hello world").unwrap();
-        let tracker = tracker();
+        let ctx = temp_ctx();
 
         let via_link = dir.path().join("link/test.txt");
-        let read = crate::tool::read::ReadTool::new(Arc::clone(&tracker))
-            .run(serde_json::json!({"file_path": via_link}))
-            .await;
+        let read = testing::run(&ReadTool, serde_json::json!({"file_path": via_link}), &ctx).await;
         assert!(!read.is_error, "{}", read.content);
 
-        edit_file(path.to_str().unwrap(), "hello", "goodbye", false, &tracker)
+        edit_file(path.to_str().unwrap(), "hello", "goodbye", false, &ctx)
             .await
             .unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "goodbye world");
@@ -948,10 +953,11 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello world\nsecond line\n").unwrap();
         let bytes = std::fs::read(&path).unwrap();
-        let tracker = tracker();
-        tracker.record_read(&path, &bytes, LastView::lines(1, 1, 2));
+        let ctx = temp_ctx();
+        ctx.tracker
+            .record_read(&path, &bytes, LastView::lines(1, 1, 2), "toolu_test");
 
-        edit_file(path.to_str().unwrap(), "hello", "goodbye", false, &tracker)
+        edit_file(path.to_str().unwrap(), "hello", "goodbye", false, &ctx)
             .await
             .unwrap();
         assert_eq!(
@@ -962,7 +968,7 @@ mod tests {
 
     #[tokio::test]
     async fn edit_file_rejects_nonexistent_file() {
-        let err = edit_file("/nonexistent/file.txt", "a", "b", false, &tracker())
+        let err = edit_file("/nonexistent/file.txt", "a", "b", false, &temp_ctx())
             .await
             .unwrap_err();
         assert!(err.contains("Error reading"));
@@ -974,10 +980,11 @@ mod tests {
         let path = dir.path().join("blob.bin");
         let bytes = [0xff_u8, 0xfe, 0xfd];
         std::fs::write(&path, bytes).unwrap();
-        let tracker = tracker();
-        tracker.record_read(&path, &bytes, LastView::Full);
+        let ctx = temp_ctx();
+        ctx.tracker
+            .record_read(&path, &bytes, LastView::Full, "toolu_test");
 
-        let err = edit_file(path.to_str().unwrap(), "a", "b", false, &tracker)
+        let err = edit_file(path.to_str().unwrap(), "a", "b", false, &ctx)
             .await
             .unwrap_err();
         assert!(
@@ -997,7 +1004,7 @@ mod tests {
             "aaa",
             "ccc",
             false,
-            &tracker_seeded(&path),
+            &seeded_ctx(&path),
         )
         .await
         .unwrap_err();
@@ -1008,7 +1015,7 @@ mod tests {
     async fn edit_file_rejects_directory() {
         let dir = canonical_tempdir();
 
-        let err = edit_file(dir.path().to_str().unwrap(), "a", "b", false, &tracker())
+        let err = edit_file(dir.path().to_str().unwrap(), "a", "b", false, &temp_ctx())
             .await
             .unwrap_err();
 
@@ -1025,7 +1032,7 @@ mod tests {
         let path = dir.path().join("socket");
         let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
 
-        let err = edit_file(path.to_str().unwrap(), "a", "b", false, &tracker())
+        let err = edit_file(path.to_str().unwrap(), "a", "b", false, &temp_ctx())
             .await
             .unwrap_err();
 
@@ -1042,7 +1049,7 @@ mod tests {
         let f = std::fs::File::create(&path).unwrap();
         f.set_len(MAX_TRACKED_FILE_SIZE + 1).unwrap();
 
-        let err = edit_file(path.to_str().unwrap(), "a", "b", false, &tracker())
+        let err = edit_file(path.to_str().unwrap(), "a", "b", false, &temp_ctx())
             .await
             .unwrap_err();
         assert!(err.contains("too large"));
@@ -1056,13 +1063,13 @@ mod tests {
         let dir = canonical_tempdir();
         let path = dir.path().join("readonly.txt");
         std::fs::write(&path, "hello world").unwrap();
-        let tracker = tracker_seeded(&path);
+        let ctx = seeded_ctx(&path);
 
         let mut perms = std::fs::metadata(&path).unwrap().permissions();
         perms.set_mode(0o444);
         std::fs::set_permissions(&path, perms).unwrap();
 
-        let err = edit_file(path.to_str().unwrap(), "hello", "goodbye", false, &tracker)
+        let err = edit_file(path.to_str().unwrap(), "hello", "goodbye", false, &ctx)
             .await
             .unwrap_err();
         assert!(err.contains("Failed to write"));
@@ -1083,15 +1090,10 @@ mod tests {
         )
         .unwrap();
 
-        let (_, replacements, chunks) = edit_file(
-            path.to_str().unwrap(),
-            "B",
-            "X",
-            true,
-            &tracker_seeded(&path),
-        )
-        .await
-        .unwrap();
+        let (_, replacements, chunks) =
+            edit_file(path.to_str().unwrap(), "B", "X", true, &seeded_ctx(&path))
+                .await
+                .unwrap();
 
         assert_eq!(replacements, 2);
         assert_eq!(chunks.len(), 2);
@@ -1145,7 +1147,7 @@ mod tests {
             "B",
             "X\nY",
             true,
-            &tracker_seeded(&path),
+            &seeded_ctx(&path),
         )
         .await
         .unwrap();
@@ -1206,7 +1208,7 @@ mod tests {
             "X\nY",
             "Z",
             true,
-            &tracker_seeded(&path),
+            &seeded_ctx(&path),
         )
         .await
         .unwrap();
