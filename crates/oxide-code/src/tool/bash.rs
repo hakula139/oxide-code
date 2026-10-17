@@ -10,7 +10,7 @@ use std::pin::Pin;
 use std::process::{ExitStatus, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
-#[cfg(target_os = "macos")]
+#[cfg(all(unix, not(target_os = "linux")))]
 use std::time::Instant;
 
 use indoc::formatdoc;
@@ -18,6 +18,8 @@ use process_wrap::tokio::{ChildWrapper, CommandWrap};
 use serde::Deserialize;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::{ChildStderr, ChildStdout};
+#[cfg(all(unix, not(target_os = "linux")))]
+use tracing::warn;
 
 use self::background::{BackgroundShells, ShellState};
 use super::{
@@ -217,7 +219,7 @@ async fn execute(command: &str, timeout: Duration, ctx: &ToolCtx) -> ToolOutput 
     let Ok((status, stdout_read, stderr_read)) = finished else {
         // Killing the tree closes its pipe ends, so the grace drain only waits on a holder that
         // escaped it.
-        shell.kill();
+        shell.kill().await;
         _ = tokio::time::timeout(DRAIN_GRACE, async {
             tokio::join!(
                 stdout_capture.drain(&mut stdout),
@@ -469,46 +471,87 @@ impl ShellTree {
         self.child.inner_mut().wait().await
     }
 
-    /// One call reaches every member, since Linux makes a group signal atomic with a fork and
-    /// terminating a Job Object ends all of its processes.
-    #[cfg(not(target_os = "macos"))]
-    fn kill(&mut self) {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+#[cfg(any(target_os = "linux", windows))]
+impl ShellTree {
+    /// One call reaches every member. Linux checks for a fatal signal and attaches a forked child
+    /// to its group under the lock a group signal holds, and terminating a Job Object ends all of
+    /// its processes.
+    #[expect(
+        clippy::unused_async,
+        reason = "shares the signature of the kill that retries on other Unix systems"
+    )]
+    async fn kill(&mut self) {
+        self.kill_blocking();
+    }
+
+    fn kill_blocking(&mut self) {
         self.armed = false;
         _ = self.child.start_kill();
     }
+}
 
-    /// Signals the group until the call fails, since XNU can miss a child forked during a
-    /// `killpg`. The call fails once no member is left alive to fork: `EPERM` when only zombies
-    /// remain and `ESRCH` when none do.
-    #[cfg(target_os = "macos")]
-    fn kill(&mut self) {
-        /// How long a member that `SIGKILL` cannot end yet, such as one in an uninterruptible
-        /// read, can hold up the kill.
-        const LIMIT: Duration = Duration::from_secs(1);
-        const RETRY_DELAY: Duration = Duration::from_millis(1);
+#[cfg(all(unix, not(target_os = "linux")))]
+impl ShellTree {
+    /// How long a kill keeps signaling members that `SIGKILL` cannot end yet, such as one in an
+    /// uninterruptible read.
+    const KILL_LIMIT: Duration = Duration::from_secs(1);
+    const KILL_RETRY_DELAY: Duration = Duration::from_millis(1);
 
+    /// Signals the group until no member it may signal is alive, since kernels other than Linux,
+    /// such as XNU, can miss a child forked during a `killpg`. On XNU, such a child joins the group
+    /// early but cannot receive signals until its fork finishes. A member still forking counts as
+    /// alive, so no child can join after the last signal. The tree stays armed until then, so
+    /// dropping the call mid-kill finishes the kill in `Drop`.
+    async fn kill(&mut self) {
+        let deadline = Instant::now() + Self::KILL_LIMIT;
+        while self.signal(deadline) {
+            tokio::time::sleep(Self::KILL_RETRY_DELAY).await;
+        }
         self.armed = false;
-        let deadline = Instant::now() + LIMIT;
-        while self.child.start_kill().is_ok() && Instant::now() < deadline {
-            std::thread::sleep(RETRY_DELAY);
+    }
+
+    /// Kills the tree as [`Self::kill`] does, blocking the thread between signals, for `Drop`.
+    fn kill_blocking(&mut self) {
+        self.armed = false;
+        let deadline = Instant::now() + Self::KILL_LIMIT;
+        while self.signal(deadline) {
+            std::thread::sleep(Self::KILL_RETRY_DELAY);
         }
     }
 
-    fn disarm(&mut self) {
-        self.armed = false;
+    /// Signals the group and says whether to signal it again. `killpg` fails once no member it
+    /// may signal is alive: `EPERM` when only zombies or members it cannot signal remain, `ESRCH`
+    /// once the group is gone.
+    fn signal(&mut self, deadline: Instant) -> bool {
+        if self.child.start_kill().is_err() {
+            return false;
+        }
+        if Instant::now() < deadline {
+            return true;
+        }
+        let limit = Self::KILL_LIMIT.as_secs();
+        warn!("stopped killing a bash process tree still alive after {limit} s of SIGKILL");
+        false
     }
 }
 
 impl Drop for ShellTree {
     fn drop(&mut self) {
         if self.armed {
-            self.kill();
+            self.kill_blocking();
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use indoc::indoc;
     use tokio::io::AsyncWriteExt as _;
 
@@ -1035,5 +1078,101 @@ mod tests {
         assert_eq!(pipe.head, vec![b'h'; PIPE_HEAD_BYTES]);
         assert_eq!(pipe.tail, vec![b't'; PIPE_TAIL_BYTES]);
         assert_eq!(pipe.omitted, 100);
+    }
+
+    // ── ShellTree::kill ──
+
+    /// A process tree whose first `live` signals reach a member and whose later ones find none,
+    /// with a count of the signals it has received.
+    fn fake_tree(live: usize) -> (ShellTree, Arc<AtomicUsize>) {
+        let signals = Arc::new(AtomicUsize::new(0));
+        let child = FakeChild {
+            live,
+            signals: Arc::clone(&signals),
+        };
+        let tree = ShellTree {
+            child: Box::new(child),
+            armed: true,
+        };
+        (tree, signals)
+    }
+
+    #[derive(Debug)]
+    struct FakeChild {
+        live: usize,
+        signals: Arc<AtomicUsize>,
+    }
+
+    impl ChildWrapper for FakeChild {
+        fn inner(&self) -> &dyn ChildWrapper {
+            unreachable!("a fake child wraps no process")
+        }
+
+        fn inner_mut(&mut self) -> &mut dyn ChildWrapper {
+            unreachable!("a fake child wraps no process")
+        }
+
+        fn into_inner(self: Box<Self>) -> Box<dyn ChildWrapper> {
+            self
+        }
+
+        fn start_kill(&mut self) -> io::Result<()> {
+            if self.signals.fetch_add(1, Ordering::Relaxed) < self.live {
+                Ok(())
+            } else {
+                Err(io::ErrorKind::PermissionDenied.into())
+            }
+        }
+    }
+
+    #[cfg(any(target_os = "linux", windows))]
+    #[tokio::test]
+    async fn kill_signals_once_from_a_call_and_from_drop() {
+        let (mut killed, killed_signals) = fake_tree(usize::MAX);
+        let (dropped, dropped_signals) = fake_tree(usize::MAX);
+
+        killed.kill().await;
+        drop(killed);
+        drop(dropped);
+
+        assert_eq!(killed_signals.load(Ordering::Relaxed), 1);
+        assert_eq!(dropped_signals.load(Ordering::Relaxed), 1);
+    }
+
+    #[cfg(all(unix, not(target_os = "linux")))]
+    #[tokio::test]
+    async fn kill_signals_until_no_member_is_alive() {
+        let (mut tree, signals) = fake_tree(2);
+
+        tree.kill().await;
+        drop(tree);
+
+        assert_eq!(signals.load(Ordering::Relaxed), 3);
+    }
+
+    #[cfg(all(unix, not(target_os = "linux")))]
+    #[tokio::test]
+    async fn kill_cut_short_finishes_in_drop() {
+        let (mut tree, signals) = fake_tree(5);
+
+        let cut = tokio::time::timeout(Duration::ZERO, tree.kill()).await;
+        let before_drop = signals.load(Ordering::Relaxed);
+        drop(tree);
+
+        assert!(cut.is_err(), "the kill waits between signals");
+        assert_eq!(before_drop, 1);
+        assert_eq!(signals.load(Ordering::Relaxed), 6);
+    }
+
+    #[cfg(all(unix, not(target_os = "linux")))]
+    #[test]
+    fn kill_from_drop_gives_up_on_a_tree_that_outlives_the_limit() {
+        let (tree, signals) = fake_tree(usize::MAX);
+
+        let began = Instant::now();
+        drop(tree);
+
+        assert!(began.elapsed() >= ShellTree::KILL_LIMIT);
+        assert!(signals.load(Ordering::Relaxed) > 1);
     }
 }
