@@ -55,8 +55,8 @@ pub(crate) fn mode(arg: &str) -> Result<Op, String> {
     let arg = required(arg, "mode", "/mode <mode>")?;
     let mode = arg
         .to_ascii_lowercase()
-        .parse()
-        .map_err(|_| format!("Unknown mode: `{arg}`. Valid: {}.", Mode::VALID_VALUES))?;
+        .parse::<Mode>()
+        .map_err(|e| format!("Unknown mode `{arg}`: {e}."))?;
     Ok(Op::SetMode(mode))
 }
 
@@ -249,13 +249,20 @@ mod tests {
     }
 
     #[test]
-    fn mode_unknown_mode_lists_the_valid_ones() {
-        for arg in ["auto", "Turbo"] {
-            assert_eq!(
-                mode(arg),
-                Err(format!("Unknown mode: `{arg}`. Valid: manual, plan, yolo.")),
-            );
-        }
+    fn mode_unknown_mode_lists_the_valid_ones_and_names_the_replacement_for_auto() {
+        assert_eq!(
+            mode("Turbo"),
+            Err("Unknown mode `Turbo`: expected one of manual, plan, yolo.".to_owned()),
+        );
+        assert_eq!(
+            mode("AUTO"),
+            Err(
+                "Unknown mode `AUTO`: expected one of manual, plan, yolo. The asking mode \
+                 \"auto\" is now \"manual\", the default, so use \"manual\" or leave the mode \
+                 unset."
+                    .to_owned()
+            ),
+        );
     }
 
     // ── model ──

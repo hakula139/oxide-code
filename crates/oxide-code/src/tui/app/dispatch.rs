@@ -246,10 +246,10 @@ impl App {
                 self.input.set_enabled(false);
                 self.status_bar.set_status(Status::SigningIn);
             }
+            Op::SetMode(mode) => self.requested_mode = *mode,
             Op::Queue(_)
             | Op::Resolve { .. }
             | Op::SetModel { .. }
-            | Op::SetMode(_)
             | Op::Clear
             | Op::Archive
             | Op::Rename { .. }
@@ -295,14 +295,13 @@ impl App {
         }
     }
 
-    /// Switches to the mode after the current one in the Shift+Tab cycle, or to the cycle's first
-    /// mode from one outside it.
+    /// Switches to the mode after the last requested one in the Shift+Tab cycle, or to the cycle's
+    /// first mode from one outside it.
     fn cycle_mode(&mut self) {
-        let current = self.session_info.config.permission_mode;
         let next = self
             .mode_cycle
             .iter()
-            .position(|&mode| mode == current)
+            .position(|&mode| mode == self.requested_mode)
             .map_or(self.mode_cycle[0], |index| {
                 self.mode_cycle[(index + 1) % self.mode_cycle.len()]
             });
@@ -1601,7 +1600,7 @@ mod tests {
         app.dispatch_action(Action::Submit("/mode".to_owned()));
 
         assert_eq!(rx.try_recv().ok(), Some(Op::SetMode(Mode::Plan)));
-        assert_eq!(rx.try_recv().ok(), Some(Op::SetMode(Mode::Plan)));
+        assert_eq!(rx.try_recv().ok(), Some(Op::SetMode(Mode::Manual)));
         assert!(app.modals.is_active(), "the bare form opens the picker");
         assert!(app.pending_prompts.is_empty());
     }
@@ -1633,9 +1632,21 @@ mod tests {
     }
 
     #[test]
+    fn cycle_mode_steps_on_from_a_switch_awaiting_its_confirmation() {
+        let (mut app, mut rx, _event_tx) = test_app(None);
+
+        app.handle_crossterm_event(&key_event(KeyCode::BackTab, KeyModifiers::SHIFT));
+        app.handle_crossterm_event(&key_event(KeyCode::BackTab, KeyModifiers::SHIFT));
+
+        assert_eq!(rx.try_recv().ok(), Some(Op::SetMode(Mode::Plan)));
+        assert_eq!(rx.try_recv().ok(), Some(Op::SetMode(Mode::Manual)));
+    }
+
+    #[test]
     fn cycle_mode_from_a_mode_outside_the_cycle_returns_to_manual() {
         let (mut app, mut rx, _event_tx) = test_app(None);
-        app.handle_engine_event(Event::ModeChanged(Mode::Yolo));
+        app.dispatch_action(Action::Submit("/mode yolo".to_owned()));
+        assert_eq!(rx.try_recv().ok(), Some(Op::SetMode(Mode::Yolo)));
 
         app.handle_crossterm_event(&key_event(KeyCode::BackTab, KeyModifiers::SHIFT));
 

@@ -23,6 +23,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
+use clap::builder::{PossibleValue, TypedValueParser};
 use clap::{ArgGroup, Parser};
 use tracing::warn;
 
@@ -89,7 +90,7 @@ struct Cli {
     list: bool,
 
     /// Start in this permission mode, overriding `permission.mode` and `OX_PERMISSION_MODE`.
-    #[arg(long, value_enum, value_name = "MODE")]
+    #[arg(long, value_parser = ModeParser, value_name = "MODE")]
     mode: Option<Mode>,
 
     /// Disable the TUI and use a bare REPL instead.
@@ -113,6 +114,30 @@ struct Cli {
     /// Open the TUI on the session picker. Quitting the picker exits without starting a session.
     #[arg(short, long, conflicts_with_all = ["continue", "list", "no_tui", "prompt"])]
     resume: bool,
+}
+
+/// Parses `--mode` through the `FromStr` of [`Mode`], whose error names the replacement for the
+/// renamed `auto`, and lists the modes in `--help`.
+#[derive(Clone)]
+struct ModeParser;
+
+impl TypedValueParser for ModeParser {
+    type Value = Mode;
+
+    fn parse_ref(
+        &self,
+        cmd: &clap::Command,
+        arg: Option<&clap::Arg>,
+        value: &std::ffi::OsStr,
+    ) -> Result<Mode, clap::Error> {
+        str::parse::<Mode>.parse_ref(cmd, arg, value)
+    }
+
+    fn possible_values(&self) -> Option<Box<dyn Iterator<Item = PossibleValue> + '_>> {
+        Some(Box::new(Mode::ALL.into_iter().map(|mode| {
+            PossibleValue::new(mode.as_str()).help(mode.description())
+        })))
+    }
 }
 
 fn main() -> Result<ExitCode> {
@@ -285,10 +310,16 @@ mod tests {
         let cli = Cli::try_parse_from(["ox", "--mode", "plan"]).unwrap();
         assert_eq!(cli.mode, Some(Mode::Plan));
         assert_eq!(Cli::try_parse_from(["ox"]).unwrap().mode, None);
-        let invalid = Cli::try_parse_from(["ox", "--mode", "auto"]).err();
-        assert_eq!(
-            invalid.map(|error| error.kind()),
-            Some(ErrorKind::InvalidValue)
+        let invalid = Cli::try_parse_from(["ox", "--mode", "auto"])
+            .err()
+            .expect("auto is not a mode");
+        assert_eq!(invalid.kind(), ErrorKind::ValueValidation);
+        assert!(
+            invalid.to_string().starts_with(
+                "error: invalid value 'auto' for '--mode <MODE>': expected one of manual, plan, \
+                 yolo. The asking mode \"auto\" is now \"manual\""
+            ),
+            "{invalid}",
         );
     }
 

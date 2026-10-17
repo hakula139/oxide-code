@@ -203,6 +203,7 @@ mod tests {
     use super::*;
     use crate::protocol::Op;
     use crate::slash::registry::testing::FakeCmd;
+    use crate::slash::test_session_info;
     use crate::tui::modal::ModalAction;
     use crate::tui::modal::testing::ScriptedModal;
 
@@ -315,6 +316,33 @@ mod tests {
             ..FakeCmd::DEFAULT
         };
         assert_eq!(empty_metadata_offenders(&[&empty]), vec!["no-desc"]);
+    }
+
+    #[test]
+    fn built_ins_steering_forms_forward_only_ops_the_engine_takes_mid_turn() {
+        let info = test_session_info();
+        let ctx = SlashContext::new(&info, None);
+        let mut steering = 0;
+
+        for cmd in BUILT_INS {
+            let completions = cmd
+                .complete_arg("")
+                .into_iter()
+                .map(|c| c.value.into_owned());
+            let forms = [String::new(), "x".to_owned()]
+                .into_iter()
+                .chain(completions);
+            for args in forms.filter(|args| cmd.classify(args) == SlashKind::Steering) {
+                match cmd.execute(&args, &ctx) {
+                    Ok(SlashOutcome::Forward(Action::Op(Op::Queue(_) | Op::SetMode(_))))
+                    | Err(_) => {}
+                    other => panic!("/{} {args} forwards {other:?}", cmd.name()),
+                }
+                steering += 1;
+            }
+        }
+
+        assert!(steering > 0, "no built-in form steers");
     }
 
     // ── lookup_in ──

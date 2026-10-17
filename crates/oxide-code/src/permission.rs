@@ -19,7 +19,6 @@ use std::sync::{Arc, LazyLock};
 
 use anyhow::{Result, bail, ensure};
 use caseless::Caseless;
-use clap::ValueEnum;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use unicode_normalization::UnicodeNormalization;
@@ -32,7 +31,7 @@ use crate::util::path::{expand_user, lexical_normalize};
 // ── Mode ──
 
 /// The standing permission posture, which settles the calls no rule does.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase", try_from = "String")]
 pub(crate) enum Mode {
     /// Ask about every call the rules leave open.
@@ -81,7 +80,7 @@ impl FromStr for Mode {
             "yolo" => Ok(Self::Yolo),
             "auto" => bail!(
                 "expected one of {}. The asking mode \"auto\" is now \"manual\", the default, so \
-                 use \"manual\" or leave the mode unset.",
+                 use \"manual\" or leave the mode unset",
                 Self::VALID_VALUES
             ),
             _ => bail!("expected one of {}", Self::VALID_VALUES),
@@ -822,12 +821,12 @@ impl Policy {
         let mut deny: Vec<TierRule> = deny.into_iter().map(TierRule::configured).collect();
         let mut ask: Vec<TierRule> = ask.into_iter().map(TierRule::configured).collect();
         for group in enabled() {
-            if let Some((tier, rules)) = group.rules()? {
+            if let Some(rules) = group.rules()? {
                 let shipped = rules.into_iter().map(|rule| TierRule {
                     rule,
                     builtin: Some(group),
                 });
-                match tier {
+                match group.tier() {
                     ShippedTier::Deny => deny.extend(shipped),
                     ShippedTier::Ask => ask.extend(shipped),
                 }
@@ -1389,7 +1388,7 @@ mod tests {
         assert_eq!(
             err,
             "expected one of manual, plan, yolo. The asking mode \"auto\" is now \"manual\", the \
-             default, so use \"manual\" or leave the mode unset."
+             default, so use \"manual\" or leave the mode unset"
         );
     }
 

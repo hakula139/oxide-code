@@ -186,7 +186,7 @@ If automatic compaction fails, oxide-code does not send the prompt, and the TUI 
 
 The usage limits come from Claude subscription sign-ins, which report how much of each window is spent with every response. A window disappears when it resets and remains gone until the next response reports it again. The [theming guide](theming.md#status-line-segments) lists the colors used by the context and usage-limit segments as a window fills.
 
-When the row is too narrow to fit every configured segment, low-utility ones drop in this order before the remaining content gets truncated: `theme` → `session-id` → `thread-title` → `current-time` → `pull-request-review` → `pull-request-checks` → `pull-request` → `git-branch` → `current-dir` → `task-progress` → `queued-prompts` → `session-cost` → `weekly-limit` → `five-hour-limit` → `context-used` → `permission-mode` → `model` → `model-with-effort` → `run-state`. Run state takes priority over every other segment. The last remaining segment is truncated to fit rather than dropped.
+When the row is too narrow to fit every configured segment, low-utility ones drop in this order before the remaining content gets truncated: `theme` → `session-id` → `thread-title` → `current-time` → `pull-request-review` → `pull-request-checks` → `pull-request` → `git-branch` → `current-dir` → `task-progress` → `queued-prompts` → `session-cost` → `weekly-limit` → `five-hour-limit` → `context-used` → `model` → `model-with-effort` → `permission-mode` → `run-state`. Run state takes priority over every other segment, and the permission mode over the rest. The last remaining segment is truncated to fit rather than dropped.
 
 `OX_STATUS_LINE` accepts the same segment names, comma-separated, with optional whitespace (`OX_STATUS_LINE="model, run-state"`). A value with no segments (`","`), an empty entry between commas (`"model,,run-state"`), or an unknown segment name fails startup with a parse error.
 
@@ -226,12 +226,12 @@ The `a` key opens the pattern of the session rule it will add, in the syntax bel
 | `defaults`    | table  | all on     | Built-in rules to turn off by name (user config only)                 |
 
 - **`manual`** asks about every call that no rule settles.
-- **`plan`** is read-only. It denies every edit, `exec`, and `net` call, including read-only commands such as `ls`, and reads behave as in `manual`.
+- **`plan`** is read-only. Every edit, `exec`, and `net` call is denied, including read-only commands such as `ls`. Reads behave as in `manual`. The `tasks`, `bash_output`, and `bash_stop` tools count as reads, so they still run.
 - **`yolo`** runs every call that no rule settles. Deny patterns still deny, and ask patterns and the built-in ask rules still ask, so `yolo` asks before an edit to `.git/hooks` until you set `git = false`. A headless run denies those calls.
 
 The environment variable `OX_PERMISSION_MODE` overrides `mode`, and `ox --mode <mode>` overrides both for one run.
 
-During a session, `/mode` opens a picker of the three modes, and `/mode <mode>` switches directly. **Shift+Tab** switches between `manual` and `plan`, and its cycle includes `yolo` only when the session started in `yolo`, so a stray key press cannot run every call unprompted. A switch during a turn applies from the turn's next tool call. The `permission-mode` [status-line segment](#tui-terminal-ui) shows `plan` and `yolo`, and a restart returns to the configured mode.
+During a session, `/mode` opens a picker of the three modes, and `/mode <mode>` switches directly. **Shift+Tab** switches between `manual` and `plan`, and its cycle includes `yolo` only when the session started in `yolo`, so a stray key press cannot run every call unprompted. A switch during a turn takes effect with the turn's next tool call. A command already running in the foreground or as a background shell continues after the switch to `plan`. The default status line includes the `permission-mode` [segment](#tui-terminal-ui), which displays `plan` or `yolo`. To display the mode in a custom `status_line`, include `permission-mode`. Restarting restores the configured mode.
 
 ```toml
 [permission.deny]

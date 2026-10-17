@@ -15,7 +15,7 @@ use super::abort::{AbortResult, Inbox, TurnAbort, await_unless_aborted};
 use crate::file_tracker::FileTracker;
 use crate::message::ContentBlock;
 use crate::permission::rule::Rule;
-use crate::permission::{Basis, Policy, SessionGrant, Workspace};
+use crate::permission::{Policy, SessionGrant, Workspace};
 use crate::protocol::{Decision, Event, EventSink, Op, ToolCall, ToolResult};
 use crate::tool::tasks::Task;
 use crate::tool::{
@@ -356,7 +356,10 @@ impl<'r> Dispatcher<'r, '_> {
         );
         match verdict.decision {
             crate::permission::Decision::Allow => Ok(None),
-            crate::permission::Decision::Deny => Ok(Some(denied_output(name, &verdict.basis))),
+            crate::permission::Decision::Deny => Ok(Some(denied_output(
+                name,
+                format_args!("by {}", verdict.basis),
+            ))),
             crate::permission::Decision::Ask => {
                 // The approval request is a control-plane event: if it can't be delivered, no
                 // frontend can answer it and `await_approval` would block forever. Fail closed on
@@ -377,14 +380,17 @@ impl<'r> Dispatcher<'r, '_> {
                     })
                     .is_err()
                 {
-                    return Ok(Some(denied_output(name, &verdict.basis)));
+                    return Ok(Some(denied_output(
+                        name,
+                        "because its approval request could not reach the user",
+                    )));
                 }
                 match await_approval(id, self.ops, self.inbox, self.sink).await? {
                     Decision::Approve => Ok(None),
                     Decision::AllowForSession { rule } => {
-                        Ok(self.allow_for_session(grant.as_ref(), *rule, name, &verdict.basis))
+                        Ok(self.allow_for_session(grant.as_ref(), *rule, name))
                     }
-                    Decision::Deny => Ok(Some(denied_output(name, "the user"))),
+                    Decision::Deny => Ok(Some(denied_output(name, "by the user"))),
                     Decision::DenyWithFeedback { feedback } => Ok(Some(ToolOutput::error(
                         format!("The {name} call was denied with this feedback: {feedback}"),
                     ))),
@@ -395,14 +401,12 @@ impl<'r> Dispatcher<'r, '_> {
     }
 
     /// Adds the frontend's `rule` to the session allow rules once the call's own `grant` admits it,
-    /// since the frontend's check is advisory. A refused rule returns a denial by `basis`, which
-    /// made the call ask.
+    /// since the frontend's check is advisory. A refused rule returns a denial.
     fn allow_for_session(
         &mut self,
         grant: Option<&SessionGrant>,
         rule: Rule,
         name: &str,
-        basis: &Basis,
     ) -> Option<ToolOutput> {
         let admitted = grant
             .context("this call offers no session rule")
@@ -423,17 +427,21 @@ impl<'r> Dispatcher<'r, '_> {
                     )),
                     "session-rule-refused",
                 );
-                Some(denied_output(name, basis))
+                Some(denied_output(
+                    name,
+                    "because the session rule chosen in its approval does not cover it",
+                ))
             }
         }
     }
 }
 
-/// The synthetic tool result for a call denied by `by`, a [`Basis`] or the user. Marked `is_error`
-/// so the model treats it as a failed call and can try another approach.
-fn denied_output(name: &str, by: impl fmt::Display) -> ToolOutput {
+/// The synthetic tool result for a call denied for `reason`, a phrase that follows "was denied",
+/// such as `by the user`. Marked `is_error` so the model treats it as a failed call and can try
+/// another approach.
+fn denied_output(name: &str, reason: impl fmt::Display) -> ToolOutput {
     ToolOutput::error(format!(
-        "The {name} call was denied by {by}. Do not retry it. Choose a different approach or ask \
+        "The {name} call was denied {reason}. Do not retry it. Choose a different approach or ask \
          the user to adjust permissions."
     ))
 }
@@ -479,7 +487,7 @@ mod tests {
 
     use super::*;
     use crate::engine::testing::{EchoTool, dispatch_with, inert_ops};
-    use crate::permission::{Mode, PermissionClass};
+    use crate::permission::{Basis, Mode, PermissionClass};
     use crate::protocol::CapturingSink;
     use crate::tool::bash::BashTool;
     #[cfg(unix)]
@@ -1069,8 +1077,9 @@ mod tests {
             assert_eq!(
                 denial.content,
                 format!(
-                    "The {name} call was denied by `manual` mode. Do not retry it. Choose a \
-                     different approach or ask the user to adjust permissions."
+                    "The {name} call was denied because the session rule chosen in its approval \
+                     does not cover it. Do not retry it. Choose a different approach or ask the \
+                     user to adjust permissions."
                 ),
                 "{class} {pattern}"
             );
@@ -1115,8 +1124,8 @@ mod tests {
 
         assert_eq!(
             denial.content,
-            "The echo call was denied by `manual` mode. Do not retry it. Choose a different \
-             approach or ask the user to adjust permissions."
+            "The echo call was denied because its approval request could not reach the user. Do \
+             not retry it. Choose a different approach or ask the user to adjust permissions."
         );
     }
 

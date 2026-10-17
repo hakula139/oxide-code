@@ -2272,6 +2272,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn submit_prompt_keeps_a_mode_switch_sent_during_a_failed_auto_compaction() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            mount_reply(&server, "   ").await;
+            let dir = tempfile::tempdir().unwrap();
+            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+            engine.compaction = CompactionConfig::with_threshold_for_test(50_000);
+            engine.messages = tool_heavy_transcript();
+            engine.last_usage = Some(TokenUsage::new(50_000, 1));
+            let sink = CapturingSink::new();
+            let (ops_tx, mut ops) = mpsc::channel(1);
+            ops_tx.try_send(Op::SetMode(Mode::Plan)).unwrap();
+
+            let end = engine.submit_prompt("five", &sink, &mut ops).await;
+
+            assert_eq!(end, TurnEnd::Failed);
+            assert_eq!(engine.policy.mode(), Mode::Plan);
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn submit_prompt_fails_while_signed_out_without_sending_a_request() {
         with_pinned_home(async {
             let server = MockServer::start().await;
@@ -2486,6 +2508,26 @@ mod tests {
                 ),
                 "{events:?}",
             );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn compact_keeps_a_mode_switch_sent_before_a_cancel() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            let dir = tempfile::tempdir().unwrap();
+            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+            engine.messages = tool_heavy_transcript();
+            let sink = CapturingSink::new();
+            let (ops_tx, mut ops) = mpsc::channel(2);
+            ops_tx.try_send(Op::SetMode(Mode::Plan)).unwrap();
+            ops_tx.try_send(Op::Interrupt).unwrap();
+
+            let end = engine.compact(&sink, &mut ops, None).await;
+
+            assert_eq!(end, TurnEnd::Cancelled);
+            assert_eq!(engine.policy.mode(), Mode::Plan);
         })
         .await;
     }
@@ -3296,6 +3338,25 @@ mod tests {
                 ),
                 "{failed:?}"
             );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn login_keeps_a_mode_switch_sent_before_a_cancel() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            let dir = tempfile::tempdir().unwrap();
+            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+            let sink = CapturingSink::new();
+            let (ops_tx, mut ops) = mpsc::channel(2);
+            ops_tx.try_send(Op::SetMode(Mode::Plan)).unwrap();
+            ops_tx.try_send(Op::Interrupt).unwrap();
+
+            let end = engine.login(&sink, &mut ops).await;
+
+            assert_eq!(end, TurnEnd::Cancelled);
+            assert_eq!(engine.policy.mode(), Mode::Plan);
         })
         .await;
     }

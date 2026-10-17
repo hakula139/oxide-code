@@ -12,6 +12,7 @@ use tracing::debug;
 use crate::config::Effort;
 use crate::engine::TurnEnd;
 use crate::model::ModelSpec;
+use crate::permission::defaults::ShippedTier;
 use crate::permission::{Basis, SessionGrant};
 use crate::protocol::{Decision, Event, EventSink, Op, ToolCall, ToolResult};
 use crate::session::display::{UNTITLED_MARKER, archive_notice, id_prefix};
@@ -102,7 +103,7 @@ impl Approver for Unattended {
                     rule.class(),
                 )
             }
-            (None, Basis::Builtin(group)) => format!(
+            (None, Basis::Builtin(group)) if group.tier() == ShippedTier::Ask => format!(
                 "This run cannot ask for approval, and {basis} holds this call. It runs only \
                  after approval in an interactive session, or once `{group} = false` under \
                  `[permission.defaults]` in the user config turns the rule off."
@@ -528,6 +529,12 @@ mod tests {
                 "This run cannot ask for approval, and the built-in `git` rule holds this call. It \
                  runs only after approval in an interactive session, or once `git = false` under \
                  `[permission.defaults]` in the user config turns the rule off.",
+            ),
+            (
+                &Basis::Builtin(Shipped::Ssh),
+                None,
+                "This run cannot ask for approval, and the built-in `ssh` rule holds this call, so \
+                 it runs only after approval in an interactive session.",
             ),
             (
                 &ask,

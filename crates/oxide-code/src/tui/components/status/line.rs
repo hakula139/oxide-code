@@ -312,9 +312,9 @@ fn segment_utility(segment: StatusLineSegment) -> u8 {
         StatusLineSegment::WeeklyLimit => 12,
         StatusLineSegment::FiveHourLimit => 13,
         StatusLineSegment::ContextUsed => 14,
-        StatusLineSegment::PermissionMode => 15,
-        StatusLineSegment::Model => 16,
-        StatusLineSegment::ModelWithEffort => 17,
+        StatusLineSegment::Model => 15,
+        StatusLineSegment::ModelWithEffort => 16,
+        StatusLineSegment::PermissionMode => 17,
         StatusLineSegment::RunState => 18,
     }
 }
@@ -973,9 +973,9 @@ mod tests {
             StatusLineSegment::WeeklyLimit,
             StatusLineSegment::FiveHourLimit,
             StatusLineSegment::ContextUsed,
-            StatusLineSegment::PermissionMode,
             StatusLineSegment::Model,
             StatusLineSegment::ModelWithEffort,
+            StatusLineSegment::PermissionMode,
             StatusLineSegment::RunState,
         ];
         for (earlier, later) in drop_order.iter().zip(&drop_order[1..]) {

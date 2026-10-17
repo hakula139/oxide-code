@@ -727,7 +727,7 @@ mod tests {
                 [permission.allow]
                 exec = ["cargo test *"]
 
-                permission.mode = "auto": expected one of manual, plan, yolo. The asking mode "auto" is now "manual", the default, so use "manual" or leave the mode unset."#,
+                permission.mode = "auto": expected one of manual, plan, yolo. The asking mode "auto" is now "manual", the default, so use "manual" or leave the mode unset"#,
                 path.display()
             }
         );
