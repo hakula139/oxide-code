@@ -853,7 +853,7 @@ mod tests {
     }
 
     #[test]
-    fn result_view_normalises_trailing_newline() {
+    fn result_view_normalizes_trailing_newline() {
         let view = GlobTool::default()
             .result_view(
                 &serde_json::json!({"pattern": "*.rs"}),
@@ -927,13 +927,13 @@ mod tests {
     }
 
     #[test]
-    fn result_view_falls_back_for_unrecognised_trailing_prose() {
+    fn result_view_falls_back_for_unrecognized_trailing_prose() {
         let view = GlobTool::default().result_view(
             &serde_json::json!({"pattern": "*.rs"}),
             indoc! {"
                 src/main.rs
 
-                (Some other footer we don't recognise)"
+                (Some other footer we don't recognize)"
             },
             &ToolMetadata::default(),
             Path::new("/repo"),

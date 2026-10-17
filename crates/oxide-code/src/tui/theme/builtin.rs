@@ -1,4 +1,4 @@
-//! Built-in theme catalogue. TOML bodies are embedded via `include_str!` so the binary stays
+//! Built-in theme catalog. TOML bodies are embedded via `include_str!` so the binary stays
 //! self-contained and the vendored files in `crates/oxide-code/themes/` double as user examples.
 
 pub(super) const MOCHA: &str = include_str!("../../../themes/mocha.toml");

@@ -54,7 +54,7 @@ The native write runs on a blocking thread and keeps its `arboard` handle for th
 
 The OSC 52 write goes out inside the next frame's synchronized update. Under GNU screen (`STY` set, outside tmux), screen passes it to the outer terminal only inside its DCS passthrough (`ESC P` ... `ESC \`) and abandons a string over its 768-byte buffer, so `ox` sends the payload as a run of DCS strings of 76 base64 bytes each. Terminal.app and the Linux console ignore OSC 52, so when no other route worked, `ox` writes nothing and names the fix: Fn-drag or Cmd-R, which turns off mouse reporting, in Terminal.app, and Shift-drag in the console. iTerm2 applies OSC 52 only once "Applications in terminal may access clipboard" is on, so its notice names that setting. Selections over 100,000 bytes, xterm's default cap, go only to the system clipboard.
 
-A pill at the chat's bottom-left corner reports the outcome for three seconds, truncated to the width the jump-to-bottom pill leaves. OSC 52 has no acknowledgement, so a terminal that blocks clipboard writes still shows the copy as done. VS Code's Remote SSH terminal drops OSC 52 this way, and since Cursor's remote terminal reports the same `TERM_PROGRAM` and applies it, `ox` cannot warn about it.
+A pill at the chat's bottom-left corner reports the outcome for three seconds, truncated to the width the jump-to-bottom pill leaves. OSC 52 has no acknowledgment, so a terminal that blocks clipboard writes still shows the copy as done. VS Code's Remote SSH terminal drops OSC 52 this way, and since Cursor's remote terminal reports the same `TERM_PROGRAM` and applies it, `ox` cannot warn about it.
 
 ## OSC 8 hyperlinks on the PR status segments
 

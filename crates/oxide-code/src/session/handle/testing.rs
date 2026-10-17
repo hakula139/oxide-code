@@ -37,7 +37,7 @@ pub(crate) fn acks_append_ai_title_with_failure(
 
 /// Stand-in actor that acks the first `succeed` non-Shutdown cmds, then drops cmds without
 /// acking, which exercises the rx-await fallback when the actor stalls between receive and ack.
-/// Shutdown is always honoured so `handle.shutdown()` still returns.
+/// Shutdown is always honored so `handle.shutdown()` still returns.
 pub(crate) fn acks_then_drops(session_id: &str, succeed: usize) -> SessionHandle {
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<SessionCmd>(8);
     let count = Arc::new(AtomicUsize::new(0));

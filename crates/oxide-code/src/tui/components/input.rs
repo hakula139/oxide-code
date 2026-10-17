@@ -522,7 +522,7 @@ mod tests {
     #[test]
     fn handle_event_ctrl_d_with_content_is_a_noop_in_idle_and_busy() {
         // Pressing Ctrl+D mid-prompt must not discard the typed text —
-        // matches bash / zsh / Codex behaviour. Applies in both idle
+        // matches bash / zsh / Codex behavior. Applies in both idle
         // and busy states since typing flows into the buffer in both
         // (busy presses queue a follow-up).
         let mut input = test_input();

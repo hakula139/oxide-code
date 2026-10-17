@@ -70,7 +70,7 @@ impl SlashCommand for ThemeCmd {
     }
 }
 
-/// Resolve a typed `/theme <name>` argument against the curated catalogue. Custom file paths
+/// Resolve a typed `/theme <name>` argument against the curated catalog. Custom file paths
 /// are rejected — users with a custom TOML edit `~/.config/ox/config.toml` directly.
 fn resolve_theme_arg(arg: &str) -> Result<&'static str, String> {
     let lower = arg.to_ascii_lowercase();

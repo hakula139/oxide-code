@@ -75,8 +75,8 @@ pub(super) struct ModelEffortPicker {
 }
 
 impl ModelEffortPicker {
-    /// Infallible because every catalogue row has an effort axis. A session on an id outside the
-    /// catalogue opens on the default model's row.
+    /// Infallible because every catalog row has an effort axis. A session on an id outside the
+    /// catalog opens on the default model's row.
     pub(super) fn new(info: &LiveSessionInfo) -> Self {
         let model = &info.config.model;
         let active_model = model.id().to_owned();
@@ -264,7 +264,7 @@ mod tests {
     // ── ModelEffortPicker::new ──
 
     #[test]
-    fn new_lists_catalogue_and_positions_cursor_on_active_model() {
+    fn new_lists_catalog_and_positions_cursor_on_active_model() {
         let p = picker();
         let row = p.list.selected().expect("active row");
         assert_eq!(row.info.id, "claude-opus-5-5");

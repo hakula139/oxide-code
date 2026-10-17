@@ -60,7 +60,7 @@ pub(crate) fn mode(arg: &str) -> Result<Op, String> {
     Ok(Op::SetMode(mode))
 }
 
-/// `/model <id>`. Matches an exact catalogue id, then a unique substring of one, so family names
+/// `/model <id>`. Matches an exact catalog id, then a unique substring of one, so family names
 /// such as `opus` work as aliases.
 pub(crate) fn model(arg: &str) -> Result<Op, String> {
     let arg = required(arg, "model id", "/model <id>")?.to_ascii_lowercase();
@@ -273,7 +273,7 @@ mod tests {
     // ── model ──
 
     #[test]
-    fn model_round_trips_every_catalogue_id() {
+    fn model_round_trips_every_catalog_id() {
         for info in MODELS {
             assert_eq!(model(info.id), Ok(set_model(info.id)));
         }
@@ -293,7 +293,7 @@ mod tests {
     }
 
     #[test]
-    fn model_unknown_id_suggests_a_replacement_and_lists_the_catalogue() {
+    fn model_unknown_id_suggests_a_replacement_and_lists_the_catalog() {
         // Ids naming a family and a `[1m]` suffix also get the matching model as a suggestion.
         for (arg, expected) in [
             (

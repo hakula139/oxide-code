@@ -73,7 +73,7 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 
 6. **Commands return modals as `SlashOutcome::Modal`.** `execute` reads a borrowed `SlashContext` and hands every effect back as a value, so the App pushes the modal in the same place it prints chat output, and commands never touch the modal stack or `ChatView`.
 
-7. **Bare `/model` and bare `/effort` open separate modals.** Threading both bare forms through one modal would force a single-axis decision through a two-axis interface. `/model` keeps the multi-axis combined picker (model and effort cycle together), while `/effort` gets its own single-axis slider. Typed-arg `/model <id>` and `/effort <level>` keep direct-switch behaviour for scripting and power users.
+7. **Bare `/model` and bare `/effort` open separate modals.** Threading both bare forms through one modal would force a single-axis decision through a two-axis interface. `/model` keeps the multi-axis combined picker (model and effort cycle together), while `/effort` gets its own single-axis slider. Typed-arg `/model <id>` and `/effort <level>` keep direct-switch behavior for scripting and power users.
 
 8. **`ListPicker` is a state + render primitive.** Concrete pickers embed it and forward keys to it. This separates "list selection state" from "what does Enter dispatch", avoiding the boxed-callback pattern while staying broadly reusable. `/model + /effort`, `/mode`, `/theme`, and `/init` build on it.
 

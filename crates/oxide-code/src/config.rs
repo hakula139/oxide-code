@@ -65,7 +65,7 @@ pub(crate) struct ConfigSnapshot {
     pub(crate) show_thinking: bool,
     pub(crate) show_welcome: bool,
     pub(crate) status_line: Vec<StatusLineSegment>,
-    /// Resolved theme base name — built-in catalogue key or filesystem path. `/theme` reads this
+    /// Resolved theme base name — built-in catalog key or filesystem path. `/theme` reads this
     /// to mark the active row in the picker.
     pub(crate) theme_name: String,
     pub(crate) provenance: Provenance,
@@ -315,7 +315,7 @@ impl FromStr for StatusLineSegment {
 /// `[tui.theme]` as configured. The TUI resolves it into a palette.
 #[derive(Debug, Clone)]
 pub(crate) struct ThemeConfig {
-    /// Built-in catalogue key (e.g. `"mocha"`) or filesystem path, [`DEFAULT_THEME`] when unset.
+    /// Built-in catalog key (e.g. `"mocha"`) or filesystem path, [`DEFAULT_THEME`] when unset.
     pub(crate) base: String,
     /// `[tui.theme.overrides]` slot patches, still raw TOML.
     pub(crate) overrides: toml::Table,
@@ -327,7 +327,7 @@ pub(crate) struct ThemeConfig {
 #[derive(Debug, Clone)]
 pub(crate) struct Config {
     pub(crate) model: ModelSpec,
-    /// `None` for models outside the catalogue.
+    /// `None` for models outside the catalog.
     pub(crate) effort: Option<Effort>,
     /// `None` while signed out, which only an interactive session starts in, since `/login` can
     /// sign it in.

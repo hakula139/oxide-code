@@ -1,4 +1,4 @@
-//! Catalogue of the supported Claude models, matched by exact id.
+//! Catalog of the supported Claude models, matched by exact id.
 //!
 //! Every row shares one request surface: adaptive thinking, the full `output_config.effort`
 //! ladder, `clear_thinking` context management, a 1M-token context window, and 128K output.
@@ -17,7 +17,7 @@ use pricing::{FABLE_5_1_RATES, HAIKU_5_5_RATES, OPUS_5_5_RATES, SONNET_5_5_RATES
 
 // ── ModelInfo ──
 
-/// One row in the [`MODELS`] catalogue.
+/// One row in the [`MODELS`] catalog.
 #[derive(Debug)]
 pub(crate) struct ModelInfo {
     pub(crate) id: &'static str,
@@ -54,7 +54,7 @@ impl Family {
 }
 
 const CONTEXT_WINDOW: u32 = 1_000_000;
-/// Half the 128K output ceiling every catalogue model shares. `effort` steers thinking depth, so
+/// Half the 128K output ceiling every catalog model shares. `effort` steers thinking depth, so
 /// this only bounds runaway output.
 const MAX_TOKENS: u32 = 64_000;
 /// Fits the lower output ceilings of the older or smaller models an unknown id may name.
@@ -106,7 +106,7 @@ fn lookup(id: &str) -> Option<&'static ModelInfo> {
     MODELS.iter().find(|info| info.id == id)
 }
 
-/// The catalogue row to suggest for an unknown `id` that carries a `[1m]` suffix or starts with
+/// The catalog row to suggest for an unknown `id` that carries a `[1m]` suffix or starts with
 /// `claude-`: the row the id names once the suffix is dropped, else the row of the family it names.
 pub(crate) fn replacement_for(id: &str) -> Option<&'static ModelInfo> {
     let id = id.to_ascii_lowercase();
@@ -144,7 +144,7 @@ impl ModelSpec {
         &self.id
     }
 
-    /// `None` for ids outside the catalogue.
+    /// `None` for ids outside the catalog.
     pub(crate) fn info(&self) -> Option<&'static ModelInfo> {
         self.info
     }
@@ -155,7 +155,7 @@ impl ModelSpec {
         self.info.map(|info| pick.unwrap_or(info.default_effort))
     }
 
-    /// Output cap to send: the user's `pick`, else 64K for catalogue models and 16K for unknown
+    /// Output cap to send: the user's `pick`, else 64K for catalog models and 16K for unknown
     /// ids, whose models may cap output lower.
     pub(crate) fn resolve_max_tokens(&self, pick: Option<u32>) -> u32 {
         pick.unwrap_or(self.info.map_or(UNKNOWN_MODEL_MAX_TOKENS, |_| MAX_TOKENS))
@@ -199,8 +199,8 @@ impl ModelSpec {
         })
     }
 
-    /// Warning for an id outside the catalogue, naming what its requests go without and the
-    /// [`replacement_for`] suggestion. `None` for catalogue models.
+    /// Warning for an id outside the catalog, naming what its requests go without and the
+    /// [`replacement_for`] suggestion. `None` for catalog models.
     pub(crate) fn unsupported_notice(&self) -> Option<String> {
         if self.info.is_some() {
             return None;
@@ -276,7 +276,7 @@ pub(crate) enum BlockBinding {
 // ── ResolvedModelId ──
 
 /// A model id a frontend picked, such as the `/model` resolver's match. The engine accepts any id,
-/// since [`ModelSpec::resolve`] keeps an unknown one without catalogue info.
+/// since [`ModelSpec::resolve`] keeps an unknown one without catalog info.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub(crate) struct ResolvedModelId(String);
@@ -308,7 +308,7 @@ mod tests {
     // ── replacement_for ──
 
     #[test]
-    fn replacement_for_maps_1m_suffix_and_family_claude_ids_to_catalogue_rows() {
+    fn replacement_for_maps_1m_suffix_and_family_claude_ids_to_catalog_rows() {
         for (id, expected) in [
             ("claude-opus-5-5[1m]", "claude-opus-5-5"),
             ("opus[1m]", "claude-opus-5-5"),
@@ -399,7 +399,7 @@ mod tests {
     // ── ModelSpec::resolve_max_tokens ──
 
     #[test]
-    fn resolve_max_tokens_prefers_pick_then_catalogue_default() {
+    fn resolve_max_tokens_prefers_pick_then_catalog_default() {
         for (id, default) in [
             ("claude-fable-5-1", 64_000),
             ("claude-opus-5-5", 64_000),
@@ -556,7 +556,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_notice_is_absent_for_catalogue_models() {
+    fn unsupported_notice_is_absent_for_catalog_models() {
         for info in MODELS {
             assert_eq!(spec(info.id).unsupported_notice(), None, "{}", info.id);
         }

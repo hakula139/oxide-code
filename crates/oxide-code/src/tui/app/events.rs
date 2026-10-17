@@ -373,7 +373,7 @@ impl App {
         }
     }
 
-    /// Sets busy status unless a user-acknowledgement status is showing. Leaving `Compacting`
+    /// Sets busy status unless a user-acknowledgment status is showing. Leaving `Compacting`
     /// releases the prompts held during an automatic compaction.
     fn set_active_status(&mut self, status: Status) {
         match self.status_bar.status() {
@@ -1275,7 +1275,7 @@ mod tests {
         // have queued StreamToken / ToolCallStart events the engine emitted
         // before its select arm dropped the turn future. Those buffered
         // events must not flip the bar back to Streaming / ToolRunning —
-        // otherwise the cancel acknowledgement flickers off until `Cancelled` finally arrives.
+        // otherwise the cancel acknowledgment flickers off until `Cancelled` finally arrives.
         let (mut app, _rx, _event_tx) = test_app(None);
         app.dispatch_action(Action::Submit("hi".to_owned()));
         app.dispatch_action(Action::Op(Op::Interrupt));

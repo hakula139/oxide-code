@@ -50,7 +50,7 @@ pub(crate) fn resolve_theme(config: &ThemeConfig) -> Result<Theme> {
 /// Theme bodies hold one line per slot, so a larger file is not a theme.
 const MAX_THEME_FILE_BYTES: u64 = 64 * 1024;
 
-/// Resolves a `base` to a TOML body. Built-in catalogue first, then a filesystem path with
+/// Resolves a `base` to a TOML body. Built-in catalog first, then a filesystem path with
 /// `~/` expanded to `$HOME`.
 fn load_base_body(name: &str) -> Result<String> {
     if let Some(body) = builtin::lookup(name) {

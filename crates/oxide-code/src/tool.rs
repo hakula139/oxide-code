@@ -278,7 +278,7 @@ pub(crate) trait Tool: Send + Sync {
     /// Resolves what the call accesses from `input`, once, in the context's workspace. The default
     /// resolves [`Self::path_field`] and pins it in the input to the resolved path, so the tool
     /// opens what the gate checked, though not past a symlink swapped into an intermediate
-    /// directory afterwards. Without a path field the call accesses [`Access::None`], which only a
+    /// directory afterward. Without a path field the call accesses [`Access::None`], which only a
     /// class-wide rule matches.
     fn prepare(&self, mut input: serde_json::Value, ctx: &ToolCtx) -> Prepared {
         let access = self
