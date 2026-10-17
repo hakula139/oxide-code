@@ -49,6 +49,7 @@ GOARCH
 GOEXPERIMENT
 hakula
 idna
+illumos
 impls
 indoc
 insta
