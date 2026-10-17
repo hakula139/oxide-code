@@ -70,10 +70,42 @@ pub(crate) const RADIO_SELECTED: char = '●';
 /// Dot for an effort level on the slider that is not chosen.
 pub(crate) const RADIO_UNSELECTED: char = '○';
 
-// ── Rules ──
+// ── Rules and Tables ──
 
 /// Horizontal line segment, repeated to draw rules and the effort slider track.
 pub(crate) const HORIZONTAL_RULE: &str = "─";
+
+/// Border between markdown table cells.
+pub(crate) const VERTICAL_RULE: &str = "│";
+
+/// Corner and junction glyphs of one horizontal rule in a markdown table.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TableRule {
+    pub(crate) left: char,
+    pub(crate) join: char,
+    pub(crate) right: char,
+}
+
+/// Rule above a table's first row.
+pub(crate) const TABLE_TOP: TableRule = TableRule {
+    left: '┌',
+    join: '┬',
+    right: '┐',
+};
+
+/// Rule between a table's header and body.
+pub(crate) const TABLE_MIDDLE: TableRule = TableRule {
+    left: '├',
+    join: '┼',
+    right: '┤',
+};
+
+/// Rule below a table's last row.
+pub(crate) const TABLE_BOTTOM: TableRule = TableRule {
+    left: '└',
+    join: '┴',
+    right: '┘',
+};
 
 // ── Separators ──
 

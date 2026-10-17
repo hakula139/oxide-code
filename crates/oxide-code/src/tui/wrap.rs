@@ -37,7 +37,7 @@ pub(crate) fn wrap_line_keeping_lead(
         return vec![line];
     }
 
-    let total_width = line_width(&line);
+    let total_width = line.width();
     if total_width <= max_width {
         return vec![line];
     }
@@ -69,10 +69,6 @@ pub(crate) fn wrap_line_keeping_lead(
             Line::from(spans)
         })
         .collect()
-}
-
-fn line_width(line: &Line<'_>) -> usize {
-    line.spans.iter().map(|s| s.content.width()).sum()
 }
 
 // ── Word Wrap Algorithm ──
@@ -225,9 +221,7 @@ fn expand_tabs_from(s: &str, col: &mut usize) -> String {
     for ch in s.chars() {
         if ch == '\t' {
             let spaces = TAB_WIDTH - (*col % TAB_WIDTH);
-            for _ in 0..spaces {
-                out.push(' ');
-            }
+            out.extend(std::iter::repeat_n(' ', spaces));
             *col += spaces;
         } else {
             out.push(ch);
@@ -251,106 +245,80 @@ mod tests {
     // ── wrap_line ──
 
     #[test]
-    fn short_line_unchanged() {
+    fn wrap_line_short_line_is_unchanged() {
         let line = Line::from("Hello, world!");
-        let result = wrap_line(line, 80, 4, None);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].spans[0].content.as_ref(), "Hello, world!");
+        assert_eq!(wrap_line(line.clone(), 80, 4, None), [line]);
     }
 
     #[test]
-    fn zero_width_passes_through_unchanged() {
+    fn wrap_line_zero_width_passes_through_unchanged() {
         let line = Line::from("Hello, world!");
-        let result = wrap_line(line, 0, 4, None);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].spans[0].content.as_ref(), "Hello, world!");
+        assert_eq!(wrap_line(line.clone(), 0, 4, None), [line]);
     }
 
     #[test]
-    fn wraps_at_word_boundary() {
-        let line = Line::from("Hello world foo bar");
-        let result = wrap_line(line, 12, 0, None);
-        let texts: Vec<String> = result
-            .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
-            .collect();
-        assert_eq!(texts[0], "Hello world ");
-        assert_eq!(texts[1], "foo bar");
+    fn wrap_line_wraps_at_word_boundary() {
+        let result = wrap_line(Line::from("Hello world foo bar"), 12, 0, None);
+        assert_eq!(texts(&result), ["Hello world ", "foo bar"]);
     }
 
     #[test]
-    fn continuation_indent_applied() {
-        // 23 chars at width 16 indent 4 → first "    Hello world ", second "    foo bar".
+    fn wrap_line_indents_continuation_rows() {
         let line = Line::from(vec![Span::raw("    "), Span::raw("Hello world foo bar")]);
         let result = wrap_line(line, 16, 4, None);
-        assert_eq!(
-            result.len(),
-            2,
-            "should wrap to exactly two lines: {result:?}"
-        );
-        let cont = &result[1];
-        assert!(
-            cont.spans[0].content.starts_with("    "),
-            "continuation should have 4-space indent: {cont:?}"
-        );
+        assert_eq!(texts(&result), ["    Hello world ", "    foo bar"]);
     }
 
     #[test]
-    fn preserves_styles_across_wrap() {
+    fn wrap_line_preserves_styles_across_wrap() {
         let bold = Style::default().add_modifier(Modifier::BOLD);
         let line = Line::from(vec![
             Span::styled("Bold ", bold),
             Span::raw("normal text that is long enough to wrap"),
         ]);
         let result = wrap_line(line, 20, 0, None);
-        // 44 chars / width 20 → "Bold normal text " | "that is long enough " | "to wrap".
         assert_eq!(
-            result.len(),
-            3,
-            "should wrap to exactly three lines: {result:?}"
-        );
-        let first_span = &result[0].spans[0];
-        assert!(
-            first_span.style.add_modifier.contains(Modifier::BOLD),
-            "bold should be preserved: {first_span:?}"
+            result,
+            [
+                Line::from(vec![Span::styled("Bold ", bold), Span::raw("normal text ")]),
+                Line::from("that is long enough "),
+                Line::from("to wrap"),
+            ]
         );
     }
 
     #[test]
-    fn force_break_on_long_word() {
+    fn wrap_line_force_breaks_a_word_wider_than_the_row() {
         let input = "abcdefghijklmnopqrstuvwxyz";
         let result = wrap_line(Line::from(input), 10, 0, None);
-        // 26 chars / width 10 → 10 + 10 + 6.
-        assert_eq!(
-            result.len(),
-            3,
-            "should force-break into three lines: {result:?}"
-        );
-        let texts: Vec<&str> = result.iter().map(|l| l.spans[0].content.as_ref()).collect();
-        assert_eq!(texts, [&input[..10], &input[10..20], &input[20..]]);
+        assert_eq!(texts(&result), [&input[..10], &input[10..20], &input[20..]]);
     }
 
     #[test]
-    fn styled_continuation_indent() {
+    fn wrap_line_keeps_span_style_on_indented_continuations() {
         let code_style = Style::default().fg(Color::Green);
         let line = Line::from(vec![
             Span::raw("  "),
             Span::styled("a b c d e f g h i j k l", code_style),
         ]);
         let result = wrap_line(line, 14, 2, None);
-        assert!(result.len() >= 2, "should wrap: {result:?}");
-        let cont = &result[1];
         assert_eq!(
-            cont.spans[0].content.as_ref(),
-            "  ",
-            "2-space continuation indent"
+            result,
+            [
+                Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled("a b c d e f ", code_style)
+                ]),
+                Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled("g h i j k l", code_style)
+                ]),
+            ]
         );
-        let has_green = cont.spans.iter().any(|s| s.style.fg == Some(Color::Green));
-        assert!(has_green, "style should be preserved on continuation");
     }
 
     #[test]
-    fn continuation_prefix_spans_applied() {
+    fn wrap_line_repeats_styled_prefix_on_continuations() {
         let marker_style = Style::default().fg(Color::Green);
         let line = Line::from(vec![
             Span::styled("> ", marker_style),
@@ -358,14 +326,11 @@ mod tests {
         ]);
         let prefix = vec![Span::styled("> ", marker_style)];
         let result = wrap_line(line, 12, 2, Some(&prefix));
-        assert!(result.len() >= 2, "should wrap: {result:?}");
-        let cont = &result[1];
+        let row = |text| Line::from(vec![Span::styled("> ", marker_style), Span::raw(text)]);
         assert_eq!(
-            cont.spans[0].content.as_ref(),
-            "> ",
-            "continuation should start with the styled prefix"
+            result,
+            [row("one two "), row("three four"), row("five six")]
         );
-        assert_eq!(cont.spans[0].style.fg, Some(Color::Green));
     }
 
     #[test]

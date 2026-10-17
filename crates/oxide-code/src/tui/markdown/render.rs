@@ -1,16 +1,18 @@
 //! Markdown → [`ratatui::text::Text`] renderer. Walks the pulldown-cmark stream into styled
-//! lines wrapped to terminal width; wrapping is block-aware so it respects the enclosing
-//! block's continuation indent.
+//! lines wrapped to terminal width. Wrapped lines keep the enclosing block's continuation indent.
 
 use pulldown_cmark::{
     Alignment, CodeBlockKind, CowStr, Event, HeadingLevel, LinkType, Tag, TagEnd,
 };
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use tracing::{debug, warn};
+use tracing::debug;
 use unicode_width::UnicodeWidthStr;
 
 use super::highlight::highlight_code;
+use crate::tui::glyphs::{
+    HORIZONTAL_RULE, TABLE_BOTTOM, TABLE_MIDDLE, TABLE_TOP, TableRule, VERTICAL_RULE,
+};
 use crate::tui::theme::Theme;
 use crate::tui::wrap::{expand_tabs_in_spans, wrap_line, wrap_line_keeping_lead};
 
@@ -62,7 +64,7 @@ enum OpenLink {
 #[derive(Default)]
 struct CodeBlockState {
     active: bool,
-    lang: Option<String>,
+    lang: String,
     buf: String,
 }
 
@@ -72,8 +74,8 @@ struct TableState {
     in_head: bool,
     alignments: Vec<Alignment>,
     head_rows: usize,
-    rows: Vec<Vec<Vec<Span<'static>>>>,
-    current_row: Vec<Vec<Span<'static>>>,
+    rows: Vec<Vec<Line<'static>>>,
+    current_row: Vec<Line<'static>>,
     cell_buf: Vec<Span<'static>>,
 }
 
@@ -148,7 +150,7 @@ where
             Tag::TableHead => self.table.in_head = true,
             Tag::TableRow => {}
             Tag::TableCell => self.table.cell_buf.clear(),
-            Tag::HtmlBlock => self.start_html_block(),
+            Tag::HtmlBlock => self.start_block(),
             Tag::Image { .. }
             | Tag::FootnoteDefinition(_)
             | Tag::MetadataBlock(_)
@@ -157,7 +159,7 @@ where
             | Tag::DefinitionListDefinition
             | Tag::Subscript
             | Tag::Superscript => {
-                warn!(?tag, "unsupported markdown tag");
+                debug!(?tag, "unsupported markdown tag");
             }
         }
     }
@@ -184,19 +186,15 @@ where
             TagEnd::TableHead => {
                 // pulldown-cmark 0.13: header cells sit inside TableHead without a TableRow.
                 if !self.table.current_row.is_empty() {
-                    let row = std::mem::take(&mut self.table.current_row);
-                    self.table.rows.push(row);
+                    self.flush_row();
                 }
                 self.table.in_head = false;
                 self.table.head_rows = self.table.rows.len();
             }
-            TagEnd::TableRow => {
-                let row = std::mem::take(&mut self.table.current_row);
-                self.table.rows.push(row);
-            }
+            TagEnd::TableRow => self.flush_row(),
             TagEnd::TableCell => {
                 let cell = std::mem::take(&mut self.table.cell_buf);
-                self.table.current_row.push(cell);
+                self.table.current_row.push(Line::from(cell));
             }
             _ => {}
         }
@@ -205,11 +203,8 @@ where
     // ── Block Elements ──
 
     fn start_paragraph(&mut self) {
-        if self.needs_newline {
-            self.push_blank_line();
-        }
+        self.start_block();
         self.push_line(Line::default());
-        self.needs_newline = false;
     }
 
     fn end_paragraph(&mut self) {
@@ -218,9 +213,7 @@ where
     }
 
     fn start_heading(&mut self, level: HeadingLevel) {
-        if self.needs_newline {
-            self.push_blank_line();
-        }
+        self.start_block();
         let style = match level {
             HeadingLevel::H1 => self.theme.heading_h1(),
             HeadingLevel::H2 => self.theme.heading_h2(),
@@ -230,7 +223,6 @@ where
         let prefix = format!("{} ", "#".repeat(level as usize));
         self.push_line(Line::from(vec![Span::styled(prefix, style)]));
         self.push_inline_style(style);
-        self.needs_newline = false;
     }
 
     fn end_heading(&mut self) {
@@ -240,10 +232,7 @@ where
     }
 
     fn start_blockquote(&mut self) {
-        if self.needs_newline {
-            self.push_blank_line();
-            self.needs_newline = false;
-        }
+        self.start_block();
         self.indent_stack
             .push(vec![Span::styled("> ", self.theme.blockquote())]);
     }
@@ -254,21 +243,12 @@ where
     }
 
     fn rule(&mut self) {
-        if self.needs_newline {
-            self.push_blank_line();
-        }
+        self.start_block();
         self.push_line(Line::from(vec![Span::styled(
-            "───",
+            HORIZONTAL_RULE.repeat(3),
             self.theme.horizontal_rule(),
         )]));
         self.needs_newline = true;
-    }
-
-    fn start_html_block(&mut self) {
-        if self.needs_newline {
-            self.push_blank_line();
-            self.needs_newline = false;
-        }
     }
 
     fn html(&mut self, html: &str) {
@@ -280,8 +260,8 @@ where
     // ── Lists ──
 
     fn start_list(&mut self, start_index: Option<u64>) {
-        if self.list_stack.is_empty() && self.needs_newline {
-            self.push_blank_line();
+        if self.list_stack.is_empty() {
+            self.start_block();
         }
         self.list_stack.push(start_index);
     }
@@ -310,15 +290,10 @@ where
     // ── Code Blocks ──
 
     fn start_code_block(&mut self, kind: CodeBlockKind<'_>) {
-        if self.needs_newline {
-            self.push_blank_line();
-        }
+        self.start_block();
         let lang = match kind {
-            CodeBlockKind::Fenced(lang) => {
-                let l = lang.to_string();
-                if l.is_empty() { None } else { Some(l) }
-            }
-            CodeBlockKind::Indented => None,
+            CodeBlockKind::Fenced(lang) => lang.into_string(),
+            CodeBlockKind::Indented => String::new(),
         };
         self.code_block = CodeBlockState {
             active: true,
@@ -330,9 +305,9 @@ where
     fn end_code_block(&mut self) {
         self.code_block.active = false;
         let code = std::mem::take(&mut self.code_block.buf);
-        let lang = self.code_block.lang.take();
+        let lang = std::mem::take(&mut self.code_block.lang);
 
-        for line in highlight_code(lang.as_deref().unwrap_or(""), &code, &self.theme) {
+        for line in highlight_code(&lang, &code, &self.theme) {
             self.push_code_line(line);
         }
         self.needs_newline = true;
@@ -358,14 +333,17 @@ where
     // ── Tables ──
 
     fn start_table(&mut self, alignments: Vec<Alignment>) {
-        if self.needs_newline {
-            self.push_blank_line();
-        }
+        self.start_block();
         self.table = TableState {
             active: true,
             alignments,
             ..Default::default()
         };
+    }
+
+    fn flush_row(&mut self) {
+        let row = std::mem::take(&mut self.table.current_row);
+        self.table.rows.push(row);
     }
 
     fn end_table(&mut self) {
@@ -393,13 +371,8 @@ where
         let border_style = self.theme.table_border();
         let header_style = self.theme.table_header();
 
-        self.lines.push(build_horizontal_rule(
-            &col_widths,
-            border_style,
-            '┌',
-            '┬',
-            '┐',
-        ));
+        self.lines
+            .push(build_horizontal_rule(&col_widths, border_style, TABLE_TOP));
 
         for (row_idx, row) in rows.iter().enumerate() {
             let cell_style = if row_idx < head_rows {
@@ -407,24 +380,20 @@ where
             } else {
                 Style::default()
             };
-            for line in build_data_rows(
+            self.lines.extend(build_data_rows(
                 row,
                 &col_widths,
                 &alignments,
                 col_count,
                 border_style,
                 cell_style,
-            ) {
-                self.lines.push(line);
-            }
+            ));
 
             if row_idx + 1 == head_rows && head_rows < rows.len() {
                 self.lines.push(build_horizontal_rule(
                     &col_widths,
                     border_style,
-                    '├',
-                    '┼',
-                    '┤',
+                    TABLE_MIDDLE,
                 ));
             }
         }
@@ -432,9 +401,7 @@ where
         self.lines.push(build_horizontal_rule(
             &col_widths,
             border_style,
-            '└',
-            '┴',
-            '┘',
+            TABLE_BOTTOM,
         ));
 
         self.needs_newline = true;
@@ -600,23 +567,24 @@ where
             self.lines.push(line);
             return;
         }
-        let mut cont_prefix = self.continuation_indent_spans();
-        let indent: usize = cont_prefix
-            .iter()
-            .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
-            .sum();
+        let mut cont_prefix = Line::from(self.continuation_indent_spans());
+        let indent = cont_prefix.width();
         let hang = hang.min(self.width.saturating_sub(indent) / 2);
         if hang > 0 {
-            cont_prefix.push(Span::raw(" ".repeat(hang)));
+            cont_prefix.push_span(Span::raw(" ".repeat(hang)));
         }
-        let prefix = if cont_prefix.is_empty() {
+        let prefix = if cont_prefix.spans.is_empty() {
             None
         } else {
-            Some(cont_prefix.as_slice())
+            Some(cont_prefix.spans.as_slice())
         };
-        for wrapped in wrap_line_keeping_lead(line, self.width, indent + hang, prefix, keep) {
-            self.lines.push(wrapped);
-        }
+        self.lines.extend(wrap_line_keeping_lead(
+            line,
+            self.width,
+            indent + hang,
+            prefix,
+            keep,
+        ));
     }
 
     fn continuation_indent_spans(&self) -> Vec<Span<'static>> {
@@ -645,6 +613,13 @@ where
         self.wrap_and_push(line);
     }
 
+    fn start_block(&mut self) {
+        if self.needs_newline {
+            self.push_blank_line();
+            self.needs_newline = false;
+        }
+    }
+
     fn push_blank_line(&mut self) {
         self.lines.push(Line::default());
     }
@@ -667,12 +642,15 @@ fn leading_whitespace_width(line: &Line<'_>) -> usize {
 
 // ── Table Helpers ──
 
+const TABLE_CELL_PADDING: usize = 1;
+const TABLE_COLUMN_OVERHEAD: usize = 2 * TABLE_CELL_PADDING + 1;
+
 /// Computes the max display width for each column across all rows.
-fn compute_column_widths(rows: &[Vec<Vec<Span<'_>>>], col_count: usize) -> Vec<usize> {
+fn compute_column_widths(rows: &[Vec<Line<'_>>], col_count: usize) -> Vec<usize> {
     let mut widths = vec![0_usize; col_count];
     for row in rows {
         for (col, cell) in row.iter().enumerate() {
-            widths[col] = widths[col].max(cell_width(cell));
+            widths[col] = widths[col].max(cell.width());
         }
     }
     widths
@@ -684,7 +662,7 @@ fn fit_column_widths(natural: &[usize], width_budget: usize) -> Vec<usize> {
     if n == 0 {
         return Vec::new();
     }
-    let overhead = 1 + 3 * n;
+    let overhead = 1 + TABLE_COLUMN_OVERHEAD * n;
     let available = width_budget.saturating_sub(overhead);
     let total_natural: usize = natural.iter().sum();
     if total_natural <= available {
@@ -710,65 +688,56 @@ fn fit_column_widths(natural: &[usize], width_budget: usize) -> Vec<usize> {
 }
 
 /// Builds a horizontal rule line: e.g. `┌───┬───┐` or `├───┼───┤`.
-fn build_horizontal_rule(
-    col_widths: &[usize],
-    style: Style,
-    left: char,
-    mid: char,
-    right: char,
-) -> Line<'static> {
-    let mut buf = String::with_capacity(col_widths.len() * 6);
-    buf.push(left);
+fn build_horizontal_rule(col_widths: &[usize], style: Style, rule: TableRule) -> Line<'static> {
+    let mut buf = String::new();
+    buf.push(rule.left);
     for (i, &w) in col_widths.iter().enumerate() {
-        for _ in 0..w + 2 {
-            buf.push('─');
-        }
-        buf.push(if i + 1 < col_widths.len() { mid } else { right });
+        buf.push_str(&HORIZONTAL_RULE.repeat(w + 2 * TABLE_CELL_PADDING));
+        buf.push(if i + 1 < col_widths.len() {
+            rule.join
+        } else {
+            rule.right
+        });
     }
     Line::from(Span::styled(buf, style))
 }
 
-/// Word-wraps a cell's spans; always returns at least one sub-line.
-fn wrap_cell(cell: &[Span<'static>], target_width: usize) -> Vec<Vec<Span<'static>>> {
-    if cell.is_empty() || target_width == 0 {
-        return vec![cell.to_vec()];
+/// Word-wraps a cell's spans, always returning at least one sub-line.
+fn wrap_cell(cell: &Line<'static>, target_width: usize) -> Vec<Line<'static>> {
+    if cell.spans.is_empty() || target_width == 0 {
+        return vec![cell.clone()];
     }
-    wrap_line(Line::from(cell.to_vec()), target_width, 0, None)
-        .into_iter()
-        .map(|line| line.spans)
-        .collect()
+    wrap_line(cell.clone(), target_width, 0, None)
 }
 
 /// Builds the visual lines for a data row, wrapping cells to column widths.
 fn build_data_rows(
-    row: &[Vec<Span<'static>>],
+    row: &[Line<'static>],
     col_widths: &[usize],
     alignments: &[Alignment],
     col_count: usize,
     border_style: Style,
     cell_style: Style,
 ) -> Vec<Line<'static>> {
-    let empty: Vec<Span<'static>> = Vec::new();
-    let cols: Vec<(Vec<Vec<Span<'static>>>, usize)> = (0..col_count)
+    let empty = Line::default();
+    let cols: Vec<(Vec<Line<'static>>, usize)> = (0..col_count)
         .map(|col| {
-            let cell = row.get(col).unwrap_or(&empty).as_slice();
+            let cell = row.get(col).unwrap_or(&empty);
             let target_width = col_widths.get(col).copied().unwrap_or(0);
             (wrap_cell(cell, target_width), target_width)
         })
         .collect();
 
     let sub_row_count = cols.iter().map(|(c, _)| c.len()).max().unwrap_or(1).max(1);
-    let pipe = Span::styled("│", border_style);
+    let pipe = Span::styled(VERTICAL_RULE, border_style);
 
     (0..sub_row_count)
         .map(|sub_idx| {
             let mut spans: Vec<Span<'static>> = Vec::with_capacity(col_count * 4 + 1);
             spans.push(pipe.clone());
             for (col, (sub_lines, target_width)) in cols.iter().enumerate() {
-                let sub_cell: &[Span<'static>] = sub_lines
-                    .get(sub_idx)
-                    .map_or(empty.as_slice(), Vec::as_slice);
-                let pad = target_width.saturating_sub(cell_width(sub_cell));
+                let sub_cell = sub_lines.get(sub_idx).unwrap_or(&empty);
+                let pad = target_width.saturating_sub(sub_cell.width());
 
                 let alignment = alignments.get(col).copied().unwrap_or(Alignment::None);
                 let (pad_left, pad_right) = match alignment {
@@ -777,9 +746,9 @@ fn build_data_rows(
                     Alignment::Left | Alignment::None => (0, pad),
                 };
 
-                spans.push(Span::raw(" ".repeat(1 + pad_left)));
+                spans.push(Span::raw(" ".repeat(TABLE_CELL_PADDING + pad_left)));
 
-                for span in sub_cell {
+                for span in &sub_cell.spans {
                     let styled = if cell_style == Style::default() {
                         span.clone()
                     } else {
@@ -788,7 +757,7 @@ fn build_data_rows(
                     spans.push(styled);
                 }
 
-                spans.push(Span::raw(" ".repeat(1 + pad_right)));
+                spans.push(Span::raw(" ".repeat(TABLE_CELL_PADDING + pad_right)));
                 spans.push(pipe.clone());
             }
             Line::from(spans)
@@ -796,28 +765,19 @@ fn build_data_rows(
         .collect()
 }
 
-/// Measure the display width of a cell's spans.
-fn cell_width(cell: &[Span<'_>]) -> usize {
-    cell.iter().map(|s| s.content.width()).sum()
-}
-
 #[cfg(test)]
 mod tests {
     use indoc::indoc;
-    use ratatui::style::{Color, Modifier};
-    use ratatui::text::Span;
-    use unicode_width::UnicodeWidthStr;
+    use ratatui::style::{Color, Stylize};
 
     use super::super::render_markdown;
-    use super::{fit_column_widths, wrap_cell};
-    use crate::tui::theme::Theme;
+    use super::*;
 
     fn theme() -> Theme {
         Theme::default()
     }
 
-    /// Render `input` at the given width budget and flatten each line
-    /// into a concatenated string (spans joined in order). `width == 0` disables word-wrapping.
+    /// Renders `input` at `width` and joins each row's spans, with `width == 0` disabling wrapping.
     fn rendered_text_at_width(input: &str, width: usize) -> Vec<String> {
         render_markdown(input, &theme(), width)
             .lines
@@ -826,8 +786,7 @@ mod tests {
             .collect()
     }
 
-    /// Convenience wrapper around [`rendered_text_at_width`] at width 0
-    /// (no wrapping) — used by most tests that don't exercise wrapping.
+    /// Renders without wrapping.
     fn rendered_text(input: &str) -> Vec<String> {
         rendered_text_at_width(input, 0)
     }
@@ -835,31 +794,25 @@ mod tests {
     // ── render_markdown ──
 
     #[test]
-    fn plain_text() {
+    fn render_markdown_plain_text_is_one_row() {
         let lines = rendered_text("Hello, world!");
         assert_eq!(lines, vec!["Hello, world!"]);
     }
 
-    // ── Paragraphs ──
+    // ── render_markdown: paragraphs ──
 
     #[test]
-    fn paragraph_separation() {
+    fn render_markdown_paragraphs_are_separated_by_one_blank_row() {
         let lines = rendered_text(indoc! {"
             First paragraph
 
             Second paragraph
         "});
-        let first_pos = lines.iter().position(|l| l.contains("First")).unwrap();
-        let blank_pos = lines.iter().position(String::is_empty).unwrap();
-        let second_pos = lines.iter().position(|l| l.contains("Second")).unwrap();
-        assert!(
-            first_pos < blank_pos && blank_pos < second_pos,
-            "expected First < blank < Second, got {first_pos} < {blank_pos} < {second_pos}"
-        );
+        assert_eq!(lines, ["First paragraph", "", "Second paragraph"]);
     }
 
     #[test]
-    fn paragraph_soft_break_joins() {
+    fn render_markdown_paragraph_soft_break_joins() {
         let lines = rendered_text(indoc! {"
             Hello
             World
@@ -867,10 +820,10 @@ mod tests {
         assert_eq!(lines, vec!["Hello World"]);
     }
 
-    // ── Headings ──
+    // ── render_markdown: headings ──
 
     #[test]
-    fn heading_levels_text_and_styles() {
+    fn render_markdown_heading_levels_text_and_styles() {
         let t = theme();
         let text = render_markdown(
             indoc! {"
@@ -919,10 +872,10 @@ mod tests {
         assert!(!h4.spans[0].style.add_modifier.contains(Modifier::BOLD));
     }
 
-    // ── Blockquotes ──
+    // ── render_markdown: blockquotes ──
 
     #[test]
-    fn blockquote_text_and_style() {
+    fn render_markdown_blockquote_text_and_style() {
         let t = theme();
         let text = render_markdown("> Quoted text", &t, 0);
         let bq_line = text
@@ -939,24 +892,18 @@ mod tests {
     }
 
     #[test]
-    fn nested_blockquote() {
+    fn render_markdown_nested_blockquote_repeats_both_markers() {
         let lines = rendered_text(indoc! {"
             > Outer
             > > Inner
         "});
-        assert!(lines.iter().any(|l| l.contains("Outer")));
-        let inner = lines.iter().find(|l| l.contains("Inner")).unwrap();
-        assert_eq!(
-            inner.matches("> ").count(),
-            2,
-            "inner blockquote should have exactly 2 nested > markers: {inner:?}"
-        );
+        assert_eq!(lines, ["> Outer", "", "> > Inner"]);
     }
 
-    // ── Horizontal Rule ──
+    // ── render_markdown: horizontal rule ──
 
     #[test]
-    fn horizontal_rule_text_and_style() {
+    fn render_markdown_horizontal_rule_text_and_style() {
         let t = theme();
         let text = render_markdown(
             indoc! {"
@@ -977,116 +924,61 @@ mod tests {
         assert_eq!(rule_span.style.fg, t.dim.fg);
     }
 
-    // ── Lists ──
+    // ── render_markdown: lists ──
 
     #[test]
-    fn tight_ordered_list() {
-        let lines = rendered_text(indoc! {"
+    fn render_markdown_ordered_list_puts_each_marker_on_its_item_row() {
+        let tight = rendered_text(indoc! {"
             1. First
             2. Second
             3. Third
         "});
-        assert!(
-            lines
-                .iter()
-                .any(|l| l.contains("1.") && l.contains("First"))
-        );
-        assert!(
-            lines
-                .iter()
-                .any(|l| l.contains("2.") && l.contains("Second"))
-        );
-        assert!(
-            lines
-                .iter()
-                .any(|l| l.contains("3.") && l.contains("Third"))
-        );
-    }
-
-    #[test]
-    fn loose_ordered_list() {
-        let lines = rendered_text(indoc! {"
+        let loose = rendered_text(indoc! {"
             1. First
 
             2. Second
 
             3. Third
         "});
-        assert!(
-            lines
-                .iter()
-                .any(|l| l.contains("1.") && l.contains("First")),
-            "loose list marker and content should be on the same line: {lines:?}"
-        );
-        assert!(
-            lines
-                .iter()
-                .any(|l| l.contains("2.") && l.contains("Second")),
-            "second item: {lines:?}"
-        );
+
+        assert_eq!(tight, ["1. First", "2. Second", "3. Third"]);
+        assert_eq!(loose, tight, "loose items render without blank rows");
     }
 
     #[test]
-    fn ordered_list_double_digit_alignment() {
-        let mut input = String::new();
-        for i in 1..=12 {
-            use std::fmt::Write;
-            writeln!(input, "{i}. Item {i}").unwrap();
-        }
-        let lines = rendered_text(&input);
-        assert!(
-            lines
-                .iter()
-                .any(|l| l.contains("10.") && l.contains("Item 10")),
-            "marker and content on same line for item 10: {lines:?}"
-        );
+    fn render_markdown_double_digit_marker_stays_on_the_item_row() {
+        let items: Vec<String> = (1..=12).map(|i| format!("{i}. Item {i}")).collect();
+
+        assert_eq!(rendered_text(&items.join("\n")), items);
     }
 
     #[test]
-    fn tight_unordered_list() {
-        let lines = rendered_text(indoc! {"
+    fn render_markdown_unordered_list_puts_each_marker_on_its_item_row() {
+        let tight = rendered_text(indoc! {"
             - Alpha
             - Beta
         "});
-        assert!(
-            lines
-                .iter()
-                .any(|l| l.contains("- ") && l.contains("Alpha"))
-        );
-        assert!(lines.iter().any(|l| l.contains("- ") && l.contains("Beta")));
-    }
-
-    #[test]
-    fn loose_unordered_list() {
-        let lines = rendered_text(indoc! {"
+        let loose = rendered_text(indoc! {"
             - Alpha
 
             - Beta
         "});
-        assert!(
-            lines.iter().any(|l| l.contains('-') && l.contains("Alpha")),
-            "loose unordered: {lines:?}"
-        );
+
+        assert_eq!(tight, ["- Alpha", "- Beta"]);
+        assert_eq!(loose, tight, "loose items render without blank rows");
     }
 
     #[test]
-    fn nested_list() {
+    fn render_markdown_nested_list_indents_the_inner_item() {
         let lines = rendered_text(indoc! {"
             - Outer
               - Inner
         "});
-        let inner = lines.iter().find(|l| l.contains("Inner")).unwrap();
-        let outer = lines.iter().find(|l| l.contains("Outer")).unwrap();
-        let inner_indent = inner.len() - inner.trim_start().len();
-        let outer_indent = outer.len() - outer.trim_start().len();
-        assert!(
-            inner_indent > outer_indent,
-            "inner indent ({inner_indent}) should exceed outer ({outer_indent})"
-        );
+        assert_eq!(lines, ["- Outer", "  - Inner"]);
     }
 
     #[test]
-    fn list_marker_uses_accent_color() {
+    fn render_markdown_list_marker_uses_accent_color() {
         let t = theme();
         let text = render_markdown("- Item", &t, 0);
         let marker_span = text
@@ -1098,7 +990,7 @@ mod tests {
     }
 
     #[test]
-    fn inline_code_in_list_item() {
+    fn render_markdown_inline_code_in_list_item() {
         let t = theme();
         let text = render_markdown("- Use `foo()` here", &t, 0);
         let code_span = text
@@ -1117,26 +1009,32 @@ mod tests {
     }
 
     #[test]
-    fn link_in_list_item() {
-        let lines = rendered_text("- [Click](https://example.com)");
-        assert!(lines.iter().any(|l| l.contains("Click")));
-        assert!(lines.iter().any(|l| l.contains("https://example.com")));
+    fn render_markdown_link_in_list_item_appends_url_on_the_item_row() {
+        assert_eq!(
+            rendered_text("- [Click](https://example.com)"),
+            ["- Click (https://example.com)"],
+        );
     }
 
-    // ── Code Blocks ──
+    // ── render_markdown: code blocks ──
 
     #[test]
-    fn fenced_code_block_plain() {
+    fn render_markdown_indented_code_preserves_content_without_language() {
+        assert_eq!(rendered_text("    let x = 1;\n"), ["let x = 1;"]);
+    }
+
+    #[test]
+    fn render_markdown_fenced_code_block_without_language_keeps_content() {
         let lines = rendered_text(indoc! {"
             ```
             fn main() {}
             ```
         "});
-        assert!(lines.iter().any(|l| l.contains("fn main()")));
+        assert_eq!(lines, ["fn main() {}"]);
     }
 
     #[test]
-    fn fenced_code_block_plain_has_no_background() {
+    fn render_markdown_fenced_code_block_plain_has_no_background() {
         // Plain fenced blocks (no language) use the `code`
         // style, which omits the bg fill so wrapping / width variance
         // across lines doesn't leave ragged highlight edges.
@@ -1191,7 +1089,7 @@ mod tests {
     }
 
     #[test]
-    fn fenced_code_block_with_lang_highlights() {
+    fn render_markdown_fenced_code_block_with_lang_highlights() {
         let text = render_markdown(
             indoc! {"
                 ```rust
@@ -1210,7 +1108,7 @@ mod tests {
     }
 
     #[test]
-    fn fenced_code_block_expands_tabs_to_stops() {
+    fn render_markdown_fenced_code_block_expands_tabs_to_stops() {
         let lines = rendered_text(indoc! {"
             ```go
             func f() {
@@ -1222,7 +1120,7 @@ mod tests {
     }
 
     #[test]
-    fn fenced_code_block_wraps_long_lines_and_keeps_line_style() {
+    fn render_markdown_fenced_code_block_wraps_long_lines_and_keeps_line_style() {
         let t = theme();
         let text = render_markdown(
             indoc! {"
@@ -1239,7 +1137,7 @@ mod tests {
     }
 
     #[test]
-    fn fenced_code_block_wrapped_rows_hang_at_the_code_indent_up_to_half_width() {
+    fn render_markdown_fenced_code_block_wrapped_rows_hang_at_the_code_indent_up_to_half_width() {
         let lines = rendered_text_at_width(
             indoc! {"
                 ```
@@ -1252,7 +1150,7 @@ mod tests {
     }
 
     #[test]
-    fn fenced_code_block_in_list_item_keeps_item_indent() {
+    fn render_markdown_fenced_code_block_in_list_item_keeps_item_indent() {
         let lines = rendered_text(indoc! {"
             - item
 
@@ -1264,7 +1162,7 @@ mod tests {
     }
 
     #[test]
-    fn fenced_code_block_in_list_item_hangs_wrapped_rows_past_the_item_indent() {
+    fn render_markdown_fenced_code_block_in_list_item_hangs_wrapped_rows_past_the_item_indent() {
         let lines = rendered_text_at_width(
             indoc! {"
                 - item
@@ -1282,7 +1180,7 @@ mod tests {
     }
 
     #[test]
-    fn fenced_code_block_as_first_item_child_takes_the_marker() {
+    fn render_markdown_fenced_code_block_as_first_item_child_takes_the_marker() {
         let lines = rendered_text(indoc! {"
             - ```
               let x = 1;
@@ -1292,7 +1190,7 @@ mod tests {
     }
 
     #[test]
-    fn fenced_code_block_in_blockquote_keeps_marker_on_wrapped_rows() {
+    fn render_markdown_fenced_code_block_in_blockquote_keeps_marker_on_wrapped_rows() {
         let lines = rendered_text_at_width(
             indoc! {"
                 > ```
@@ -1304,92 +1202,50 @@ mod tests {
         assert_eq!(lines, ["> alpha beta", "> gamma"]);
     }
 
-    // ── Tables ──
+    // ── render_markdown: tables ──
 
     #[test]
-    fn table_basic() {
+    fn render_markdown_table_draws_borders_header_rule_and_rows() {
         let lines = rendered_text(indoc! {"
             | A | B |
             |---|---|
             | 1 | 2 |
             | 3 | 4 |
         "});
-        // Top border
-        assert!(
-            lines
-                .iter()
-                .any(|l| l.contains('┌') && l.contains('┬') && l.contains('┐')),
-            "top border missing: {lines:?}"
-        );
-        // Header cells
-        assert!(
-            lines
-                .iter()
-                .any(|l| l.contains('A') && l.contains('B') && l.contains('│')),
-            "header row missing: {lines:?}"
-        );
-        // Header separator
-        assert!(
-            lines
-                .iter()
-                .any(|l| l.contains('├') && l.contains('┼') && l.contains('┤')),
-            "header separator missing: {lines:?}"
-        );
-        // Body cells
-        assert!(
-            lines.iter().any(|l| l.contains('1') && l.contains('2')),
-            "first body row missing: {lines:?}"
-        );
-        assert!(
-            lines.iter().any(|l| l.contains('3') && l.contains('4')),
-            "second body row missing: {lines:?}"
-        );
-        // Bottom border
-        assert!(
-            lines
-                .iter()
-                .any(|l| l.contains('└') && l.contains('┴') && l.contains('┘')),
-            "bottom border missing: {lines:?}"
+        assert_eq!(
+            lines,
+            [
+                "┌───┬───┐",
+                "│ A │ B │",
+                "├───┼───┤",
+                "│ 1 │ 2 │",
+                "│ 3 │ 4 │",
+                "└───┴───┘",
+            ]
         );
     }
 
     #[test]
-    fn table_alignment() {
+    fn render_markdown_table_aligns_cells_per_column() {
         let lines = rendered_text(indoc! {"
             | Left | Center | Right |
             |:-----|:------:|------:|
             | a    |   b    |     c |
         "});
-        let body_row = lines
-            .iter()
-            .find(|l| l.contains('a') && l.contains('b') && l.contains('c'))
-            .expect("body row not found");
-
-        // "a" should be left-aligned (near left pipe), "c" right-aligned (near right pipe).
-        let a_pos = body_row.find('a').unwrap();
-        let c_pos = body_row.find('c').unwrap();
-        assert!(
-            a_pos < c_pos,
-            "left-aligned 'a' should appear before right-aligned 'c'"
-        );
-
-        // For center alignment, 'b' should have padding on both sides.
-        let b_segment: String = body_row
-            .split('│')
-            .nth(2)
-            .expect("center column not found")
-            .to_owned();
-        let trimmed = b_segment.trim();
-        let left_pad = b_segment.len() - b_segment.trim_start().len();
-        let right_pad = b_segment.len() - b_segment.trim_end().len();
-        assert!(
-            !trimmed.is_empty() && left_pad > 0 && right_pad > 0,
-            "center-aligned cell should have padding on both sides: {body_row:?}"
+        assert_eq!(
+            lines,
+            [
+                "┌──────┬────────┬───────┐",
+                "│ Left │ Center │ Right │",
+                "├──────┼────────┼───────┤",
+                "│ a    │   b    │     c │",
+                "└──────┴────────┴───────┘",
+            ]
         );
     }
 
     #[test]
-    fn table_header_style() {
+    fn render_markdown_table_header_cells_are_bold() {
         let t = theme();
         let text = render_markdown(
             indoc! {"
@@ -1417,7 +1273,7 @@ mod tests {
     }
 
     #[test]
-    fn table_inline_styles() {
+    fn render_markdown_table_cell_keeps_inline_code_style() {
         let t = theme();
         let text = render_markdown(
             indoc! {"
@@ -1444,183 +1300,339 @@ mod tests {
     }
 
     #[test]
-    fn table_empty_cells() {
+    fn render_markdown_table_empty_cell_keeps_its_borders() {
         let lines = rendered_text(indoc! {"
             | A | B |
             |---|---|
             |   | x |
         "});
-        let body_row = lines
-            .iter()
-            .find(|l| l.contains('x'))
-            .expect("body row not found");
-        // Row should still have 3 pipe characters (left, middle, right).
-        let pipe_count = body_row.matches('│').count();
         assert_eq!(
-            pipe_count, 3,
-            "row with empty cell should have 3 borders: {body_row:?}"
+            lines,
+            [
+                "┌───┬───┐",
+                "│ A │ B │",
+                "├───┼───┤",
+                "│   │ x │",
+                "└───┴───┘"
+            ]
         );
     }
 
     #[test]
-    fn table_mismatched_column_counts() {
+    fn render_markdown_table_pads_short_rows_to_the_column_count() {
         let lines = rendered_text(indoc! {"
             | A | B | C |
             |---|---|---|
             | 1 | 2 |
         "});
-        // Short row should be padded to 3 columns.
-        let body_row = lines
-            .iter()
-            .find(|l| l.contains('1') && l.contains('2'))
-            .expect("body row not found");
-        let pipe_count = body_row.matches('│').count();
         assert_eq!(
-            pipe_count, 4,
-            "short row should still have 4 borders (3 columns): {body_row:?}"
+            lines,
+            [
+                "┌───┬───┬───┐",
+                "│ A │ B │ C │",
+                "├───┼───┼───┤",
+                "│ 1 │ 2 │   │",
+                "└───┴───┴───┘",
+            ]
         );
     }
 
     #[test]
-    fn table_header_only() {
+    fn render_markdown_table_without_body_omits_the_header_rule() {
         let lines = rendered_text(indoc! {"
             | A | B |
             |---|---|
         "});
-        // Should render top border, header row, bottom border (no separator
-        // since there are no body rows).
-        assert!(
-            lines.iter().any(|l| l.contains('┌')),
-            "top border missing: {lines:?}"
-        );
-        assert!(
-            lines.iter().any(|l| l.contains('A') && l.contains('B')),
-            "header row missing: {lines:?}"
-        );
-        assert!(
-            lines.iter().any(|l| l.contains('└')),
-            "bottom border missing: {lines:?}"
-        );
-        assert!(
-            !lines.iter().any(|l| l.contains('├')),
-            "separator should not appear with no body rows: {lines:?}"
-        );
+        assert_eq!(lines, ["┌───┬───┐", "│ A │ B │", "└───┴───┘"]);
     }
 
     #[test]
-    fn table_fits_width_budget_and_wraps_cells() {
-        // Natural width of the second column (~35 cols of content) would
-        // overflow a 40-col budget; the table should shrink that column and
-        // wrap the long cell across multiple visual sub-lines. All rendered
-        // lines — borders and data rows alike — must stay within the budget.
-        let width = 40;
-        let text = render_markdown(
+    fn render_markdown_table_fits_width_budget_and_wraps_cells() {
+        let lines = rendered_text_at_width(
             indoc! {"
                 | # | Description                         |
                 |---|-------------------------------------|
                 | 1 | short                               |
                 | 2 | a cell with enough words to wrap it |
             "},
-            &theme(),
-            width,
+            40,
         );
-        let rendered: Vec<String> = text
-            .lines
-            .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
-            .collect();
-
-        for line in &rendered {
-            if line.contains('│') || line.contains('┌') || line.contains('└') {
-                assert!(
-                    UnicodeWidthStr::width(line.as_str()) <= width,
-                    "table line exceeds width budget ({width}): {line:?}"
-                );
-            }
-        }
-
-        let border_chars: Vec<&str> = rendered
-            .iter()
-            .filter(|l| l.starts_with('┌') || l.starts_with('├') || l.starts_with('└'))
-            .map(String::as_str)
-            .collect();
-        assert!(!border_chars.is_empty(), "borders missing: {rendered:?}");
-        let border_width = UnicodeWidthStr::width(border_chars[0]);
-        for b in &border_chars {
-            assert_eq!(
-                UnicodeWidthStr::width(*b),
-                border_width,
-                "borders should share the same width: {border_chars:?}"
-            );
-        }
-
-        // All data rows should also share that width so the right border
-        // stays aligned with the top/bottom borders.
-        let data_rows: Vec<&str> = rendered
-            .iter()
-            .filter(|l| l.starts_with('│'))
-            .map(String::as_str)
-            .collect();
-        for row in &data_rows {
-            let row_width = UnicodeWidthStr::width(*row);
-            assert_eq!(
-                row_width, border_width,
-                "data row width ({row_width}) != border width ({border_width}): {row:?}",
-            );
-        }
-
-        // The long cell from row "2" must produce more than one visual
-        // sub-line starting with │ between the separator and the bottom border.
-        let sep_idx = rendered.iter().position(|l| l.starts_with('├')).unwrap();
-        let bot_idx = rendered.iter().position(|l| l.starts_with('└')).unwrap();
-        let body = &rendered[sep_idx + 1..bot_idx];
-        assert!(
-            body.len() >= 3,
-            "long cell should wrap into multiple sub-lines, got body: {body:?}"
+        assert_eq!(
+            lines,
+            [
+                "┌───┬──────────────────────────────────┐",
+                "│ # │ Description                      │",
+                "├───┼──────────────────────────────────┤",
+                "│ 1 │ short                            │",
+                "│ 2 │ a cell with enough words to wrap │",
+                "│   │ it                               │",
+                "└───┴──────────────────────────────────┘",
+            ]
         );
     }
 
     #[test]
-    fn table_wrapped_cell_keeps_alignment_in_other_columns() {
-        // A wrapping cell in one column should leave the other columns
-        // padded out on trailing sub-lines so the column pipes stay aligned.
-        let text = render_markdown(
+    fn render_markdown_table_wrapped_cell_keeps_alignment_in_other_columns() {
+        let lines = rendered_text_at_width(
             indoc! {"
                 | ID | Note                               |
                 |----|------------------------------------|
                 | 42 | enough words here to force a wrap  |
             "},
-            &theme(),
             30,
         );
-        let rendered: Vec<String> = text
+        assert_eq!(
+            lines,
+            [
+                "┌────┬───────────────────────┐",
+                "│ ID │ Note                  │",
+                "├────┼───────────────────────┤",
+                "│ 42 │ enough words here to  │",
+                "│    │ force a wrap          │",
+                "└────┴───────────────────────┘",
+            ]
+        );
+    }
+
+    // ── render_markdown: inline content ──
+
+    #[test]
+    fn render_markdown_strong_and_emphasis_set_bold_and_italic() {
+        let text = render_markdown("**bold** and *italic*", &theme(), 0);
+        assert_eq!(
+            text.lines[0].spans,
+            [
+                Span::raw("bold").bold(),
+                Span::raw(" and "),
+                Span::raw("italic").italic(),
+            ]
+        );
+    }
+
+    #[test]
+    fn render_markdown_strong_emphasis_sets_bold_and_italic_together() {
+        let text = render_markdown("***bold italic***", &theme(), 0);
+        assert_eq!(
+            text.lines[0].spans,
+            [Span::raw("bold italic").bold().italic()]
+        );
+    }
+
+    #[test]
+    fn render_markdown_strikethrough_crosses_out_text() {
+        let text = render_markdown("~~struck~~", &theme(), 0);
+        assert_eq!(text.lines[0].spans, [Span::raw("struck").crossed_out()]);
+    }
+
+    #[test]
+    fn render_markdown_inline_code_uses_the_inline_code_style() {
+        let t = theme();
+        let text = render_markdown("Use `foo()` here", &t, 0);
+        assert_eq!(
+            text.lines[0].spans,
+            [
+                Span::raw("Use "),
+                Span::styled("foo()", t.inline_code()),
+                Span::raw(" here"),
+            ]
+        );
+    }
+
+    #[test]
+    fn render_markdown_image_renders_its_alt_text_inline() {
+        assert_eq!(
+            rendered_text("before ![alt](https://example.com) after"),
+            ["before alt after"],
+        );
+    }
+
+    #[test]
+    fn render_markdown_inline_code_inside_bold_inherits_bold() {
+        let t = theme();
+        let text = render_markdown("**use `foo()` here**", &t, 0);
+        let span = text.lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content.contains("foo()"))
+            .expect("code span not found");
+        assert_eq!(
+            span.style.fg, t.user.fg,
+            "code span keeps its distinctive fg"
+        );
+        assert_eq!(span.style.bg, None, "code span stays fg-only");
+        assert!(
+            span.style.add_modifier.contains(Modifier::BOLD),
+            "code span inside **bold** should inherit BOLD modifier"
+        );
+    }
+
+    #[test]
+    fn render_markdown_inline_code_inside_heading_inherits_modifiers() {
+        let t = theme();
+        let text = render_markdown("# see `foo()`", &t, 0);
+        let span = text
             .lines
             .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
-            .collect();
-
-        let sep_idx = rendered.iter().position(|l| l.starts_with('├')).unwrap();
-        let bot_idx = rendered.iter().position(|l| l.starts_with('└')).unwrap();
-        let body: Vec<&str> = rendered[sep_idx + 1..bot_idx]
-            .iter()
-            .map(String::as_str)
-            .collect();
+            .find_map(|l| l.spans.iter().find(|s| s.content.contains("foo()")))
+            .expect("code span not found in heading");
+        assert_eq!(span.style.fg, t.user.fg);
+        assert_eq!(span.style.bg, None);
         assert!(
-            body.len() >= 2,
-            "expected wrapped sub-lines in body: {body:?}"
+            span.style.add_modifier.contains(Modifier::BOLD),
+            "code inside an H1 should inherit the heading's BOLD"
         );
+        assert!(
+            span.style.add_modifier.contains(Modifier::UNDERLINED),
+            "code inside an H1 should inherit the heading's UNDERLINED"
+        );
+    }
 
-        // Every sub-line should have the same number of `│` separators as
-        // the header row (left + per-column = col_count + 1).
-        let header_idx = rendered.iter().position(|l| l.contains("ID")).unwrap();
-        let expected_pipes = rendered[header_idx].matches('│').count();
-        for row in &body {
-            assert_eq!(
-                row.matches('│').count(),
-                expected_pipes,
-                "sub-row should keep all column pipes: {row:?}"
-            );
-        }
+    // ── render_markdown: html ──
+
+    #[test]
+    fn render_markdown_html_block_renders_one_row_per_line_between_blank_separators() {
+        let lines = rendered_text(indoc! {"
+            para
+
+            <div>
+            hello
+            </div>
+
+            after
+        "});
+        assert_eq!(lines, ["para", "", "<div>", "hello", "</div>", "", "after"]);
+    }
+
+    #[test]
+    fn render_markdown_html_block_in_blockquote_keeps_the_marker_on_every_row() {
+        let lines = rendered_text(indoc! {"
+            > <div>
+            > x
+            > </div>
+        "});
+        assert_eq!(lines, ["> <div>", "> x", "> </div>"]);
+    }
+
+    #[test]
+    fn render_markdown_inline_html_is_kept_as_text() {
+        assert_eq!(rendered_text("text <br> more"), ["text <br> more"]);
+    }
+
+    // ── render_markdown: links ──
+
+    #[test]
+    fn render_markdown_link_appends_url() {
+        let lines = rendered_text("[Click](https://example.com)");
+        assert_eq!(lines, vec!["Click (https://example.com)"]);
+    }
+
+    #[test]
+    fn render_markdown_link_url_has_accent_underline_style() {
+        let t = theme();
+        let text = render_markdown("[text](https://example.com)", &t, 0);
+        let url_span = text.lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content.contains("https://example.com"))
+            .unwrap();
+        assert!(url_span.style.add_modifier.contains(Modifier::UNDERLINED));
+        assert_eq!(url_span.style.fg, t.accent.fg);
+    }
+
+    #[test]
+    fn render_markdown_link_autolink_renders_url_once_in_link_style() {
+        let t = theme();
+        let text = render_markdown("<https://x.io>", &t, 0);
+        assert_eq!(
+            text.lines[0].spans,
+            [Span::styled("https://x.io", t.link())]
+        );
+    }
+
+    #[test]
+    fn render_markdown_link_email_autolink_renders_address_once() {
+        assert_eq!(rendered_text("<me@x.io>"), ["me@x.io"]);
+    }
+
+    #[test]
+    fn render_markdown_link_in_table_cell_keeps_url_in_the_cell() {
+        let lines = rendered_text(indoc! {"
+            intro
+
+            | site |
+            | ---- |
+            | [x](https://x.io) |
+        "});
+        assert_eq!(
+            lines,
+            [
+                "intro",
+                "",
+                "┌──────────────────┐",
+                "│ site             │",
+                "├──────────────────┤",
+                "│ x (https://x.io) │",
+                "└──────────────────┘",
+            ]
+        );
+    }
+
+    // ── render_markdown: word wrapping ──
+
+    #[test]
+    fn render_markdown_paragraph_wraps_at_width() {
+        assert_eq!(
+            rendered_text_at_width("one two three four five six", 15),
+            ["one two three ", "four five six"],
+        );
+    }
+
+    #[test]
+    fn render_markdown_heading_wraps_at_width() {
+        assert_eq!(
+            rendered_text_at_width("# one two three four five six", 15),
+            ["# one two three", "four five six"],
+        );
+    }
+
+    #[test]
+    fn render_markdown_blockquote_wraps_with_marker_on_continuations() {
+        assert_eq!(
+            rendered_text_at_width("> one two three four five six seven eight", 15),
+            ["> one two three", "> four five six", "> seven eight"],
+        );
+    }
+
+    #[test]
+    fn render_markdown_nested_blockquote_wraps_with_nested_markers() {
+        assert_eq!(
+            rendered_text_at_width("> > one two three four five six seven eight", 20),
+            [
+                "> > one two three ",
+                "> > four five six ",
+                "> > seven eight"
+            ],
+        );
+    }
+
+    #[test]
+    fn render_markdown_tight_list_item_wraps_without_repeating_marker() {
+        assert_eq!(
+            rendered_text_at_width("- one two three four five six seven eight", 15),
+            ["- one two three", "  four five six", "  seven eight"],
+        );
+    }
+
+    #[test]
+    fn render_markdown_blockquote_list_item_wraps_with_blockquote_marker_only() {
+        assert_eq!(
+            rendered_text_at_width("> - one two three four five six seven eight", 20),
+            [
+                "> - one two three ",
+                ">   four five six ",
+                ">   seven eight"
+            ],
+        );
     }
 
     // ── fit_column_widths ──
@@ -1659,298 +1671,27 @@ mod tests {
 
     #[test]
     fn wrap_cell_wraps_long_content_to_target_width() {
-        let cell = vec![Span::raw("one two three four".to_owned())];
+        let cell = Line::from("one two three four");
         let out = wrap_cell(&cell, 8);
         assert!(out.len() >= 2, "long cell should wrap: {out:?}");
         for sub_line in &out {
-            let width: usize = sub_line
-                .iter()
-                .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
-                .sum();
+            let width = sub_line.width();
             assert!(width <= 8, "sub-line exceeds target width: {sub_line:?}");
         }
     }
 
     #[test]
     fn wrap_cell_empty_produces_single_empty_sub_line() {
-        let out = wrap_cell(&[], 10);
+        let out = wrap_cell(&Line::default(), 10);
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0], []);
+        assert_eq!(out[0], Line::default());
     }
 
     #[test]
     fn wrap_cell_zero_target_width_preserves_cell() {
-        let cell = vec![Span::raw("hello".to_owned())];
+        let cell = Line::from("hello");
         let out = wrap_cell(&cell, 0);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0], cell);
-    }
-
-    // ── Inline Content ──
-
-    #[test]
-    fn bold_and_italic() {
-        let text = render_markdown("**bold** and *italic*", &theme(), 0);
-        let bold_span = text.lines[0]
-            .spans
-            .iter()
-            .find(|s| s.content.contains("bold"))
-            .unwrap();
-        assert!(bold_span.style.add_modifier.contains(Modifier::BOLD));
-        let italic_span = text.lines[0]
-            .spans
-            .iter()
-            .find(|s| s.content.contains("italic"))
-            .unwrap();
-        assert!(italic_span.style.add_modifier.contains(Modifier::ITALIC));
-    }
-
-    #[test]
-    fn bold_italic_combined() {
-        let text = render_markdown("***bold italic***", &theme(), 0);
-        let span = text.lines[0]
-            .spans
-            .iter()
-            .find(|s| s.content.contains("bold italic"))
-            .unwrap();
-        assert!(span.style.add_modifier.contains(Modifier::BOLD));
-        assert!(span.style.add_modifier.contains(Modifier::ITALIC));
-    }
-
-    #[test]
-    fn strikethrough() {
-        let text = render_markdown("~~struck~~", &theme(), 0);
-        let span = text.lines[0]
-            .spans
-            .iter()
-            .find(|s| s.content.contains("struck"))
-            .unwrap();
-        assert!(span.style.add_modifier.contains(Modifier::CROSSED_OUT));
-    }
-
-    #[test]
-    fn inline_code() {
-        let t = theme();
-        let text = render_markdown("Use `foo()` here", &t, 0);
-        let span = text.lines[0]
-            .spans
-            .iter()
-            .find(|s| s.content.contains("foo()"))
-            .unwrap();
-        assert_eq!(span.style.fg, t.user.fg);
-        assert_eq!(
-            span.style.bg, None,
-            "inline code is fg-only — no background fill"
-        );
-    }
-
-    #[test]
-    fn inline_code_inside_bold_inherits_bold() {
-        let t = theme();
-        let text = render_markdown("**use `foo()` here**", &t, 0);
-        let span = text.lines[0]
-            .spans
-            .iter()
-            .find(|s| s.content.contains("foo()"))
-            .expect("code span not found");
-        assert_eq!(
-            span.style.fg, t.user.fg,
-            "code span keeps its distinctive fg"
-        );
-        assert_eq!(span.style.bg, None, "code span stays fg-only");
-        assert!(
-            span.style.add_modifier.contains(Modifier::BOLD),
-            "code span inside **bold** should inherit BOLD modifier"
-        );
-    }
-
-    #[test]
-    fn inline_code_inside_heading_inherits_modifiers() {
-        let t = theme();
-        let text = render_markdown("# see `foo()`", &t, 0);
-        let span = text
-            .lines
-            .iter()
-            .find_map(|l| l.spans.iter().find(|s| s.content.contains("foo()")))
-            .expect("code span not found in heading");
-        assert_eq!(span.style.fg, t.user.fg);
-        assert_eq!(span.style.bg, None);
-        assert!(
-            span.style.add_modifier.contains(Modifier::BOLD),
-            "code inside an H1 should inherit the heading's BOLD"
-        );
-        assert!(
-            span.style.add_modifier.contains(Modifier::UNDERLINED),
-            "code inside an H1 should inherit the heading's UNDERLINED"
-        );
-    }
-
-    // ── HTML ──
-
-    #[test]
-    fn html_block_renders_one_row_per_line_between_blank_separators() {
-        let lines = rendered_text(indoc! {"
-            para
-
-            <div>
-            hello
-            </div>
-
-            after
-        "});
-        assert_eq!(lines, ["para", "", "<div>", "hello", "</div>", "", "after"]);
-    }
-
-    #[test]
-    fn html_block_in_blockquote_keeps_the_marker_on_every_row() {
-        let lines = rendered_text(indoc! {"
-            > <div>
-            > x
-            > </div>
-        "});
-        assert_eq!(lines, ["> <div>", "> x", "> </div>"]);
-    }
-
-    #[test]
-    fn inline_html_preserved() {
-        let lines = rendered_text("text <br> more");
-        let joined: String = lines.join("");
-        assert!(joined.contains("<br>"));
-    }
-
-    // ── Links ──
-
-    #[test]
-    fn link_appends_url() {
-        let lines = rendered_text("[Click](https://example.com)");
-        assert_eq!(lines, vec!["Click (https://example.com)"]);
-    }
-
-    #[test]
-    fn link_url_has_accent_underline_style() {
-        let t = theme();
-        let text = render_markdown("[text](https://example.com)", &t, 0);
-        let url_span = text.lines[0]
-            .spans
-            .iter()
-            .find(|s| s.content.contains("https://example.com"))
-            .unwrap();
-        assert!(url_span.style.add_modifier.contains(Modifier::UNDERLINED));
-        assert_eq!(url_span.style.fg, t.accent.fg);
-    }
-
-    #[test]
-    fn link_autolink_renders_url_once_in_link_style() {
-        let t = theme();
-        let text = render_markdown("<https://x.io>", &t, 0);
-        assert_eq!(
-            text.lines[0].spans,
-            [Span::styled("https://x.io", t.link())]
-        );
-    }
-
-    #[test]
-    fn link_email_autolink_renders_address_once() {
-        assert_eq!(rendered_text("<me@x.io>"), ["me@x.io"]);
-    }
-
-    #[test]
-    fn link_in_table_cell_keeps_url_in_the_cell() {
-        let lines = rendered_text(indoc! {"
-            intro
-
-            | site |
-            | ---- |
-            | [x](https://x.io) |
-        "});
-        assert_eq!(lines[0], "intro");
-        assert!(
-            lines.iter().any(|l| l.contains("x (https://x.io)")),
-            "{lines:#?}"
-        );
-    }
-
-    // ── Word Wrapping ──
-
-    #[test]
-    fn paragraph_wraps_at_width() {
-        let t = theme();
-        let text = render_markdown("one two three four five six", &t, 15);
-        assert!(
-            text.lines.len() >= 2,
-            "long paragraph should wrap into multiple lines, got {} line(s)",
-            text.lines.len()
-        );
-    }
-
-    #[test]
-    fn heading_wraps_at_width() {
-        let t = theme();
-        let text = render_markdown("# one two three four five six", &t, 15);
-        assert!(
-            text.lines.len() >= 2,
-            "long heading should wrap into multiple lines, got {} line(s)",
-            text.lines.len()
-        );
-    }
-
-    #[test]
-    fn blockquote_wraps_with_marker_on_continuations() {
-        let lines = rendered_text_at_width("> one two three four five six seven eight", 15);
-        assert!(lines.len() >= 2, "should wrap: {lines:?}");
-        for line in &lines {
-            assert!(
-                line.starts_with("> "),
-                "blockquote continuation must repeat `> ` marker: {line:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn nested_blockquote_wraps_with_nested_markers() {
-        let lines = rendered_text_at_width("> > one two three four five six seven eight", 20);
-        assert!(lines.len() >= 2, "should wrap: {lines:?}");
-        for line in &lines {
-            assert!(
-                line.starts_with("> > "),
-                "nested blockquote continuation must repeat `> > ` markers: {line:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn tight_list_item_wraps_without_repeating_marker() {
-        let lines = rendered_text_at_width("- one two three four five six seven eight", 15);
-        assert!(lines.len() >= 2, "tight list item should wrap: {lines:?}");
-        assert!(
-            lines[0].starts_with("- "),
-            "first line has marker: {lines:?}"
-        );
-        for line in &lines[1..] {
-            assert!(
-                line.starts_with("  ") && !line.starts_with("- "),
-                "continuation should be space-indented, not a new marker: {line:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn blockquote_list_item_wraps_with_blockquote_marker_only() {
-        let lines = rendered_text_at_width("> - one two three four five six seven eight", 20);
-        assert!(lines.len() >= 2, "should wrap: {lines:?}");
-        assert!(
-            lines[0].starts_with("> - "),
-            "first line has blockquote + list markers: {lines:?}"
-        );
-        for line in &lines[1..] {
-            assert!(
-                line.starts_with("> "),
-                "continuation keeps blockquote marker: {line:?}"
-            );
-            assert!(
-                !line.contains("- "),
-                "continuation should not repeat list marker: {line:?}"
-            );
-        }
     }
 }
