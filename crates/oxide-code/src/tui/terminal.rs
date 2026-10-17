@@ -21,10 +21,15 @@ use super::components::status::StatusHyperlink;
 
 pub(crate) type Tui = Terminal<CrosstermBackend<Stdout>>;
 
-/// Enters raw mode + alt screen + mouse capture + bracketed paste + Kitty keyboard (outside
-/// Windows). Caller must invoke [`restore`] on exit (including panics).
+/// Enters raw mode, the alternate screen, mouse capture, bracketed paste, and, outside Windows,
+/// Kitty keyboard disambiguation. A failed setup restores the terminal before returning the error.
+/// Otherwise the caller must invoke [`restore`] on exit, including panics.
 pub(crate) fn init() -> Result<Tui> {
     enable_raw_mode()?;
+    open_tui().inspect_err(|_| restore())
+}
+
+fn open_tui() -> Result<Tui> {
     let mut stdout = io::stdout();
     enter_tui_mode(&mut stdout)?;
     #[cfg(windows)]
