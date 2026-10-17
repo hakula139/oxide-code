@@ -5,7 +5,7 @@
 //! it. `exec` patterns parse here too, so they read words the way commands do. Design:
 //! `docs/design/tools/permissions.md`.
 
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use std::sync::LazyLock;
 
 use anyhow::{Result, bail, ensure};
@@ -28,6 +28,13 @@ const CODE_BUILTINS: &[&str] = &[".", "eval", "let", "source", "trap"];
 /// Builtins that change the working directory, after which a relative redirection target no longer
 /// names the file the gate resolved.
 const DIRECTORY_CHANGERS: &[&str] = &["cd", "popd", "pushd"];
+
+/// Commands whose file operands the gate weighs against `read` rules, whether or not they run as
+/// [known-safe](safe_operands) reads.
+const READERS: &[&str] = &["cat", "find", "grep", "head", "ls", "sed", "tail", "wc"];
+
+/// Files one globbing word may match before the analysis gives up on listing them.
+const MAX_GLOB_MATCHES: usize = 1024;
 
 /// Variables a leading assignment may set without changing what a rule names, since none of them
 /// changes which program runs, what it loads, or where it writes.
@@ -255,9 +262,14 @@ pub(super) struct Segment {
     named: Vec<ShellWord>,
     /// Where the program that runs starts in `named`, past every assignment and wrapper.
     program: usize,
-    /// The files a shipped known-safe read-only command reads, resolved like a read's path, or
-    /// `None` for any other command.
-    safe_reads: Option<Vec<Access>>,
+    /// The files one of [`READERS`] may read, resolved like a read's path: each literal operand,
+    /// and each file a globbing one matches when the analysis runs. Empty for any other command.
+    reads: Vec<Access>,
+    /// Whether one of [`READERS`] takes a word whose files the analysis cannot list, such as one
+    /// that expands a variable, so it may read any file.
+    reads_anything: bool,
+    /// Whether it is a shipped known-safe read-only command, whose `reads` are all it reads.
+    safe: bool,
 }
 
 impl Segment {
@@ -284,8 +296,48 @@ impl Segment {
         })
     }
 
+    /// The files a known-safe read-only command reads, or `None` for any other command.
     pub(super) fn safe_reads(&self) -> Option<&[Access]> {
-        self.safe_reads.as_deref()
+        self.safe.then_some(self.reads.as_slice())
+    }
+
+    pub(super) fn reads(&self) -> &[Access] {
+        &self.reads
+    }
+
+    pub(super) const fn reads_anything(&self) -> bool {
+        self.reads_anything
+    }
+
+    /// Whether this may run `rm` with both its recursive and force options before any `--`, in one
+    /// short cluster or two, such as `-rf` or `-R -f`, or as `--recursive` and `--force` or a
+    /// prefix GNU `rm` takes for either. A word that expands, the program name included, may become
+    /// any of them, and GNU `rm` reads options after operands too, so `rm / -rf` counts.
+    pub(super) fn removes_recursively_by_force(&self) -> bool {
+        let (name, args) = self
+            .program()
+            .split_first()
+            .expect("a simple command runs a program");
+        if name.literal && fold_name(basename(&name.text)) != "rm" {
+            return false;
+        }
+        let (mut recursive, mut force) = (false, false);
+        for arg in args {
+            if !arg.literal {
+                return true;
+            }
+            if arg.text == "--" {
+                break;
+            }
+            if let Some(long) = arg.text.strip_prefix("--") {
+                recursive |= !long.is_empty() && "recursive".starts_with(long);
+                force |= !long.is_empty() && "force".starts_with(long);
+            } else if let Some(cluster) = arg.text.strip_prefix('-') {
+                recursive |= cluster.contains(['r', 'R']);
+                force |= cluster.contains('f');
+            }
+        }
+        recursive && force
     }
 }
 
@@ -418,19 +470,25 @@ impl Walk<'_> {
                     self.nested_script(runner, args);
                 }
                 self.changes_dir |= DIRECTORY_CHANGERS.contains(&name);
+                // `shopt` can turn on `dotglob` or `globstar`, which change what a glob matches.
+                self.opaque |= name == "shopt";
             }
         }
         let pinned = unsafe_assignment.is_some() || named.len() > words.len();
-        let safe_reads = name
+        let safe = name
             .filter(|_| !pinned)
-            .and_then(|name| safe_operands(name, args))
-            .map(|operands| {
-                self.relative_path |= operands.iter().any(|path| Path::new(path).is_relative());
-                operands
-                    .iter()
-                    .map(|operand| Access::for_path(operand, self.workspace))
-                    .collect()
-            });
+            .and_then(|name| safe_operands(name, args));
+        let reader = name.is_some_and(|name| READERS.contains(&fold_name(basename(name)).as_str()));
+        let (operands, reads_anything) = match (&safe, reader) {
+            (Some(operands), _) => (operands.clone(), false),
+            (None, true) => reader_operands(args, self.workspace.cwd()),
+            (None, false) => (Vec::new(), false),
+        };
+        self.relative_path |= operands.iter().any(|path| Path::new(path).is_relative());
+        let reads = operands
+            .iter()
+            .map(|operand| Access::for_path(operand, self.workspace))
+            .collect();
         let named: Vec<ShellWord> = match unsafe_assignment {
             Some(first) => assignments
                 .split_off(first)
@@ -442,7 +500,9 @@ impl Walk<'_> {
         self.segments.push(Segment {
             program: named.len() - words.len(),
             named,
-            safe_reads,
+            reads,
+            reads_anything,
+            safe: safe.is_some(),
         });
     }
 
@@ -763,6 +823,7 @@ fn unquote(node: Node<'_>, src: &str, leading: bool) -> Option<(String, bool)> {
         "word" => unquote_word(text, leading),
         "number" => Some((text.to_owned(), false)),
         "raw_string" => Some((text.get(1..text.len() - 1)?.to_owned(), false)),
+        "ansi_c_string" => Some((unquote_ansi_c(text.get(2..text.len() - 1)?)?, false)),
         "string" => {
             let mut cursor = node.walk();
             if !node
@@ -828,6 +889,69 @@ fn unquote_double(inner: &str) -> String {
         }
     }
     value
+}
+
+/// A `$'...'` string's value, with its escapes decoded as bash does, or `None` when an escape names
+/// no character, names a lone byte past ASCII, or names NUL, where bash cuts the word short.
+fn unquote_ansi_c(inner: &str) -> Option<String> {
+    let mut value = String::with_capacity(inner.len());
+    let mut chars = inner.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            value.push(c);
+            continue;
+        }
+        let escape = chars.next()?;
+        let decoded = match escape {
+            'a' => '\u{7}',
+            'b' => '\u{8}',
+            'e' | 'E' => '\u{1b}',
+            'f' => '\u{c}',
+            'n' => '\n',
+            'r' => '\r',
+            't' => '\t',
+            'v' => '\u{b}',
+            '\\' | '\'' | '"' | '?' => escape,
+            '0'..='7' => {
+                let first = escape.to_digit(8)?;
+                let code = take_digits(&mut chars, 8, 2)
+                    .map_or(first, |(rest, width)| first * 8_u32.pow(width) + rest);
+                char::from_u32(code & 0xff).filter(char::is_ascii)?
+            }
+            'x' => char::from_u32(take_digits(&mut chars, 16, 2)?.0).filter(char::is_ascii)?,
+            'u' => char::from_u32(take_digits(&mut chars, 16, 4)?.0)?,
+            'U' => char::from_u32(take_digits(&mut chars, 16, 8)?.0)?,
+            'c' => char::from_u32(u32::from(chars.next()?) & 0x1f)?,
+            other => {
+                value.push('\\');
+                other
+            }
+        };
+        if decoded == '\0' {
+            return None;
+        }
+        value.push(decoded);
+    }
+    Some(value)
+}
+
+/// Up to `max` digits in `radix` from the front of `chars`, as their value and their count, or
+/// `None` when none leads.
+fn take_digits(
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+    radix: u32,
+    max: usize,
+) -> Option<(u32, u32)> {
+    let mut taken = None;
+    for _ in 0..max {
+        let Some(digit) = chars.peek().and_then(|c| c.to_digit(radix)) else {
+            break;
+        };
+        chars.next();
+        let (value, count) = taken.unwrap_or((0, 0));
+        taken = Some((value * radix + digit, count + 1));
+    }
+    taken
 }
 
 // ── Patterns ──
@@ -940,23 +1064,28 @@ fn safe_operands(name: &str, args: &[Word<'_>]) -> Option<Vec<String>> {
         .iter()
         .map(|word| word.value.as_deref().filter(|_| !word.glob))
         .collect::<Option<Vec<_>>>()?;
+    let files = || {
+        operands(&values)
+            .into_iter()
+            .map(|(_, file)| file)
+            .collect()
+    };
     match name {
-        "cat" | "head" | "ls" | "tail" | "wc" => Some(operands(&values)),
-        "find" if !values.iter().any(|value| FIND_ACTIONS.contains(value)) => {
-            Some(operands(&values))
-        }
-        "grep" if !values.iter().any(|value| is_recursive_grep(value)) => Some(operands(&values)),
+        "cat" | "head" | "ls" | "tail" | "wc" => Some(files()),
+        "find" if !values.iter().any(|value| FIND_ACTIONS.contains(value)) => Some(files()),
+        "grep" if !values.iter().any(|value| is_recursive_grep(value)) => Some(files()),
         "sed" => sed_files(&values),
         _ => None,
     }
 }
 
-/// Every argument that may name a file: each word past the options, the value of a long option
-/// such as `--file=x`, and the rest of a short option cluster, which may hold an attached value.
-fn operands(values: &[&str]) -> Vec<String> {
+/// Every argument that may name a file, with the index of the value it comes from: each word past
+/// the options, the value of a long option such as `--file=x`, and the rest of a short option
+/// cluster, which may hold an attached value.
+fn operands(values: &[&str]) -> Vec<(usize, String)> {
     let mut operands = Vec::new();
     let mut options = true;
-    for &value in values {
+    for (index, &value) in values.iter().enumerate() {
         if options && value == "--" {
             options = false;
             continue;
@@ -971,7 +1100,7 @@ fn operands(values: &[&str]) -> Vec<String> {
             cluster.as_str()
         };
         if !operand.is_empty() && operand != "-" {
-            operands.push(operand.to_owned());
+            operands.push((index, operand.to_owned()));
         }
     }
     operands
@@ -1044,13 +1173,85 @@ fn long_option(arg: &str) -> Option<&str> {
     (!name.is_empty()).then_some(name)
 }
 
+// ── Readers ──
+
+/// The files one of [`READERS`] that is no known-safe read may read, from `args`: every word that
+/// may name a file, with each globbing one also expanded in `cwd` as bash expands it. The second
+/// value is whether a word expands a variable or globs to files [`expand_glob`] cannot list, which
+/// leaves what it reads unknown.
+fn reader_operands(args: &[Word<'_>], cwd: &Path) -> (Vec<String>, bool) {
+    let known: Vec<(&str, bool)> = args
+        .iter()
+        .filter_map(|word| Some((word.value.as_deref()?, word.glob)))
+        .collect();
+    let mut anything = known.len() < args.len();
+    let values: Vec<&str> = known.iter().map(|(value, _)| *value).collect();
+    let mut files = Vec::new();
+    for (index, operand) in operands(&values) {
+        if known[index].1 {
+            match expand_glob(&operand, cwd) {
+                Some(matches) => files.extend(matches),
+                None => anything = true,
+            }
+        }
+        files.push(operand);
+    }
+    (files, anything)
+}
+
+/// The paths bash's brace and pathname expansion give `pattern` in `cwd`: each name with `*`, `?`,
+/// `[`, or `{` matches the entries of its directory, skipping those that start with `.` unless the
+/// name starts with `.` too or holds a brace, whose alternatives bash writes out before globbing.
+/// `None` when one name matches more than [`MAX_GLOB_MATCHES`] files, fails to compile, or meets a
+/// file whose name is not UTF-8.
+fn expand_glob(pattern: &str, cwd: &Path) -> Option<Vec<String>> {
+    let mut paths = vec![PathBuf::new()];
+    for component in Path::new(pattern).components() {
+        let name = component.as_os_str().to_string_lossy();
+        if !matches!(component, Component::Normal(_)) || !name.contains(['*', '?', '[', '{']) {
+            for path in &mut paths {
+                path.push(component);
+            }
+            continue;
+        }
+        let glob = globset::GlobBuilder::new(&name)
+            .literal_separator(true)
+            .build()
+            .ok()?
+            .compile_matcher();
+        let dotted = name.starts_with('.') || name.contains('{');
+        let mut matched = Vec::new();
+        for dir in &paths {
+            let Ok(entries) = std::fs::read_dir(cwd.join(dir)) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let entry_name = entry.file_name();
+                let entry_name = entry_name.to_str()?;
+                if (dotted || !entry_name.starts_with('.')) && glob.is_match(entry_name) {
+                    matched.push(dir.join(entry_name));
+                    if matched.len() > MAX_GLOB_MATCHES {
+                        return None;
+                    }
+                }
+            }
+        }
+        paths = matched;
+    }
+    Some(
+        paths
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use indoc::indoc;
 
     use super::*;
+    use crate::util::path::slash_separated;
     use crate::util::path::testing::{HOME_VAR, abs};
 
     fn temp_cwd() -> (tempfile::TempDir, PathBuf) {
@@ -1121,7 +1322,7 @@ mod tests {
     }
 
     fn is_safe(command: &str) -> bool {
-        parse(command).segments[0].safe_reads.is_some()
+        parse(command).segments[0].safe_reads().is_some()
     }
 
     // ── CommandTarget::parse: segments ──
@@ -1175,7 +1376,7 @@ mod tests {
             let segment = &command.segments[0];
             assert_eq!(joined(segment.named()), text, "{command:?}");
             assert_eq!(segment.program()[0].text(), name, "{command:?}");
-            assert!(segment.safe_reads.is_none(), "{command:?}");
+            assert!(segment.safe_reads().is_none(), "{command:?}");
             assert!(!command.is_opaque(), "{command:?}");
         }
         assert!(is_safe("LANG=C TZ=UTC env NO_COLOR=1 cat a"));
@@ -1220,14 +1421,19 @@ mod tests {
 
     #[test]
     fn parse_marks_each_word_that_expands_or_globs_as_not_literal() {
-        let command = parse(r#"FOO="a b" BAR=$X EMPTY= a[$i]=1 cat 'x*' *.rs "$HOME" ~/n"#);
+        let command = temp_env::with_var(HOME_VAR, Some(abs("/home/u")), || {
+            parse(r#"FOO="a b" BAR=$X EMPTY= a[$i]=1 cat 'x*' *.rs "$HOME" ~/n"#)
+        });
         let segment = &command.segments[0];
         let named: Vec<(&str, bool)> = segment
             .named()
             .iter()
             .map(|word| (word.text(), word.is_literal()))
             .collect();
-        let home = expand_user("~/n").unwrap().to_string_lossy().into_owned();
+        let home = Path::new(&abs("/home/u"))
+            .join("n")
+            .to_string_lossy()
+            .into_owned();
         assert_eq!(
             named,
             [
@@ -1245,6 +1451,27 @@ mod tests {
         assert_eq!(
             joined(segment.program()),
             format!("cat x* *.rs \"$HOME\" {home}")
+        );
+    }
+
+    #[test]
+    fn parse_reads_an_ansi_c_string_as_the_literal_word_it_decodes_to() {
+        let command = parse(r"$'rm' pu$'sh' $'\055rf' $'\x80'");
+
+        let program: Vec<(&str, bool)> = command.segments[0]
+            .program()
+            .iter()
+            .map(|word| (word.text(), word.is_literal()))
+            .collect();
+
+        assert_eq!(
+            program,
+            [
+                ("rm", true),
+                ("push", true),
+                ("-rf", true),
+                (r"$'\x80'", false)
+            ]
         );
     }
 
@@ -1306,7 +1533,7 @@ mod tests {
 
             assert_eq!(joined(segment.named()), named, "{command:?}");
             assert_eq!(joined(segment.program()), program, "{command:?}");
-            assert!(segment.safe_reads.is_none(), "{command:?}");
+            assert!(segment.safe_reads().is_none(), "{command:?}");
         }
     }
 
@@ -1393,6 +1620,48 @@ mod tests {
         }
     }
 
+    // ── Segment::removes_recursively_by_force ──
+
+    #[test]
+    fn removes_recursively_by_force_reads_both_options_in_every_spelling_before_a_double_dash() {
+        for command in [
+            "rm -rf /",
+            "rm -fr x",
+            "rm -rfv /",
+            "rm -Rf x",
+            "rm -f -R x",
+            "rm -r --force /",
+            "rm --recursive --force x",
+            "rm --rec --f x",
+            "rm / -rf",
+            "RM -Rf x",
+            "/bin/rm -rf x",
+            "nice -n 5 rm -rf x",
+            "rm $FLAGS x",
+            "$RM -rf x",
+        ] {
+            assert!(
+                parse(command).segments[0].removes_recursively_by_force(),
+                "{command:?}"
+            );
+        }
+        for command in [
+            "rm -r x",
+            "rm -f x",
+            "rm --recursive x",
+            "rm -- -rf",
+            "rm -f -- -r",
+            "rm --forced -r x",
+            "rmdir -rf x",
+            "$RM x",
+        ] {
+            assert!(
+                !parse(command).segments[0].removes_recursively_by_force(),
+                "{command:?}"
+            );
+        }
+    }
+
     // ── Walk::redirect ──
 
     #[test]
@@ -1452,6 +1721,38 @@ mod tests {
         }
     }
 
+    // ── unquote_ansi_c ──
+
+    #[test]
+    fn unquote_ansi_c_decodes_each_escape_bash_does() {
+        for (inner, value) in [
+            ("push", "push"),
+            (r"pu\x73h", "push"),
+            (r"\162m", "rm"),
+            (r"\55rf", "-rf"),
+            (r"\0101", "\u{8}1"),
+            (r"\u002drf", "-rf"),
+            (r"\U0000002drf", "-rf"),
+            (r"\u00e9", "\u{e9}"),
+            (r"a\tb\n\r\v\f\a\b", "a\tb\n\r\u{b}\u{c}\u{7}\u{8}"),
+            (r"\e[0m\E", "\u{1b}[0m\u{1b}"),
+            (r#"\'\"\\\?"#, r#"'"\?"#),
+            (r"\cA", "\u{1}"),
+            (r"\q", r"\q"),
+        ] {
+            assert_eq!(unquote_ansi_c(inner).as_deref(), Some(value), "{inner:?}");
+        }
+    }
+
+    #[test]
+    fn unquote_ansi_c_declines_an_escape_that_names_no_ascii_character_or_nul() {
+        for inner in [
+            r"\x80", r"\200", r"\xZ", r"\0", r"\400", r"a\x00b", r"\c", "a\\",
+        ] {
+            assert_eq!(unquote_ansi_c(inner), None, "{inner:?}");
+        }
+    }
+
     // ── pattern_words ──
 
     #[test]
@@ -1490,12 +1791,12 @@ mod tests {
         );
         let at = |name: &str| Access::for_path(name, &Workspace::new(Path::new("/repo")));
         assert_eq!(
-            command.segments[0].safe_reads,
-            Some(vec![at("pats"), at("more"), at("x"), at("-y"), at("src")])
+            command.segments[0].safe_reads(),
+            Some(&[at("pats"), at("more"), at("x"), at("-y"), at("src")][..])
         );
         assert_eq!(
-            parse("echo $HOME *").segments[0].safe_reads,
-            Some(Vec::new())
+            parse("echo $HOME *").segments[0].safe_reads(),
+            Some(&[][..])
         );
     }
 
@@ -1592,7 +1893,7 @@ mod tests {
     #[test]
     fn sed_files_reads_the_files_past_the_script() {
         for command in ["sed -n 1p a.rs", "sed -e 1p -- a.rs"] {
-            let reads = parse(command).segments[0].safe_reads.clone().unwrap();
+            let reads = parse(command).segments[0].safe_reads().unwrap().to_vec();
             assert_eq!(
                 reads,
                 [Access::for_path(
@@ -1602,5 +1903,123 @@ mod tests {
                 "{command:?}"
             );
         }
+    }
+
+    // ── reader_operands ──
+
+    #[test]
+    fn reader_operands_flag_a_reader_word_whose_files_are_unknown() {
+        for command in [
+            "cat $F",
+            r#"cat "$HOME/.ssh/id_rsa""#,
+            "/bin/cat $F",
+            "grep -r x $DIR",
+            "head -n $N a",
+            "cat x[",
+        ] {
+            assert!(parse(command).segments[0].reads_anything(), "{command:?}");
+        }
+        for command in ["cat a", "cat *.rs", "echo $F", "cp $F b"] {
+            assert!(!parse(command).segments[0].reads_anything(), "{command:?}");
+        }
+    }
+
+    #[test]
+    fn reader_operands_read_each_literal_operand_and_each_file_a_glob_matches() {
+        let (_dir, cwd) = temp_cwd();
+        std::fs::create_dir(cwd.join("src")).unwrap();
+        std::fs::write(cwd.join("src/main.rs"), "").unwrap();
+        let workspace = Workspace::new(&cwd);
+
+        let command = CommandTarget::parse("grep -r x src/*.rs docs", &workspace);
+
+        let segment = &command.segments[0];
+        assert_eq!(segment.safe_reads(), None);
+        let at = |name: &str| Access::for_path(name, &workspace);
+        let main = Path::new("src").join("main.rs");
+        assert_eq!(
+            segment.reads(),
+            [
+                at("x"),
+                at(&main.to_string_lossy()),
+                at("src/*.rs"),
+                at("docs")
+            ]
+        );
+    }
+
+    // ── expand_glob ──
+
+    #[test]
+    fn expand_glob_lists_what_bash_would_and_skips_dot_names_unless_a_name_asks_for_them() {
+        let (_dir, cwd) = temp_cwd();
+        for dir in ["src/sub", ".ssh", "docs"] {
+            std::fs::create_dir_all(cwd.join(dir)).unwrap();
+        }
+        for file in [
+            "src/a.rs",
+            "src/b.rs",
+            "src/c.md",
+            "src/sub/d.rs",
+            ".ssh/id_rsa",
+            ".ssh/id_ed25519",
+            "docs/id_x",
+            ".env",
+        ] {
+            std::fs::write(cwd.join(file), "").unwrap();
+        }
+        let expand = |pattern: &str| {
+            let mut paths: Vec<String> = expand_glob(pattern, &cwd)
+                .unwrap()
+                .iter()
+                .map(|path| slash_separated(Path::new(path)))
+                .collect();
+            paths.sort();
+            paths
+        };
+        let root = slash_separated(&cwd);
+
+        assert_eq!(expand("src/*.rs"), ["src/a.rs", "src/b.rs"]);
+        assert_eq!(expand("./src/*/*.rs"), ["./src/sub/d.rs"]);
+        assert_eq!(expand("*/id_*"), ["docs/id_x"]);
+        assert_eq!(expand(".*/id_*"), [".ssh/id_ed25519", ".ssh/id_rsa"]);
+        assert_eq!(
+            expand("{.ssh,docs}/id_[er]*"),
+            [".ssh/id_ed25519", ".ssh/id_rsa"]
+        );
+        assert_eq!(expand("?env"), [""; 0]);
+        assert_eq!(expand("missing/*"), [""; 0]);
+        assert_eq!(
+            expand(&format!("{root}/.ss?/id_rsa")),
+            [format!("{root}/.ssh/id_rsa")]
+        );
+    }
+
+    #[test]
+    fn expand_glob_gives_up_past_the_match_cap_or_on_a_pattern_globset_rejects() {
+        let (_dir, cwd) = temp_cwd();
+        for i in 0..MAX_GLOB_MATCHES {
+            std::fs::write(cwd.join(format!("{i}.txt")), "").unwrap();
+        }
+        assert_eq!(
+            expand_glob("*.txt", &cwd).map(|paths| paths.len()),
+            Some(MAX_GLOB_MATCHES)
+        );
+
+        std::fs::write(cwd.join("last.txt"), "").unwrap();
+
+        assert_eq!(expand_glob("*.txt", &cwd), None);
+        assert_eq!(expand_glob("[", &cwd), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn expand_glob_gives_up_on_a_file_name_that_is_not_utf8() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let (_dir, cwd) = temp_cwd();
+        std::fs::write(cwd.join(std::ffi::OsStr::from_bytes(b"a\xff")), "").unwrap();
+
+        assert_eq!(expand_glob("*", &cwd), None);
     }
 }

@@ -860,8 +860,7 @@ mod tests {
 
     #[tokio::test]
     async fn gate_allow_proceeds_without_an_approval_event() {
-        // `echo` is an exec-class tool, so `manual` asks by default, and a class-wide allow clears
-        // it.
+        // `echo` is an exec-class tool, so `manual` asks unless a class-wide allow clears it.
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
         let sink = CapturingSink::new();
         let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &["*"], Path::new("/repo"));

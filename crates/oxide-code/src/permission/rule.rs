@@ -76,8 +76,10 @@ pub(super) enum MatchDiscipline {
     /// pattern writes them. Neither a chained command, a symlink, nor a variant spelling widens.
     Allow,
     /// Any simple command may match, by its named words, its program words, or its program's bare
-    /// name, with each word folded as names are, and a path matches as resolved or as spelled, with
-    /// names folded too. A danger behind a safe head, a symlink, or a variant spelling is caught.
+    /// name. The pattern's later words may sit among other words, each word compares folded as
+    /// names do, and a word that expands matches any pattern word. A path matches as resolved or as
+    /// spelled, with names folded too. A danger behind a safe head, an option, an expansion, a
+    /// symlink, or a variant spelling is caught.
     Deny,
 }
 
@@ -191,7 +193,7 @@ impl Rule {
     pub(super) fn allows(&self, segment: &Segment) -> bool {
         match &self.pattern {
             Pattern::Any => self.class == PermissionClass::Exec,
-            Pattern::Exec(words) => words_match(words, segment.named(), MatchDiscipline::Allow),
+            Pattern::Exec(words) => words_allowed(words, segment.named()),
             Pattern::Path(_) | Pattern::Host(_) | Pattern::Tool(_) => false,
         }
     }
@@ -226,9 +228,7 @@ impl Rule {
             } else {
                 format!("{}/{rest}", target.trim_end_matches('/'))
             };
-            if !globs.iter().any(|existing| existing.glob == glob) {
-                globs.push(PathGlob::new(glob, true)?);
-            }
+            globs.push(PathGlob::new(glob, true)?);
         }
         Ok(self)
     }
@@ -292,35 +292,61 @@ fn quote(word: &str) -> String {
     }
 }
 
-/// Whether a deny or ask pattern matches `segment` by its named words, its program words, or its
+/// Whether a deny or ask pattern holds `segment` by its named words, its program words, or its
 /// program words with the program's directory dropped.
 fn segment_held(pattern: &[PatternWord], segment: &Segment) -> bool {
-    let program = segment.program();
-    words_match(pattern, segment.named(), MatchDiscipline::Deny)
-        || words_match(pattern, program, MatchDiscipline::Deny)
+    words_held(pattern, segment.named())
+        || words_held(pattern, segment.program())
         || segment
             .bare_program()
-            .is_some_and(|bare| words_match(pattern, &bare, MatchDiscipline::Deny))
+            .is_some_and(|bare| words_held(pattern, &bare))
 }
 
-/// Whether `pattern` matches all of `words`. A trailing `*` matches whatever words remain, and
-/// every other pattern word matches one word. Under allow, that word must be literal, since a
-/// word that expands or globs can become several, and must equal the pattern word. Under deny, the
-/// two compare folded, so `RM -Rf` matches `rm -rf` as a case-insensitive file system runs it.
-fn words_match(pattern: &[PatternWord], words: &[ShellWord], discipline: MatchDiscipline) -> bool {
-    let deny = discipline == MatchDiscipline::Deny;
+/// Whether an allow `pattern` matches all of `words`. A trailing `*` matches whatever words
+/// remain, and every other pattern word matches one literal word, equal to it, since a word that
+/// expands or globs can become several.
+fn words_allowed(pattern: &[PatternWord], words: &[ShellWord]) -> bool {
     match pattern.split_first() {
         None => words.is_empty(),
         Some((PatternWord::Any, [])) => true,
         Some((head, rest)) => words.split_first().is_some_and(|(word, tail)| {
-            (deny || word.is_literal())
+            word.is_literal()
                 && match head {
-                    PatternWord::Literal(text) if deny => fold_name(word.text()) == fold_name(text),
                     PatternWord::Literal(text) => word.text() == text,
                     PatternWord::Any => true,
                 }
-                && words_match(rest, tail, discipline)
+                && words_allowed(rest, tail)
         }),
+    }
+}
+
+/// Whether a deny or ask `pattern` holds `words`: its first word matches the first of them, and
+/// each later literal word matches one of the rest, in order, with every `*` left out. A
+/// program's options can sit between the words a pattern names, as in `git -c a=b push`, so the
+/// rest need not be adjacent.
+fn words_held(pattern: &[PatternWord], words: &[ShellWord]) -> bool {
+    pattern
+        .split_first()
+        .zip(words.split_first())
+        .is_some_and(|((head, rest), (word, tail))| {
+            let mut tail = tail.iter();
+            word_held(head, word)
+                && rest
+                    .iter()
+                    .filter(|pattern_word| **pattern_word != PatternWord::Any)
+                    .all(|pattern_word| tail.any(|word| word_held(pattern_word, word)))
+        })
+}
+
+/// Whether one deny or ask pattern word matches `word`. The two compare folded, so `RM` matches
+/// `rm` as a case-insensitive file system runs it, and a word that expands or globs matches any
+/// pattern word, since it may become that word when the command runs.
+fn word_held(pattern_word: &PatternWord, word: &ShellWord) -> bool {
+    match pattern_word {
+        PatternWord::Literal(text) => {
+            !word.is_literal() || fold_name(word.text()) == fold_name(text)
+        }
+        PatternWord::Any => true,
     }
 }
 
@@ -340,16 +366,28 @@ impl PathGlob {
         let mut pattern = slash_separated(Path::new(raw));
         if pattern == "~" || pattern.starts_with("~/") {
             let home = std::env::home_dir().context("cannot expand `~`: no home directory")?;
-            pattern = format!("{}{}", escaped(&home), &pattern[1..]);
+            let home = escaped(&lexical_normalize(&home));
+            pattern = format!(
+                "{}/{}",
+                home.trim_end_matches('/'),
+                pattern[1..].trim_start_matches('/')
+            );
         }
-        ensure!(
-            !pattern
-                .split('/')
-                .enumerate()
-                .any(|(i, name)| name == ".." || (name == "." && i > 0)),
-            "the pattern holds a `.` or `..` component, which no resolved path does. Start it with \
-             `/` or `~/` to name a path outside the working directory and extra roots."
-        );
+        if pattern
+            .split('/')
+            .enumerate()
+            .any(|(i, name)| name == ".." || (name == "." && i > 0))
+        {
+            let advice = if Path::new(&pattern).has_root() {
+                ""
+            } else {
+                " Start it with `/` or `~/` to name a path outside the working directory and extra \
+                 roots."
+            };
+            bail!(
+                "the pattern holds a `.` or `..` component, which no resolved path does.{advice}"
+            );
+        }
         let path = Path::new(&pattern);
         ensure!(
             path.is_absolute() || !path.has_root(),
@@ -630,6 +668,28 @@ mod tests {
         }
     }
 
+    #[test]
+    fn parse_suggests_an_absolute_pattern_only_for_a_relative_one_with_a_dot_component() {
+        let relative = format!(
+            "{:#}",
+            Rule::parse(PermissionClass::Read, "../shared/x").unwrap_err()
+        );
+        let absolute = format!(
+            "{:#}",
+            Rule::parse(PermissionClass::Read, &abs("/repo/../etc/**")).unwrap_err()
+        );
+
+        assert_eq!(
+            relative,
+            "the pattern holds a `.` or `..` component, which no resolved path does. Start it with \
+             `/` or `~/` to name a path outside the working directory and extra roots."
+        );
+        assert_eq!(
+            absolute,
+            "the pattern holds a `.` or `..` component, which no resolved path does."
+        );
+    }
+
     // ── Rule::for_call ──
 
     #[test]
@@ -845,6 +905,35 @@ mod tests {
     }
 
     #[test]
+    fn matches_exec_deny_finds_its_words_in_order_among_options_and_in_any_word_that_expands() {
+        let rule = exec("git push --force *");
+        for command in [
+            "git push --force",
+            "git push origin --force",
+            "git -c a=b push --force",
+            "git ${X:-push} --force",
+            "git $'push' $'--force'",
+            "git pu$'sh' --force",
+            "git push $FLAGS",
+            "$GIT push --force",
+        ] {
+            assert!(holds(&rule, command), "{command}");
+        }
+        for command in [
+            "git push origin",
+            "git --force push",
+            "git status --force",
+            "gh push --force",
+        ] {
+            assert!(!holds(&rule, command), "{command}");
+        }
+
+        let any_program = exec("* --force");
+        assert!(holds(&any_program, "git push origin --force"));
+        assert!(!holds(&any_program, "git push origin"));
+    }
+
+    #[test]
     fn matches_exec_deny_folds_each_word_where_allow_compares_it_exactly() {
         let rule = exec("rm -rf *");
         for command in ["RM -Rf x", "/BIN/RM -RF x", "r\u{200c}m -rf x"] {
@@ -952,6 +1041,25 @@ mod tests {
                 MatchDiscipline::Allow
             ));
         });
+    }
+
+    #[test]
+    fn matches_path_home_pattern_expands_a_home_spelled_with_a_trailing_slash_or_dot() {
+        let home = abs("/home/u");
+        for (spelling, target) in [
+            (format!("{home}/"), abs("/home/u/notes/a.md")),
+            (format!("{home}/."), abs("/home/u/notes/a.md")),
+            (format!("{home}/x/.."), abs("/home/u/notes/a.md")),
+            (abs("/"), abs("/notes/a.md")),
+        ] {
+            temp_env::with_var(HOME_VAR, Some(&spelling), || {
+                let notes = edit("~/notes/*.md");
+                assert!(
+                    matches_path(&notes, &path(&target, &[]), MatchDiscipline::Allow),
+                    "{spelling}"
+                );
+            });
+        }
     }
 
     #[test]

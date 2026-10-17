@@ -1,14 +1,16 @@
 //! The rules oxide-code ships, in named groups that `[permission.defaults]` turns off. Most groups
-//! name files whose edits ask, and the rest add patterns to the deny or ask tier.
+//! name files whose edits ask, the `rm` group asks about forced recursive deletes, and the rest
+//! add patterns to the deny or ask tier.
 
+use std::fmt;
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::permission::rule::{Rule, escaped};
 use crate::permission::{PermissionClass, folded_names, resolve};
-use crate::util::path::{XdgBase, app_dir};
+use crate::util::path::{XdgBase, app_dir, lexical_normalize, xdg_dir};
 
 // ── Shipped ──
 
@@ -44,7 +46,24 @@ impl Shipped {
         Self::Credentials,
     ];
 
-    /// The names this group asks about when edited, or `None` for a group of patterns.
+    /// The group's name, its key under `[permission.defaults]`.
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Git => "git",
+            Self::Direnv => "direnv",
+            Self::Editors => "editors",
+            Self::Cargo => "cargo",
+            Self::Shell => "shell",
+            Self::Agents => "agents",
+            Self::Ox => "ox",
+            Self::Devices => "devices",
+            Self::Rm => "rm",
+            Self::Ssh => "ssh",
+            Self::Credentials => "credentials",
+        }
+    }
+
+    /// The names this group asks about when edited, or `None` for any other group.
     const fn names(self) -> Option<&'static Names> {
         match self {
             Self::Git => Some(&GIT),
@@ -58,15 +77,10 @@ impl Shipped {
         }
     }
 
-    /// Whether this group protects names, so the policy weighs it through a path's protected
-    /// groups.
-    pub(super) const fn protects(self) -> bool {
-        self.names().is_some()
-    }
-
-    /// The tier and rules of a group of patterns, or `None` for a group of protected names.
+    /// The tier and rules of a group of patterns, or `None` for any other group.
     pub(super) fn rules(self) -> Result<Option<(ShippedTier, Vec<Rule>)>> {
-        let home = || std::env::home_dir().map(|home| escaped(&home));
+        let home = std::env::home_dir;
+        let pattern = |path: PathBuf| escaped(&lexical_normalize(&path));
         let (tier, class, patterns): (ShippedTier, PermissionClass, Vec<String>) = match self {
             Self::Devices => (
                 ShippedTier::Ask,
@@ -77,19 +91,11 @@ impl Shipped {
                     Vec::new()
                 },
             ),
-            Self::Rm => (
-                ShippedTier::Ask,
-                PermissionClass::Exec,
-                RM_PATTERNS
-                    .iter()
-                    .map(|&pattern| pattern.to_owned())
-                    .collect(),
-            ),
             Self::Ssh => (
                 ShippedTier::Deny,
                 PermissionClass::Read,
                 home()
-                    .map(|home| format!("{home}/.ssh"))
+                    .map(|home| pattern(home.join(".ssh")))
                     .into_iter()
                     .collect(),
             ),
@@ -97,11 +103,12 @@ impl Shipped {
                 ShippedTier::Deny,
                 PermissionClass::Read,
                 [
-                    app_dir(XdgBase::Data).map(|dir| escaped(&dir.join("credentials.json"))),
-                    home().map(|home| format!("{home}/.claude/.credentials.json")),
+                    app_dir(XdgBase::Data).map(|dir| dir.join("credentials.json")),
+                    home().map(|home| home.join(".claude").join(".credentials.json")),
                 ]
                 .into_iter()
                 .flatten()
+                .map(pattern)
                 .collect(),
             ),
             Self::Git
@@ -110,13 +117,23 @@ impl Shipped {
             | Self::Cargo
             | Self::Shell
             | Self::Agents
-            | Self::Ox => return Ok(None),
+            | Self::Ox
+            | Self::Rm => return Ok(None),
         };
         let rules = patterns
             .iter()
-            .map(|pattern| Rule::parse(class, pattern))
+            .map(|pattern| {
+                Rule::parse(class, pattern)
+                    .with_context(|| format!("invalid built-in `{self}` pattern {pattern:?}"))
+            })
             .collect::<Result<_>>()?;
         Ok(Some((tier, rules)))
+    }
+}
+
+impl fmt::Display for Shipped {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -127,17 +144,6 @@ pub(super) enum ShippedTier {
     Deny,
     Ask,
 }
-
-/// The common spellings of a forced recursive `rm`. Deny and ask patterns compare words folded, so
-/// `-Rf` and `-RF` match `-rf`.
-const RM_PATTERNS: &[&str] = &[
-    "rm -rf *",
-    "rm -fr *",
-    "rm -r -f *",
-    "rm -f -r *",
-    "rm --recursive --force *",
-    "rm --force --recursive *",
-];
 
 // ── Protected Names ──
 
@@ -249,17 +255,15 @@ impl Names {
 }
 
 /// The protected locations whose insides belong to a group wherever their names sit: oxide-code's
-/// own directories, plus where each protected name directly under `cwd` or a workspace root
-/// resolves, so a `.vscode` symlinked to `tools/vscode` protects its target too.
+/// own directories, the user's git and SSH config, plus where each protected name directly under
+/// `cwd` or a workspace root resolves, so a `.vscode` symlinked to `tools/vscode` protects its
+/// target too.
 pub(super) fn protected_roots(cwd: &Path, workspace_roots: &[PathBuf]) -> Vec<(Shipped, PathBuf)> {
     let extra = workspace_roots.iter().filter(|root| *root != cwd);
     let bases: Vec<&Path> = std::iter::once(cwd)
         .chain(extra.map(PathBuf::as_path))
         .collect();
-    let mut roots: Vec<(Shipped, PathBuf)> = app_dirs()
-        .into_iter()
-        .map(|dir| (Shipped::Ox, dir))
-        .collect();
+    let mut roots: Vec<(Shipped, PathBuf)> = home_locations();
     for group in Shipped::ALL {
         let Some(names) = group.names() else {
             continue;
@@ -276,13 +280,22 @@ pub(super) fn protected_roots(cwd: &Path, workspace_roots: &[PathBuf]) -> Vec<(S
     roots
 }
 
-/// oxide-code's own config, data, and state directories, resolved like a target so a symlinked
-/// XDG base still compares equal.
-fn app_dirs() -> Vec<PathBuf> {
-    XdgBase::ALL
+/// oxide-code's own config, data, and state directories, the XDG git config, and the SSH client
+/// config and `authorized_keys`, each with its group and resolved like a target so a symlinked
+/// home or XDG base still compares equal.
+fn home_locations() -> Vec<(Shipped, PathBuf)> {
+    let app_dirs = XdgBase::ALL
         .into_iter()
         .filter_map(app_dir)
-        .map(|dir| resolve(&dir).unwrap_or(dir))
+        .map(|dir| (Shipped::Ox, dir));
+    let git = xdg_dir(XdgBase::Config).map(|dir| (Shipped::Git, dir.join("git").join("config")));
+    let ssh = std::env::home_dir().into_iter().flat_map(|home| {
+        ["authorized_keys", "config"].map(|name| (Shipped::Ssh, home.join(".ssh").join(name)))
+    });
+    app_dirs
+        .chain(git)
+        .chain(ssh)
+        .map(|(group, path)| (group, resolve(&path).unwrap_or(path)))
         .collect()
 }
 
@@ -318,6 +331,18 @@ mod tests {
 
     fn groups(raw: &str) -> Vec<Shipped> {
         protected_by(&[Path::new(raw)], &[])
+    }
+
+    // ── Shipped::as_str ──
+
+    #[test]
+    fn as_str_names_each_group_by_its_defaults_key() {
+        for group in Shipped::ALL {
+            assert_eq!(
+                toml::Value::try_from(group).unwrap().as_str(),
+                Some(group.as_str())
+            );
+        }
     }
 
     // ── Shipped::rules ──
@@ -356,17 +381,6 @@ mod tests {
                     )
                 );
                 assert_eq!(
-                    patterns(Shipped::Rm),
-                    (
-                        ShippedTier::Ask,
-                        vec![PermissionClass::Exec; RM_PATTERNS.len()],
-                        RM_PATTERNS
-                            .iter()
-                            .map(|&pattern| pattern.to_owned())
-                            .collect()
-                    )
-                );
-                assert_eq!(
                     patterns(Shipped::Ssh),
                     (
                         ShippedTier::Deny,
@@ -386,8 +400,44 @@ mod tests {
                     )
                 );
                 assert!(Shipped::Git.rules().unwrap().is_none());
+                assert!(Shipped::Rm.rules().unwrap().is_none());
             },
         );
+    }
+
+    #[test]
+    fn rules_name_the_home_directory_however_its_variable_spells_it() {
+        let home = abs("/home/u");
+        let expected = slash_separated(Path::new(&home));
+        for spelling in [
+            format!("{home}/"),
+            format!("{home}/."),
+            format!("{home}/x/.."),
+        ] {
+            let patterns = temp_env::with_vars(
+                [(HOME_VAR, Some(spelling.as_str())), ("XDG_DATA_HOME", None)],
+                || {
+                    [Shipped::Ssh, Shipped::Credentials].map(|group| {
+                        let (_, rules) = group.rules().unwrap().unwrap();
+                        rules
+                            .iter()
+                            .map(|rule| rule.pattern().to_owned())
+                            .collect::<Vec<_>>()
+                    })
+                },
+            );
+            assert_eq!(
+                patterns,
+                [
+                    vec![format!("{expected}/.ssh")],
+                    vec![
+                        format!("{expected}/.local/share/ox/credentials.json"),
+                        format!("{expected}/.claude/.credentials.json"),
+                    ],
+                ],
+                "{spelling}"
+            );
+        }
     }
 
     // ── protected_roots ──

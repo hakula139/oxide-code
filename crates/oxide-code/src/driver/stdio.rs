@@ -95,11 +95,11 @@ impl Approver for Unattended {
             }
             None => {
                 "This run cannot ask for approval, and no exact allow pattern names this call. \
-                     A chained command needs a pattern for each of its commands, and a word that \
-                     expands needs a `*` in its place, both in the `[permission.allow]` table of \
-                     the user config. A command that hides what it runs, such as `$(...)` or \
-                     `sh -c`, and a call an ask rule or a built-in rule holds run only after \
-                     approval in an interactive session."
+                     In the `[permission.allow]` table of the user config, a chained command \
+                     needs a pattern for each of its commands, and a word that expands needs a \
+                     pattern ending in a `*` that covers it and every word after it. A command \
+                     that hides what it runs, such as `$(...)` or `sh -c`, and a call an ask rule \
+                     or a built-in rule holds run only after approval in an interactive session."
                     .to_owned()
             }
         };

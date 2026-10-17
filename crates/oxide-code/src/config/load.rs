@@ -129,8 +129,7 @@ pub(crate) fn user_config_path() -> Option<PathBuf> {
 
 /// Parses one layer. `Ok(None)` when the user file is missing, and `Err` when a file is unreadable,
 /// including a drop-in symlink whose target is gone, is a project file setting a user-only key,
-/// holds an old permission form, fails the schema, or holds a malformed pattern or an invalid extra
-/// root.
+/// holds an old permission form, fails the schema, or holds a malformed pattern or extra root.
 fn read_layer(layer: &Layer) -> Result<Option<Table>> {
     let path = layer.path();
     let content = match std::fs::read_to_string(path) {
@@ -274,6 +273,7 @@ mod tests {
     use crate::config::{Effort, StatusLineSegment};
     use crate::permission::Mode;
     use crate::permission::defaults::Shipped;
+    use crate::util::path::testing::abs;
 
     fn write(path: &Path, body: &str) -> PathBuf {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -334,11 +334,12 @@ mod tests {
     #[test]
     fn load_layers_concatenate_permission_lists_across_user_drop_in_and_project() {
         let dir = tempfile::tempdir().unwrap();
+        let (root_a, root_b) = (abs("/srv/a"), abs("/srv/b"));
         write(
             &dir.path().join("config.toml"),
-            indoc! {r#"
+            &formatdoc! {r#"
                 [permission]
-                extra_roots = ["/srv/a"]
+                extra_roots = ["{root_a}"]
 
                 [permission.allow]
                 exec = ["ls"]
@@ -349,9 +350,9 @@ mod tests {
         );
         write(
             &dir.path().join("config.d/10-team.toml"),
-            indoc! {r#"
+            &formatdoc! {r#"
                 [permission]
-                extra_roots = ["/srv/b"]
+                extra_roots = ["{root_b}"]
                 allow.exec = ["cargo test *"]
                 ask.edit = ["**/*.lock"]
             "#},
@@ -370,10 +371,7 @@ mod tests {
         let Loaded { config, .. } = load_layers(layers).unwrap();
 
         let permission = config.permission;
-        assert_eq!(
-            permission.extra_roots,
-            Some(vec!["/srv/a".to_owned(), "/srv/b".to_owned()])
-        );
+        assert_eq!(permission.extra_roots, Some(vec![root_a, root_b]));
         assert_eq!(
             permission.allow.unwrap().exec,
             Some(vec!["ls".to_owned(), "cargo test *".to_owned()])
@@ -826,16 +824,20 @@ mod tests {
         "#};
         let path = write(&dir.path().join(".ox/config.toml"), body);
         let legacy = write(&dir.path().join("ox.toml"), body);
+        let config_home = dir.path().join("config-home");
+        let user_config = config_home.join("ox").join("config.toml");
 
         for layer in [Layer::Project(path), Layer::LegacyProject(legacy)] {
-            let err = read_layer(&layer).expect_err("project secrets must be blocked");
+            let err = temp_env::with_var("XDG_CONFIG_HOME", Some(&config_home), || {
+                read_layer(&layer).expect_err("project secrets must be blocked")
+            });
             let msg = format!("{err:#}");
             assert!(msg.contains(&layer.path().display().to_string()), "{msg}");
             assert!(
                 msg.contains("client.api_key, client.base_url, client.extra_ca_certs"),
                 "{msg}"
             );
-            assert!(msg.contains(&user_config_hint()), "{msg}");
+            assert!(msg.contains(&user_config.display().to_string()), "{msg}");
         }
         assert!(
             read_layer(&Layer::User(dir.path().join("ox.toml")))
@@ -871,8 +873,12 @@ mod tests {
             ),
         ] {
             let path = write(&dir.path().join(".ox/config.toml"), body);
+            let config_home = dir.path().join("config-home");
 
-            let err = read_layer(&Layer::Project(path.clone())).expect_err(body);
+            let err = temp_env::with_var("XDG_CONFIG_HOME", Some(&config_home), || {
+                read_layer(&Layer::Project(path.clone())).expect_err(body)
+            });
+
             assert_eq!(
                 format!("{err:#}"),
                 format!(
@@ -880,7 +886,7 @@ mod tests {
                      deny and ask rules. Set mode, allow, extra_roots, and defaults in {} or a \
                      config.d drop-in, or the mode with OX_PERMISSION_MODE.",
                     path.display(),
-                    user_config_hint()
+                    config_home.join("ox").join("config.toml").display()
                 )
             );
         }

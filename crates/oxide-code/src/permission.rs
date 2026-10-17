@@ -656,11 +656,11 @@ pub(crate) struct Policy {
     allow: Vec<Rule>,
     /// Rules the user granted from an approval for the rest of the session. In memory only.
     session_allow: Vec<Rule>,
-    /// The enabled shipped groups of protected names, whose edits ask.
-    protected: Vec<Shipped>,
+    /// The shipped groups `[permission.defaults]` leaves on.
+    enabled: Vec<Shipped>,
 }
 
-/// A manual-mode policy with no rules beyond the shipped protected names.
+/// A manual-mode policy with every shipped group on but none of their patterns.
 #[cfg(test)]
 impl Default for Policy {
     fn default() -> Self {
@@ -670,17 +670,13 @@ impl Default for Policy {
             ask: Vec::new(),
             allow: Vec::new(),
             session_allow: Vec::new(),
-            protected: Shipped::ALL
-                .into_iter()
-                .filter(|group| group.protects())
-                .collect(),
+            enabled: Shipped::ALL.to_vec(),
         }
     }
 }
 
 impl Policy {
-    /// Builds a policy from parsed rule tiers, with every shipped protected name and no shipped
-    /// patterns.
+    /// Builds a policy from parsed rule tiers, with every shipped group on but no shipped patterns.
     #[cfg(test)]
     pub(crate) fn new(mode: Mode, deny: Vec<Rule>, ask: Vec<Rule>, allow: Vec<Rule>) -> Self {
         Self {
@@ -733,7 +729,7 @@ impl Policy {
             ask: with_prefixes(ask)?,
             allow,
             session_allow: Vec::new(),
-            protected: enabled().filter(|group| group.protects()).collect(),
+            enabled: enabled().collect(),
         })
     }
 
@@ -798,9 +794,8 @@ impl Policy {
     /// 7. `yolo` allows, and the other modes ask.
     ///
     /// A `bash` command is denied when a deny rule matches one of its simple commands, an edit of a
-    /// file it writes, or a read of a file it redirects into its input. It asks at step 3 when an
-    /// ask rule does, when it writes a protected path, or when a deny or ask `read` rule matches a
-    /// file a known-safe command in it reads. Step 6 allows it only when it is not opaque and
+    /// file it writes, or a read of a file it redirects into its input. It asks at step 3 in each
+    /// case [`Self::asks`] lists, and step 6 allows it only when it is not opaque and
     /// [`Self::allows_command`] holds.
     pub(crate) fn decide(&self, class: PermissionClass, target: &Target<'_>) -> Decision {
         if holds_back(&self.deny, class, target) {
@@ -840,7 +835,9 @@ impl Policy {
     }
 
     /// Whether the ask tier holds the call: an ask rule matches it, it edits a protected path, or
-    /// it is a command that writes one or reads a file a deny or ask `read` rule matches.
+    /// it is a command that writes one, reads a file a deny or ask `read` rule matches, or, while
+    /// the `rm` group is on, [removes recursively by force](Segment::removes_recursively_by_force).
+    /// A read whose file a variable names may be any file, so it asks whenever such a rule exists.
     fn asks(&self, class: PermissionClass, target: &Target<'_>) -> bool {
         if holds_back(&self.ask, class, target)
             || (class == PermissionClass::Edit && self.is_protected(target))
@@ -850,26 +847,34 @@ impl Policy {
         let Target::Command(command) = target else {
             return false;
         };
+        let held = |read: &Access| {
+            let read = read.as_target();
+            holds_back(&self.deny, PermissionClass::Read, &read)
+                || holds_back(&self.ask, PermissionClass::Read, &read)
+        };
+        let reads_held = self
+            .deny
+            .iter()
+            .chain(&self.ask)
+            .any(|rule| rule.class() == PermissionClass::Read);
         command
             .writes()
             .iter()
             .any(|write| self.is_protected(&write.as_target()))
-            || command
-                .segments()
-                .iter()
-                .filter_map(Segment::safe_reads)
-                .flatten()
-                .any(|read| {
-                    let read = read.as_target();
-                    holds_back(&self.deny, PermissionClass::Read, &read)
-                        || holds_back(&self.ask, PermissionClass::Read, &read)
-                })
+            || command.segments().iter().any(|segment| {
+                (reads_held && segment.reads_anything()) || segment.reads().iter().any(held)
+            })
+            || (self.enabled.contains(&Shipped::Rm)
+                && command
+                    .segments()
+                    .iter()
+                    .any(Segment::removes_recursively_by_force))
     }
 
     /// Whether `target` is a path an enabled protected group holds.
     fn is_protected(&self, target: &Target<'_>) -> bool {
         matches!(target, Target::Path { protected, .. }
-            if protected.iter().any(|group| self.protected.contains(group)))
+            if protected.iter().any(|group| self.enabled.contains(group)))
     }
 
     /// Whether an allow rule or a session allow rule matches the call.
@@ -1058,7 +1063,7 @@ mod tests {
             .collect()
     }
 
-    /// A policy with every shipped protected name and the given tiers, but no shipped patterns.
+    /// A policy with every shipped group on and the given tiers, but none of the shipped patterns.
     fn policy(
         mode: Mode,
         deny: &[(PermissionClass, &str)],
@@ -1843,6 +1848,51 @@ mod tests {
     }
 
     #[test]
+    fn resolve_protects_the_user_git_and_ssh_config_until_disabled() {
+        let (_dir, root) = temp_cwd();
+        let (cwd, home, config) = (root.join("repo"), root.join("home"), root.join("config"));
+        std::fs::create_dir(&cwd).unwrap();
+        temp_env::with_vars(
+            [(HOME_VAR, Some(&home)), ("XDG_CONFIG_HOME", Some(&config))],
+            || {
+                let workspace = Workspace::new(&cwd);
+                let resolve = |disabled: &[Shipped]| {
+                    Policy::resolve(
+                        Mode::Yolo,
+                        Vec::new(),
+                        Vec::new(),
+                        rules(&[(EDIT, "*")]),
+                        disabled,
+                        &workspace,
+                    )
+                    .unwrap()
+                };
+                let edit = |path: PathBuf| Access::for_path(&slash_separated(&path), &workspace);
+
+                for (path, group) in [
+                    (config.join("git/config"), Shipped::Git),
+                    (home.join(".ssh/config"), Shipped::Ssh),
+                    (home.join(".ssh/authorized_keys"), Shipped::Ssh),
+                ] {
+                    let target = edit(path.clone());
+                    assert_eq!(
+                        decide(&resolve(&[]), EDIT, &target),
+                        Decision::Ask,
+                        "{path:?}"
+                    );
+                    assert_eq!(
+                        decide(&resolve(&[group]), EDIT, &target),
+                        Decision::Allow,
+                        "{path:?} with {group} off"
+                    );
+                }
+                let known_hosts = edit(home.join(".ssh/known_hosts"));
+                assert_eq!(decide(&resolve(&[]), EDIT, &known_hosts), Decision::Allow);
+            },
+        );
+    }
+
+    #[test]
     fn resolve_disables_one_protected_group_and_keeps_the_rest() {
         let (_dir, cwd) = temp_cwd();
         let workspace = Workspace::new(&cwd);
@@ -2362,6 +2412,56 @@ mod tests {
     }
 
     #[test]
+    fn decide_command_deny_and_ask_hold_a_command_whatever_its_words_expand_to() {
+        let p = policy(
+            Mode::Manual,
+            &[(EXEC, "git push --force *")],
+            &[(EXEC, "git push *")],
+            &[(EXEC, "git *")],
+        );
+        for (case, expected) in [
+            ("git status", Decision::Allow),
+            ("git ${X:-push} origin", Decision::Ask),
+            ("git $'push' origin", Decision::Ask),
+            ("git pu$'sh' origin", Decision::Ask),
+            ("git -c a=b push origin", Decision::Ask),
+            ("git push $'--force'", Decision::Deny),
+            ("git push origin --force", Decision::Deny),
+        ] {
+            assert_eq!(decide(&p, EXEC, &command(case)), expected, "{case}");
+        }
+    }
+
+    #[test]
+    fn decide_command_asks_for_every_spelling_of_a_forced_recursive_rm_even_in_yolo() {
+        for mode in [Mode::Manual, Mode::Yolo] {
+            let p = policy(mode, &[], &[], &[(EXEC, "*")]);
+            for case in [
+                "rm -rfv /",
+                "rm -r --force /",
+                "rm / -rf",
+                "rm -f -R x",
+                "rm $'-rf' /",
+                "$'rm' -rf /",
+                "ls && /bin/rm --rec --f x",
+            ] {
+                assert_eq!(
+                    decide(&p, EXEC, &command(case)),
+                    Decision::Ask,
+                    "{mode:?}: {case}"
+                );
+            }
+            for case in ["rm -r x", "rm -f x", "rm -- -rf", "rmdir -rf x"] {
+                assert_eq!(
+                    decide(&p, EXEC, &command(case)),
+                    Decision::Allow,
+                    "{mode:?}: {case}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn decide_command_never_allows_an_opaque_command_but_still_denies_one() {
         let p = policy(Mode::Manual, &[(EXEC, "rm -rf *")], &[], &[(EXEC, "*")]);
         assert_eq!(decide(&p, EXEC, &command("ls")), Decision::Allow);
@@ -2435,6 +2535,52 @@ mod tests {
         assert_eq!(decide("cat .env"), Decision::Ask);
         assert_eq!(decide("cat secrets/key"), Decision::Ask);
         assert_eq!(decide("grep --file=.env x"), Decision::Ask);
+    }
+
+    #[test]
+    fn decide_command_asks_for_a_reader_glob_or_variable_that_may_name_a_denied_file() {
+        let (_dir, root) = temp_cwd();
+        let (cwd, home) = (root.join("repo"), root.join("home"));
+        std::fs::create_dir_all(cwd.join("src")).unwrap();
+        std::fs::create_dir_all(home.join(".ssh")).unwrap();
+        std::fs::write(cwd.join("src/main.rs"), "").unwrap();
+        std::fs::write(home.join(".ssh/id_rsa"), "").unwrap();
+        temp_env::with_var(HOME_VAR, Some(&home), || {
+            let workspace = Workspace::new(&cwd);
+            let resolve = |disabled: &[Shipped]| {
+                Policy::resolve(
+                    Mode::Manual,
+                    Vec::new(),
+                    Vec::new(),
+                    rules(&[(EXEC, "cat *"), (EXEC, "grep *")]),
+                    disabled,
+                    &workspace,
+                )
+                .unwrap()
+            };
+            let decide = |p: &Policy, case: &str| {
+                p.decide(EXEC, &Access::for_command(case, &workspace).as_target())
+            };
+
+            let p = resolve(&[]);
+            for (case, expected) in [
+                ("cat src/*.rs", Decision::Allow),
+                ("cat ~/*/id_rsa", Decision::Allow),
+                ("cat ~/.ssh/id_*", Decision::Ask),
+                ("cat ~/.ss?/id_rsa", Decision::Ask),
+                ("cat ~/.*/id_rsa", Decision::Ask),
+                ("grep -r key ~/.ssh", Decision::Ask),
+                ("cat $HOME/.ssh/id_rsa", Decision::Ask),
+            ] {
+                assert_eq!(decide(&p, case), expected, "{case}");
+            }
+            let unguarded = resolve(&[Shipped::Ssh, Shipped::Credentials]);
+            assert_eq!(
+                decide(&unguarded, "cat $HOME/.ssh/id_rsa"),
+                Decision::Allow,
+                "no read rule is left to hold it"
+            );
+        });
     }
 
     #[test]

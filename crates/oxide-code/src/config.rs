@@ -2025,6 +2025,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn load_permission_denies_ssh_reads_under_a_home_spelled_with_a_trailing_slash_or_dot() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dunce::canonicalize(dir.path()).unwrap().join("home");
+        std::fs::create_dir(&home).unwrap();
+        let key = home.join(".ssh").join("id_ed25519");
+
+        for spelling in [
+            format!("{}/", home.display()),
+            format!("{}/.", home.display()),
+        ] {
+            let config = Box::pin(temp_env::async_with_vars(
+                [(HOME_VAR, Some(spelling.as_str()))],
+                load_with(&dir, &[]),
+            ))
+            .await
+            .unwrap();
+
+            let target = Access::for_path(&key.to_string_lossy(), &config.workspace);
+            assert_eq!(
+                config
+                    .permission
+                    .decide(PermissionClass::Read, &target.as_target()),
+                Decision::Deny,
+                "{spelling}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn load_permission_invalid_built_in_pattern_errors() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let err = Box::pin(temp_env::async_with_vars(
+            [(HOME_VAR, Some("!home"))],
+            load_with(&dir, &[]),
+        ))
+        .await
+        .expect_err("a built-in pattern that fails to parse must fail the load");
+
+        assert_eq!(
+            format!("{err:#}"),
+            "invalid built-in `ssh` pattern \"!home/.ssh\": a pattern cannot start with `!`, since \
+             patterns have no negation. Write the paths to match instead, or turn off the built-in \
+             rule that covers them."
+        );
+    }
+
+    #[tokio::test]
     async fn load_permission_mode_env_beats_file() {
         let dir = tempfile::tempdir().unwrap();
         write_user_config(
