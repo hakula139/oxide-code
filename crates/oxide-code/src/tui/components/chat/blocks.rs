@@ -1,4 +1,4 @@
-//! Chat render blocks — each conversation unit implements [`ChatBlock`].
+//! Chat render blocks. Each conversation unit implements [`ChatBlock`].
 
 mod assistant;
 mod compacted;
@@ -44,8 +44,8 @@ pub(super) struct RenderCtx<'a> {
 
 /// Categorizes a block for inter-block spacing decisions.
 ///
-/// Adjacent `Call` + `Result` pairs render flush against each other so a tool call and its
-/// result read as a single unit; `Other` blocks always get a blank-line separator.
+/// Adjacent `Call` and `Result` pairs render flush against each other so a tool call and its
+/// result read as a single unit, while `Other` blocks always get a blank-line separator.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum BlockKind {
     Call,
@@ -60,7 +60,7 @@ pub(super) enum BlockKind {
 pub(super) trait ChatBlock {
     fn render(&self, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>;
 
-    /// Standalone blocks get blank-line separators; tool call/result pairs hug.
+    /// Standalone blocks get blank-line separators, while a tool call and its result hug.
     fn standalone(&self) -> bool {
         true
     }
@@ -106,26 +106,22 @@ pub(super) fn push_icon_wrapped(
     text_style: Style,
     width: usize,
 ) {
-    let indent = prefix.width();
-    let cont_prefix = vec![Span::raw(" ".repeat(indent))];
     let line = Line::from(vec![
         Span::styled(prefix.to_owned(), prefix_style),
         Span::styled(text.to_owned(), text_style),
     ]);
-    out.extend(wrap_line(line, width, indent, Some(&cont_prefix)));
+    out.extend(wrap_line(line, width, prefix.width(), None));
 }
 
-/// Prepends a styled prefix span, preserving `Line.style` for code blocks.
+/// Prepends a styled prefix span, keeping the line's style and alignment.
 pub(super) fn prepend_markdown_prefix(
-    line: Line<'static>,
+    mut line: Line<'static>,
     prefix: &str,
     prefix_style: Style,
 ) -> Line<'static> {
-    let mut spans = vec![Span::styled(prefix.to_owned(), prefix_style)];
-    spans.extend(line.spans);
-    let mut out = Line::from(spans);
-    out.style = line.style;
-    out
+    line.spans
+        .insert(0, Span::styled(prefix.to_owned(), prefix_style));
+    line
 }
 
 /// Continuation prefix that keeps the shared left bar styled after wrapping.
@@ -177,18 +173,27 @@ mod tests {
 
     #[test]
     fn push_icon_wrapped_wraps_long_text_with_indent() {
+        let text_style = Style::default().fg(Color::Green);
         let mut out = Vec::new();
+
         push_icon_wrapped(
             &mut out,
             USER_PROMPT_PREFIX,
             Style::default(),
             "one two three four five six seven",
-            Style::default(),
+            text_style,
             16,
         );
-        assert!(out.len() >= 2, "should wrap: {out:?}");
-        let cont = &out[1];
-        assert_eq!(cont.spans[0].content.as_ref(), "  ");
+
+        let row = |lead, text| Line::from(vec![Span::raw(lead), Span::styled(text, text_style)]);
+        assert_eq!(
+            out,
+            [
+                row(USER_PROMPT_PREFIX, "one two three "),
+                row("  ", "four five six "),
+                row("  ", "seven"),
+            ]
+        );
     }
 
     #[test]
@@ -209,13 +214,19 @@ mod tests {
     // ── prepend_markdown_prefix ──
 
     #[test]
-    fn prepend_markdown_prefix_adds_styled_prefix() {
-        let line = Line::from(vec![Span::raw("content")]);
-        let result = prepend_markdown_prefix(line, "◉ ", Style::default().fg(Color::Blue));
-        assert_eq!(result.spans.len(), 2);
-        assert_eq!(result.spans[0].content, "◉ ");
-        assert_eq!(result.spans[0].style.fg, Some(Color::Blue));
-        assert_eq!(result.spans[1].content, "content");
+    fn prepend_markdown_prefix_adds_styled_prefix_and_keeps_line_style_and_alignment() {
+        let line_style = Style::default().fg(Color::Green);
+        let prefix_style = Style::default().fg(Color::Blue);
+        let line = Line::styled("content", line_style).centered();
+
+        let result = prepend_markdown_prefix(line, "◉ ", prefix_style);
+
+        assert_eq!(
+            result,
+            Line::from(vec![Span::styled("◉ ", prefix_style), Span::raw("content")])
+                .style(line_style)
+                .centered()
+        );
     }
 
     // ── bar_continuation_prefix ──

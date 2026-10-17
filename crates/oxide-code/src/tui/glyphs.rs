@@ -63,6 +63,9 @@ pub(crate) const fn task_marker(status: TaskStatus) -> &'static str {
 /// First-line prefix for error blocks.
 pub(crate) const ERROR_PREFIX: &str = "✗ ";
 
+/// Continuation indent for multi-line error messages.
+pub(crate) const ERROR_CONT: &str = "  ";
+
 /// Prefix for an error shown inside a modal, such as a failed delete or session load.
 pub(crate) const MODAL_ERROR_PREFIX: &str = "! ";
 
@@ -133,8 +136,7 @@ pub(crate) const INLINE_SEPARATOR: &str = " · ";
 /// Inline newline replacement for collapsed multi-line previews.
 pub(crate) const NEWLINE_GLYPH: &str = " ⏎ ";
 
-/// Line marking where a cancelled turn's reply stopped, in the chat and on stderr in `--no-tui`
-/// mode.
+/// Line marking where a cancelled turn's reply stopped, in the chat and on stderr under `--no-tui`.
 pub(crate) const INTERRUPTED_MARKER: &str = "(interrupted)";
 
 // ── Status Spinner ──
@@ -166,6 +168,11 @@ mod tests {
     #[test]
     fn assistant_continuation_aligns_with_prefix_width() {
         assert_eq!(ASSISTANT_CONT.width(), ASSISTANT_PREFIX.width());
+    }
+
+    #[test]
+    fn error_continuation_aligns_with_prefix_width() {
+        assert_eq!(ERROR_CONT.width(), ERROR_PREFIX.width());
     }
 
     #[test]

@@ -11,7 +11,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 /// `continuation_prefix`, when supplied, replaces the default whitespace fill with styled spans
 /// (blockquote `> ` markers, nested list indentation). The first line is never indented, since
 /// callers prepend the original prefix themselves. Breaks fall between grapheme clusters, so ZWJ
-/// emoji and combining sequences stay whole.
+/// emoji and combining sequences stay whole. Every row keeps the line's style and alignment.
 ///
 /// `max_width == 0` passes the line through unwrapped. Deep indents that would leave less than one
 /// column for content fall back to a one-column minimum so wrapping still terminates.
@@ -66,7 +66,11 @@ pub(crate) fn wrap_line_keeping_lead(
                 Vec::new()
             };
             spans.extend(graphemes_to_spans(graphemes));
-            Line::from(spans)
+            Line {
+                style: line.style,
+                alignment: line.alignment,
+                spans,
+            }
         })
         .collect()
 }
@@ -115,8 +119,7 @@ fn greedy_word_wrap<'a>(
 }
 
 /// Measures one visual line starting at `start`, returning its end and the next line's start.
-/// Rows break after whitespace and around wide characters, never inside the first `lead_width`
-/// columns.
+/// Rows break after whitespace and around wide characters, never in the first `lead_width` columns.
 fn take_one_line(
     graphemes: &[(&str, Style)],
     start: usize,
@@ -303,6 +306,23 @@ mod tests {
                 Line::from(vec![Span::styled("Bold ", bold), Span::raw("normal text ")]),
                 Line::from("that is long enough "),
                 Line::from("to wrap"),
+            ]
+        );
+    }
+
+    #[test]
+    fn wrap_line_keeps_line_style_and_alignment_on_every_row() {
+        let style = Style::default().fg(Color::Green);
+        let line = Line::from("one two three").style(style).right_aligned();
+
+        let result = wrap_line(line, 8, 2, None);
+
+        let row = |spans: Vec<Span<'static>>| Line::from(spans).style(style).right_aligned();
+        assert_eq!(
+            result,
+            [
+                row(vec![Span::raw("one two ")]),
+                row(vec![Span::raw("  "), Span::raw("three")]),
             ]
         );
     }
