@@ -1,10 +1,12 @@
 //! The synthetic user message that opens a compacted transcript. Compaction writes it with the
 //! summary, and the resumed display strips its prefix again, since the boundary block shows it.
 
+use std::fmt::Write as _;
+
 use indoc::{formatdoc, indoc};
 
 use crate::message::{ContentBlock, Message, Role};
-use crate::tool::tasks::{self, Task};
+use crate::tool::tasks::Task;
 
 /// Prefix for the synthetic post-compact user message.
 const SUMMARY_PREFIX: &str = indoc! {r"
@@ -22,8 +24,26 @@ pub(crate) fn synthesize_post_compact_message(summary: &str, tasks: &[Task]) -> 
     ", prefix = SUMMARY_PREFIX.trim(), summary = summary.trim()});
     message
         .content
-        .extend(tasks::reminder(tasks).map(|text| ContentBlock::Text { text }));
+        .extend(task_reminder(tasks).map(|text| ContentBlock::Text { text }));
     message
+}
+
+/// The block that lists `tasks` after the summary, since the calls that built the list are gone.
+/// `None` for an empty list.
+fn task_reminder(tasks: &[Task]) -> Option<String> {
+    if tasks.is_empty() {
+        return None;
+    }
+    let mut list = String::new();
+    for task in tasks {
+        _ = writeln!(list, "- [{}] {}", task.status.as_str(), task.content);
+    }
+    Some(formatdoc! {"
+        <system-reminder>
+        Your task list carries over from before the summary. Keep it current with the tasks tool:
+
+        {list}</system-reminder>"
+    })
 }
 
 /// Removes the synthetic summary prefix from a resumed post-compact root message.
@@ -72,7 +92,18 @@ mod tests {
             panic!("expected the summary and a reminder: {m:?}");
         };
         assert!(summary.ends_with("did X\n"), "{summary:?}");
-        assert_eq!(Some(reminder), tasks::reminder(&plan()).as_ref());
+        assert_eq!(
+            reminder,
+            indoc! {"
+                <system-reminder>
+                Your task list carries over from before the summary. Keep it current with the tasks tool:
+
+                - [completed] Read the config loader
+                - [in_progress] Add the entry type
+                - [pending] Write the tests
+                </system-reminder>"
+            },
+        );
     }
 
     // ── strip_synthetic_post_compact_prefix ──

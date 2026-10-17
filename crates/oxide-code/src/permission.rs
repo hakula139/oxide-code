@@ -116,7 +116,7 @@ impl FromStr for PermissionClass {
             "bash" => Ok(Self::Bash),
             _ => bail!(
                 "unknown permission class {s:?}: expected one of {} (`read` covers the read, \
-                 grep, and glob tools, and `edit` covers edit and write)",
+                 grep, glob, and tasks tools, and `edit` covers edit and write)",
                 Self::VALID_VALUES
             ),
         }

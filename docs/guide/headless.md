@@ -78,7 +78,7 @@ Each `stream-json` line is an object with a `type` and, for most types, a `data`
 
 `rate_limits_updated` arrives with each response under a Claude subscription sign-in. Its `five_hour` and `seven_day` windows are each `null` when the response omits them, or an object with the spent share as `utilization`, from 0 to 1, and the reset time as `resets_at`, in Unix seconds.
 
-`tasks_updated` follows the `tool_call_end` of each successful `tasks` call, and also arrives before the turn starts when a resumed session restores a list. Its `data` is an array of tasks in order, each with its `content` and a `status` of `pending`, `in_progress`, or `completed`. An empty array means the list cleared, which happens once every task is completed.
+`tasks_updated` follows the `tool_call_end` of each successful `tasks` call. Its `data` is an array of tasks in order, each with its `content` and a `status` of `pending`, `in_progress`, or `completed`. An empty array means the list cleared, which happens once every task is completed or when the model sends an empty list.
 
 A denied call ends with a `tool_call_end` event whose `is_error` is `true` and whose `content` tells the model the call was denied, naming the allow rule that would permit it when one can.
 

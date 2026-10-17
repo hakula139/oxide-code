@@ -184,11 +184,11 @@ impl Theme {
         Span::styled(SEGMENT_SEPARATOR, self.separator())
     }
 
-    /// Style of a task row, which marks the task in progress and dims the finished ones.
+    /// Style of a task row, which highlights the task in progress and dims the finished ones.
     pub(crate) fn task_style(&self, status: TaskStatus) -> Style {
         match status {
             TaskStatus::Pending => self.text(),
-            TaskStatus::InProgress => self.accent(),
+            TaskStatus::InProgress => self.info(),
             TaskStatus::Completed => self.dim(),
         }
     }
@@ -351,10 +351,10 @@ mod tests {
     // ── Theme::task_style ──
 
     #[test]
-    fn task_style_accents_the_task_in_progress_and_dims_completed_ones() {
+    fn task_style_highlights_the_task_in_progress_and_dims_completed_ones() {
         let t = Theme::default();
         assert_eq!(t.task_style(TaskStatus::Pending), t.text());
-        assert_eq!(t.task_style(TaskStatus::InProgress), t.accent());
+        assert_eq!(t.task_style(TaskStatus::InProgress), t.info());
         assert_eq!(t.task_style(TaskStatus::Completed), t.dim());
     }
 }

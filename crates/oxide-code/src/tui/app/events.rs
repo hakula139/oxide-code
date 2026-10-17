@@ -434,8 +434,8 @@ mod tests {
     use crate::permission::rule::Rule;
     use crate::permission::{GateTarget, PermissionClass, Policy};
     use crate::protocol::{ResumeTarget, ToolCall, ToolResult, UsageSnapshot};
+    use crate::tool::tasks::TaskStatus;
     use crate::tool::tasks::testing::{plan, task};
-    use crate::tool::tasks::{Progress, TaskStatus};
     use crate::tool::{ApprovalBody, ToolResultView};
     use crate::tui::action::Action;
     use crate::tui::app::testing::{five_hour_limit, rendered_text, test_app};
@@ -776,7 +776,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_tasks_updated_replaces_the_panel_list_and_the_status_progress() {
+    fn handle_tasks_updated_replaces_the_panel_list() {
         let (mut app, _rx, _event_tx) = test_app(None);
         app.handle_engine_event(Event::TasksUpdated(vec![task(
             "Sketch the design",
@@ -786,13 +786,6 @@ mod tests {
         app.handle_engine_event(Event::TasksUpdated(plan()));
 
         assert_eq!(app.tasks.tasks(), plan());
-        assert_eq!(
-            app.tasks.progress(),
-            Some(Progress {
-                completed: 1,
-                total: 3,
-            }),
-        );
         assert!(app.dirty);
     }
 
@@ -998,6 +991,7 @@ mod tests {
         app.chat.push_user_message("pre-compact prompt".to_owned());
         app.status_bar.set_usage(Some(usage_snapshot()));
         app.handle_engine_event(bash_call_start("pending-1", "ls"));
+        app.tasks.set(plan());
 
         app.handle_engine_event(Event::SessionCompacted {
             summary: "## Recap\n\nDid the thing.".to_owned(),
@@ -1019,6 +1013,11 @@ mod tests {
         assert!(
             app.status_bar.usage().is_none(),
             "stale usage must be cleared on compact",
+        );
+        assert_eq!(
+            app.tasks.tasks(),
+            plan(),
+            "the task list outlives compaction"
         );
         assert_eq!(app.status_bar.status(), &Status::Idle);
         assert!(app.input.is_enabled(), "compact returns to idle input");

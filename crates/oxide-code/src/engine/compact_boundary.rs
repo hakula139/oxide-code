@@ -7,7 +7,7 @@ use crate::session::handle::SessionHandle;
 use crate::session::post_compact::synthesize_post_compact_message;
 use crate::tool::tasks::Task;
 
-/// What a compaction leaves in place of the transcript it summarized.
+/// A finished summary and what the boundary records beside it.
 pub(super) struct Boundary {
     pub(super) summary: String,
     /// The `/compact` focus the summary followed.

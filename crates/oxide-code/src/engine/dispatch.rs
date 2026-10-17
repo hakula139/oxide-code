@@ -370,8 +370,11 @@ mod tests {
             round.results,
         );
         let events = sink.events();
-        let updates: Vec<usize> = (0..events.len())
-            .filter(|&i| matches!(events[i], Event::TasksUpdated(_)))
+        let updates: Vec<usize> = events
+            .iter()
+            .enumerate()
+            .filter(|(_, event)| matches!(event, Event::TasksUpdated(_)))
+            .map(|(i, _)| i)
             .collect();
         assert_eq!(updates, [2], "{events:?}");
         assert!(

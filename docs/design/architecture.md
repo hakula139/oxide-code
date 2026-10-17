@@ -27,7 +27,7 @@ Layers run from the foundation to the frontends.
 | Engine     | `engine`       | The live conversation as a task that every frontend drives through `EngineHandle`, with its turn loop, tool dispatch, and compaction      |
 | Frontend   | `driver`       | The TUI, bare REPL, and headless drivers, which drive the `Engine` through `EngineHandle`, plus exit status and shutdown signals          |
 | Frontend   | `slash`        | Slash-command parser, registry, and built-in commands                                                                                     |
-| Frontend   | `tui`          | Terminal UI: the `App` event loop, chat, input, and status components, modals, markdown rendering, and themes                             |
+| Frontend   | `tui`          | Terminal UI: the `App` event loop, chat, input, status, and task panel components, modals, markdown rendering, and themes                 |
 | Frontend   | `main.rs`      | CLI parsing, config and session resolution, and handing a new `Engine` to a driver                                                        |
 
 ## Dependency Direction

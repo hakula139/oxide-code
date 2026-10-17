@@ -49,7 +49,7 @@ pub(crate) const TOOL_ERROR: &str = "✗";
 
 // ── Tasks ──
 
-/// Marker before a task in the task panel and the `tasks` tool body, by status.
+/// Marker before a task, by status.
 pub(crate) const fn task_marker(status: TaskStatus) -> &'static str {
     match status {
         TaskStatus::Pending => "○",

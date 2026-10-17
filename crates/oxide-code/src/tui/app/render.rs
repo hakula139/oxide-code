@@ -42,15 +42,10 @@ impl App {
     }
 
     pub(super) fn draw_frame(&mut self, frame: &mut ratatui::Frame<'_>) {
-        // The status bar and one chat row stay visible above a modal, which then outranks the
-        // queued-prompt preview, and the preview the task panel.
+        // The status bar and one chat row stay visible. The modal, or else the input and its
+        // popup, outranks the queued-prompt preview, and the preview the task panel.
         let modal_max = frame.area().height.saturating_sub(2 + 1);
         let modal_height = self.modals.height(frame.area().width, modal_max);
-        let preview_height = self.preview_height().min(modal_max - modal_height);
-        let tasks_height = self
-            .tasks
-            .height()
-            .min(modal_max - modal_height - preview_height);
         // Modal owns focus, so input and popup bands collapse.
         let modal_active = self.modals.is_active();
         let popup_height = if modal_active {
@@ -59,6 +54,9 @@ impl App {
             self.input.popup_height()
         };
         let input_height = if modal_active { 0 } else { self.input.height() };
+        let spare = modal_max.saturating_sub(modal_height + popup_height + input_height);
+        let preview_height = self.preview_height().min(spare);
+        let tasks_height = self.tasks.height().min(spare - preview_height);
         // Pre-fill with surface bg so unpainted gaps inherit the theme.
         frame.render_widget(
             ratatui::widgets::Block::default().style(self.theme.surface()),
@@ -516,6 +514,23 @@ mod tests {
         app.handle_engine_event(Event::TasksUpdated(plan()));
 
         insta::assert_snapshot!(render_app(&mut app, 60, 14));
+    }
+
+    #[test]
+    fn draw_frame_gives_the_input_its_rows_before_the_task_panel() {
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.input.set_text("one\ntwo\nthree\nfour\nfive");
+        app.handle_engine_event(Event::TasksUpdated(plan()));
+
+        let text = rendered_text(&mut app, 40, 12);
+        let rows: Vec<&str> = text.lines().map(str::trim_end).collect();
+
+        assert_eq!(
+            rows[3..5],
+            ["  ● Add the entry type", "  +1 pending, 1 completed"]
+        );
+        assert_eq!(rows[5], "─".repeat(40));
+        assert!(rows[6].ends_with("one"), "{text}");
     }
 
     #[test]

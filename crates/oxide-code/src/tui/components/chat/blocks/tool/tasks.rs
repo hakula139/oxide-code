@@ -8,9 +8,7 @@ use super::{
     truncate_to_bytes,
 };
 use crate::tool::tasks::Task;
-use crate::tui::components::tasks::window;
-use crate::tui::glyphs::task_marker;
-use crate::util::text::plural;
+use crate::tui::components::tasks::{hidden_summary, row_text, window};
 
 pub(super) fn render(
     out: &mut Vec<Line<'static>>,
@@ -20,24 +18,21 @@ pub(super) fn render(
 ) {
     let border_style = border_style_for(ctx.theme, is_error);
     let shown = window(tasks, MAX_TOOL_OUTPUT_LINES);
-    let hidden = tasks.len() - shown.len();
-    for task in &tasks[shown] {
-        let content = truncate_to_bytes(&task.content, MAX_TOOL_OUTPUT_LINE_BYTES);
+    for task in &tasks[shown.clone()] {
         bordered_row::render(
             out,
             ctx,
             border_style,
-            format!("{} {content}", task_marker(task.status)),
+            truncate_to_bytes(&row_text(task), MAX_TOOL_OUTPUT_LINE_BYTES),
             ctx.theme.task_style(task.status),
         );
     }
-    if hidden > 0 {
-        let noun = plural(hidden, "task", "tasks");
+    if let Some(summary) = hidden_summary(tasks, &shown) {
         bordered_row::render(
             out,
             ctx,
             border_style,
-            format!("... +{hidden} {noun}"),
+            format!("... {summary}"),
             ctx.theme.dim(),
         );
     }
@@ -45,13 +40,16 @@ pub(super) fn render(
 
 #[cfg(test)]
 mod tests {
+    use ratatui::style::Style;
+
     use super::*;
     use crate::tool::tasks::TaskStatus;
     use crate::tool::tasks::testing::{plan, task};
     use crate::tui::glyphs::TOOL_BORDER_CONT;
     use crate::tui::theme::Theme;
 
-    fn rows(tasks: &[Task]) -> Vec<String> {
+    /// Each row's text, plus the style of the span after the bar.
+    fn rows(tasks: &[Task]) -> Vec<(String, Style)> {
         let theme = Theme::default();
         let ctx = RenderCtx {
             width: 80,
@@ -62,10 +60,16 @@ mod tests {
         render(&mut out, &ctx, tasks, false);
         out.iter()
             .map(|line| {
-                line.spans
+                let text = line
+                    .spans
                     .iter()
                     .map(|span| span.content.as_ref())
-                    .collect::<String>()
+                    .collect::<String>();
+                let style = line
+                    .spans
+                    .last()
+                    .map_or_else(Style::default, |span| span.style);
+                (text, style)
             })
             .collect()
     }
@@ -73,30 +77,46 @@ mod tests {
     // ── render ──
 
     #[test]
-    fn render_marks_each_task_under_the_bar() {
+    fn render_marks_and_styles_each_task_under_the_bar() {
+        let theme = Theme::default();
+
         assert_eq!(
             rows(&plan()),
             [
-                format!("{TOOL_BORDER_CONT}✓ Read the config loader"),
-                format!("{TOOL_BORDER_CONT}● Add the entry type"),
-                format!("{TOOL_BORDER_CONT}○ Write the tests"),
+                (
+                    format!("{TOOL_BORDER_CONT}✓ Read the config loader"),
+                    theme.task_style(TaskStatus::Completed),
+                ),
+                (
+                    format!("{TOOL_BORDER_CONT}● Add the entry type"),
+                    theme.task_style(TaskStatus::InProgress),
+                ),
+                (
+                    format!("{TOOL_BORDER_CONT}○ Write the tests"),
+                    theme.task_style(TaskStatus::Pending),
+                ),
             ],
         );
     }
 
     #[test]
-    fn render_counts_the_tasks_outside_the_window() {
-        let tasks: Vec<Task> = (1..=7)
-            .map(|n| task(&format!("Step {n}"), TaskStatus::Pending))
+    fn render_summarizes_the_tasks_outside_the_window_by_status() {
+        let tasks: Vec<Task> = (1..=8)
+            .map(|n| task(&format!("Step {n}"), TaskStatus::Completed))
             .collect();
 
-        let rendered = rows(&tasks);
+        let rendered: Vec<String> = rows(&tasks).into_iter().map(|(text, _)| text).collect();
 
-        assert_eq!(rendered.len(), MAX_TOOL_OUTPUT_LINES + 1);
-        assert_eq!(rendered[0], format!("{TOOL_BORDER_CONT}○ Step 1"));
         assert_eq!(
-            rendered[MAX_TOOL_OUTPUT_LINES],
-            format!("{TOOL_BORDER_CONT}... +2 tasks"),
+            rendered,
+            [
+                format!("{TOOL_BORDER_CONT}✓ Step 4"),
+                format!("{TOOL_BORDER_CONT}✓ Step 5"),
+                format!("{TOOL_BORDER_CONT}✓ Step 6"),
+                format!("{TOOL_BORDER_CONT}✓ Step 7"),
+                format!("{TOOL_BORDER_CONT}✓ Step 8"),
+                format!("{TOOL_BORDER_CONT}... +3 completed"),
+            ],
         );
     }
 }

@@ -14,7 +14,7 @@ use crate::permission::SessionGrant;
 use crate::protocol::{Decision, Event, EventSink, Op, ToolCall, ToolResult};
 use crate::session::display::{UNTITLED_MARKER, archive_notice, id_prefix};
 use crate::tool::ApprovalPreview;
-use crate::tool::tasks::Task;
+use crate::tool::tasks::{Progress, Task};
 use crate::tui::glyphs::{INTERRUPTED_MARKER, task_marker};
 use crate::util::text::escape_controls;
 
@@ -224,16 +224,18 @@ impl EventSink for StdioSink {
     }
 }
 
-/// One marked line per task and a closing blank line, or nothing for a cleared list.
+/// A progress header, one marked line per task, and a closing blank line, or nothing for a
+/// cleared list.
 fn task_lines(tasks: &[Task]) -> String {
-    let mut lines = String::new();
+    let Some(Progress { completed, total }) = Progress::of(tasks) else {
+        return String::new();
+    };
+    let mut lines = format!("Tasks: {completed}/{total}\n");
     for task in tasks {
         let content = escape_controls(&task.content);
         _ = writeln!(lines, "  {} {content}", task_marker(task.status));
     }
-    if !lines.is_empty() {
-        lines.push('\n');
-    }
+    lines.push('\n');
     lines
 }
 
@@ -269,7 +271,8 @@ mod tests {
     use crate::config::compaction::AutoCompactionConfig;
     use crate::permission::{GateTarget, PermissionClass, Policy};
     use crate::protocol::{CapturingSink, FailingSink};
-    use crate::tool::tasks::testing::plan;
+    use crate::tool::tasks::TaskStatus;
+    use crate::tool::tasks::testing::{plan, task};
     use crate::tool::{ApprovalBody, ToolResultView};
 
     /// Answers every approval with its decision, recording what each request offered.
@@ -496,6 +499,12 @@ mod tests {
             Event::ToolCallEnd(text_result("t1", "ok\u{1b}[8m", false, Some("Ran"))),
         );
         assert_eq!(stderr, "  Ran\nok\\u{1b}[8m\n\n");
+
+        let (_, stderr) = render_one(
+            &sink,
+            Event::TasksUpdated(vec![task("Fix\u{1b}[2K it", TaskStatus::Pending)]),
+        );
+        assert_eq!(stderr, "Tasks: 0/1\n  ○ Fix\\u{1b}[2K it\n\n");
     }
 
     #[test]
@@ -569,7 +578,7 @@ mod tests {
     }
 
     #[test]
-    fn render_tasks_updated_marks_each_task_and_skips_a_cleared_list() {
+    fn render_tasks_updated_marks_each_task_under_its_progress_and_skips_a_cleared_list() {
         let sink = test_sink(false);
 
         let (stdout, stderr) = render_one(&sink, Event::TasksUpdated(plan()));
@@ -577,6 +586,7 @@ mod tests {
         assert_eq!(
             stderr,
             [
+                "Tasks: 1/3\n",
                 "  ✓ Read the config loader\n",
                 "  ● Add the entry type\n",
                 "  ○ Write the tests\n",

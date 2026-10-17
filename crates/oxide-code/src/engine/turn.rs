@@ -17,8 +17,8 @@ use crate::tool::{ToolDefinition, ToolMetadata, ToolRegistry};
 
 // ── Agent Turn ──
 
-/// What one turn leaves for the engine to account: the usage its requests reported and the task
-/// list its tool calls set.
+/// What one turn leaves for the engine: the usage its requests reported and the task list its
+/// tool calls set.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct TurnReport {
     /// Latest single round's usage, used by the auto-compaction threshold check, which compares

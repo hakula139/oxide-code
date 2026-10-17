@@ -2,15 +2,13 @@
 //! transcript leaves behind.
 
 use std::collections::HashMap;
-use std::fmt::Write as _;
 use std::future::Future;
 use std::pin::Pin;
 
-use indoc::formatdoc;
 use serde::{Deserialize, Serialize};
 
-use super::{Tool, ToolMetadata, ToolOutput, ToolResultView};
-use crate::message::{ContentBlock, Message, Role};
+use super::{Tool, ToolMetadata, ToolOutput, ToolResultView, invalid_input};
+use crate::message::{ContentBlock, Message};
 use crate::permission::PermissionClass;
 use crate::util::text::plural;
 
@@ -35,7 +33,7 @@ pub(crate) enum TaskStatus {
 
 impl TaskStatus {
     /// The name the tool schema uses.
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Pending => "pending",
             Self::InProgress => "in_progress",
@@ -81,8 +79,10 @@ impl Tool for TasksTool {
          work that takes three or more steps or when the user asks for several things at once, \
          and skip it for a single straightforward step or a conversational reply. Each call \
          replaces the whole list, so send every task with its current status each time. Mark a \
-         task in_progress just before starting it and completed as soon as it is done, with at \
-         most one task in_progress at a time. Once every task is completed, the list clears."
+         task in_progress just before starting it, with at most one in_progress at a time, and \
+         completed only once it is fully done. Remove tasks that no longer apply, and send an \
+         empty list when the user changes course. Once every task is completed, the list clears. \
+         The user already sees the list, so don't repeat it in your reply."
     }
 
     /// Touches only the session's own task list, so it never needs approval.
@@ -102,7 +102,7 @@ impl Tool for TasksTool {
                         "properties": {
                             "content": {
                                 "type": "string",
-                                "description": "What the task does, in the imperative (e.g. \"Run the tests\")"
+                                "description": "The task as a short imperative phrase, such as \"Run the tests\""
                             },
                             "status": {
                                 "type": "string",
@@ -146,10 +146,23 @@ struct Input {
     tasks: Vec<Task>,
 }
 
+/// The tasks `input` lists, each with its content collapsed onto one line.
+fn parse(input: &serde_json::Value) -> Result<Vec<Task>, serde_json::Error> {
+    let Input { mut tasks } = Input::deserialize(input)?;
+    for task in &mut tasks {
+        task.content = task
+            .content
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+    }
+    Ok(tasks)
+}
+
 /// The list a call with `input` sends, or the message telling the model why it is invalid.
 fn requested(input: &serde_json::Value) -> Result<Vec<Task>, String> {
-    let Input { tasks } = Input::deserialize(input).map_err(|e| format!("Invalid input: {e}"))?;
-    if let Some(index) = tasks.iter().position(|task| task.content.trim().is_empty()) {
+    let tasks = parse(input).map_err(|e| invalid_input(&e))?;
+    if let Some(index) = tasks.iter().position(|task| task.content.is_empty()) {
         return Err(format!(
             "Task {} has no content. Describe each task in a few words.",
             index + 1,
@@ -183,18 +196,17 @@ fn run(input: &serde_json::Value) -> ToolOutput {
                 ))
         }
         Some(Progress { completed, total }) => ToolOutput::success(format!(
-            "Updated the task list: {completed} of {total} completed."
+            "Updated the task list: {completed} of {total} completed. Carry on with the remaining \
+             tasks."
         ))
         .with_title(format!(
-            "{completed} of {total} {} completed",
+            "Updated {total} {}, {completed} completed",
             plural(total, "task", "tasks"),
         )),
     };
     output.with_tasks(kept(tasks))
 }
 
-/// The list the session keeps after a call sends `tasks`. A finished list clears, so it stops
-/// showing once the work is done.
 fn kept(tasks: Vec<Task>) -> Vec<Task> {
     if tasks
         .iter()
@@ -211,46 +223,30 @@ fn kept(tasks: Vec<Task>) -> Vec<Task> {
 /// there, as in a transcript that starts from a compaction summary.
 pub(crate) fn latest(messages: &[Message]) -> Option<Vec<Task>> {
     let mut succeeded: HashMap<&str, bool> = HashMap::new();
-    for message in messages.iter().rev() {
-        for block in message.content.iter().rev() {
-            match block {
-                ContentBlock::ToolResult {
-                    tool_use_id,
-                    is_error,
-                    ..
-                } if message.role == Role::User => {
-                    succeeded.insert(tool_use_id.as_str(), !is_error);
-                }
-                ContentBlock::ToolUse { id, name, input }
-                    if name == NAME && succeeded.get(id.as_str()) == Some(&true) =>
-                {
-                    if let Ok(tasks) = requested(input) {
-                        return Some(kept(tasks));
-                    }
-                }
-                _ => {}
+    let blocks = messages
+        .iter()
+        .rev()
+        .flat_map(|message| message.content.iter().rev());
+    for block in blocks {
+        match block {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                is_error,
+                ..
+            } => {
+                succeeded.insert(tool_use_id.as_str(), !is_error);
             }
+            ContentBlock::ToolUse { id, name, input }
+                if name == NAME && succeeded.get(id.as_str()) == Some(&true) =>
+            {
+                if let Ok(tasks) = parse(input) {
+                    return Some(kept(tasks));
+                }
+            }
+            _ => {}
         }
     }
     None
-}
-
-/// Reminds the model of `tasks` in a transcript that no longer holds the calls that built them,
-/// such as one a compaction summary starts. `None` for an empty list.
-pub(crate) fn reminder(tasks: &[Task]) -> Option<String> {
-    if tasks.is_empty() {
-        return None;
-    }
-    let mut list = String::new();
-    for task in tasks {
-        _ = writeln!(list, "- [{}] {}", task.status.as_str(), task.content);
-    }
-    Some(formatdoc! {"
-        <system-reminder>
-        Your task list carries over from before the summary. Keep it current with the tasks tool:
-
-        {list}</system-reminder>"
-    })
 }
 
 #[cfg(test)]
@@ -277,23 +273,25 @@ pub(crate) mod testing {
 
 #[cfg(test)]
 mod tests {
-    use indoc::indoc;
     use serde_json::json;
 
     use super::testing::{plan, task};
     use super::*;
+    use crate::message::Role;
+
+    // ── Fixtures ──
 
     fn input(tasks: &[Task]) -> serde_json::Value {
         json!({ "tasks": tasks })
     }
 
-    fn tasks_call(id: &str, tasks: &[Task]) -> Message {
+    fn tasks_call(id: &str, input: serde_json::Value) -> Message {
         Message {
             role: Role::Assistant,
             content: vec![ContentBlock::ToolUse {
                 id: id.to_owned(),
                 name: NAME.to_owned(),
-                input: input(tasks),
+                input,
             }],
         }
     }
@@ -323,48 +321,56 @@ mod tests {
         assert_eq!(Progress::of(&[]), None);
     }
 
-    // ── TasksTool::run ──
+    // ── result_view ──
+
+    #[test]
+    fn result_view_shows_the_list_as_sent_even_when_it_cleared() {
+        let done = [task("Fix the parser", TaskStatus::Completed)];
+
+        let view = TasksTool.result_view(&input(&done), "", &ToolMetadata::default());
+
+        assert_eq!(
+            view,
+            Some(ToolResultView::Tasks {
+                tasks: done.to_vec(),
+            }),
+        );
+    }
+
+    // ── run ──
 
     #[tokio::test]
     async fn run_keeps_the_sent_list_and_reports_its_progress() {
         let output = TasksTool.run(input(&plan())).await;
 
         assert!(!output.is_error, "{}", output.content);
-        assert_eq!(output.content, "Updated the task list: 1 of 3 completed.");
+        assert_eq!(
+            output.content,
+            "Updated the task list: 1 of 3 completed. Carry on with the remaining tasks."
+        );
         assert_eq!(
             output.metadata.title.as_deref(),
-            Some("1 of 3 tasks completed")
+            Some("Updated 3 tasks, 1 completed")
         );
         assert_eq!(output.tasks, Some(plan()));
     }
 
     #[tokio::test]
-    async fn run_moves_a_task_through_each_status_across_calls() {
-        let steps = [
-            (
-                TaskStatus::Pending,
-                "Updated the task list: 0 of 2 completed.",
-            ),
-            (
-                TaskStatus::InProgress,
-                "Updated the task list: 0 of 2 completed.",
-            ),
-            (
-                TaskStatus::Completed,
-                "Updated the task list: 1 of 2 completed.",
-            ),
-        ];
-        for (status, expected) in steps {
-            let tasks = [
-                task("Fix the parser", status),
-                task("Run the tests", TaskStatus::Pending),
-            ];
+    async fn run_collapses_each_task_onto_one_line() {
+        let sent = [task(
+            "  Fix the parser\nthen   rerun\tthe tests ",
+            TaskStatus::Pending,
+        )];
 
-            let output = TasksTool.run(input(&tasks)).await;
+        let output = TasksTool.run(input(&sent)).await;
 
-            assert_eq!(output.content, expected, "{status:?}");
-            assert_eq!(output.tasks, Some(tasks.to_vec()), "{status:?}");
-        }
+        assert_eq!(
+            output.tasks,
+            Some(vec![task(
+                "Fix the parser then rerun the tests",
+                TaskStatus::Pending
+            )]),
+        );
     }
 
     #[tokio::test]
@@ -414,7 +420,7 @@ mod tests {
     async fn run_rejects_a_task_without_content() {
         let tasks = [
             task("Fix the parser", TaskStatus::Pending),
-            task("  ", TaskStatus::Pending),
+            task(" \n ", TaskStatus::Pending),
         ];
 
         let output = TasksTool.run(input(&tasks)).await;
@@ -441,33 +447,17 @@ mod tests {
         assert_eq!(output.tasks, None);
     }
 
-    // ── TasksTool::result_view ──
-
-    #[test]
-    fn result_view_shows_the_list_as_sent_even_when_it_cleared() {
-        let done = [task("Fix the parser", TaskStatus::Completed)];
-
-        let view = TasksTool.result_view(&input(&done), "", &ToolMetadata::default());
-
-        assert_eq!(
-            view,
-            Some(ToolResultView::Tasks {
-                tasks: done.to_vec(),
-            }),
-        );
-    }
-
     // ── latest ──
 
     #[test]
     fn latest_takes_the_last_successful_call() {
         let earlier = [task("Fix the parser", TaskStatus::Pending)];
         let messages = [
-            tasks_call("t1", &earlier),
+            tasks_call("t1", input(&earlier)),
             result("t1", false),
-            tasks_call("t2", &plan()),
+            tasks_call("t2", input(&plan())),
             result("t2", false),
-            tasks_call("t3", &[task("Rejected", TaskStatus::Pending)]),
+            tasks_call("t3", input(&[task("Rejected", TaskStatus::Pending)])),
             result("t3", true),
         ];
 
@@ -476,30 +466,22 @@ mod tests {
 
     #[test]
     fn latest_skips_a_call_without_a_result() {
-        let earlier = plan();
         let messages = [
-            tasks_call("t1", &earlier),
+            tasks_call("t1", input(&plan())),
             result("t1", false),
-            tasks_call("t2", &[task("Unanswered", TaskStatus::Pending)]),
+            tasks_call("t2", input(&[task("Unanswered", TaskStatus::Pending)])),
         ];
 
-        assert_eq!(latest(&messages), Some(earlier));
+        assert_eq!(latest(&messages), Some(plan()));
     }
 
     #[test]
     fn latest_skips_a_successful_call_whose_input_does_not_parse() {
-        let unparsable = Message {
-            role: Role::Assistant,
-            content: vec![ContentBlock::ToolUse {
-                id: "t2".to_owned(),
-                name: NAME.to_owned(),
-                input: json!({"tasks": [{"content": "Fix the parser", "status": "blocked"}]}),
-            }],
-        };
+        let unknown_status = json!({"tasks": [{"content": "Fix the parser", "status": "blocked"}]});
         let messages = [
-            tasks_call("t1", &plan()),
+            tasks_call("t1", input(&plan())),
             result("t1", false),
-            unparsable,
+            tasks_call("t2", unknown_status),
             result("t2", false),
         ];
 
@@ -510,9 +492,9 @@ mod tests {
     fn latest_reports_a_cleared_list_as_empty() {
         let done = [task("Fix the parser", TaskStatus::Completed)];
         let messages = [
-            tasks_call("t1", &plan()),
+            tasks_call("t1", input(&plan())),
             result("t1", false),
-            tasks_call("t2", &done),
+            tasks_call("t2", input(&done)),
             result("t2", false),
         ];
 
@@ -524,24 +506,5 @@ mod tests {
         let messages = [Message::user("hi"), Message::assistant("hello")];
 
         assert_eq!(latest(&messages), None);
-    }
-
-    // ── reminder ──
-
-    #[test]
-    fn reminder_lists_each_task_with_its_status() {
-        assert_eq!(
-            reminder(&plan()).as_deref(),
-            Some(indoc! {"
-                <system-reminder>
-                Your task list carries over from before the summary. Keep it current with the tasks tool:
-
-                - [completed] Read the config loader
-                - [in_progress] Add the entry type
-                - [pending] Write the tests
-                </system-reminder>"
-            }),
-        );
-        assert_eq!(reminder(&[]), None);
     }
 }

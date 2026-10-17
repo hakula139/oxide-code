@@ -91,7 +91,7 @@ pub(crate) enum Entry {
     /// Boundary written by `/compact` immediately before the synthetic post-compact `Message`.
     /// Carries the summary body and the pre-compact message count so listings can surface
     /// "compacted N → 1" without rescanning the prior tail, plus the task list the summarized
-    /// transcript left, which no call after the boundary has set yet.
+    /// transcript left, which applies on resume until a later `tasks` call replaces it.
     Compact {
         summary: String,
         pre_message_count: u32,

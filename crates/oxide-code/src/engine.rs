@@ -2002,6 +2002,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn submit_prompt_keeps_the_list_through_a_later_round_that_sets_none() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            let planned = serde_json::json!({ "tasks": plan() }).to_string();
+            let rejected = serde_json::json!({ "tasks": [
+                {"content": "Fix the parser", "status": "in_progress"},
+                {"content": "Fix the lexer", "status": "in_progress"},
+            ]})
+            .to_string();
+            mount_tool_call_once(&server, "call-1", "tasks", &planned).await;
+            mount_tool_call_once(&server, "call-2", "tasks", &rejected).await;
+            mount_reply(&server, "done").await;
+            let dir = tempfile::tempdir().unwrap();
+            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path())
+                .await
+                .with_tools(ToolRegistry::new(vec![Box::new(TasksTool)]));
+            let (_ops_tx, mut ops) = crate::protocol::inert_op_channel();
+
+            let end = engine
+                .submit_prompt("plan it", &CapturingSink::new(), &mut ops)
+                .await;
+
+            assert_eq!(end, TurnEnd::Completed);
+            assert_eq!(server.received_requests().await.unwrap().len(), 3);
+            assert_eq!(engine.tasks, plan());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn submit_prompt_adopts_the_list_of_a_turn_that_fails_after_the_call() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            let input = serde_json::json!({ "tasks": plan() }).to_string();
+            mount_tool_call_once(&server, "call-1", "tasks", &input).await;
+            let dir = tempfile::tempdir().unwrap();
+            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path())
+                .await
+                .with_tools(ToolRegistry::new(vec![Box::new(TasksTool)]));
+            engine.max_tool_rounds = Some(1);
+            let (_ops_tx, mut ops) = crate::protocol::inert_op_channel();
+
+            let end = engine
+                .submit_prompt("plan it", &CapturingSink::new(), &mut ops)
+                .await;
+
+            assert_eq!(end, TurnEnd::Failed);
+            assert_eq!(engine.tasks, plan());
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn submit_prompt_auto_compacts_before_recording_the_new_prompt() {
         with_pinned_home(async {
             let server = MockServer::start().await;
@@ -2217,7 +2270,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compact_carries_the_task_list_into_the_summary_and_its_boundary() {
+    async fn compact_carries_the_task_list_into_the_summary_and_through_a_resume() {
         with_pinned_home(async {
             let server = MockServer::start().await;
             mount_reply(&server, "manual summary").await;
@@ -2237,8 +2290,15 @@ mod tests {
                 [synthesize_post_compact_message("manual summary", &plan())]
             );
             assert_eq!(engine.tasks, plan());
-            let saved = store.load_session_data(&session_id).unwrap();
-            assert_eq!(saved.compact.map(|compact| compact.tasks), Some(plan()));
+
+            engine.clear(&CapturingSink::new()).await;
+            let compacted = store.find_session_path(&session_id).unwrap();
+            engine
+                .resume(&CapturingSink::new(), ResumeTarget::Path(compacted))
+                .await;
+
+            assert_eq!(engine.session_id(), session_id);
+            assert_eq!(engine.tasks, plan());
         })
         .await;
     }

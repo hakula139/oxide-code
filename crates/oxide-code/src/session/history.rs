@@ -50,7 +50,7 @@ fn post_compact_messages(messages: &[Message]) -> Vec<Message> {
 
 /// Walks a transcript in display order. Tool calls are paired inline with their `tool_use_id`
 /// results, and an interruption marker becomes [`Interaction::Interrupted`]. Whitespace-only text
-/// and the context reminders sent with user prompts are dropped.
+/// and the `<system-reminder>` blocks in user messages are dropped.
 fn walk_transcript(
     messages: &[Message],
     tool_metadata: &HashMap<String, ToolMetadata>,

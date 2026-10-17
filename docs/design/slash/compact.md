@@ -18,7 +18,7 @@ Companions: [commands.md](commands.md), [session/persistence.md](../session/pers
 
 `session/handle` exposes `compact(summary, instructions, tasks, synthetic_message) -> CompactOutcome`:
 
-- The actor writes one `Entry::Compact` followed by the synthetic post-compact `Entry::Message` (a `role: user` carrying `SUMMARY_PREFIX + summary` and a reminder of the task list), with the synthetic message's `parent_uuid` deliberately set to `None`.
+- The actor writes one `Entry::Compact` followed by the synthetic post-compact `Entry::Message` (a `role: user` carrying `SUMMARY_PREFIX + summary`, plus a reminder of the task list when it holds any), with the synthetic message's `parent_uuid` deliberately set to `None`.
 - `SessionState`'s `last_message_uuid` is reset to the synthetic message's id and `message_count` resets to `1`.
 - `SessionCmd::Compact` is a batch barrier, so queued writes cannot share the same flush after the boundary.
 - The file tracker is reset to match `/clear`.
@@ -131,12 +131,11 @@ A `pre_compact` hook is tracked in [#168](https://github.com/hakula139/oxide-cod
 - `crates/oxide-code/src/session/actor.rs`: `SessionCmd::Compact` handler.
 - `crates/oxide-code/src/session/entry.rs`: `Entry::Compact` variant.
 - `crates/oxide-code/src/session/handle.rs`: `SessionHandle::compact`, `CompactOutcome`.
-- `crates/oxide-code/src/session/post_compact.rs`: `SUMMARY_PREFIX` and `synthesize_post_compact_message`, plus `strip_synthetic_post_compact_prefix`, which hides the prefix when a resumed session displays it.
+- `crates/oxide-code/src/session/post_compact.rs`: `SUMMARY_PREFIX`, `synthesize_post_compact_message` and its `task_reminder` block, plus `strip_synthetic_post_compact_prefix`, which hides the prefix when a resumed session displays it.
 - `crates/oxide-code/src/session/state.rs`: `compact_entries` and `commit_compact` (chain reset).
 - `crates/oxide-code/src/session/store.rs`: resume loader compact boundary reset, tail filtering, and `CompactInfo`.
 - `crates/oxide-code/src/slash/compact.rs`: `CompactCmd`.
 - `crates/oxide-code/src/slash/registry.rs`: `BUILT_INS` entry `&CompactCmd`.
-- `crates/oxide-code/src/tool/tasks.rs`: `reminder`, the task-list block the synthetic message ends with.
 - `crates/oxide-code/src/tui/app/events.rs`: `apply_session_compacted`.
 - `crates/oxide-code/src/tui/components/chat.rs`: `ChatView::append_summary_token` and `ChatView::discard_summary`.
 - `crates/oxide-code/src/tui/components/chat/blocks/compacted.rs`: `CompactedBlock`.

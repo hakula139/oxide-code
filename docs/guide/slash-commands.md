@@ -50,7 +50,7 @@ Bare `/model` and `/effort` open pickers. Both apply on Enter and cancel on Esc.
 
 `/compact <instructions>` appends free-text focus instructions to the rubric (e.g., `/compact focus on the build error and how we fixed it`). Useful when only a slice of the work matters going forward.
 
-The pre-compact transcript stays on disk, but resuming via `ox -c` starts from the compacted summary and post-compact tail. The file-change tracker resets on compact, so any `Edit` after `/compact` requires a fresh `Read`. Queued prompts survive the compaction.
+The pre-compact transcript stays on disk, but resuming via `ox -c` starts from the compacted summary and post-compact tail. The file-change tracker resets on compact, so any `Edit` after `/compact` requires a fresh `Read`. Queued prompts and the task list survive the compaction.
 
 `/compact` refuses a conversation shorter than about 1,000 tokens, counting messages, tool calls, and tool output but not instructions or tool definitions. An empty summary from the model also fails the compaction and leaves the conversation unchanged.
 
