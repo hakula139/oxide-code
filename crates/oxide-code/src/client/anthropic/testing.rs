@@ -3,6 +3,7 @@
 use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
 
+use bytes::Bytes;
 use indoc::writedoc;
 use reqwest::header::HeaderMap;
 use wiremock::ResponseTemplate;
@@ -66,7 +67,7 @@ pub(super) fn messages_request(url: impl Into<String>) -> MessagesRequest {
         url: url.into(),
         betas: String::new(),
         session_id: "sid".to_owned(),
-        body: "{}".to_owned(),
+        body: Bytes::from_static(b"{}"),
         auth: auth.source(),
         credential: auth.header().unwrap(),
     }

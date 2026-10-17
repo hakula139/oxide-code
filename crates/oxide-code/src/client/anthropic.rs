@@ -204,12 +204,6 @@ impl Client {
         breakpoint: Option<CacheControl>,
     ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
         let auth = self.auth()?;
-        let effective_messages: Vec<Message> = match user_context {
-            Some(ctx) => std::iter::once(Message::user(ctx))
-                .chain(messages.iter().cloned())
-                .collect(),
-            None => messages.to_vec(),
-        };
 
         // The fingerprint skips the user context, which Claude Code marks as a meta message.
         let attribution = self
@@ -247,7 +241,8 @@ impl Client {
                 .info()
                 .map(|_| ContextManagement::clear_thinking_keep_all()),
             messages: RequestMessages {
-                messages: &effective_messages,
+                user_context,
+                messages,
                 breakpoint,
             },
         })

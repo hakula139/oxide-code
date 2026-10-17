@@ -6,6 +6,7 @@ use std::future::Future;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
+use bytes::Bytes;
 use reqwest::StatusCode;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use tracing::warn;
@@ -39,7 +40,7 @@ pub(super) struct MessagesRequest {
     pub(super) url: String,
     pub(super) betas: String,
     pub(super) session_id: String,
-    pub(super) body: String,
+    pub(super) body: Bytes,
     pub(super) auth: AuthSource,
     pub(super) credential: (HeaderName, HeaderValue),
 }
@@ -56,7 +57,7 @@ impl Client {
             url: format!("{}/v1/messages?beta=true", self.base_url),
             betas,
             session_id: self.session_id.clone(),
-            body,
+            body: body.into(),
             auth: auth.source(),
             credential: auth.header()?,
         })

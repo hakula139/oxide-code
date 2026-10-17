@@ -104,6 +104,7 @@ fn build_completion_body(
         output_config: OutputConfig::new(output_format, effort),
         context_management: None,
         messages: RequestMessages {
+            user_context: None,
             messages: &messages,
             breakpoint: None,
         },

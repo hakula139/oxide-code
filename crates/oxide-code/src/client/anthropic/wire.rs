@@ -34,18 +34,23 @@ pub(super) struct CreateMessageRequest<'a> {
     pub(super) messages: RequestMessages<'a>,
 }
 
-/// Serializes `messages` in the request shape, with `breakpoint` (when set) stamped onto the last
-/// content block of the final message. The marker exists only on the wire, so in-memory
-/// [`Message`]s never carry cache state.
+/// Serializes `messages` in the request shape. A user message holding `user_context` leads when
+/// set, and `breakpoint` marks the last content block of the final message. Both exist only on
+/// the wire, so the transcript never stores the context or cache state.
 pub(super) struct RequestMessages<'a> {
+    pub(super) user_context: Option<&'a str>,
     pub(super) messages: &'a [Message],
     pub(super) breakpoint: Option<CacheControl>,
 }
 
 impl Serialize for RequestMessages<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let messages: Vec<RequestMessage<'_>> =
-            self.messages.iter().map(RequestMessage::of).collect();
+        let messages: Vec<RequestMessage<'_>> = self
+            .user_context
+            .map(RequestMessage::user_context)
+            .into_iter()
+            .chain(self.messages.iter().map(RequestMessage::of))
+            .collect();
         let Some(cache_control) = &self.breakpoint else {
             return messages.serialize(serializer);
         };
@@ -66,6 +71,13 @@ struct RequestMessage<'a> {
 }
 
 impl<'a> RequestMessage<'a> {
+    fn user_context(text: &'a str) -> Self {
+        Self {
+            role: Role::User,
+            content: vec![RequestBlock::Text { text }],
+        }
+    }
+
     fn of(message: &'a Message) -> Self {
         Self {
             role: message.role,
@@ -79,6 +91,9 @@ impl<'a> RequestMessage<'a> {
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum RequestBlock<'a> {
+    Text {
+        text: &'a str,
+    },
     Thinking {
         thinking: &'a str,
         signature: &'a str,
@@ -436,6 +451,7 @@ mod tests {
             },
         ];
         let v = serde_json::to_value(RequestMessages {
+            user_context: None,
             messages: &messages,
             breakpoint: Some(one_hour_breakpoint()),
         })
@@ -469,6 +485,7 @@ mod tests {
             }],
         }];
         let v = serde_json::to_value(RequestMessages {
+            user_context: None,
             messages: &messages,
             breakpoint: Some(one_hour_breakpoint()),
         })
@@ -490,6 +507,7 @@ mod tests {
     fn request_messages_without_breakpoint_or_messages_serializes_verbatim() {
         let messages = [Message::user("question"), Message::assistant("answer")];
         let v = serde_json::to_value(RequestMessages {
+            user_context: None,
             messages: &messages,
             breakpoint: None,
         })
@@ -497,11 +515,46 @@ mod tests {
         assert_eq!(v, serde_json::to_value(messages).unwrap());
 
         let empty = serde_json::to_value(RequestMessages {
+            user_context: None,
             messages: &[],
             breakpoint: Some(one_hour_breakpoint()),
         })
         .unwrap();
         assert_eq!(empty, json!([]));
+    }
+
+    #[test]
+    fn request_messages_lead_with_the_user_context() {
+        let text = |text: &str| json!({"type": "text", "text": text});
+        let marked = |text: &str| {
+            json!({
+                "type": "text",
+                "text": text,
+                "cache_control": {"type": "ephemeral", "ttl": "1h"},
+            })
+        };
+        for (messages, expected) in [
+            (
+                vec![Message::user("question")],
+                json!([
+                    {"role": "user", "content": [text("context")]},
+                    {"role": "user", "content": [marked("question")]},
+                ]),
+            ),
+            (
+                Vec::new(),
+                json!([{"role": "user", "content": [marked("context")]}]),
+            ),
+        ] {
+            let v = serde_json::to_value(RequestMessages {
+                user_context: Some("context"),
+                messages: &messages,
+                breakpoint: Some(one_hour_breakpoint()),
+            })
+            .unwrap();
+
+            assert_eq!(v, expected);
+        }
     }
 
     #[test]
@@ -527,6 +580,7 @@ mod tests {
         ];
 
         let v = serde_json::to_value(RequestMessages {
+            user_context: None,
             messages: &messages,
             breakpoint: None,
         })
@@ -582,6 +636,7 @@ mod tests {
         ];
 
         let v = serde_json::to_value(RequestMessages {
+            user_context: None,
             messages: &messages,
             breakpoint: Some(one_hour_breakpoint()),
         })
