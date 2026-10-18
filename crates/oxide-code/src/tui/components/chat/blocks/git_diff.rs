@@ -116,7 +116,11 @@ fn split_truncation_footer(text: &str) -> (&str, Option<&str>) {
 fn file_label<'a>(line: &'a str, rest: &[&'a str]) -> Cow<'a, str> {
     let header_len = rest
         .iter()
-        .position(|line| !is_file_header(line))
+        .position(|line| {
+            !is_file_header(line)
+                && !line.starts_with("old mode ")
+                && !line.starts_with("new mode ")
+        })
         .unwrap_or(rest.len());
     let header = &rest[..header_len];
     let renamed = |prefix: &str| header.iter().find_map(|line| line.strip_prefix(prefix));
@@ -451,6 +455,26 @@ mod tests {
         assert_eq!(
             body_rows(&lines),
             ["old.rs → new.rs", "@@ -1 +1 @@", "1 - a", "1 + b"]
+        );
+    }
+
+    #[test]
+    fn render_names_a_renamed_file_after_mode_headers_and_keeps_the_modes() {
+        let theme = Theme::default();
+        let block = GitDiffBlock::new(indoc! {"
+            diff --git a/old.sh b/new.sh
+            old mode 100644
+            new mode 100755
+            similarity index 100%
+            rename from old.sh
+            rename to new.sh
+        "});
+
+        let lines = block.render(&ctx_at(80, &theme));
+
+        assert_eq!(
+            body_rows(&lines),
+            ["old.sh → new.sh", "old mode 100644", "new mode 100755"]
         );
     }
 
