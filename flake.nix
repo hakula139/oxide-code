@@ -50,13 +50,14 @@
           overlays = [ rust-overlay.overlays.default ];
         };
 
-        rustToolchain = (pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml).override {
-          extensions = [
+        rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+        rustDevToolchain = rustToolchain.override (prev: {
+          extensions = prev.extensions ++ [
             "llvm-tools-preview"
             "rust-analyzer"
             "rust-src"
           ];
-        };
+        });
 
         oxide-code = pkgs.callPackage ./package.nix {
           rustPlatform = pkgs.makeRustPlatform {
@@ -70,13 +71,10 @@
         # ------------------------------------------------------------------------------------------
         hooks = {
           end-of-file-fixer.enable = true;
-          # Preserve Markdown's two-trailing-space hard-break syntax.
-          trim-trailing-whitespace = {
-            enable = true;
-            args = [ "--markdown-linebreak-ext=md" ];
-          };
+          trim-trailing-whitespace.enable = true;
           check-added-large-files.enable = true;
           check-yaml.enable = true;
+          taplo.enable = true;
 
           nixfmt.enable = true;
           deadnix.enable = true;
@@ -120,33 +118,23 @@
           );
 
         nodeHooks = {
-          dprint-write = {
-            enable = true;
-            name = "dprint";
-            entry = nodeHook "dprint-write" "dprint fmt";
-            files = "\\.md$";
-          };
           prettier-write = {
             enable = true;
             name = "prettier";
             entry = nodeHook "prettier-write" "prettier --write --ignore-unknown";
-            files = "\\.(cjs|js|json|jsonc|mjs|ya?ml)$";
-          };
-          taplo-write = {
-            enable = true;
-            name = "taplo";
-            entry = nodeHook "taplo-write" "taplo format";
-            files = "\\.toml$";
+            files = "\\.(json|jsonc|md|ya?ml)$";
           };
 
           cspell = {
             enable = true;
+            package = null;
             entry = nodeHook "cspell" "cspell --no-must-find-files --no-progress";
             types = [ "text" ];
           };
           markdownlint = {
             enable = true;
             name = "markdownlint-cli2";
+            package = null;
             entry = nodeHook "markdownlint" "markdownlint-cli2 --fix";
             files = "\\.md$";
           };
@@ -171,18 +159,19 @@
         devShells.default = pkgs.mkShell {
           name = "oxide-code-dev";
 
-          packages =
-            preCommit.enabledPackages
-            ++ [ rustToolchain ]
-            ++ (with pkgs; [
-              cargo-about
-              cargo-deny
-              cargo-llvm-cov
-              cargo-mutants
-              git-cliff
-              nodejs_24
-              pnpm
-            ]);
+          # The rustfmt hook puts the plain toolchain on PATH, so the dev toolchain must come first.
+          packages = [
+            rustDevToolchain
+          ]
+          ++ preCommit.enabledPackages
+          ++ (with pkgs; [
+            cargo-deny
+            cargo-llvm-cov
+            cargo-mutants
+            git-cliff
+            nodejs_24
+            pnpm
+          ]);
 
           # git-hooks.nix stores a hooks path relative to the main checkout, which linked worktrees
           # can't resolve (cachix/git-hooks.nix#688), so commits there would skip the hooks.

@@ -35,6 +35,7 @@ ENOENT
 ENOTDIR
 envrc
 EPERM
+esbenp
 ESRCH
 fcntl
 feff
@@ -144,7 +145,6 @@ unarchived
 unarchives
 unarchiving
 uninlined
-unreaped
 untap
 unwritable
 URXVT

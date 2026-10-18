@@ -14,6 +14,7 @@ on:
       - Cargo.toml
       - crates/*/Cargo.toml
       - rust-toolchain.toml
+      - docs/guide/install.md
   workflow_dispatch:
 
 permissions:
