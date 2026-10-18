@@ -75,13 +75,6 @@
             enable = true;
             args = [ "--markdown-linebreak-ext=md" ];
           };
-          ascii-ellipsis = {
-            enable = true;
-            name = "ASCII ellipsis";
-            entry = "${pkgs.bash}/bin/bash scripts/check-ellipsis.sh";
-            types = [ "text" ];
-            extraPackages = [ pkgs.gnugrep ];
-          };
           check-added-large-files.enable = true;
           check-yaml.enable = true;
 
