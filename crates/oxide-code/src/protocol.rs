@@ -240,8 +240,8 @@ pub(crate) enum Event {
     },
     /// The user granted a session allow rule. Carries every session allow rule now in force.
     SessionRulesUpdated(Vec<Rule>),
-    /// The session's whole task list, after a `tasks` call sets it or a loaded session restores
-    /// one. Frontends drop theirs on [`Self::SessionRolled`] and [`Self::SessionResumed`].
+    /// The full task list, after a `tasks` call sets it or a loaded session restores a non-empty
+    /// one. Frontends empty their copy on [`Self::SessionRolled`] and [`Self::SessionResumed`].
     TasksUpdated(Vec<Task>),
     /// A background shell started, exited, or stopped. Carries every open shell. Frontends empty
     /// their copy on [`Self::SessionRolled`] and [`Self::SessionResumed`], since the session's
