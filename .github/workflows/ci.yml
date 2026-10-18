@@ -130,6 +130,9 @@ jobs:
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
 
+      - name: Rustdoc
+        run: cargo doc --locked --no-deps
+
       - name: Test
         run: cargo test --locked
 
@@ -148,6 +151,9 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Rustdoc
+        run: cargo doc --locked --no-deps
 
       - name: Test
         # crossterm writes ANSI sequences to its writer only on a VT console or with `TERM` set, and
