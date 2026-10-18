@@ -1,5 +1,5 @@
-//! Text helpers: display-width-aware truncation, count-based pluralization, and escaping for
-//! terminal output.
+//! Text helpers: display-width-aware truncation, count-based pluralization, sentence joining, and
+//! escaping for terminal output.
 
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -7,6 +7,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 pub(crate) const ELLIPSIS: &str = "...";
 /// Columns [`ELLIPSIS`] fills, one per byte since it is ASCII.
 pub(crate) const ELLIPSIS_WIDTH: usize = ELLIPSIS.len();
+const HORIZONTAL_ELLIPSIS: char = '\u{2026}';
 
 /// `singular` when `count` is one, `plural` otherwise.
 #[expect(
@@ -23,6 +24,17 @@ pub(crate) fn plural<'a, N: PartialEq + From<u8>>(
     } else {
         plural
     }
+}
+
+/// `text`, which ends in variable external content, then the sentence `next`, with a period
+/// between them unless `text` already ends a sentence. Never pass our own literal as `text`.
+pub(crate) fn join_sentences(text: &str, next: &str) -> String {
+    let separator = if text.ends_with(['.', '?', '!', HORIZONTAL_ELLIPSIS, '。', '？', '！']) {
+        " "
+    } else {
+        ". "
+    };
+    format!("{text}{separator}{next}")
 }
 
 /// Truncates `s` to `max_width` display columns, appending [`ELLIPSIS`] when shortened.
@@ -137,6 +149,31 @@ mod tests {
     fn plural_uses_singular_only_for_one() {
         for (count, expected) in [(0, "files"), (1, "file"), (2, "files")] {
             assert_eq!(plural(count, "file", "files"), expected);
+        }
+    }
+
+    // ── join_sentences ──
+
+    #[test]
+    fn join_sentences_adds_a_period_only_after_text_that_does_not_end_a_sentence() {
+        for (text, expected) in [
+            ("Upstream is down.", "Upstream is down. Retry later."),
+            ("Is it down?", "Is it down? Retry later."),
+            ("It is down!", "It is down! Retry later."),
+            (
+                "Upstream timed out...",
+                "Upstream timed out... Retry later.",
+            ),
+            (
+                "Upstream timed out\u{2026}",
+                "Upstream timed out\u{2026} Retry later.",
+            ),
+            ("上游已断开。", "上游已断开。 Retry later."),
+            ("上游断开了吗？", "上游断开了吗？ Retry later."),
+            ("上游断开了！", "上游断开了！ Retry later."),
+            ("Upstream is down", "Upstream is down. Retry later."),
+        ] {
+            assert_eq!(join_sentences(text, "Retry later."), expected);
         }
     }
 

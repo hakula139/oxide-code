@@ -13,6 +13,7 @@ use tracing::{debug, warn};
 use crate::util::env;
 use crate::util::fs::{atomic_write_private, create_private_dir_all};
 use crate::util::path::{XdgBase, app_dir};
+use crate::util::text::join_sentences;
 use crate::util::tls::apply_extra_ca_certs;
 
 pub(crate) const OAUTH_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
@@ -94,10 +95,19 @@ pub(super) enum LoginError {
     /// The token expired, and no refresh token is stored.
     #[error("{0} has expired. {step}", step = .0.sign_in_step())]
     Expired(Login),
-    #[error("failed to refresh the expired {0}: {1:#}. {step}", step = .0.sign_in_step())]
+    #[error(
+        "{}",
+        join_sentences(
+            &format!("failed to refresh the expired {}: {:#}", .0, .1),
+            .0.sign_in_step(),
+        )
+    )]
     RefreshFailed(Login, anyhow::Error),
     /// The stored login exists but cannot be read or parsed.
-    #[error("failed to load the {0}: {1:#}. {step}", step = .0.sign_in_step())]
+    #[error(
+        "{}",
+        join_sentences(&format!("failed to load the {}: {:#}", .0, .1), .0.sign_in_step())
+    )]
     Unreadable(Login, anyhow::Error),
 }
 
@@ -1137,6 +1147,31 @@ mod tests {
             format!("{err:#}"),
             "failed to refresh the expired Claude Code login: \
              token refresh failed with 503 Service Unavailable. \
+             Run `claude` to sign in again.",
+        );
+    }
+
+    #[tokio::test]
+    async fn load_token_from_refresh_rejection_keeps_a_body_that_ends_a_sentence_verbatim() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(wm_path("/"))
+            .respond_with(ResponseTemplate::new(400).set_body_string("Refresh token revoked."))
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let creds = dir.path().join("creds.json");
+        let lock = dir.path().join("lock");
+        write_creds(&creds, "dead", Some("old"), 0);
+
+        let err = load_token_from(&store(None, &creds, &lock), &server.uri(), None)
+            .await
+            .expect_err("expired + refresh rejected must bail");
+
+        assert_eq!(
+            format!("{err:#}"),
+            "failed to refresh the expired Claude Code login: \
+             token refresh failed with 400 Bad Request: Refresh token revoked. \
              Run `claude` to sign in again.",
         );
     }

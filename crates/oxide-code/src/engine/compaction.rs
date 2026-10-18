@@ -31,6 +31,7 @@ use crate::session::handle::SessionHandle;
 use crate::tool::ToolDefinition;
 use crate::tool::bash::background::BackgroundShells;
 use crate::tool::tasks::Task;
+use crate::util::text::join_sentences;
 
 const MAX_AUTO_COMPACT_FAILURES: u8 = 3;
 
@@ -165,11 +166,7 @@ pub(super) async fn auto_compact_if_needed(
         Ok(summary) => summary,
         Err(e) => {
             warn!("auto-compaction failed: {e:#}");
-            return Err(record_auto_compact_failure(
-                auto,
-                sink,
-                &format!("Auto-compaction failed: {e:#}"),
-            ));
+            return Err(record_auto_compact_failure(auto, sink, Some(&e)));
         }
     };
     let compacted = compact_boundary::replace_session_with_summary(
@@ -187,21 +184,17 @@ pub(super) async fn auto_compact_if_needed(
     )
     .await;
     if !compacted {
-        return Err(record_auto_compact_failure(
-            auto,
-            sink,
-            "Auto-compaction was not saved",
-        ));
+        return Err(record_auto_compact_failure(auto, sink, None));
     }
     Ok(true)
 }
 
-/// Counts a failed attempt and returns the abort that fails the unsent prompt. `headline` can end
-/// on a cause's own sentence, so its period is dropped before the sentences on what to do next.
+/// Counts a failed attempt and returns the abort that fails the unsent prompt. `cause` is why the
+/// summary failed, and `None` means the summary succeeded but its boundary was not saved.
 fn record_auto_compact_failure(
     auto: &mut AutoCompact<'_>,
     sink: &dyn EventSink,
-    headline: &str,
+    cause: Option<&anyhow::Error>,
 ) -> TurnAbort {
     auto.failures.record(sink);
     let next = if auto.failures.is_paused() {
@@ -214,7 +207,11 @@ fn record_auto_compact_failure(
     } else {
         "The prompt was not sent, so send it again to retry.".to_owned()
     };
-    TurnAbort::Failed(anyhow!("{}. {next}", headline.trim_end_matches('.')))
+    let message = match cause {
+        Some(e) => join_sentences(&format!("Auto-compaction failed: {e:#}"), &next),
+        None => format!("Auto-compaction was not saved. {next}"),
+    };
+    TurnAbort::Failed(anyhow!(message))
 }
 
 /// Drives the summarization request and returns the trimmed summary. `prompt` and `tools` must be
@@ -957,6 +954,34 @@ mod tests {
             ),
             "the overflowed summary is discarded before the retry streams: {events:?}",
         );
+    }
+
+    // ── record_auto_compact_failure ──
+
+    #[test]
+    fn record_auto_compact_failure_keeps_the_cause_verbatim_before_the_next_step() {
+        for (cause, expected) in [
+            (
+                "upstream timed out...",
+                "Auto-compaction failed: upstream timed out... \
+                 The prompt was not sent, so send it again to retry.",
+            ),
+            (
+                "upstream timed out",
+                "Auto-compaction failed: upstream timed out. \
+                 The prompt was not sent, so send it again to retry.",
+            ),
+        ] {
+            let mut failures = AutoCompactFailures::default();
+
+            let abort = record_auto_compact_failure(
+                &mut auto_compact(10, None, &mut failures),
+                &CapturingSink::new(),
+                Some(&anyhow!(cause)),
+            );
+
+            assert_eq!(abort.to_string(), expected);
+        }
     }
 
     // ── compact_session ──
