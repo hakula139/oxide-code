@@ -22,8 +22,7 @@ const FIXED_PREFIX_WIDTH: usize = ID_COL + 1 + LAST_ACTIVE_COL + 1 + MSGS_COL + 
 /// Smallest title budget worth truncating to, since a narrower one chops titles to `F...`.
 const MIN_TITLE_BUDGET: usize = 12;
 
-/// Header "Project" is 7 chars, padded to 8 so the label always fits.
-const PROJECT_COL_MIN: usize = 8;
+const PROJECT_COL_MIN: usize = "Project".len() + 1;
 
 /// Project column cap. A deeper path overflows the column in its own row, so the title column
 /// keeps its width in every other row.
@@ -44,8 +43,8 @@ pub(crate) fn render_list(
     render_sessions(out, &page, scope, local_offset, term_width)
 }
 
-/// `scope.all` inserts a `Project` column to disambiguate cross-project rows.
-/// Appends a `... more` footer when sessions follow the page.
+/// Writes `page` as `--list` rows, with a `Project` column when `scope.all` is set and a
+/// `... more` footer when sessions follow the page.
 fn render_sessions(
     out: &mut dyn Write,
     page: &ListPage,
@@ -73,7 +72,6 @@ fn render_sessions(
         0
     };
 
-    // Title starts after this many cols, and anything beyond truncates to keep rows single-line.
     let prefix_width = FIXED_PREFIX_WIDTH + if all { project_col_width + 1 } else { 0 };
     let title_budget = term_width.and_then(|w| {
         let budget = w.checked_sub(prefix_width)?;
@@ -173,7 +171,6 @@ mod tests {
 
     #[test]
     fn render_list_empty_store_shows_no_sessions_notice() {
-        // Covers the `render_list → render_sessions` glue.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let mut buf = Vec::new();
@@ -360,7 +357,6 @@ mod tests {
             rows[1],
         );
 
-        // Title slot must start at the same column across rows, aligned with the header.
         let header_title_col = header.find("Title").expect("header must contain Title");
         let row_title_cols: Vec<usize> = rows
             .iter()

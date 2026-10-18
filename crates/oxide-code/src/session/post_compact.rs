@@ -1,5 +1,6 @@
 //! The synthetic user message that opens a compacted transcript. Compaction writes it with the
-//! summary, and the resumed display strips its prefix again, since the boundary block shows it.
+//! summary as its first block, and the resumed display strips that block again, since the
+//! boundary block shows the summary.
 
 use indoc::{formatdoc, indoc};
 
@@ -81,7 +82,8 @@ fn shell_reminder(shells: &[BackgroundShell]) -> Option<String> {
     }))
 }
 
-/// Removes the synthetic summary prefix from a resumed post-compact root message.
+/// Removes the synthetic summary block from a resumed post-compact root message, returning whether
+/// it was there.
 pub(crate) fn strip_synthetic_post_compact_prefix(message: &mut Message) -> bool {
     if message.role != Role::User {
         return false;

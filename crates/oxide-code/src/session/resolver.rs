@@ -1,5 +1,4 @@
-//! CLI `--continue` argument resolution. Translates the `clap`-parsed `Option<Option<String>>`
-//! into a fresh or resumed session via [`resolve_session`].
+//! Resolution of the CLI `--continue` argument and of session-ID prefixes.
 
 use std::path::Path;
 
@@ -67,9 +66,8 @@ pub(crate) async fn resolve_session(
     Ok(resumed)
 }
 
-/// Trims and classifies a `--continue` argument into a [`ResumeMode`]. Empty / whitespace
-/// prefixes are rejected explicitly to avoid silently collapsing into "resume latest", which bare
-/// `--continue` already expresses.
+/// Trims and classifies a `--continue` argument into a [`ResumeMode`], rejecting a blank prefix
+/// that would otherwise read as bare `--continue`.
 fn normalize_resume_arg(resume: Option<&Option<String>>) -> Result<ResumeMode<'_>> {
     match resume {
         None => Ok(ResumeMode::Fresh),
@@ -88,8 +86,8 @@ fn normalize_resume_arg(resume: Option<&Option<String>>) -> Result<ResumeMode<'_
     }
 }
 
-/// True if the argument contains a path separator or has a `.jsonl` extension. UUIDs contain
-/// only hex digits and `-`, so this never mis-routes a valid session-ID prefix.
+/// Returns whether `arg` contains a path separator or has a `.jsonl` extension, which no session-ID
+/// prefix does.
 fn looks_like_path(arg: &str) -> bool {
     arg.contains('/')
         || arg.contains('\\')
@@ -98,13 +96,13 @@ fn looks_like_path(arg: &str) -> bool {
             .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"))
 }
 
-/// Why a session-id prefix resolved to no single session. `Display` is the lowercase `anyhow`
+/// Why a session-ID prefix resolved to no single session. `Display` is the lowercase `anyhow`
 /// headline for startup, which slash commands rephrase as a sentence.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ResolveError {
     #[error("no session matching `{prefix}`")]
     NoMatch { prefix: String },
-    /// `preview` names the first matching ids in short form, then how many more matched.
+    /// `preview` names the first matching IDs in short form, then how many more matched.
     #[error("ambiguous prefix `{prefix}` matches {count} sessions: {preview}")]
     Ambiguous {
         prefix: String,
@@ -118,7 +116,7 @@ pub(crate) enum ResolveError {
     },
 }
 
-/// Matches `prefix` against session ids other than `live_id`, first in the current project, then
+/// Matches `prefix` against session IDs other than `live_id`, first in the current project, then
 /// in every project.
 pub(crate) fn resolve_prefix_to_info(
     store: &SessionStore,
@@ -175,7 +173,7 @@ fn match_in_scope(
     }
 }
 
-/// Renders up to `MATCH_PREVIEW_LIMIT` ids as [`id_prefix`] short forms, then how many remain.
+/// Renders up to `MATCH_PREVIEW_LIMIT` IDs as [`id_prefix`] short forms, then how many remain.
 fn format_session_id_preview(ids: impl IntoIterator<Item = String>) -> String {
     const MATCH_PREVIEW_LIMIT: usize = 5;
     let mut iter = ids.into_iter();
@@ -224,8 +222,6 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_session_resumes_from_external_path() {
-        // Path-based resume must pick up title, messages, and session_id from the header
-        // even when the file lives outside any store-searched directory.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let original = handle::start(&store, "m", None);
@@ -237,7 +233,6 @@ mod tests {
         let path = test_session_file(dir.path(), &full_id);
         drop(original);
 
-        // Imported-from-another-machine scenario.
         let external_dir = tempfile::tempdir().unwrap();
         let external_path = external_dir.path().join("copied.jsonl");
         std::fs::copy(&path, &external_path).unwrap();
@@ -261,7 +256,6 @@ mod tests {
         original.finish(Vec::new()).await;
         drop(original);
 
-        // A 10-char UUID prefix is vanishingly unlikely to collide.
         let prefix = full_id[..10].to_owned();
         let arg = Some(prefix);
         let resumed = resolve_session(&store, "m", None, Some(&arg), false)
@@ -521,7 +515,6 @@ mod tests {
 
     #[test]
     fn normalize_resume_arg_keeps_uuid_shaped_prefix_as_prefix() {
-        // A UUID prefix has no `/` or `.jsonl`, so it must not classify as a path.
         let arg = Some("a1b2c3d4-e5f6-7890".to_owned());
         let mode = normalize_resume_arg(Some(&arg)).unwrap();
         assert!(matches!(mode, ResumeMode::Prefix("a1b2c3d4-e5f6-7890")));
@@ -543,8 +536,6 @@ mod tests {
 
     #[test]
     fn resolve_prefix_to_info_widens_to_other_projects_when_current_misses() {
-        // The shared resolver tries the current project first, then falls back to all projects.
-        // Without the widening pass `/delete` and `/resume` would refuse a real cross-project id.
         let dir = tempfile::tempdir().unwrap();
         let other = SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
         let target = "abcd1234-eeff-1122-3344-556677889900";
@@ -577,8 +568,6 @@ mod tests {
 
     #[test]
     fn resolve_prefix_to_info_filters_live_id_so_caller_layers_its_own_message() {
-        // The resolver excludes the live id silently, so `/delete` adds its dedicated "Cannot
-        // delete the live session" error and `/resume` falls through to "No session matching".
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let live_id = "abcd1234-eeff-1122-3344-556677889900";

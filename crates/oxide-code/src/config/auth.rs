@@ -70,7 +70,6 @@ impl AuthSource {
     }
 
     /// Returns whether the credential is a stored login, which `/login` and `/logout` can replace.
-    /// Env vars and `client.api_key` outrank both stored logins.
     pub(crate) const fn is_stored_login(self) -> bool {
         self.login().is_some()
     }

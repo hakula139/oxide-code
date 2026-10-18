@@ -28,8 +28,7 @@ pub(crate) enum Entry {
         #[serde(with = "time::serde::rfc3339")]
         created_at: OffsetDateTime,
         version: u32,
-        /// Captured at session start so the resume picker can disambiguate sibling sessions by
-        /// branch context.
+        /// The branch the session started on, which tells sibling sessions apart in the picker.
         #[serde(skip_serializing_if = "Option::is_none")]
         git_branch: Option<String>,
     },
@@ -88,9 +87,8 @@ pub(crate) enum Entry {
         #[serde(flatten)]
         snapshot: FileSnapshot,
     },
-    /// Boundary written by `/compact` immediately before the synthetic post-compact `Message`.
-    /// Carries the summary body and the pre-compact message count so listings can surface
-    /// "compacted N → 1" without rescanning the prior tail, plus the task list the summarized
+    /// Compaction boundary, written just before the synthetic post-compact `Message`. Carries the
+    /// pre-compact message count the resumed chat shows, and the task list the summarized
     /// transcript left, which applies on resume until a later `tasks` call replaces it.
     Compact {
         summary: String,
@@ -146,7 +144,7 @@ pub(crate) struct UsageRecord {
 pub(crate) struct SessionInfo {
     pub(crate) session_id: String,
     /// File this info was read from. Resume and delete act on it, since a renamed file's header
-    /// id can name another file.
+    /// ID can name another file.
     pub(crate) path: PathBuf,
     pub(crate) cwd: String,
     pub(crate) last_active_at: OffsetDateTime,

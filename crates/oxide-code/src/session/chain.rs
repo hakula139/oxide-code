@@ -1,5 +1,4 @@
-//! UUID-DAG message chain reconstruction. [`ChainBuilder::resolve`] picks the chain ending at the
-//! newest leaf.
+//! UUID-DAG message chain reconstruction.
 
 use std::collections::{HashMap, HashSet};
 
@@ -10,15 +9,12 @@ use uuid::Uuid;
 use crate::message::Message;
 use crate::prompt::SessionContext;
 
-/// Accumulator for messages read off disk. Loader calls [`Self::insert`] per `Entry::Message`,
-/// then [`Self::resolve`] once to flatten the recorded UUID DAG into a linear chain.
-///
-/// The DAG can fork when concurrent resumes, such as two `ox -c` processes on the same session,
-/// each append follow-ups onto the same parent. `resolve` picks one tip deterministically.
+/// Accumulator of the messages a loader reads, which [`Self::resolve`] flattens into one chain. The
+/// UUID DAG forks when two `ox -c` processes on one session each append onto the same parent.
 #[derive(Default)]
 pub(super) struct ChainBuilder {
     nodes: HashMap<Uuid, ChainNode>,
-    /// UUIDs claimed as some other message's `parent_uuid`. Leaves = keys − referenced.
+    /// UUIDs some message names as its `parent_uuid`.
     referenced: HashSet<Uuid>,
 }
 
@@ -39,8 +35,7 @@ pub(super) struct Chain {
 }
 
 impl ChainBuilder {
-    /// Last-append-wins on duplicate UUIDs (retry / partial-write replay). `context` is the prompt
-    /// context recorded with the message, if any.
+    /// Adds a message. A duplicate UUID, as a retried or replayed write leaves, keeps the last one.
     pub(super) fn insert(
         &mut self,
         uuid: Uuid,
@@ -63,13 +58,9 @@ impl ChainBuilder {
         );
     }
 
-    /// Flattens the branch ending at the tip.
-    ///
-    /// Tip selection is fork-aware: the leaf (UUID never referenced as a parent) with the
-    /// newest timestamp wins, with UUID order breaking ties so two callers loading the same
-    /// file always pick the same branch. Walks back via `parent_uuid`, taking each node out of
-    /// the map, so a cycle or an orphan parent ends the walk at a missing node and corrupted
-    /// on-disk state cannot hang the loader. Returns an empty chain when no leaf exists, as in a
+    /// Flattens the branch ending at the newest leaf, with UUID order breaking timestamp ties so
+    /// every load picks the same branch. The walk takes each node out of the map, so a cycle or an
+    /// orphan parent ends it at a missing node. Returns an empty chain when no leaf exists, as in a
     /// pure cycle.
     pub(super) fn resolve(mut self) -> Chain {
         let tip = self
@@ -119,8 +110,7 @@ mod tests {
         Message::user(text)
     }
 
-    /// Asserts each message opens with a Text block holding these texts, in order.
-    /// `matches!` keeps the helper free of a panic arm that coverage would flag.
+    /// Asserts the messages open with Text blocks holding `want`, in order.
     fn assert_chain_texts(chain: &[Message], want: &[&str]) {
         assert_eq!(chain.len(), want.len());
         for (msg, want_text) in chain.iter().zip(want) {

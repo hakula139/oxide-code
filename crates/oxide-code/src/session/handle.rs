@@ -40,7 +40,7 @@ pub(crate) struct SessionHandle {
     cmd_tx: mpsc::Sender<SessionCmd>,
     session_id: Arc<str>,
     shared: Arc<SharedState>,
-    /// First `shutdown` takes the join. Subsequent calls no-op.
+    /// Taken by the first `shutdown` among the clones.
     actor_join: Arc<std::sync::Mutex<Option<JoinHandle<()>>>>,
     title_task: Arc<std::sync::Mutex<Option<JoinHandle<()>>>>,
 }
@@ -95,22 +95,22 @@ fn surface_once(surfaced: &AtomicBool) -> bool {
     !surfaced.swap(true, Ordering::AcqRel)
 }
 
-/// Combined ack from `record_message`: AI-title seed and first-failure surface in one round-trip.
+/// Ack from [`SessionHandle::record_message`].
 pub(crate) struct RecordOutcome {
     /// `Some` only on the first user-text message of a fresh session.
     pub(crate) ai_title_seed: Option<String>,
-    /// First I/O failure once per session. Subsequent failures stay silent (warn-logged instead).
-    /// `None` on healthy writes.
+    /// A write failure, reported only the first time each kind of failure occurs.
     pub(crate) failure: Option<String>,
 }
 
-/// Plain ack from non-record cmds, carrying the same first-failure surface as [`RecordOutcome`].
+/// Ack from the other write cmds, with the same failure surface as [`RecordOutcome`], except
+/// [`SessionHandle::archive`]'s, which reports every failure.
 pub(crate) struct Outcome {
     pub(crate) failure: Option<String>,
 }
 
-/// Ack from `SessionHandle::compact`. `pre_count` is the message count when the compact request
-/// landed in the actor, which the post-compact line shows as "compacted N messages → 1 summary".
+/// Ack from [`SessionHandle::compact`]. `pre_count` is the message count when the request reached
+/// the actor.
 pub(crate) struct CompactOutcome {
     pub(crate) pre_count: u32,
     pub(crate) failure: Option<String>,
@@ -126,7 +126,7 @@ impl SessionHandle {
         *lock_or_recover(&self.title_task, "title_task") = Some(task);
     }
 
-    /// Records a conversation message. Returns after the batch flush completes.
+    /// Records a conversation message.
     pub(crate) async fn record_message(&self, msg: Message) -> RecordOutcome {
         self.record_message_with_context(msg, None).await
     }
@@ -183,10 +183,9 @@ impl SessionHandle {
         self.shared.manual_title_set()
     }
 
-    /// Writes the compact boundary and synthetic post-compact message, then reset the chain anchor.
-    /// `tasks` is the task list the summarized transcript leaves. Returns `pre_count` for the
-    /// post-compact UI plus every write failure, since the caller swaps in the summary only once
-    /// the boundary is on disk.
+    /// Writes the compaction boundary and the synthetic post-compact message, then resets the chain
+    /// anchor. `tasks` is the task list the summarized transcript leaves. Reports every write
+    /// failure, since the caller swaps in the summary only once the boundary is on disk.
     pub(crate) async fn compact(
         &self,
         summary: String,
@@ -222,16 +221,15 @@ impl SessionHandle {
             })
     }
 
-    /// Writes the session summary and finalizes. Idempotent no-op on fresh sessions that never
-    /// recorded anything. `snapshots` are written as `Entry::FileSnapshot` ahead of the summary.
+    /// Writes `snapshots` and the summary, once and only if the session recorded new messages.
     pub(crate) async fn finish(&self, snapshots: Vec<FileSnapshot>) -> Outcome {
         let (ack, rx) = oneshot::channel();
         self.dispatch_outcome(SessionCmd::Finish { snapshots, ack }, rx)
             .await
     }
 
-    /// Tears down: stops the title request, writes the summary, surfaces a flush error (if any),
-    /// and shuts the actor down. Returns the failure message for the caller to route.
+    /// Stops the title request, writes the summary, and shuts the actor down, returning the
+    /// summary's write failure.
     pub(crate) async fn finalize(self, snapshots: Vec<FileSnapshot>) -> Option<String> {
         self.stop_title_task().await;
         let outcome = self.finish(snapshots).await;
@@ -260,8 +258,6 @@ impl SessionHandle {
             cmd_tx, actor_join, ..
         } = self;
         let (ack, rx) = oneshot::channel();
-        // If send fails, the actor is already gone, so go straight to the join handle, which has
-        // likely finished.
         if cmd_tx.send(SessionCmd::Shutdown { ack }).await.is_ok() {
             _ = rx.await;
         }
@@ -355,16 +351,15 @@ pub(crate) fn start(
     spawn_actor(SessionState::fresh(store.clone(), model, git_branch))
 }
 
-/// New id plus any flush failure from finalizing the old session.
+/// The new session ID and the old session's finalize failure.
 #[derive(Debug)]
 pub(crate) struct RollOutcome {
     pub(crate) new_id: String,
     pub(crate) finalize_failure: Option<String>,
 }
 
-/// Rolls `session` to a fresh handle on `git_branch` and finalizes the old one. Tracker snapshots
-/// are taken before the clear so they land in the old JSONL, and the swap precedes finalize so the
-/// new session is already in place.
+/// Rolls `session` to a fresh handle on `git_branch` and finalizes the old one with the tracker
+/// snapshots taken before the clear.
 pub(crate) async fn roll(
     session: &mut SessionHandle,
     store: &SessionStore,
@@ -384,26 +379,21 @@ pub(crate) async fn roll(
     }
 }
 
-/// Resumed transcript and finalize failure from the old session. The handle swap happens via
-/// `&mut SessionHandle`. This struct only carries what the conversation and UI rebuild from.
+/// The resumed transcript and the old session's finalize failure.
 #[derive(Debug)]
 pub(crate) struct RollIntoOutcome {
     pub(crate) transcript: LoadedTranscript,
     pub(crate) title: Option<String>,
     pub(crate) unarchived: bool,
     pub(crate) finalize_failure: Option<String>,
-    /// Tracker snapshots that drifted on disk between save and resume. The caller surfaces these so
-    /// the user knows those files need a fresh Read before any Edit.
+    /// Tracked files that changed on disk since the session saved them, which need a fresh Read
+    /// before an Edit.
     pub(crate) drifted_paths: Vec<PathBuf>,
 }
 
-/// Mid-session re-init: load and sanitize the target session, swap the handle in place, then
-/// finalize the old. Same shape as [`roll`] but loading from disk.
-///
-/// Bails _without swapping_ when the target id matches the live session (would race the
-/// in-flight append-writer) or can't be loaded (missing file, parse error, empty after sanitize,
-/// open-append failure, failed unarchive write). The caller stays on the old session and surfaces
-/// the error.
+/// Loads and sanitizes the session at `target`, swaps it in, then finalizes the old one. Fails
+/// without swapping when `target` is the live session, whose append writer is in flight, or cannot
+/// be loaded.
 pub(crate) async fn roll_into(
     session: &mut SessionHandle,
     store: &SessionStore,
@@ -413,7 +403,6 @@ pub(crate) async fn roll_into(
     if read_session_id_from_path(target)? == session.session_id() {
         bail!("already resumed: target ID matches the live session");
     }
-    // Load and sanitize first so a target-load error leaves the live session untouched.
     let ResumedSession {
         handle: target_handle,
         transcript,
@@ -622,7 +611,6 @@ mod tests {
 
     #[tokio::test]
     async fn record_message_actor_gone_carries_underlying_flush_error() {
-        // When an I/O cause is on record, the actor-gone message must name it.
         let handle = testing::dead("dead");
         handle
             .shared
@@ -639,8 +627,6 @@ mod tests {
 
     #[tokio::test]
     async fn record_message_actor_gone_surfaces_after_prior_flush_failure_was_surfaced() {
-        // The two sticky-once flags must be independent: a surfaced flush failure must not
-        // silence the actor-gone signal.
         let handle = testing::dead("dead");
         handle.shared.record_flush_failure("disk full");
         assert!(handle.shared.surface_first_flush_failure());
@@ -652,7 +638,6 @@ mod tests {
 
     #[tokio::test]
     async fn record_message_resumed_session_does_not_seed_ai_title() {
-        // Resumed sessions inherit the original first-prompt title.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let original = start(&store, "m", None);
@@ -670,7 +655,6 @@ mod tests {
 
     #[tokio::test]
     async fn record_tool_metadata_batch_writes_all_non_default_in_one_cmd() {
-        // Default-metadata items are skipped at absorb, and non-defaults each produce one line.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let handle = start(&store, "m", None);
@@ -765,10 +749,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_tool_metadata_batch_actor_drops_ack_surfaces_actor_gone_failure() {
-        // Distinguishes the rx-await fallback in dispatch_outcome from the cmd_tx.send-failed
-        // early return: send succeeds, actor receives the cmd, but drops the ack (simulates a
-        // panic between recv and ack). `succeed=5` exercises each ack-bearing variant of the
-        // helper's or-pattern healthy first, then the drop arm on the 6th cmd.
+        // Five healthy acks cover each cmd `dispatch_outcome` sends. The actor drops the sixth.
         let handle = testing::acks_then_drops("acks-then-drops", 5);
 
         let title = handle.append_ai_title("ok".to_owned()).await;
@@ -802,8 +783,7 @@ mod tests {
             "dropped ack surfaces actor-gone",
         );
 
-        // Drain the actor task so its loop exit is exercised. Without shutdown, the test runtime
-        // tears the task down mid-recv.
+        // Shutting down runs the stand-in actor's loop exit.
         handle.shutdown().await;
     }
 
@@ -977,8 +957,6 @@ mod tests {
 
     #[tokio::test]
     async fn set_manual_title_actor_gone_surfaces_failure_but_still_latches_flag() {
-        // The flag flips in SharedState *before* dispatch, so even with a dead actor channel, the
-        // title generator's pre-check must see the latch and skip its append.
         let handle = testing::dead("dead");
 
         let outcome = handle.set_manual_title("User wins".to_owned()).await;
@@ -1177,7 +1155,6 @@ mod tests {
 
     #[tokio::test]
     async fn finish_persists_one_file_snapshot_per_tracked_file() {
-        // Assert the path set so the test fails even if every snapshot points at the same file.
         let dir = tempfile::tempdir().unwrap();
         let files_dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
@@ -1236,8 +1213,6 @@ mod tests {
 
     #[tokio::test]
     async fn finalize_fails_when_actor_dead() {
-        // Dead-actor path must surface so callers can route the failure (warn-log on exit, sink on
-        // `/clear` roll).
         let handle = testing::dead("dead");
         let failure = handle.finalize(Vec::new()).await;
         assert!(failure.is_some(), "dead handle finalize surfaces failure");
@@ -1291,7 +1266,6 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_after_record_completes_after_actor_exits() {
-        // shutdown's contract: the recorded message must be on disk by the time the await returns.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let handle = start(&store, "m", None);
@@ -1310,7 +1284,6 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_dead_actor_completes_without_panicking() {
-        // Smoke check: empty join slot must not panic.
         let handle = testing::dead("dead");
         handle.shutdown().await;
     }
@@ -1330,8 +1303,6 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_cancelled_actor_completes_without_panicking() {
-        // Abort produces a JoinError where is_panic() == false, exercising the "cancelled" branch
-        // in shutdown.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let handle = start(&store, "m", None);
@@ -1356,7 +1327,6 @@ mod tests {
         );
 
         handle.record_message(Message::user("first")).await;
-        // The await means the batch flushed, so the file is on disk.
         assert!(
             test_session_file(dir.path(), handle.session_id()).exists(),
             "first record_message should materialize the session file",
@@ -1417,8 +1387,6 @@ mod tests {
 
     #[tokio::test]
     async fn roll_persists_tracker_snapshots_into_old_session_then_clears_tracker() {
-        // Snapshot-before-clear: snapshots from the live tracker must land in the OLD JSONL via
-        // finalize, and the tracker must be empty afterward so the new session starts cold.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let tracker = FileTracker::default();
@@ -1454,7 +1422,6 @@ mod tests {
         let store = test_store(dir.path());
         let tracker = FileTracker::default();
 
-        // Seed a target session on disk.
         let target = start(&store, "test-model", None);
         let target_id = target.session_id().to_owned();
         target.record_message(Message::user("target prompt")).await;
@@ -1464,7 +1431,6 @@ mod tests {
         target.finish(Vec::new()).await;
         drop(target);
 
-        // Live session that swaps into the target.
         let mut session = start(&store, "test-model", None);
         let original_id = session.session_id().to_owned();
         session.record_message(Message::user("live")).await;
@@ -1502,7 +1468,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let tracker = FileTracker::default();
-        // Seed a tracker snapshot so we can pin that load failure preserves it.
         let seed = dir.path().join("seed.txt");
         std::fs::write(&seed, b"hello").unwrap();
         seed_full_read(&tracker, &seed);
@@ -1529,7 +1494,6 @@ mod tests {
 
     #[tokio::test]
     async fn roll_into_rejects_resuming_into_live_session_id() {
-        // Same-id resume would race the in-flight append-writer, so the guard short-circuits.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let tracker = FileTracker::default();
@@ -1554,7 +1518,6 @@ mod tests {
         let store = test_store(dir.path());
         let tracker = FileTracker::default();
 
-        // Target session: persist a tracker snapshot via finish so resume restores it.
         let target = start(&store, "test-model", None);
         let target_id = target.session_id().to_owned();
         target.record_message(Message::user("target")).await;
@@ -1565,7 +1528,6 @@ mod tests {
         target.finish(target_snapshots).await;
         drop(target);
 
-        // Live session with a distinct snapshot already in the tracker.
         let live_seed = dir.path().join("live.txt");
         std::fs::write(&live_seed, b"live body").unwrap();
         seed_full_read(&tracker, &live_seed);
@@ -1578,7 +1540,6 @@ mod tests {
             .await
             .expect("roll_into must succeed");
 
-        // The old JSONL should hold the live snapshot, and the tracker the target's.
         let old_jsonl = std::fs::read_to_string(test_session_file(dir.path(), &original_id))
             .expect("old session file persists");
         assert!(
@@ -1629,7 +1590,6 @@ mod tests {
         let original = start(&store, "m", None);
         let session_id = original.session_id().to_owned();
         original.record_message(Message::user("hello")).await;
-        // Skip finish, since `shutdown` drains the queued record cmd anyway.
         original.shutdown().await;
 
         let ResumedSession { transcript, .. } = resume_id(&store, &session_id).unwrap();
@@ -1638,7 +1598,6 @@ mod tests {
 
     #[tokio::test]
     async fn resume_from_path_title_only_session_keeps_title_on_next_message() {
-        // Title-only resume must not push a duplicate `FirstPrompt` on the next message.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let session_id = "title-only-fixture";
@@ -1843,7 +1802,6 @@ mod tests {
         handle.finish(tracker.snapshot_all()).await;
         drop(handle);
 
-        // Change content before resume so the snapshot drops.
         std::fs::write(&path_a, b"externally edited bytes").unwrap();
 
         let resumed_tracker = FileTracker::default();
@@ -1883,8 +1841,6 @@ mod tests {
 
         let resumed_tracker = FileTracker::default();
         let resumed = resume_id(&store, &session_id).unwrap();
-        // restore_verified must drop the missing file's snapshot without panicking, leaving the
-        // tracker empty for this path.
         resumed_tracker.restore_verified(resumed.file_snapshots);
         let result = resumed_tracker.verify_current_content(&path_a, b"", GatePurpose::Edit);
         assert_eq!(

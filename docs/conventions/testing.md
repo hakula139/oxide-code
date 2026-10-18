@@ -52,6 +52,7 @@ CI uploads `cargo llvm-cov` results to Codecov. Its PR comment reports patch cov
 
 - Cover changed lines with tests that check behavior. Run `cargo llvm-cov --show-missing-lines` locally to list uncovered lines.
 - Leave a line uncovered only when it is untestable wiring, such as an event-loop entry point or a panic hook. Explain why in the PR's Test plan.
+- Check a shape in a test helper with `assert!(matches!(..))`, which leaves no panic arm for coverage to flag.
 
 ## Mutation Testing
 

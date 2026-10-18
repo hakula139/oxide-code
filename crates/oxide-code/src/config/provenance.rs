@@ -13,8 +13,7 @@ use crate::util::env;
 pub(crate) enum Layer {
     /// `$XDG_CONFIG_HOME/ox/config.toml`.
     User(PathBuf),
-    /// A `$XDG_CONFIG_HOME/ox/config.d/*.toml` drop-in, applied in file-name order after the user
-    /// file.
+    /// A `$XDG_CONFIG_HOME/ox/config.d/*.toml` drop-in, applied in name order after the user file.
     DropIn(PathBuf),
     /// `.ox/config.toml` in the nearest directory at or above the working directory that has one.
     Project(PathBuf),
@@ -27,8 +26,8 @@ impl Layer {
         }
     }
 
-    /// The project layer comes from the checkout, so it may not set credentials, endpoints, or
-    /// permission grants.
+    /// Returns whether this is the project layer, which comes from the checkout and so may not set
+    /// credentials, endpoints, or permission grants.
     pub(super) const fn is_project(&self) -> bool {
         matches!(self, Self::Project(_))
     }

@@ -64,7 +64,7 @@ impl SessionStore {
         &self.cwd
     }
 
-    /// Creates the file (0o600, `O_EXCL`) and writes the header, then the JSONL `lines`, in one
+    /// Creates the file (`0600`, `O_EXCL`) and writes the header, then the JSONL `lines`, in one
     /// write that unlinks the file on failure.
     pub(crate) fn create(&self, header: &Entry, lines: &[u8]) -> Result<SessionWriter> {
         let Entry::Header {
@@ -358,7 +358,7 @@ fn session_filename(session_id: &str, created_at: OffsetDateTime) -> String {
     format!("{}-{session_id}.jsonl", created_at.unix_timestamp())
 }
 
-/// The session id in a `{ts}-{id}.jsonl` file name.
+/// The session ID in a `{ts}-{id}.jsonl` file name.
 fn file_session_id(path: &Path) -> Option<&str> {
     let stem = path.file_name()?.to_str()?.strip_suffix(".jsonl")?;
     stem.split_once('-').map(|(_, id)| id)
@@ -551,7 +551,7 @@ impl<R: BufRead> JsonlLines<R> {
         }
     }
 
-    /// Next non-empty line with its 1-based line number, or `None` at EOF.
+    /// Reads the next non-empty line with its 1-based line number, or `None` at EOF.
     fn next_line(&mut self) -> Result<Option<(u32, &str)>> {
         let mut buf = std::mem::take(&mut self.line).into_bytes();
         loop {
@@ -590,7 +590,7 @@ struct HeaderInfo {
     git_branch: Option<String>,
 }
 
-/// Parses the first non-empty line as the session header and validates its id.
+/// Parses the first non-empty line as the session header and validates its ID.
 fn read_header<R: BufRead>(lines: &mut JsonlLines<R>, path: &Path) -> Result<HeaderInfo> {
     let Some((_, line)) = lines.next_line()? else {
         bail!("{} is empty (no header)", path.display());
@@ -1726,8 +1726,6 @@ mod tests {
 
     #[test]
     fn delete_at_refuses_the_live_session_file() {
-        // Defense in depth: the resume picker filters the live session from its rows, but a bug
-        // upstream would otherwise unlink the open writer's file.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let _writer = store.create(&sample_header("live-id"), &[]).unwrap();

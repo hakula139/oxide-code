@@ -1,5 +1,5 @@
-//! In-memory session state owned by the actor. Pure data with no tokio. I/O hides behind
-//! [`WriterStatus`] so lifecycle transitions test without a runtime.
+//! In-memory session state owned by the actor. It uses no tokio, so lifecycle transitions test
+//! without a runtime.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -28,8 +28,8 @@ fn persistence_stopped() -> String {
 
 // ── SessionState ──
 
-/// Pure-data lifecycle owned by [`super::actor::run`]. All I/O happens through
-/// [`SessionWriter`] held inside [`WriterStatus`]. The actor owns the remaining bookkeeping.
+/// Session lifecycle that [`super::actor::run`] drives, with all I/O going through the
+/// [`SessionWriter`] in [`WriterStatus`].
 pub(super) struct SessionState {
     pub(super) session_id: Arc<str>,
     store: SessionStore,
@@ -76,8 +76,8 @@ impl SessionState {
         }
     }
 
-    /// Resumed sessions land directly in `Active`. Set `first_user_prompt_seen` when disk already
-    /// holds a title or user message.
+    /// A resumed session, writing through `writer` at once. `first_user_prompt_seen` says whether
+    /// disk already holds a title or user message.
     pub(super) fn resumed(
         store: SessionStore,
         session_id: String,
@@ -125,7 +125,6 @@ impl SessionState {
         {
             // Latch before queueing anything. A flush failure must not replay this branch.
             self.first_user_prompt_seen = true;
-            // `/rename` already queued the UserProvided title. Skip FirstPrompt and the AI seed.
             if !manual_title_set {
                 ai_title_seed = Some(text.to_owned());
                 entries.push(Entry::Title {
@@ -149,7 +148,7 @@ impl SessionState {
         (entries, ai_title_seed)
     }
 
-    /// Builds the compact boundary and synthetic post-compact root message.
+    /// Builds the compaction boundary and the synthetic post-compact root message.
     pub(super) fn compact_entries(
         &self,
         summary: &str,
@@ -198,8 +197,7 @@ impl SessionState {
         self.truncate_from_last(|entry| matches!(entry, Entry::Archive { .. }));
     }
 
-    /// Drops the queue from the last entry matching `starts_batch`. Relies on the abandoned cmd
-    /// ending its batch, which leaves its entries at the tail of the queue.
+    /// Drops the queue from the last entry matching `starts_batch`.
     fn truncate_from_last(&mut self, starts_batch: impl Fn(&Entry) -> bool) {
         if let Some(start) = self.unwritten.iter().rposition(starts_batch) {
             self.unwritten.truncate(start);
@@ -214,7 +212,8 @@ impl SessionState {
         self.persistence_stopped
     }
 
-    /// Builds snapshot and summary closing entries, or empty vec for no-op finish.
+    /// Builds the snapshot and summary entries that close the session, once, and none when it
+    /// recorded no new messages.
     pub(super) fn finish_entries(
         &mut self,
         snapshots: Vec<FileSnapshot>,
@@ -594,8 +593,6 @@ mod tests {
 
     #[test]
     fn finish_entries_pending_writer_is_empty_and_marks_finished() {
-        // Nothing recorded → nothing to summarize, but `finished` still latches so a later
-        // record cmd no-ops cleanly.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let mut state = SessionState::fresh(store, "m", None);
@@ -655,7 +652,6 @@ mod tests {
 
     #[test]
     fn finish_entries_skips_summary_on_empty_resume() {
-        // Without this short-circuit, every noisy resume would append another summary line.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let mut original = SessionState::fresh(store.clone(), "m", None);

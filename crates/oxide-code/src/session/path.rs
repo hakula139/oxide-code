@@ -1,6 +1,4 @@
-//! Filesystem-safe project subdir derivation. Sessions live under
-//! `$XDG_DATA_HOME/ox/sessions/{sanitized-cwd}/`. Reserved chars become `-` and long names get
-//! a hash suffix to prevent post-truncation collisions.
+//! Filesystem-safe project subdir names, as in `$XDG_DATA_HOME/ox/sessions/{sanitized-cwd}/`.
 
 use std::path::Path;
 
@@ -15,9 +13,9 @@ const HASH_SUFFIX_HEX_LEN: usize = 16;
 /// The subdir for a cwd with no safe characters to keep, such as `/`.
 const UNKNOWN_PROJECT_DIR: &str = "_unknown_";
 
-/// Derives a filesystem-safe subdir name. Non-`[A-Za-z0-9._-]` chars become `-`, and long names get
-/// a 16-char xxh64 suffix over the raw path bytes (so non-UTF8 paths whose lossy forms collide
-/// still hash apart).
+/// Derives a filesystem-safe subdir name. Non-`[A-Za-z0-9._-]` chars become `-`, and a long name
+/// gets an xxh64 suffix over the raw path bytes, so names that truncate alike stay distinct, as do
+/// non-UTF-8 paths whose lossy forms collide.
 pub(crate) fn sanitize_cwd(path: &Path) -> String {
     let raw = path.to_string_lossy();
     let sanitized: String = raw
@@ -91,7 +89,6 @@ mod tests {
         let long = "/".to_owned() + &"a".repeat(200);
         let out = sanitize_cwd(Path::new(&long));
         assert_eq!(out.chars().count(), MAX_PROJECT_DIR_LEN);
-        // Suffix is 16 hex chars preceded by a separator.
         let suffix = &out[out.len() - (HASH_SUFFIX_HEX_LEN + 1)..];
         assert!(suffix.starts_with('-'));
         assert!(suffix[1..].chars().all(|c| c.is_ascii_hexdigit()));
@@ -99,7 +96,6 @@ mod tests {
 
     #[test]
     fn sanitize_cwd_truncation_distinguishes_similar_long_paths() {
-        // Paths sharing a prefix beyond the truncation point must still hash apart.
         let base = "/".to_owned() + &"a".repeat(200);
         let a = sanitize_cwd(Path::new(&(base.clone() + "/alpha")));
         let b = sanitize_cwd(Path::new(&(base + "/beta")));

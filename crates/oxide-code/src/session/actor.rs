@@ -1,7 +1,7 @@
 //! Session actor that owns [`SessionState`] and its writer. Each `recv()` wakeup drains the queued
 //! [`SessionCmd`]s into one batch and appends it in one write, so an isolated write flushes at once
-//! with no interval timer. `/compact` and `/archive` end their batch so a failed one can be
-//! unqueued, and cmds after a compact see its committed synthetic root.
+//! with no interval timer. A compaction and `/archive` end their batch so a failed one can be
+//! unqueued, and cmds after a compaction see its committed synthetic root.
 //!
 //! Design: `docs/design/session/persistence.md`.
 
@@ -29,8 +29,7 @@ pub(super) enum SessionCmd {
         context: Option<SessionContext>,
         ack: oneshot::Sender<RecordOutcome>,
     },
-    /// One or more tool-result sidecars from a single agent turn. Default-metadata items are
-    /// skipped at absorb time.
+    /// Tool-result sidecars from one agent turn.
     ToolMetadata {
         items: Vec<(String, ToolMetadata)>,
         ack: oneshot::Sender<Outcome>,
@@ -49,16 +48,15 @@ pub(super) enum SessionCmd {
         ack: oneshot::Sender<Outcome>,
     },
     /// Bare `/archive`, sent just before the roll that finalizes the session. Ends its batch, and
-    /// its ack carries every write failure, since the driver rolls only once the entry is on disk.
+    /// its ack carries every write failure.
     Archive { ack: oneshot::Sender<Outcome> },
     Finish {
         /// Drained tracker snapshots, written as one `FileSnapshot` entry each plus a `Summary`.
         snapshots: Vec<FileSnapshot>,
         ack: oneshot::Sender<Outcome>,
     },
-    /// `/compact`: write the compaction boundary and synthetic post-compact message in one batched
-    /// flush, reset the chain anchor in `SessionState`, and ack the pre-compact message count for
-    /// the post-compact UI line.
+    /// Writes a compaction boundary and the synthetic post-compact message, ends its batch, and
+    /// acks the pre-compact message count.
     Compact {
         summary: String,
         instructions: Option<String>,
@@ -69,8 +67,7 @@ pub(super) enum SessionCmd {
     /// Drains pending writes, acks, then exits the actor loop so shutdown returns without
     /// waiting for orphaned clones to drop.
     Shutdown { ack: oneshot::Sender<()> },
-    /// Test-only: panics inside the actor task so callers can exercise the `JoinError::is_panic()`
-    /// path in `shutdown`.
+    /// Panics inside the actor task, for the `JoinError::is_panic()` path in `shutdown`.
     #[cfg(test)]
     Panic,
 }
@@ -340,8 +337,7 @@ mod tests {
     use crate::session::store::SessionWriter;
     use crate::session::store::testing::{test_project_dir, test_session_file, test_store};
 
-    /// Drives the actor against `cmds` until the receiver closes (we drop `tx` after sending),
-    /// returning `SharedState` so callers can assert flush-failure flags.
+    /// Runs the actor over `cmds` until the channel closes, returning its `SharedState`.
     async fn drive(state: SessionState, cmds: Vec<SessionCmd>) -> Arc<SharedState> {
         let shared = Arc::new(SharedState::default());
         drive_with(state, Arc::clone(&shared), cmds).await;
@@ -446,7 +442,6 @@ mod tests {
 
     #[tokio::test]
     async fn run_drains_burst_into_single_batch() {
-        // Three records queued at once must all reach disk in send order via one flush.
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
         let state = SessionState::fresh(store.clone(), "m", None);
@@ -463,7 +458,6 @@ mod tests {
 
     #[tokio::test]
     async fn run_tool_metadata_with_default_short_circuits_without_writing() {
-        // Default metadata has no display fields, so emitting an entry would be noise.
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
         let state = SessionState::fresh(store.clone(), "m", None);
@@ -516,8 +510,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_set_manual_title_alone_leaves_no_file_on_disk() {
-        // `/rename`-then-quit must leave no JSONL artifact. The deferred entry rides on
-        // `WriterStatus::Pending` and dies with the actor when no record ever arrives.
+        // The deferred title waits in `WriterStatus::Pending` and dies with the actor.
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
         let state = SessionState::fresh(store.clone(), "m", None);
@@ -544,8 +537,6 @@ mod tests {
 
     #[tokio::test]
     async fn run_set_manual_title_then_record_replaces_first_prompt_title() {
-        // `/rename` then send produces exactly one title (UserProvided). The deferred title
-        // flushes ahead of the message, and `manual_title_set` suppresses the FirstPrompt push.
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
         let state = SessionState::fresh(store.clone(), "m", None);
@@ -595,8 +586,6 @@ mod tests {
 
     #[tokio::test]
     async fn run_two_set_manual_titles_keep_only_the_last() {
-        // Multiple `/rename` calls before any record must collapse to last-wins via the
-        // deferred slot's overwrite semantics.
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
         let state = SessionState::fresh(store.clone(), "m", None);
@@ -714,8 +703,6 @@ mod tests {
 
     #[tokio::test]
     async fn run_shutdown_flushes_preceding_record_in_same_batch() {
-        // Pending writes ahead of Shutdown must reach disk, since the actor breaks only after the
-        // batch flush.
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
         let state = SessionState::fresh(store.clone(), "m", None);
@@ -967,7 +954,6 @@ mod tests {
 
     #[tokio::test]
     async fn run_flush_error_records_failure_in_ack() {
-        // Force store.create() to fail by removing its parent dir.
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
         let state = SessionState::fresh(store.clone(), "m", None);

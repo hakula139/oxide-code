@@ -1,6 +1,4 @@
-//! Background AI title generator. After the first user prompt, asks Haiku for a 3-7 word title,
-//! persists it as an `AiGenerated` `Entry::Title`, and emits `Event::SessionTitleUpdated`.
-//! Failures warn-log only, so the first-prompt title stays on disk. Fresh sessions only.
+//! Background AI title generator, which asks Haiku to title a fresh session after its first prompt.
 
 use anyhow::{Context, Result, bail};
 use indoc::indoc;
@@ -18,18 +16,17 @@ use crate::util::text::{ELLIPSIS, ELLIPSIS_WIDTH, truncate_to_width};
 
 // ── Constants ──
 
-/// Haiku model used for title generation. Cheap enough to fire on every fresh session.
+/// Model for title generation, cheap enough to run on every fresh session.
 const HAIKU_MODEL: &str = "claude-haiku-5-5";
 
 /// Output budget. Haiku 5.5 always runs adaptive thinking, so this leaves room for a short think
 /// ahead of the 3-7 word JSON envelope.
 const MAX_TOKENS: u32 = 1_024;
 
-/// Clamp on the prompt. Long first messages with pasted code stay cheap to title.
+/// Chars of the first prompt sent for titling, so a long paste stays cheap.
 const MAX_PROMPT_CHARS: usize = 1_000;
 
-/// Title prompt. The paired JSON-schema output format ([`title_output_format`]) enforces the
-/// `{"title": ...}` shape regardless of how the model would otherwise respond.
+/// Title prompt, whose `{"title": ...}` shape [`title_output_format`] enforces.
 const SYSTEM_PROMPT: &str = indoc! {r#"
     Generate a concise, sentence-case title (3-7 words) that captures the main topic or goal of this coding session. The title should be clear enough that the user recognizes the session in a list. Use sentence case: capitalize only the first word and proper nouns.
 
@@ -49,9 +46,8 @@ const SYSTEM_PROMPT: &str = indoc! {r#"
 // ── Public API ──
 
 /// Spawns a task that asks Haiku for a title, appends it to `session`, and emits
-/// `SessionTitleUpdated` through `sink`. `session` owns the task, so finalizing it aborts the
-/// request. A generation failure only warns, so the first-prompt title stays, while an append
-/// failure surfaces as a session write error.
+/// `SessionTitleUpdated` through `sink`. Finalizing `session` aborts the task. A generation failure
+/// only warns, while an append failure shows as a session write error.
 pub(crate) fn spawn<S>(client: Client, session: SessionHandle, sink: S, first_prompt: String)
 where
     S: EventSink + Clone + Send + 'static,
@@ -67,7 +63,7 @@ where
 
 // ── Generation ──
 
-/// Single-shot title generator: call Haiku, parse, append, notify.
+/// Asks Haiku for a title, then appends it and notifies `sink` unless a `/rename` won the race.
 async fn generate_and_record(
     client: &Client,
     session: &SessionHandle,
@@ -89,7 +85,6 @@ async fn generate_and_record(
         .context("Haiku completion failed")?;
     let title = parse_title(&raw).context("Haiku returned a malformed title")?;
 
-    // Skip if the user ran `/rename` while Haiku was thinking.
     if session.manual_title_set() {
         return Ok(());
     }
@@ -121,8 +116,8 @@ fn title_output_format() -> OutputFormat {
 
 // ── Parsing ──
 
-/// Parses the `{"title": "..."}` JSON envelope from Haiku's response. Plain-text responses
-/// (Haiku refusals) are rejected so the first-prompt title stays. Code fences are stripped first.
+/// Parses the `{"title": "..."}` envelope from Haiku's response, fenced or not. Plain text, such as
+/// a refusal, fails.
 fn parse_title(response: &str) -> Result<String> {
     let trimmed = response.trim();
     if trimmed.is_empty() {
@@ -143,7 +138,7 @@ fn parse_title(response: &str) -> Result<String> {
     Ok(cleaned.to_owned())
 }
 
-/// Cap a string for log / error messages so long Haiku refusals stay readable.
+/// Caps `s` for log and error messages, so a long Haiku refusal stays readable.
 fn truncate_for_log(s: &str) -> String {
     const LOG_CAP: usize = 120;
     let prefix: String = s.chars().take(LOG_CAP).collect();
@@ -153,8 +148,8 @@ fn truncate_for_log(s: &str) -> String {
     truncate_to_width(&format!("{prefix}{ELLIPSIS}"), LOG_CAP + ELLIPSIS_WIDTH)
 }
 
-/// Strips a surrounding triple-backtick code fence (with optional language tag). Leaves
-/// non-fenced input untouched.
+/// Strips a surrounding triple-backtick code fence and its optional language tag, leaving other
+/// input untouched.
 fn strip_code_fence(s: &str) -> &str {
     let Some(rest) = s.strip_prefix("```") else {
         return s;
@@ -164,7 +159,7 @@ fn strip_code_fence(s: &str) -> &str {
     body.trim_end().strip_suffix("```").unwrap_or(body).trim()
 }
 
-/// Truncates `text` to `max_chars`, keeping the tail (where the actual request usually lives).
+/// Truncates `text` to `max_chars`, keeping the tail, where the request usually is.
 fn truncate_prompt(text: &str, max_chars: usize) -> String {
     if text.chars().count() <= max_chars {
         return text.to_owned();
@@ -367,8 +362,6 @@ mod tests {
 
     #[tokio::test]
     async fn generate_and_record_conversational_reply_bails_without_updating_title() {
-        // Haiku sometimes answers the prompt conversationally. The bail keeps the first-prompt
-        // title on disk and out of the UI.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(wm_path("/v1/messages"))
@@ -459,8 +452,6 @@ mod tests {
 
     #[test]
     fn title_output_format_matches_title_envelope_shape() {
-        // The schema must line up with [`TitleEnvelope`] so a schema-conforming response parses via
-        // `parse_title`.
         let fmt = title_output_format();
         let v = serde_json::to_value(&fmt).unwrap();
         assert_eq!(v["type"], "json_schema");
@@ -485,17 +476,12 @@ mod tests {
 
     #[test]
     fn parse_title_errors_on_empty_title_field() {
-        // An envelope with an empty title is as useless as no title at all. Bail so the
-        // first-prompt fallback stays in place.
         let err = parse_title(r#"{"title": ""}"#).unwrap_err().to_string();
         assert!(err.contains("empty title"), "got: {err}");
     }
 
     #[test]
     fn parse_title_errors_on_plain_text_response() {
-        // Haiku's conversational refusal ("I'd be happy to help! However, I need more details...")
-        // would otherwise land on the status bar as a multi-sentence "title". Require the JSON
-        // envelope so the first-prompt title survives instead.
         let err = parse_title("I'd be happy to help! However, I need more details.")
             .unwrap_err()
             .to_string();
@@ -574,7 +560,6 @@ mod tests {
 
     #[test]
     fn strip_code_fence_handles_no_opening_newline() {
-        // Single-line fenced block with no language tag or newline.
         assert_eq!(strip_code_fence("```body```"), "body");
     }
 

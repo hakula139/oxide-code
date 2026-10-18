@@ -9,16 +9,14 @@ use tokio::task::JoinHandle;
 use super::{CompactOutcome, Outcome, RecordOutcome, SessionHandle, SharedState};
 use crate::session::actor::SessionCmd;
 
-/// Handle whose actor channel is already closed, so every write surfaces actor-gone immediately
-/// and tests can assert failure surfacing without a real actor.
+/// Handle whose actor channel is already closed, so every write fails as actor-gone.
 pub(crate) fn dead(session_id: &str) -> SessionHandle {
     let (cmd_tx, _) = mpsc::channel(1);
     handle(session_id, cmd_tx, None)
 }
 
-/// Stand-in actor that acks the first `succeed` non-Shutdown cmds, then drops cmds without
-/// acking, which exercises the rx-await fallback when the actor stalls between receive and ack.
-/// Shutdown is always honored so `handle.shutdown()` still returns.
+/// Handle on a stand-in actor that acks the first `succeed` cmds, then drops each cmd without
+/// acking it. It always honors `Shutdown`.
 pub(crate) fn acks_then_drops(session_id: &str, succeed: usize) -> SessionHandle {
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<SessionCmd>(8);
     let count = Arc::new(AtomicUsize::new(0));
