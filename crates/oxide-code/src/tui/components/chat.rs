@@ -345,13 +345,13 @@ impl ChatView {
         self.last_error_text().is_some()
     }
 
-    /// Error text of the tail block, if it is an [`ErrorBlock`].
+    /// Returns the error text of the tail block, if it is an [`ErrorBlock`].
     #[cfg(test)]
     pub(crate) fn last_error_text(&self) -> Option<&str> {
         self.blocks.last().and_then(|b| b.block().error_text())
     }
 
-    /// Body text of the tail block, if it is a [`SystemMessageBlock`].
+    /// Returns the body text of the tail block, if it is a [`SystemMessageBlock`].
     #[cfg(test)]
     pub(crate) fn last_system_text(&self) -> Option<&str> {
         self.blocks.last().and_then(|b| b.block().system_text())
@@ -1669,13 +1669,6 @@ mod tests {
     // ── last_is_error ──
 
     #[test]
-    fn last_is_error_true_after_push_error() {
-        let mut chat = test_chat();
-        chat.push_error("boom");
-        assert!(chat.last_is_error());
-    }
-
-    #[test]
     fn last_is_error_false_for_non_error_blocks() {
         let mut chat = test_chat();
         chat.push_user_message("hello".to_owned());
@@ -1695,6 +1688,17 @@ mod tests {
     fn last_is_error_false_when_no_blocks() {
         let chat = test_chat();
         assert!(!chat.last_is_error());
+    }
+
+    // ── last_error_text ──
+
+    #[test]
+    fn last_error_text_returns_the_pushed_error() {
+        let mut chat = test_chat();
+
+        chat.push_error("boom");
+
+        assert_eq!(chat.last_error_text(), Some("boom"));
     }
 
     // ── last_system_text ──

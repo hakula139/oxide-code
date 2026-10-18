@@ -49,7 +49,8 @@ pub(super) struct RenderCtx<'a> {
 pub(super) trait ChatBlock {
     fn render(&self, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>;
 
-    /// Standalone blocks get blank-line separators, while a tool call and its result hug.
+    /// Returns whether blank rows separate this block from its neighbors. A tool call and its
+    /// result return false, so they stay flush.
     fn standalone(&self) -> bool {
         true
     }

@@ -283,7 +283,6 @@ mod tests {
     struct FixedBlock {
         rows: Vec<&'static str>,
         standalone: bool,
-        ends_tool_group: bool,
         hidden: bool,
     }
 
@@ -294,10 +293,6 @@ mod tests {
 
         fn standalone(&self) -> bool {
             self.standalone
-        }
-
-        fn ends_tool_group(&self) -> bool {
-            self.ends_tool_group
         }
 
         fn visible(&self, _ctx: &RenderCtx<'_>) -> bool {
@@ -323,27 +318,15 @@ mod tests {
         cached(FixedBlock {
             rows: rows.to_vec(),
             standalone: true,
-            ends_tool_group: false,
             hidden: false,
         })
     }
 
-    /// A block that stacks flush against its neighbors, like a tool call.
+    /// A block that stacks flush against its neighbors, like a tool row.
     fn flush(rows: &[&'static str]) -> CachedBlock {
         cached(FixedBlock {
             rows: rows.to_vec(),
             standalone: false,
-            ends_tool_group: false,
-            hidden: false,
-        })
-    }
-
-    /// A flush block that closes a tool group, like a tool result.
-    fn group_end(rows: &[&'static str]) -> CachedBlock {
-        cached(FixedBlock {
-            rows: rows.to_vec(),
-            standalone: false,
-            ends_tool_group: true,
             hidden: false,
         })
     }
@@ -352,7 +335,6 @@ mod tests {
         cached(FixedBlock {
             rows: rows.to_vec(),
             standalone: true,
-            ends_tool_group: false,
             hidden: true,
         })
     }
@@ -493,23 +475,6 @@ mod tests {
             stack.into_tops(),
             SlotTops(vec![0, 2, 2, 4, 6]),
             "the blank above the reply ends the call's slot",
-        );
-    }
-
-    #[test]
-    fn push_block_keeps_each_result_under_its_call_and_separates_the_next_group() {
-        let mut blocks = [
-            flush(&["call a"]),
-            group_end(&["result a"]),
-            flush(&["call b"]),
-            group_end(&["result b"]),
-        ];
-
-        let stack = stack_of(&mut blocks);
-
-        assert_eq!(
-            texts(&stack.slice(0, stack.height())),
-            ["call a", "result a", "", "call b", "result b"],
         );
     }
 
