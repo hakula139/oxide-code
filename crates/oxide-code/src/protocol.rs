@@ -39,11 +39,8 @@ pub(crate) enum Op {
     /// blocked call so a decision for an already-dropped call is ignored.
     Resolve { id: String, decision: Decision },
     /// Swaps the model, the effort, or both for later turns, and confirms with
-    /// [`Event::ConfigChanged`]. A `None` field keeps its current value.
-    SetModel {
-        model: Option<ResolvedModelId>,
-        effort: Option<Effort>,
-    },
+    /// [`Event::ConfigChanged`].
+    SetModel(ConfigPick),
     /// Switches the permission mode and confirms with [`Event::ModeChanged`]. Mid-turn, the switch
     /// applies from the next tool call the gate weighs.
     SetMode(Mode),
@@ -99,6 +96,30 @@ pub(crate) enum Decision {
     },
     /// Deny, and end the turn as [`Op::Interrupt`] does.
     Abort,
+}
+
+/// The model, the effort, or both that an [`Op::SetModel`] picks. An omitted model keeps its
+/// current value, and an omitted effort carries over where the new model supports it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+pub(crate) enum ConfigPick {
+    /// A model, with the effort to use on it when one was picked alongside.
+    Model {
+        id: ResolvedModelId,
+        effort: Option<Effort>,
+    },
+    /// An effort for the active model.
+    Effort(Effort),
+}
+
+impl ConfigPick {
+    /// The picked effort, if any.
+    pub(crate) fn effort(&self) -> Option<Effort> {
+        match *self {
+            Self::Model { effort, .. } => effort,
+            Self::Effort(effort) => Some(effort),
+        }
+    }
 }
 
 // ── Events ──
@@ -199,12 +220,12 @@ pub(crate) enum Event {
     /// transcript. Follows every event that reports the new transcript's state, such as its usage
     /// and notices.
     SessionReady,
-    /// Live config after an [`Op::SetModel`]. `effort` is the resolved value. `requested_effort`
-    /// is the user's pick, surfaced when an unknown model drops it.
+    /// Live config after an [`Op::SetModel`]. `effort` is the resolved value, and `requested` is
+    /// the op's pick, whose effort an unknown model drops.
     ConfigChanged {
         model: ModelSpec,
         effort: Option<Effort>,
-        requested_effort: Option<Effort>,
+        requested: ConfigPick,
         auto_compaction: AutoCompactionConfig,
     },
     /// The permission mode after an [`Op::SetMode`].
@@ -496,7 +517,7 @@ mod tests {
             Op::Queue(_) => "queue",
             Op::Interrupt => "interrupt",
             Op::Resolve { .. } => "resolve",
-            Op::SetModel { .. } => "set_model",
+            Op::SetModel(_) => "set_model",
             Op::SetMode(_) => "set_mode",
             Op::Compact { .. } => "compact",
             Op::Clear => "clear",
@@ -538,10 +559,11 @@ mod tests {
                 id: "t1".to_owned(),
                 decision: Decision::Abort,
             },
-            Op::SetModel {
-                model: Some(ResolvedModelId::new("claude-opus-5-5".to_owned())),
+            Op::SetModel(ConfigPick::Model {
+                id: ResolvedModelId::new("claude-opus-5-5".to_owned()),
                 effort: Some(Effort::High),
-            },
+            }),
+            Op::SetModel(ConfigPick::Effort(Effort::Low)),
             Op::SetMode(Mode::Plan),
             Op::Compact {
                 instructions: Some("focus on auth".to_owned()),
@@ -705,7 +727,7 @@ mod tests {
             Event::ConfigChanged {
                 model: ModelSpec::resolve("claude-opus-5-5".to_owned()),
                 effort: Some(Effort::High),
-                requested_effort: Some(Effort::Max),
+                requested: ConfigPick::Effort(Effort::Max),
                 auto_compaction: AutoCompactionConfig {
                     enabled: true,
                     threshold_tokens: Some(400_000),
@@ -890,7 +912,10 @@ mod tests {
             model: ModelSpec::resolve("claude-opus-5-5".to_owned()),
             effort: None,
             auto_compaction: AutoCompactionConfig::disabled(),
-            requested_effort: None,
+            requested: ConfigPick::Model {
+                id: ResolvedModelId::new("claude-opus-5-5".to_owned()),
+                effort: None,
+            },
         };
         let value = serde_json::to_value(&event).unwrap();
         assert_eq!(value["data"]["model"], "claude-opus-5-5");

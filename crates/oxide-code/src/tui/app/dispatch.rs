@@ -222,7 +222,7 @@ impl App {
             Op::SetMode(mode) => self.requested_mode = *mode,
             Op::Queue(_)
             | Op::Resolve { .. }
-            | Op::SetModel { .. }
+            | Op::SetModel(_)
             | Op::Clear
             | Op::Archive
             | Op::Rename { .. }
@@ -442,9 +442,10 @@ mod tests {
 
     use super::*;
     use crate::config::Effort;
+    use crate::model::ResolvedModelId;
     use crate::permission::defaults::Shipped;
     use crate::permission::{Basis, Mode};
-    use crate::protocol::{Decision, Event, ResumeTarget};
+    use crate::protocol::{ConfigPick, Decision, Event, ResumeTarget};
     use crate::tool::{ApprovalBody, ApprovalPreview};
     use crate::tui::app::testing::{
         FakeModal, KeyLogModal, OP_CHANNEL_CAPACITY, key_event, long_chat_block, mouse_event,
@@ -1223,16 +1224,11 @@ mod tests {
     async fn dispatch_op_forwards_engine_ops_unchanged() {
         // A modal-emitted `SetModel` must reach the engine so it can emit `ConfigChanged`.
         for op in [
-            Op::SetModel {
-                model: Some(crate::model::ResolvedModelId::new(
-                    "claude-opus-5-5".to_owned(),
-                )),
+            Op::SetModel(ConfigPick::Model {
+                id: ResolvedModelId::new("claude-opus-5-5".to_owned()),
                 effort: None,
-            },
-            Op::SetModel {
-                model: None,
-                effort: Some(Effort::High),
-            },
+            }),
+            Op::SetModel(ConfigPick::Effort(Effort::High)),
             Op::Clear,
         ] {
             let (mut app, mut rx, _event_tx) = test_app(None);
@@ -1801,16 +1797,13 @@ mod tests {
         app.dispatch_action(Action::Submit("/model haiku".to_owned()));
 
         let forwarded = rx.recv().await.expect("SetModel forwarded to the engine");
-        match forwarded {
-            Op::SetModel { model, effort } => {
-                assert_eq!(
-                    model.as_ref().map(crate::model::ResolvedModelId::as_str),
-                    Some("claude-haiku-5-5")
-                );
-                assert_eq!(effort, None);
-            }
-            other => panic!("expected SetModel, got {other:?}"),
-        }
+        assert_eq!(
+            forwarded,
+            Op::SetModel(ConfigPick::Model {
+                id: ResolvedModelId::new("claude-haiku-5-5".to_owned()),
+                effort: None,
+            }),
+        );
     }
 
     #[test]

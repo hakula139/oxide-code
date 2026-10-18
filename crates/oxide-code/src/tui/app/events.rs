@@ -11,7 +11,7 @@ use crate::config::compaction::AutoCompactionConfig;
 use crate::config::{Effort, display_auto_compaction};
 use crate::model::ModelSpec;
 use crate::permission::{Basis, Mode, SessionGrant};
-use crate::protocol::{Event, Interaction, Op};
+use crate::protocol::{ConfigPick, Event, Interaction, Op};
 use crate::session::display::archive_notice;
 use crate::slash;
 use crate::tool::ApprovalPreview;
@@ -91,9 +91,9 @@ impl App {
             Event::ConfigChanged {
                 model,
                 effort,
-                requested_effort,
+                requested,
                 auto_compaction,
-            } => self.apply_config_changed(model, effort, requested_effort, auto_compaction),
+            } => self.apply_config_changed(model, effort, &requested, auto_compaction),
             Event::ModeChanged(mode) => self.apply_mode_changed(mode),
             Event::LoginStarted { url } => self.open_sign_in_url(&url),
             Event::SignedIn { auth } => self.apply_signed_in(auth),
@@ -267,7 +267,7 @@ impl App {
         &mut self,
         model: ModelSpec,
         effort: Option<Effort>,
-        requested_effort: Option<Effort>,
+        requested: &ConfigPick,
         auto_compaction: AutoCompactionConfig,
     ) {
         let config = &self.session_info.config;
@@ -283,7 +283,7 @@ impl App {
                 effort,
                 auto_compaction,
             },
-            requested_effort,
+            requested,
         );
         if model_changed {
             self.status_bar
@@ -292,7 +292,7 @@ impl App {
         self.status_bar.set_effort(effort);
         self.session_info
             .config
-            .apply_swap(model, effort, requested_effort, auto_compaction);
+            .apply_swap(model, effort, requested.effort(), auto_compaction);
         self.chat.push_system_message(confirmation);
     }
 
@@ -434,27 +434,33 @@ struct ConfigSettings<'a> {
 fn format_config_change(
     before: &ConfigSettings<'_>,
     after: &ConfigSettings<'_>,
-    requested_effort: Option<Effort>,
+    requested: &ConfigPick,
 ) -> String {
-    if after.model.id() == before.model.id() {
-        return match (requested_effort, after.effort) {
-            (Some(req), None) => req.unapplied_notice(),
-            (_, Some(eff)) => format!("Effort set to {eff}"),
-            // Slash dispatch keeps this unreachable, but a clear fallback beats a panic.
-            (None, None) => "Config unchanged".to_owned(),
-        };
-    }
+    let requested_effort = match *requested {
+        ConfigPick::Model { effort, .. } => effort,
+        ConfigPick::Effort(pick) => {
+            return match after.effort {
+                Some(effort) => format!("Effort set to {effort}"),
+                None => pick.unapplied_notice(),
+            };
+        }
+    };
     let model = after.model;
-    let switched = format!("Switched to {} ({})", model.display_name(), model.id());
+    let action = if model.id() == before.model.id() {
+        "Using"
+    } else {
+        "Switched to"
+    };
+    let named = format!("{action} {} ({})", model.display_name(), model.id());
     let (head, effort) = match (requested_effort, before.effort, after.effort) {
-        (Some(req), _, None) => (switched, Some(req.unapplied_notice())),
-        (None, None, None) => (switched, None),
+        (Some(req), _, None) => (named, Some(req.unapplied_notice())),
+        (None, None, None) => (named, None),
         (None, Some(_), None) => (
-            switched,
+            named,
             Some("Effort cleared (model has no effort tier)".to_owned()),
         ),
-        (None, None, Some(eff)) => (format!("{switched} · effort {eff} (model default)"), None),
-        (_, _, Some(eff)) => (format!("{switched} · effort {eff}"), None),
+        (None, None, Some(eff)) => (format!("{named} · effort {eff} (model default)"), None),
+        (_, _, Some(eff)) => (format!("{named} · effort {eff}"), None),
     };
     let compaction = (before.auto_compaction != after.auto_compaction).then(|| {
         format!(
@@ -483,6 +489,7 @@ mod tests {
     use super::*;
     use crate::config::compaction::test_thresholds;
     use crate::config::provenance::Source;
+    use crate::model::ResolvedModelId;
     use crate::permission::rule::Rule;
     use crate::permission::{Access, PermissionClass, Policy, Workspace};
     use crate::protocol::{ResumeTarget, ToolCall, ToolResult, UsageSnapshot};
@@ -534,6 +541,13 @@ mod tests {
             model,
             effort,
             auto_compaction: base_auto_compaction(),
+        }
+    }
+
+    fn model_pick(model: &ModelSpec, effort: Option<Effort>) -> ConfigPick {
+        ConfigPick::Model {
+            id: ResolvedModelId::new(model.id().to_owned()),
+            effort,
         }
     }
 
@@ -595,7 +609,7 @@ mod tests {
         app.handle_engine_event(Event::ConfigChanged {
             model: spec("claude-sonnet-5-5"),
             effort: Some(Effort::High),
-            requested_effort: None,
+            requested: model_pick(&spec("claude-sonnet-5-5"), None),
             auto_compaction: AutoCompactionConfig {
                 enabled: true,
                 threshold_tokens: Some(test_thresholds::WINDOW_1M),
@@ -630,7 +644,7 @@ mod tests {
         app.handle_engine_event(Event::ConfigChanged {
             model: app.session_info.config.model.clone(),
             effort: Some(Effort::Xhigh),
-            requested_effort: Some(Effort::Xhigh),
+            requested: ConfigPick::Effort(Effort::Xhigh),
             auto_compaction: app.session_info.config.compaction.auto,
         });
         assert_eq!(app.session_info.config.effort, Some(Effort::Xhigh),);
@@ -1929,7 +1943,11 @@ mod tests {
     fn format_config_change_swap_both_none_omits_effort_clause() {
         let (opus, custom) = (spec("claude-opus-5-5"), spec("custom-model"));
 
-        let s = format_config_change(&settings(&opus, None), &settings(&custom, None), None);
+        let s = format_config_change(
+            &settings(&opus, None),
+            &settings(&custom, None),
+            &model_pick(&custom, None),
+        );
 
         assert_eq!(s, "Switched to custom-model (custom-model)");
     }
@@ -1943,7 +1961,7 @@ mod tests {
         let s = format_config_change(
             &settings(&opus, None),
             &settings(&custom, None),
-            Some(Effort::High),
+            &model_pick(&custom, Some(Effort::High)),
         );
 
         assert_eq!(
@@ -1960,7 +1978,7 @@ mod tests {
         let s = format_config_change(
             &settings(&opus, Some(Effort::Xhigh)),
             &settings(&custom, None),
-            None,
+            &model_pick(&custom, None),
         );
 
         assert_eq!(
@@ -1978,7 +1996,7 @@ mod tests {
         let s = format_config_change(
             &settings(&custom, None),
             &settings(&opus, Some(Effort::Medium)),
-            None,
+            &model_pick(&opus, None),
         );
 
         assert_eq!(
@@ -1997,7 +2015,7 @@ mod tests {
             let s = format_config_change(
                 &settings(&sonnet, Some(prev)),
                 &settings(&opus, Some(new)),
-                requested,
+                &model_pick(&opus, requested),
             );
 
             assert_eq!(
@@ -2008,13 +2026,26 @@ mod tests {
     }
 
     #[test]
+    fn format_config_change_model_pick_of_the_active_model_reads_as_using_it() {
+        let opus = spec("claude-opus-5-5");
+
+        let s = format_config_change(
+            &settings(&opus, Some(Effort::High)),
+            &settings(&opus, Some(Effort::High)),
+            &model_pick(&opus, None),
+        );
+
+        assert_eq!(s, "Using Claude Opus 5.5 (claude-opus-5-5) · effort high");
+    }
+
+    #[test]
     fn format_config_change_effort_explicit_pick_matches_resolution() {
         let opus = spec("claude-opus-5-5");
 
         let s = format_config_change(
             &settings(&opus, Some(Effort::High)),
             &settings(&opus, Some(Effort::Xhigh)),
-            Some(Effort::Xhigh),
+            &ConfigPick::Effort(Effort::Xhigh),
         );
 
         assert_eq!(s, "Effort set to xhigh");
@@ -2028,22 +2059,13 @@ mod tests {
         let s = format_config_change(
             &settings(&custom, None),
             &settings(&custom, None),
-            Some(Effort::High),
+            &ConfigPick::Effort(Effort::High),
         );
 
         assert_eq!(
             s,
             "Effort unchanged (model has no effort tier, asked for high)"
         );
-    }
-
-    #[test]
-    fn format_config_change_without_model_or_effort_reports_no_change() {
-        let custom = spec("custom-model");
-
-        let s = format_config_change(&settings(&custom, None), &settings(&custom, None), None);
-
-        assert_eq!(s, "Config unchanged");
     }
 
     #[test]
@@ -2057,7 +2079,11 @@ mod tests {
             ..settings(&sonnet, Some(Effort::High))
         };
 
-        let s = format_config_change(&settings(&opus, Some(Effort::High)), &after, None);
+        let s = format_config_change(
+            &settings(&opus, Some(Effort::High)),
+            &after,
+            &model_pick(&sonnet, None),
+        );
 
         assert_eq!(
             s,
@@ -2083,7 +2109,7 @@ mod tests {
         let s = format_config_change(
             &settings(&opus, Some(Effort::High)),
             &after,
-            Some(Effort::Max),
+            &model_pick(&custom, Some(Effort::Max)),
         );
 
         assert_eq!(

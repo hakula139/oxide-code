@@ -458,7 +458,9 @@ mod tests {
     };
     use crate::message::{Replay, Role};
     use crate::model::ResolvedModelId;
-    use crate::protocol::{CapturingSink, Decision, ResumeTarget, ToolCall, ToolResult};
+    use crate::protocol::{
+        CapturingSink, ConfigPick, Decision, ResumeTarget, ToolCall, ToolResult,
+    };
     use crate::tool::{
         DEFAULT_TOOL_ICON, Prepared, ReadExcerptLine, Tool, ToolCtx, ToolMetadata, ToolOutput,
         ToolRegistry, ToolResultView, ToolSpec,
@@ -1217,10 +1219,10 @@ mod tests {
                 id: "stale".to_owned(),
                 decision: Decision::Approve,
             },
-            Op::SetModel {
-                model: Some(ResolvedModelId::new("claude-opus-5-5".to_owned())),
+            Op::SetModel(ConfigPick::Model {
+                id: ResolvedModelId::new("claude-opus-5-5".to_owned()),
                 effort: Some(Effort::High),
-            },
+            }),
             Op::Compact { instructions: None },
             Op::Clear,
             Op::Archive,

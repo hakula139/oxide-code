@@ -58,7 +58,7 @@ impl SlashCommand for ModelCmd {
 mod tests {
     use super::*;
     use crate::model::ResolvedModelId;
-    use crate::protocol::Op;
+    use crate::protocol::{ConfigPick, Op};
     use crate::slash::registry::testing::run_execute;
 
     // ── ModelCmd::name ──
@@ -122,10 +122,10 @@ mod tests {
     fn execute_typed_id_forwards_the_resolved_model() {
         assert_eq!(
             run_execute(&ModelCmd, "sonnet").unwrap().into_forward(),
-            Action::Op(Op::SetModel {
-                model: Some(ResolvedModelId::new("claude-sonnet-5-5".to_owned())),
+            Action::Op(Op::SetModel(ConfigPick::Model {
+                id: ResolvedModelId::new("claude-sonnet-5-5".to_owned()),
                 effort: None,
-            }),
+            })),
         );
     }
 

@@ -60,7 +60,7 @@ impl Inbox {
                 | Op::Resume { .. }
                 | Op::Compact { .. }
                 | Op::Rename { .. }
-                | Op::SetModel { .. }
+                | Op::SetModel(_)
                 | Op::Login
                 | Op::Logout
                 | Op::Resolve { .. }),

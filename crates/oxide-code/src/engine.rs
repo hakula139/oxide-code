@@ -24,18 +24,19 @@ use self::compaction::{AutoCompact, AutoCompactFailures};
 use self::turn::{TurnContext, TurnOutcome, TurnReport};
 use crate::client::TokenUsage;
 use crate::client::anthropic::Client;
+use crate::config::Config;
 use crate::config::auth::{self, Auth, AuthSource};
 use crate::config::compaction::CompactionConfig;
 use crate::config::login::PendingLogin;
 use crate::config::oauth::{self, ClaudeCodeKeychain};
-use crate::config::{Config, Effort};
 use crate::file_tracker::FileTracker;
 use crate::message::{ContentBlock, Message};
-use crate::model::{self, ModelSpec, ResolvedModelId};
+use crate::model::{self, ModelSpec};
 use crate::permission::{Mode, Policy, Workspace};
 use crate::prompt::{self, PromptParts, SessionContext, UserContext};
 use crate::protocol::{
-    Event, EventSink, Interaction, Op, ResumeTarget, UsageSnapshot, session_write_failed,
+    ConfigPick, Event, EventSink, Interaction, Op, ResumeTarget, UsageSnapshot,
+    session_write_failed,
 };
 use crate::session::display::id_prefix;
 use crate::session::entry::{CompactInfo, UsageRecord};
@@ -283,7 +284,7 @@ impl Engine {
                 Op::Archive => self.archive(&sink).await,
                 Op::Resume { target } => self.resume(&sink, target).await,
                 Op::Rename { title } => self.rename(&sink, title).await,
-                Op::SetModel { model, effort } => self.set_model(&sink, model, effort),
+                Op::SetModel(pick) => self.set_model(&sink, pick),
                 Op::SetMode(mode) => self.set_mode(&sink, mode),
                 Op::Login => {
                     if self.login(&sink, &mut ops).await == TurnEnd::Shutdown {
@@ -653,20 +654,15 @@ impl Engine {
     }
 
     /// Applies a model and / or effort pick. The model goes first because it re-resolves effort.
-    fn set_model(
-        &mut self,
-        sink: &dyn EventSink,
-        model: Option<ResolvedModelId>,
-        effort: Option<Effort>,
-    ) {
-        if let Some(id) = model {
-            self.client.set_model(id.into_inner());
+    fn set_model(&mut self, sink: &dyn EventSink, pick: ConfigPick) {
+        if let ConfigPick::Model { id, .. } = &pick {
+            self.client.set_model(id.clone().into_inner());
             self.compaction = self
                 .compaction
                 .for_model(self.client.model(), self.client.max_tokens());
         }
-        let resolved = match effort {
-            Some(pick) => self.client.set_effort(pick),
+        let resolved = match pick.effort() {
+            Some(effort) => self.client.set_effort(effort),
             None => self.client.effort(),
         };
         self.auto_compaction_failures.reset(sink);
@@ -675,7 +671,7 @@ impl Engine {
             Event::ConfigChanged {
                 model: self.client.model().clone(),
                 effort: resolved,
-                requested_effort: effort,
+                requested: pick,
                 auto_compaction: self.compaction.auto,
             },
             "config-changed",
@@ -908,17 +904,13 @@ impl TurnEnd {
             (Op::Prompt(_) | Op::Compact { .. } | Op::Resume { .. }, Event::TurnFailed(_))
             | (Op::Rename { .. }, Event::RenameFailed(_))
             // The model has no tier for the effort, so the pick changed nothing.
-            | (
-                Op::SetModel {
-                    model: None,
-                    effort: Some(_),
-                },
-                Event::ConfigChanged { effort: None, .. },
-            ) => Some(Self::Failed),
+            | (Op::SetModel(ConfigPick::Effort(_)), Event::ConfigChanged { effort: None, .. }) => {
+                Some(Self::Failed)
+            }
             (Op::Prompt(_), Event::TurnComplete)
             | (Op::Clear | Op::Compact { .. } | Op::Resume { .. }, Event::SessionReady)
             | (Op::Rename { .. }, Event::SessionTitleUpdated { .. })
-            | (Op::SetModel { .. }, Event::ConfigChanged { .. })
+            | (Op::SetModel(_), Event::ConfigChanged { .. })
             | (Op::SetMode(_), Event::ModeChanged(_)) => Some(Self::Completed),
             (Op::Prompt(_) | Op::Compact { .. }, Event::Cancelled) => Some(Self::Cancelled),
             _ => None,
@@ -1016,10 +1008,11 @@ mod tests {
         DEVICE_ID, api_key, client_for, completion_body, sse_body, sse_response, test_config,
         text_stream_body,
     };
-    use crate::config::PromptCacheTtl;
     use crate::config::compaction::{CompactionConfig, test_thresholds};
+    use crate::config::{Effort, PromptCacheTtl};
     use crate::file_tracker::testing::seed_full_read;
     use crate::message::{Replay, Role};
+    use crate::model::ResolvedModelId;
     use crate::permission::rule::Rule;
     use crate::permission::{Mode, PermissionClass, Workspace};
     use crate::protocol::CapturingSink;
@@ -1740,10 +1733,7 @@ mod tests {
                 Op::Rename {
                     title: "Fix login".to_owned(),
                 },
-                Op::SetModel {
-                    model: None,
-                    effort: Some(Effort::Low),
-                },
+                Op::SetModel(ConfigPick::Effort(Effort::Low)),
                 Op::SetMode(Mode::Plan),
                 Op::Shutdown,
             ] {
@@ -1765,7 +1755,7 @@ mod tests {
                     [
                         Event::SessionTitleUpdated { session_id, title },
                         Event::ConfigChanged {
-                            requested_effort: Some(Effort::Low),
+                            requested: ConfigPick::Effort(Effort::Low),
                             ..
                         },
                         Event::ModeChanged(Mode::Plan),
@@ -3265,6 +3255,13 @@ mod tests {
 
     // ── set_model ──
 
+    fn sonnet_pick() -> ConfigPick {
+        ConfigPick::Model {
+            id: ResolvedModelId::new("claude-sonnet-5-5".to_owned()),
+            effort: None,
+        }
+    }
+
     #[tokio::test]
     async fn set_model_swap_keeps_the_system_prompt_and_names_the_model_next_turn() {
         with_pinned_home(async {
@@ -3276,11 +3273,7 @@ mod tests {
             let (_ops_tx, mut ops) = crate::protocol::inert_op_channel();
 
             engine.submit_prompt("first", &sink, &mut ops).await;
-            engine.set_model(
-                &sink,
-                Some(ResolvedModelId::new("claude-sonnet-5-5".to_owned())),
-                None,
-            );
+            engine.set_model(&sink, sonnet_pick());
             engine.submit_prompt("second", &sink, &mut ops).await;
 
             let turns = request_bodies(&server).await;
@@ -3328,11 +3321,7 @@ mod tests {
             let (_ops_tx, mut ops) = crate::protocol::inert_op_channel();
 
             engine.submit_prompt("first", &sink, &mut ops).await;
-            engine.set_model(
-                &sink,
-                Some(ResolvedModelId::new("claude-sonnet-5-5".to_owned())),
-                None,
-            );
+            engine.set_model(&sink, sonnet_pick());
             engine.submit_prompt("second", &sink, &mut ops).await;
 
             let turns = request_bodies(&server).await;
@@ -3379,11 +3368,7 @@ mod tests {
                 engine.client = client_for(&config);
                 engine.compaction = configured;
 
-                engine.set_model(
-                    &sink,
-                    Some(ResolvedModelId::new("claude-sonnet-5-5".to_owned())),
-                    None,
-                );
+                engine.set_model(&sink, sonnet_pick());
 
                 assert_eq!(
                     engine.compaction.auto.threshold_tokens,
@@ -3418,7 +3403,7 @@ mod tests {
             engine.total_estimated_cost_usd = 1.23;
             let sink = CapturingSink::new();
 
-            engine.set_model(&sink, None, Some(Effort::Xhigh));
+            engine.set_model(&sink, ConfigPick::Effort(Effort::Xhigh));
 
             assert_eq!(
                 engine.auto_compaction_failures,
@@ -3804,10 +3789,7 @@ mod tests {
         let rename = Op::Rename {
             title: "Fix login".to_owned(),
         };
-        let set_model = Op::SetModel {
-            model: None,
-            effort: Some(Effort::Low),
-        };
+        let set_model = Op::SetModel(ConfigPick::Effort(Effort::Low));
         let set_mode = Op::SetMode(Mode::Plan);
         let compacted = |automatic| Event::SessionCompacted {
             summary: "summary".to_owned(),
@@ -3866,7 +3848,7 @@ mod tests {
                 Event::ConfigChanged {
                     model: ModelSpec::resolve(MODEL.to_owned()),
                     effort: Some(Effort::Low),
-                    requested_effort: Some(Effort::Low),
+                    requested: ConfigPick::Effort(Effort::Low),
                     auto_compaction: CompactionConfig::with_threshold_for_test(50_000).auto,
                 },
                 Some(TurnEnd::Completed),
@@ -3876,7 +3858,7 @@ mod tests {
                 Event::ConfigChanged {
                     model: ModelSpec::resolve("custom-model".to_owned()),
                     effort: None,
-                    requested_effort: Some(Effort::Low),
+                    requested: ConfigPick::Effort(Effort::Low),
                     auto_compaction: CompactionConfig::with_threshold_for_test(50_000).auto,
                 },
                 Some(TurnEnd::Failed),
