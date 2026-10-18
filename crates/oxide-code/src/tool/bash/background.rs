@@ -659,7 +659,8 @@ mod tests {
     use super::*;
     use crate::protocol::CapturingSink;
     use crate::tool::MAX_OUTPUT_BYTES;
-    use crate::tool::bash::{BashTool, OUTPUT_BUDGET, processes};
+    use crate::tool::bash::testing::{record_pid, until_gone, until_recorded};
+    use crate::tool::bash::{BashTool, OUTPUT_BUDGET};
     use crate::tool::testing::{self, temp_ctx};
 
     // ── Fixtures ──
@@ -694,7 +695,7 @@ mod tests {
     fn leaking(pid_file: &Path) -> String {
         format!(
             "echo hi; sleep 30 & {}; sleep 30",
-            processes::record("$!", pid_file)
+            record_pid("$!", pid_file)
         )
     }
 
@@ -787,7 +788,7 @@ mod tests {
         let mut descendants = Vec::new();
         for pid_file in &pid_files {
             start(&shells, &leaking(pid_file)).await;
-            descendants.push(processes::until_recorded(pid_file).await);
+            descendants.push(until_recorded(pid_file).await);
         }
         let reported = sink.events().len();
 
@@ -796,7 +797,7 @@ mod tests {
         assert_eq!(shells.list(), []);
         assert_eq!(sink.events().len(), reported);
         for pid in &descendants {
-            processes::until_gone(pid).await;
+            until_gone(pid).await;
         }
     }
 
@@ -941,7 +942,7 @@ mod tests {
         let pid_file = dir.path().join("pid");
         let (shells, sink) = shells();
         start(&shells, &leaking(&pid_file)).await;
-        let pid = processes::until_recorded(&pid_file).await;
+        let pid = until_recorded(&pid_file).await;
 
         let stopped = stop(&shells, "shell-1").await;
 
@@ -960,7 +961,7 @@ mod tests {
             "{}",
             again.content,
         );
-        processes::until_gone(&pid).await;
+        until_gone(&pid).await;
     }
 
     #[tokio::test]
@@ -968,7 +969,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let pid_file = dir.path().join("pid");
         let (shells, _sink) = shells();
-        let command = format!("sleep 30 & {}; exit 3", processes::record("$!", &pid_file));
+        let command = format!("sleep 30 & {}; exit 3", record_pid("$!", &pid_file));
         start(&shells, &command).await;
 
         let read = output(&shells, "shell-1", 5_000).await;
@@ -980,7 +981,7 @@ mod tests {
             stopped.content,
             "(no new output)\n\n(stopped after it exited with code 3)"
         );
-        processes::until_gone(&processes::until_recorded(&pid_file).await).await;
+        until_gone(&until_recorded(&pid_file).await).await;
     }
 
     #[cfg(unix)]

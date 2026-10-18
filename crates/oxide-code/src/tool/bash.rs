@@ -193,23 +193,31 @@ fn resolve_timeout(millis: Option<u64>) -> Duration {
 
 /// Runs `command` in the context's cwd, with [`SESSION_ID_VAR`] set to its session ID.
 async fn execute(command: &str, timeout: Duration, ctx: &ToolCtx) -> ToolOutput {
-    execute_until(command, timeout, tokio::time::sleep(timeout), ctx).await
+    match execute_until(command, tokio::time::sleep(timeout), ctx).await {
+        Ok(output) => output,
+        Err(TimedOut(mut content)) => {
+            push_footer(
+                &mut content,
+                &format!("Command timed out after {} ms", timeout.as_millis()),
+            );
+            ToolOutput::error(content)
+        }
+    }
 }
 
-/// [`execute`], timing out once `deadline` completes. The timeout message reports `timeout`.
+/// [`execute`], killing the command and returning [`TimedOut`] once `deadline` completes.
 async fn execute_until(
     command: &str,
-    timeout: Duration,
     deadline: impl Future<Output = ()>,
     ctx: &ToolCtx,
-) -> ToolOutput {
+) -> Result<ToolOutput, TimedOut> {
     let mut shell = match ShellTree::spawn(command, ctx) {
         Ok(shell) => shell,
         Err(e) => {
-            return ToolOutput::error(format!(
+            return Ok(ToolOutput::error(format!(
                 "Failed to execute command in {}: {e}",
                 ctx.cwd().display()
-            ));
+            )));
         }
     };
 
@@ -242,20 +250,24 @@ async fn execute_until(
             )
         })
         .await;
-        return timeout_output(timeout, &stdout_capture, &stderr_capture);
+        return Err(TimedOut(render_streams(&stdout_capture, &stderr_capture)));
     };
 
     let status = match status {
         Ok(status) => status,
         Err(e) => {
-            return ToolOutput::error(format!("Failed to execute command: {e}"));
+            return Ok(ToolOutput::error(format!("Failed to execute command: {e}")));
         }
     };
     if let Err(e) = stdout_read {
-        return ToolOutput::error(format!("Failed to read command stdout: {e}"));
+        return Ok(ToolOutput::error(format!(
+            "Failed to read command stdout: {e}"
+        )));
     }
     if let Err(e) = stderr_read {
-        return ToolOutput::error(format!("Failed to read command stderr: {e}"));
+        return Ok(ToolOutput::error(format!(
+            "Failed to read command stderr: {e}"
+        )));
     }
     // Descendants that released the pipes, such as a redirected background server, keep running.
     shell.disarm();
@@ -271,17 +283,12 @@ async fn execute_until(
     // A nonzero exit stays in the body because commands like `grep` (1 on no match) and `test`
     // probes signal through their exit code. Reserving `is_error` for spawn, pipe, and timeout
     // failures keeps the model from treating those probes as hard failures.
-    ToolOutput::success(content)
+    Ok(ToolOutput::success(content))
 }
 
-fn timeout_output(timeout: Duration, stdout: &PipeCapture, stderr: &PipeCapture) -> ToolOutput {
-    let mut content = render_streams(stdout, stderr);
-    push_footer(
-        &mut content,
-        &format!("Command timed out after {} ms", timeout.as_millis()),
-    );
-    ToolOutput::error(content)
-}
+/// A command [`execute_until`] killed at its deadline, with the output it rendered by then.
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+struct TimedOut(String);
 
 fn exit_footer(status: ExitStatus) -> String {
     format!("({})", ShellState::of(status).describe())
@@ -566,7 +573,7 @@ impl Drop for ShellTree {
 // ── Testing ──
 
 #[cfg(test)]
-mod processes {
+mod testing {
     use std::path::Path;
     use std::process::Stdio;
     use std::time::{Duration, Instant};
@@ -575,13 +582,13 @@ mod processes {
 
     /// A command that records the PID `pid`, such as `$!` or `$$`, in `pid_file`. The rename
     /// publishes the PID whole.
-    pub(super) fn record(pid: &str, pid_file: &Path) -> String {
+    pub(super) fn record_pid(pid: &str, pid_file: &Path) -> String {
         let pid_file = pid_file.display();
         format!("echo {pid} > '{pid_file}.tmp' && mv '{pid_file}.tmp' '{pid_file}'")
     }
 
-    /// The PID [`record`] writes to `pid_file`, once it appears. Spawning bash on a loaded Windows
-    /// runner can take several seconds.
+    /// The PID [`record_pid`] writes to `pid_file`, once it appears. Spawning bash on a loaded
+    /// Windows runner can take several seconds.
     pub(super) async fn until_recorded(pid_file: &Path) -> String {
         let deadline = Instant::now() + Duration::from_secs(20);
         while !pid_file.exists() {
@@ -624,6 +631,7 @@ mod tests {
     use indoc::indoc;
     use tokio::io::AsyncWriteExt as _;
 
+    use super::testing::{record_pid, until_gone, until_recorded};
     use super::*;
     use crate::tool::MAX_OUTPUT_BYTES;
     use crate::tool::testing::{self, temp_ctx};
@@ -847,19 +855,15 @@ mod tests {
     async fn execute_timeout_kills_backgrounded_children() {
         let dir = tempfile::tempdir().unwrap();
         let pid_file = dir.path().join("pid");
-        let command = format!(
-            "sleep 30 & {}; sleep 30",
-            processes::record("$!", &pid_file)
-        );
+        let command = format!("sleep 30 & {}; sleep 30", record_pid("$!", &pid_file));
         let started = async {
-            processes::until_recorded(&pid_file).await;
+            until_recorded(&pid_file).await;
         };
 
-        let output = execute_until(&command, Duration::from_secs(60), started, &temp_ctx()).await;
+        let timed_out = execute_until(&command, started, &temp_ctx()).await.err();
 
-        assert!(output.is_error, "expected timeout");
-        assert_eq!(output.content, "Command timed out after 60000 ms");
-        processes::until_gone(&processes::until_recorded(&pid_file).await).await;
+        assert_eq!(timed_out, Some(TimedOut(String::new())));
+        until_gone(&until_recorded(&pid_file).await).await;
     }
 
     #[tokio::test]
@@ -868,17 +872,17 @@ mod tests {
         for tail in ["sleep 30", "echo done"] {
             let dir = tempfile::tempdir().unwrap();
             let pid_file = dir.path().join("pid");
-            let command = format!("sleep 30 & {}; {tail}", processes::record("$!", &pid_file));
+            let command = format!("sleep 30 & {}; {tail}", record_pid("$!", &pid_file));
             let ctx = temp_ctx();
             let mut call = Box::pin(execute(&command, DEFAULT_TIMEOUT, &ctx));
 
             let pid = tokio::select! {
                 output = &mut call => panic!("{tail}: finished before the cancel: {}", output.content),
-                pid = processes::until_recorded(&pid_file) => pid,
+                pid = until_recorded(&pid_file) => pid,
             };
             drop(call);
 
-            processes::until_gone(&pid).await;
+            until_gone(&pid).await;
         }
     }
 
@@ -905,25 +909,14 @@ mod tests {
         // covers the drain ends the call before the `sleep` does.
         let dir = tempfile::tempdir().unwrap();
         let pid_file = dir.path().join("pid");
-        let command = format!(
-            "sleep 30 & echo done; {}",
-            processes::record("$$", &pid_file)
-        );
+        let command = format!("sleep 30 & echo done; {}", record_pid("$$", &pid_file));
         let exited = async {
-            processes::until_gone(&processes::until_recorded(&pid_file).await).await;
+            until_gone(&until_recorded(&pid_file).await).await;
         };
 
-        let output = execute_until(&command, Duration::from_secs(60), exited, &temp_ctx()).await;
+        let timed_out = execute_until(&command, exited, &temp_ctx()).await.err();
 
-        assert!(output.is_error, "expected timeout");
-        assert_eq!(
-            output.content,
-            indoc! {"
-                done
-
-                Command timed out after 60000 ms"
-            }
-        );
+        assert_eq!(timed_out, Some(TimedOut("done".to_owned())));
     }
 
     #[cfg(unix)]
