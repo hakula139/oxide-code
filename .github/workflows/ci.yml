@@ -204,3 +204,23 @@ jobs:
 
       - name: Build package
         run: nix build .#oxide-code --no-link --print-build-logs
+
+  result:
+    name: CI Result
+    # A skipped job counts as a passing required check, so the gate must run after failures too.
+    if: ${{ !cancelled() }}
+    needs:
+      - flake-check
+      - node-check
+      - rust-check
+      - dependency-check
+      - msrv-check
+      - macos-check
+      - windows-check
+      - coverage
+      - nix-build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check results
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1

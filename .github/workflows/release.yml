@@ -179,7 +179,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       actions: write
-      checks: read
       contents: write
       issues: write
       pull-requests: write
@@ -240,16 +239,9 @@ jobs:
           fi
 
           # A PR opened with GITHUB_TOKEN starts no workflows, so dispatch CI for its checks.
-          gh workflow run ci.yml --ref "$branch"
-
-          sha=$(git rev-parse HEAD)
-          for _ in {1..30}; do
-            names=$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs" --jq '.check_runs[].name')
-            if grep -qx 'Rust Check' <<< "$names" && grep -qx 'Node Check' <<< "$names" &&
-              grep -qx 'Nix Flake Check' <<< "$names"; then
-              exit 0
-            fi
-            sleep 10
-          done
-          echo "::error::The dispatched CI run reported no required checks on $sha. $setting"
-          exit 1
+          run_url=$(gh workflow run ci.yml --ref "$branch")
+          if [[ -z "$run_url" ]]; then
+            echo "::error::The CI dispatch on $branch returned no run."
+            exit 1
+          fi
+          echo "Dispatched CI: $run_url"
