@@ -648,9 +648,10 @@ mod tests {
     #[test]
     fn context_management_clear_thinking_keep_all_serializes_tagged_shape() {
         let v = serde_json::to_value(ContextManagement::clear_thinking_keep_all()).unwrap();
+
         assert_eq!(
             v,
-            serde_json::json!({
+            json!({
                 "edits": [{"type": "clear_thinking_20251015", "keep": "all"}],
             }),
         );
@@ -660,15 +661,16 @@ mod tests {
 
     #[test]
     fn output_format_json_schema_serializes_with_type_and_schema() {
-        let schema = serde_json::json!({
+        let schema = json!({
             "type": "object",
             "properties": {"title": {"type": "string"}},
             "required": ["title"],
         });
         let fmt = OutputFormat::json_schema(schema.clone());
+
         let v = serde_json::to_value(&fmt).unwrap();
-        assert_eq!(v["type"], "json_schema");
-        assert_eq!(v["schema"], schema);
+
+        assert_eq!(v, json!({"type": "json_schema", "schema": schema}));
     }
 
     // ── StreamEvent ──

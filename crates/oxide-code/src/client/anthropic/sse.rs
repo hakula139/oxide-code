@@ -12,7 +12,7 @@ use super::transport::{
 use super::wire::{ApiError, StreamEvent};
 use crate::client::ResponseEvent;
 
-/// Hard cap. A misbehaving upstream that never ends a frame would otherwise grow until OOM.
+/// A misbehaving upstream that never ends a frame would otherwise grow until OOM.
 const MAX_SSE_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 /// Runs [`stream_sse`] until it ends or the receiver drops, then forwards any failure on `tx`.

@@ -182,7 +182,9 @@ impl ModelSpec {
         })
     }
 
-    /// The context window in tokens, `None` for unknown ids, which disables auto-compaction.
+    /// The context window in tokens. `None` for unknown IDs disables default and
+    /// percentage-based auto-compaction and the status-line percentage. Explicit token thresholds
+    /// still apply.
     pub(crate) fn context_window(&self) -> Option<u32> {
         self.info.map(|_| CONTEXT_WINDOW)
     }
