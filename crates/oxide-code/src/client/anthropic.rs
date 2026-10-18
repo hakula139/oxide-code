@@ -38,7 +38,7 @@ use crate::tool::ToolDefinition;
 use crate::util::tls::apply_extra_ca_certs;
 
 use betas::{compute_betas, conversation_cache_control, static_prefix_cache_control};
-use sse::stream_sse;
+use sse::forward_sse;
 use wire::{
     CacheControl, ContextManagement, CreateMessageRequest, OutputConfig, RequestMessages,
     RequestMetadata, SystemBlock,
@@ -204,12 +204,6 @@ impl Client {
         breakpoint: Option<CacheControl>,
     ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
         let auth = self.auth()?;
-        let effective_messages: Vec<Message> = match user_context {
-            Some(ctx) => std::iter::once(Message::user(ctx))
-                .chain(messages.iter().cloned())
-                .collect(),
-            None => messages.to_vec(),
-        };
 
         // The fingerprint skips the user context, which Claude Code marks as a meta message.
         let attribution = self
@@ -225,7 +219,7 @@ impl Client {
             static_prefix_cache_control(self.is_first_party, self.prompt_cache_ttl);
         let system_blocks = build_system_blocks(
             attribution.as_deref(),
-            [
+            &[
                 (static_joined.as_str(), Some(static_cache_control)),
                 (dynamic_joined.as_str(), None),
             ],
@@ -247,7 +241,8 @@ impl Client {
                 .info()
                 .map(|_| ContextManagement::clear_thinking_keep_all()),
             messages: RequestMessages {
-                messages: &effective_messages,
+                user_context,
+                messages,
                 breakpoint,
             },
         })
@@ -263,19 +258,7 @@ impl Client {
         let http = self.http.clone();
         let betas = compute_betas(model, thinking.as_ref(), auth.kind(), true).join(",");
         let request = self.messages_request(betas, body, auth)?;
-        let model_id = model.id().to_owned();
-
-        // Racing `closed` stops an in-flight request or retry backoff once the consumer is gone.
-        tokio::spawn(async move {
-            tokio::select! {
-                result = stream_sse(&http, &request, &model_id, &tx) => {
-                    if let Err(e) = result {
-                        _ = tx.send(Err(e)).await;
-                    }
-                }
-                () = tx.closed() => {}
-            }
-        });
+        tokio::spawn(forward_sse(http, request, model.id().to_owned(), tx));
 
         Ok(rx)
     }
@@ -400,11 +383,11 @@ fn build_metadata(device_id: &str, session_id: &str) -> RequestMetadata {
 
 /// The billing block leads, as in Claude Code, so [`billing::inject_cch`] finds its placeholder
 /// first. Some relay gateways reject the block in any other slot.
-fn build_system_blocks<'a, const N: usize>(
+fn build_system_blocks<'a>(
     attribution: Option<&'a str>,
-    extras: [(&'a str, Option<CacheControl>); N],
+    extras: &[(&'a str, Option<CacheControl>)],
 ) -> Vec<SystemBlock<'a>> {
-    let mut blocks = Vec::with_capacity(2 + N);
+    let mut blocks = Vec::with_capacity(2 + extras.len());
     if let Some(text) = attribution {
         blocks.push(SystemBlock {
             r#type: "text",
@@ -417,7 +400,7 @@ fn build_system_blocks<'a, const N: usize>(
         text: SYSTEM_PROMPT_PREFIX,
         cache_control: None,
     });
-    for (text, cache_control) in extras {
+    for &(text, cache_control) in extras {
         if !text.is_empty() {
             blocks.push(SystemBlock {
                 r#type: "text",
@@ -503,7 +486,6 @@ mod tests {
     use wiremock::matchers::{header, method, path, query_param};
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
-    use super::billing::build_billing_header;
     use super::testing::{
         Captured, DEVICE_ID, api_key, captured, client_for, oauth, test_client, test_config,
         text_stream_body,
@@ -1296,7 +1278,7 @@ mod tests {
 
         assert_eq!(
             format!("{err:#}"),
-            "API error (invalid_request_error). Details: Bad block"
+            "API error (invalid_request_error): Bad block"
         );
         assert_eq!(
             server.received_requests().await.unwrap().len(),
@@ -1328,26 +1310,42 @@ mod tests {
             .stream_message(&[Message::user("hi")], &[], None, &[])
             .unwrap();
         let err = collect_events(rx).await.expect_err("redirect must fail");
-        let msg = format!("{err:#}");
-        assert!(
-            msg.starts_with(
-                "Anthropic API endpoint redirected (HTTP 307 Temporary Redirect) to 127.0.0.1."
-            ),
-            "{msg}"
+
+        assert_eq!(
+            format!("{err:#}"),
+            "Anthropic API endpoint redirected (HTTP 307 Temporary Redirect) to 127.0.0.1. \
+             Redirects are not followed, so point the base URL at the final endpoint.",
         );
         elsewhere.verify().await;
     }
 
     #[tokio::test]
     async fn stream_message_http_error_propagates_status_and_body() {
-        for (status, body) in [
-            (429_u16, r#"{"error":{"type":"rate_limit_error"}}"#),
-            (529, "overloaded"),
+        let rate_limited = r#"{"error":{"type":"rate_limit_error"}}"#;
+        for (status, body, expected) in [
+            (
+                429_u16,
+                rate_limited,
+                format!(
+                    "Anthropic API rate limited (HTTP 429): {rate_limited}. \
+                     Retry after a short delay."
+                ),
+            ),
+            (
+                529,
+                "overloaded",
+                "Anthropic API overloaded (HTTP 529): overloaded. Retry in a few seconds."
+                    .to_owned(),
+            ),
         ] {
             let server = MockServer::start().await;
             Mock::given(method("POST"))
                 .and(path("/v1/messages"))
-                .respond_with(ResponseTemplate::new(status).set_body_string(body))
+                .respond_with(
+                    ResponseTemplate::new(status)
+                        .insert_header("x-should-retry", "false")
+                        .set_body_string(body),
+                )
                 .mount(&server)
                 .await;
 
@@ -1356,12 +1354,8 @@ mod tests {
                 .stream_message(&[Message::user("hi")], &[], None, &[])
                 .unwrap();
             let err = collect_events(rx).await.expect_err("expected HTTP error");
-            let msg = format!("{err:#}");
-            assert!(
-                msg.contains(&status.to_string()),
-                "status {status} in error: {msg}",
-            );
-            assert!(msg.contains(body), "body surfaced in error: {msg}");
+
+            assert_eq!(format!("{err:#}"), expected);
         }
     }
 
@@ -1383,12 +1377,13 @@ mod tests {
             .stream_message(&[Message::user("hi")], &[], None, &[])
             .unwrap();
         let err = collect_events(rx).await.expect_err("expected 401");
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains("CLAUDE_CODE_OAUTH_TOKEN may be expired or revoked"),
-            "{msg}"
+
+        assert_eq!(
+            format!("{err:#}"),
+            "Anthropic API rejected credentials (HTTP 401): token revoked. \
+             CLAUDE_CODE_OAUTH_TOKEN may be expired or revoked. \
+             Generate a new one with `claude setup-token`.",
         );
-        assert!(msg.contains("claude setup-token"), "{msg}");
     }
 
     #[tokio::test]
@@ -1400,7 +1395,7 @@ mod tests {
             .respond_with(
                 ResponseTemplate::new(429)
                     .insert_header("retry-after", "120")
-                    .set_body_string(r#"{"error":{"type":"rate_limit_error"}}"#),
+                    .set_body_string("Too many requests"),
             )
             .mount(&server)
             .await;
@@ -1410,35 +1405,12 @@ mod tests {
             .stream_message(&[Message::user("hi")], &[], None, &[])
             .unwrap();
         let err = collect_events(rx).await.expect_err("expected 429");
-        assert!(
-            format!("{err:#}").contains("Retry after 120 s."),
-            "retry-after threaded through stream_sse: {err:#}",
+
+        assert_eq!(
+            format!("{err:#}"),
+            "Anthropic API rate limited (HTTP 429): Too many requests. Retry after 120 s.",
         );
         assert_eq!(server.received_requests().await.unwrap().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn stream_message_receiver_dropped_mid_stream_does_not_deadlock() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("content-type", "text/event-stream")
-                    .set_body_string(text_stream_body("", "Hi"))
-                    .set_delay(Duration::from_millis(50)),
-            )
-            .mount(&server)
-            .await;
-
-        let client = test_client(server.uri(), api_key(), TEST_MODEL);
-        let mut rx = client
-            .stream_message(&[Message::user("hi")], &[], None, &[])
-            .unwrap();
-        _ = rx.recv().await;
-        drop(rx);
-        // Give the background task time to observe the closed channel so any panic surfaces here.
-        tokio::time::sleep(Duration::from_millis(80)).await;
     }
 
     #[test]
@@ -1576,37 +1548,43 @@ mod tests {
 
     #[test]
     fn build_system_blocks_orders_billing_then_identity_then_extras() {
-        let billing = build_billing_header(CLAUDE_CLI_VERSION, "abc", true);
         let cache = CacheControl {
             r#type: "ephemeral",
             scope: Some("global"),
             ttl: Some("1h"),
         };
+
         let blocks = build_system_blocks(
-            Some(&billing),
-            [("static body", Some(cache)), ("dynamic body", None)],
+            Some("billing"),
+            &[("static body", Some(cache)), ("dynamic body", None)],
         );
 
-        assert_eq!(blocks.len(), 4);
-        assert_eq!(blocks[0].text, billing);
-        assert!(blocks[0].cache_control.is_none(), "billing has no cc");
-        assert_eq!(blocks[1].text, SYSTEM_PROMPT_PREFIX);
-        assert!(blocks[1].cache_control.is_none(), "identity has no cc");
-        assert_eq!(blocks[2].text, "static body");
         assert_eq!(
-            blocks[2].cache_control.as_ref().and_then(|c| c.scope),
-            Some("global"),
+            serde_json::to_value(blocks).unwrap(),
+            serde_json::json!([
+                {"type": "text", "text": "billing"},
+                {"type": "text", "text": SYSTEM_PROMPT_PREFIX},
+                {
+                    "type": "text",
+                    "text": "static body",
+                    "cache_control": {"type": "ephemeral", "scope": "global", "ttl": "1h"},
+                },
+                {"type": "text", "text": "dynamic body"},
+            ]),
         );
-        assert_eq!(blocks[3].text, "dynamic body");
-        assert!(blocks[3].cache_control.is_none(), "dynamic has no cc");
     }
 
     #[test]
     fn build_system_blocks_drops_empty_extras_and_omits_billing_when_absent() {
-        let blocks = build_system_blocks(None, [("", None), ("only-content", None)]);
-        assert_eq!(blocks.len(), 2);
-        assert_eq!(blocks[0].text, SYSTEM_PROMPT_PREFIX);
-        assert_eq!(blocks[1].text, "only-content");
+        let blocks = build_system_blocks(None, &[("", None), ("only-content", None)]);
+
+        assert_eq!(
+            serde_json::to_value(blocks).unwrap(),
+            serde_json::json!([
+                {"type": "text", "text": SYSTEM_PROMPT_PREFIX},
+                {"type": "text", "text": "only-content"},
+            ]),
+        );
     }
 
     // ── normalize_platform ──

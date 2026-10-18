@@ -26,6 +26,7 @@ unwrap_used = "warn"
 anyhow = "1"
 arboard = { version = "3.7", default-features = false, features = ["wayland-data-control"] }
 base64 = "0.23"
+bytes = "1"
 caseless = "0.2"
 clap = { version = "4", features = ["derive"] }
 core-foundation = "0.10"

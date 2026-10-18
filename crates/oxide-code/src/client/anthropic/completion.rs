@@ -91,7 +91,7 @@ fn build_completion_body(
 ) -> Result<String> {
     let messages = [Message::user(user)];
 
-    let system_blocks = build_system_blocks(attribution, [(system, None)]);
+    let system_blocks = build_system_blocks(attribution, &[(system, None)]);
 
     let mut body = serde_json::to_string(&CreateMessageRequest {
         model,
@@ -104,6 +104,7 @@ fn build_completion_body(
         output_config: OutputConfig::new(output_format, effort),
         context_management: None,
         messages: RequestMessages {
+            user_context: None,
             messages: &messages,
             breakpoint: None,
         },
@@ -197,6 +198,33 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(text, "Fix login bug");
+    }
+
+    #[tokio::test]
+    async fn complete_retries_a_transient_status_before_the_reply() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(529).insert_header("retry-after", "0"))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(completion_body("Fix login bug")),
+            )
+            .mount(&server)
+            .await;
+
+        let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
+        let text = client
+            .complete(&haiku(), "sys", "user input", 40, None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(text, "Fix login bug");
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
     }
 
     #[tokio::test]
