@@ -648,9 +648,10 @@ mod tests {
     #[test]
     fn context_management_clear_thinking_keep_all_serializes_tagged_shape() {
         let v = serde_json::to_value(ContextManagement::clear_thinking_keep_all()).unwrap();
+
         assert_eq!(
             v,
-            serde_json::json!({
+            json!({
                 "edits": [{"type": "clear_thinking_20251015", "keep": "all"}],
             }),
         );
@@ -660,15 +661,16 @@ mod tests {
 
     #[test]
     fn output_format_json_schema_serializes_with_type_and_schema() {
-        let schema = serde_json::json!({
+        let schema = json!({
             "type": "object",
             "properties": {"title": {"type": "string"}},
             "required": ["title"],
         });
         let fmt = OutputFormat::json_schema(schema.clone());
+
         let v = serde_json::to_value(&fmt).unwrap();
-        assert_eq!(v["type"], "json_schema");
-        assert_eq!(v["schema"], schema);
+
+        assert_eq!(v, json!({"type": "json_schema", "schema": schema}));
     }
 
     // ── StreamEvent ──
@@ -677,75 +679,90 @@ mod tests {
     fn stream_event_content_block_start_text() {
         let json =
             r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#;
+
         let event: StreamEvent = serde_json::from_str(json).unwrap();
-        assert!(matches!(
+
+        assert_eq!(
             event,
             StreamEvent::ContentBlockStart {
                 index: 0,
-                content_block: ContentBlockInfo::Text { text },
-            } if text.is_empty(),
-        ));
+                content_block: ContentBlockInfo::Text {
+                    text: String::new(),
+                },
+            }
+        );
     }
 
     #[test]
     fn stream_event_content_block_stop() {
         let event: StreamEvent =
             serde_json::from_str(r#"{"type":"content_block_stop","index":2}"#).unwrap();
+
         assert_eq!(event, StreamEvent::ContentBlockStop);
     }
 
     #[test]
     fn stream_event_message_delta_with_usage() {
         let json = r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":42}}"#;
+
         let event: StreamEvent = serde_json::from_str(json).unwrap();
-        assert!(matches!(
+
+        assert_eq!(
             event,
             StreamEvent::MessageDelta {
                 delta: MessageDeltaBody {
                     stop_reason: Some(StopReason::EndTurn),
                     stop_details: None,
                 },
-                usage: Some(TokenUsage {
-                    input_tokens: 0,
-                    cache_creation_input_tokens: 0,
-                    cache_read_input_tokens: 0,
-                    output_tokens: 42,
-                }),
-            },
-        ));
+                usage: Some(TokenUsage::new(0, 42)),
+            }
+        );
     }
 
     #[test]
     fn stream_event_message_delta_refusal_carries_stop_details() {
         let json = r#"{"type":"message_delta","delta":{"stop_reason":"refusal","stop_details":{"type":"refusal","category":"cyber","explanation":"Exploit development"}},"usage":{"output_tokens":3}}"#;
-        let StreamEvent::MessageDelta { delta, .. } = serde_json::from_str(json).unwrap() else {
-            panic!("expected MessageDelta");
-        };
-        assert_eq!(delta.stop_reason, Some(StopReason::Refusal));
+
+        let event: StreamEvent = serde_json::from_str(json).unwrap();
+
         assert_eq!(
-            delta.stop_details,
-            Some(StopDetails {
-                category: Some("cyber".to_owned()),
-                explanation: Some("Exploit development".to_owned()),
-            }),
+            event,
+            StreamEvent::MessageDelta {
+                delta: MessageDeltaBody {
+                    stop_reason: Some(StopReason::Refusal),
+                    stop_details: Some(StopDetails {
+                        category: Some("cyber".to_owned()),
+                        explanation: Some("Exploit development".to_owned()),
+                    }),
+                },
+                usage: Some(TokenUsage::new(0, 3)),
+            }
         );
     }
 
     #[test]
     fn stream_event_message_delta_unknown_stop_reason_keeps_usage() {
         let json = r#"{"type":"message_delta","delta":{"stop_reason":"some_future_reason","stop_details":null},"usage":{"output_tokens":7}}"#;
-        let StreamEvent::MessageDelta { delta, usage } = serde_json::from_str(json).unwrap() else {
-            panic!("expected MessageDelta");
-        };
-        assert_eq!(delta.stop_reason, Some(StopReason::Unknown));
-        assert!(delta.stop_details.is_none());
-        assert_eq!(usage.map(|u| u.output_tokens), Some(7));
+
+        let event: StreamEvent = serde_json::from_str(json).unwrap();
+
+        assert_eq!(
+            event,
+            StreamEvent::MessageDelta {
+                delta: MessageDeltaBody {
+                    stop_reason: Some(StopReason::Unknown),
+                    stop_details: None,
+                },
+                usage: Some(TokenUsage::new(0, 7)),
+            }
+        );
     }
 
     #[test]
     fn stream_event_message_stop() {
         let event: StreamEvent = serde_json::from_str(r#"{"type":"message_stop"}"#).unwrap();
-        assert!(matches!(event, StreamEvent::MessageStop));
+
+        assert_eq!(event, StreamEvent::MessageStop);
     }
 
     // ── ContentBlockInfo ──
@@ -754,17 +771,27 @@ mod tests {
     fn content_block_info_text() {
         let info: ContentBlockInfo =
             serde_json::from_str(r#"{"type":"text","text":"Hello world"}"#).unwrap();
-        assert!(matches!(info, ContentBlockInfo::Text { text } if text == "Hello world"));
+
+        assert_eq!(
+            info,
+            ContentBlockInfo::Text {
+                text: "Hello world".to_owned(),
+            }
+        );
     }
 
     #[test]
     fn content_block_info_tool_use() {
         let info: ContentBlockInfo =
             serde_json::from_str(r#"{"type":"tool_use","id":"toolu_01","name":"bash"}"#).unwrap();
-        assert!(matches!(
+
+        assert_eq!(
             info,
-            ContentBlockInfo::ToolUse { id, name } if id == "toolu_01" && name == "bash",
-        ));
+            ContentBlockInfo::ToolUse {
+                id: "toolu_01".to_owned(),
+                name: "bash".to_owned(),
+            }
+        );
     }
 
     #[test]
@@ -772,63 +799,70 @@ mod tests {
         let info: ContentBlockInfo =
             serde_json::from_str(r#"{"type":"server_tool_use","id":"stu_01","name":"advisor"}"#)
                 .unwrap();
-        assert!(matches!(
+
+        assert_eq!(
             info,
-            ContentBlockInfo::ServerToolUse { id, name } if id == "stu_01" && name == "advisor",
-        ));
+            ContentBlockInfo::ServerToolUse {
+                id: "stu_01".to_owned(),
+                name: "advisor".to_owned(),
+            }
+        );
     }
 
     #[test]
     fn content_block_info_thinking() {
         let json = r#"{"type":"thinking","thinking":"Let me analyze this","signature":"sig_xyz"}"#;
+
         let info: ContentBlockInfo = serde_json::from_str(json).unwrap();
-        assert!(matches!(
+
+        assert_eq!(
             info,
-            ContentBlockInfo::Thinking { thinking, signature }
-                if thinking == "Let me analyze this" && signature == "sig_xyz",
-        ));
+            ContentBlockInfo::Thinking {
+                thinking: "Let me analyze this".to_owned(),
+                signature: "sig_xyz".to_owned(),
+            }
+        );
     }
 
     #[test]
     fn content_block_info_redacted_thinking() {
         let info: ContentBlockInfo =
             serde_json::from_str(r#"{"type":"redacted_thinking","data":"base64data=="}"#).unwrap();
-        assert!(matches!(
+
+        assert_eq!(
             info,
-            ContentBlockInfo::RedactedThinking { data } if data == "base64data==",
-        ));
+            ContentBlockInfo::RedactedThinking {
+                data: "base64data==".to_owned(),
+            }
+        );
     }
 
     #[test]
     fn content_block_info_server_tool_result_keeps_its_type_and_fields() {
         let json = r#"{"type":"advisor_tool_result","tool_use_id":"stu_1","content":{"type":"advisor_redacted_result","encrypted_content":"opaque"}}"#;
+
         let info: ContentBlockInfo = serde_json::from_str(json).unwrap();
-        let ContentBlockInfo::ServerToolResult {
-            r#type,
-            tool_use_id,
-            fields,
-        } = info
-        else {
-            panic!("expected ServerToolResult, got {info:?}");
-        };
+
         assert_eq!(
-            (r#type.as_str(), tool_use_id.as_str()),
-            ("advisor_tool_result", "stu_1"),
-        );
-        assert_eq!(
-            serde_json::Value::Object(fields),
-            json!({"content": {"type": "advisor_redacted_result", "encrypted_content": "opaque"}}),
+            info,
+            ContentBlockInfo::ServerToolResult {
+                r#type: "advisor_tool_result".to_owned(),
+                tool_use_id: "stu_1".to_owned(),
+                fields: serde_json::Map::from_iter([(
+                    "content".to_owned(),
+                    json!({"type": "advisor_redacted_result", "encrypted_content": "opaque"}),
+                )]),
+            }
         );
     }
 
     #[test]
     fn content_block_info_mcp_tool_result_is_no_server_tool_result() {
         let json = r#"{"type":"mcp_tool_result","tool_use_id":"m1","content":[]}"#;
+
         let info: ContentBlockInfo = serde_json::from_str(json).unwrap();
-        assert!(
-            matches!(info, ContentBlockInfo::McpToolResult {}),
-            "{info:?}"
-        );
+
+        assert_eq!(info, ContentBlockInfo::McpToolResult {});
     }
 
     #[test]
@@ -841,9 +875,11 @@ mod tests {
             (r#"{"type":"tool_use","id":"toolu_01"}"#, json!("tool_use")),
         ] {
             let info: ContentBlockInfo = serde_json::from_str(json).unwrap();
-            assert!(
-                matches!(&info, ContentBlockInfo::Unknown { r#type } if *r#type == expected),
-                "{json}: {info:?}",
+
+            assert_eq!(
+                info,
+                ContentBlockInfo::Unknown { r#type: expected },
+                "{json}"
             );
         }
     }
@@ -853,7 +889,13 @@ mod tests {
     #[test]
     fn delta_text() {
         let delta: Delta = serde_json::from_str(r#"{"type":"text_delta","text":"Hello"}"#).unwrap();
-        assert!(matches!(delta, Delta::TextDelta { text } if text == "Hello"));
+
+        assert_eq!(
+            delta,
+            Delta::TextDelta {
+                text: "Hello".to_owned(),
+            }
+        );
     }
 
     #[test]
@@ -861,10 +903,13 @@ mod tests {
         let delta: Delta =
             serde_json::from_str(r#"{"type":"input_json_delta","partial_json":"{\"key\":"}"#)
                 .unwrap();
-        assert!(matches!(
+
+        assert_eq!(
             delta,
-            Delta::InputJsonDelta { partial_json } if partial_json == r#"{"key":"#,
-        ));
+            Delta::InputJsonDelta {
+                partial_json: r#"{"key":"#.to_owned(),
+            }
+        );
     }
 
     #[test]
@@ -872,26 +917,34 @@ mod tests {
         let delta: Delta =
             serde_json::from_str(r#"{"type":"thinking_delta","thinking":"partial reasoning"}"#)
                 .unwrap();
-        assert!(matches!(
+
+        assert_eq!(
             delta,
-            Delta::ThinkingDelta { thinking } if thinking == "partial reasoning",
-        ));
+            Delta::ThinkingDelta {
+                thinking: "partial reasoning".to_owned(),
+            }
+        );
     }
 
     #[test]
     fn delta_signature() {
         let delta: Delta =
             serde_json::from_str(r#"{"type":"signature_delta","signature":"sig_abc123"}"#).unwrap();
-        assert!(matches!(
+
+        assert_eq!(
             delta,
-            Delta::SignatureDelta { signature } if signature == "sig_abc123",
-        ));
+            Delta::SignatureDelta {
+                signature: "sig_abc123".to_owned(),
+            }
+        );
     }
 
     #[test]
     fn delta_unknown_type() {
         let json = r#"{"type":"some_future_delta","data":"opaque"}"#;
+
         let delta: Delta = serde_json::from_str(json).unwrap();
-        assert!(matches!(delta, Delta::Unknown));
+
+        assert_eq!(delta, Delta::Unknown);
     }
 }

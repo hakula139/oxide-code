@@ -196,7 +196,7 @@ impl Client {
     /// The static `system` prefix up to [`SYSTEM_PROMPT_DYNAMIC_BOUNDARY`] always carries a
     /// `cache_control` breakpoint, shared across sessions. `breakpoint` marks the last content
     /// block of the final message. `user_context` rides as a synthetic leading user message to
-    /// keep dynamic content (CLAUDE.md and friends) out of the `system` parameter.
+    /// keep dynamic content such as CLAUDE.md out of the `system` parameter.
     fn stream(
         &self,
         messages: &[Message],
@@ -299,7 +299,8 @@ impl Wire for Client {
 
 // ── HTTP Client ──
 
-/// The HTTP client with every header requests share. Each request adds its own credential.
+/// Builds the HTTP client with shared request headers and TLS trust.
+/// Each request adds its own credential.
 fn build_http(gateway: &GatewayCompat, trust: &dyn Trust) -> Result<reqwest::Client> {
     let mut headers = HeaderMap::new();
     headers.insert("anthropic-version", HeaderValue::from_static(API_VERSION));

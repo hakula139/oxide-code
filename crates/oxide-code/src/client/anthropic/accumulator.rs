@@ -137,7 +137,7 @@ fn observe(usage: TokenUsage, reported: TokenUsage) -> TokenUsage {
 
 // ── BlockAccumulator ──
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 enum BlockAccumulator {
     Text(String),
     ToolUse {
@@ -745,7 +745,8 @@ mod tests {
             },
             0,
         );
-        assert!(matches!(text, BlockAccumulator::Text(t) if t == "hi"));
+
+        assert_eq!(text, BlockAccumulator::Text("hi".to_owned()));
 
         let thinking = BlockAccumulator::start(
             ContentBlockInfo::Thinking {
@@ -754,11 +755,14 @@ mod tests {
             },
             0,
         );
-        assert!(matches!(
+
+        assert_eq!(
             thinking,
-            BlockAccumulator::Thinking { thinking, signature }
-                if thinking == "step 1" && signature == "sig_abc"
-        ));
+            BlockAccumulator::Thinking {
+                thinking: "step 1".to_owned(),
+                signature: "sig_abc".to_owned(),
+            },
+        );
 
         let redacted = BlockAccumulator::start(
             ContentBlockInfo::RedactedThinking {
@@ -766,8 +770,12 @@ mod tests {
             },
             0,
         );
-        assert!(
-            matches!(redacted, BlockAccumulator::RedactedThinking { data } if data == "opaque-blob")
+
+        assert_eq!(
+            redacted,
+            BlockAccumulator::RedactedThinking {
+                data: "opaque-blob".to_owned()
+            },
         );
     }
 
@@ -780,13 +788,15 @@ mod tests {
             },
             0,
         );
-        assert!(
-            matches!(
-                &tool,
-                BlockAccumulator::ToolUse { id, name, json_buf, server: false }
-                    if id == "tool_1" && name == "bash" && json_buf.is_empty()
-            ),
-            "{tool:?}",
+
+        assert_eq!(
+            tool,
+            BlockAccumulator::ToolUse {
+                id: "tool_1".to_owned(),
+                name: "bash".to_owned(),
+                json_buf: String::new(),
+                server: false,
+            },
         );
 
         let server = BlockAccumulator::start(
@@ -796,13 +806,15 @@ mod tests {
             },
             0,
         );
-        assert!(
-            matches!(
-                &server,
-                BlockAccumulator::ToolUse { id, name, json_buf, server: true }
-                    if id == "srv_1" && name == "web_search" && json_buf.is_empty()
-            ),
-            "{server:?}",
+
+        assert_eq!(
+            server,
+            BlockAccumulator::ToolUse {
+                id: "srv_1".to_owned(),
+                name: "web_search".to_owned(),
+                json_buf: String::new(),
+                server: true,
+            },
         );
     }
 
@@ -815,7 +827,8 @@ mod tests {
             ContentBlockInfo::McpToolResult {},
         ] {
             let block = BlockAccumulator::start(info, 0);
-            assert!(matches!(block, BlockAccumulator::Skipped), "{block:?}");
+
+            assert_eq!(block, BlockAccumulator::Skipped);
         }
     }
 
@@ -835,9 +848,14 @@ mod tests {
         });
 
         assert_eq!(forwarded, None);
-        assert!(
-            matches!(&block, BlockAccumulator::ToolUse { json_buf, .. } if json_buf == r#"{"x:1}"#),
-            "{block:?}",
+        assert_eq!(
+            block,
+            BlockAccumulator::ToolUse {
+                id: "tool_1".to_owned(),
+                name: "bash".to_owned(),
+                json_buf: r#"{"x:1}"#.to_owned(),
+                server: false,
+            },
         );
     }
 
@@ -860,11 +878,13 @@ mod tests {
             Some(ResponseEvent::Thinking(", step 2".to_owned()))
         );
         assert_eq!(signature, None);
-        assert!(matches!(
-            &block,
-            BlockAccumulator::Thinking { thinking, signature }
-                if thinking == "step 1, step 2" && signature == "sig_abc"
-        ));
+        assert_eq!(
+            block,
+            BlockAccumulator::Thinking {
+                thinking: "step 1, step 2".to_owned(),
+                signature: "sig_abc".to_owned(),
+            },
+        );
     }
 
     #[test]
@@ -876,7 +896,7 @@ mod tests {
         });
 
         assert_eq!(forwarded, None);
-        assert!(matches!(&block, BlockAccumulator::Text(buf) if buf == "hi"));
+        assert_eq!(block, BlockAccumulator::Text("hi".to_owned()));
     }
 
     // ── BlockAccumulator::into_content_block ──
