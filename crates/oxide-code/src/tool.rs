@@ -1486,15 +1486,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prepare_keeps_directory_only_paths_from_reading_or_overwriting_files() {
-        let dir = canonical_tempdir();
-        let ctx = ctx(dir.path());
-        let path = dir.path().join("notes");
-        std::fs::write(&path, "original").unwrap();
-        let read = testing::run(&ReadTool, serde_json::json!({"file_path": "notes"}), &ctx).await;
-        assert!(!read.is_error, "{}", read.content);
+    async fn prepare_matches_native_file_access_for_directory_suffixed_paths() {
+        for name in ["notes/", "notes/."] {
+            let dir = canonical_tempdir();
+            let ctx = ctx(dir.path());
+            let path = dir.path().join("notes");
+            std::fs::write(&path, "original").unwrap();
+            let native = std::fs::read_to_string(dir.path().join(name));
+            let succeeds = native.is_ok();
 
-        for name in ["notes/", "notes/.", "missing/", "missing/."] {
+            let prepared = ReadTool.prepare(serde_json::json!({"file_path": name}), &ctx);
+            let Access::Path { zone, .. } = &prepared.access else {
+                panic!("expected a path target, got {prepared:?}");
+            };
+            assert_eq!(*zone, Zone::Outside, "{name}");
+            let read = ReadTool.run(prepared, &ctx).await;
+            assert_eq!(read.is_error, !succeeds, "{name}: {}", read.content);
+            if let Ok(content) = native {
+                assert_eq!(content, "original");
+                assert_eq!(read.content, "1\toriginal");
+            }
+
+            let write = testing::run(
+                &WriteTool,
+                serde_json::json!({"file_path": name, "content": "replacement"}),
+                &ctx,
+            )
+            .await;
+            assert_eq!(write.is_error, !succeeds, "{name}: {}", write.content);
+
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                if succeeds { "replacement" } else { "original" },
+                "{name}",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn prepare_keeps_missing_directory_paths_from_becoming_files() {
+        for name in ["missing/", "missing/."] {
+            let dir = canonical_tempdir();
+            let ctx = ctx(dir.path());
+
             let read = testing::run(&ReadTool, serde_json::json!({"file_path": name}), &ctx).await;
             assert!(read.is_error, "{name}: {}", read.content);
             let write = testing::run(
@@ -1505,7 +1539,6 @@ mod tests {
             .await;
             assert!(write.is_error, "{name}: {}", write.content);
 
-            assert_eq!(std::fs::read_to_string(&path).unwrap(), "original");
             assert!(!dir.path().join("missing").is_file());
         }
     }
