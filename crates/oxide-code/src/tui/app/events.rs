@@ -19,6 +19,7 @@ use crate::tui::clipboard::{CopyReport, Delivery};
 use crate::tui::components::status::Status;
 use crate::tui::git_probes::GitUpdate;
 use crate::tui::modal::approval::ApprovalModal;
+use crate::tui::now;
 use crate::util::text::plural;
 
 impl App {
@@ -415,7 +416,7 @@ impl App {
         self.copy_notice = Some(CopyNotice {
             text,
             failed,
-            until: Instant::now() + COPY_NOTICE_DURATION,
+            until: now() + COPY_NOTICE_DURATION,
         });
         self.dirty = true;
     }
@@ -1991,21 +1992,25 @@ mod tests {
 
     // ── expire_copy_notice ──
 
-    #[test]
-    fn expire_copy_notice_clears_the_notice_once_its_time_is_up() {
+    #[tokio::test(start_paused = true)]
+    async fn expire_copy_notice_clears_the_notice_once_its_time_is_up() {
         let (mut app, _rx, _event_tx) = test_app(None);
         app.apply_copy_report(CopyReport {
             chars: 4,
             outcome: Ok(Delivery::Copied),
         });
-        let until = app.copy_notice.as_ref().unwrap().until;
 
-        let before = until.checked_sub(Duration::from_millis(1)).unwrap();
-        assert!(!app.expire_copy_notice(before));
+        let just_before = COPY_NOTICE_DURATION
+            .checked_sub(Duration::from_millis(1))
+            .unwrap();
+        tokio::time::advance(just_before).await;
+        assert!(!app.expire_copy_notice(now()));
         assert!(app.copy_notice.is_some());
-        assert!(app.expire_copy_notice(until));
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(app.expire_copy_notice(now()));
         assert!(app.copy_notice.is_none());
-        assert!(!app.expire_copy_notice(until), "nothing left to clear");
+        assert!(!app.expire_copy_notice(now()), "nothing left to clear");
     }
 
     // ── format_config_change ──

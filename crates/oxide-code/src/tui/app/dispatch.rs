@@ -17,6 +17,7 @@ use crate::tui::action::Action;
 use crate::tui::components::input::InputOutcome;
 use crate::tui::components::status::Status;
 use crate::tui::modal::ModalAction;
+use crate::tui::now;
 use crate::tui::theme::{self, Theme};
 use crate::tui::viewport::wrap_next;
 
@@ -89,7 +90,7 @@ impl App {
                     ) {
                         return;
                     }
-                    if let Some(text) = self.chat.handle_mouse(*mouse, Instant::now()) {
+                    if let Some(text) = self.chat.handle_mouse(*mouse, now()) {
                         self.clipboard.copy(text);
                     }
                 }
@@ -263,11 +264,11 @@ impl App {
     /// Quits on a second Ctrl+C inside the exit window, or arms the window.
     fn confirm_exit(&mut self) {
         if let Status::ExitArmed { until } = self.status_bar.status()
-            && Instant::now() < *until
+            && now() < *until
         {
             self.should_quit = true;
         } else {
-            let until = Instant::now() + EXIT_WINDOW;
+            let until = now() + EXIT_WINDOW;
             self.status_bar.set_status(Status::ExitArmed { until });
         }
     }
@@ -499,16 +500,39 @@ mod tests {
         assert!(matches!(forwarded, Op::Prompt(s) if s == "hi"));
     }
 
-    #[test]
-    fn handle_crossterm_key_ctrl_c_idle_arms_exit_then_confirms() {
+    #[tokio::test(start_paused = true)]
+    async fn handle_crossterm_key_ctrl_c_idle_arms_exit_then_confirms() {
         // The first press arms, and a second press inside the window confirms.
         let (mut app, _rx, _event_tx) = test_app(None);
         app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::CONTROL));
         assert!(!app.should_quit, "first press only arms");
-        assert!(matches!(app.status_bar.status(), Status::ExitArmed { .. }));
+        assert_eq!(
+            app.status_bar.status(),
+            &Status::ExitArmed {
+                until: now() + EXIT_WINDOW
+            }
+        );
 
+        tokio::time::advance(EXIT_WINDOW.checked_sub(Duration::from_millis(1)).unwrap()).await;
         app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::CONTROL));
         assert!(app.should_quit, "second press within window confirms");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn handle_crossterm_key_ctrl_c_after_the_exit_window_arms_it_again() {
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::CONTROL));
+
+        tokio::time::advance(EXIT_WINDOW).await;
+        app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::CONTROL));
+
+        assert!(!app.should_quit);
+        assert_eq!(
+            app.status_bar.status(),
+            &Status::ExitArmed {
+                until: now() + EXIT_WINDOW
+            }
+        );
     }
 
     #[tokio::test]
@@ -645,7 +669,7 @@ mod tests {
         assert!(app.dirty);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn handle_crossterm_event_ctrl_c_copies_the_selection_without_interrupting() {
         let (mut app, mut rx, _event_tx) = test_app(None);
         app.chat.push_system_message("copy this word");
@@ -665,7 +689,7 @@ mod tests {
         assert_eq!(app.status_bar.status(), &Status::Streaming);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn handle_crossterm_event_any_other_key_clears_the_selection_and_still_acts() {
         let (mut app, _rx, _event_tx) = test_app(None);
         app.chat.push_system_message("copy this word");
