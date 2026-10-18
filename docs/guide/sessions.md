@@ -108,6 +108,8 @@ When the TUI is running, oxide-code generates a concise AI title (3-7 words) sho
 
 In the TUI, `/rename` opens a title editor pre-filled with the current title, and `/rename <title>` sets it directly, as it does in the `--no-tui` REPL. Your title replaces the AI title, and AI title generation stops for that session.
 
+The first-prompt title and a typed `/rename <title>` keep only their first non-blank line and are cut short with `...` past 80 columns. The `/rename` editor stops taking input at 80 columns.
+
 ## Session ID in Commands
 
 Each `bash` command the agent runs sees the session's ID in `OX_SESSION_ID`, so a script can tell which session started it.

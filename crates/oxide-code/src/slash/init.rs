@@ -2,7 +2,6 @@
 //! existing ones as a diff. When neither `AGENTS.md` nor `CLAUDE.md` exists, a picker first asks
 //! which one to create.
 
-use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::{fs, iter};
 
@@ -90,71 +89,57 @@ fn prompt(text: String) -> Action {
 const RUBRIC: &str = indoc! {"
     An instruction file should include only what an agent would get wrong without it:
 
-    1. Build / lint / test commands the agent can't infer from manifest files. Include any flags or
-       sequences that differ from the language defaults (e.g., how to run a single test).
-    2. High-level architecture that requires reading multiple files to understand: modules,
-       layering, ownership, and the data flow between them.
-    3. Project-specific conventions that diverge from language defaults (import grouping,
-       error-handling style, naming, blank-line rules).
-    4. External constraints the code can't reveal: required env vars, platform-only behavior,
-       services that must be running, workflow steps the agent can't infer.
+    1. Build / lint / test commands the agent can't infer from manifest files. Include any flags or sequences that differ from the language defaults (e.g., how to run a single test).
+    2. High-level architecture that requires reading multiple files to understand: modules, layering, ownership, and the data flow between them.
+    3. Project-specific conventions that diverge from language defaults (import grouping, error-handling style, naming, blank-line rules).
+    4. External constraints the code can't reveal: required env vars, platform-only behavior, services that must be running, workflow steps the agent can't infer.
 
     Exclude:
 
-    - Standard language conventions the agent already knows (`cargo test`,
-      `npm test`, etc.).
+    - Standard language conventions the agent already knows (`cargo test`, `npm test`, etc.).
     - File-by-file structure or component lists. These are discoverable via `glob` / `ls`.
     - Generic development advice (`write tests`, `handle errors`).
-    - Information that changes frequently. Reference the source file by relative path so the agent
-      reads the current version.
-    - Sections you can't ground in files you actually read. Do not fabricate `Common Tasks`, `Tips
-      for Development`, or `Support` headers.
+    - Information that changes frequently. Reference the source file by relative path so the agent reads the current version.
+    - Sections you can't ground in files you actually read. Do not fabricate `Common Tasks`, `Tips for Development`, or `Support` headers.
 
-    Be specific. `Use 2-space indentation in TypeScript` is better than `Format code properly`.
-    Don't restate the same fact in multiple sections. Every line should answer `what would a fresh
-    agent get wrong without this?` If the answer is `nothing`, cut the line.
+    Be specific. `Use 2-space indentation in TypeScript` is better than `Format code properly`. Don't restate the same fact in multiple sections. Every line should answer `what would a fresh agent get wrong without this?` If the answer is `nothing`, cut the line.
 
-    If a `README.md`, `.cursor/rules/`, `.cursorrules`, or `.github/copilot-instructions.md` exists,
-    extract the load-bearing parts (commands, conventions, gotchas) and merge them into the
-    instructions without duplication. Skip prose that restates language defaults.
-"};
+    If a `README.md`, `.cursor/rules/`, `.cursorrules`, or `.github/copilot-instructions.md` exists, extract the load-bearing parts (commands, conventions, gotchas) and merge them into the instructions without duplication. Skip prose that restates language defaults."
+};
 
 /// Asks the model to create `file` at `root`, for a project with no instruction file yet.
 fn create_prompt(root: &Path, file: &str) -> String {
     let root = root.display();
     formatdoc! {"
-        Please analyze this codebase and create `{file}` in `{root}`. Future AI coding assistants
-        will read it as project instructions when working on this codebase.
+        Please analyze this codebase and create `{file}` in `{root}`. Future AI coding assistants will read it as project instructions when working on this codebase.
 
         {RUBRIC}
+
         Prefix the file with:
 
         ```
         # {file}
 
-        This file provides guidance to AI coding assistants when working with code in this
-        repository.
-        ```
-    "}
+        This file provides guidance to AI coding assistants when working with code in this repository.
+        ```"
+    }
 }
 
 /// Asks the model to propose changes to the `existing` instruction files at `root` as a diff, and
 /// to apply them only once the user confirms.
 fn update_prompt(root: &Path, existing: &[PathBuf]) -> String {
     let root = root.display();
-    let files = existing.iter().fold(String::new(), |mut list, path| {
-        _ = writeln!(list, "- `{}`", path.display());
-        list
-    });
+    let files = existing
+        .iter()
+        .map(|path| format!("- `{}`", path.display()))
+        .collect::<Vec<_>>()
+        .join("\n");
     formatdoc! {"
-        Please analyze this codebase and improve its project instructions, which future AI coding
-        assistants read when working on it. They live in these files in `{root}`:
+        Please analyze this codebase and improve its project instructions, which future AI coding assistants read when working on it. They live in these files in `{root}`:
 
         {files}
-        Read each file, but do not edit any file in this turn. Show the changes you propose as a
-        unified diff in a `diff` code block, explain why each change helps, then end your turn.
-        Apply the changes only after the user confirms them. If nothing needs to change, say so.
-        Update each file in place, without moving content between files.
+
+        Read each file, but do not edit any file in this turn. Show the changes you propose as a unified diff in a `diff` code block, explain why each change helps, then end your turn. Apply the changes only after the user confirms them. If nothing needs to change, say so. Update each file in place, without moving content between files.
 
         {RUBRIC}"
     }
@@ -258,7 +243,7 @@ mod tests {
     use crate::slash::test_session_info;
     use crate::tui::modal::testing::render_rows;
 
-    fn run_execute(project_root: &Path) -> SlashOutcome {
+    fn execute_in(project_root: &Path) -> SlashOutcome {
         let mut info = test_session_info();
         info.project_root = project_root.to_owned();
         InitCmd
@@ -302,7 +287,7 @@ mod tests {
     fn execute_without_an_instruction_file_opens_the_picker() {
         let root = tempfile::tempdir().unwrap();
 
-        let mut picker = run_execute(root.path()).into_modal();
+        let mut picker = execute_in(root.path()).into_modal();
 
         assert_eq!(
             press(picker.as_mut(), KeyCode::Enter),
@@ -315,7 +300,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         fs::write(root.path().join("AGENTS.md"), "# AGENTS.md\n").unwrap();
 
-        let action = run_execute(root.path()).into_forward();
+        let action = execute_in(root.path()).into_forward();
 
         assert_eq!(
             action,
@@ -365,12 +350,22 @@ mod tests {
     fn create_prompt_names_the_file_in_its_header() {
         let prompt = create_prompt(Path::new("/repo"), "CLAUDE.md");
 
-        assert!(
-            prompt.starts_with("Please analyze this codebase and create `CLAUDE.md` in `/repo`."),
-            "{prompt}"
+        assert_eq!(
+            prompt,
+            formatdoc! {"
+                Please analyze this codebase and create `CLAUDE.md` in `/repo`. Future AI coding assistants will read it as project instructions when working on this codebase.
+
+                {RUBRIC}
+
+                Prefix the file with:
+
+                ```
+                # CLAUDE.md
+
+                This file provides guidance to AI coding assistants when working with code in this repository.
+                ```"
+            },
         );
-        assert!(prompt.contains("```\n# CLAUDE.md\n\n"), "{prompt}");
-        assert!(prompt.contains(RUBRIC), "{prompt}");
     }
 
     #[test]
@@ -382,17 +377,20 @@ mod tests {
 
         let prompt = update_prompt(Path::new("/repo"), &existing);
 
-        let files = format!(
-            "\n\n- `CLAUDE.md`\n- `{}`\n\nRead each file",
-            existing[1].display()
+        let nested = existing[1].display();
+        assert_eq!(
+            prompt,
+            formatdoc! {"
+                Please analyze this codebase and improve its project instructions, which future AI coding assistants read when working on it. They live in these files in `/repo`:
+
+                - `CLAUDE.md`
+                - `{nested}`
+
+                Read each file, but do not edit any file in this turn. Show the changes you propose as a unified diff in a `diff` code block, explain why each change helps, then end your turn. Apply the changes only after the user confirms them. If nothing needs to change, say so. Update each file in place, without moving content between files.
+
+                {RUBRIC}"
+            },
         );
-        assert!(prompt.contains(&files), "{prompt}");
-        assert!(
-            prompt.contains("do not edit any file in this turn"),
-            "{prompt}"
-        );
-        assert!(prompt.contains("unified diff"), "{prompt}");
-        assert!(prompt.ends_with(RUBRIC), "{prompt}");
     }
 
     // ── InitPicker::handle_key ──

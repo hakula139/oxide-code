@@ -22,8 +22,8 @@ enum Tier {
     AliasSubstring,
 }
 
-/// Empty `query` returns the slice in declared order; non-empty matches by prefix or substring,
-/// sorted by tier.
+/// Matches `query` by prefix or substring, sorted by tier. An empty `query` returns `commands` in
+/// declared order.
 pub(super) fn filter_and_rank(query: &str, commands: &[&dyn SlashCommand]) -> Vec<MatchedCommand> {
     if query.is_empty() {
         return commands.iter().map(|cmd| on_name(*cmd)).collect();
@@ -261,7 +261,6 @@ mod tests {
 
     #[test]
     fn rank_by_prefix_promotes_prefix_above_substring() {
-        // `h` prefixes `high`; substring-matches `xhigh`. Prefix wins; declared order otherwise.
         assert_eq!(ranked("h"), vec!["high", "xhigh"]);
     }
 

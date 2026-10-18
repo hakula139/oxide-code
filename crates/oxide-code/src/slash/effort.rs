@@ -1,5 +1,5 @@
-//! `/effort` opens the slider, or swaps with `/effort <level>`. Bare form opens the
-//! Speed ↔ Intelligence slider (see [`super::effort_slider`]). Typed arg shortcuts the picker.
+//! Bare `/effort` opens the Speed ↔ Intelligence slider in [`super::effort_slider`], and
+//! `/effort <level>` switches directly.
 
 use std::borrow::Cow;
 
@@ -77,6 +77,7 @@ fn no_effort_tier_msg(model: &ModelSpec) -> String {
 mod tests {
     use super::*;
     use crate::protocol::Op;
+    use crate::slash::registry::testing::run_execute;
     use crate::slash::test_session_info;
 
     // ── EffortCmd::name ──
@@ -118,13 +119,11 @@ mod tests {
 
     #[test]
     fn complete_arg_prefix_match_pulls_xhigh_above_max_substring() {
-        // `x` prefixes `xhigh`; `max` ends in `x` (substring). Prefix tier wins.
         assert_eq!(arg_values("x"), vec!["xhigh", "max"]);
     }
 
     #[test]
     fn complete_arg_substring_match_lands_after_prefix_tier() {
-        // `high` is a substring of `xhigh` and a prefix of `high` — both tiers fire.
         assert_eq!(arg_values("high"), vec!["high", "xhigh"]);
     }
 
@@ -139,10 +138,6 @@ mod tests {
                                  Switch to a supported model first with `/model`, \
                                  for example `/model opus`.";
 
-    fn run_execute(args: &str) -> Result<SlashOutcome, String> {
-        run_execute_with_model(test_session_info().config.model.id(), args)
-    }
-
     fn run_execute_with_model(model_id: &str, args: &str) -> Result<SlashOutcome, String> {
         let mut info = test_session_info();
         info.config.model = ModelSpec::resolve(model_id.to_owned());
@@ -151,7 +146,7 @@ mod tests {
 
     #[test]
     fn execute_no_args_opens_the_slider() {
-        run_execute("").unwrap().into_modal();
+        run_execute(&EffortCmd, "").unwrap().into_modal();
     }
 
     #[test]
@@ -164,7 +159,7 @@ mod tests {
     #[test]
     fn execute_with_level_forwards_set_model_with_effort_only() {
         assert_eq!(
-            run_execute("xhigh").unwrap().into_forward(),
+            run_execute(&EffortCmd, "xhigh").unwrap().into_forward(),
             Action::Op(Op::SetModel {
                 model: None,
                 effort: Some(Effort::Xhigh),

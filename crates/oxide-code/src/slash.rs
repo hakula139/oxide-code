@@ -1,8 +1,7 @@
 //! Slash-command surface.
 //!
-//! [`parse_slash`] detects commands. [`dispatch`] resolves them via the registry. Each command is
-//! a [`registry::SlashCommand`] impl in a submodule, which a pair such as `/login` and `/logout`
-//! shares. Adding one is an impl plus an entry in [`registry::BUILT_INS`].
+//! [`parse_slash`] detects commands, and [`dispatch`] runs them through the registry of
+//! [`registry::SlashCommand`] impls.
 //!
 //! Persistence: commands never write config. Mutations are session-local. Restart returns to the
 //! user-declared config (see `docs/design/slash/commands.md` § Design Decisions 6).
@@ -43,7 +42,7 @@ pub(crate) use resume::ResumePicker;
 use crate::command;
 use crate::protocol::Op;
 
-/// Filter the built-in registry against a popup query (leading `/` stripped).
+/// Filters the built-in registry against a popup query (leading `/` stripped).
 pub(crate) fn filter_built_ins(query: &str) -> Vec<MatchedCommand> {
     matcher::filter_and_rank(query, registry::BUILT_INS)
 }
@@ -126,18 +125,13 @@ fn classify_in(commands: &[&dyn registry::SlashCommand], parsed: &Parsed) -> Sla
     }
 }
 
-/// 36-byte UUID-shaped id seeded from `byte`. Matches the wire shape of real session ids so
-/// `validate_session_id` accepts them and `id_prefix` slicing lines up.
+/// Session ID with every byte set to `byte`, in the hyphenated UUID form real session IDs use.
 #[cfg(test)]
 pub(crate) fn stamped_id(byte: u8) -> String {
-    let s = format!("{byte:02x}");
-    format!(
-        "{s}{s}1111-2222-3333-4444-{s}{s}{s}{s}{s}{s}",
-        s = s.repeat(2),
-    )
+    uuid::Uuid::from_bytes([byte; 16]).to_string()
 }
 
-/// Run `f` with a fresh `XDG_DATA_HOME` so `SessionStore::open` lands in a private tempdir.
+/// Runs `f` with a fresh `XDG_DATA_HOME` so `SessionStore::open` lands in a private tempdir.
 /// Hands the directory back so callers can layer extra stores beneath the same root.
 #[cfg(test)]
 pub(crate) fn with_isolated_xdg<R>(f: impl FnOnce(&std::path::Path) -> R) -> R {

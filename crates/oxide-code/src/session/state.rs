@@ -8,17 +8,13 @@ use anyhow::{Result, bail};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+use super::display::fit_title;
 use super::entry::{CURRENT_VERSION, Entry, TitleSource};
 use super::store::{SessionStore, SessionWriter, encode_lines};
 use crate::file_tracker::FileSnapshot;
 use crate::message::{ContentBlock, Message, Role};
 use crate::tool::tasks::Task;
 use crate::util::git::current_branch;
-use crate::util::text::truncate_to_width;
-
-/// Terminal-column cap for first-prompt titles, leaving room in a 120-col `--list` row
-/// after the fixed `ID / Last Active / Msgs` prefix.
-const MAX_TITLE_LEN: usize = 80;
 
 /// Retry-queue size in MiB past which a failed flush stops persistence for the rest of the session.
 const MAX_UNWRITTEN_MIB: usize = 8;
@@ -145,7 +141,7 @@ impl SessionState {
             if !manual_title_set {
                 ai_title_seed = Some(text.to_owned());
                 entries.push(Entry::Title {
-                    title: truncate_title(text, MAX_TITLE_LEN),
+                    title: fit_title(text),
                     source: TitleSource::FirstPrompt,
                     updated_at: now,
                 });
@@ -335,11 +331,6 @@ pub(super) fn extract_user_text(message: &Message) -> Option<&str> {
         ContentBlock::Text { text } if !text.trim().is_empty() => Some(text.as_str()),
         _ => None,
     })
-}
-
-/// Truncates the trimmed first line to `max_width` terminal columns.
-fn truncate_title(s: &str, max_width: usize) -> String {
-    truncate_to_width(s.lines().next().unwrap_or(s).trim(), max_width)
 }
 
 #[cfg(test)]
@@ -864,39 +855,5 @@ mod tests {
             extract_user_text(&user_with_text_after_tool_result),
             Some("follow-up"),
         );
-    }
-
-    // ── truncate_title ──
-
-    #[test]
-    fn truncate_title_trims_first_line_and_caps_terminal_width() {
-        assert_eq!(truncate_title("hello world", 60), "hello world");
-        assert_eq!(truncate_title("", 60), "");
-        assert_eq!(truncate_title("first line\nsecond line", 60), "first line");
-        assert_eq!(truncate_title("  padded  ", 60), "padded");
-
-        let exact = "a".repeat(60);
-        assert_eq!(truncate_title(&exact, 60), exact);
-
-        let long = "a".repeat(100);
-        assert_eq!(truncate_title(&long, 20), format!("{}...", "a".repeat(17)));
-    }
-
-    #[test]
-    fn truncate_title_cjk_title_fits_terminal_column_cap() {
-        use unicode_width::UnicodeWidthStr;
-
-        let result = truncate_title(&"界".repeat(MAX_TITLE_LEN), MAX_TITLE_LEN);
-        assert_eq!(result, format!("{}...", "界".repeat(38)));
-        assert_eq!(result.width(), 79);
-    }
-
-    #[test]
-    fn truncate_title_multibyte_respects_terminal_width() {
-        // Each é is one column, so the cap keeps 57 of them plus "...".
-        let s = "\u{00e9}".repeat(61);
-        let result = truncate_title(&s, 60);
-        assert_eq!(result.chars().count(), 60);
-        assert_eq!(result, format!("{}...", "\u{00e9}".repeat(57)));
     }
 }

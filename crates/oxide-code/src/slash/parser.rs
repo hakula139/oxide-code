@@ -1,7 +1,7 @@
-//! Slash-command parser. Splits `/cmd args...` into name + args. Names accept ASCII alphanumerics,
-//! `_`, `-`, `:`, `.` for plugin-namespace forward-compat.
+//! Slash-command parser. Splits `/cmd args...` into a name and args. Names accept ASCII
+//! alphanumerics, `_`, `-`, `:`, and `.`, so namespaced names such as `/plugin:cmd` parse.
 
-/// `name` has the leading `/` stripped; `args` is trimmed.
+/// `name` with its leading `/` removed, and the trimmed `args`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Parsed {
     pub(crate) name: String,
@@ -37,18 +37,16 @@ pub(crate) fn unescape_literal(input: &str) -> &str {
         .unwrap_or(input)
 }
 
-/// In-progress popup context. `Name` while typing the command name (no whitespace yet);
-/// `Arg` once the user has typed a space after the name. `None` for plain prompts and `//`
-/// escape.
+/// In-progress popup context: `Name` while the user types the command name, and `Arg` once a
+/// space follows it. `None` for plain prompts and the `//` escape.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PopupState<'a> {
     Name(&'a str),
     Arg { name: &'a str, prefix: &'a str },
 }
 
-/// Classifies the cursor's position within a single-line input. Empty `prefix` in `Arg` means
-/// the user typed `/cmd ` and is poised to start the argument — distinct from `Arg { prefix:
-/// non-empty }` (already typing) and `Name` (still inside the name).
+/// Classifies the cursor's position within a single-line input. An empty `prefix` in `Arg` means
+/// the user typed `/cmd ` and has not started the argument yet.
 pub(crate) fn popup_state(buffer: &str) -> Option<PopupState<'_>> {
     let rest = buffer.trim_start().strip_prefix('/')?;
     if rest.starts_with('/') {

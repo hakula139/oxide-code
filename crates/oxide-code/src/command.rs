@@ -7,6 +7,7 @@ use crate::config::Effort;
 use crate::model::{MODELS, ModelInfo, ResolvedModelId, replacement_for};
 use crate::permission::Mode;
 use crate::protocol::{Op, ResumeTarget};
+use crate::session::display::fit_title;
 
 /// Canonical names of the commands [`parse`] knows, without their leading `/`.
 pub(crate) const NAMES: [&str; 7] = [
@@ -91,7 +92,7 @@ pub(crate) fn model(arg: &str) -> Result<Op, String> {
                 .map_or_else(String::new, |info| format!(" Did you mean `{}`?", info.id));
             let models = format_models(MODELS);
             return Err(formatdoc! {"
-                Unknown model: `{arg}`.{hint} Supported models:
+                Unknown model: `{arg}`.{hint} Valid:
 
                 {models}"
             });
@@ -103,11 +104,11 @@ pub(crate) fn model(arg: &str) -> Result<Op, String> {
     })
 }
 
-/// `/rename <title>`.
+/// `/rename <title>`, fitted to the session's title cap.
 pub(crate) fn rename(title: &str) -> Result<Op, String> {
     let title = required(title, "title", "/rename <title>")?;
     Ok(Op::Rename {
-        title: title.to_owned(),
+        title: fit_title(title),
     })
 }
 
@@ -142,6 +143,7 @@ mod tests {
     use indoc::indoc;
 
     use super::*;
+    use crate::session::display::MAX_TITLE_WIDTH;
 
     fn set_model(id: &str) -> Op {
         Op::SetModel {
@@ -290,7 +292,7 @@ mod tests {
             (
                 "gpt-4",
                 indoc! {"
-                    Unknown model: `gpt-4`. Supported models:
+                    Unknown model: `gpt-4`. Valid:
 
                     - `claude-fable-5-1` — Claude Fable 5.1
                     - `claude-opus-5-5` — Claude Opus 5.5
@@ -301,7 +303,7 @@ mod tests {
             (
                 "claude-opus-5-5-20261001",
                 indoc! {"
-                    Unknown model: `claude-opus-5-5-20261001`. Did you mean `claude-opus-5-5`? Supported models:
+                    Unknown model: `claude-opus-5-5-20261001`. Did you mean `claude-opus-5-5`? Valid:
 
                     - `claude-fable-5-1` — Claude Fable 5.1
                     - `claude-opus-5-5` — Claude Opus 5.5
@@ -312,7 +314,7 @@ mod tests {
             (
                 "sonnet[1m]",
                 indoc! {"
-                    Unknown model: `sonnet[1m]`. Did you mean `claude-sonnet-5-5`? Supported models:
+                    Unknown model: `sonnet[1m]`. Did you mean `claude-sonnet-5-5`? Valid:
 
                     - `claude-fable-5-1` — Claude Fable 5.1
                     - `claude-opus-5-5` — Claude Opus 5.5
@@ -356,6 +358,18 @@ mod tests {
             rename("  Fix auth bug  "),
             Ok(Op::Rename {
                 title: "Fix auth bug".to_owned(),
+            }),
+        );
+    }
+
+    #[test]
+    fn rename_fits_a_long_title_to_the_session_cap() {
+        let pasted = format!("{}\nSecond line", "a".repeat(MAX_TITLE_WIDTH + 1));
+
+        assert_eq!(
+            rename(&pasted),
+            Ok(Op::Rename {
+                title: format!("{}...", "a".repeat(MAX_TITLE_WIDTH - 3)),
             }),
         );
     }

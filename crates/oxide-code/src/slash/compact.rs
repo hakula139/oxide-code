@@ -35,15 +35,7 @@ impl SlashCommand for CompactCmd {
 mod tests {
     use super::*;
     use crate::protocol::Op;
-    use crate::slash::test_session_info;
-
-    fn run_execute(args: &str) -> Action {
-        let info = test_session_info();
-        CompactCmd
-            .execute(args, &SlashContext::new(&info, None))
-            .unwrap()
-            .into_forward()
-    }
+    use crate::slash::registry::testing::run_execute;
 
     // ── CompactCmd metadata ──
 
@@ -66,7 +58,9 @@ mod tests {
     #[test]
     fn execute_with_args_forwards_trimmed_instructions() {
         assert_eq!(
-            run_execute("  focus on the build error  "),
+            run_execute(&CompactCmd, "  focus on the build error  ")
+                .unwrap()
+                .into_forward(),
             Action::Op(Op::Compact {
                 instructions: Some("focus on the build error".to_owned()),
             }),

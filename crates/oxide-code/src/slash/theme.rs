@@ -70,8 +70,8 @@ impl SlashCommand for ThemeCmd {
     }
 }
 
-/// Resolve a typed `/theme <name>` argument against the curated catalog. Custom file paths
-/// are rejected — users with a custom TOML edit `~/.config/ox/config.toml` directly.
+/// Resolves a typed `/theme <name>` argument against the curated catalog. Custom themes require
+/// an edit to `config.toml`, so file paths are rejected.
 fn resolve_theme_arg(arg: &str) -> Result<&'static str, String> {
     let lower = arg.to_ascii_lowercase();
     BUILT_IN
@@ -214,15 +214,11 @@ impl Modal for ThemePicker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::slash::test_session_info;
+    use crate::slash::registry::testing::run_execute;
     use crate::tui::modal::testing::render_rows;
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::from(code)
-    }
-
-    fn run_execute(args: &str) -> Result<SlashOutcome, String> {
-        ThemeCmd.execute(args, &SlashContext::new(&test_session_info(), None))
     }
 
     fn picker_with_active(name: &str) -> ThemePicker {
@@ -283,14 +279,14 @@ mod tests {
 
     #[test]
     fn execute_no_args_opens_the_picker() {
-        run_execute("").unwrap().into_modal();
+        run_execute(&ThemeCmd, "").unwrap().into_modal();
     }
 
     #[test]
     fn execute_with_known_name_forwards_swap_theme() {
         for theme in BUILT_IN {
             assert_eq!(
-                run_execute(theme.name).unwrap().into_forward(),
+                run_execute(&ThemeCmd, theme.name).unwrap().into_forward(),
                 Action::SwapTheme {
                     name: theme.name.to_owned(),
                 },
@@ -303,7 +299,7 @@ mod tests {
     #[test]
     fn execute_is_case_insensitive() {
         assert_eq!(
-            run_execute("LATTE").unwrap().into_forward(),
+            run_execute(&ThemeCmd, "LATTE").unwrap().into_forward(),
             Action::SwapTheme {
                 name: "latte".to_owned(),
             },
@@ -312,7 +308,7 @@ mod tests {
 
     #[test]
     fn execute_unknown_name_errors_listing_valid_options() {
-        let err = run_execute("solarized").unwrap_err();
+        let err = run_execute(&ThemeCmd, "solarized").unwrap_err();
 
         assert_eq!(
             err,
