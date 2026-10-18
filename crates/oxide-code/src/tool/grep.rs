@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     GrepFileGroup, GrepMatchLine, NO_FILES_FOUND, Prepared, SearchRoot, Tool, ToolCtx,
-    ToolMetadata, ToolOutput, ToolResultView, ToolSpec, extract_input_field,
+    ToolMetadata, ToolOutput, ToolResultView, ToolSpec, Unreadable, extract_input_field,
 };
 use crate::permission::{PermissionClass, ReadFilter, WalkFilter};
 use crate::util::text::plural;
@@ -191,7 +191,7 @@ async fn run(prepared: Prepared, ctx: &ToolCtx, read_filter: ReadFilter) -> Tool
     .await
     {
         Ok(content) => {
-            let title = grep_title(super::strip_withheld_note(&content));
+            let title = grep_title(super::strip_search_notes(&content));
             ToolOutput::success(content).with_title(title)
         }
         Err(msg) => ToolOutput::error(msg),
@@ -258,7 +258,12 @@ fn grep_files(params: &GrepParams<'_>) -> Result<String, String> {
     let read_filter = params
         .read_filter
         .walk(&root.base, &root.spelled, &root.workspace);
-    let collected = collect_files(
+    let CollectedFiles {
+        files,
+        skipped_large,
+        mut unreadable,
+        withheld,
+    } = collect_files(
         &root.base,
         include_matcher.as_ref(),
         &read_filter,
@@ -266,15 +271,16 @@ fn grep_files(params: &GrepParams<'_>) -> Result<String, String> {
     );
 
     let cwd = &root.cwd;
-    let texts = texts(&collected.files, &params.cancel);
+    let texts = texts(&files, &params.cancel, &mut unreadable);
     let mut result = match params.output_mode {
         OutputMode::FilesWithMatches => format_files_with_matches(texts, cwd, &re, head_limit),
         OutputMode::Count => format_count(texts, cwd, &re, head_limit),
         OutputMode::Content => format_content(texts, cwd, &re, params.context, head_limit),
     };
 
-    append_skipped_warnings(&mut result, &collected.skipped_large, cwd);
-    super::push_withheld_note(&mut result, collected.withheld);
+    push_skipped_note(&mut result, &skipped_large, cwd);
+    super::push_unreadable_note(&mut result, &unreadable, cwd);
+    super::push_withheld_note(&mut result, withheld);
 
     Ok(result)
 }
@@ -282,6 +288,8 @@ fn grep_files(params: &GrepParams<'_>) -> Result<String, String> {
 struct CollectedFiles {
     files: Vec<PathBuf>,
     skipped_large: Vec<(PathBuf, u64)>,
+    /// Paths the walk could not read.
+    unreadable: Vec<Unreadable>,
     /// Files a `read` deny or ask rule withheld.
     withheld: usize,
 }
@@ -307,13 +315,15 @@ fn collect_files(
         return CollectedFiles {
             files,
             skipped_large,
+            unreadable: Vec::new(),
             withheld: 0,
         };
     }
 
     let mut skipped_large = Vec::new();
+    let mut unreadable = Vec::new();
     let mut withheld = 0;
-    let entries = super::walk_files(base, cancel)
+    let entries = super::walk_files(base, cancel, &mut unreadable)
         .filter(|entry| {
             include_matcher.is_none_or(|m| {
                 let name = entry.file_name().to_string_lossy();
@@ -342,40 +352,52 @@ fn collect_files(
     CollectedFiles {
         files,
         skipped_large,
+        unreadable,
         withheld,
     }
 }
 
-/// Each of `files` that reads as text, with its content, until `cancel` fires.
+/// Each of `files` that reads as text, with its content, until `cancel` fires. Each file whose read
+/// fails goes to `unreadable`, except one that vanished after the walk found it.
 fn texts<'a>(
     files: &'a [PathBuf],
     cancel: &'a CancellationToken,
+    unreadable: &'a mut Vec<Unreadable>,
 ) -> impl Iterator<Item = (&'a Path, String)> + 'a {
     files
         .iter()
         .take_while(|_| !cancel.is_cancelled())
-        .filter_map(|path| Some((path.as_path(), read_text(path)?)))
+        .filter_map(move |path| match read_text(path) {
+            Ok(text) => text.map(|text| (path.as_path(), text)),
+            Err(e) => {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    unreadable.push(Unreadable::from_read(path, &e));
+                }
+                None
+            }
+        })
 }
 
-fn read_text(path: &Path) -> Option<String> {
-    let bytes = std::fs::read(path).ok()?;
+/// The text of the file at `path`, or `None` when it is binary.
+fn read_text(path: &Path) -> std::io::Result<Option<String>> {
+    let bytes = std::fs::read(path)?;
     if super::is_binary(&bytes) {
-        return None;
+        return Ok(None);
     }
-    Some(String::from_utf8_lossy(&bytes).into_owned())
+    Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
 }
 
-fn append_skipped_warnings(output: &mut String, skipped: &[(PathBuf, u64)], cwd: &Path) {
-    if skipped.is_empty() {
-        return;
-    }
+fn push_skipped_note(output: &mut String, skipped: &[(PathBuf, u64)], cwd: &Path) {
     let limit_mb = MAX_GREP_FILE_SIZE / (1024 * 1024);
-    _ = write!(output, "\n\nSkipped (exceeds {limit_mb} MB size limit):");
-    for (path, size) in skipped {
-        let mb = super::bytes_to_mb(*size);
-        let display = super::display_path(path, cwd);
-        _ = write!(output, "\n  {display} ({mb:.1} MB)");
-    }
+    let lines: Vec<String> = skipped
+        .iter()
+        .map(|(path, size)| {
+            let mb = super::bytes_to_mb(*size);
+            format!("{} ({mb:.1} MB)", super::display_path(path, cwd))
+        })
+        .collect();
+    let header = format!("Skipped (exceeds {limit_mb} MB size limit):");
+    super::push_path_note(output, &header, &lines);
 }
 
 // ── Content Mode ──
@@ -1084,9 +1106,93 @@ mod tests {
         f.set_len(MAX_GREP_FILE_SIZE + 1).unwrap();
 
         let result = grep_files(&params("match", dir.path())).unwrap();
-        assert!(result.contains("small.txt:1:match here"));
-        assert!(result.contains("Skipped"));
-        assert!(result.contains("\n  large.txt ("));
+
+        assert_eq!(
+            result,
+            indoc! {"
+                small.txt:1:match here
+
+                Skipped (exceeds 1 MB size limit):
+                  large.txt (1.0 MB)"
+            }
+        );
+    }
+
+    #[test]
+    fn grep_files_lists_what_it_could_not_read_after_the_matches() {
+        let dir = canonical_tempdir();
+        std::fs::write(dir.path().join("a.rs"), "hit\n").unwrap();
+        let locked = dir.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::write(locked.join("b.rs"), "hit\n").unwrap();
+        let secret = dir.path().join("secret.rs");
+        std::fs::write(&secret, "hit\n").unwrap();
+        let _denied = [testing::deny_read(&locked), testing::deny_read(&secret)];
+
+        let result = grep_files(&params("hit", dir.path())).unwrap();
+
+        let dir_cause = std::fs::read_dir(&locked).unwrap_err();
+        let file_cause = std::fs::read(&secret).unwrap_err();
+        assert_eq!(
+            result,
+            formatdoc! {"
+                a.rs:1:hit
+
+                Could not read:
+                  locked: {dir_cause}
+                  secret.rs: {file_cause}"
+            }
+        );
+        assert_eq!(
+            grep_title(crate::tool::strip_search_notes(&result)),
+            "1 match"
+        );
+    }
+
+    #[test]
+    fn grep_files_without_matches_still_lists_what_it_could_not_read() {
+        let dir = canonical_tempdir();
+        let secret = dir.path().join("secret.rs");
+        std::fs::write(&secret, "hit\n").unwrap();
+        let _denied = testing::deny_read(&secret);
+
+        let result = grep_files(&params("hit", dir.path())).unwrap();
+
+        let cause = std::fs::read(&secret).unwrap_err();
+        assert_eq!(
+            result,
+            formatdoc! {"
+                No matches found
+
+                Could not read:
+                  secret.rs: {cause}"
+            }
+        );
+    }
+
+    // ── texts ──
+
+    #[test]
+    fn texts_records_a_failed_read_but_skips_a_file_that_vanished() {
+        let dir = canonical_tempdir();
+        let secret = dir.path().join("secret.txt");
+        std::fs::write(&secret, "x").unwrap();
+        let _denied = testing::deny_read(&secret);
+        let files = [dir.path().join("gone.txt"), secret.clone()];
+        let cancel = CancellationToken::new();
+        let mut unreadable = Vec::new();
+
+        let read: Vec<_> = texts(&files, &cancel, &mut unreadable).collect();
+
+        let cause = std::fs::read(&secret).unwrap_err().to_string();
+        assert_eq!(read, []);
+        assert_eq!(
+            unreadable,
+            [Unreadable {
+                path: Some(secret),
+                error: cause,
+            }]
+        );
     }
 
     #[test]
@@ -1116,7 +1222,7 @@ mod tests {
                 (1 file withheld by read deny or ask rules)"
             }
         );
-        let title = grep_title(crate::tool::strip_withheld_note(&result));
+        let title = grep_title(crate::tool::strip_search_notes(&result));
         assert_eq!(title, "No matches found");
         // The structured view would drop the note, so the text view shows it.
         let input = serde_json::json!({"pattern": "secret"});

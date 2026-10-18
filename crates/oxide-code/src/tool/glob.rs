@@ -127,7 +127,7 @@ async fn run(prepared: Prepared, ctx: &ToolCtx, read_filter: ReadFilter) -> Tool
             content,
             truncated_total,
         }) => {
-            let title = glob_title(super::strip_withheld_note(&content));
+            let title = glob_title(super::strip_search_notes(&content));
             let output = ToolOutput::success(content).with_title(title);
             match truncated_total {
                 Some(total) => output.with_truncated_total(total),
@@ -155,8 +155,9 @@ struct GlobOutput {
 }
 
 /// Walks `root`, filters entries against `pattern`, and returns up to `MAX_RESULTS` matches sorted
-/// newest-first by mtime, rendered relative to the root's canonical cwd. Matches `read_filter`
-/// withholds are counted in a trailing note, and the walk stops once `cancel` fires.
+/// newest-first by mtime, rendered relative to the root's canonical cwd. Trailing notes list the
+/// paths the walk could not read and count the matches `read_filter` withholds. The walk stops
+/// once `cancel` fires.
 ///
 /// `walk_files` skips files matched by `.gitignore` or a global ignore file, so only non-ignored
 /// files reach the matcher. Truncation past `MAX_RESULTS` is announced inline and surfaced
@@ -183,8 +184,9 @@ fn glob_files(
     let glob = compile_glob(pattern)?;
 
     let read_filter = read_filter.walk(base, spelled, workspace);
+    let mut unreadable = Vec::new();
     let mut withheld = 0;
-    let entries = super::walk_files(base, cancel)
+    let entries = super::walk_files(base, cancel, &mut unreadable)
         .filter(|entry| {
             let rel = entry.path().strip_prefix(base).unwrap_or(entry.path());
             glob.is_match(rel)
@@ -199,27 +201,22 @@ fn glob_files(
         .map(|entry| super::display_path(entry.path(), cwd))
         .collect();
 
-    if matches.is_empty() {
-        let mut content = NO_FILES_FOUND.to_owned();
-        super::push_withheld_note(&mut content, withheld);
-        return Ok(GlobOutput {
-            content,
-            truncated_total: None,
-        });
-    }
-
     let total = matches.len();
     let truncated = total > MAX_RESULTS;
     matches.truncate(MAX_RESULTS);
 
-    let mut content = matches.join("\n");
-
+    let mut content = if matches.is_empty() {
+        NO_FILES_FOUND.to_owned()
+    } else {
+        matches.join("\n")
+    };
     if truncated {
         _ = write!(
             content,
             "\n\n{SHOWING_PREFIX}{MAX_RESULTS} of {total} matches. Use a more specific pattern.)"
         );
     }
+    super::push_unreadable_note(&mut content, &unreadable, cwd);
     super::push_withheld_note(&mut content, withheld);
 
     Ok(GlobOutput {
@@ -600,7 +597,7 @@ mod tests {
         );
         assert_eq!(result.truncated_total, None);
         assert_eq!(
-            glob_title(crate::tool::strip_withheld_note(&result.content)),
+            glob_title(crate::tool::strip_search_notes(&result.content)),
             "Found 1 file"
         );
         // The structured view would drop the note, so the text view shows it.
@@ -620,6 +617,33 @@ mod tests {
 
                 (1 file withheld by read deny or ask rules)"
             }
+        );
+    }
+
+    #[test]
+    fn glob_files_lists_a_directory_it_could_not_read_after_the_matches() {
+        let dir = canonical_tempdir();
+        std::fs::write(dir.path().join("a.rs"), "").unwrap();
+        let locked = dir.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::write(locked.join("b.rs"), "").unwrap();
+        let _denied = testing::deny_read(&locked);
+
+        let result = glob_in("*.rs", None, dir.path(), &ReadFilter::default()).unwrap();
+
+        let cause = std::fs::read_dir(&locked).unwrap_err();
+        assert_eq!(
+            result.content,
+            formatdoc! {"
+                a.rs
+
+                Could not read:
+                  locked: {cause}"
+            }
+        );
+        assert_eq!(
+            glob_title(crate::tool::strip_search_notes(&result.content)),
+            "Found 1 file"
         );
     }
 

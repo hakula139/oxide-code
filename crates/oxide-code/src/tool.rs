@@ -787,7 +787,8 @@ const MAX_WALK_DEPTH: usize = 64;
 
 const VCS_DIRS: &[&str] = &[".bzr", ".git", ".hg", ".jj", ".sl", ".svn"];
 
-/// Recursively walks `base`, yielding regular files only, until `cancel` fires.
+/// Recursively walks `base`, yielding regular files only, until `cancel` fires. Each path the walk
+/// cannot read goes to `unreadable`.
 ///
 /// Honors `.gitignore` and global ignore files, includes hidden entries such as `.github/` so
 /// dotfile config stays searchable, skips VCS metadata directories below `base`, and pins the walk
@@ -795,6 +796,7 @@ const VCS_DIRS: &[&str] = &[".bzr", ".git", ".hg", ".jj", ".sl", ".svn"];
 fn walk_files<'a>(
     base: &Path,
     cancel: &'a CancellationToken,
+    unreadable: &'a mut Vec<Unreadable>,
 ) -> impl Iterator<Item = ignore::DirEntry> + 'a {
     ignore::WalkBuilder::new(base)
         .hidden(false)
@@ -803,8 +805,55 @@ fn walk_files<'a>(
         .max_depth(Some(MAX_WALK_DEPTH))
         .build()
         .take_while(|_| !cancel.is_cancelled())
-        .filter_map(Result::ok)
+        .filter_map(move |entry| match entry {
+            Ok(entry) => Some(entry),
+            Err(e) => {
+                unreadable.extend(Unreadable::from_walk(&e));
+                None
+            }
+        })
         .filter(|e| e.file_type().is_some_and(|ft| ft.is_file()))
+}
+
+/// A path a search could not read, with the error that stopped it.
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+struct Unreadable {
+    /// The path, unless the walk failed partway through a directory listing without naming it.
+    path: Option<PathBuf>,
+    error: String,
+}
+
+impl Unreadable {
+    /// What walk error `e` failed to read, or `None` when `e` reports an ignore file that failed to
+    /// load. Such a file only loses its rules, so it hides nothing from the walk.
+    fn from_walk(e: &ignore::Error) -> Option<Self> {
+        e.depth()?;
+        let (path, cause) = match e {
+            ignore::Error::WithPath { path, err } => (Some(path.clone()), err.as_ref()),
+            _ => (None, e),
+        };
+        let error = cause
+            .io_error()
+            .map_or_else(|| cause.to_string(), innermost_error);
+        Some(Self { path, error })
+    }
+
+    /// The file at `path`, whose read failed with `e`.
+    fn from_read(path: &Path, e: &std::io::Error) -> Self {
+        Self {
+            path: Some(path.to_owned()),
+            error: innermost_error(e),
+        }
+    }
+}
+
+/// The text of the error at the bottom of `e`'s source chain, without the context wrapping it.
+fn innermost_error(e: &std::io::Error) -> String {
+    let mut error: &dyn std::error::Error = e;
+    while let Some(source) = error.source() {
+        error = source;
+    }
+    error.to_string()
 }
 
 /// `entries` sorted newest first by modification time, keeping walk order among equal times.
@@ -867,6 +916,40 @@ fn truncate_line(line: &str, max_chars: usize) -> Cow<'_, str> {
 
 const NO_FILES_FOUND: &str = "No files found";
 
+/// Most paths a search note names before it counts the rest.
+const MAX_NOTE_PATHS: usize = 10;
+
+/// Appends a search note listing `lines` under `header`. It names at most [`MAX_NOTE_PATHS`] and
+/// counts the rest, so a tree full of failures cannot flood the result.
+fn push_path_note(content: &mut String, header: &str, lines: &[String]) {
+    if lines.is_empty() {
+        return;
+    }
+    _ = write!(content, "\n\n{header}");
+    for line in lines.iter().take(MAX_NOTE_PATHS) {
+        _ = write!(content, "\n  {line}");
+    }
+    if lines.len() > MAX_NOTE_PATHS {
+        let more = lines.len() - MAX_NOTE_PATHS;
+        _ = write!(content, "\n  {ELLIPSIS} and {more} more");
+    }
+}
+
+const UNREADABLE_HEADER: &str = "Could not read:";
+
+/// Appends the note a search tool adds for the paths in `unreadable`, so a search that missed them
+/// does not pass for a complete one. Paths render relative to `cwd`.
+fn push_unreadable_note(content: &mut String, unreadable: &[Unreadable], cwd: &Path) {
+    let lines: Vec<String> = unreadable
+        .iter()
+        .map(|Unreadable { path, error }| match path {
+            Some(path) => format!("{}: {error}", display_path(path, cwd)),
+            None => error.clone(),
+        })
+        .collect();
+    push_path_note(content, UNREADABLE_HEADER, &lines);
+}
+
 const WITHHELD_NOTE_END: &str = "withheld by read deny or ask rules)";
 
 /// Appends the note a search tool adds when read deny or ask rules withheld `count` of the files
@@ -879,10 +962,15 @@ fn push_withheld_note(content: &mut String, count: usize) {
     _ = write!(content, "\n\n({count} {word} {WITHHELD_NOTE_END}");
 }
 
-/// `content` without the note [`push_withheld_note`] appended, for parsing the rest.
-fn strip_withheld_note(content: &str) -> &str {
-    match content.rsplit_once("\n\n") {
+/// `content` without the notes [`push_unreadable_note`] and [`push_withheld_note`] appended, for
+/// parsing the rest.
+fn strip_search_notes(content: &str) -> &str {
+    let content = match content.rsplit_once("\n\n") {
         Some((rest, note)) if note.starts_with('(') && note.ends_with(WITHHELD_NOTE_END) => rest,
+        _ => content,
+    };
+    match content.rsplit_once("\n\n") {
+        Some((rest, note)) if note.starts_with(UNREADABLE_HEADER) => rest,
         _ => content,
     }
 }
@@ -995,6 +1083,73 @@ pub(crate) mod testing {
         file.set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
             .unwrap();
     }
+
+    /// Denies reading the file or directory at `path` until the returned guard drops, which
+    /// restores access so the temp dir can be removed.
+    pub(crate) fn deny_read(path: &Path) -> ReadDenied {
+        #[cfg(unix)]
+        let mode = {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let mode = std::fs::metadata(path).unwrap().permissions().mode();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000)).unwrap();
+            mode
+        };
+        // `(RD)` is the right to read a file's data or list a directory.
+        #[cfg(windows)]
+        icacls(path, &["/deny", format!("{EVERYONE}:(RD)").as_str()]);
+
+        let readable = if path.is_dir() {
+            std::fs::read_dir(path).is_ok()
+        } else {
+            std::fs::File::open(path).is_ok()
+        };
+        assert!(!readable, "{} stayed readable", path.display());
+        ReadDenied {
+            path: path.to_owned(),
+            #[cfg(unix)]
+            mode,
+        }
+    }
+
+    /// Read access denied by [`deny_read`], restored on drop.
+    pub(crate) struct ReadDenied {
+        path: PathBuf,
+        #[cfg(unix)]
+        mode: u32,
+    }
+
+    impl Drop for ReadDenied {
+        fn drop(&mut self) {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+
+                std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(self.mode))
+                    .unwrap();
+            }
+            #[cfg(windows)]
+            icacls(&self.path, &["/remove:d", EVERYONE]);
+        }
+    }
+
+    /// The well-known SID of Everyone. A deny entry for it binds the file's owner too.
+    #[cfg(windows)]
+    const EVERYONE: &str = "*S-1-1-0";
+
+    #[cfg(windows)]
+    fn icacls(path: &Path, args: &[&str]) {
+        let output = std::process::Command::new("icacls")
+            .arg(path)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1011,7 +1166,7 @@ mod tests {
     use super::read::ReadTool;
     use super::tasks::TasksTool;
     use super::testing::{
-        canonical_tempdir, create_modified_at, ctx, search_root, symlink_file, temp_ctx,
+        canonical_tempdir, create_modified_at, ctx, deny_read, search_root, symlink_file, temp_ctx,
     };
     use super::write::WriteTool;
     use super::*;
@@ -2117,13 +2272,91 @@ mod tests {
             std::fs::write(dir.path().join(name), "").unwrap();
         }
         let cancel = CancellationToken::new();
-        let mut walk = walk_files(dir.path(), &cancel);
+        let mut unreadable = Vec::new();
+        let mut walk = walk_files(dir.path(), &cancel, &mut unreadable);
 
         let first = walk.next();
         cancel.cancel();
 
         assert!(first.is_some(), "an uncancelled walk yields files");
         assert_eq!(walk.count(), 0, "the walk stops at the cancel");
+    }
+
+    #[test]
+    fn walk_files_records_a_directory_it_cannot_read_and_walks_on() {
+        let dir = canonical_tempdir();
+        let readable = dir.path().join("a.txt");
+        std::fs::write(&readable, "").unwrap();
+        let locked = dir.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::write(locked.join("b.txt"), "").unwrap();
+        let _denied = deny_read(&locked);
+        let mut unreadable = Vec::new();
+
+        let files: Vec<_> = walk_files(dir.path(), &CancellationToken::new(), &mut unreadable)
+            .map(ignore::DirEntry::into_path)
+            .collect();
+
+        let cause = std::fs::read_dir(&locked).unwrap_err().to_string();
+        assert_eq!(files, [readable]);
+        assert_eq!(
+            unreadable,
+            [Unreadable {
+                path: Some(locked),
+                error: cause,
+            }]
+        );
+    }
+
+    // ── Unreadable::from_walk ──
+
+    #[test]
+    fn unreadable_from_walk_keeps_traversal_failures_and_drops_ignore_file_errors() {
+        let denied = || ignore::Error::Io(std::io::Error::other("denied"));
+        let at_depth = |err| ignore::Error::WithDepth {
+            depth: 1,
+            err: Box::new(err),
+        };
+        let loop_error = ignore::Error::Loop {
+            ancestor: "a".into(),
+            child: "a/b".into(),
+        };
+        let cases = [
+            (
+                ignore::Error::WithPath {
+                    path: "locked".into(),
+                    err: Box::new(at_depth(denied())),
+                },
+                Some((Some("locked"), "denied")),
+            ),
+            (at_depth(denied()), Some((None, "denied"))),
+            (
+                ignore::Error::WithPath {
+                    path: "a/b".into(),
+                    err: Box::new(at_depth(loop_error)),
+                },
+                Some((
+                    Some("a/b"),
+                    "File system loop found: a/b points to an ancestor a",
+                )),
+            ),
+            (
+                ignore::Error::WithPath {
+                    path: ".gitignore".into(),
+                    err: Box::new(denied()),
+                },
+                None,
+            ),
+            (ignore::Error::Partial(vec![denied(), denied()]), None),
+        ];
+
+        for (e, expected) in cases {
+            let expected = expected.map(|(path, error): (Option<&str>, &str)| Unreadable {
+                path: path.map(PathBuf::from),
+                error: error.to_owned(),
+            });
+            assert_eq!(Unreadable::from_walk(&e), expected, "{e}");
+        }
     }
 
     // ── newest_first ──
@@ -2138,7 +2371,9 @@ mod tests {
         ] {
             create_modified_at(&dir.path().join(name), secs);
         }
-        let mut entries: Vec<_> = walk_files(dir.path(), &CancellationToken::new()).collect();
+        let mut unreadable = Vec::new();
+        let mut entries: Vec<_> =
+            walk_files(dir.path(), &CancellationToken::new(), &mut unreadable).collect();
         entries.sort_by_key(|entry| Reverse(entry.file_name().to_owned()));
 
         let sorted = newest_first(entries.into_iter());
@@ -2222,7 +2457,7 @@ mod tests {
                     {note}"
                 }
             );
-            assert_eq!(strip_withheld_note(&content), "a.rs");
+            assert_eq!(strip_search_notes(&content), "a.rs");
         }
 
         let mut content = "a.rs".to_owned();
@@ -2230,10 +2465,97 @@ mod tests {
         assert_eq!(content, "a.rs");
     }
 
-    // ── strip_withheld_note ──
+    // ── push_path_note ──
 
     #[test]
-    fn strip_withheld_note_keeps_content_without_one() {
+    fn push_path_note_names_up_to_the_cap_and_counts_the_rest() {
+        let lines: Vec<String> = (1..=13).map(|i| format!("{i}.rs")).collect();
+        let listed = indoc! {"
+            a.rs
+
+            Header:
+              1.rs
+              2.rs
+              3.rs
+              4.rs
+              5.rs
+              6.rs
+              7.rs
+              8.rs
+              9.rs
+              10.rs"
+        };
+        for (count, expected) in [
+            (10, listed.to_owned()),
+            (13, format!("{listed}\n  ... and 3 more")),
+        ] {
+            let mut content = "a.rs".to_owned();
+
+            push_path_note(&mut content, "Header:", &lines[..count]);
+
+            assert_eq!(content, expected);
+        }
+
+        let mut content = "a.rs".to_owned();
+        push_path_note(&mut content, "Header:", &[]);
+        assert_eq!(content, "a.rs");
+    }
+
+    // ── push_unreadable_note ──
+
+    #[test]
+    fn push_unreadable_note_names_each_path_relative_to_the_cwd() {
+        let cwd = Path::new("/repo");
+        let unreadable = [
+            Unreadable {
+                path: Some(cwd.join("locked")),
+                error: "Permission denied (os error 13)".to_owned(),
+            },
+            Unreadable {
+                path: None,
+                error: "Input/output error (os error 5)".to_owned(),
+            },
+        ];
+        let mut content = "a.rs".to_owned();
+
+        push_unreadable_note(&mut content, &unreadable, cwd);
+
+        assert_eq!(
+            content,
+            indoc! {"
+                a.rs
+
+                Could not read:
+                  locked: Permission denied (os error 13)
+                  Input/output error (os error 5)"
+            }
+        );
+        assert_eq!(strip_search_notes(&content), "a.rs");
+    }
+
+    // ── strip_search_notes ──
+
+    #[test]
+    fn strip_search_notes_strips_both_notes_and_keeps_other_sections() {
+        let notes = indoc! {"
+            a.rs
+
+            (Showing 100 of 120 matches. Use a more specific pattern.)
+
+            Could not read:
+              locked: Permission denied (os error 13)
+
+            (1 file withheld by read deny or ask rules)"
+        };
+        assert_eq!(
+            strip_search_notes(notes),
+            indoc! {"
+                a.rs
+
+                (Showing 100 of 120 matches. Use a more specific pattern.)"
+            }
+        );
+
         for content in [
             "a.rs",
             indoc! {"
@@ -2242,7 +2564,7 @@ mod tests {
                 (Showing 100 of 120 matches. Use a more specific pattern.)"
             },
         ] {
-            assert_eq!(strip_withheld_note(content), content);
+            assert_eq!(strip_search_notes(content), content);
         }
     }
 }
