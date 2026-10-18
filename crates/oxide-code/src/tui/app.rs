@@ -238,13 +238,14 @@ impl App {
 mod tests {
     use std::io;
 
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::{KeyCode, KeyModifiers};
 
     use super::testing::{crossterm_test_terminal, rendered_text, test_app, test_session_info};
     use super::*;
     use crate::tui::components::status::{Status, TICKS_PER_FRAME};
     use crate::tui::git_probes::GitUpdate;
     use crate::tui::glyphs::SPINNER_FRAMES;
+    use crate::tui::testing::key_event;
 
     // ── App::new ──
 
@@ -366,10 +367,7 @@ mod tests {
         let (mut app, _rx, event_tx) = test_app(None);
         let (mut terminal, _buf) = crossterm_test_terminal(60, 8);
 
-        let key = Ok(CrosstermEvent::Key(KeyEvent::new(
-            KeyCode::Char('x'),
-            KeyModifiers::NONE,
-        )));
+        let key = Ok(key_event(KeyCode::Char('x'), KeyModifiers::NONE));
         let stream = futures::stream::iter(vec![key]).chain(futures::stream::pending());
 
         let driver = tokio::spawn(async move {

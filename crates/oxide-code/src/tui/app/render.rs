@@ -279,11 +279,12 @@ mod tests {
     use crate::tui::action::Action;
     use crate::tui::app::CopyNotice;
     use crate::tui::app::testing::{
-        FakeModal, crossterm_test_terminal, five_hour_limit, key_event, long_chat_block,
+        FakeModal, crossterm_test_terminal, five_hour_limit, long_chat_block,
         push_answerable_approval, render_app, rendered_text, test_app,
     };
     use crate::tui::components::status::StatusBar;
     use crate::tui::git_probes::GitUpdate;
+    use crate::tui::testing::key_event;
 
     // ── render ──
 
@@ -705,9 +706,7 @@ mod tests {
         );
 
         // A non-cancel key still reaches the modal, so collapsing the layout keeps its focus grab.
-        let action = app
-            .modals
-            .handle_key(&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        let action = app.modals.handle_key(&KeyEvent::from(KeyCode::Char('x')));
         assert!(action.is_none(), "FakeModal consumes without emitting");
         assert!(app.modals.is_active(), "Consumed must not pop the stack");
     }

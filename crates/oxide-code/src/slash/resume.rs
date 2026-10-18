@@ -563,10 +563,6 @@ mod tests {
     use crate::tui::modal::chrome::HINT_SEPARATOR;
     use crate::tui::modal::testing::render_rows;
 
-    fn key(code: KeyCode) -> KeyEvent {
-        KeyEvent::from(code)
-    }
-
     fn seed_session(
         store: &SessionStore,
         id: &str,
@@ -876,13 +872,17 @@ mod tests {
 
     #[test]
     fn actions_dispatch_each_key_to_its_own_action() {
-        for entry in ACTIONS.actions() {
-            assert_eq!(
-                ACTIONS.action_for(&entry.key.event()),
-                Some(entry.action),
-                "{} is bound to an earlier action",
-                entry.key,
-            );
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        for (event, action) in [
+            (KeyEvent::from(KeyCode::Enter), PickerAction::Resume),
+            (KeyEvent::from(KeyCode::Esc), PickerAction::Dismiss),
+            (ctrl('x'), PickerAction::Archive),
+            (ctrl('d'), PickerAction::Delete),
+            (KeyEvent::from(KeyCode::Tab), PickerAction::ToggleScope),
+            (ctrl('a'), PickerAction::ToggleArchivedView),
+            (ctrl('u'), PickerAction::ClearFilter),
+        ] {
+            assert_eq!(ACTIONS.action_for(&event), Some(action), "{event:?}");
         }
     }
 
@@ -1057,7 +1057,7 @@ mod tests {
         let (_dir, store) = isolated_store();
         let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
         assert!(matches!(
-            picker.handle_key(&key(KeyCode::Enter)),
+            picker.handle_key(&KeyEvent::from(KeyCode::Enter)),
             ModalKey::Consumed,
         ));
     }
@@ -1093,7 +1093,7 @@ mod tests {
 
         let (_dir2, empty_store) = isolated_store();
         let mut empty = ResumePicker::new(empty_store, "live-session-id".to_owned());
-        empty.handle_key(&key(KeyCode::Tab));
+        empty.handle_key(&KeyEvent::from(KeyCode::Tab));
         assert_eq!(
             empty.footer_hints(),
             [
@@ -1140,7 +1140,7 @@ mod tests {
         }
         let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
         for c in "fix".chars() {
-            picker.handle_key(&key(KeyCode::Char(c)));
+            picker.handle_key(&KeyEvent::from(KeyCode::Char(c)));
         }
         let hints = picker.footer_hints();
         assert_eq!(
@@ -1178,7 +1178,7 @@ mod tests {
         );
 
         for c in "oldest".chars() {
-            picker.handle_key(&key(KeyCode::Char(c)));
+            picker.handle_key(&KeyEvent::from(KeyCode::Char(c)));
         }
         assert_eq!(
             picker.footer_hints(),
@@ -1307,7 +1307,7 @@ mod tests {
         );
         let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
         for c in "auth".chars() {
-            picker.handle_key(&key(KeyCode::Char(c)));
+            picker.handle_key(&KeyEvent::from(KeyCode::Char(c)));
         }
         assert_eq!(picker.list.visible_len(), 1, "only `Auth fix` should match");
 
@@ -1333,9 +1333,9 @@ mod tests {
         );
         let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
         for c in "ab".chars() {
-            picker.handle_key(&key(KeyCode::Char(c)));
+            picker.handle_key(&KeyEvent::from(KeyCode::Char(c)));
         }
-        picker.handle_key(&key(KeyCode::Backspace));
+        picker.handle_key(&KeyEvent::from(KeyCode::Backspace));
         assert_eq!(picker.list.query(), "a");
     }
 
@@ -1351,10 +1351,10 @@ mod tests {
         );
         let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
         for c in "zzz".chars() {
-            picker.handle_key(&key(KeyCode::Char(c)));
+            picker.handle_key(&KeyEvent::from(KeyCode::Char(c)));
         }
         assert_eq!(picker.list.visible_len(), 0);
-        let event = KeyChord::ctrl('u').event();
+        let event = KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL);
         picker.handle_key(&event);
         assert_eq!(picker.list.query(), "");
         assert_eq!(picker.list.visible_len(), 1);
@@ -1375,17 +1375,17 @@ mod tests {
         let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
         render_rows(&picker, 60, 30);
         assert_eq!(picker.list.cursor_index(), 0);
-        picker.handle_key(&key(KeyCode::Down));
+        picker.handle_key(&KeyEvent::from(KeyCode::Down));
         assert_eq!(picker.list.cursor_index(), 1);
-        picker.handle_key(&key(KeyCode::Up));
+        picker.handle_key(&KeyEvent::from(KeyCode::Up));
         assert_eq!(picker.list.cursor_index(), 0);
-        picker.handle_key(&key(KeyCode::PageDown));
+        picker.handle_key(&KeyEvent::from(KeyCode::PageDown));
         assert_eq!(
             picker.list.cursor_index(),
             2,
             "PageDown clamps at last visible row",
         );
-        picker.handle_key(&key(KeyCode::PageUp));
+        picker.handle_key(&KeyEvent::from(KeyCode::PageUp));
         assert_eq!(picker.list.cursor_index(), 0, "PageUp clamps at zero");
     }
 
@@ -1401,10 +1401,10 @@ mod tests {
         );
         let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
         assert!(!picker.all);
-        picker.handle_key(&key(KeyCode::Tab));
+        picker.handle_key(&KeyEvent::from(KeyCode::Tab));
         assert!(picker.all, "Tab flips scope to all-projects");
         assert_eq!(picker.footer_hints()[3], "scope: all projects");
-        picker.handle_key(&key(KeyCode::Tab));
+        picker.handle_key(&KeyEvent::from(KeyCode::Tab));
         assert!(!picker.all, "second Tab flips back");
     }
 
@@ -1441,10 +1441,10 @@ mod tests {
         let mut picker = ResumePicker::new(store, live_id.clone());
         assert_eq!(picker.loaded, 1, "scoped: only the home project");
         for c in "11".chars() {
-            picker.handle_key(&key(KeyCode::Char(c)));
+            picker.handle_key(&KeyEvent::from(KeyCode::Char(c)));
         }
         assert_eq!(picker.list.query(), "11");
-        picker.handle_key(&key(KeyCode::Tab));
+        picker.handle_key(&KeyEvent::from(KeyCode::Tab));
         assert_eq!(
             picker.loaded, 2,
             "Tab widens to all projects but excludes the live session",
@@ -1480,7 +1480,7 @@ mod tests {
         let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
         let selected_id =
             |picker: &ResumePicker| picker.list.selected().unwrap().session_id.clone();
-        let ctrl_a = KeyChord::ctrl('a').event();
+        let ctrl_a = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL);
         assert_eq!(picker.loaded, 1);
         assert_eq!(selected_id(&picker), active_id);
 
@@ -1501,7 +1501,7 @@ mod tests {
         let rows = render_rows(&picker, 60, 20);
         let title = &rows[0];
         assert_eq!(title.trim_end(), ARCHIVED_PICKER_TITLE);
-        let outcome = picker.handle_key(&key(KeyCode::Enter));
+        let outcome = picker.handle_key(&KeyEvent::from(KeyCode::Enter));
         assert!(
             matches!(
                 &outcome,
@@ -1529,12 +1529,12 @@ mod tests {
             datetime!(2026-04-18 09:00:00 UTC),
         );
         let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
-        let outcome = picker.handle_key(&key(KeyCode::Insert));
+        let outcome = picker.handle_key(&KeyEvent::from(KeyCode::Insert));
         assert!(matches!(outcome, ModalKey::Consumed));
         assert_eq!(picker.list.query(), "");
         assert_eq!(picker.list.cursor_index(), 0);
 
-        let event = KeyChord::ctrl('g').event();
+        let event = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL);
         picker.handle_key(&event);
         assert_eq!(picker.list.query(), "");
     }
@@ -1552,11 +1552,11 @@ mod tests {
         );
         let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
         for c in "auths".chars() {
-            picker.handle_key(&key(KeyCode::Char(c)));
+            picker.handle_key(&KeyEvent::from(KeyCode::Char(c)));
         }
-        picker.handle_key(&key(KeyCode::Left));
+        picker.handle_key(&KeyEvent::from(KeyCode::Left));
 
-        let outcome = picker.handle_key(&key(KeyCode::Delete));
+        let outcome = picker.handle_key(&KeyEvent::from(KeyCode::Delete));
         assert!(matches!(outcome, ModalKey::Consumed), "{outcome:?}");
         assert_eq!(
             picker.list.query(),
@@ -1564,7 +1564,7 @@ mod tests {
             "Delete removes the char after the cursor"
         );
 
-        let ctrl_d = KeyChord::ctrl('d').event();
+        let ctrl_d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
         let outcome = picker.handle_key(&ctrl_d);
 
         let ModalKey::Push(confirm) = outcome else {
@@ -1581,7 +1581,7 @@ mod tests {
         let (_dir, store) = isolated_store();
         let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
 
-        let ctrl_d = KeyChord::ctrl('d').event();
+        let ctrl_d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
         let outcome = picker.handle_key(&ctrl_d);
         assert!(matches!(outcome, ModalKey::Consumed));
     }
@@ -1601,10 +1601,10 @@ mod tests {
         let picker = ResumePicker::new(store.clone(), "live-session-id".to_owned());
         let mut stack = crate::tui::modal::ModalStack::default();
         stack.push(Box::new(picker));
-        let ctrl_d = KeyChord::ctrl('d').event();
+        let ctrl_d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
 
         let pushed = stack.handle_key(&ctrl_d);
-        let deleted = stack.handle_key(&key(KeyCode::Char('y')));
+        let deleted = stack.handle_key(&KeyEvent::from(KeyCode::Char('y')));
 
         assert!(pushed.is_none(), "{pushed:?}");
         assert!(
@@ -1645,13 +1645,13 @@ mod tests {
             );
         }
         let mut picker = ResumePicker::new(store.clone(), "live-session-id".to_owned());
-        picker.handle_key(&key(KeyCode::Tab));
+        picker.handle_key(&KeyEvent::from(KeyCode::Tab));
         for c in "fix".chars() {
-            picker.handle_key(&key(KeyCode::Char(c)));
+            picker.handle_key(&KeyEvent::from(KeyCode::Char(c)));
         }
-        picker.handle_key(&key(KeyCode::Down));
+        picker.handle_key(&KeyEvent::from(KeyCode::Down));
 
-        let outcome = picker.handle_key(&KeyChord::ctrl('x').event());
+        let outcome = picker.handle_key(&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
 
         assert!(matches!(outcome, ModalKey::Consumed), "{outcome:?}");
         assert_eq!(listed_ids(&store, true), [stamped_id(0x22)]);
@@ -1668,7 +1668,7 @@ mod tests {
         assert_eq!(picker.list.query(), "fix");
         assert!(picker.all, "the scope survives the reload");
 
-        picker.handle_key(&key(KeyCode::Up));
+        picker.handle_key(&KeyEvent::from(KeyCode::Up));
         assert_eq!(
             footer_row(&picker, 80),
             "Enter to resume  ·  Esc to cancel  ·  2 / 3 matching  ·  scope: all projects ...",
@@ -1694,14 +1694,14 @@ mod tests {
             rows[5].trim_end().to_owned()
         };
         for _ in 0..9 {
-            picker.handle_key(&key(KeyCode::Down));
+            picker.handle_key(&KeyEvent::from(KeyCode::Down));
         }
         first_shown(&picker);
-        picker.handle_key(&key(KeyCode::Up));
-        picker.handle_key(&key(KeyCode::Up));
+        picker.handle_key(&KeyEvent::from(KeyCode::Up));
+        picker.handle_key(&KeyEvent::from(KeyCode::Up));
         assert_eq!(first_shown(&picker), "  row-7");
 
-        picker.handle_key(&KeyChord::ctrl('x').event());
+        picker.handle_key(&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
 
         assert_eq!(
             first_shown(&picker),
@@ -1726,10 +1726,10 @@ mod tests {
             set_archived_at(&store.find_session_path(&id).unwrap(), true).unwrap();
         }
         let mut picker = ResumePicker::new(store.clone(), "live-session-id".to_owned());
-        picker.handle_key(&KeyChord::ctrl('a').event());
-        picker.handle_key(&key(KeyCode::Down));
+        picker.handle_key(&KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        picker.handle_key(&KeyEvent::from(KeyCode::Down));
 
-        picker.handle_key(&KeyChord::ctrl('x').event());
+        picker.handle_key(&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
 
         assert_eq!(listed_ids(&store, false), [stamped_id(0x11)]);
         assert_eq!(
@@ -1755,7 +1755,7 @@ mod tests {
         let mut picker = ResumePicker::new(store.clone(), "live-session-id".to_owned());
         picker.live_session_id.clone_from(&id);
 
-        picker.handle_key(&KeyChord::ctrl('x').event());
+        picker.handle_key(&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
 
         assert_eq!(
             footer_row(&picker, 120),
@@ -1785,7 +1785,7 @@ mod tests {
         let cause = set_archived_at(&path, true).unwrap_err();
         let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
 
-        picker.handle_key(&KeyChord::ctrl('x').event());
+        picker.handle_key(&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
 
         assert_eq!(
             footer_row(&picker, 400),
@@ -1800,11 +1800,11 @@ mod tests {
         let (_dir, store) = isolated_store();
         let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
         for c in "ab".chars() {
-            picker.handle_key(&key(KeyCode::Char(c)));
+            picker.handle_key(&KeyEvent::from(KeyCode::Char(c)));
         }
         picker.handle_key(&KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT));
 
-        let outcome = picker.handle_key(&KeyChord::ctrl('x').event());
+        let outcome = picker.handle_key(&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
 
         assert!(matches!(outcome, ModalKey::Consumed), "{outcome:?}");
         assert_eq!(picker.list.query(), "ab");
@@ -1826,7 +1826,7 @@ mod tests {
             );
         }
         let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
-        picker.handle_key(&KeyChord::ctrl('x').event());
+        picker.handle_key(&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
         assert_eq!(footer_row(&picker, 80), "Archived session 22222222: second");
 
         picker.handle_paste("fir");
@@ -1877,7 +1877,7 @@ mod tests {
             );
         }
         let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
-        picker.handle_key(&key(KeyCode::Down));
+        picker.handle_key(&KeyEvent::from(KeyCode::Down));
         let pinned = picker.list.selected().unwrap().session_id.clone();
 
         picker.on_focus_regained();
@@ -1928,7 +1928,7 @@ mod tests {
             "live-session-id".to_owned(),
             false,
         )));
-        let outcome = stack.handle_key(&key(KeyCode::Esc));
+        let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Esc));
         assert!(
             matches!(
                 outcome,

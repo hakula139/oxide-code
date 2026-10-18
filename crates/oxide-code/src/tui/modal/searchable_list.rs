@@ -351,20 +351,16 @@ mod tests {
 
     // ── edit_query ──
 
-    fn key(code: KeyCode) -> KeyEvent {
-        KeyEvent::from(code)
-    }
-
     #[test]
     fn edit_query_refilters_as_the_query_grows_and_shrinks() {
         let mut l = list(vec![FakeItem::new("alpha"), FakeItem::new("beta")]);
-        l.edit_query(&key(KeyCode::Char('a')));
+        l.edit_query(&KeyEvent::from(KeyCode::Char('a')));
         assert_eq!(l.visible_len(), 2, "both contain 'a'");
-        l.edit_query(&key(KeyCode::Char('l')));
+        l.edit_query(&KeyEvent::from(KeyCode::Char('l')));
         assert_eq!(l.visible_len(), 1, "only `alpha` contains `al`");
-        l.edit_query(&key(KeyCode::Backspace));
+        l.edit_query(&KeyEvent::from(KeyCode::Backspace));
         assert_eq!(l.visible_len(), 2);
-        l.edit_query(&key(KeyCode::Backspace));
+        l.edit_query(&KeyEvent::from(KeyCode::Backspace));
         assert_eq!(l.query(), "");
     }
 
@@ -374,10 +370,10 @@ mod tests {
         l.set_query("aha");
         assert_eq!(l.visible_len(), 0);
 
-        l.edit_query(&key(KeyCode::Left));
-        l.edit_query(&key(KeyCode::Left));
-        l.edit_query(&key(KeyCode::Char('l')));
-        l.edit_query(&key(KeyCode::Char('p')));
+        l.edit_query(&KeyEvent::from(KeyCode::Left));
+        l.edit_query(&KeyEvent::from(KeyCode::Left));
+        l.edit_query(&KeyEvent::from(KeyCode::Char('l')));
+        l.edit_query(&KeyEvent::from(KeyCode::Char('p')));
         assert_eq!(l.query(), "alpha");
         assert_eq!(l.visible_len(), 1);
     }
@@ -386,7 +382,7 @@ mod tests {
     fn edit_query_cursor_only_keys_keep_the_list_cursor() {
         let mut l = list(vec![FakeItem::new("alpha"), FakeItem::new("beta")]);
         l.select_next();
-        l.edit_query(&key(KeyCode::Home));
+        l.edit_query(&KeyEvent::from(KeyCode::Home));
         l.edit_query(&KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL));
         assert_eq!(l.query(), "", "control chords never insert");
         assert_eq!(l.cursor_index(), 1, "no refilter, so no cursor reset");
