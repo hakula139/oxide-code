@@ -2073,8 +2073,8 @@ mod tests {
         assert_eq!(
             notices,
             [
-                "HTTP 529. Retrying in 1 s (retry 1 of 5).",
-                "HTTP 503 Service Unavailable. Retrying in 1 s (retry 2 of 5).",
+                "HTTP 529. Retrying in 2 s (retry 1 of 5).",
+                "HTTP 503 Service Unavailable. Retrying in 3 s (retry 2 of 5).",
             ],
         );
         assert!(

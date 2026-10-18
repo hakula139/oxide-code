@@ -1341,7 +1341,11 @@ mod tests {
             let server = MockServer::start().await;
             Mock::given(method("POST"))
                 .and(path("/v1/messages"))
-                .respond_with(ResponseTemplate::new(status).set_body_string(body))
+                .respond_with(
+                    ResponseTemplate::new(status)
+                        .insert_header("x-should-retry", "false")
+                        .set_body_string(body),
+                )
                 .mount(&server)
                 .await;
 

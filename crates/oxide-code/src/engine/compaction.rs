@@ -1821,7 +1821,7 @@ mod tests {
                 data: {"type":"message_start","message":{"id":"m","model":"claude-haiku-5-5"}}
 
                 event: ping
-                data: {"type":"error","error":{"type":"overloaded_error","message":"servers overloaded"}}
+                data: {"type":"error","error":{"type":"invalid_request_error","message":"summary request rejected"}}
 
             "#}
             .to_owned(),
@@ -1833,7 +1833,7 @@ mod tests {
             .await
             .expect_err("in-band error must propagate");
         assert!(
-            format!("{err:#}").contains("servers overloaded"),
+            format!("{err:#}").contains("summary request rejected"),
             "underlying API error message must thread through: {err:#}",
         );
     }
@@ -1844,7 +1844,9 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/v1/messages"))
             .respond_with(
-                ResponseTemplate::new(500).set_body_string(r#"{"error":{"type":"server_error"}}"#),
+                ResponseTemplate::new(500)
+                    .insert_header("x-should-retry", "false")
+                    .set_body_string(r#"{"error":{"type":"server_error"}}"#),
             )
             .mount(&server)
             .await;

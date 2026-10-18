@@ -450,7 +450,11 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(wm_path("/v1/messages"))
-            .respond_with(ResponseTemplate::new(503).set_body_string("bad gateway"))
+            .respond_with(
+                ResponseTemplate::new(503)
+                    .insert_header("x-should-retry", "false")
+                    .set_body_string("bad gateway"),
+            )
             .mount(&server)
             .await;
 

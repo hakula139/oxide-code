@@ -439,7 +439,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn stream_sse_retries_failures_before_any_content() {
         // An in-band overload and a stream cut before content both retry. The consumer sees only
         // the pre-content usage from the failed attempts, each replaced by the next attempt's.
@@ -459,11 +459,11 @@ mod tests {
             [
                 START_USAGE,
                 ResponseEvent::Retrying(
-                    "API stream overloaded_error. Retrying in 1 s (retry 1 of 5).".to_owned()
+                    "API stream overloaded_error. Retrying in 2 s (retry 1 of 5).".to_owned()
                 ),
                 START_USAGE,
                 ResponseEvent::Retrying(
-                    "API stream ended early. Retrying in 1 s (retry 2 of 5).".to_owned()
+                    "API stream ended early. Retrying in 3 s (retry 2 of 5).".to_owned()
                 ),
                 START_USAGE,
                 ResponseEvent::Text("Hi".to_owned()),
@@ -509,7 +509,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn stream_sse_failed_body_read_retries_only_before_content() {
         let cut = |body: &str| raw_sse_response(body, body.len() + 64);
         let full = [MESSAGE_START, TEXT_DELTA, MESSAGE_STOP].concat();
@@ -526,7 +526,7 @@ mod tests {
             [
                 START_USAGE,
                 ResponseEvent::Retrying(
-                    "API stream failed. Retrying in 1 s (retry 1 of 5).".to_owned()
+                    "API stream failed. Retrying in 2 s (retry 1 of 5).".to_owned()
                 ),
                 START_USAGE,
                 ResponseEvent::Text("Hi".to_owned()),
@@ -546,7 +546,7 @@ mod tests {
         assert_eq!(events, [START_USAGE, ResponseEvent::Text("Hi".to_owned())]);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn stream_sse_gives_up_on_a_stream_that_never_finishes() {
         let server = serve(vec![sse_response(MESSAGE_START)]).await;
 

@@ -25,11 +25,7 @@ use crate::util::text::truncate_to_width;
 /// Retries after the first attempt, so one request makes at most `MAX_RETRIES + 1` attempts.
 const MAX_RETRIES: u32 = 5;
 /// Doubles per retry: 1, 2, 4, 8, 16 s before jitter, about half a minute in total.
-#[cfg(not(test))]
 const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
-/// Tests exercise the retry loop without sleeping for real.
-#[cfg(test)]
-const INITIAL_BACKOFF: Duration = Duration::from_millis(1);
 /// Upper bound of the random extra delay, as a fraction of the backoff.
 const MAX_JITTER: f64 = 0.25;
 /// Longest server-requested `retry-after` worth waiting out. A longer hint, such as an exhausted
@@ -469,7 +465,7 @@ mod tests {
 
     // ── with_retry ──
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn with_retry_retries_transient_failures_until_success() {
         let calls = &AtomicU32::new(0);
         let mut notices = Vec::new();
@@ -503,7 +499,7 @@ mod tests {
         assert_eq!(notices, expected, "one notice per retry, before its delay");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn with_retry_gives_up_after_the_retry_budget() {
         let calls = &AtomicU32::new(0);
         let err = with_retry(
@@ -810,7 +806,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn post_messages_with_retry_recovers_from_a_transient_status() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
