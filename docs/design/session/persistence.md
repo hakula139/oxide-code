@@ -110,7 +110,7 @@ There is no file-level lock: two processes resuming the same session both append
 
 ### AI-Generated Titles
 
-In the TUI, the first user prompt of a fresh session spawns a detached tokio task that asks Haiku through `Client::complete` for a 3-7 word sentence-case title, constrained by a structured-outputs JSON schema. Failures only log a warning.
+In the TUI, the first user prompt of a fresh session spawns a tokio task that asks Haiku through `Client::complete` for a 3-7 word sentence-case title, constrained by a structured-outputs JSON schema. The session owns the task, and finalizing the session on a roll or at exit aborts it first, so a late title never writes to or reports on a session that has ended. Generation failures only log a warning, while a failed title write surfaces like any other session write error.
 
 ### Session Cost
 
@@ -155,7 +155,7 @@ Listings sort rows and render them as follows:
 5. **Lazy file creation.** Empty sessions leave no artifact.
 6. **Resume + symmetric sanitization.** Reopen, walk DAG, sanitize, keep every transcript API-valid.
 7. **Fork-on-conflict concurrency, no file lock.** Newest-leaf rule resolves forks, and one write per batch keeps concurrent appends from splitting a line.
-8. **Fire-and-forget AI titles.** A one-shot Haiku call logs a warning on failure. The title with the newest `updated_at` wins.
+8. **Best-effort AI titles scoped to their session.** A one-shot Haiku call logs a warning on failure, and finalizing the session aborts it. The title with the newest `updated_at` wins.
 9. **First-failure-only write-error surfacing.** One `Event::Error` per failure kind plus warn-logs gives visibility without spam.
 10. **Listing scan with message pre-filter, mtime sort.** Titles and summaries can appear anywhere in the file, so the scan reads every line and the prefix check keeps message lines out of JSON parsing.
 11. **Actor-owned writes, receive-and-drain batching.** One task owns the writer, and `tokio::join!` coalesces a tool round's records into one append.

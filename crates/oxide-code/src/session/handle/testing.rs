@@ -16,25 +16,6 @@ pub(crate) fn dead(session_id: &str) -> SessionHandle {
     handle(session_id, cmd_tx, None)
 }
 
-/// Stand-in actor that fails every `AppendAiTitle` ack with `message`, exercising the
-/// alive-session-with-failure branch in background title-gen (`is_actor_alive` stays true because
-/// the channel is open). Any other cmd ends the actor, since tests using this fixture send none.
-pub(crate) fn acks_append_ai_title_with_failure(
-    session_id: &str,
-    message: &'static str,
-) -> SessionHandle {
-    let (cmd_tx, mut cmd_rx) = mpsc::channel::<SessionCmd>(8);
-    let join = tokio::spawn(async move {
-        while let Some(SessionCmd::AppendAiTitle { ack, .. }) = cmd_rx.recv().await {
-            _ = ack.send(Outcome {
-                failure: Some(message.to_owned()),
-            });
-        }
-    });
-
-    handle(session_id, cmd_tx, Some(join))
-}
-
 /// Stand-in actor that acks the first `succeed` non-Shutdown cmds, then drops cmds without
 /// acking, which exercises the rx-await fallback when the actor stalls between receive and ack.
 /// Shutdown is always honored so `handle.shutdown()` still returns.
@@ -93,5 +74,6 @@ fn handle(
         session_id: Arc::from(session_id),
         shared: Arc::new(SharedState::default()),
         actor_join: Arc::new(std::sync::Mutex::new(join)),
+        title_task: Arc::default(),
     }
 }

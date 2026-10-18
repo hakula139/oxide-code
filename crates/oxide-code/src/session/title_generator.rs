@@ -48,17 +48,20 @@ const SYSTEM_PROMPT: &str = indoc! {r#"
 
 // ── Public API ──
 
-/// Spawns a detached task that asks Haiku for a title, appends it to `session`, and emits
-/// `SessionTitleUpdated` through `sink`. A failure only warns, so the first-prompt title stays.
+/// Spawns a task that asks Haiku for a title, appends it to `session`, and emits
+/// `SessionTitleUpdated` through `sink`. `session` owns the task, so finalizing it aborts the
+/// request. A failure only warns, so the first-prompt title stays.
 pub(crate) fn spawn<S>(client: Client, session: SessionHandle, sink: S, first_prompt: String)
 where
     S: EventSink + Clone + Send + 'static,
 {
-    tokio::spawn(async move {
+    let owner = session.clone();
+    let task = tokio::spawn(async move {
         if let Err(e) = generate_and_record(&client, &session, &sink, &first_prompt).await {
             warn!("AI title generation failed: {e:#}");
         }
     });
+    owner.set_title_task(task);
 }
 
 // ── Generation ──
@@ -90,15 +93,7 @@ async fn generate_and_record(
         return Ok(());
     }
     let outcome = session.append_ai_title(title.clone()).await;
-    if let Some(failure) = outcome.failure.as_deref() {
-        if !session.is_actor_alive() {
-            // Session was finalized before this task returned. Surfacing into the next session's
-            // UI would mislead the user.
-            warn!("title-gen append after session shutdown: {failure}");
-            return Ok(());
-        }
-        sink.session_write_error(Some(failure));
-    }
+    sink.session_write_error(outcome.failure.as_deref());
 
     sink.emit(
         Event::SessionTitleUpdated {
@@ -194,7 +189,7 @@ mod tests {
     use crate::config::auth::{Auth, AuthSource};
     use crate::message::Message;
     use crate::protocol::CapturingSink;
-    use crate::session::handle::testing::{acks_append_ai_title_with_failure, dead};
+    use crate::session::handle::testing::dead;
     use crate::session::store::testing::test_store;
 
     // ── Fixtures ──
@@ -414,42 +409,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn generate_and_record_alive_session_writer_failure_surfaces_as_error() {
-        // While the actor is alive, a `failure` on the `append_ai_title` ack concerns the session
-        // the user is looking at, so it surfaces as a session-write error.
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(wm_path("/v1/messages"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_string(completion_body(r#"{"title":"Fix auth"}"#)),
-            )
-            .mount(&server)
-            .await;
-
-        let session = acks_append_ai_title_with_failure("live-session", "disk full");
-        let client = title_client(server.uri());
-        let sink = CapturingSink::new();
-
-        generate_and_record(&client, &session, &sink, "first prompt")
-            .await
-            .unwrap();
-
-        let events = sink.events();
-        assert!(
-            events.iter().any(|e| matches!(
-                e,
-                Event::Error(msg) if msg.contains("disk full")
-            )),
-            "writer-failure on live session must surface as Error: {events:?}",
-        );
-    }
-
-    #[tokio::test]
-    async fn generate_and_record_post_finalize_actor_gone_is_silent() {
-        // Title-gen is best-effort: a session that finalized (`/clear`, `/resume`) before this
-        // background task returned must not surface "Session write failed" into the UI of the
-        // *next* session. It only logs a warning, with no Error and no title event.
+    async fn generate_and_record_surfaces_an_append_failure_before_the_title_event() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(wm_path("/v1/messages"))
@@ -468,17 +428,19 @@ mod tests {
             .await
             .unwrap();
 
-        let events = sink.events();
-        assert!(
-            !events.iter().any(|e| matches!(e, Event::Error(_))),
-            "post-finalize actor-gone must not surface as Error: {events:?}",
-        );
-        assert!(
-            !events
-                .iter()
-                .any(|e| matches!(e, Event::SessionTitleUpdated { .. })),
-            "post-finalize must skip SessionTitleUpdated \
-             because the title belongs to the dead session: {events:?}",
+        assert_eq!(
+            sink.events(),
+            [
+                Event::Error(
+                    "Session write failed: session writer task has stopped. \
+                     Conversation history may be incomplete."
+                        .to_owned(),
+                ),
+                Event::SessionTitleUpdated {
+                    session_id: "dead-session".to_owned(),
+                    title: "Fix auth".to_owned(),
+                },
+            ],
         );
     }
 

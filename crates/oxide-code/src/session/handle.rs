@@ -42,6 +42,7 @@ pub(crate) struct SessionHandle {
     shared: Arc<SharedState>,
     /// First `shutdown` takes the join. Subsequent calls no-op.
     actor_join: Arc<std::sync::Mutex<Option<JoinHandle<()>>>>,
+    title_task: Arc<std::sync::Mutex<Option<JoinHandle<()>>>>,
 }
 
 /// State the actor and every handle clone share. Each `surface_first_*` method returns `true` on
@@ -119,11 +120,9 @@ impl SessionHandle {
         &self.session_id
     }
 
-    /// `false` once the actor has shut down (after `finalize` / `roll` / `roll_into`). Lets
-    /// background best-effort tasks (title generator) suppress actor-gone failures that follow a
-    /// session swap, since those aren't real I/O errors the user needs to see.
-    pub(crate) fn is_actor_alive(&self) -> bool {
-        !self.cmd_tx.is_closed()
+    /// Ties the AI title request to this session, so `finalize` aborts it.
+    pub(super) fn set_title_task(&self, task: JoinHandle<()>) {
+        *lock_or_recover(&self.title_task, "title_task") = Some(task);
     }
 
     /// Records a conversation message. Returns after the batch flush completes.
@@ -229,16 +228,31 @@ impl SessionHandle {
             .await
     }
 
-    /// Finalizes and tears down: writes the summary, surfaces a flush error (if any), and shuts
-    /// the actor down. Returns the failure message for the caller to route.
+    /// Tears down: stops the title request, writes the summary, surfaces a flush error (if any),
+    /// and shuts the actor down. Returns the failure message for the caller to route.
     pub(crate) async fn finalize(self, snapshots: Vec<FileSnapshot>) -> Option<String> {
+        self.stop_title_task().await;
         let outcome = self.finish(snapshots).await;
         self.shutdown().await;
         outcome.failure
     }
 
+    /// Aborts the title request and waits for it to end, so it never writes to or reports on a
+    /// finalized session.
+    async fn stop_title_task(&self) {
+        let task = lock_or_recover(&self.title_task, "title_task").take();
+        if let Some(task) = task {
+            task.abort();
+            if let Err(e) = task.await
+                && e.is_panic()
+            {
+                tracing::error!("title generation panicked: {e}");
+            }
+        }
+    }
+
     /// Sends [`SessionCmd::Shutdown`] so the actor breaks after the current batch, then awaits
-    /// the join handle. Cmd-driven exit keeps process-exit fast when orphaned clones are mid-HTTP.
+    /// the join handle. Cmd-driven exit keeps a clone held elsewhere from pinning the actor.
     pub(crate) async fn shutdown(self) {
         let Self {
             cmd_tx, actor_join, ..
@@ -488,6 +502,7 @@ fn spawn_actor(state: SessionState) -> SessionHandle {
         session_id,
         shared,
         actor_join: Arc::new(std::sync::Mutex::new(Some(join))),
+        title_task: Arc::default(),
     }
 }
 
@@ -1117,6 +1132,26 @@ mod tests {
         let handle = testing::dead("dead");
         let failure = handle.finalize(Vec::new()).await;
         assert!(failure.is_some(), "dead handle finalize surfaces failure");
+    }
+
+    #[tokio::test]
+    async fn finalize_ends_the_title_task_before_it_returns() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let handle = start(&store, "m");
+        let (started_tx, started) = oneshot::channel();
+        let (alive, mut ended) = oneshot::channel::<()>();
+        handle.set_title_task(tokio::spawn(async move {
+            let _alive = alive;
+            started_tx.send(()).unwrap();
+            std::future::pending::<()>().await;
+        }));
+        started.await.unwrap();
+
+        let failure = handle.finalize(Vec::new()).await;
+
+        assert_eq!(failure, None);
+        assert_eq!(ended.try_recv(), Err(oneshot::error::TryRecvError::Closed));
     }
 
     // ── shutdown ──

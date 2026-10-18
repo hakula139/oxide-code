@@ -692,8 +692,6 @@ mod tests {
 
     #[tokio::test]
     async fn run_shutdown_exits_loop_even_with_live_sender_clones() {
-        // Otherwise an orphaned title-generator's mid-HTTP clone would pin the actor through
-        // the full HTTP timeout.
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
         let state = SessionState::fresh(store, "m");
