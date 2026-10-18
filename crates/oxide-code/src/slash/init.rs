@@ -377,18 +377,18 @@ mod tests {
 
         let prompt = update_prompt(Path::new("/repo"), &existing);
 
+        let nested = existing[1].display();
         assert_eq!(
             prompt,
             formatdoc! {"
                 Please analyze this codebase and improve its project instructions, which future AI coding assistants read when working on it. They live in these files in `/repo`:
 
                 - `CLAUDE.md`
-                - `{}`
+                - `{nested}`
 
                 Read each file, but do not edit any file in this turn. Show the changes you propose as a unified diff in a `diff` code block, explain why each change helps, then end your turn. Apply the changes only after the user confirms them. If nothing needs to change, say so. Update each file in place, without moving content between files.
 
-                {RUBRIC}",
-                existing[1].display(),
+                {RUBRIC}"
             },
         );
     }
