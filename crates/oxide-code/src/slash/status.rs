@@ -91,12 +91,7 @@ mod tests {
     use crate::slash::testing::test_session_info;
     use crate::tool::bash::background::testing::shells_in_each_state;
     use crate::tui::modal::Modal;
-    use crate::tui::modal::testing::render_rows;
-
-    fn render_modal(modal: &KvOverview, width: u16) -> String {
-        let height = modal.height(width, u16::MAX);
-        format!("{}\n", render_rows(modal, width, height).join("\n"))
-    }
+    use crate::tui::modal::testing::render_modal;
 
     // ── StatusCmd::name ──
 

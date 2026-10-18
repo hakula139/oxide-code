@@ -439,6 +439,7 @@ mod tests {
     use indoc::indoc;
     use ratatui::layout::Rect;
     use tokio::sync::mpsc::error::TryRecvError;
+    use unicode_width::UnicodeWidthStr;
 
     use super::*;
     use crate::config::Effort;
@@ -465,7 +466,7 @@ mod tests {
             .enumerate()
             .find(|(_, line)| line.contains(needle))
             .unwrap();
-        let x = line[..line.find(needle).unwrap()].chars().count();
+        let x = line[..line.find(needle).unwrap()].width();
         (u16::try_from(x).unwrap(), u16::try_from(row).unwrap())
     }
 

@@ -636,6 +636,7 @@ mod tests {
     use crate::permission::rule::Rule;
     use crate::permission::{Access, PermissionClass, Policy, Workspace};
     use crate::tool::DiffLine;
+    use crate::tui::modal::testing::render_rows;
 
     fn fresh_command_modal(command: &str) -> ApprovalModal {
         ApprovalModal::new(
@@ -695,15 +696,8 @@ mod tests {
     }
 
     fn render_to_string(modal: &ApprovalModal, width: u16, height: u16) -> String {
-        let theme = Theme::default();
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal
-            .draw(|frame| modal.render(frame, Rect::new(0, 0, width, height), &theme))
-            .unwrap();
-        let buf = terminal.backend().buffer();
         let mut out = String::new();
-        for y in 0..height {
-            let row: String = (0..width).map(|x| buf[(x, y)].symbol()).collect();
+        for row in render_rows(modal, width, height) {
             out.push_str(row.trim_end());
             out.push('\n');
         }

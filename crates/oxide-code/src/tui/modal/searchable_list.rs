@@ -682,21 +682,22 @@ mod tests {
         let mut l = list(vec![FakeItem::new("alpha"), FakeItem::new("beta")]);
         l.set_query("zzz");
 
-        let theme = Theme::default();
-        let h = l.height(40, 40);
-        let mut terminal = Terminal::new(TestBackend::new(40, h)).unwrap();
-        terminal
-            .draw(|frame| l.render(frame, Rect::new(0, 0, 40, h), &theme))
-            .expect("render must not panic");
+        let rows = render_rows(&l, 40, l.height(40, 40));
 
-        let buf = terminal.backend().buffer();
-        let dump: String = (0..h)
-            .flat_map(|y| (0..40).map(move |x| (x, y)))
-            .map(|(x, y)| buf[(x, y)].symbol().to_owned())
-            .collect();
-        assert!(
-            dump.contains("no matches"),
-            "no-matches notice should render: {dump}",
+        let rows: Vec<&str> = rows.iter().map(|row| row.trim_end()).collect();
+        assert_eq!(
+            rows,
+            [
+                "Pick one",
+                "",
+                "/ zzz",
+                "",
+                "  no matches for `zzz`",
+                "",
+                "",
+                "",
+                ""
+            ],
         );
     }
 

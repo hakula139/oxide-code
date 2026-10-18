@@ -155,13 +155,8 @@ mod tests {
     use super::*;
     use crate::slash::testing::test_session_info;
     use crate::tui::modal::Modal;
-    use crate::tui::modal::testing::render_rows;
+    use crate::tui::modal::testing::render_modal;
     use crate::util::path::testing::HOME_VAR;
-
-    fn render_modal(modal: &KvOverview, width: u16) -> String {
-        let height = modal.height(width, u16::MAX);
-        format!("{}\n", render_rows(modal, width, height).join("\n"))
-    }
 
     // ── ConfigCmd::name ──
 
