@@ -6,6 +6,7 @@
 //! capabilities, so their requests carry none of those opt-ins and auto-compaction stays off.
 
 mod pricing;
+mod usage;
 
 use std::fmt::Write;
 
@@ -14,6 +15,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use crate::config::Effort;
 pub(crate) use pricing::TokenCostRates;
 use pricing::{FABLE_5_1_RATES, HAIKU_5_5_RATES, OPUS_5_5_RATES, SONNET_5_5_RATES};
+pub(crate) use usage::TokenUsage;
 
 // ── ModelInfo ──
 
@@ -346,8 +348,14 @@ mod tests {
             ("claude-sonnet-5-5", 10.105),
             ("claude-haiku-5-5", 0.5055),
         ] {
-            let rates = cost_rates(id).unwrap();
-            let cost = rates.estimate_usd(50_000, 0, 50_000, 1_000_000, PromptCacheTtl::FiveMin);
+            let usage = TokenUsage {
+                cache_read_input_tokens: 50_000,
+                ..TokenUsage::new(50_000, 1_000_000)
+            };
+
+            let cost = cost_rates(id)
+                .unwrap()
+                .estimate_usd(usage, PromptCacheTtl::FiveMin);
             assert!((cost - expected).abs() < 1e-9, "{id}: {cost} vs {expected}");
         }
     }

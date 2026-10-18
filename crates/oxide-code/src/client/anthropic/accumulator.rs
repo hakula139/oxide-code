@@ -6,8 +6,9 @@ use std::mem;
 use tracing::{debug, warn};
 
 use super::wire::{ApiError, ContentBlockInfo, Delta, StreamEvent};
-use crate::client::{Response, ResponseEvent, StopDetails, StopReason, TokenUsage};
+use crate::client::{Response, ResponseEvent, StopDetails, StopReason};
 use crate::message::{ContentBlock, Replay, WireKind, progress_note};
+use crate::model::TokenUsage;
 
 // ── ResponseAccumulator ──
 

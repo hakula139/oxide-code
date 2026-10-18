@@ -3,10 +3,10 @@
 use serde::ser::SerializeSeq;
 use serde::{Deserialize, Serialize, Serializer};
 
-use crate::client::{StopDetails, StopReason, TokenUsage};
+use crate::client::{StopDetails, StopReason};
 use crate::config::Effort;
 use crate::message::{ContentBlock, Message, Role, WireKind};
-use crate::model::ThinkingConfig;
+use crate::model::{ThinkingConfig, TokenUsage};
 use crate::tool::ToolDefinition;
 
 // ── Request Types ──

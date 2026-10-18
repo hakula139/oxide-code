@@ -22,7 +22,6 @@ use self::abort::{AbortResult, Inbox, TurnAbort};
 use self::compact_boundary::Boundary;
 use self::compaction::{AutoCompact, AutoCompactFailures};
 use self::turn::{TurnContext, TurnOutcome, TurnReport};
-use crate::client::TokenUsage;
 use crate::client::anthropic::Client;
 use crate::config::Config;
 use crate::config::auth::{self, Auth, AuthSource};
@@ -31,7 +30,7 @@ use crate::config::login::PendingLogin;
 use crate::config::oauth::{self, ClaudeCodeKeychain};
 use crate::file_tracker::FileTracker;
 use crate::message::{ContentBlock, Message};
-use crate::model::{self, ModelSpec};
+use crate::model::{self, ModelSpec, TokenUsage};
 use crate::permission::{Mode, Policy, Workspace};
 use crate::prompt::{self, PromptParts, SessionContext, UserContext};
 use crate::protocol::{
@@ -862,14 +861,7 @@ fn estimate_cost_usd(requests: &[UsageRecord]) -> f64 {
         .iter()
         .filter_map(|request| {
             let rates = model::cost_rates(&request.model)?;
-            let tokens = request.tokens;
-            Some(rates.estimate_usd(
-                tokens.input_tokens,
-                tokens.cache_creation_input_tokens,
-                tokens.cache_read_input_tokens,
-                tokens.output_tokens,
-                request.cache_ttl,
-            ))
+            Some(rates.estimate_usd(request.tokens, request.cache_ttl))
         })
         .sum()
 }

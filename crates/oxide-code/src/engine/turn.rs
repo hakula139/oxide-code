@@ -7,8 +7,9 @@ use tokio::sync::mpsc;
 
 use super::abort::{AbortResult, Inbox, TurnAbort, await_unless_aborted};
 use super::dispatch::{self, DispatchContext};
-use crate::client::{Response, ResponseEvent, StopDetails, StopReason, TokenUsage, Wire};
+use crate::client::{Response, ResponseEvent, StopDetails, StopReason, Wire};
 use crate::message::{ContentBlock, Message, Role};
+use crate::model::TokenUsage;
 use crate::prompt::PromptParts;
 use crate::protocol::{Event, EventSink, Op};
 use crate::session::handle::SessionHandle;

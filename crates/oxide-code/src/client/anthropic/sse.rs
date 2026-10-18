@@ -237,8 +237,9 @@ mod tests {
     use super::*;
     use crate::client::anthropic::testing::messages_request;
     use crate::client::anthropic::wire::Delta;
-    use crate::client::{RateLimitWindow, RateLimits, Response, TokenUsage};
+    use crate::client::{RateLimitWindow, RateLimits, Response};
     use crate::message::ContentBlock;
+    use crate::model::TokenUsage;
 
     // ── Fixtures ──
 
@@ -736,7 +737,7 @@ mod tests {
                 message: super::super::wire::MessageResponse {
                     ref id,
                     ref model,
-                    usage: Some(crate::client::TokenUsage {
+                    usage: Some(TokenUsage {
                         input_tokens: 25,
                         cache_creation_input_tokens: 0,
                         cache_read_input_tokens: 0,
