@@ -8,7 +8,14 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn ox() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_ox"))
+    let mut ox = Command::new(env!("CARGO_BIN_EXE_ox"));
+    // On Linux, building the HTTP client reads the system trust store and fails when it holds no
+    // certificates, so the tests pin it to a test CA.
+    ox.env(
+        "SSL_CERT_FILE",
+        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/test-ca.pem"),
+    );
+    ox
 }
 
 #[test]

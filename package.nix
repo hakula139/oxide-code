@@ -1,6 +1,5 @@
 {
   lib,
-  cacert,
   git,
   rustPlatform,
   versionCheckHook,
@@ -23,11 +22,7 @@ rustPlatform.buildRustPackage {
   # Tests bind loopback ports, which the darwin sandbox denies by default.
   __darwinAllowLocalNetworking = true;
 
-  # TLS clients load the platform trust store, which the sandbox leaves empty without cacert.
-  nativeCheckInputs = [
-    cacert
-    git
-  ];
+  nativeCheckInputs = [ git ];
 
   doInstallCheck = true;
   nativeInstallCheckInputs = [ versionCheckHook ];

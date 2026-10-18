@@ -2,7 +2,6 @@
 //! loopback listener for the redirect, and the code exchange.
 
 use std::net::Ipv4Addr;
-use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -17,6 +16,7 @@ use tracing::debug;
 
 use super::auth::{Auth, AuthSource};
 use super::oauth::{self, CodeGrant, OAUTH_CLIENT_ID, OAUTH_SCOPES};
+use crate::util::tls::Trust;
 
 const AUTHORIZE_URL: &str = "https://claude.ai/oauth/authorize";
 /// Claude Code's sign-in asks for this Console scope beside the refresh scopes, and its consent
@@ -64,11 +64,7 @@ impl PendingLogin {
 
     /// Waits for the browser redirect, exchanges its code for tokens at `token_url`, and stores
     /// them as the oxide-code login. Fails if the browser does not return in time.
-    pub(crate) async fn finish(
-        self,
-        token_url: &str,
-        extra_ca_certs: Option<&Path>,
-    ) -> Result<Auth> {
+    pub(crate) async fn finish(self, token_url: &str, trust: &Trust) -> Result<Auth> {
         let Ok(callback) = tokio::time::timeout(LOGIN_TIMEOUT, self.await_code()).await else {
             bail!(
                 "the browser did not return within {} minutes",
@@ -83,7 +79,7 @@ impl PendingLogin {
             state: &self.state,
         };
         let result = async {
-            let tokens = oauth::exchange_code(token_url, &grant, extra_ca_certs).await?;
+            let tokens = oauth::exchange_code(token_url, &grant, trust).await?;
             oauth::save_login(&tokens).await?;
             Ok(Auth::new(AuthSource::OxLogin, tokens.access_token))
         }
@@ -376,12 +372,14 @@ mod tests {
 
         let (auth, reply, reloaded) =
             temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
-                let (auth, reply) =
-                    tokio::join!(pending.finish(&token_url, None), browse(port, &target));
+                let (auth, reply) = tokio::join!(
+                    pending.finish(&token_url, &Trust::NoRoots),
+                    browse(port, &target)
+                );
                 (
                     auth,
                     reply,
-                    oauth::load_token(Login::Ox, ClaudeCodeKeychain::NONE, None).await,
+                    oauth::load_token(Login::Ox, ClaudeCodeKeychain::NONE, &Trust::NoRoots).await,
                 )
             })
             .await;
@@ -422,7 +420,10 @@ mod tests {
 
         let (auth, reply) =
             temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
-                tokio::join!(pending.finish(&token_url, None), browse(port, &target))
+                tokio::join!(
+                    pending.finish(&token_url, &Trust::NoRoots),
+                    browse(port, &target)
+                )
             })
             .await;
 
@@ -445,7 +446,7 @@ mod tests {
         let target = format!("/callback?error=access_denied&state={}", pending.state);
 
         let (auth, reply) = tokio::join!(
-            pending.finish(UNUSED_TOKEN_URL, None),
+            pending.finish(UNUSED_TOKEN_URL, &Trust::NoRoots),
             browse(port, &target),
         );
 
@@ -461,7 +462,10 @@ mod tests {
     async fn finish_gives_up_when_the_browser_never_returns() {
         let pending = PendingLogin::start().await.unwrap();
 
-        let err = pending.finish(UNUSED_TOKEN_URL, None).await.unwrap_err();
+        let err = pending
+            .finish(UNUSED_TOKEN_URL, &Trust::NoRoots)
+            .await
+            .unwrap_err();
 
         assert_eq!(
             err.to_string(),

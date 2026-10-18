@@ -442,14 +442,14 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
-    use crate::client::anthropic::testing::messages_request;
+    use crate::client::anthropic::testing::{messages_request, plain_http};
 
     fn request(server: &MockServer) -> MessagesRequest {
         messages_request(format!("{}/v1/messages", server.uri()))
     }
 
     async fn post_once(server: &MockServer) -> Result<reqwest::Response, AttemptError> {
-        post_messages(&reqwest::Client::new(), &request(server), 0).await
+        post_messages(&plain_http(), &request(server), 0).await
     }
 
     async fn mount(server: &MockServer, response: ResponseTemplate) {
@@ -615,7 +615,7 @@ mod tests {
         let mut req = request(&server);
         req.betas = "beta-a,beta-b".to_owned();
 
-        post_messages(&reqwest::Client::new(), &req, 3)
+        post_messages(&plain_http(), &req, 3)
             .await
             .expect("2xx passes through");
 
@@ -631,7 +631,7 @@ mod tests {
     async fn post_messages_connection_failure_is_retryable() {
         // Port 9 (discard) is closed on test hosts, so the connect fails fast.
         let req = messages_request("http://127.0.0.1:9/v1/messages");
-        let err = post_messages(&reqwest::Client::new(), &req, 0)
+        let err = post_messages(&plain_http(), &req, 0)
             .await
             .expect_err("nothing listens on the discard port");
         let AttemptError::Retryable { error, cause, .. } = &err else {
@@ -647,7 +647,7 @@ mod tests {
     #[tokio::test]
     async fn post_messages_malformed_url_is_fatal() {
         let req = messages_request("not a url");
-        let err = post_messages(&reqwest::Client::new(), &req, 0)
+        let err = post_messages(&plain_http(), &req, 0)
             .await
             .expect_err("the request cannot be built");
         assert!(matches!(err, AttemptError::Fatal(_)), "{err:?}");
@@ -813,7 +813,7 @@ mod tests {
             .mount(&server)
             .await;
         mount(&server, ResponseTemplate::new(200).set_body_string("ok")).await;
-        let http = &reqwest::Client::new();
+        let http = &plain_http();
         let req = &request(&server);
 
         let body = with_retry(

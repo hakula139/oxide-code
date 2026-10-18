@@ -15,6 +15,7 @@ use crate::config::compaction::CompactionConfig;
 use crate::config::gateway::GatewayCompat;
 use crate::config::{Config, DEFAULT_THEME, PromptCacheTtl, StatusLineSegment, ThemeConfig};
 use crate::model::ModelSpec;
+use crate::util::tls::Trust;
 
 pub(crate) const DEVICE_ID: &str = "did";
 
@@ -57,7 +58,22 @@ pub(crate) fn test_client(base_url: impl Into<String>, auth: Auth, model: &str) 
 /// Client on `config` with a fixed session id, so wire headers carry a deterministic
 /// `x-claude-code-session-id`.
 pub(crate) fn client_for(config: &Config) -> Client {
-    Client::new(config, Some("sid".to_owned()), DEVICE_ID.to_owned()).unwrap()
+    Client::new(
+        config,
+        Trust::NoRoots,
+        Some("sid".to_owned()),
+        DEVICE_ID.to_owned(),
+    )
+    .unwrap()
+}
+
+/// An HTTP client for plain-HTTP mock servers, which reads no system trust store.
+pub(super) fn plain_http() -> reqwest::Client {
+    Trust::NoRoots
+        .apply(reqwest::Client::builder())
+        .unwrap()
+        .build()
+        .unwrap()
 }
 
 /// A `/v1/messages` call to `url` with an empty body and an API key.
