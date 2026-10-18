@@ -127,12 +127,14 @@
 
           cspell = {
             enable = true;
+            package = null;
             entry = nodeHook "cspell" "cspell --no-must-find-files --no-progress";
             types = [ "text" ];
           };
           markdownlint = {
             enable = true;
             name = "markdownlint-cli2";
+            package = null;
             entry = nodeHook "markdownlint" "markdownlint-cli2 --fix";
             files = "\\.md$";
           };
