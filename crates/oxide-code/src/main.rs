@@ -32,7 +32,7 @@ use config::Config;
 use driver::Exit;
 use driver::headless::OutputFormat;
 use driver::tui::Startup;
-use engine::{Engine, EnginePanic, Toolbox};
+use engine::{Engine, EnginePanic, SessionParts, Toolbox};
 use file_tracker::FileTracker;
 use permission::{Mode, ReadFilter};
 use session::display::archive_notice;
@@ -195,10 +195,12 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
         &config,
         identity::load_or_create_device_id(),
         toolbox,
-        store,
-        handle,
-        transcript,
-        file_tracker,
+        SessionParts {
+            store,
+            handle,
+            transcript,
+            file_tracker,
+        },
         tui_mode,
     )
     .await?;

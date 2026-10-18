@@ -11,7 +11,7 @@ use crate::client::{Response, ResponseEvent, StopDetails, StopReason, TokenUsage
 use crate::message::{ContentBlock, Message, Role};
 use crate::prompt::PromptParts;
 use crate::protocol::{Event, EventSink, Op};
-use crate::session::handle::{RecordOutcome, SessionHandle};
+use crate::session::handle::SessionHandle;
 use crate::tool::tasks::Task;
 use crate::tool::{ToolDefinition, ToolMetadata, ToolRegistry};
 
@@ -68,31 +68,39 @@ impl TurnOutcome {
     }
 }
 
+/// What a turn reads from the engine.
+pub(super) struct TurnContext<'a> {
+    pub(super) client: &'a dyn Wire,
+    pub(super) tools: &'a ToolRegistry,
+    pub(super) prompt: &'a PromptParts,
+    pub(super) sink: &'a dyn EventSink,
+    pub(super) session: &'a SessionHandle,
+    /// How many rounds may run without a final reply before the turn fails, unbounded when `None`.
+    pub(super) max_tool_rounds: Option<u32>,
+}
+
 /// Drives one user prompt to a final assistant text reply. The loop returns as soon as a round
 /// produces no tool calls, and a `pause_turn` stop re-requests without a new user message.
 /// [`Op::Queue`]s splice in as user messages at round boundaries, and an [`Op::SetMode`] waits in
 /// `inbox` for the next gated call. Long-running awaits race `ops` so `Interrupt` / `Shutdown`
-/// abort promptly. An abort mid-stream commits none of the reply, while
-/// an abort mid-round commits the round with the unfinished calls marked interrupted. Either way
-/// the transcript then ends on [`Message::interruption`].
-/// `max_tool_rounds = None` runs unbounded, and `Some(n)` bails after `n` rounds without a reply.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "agent_turn takes the full per-turn dependency set, \
-              since a bundle struct would obscure lifetimes"
-)]
+/// abort promptly. An abort mid-stream commits none of the reply, while an abort mid-round commits
+/// the round with the unfinished calls marked interrupted. Either way the transcript then ends on
+/// [`Message::interruption`].
 pub(super) async fn agent_turn(
-    client: &dyn Wire,
-    tools: &ToolRegistry,
+    turn: TurnContext<'_>,
     messages: &mut Vec<Message>,
-    prompt: &PromptParts,
-    sink: &dyn EventSink,
-    session: &SessionHandle,
     ops: &mut mpsc::Receiver<Op>,
     inbox: &mut Inbox,
-    max_tool_rounds: Option<u32>,
     dispatch_ctx: &mut DispatchContext<'_>,
 ) -> TurnOutcome {
+    let TurnContext {
+        client,
+        tools,
+        prompt,
+        sink,
+        session,
+        max_tool_rounds,
+    } = turn;
     let tool_defs = tools.definitions();
     let mut report = TurnReport::default();
 
@@ -360,6 +368,7 @@ async fn commit_round(
     messages.push(tool_result_msg);
 }
 
+/// Records and appends each queued prompt, then confirms it with [`Event::PromptDrained`].
 pub(super) async fn record_drained_prompts(
     texts: impl IntoIterator<Item = String>,
     messages: &mut Vec<Message>,
@@ -375,7 +384,7 @@ pub(super) async fn record_drained_prompts(
 }
 
 async fn record_message(session: &SessionHandle, msg: Message, sink: &dyn EventSink) {
-    let outcome: RecordOutcome = session.record_message(msg).await;
+    let outcome = session.record_message(msg).await;
     sink.session_write_error(outcome.failure.as_deref());
 }
 
@@ -608,6 +617,22 @@ mod tests {
             .collect()
     }
 
+    fn turn_context<'a>(
+        client: &'a dyn Wire,
+        tools: &'a ToolRegistry,
+        sink: &'a dyn EventSink,
+        session: &'a SessionHandle,
+    ) -> TurnContext<'a> {
+        TurnContext {
+            client,
+            tools,
+            prompt: empty_prompt(),
+            sink,
+            session,
+            max_tool_rounds: None,
+        }
+    }
+
     /// Dispatch context in `cwd` whose gate runs every call that no deny or ask rule stops
     /// (`yolo`), so the turn tests exercise the loop without approvals. The `dispatch` and
     /// `permission` tests cover the gate itself.
@@ -654,15 +679,10 @@ mod tests {
         let mut messages = vec![crate::message::Message::user("hi")];
 
         agent_turn(
-            &client,
-            &tools,
+            turn_context(&client, &tools, &sink, &session),
             &mut messages,
-            &empty_prompt(),
-            &sink,
-            &session,
             &mut inert_ops(),
             &mut Inbox::default(),
-            None,
             &mut yolo_dispatch(),
         )
         .await
@@ -695,15 +715,10 @@ mod tests {
         let mut messages = vec![Message::user("run echo")];
 
         agent_turn(
-            &client,
-            &tools,
+            turn_context(&client, &tools, &sink, &session),
             &mut messages,
-            &empty_prompt(),
-            &sink,
-            &session,
             &mut inert_ops(),
             &mut Inbox::default(),
-            None,
             &mut yolo_dispatch(),
         )
         .await
@@ -732,15 +747,10 @@ mod tests {
         let mut messages = vec![Message::user("hi")];
 
         agent_turn(
-            &client,
-            &tools,
+            turn_context(&client, &tools, &sink, &session),
             &mut messages,
-            &empty_prompt(),
-            &sink,
-            &session,
             &mut inert_ops(),
             &mut Inbox::default(),
-            None,
             &mut yolo_dispatch(),
         )
         .await
@@ -774,15 +784,10 @@ mod tests {
         let mut messages = vec![Message::user("hi")];
 
         let report = agent_turn(
-            &client,
-            &tools,
+            turn_context(&client, &tools, &sink, &session),
             &mut messages,
-            &empty_prompt(),
-            &sink,
-            &session,
             &mut inert_ops(),
             &mut Inbox::default(),
-            None,
             &mut yolo_dispatch(),
         )
         .await
@@ -806,15 +811,10 @@ mod tests {
         let mut messages = vec![Message::user("run echo")];
 
         agent_turn(
-            &client,
-            &tools,
+            turn_context(&client, &tools, &sink, &session),
             &mut messages,
-            &empty_prompt(),
-            &sink,
-            &session,
             &mut inert_ops(),
             &mut Inbox::default(),
-            None,
             &mut yolo_dispatch(),
         )
         .await
@@ -887,15 +887,10 @@ mod tests {
         let mut messages = vec![Message::user("view notes")];
 
         agent_turn(
-            &client,
-            &tools,
+            turn_context(&client, &tools, &sink, &session),
             &mut messages,
-            &empty_prompt(),
-            &sink,
-            &session,
             &mut inert_ops(),
             &mut Inbox::default(),
-            None,
             &mut yolo_in(cwd.path()),
         )
         .await
@@ -952,15 +947,10 @@ mod tests {
         ];
 
         let report = agent_turn(
-            &client,
-            &tools,
+            turn_context(&client, &tools, &sink, &session),
             &mut messages,
-            &empty_prompt(),
-            &sink,
-            &session,
             &mut inert_ops(),
             &mut Inbox::default(),
-            None,
             &mut yolo_dispatch(),
         )
         .await
@@ -997,15 +987,10 @@ mod tests {
         tx.send(Op::Queue("follow up".to_owned())).await.unwrap();
 
         agent_turn(
-            &client,
-            &tools,
+            turn_context(&client, &tools, &sink, &session),
             &mut messages,
-            &empty_prompt(),
-            &sink,
-            &session,
             &mut rx,
             &mut Inbox::default(),
-            None,
             &mut yolo_dispatch(),
         )
         .await
@@ -1058,15 +1043,10 @@ mod tests {
         tx.send(Op::Queue("second".to_owned())).await.unwrap();
 
         agent_turn(
-            &client,
-            &tools,
+            turn_context(&client, &tools, &sink, &session),
             &mut messages,
-            &empty_prompt(),
-            &sink,
-            &session,
             &mut rx,
             &mut Inbox::default(),
-            None,
             &mut yolo_dispatch(),
         )
         .await
@@ -1111,15 +1091,10 @@ mod tests {
         tx.try_send(Op::Interrupt).unwrap();
 
         let abort = agent_turn(
-            &client,
-            &tools,
+            turn_context(&client, &tools, &sink, &session),
             &mut messages,
-            &empty_prompt(),
-            &sink,
-            &session,
             &mut rx,
             &mut Inbox::default(),
-            None,
             &mut yolo_dispatch(),
         )
         .await
@@ -1140,22 +1115,16 @@ mod tests {
         let sink = CapturingSink::new();
         let mut messages = vec![Message::user("write a story")];
         let (tx, mut rx) = mpsc::channel::<Op>(1);
-        let prompt = empty_prompt();
         let mut dispatch_ctx = yolo_dispatch();
         let mut inbox = Inbox::default();
 
         let (outcome, ()) = tokio::join!(
             agent_turn(
-                &client,
-                &tools,
+                turn_context(&client, &tools, &sink, &session),
                 &mut messages,
-                &prompt,
-                &sink,
-                &session,
                 &mut rx,
                 &mut inbox,
-                None,
-                &mut dispatch_ctx,
+                &mut dispatch_ctx
             ),
             async {
                 while sink.events().is_empty() {
@@ -1192,15 +1161,10 @@ mod tests {
         tx.try_send(Op::Shutdown).unwrap();
 
         let abort = agent_turn(
-            &client,
-            &tools,
+            turn_context(&client, &tools, &sink, &session),
             &mut messages,
-            &empty_prompt(),
-            &sink,
-            &session,
             &mut rx,
             &mut Inbox::default(),
-            None,
             &mut yolo_dispatch(),
         )
         .await
@@ -1225,15 +1189,10 @@ mod tests {
         drop(tx);
 
         let abort = agent_turn(
-            &client,
-            &tools,
+            turn_context(&client, &tools, &sink, &session),
             &mut messages,
-            &empty_prompt(),
-            &sink,
-            &session,
             &mut rx,
             &mut Inbox::default(),
-            None,
             &mut yolo_dispatch(),
         )
         .await
@@ -1277,15 +1236,10 @@ mod tests {
             tx.try_send(op.clone()).unwrap();
 
             let outcome = agent_turn(
-                &client,
-                &tools,
+                turn_context(&client, &tools, &sink, &session),
                 &mut messages,
-                &empty_prompt(),
-                &sink,
-                &session,
                 &mut rx,
                 &mut Inbox::default(),
-                None,
                 &mut yolo_dispatch(),
             )
             .await;
@@ -1316,22 +1270,16 @@ mod tests {
         let sink = CapturingSink::new();
         let mut messages = vec![Message::user("kick off")];
         let (tx, mut rx) = mpsc::channel::<Op>(1);
-        let prompt = empty_prompt();
         let mut dispatch_ctx = yolo_dispatch();
         let mut inbox = Inbox::default();
 
         let (turn_result, ()) = tokio::join!(
             agent_turn(
-                &client,
-                &tools,
+                turn_context(&client, &tools, &sink, &session),
                 &mut messages,
-                &prompt,
-                &sink,
-                &session,
                 &mut rx,
                 &mut inbox,
-                None,
-                &mut dispatch_ctx,
+                &mut dispatch_ctx
             ),
             async {
                 started.notified().await;
@@ -1413,22 +1361,16 @@ mod tests {
         let sink = CapturingSink::new();
         let mut messages = vec![Message::user("kick off")];
         let (tx, mut rx) = mpsc::channel::<Op>(1);
-        let prompt = empty_prompt();
         let mut dispatch_ctx = yolo_dispatch();
         let mut inbox = Inbox::default();
 
         let (outcome, ()) = tokio::join!(
             agent_turn(
-                &client,
-                &tools,
+                turn_context(&client, &tools, &sink, &session),
                 &mut messages,
-                &prompt,
-                &sink,
-                &session,
                 &mut rx,
                 &mut inbox,
-                None,
-                &mut dispatch_ctx,
+                &mut dispatch_ctx
             ),
             async {
                 started.notified().await;
@@ -1463,15 +1405,10 @@ mod tests {
         let mut messages = vec![Message::user("hi")];
 
         agent_turn(
-            &client,
-            &tools,
+            turn_context(&client, &tools, &sink, &session),
             &mut messages,
-            &empty_prompt(),
-            &sink,
-            &session,
             &mut inert_ops(),
             &mut Inbox::default(),
-            None,
             &mut yolo_dispatch(),
         )
         .await
@@ -1508,15 +1445,10 @@ mod tests {
         let mut messages = vec![Message::user("run echo")];
 
         agent_turn(
-            &client,
-            &tools,
+            turn_context(&client, &tools, &sink, &session),
             &mut messages,
-            &empty_prompt(),
-            &sink,
-            &session,
             &mut inert_ops(),
             &mut Inbox::default(),
-            None,
             &mut yolo_dispatch(),
         )
         .await
@@ -1565,15 +1497,13 @@ mod tests {
         let mut messages = vec![Message::user("loop forever")];
 
         let err = agent_turn(
-            &client,
-            &tools,
+            TurnContext {
+                max_tool_rounds: Some(CAP),
+                ..turn_context(&client, &tools, &sink, &session)
+            },
             &mut messages,
-            &empty_prompt(),
-            &sink,
-            &session,
             &mut inert_ops(),
             &mut Inbox::default(),
-            Some(CAP),
             &mut yolo_dispatch(),
         )
         .await
@@ -1602,15 +1532,13 @@ mod tests {
         let mut messages = vec![Message::user("loop forever")];
 
         let outcome = agent_turn(
-            &client,
-            &tools,
+            TurnContext {
+                max_tool_rounds: Some(CAP),
+                ..turn_context(&client, &tools, &sink, &session)
+            },
             &mut messages,
-            &empty_prompt(),
-            &sink,
-            &session,
             &mut inert_ops(),
             &mut Inbox::default(),
-            Some(CAP),
             &mut yolo_dispatch(),
         )
         .await;
@@ -1642,15 +1570,10 @@ mod tests {
         let mut messages = vec![Message::user("loop a while then stop")];
 
         agent_turn(
-            &client,
-            &tools,
+            turn_context(&client, &tools, &sink, &session),
             &mut messages,
-            &empty_prompt(),
-            &sink,
-            &session,
             &mut inert_ops(),
             &mut Inbox::default(),
-            None,
             &mut yolo_dispatch(),
         )
         .await
@@ -1670,15 +1593,10 @@ mod tests {
         let mut messages = vec![Message::user("hi")];
 
         let err = agent_turn(
-            &client,
-            &tools,
+            turn_context(&client, &tools, &sink, &session),
             &mut messages,
-            &empty_prompt(),
-            &sink,
-            &session,
             &mut inert_ops(),
             &mut Inbox::default(),
-            None,
             &mut yolo_dispatch(),
         )
         .await
@@ -1705,15 +1623,10 @@ mod tests {
         let mut messages = vec![Message::user("hi")];
 
         let outcome = agent_turn(
-            &client,
-            &tools,
+            turn_context(&client, &tools, &sink, &session),
             &mut messages,
-            &empty_prompt(),
-            &sink,
-            &session,
             &mut inert_ops(),
             &mut Inbox::default(),
-            None,
             &mut yolo_dispatch(),
         )
         .await;
@@ -1747,15 +1660,10 @@ mod tests {
         let mut messages = vec![Message::user("run echo")];
 
         agent_turn(
-            &client,
-            &tools,
+            turn_context(&client, &tools, &sink, &session),
             &mut messages,
-            &empty_prompt(),
-            &sink,
-            &session,
             &mut inert_ops(),
             &mut Inbox::default(),
-            None,
             &mut yolo_dispatch(),
         )
         .await
@@ -1785,15 +1693,10 @@ mod tests {
         let mut messages = vec![Message::user("hi")];
 
         agent_turn(
-            &client,
-            &tools,
+            turn_context(&client, &tools, &sink, &session),
             &mut messages,
-            &empty_prompt(),
-            &sink,
-            &session,
             &mut inert_ops(),
             &mut Inbox::default(),
-            None,
             &mut yolo_dispatch(),
         )
         .await
@@ -1821,15 +1724,10 @@ mod tests {
         let mut messages = vec![Message::user("look it up")];
 
         agent_turn(
-            &client,
-            &tools,
+            turn_context(&client, &tools, &sink, &session),
             &mut messages,
-            &empty_prompt(),
-            &sink,
-            &session,
             &mut inert_ops(),
             &mut Inbox::default(),
-            None,
             &mut yolo_dispatch(),
         )
         .await
@@ -1872,15 +1770,10 @@ mod tests {
         let mut messages = vec![Message::user("write the file")];
 
         let abort = agent_turn(
-            &client,
-            &tools,
+            turn_context(&client, &tools, &sink, &session),
             &mut messages,
-            &empty_prompt(),
-            &sink,
-            &session,
             &mut inert_ops(),
             &mut Inbox::default(),
-            None,
             &mut yolo_dispatch(),
         )
         .await
@@ -1920,15 +1813,10 @@ mod tests {
         let mut messages = vec![Message::user("hi")];
 
         agent_turn(
-            &client,
-            &tools,
+            turn_context(&client, &tools, &sink, &session),
             &mut messages,
-            &empty_prompt(),
-            &sink,
-            &session,
             &mut inert_ops(),
             &mut Inbox::default(),
-            None,
             &mut yolo_dispatch(),
         )
         .await
@@ -1950,15 +1838,10 @@ mod tests {
         let mut messages = vec![Message::user("hi")];
 
         let abort = agent_turn(
-            &client,
-            &tools,
+            turn_context(&client, &tools, &sink, &session),
             &mut messages,
-            &empty_prompt(),
-            &sink,
-            &session,
             &mut inert_ops(),
             &mut Inbox::default(),
-            None,
             &mut yolo_dispatch(),
         )
         .await
@@ -2026,15 +1909,10 @@ mod tests {
         let mut messages = vec![Message::user("hi")];
 
         let outcome = agent_turn(
-            &client,
-            tools,
+            turn_context(&client, tools, &sink, &session),
             &mut messages,
-            &empty_prompt(),
-            &sink,
-            &session,
             &mut inert_ops(),
             &mut Inbox::default(),
-            None,
             &mut yolo_dispatch(),
         )
         .await;
@@ -2202,15 +2080,10 @@ mod tests {
         let mut messages = vec![Message::user("run echo")];
 
         agent_turn(
-            &client,
-            &tools,
+            turn_context(&client, &tools, &sink, &session),
             &mut messages,
-            &empty_prompt(),
-            &sink,
-            &session,
             &mut inert_ops(),
             &mut Inbox::default(),
-            None,
             &mut dispatch_with(
                 crate::permission::Mode::Manual,
                 &["*"],
@@ -2263,15 +2136,10 @@ mod tests {
         let mut dispatch_ctx = yolo_dispatch();
 
         let outcome = agent_turn(
-            &client,
-            &tools,
+            turn_context(&client, &tools, &sink, &session),
             &mut messages,
-            &empty_prompt(),
-            &sink,
-            &session,
             &mut rx,
             &mut inbox,
-            None,
             &mut dispatch_ctx,
         )
         .await;
@@ -2334,15 +2202,10 @@ mod tests {
             let mut messages = vec![Message::user("run echo")];
 
             let outcome = agent_turn(
-                &client,
-                &tools,
+                turn_context(&client, &tools, &sink, &session),
                 &mut messages,
-                &empty_prompt(),
-                &sink,
-                &session,
                 &mut ops,
                 &mut Inbox::default(),
-                None,
                 &mut dispatch_with(
                     crate::permission::Mode::Manual,
                     &[],
@@ -2411,15 +2274,10 @@ mod tests {
         };
 
         agent_turn(
-            &client,
-            &tools,
+            turn_context(&client, &tools, &sink, &session),
             &mut messages,
-            &empty_prompt(),
-            &sink,
-            &session,
             &mut ops,
             &mut Inbox::default(),
-            None,
             &mut dispatch_ctx,
         )
         .await

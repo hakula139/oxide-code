@@ -104,8 +104,11 @@ impl AutoCompactFailures {
     }
 }
 
+/// What auto-compaction reads from the engine and the state it updates.
 pub(super) struct AutoCompact<'a> {
     pub(super) config: AutoCompactionConfig,
+    /// The latest turn's last round usage, whose total the threshold checks.
+    pub(super) usage: Option<TokenUsage>,
     pub(super) failures: &'a mut AutoCompactFailures,
     pub(super) file_tracker: &'a FileTracker,
     /// The conversation's request prefix, which the summarizer reuses to read its prompt cache.
@@ -119,14 +122,10 @@ pub(super) struct AutoCompact<'a> {
     pub(super) spent: &'a mut Vec<TokenUsage>,
 }
 
-/// Compacts `messages` when `usage` crosses the threshold, returning whether it did. Skips without
-/// auto state or usage, below the threshold, while [`AutoCompactFailures`] has paused
+/// Compacts `messages` when the usage in `auto` crosses the threshold, returning whether it did.
+/// Skips without usage, below the threshold, while [`AutoCompactFailures`] has paused
 /// auto-compaction, or when the transcript is too short for a summary to shrink it. A failed
 /// summary or boundary write counts as a failure and fails the prompt before it is sent.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "auto-compaction needs the same live turn state as manual compaction"
-)]
 pub(super) async fn auto_compact_if_needed(
     client: &dyn Wire,
     session: &SessionHandle,
@@ -134,13 +133,9 @@ pub(super) async fn auto_compact_if_needed(
     sink: &dyn EventSink,
     ops: &mut mpsc::Receiver<Op>,
     inbox: &mut Inbox,
-    auto: Option<&mut AutoCompact<'_>>,
-    usage: Option<TokenUsage>,
+    auto: &mut AutoCompact<'_>,
 ) -> AbortResult<bool> {
-    let Some(auto) = auto else {
-        return Ok(false);
-    };
-    let Some(usage) = usage else {
+    let Some(usage) = auto.usage else {
         return Ok(false);
     };
     if auto.failures.is_paused()
@@ -610,35 +605,38 @@ mod tests {
         }
     }
 
+    /// Auto-compaction at `threshold` tokens after a turn whose last round reported `usage`,
+    /// counting into `failures`. Its file tracker, tools, task list, shells, and spend start empty.
+    fn auto_compact(
+        threshold: u32,
+        usage: Option<TokenUsage>,
+        failures: &mut AutoCompactFailures,
+    ) -> AutoCompact<'_> {
+        AutoCompact {
+            config: AutoCompactionConfig {
+                enabled: true,
+                threshold_tokens: Some(threshold),
+            },
+            usage,
+            failures,
+            file_tracker: Box::leak(Box::default()),
+            prompt: empty_prompt(),
+            tools: &[],
+            tasks: &[],
+            shells: Box::leak(Box::default()),
+            spent: Box::leak(Box::default()),
+        }
+    }
+
     #[tokio::test]
-    async fn auto_compact_if_needed_skips_without_auto_state_usage_or_threshold() {
+    async fn auto_compact_if_needed_skips_without_usage_or_below_the_threshold() {
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let client = FakeClient::new(Vec::new());
         let sink = CapturingSink::new();
-        let tracker = FileTracker::default();
         let mut messages = tool_heavy_transcript();
         let mut inbox = Inbox::default();
         let mut failures = AutoCompactFailures::default();
-
-        let absent = auto_compact_if_needed(
-            &client,
-            &session,
-            &mut messages,
-            &sink,
-            &mut inert_ops(),
-            &mut inbox,
-            None,
-            Some(TokenUsage {
-                input_tokens: 20,
-                cache_creation_input_tokens: 0,
-                cache_read_input_tokens: 0,
-                output_tokens: 1,
-            }),
-        )
-        .await
-        .unwrap();
-        assert!(!absent);
 
         let missing_usage = auto_compact_if_needed(
             &client,
@@ -647,20 +645,7 @@ mod tests {
             &sink,
             &mut inert_ops(),
             &mut inbox,
-            Some(&mut AutoCompact {
-                config: AutoCompactionConfig {
-                    enabled: true,
-                    threshold_tokens: Some(10),
-                },
-                failures: &mut failures,
-                file_tracker: &tracker,
-                prompt: &empty_prompt(),
-                tools: &[],
-                tasks: &[],
-                shells: &BackgroundShells::default(),
-                spent: &mut Vec::new(),
-            }),
-            None,
+            &mut auto_compact(10, None, &mut failures),
         )
         .await
         .unwrap();
@@ -673,25 +658,7 @@ mod tests {
             &sink,
             &mut inert_ops(),
             &mut inbox,
-            Some(&mut AutoCompact {
-                config: AutoCompactionConfig {
-                    enabled: true,
-                    threshold_tokens: Some(100),
-                },
-                failures: &mut failures,
-                file_tracker: &tracker,
-                prompt: &empty_prompt(),
-                tools: &[],
-                tasks: &[],
-                shells: &BackgroundShells::default(),
-                spent: &mut Vec::new(),
-            }),
-            Some(TokenUsage {
-                input_tokens: 20,
-                cache_creation_input_tokens: 0,
-                cache_read_input_tokens: 0,
-                output_tokens: 1,
-            }),
+            &mut auto_compact(100, Some(TokenUsage::new(20, 1)), &mut failures),
         )
         .await
         .unwrap();
@@ -706,7 +673,6 @@ mod tests {
         let session = test_session(dir.path());
         let client = FakeClient::new(Vec::new());
         let sink = CapturingSink::new();
-        let tracker = FileTracker::default();
         let short = vec![Message::user("hi"), Message::assistant("hello")];
         let mut messages = short.clone();
         let mut failures = AutoCompactFailures::default();
@@ -718,25 +684,7 @@ mod tests {
             &sink,
             &mut inert_ops(),
             &mut Inbox::default(),
-            Some(&mut AutoCompact {
-                config: AutoCompactionConfig {
-                    enabled: true,
-                    threshold_tokens: Some(10),
-                },
-                failures: &mut failures,
-                file_tracker: &tracker,
-                prompt: &empty_prompt(),
-                tools: &[],
-                tasks: &[],
-                shells: &BackgroundShells::default(),
-                spent: &mut Vec::new(),
-            }),
-            Some(TokenUsage {
-                input_tokens: 20,
-                cache_creation_input_tokens: 0,
-                cache_read_input_tokens: 0,
-                output_tokens: 1,
-            }),
+            &mut auto_compact(10, Some(TokenUsage::new(20, 1)), &mut failures),
         )
         .await;
 
@@ -755,7 +703,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let sink = CapturingSink::new();
-        let tracker = FileTracker::default();
         let mut messages = tool_heavy_transcript();
         let mut inbox = Inbox::default();
         let mut failures = AutoCompactFailures::default();
@@ -767,25 +714,7 @@ mod tests {
             &sink,
             &mut inert_ops(),
             &mut inbox,
-            Some(&mut AutoCompact {
-                config: AutoCompactionConfig {
-                    enabled: true,
-                    threshold_tokens: Some(10),
-                },
-                failures: &mut failures,
-                file_tracker: &tracker,
-                prompt: &empty_prompt(),
-                tools: &[],
-                tasks: &[],
-                shells: &BackgroundShells::default(),
-                spent: &mut Vec::new(),
-            }),
-            Some(TokenUsage {
-                input_tokens: 20,
-                cache_creation_input_tokens: 0,
-                cache_read_input_tokens: 0,
-                output_tokens: 1,
-            }),
+            &mut auto_compact(10, Some(TokenUsage::new(20, 1)), &mut failures),
         )
         .await;
 
@@ -808,7 +737,6 @@ mod tests {
         let session = dead_test_session();
         let client = FakeClient::new(vec![text_turn("auto summary")]);
         let sink = CapturingSink::new();
-        let tracker = FileTracker::default();
         let mut messages = tool_heavy_transcript();
         let mut inbox = Inbox::default();
         let mut failures = AutoCompactFailures::default();
@@ -820,25 +748,7 @@ mod tests {
             &sink,
             &mut inert_ops(),
             &mut inbox,
-            Some(&mut AutoCompact {
-                config: AutoCompactionConfig {
-                    enabled: true,
-                    threshold_tokens: Some(10),
-                },
-                failures: &mut failures,
-                file_tracker: &tracker,
-                prompt: &empty_prompt(),
-                tools: &[],
-                tasks: &[],
-                shells: &BackgroundShells::default(),
-                spent: &mut Vec::new(),
-            }),
-            Some(TokenUsage {
-                input_tokens: 20,
-                cache_creation_input_tokens: 0,
-                cache_read_input_tokens: 0,
-                output_tokens: 1,
-            }),
+            &mut auto_compact(10, Some(TokenUsage::new(20, 1)), &mut failures),
         )
         .await;
 
@@ -872,16 +782,10 @@ mod tests {
         let session = test_session(dir.path());
         let client = CountingFailingClient::new();
         let sink = CapturingSink::new();
-        let tracker = FileTracker::default();
         let mut messages = tool_heavy_transcript();
         let mut inbox = Inbox::default();
         let mut failures = AutoCompactFailures::new(MAX_AUTO_COMPACT_FAILURES - 1);
-        let usage = Some(TokenUsage {
-            input_tokens: 50_000,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 0,
-            output_tokens: 1,
-        });
+        let usage = Some(TokenUsage::new(50_000, 1));
         let mut attempt = async || {
             auto_compact_if_needed(
                 &client,
@@ -890,20 +794,7 @@ mod tests {
                 &sink,
                 &mut inert_ops(),
                 &mut inbox,
-                Some(&mut AutoCompact {
-                    config: AutoCompactionConfig {
-                        enabled: true,
-                        threshold_tokens: Some(50_000),
-                    },
-                    failures: &mut failures,
-                    file_tracker: &tracker,
-                    prompt: &empty_prompt(),
-                    tools: &[],
-                    tasks: &[],
-                    shells: &BackgroundShells::default(),
-                    spent: &mut Vec::new(),
-                }),
-                usage,
+                &mut auto_compact(50_000, usage, &mut failures),
             )
             .await
         };
@@ -951,23 +842,13 @@ mod tests {
             release: release.clone(),
         };
         let sink = CapturingSink::new();
-        let tracker = FileTracker::default();
         let mut messages = tool_heavy_transcript();
         let mut inbox = Inbox::default();
         let mut failures = AutoCompactFailures::default();
         let (tx, mut rx) = mpsc::channel::<Op>(1);
         let mut auto = AutoCompact {
-            config: AutoCompactionConfig {
-                enabled: true,
-                threshold_tokens: Some(10),
-            },
-            failures: &mut failures,
-            file_tracker: &tracker,
-            prompt: &empty_prompt(),
-            tools: &[],
             tasks: &plan(),
-            shells: &BackgroundShells::default(),
-            spent: &mut Vec::new(),
+            ..auto_compact(10, Some(TokenUsage::new(20, 1)), &mut failures)
         };
 
         let compact = auto_compact_if_needed(
@@ -977,13 +858,7 @@ mod tests {
             &sink,
             &mut rx,
             &mut inbox,
-            Some(&mut auto),
-            Some(TokenUsage {
-                input_tokens: 20,
-                cache_creation_input_tokens: 0,
-                cache_read_input_tokens: 0,
-                output_tokens: 1,
-            }),
+            &mut auto,
         );
         let queue_prompt = async {
             started.notified().await;
@@ -1036,7 +911,6 @@ mod tests {
             text_turn("auto summary"),
         ]);
         let sink = CapturingSink::new();
-        let tracker = FileTracker::default();
         let mut messages = tool_heavy_transcript();
         let mut failures = AutoCompactFailures::default();
 
@@ -1047,25 +921,7 @@ mod tests {
             &sink,
             &mut inert_ops(),
             &mut Inbox::default(),
-            Some(&mut AutoCompact {
-                config: AutoCompactionConfig {
-                    enabled: true,
-                    threshold_tokens: Some(10),
-                },
-                failures: &mut failures,
-                file_tracker: &tracker,
-                prompt: &empty_prompt(),
-                tools: &[],
-                tasks: &[],
-                shells: &BackgroundShells::default(),
-                spent: &mut Vec::new(),
-            }),
-            Some(TokenUsage {
-                input_tokens: 20,
-                cache_creation_input_tokens: 0,
-                cache_read_input_tokens: 0,
-                output_tokens: 1,
-            }),
+            &mut auto_compact(10, Some(TokenUsage::new(20, 1)), &mut failures),
         )
         .await
         .unwrap();

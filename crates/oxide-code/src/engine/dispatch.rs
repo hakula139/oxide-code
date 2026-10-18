@@ -44,15 +44,23 @@ impl DispatchContext<'_> {
     }
 }
 
-pub(super) fn collect_tool_uses(
-    blocks: &[ContentBlock],
-) -> Vec<(String, String, serde_json::Value)> {
+/// A tool call a reply made, which the round has yet to run.
+pub(super) struct PendingToolUse {
+    id: String,
+    name: String,
+    input: serde_json::Value,
+}
+
+/// The tool calls in `blocks`, in the order the reply made them.
+pub(super) fn collect_tool_uses(blocks: &[ContentBlock]) -> Vec<PendingToolUse> {
     blocks
         .iter()
         .filter_map(|b| match b {
-            ContentBlock::ToolUse { id, name, input } => {
-                Some((id.clone(), name.clone(), input.clone()))
-            }
+            ContentBlock::ToolUse { id, name, input } => Some(PendingToolUse {
+                id: id.clone(),
+                name: name.clone(),
+                input: input.clone(),
+            }),
             _ => None,
         })
         .collect()
@@ -83,7 +91,7 @@ impl ToolRound {
 /// running call. Any other call is a batch of its own.
 pub(super) async fn run_tool_round(
     tools: &ToolRegistry,
-    tool_uses: Vec<(String, String, serde_json::Value)>,
+    tool_uses: Vec<PendingToolUse>,
     parse_errors: &HashMap<String, String>,
     sink: &dyn EventSink,
     ops: &mut mpsc::Receiver<Op>,
@@ -108,9 +116,9 @@ pub(super) async fn run_tool_round(
     let mut calls = tool_uses.into_iter().peekable();
     while let Some(first) = calls.next() {
         let mut batch = vec![first];
-        if parallel_safe(&batch[0].1) {
+        if parallel_safe(&batch[0].name) {
             batch.extend(std::iter::from_fn(|| {
-                calls.next_if(|(_, name, _)| parallel_safe(name))
+                calls.next_if(|call| parallel_safe(&call.name))
             }));
         }
         if let Some(abort) = dispatcher.run_batch(batch, &mut round).await {
@@ -118,8 +126,8 @@ pub(super) async fn run_tool_round(
             break;
         }
     }
-    for (id, ..) in calls {
-        round.push(id, ToolOutput::error(NOT_RUN));
+    for call in calls {
+        round.push(call.id, ToolOutput::error(NOT_RUN));
     }
     round
 }
@@ -174,22 +182,23 @@ impl<'r> Dispatcher<'r, '_> {
     /// it has a result.
     async fn run_batch(
         &mut self,
-        batch: Vec<(String, String, serde_json::Value)>,
+        batch: Vec<PendingToolUse>,
         round: &mut ToolRound,
     ) -> Option<TurnAbort> {
-        let cwd = self.dispatch_ctx.workspace.cwd().to_path_buf();
+        let workspace = Arc::clone(&self.dispatch_ctx.workspace);
+        let cwd = workspace.cwd();
         let mut started = Vec::with_capacity(batch.len());
         let mut ready = Vec::new();
         let mut abort = None;
         let mut calls = batch.into_iter();
-        for (id, name, input) in calls.by_ref() {
+        for PendingToolUse { id, name, input } in calls.by_ref() {
             self.sink.emit(
                 Event::ToolCallStart(ToolCall {
                     id: id.clone(),
                     name: name.clone(),
                     input: input.clone(),
                     icon: self.tools.icon(&name).to_owned(),
-                    label: self.tools.label(&name, &input, &cwd),
+                    label: self.tools.label(&name, &input, cwd),
                 }),
                 "tool-call-start",
             );
@@ -241,7 +250,7 @@ impl<'r> Dispatcher<'r, '_> {
                         &output.content,
                         &output.metadata,
                         output.is_error,
-                        &cwd,
+                        cwd,
                     ),
                 }),
                 "tool-call-end",
@@ -253,8 +262,8 @@ impl<'r> Dispatcher<'r, '_> {
             }
             round.push(call.id, output);
         }
-        for (id, ..) in calls {
-            round.push(id, ToolOutput::error(NOT_RUN));
+        for call in calls {
+            round.push(call.id, ToolOutput::error(NOT_RUN));
         }
         abort
     }
@@ -492,8 +501,12 @@ mod tests {
     #[cfg(unix)]
     use crate::tool::write::WriteTool;
 
-    fn call(id: &str, name: &str, input: serde_json::Value) -> (String, String, serde_json::Value) {
-        (id.to_owned(), name.to_owned(), input)
+    fn call(id: &str, name: &str, input: serde_json::Value) -> PendingToolUse {
+        PendingToolUse {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            input,
+        }
     }
 
     /// Each result of `round` as `(id, content, is_error)`, in order.
@@ -831,12 +844,8 @@ mod tests {
             {"content": "Fix the lexer", "status": "in_progress"},
         ]});
         let calls = vec![
-            (
-                "call-1".to_owned(),
-                "tasks".to_owned(),
-                json!({"tasks": plan()}),
-            ),
-            ("call-2".to_owned(), "tasks".to_owned(), both_in_progress),
+            call("call-1", "tasks", json!({"tasks": plan()})),
+            call("call-2", "tasks", both_in_progress),
         ];
 
         let round = run_tool_round(
