@@ -342,9 +342,7 @@ impl ChatView {
     /// Returns whether the tail block is an [`ErrorBlock`].
     #[cfg(test)]
     pub(crate) fn last_is_error(&self) -> bool {
-        self.blocks
-            .last()
-            .is_some_and(|b| b.block().is_error_marker())
+        self.last_error_text().is_some()
     }
 
     /// Error text of the tail block, if it is an [`ErrorBlock`].
