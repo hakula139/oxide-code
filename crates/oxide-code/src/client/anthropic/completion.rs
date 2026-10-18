@@ -201,6 +201,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn complete_retries_a_transient_status_before_the_reply() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(529).insert_header("retry-after", "0"))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(completion_body("Fix login bug")),
+            )
+            .mount(&server)
+            .await;
+
+        let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
+        let text = client
+            .complete(&haiku(), "sys", "user input", 40, None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(text, "Fix login bug");
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
     async fn complete_while_signed_out_fails_without_a_request() {
         let mut config = test_config("https://example.invalid", api_key(), "claude-haiku-5-5");
         config.auth = None;

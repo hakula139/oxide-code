@@ -1832,9 +1832,9 @@ mod tests {
         let err = summarize(&client, &tool_heavy_transcript())
             .await
             .expect_err("in-band error must propagate");
-        assert!(
-            format!("{err:#}").contains("summary request rejected"),
-            "underlying API error message must thread through: {err:#}",
+        assert_eq!(
+            format!("{err:#}"),
+            "API error (invalid_request_error): summary request rejected"
         );
     }
 
@@ -1843,11 +1843,9 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/messages"))
-            .respond_with(
-                ResponseTemplate::new(500)
-                    .insert_header("x-should-retry", "false")
-                    .set_body_string(r#"{"error":{"type":"server_error"}}"#),
-            )
+            .respond_with(ResponseTemplate::new(400).set_body_string(
+                r#"{"type":"error","error":{"type":"invalid_request_error","message":"summary request rejected"}}"#,
+            ))
             .mount(&server)
             .await;
 
@@ -1855,7 +1853,10 @@ mod tests {
         let err = summarize(&client, &tool_heavy_transcript())
             .await
             .expect_err("expected error");
-        assert!(format!("{err:#}").contains("500") || format!("{err:#}").contains("server_error"));
+        assert_eq!(
+            format!("{err:#}"),
+            "API error (HTTP 400 Bad Request): summary request rejected"
+        );
     }
 
     // ── drop_oldest_rounds ──

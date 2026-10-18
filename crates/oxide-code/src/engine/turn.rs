@@ -2052,8 +2052,8 @@ mod tests {
     async fn agent_turn_real_client_announces_each_retry_before_the_reply() {
         let (outcome, messages, sink) = real_client_turn(
             vec![
-                ResponseTemplate::new(529),
-                ResponseTemplate::new(503),
+                ResponseTemplate::new(529).insert_header("retry-after", "0"),
+                ResponseTemplate::new(503).insert_header("retry-after", "0"),
                 sse(HELLO_SSE),
             ],
             &ToolRegistry::new(vec![]),
@@ -2073,8 +2073,8 @@ mod tests {
         assert_eq!(
             notices,
             [
-                "HTTP 529. Retrying in 2 s (retry 1 of 5).",
-                "HTTP 503 Service Unavailable. Retrying in 3 s (retry 2 of 5).",
+                "HTTP 529. Retrying in 0 s (retry 1 of 5).",
+                "HTTP 503 Service Unavailable. Retrying in 0 s (retry 2 of 5).",
             ],
         );
         assert!(

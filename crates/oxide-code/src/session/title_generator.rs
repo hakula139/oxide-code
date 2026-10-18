@@ -450,11 +450,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(wm_path("/v1/messages"))
-            .respond_with(
-                ResponseTemplate::new(503)
-                    .insert_header("x-should-retry", "false")
-                    .set_body_string("bad gateway"),
-            )
+            .respond_with(ResponseTemplate::new(400).set_body_string("bad request"))
             .mount(&server)
             .await;
 
@@ -466,12 +462,10 @@ mod tests {
         let err = generate_and_record(&client, &session, &sink, "hi")
             .await
             .expect_err("HTTP error must propagate");
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains("Haiku completion failed"),
-            "outer context: {msg}"
+        assert_eq!(
+            format!("{err:#}"),
+            "Haiku completion failed: API error (HTTP 400 Bad Request): bad request"
         );
-        assert!(msg.contains("503"), "status surfaced: {msg}");
     }
 
     // ── title_output_format ──
