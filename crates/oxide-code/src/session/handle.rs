@@ -172,6 +172,7 @@ impl SessionHandle {
 
     /// Persists a user-supplied title, suppressing AI titles for the rest of the session.
     pub(crate) async fn set_manual_title(&self, title: String) -> Outcome {
+        self.stop_title_task().await;
         self.shared.mark_manual_title_set();
         let (ack, rx) = oneshot::channel();
         self.dispatch_outcome(SessionCmd::SetManualTitle { title, ack }, rx)
@@ -239,7 +240,7 @@ impl SessionHandle {
     }
 
     /// Aborts the title request and waits for it to end, so it never writes to or reports on a
-    /// finalized session.
+    /// renamed or finalized session.
     async fn stop_title_task(&self) {
         let task = lock_or_recover(&self.title_task, "title_task").take();
         if let Some(task) = task {
@@ -870,6 +871,108 @@ mod tests {
         let sessions = store.list().unwrap();
         let session = sessions.iter().find(|s| s.session_id == sid).unwrap();
         assert_eq!(session.title.as_ref().unwrap().title, "User wins");
+    }
+
+    #[tokio::test]
+    async fn set_manual_title_suppresses_ai_notification_when_actor_skips_append() {
+        title_notification_race(false).await;
+    }
+
+    #[tokio::test]
+    async fn set_manual_title_suppresses_ai_notification_after_accepted_append() {
+        title_notification_race(true).await;
+    }
+
+    async fn title_notification_race(accept_before_rename: bool) {
+        use wiremock::matchers::{method, path as wm_path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        use crate::client::anthropic::testing::{completion_body, test_client};
+        use crate::config::auth::{Auth, AuthSource};
+        use crate::protocol::{Event, EventSink};
+        use crate::session::title_generator;
+
+        #[derive(Clone)]
+        struct TitleSink(mpsc::UnboundedSender<Event>);
+
+        impl EventSink for TitleSink {
+            fn send(&self, event: Event) -> Result<()> {
+                Ok(self.0.send(event)?)
+            }
+        }
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(wm_path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(completion_body(r#"{"title":"AI title"}"#)),
+            )
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = start(&test_store(dir.path()), "claude-haiku-5-5", None);
+        session.record_message(Message::user("first prompt")).await;
+        let session_id = session.session_id().to_owned();
+        let actor = session.cmd_tx.clone();
+        let (cmd_tx, mut commands) = mpsc::channel(8);
+        session.cmd_tx = cmd_tx;
+        let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
+        title_generator::spawn(
+            test_client(
+                server.uri(),
+                Auth::new(AuthSource::ApiKeyEnv, "sk"),
+                "claude-haiku-5-5",
+            ),
+            session.clone(),
+            TitleSink(tx),
+            "prompt".to_owned(),
+        );
+        let SessionCmd::AppendAiTitle { title, ack } = commands.recv().await.unwrap() else {
+            panic!("title generator must request AI append");
+        };
+        if accept_before_rename {
+            let (accepted, accepted_rx) = tokio::sync::oneshot::channel();
+            actor
+                .send(SessionCmd::AppendAiTitle {
+                    title: title.clone(),
+                    ack: accepted,
+                })
+                .await
+                .unwrap();
+            assert!(accepted_rx.await.unwrap().failure.is_none());
+        }
+        let renamed = session.clone();
+        let rename =
+            tokio::spawn(async move { renamed.set_manual_title("Manual title".to_owned()).await });
+        let manual = commands.recv().await.unwrap();
+        assert!(matches!(manual, SessionCmd::SetManualTitle { .. }));
+
+        actor.send(manual).await.unwrap();
+        assert!(rename.await.unwrap().failure.is_none());
+        if accept_before_rename {
+            _ = ack.send(Outcome { failure: None });
+        } else {
+            actor
+                .send(SessionCmd::AppendAiTitle { title, ack })
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(
+            test_store(dir.path())
+                .load_session_data(&session_id)
+                .unwrap()
+                .title
+                .unwrap()
+                .title,
+            "Manual title"
+        );
+        assert_eq!(
+            events.recv().await,
+            None,
+            "a completed manual rename must suppress the delayed AI event"
+        );
     }
 
     #[tokio::test]
