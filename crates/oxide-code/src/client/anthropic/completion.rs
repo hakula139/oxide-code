@@ -142,7 +142,7 @@ mod tests {
     use super::*;
     use crate::client::anthropic::testing::completion_body;
     use crate::client::anthropic::{CLAUDE_CLI_VERSION, SYSTEM_PROMPT_PREFIX};
-    use crate::util::tls::Trust;
+    use crate::util::tls::testing::NoRoots;
 
     fn haiku() -> ModelSpec {
         ModelSpec::resolve("claude-haiku-5-5".to_owned())
@@ -167,7 +167,7 @@ mod tests {
 
         let client = Client::new(
             &test_config(server.uri(), api_key(), "claude-haiku-5-5"),
-            Trust::NoRoots,
+            NoRoots,
             Some("sid-complete".to_owned()),
             DEVICE_ID.to_owned(),
         )
@@ -228,7 +228,7 @@ mod tests {
     async fn complete_while_signed_out_fails_without_a_request() {
         let mut config = test_config("https://example.invalid", api_key(), "claude-haiku-5-5");
         config.auth = None;
-        let client = Client::new(&config, Trust::NoRoots, None, DEVICE_ID.to_owned()).unwrap();
+        let client = Client::new(&config, NoRoots, None, DEVICE_ID.to_owned()).unwrap();
 
         let err = client
             .complete(&haiku(), "", "u", 40, None, None)

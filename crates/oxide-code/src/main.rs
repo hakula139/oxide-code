@@ -47,7 +47,7 @@ use tool::{
     ToolRegistry, bash::BashTool, edit::EditTool, glob::GlobTool, grep::GrepTool, read::ReadTool,
     tasks::TasksTool, write::WriteTool,
 };
-use util::tls::Trust;
+use util::tls::PlatformTrust;
 
 #[derive(Parser)]
 #[command(name = "ox", version, about = "A terminal-based AI coding assistant")]
@@ -203,7 +203,7 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
     let toolbox = create_toolbox(&config.permission.read_filter());
     let engine = Engine::new(
         &config,
-        Trust::Platform(config.extra_ca_certs.clone()),
+        PlatformTrust(config.extra_ca_certs.clone()),
         identity::load_or_create_device_id(),
         toolbox,
         SessionParts {

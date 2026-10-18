@@ -64,7 +64,7 @@ impl PendingLogin {
 
     /// Waits for the browser redirect, exchanges its code for tokens at `token_url`, and stores
     /// them as the oxide-code login. Fails if the browser does not return in time.
-    pub(crate) async fn finish(self, token_url: &str, trust: &Trust) -> Result<Auth> {
+    pub(crate) async fn finish(self, token_url: &str, trust: &dyn Trust) -> Result<Auth> {
         let Ok(callback) = tokio::time::timeout(LOGIN_TIMEOUT, self.await_code()).await else {
             bail!(
                 "the browser did not return within {} minutes",
@@ -279,6 +279,7 @@ mod tests {
 
     use super::*;
     use crate::config::oauth::{ClaudeCodeKeychain, Login};
+    use crate::util::tls::testing::NoRoots;
 
     /// A token endpoint nothing listens on, for flows that end before the exchange.
     const UNUSED_TOKEN_URL: &str = "http://127.0.0.1:9/token";
@@ -372,14 +373,12 @@ mod tests {
 
         let (auth, reply, reloaded) =
             temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
-                let (auth, reply) = tokio::join!(
-                    pending.finish(&token_url, &Trust::NoRoots),
-                    browse(port, &target)
-                );
+                let (auth, reply) =
+                    tokio::join!(pending.finish(&token_url, &NoRoots), browse(port, &target));
                 (
                     auth,
                     reply,
-                    oauth::load_token(Login::Ox, ClaudeCodeKeychain::NONE, &Trust::NoRoots).await,
+                    oauth::load_token(Login::Ox, ClaudeCodeKeychain::NONE, &NoRoots).await,
                 )
             })
             .await;
@@ -420,10 +419,7 @@ mod tests {
 
         let (auth, reply) =
             temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
-                tokio::join!(
-                    pending.finish(&token_url, &Trust::NoRoots),
-                    browse(port, &target)
-                )
+                tokio::join!(pending.finish(&token_url, &NoRoots), browse(port, &target))
             })
             .await;
 
@@ -446,7 +442,7 @@ mod tests {
         let target = format!("/callback?error=access_denied&state={}", pending.state);
 
         let (auth, reply) = tokio::join!(
-            pending.finish(UNUSED_TOKEN_URL, &Trust::NoRoots),
+            pending.finish(UNUSED_TOKEN_URL, &NoRoots),
             browse(port, &target),
         );
 
@@ -463,7 +459,7 @@ mod tests {
         let pending = PendingLogin::start().await.unwrap();
 
         let err = pending
-            .finish(UNUSED_TOKEN_URL, &Trust::NoRoots)
+            .finish(UNUSED_TOKEN_URL, &NoRoots)
             .await
             .unwrap_err();
 

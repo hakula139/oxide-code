@@ -31,28 +31,20 @@ use {
 
 // ── Trust ──
 
-/// The roots an HTTP client verifies servers against.
-#[derive(Debug, Clone)]
-pub(crate) enum Trust {
-    /// The platform trust store, plus the PEM bundle at the path when one is set.
-    Platform(Option<PathBuf>),
-    /// No roots, so building a client reads no system store. The client reaches only plain-HTTP
-    /// servers, such as the tests' mock servers.
-    #[cfg(test)]
-    NoRoots,
+/// The roots an HTTP client verifies servers against. Tests substitute roots that read no system
+/// store.
+pub(crate) trait Trust: Send + Sync {
+    /// Configures `builder` to verify servers against these roots.
+    fn apply(&self, builder: ClientBuilder) -> Result<ClientBuilder>;
 }
 
-impl Trust {
-    /// Configures `builder` to verify servers against these roots. On macOS an extra bundle comes
-    /// with a TLS configuration of its own, which replaces the TLS options set on `builder`.
-    pub(crate) fn apply(&self, builder: ClientBuilder) -> Result<ClientBuilder> {
-        match self {
-            Self::Platform(extra_ca_certs) => {
-                apply_extra_ca_certs(builder, extra_ca_certs.as_deref())
-            }
-            #[cfg(test)]
-            Self::NoRoots => Ok(builder.tls_certs_only([])),
-        }
+/// The platform trust store, plus the PEM bundle at the path when one is set. On macOS a bundle
+/// comes with a TLS configuration of its own, which replaces the TLS options set on the builder.
+pub(crate) struct PlatformTrust(pub(crate) Option<PathBuf>);
+
+impl Trust for PlatformTrust {
+    fn apply(&self, builder: ClientBuilder) -> Result<ClientBuilder> {
+        apply_extra_ca_certs(builder, self.0.as_deref())
     }
 }
 
@@ -505,8 +497,23 @@ fn evaluation_error(code: isize, description: &str) -> Error {
 
 #[cfg(test)]
 pub(crate) mod testing {
+    use anyhow::Result;
+    use reqwest::ClientBuilder;
+
+    use super::Trust;
+
     /// A self-signed P-256 CA, valid for 100 years. The CLI tests pin it as the trust store.
     pub(crate) const TEST_CA_PEM: &str = include_str!("../../tests/fixtures/test-ca.pem");
+
+    /// No roots, so building a client reads no system store. The client reaches only plain-HTTP
+    /// servers, such as the mock servers.
+    pub(crate) struct NoRoots;
+
+    impl Trust for NoRoots {
+        fn apply(&self, builder: ClientBuilder) -> Result<ClientBuilder> {
+            Ok(builder.tls_certs_only([]))
+        }
+    }
 }
 
 #[cfg(test)]

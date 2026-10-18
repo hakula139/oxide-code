@@ -167,7 +167,7 @@ impl Engine {
     /// from `config`. Fails when the client cannot be built.
     pub(crate) async fn new(
         config: &Config,
-        trust: Trust,
+        trust: impl Trust + 'static,
         device_id: String,
         toolbox: Toolbox,
         session: SessionParts,
@@ -1012,6 +1012,7 @@ mod tests {
     use crate::tool::tasks::TasksTool;
     use crate::tool::tasks::testing::plan;
     use crate::util::git::testing::{init_fixture_repo, with_isolated_git_env_async};
+    use crate::util::tls::testing::NoRoots;
 
     /// A toolbox without tools, for an engine that [`Engine::new`] builds.
     fn toolbox() -> Toolbox {
@@ -1200,7 +1201,7 @@ mod tests {
             for (context, replayed) in [(Some(recorded), true), (None, false)] {
                 let engine = Engine::new(
                     &config,
-                    Trust::NoRoots,
+                    NoRoots,
                     DEVICE_ID.to_owned(),
                     toolbox(),
                     SessionParts {
@@ -1259,7 +1260,7 @@ mod tests {
 
             let engine = Engine::new(
                 &config,
-                Trust::NoRoots,
+                NoRoots,
                 DEVICE_ID.to_owned(),
                 toolbox(),
                 SessionParts {

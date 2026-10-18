@@ -18,6 +18,7 @@ pub(crate) mod wire;
 #[cfg(test)]
 pub(crate) mod testing;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -71,7 +72,7 @@ pub(crate) struct Client {
     /// `None` while signed out.
     auth: Option<Auth>,
     base_url: String,
-    trust: Trust,
+    trust: Arc<dyn Trust>,
     gateway: GatewayCompat,
     /// User-set output cap. `None` defers to [`ModelSpec::resolve_max_tokens`].
     max_tokens: Option<u32>,
@@ -90,7 +91,7 @@ impl Client {
     /// `trust` to verify servers.
     pub(crate) fn new(
         config: &Config,
-        trust: Trust,
+        trust: impl Trust + 'static,
         session_id: Option<String>,
         device_id: String,
     ) -> Result<Self> {
@@ -111,7 +112,7 @@ impl Client {
             effort: *effort,
             auth: auth.clone(),
             base_url: base_url.clone(),
-            trust,
+            trust: Arc::new(trust),
             gateway: gateway.clone(),
             max_tokens: *max_tokens,
             prompt_cache_ttl: *prompt_cache_ttl,
@@ -145,8 +146,8 @@ impl Client {
     }
 
     /// The trust roots used by requests, sign-ins, and stored-login refreshes.
-    pub(crate) fn trust(&self) -> &Trust {
-        &self.trust
+    pub(crate) fn trust(&self) -> &dyn Trust {
+        self.trust.as_ref()
     }
 
     /// The credential used by requests, or an error while signed out.
@@ -299,7 +300,7 @@ impl Wire for Client {
 // ── HTTP Client ──
 
 /// The HTTP client with every header requests share. Each request adds its own credential.
-fn build_http(gateway: &GatewayCompat, trust: &Trust) -> Result<reqwest::Client> {
+fn build_http(gateway: &GatewayCompat, trust: &dyn Trust) -> Result<reqwest::Client> {
     let mut headers = HeaderMap::new();
     headers.insert("anthropic-version", HeaderValue::from_static(API_VERSION));
     headers.insert(
@@ -498,7 +499,8 @@ mod tests {
     use crate::config::auth::{Auth, AuthSource};
     use crate::config::{Effort, PromptCacheTtl};
     use crate::model::TokenUsage;
-    use crate::util::tls::testing::TEST_CA_PEM;
+    use crate::util::tls::PlatformTrust;
+    use crate::util::tls::testing::{NoRoots, TEST_CA_PEM};
 
     // ── Fixtures ──
 
@@ -571,7 +573,7 @@ mod tests {
                 Auth::new(AuthSource::ApiKeyEnv, "sk-test"),
                 TEST_MODEL,
             ),
-            Trust::NoRoots,
+            NoRoots,
             None,
             DEVICE_ID.to_owned(),
         )
@@ -587,7 +589,7 @@ mod tests {
                 Auth::new(AuthSource::ClaudeCodeLogin, "oauth-token"),
                 TEST_MODEL,
             ),
-            Trust::NoRoots,
+            NoRoots,
             None,
             DEVICE_ID.to_owned(),
         )
@@ -603,7 +605,7 @@ mod tests {
             TEST_MODEL,
         );
         config.prompt_cache_ttl = PromptCacheTtl::FiveMin;
-        let client = Client::new(&config, Trust::NoRoots, None, DEVICE_ID.to_owned()).unwrap();
+        let client = Client::new(&config, NoRoots, None, DEVICE_ID.to_owned()).unwrap();
 
         assert_eq!(client.prompt_cache_ttl(), PromptCacheTtl::FiveMin);
     }
@@ -616,7 +618,7 @@ mod tests {
                 Auth::new(AuthSource::ApiKeyEnv, "k"),
                 TEST_MODEL,
             ),
-            Trust::NoRoots,
+            NoRoots,
             None,
             DEVICE_ID.to_owned(),
         )
@@ -636,7 +638,7 @@ mod tests {
                 Auth::new(AuthSource::ApiKeyEnv, "k"),
                 TEST_MODEL,
             ),
-            Trust::NoRoots,
+            NoRoots,
             Some(sid.clone()),
             DEVICE_ID.to_owned(),
         )
@@ -651,7 +653,7 @@ mod tests {
         let pem = tempfile::NamedTempFile::new().unwrap();
         std::io::Write::write_all(&mut pem.as_file(), TEST_CA_PEM.as_bytes()).unwrap();
         let cfg = test_config(OFFLINE_URL, api_key(), TEST_MODEL);
-        let trust = Trust::Platform(Some(pem.path().to_path_buf()));
+        let trust = PlatformTrust(Some(pem.path().to_path_buf()));
         Client::new(&cfg, trust, None, DEVICE_ID.to_owned())
             .expect("valid CA bundle must build a client");
     }
@@ -661,7 +663,7 @@ mod tests {
         // An unreadable trust anchor must fail the client build and cite the configured path so
         // the user can debug it without inspecting TLS internals.
         let cfg = test_config(OFFLINE_URL, api_key(), TEST_MODEL);
-        let trust = Trust::Platform(Some(std::path::PathBuf::from("/no/such/bundle.pem")));
+        let trust = PlatformTrust(Some(std::path::PathBuf::from("/no/such/bundle.pem")));
         let err = Client::new(&cfg, trust, None, DEVICE_ID.to_owned())
             .err()
             .expect("missing CA must error");
@@ -708,7 +710,7 @@ mod tests {
                 Auth::new(AuthSource::ApiKeyEnv, "k"),
                 TEST_MODEL,
             ),
-            Trust::NoRoots,
+            NoRoots,
             Some("sid-original".to_owned()),
             DEVICE_ID.to_owned(),
         )
@@ -841,7 +843,7 @@ mod tests {
     async fn set_auth_sends_the_new_credential_and_signing_out_stops_requests() {
         let mut client = Client::new(
             &test_config(OFFLINE_URL, api_key(), TEST_MODEL),
-            Trust::NoRoots,
+            NoRoots,
             None,
             DEVICE_ID.to_owned(),
         )

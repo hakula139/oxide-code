@@ -35,7 +35,7 @@ use crate::model::ModelSpec;
 use crate::permission::{Mode, Policy, Tier, Workspace};
 use crate::util::env;
 use crate::util::path::expand_user;
-use crate::util::tls::{Trust, load_extra_ca_certs};
+use crate::util::tls::{PlatformTrust, Trust, load_extra_ca_certs};
 
 pub(crate) const DEFAULT_MODEL: &str = "claude-opus-5-5";
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
@@ -386,7 +386,7 @@ impl Config {
             client.api_key,
             &origins,
             &base_url.value,
-            &Trust::Platform(extra_ca_certs.value.clone()),
+            &PlatformTrust(extra_ca_certs.value.clone()),
             &gateway,
             interactive,
         )
@@ -546,7 +546,7 @@ async fn resolve_auth(
     file_api_key: Option<String>,
     origins: &Origins,
     base_url: &str,
-    trust: &Trust,
+    trust: &dyn Trust,
     gateway: &GatewayCompat,
     interactive: bool,
 ) -> Result<ResolvedAuth> {

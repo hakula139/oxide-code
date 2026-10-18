@@ -15,7 +15,8 @@ use crate::config::compaction::CompactionConfig;
 use crate::config::gateway::GatewayCompat;
 use crate::config::{Config, DEFAULT_THEME, PromptCacheTtl, StatusLineSegment, ThemeConfig};
 use crate::model::ModelSpec;
-use crate::util::tls::Trust;
+use crate::util::tls::Trust as _;
+use crate::util::tls::testing::NoRoots;
 
 pub(crate) const DEVICE_ID: &str = "did";
 
@@ -60,7 +61,7 @@ pub(crate) fn test_client(base_url: impl Into<String>, auth: Auth, model: &str) 
 pub(crate) fn client_for(config: &Config) -> Client {
     Client::new(
         config,
-        Trust::NoRoots,
+        NoRoots,
         Some("sid".to_owned()),
         DEVICE_ID.to_owned(),
     )
@@ -69,7 +70,7 @@ pub(crate) fn client_for(config: &Config) -> Client {
 
 /// An HTTP client for plain-HTTP mock servers, which reads no system trust store.
 pub(super) fn plain_http() -> reqwest::Client {
-    Trust::NoRoots
+    NoRoots
         .apply(reqwest::Client::builder())
         .unwrap()
         .build()

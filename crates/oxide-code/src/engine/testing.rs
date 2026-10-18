@@ -35,7 +35,7 @@ use crate::session::store::SessionStore;
 use crate::session::store::testing::test_store;
 use crate::tool::{Prepared, Tool, ToolCtx, ToolDefinition, ToolOutput, ToolRegistry, ToolSpec};
 use crate::util::path::testing::HOME_VAR;
-use crate::util::tls::Trust;
+use crate::util::tls::testing::NoRoots;
 
 // ── Engine ──
 
@@ -55,7 +55,7 @@ pub(crate) async fn engine(base_url: String, store: &SessionStore, cwd: &Path) -
     Engine {
         client: Client::new(
             &config,
-            Trust::NoRoots,
+            NoRoots,
             Some(session.session_id().to_owned()),
             DEVICE_ID.to_owned(),
         )
