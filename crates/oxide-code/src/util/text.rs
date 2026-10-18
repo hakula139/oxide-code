@@ -66,7 +66,8 @@ pub(crate) fn center_truncate_to_width(s: &str, max_width: usize) -> String {
     format!("{head}{ELLIPSIS}{tail}")
 }
 
-fn take_head(s: &str, budget: usize) -> String {
+/// The longest prefix of `s` that fits `budget` display columns, cut between grapheme clusters.
+pub(crate) fn take_head(s: &str, budget: usize) -> String {
     let mut used = 0;
     s.graphemes(true)
         .take_while(|g| {

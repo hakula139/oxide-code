@@ -12,6 +12,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::tui::saturating_u16;
 use crate::tui::theme::Theme;
+use crate::util::text::take_head;
 
 const PROMPT: &str = "/ ";
 const PROMPT_WIDTH: u16 = 2;
@@ -40,7 +41,7 @@ impl LineEditor {
     /// Caps the text at `max_width` display columns. Truncates the current text, and edits that
     /// would grow past the cap are dropped.
     pub(crate) fn with_max_width(mut self, max_width: usize) -> Self {
-        let text = head_within(self.text(), max_width);
+        let text = take_head(self.text(), max_width);
         self.max_width = max_width;
         self.set_text(&text);
         self
@@ -84,7 +85,7 @@ impl LineEditor {
             .filter(|part| !part.is_empty())
             .collect::<Vec<_>>()
             .join(" ");
-        self.textarea.insert_str(head_within(&flat, room))
+        self.textarea.insert_str(take_head(&flat, room))
     }
 
     /// The prompt plus the slice of the text that fits `width`, or the placeholder while empty.
@@ -137,16 +138,6 @@ fn is_blocked_key(event: &KeyEvent) -> bool {
         KeyCode::Char('m') => event.modifiers.contains(KeyModifiers::CONTROL),
         _ => false,
     }
-}
-
-fn head_within(text: &str, max_width: usize) -> String {
-    let mut used = 0;
-    text.chars()
-        .take_while(|c| {
-            used += c.width().unwrap_or(0);
-            used <= max_width
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -279,6 +270,20 @@ mod tests {
         );
         assert!(!editor.paste("x"), "a full field takes nothing");
         assert!(!editor.paste("\n\n"), "line breaks alone insert nothing");
+    }
+
+    #[test]
+    fn paste_keeps_whole_graphemes_under_the_cap() {
+        let mut family = LineEditor::new("").with_max_width(4);
+        let mut heart = LineEditor::new("abcde").with_max_width(6);
+
+        let family_changed = family.paste("👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧");
+        let heart_changed = heart.paste("❤️");
+
+        assert!(family_changed);
+        assert_eq!(family.text(), "👨‍👩‍👧👨‍👩‍👧", "a ZWJ sequence is never split");
+        assert!(!heart_changed);
+        assert_eq!(heart.text(), "abcde", "a VS16 emoji takes two columns");
     }
 
     // ── line ──
