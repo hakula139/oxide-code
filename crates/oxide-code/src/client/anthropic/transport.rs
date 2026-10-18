@@ -127,7 +127,7 @@ where
 }
 
 /// A retry about to wait out its delay, surfaced so a slow recovery never looks like a hang. The
-/// full error, with its advice and response body, surfaces only if every retry fails.
+/// full error, with its details and advice, surfaces only if every retry fails.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct RetryNotice {
     delay: Duration,
@@ -396,12 +396,16 @@ pub(super) fn format_stream_error(error_type: &str, message: &str) -> String {
     )
 }
 
-/// Joins a diagnostic as `headline: details. advice`, leaving out whichever part is absent.
+/// Joins a diagnostic as `headline: details. advice`, leaving out whichever part is absent. Details
+/// that already end in `.`, `?`, `!`, or `...` take the advice after a space alone.
 fn with_details(headline: &str, details: Option<&str>, advice: Option<&str>) -> String {
     match (details, advice) {
         (None, None) => headline.to_owned(),
         (None, Some(advice)) => format!("{headline}. {advice}"),
         (Some(details), None) => format!("{headline}: {details}"),
+        (Some(details), Some(advice)) if details.ends_with(['.', '?', '!']) => {
+            format!("{headline}: {details} {advice}")
+        }
         (Some(details), Some(advice)) => format!("{headline}: {details}. {advice}"),
     }
 }
@@ -425,15 +429,11 @@ fn body_details(body: &str, error: Option<&ApiError>) -> Option<String> {
     condense(text)
 }
 
-/// Server text on one line of at most [`MAX_DETAILS_WIDTH`] columns, without the sentence period
-/// that the diagnostic places after it. An ellipsis stays. `None` when the text is blank.
+/// Server text on one line of at most [`MAX_DETAILS_WIDTH`] columns, with its punctuation as sent.
+/// `None` when the text is blank.
 fn condense(text: &str) -> Option<String> {
     let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let text = text
-        .strip_suffix('.')
-        .filter(|rest| !rest.ends_with('.'))
-        .unwrap_or(&text);
-    (!text.is_empty()).then(|| truncate_to_width(text, MAX_DETAILS_WIDTH))
+    (!text.is_empty()).then(|| truncate_to_width(&text, MAX_DETAILS_WIDTH))
 }
 
 #[cfg(test)]
@@ -987,6 +987,48 @@ mod tests {
     }
 
     #[test]
+    fn format_api_error_keeps_the_details_as_sent_and_ends_each_sentence_once() {
+        let truncated = body_details(&"x".repeat(MAX_DETAILS_WIDTH + 1), None).unwrap();
+        for (status, details, expected) in [
+            (
+                StatusCode::BAD_GATEWAY,
+                "Upstream is down.",
+                "Anthropic API server error (HTTP 502 Bad Gateway): Upstream is down. \
+                 Retry in a few seconds."
+                    .to_owned(),
+            ),
+            (
+                StatusCode::BAD_GATEWAY,
+                truncated.as_str(),
+                format!(
+                    "Anthropic API server error (HTTP 502 Bad Gateway): {}... \
+                     Retry in a few seconds.",
+                    "x".repeat(MAX_DETAILS_WIDTH - 3),
+                ),
+            ),
+            (
+                StatusCode::BAD_GATEWAY,
+                "upstream connect error",
+                "Anthropic API server error (HTTP 502 Bad Gateway): upstream connect error. \
+                 Retry in a few seconds."
+                    .to_owned(),
+            ),
+            (
+                StatusCode::BAD_REQUEST,
+                "messages.0: The block is empty. Remove it.",
+                "API error (HTTP 400 Bad Request): messages.0: The block is empty. Remove it."
+                    .to_owned(),
+            ),
+        ] {
+            assert_eq!(
+                format_api_error(AuthSource::ApiKeyEnv, status, None, None, Some(details)),
+                expected,
+                "{details:?}",
+            );
+        }
+    }
+
+    #[test]
     fn format_api_error_3xx_names_the_redirect_host() {
         let redirected = "Anthropic API endpoint redirected (HTTP 307 Temporary Redirect)";
         let advice = "Redirects are not followed, so point the base URL at the final endpoint.";
@@ -1056,19 +1098,6 @@ mod tests {
             (" \r\n", None),
         ] {
             assert_eq!(body_details(body, None), expected, "{body:?}");
-        }
-    }
-
-    // ── condense ──
-
-    #[test]
-    fn condense_drops_a_final_period_and_keeps_an_ellipsis() {
-        for (text, expected) in [
-            ("Upstream is down.\n", Some("Upstream is down")),
-            ("Still starting...", Some("Still starting...")),
-            (".", None),
-        ] {
-            assert_eq!(condense(text).as_deref(), expected, "{text:?}");
         }
     }
 
