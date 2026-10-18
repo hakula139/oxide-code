@@ -1,7 +1,7 @@
 //! `/diff` output block, drawn like an Edit-tool diff with a line-number gutter. It parses the
 //! raw text lazily on `render`.
 
-use ratatui::style::Modifier;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 
 use super::rows::{NumberedRows, body_row};
@@ -43,66 +43,93 @@ impl ChatBlock for GitDiffBlock {
         );
 
         let mut out = Vec::new();
-        let mut old_ln: usize = 0;
-        let mut new_ln: usize = 0;
-        let mut old_left: usize = 0;
-        let mut new_left: usize = 0;
-
+        let mut hunk = HunkCursor::default();
         for line in self.text.lines() {
             if line.starts_with("diff ") {
+                hunk = HunkCursor::default();
                 let header = parse_diff_git_path(line).unwrap_or(line);
-                body_row(
-                    &mut out,
-                    ctx,
-                    border,
-                    header,
-                    ctx.theme.text().add_modifier(Modifier::BOLD),
-                );
-                old_left = 0;
-                new_left = 0;
+                let style = ctx.theme.text().add_modifier(Modifier::BOLD);
+                body_row(&mut out, ctx, border, header.to_owned(), style);
             } else if let Some((old, new)) = parse_hunk_header(line) {
-                old_ln = old.start;
-                new_ln = new.start;
-                old_left = old.count;
-                new_left = new.count;
-                body_row(&mut out, ctx, border, line, ctx.theme.dim());
+                hunk = HunkCursor::start(old, new);
+                body_row(&mut out, ctx, border, line.to_owned(), ctx.theme.dim());
             } else if line.is_empty() {
-                old_left = 0;
-                new_left = 0;
-                body_row(&mut out, ctx, border, "", ctx.theme.dim());
-            } else if old_left == 0 && new_left == 0 {
-                if is_file_header(line) {
-                    continue;
-                }
-                // Untracked heading and paths, the truncation footer, or a no-newline marker.
-                let style = if line.starts_with("Untracked")
-                    || line.starts_with("(truncated")
-                    || line.starts_with('\\')
-                {
-                    ctx.theme.dim()
-                } else {
-                    ctx.theme.text()
-                };
-                body_row(&mut out, ctx, border, line, style);
+                hunk = HunkCursor::default();
+                body_row(&mut out, ctx, border, String::new(), ctx.theme.dim());
+            } else if !hunk.is_open() {
+                push_outside_hunk(&mut out, ctx, border, line);
             } else if let Some(text) = line.strip_prefix('+') {
-                add.render(&mut out, new_ln, text, ctx.theme.text());
-                new_ln += 1;
-                new_left = new_left.saturating_sub(1);
+                add.render(&mut out, hunk.advance_new(), text, ctx.theme.text());
             } else if let Some(text) = line.strip_prefix('-') {
-                del.render(&mut out, old_ln, text, ctx.theme.text());
-                old_ln += 1;
-                old_left = old_left.saturating_sub(1);
+                del.render(&mut out, hunk.advance_old(), text, ctx.theme.text());
             } else if let Some(text) = line.strip_prefix(' ') {
-                context.render(&mut out, new_ln, text, ctx.theme.dim());
-                old_ln += 1;
-                new_ln += 1;
-                old_left = old_left.saturating_sub(1);
-                new_left = new_left.saturating_sub(1);
+                hunk.advance_old();
+                context.render(&mut out, hunk.advance_new(), text, ctx.theme.dim());
             } else {
                 body_row(&mut out, ctx, border, line, ctx.theme.dim());
             }
         }
         out
+    }
+}
+
+/// Draws a line between hunks, such as an untracked heading or path, the truncation footer, or a
+/// no-newline marker. Extended file headers are skipped because the path row names the file.
+fn push_outside_hunk(out: &mut Vec<Line<'static>>, ctx: &RenderCtx<'_>, border: Style, line: &str) {
+    if is_file_header(line) {
+        return;
+    }
+    let style = if line.starts_with("Untracked")
+        || line.starts_with("(truncated")
+        || line.starts_with('\\')
+    {
+        ctx.theme.dim()
+    } else {
+        ctx.theme.text()
+    };
+    body_row(out, ctx, border, line.to_owned(), style);
+}
+
+// ── HunkCursor ──
+
+/// The next line number on each side of the hunk being drawn, and the lines each side has left.
+#[derive(Debug, Default)]
+struct HunkCursor {
+    old: usize,
+    new: usize,
+    old_left: usize,
+    new_left: usize,
+}
+
+impl HunkCursor {
+    fn start(old: HunkRange, new: HunkRange) -> Self {
+        Self {
+            old: old.start,
+            new: new.start,
+            old_left: old.count,
+            new_left: new.count,
+        }
+    }
+
+    /// Returns whether either side has body lines left, so the next line belongs to the hunk.
+    fn is_open(&self) -> bool {
+        self.old_left > 0 || self.new_left > 0
+    }
+
+    /// Returns the old-side number of the next line and moves past it.
+    fn advance_old(&mut self) -> usize {
+        let number = self.old;
+        self.old += 1;
+        self.old_left = self.old_left.saturating_sub(1);
+        number
+    }
+
+    /// Returns the new-side number of the next line and moves past it.
+    fn advance_new(&mut self) -> usize {
+        let number = self.new;
+        self.new += 1;
+        self.new_left = self.new_left.saturating_sub(1);
+        number
     }
 }
 
