@@ -29,9 +29,10 @@ pub(crate) fn display_title(info: &SessionInfo) -> String {
         .map_or_else(|| UNTITLED_MARKER.to_owned(), |t| t.title.clone())
 }
 
-/// The first line of `text`, trimmed and truncated to [`MAX_TITLE_WIDTH`] columns.
+/// The first non-blank line of `text`, trimmed and truncated to [`MAX_TITLE_WIDTH`] columns.
 pub(crate) fn fit_title(text: &str) -> String {
-    truncate_to_width(text.lines().next().unwrap_or(text).trim(), MAX_TITLE_WIDTH)
+    let first_line = text.trim().lines().next().unwrap_or_default();
+    truncate_to_width(first_line.trim_end(), MAX_TITLE_WIDTH)
 }
 
 /// Compact "N units ago" with an ISO-date fallback past 30 days. Negative deltas (clock skew or
@@ -146,7 +147,16 @@ mod tests {
             fit_title("  Fix auth flow  \nDetails below"),
             "Fix auth flow"
         );
-        assert_eq!(fit_title(""), "");
+    }
+
+    #[test]
+    fn fit_title_skips_leading_blank_lines() {
+        assert_eq!(fit_title("\n  \n Fix auth flow\nDetails"), "Fix auth flow");
+    }
+
+    #[test]
+    fn fit_title_of_blank_text_is_empty() {
+        assert_eq!(fit_title(" \n\t\n "), "");
     }
 
     #[test]
