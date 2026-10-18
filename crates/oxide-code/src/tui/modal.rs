@@ -234,7 +234,7 @@ fn is_universal_cancel(event: &KeyEvent) -> bool {
         || (event.code == KeyCode::Char('c') && event.modifiers.contains(KeyModifiers::CONTROL))
 }
 
-// ── Test Fixtures ──
+// ── Testing ──
 
 #[cfg(test)]
 pub(crate) mod testing {
@@ -246,10 +246,15 @@ pub(crate) mod testing {
 
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use ratatui::buffer::Buffer;
-    use unicode_width::UnicodeWidthStr;
 
     use super::*;
+    use crate::tui::testing::buffer_rows;
+
+    /// Renders `modal` at `width` and the height it requests.
+    pub(crate) fn rendered_text(modal: &dyn Modal, width: u16) -> String {
+        let height = modal.height(width, u16::MAX);
+        render_rows(modal, width, height).join("\n")
+    }
 
     /// Renders `modal` into a `width` x `height` buffer and returns each row as displayed.
     pub(crate) fn render_rows(modal: &dyn Modal, width: u16, height: u16) -> Vec<String> {
@@ -268,24 +273,7 @@ pub(crate) mod testing {
         terminal
             .draw(|frame| render(frame, Rect::new(0, 0, width, height), &Theme::default()))
             .unwrap();
-        let buffer = terminal.backend().buffer();
-        (0..height).map(|y| row_text(buffer, y)).collect()
-    }
-
-    /// Skips the cells a wide symbol covers, which hold a placeholder space.
-    fn row_text(buffer: &Buffer, y: u16) -> String {
-        let mut text = String::new();
-        let mut covered = 0;
-        for x in 0..buffer.area.width {
-            let symbol = buffer[(x, y)].symbol();
-            if covered > 0 {
-                covered -= 1;
-            } else {
-                text.push_str(symbol);
-                covered = symbol.width().saturating_sub(1);
-            }
-        }
-        text
+        buffer_rows(terminal.backend().buffer())
     }
 
     /// Emits a fixed action on a sentinel key for exercising `ModalStack`.

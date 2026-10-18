@@ -155,13 +155,8 @@ mod tests {
     use super::*;
     use crate::slash::testing::test_session_info;
     use crate::tui::modal::Modal;
-    use crate::tui::modal::testing::render_rows;
+    use crate::tui::modal::testing::rendered_text;
     use crate::util::path::testing::HOME_VAR;
-
-    fn render_modal(modal: &KvOverview, width: u16) -> String {
-        let height = modal.height(width, u16::MAX);
-        format!("{}\n", render_rows(modal, width, height).join("\n"))
-    }
 
     // ── ConfigCmd::name ──
 
@@ -196,7 +191,7 @@ mod tests {
     fn build_modal_renders_resolved_auto_compaction() {
         let info = test_session_info();
         let m = build_modal(&info, None);
-        let rendered = render_modal(&m, 80);
+        let rendered = rendered_text(&m, 80);
 
         assert!(rendered.contains("Auto Compaction"), "{rendered}");
         assert!(rendered.contains("at 155000 tokens"), "{rendered}");
@@ -208,7 +203,7 @@ mod tests {
             let mut info = test_session_info();
             info.config.extra_ca_certs = Some(PathBuf::from("/tmp/oxide-fake-home/certs/corp.pem"));
             let m = build_modal(&info, None);
-            let rendered = render_modal(&m, 80);
+            let rendered = rendered_text(&m, 80);
 
             assert!(rendered.contains("Extra CA Certs"), "{rendered}");
             assert!(rendered.contains("~/certs/corp.pem"), "{rendered}");
@@ -220,7 +215,7 @@ mod tests {
         let info = test_session_info();
         assert!(info.config.extra_ca_certs.is_none(), "precondition: unset");
         let m = build_modal(&info, None);
-        let rendered = render_modal(&m, 80);
+        let rendered = rendered_text(&m, 80);
 
         assert!(
             row(&rendered, "Extra CA Certs").contains("(none)"),
@@ -231,7 +226,7 @@ mod tests {
     #[test]
     fn build_modal_shows_gateway_settings() {
         let mut info = test_session_info();
-        let rendered = render_modal(&build_modal(&info, None), 80);
+        let rendered = rendered_text(&build_modal(&info, None), 80);
         assert!(
             row(&rendered, "Custom Headers").contains("(none)"),
             "{rendered}"
@@ -239,14 +234,14 @@ mod tests {
 
         info.config.gateway.custom_header_names =
             vec!["x-team".to_owned(), "x-gateway-key".to_owned()];
-        let rendered = render_modal(&build_modal(&info, None), 80);
+        let rendered = rendered_text(&build_modal(&info, None), 80);
         assert!(
             row(&rendered, "Custom Headers").contains("x-team, x-gateway-key"),
             "{rendered}"
         );
 
         info.config.gateway.attribution = false;
-        let rendered = render_modal(&build_modal(&info, None), 80);
+        let rendered = rendered_text(&build_modal(&info, None), 80);
         assert!(
             row(&rendered, "Attribution Header").contains(display_bool(false)),
             "{rendered}"
@@ -261,7 +256,7 @@ mod tests {
     fn build_modal_resolves_max_tokens_for_the_current_model() {
         let mut info = test_session_info();
         let assert_max_tokens = |info: &LiveSessionInfo, expected: &str| {
-            let rendered = render_modal(&build_modal(info, None), 80);
+            let rendered = rendered_text(&build_modal(info, None), 80);
             let row = row(&rendered, "Max Tokens");
             assert!(row.contains(&format!(" {expected} ")), "{row}");
         };
@@ -282,7 +277,7 @@ mod tests {
         info.config.provenance.model = Source::Env("ANTHROPIC_MODEL");
         info.config.provenance.effort = Source::Session;
         info.config.provenance.max_tokens = Source::File(drop_in);
-        let rendered = render_modal(&build_modal(&info, None), 100);
+        let rendered = rendered_text(&build_modal(&info, None), 100);
 
         assert!(
             row(&rendered, "Model ID").ends_with("claude-opus-5-5              $ANTHROPIC_MODEL"),

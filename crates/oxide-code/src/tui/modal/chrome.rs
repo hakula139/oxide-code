@@ -111,6 +111,7 @@ mod tests {
 
     use super::*;
     use crate::tui::modal::testing::render_rows_with;
+    use crate::tui::testing::buffer_rows;
 
     // ── Header::height ──
 
@@ -179,8 +180,9 @@ mod tests {
             .unwrap();
 
         let buffer = terminal.backend().buffer();
-        let row: String = (0..12).map(|x| buffer[(x, 1)].symbol()).collect();
-        assert_eq!(row, "! permiss...");
+        let rows = buffer_rows(buffer);
+        let rows: Vec<&str> = rows.iter().map(|row| row.trim_end()).collect();
+        assert_eq!(rows, ["", "! permiss..."]);
         assert_eq!(buffer[(0, 1)].fg, theme.error().fg.unwrap());
     }
 }

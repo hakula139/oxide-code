@@ -18,6 +18,7 @@ use crate::protocol::{Event, Op};
 use crate::slash::{self, LiveSessionInfo};
 use crate::tool::{ApprovalBody, ApprovalPreview};
 use crate::tui::clipboard::{self, Clipboard, Environment};
+use crate::tui::testing::buffer_rows;
 use crate::tui::theme::Theme;
 
 /// How many unread ops [`test_app`]'s channel holds before `try_send` reports it full.
@@ -161,23 +162,9 @@ pub(super) fn render_app(app: &mut App, width: u16, height: u16) -> TestBackend 
     terminal.backend().clone()
 }
 
-/// Renders the app and returns the buffer as a newline-joined string. Use when substring-asserting
-/// on the rendered UI is more readable than a full `insta::assert_snapshot!`.
+/// Renders the app and returns its rows joined by newlines, for asserting on part of the frame.
 pub(super) fn rendered_text(app: &mut App, width: u16, height: u16) -> String {
-    let backend = render_app(app, width, height);
-    let buffer = backend.buffer();
-    (0..height)
-        .map(|y| {
-            (0..width)
-                .map(|x| {
-                    buffer
-                        .cell((x, y))
-                        .map_or(' ', |c| c.symbol().chars().next().unwrap_or(' '))
-                })
-                .collect::<String>()
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    buffer_rows(render_app(app, width, height).buffer()).join("\n")
 }
 
 pub(super) fn long_chat_block() -> String {

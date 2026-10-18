@@ -437,6 +437,7 @@ mod tests {
 
     use base64::Engine as _;
     use indoc::indoc;
+    use ratatui::buffer::CellWidth;
     use ratatui::layout::Rect;
     use tokio::sync::mpsc::error::TryRecvError;
 
@@ -460,13 +461,11 @@ mod tests {
     /// Screen cell where `needle` first shows in a 60x10 frame.
     fn cell_of(app: &mut App, needle: &str) -> (u16, u16) {
         let text = rendered_text(app, 60, 10);
-        let (row, line) = text
-            .lines()
-            .enumerate()
-            .find(|(_, line)| line.contains(needle))
+        let (row, x) = (0..)
+            .zip(text.lines())
+            .find_map(|(row, line)| Some((row, line[..line.find(needle)?].cell_width())))
             .unwrap();
-        let x = line[..line.find(needle).unwrap()].chars().count();
-        (u16::try_from(x).unwrap(), u16::try_from(row).unwrap())
+        (x, row)
     }
 
     /// Double-clicks the word `needle`, which selects and copies it.

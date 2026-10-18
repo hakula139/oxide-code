@@ -91,12 +91,7 @@ mod tests {
     use crate::slash::testing::test_session_info;
     use crate::tool::bash::background::testing::shells_in_each_state;
     use crate::tui::modal::Modal;
-    use crate::tui::modal::testing::render_rows;
-
-    fn render_modal(modal: &KvOverview, width: u16) -> String {
-        let height = modal.height(width, u16::MAX);
-        format!("{}\n", render_rows(modal, width, height).join("\n"))
-    }
+    use crate::tui::modal::testing::rendered_text;
 
     // ── StatusCmd::name ──
 
@@ -129,7 +124,7 @@ mod tests {
     #[test]
     fn build_modal_lists_session_rules_under_their_own_heading() {
         let mut info = test_session_info();
-        let without = render_modal(&build_modal(&info), 80);
+        let without = rendered_text(&build_modal(&info), 80);
         assert!(!without.contains("Session Rules"), "{without}");
 
         info.session_allow = [
@@ -138,7 +133,7 @@ mod tests {
         ]
         .map(|(class, pattern)| Rule::parse(class, pattern).unwrap())
         .to_vec();
-        let rendered = render_modal(&build_modal(&info), 80);
+        let rendered = rendered_text(&build_modal(&info), 80);
         let rules: Vec<Vec<&str>> = rendered
             .lines()
             .skip_while(|line| !line.contains("Session Rules"))
@@ -160,11 +155,11 @@ mod tests {
     #[test]
     fn build_modal_lists_background_shells_with_their_state() {
         let mut info = test_session_info();
-        let without = render_modal(&build_modal(&info), 80);
+        let without = rendered_text(&build_modal(&info), 80);
         assert!(!without.contains("Background Shells"), "{without}");
 
         info.background_shells = shells_in_each_state();
-        let rendered = render_modal(&build_modal(&info), 80);
+        let rendered = rendered_text(&build_modal(&info), 80);
 
         let shells: Vec<&str> = rendered
             .lines()
@@ -187,7 +182,7 @@ mod tests {
     fn build_modal_renders_the_auto_compaction_threshold_until_paused() {
         let mut info = test_session_info();
         let auto_compaction_row = |info: &LiveSessionInfo| {
-            let rendered = render_modal(&build_modal(info), 80);
+            let rendered = rendered_text(&build_modal(info), 80);
             rendered
                 .lines()
                 .find(|line| line.contains("Auto Compaction"))

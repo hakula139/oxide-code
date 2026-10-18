@@ -285,7 +285,7 @@ mod tests {
     use crate::tui::components::status::StatusBar;
     use crate::tui::components::status::testing::status_bar_init;
     use crate::tui::git_probes::GitUpdate;
-    use crate::tui::testing::key_event;
+    use crate::tui::testing::{buffer_rows, key_event};
 
     // ── render ──
 
@@ -539,9 +539,7 @@ mod tests {
             let backend = render_app(&mut app, 60, 10);
 
             let buffer = backend.buffer();
-            let rows: Vec<String> = (0..10)
-                .map(|y| (0..60).map(|x| buffer[(x, y)].symbol()).collect())
-                .collect();
+            let rows = buffer_rows(buffer);
             let y = rows
                 .iter()
                 .position(|row| row.contains(text))
