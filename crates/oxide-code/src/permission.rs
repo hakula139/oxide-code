@@ -1262,6 +1262,25 @@ impl WalkFilter<'_> {
     }
 }
 
+// ── Testing ──
+
+#[cfg(test)]
+pub(crate) mod testing {
+    use std::path::Path;
+
+    use super::{Access, PermissionClass, Policy, SessionGrant, Workspace};
+
+    /// The session grant the default policy offers for running `command` in `/repo`.
+    pub(crate) fn exec_grant(command: &str) -> SessionGrant {
+        Policy::default()
+            .session_grant(
+                PermissionClass::Exec,
+                &Access::for_command(command, &Workspace::new(Path::new("/repo"))),
+            )
+            .unwrap()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

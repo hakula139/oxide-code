@@ -445,7 +445,7 @@ mod tests {
 
     use super::*;
     use crate::client::anthropic::testing::test_client;
-    use crate::client::{RateLimitWindow, RateLimits};
+    use crate::client::testing::five_hour_limit;
     use crate::config::Effort;
     use crate::config::auth::{Auth, AuthSource};
     use crate::engine::dispatch::NOT_RUN;
@@ -455,9 +455,8 @@ mod tests {
     };
     use crate::message::{Replay, Role};
     use crate::model::ResolvedModelId;
-    use crate::protocol::{
-        CapturingSink, ConfigPick, Decision, ResumeTarget, ToolCall, ToolResult,
-    };
+    use crate::protocol::testing::CapturingSink;
+    use crate::protocol::{ConfigPick, Decision, ResumeTarget, ToolCall, ToolResult};
     use crate::tool::{
         DEFAULT_TOOL_ICON, Prepared, ReadExcerptLine, Tool, ToolCtx, ToolMetadata, ToolOutput,
         ToolRegistry, ToolResultView, ToolSpec,
@@ -676,7 +675,7 @@ mod tests {
         let session = dead_test_session();
         let client = FakeClient::new(vec![text_turn("Hello!")]);
         let tools = ToolRegistry::new(vec![]);
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut messages = vec![crate::message::Message::user("hi")];
 
         agent_turn(
@@ -711,7 +710,7 @@ mod tests {
             text_turn("Done"),
         ]);
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut messages = vec![Message::user("run echo")];
 
         agent_turn(
@@ -743,7 +742,7 @@ mod tests {
         let session = test_session(dir.path());
         let client = FakeClient::new(vec![text_turn("Hello there!")]);
         let tools = ToolRegistry::new(vec![]);
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut messages = vec![Message::user("hi")];
 
         agent_turn(
@@ -780,7 +779,7 @@ mod tests {
         let input_only = with_usage(text_turn("Hello!"), 100, 0);
         let client = FakeClient::new(vec![with_usage(input_only, 100, 7)]);
         let tools = ToolRegistry::new(Vec::new());
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut messages = vec![Message::user("hi")];
 
         let report = agent_turn(
@@ -807,7 +806,7 @@ mod tests {
             text_turn("Done"),
         ]);
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut messages = vec![Message::user("run echo")];
 
         agent_turn(
@@ -883,7 +882,7 @@ mod tests {
             text_turn("Done"),
         ]);
         let tools = ToolRegistry::new(vec![Box::new(PathViewTool)]);
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut messages = vec![Message::user("view notes")];
 
         agent_turn(
@@ -939,7 +938,7 @@ mod tests {
             with_usage(text_turn("Done"), 1, 2),
         ]);
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut messages = vec![
             Message::user("run echo"),
             Message::assistant("earlier"),
@@ -978,7 +977,7 @@ mod tests {
             text_turn("done"),
         ]);
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut messages = vec![Message::user("kick off")];
         let (tx, mut rx) = mpsc::channel::<Op>(4);
         // Hold the sender so `recv()` stays pending after the queued submit.
@@ -1032,7 +1031,7 @@ mod tests {
             text_turn("done"),
         ]);
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut messages = vec![Message::user("kick off")];
         let (tx, mut rx) = mpsc::channel::<Op>(4);
         tx.send(Op::Queue("first".to_owned())).await.unwrap();
@@ -1080,7 +1079,7 @@ mod tests {
         let session = test_session(dir.path());
         let client = FakeClient::new(vec![text_turn("never reached")]);
         let tools = ToolRegistry::new(vec![]);
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut messages = vec![Message::user("hi")];
         let (tx, mut rx) = mpsc::channel::<Op>(1);
         tx.try_send(Op::Interrupt).unwrap();
@@ -1107,7 +1106,7 @@ mod tests {
         let session = test_session(dir.path());
         let client = StalledClient("Once upon a time");
         let tools = ToolRegistry::new(vec![]);
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut messages = vec![Message::user("write a story")];
         let (tx, mut rx) = mpsc::channel::<Op>(1);
         let mut dispatch_ctx = yolo_dispatch();
@@ -1149,7 +1148,7 @@ mod tests {
         let session = test_session(dir.path());
         let client = FakeClient::new(vec![text_turn("never reached")]);
         let tools = ToolRegistry::new(vec![]);
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut messages = vec![Message::user("hi")];
         let (tx, mut rx) = mpsc::channel::<Op>(1);
         tx.try_send(Op::Shutdown).unwrap();
@@ -1176,7 +1175,7 @@ mod tests {
         let session = test_session(dir.path());
         let client = FakeClient::new(vec![text_turn("never reached")]);
         let tools = ToolRegistry::new(vec![]);
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut messages = vec![Message::user("hi")];
         let (tx, mut rx) = mpsc::channel::<Op>(1);
         drop(tx);
@@ -1221,7 +1220,7 @@ mod tests {
             let session = test_session(dir.path());
             let client = FakeClient::new(vec![text_turn("Hello!")]);
             let tools = ToolRegistry::new(vec![]);
-            let sink = CapturingSink::new();
+            let sink = CapturingSink::default();
             let mut messages = vec![Message::user("hi")];
             let (tx, mut rx) = mpsc::channel::<Op>(1);
             tx.try_send(op.clone()).unwrap();
@@ -1258,7 +1257,7 @@ mod tests {
                 started: started.clone(),
             }),
         ]);
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut messages = vec![Message::user("kick off")];
         let (tx, mut rx) = mpsc::channel::<Op>(1);
         let mut dispatch_ctx = yolo_dispatch();
@@ -1347,7 +1346,7 @@ mod tests {
         let tools = ToolRegistry::new(vec![Box::new(GateTool {
             started: started.clone(),
         })]);
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut messages = vec![Message::user("kick off")];
         let (tx, mut rx) = mpsc::channel::<Op>(1);
         let mut dispatch_ctx = yolo_dispatch();
@@ -1390,7 +1389,7 @@ mod tests {
             text_turn("fallback"),
         ]);
         let tools = ToolRegistry::new(vec![]);
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut messages = vec![Message::user("hi")];
 
         agent_turn(
@@ -1428,7 +1427,7 @@ mod tests {
         );
         let client = FakeClient::new(vec![malformed, text_turn("recovered")]);
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut messages = vec![Message::user("run echo")];
 
         agent_turn(
@@ -1478,7 +1477,7 @@ mod tests {
             .collect();
         let client = FakeClient::new(turns);
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut messages = vec![Message::user("loop forever")];
 
         let err = agent_turn(
@@ -1511,7 +1510,7 @@ mod tests {
             .collect();
         let client = FakeClient::new(turns);
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut messages = vec![Message::user("loop forever")];
 
         let outcome = agent_turn(
@@ -1549,7 +1548,7 @@ mod tests {
         turns.push(text_turn("done"));
         let client = FakeClient::new(turns);
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut messages = vec![Message::user("loop a while then stop")];
 
         agent_turn(
@@ -1572,7 +1571,7 @@ mod tests {
         let session = test_session(dir.path());
         let client = FakeClient::new(Vec::new()).then_fail("API error (overloaded_error): Busy");
         let tools = ToolRegistry::new(vec![]);
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut messages = vec![Message::user("hi")];
 
         let err = agent_turn(
@@ -1599,7 +1598,7 @@ mod tests {
         )])
         .then_fail("API error (overloaded_error): Busy");
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut messages = vec![Message::user("hi")];
 
         let outcome = agent_turn(
@@ -1636,7 +1635,7 @@ mod tests {
             text_turn("Done"),
         ]);
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut messages = vec![Message::user("run echo")];
 
         agent_turn(
@@ -1669,7 +1668,7 @@ mod tests {
             INTERRUPTED_WORK_SENTINEL,
         )])]);
         let tools = ToolRegistry::new(vec![]);
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut messages = vec![Message::user("hi")];
 
         agent_turn(
@@ -1700,7 +1699,7 @@ mod tests {
             text_turn("found it"),
         ]);
         let tools = ToolRegistry::new(vec![]);
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut messages = vec![Message::user("look it up")];
 
         agent_turn(
@@ -1746,7 +1745,7 @@ mod tests {
             None,
         )]);
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut messages = vec![Message::user("write the file")];
 
         let abort = agent_turn(
@@ -1789,7 +1788,7 @@ mod tests {
             None,
         )]);
         let tools = ToolRegistry::new(vec![]);
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut messages = vec![Message::user("hi")];
 
         agent_turn(
@@ -1814,7 +1813,7 @@ mod tests {
         events.pop();
         let client = FakeClient::new(vec![events]);
         let tools = ToolRegistry::new(vec![]);
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut messages = vec![Message::user("hi")];
 
         let abort = agent_turn(
@@ -1885,7 +1884,7 @@ mod tests {
         );
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut messages = vec![Message::user("hi")];
 
         let outcome = agent_turn(
@@ -2054,7 +2053,7 @@ mod tests {
             text_turn("Done"),
         ]);
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut messages = vec![Message::user("run echo")];
 
         agent_turn(
@@ -2105,7 +2104,7 @@ mod tests {
             text_turn("Done"),
         ]);
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut messages = vec![Message::user("run echo")];
         let (tx, mut rx) = mpsc::channel::<Op>(1);
         tx.try_send(Op::SetMode(crate::permission::Mode::Plan))
@@ -2171,7 +2170,7 @@ mod tests {
             let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
             let (op_tx, mut ops) = mpsc::channel(4);
             let sink = ReplyingSink {
-                events: CapturingSink::new(),
+                events: CapturingSink::default(),
                 op_tx,
                 decision: decision.clone(),
             };
@@ -2244,7 +2243,7 @@ mod tests {
         let mut messages = vec![Message::user("take notes")];
         let (op_tx, mut ops) = mpsc::channel(4);
         let sink = ReplyingSink {
-            events: CapturingSink::new(),
+            events: CapturingSink::default(),
             op_tx,
             decision: Decision::Deny,
         };
@@ -2360,7 +2359,7 @@ mod tests {
             }],
         };
         let events = |messages: &[Message]| {
-            let sink = CapturingSink::new();
+            let sink = CapturingSink::default();
             notify_if_interrupted(messages, &sink);
             sink.events()
                 .iter()
@@ -2391,13 +2390,7 @@ mod tests {
             stop_reason: Some(StopReason::EndTurn),
             ..Response::default()
         };
-        let limits = RateLimits {
-            five_hour: Some(RateLimitWindow {
-                utilization: 0.42,
-                resets_at: 1_760_000_000,
-            }),
-            seven_day: None,
-        };
+        let limits = five_hour_limit();
         let events = [
             ResponseEvent::RateLimits(limits),
             ResponseEvent::Usage(TokenUsage::new(5, 0)),
@@ -2412,7 +2405,7 @@ mod tests {
         for event in events {
             tx.try_send(Ok(event)).unwrap();
         }
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut usage = None;
 
         let response = collect_response(rx, &sink, &mut usage).await.unwrap();

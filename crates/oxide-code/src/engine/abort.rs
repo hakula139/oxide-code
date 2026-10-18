@@ -100,7 +100,7 @@ mod tests {
     use anyhow::anyhow;
 
     use super::*;
-    use crate::protocol::CapturingSink;
+    use crate::protocol::testing::CapturingSink;
 
     // ── TurnAbort ──
 
@@ -126,7 +126,7 @@ mod tests {
     #[test]
     fn absorb_aborts_on_interrupt_shutdown_or_a_closed_channel() {
         let mut inbox = Inbox::default();
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
 
         let interrupted = inbox.absorb(Some(Op::Interrupt), &sink);
         let shut_down = inbox.absorb(Some(Op::Shutdown), &sink);
@@ -146,7 +146,7 @@ mod tests {
     #[test]
     fn absorb_hands_back_an_op_it_does_not_keep() {
         let mut inbox = Inbox::default();
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
 
         let op = inbox.absorb(Some(Op::Clear), &sink);
 
@@ -165,7 +165,7 @@ mod tests {
         tx.try_send(Op::SetMode(Mode::Plan)).unwrap();
         tx.try_send(Op::SetMode(Mode::Yolo)).unwrap();
         let mut inbox = Inbox::default();
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
 
         let output = await_unless_aborted(std::future::ready(7), &mut rx, &mut inbox, &sink).await;
 

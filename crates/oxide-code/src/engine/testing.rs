@@ -334,7 +334,7 @@ impl Tool for EchoTool {
 
 /// Inert receiver whose `recv()` stays pending, its sender leaked so callers need not hold it.
 pub(super) fn inert_ops() -> mpsc::Receiver<Op> {
-    let (tx, rx) = crate::protocol::inert_op_channel();
+    let (tx, rx) = mpsc::channel(1);
     std::mem::forget(tx);
     rx
 }

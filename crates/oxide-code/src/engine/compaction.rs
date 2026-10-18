@@ -509,13 +509,13 @@ mod tests {
     use super::*;
     use crate::client::anthropic::Client;
     use crate::client::anthropic::testing::{api_key, sse_body, test_client};
-    use crate::client::{RateLimitWindow, RateLimits};
+    use crate::client::testing::five_hour_limit;
     use crate::engine::testing::{
         FakeClient, MODEL, dead_test_session, empty_prompt, inert_ops, test_session, text_turn,
         tool_heavy_transcript, with_stop,
     };
     use crate::message::Replay;
-    use crate::protocol::CapturingSink;
+    use crate::protocol::testing::CapturingSink;
     use crate::session::post_compact::synthesize_post_compact_message;
     use crate::tool::tasks::testing::plan;
 
@@ -523,7 +523,7 @@ mod tests {
 
     #[test]
     fn reset_reports_a_resume_only_from_a_pause() {
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut counting = AutoCompactFailures::new(MAX_AUTO_COMPACT_FAILURES - 1);
         let mut paused = AutoCompactFailures::new(MAX_AUTO_COMPACT_FAILURES);
 
@@ -623,7 +623,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let client = FakeClient::new(Vec::new());
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut messages = tool_heavy_transcript();
         let mut inbox = Inbox::default();
         let mut failures = AutoCompactFailures::default();
@@ -662,7 +662,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let client = FakeClient::new(Vec::new());
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let short = vec![Message::user("hi"), Message::assistant("hello")];
         let mut messages = short.clone();
         let mut failures = AutoCompactFailures::default();
@@ -692,7 +692,7 @@ mod tests {
     async fn auto_compact_if_needed_fails_the_prompt_when_the_summary_fails() {
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut messages = tool_heavy_transcript();
         let mut inbox = Inbox::default();
         let mut failures = AutoCompactFailures::default();
@@ -726,7 +726,7 @@ mod tests {
     async fn auto_compact_if_needed_fails_the_prompt_when_the_boundary_is_not_saved() {
         let session = dead_test_session();
         let client = FakeClient::new(vec![text_turn("auto summary")]);
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut messages = tool_heavy_transcript();
         let mut inbox = Inbox::default();
         let mut failures = AutoCompactFailures::default();
@@ -771,7 +771,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let client = CountingFailingClient::new();
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut messages = tool_heavy_transcript();
         let mut inbox = Inbox::default();
         let mut failures = AutoCompactFailures::new(MAX_AUTO_COMPACT_FAILURES - 1);
@@ -831,7 +831,7 @@ mod tests {
             started: started.clone(),
             release: release.clone(),
         };
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut messages = tool_heavy_transcript();
         let mut inbox = Inbox::default();
         let mut failures = AutoCompactFailures::default();
@@ -900,7 +900,7 @@ mod tests {
             ),
             text_turn("auto summary"),
         ]);
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut messages = tool_heavy_transcript();
         let mut failures = AutoCompactFailures::default();
 
@@ -969,7 +969,7 @@ mod tests {
 
             let abort = record_auto_compact_failure(
                 &mut auto_compact(10, None, &mut failures),
-                &CapturingSink::new(),
+                &CapturingSink::default(),
                 Some(&anyhow!(cause)),
             );
 
@@ -1031,7 +1031,7 @@ mod tests {
         client: &Client,
         transcript: &[Message],
     ) -> (Result<String>, Vec<Event>) {
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let summary = compact_session(
             client,
             &parent_prompt(),
@@ -1142,7 +1142,7 @@ mod tests {
             &tools,
             &transcript,
             Some("focus on auth"),
-            &CapturingSink::new(),
+            &CapturingSink::default(),
             &mut Vec::new(),
         )
         .await
@@ -1245,7 +1245,7 @@ mod tests {
         let server = MockServer::start().await;
         mount_overflow_then(&server, streamed_summary_body("trimmed summary")).await;
         let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut spent = Vec::new();
 
         let summary = compact_session(
@@ -1448,7 +1448,7 @@ mod tests {
         )
         .await;
         let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut spent = Vec::new();
 
         let err = compact_session(
@@ -1561,7 +1561,7 @@ mod tests {
             )
             .await;
             let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
-            let sink = CapturingSink::new();
+            let sink = CapturingSink::default();
             let mut spent = Vec::new();
 
             let err = compact_session(
@@ -1597,7 +1597,7 @@ mod tests {
             .unwrap();
         let client = HeldStreamClient(Mutex::new(Some(rx)));
         let (prompt, transcript) = (parent_prompt(), tool_heavy_transcript());
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut spent = Vec::new();
 
         {
@@ -1620,13 +1620,7 @@ mod tests {
     #[tokio::test]
     async fn compact_session_passes_retry_notices_and_usage_limits_through() {
         let notice = "HTTP 529 overloaded_error. Retrying in 1 s (retry 1 of 5).";
-        let limits = RateLimits {
-            five_hour: Some(RateLimitWindow {
-                utilization: 0.42,
-                resets_at: 1_760_000_000,
-            }),
-            seven_day: None,
-        };
+        let limits = five_hour_limit();
         let (tx, rx) = mpsc::channel(4);
         for event in [
             ResponseEvent::Retrying(notice.to_owned()),
@@ -1642,7 +1636,7 @@ mod tests {
             tx.send(Ok(event)).await.unwrap();
         }
         let client = HeldStreamClient(Mutex::new(Some(rx)));
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
 
         let summary = compact_session(
             &client,

@@ -189,7 +189,7 @@ mod tests {
     use crate::client::anthropic::testing::{completion_body, test_client};
     use crate::config::auth::{Auth, AuthSource};
     use crate::message::Message;
-    use crate::protocol::CapturingSink;
+    use crate::protocol::testing::CapturingSink;
     use crate::session::handle::testing::dead;
     use crate::session::store::testing::test_store;
 
@@ -201,17 +201,6 @@ mod tests {
             Auth::new(AuthSource::ApiKeyEnv, "sk"),
             HAIKU_MODEL,
         )
-    }
-
-    /// Sink backed by an mpsc channel. The spawned task owns the only sender, so `recv()` returns
-    /// `None` once the task ends.
-    #[derive(Clone)]
-    struct ChannelSink(tokio::sync::mpsc::UnboundedSender<Event>);
-
-    impl crate::protocol::EventSink for ChannelSink {
-        fn send(&self, event: Event) -> anyhow::Result<()> {
-            Ok(self.0.send(event)?)
-        }
     }
 
     /// Session handle with one recorded message, so `append_ai_title` writes to an existing file.
@@ -241,9 +230,8 @@ mod tests {
         let session_id = session.session_id().to_owned();
         let client = title_client(server.uri());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let sink = ChannelSink(tx);
 
-        spawn(client, session, sink, "first prompt".to_owned());
+        spawn(client, session, tx, "first prompt".to_owned());
 
         assert_eq!(
             rx.recv().await,
@@ -270,9 +258,8 @@ mod tests {
         let session = prepared_session(dir.path()).await;
         let client = title_client(server.uri());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let sink = ChannelSink(tx);
 
-        spawn(client, session, sink, "first prompt".to_owned());
+        spawn(client, session, tx, "first prompt".to_owned());
 
         assert_eq!(rx.recv().await, None);
     }
@@ -299,7 +286,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session = prepared_session(dir.path()).await;
         let client = title_client(server.uri());
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
 
         generate_and_record(&client, &session, &sink, "first prompt")
             .await
@@ -331,7 +318,7 @@ mod tests {
         session.set_manual_title("User wins".to_owned()).await;
 
         let client = title_client(server.uri());
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
 
         generate_and_record(&client, &session, &sink, "first prompt")
             .await
@@ -363,7 +350,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session = prepared_session(dir.path()).await;
         let client = title_client(server.uri());
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
 
         generate_and_record(&client, &session, &sink, "prompt")
             .await
@@ -394,7 +381,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session = prepared_session(dir.path()).await;
         let client = title_client(server.uri());
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
 
         let err = generate_and_record(&client, &session, &sink, "hi")
             .await
@@ -423,7 +410,7 @@ mod tests {
 
         let session = dead("dead-session");
         let client = title_client(server.uri());
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
 
         generate_and_record(&client, &session, &sink, "first prompt")
             .await
@@ -457,7 +444,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session = prepared_session(dir.path()).await;
         let client = title_client(server.uri());
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
 
         let err = generate_and_record(&client, &session, &sink, "hi")
             .await

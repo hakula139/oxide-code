@@ -343,8 +343,6 @@ fn config_change(model: &ModelSpec, effort: Option<Effort>, requested: Option<Ef
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
     use indoc::indoc;
     use wiremock::MockServer;
 
@@ -355,13 +353,15 @@ mod tests {
     use crate::model::ResolvedModelId;
     use crate::permission::defaults::Shipped;
     use crate::permission::rule::Rule;
-    use crate::permission::{Access, Mode, PermissionClass, Policy, Tier, Workspace};
-    use crate::protocol::{CapturingSink, ConfigPick, FailingSink};
+    use crate::permission::testing::exec_grant;
+    use crate::permission::{Mode, PermissionClass, Tier};
+    use crate::protocol::ConfigPick;
+    use crate::protocol::testing::{CapturingSink, FailingSink, ls_call, text_result};
     use crate::session::store::testing::test_store;
     use crate::tool::bash::background::testing::shells_in_each_state;
     use crate::tool::tasks::TaskStatus;
     use crate::tool::tasks::testing::{plan, task};
-    use crate::tool::{ApprovalBody, ToolResultView};
+    use crate::tool::testing::bash_preview;
 
     /// Answers every approval with its decision, recording what each request offered.
     struct Fixed {
@@ -393,22 +393,6 @@ mod tests {
         Op::Prompt("hi".to_owned())
     }
 
-    fn bash_preview(command: &str) -> ApprovalPreview {
-        ApprovalPreview {
-            title: "Bash".to_owned(),
-            body: ApprovalBody::Command(command.to_owned()),
-        }
-    }
-
-    fn bash_grant(command: &str) -> SessionGrant {
-        Policy::default()
-            .session_grant(
-                PermissionClass::Exec,
-                &Access::for_command(command, &Workspace::new(Path::new("/repo"))),
-            )
-            .unwrap()
-    }
-
     // ── render_op ──
 
     #[tokio::test]
@@ -418,13 +402,13 @@ mod tests {
             id: "t1".to_owned(),
             preview: bash_preview("ls"),
             basis: Basis::Mode(Mode::Manual),
-            grant: Some(Box::new(bash_grant("ls"))),
+            grant: Some(Box::new(exec_grant("ls"))),
         };
         for event in [approval, Event::TurnComplete] {
             tx.send(event).unwrap();
         }
         let (ops_tx, mut ops) = mpsc::channel(1);
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut approver = fixed(Decision::Deny);
 
         let end = render_op(&mut events, &sink, &ops_tx, &prompt(), &mut approver).await;
@@ -479,7 +463,7 @@ mod tests {
             tx.send(event).unwrap();
         }
         drop(tx);
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
 
         let (ops, _) = mpsc::channel(1);
         let mut approver = fixed(Decision::Deny);
@@ -500,7 +484,7 @@ mod tests {
             std::fs::write(&instructions, b"\xff\xfe").unwrap();
             let mut handle = engine.spawn(&[]);
             handle.ops.send(Op::Clear).await.unwrap();
-            let sink = CapturingSink::new();
+            let sink = CapturingSink::default();
             let mut approver = fixed(Decision::Deny);
 
             let end = render_op(
@@ -539,7 +523,7 @@ mod tests {
         let (tx, mut events) = mpsc::unbounded_channel();
         tx.send(Event::StreamToken("partial".to_owned())).unwrap();
         drop(tx);
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
 
         let (ops, _) = mpsc::channel(1);
         let mut approver = fixed(Decision::Deny);
@@ -556,7 +540,7 @@ mod tests {
         let command = r#"echo "a\b""#;
         let preview = bash_preview(command);
         let manual = Basis::Mode(Mode::Manual);
-        let grant = bash_grant(command);
+        let grant = exec_grant(command);
         let ask = Basis::Rule {
             tier: Tier::Ask,
             rule: Rule::parse(PermissionClass::Exec, "git push *").unwrap(),
@@ -631,18 +615,6 @@ mod tests {
         )
     }
 
-    fn text_result(id: &str, content: &str, is_error: bool, title: Option<&str>) -> ToolResult {
-        ToolResult {
-            id: id.to_owned(),
-            content: content.to_owned(),
-            is_error,
-            title: title.map(ToOwned::to_owned),
-            view: ToolResultView::Text {
-                content: content.to_owned(),
-            },
-        }
-    }
-
     #[test]
     fn render_stream_token_writes_text_verbatim_to_stdout() {
         let (stdout, stderr) =
@@ -712,16 +684,7 @@ mod tests {
 
     #[test]
     fn render_tool_call_start_writes_icon_label_to_stderr() {
-        let (stdout, stderr) = render_one(
-            &test_sink(false),
-            Event::ToolCallStart(ToolCall {
-                id: "t1".to_owned(),
-                name: "bash".to_owned(),
-                input: serde_json::json!({"command": "ls"}),
-                icon: "$".to_owned(),
-                label: "ls".to_owned(),
-            }),
-        );
+        let (stdout, stderr) = render_one(&test_sink(false), Event::ToolCallStart(ls_call()));
         assert_eq!(stdout, "");
         assert_eq!(stderr, "$ ls\n");
     }

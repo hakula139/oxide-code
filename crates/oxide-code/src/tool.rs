@@ -1004,7 +1004,10 @@ pub(crate) mod testing {
     use tempfile::TempDir;
     use tokio_util::sync::CancellationToken;
 
-    use super::{SearchRoot, Tool, ToolCtx, ToolOutput, ToolRegistry, run_capped};
+    use super::{
+        ApprovalBody, ApprovalPreview, SearchRoot, Tool, ToolCtx, ToolOutput, ToolRegistry,
+        run_capped,
+    };
     use crate::file_tracker::FileTracker;
     use crate::permission::rule::Rule;
     use crate::permission::{Access, Mode, PermissionClass, Policy, ReadFilter, Workspace};
@@ -1037,6 +1040,14 @@ pub(crate) mod testing {
         ctx: &ToolCtx,
     ) -> ToolOutput {
         tool.run(tool.prepare(input, ctx), ctx).await
+    }
+
+    /// The approval preview of a foreground `bash` call that runs `command`.
+    pub(crate) fn bash_preview(command: &str) -> ApprovalPreview {
+        ApprovalPreview {
+            title: "Bash".to_owned(),
+            body: ApprovalBody::Command(command.to_owned()),
+        }
     }
 
     /// The read filter of a policy that denies reading whatever one of `patterns` matches.

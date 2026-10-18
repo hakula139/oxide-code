@@ -242,7 +242,7 @@ mod tests {
         with_pinned_home,
     };
     use crate::permission::PermissionClass;
-    use crate::protocol::ToolCall;
+    use crate::protocol::testing::ls_call;
     use crate::session::store::testing::test_store;
     use crate::tool::bash::BashTool;
     use crate::tool::{Prepared, Tool, ToolCtx, ToolOutput, ToolRegistry, ToolSpec};
@@ -455,13 +455,7 @@ mod tests {
         for event in [
             Event::StreamToken("Let me ".to_owned()),
             Event::StreamToken("look.".to_owned()),
-            Event::ToolCallStart(ToolCall {
-                id: "t1".to_owned(),
-                name: "bash".to_owned(),
-                input: serde_json::json!({"command": "ls"}),
-                icon: "$".to_owned(),
-                label: "ls".to_owned(),
-            }),
+            Event::ToolCallStart(ls_call()),
             Event::UsageUpdated(usage(1_000)),
             Event::StreamToken("Found ".to_owned()),
             Event::StreamToken("it.".to_owned()),

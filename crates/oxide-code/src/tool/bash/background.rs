@@ -657,7 +657,7 @@ mod tests {
 
     use super::testing::shell;
     use super::*;
-    use crate::protocol::CapturingSink;
+    use crate::protocol::testing::CapturingSink;
     use crate::tool::MAX_OUTPUT_BYTES;
     use crate::tool::bash::testing::{record_pid, until_gone, until_recorded};
     use crate::tool::bash::{BashTool, OUTPUT_BUDGET};
@@ -668,7 +668,7 @@ mod tests {
     /// A registry that reports its list to the returned sink.
     fn shells() -> (Arc<BackgroundShells>, CapturingSink) {
         let shells = Arc::new(BackgroundShells::default());
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         shells.attach(Arc::new(sink.clone()));
         (shells, sink)
     }

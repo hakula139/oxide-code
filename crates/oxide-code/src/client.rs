@@ -166,6 +166,24 @@ pub(crate) struct PromptTooLong {
     diagnostic: String,
 }
 
+// ── Testing ──
+
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::{RateLimitWindow, RateLimits};
+
+    /// Limits with the five-hour window 42% spent and no seven-day window.
+    pub(crate) fn five_hour_limit() -> RateLimits {
+        RateLimits {
+            five_hour: Some(RateLimitWindow {
+                utilization: 0.42,
+                resets_at: 1_760_000_000,
+            }),
+            seven_day: None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
