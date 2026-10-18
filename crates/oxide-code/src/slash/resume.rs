@@ -757,9 +757,8 @@ mod tests {
             3,
             "row must paint title + meta + trailing blank"
         );
-        let title_text = lines[0].to_string();
+        assert_eq!(lines[0].to_string(), "Fix auth");
         let meta_text = lines[1].to_string();
-        assert!(title_text.contains("Fix auth"), "title row: {title_text}");
         assert!(
             meta_text.contains(&row.session_id[..8]),
             "meta row: {meta_text}"
@@ -768,10 +767,7 @@ mod tests {
             meta_text.contains(" ago") || meta_text.contains('-'),
             "meta row must carry a relative time or ISO date: {meta_text}",
         );
-        assert!(
-            lines[2].spans.iter().all(|s| s.content.is_empty()),
-            "trailing row must be blank for between-row breathing room",
-        );
+        assert_eq!(lines[2], Line::default());
     }
 
     #[test]

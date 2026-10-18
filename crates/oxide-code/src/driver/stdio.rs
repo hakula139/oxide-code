@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::io::Write;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Mutex, MutexGuard};
 
 use anyhow::Result;
 use tokio::sync::mpsc;
@@ -19,6 +19,7 @@ use crate::session::display::{UNTITLED_MARKER, archive_notice, id_prefix};
 use crate::tool::ApprovalPreview;
 use crate::tool::tasks::{Progress, Task};
 use crate::tui::glyphs::{INTERRUPTED_MARKER, task_marker};
+use crate::util::sync::lock_or_recover;
 use crate::util::text::escape_controls;
 
 // ── Turn Rendering ──
@@ -258,7 +259,7 @@ impl StdioSink {
 
 impl StdioSink {
     fn calls(&self) -> MutexGuard<'_, StartedCalls> {
-        self.calls.lock().unwrap_or_else(PoisonError::into_inner)
+        lock_or_recover(&self.calls, "started tool calls")
     }
 
     /// Writes a call's result under its title, after its call's header again when another call's

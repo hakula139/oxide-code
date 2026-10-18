@@ -1,7 +1,7 @@
 //! Headless driver for `--prompt`: one turn, printed to stdout as text or JSON.
 
 use std::io::{self, Write};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Mutex, MutexGuard};
 
 use anyhow::Result;
 use clap::ValueEnum;
@@ -12,6 +12,7 @@ use super::{Exit, shutdown_signal};
 use crate::engine::{Engine, EngineHandle, EnginePanic, TurnEnd};
 use crate::protocol::{Event, EventSink, Op, UsageSnapshot};
 use crate::slash;
+use crate::util::sync::lock_or_recover;
 
 /// Runs `prompt` as a single turn, printed in `format`. A turn that does not complete exits with
 /// failure, and a signal exits with its own status. If the engine panics, the panic is returned
@@ -166,7 +167,7 @@ impl<O: Write, E: Write> Printer<O, E> {
     }
 
     fn lock(&self) -> MutexGuard<'_, Output<O, E>> {
-        self.output.lock().unwrap_or_else(PoisonError::into_inner)
+        lock_or_recover(&self.output, "headless output")
     }
 }
 

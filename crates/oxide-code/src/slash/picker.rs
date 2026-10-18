@@ -297,9 +297,8 @@ mod tests {
     #[test]
     fn render_effort_row_marks_default_only_without_active_effort() {
         let theme = Theme::default();
-        let row_text = |p: &ModelEffortPicker| -> String {
-            p.render_effort_row(&theme).expect("effort row").to_string()
-        };
+        let row_text =
+            |p: &ModelEffortPicker| p.render_effort_row(&theme).expect("effort row").to_string();
 
         assert_eq!(row_text(&picker()), "● high effort  ← / → to adjust");
         assert_eq!(
