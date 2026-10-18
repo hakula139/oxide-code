@@ -3,12 +3,11 @@
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use super::super::RenderCtx;
-use super::numbered_row;
-use super::{MAX_TOOL_OUTPUT_LINES, TOOL_BORDER_CONT, border_style_for};
+use super::{MAX_TOOL_OUTPUT_LINES, border_style_for};
 use crate::tool::ReadExcerptLine;
-use crate::tui::components::chat::blocks::bar_continuation_prefix;
-use crate::tui::wrap::wrap_line;
+use crate::tui::components::chat::blocks::RenderCtx;
+use crate::tui::components::chat::blocks::rows::{NumberedRows, body_row};
+use crate::tui::glyphs::TOOL_BORDER_CONT;
 
 pub(super) fn render(
     out: &mut Vec<Line<'static>>,
@@ -19,19 +18,8 @@ pub(super) fn render(
     is_error: bool,
 ) {
     let border_style = border_style_for(ctx.theme, is_error);
-    let width = usize::from(ctx.width);
-    let status_cont_prefix = bar_continuation_prefix(TOOL_BORDER_CONT, border_style);
     let context = context_label(path, lines, total_lines);
-    let context_line = Line::from(vec![
-        Span::styled(TOOL_BORDER_CONT.to_owned(), border_style),
-        Span::styled(context, ctx.theme.dim()),
-    ]);
-    out.extend(wrap_line(
-        context_line,
-        width,
-        TOOL_BORDER_CONT.width(),
-        Some(&status_cont_prefix),
-    ));
+    body_row(out, ctx, border_style, context, ctx.theme.dim());
     if lines.is_empty() {
         return;
     }
@@ -46,7 +34,7 @@ pub(super) fn render(
         .map(|line| line.number.to_string().width())
         .max()
         .unwrap_or(1);
-    let rows = numbered_row::Renderer::new(ctx, border_style, line_number_width);
+    let rows = NumberedRows::new(ctx, border_style, line_number_width);
 
     for line in visible {
         rows.render(out, line.number, &line.text, ctx.theme.text());

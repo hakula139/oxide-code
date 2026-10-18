@@ -2,28 +2,23 @@
 //! error color when the tool fails. Each [`ToolResultView`] variant renders its body in a child
 //! module, and unstructured output renders as truncated text.
 
-pub(super) mod bordered_row;
 mod diff;
 mod glob;
 mod grep;
-pub(super) mod numbered_row;
 mod read_excerpt;
 mod tasks;
 mod text;
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthStr;
 
-use super::{ChatBlock, RenderCtx, bar_continuation_prefix};
+use super::rows::wrapped_row;
+use super::{ChatBlock, RenderCtx};
 use crate::tool::ToolResultView;
 use crate::tui::glyphs::{TOOL_BORDER_CONT, TOOL_BORDER_PREFIX, TOOL_ERROR, TOOL_SUCCESS};
 use crate::tui::theme::Theme;
-use crate::tui::wrap::wrap_line;
 
 const MAX_TOOL_OUTPUT_LINES: usize = 5;
-
-const MAX_TOOL_OUTPUT_LINE_BYTES: usize = 512;
 
 // ── Tool Call ──
 
@@ -44,20 +39,15 @@ impl ToolCallBlock {
 
 impl ChatBlock for ToolCallBlock {
     fn render(&self, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
-        let border_style = ctx.theme.tool_border();
-        let cont_prefix = bar_continuation_prefix(TOOL_BORDER_CONT, border_style);
-        let line = Line::from(vec![
-            Span::styled(TOOL_BORDER_PREFIX.to_owned(), border_style),
+        let mut out = Vec::new();
+        status_row(
+            &mut out,
+            ctx,
+            ctx.theme.tool_border(),
             Span::styled(self.icon.clone(), ctx.theme.tool_icon()),
-            Span::raw(" "),
             Span::styled(self.label.clone(), ctx.theme.text()),
-        ]);
-        wrap_line(
-            line,
-            usize::from(ctx.width),
-            TOOL_BORDER_CONT.width(),
-            Some(&cont_prefix),
-        )
+        );
+        out
     }
 
     fn standalone(&self) -> bool {
@@ -141,20 +131,30 @@ fn render_status_line(
     } else {
         (TOOL_SUCCESS, ctx.theme.success())
     };
-    let border_style = border_style_for(ctx.theme, is_error);
-    let cont_prefix = bar_continuation_prefix(TOOL_BORDER_CONT, border_style);
-    let line = Line::from(vec![
-        Span::styled(TOOL_BORDER_PREFIX.to_owned(), border_style),
+    status_row(
+        out,
+        ctx,
+        border_style_for(ctx.theme, is_error),
         Span::styled(indicator, indicator_style),
-        Span::raw(" "),
         Span::styled(label.to_owned(), ctx.theme.muted()),
+    );
+}
+
+/// Emits a tool call or result status line, whose wrapped rows continue under the body text.
+fn status_row(
+    out: &mut Vec<Line<'static>>,
+    ctx: &RenderCtx<'_>,
+    border_style: Style,
+    marker: Span<'static>,
+    label: Span<'static>,
+) {
+    let line = Line::from(vec![
+        Span::styled(TOOL_BORDER_PREFIX, border_style),
+        marker,
+        Span::raw(" "),
+        label,
     ]);
-    out.extend(wrap_line(
-        line,
-        usize::from(ctx.width),
-        TOOL_BORDER_CONT.width(),
-        Some(&cont_prefix),
-    ));
+    wrapped_row(out, ctx, line, TOOL_BORDER_CONT, border_style);
 }
 
 fn border_style_for(theme: &Theme, is_error: bool) -> Style {
@@ -163,14 +163,6 @@ fn border_style_for(theme: &Theme, is_error: bool) -> Style {
     } else {
         theme.tool_border()
     }
-}
-
-fn truncate_to_bytes(s: &str, max_bytes: usize) -> String {
-    if s.len() <= max_bytes {
-        return s.to_owned();
-    }
-    let boundary = s.floor_char_boundary(max_bytes);
-    format!("{}...", &s[..boundary])
 }
 
 #[cfg(test)]
@@ -229,32 +221,5 @@ mod tests {
             expected.extend(body.iter().map(|text| format!("{TOOL_BORDER_CONT}{text}")));
             assert_eq!(rows, expected);
         }
-    }
-
-    // ── truncate_to_bytes ──
-
-    #[test]
-    fn truncate_to_bytes_under_limit_preserves_input() {
-        assert_eq!(truncate_to_bytes("hello", 10), "hello");
-    }
-
-    #[test]
-    fn truncate_to_bytes_over_limit_appends_ellipsis() {
-        assert_eq!(truncate_to_bytes("hello world", 5), "hello...");
-    }
-
-    #[test]
-    fn truncate_to_bytes_respects_char_boundary() {
-        // Each `中` is 3 bytes, so cutting at byte 5 without `floor_char_boundary` would split a
-        // codepoint and panic on `&s[..5]`. Rounding down to byte 3 yields one `中` + `...`.
-        let input = "中中中中";
-        let result = truncate_to_bytes(input, 5);
-        assert_eq!(result, "中...");
-        assert!(result.is_char_boundary(result.len() - 3));
-    }
-
-    #[test]
-    fn truncate_to_bytes_exact_boundary_no_split() {
-        assert_eq!(truncate_to_bytes("中中", 6), "中中");
     }
 }

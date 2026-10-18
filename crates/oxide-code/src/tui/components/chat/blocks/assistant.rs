@@ -1,13 +1,11 @@
 //! Assistant text, thinking, and progress-update blocks.
 
-use ratatui::text::{Line, Span};
+use ratatui::text::Line;
 use unicode_width::UnicodeWidthStr;
 
-use super::{ChatBlock, RenderCtx, prepend_markdown_prefix};
+use super::{ChatBlock, RenderCtx, SectionStyles, bar_section, prepend_markdown_prefix};
 use crate::tui::glyphs::{ASSISTANT_CONT, ASSISTANT_PREFIX, THINKING_PREFIX};
 use crate::tui::markdown::render_markdown;
-use crate::tui::theme::Theme;
-use crate::tui::wrap::wrap_line;
 
 /// Header label on the first line of a thinking block.
 const THINKING_LABEL: &str = "Thinking...";
@@ -78,51 +76,18 @@ impl AssistantThinking {
 
 impl ChatBlock for AssistantThinking {
     fn render(&self, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
-        let theme = ctx.theme;
-        let width = usize::from(ctx.width);
-        let style = theme.thinking();
-
-        let bar_width = THINKING_PREFIX.width();
-        let md_width = width.saturating_sub(bar_width);
-        let bar_spans = vec![Span::styled(THINKING_PREFIX, style)];
-
-        let mut out = Vec::new();
-
-        let header = Line::from(vec![
-            Span::styled(THINKING_PREFIX, style),
-            Span::styled(THINKING_LABEL, style),
-        ]);
-        out.extend(wrap_line(header, width, bar_width, Some(&bar_spans)));
-
-        if !self.text.trim().is_empty() {
-            out.push(Line::from(Span::styled(THINKING_PREFIX, style)));
-            let rendered = render_markdown(&self.text, theme, md_width);
-            for line in rendered.lines {
-                let dimmed = apply_thinking_style(line, theme);
-                out.push(prepend_markdown_prefix(dimmed, THINKING_PREFIX, style));
-            }
-        }
-
-        out
+        let style = ctx.theme.thinking();
+        let styles = SectionStyles {
+            bar: style,
+            header: style,
+            body: style,
+        };
+        bar_section(ctx, THINKING_PREFIX, &styles, THINKING_LABEL, &self.text)
     }
 
     fn visible(&self, ctx: &RenderCtx<'_>) -> bool {
         ctx.show_thinking
     }
-}
-
-/// Dims plain spans and leaves explicitly colored spans at full color.
-fn apply_thinking_style(mut line: Line<'static>, theme: &Theme) -> Line<'static> {
-    if line.style.fg.is_some() {
-        return line;
-    }
-    let base = theme.thinking();
-    for span in &mut line.spans {
-        if span.style.fg.is_none() {
-            span.style = span.style.patch(base);
-        }
-    }
-    line
 }
 
 // ── ProgressUpdate ──
@@ -153,6 +118,7 @@ impl ChatBlock for ProgressUpdate {
 #[cfg(test)]
 mod tests {
     use indoc::indoc;
+    use ratatui::text::Span;
 
     use super::*;
     use crate::tui::theme::Theme;
@@ -207,15 +173,27 @@ mod tests {
     }
 
     #[test]
-    fn render_inserts_gutter_line_between_header_and_body() {
-        // Bar-only gutter row separates header from prose without crowding.
+    fn render_paints_header_gutter_and_plain_body_in_the_thinking_style() {
         let theme = Theme::default();
         let block = AssistantThinking::new("hello");
 
         let lines = block.render(&ctx_at(60, &theme));
 
-        let rows: Vec<String> = lines.iter().map(ToString::to_string).collect();
-        assert_eq!(rows, ["▎ Thinking...", "▎ ", "▎ hello"]);
+        let style = theme.thinking();
+        assert_eq!(
+            lines,
+            [
+                Line::from(vec![
+                    Span::styled(THINKING_PREFIX, style),
+                    Span::styled(THINKING_LABEL, style),
+                ]),
+                Line::from(Span::styled(THINKING_PREFIX, style)),
+                Line::from(vec![
+                    Span::styled(THINKING_PREFIX, style),
+                    Span::styled("hello", style),
+                ]),
+            ]
+        );
     }
 
     #[test]
@@ -240,20 +218,6 @@ mod tests {
         let first_span = fence_line.spans.first().expect("empty fence line");
         assert_eq!(first_span.content, THINKING_PREFIX);
         assert_eq!(first_span.style, theme.thinking());
-    }
-
-    // ── apply_thinking_style ──
-
-    #[test]
-    fn apply_thinking_style_dims_plain_spans_only() {
-        let theme = Theme::default();
-        let line = Line::from(vec![
-            Span::raw("plain "),
-            Span::styled("code", theme.code()),
-        ]);
-        let out = apply_thinking_style(line, &theme);
-        assert_eq!(out.spans[0].style.fg, theme.thinking().fg);
-        assert_eq!(out.spans[1].style.fg, theme.code().fg);
     }
 
     // ── ProgressUpdate::visible ──

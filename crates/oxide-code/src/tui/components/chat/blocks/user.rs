@@ -2,7 +2,8 @@
 
 use ratatui::text::Line;
 
-use super::{ChatBlock, RenderCtx, push_icon_wrapped};
+use super::rows::prefixed_row;
+use super::{ChatBlock, RenderCtx};
 use crate::tui::glyphs::{USER_PROMPT_CONT, USER_PROMPT_PREFIX};
 use crate::tui::wrap::expand_tabs;
 
@@ -21,7 +22,6 @@ impl ChatBlock for UserMessage {
     fn render(&self, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
         let icon_style = ctx.theme.user();
         let text_style = ctx.theme.text();
-        let width = usize::from(ctx.width);
 
         let mut out = Vec::new();
         for (i, text_line) in self.text.trim().lines().enumerate() {
@@ -31,7 +31,7 @@ impl ChatBlock for UserMessage {
                 USER_PROMPT_CONT
             };
             let text_line = expand_tabs(text_line);
-            push_icon_wrapped(&mut out, prefix, icon_style, &text_line, text_style, width);
+            prefixed_row(&mut out, ctx, prefix, icon_style, text_line, text_style);
         }
         out
     }

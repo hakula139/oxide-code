@@ -1,10 +1,10 @@
-//! `/diff` output block, drawn like an Edit-tool diff with a line-number gutter. It reuses the
-//! tool tree's `numbered_row` and `bordered_row`, and parses the raw text lazily on `render`.
+//! `/diff` output block, drawn like an Edit-tool diff with a line-number gutter. It parses the
+//! raw text lazily on `render`.
 
 use ratatui::style::Modifier;
 use ratatui::text::Line;
 
-use super::tool::{bordered_row, numbered_row};
+use super::rows::{NumberedRows, body_row};
 use super::{ChatBlock, RenderCtx};
 
 // ── GitDiffBlock ──
@@ -24,8 +24,8 @@ impl ChatBlock for GitDiffBlock {
     fn render(&self, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
         let border = ctx.theme.tool_border();
         let number_width = max_line_number_width(&self.text);
-        let context = numbered_row::Renderer::new(ctx, border, number_width);
-        let del = numbered_row::Renderer::with_style(
+        let context = NumberedRows::new(ctx, border, number_width);
+        let del = NumberedRows::with_style(
             ctx,
             border,
             number_width,
@@ -33,7 +33,7 @@ impl ChatBlock for GitDiffBlock {
             ctx.theme.error(),
             Some(ctx.theme.diff_del_row()),
         );
-        let add = numbered_row::Renderer::with_style(
+        let add = NumberedRows::with_style(
             ctx,
             border,
             number_width,
@@ -51,11 +51,11 @@ impl ChatBlock for GitDiffBlock {
         for line in self.text.lines() {
             if line.starts_with("diff ") {
                 let header = parse_diff_git_path(line).unwrap_or(line);
-                bordered_row::render(
+                body_row(
                     &mut out,
                     ctx,
                     border,
-                    header.to_owned(),
+                    header,
                     ctx.theme.text().add_modifier(Modifier::BOLD),
                 );
                 old_left = 0;
@@ -65,11 +65,11 @@ impl ChatBlock for GitDiffBlock {
                 new_ln = new.start;
                 old_left = old.count;
                 new_left = new.count;
-                bordered_row::render(&mut out, ctx, border, line.to_owned(), ctx.theme.dim());
+                body_row(&mut out, ctx, border, line, ctx.theme.dim());
             } else if line.is_empty() {
                 old_left = 0;
                 new_left = 0;
-                bordered_row::render(&mut out, ctx, border, String::new(), ctx.theme.dim());
+                body_row(&mut out, ctx, border, "", ctx.theme.dim());
             } else if old_left == 0 && new_left == 0 {
                 if is_file_header(line) {
                     continue;
@@ -83,7 +83,7 @@ impl ChatBlock for GitDiffBlock {
                 } else {
                     ctx.theme.text()
                 };
-                bordered_row::render(&mut out, ctx, border, line.to_owned(), style);
+                body_row(&mut out, ctx, border, line, style);
             } else if let Some(text) = line.strip_prefix('+') {
                 add.render(&mut out, new_ln, text, ctx.theme.text());
                 new_ln += 1;
@@ -99,7 +99,7 @@ impl ChatBlock for GitDiffBlock {
                 old_left = old_left.saturating_sub(1);
                 new_left = new_left.saturating_sub(1);
             } else {
-                bordered_row::render(&mut out, ctx, border, line.to_owned(), ctx.theme.dim());
+                body_row(&mut out, ctx, border, line, ctx.theme.dim());
             }
         }
         out

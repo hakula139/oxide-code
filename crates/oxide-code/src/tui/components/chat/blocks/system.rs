@@ -2,11 +2,10 @@
 //! [`super::ErrorBlock`], which keeps failures visually distinct from this output.
 
 use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthStr;
 
-use super::{ChatBlock, RenderCtx, bar_continuation_prefix};
+use super::rows::prefixed_row;
+use super::{ChatBlock, RenderCtx};
 use crate::tui::glyphs::TOOL_BORDER_PREFIX;
-use crate::tui::wrap::wrap_line;
 
 /// Output from a locally-dispatched slash command.
 pub(crate) struct SystemMessageBlock {
@@ -27,17 +26,16 @@ impl ChatBlock for SystemMessageBlock {
 
     fn render(&self, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
         let bar_style = ctx.theme.accent();
-        let body_style = ctx.theme.text();
-        let width = usize::from(ctx.width);
-        let cont_prefix = bar_continuation_prefix(TOOL_BORDER_PREFIX, bar_style);
-        let indent = TOOL_BORDER_PREFIX.width();
         let mut out = Vec::new();
         for body_line in self.text.lines() {
-            let line = Line::from(vec![
-                Span::styled(TOOL_BORDER_PREFIX.to_owned(), bar_style),
-                Span::styled(body_line.to_owned(), body_style),
-            ]);
-            out.extend(wrap_line(line, width, indent, Some(&cont_prefix)));
+            prefixed_row(
+                &mut out,
+                ctx,
+                TOOL_BORDER_PREFIX,
+                bar_style,
+                body_line,
+                ctx.theme.text(),
+            );
         }
         if out.is_empty() {
             // Empty content renders a bare bar, so the block stays visible.
@@ -80,15 +78,16 @@ mod tests {
             second
             third
         "});
+
         let lines = block.render(&ctx_at(60, &theme));
-        assert_eq!(lines.len(), 3);
-        for (i, expected) in ["first", "second", "third"].iter().enumerate() {
-            assert_eq!(lines[i].spans.len(), 2, "row {i}: bar + body");
-            assert_eq!(lines[i].spans[0].content, TOOL_BORDER_PREFIX);
-            assert_eq!(lines[i].spans[0].style, theme.accent());
-            assert_eq!(lines[i].spans[1].content, *expected);
-            assert_eq!(lines[i].spans[1].style, theme.text());
-        }
+
+        let row = |text| {
+            Line::from(vec![
+                Span::styled(TOOL_BORDER_PREFIX, theme.accent()),
+                Span::styled(text, theme.text()),
+            ])
+        };
+        assert_eq!(lines, [row("first"), row("second"), row("third")]);
     }
 
     #[test]

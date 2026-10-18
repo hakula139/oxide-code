@@ -4,9 +4,10 @@
 use ratatui::text::Line;
 use unicode_width::UnicodeWidthStr;
 
-use super::super::RenderCtx;
-use super::{MAX_TOOL_OUTPUT_LINES, border_style_for, bordered_row, numbered_row};
+use super::{MAX_TOOL_OUTPUT_LINES, border_style_for};
 use crate::tool::GrepFileGroup;
+use crate::tui::components::chat::blocks::RenderCtx;
+use crate::tui::components::chat::blocks::rows::{NumberedRows, body_row};
 
 pub(super) fn render(
     out: &mut Vec<Line<'static>>,
@@ -32,20 +33,14 @@ pub(super) fn render(
         .map(|l| l.number.to_string().width())
         .max()
         .unwrap_or(1);
-    let rows = numbered_row::Renderer::new(ctx, border_style, line_number_width);
+    let rows = NumberedRows::new(ctx, border_style, line_number_width);
 
     let mut emitted: usize = 0;
     'outer: for group in groups {
         if emitted >= visible_rows {
             break;
         }
-        bordered_row::render(
-            out,
-            ctx,
-            border_style,
-            group.path.clone(),
-            ctx.theme.muted(),
-        );
+        body_row(out, ctx, border_style, &group.path, ctx.theme.muted());
         emitted += 1;
 
         for line in &group.lines {
@@ -63,7 +58,7 @@ pub(super) fn render(
     }
 
     if let Some(text) = footer_text(hidden, truncated) {
-        bordered_row::render(out, ctx, border_style, text, ctx.theme.dim());
+        body_row(out, ctx, border_style, text, ctx.theme.dim());
     }
 }
 
