@@ -70,11 +70,7 @@
         # ------------------------------------------------------------------------------------------
         hooks = {
           end-of-file-fixer.enable = true;
-          # Preserve Markdown's two-trailing-space hard-break syntax.
-          trim-trailing-whitespace = {
-            enable = true;
-            args = [ "--markdown-linebreak-ext=md" ];
-          };
+          trim-trailing-whitespace.enable = true;
           check-added-large-files.enable = true;
           check-yaml.enable = true;
           taplo.enable = true;
