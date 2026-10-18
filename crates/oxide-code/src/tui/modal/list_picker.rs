@@ -204,12 +204,15 @@ mod tests {
         fn label(&self) -> &str {
             self.label
         }
+
         fn description(&self) -> Option<&str> {
             self.description
         }
+
         fn is_active(&self) -> bool {
             self.active
         }
+
         fn key_hint(&self) -> Option<char> {
             self.hint
         }
@@ -264,8 +267,10 @@ mod tests {
     #[test]
     fn select_next_advances_and_wraps_at_end() {
         let mut p = picker(vec![FakeItem::new("a"), FakeItem::new("b")]);
+
         p.select_next();
         assert_eq!(p.cursor_index(), 1);
+
         p.select_next();
         assert_eq!(p.cursor_index(), 0, "wraps past the last row");
     }
@@ -273,8 +278,10 @@ mod tests {
     #[test]
     fn select_prev_retreats_and_wraps_at_zero() {
         let mut p = picker(vec![FakeItem::new("a"), FakeItem::new("b")]);
+
         p.select_prev();
         assert_eq!(p.cursor_index(), 1, "wraps past the first row");
+
         p.select_prev();
         assert_eq!(p.cursor_index(), 0);
     }
@@ -282,8 +289,10 @@ mod tests {
     #[test]
     fn select_next_and_prev_on_empty_list_are_noops() {
         let mut p = picker(Vec::new());
+
         p.select_next();
         p.select_prev();
+
         assert_eq!(p.cursor_index(), 0);
         assert!(p.selected().is_none());
     }
@@ -306,6 +315,7 @@ mod tests {
                 ..FakeItem::new("c")
             },
         ]);
+
         assert!(p.select_by_hint('2'));
         assert_eq!(p.cursor_index(), 1);
     }
@@ -316,6 +326,7 @@ mod tests {
             hint: Some('1'),
             ..FakeItem::new("a")
         }]);
+
         assert!(!p.select_by_hint('9'));
         assert_eq!(p.cursor_index(), 0, "cursor stays put on miss");
     }
@@ -326,6 +337,7 @@ mod tests {
     fn height_with_no_description_is_two_header_rows_plus_items() {
         // Title (1) + blank (1) + items.
         let p = picker(vec![FakeItem::new("a"), FakeItem::new("b")]);
+
         assert_eq!(p.height(80, 40), 4);
     }
 
@@ -333,18 +345,21 @@ mod tests {
     fn height_with_description_adds_one_more_row() {
         // Title (1) + description (1) + blank (1) = 3 header rows + items.
         let p = picker(vec![FakeItem::new("a")]).with_description("a small picker");
+
         assert_eq!(p.height(80, 40), 4);
     }
 
     #[test]
     fn height_with_empty_items_is_just_header_rows() {
         let p: ListPicker<FakeItem> = picker(Vec::new());
+
         assert_eq!(p.height(80, 40), 2, "empty list still draws title + blank");
     }
 
     #[test]
     fn height_caps_long_lists_at_the_max() {
         let items = (0..20).map(|_| FakeItem::new("x")).collect();
+
         assert_eq!(picker(items).height(80, 7), 7);
     }
 
@@ -363,7 +378,9 @@ mod tests {
                 ..FakeItem::new("a")
             },
         ]);
+
         let rows = render_rows(&p, 20, p.height(20, 20));
+
         assert_eq!(rows[2].trim_end(), ">    中文    ab...");
         assert_eq!(rows[3].trim_end(), "     a     ✓ xyz");
     }
@@ -393,6 +410,7 @@ mod tests {
     #[test]
     fn render_label_only_items_show_no_marker_or_description() {
         struct MinimalItem(&'static str);
+
         impl PickerItem for MinimalItem {
             fn label(&self) -> &str {
                 self.0
@@ -412,7 +430,9 @@ mod tests {
         const LABELS: [&str; 6] = ["r0", "r1", "r2", "r3", "r4", "r5"];
         let mut p = picker(LABELS.into_iter().map(FakeItem::new).collect());
         p.cursor_to(|item| item.label == "r4");
+
         let rows = render_rows(&p, 20, p.height(20, 5));
+
         assert_eq!(
             rows.iter().map(|row| row.trim_end()).collect::<Vec<_>>(),
             ["Pick one", "", "     r2", "     r3", ">    r4"],

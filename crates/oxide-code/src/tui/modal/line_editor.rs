@@ -179,7 +179,9 @@ mod tests {
     #[test]
     fn new_parks_the_cursor_after_the_initial_text() {
         let mut editor = LineEditor::new("ab");
+
         type_str(&mut editor, "c");
+
         assert_eq!(editor.text(), "abc");
     }
 
@@ -217,8 +219,10 @@ mod tests {
     #[test]
     fn set_text_replaces_the_text_and_parks_the_cursor_at_its_end() {
         let mut editor = LineEditor::new("old");
+
         editor.set_text("new");
         type_str(&mut editor, "!");
+
         assert_eq!(editor.text(), "new!");
     }
 
@@ -229,6 +233,7 @@ mod tests {
         let mut editor = LineEditor::new("acd");
         editor.handle_key(&KeyEvent::from(KeyCode::Left));
         editor.handle_key(&KeyEvent::from(KeyCode::Left));
+
         assert!(editor.handle_key(&KeyEvent::from(KeyCode::Char('b'))));
         assert_eq!(editor.text(), "abcd");
 
@@ -240,6 +245,7 @@ mod tests {
     #[test]
     fn handle_key_supports_readline_word_deletion() {
         let mut editor = LineEditor::new("fix auth bug");
+
         assert!(editor.handle_key(&KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL)));
         assert_eq!(editor.text(), "fix auth ");
     }
@@ -247,6 +253,7 @@ mod tests {
     #[test]
     fn handle_key_never_inserts_control_chords_or_line_breaks() {
         let mut editor = LineEditor::new("ab");
+
         for event in [
             KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL),
             KeyEvent::new(KeyCode::Char('m'), KeyModifiers::CONTROL),
@@ -258,6 +265,7 @@ mod tests {
         ] {
             assert!(!editor.handle_key(&event), "{event:?} must not edit");
         }
+
         assert_eq!(editor.text(), "ab");
     }
 
@@ -267,6 +275,7 @@ mod tests {
     fn paste_inserts_at_the_cursor_with_line_breaks_collapsed() {
         let mut editor = LineEditor::new("[]");
         editor.handle_key(&KeyEvent::from(KeyCode::Left));
+
         assert!(editor.paste("\nfix\r\nauth\n\tflow\n"));
         assert_eq!(editor.text(), "[fix auth flow]");
     }
@@ -274,12 +283,14 @@ mod tests {
     #[test]
     fn paste_keeps_only_what_fits_under_the_cap() {
         let mut editor = LineEditor::new("ab").with_max_width(6);
+
         assert!(editor.paste("c界d界"));
         assert_eq!(
             editor.text(),
             "abc界d",
             "a wide char past the cap is dropped"
         );
+
         assert!(!editor.paste("x"), "a full field takes nothing");
         assert!(!editor.paste("\n\n"), "line breaks alone insert nothing");
     }

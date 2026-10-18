@@ -165,6 +165,7 @@ mod tests {
     #[test]
     fn highlight_code_known_language_produces_rgb() {
         let lines = highlight_code("rust", "fn main() {}", &Theme::default());
+
         assert!(has_rgb_color(&lines));
         assert!(all_text(&lines).contains("fn"));
     }
@@ -187,6 +188,7 @@ mod tests {
             "},
             &Theme::default(),
         );
+
         assert_eq!(all_text(&lines), "fn a() {}\nfn b() {}");
     }
 
@@ -200,8 +202,10 @@ mod tests {
     #[test]
     fn highlight_code_line_comment_ends_at_line_break() {
         let theme = Theme::default();
+
         let after_comment = highlight_code("rust", "// c\nlet x = 1;", &theme);
         let alone = highlight_code("rust", "let x = 1;", &theme);
+
         assert_eq!(styled_spans(&after_comment[1]), styled_spans(&alone[0]));
     }
 
@@ -209,6 +213,7 @@ mod tests {
     fn highlight_code_follows_theme_syntax_palette() {
         let dark = highlight_code("rust", "fn main() {}", &Theme::default());
         let light = highlight_code("rust", "fn main() {}", &load_builtin("latte").unwrap());
+
         assert_eq!(all_text(&dark), all_text(&light));
         assert_ne!(styled_spans(&dark[0]), styled_spans(&light[0]));
     }
@@ -216,20 +221,25 @@ mod tests {
     #[test]
     fn highlight_code_unknown_language_uses_fallback() {
         let theme = Theme::default();
+
         let lines = highlight_code("nonexistent_lang_xyz", "hello", &theme);
+
         assert_eq!(lines, [Line::styled("hello", theme.code())]);
     }
 
     #[test]
     fn highlight_code_empty_language_uses_fallback() {
         let theme = Theme::default();
+
         let lines = highlight_code("", "code here", &theme);
+
         assert_eq!(lines, [Line::styled("code here", theme.code())]);
     }
 
     #[test]
     fn highlight_code_empty_input_yields_empty() {
         let lines = highlight_code("rust", "", &Theme::default());
+
         assert_eq!(lines, Vec::<Line<'_>>::new());
     }
 
@@ -254,6 +264,7 @@ mod tests {
 
         let code = "fn a() {}\nfn b() {}\n";
         let lines = highlight_resuming(&mut resume, syntax("rust"), Theme::default().syntax, code);
+
         assert_eq!(lines[0], Line::from("sentinel"));
         assert_eq!(all_text(&lines[1..]), "fn b() {}");
         assert_eq!(resume.unwrap().code, code);
@@ -269,6 +280,7 @@ mod tests {
         "};
         let (syntax, theme) = (syntax("rust"), Theme::default().syntax);
         let mut resume = None;
+
         for end in (1..=code.len()).filter(|&i| code.is_char_boundary(i)) {
             let prefix = &code[..end];
             assert_eq!(
@@ -283,6 +295,7 @@ mod tests {
     fn highlight_resuming_starts_over_for_another_syntax_theme_or_prefix() {
         let latte = load_builtin("latte").unwrap();
         let rust_dark = (syntax("rust"), Theme::default().syntax);
+
         for (syntax, theme, code) in [
             (syntax("python"), rust_dark.1, "fn a() {}\n"),
             (rust_dark.0, latte.syntax, "fn a() {}\n"),
