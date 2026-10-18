@@ -25,12 +25,13 @@ Every format also writes tool calls, the task list, retries, and errors as text 
 
 ## Exit Status
 
-| Status              | Meaning                                                     |
-| ------------------- | ----------------------------------------------------------- |
-| `0`                 | The turn completed                                          |
-| `1`                 | The turn failed, or `ox` could not start it                 |
-| `2`                 | The command line was invalid, such as an unknown `--output` |
-| `129`, `130`, `143` | SIGHUP, SIGINT, or SIGTERM stopped the run                  |
+| Status              | Meaning                                                          |
+| ------------------- | ---------------------------------------------------------------- |
+| `0`                 | The turn completed                                               |
+| `1`                 | The turn failed, or `ox` could not start it                      |
+| `2`                 | The command line was invalid, such as an unknown `--output`      |
+| `101`               | `ox` crashed, and the JSON formats still print a `failed` result |
+| `129`, `130`, `143` | SIGHUP, SIGINT, or SIGTERM stopped the run                       |
 
 If `ox` cannot start a run, for example because of a configuration or credential error, it prints the error to stderr and emits no result.
 

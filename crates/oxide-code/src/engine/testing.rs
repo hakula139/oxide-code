@@ -3,6 +3,7 @@
 //! `engine` so it can build the private fields.
 
 use std::collections::{HashMap, VecDeque};
+use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -16,7 +17,7 @@ use wiremock::{Mock, MockServer};
 
 use super::compaction::AutoCompactFailures;
 use super::dispatch::DispatchContext;
-use super::{Engine, EngineHandle, EngineTask};
+use super::{Engine, EngineHandle, EnginePanic, EngineTask};
 use crate::client::anthropic::Client;
 use crate::client::anthropic::testing::{
     DEVICE_ID, api_key, sse_response, test_config, text_stream_body, tool_use_stream_body,
@@ -89,15 +90,23 @@ impl Engine {
     }
 }
 
-/// Handle to an engine that has already stopped, as after a panic.
-pub(crate) fn stopped_engine() -> EngineHandle {
+/// Handle to an engine whose task panicked with `engine bug`, closing both channels.
+pub(crate) fn panicked_engine() -> EngineHandle {
     let (ops, _) = mpsc::channel(1);
     let (_, events) = mpsc::unbounded_channel();
     EngineHandle {
         ops,
         events,
-        task: EngineTask(tokio::spawn(async { None })),
+        task: EngineTask(tokio::spawn(async { panic!("engine bug") })),
     }
+}
+
+/// The message of an [`EnginePanic`] whose `panic!` took a string literal.
+pub(crate) fn panic_message(panic: EnginePanic) -> &'static str {
+    let payload = std::panic::catch_unwind(AssertUnwindSafe(|| panic.resume())).unwrap_err();
+    payload
+        .downcast_ref::<&str>()
+        .expect("the panic message is a literal")
 }
 
 /// Runs `test` with the home directory pinned to an empty one, so context loads find no user

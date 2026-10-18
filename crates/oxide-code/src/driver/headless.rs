@@ -9,18 +9,19 @@ use serde::Serialize;
 
 use super::stdio::{StdioSink, Unattended, render_op};
 use super::{Exit, shutdown_signal};
-use crate::engine::{Engine, EngineHandle, TurnEnd};
+use crate::engine::{Engine, EngineHandle, EnginePanic, TurnEnd};
 use crate::protocol::{Event, EventSink, Op, UsageSnapshot};
 use crate::slash;
 
 /// Runs `prompt` as a single turn, printed in `format`. A turn that does not complete exits with
-/// failure, and a signal exits with its own status.
+/// failure, and a signal exits with its own status. If the engine panics, the panic is returned
+/// after the failed result is printed.
 pub(crate) async fn run(
     engine: Engine,
     show_thinking: bool,
     prompt: &str,
     format: OutputFormat,
-) -> Exit {
+) -> Result<Exit, EnginePanic> {
     let session_id = engine.session_id().to_owned();
     let printer = Printer::new(
         format,
@@ -32,7 +33,11 @@ pub(crate) async fn run(
     drive(engine.spawn(&[]), &printer, prompt).await
 }
 
-async fn drive<O, E>(mut handle: EngineHandle, printer: &Printer<O, E>, prompt: &str) -> Exit
+async fn drive<O, E>(
+    mut handle: EngineHandle,
+    printer: &Printer<O, E>,
+    prompt: &str,
+) -> Result<Exit, EnginePanic>
 where
     O: Write + Send,
     E: Write + Send,
@@ -48,7 +53,7 @@ where
         &prompt,
         &mut approver,
     );
-    let (end, exit) = tokio::select! {
+    let (end, mut exit) = tokio::select! {
         end = rendered => match end {
             Some(TurnEnd::Completed) => (TurnEnd::Completed, Exit::Success),
             Some(end) => (end, Exit::Failure),
@@ -66,15 +71,17 @@ where
         }
     };
 
-    let failure = handle.shutdown().await;
-    printer.session_write_error(failure.as_deref());
+    let finished = handle.shutdown().await;
+    if let Ok(failure) = &finished {
+        printer.session_write_error(failure.as_deref());
+    }
     if let Err(e) = printer.finish(end) {
         eprintln!("Error: failed to print the result: {e:#}");
         if !matches!(exit, Exit::Signal(_)) {
-            return Exit::Failure;
+            exit = Exit::Failure;
         }
     }
-    exit
+    finished.map(|_| exit)
 }
 
 // ── Output Format ──
@@ -224,12 +231,14 @@ fn write_json_line(out: &mut impl Write, value: &impl Serialize) -> Result<()> {
 mod tests {
     use std::pin::Pin;
 
+    use indoc::indoc;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
     use crate::engine::testing::{
-        engine, mount_reply, mount_tool_call_once, request_bodies, stopped_engine, with_pinned_home,
+        engine, mount_reply, mount_tool_call_once, panic_message, panicked_engine, request_bodies,
+        with_pinned_home,
     };
     use crate::permission::PermissionClass;
     use crate::protocol::ToolCall;
@@ -315,7 +324,9 @@ mod tests {
                 let printer =
                     Printer::new(format, false, session_id.clone(), Vec::new(), Vec::new());
 
-                let exit = Box::pin(drive(engine.spawn(&[]), &printer, "Look around.")).await;
+                let exit = Box::pin(drive(engine.spawn(&[]), &printer, "Look around."))
+                    .await
+                    .unwrap();
 
                 assert_eq!(exit, Exit::Success);
                 let (stdout, stderr) = printed(printer);
@@ -348,7 +359,9 @@ mod tests {
 
             let failed = printer(OutputFormat::Json);
             let engine_failed = engine(server.uri(), &store, dir.path()).await;
-            let exit = Box::pin(drive(engine_failed.spawn(&[]), &failed, "first")).await;
+            let exit = Box::pin(drive(engine_failed.spawn(&[]), &failed, "first"))
+                .await
+                .unwrap();
             assert_eq!(exit, Exit::Failure);
             let (stdout, stderr) = printed(failed);
             let result = result_data(&stdout);
@@ -359,24 +372,37 @@ mod tests {
 
             let completed = printer(OutputFormat::Json);
             let engine_completed = engine(server.uri(), &store, dir.path()).await;
-            let exit = Box::pin(drive(engine_completed.spawn(&[]), &completed, "//second")).await;
+            let exit = Box::pin(drive(engine_completed.spawn(&[]), &completed, "//second"))
+                .await
+                .unwrap();
             assert_eq!(exit, Exit::Success);
             let result = result_data(&printed(completed).0);
             assert_eq!(result["stop_reason"], "completed");
             assert_eq!(result["message"], "reply");
             let requests = request_bodies(&server).await;
             assert_eq!(requests[1]["messages"][1]["content"][0]["text"], "/second");
-
-            let stopped = printer(OutputFormat::Json);
-            let exit = Box::pin(drive(stopped_engine(), &stopped, "third")).await;
-            assert_eq!(exit, Exit::Failure);
-            let (stdout, stderr) = printed(stopped);
-            let result = result_data(&stdout);
-            assert_eq!(result["stop_reason"], "failed");
-            assert_eq!(result["error"], "The engine stopped before the turn ended");
-            assert_eq!(stderr, "Error: The engine stopped before the turn ended\n");
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn drive_prints_the_failed_result_before_handing_back_an_engine_panic() {
+        let printer = printer(OutputFormat::StreamJson);
+
+        let panic = Box::pin(drive(panicked_engine(), &printer, "hello"))
+            .await
+            .unwrap_err();
+
+        assert_eq!(panic_message(panic), "engine bug");
+        let (stdout, stderr) = printed(printer);
+        assert_eq!(
+            String::from_utf8(stdout).unwrap(),
+            indoc! {r#"
+                {"type":"turn_failed","data":"The engine stopped before the turn ended"}
+                {"type":"result","data":{"stop_reason":"failed","error":"The engine stopped before the turn ended","message":null,"usage":null,"session_id":"session-1"}}
+            "#},
+        );
+        assert_eq!(stderr, "Error: The engine stopped before the turn ended\n");
     }
 
     #[tokio::test]
@@ -394,7 +420,9 @@ mod tests {
                 Vec::new(),
             );
 
-            let exit = Box::pin(drive(engine.spawn(&[]), &printer, "hello")).await;
+            let exit = Box::pin(drive(engine.spawn(&[]), &printer, "hello"))
+                .await
+                .unwrap();
 
             assert_eq!(exit, Exit::Failure);
         })

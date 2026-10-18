@@ -16,7 +16,7 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow};
 use serde::Serialize;
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
+use tokio::task::{JoinError, JoinHandle};
 
 use self::abort::{Inbox, TurnAbort};
 use self::compact_boundary::Boundary;
@@ -63,7 +63,7 @@ pub(crate) struct EngineHandle {
 impl EngineHandle {
     /// Quits the engine and joins its task. Holds `events` open until then, so the engine's final
     /// emits don't fail and log as dropped.
-    pub(crate) async fn shutdown(self) -> Option<String> {
+    pub(crate) async fn shutdown(self) -> Result<Option<String>, EnginePanic> {
         let Self {
             ops,
             events: _events,
@@ -77,12 +77,22 @@ impl EngineHandle {
 pub(crate) struct EngineTask(JoinHandle<Option<String>>);
 
 impl EngineTask {
-    /// Waits until the engine has finalized the live session, returning the write failure if any.
-    /// Resumes the panic of an engine that panicked, since it never finalized the session.
-    pub(crate) async fn join(self) -> Option<String> {
-        self.0
-            .await
-            .unwrap_or_else(|e| std::panic::resume_unwind(e.into_panic()))
+    /// Waits until the engine has finalized the live session, returning the write failure if any,
+    /// or the panic of an engine that never finalized it.
+    pub(crate) async fn join(self) -> Result<Option<String>, EnginePanic> {
+        self.0.await.map_err(EnginePanic)
+    }
+}
+
+/// The panic that ended the engine task. The frontend finishes its output first, then `main`
+/// re-raises it with [`Self::resume`], so `ox` exits with the panic status.
+#[derive(Debug, thiserror::Error)]
+#[error(transparent)]
+pub(crate) struct EnginePanic(JoinError);
+
+impl EnginePanic {
+    pub(crate) fn resume(self) -> ! {
+        std::panic::resume_unwind(self.0.into_panic())
     }
 }
 
@@ -974,8 +984,8 @@ mod tests {
 
     use super::testing::{
         MODEL, SESSION_CONTEXT, engine, mount_reply, mount_stalled_reply_once,
-        mount_tool_call_once, request_bodies, service_log, system_prompt, tool_heavy_transcript,
-        until_requested, with_pinned_home,
+        mount_tool_call_once, panic_message, request_bodies, service_log, system_prompt,
+        tool_heavy_transcript, until_requested, with_pinned_home,
     };
     use super::*;
     use crate::client::anthropic::testing::{
@@ -1138,7 +1148,7 @@ mod tests {
             let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
             engine.session = handle::testing::dead("dead");
 
-            let failure = engine.spawn(&[]).shutdown().await;
+            let failure = engine.spawn(&[]).shutdown().await.unwrap();
 
             assert!(
                 failure.is_some_and(|f| f.starts_with("session writer task has stopped")),
@@ -1151,11 +1161,12 @@ mod tests {
     // ── EngineTask::join ──
 
     #[tokio::test]
-    #[should_panic(expected = "engine bug")]
-    async fn join_resumes_the_panic_of_a_panicked_engine() {
+    async fn join_hands_back_the_panic_of_a_panicked_engine() {
         let task = EngineTask(tokio::spawn(async { panic!("engine bug") }));
 
-        task.join().await;
+        let panic = task.join().await.unwrap_err();
+
+        assert_eq!(panic_message(panic), "engine bug");
     }
 
     // ── new ──
@@ -1286,7 +1297,7 @@ mod tests {
             let instructions = handle.events.recv().await.unwrap();
             let drift = handle.events.recv().await.unwrap();
             let interrupted = handle.events.recv().await.unwrap();
-            let failure = handle.shutdown().await;
+            let failure = handle.shutdown().await.unwrap();
 
             assert!(
                 matches!(
@@ -1331,7 +1342,7 @@ mod tests {
             let mut handle = engine.spawn(&[]);
 
             let events = submit(&mut handle, "hello").await;
-            let failure = handle.shutdown().await;
+            let failure = handle.shutdown().await.unwrap();
 
             assert!(
                 matches!(
@@ -1386,7 +1397,7 @@ mod tests {
                 _ => None,
             })
             .await;
-            handle.shutdown().await;
+            handle.shutdown().await.unwrap();
 
             assert_eq!(titled, (live_id, "Greeting".to_owned()));
         })
@@ -1411,7 +1422,7 @@ mod tests {
                 handle.ops.send(op).await.unwrap();
             }
             let events = turn_events(&mut handle.events).await;
-            handle.shutdown().await;
+            handle.shutdown().await.unwrap();
 
             let drained: Vec<_> = events
                 .iter()
@@ -1476,7 +1487,7 @@ mod tests {
             })
             .await;
             submit(&mut handle, "after").await;
-            handle.shutdown().await;
+            handle.shutdown().await.unwrap();
 
             assert_eq!(compacted, (4, Some("focus".to_owned()), false));
             let requests = request_bodies(&server).await;
@@ -1512,7 +1523,7 @@ mod tests {
             })
             .await;
             submit(&mut handle, "again").await;
-            handle.shutdown().await;
+            handle.shutdown().await.unwrap();
 
             assert_eq!(
                 resumed,
@@ -1563,7 +1574,7 @@ mod tests {
             })
             .await;
             submit(&mut handle, "second").await;
-            handle.shutdown().await;
+            handle.shutdown().await.unwrap();
 
             assert_eq!(
                 failure,
@@ -1615,7 +1626,7 @@ mod tests {
             })
             .await;
             let restored = handle.events.recv().await.unwrap();
-            handle.shutdown().await;
+            handle.shutdown().await.unwrap();
 
             assert!(
                 matches!(
@@ -1675,7 +1686,7 @@ mod tests {
                 _ => None,
             })
             .await;
-            handle.shutdown().await;
+            handle.shutdown().await.unwrap();
 
             assert_eq!(resumed, (archived_id.clone(), true));
             assert!(!store.load_session_data(&archived_id).unwrap().archived);
@@ -1711,7 +1722,8 @@ mod tests {
             }
             let failure = tokio::time::timeout(Duration::from_secs(5), task.join())
                 .await
-                .expect("Shutdown stops the engine while its op channel is still open");
+                .expect("Shutdown stops the engine while its op channel is still open")
+                .unwrap();
             let mut seen = Vec::new();
             while let Ok(event) = events.try_recv() {
                 seen.push(event);
@@ -1745,7 +1757,7 @@ mod tests {
             let handle = engine(server.uri(), &store, dir.path()).await.spawn(&[]);
 
             handle.ops.send(Op::Shutdown).await.unwrap();
-            assert_eq!(handle.task.join().await, None);
+            assert_eq!(handle.task.join().await.unwrap(), None);
 
             assert!(store.list().unwrap().is_empty());
         })
@@ -1776,7 +1788,7 @@ mod tests {
             .await;
             seed_full_read(&tracker, &read_path);
             submit(&mut handle, "after clear").await;
-            handle.shutdown().await;
+            handle.shutdown().await.unwrap();
 
             let snapshots = store.load_session_data(&live_id).unwrap().file_snapshots;
             let paths: Vec<_> = snapshots.iter().map(|snapshot| &snapshot.path).collect();
@@ -1801,7 +1813,7 @@ mod tests {
                 _ => None,
             })
             .await;
-            handle.shutdown().await;
+            handle.shutdown().await.unwrap();
 
             assert_eq!(listed, [shell("shell-1", "sleep 30", ShellState::Running)]);
             assert_eq!(shells.list(), []);
@@ -1834,7 +1846,7 @@ mod tests {
                 cancelled.extend(turn_events(&mut handle.events).await);
             }
             let next = submit(&mut handle, "what is 7 times 6?").await;
-            handle.shutdown().await;
+            handle.shutdown().await.unwrap();
 
             assert_eq!(cancelled, [Event::Cancelled, Event::Cancelled]);
             assert!(matches!(next.last(), Some(Event::TurnComplete)));
@@ -1886,7 +1898,7 @@ mod tests {
             until_requested(&server, 1).await;
             handle.ops.send(Op::Interrupt).await.unwrap();
             let events = turn_events(&mut handle.events).await;
-            handle.shutdown().await;
+            handle.shutdown().await.unwrap();
 
             assert!(
                 matches!(
@@ -1933,7 +1945,8 @@ mod tests {
                     .await
                     .unwrap_or_else(|_| {
                         panic!("Shutdown stops a {label} while the op channel is open")
-                    });
+                    })
+                    .unwrap();
 
                 assert_eq!(failure, None, "{label}");
                 assert!(events.try_recv().is_err(), "{label}");
@@ -1964,7 +1977,8 @@ mod tests {
             until_requested(&server, 1).await;
             tokio::time::timeout(Duration::from_secs(5), handle.shutdown())
                 .await
-                .expect("the engine must stop waiting on the stream");
+                .expect("the engine must stop waiting on the stream")
+                .unwrap();
 
             let data = store.load_session_data(&live_id).unwrap();
             assert_eq!(
@@ -2006,7 +2020,8 @@ mod tests {
                 ops.send(Op::Shutdown).await.unwrap();
                 let failure = tokio::time::timeout(Duration::from_secs(5), task.join())
                     .await
-                    .expect("Shutdown stops the engine mid sign-in");
+                    .expect("Shutdown stops the engine mid sign-in")
+                    .unwrap();
 
                 assert!(
                     url.starts_with("https://claude.ai/oauth/authorize?"),
@@ -3444,7 +3459,7 @@ mod tests {
                 let reply = return_from_browser(&url, "code=auth-code").await;
                 let signed_in = handle.events.recv().await;
                 let turn = submit(&mut handle, "hi").await;
-                handle.shutdown().await;
+                handle.shutdown().await.unwrap();
 
                 assert!(reply.starts_with("HTTP/1.1 302 Found\r\n"), "{reply}");
                 assert!(
@@ -3482,7 +3497,7 @@ mod tests {
             let url = login_url(&mut handle.events).await;
             let reply = return_from_browser(&url, "error=access_denied").await;
             let failed = handle.events.recv().await;
-            handle.shutdown().await;
+            handle.shutdown().await.unwrap();
 
             assert!(reply.starts_with("HTTP/1.1 400 Bad Request\r\n"), "{reply}");
             assert!(

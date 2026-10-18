@@ -104,7 +104,7 @@ where
     }
     .await;
 
-    let failure = handle.shutdown().await;
+    let failure = handle.shutdown().await?;
     sink.session_write_error(failure.as_deref());
     result?;
     Ok(match signal {
@@ -261,8 +261,10 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
+    use crate::engine::EnginePanic;
     use crate::engine::testing::{
-        engine, mount_reply, mount_tool_call_once, request_bodies, stopped_engine, with_pinned_home,
+        engine, mount_reply, mount_tool_call_once, panic_message, panicked_engine, request_bodies,
+        with_pinned_home,
     };
     use crate::permission::{Access, Mode, PermissionClass, Policy, Tier, Workspace};
     use crate::protocol::CapturingSink;
@@ -592,12 +594,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn drive_fails_once_the_engine_stops() {
+    async fn drive_hands_back_the_panic_of_an_engine_that_stops() {
         let input: &[u8] = b"hello\n";
 
-        let result = Box::pin(drive(stopped_engine(), &CapturingSink::new(), input, true)).await;
+        let result = Box::pin(drive(panicked_engine(), &CapturingSink::new(), input, true)).await;
 
-        assert_eq!(result.unwrap_err().to_string(), "the engine stopped");
+        let panic = result.unwrap_err().downcast::<EnginePanic>().unwrap();
+        assert_eq!(panic_message(panic), "engine bug");
     }
 
     // ── Prompter::decide ──
