@@ -512,6 +512,28 @@ mod tests {
 
     #[test]
     fn build_status_hyperlink_envelope_replays_each_cell_style_and_resets_it() {
+        const CHILD: &str = "OX_TEST_HYPERLINK_STYLES_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let thread = std::thread::current();
+            let test_name = thread.name().unwrap();
+
+            // crossterm caches NO_COLOR globally, so isolate the exact-color fixture from the suite.
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", test_name, "--nocapture"])
+                .env(CHILD, "1")
+                .env_remove("NO_COLOR")
+                .output()
+                .unwrap();
+
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                output.status.success() && stdout.contains(&format!("test {test_name} ... ok")),
+                "{stdout}{stderr}",
+            );
+            return;
+        }
+
         let link = StatusHyperlink {
             rect: Rect::new(0, 0, 2, 1),
             url: "https://x".to_owned(),
