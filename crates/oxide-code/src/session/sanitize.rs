@@ -112,7 +112,7 @@ fn insert_resume_sentinels(messages: &mut Vec<Message>) {
     }
 }
 
-/// Tool-use ids by where the call ran, since ids pair only on their own side. A client call's
+/// Tool-use IDs by where the call ran, since IDs pair only on their own side. A client call's
 /// result comes back in a user `tool_result`. A server call's comes back in an assistant reply,
 /// the next one when a `pause_turn` or a client call in the same reply deferred it.
 #[derive(Default)]
@@ -231,12 +231,10 @@ mod tests {
         ];
         sanitize_resumed_messages(&mut messages);
 
-        // Assistant keeps the text and the resolved t1, and t2 drops as unresolved.
         let assistant_blocks = &messages[1].content;
         assert_eq!(assistant_blocks.len(), 2);
         assert!(matches!(&assistant_blocks[0], ContentBlock::Text { .. }));
         assert!(matches!(&assistant_blocks[1], ContentBlock::ToolUse { id, .. } if id == "t1"));
-        // Trailing tool_result-only user → assistant sentinel appended.
         assert_eq!(messages.len(), 4);
         assert_eq!(messages[3].role, Role::Assistant);
         assert!(
@@ -325,8 +323,6 @@ mod tests {
 
     #[test]
     fn sanitize_resumed_messages_drops_orphan_when_assistant_tool_use_was_dropped() {
-        // Mismatched ids: pass 1 strips the assistant's unresolved t1, leaving no surviving ids, so
-        // pass 2 drops the user's t2.
         let mut messages = vec![
             Message::user("do X"),
             Message {
@@ -656,7 +652,6 @@ mod tests {
 
     #[test]
     fn insert_resume_sentinels_skips_append_when_trailing_user_has_text() {
-        // Mixed text and tool_result is a normal follow-up, so it gets no sentinel.
         let mut messages = vec![
             Message::user("do X"),
             Message {

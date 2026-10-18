@@ -77,7 +77,7 @@ impl SessionStore {
         Ok(read_session_infos(self.session_paths(all)?.into_iter()).find(|info| !info.archived))
     }
 
-    /// Readable sessions whose id starts with `prefix`, most recently active first. Ids are
+    /// Readable sessions whose ID starts with `prefix`, most recently active first. IDs are
     /// matched on file names, so only the matching files are parsed.
     pub(crate) fn list_matching(&self, prefix: &str, all: bool) -> Result<Vec<SessionInfo>> {
         let mut paths = self.session_paths(all)?;

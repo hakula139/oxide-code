@@ -1,5 +1,4 @@
-//! Shared display-layer helpers for session titles, listings, and archive notices, used by the
-//! resume picker, the `/delete` confirm modal, the archive commands, and `/rename`.
+//! Display helpers for session titles, metadata lines, and archive notices.
 
 use std::fmt::Write as _;
 
@@ -16,13 +15,12 @@ pub(crate) const UNTITLED_MARKER: &str = "(untitled)";
 /// the fixed `ID / Last Active / Msgs` prefix.
 pub(crate) const MAX_TITLE_WIDTH: usize = 80;
 
-/// First [`ID_PREFIX_WIDTH`] bytes of `session_id`, falling back to the full id when shorter.
+/// First [`ID_PREFIX_WIDTH`] bytes of `session_id`, or the full ID when shorter.
 pub(crate) fn id_prefix(session_id: &str) -> &str {
     session_id.get(..ID_PREFIX_WIDTH).unwrap_or(session_id)
 }
 
-/// Title from `info`, or [`UNTITLED_MARKER`] when absent. Owned so callers can pass it into
-/// `Box<dyn Modal>` constructors that outlive the borrow.
+/// Title from `info`, or [`UNTITLED_MARKER`] when absent.
 pub(crate) fn display_title(info: &SessionInfo) -> String {
     info.title
         .as_ref()
@@ -35,8 +33,7 @@ pub(crate) fn fit_title(text: &str) -> String {
     truncate_to_width(first_line.trim_end(), MAX_TITLE_WIDTH)
 }
 
-/// Compact "N units ago" with an ISO-date fallback past 30 days. Negative deltas (clock skew or
-/// future stamps) collapse to 0 so the singular / plural axis stays sane.
+/// Compact "N units ago", or the ISO date past 30 days. A future `ts` reads as 0 seconds ago.
 fn format_relative_time(ts: OffsetDateTime, now: OffsetDateTime) -> String {
     let secs = (now - ts).whole_seconds().max(0);
     let (n, unit) = if secs < 60 {
@@ -56,9 +53,8 @@ fn format_relative_time(ts: OffsetDateTime, now: OffsetDateTime) -> String {
     format!("{n} {unit}{suffix} ago")
 }
 
-/// `{id_prefix} · {when} · {N msgs} · {branch} · {project}`. Trailing components are omitted when
-/// their inputs are zero or `None`. Caller decides whether to include the project: the picker
-/// hides it in scoped mode (every row shares the project), and the delete confirm always shows it.
+/// `{id_prefix} · {when} · {N msgs} · {branch} · {project}`, omitting each trailing component
+/// whose input is zero or `None`.
 pub(crate) fn format_metadata_line(
     session_id: &str,
     last_active_at: OffsetDateTime,
@@ -109,8 +105,6 @@ mod tests {
 
     #[test]
     fn id_prefix_uses_first_eight_bytes_or_full_short_id() {
-        // Pin both the long-id slicing and the short-id fallback so a future change to direct
-        // `&id[..8]` slicing would panic on short ids and break this test.
         assert_eq!(id_prefix("abcdefghij"), "abcdefgh");
         assert_eq!(id_prefix("abcd"), "abcd");
         assert_eq!(id_prefix(""), "");

@@ -95,7 +95,8 @@ impl ThresholdPercent {
 
 // ── Resolution ──
 
-/// Sourced from the threshold when one applies, otherwise from `auto_enabled`.
+/// Resolves the compaction config, sourced from the threshold when one applies and otherwise from
+/// `auto_enabled`.
 pub(super) fn resolve(
     file: &CompactionTable,
     origins: &Origins,

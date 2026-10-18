@@ -1,4 +1,4 @@
-//! Test-only session fixtures and id-keyed lookups.
+//! Test-only session fixtures and ID-keyed lookups.
 
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
@@ -41,7 +41,7 @@ impl SessionStore {
         load_session_data_from_path(&self.find_session_path(session_id)?)
     }
 
-    /// Finds a session file by the id in its name, in any project.
+    /// Finds a session file by the ID in its name, in any project.
     pub(crate) fn find_session_path(&self, session_id: &str) -> Result<PathBuf> {
         for entry in fs::read_dir(&self.sessions_dir)
             .with_context(|| format!("cannot read {}", self.sessions_dir.display()))?
@@ -97,9 +97,8 @@ pub(crate) fn test_session_file(dir: &Path, session_id: &str) -> PathBuf {
         .unwrap_or_else(|| panic!("no session file for id {session_id} in {project_dir:?}"))
 }
 
-/// Seed a session for cross-module tests. `last_active_at` derives from `created_at`. Title and
-/// summary are written only when their args are `Some`, so `message_count: None` leaves the
-/// session unfinished. Title source is hard-coded to `UserProvided`.
+/// Seeds a session holding a header and, when given, a `UserProvided` title and a summary of
+/// `message_count`, so `None` leaves the session unfinished.
 pub(crate) fn seed_test_session(
     store: &SessionStore,
     session_id: &str,
@@ -139,7 +138,7 @@ pub(crate) fn seed_test_session(
     }
 }
 
-/// Ids of the home project's sessions in the given archive state, most recently active first.
+/// IDs of the home project's sessions in the given archive state, most recently active first.
 pub(crate) fn listed_ids(store: &SessionStore, archived: bool) -> Vec<String> {
     let scope = ListScope {
         all: false,
@@ -152,7 +151,7 @@ pub(crate) fn listed_ids(store: &SessionStore, archived: bool) -> Vec<String> {
         .collect()
 }
 
-/// Writes an unparsable session file with id `corrupt`. Call it last: it then has the newest
+/// Writes an unparsable session file with ID `corrupt`. Call it last: it then has the newest
 /// mtime, and its name wins any mtime tie, so it always sorts first.
 pub(crate) fn write_newest_corrupt_session(dir: &Path) {
     fs::write(

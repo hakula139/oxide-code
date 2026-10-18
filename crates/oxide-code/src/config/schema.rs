@@ -53,8 +53,8 @@ pub(super) struct CompactionTable {
     pub(super) threshold_percent: Option<u8>,
 }
 
-/// The tier tables hold raw patterns and `extra_roots` raw paths, which `Config::load` parses, so a
-/// malformed entry fails at startup. `defaults` turns shipped rule groups off by name.
+/// The tier tables hold raw patterns and `extra_roots` raw paths, which the loader parses per file,
+/// so a malformed entry fails at startup. `defaults` turns shipped rule groups off by name.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(super) struct PermissionTable {

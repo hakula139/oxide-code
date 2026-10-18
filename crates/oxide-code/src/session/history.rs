@@ -14,7 +14,7 @@ use crate::protocol::{Interaction, ToolCall, ToolResult};
 use crate::tool::{ToolMetadata, ToolRegistry, ToolResultView};
 
 /// Projects a resumed transcript for display, opening with its compaction boundary when `compact`
-/// is set. `tool_metadata` holds the per-call metadata the session persisted, keyed by tool-use id,
+/// is set. `tool_metadata` holds the per-call metadata the session persisted, keyed by tool-use ID,
 /// and path arguments show relative to `cwd`.
 pub(crate) fn interactions(
     messages: &[Message],
@@ -489,8 +489,6 @@ mod tests {
 
     #[test]
     fn walk_transcript_pairs_multiple_calls_in_order_even_across_batched_results() {
-        // JSONL stores calls and results batched: Assistant[Call1, Call2] then User[Result1,
-        // Result2]. Live rendering pairs them: Call1 → Result1 → Call2 → Result2.
         let messages = [
             Message {
                 role: Role::Assistant,
@@ -601,8 +599,7 @@ mod tests {
 
     #[test]
     fn walk_transcript_orphan_result_in_user_only_message_keeps_its_persisted_title() {
-        // Sanitization normally drops such a message, but the projection still renders it so the
-        // UI stays robust to corrupted transcripts.
+        // Sanitizing drops such a message on resume, but the projection still renders one.
         let messages = [Message {
             role: Role::User,
             content: vec![tool_result_block("missing", "stderr", true)],

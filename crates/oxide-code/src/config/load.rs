@@ -172,9 +172,8 @@ fn reject_project_secrets(config: &FileConfig, path: &Path) -> Result<()> {
     )
 }
 
-/// A project file is untrusted, so under `[permission]` it may only add `deny` and `ask` rules.
-/// Any other key there, including one a later version adds, is a hard error so the user learns the
-/// setting did not take effect.
+/// Rejects every `[permission]` key but `deny` and `ask` in a project file, which is untrusted. An
+/// unknown key fails too, so the user learns the setting did not take effect.
 fn reject_project_permissions(table: &Table, path: &Path) -> Result<()> {
     let Some(permission) = table.get("permission").and_then(Value::as_table) else {
         return Ok(());
@@ -579,8 +578,6 @@ mod tests {
 
     #[test]
     fn read_layer_missing_drop_in_is_an_error() {
-        // A listed drop-in that is missing is a dangling symlink, whose settings must not vanish
-        // silently.
         let path = PathBuf::from("/nonexistent/config.d/10-gone.toml");
         let err = read_layer(&Layer::DropIn(path.clone())).expect_err("a dangling drop-in");
         assert!(
@@ -638,7 +635,6 @@ mod tests {
         }
     }
 
-    /// Non-`NotFound` IO errors (e.g. directory → `IsADirectory`) must surface with the path.
     #[test]
     fn read_layer_unreadable_path_propagates_io_error() {
         let dir = tempfile::tempdir().unwrap();
@@ -744,8 +740,6 @@ mod tests {
 
     #[test]
     fn read_layer_rejects_trust_establishing_client_fields_in_a_project() {
-        // `api_key`, `base_url`, and `extra_ca_certs` all influence who receives or is trusted to
-        // be the server, so a checked-in project file cannot set them.
         let dir = tempfile::tempdir().unwrap();
         let body = indoc! {r#"
             [client]

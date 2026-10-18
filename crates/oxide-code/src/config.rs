@@ -66,8 +66,7 @@ pub(crate) struct ConfigSnapshot {
     pub(crate) show_thinking: bool,
     pub(crate) show_welcome: bool,
     pub(crate) status_line: Vec<StatusLineSegment>,
-    /// Resolved theme base name, either a built-in catalog key or a filesystem path. `/theme` reads
-    /// this to mark the active row in the picker.
+    /// Resolved theme base name, either a built-in catalog key or a filesystem path.
     pub(crate) theme_name: String,
     pub(crate) provenance: Provenance,
 }
@@ -250,9 +249,8 @@ pub(crate) enum StatusLineSegment {
 }
 
 impl StatusLineSegment {
-    /// Canonical name table for `OX_STATUS_LINE` parsing and error messages. TOML config goes
-    /// through serde, so the strings here must match the kebab-case form
-    /// `serde(rename_all = "kebab-case")` would produce.
+    /// Names for `OX_STATUS_LINE` parsing and error messages, which must match the kebab-case names
+    /// serde gives TOML config.
     const ALL: &'static [(Self, &'static str)] = &[
         (Self::CurrentDir, "current-dir"),
         (Self::GitBranch, "git-branch"),
@@ -313,7 +311,7 @@ impl FromStr for StatusLineSegment {
 /// `[tui.theme]` as configured. The TUI resolves it into a palette.
 #[derive(Debug, Clone)]
 pub(crate) struct ThemeConfig {
-    /// Built-in catalog key (e.g. `"mocha"`) or filesystem path, [`DEFAULT_THEME`] when unset.
+    /// Built-in catalog key, such as `"mocha"`, or filesystem path, [`DEFAULT_THEME`] when unset.
     pub(crate) base: String,
     /// `[tui.theme.overrides]` slot patches, still raw TOML.
     pub(crate) overrides: toml::Table,
@@ -356,11 +354,9 @@ pub(crate) struct Config {
 }
 
 impl Config {
-    /// Resolves config from layered sources, finding the project file from `cwd`. Per-field
-    /// precedence is env > config files (see [`load::load`]) > built-in default. See the module
-    /// docs for the auth chain. Parse errors (TOML, env) propagate so a typo doesn't degrade
-    /// silently into "no credentials". An `interactive` session starts signed out when no stored
-    /// login works. Other sessions return an error.
+    /// Resolves config from env, the config files [`load::load`] finds from `cwd`, and built-in
+    /// defaults, in that precedence. A TOML or env parse error fails the load. Without a working
+    /// login, an `interactive` session starts signed out and any other session fails.
     pub(crate) async fn load(cwd: &Path, interactive: bool) -> Result<Self> {
         let Loaded { config, origins } = load::load(cwd)?;
         let FileConfig {
@@ -374,8 +370,7 @@ impl Config {
             .unwrap_or_else(|| Sourced::fallback(DEFAULT_BASE_URL.to_owned()));
         validate_base_url(&base_url.value)?;
 
-        // Resolve before `auth` so the OAuth refresh can also thread the extra trust anchors
-        // through reqwest (relevant under SSL-inspecting corporate proxies).
+        // Resolved before `auth`, since the OAuth refresh needs the extra trust anchors too.
         let extra_ca_certs = resolve_extra_ca_certs(
             origins.sourced("client.extra_ca_certs", client.extra_ca_certs),
         )?;
@@ -627,11 +622,8 @@ fn validate_status_line(segments: Vec<StatusLineSegment>) -> Result<Vec<StatusLi
     Ok(segments)
 }
 
-/// Resolves the permission policy and the workspace launched in `cwd` from the merged file config
-/// plus the `OX_PERMISSION_MODE` override, along with the source of the mode. The env mode wins
-/// over the file mode with the empty-is-absent and parse-error-propagates behavior `effort` uses,
-/// so a typo fails loudly. Deny and ask prefixes resolve from the workspace's anchor directories,
-/// as the gate's paths do.
+/// Resolves the permission policy, the workspace launched in `cwd`, and the mode's source from the
+/// file config and `OX_PERMISSION_MODE`, which wins over the file mode.
 fn resolve_permission(
     file: PermissionTable,
     origins: &Origins,
@@ -1350,7 +1342,6 @@ mod tests {
             "#},
         );
         let home = [(HOME_VAR, Some(dir.path()))];
-        // Env supplies a `~`-prefixed path so the expansion branch is also covered.
         let overrides = [("OX_EXTRA_CA_CERTS", "~/certs/env.pem")];
         let config = Box::pin(temp_env::async_with_vars(home, load_with(&dir, &overrides)))
             .await
@@ -1414,8 +1405,6 @@ mod tests {
 
     #[tokio::test]
     async fn load_extra_ca_certs_file_wins_when_env_is_empty() {
-        // `env::string` treats an empty env var as absent, so a file value must survive even
-        // when the caller exports `OX_EXTRA_CA_CERTS=""` (e.g., by unsetting via shell).
         let dir = tempfile::tempdir().unwrap();
         write_user_config(
             dir.path(),
@@ -2245,7 +2234,6 @@ mod tests {
 
     #[test]
     fn snapshot_copies_every_user_facing_field_and_drops_secret() {
-        // `/config` prints from the snapshot, so secrets must reduce to their source and names.
         let cfg = sample_config();
         let snap = cfg.snapshot();
         assert_eq!(snap.auth, Some(AuthSource::ClaudeCodeLogin));

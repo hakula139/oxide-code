@@ -286,7 +286,7 @@ async fn load_token_from(
         }
     };
 
-    // Double-checked: a sibling process may have refreshed while we were waiting on the lock.
+    // A sibling process may have refreshed while this one waited on the lock.
     let creds = load_credentials(store)?;
     let expires_at_ms = creds.oauth.expires_at_ms();
     if !is_near_expiry(expires_at_ms) {
@@ -1503,8 +1503,6 @@ mod tests {
 
     #[tokio::test]
     async fn refresh_oauth_token_honors_extra_ca_certs() {
-        // A valid PEM bundle must thread through the client builder without disrupting the
-        // existing request flow. Pairs with the surfaces-loader-error test below.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(wm_path("/"))
@@ -1527,8 +1525,6 @@ mod tests {
 
     #[tokio::test]
     async fn refresh_oauth_token_surfaces_extra_ca_certs_error_with_path() {
-        // An unreadable bundle must fail before any network call, citing the path so the user
-        // can fix the configuration.
         let missing = Path::new("/definitely/does/not/exist.pem");
         let err = refresh_oauth_token("http://unused.invalid/", "refresh", Some(missing))
             .await

@@ -27,8 +27,8 @@ impl Layer {
         }
     }
 
-    /// The project layer comes from the checkout, so it may not set credentials, endpoints, or
-    /// permission grants.
+    /// Returns whether this is the project layer, which comes from the checkout and so may not set
+    /// credentials, endpoints, or permission grants.
     pub(super) const fn is_project(&self) -> bool {
         matches!(self, Self::Project(_))
     }
