@@ -282,7 +282,8 @@ mod tests {
         FakeModal, crossterm_test_terminal, five_hour_limit, long_chat_block,
         push_answerable_approval, render_app, rendered_text, test_app,
     };
-    use crate::tui::components::status::{StatusBar, StatusBarInit};
+    use crate::tui::components::status::StatusBar;
+    use crate::tui::components::status::testing::status_bar_init;
     use crate::tui::git_probes::GitUpdate;
     use crate::tui::testing::key_event;
 
@@ -394,18 +395,12 @@ mod tests {
         let (mut app, _rx, _event_tx) = test_app(None);
         app.status_bar = StatusBar::new(
             &app.theme,
-            StatusBarInit {
-                segments: vec![
-                    StatusLineSegment::QueuedPrompts,
-                    StatusLineSegment::FiveHourLimit,
-                    StatusLineSegment::SessionId,
-                    StatusLineSegment::Theme,
-                ],
-                model: "test-model".to_owned(),
-                effort: None,
-                cwd: "~/test".to_owned(),
-                git_branch: None,
-            },
+            status_bar_init(vec![
+                StatusLineSegment::QueuedPrompts,
+                StatusLineSegment::FiveHourLimit,
+                StatusLineSegment::SessionId,
+                StatusLineSegment::Theme,
+            ]),
         );
         app.pending_prompts.push_back("next".to_owned());
 
@@ -652,13 +647,10 @@ mod tests {
         let (mut app, _rx, _event_tx) = test_app(None);
         app.status_bar = StatusBar::new(
             &app.theme,
-            StatusBarInit {
-                segments: vec![StatusLineSegment::Model, StatusLineSegment::TaskProgress],
-                model: "test-model".to_owned(),
-                effort: None,
-                cwd: "~/test".to_owned(),
-                git_branch: None,
-            },
+            status_bar_init(vec![
+                StatusLineSegment::Model,
+                StatusLineSegment::TaskProgress,
+            ]),
         );
         app.dispatch_action(Action::Submit("active".to_owned()));
         push_ls_call(&mut app);

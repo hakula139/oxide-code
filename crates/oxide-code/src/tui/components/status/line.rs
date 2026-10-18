@@ -73,13 +73,13 @@ impl StatusLine {
         let mut spans = vec![Span::raw(LEFT_MARGIN)];
         let mut hyperlinks = Vec::new();
         let mut col = saturating_u16(LEFT_MARGIN.width());
-        let sep_w = u16::try_from(sep_width).unwrap_or(0);
+        let sep_w = saturating_u16(sep_width);
         for (index, segment) in rendered.iter().enumerate() {
             if index > 0 {
                 spans.push(sep.clone());
                 col = col.saturating_add(sep_w);
             }
-            let span_width = u16::try_from(segment.width()).unwrap_or(0);
+            let span_width = saturating_u16(segment.width());
             if let Some(url) = &segment.hyperlink
                 && span_width > 0
             {

@@ -65,8 +65,10 @@ pub(crate) struct StatusBar {
 /// The segments a [`StatusBar`] shows and the session values it starts with.
 pub(crate) struct StatusBarInit {
     pub(crate) segments: Vec<StatusLineSegment>,
+    /// Display label, such as `Opus 5.5`.
     pub(crate) model: String,
     pub(crate) effort: Option<Effort>,
+    /// Already shortened with `~` by `tildify`.
     pub(crate) cwd: String,
     pub(crate) git_branch: Option<String>,
 }
@@ -384,18 +386,11 @@ fn current_time_minute() -> u16 {
 }
 
 #[cfg(test)]
-mod tests {
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
-
-    use super::*;
-    use crate::client::RateLimitWindow;
-
-    /// 2100-01-01, a reset no test run reaches.
-    const FUTURE_RESET: i64 = 4_102_444_800;
+pub(crate) mod testing {
+    use super::{StatusBarInit, StatusLineSegment};
 
     /// A `test-model` session in `~/test` with no effort or branch, showing `segments`.
-    fn init(segments: Vec<StatusLineSegment>) -> StatusBarInit {
+    pub(crate) fn status_bar_init(segments: Vec<StatusLineSegment>) -> StatusBarInit {
         StatusBarInit {
             segments,
             model: "test-model".to_owned(),
@@ -404,6 +399,19 @@ mod tests {
             git_branch: None,
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    use super::testing::status_bar_init;
+    use super::*;
+    use crate::client::RateLimitWindow;
+
+    /// 2100-01-01, a reset no test run reaches.
+    const FUTURE_RESET: i64 = 4_102_444_800;
 
     fn test_bar() -> StatusBar {
         StatusBar::new(
@@ -411,7 +419,7 @@ mod tests {
             StatusBarInit {
                 effort: Some(Effort::High),
                 git_branch: Some("main".to_owned()),
-                ..init(StatusLineSegment::DEFAULT.to_vec())
+                ..status_bar_init(StatusLineSegment::DEFAULT.to_vec())
             },
         )
     }
@@ -419,7 +427,7 @@ mod tests {
     fn pr_bar() -> StatusBar {
         StatusBar::new(
             &Theme::default(),
-            init(vec![
+            status_bar_init(vec![
                 StatusLineSegment::PullRequest,
                 StatusLineSegment::RunState,
             ]),
@@ -563,7 +571,7 @@ mod tests {
     fn tick_without_current_time_segment_skips_minute_refresh() {
         let mut bar = StatusBar::new(
             &Theme::default(),
-            init(vec![StatusLineSegment::Model, StatusLineSegment::RunState]),
+            status_bar_init(vec![StatusLineSegment::Model, StatusLineSegment::RunState]),
         );
 
         assert_eq!(bar.current_time_minute, None);
@@ -575,7 +583,7 @@ mod tests {
     fn tick_idle_current_time_marks_dirty_on_minute_change() {
         let mut bar = StatusBar::new(
             &Theme::default(),
-            init(vec![StatusLineSegment::CurrentTime]),
+            status_bar_init(vec![StatusLineSegment::CurrentTime]),
         );
         let current = current_time_minute();
         bar.current_time_minute = Some((current + 1) % 1440);
@@ -875,7 +883,7 @@ mod tests {
             &Theme::default(),
             StatusBarInit {
                 cwd: String::new(),
-                ..init(StatusLineSegment::DEFAULT.to_vec())
+                ..status_bar_init(StatusLineSegment::DEFAULT.to_vec())
             },
         );
         let output = render_top_row(&mut bar, 120);

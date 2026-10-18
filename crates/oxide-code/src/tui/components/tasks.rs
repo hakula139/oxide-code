@@ -11,6 +11,7 @@ use unicode_width::UnicodeWidthStr;
 use super::LEFT_MARGIN;
 use crate::tool::tasks::{Progress, Task, TaskStatus};
 use crate::tui::glyphs::task_marker;
+use crate::tui::saturating_u16;
 use crate::tui::theme::Theme;
 use crate::util::text::truncate_to_width;
 
@@ -48,7 +49,7 @@ impl TaskPanel {
         if self.tasks.is_empty() {
             return 0;
         }
-        let rows = u16::try_from(self.tasks.len().min(MAX_ROWS)).unwrap_or(u16::MAX);
+        let rows = saturating_u16(self.tasks.len().min(MAX_ROWS));
         GAP_ROWS + rows
     }
 

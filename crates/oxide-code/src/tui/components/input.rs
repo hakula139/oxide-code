@@ -304,15 +304,11 @@ impl InputArea {
     }
 
     fn popup_complete_to_buffer(&mut self) {
-        let Some(replacement) = self.popup_completion_text() else {
+        let Some(completion) = self.popup.completion() else {
             return;
         };
-        self.set_text(&replacement);
+        self.set_text(&format!("{completion} "));
         self.refresh_popup();
-    }
-
-    fn popup_completion_text(&self) -> Option<String> {
-        Some(format!("{} ", self.popup.completion()?))
     }
 
     fn popup_submit_selected(&mut self) -> Option<Action> {
@@ -715,21 +711,21 @@ mod tests {
     #[test]
     fn handle_event_popup_down_advances_selection() {
         let mut input = input_with_popup();
-        let initial = popup_completion(&input);
+
         let outcome = input.handle_event(&key(KeyCode::Down, KeyModifiers::NONE));
+
         assert_eq!(outcome, InputOutcome::Consumed, "chat must not scroll too");
-        let after = popup_completion(&input);
-        assert_ne!(initial, after, "Down moves to a different command");
+        assert_eq!(popup_completion(&input), "/clear");
     }
 
     #[test]
     fn handle_event_popup_up_reverses_selection() {
         let mut input = input_with_popup();
         input.handle_event(&key(KeyCode::Down, KeyModifiers::NONE));
-        let after_down = popup_completion(&input);
+
         input.handle_event(&key(KeyCode::Up, KeyModifiers::NONE));
-        let after_up = popup_completion(&input);
-        assert_ne!(after_down, after_up, "Up reverses Down");
+
+        assert_eq!(popup_completion(&input), "/archive");
     }
 
     #[test]
@@ -756,10 +752,11 @@ mod tests {
         // The first row, `/archive`, has no arg roster, so the popup hides once Tab writes
         // `/archive ` and the line turns into an arg-mode query with no rows.
         let mut input = input_with_popup();
-        let completion = popup_completion(&input);
+
         let outcome = input.handle_event(&key(KeyCode::Tab, KeyModifiers::NONE));
+
         assert_eq!(outcome, InputOutcome::Consumed);
-        assert_eq!(input.textarea.lines(), vec![format!("{completion} ")]);
+        assert_eq!(input.textarea.lines(), vec!["/archive "]);
         assert!(!input.popup_visible(), "no arg roster → popup hides");
     }
 
@@ -783,19 +780,24 @@ mod tests {
         type_text(&mut input, "/effort ");
         input.refresh_popup();
         assert!(input.popup_visible(), "popup opens for /effort arg mode");
-        let completion = popup_completion(&input);
+
         let outcome = input.handle_event(&key(KeyCode::Tab, KeyModifiers::NONE));
+
         assert_eq!(outcome, InputOutcome::Consumed);
-        assert_eq!(input.textarea.lines(), vec![format!("{completion} ")]);
+        assert_eq!(input.textarea.lines(), vec!["/effort low "]);
         assert!(!input.popup_visible(), "popup dismisses after Tab");
     }
 
     #[test]
     fn handle_event_popup_enter_in_name_mode_commits_picked_row() {
         let mut input = input_with_popup();
-        let completion = popup_completion(&input);
+
         let outcome = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(outcome, InputOutcome::Action(Action::Submit(completion)));
+
+        assert_eq!(
+            outcome,
+            InputOutcome::Action(Action::Submit("/archive".to_owned()))
+        );
         assert!(input.textarea.is_empty());
     }
 
@@ -804,9 +806,13 @@ mod tests {
         let mut input = test_input();
         type_text(&mut input, "/effort ");
         input.refresh_popup();
-        let completion = popup_completion(&input);
+
         let outcome = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(outcome, InputOutcome::Action(Action::Submit(completion)));
+
+        assert_eq!(
+            outcome,
+            InputOutcome::Action(Action::Submit("/effort low".to_owned()))
+        );
         assert!(input.textarea.is_empty());
     }
 
@@ -816,9 +822,13 @@ mod tests {
         type_text(&mut input, "/model claude-opus");
         input.refresh_popup();
         assert!(input.popup_visible());
-        let completion = popup_completion(&input);
+
         let outcome = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(outcome, InputOutcome::Action(Action::Submit(completion)));
+
+        assert_eq!(
+            outcome,
+            InputOutcome::Action(Action::Submit("/model claude-opus-5-5".to_owned()))
+        );
         assert!(input.textarea.is_empty());
         assert!(!input.popup_visible());
     }
