@@ -29,10 +29,7 @@ const TOKEN_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
 const LOCK_STALE_THRESHOLD: Duration = Duration::from_secs(30);
 const LOCK_MAX_RETRIES: u32 = 5;
-#[cfg(not(test))]
 const LOCK_RETRY_INTERVAL: Duration = Duration::from_secs(1);
-#[cfg(test)]
-const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(10);
 
 #[cfg(target_os = "macos")]
 const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
@@ -1061,7 +1058,7 @@ mod tests {
         assert_eq!(token, "stale");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn load_token_from_lock_held_keeps_existing_token_if_unexpired() {
         let dir = tempfile::tempdir().unwrap();
         let creds = dir.path().join("creds.json");
@@ -1124,7 +1121,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn load_token_from_lock_held_bails_if_expired() {
         let dir = tempfile::tempdir().unwrap();
         let creds = dir.path().join("creds.json");
@@ -1152,7 +1149,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn load_token_from_lock_held_picks_up_sibling_refresh() {
         let dir = tempfile::tempdir().unwrap();
         let creds = dir.path().join("creds.json");
@@ -1182,7 +1179,7 @@ mod tests {
         assert_eq!(token, "sibling");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn load_token_from_lock_released_without_a_refresh_token_keeps_the_sibling_login() {
         let dir = tempfile::tempdir().unwrap();
         let creds = dir.path().join("creds.json");
@@ -1630,7 +1627,7 @@ mod tests {
         assert!(!lock_path.exists());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn acquire_lock_clears_stale_lock() {
         let dir = tempfile::tempdir().unwrap();
         let lock_path = dir.path().join("test.lock");
