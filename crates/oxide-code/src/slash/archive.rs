@@ -5,6 +5,7 @@
 use super::context::{LiveSessionInfo, SlashContext};
 use super::registry::{SlashCommand, SlashKind, SlashOutcome};
 use super::sessions::{open_store, resolve_error_message};
+use crate::command;
 use crate::protocol::Op;
 use crate::session::display::{archive_notice, id_prefix};
 use crate::session::entry::SessionInfo;
@@ -75,10 +76,14 @@ impl SlashCommand for UnarchiveCmd {
     fn execute(&self, args: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
         let prefix = args.trim();
         if prefix.is_empty() {
-            return Err("Missing session ID. \
-                        Usage: `/unarchive <id-prefix>`, or press Ctrl+A in the `/resume` picker \
-                        to list archived sessions and Ctrl+X to unarchive one."
-                .to_owned());
+            return Err(command::missing(
+                "session ID",
+                "/unarchive <id-prefix>",
+                Some(
+                    "press Ctrl+A in the `/resume` picker to list archived sessions and Ctrl+X to \
+                     unarchive one",
+                ),
+            ));
         }
         match resolve_saved(prefix, ctx.info)? {
             Some(info) => set_archived(&info, false, &ctx.info.session_id),
