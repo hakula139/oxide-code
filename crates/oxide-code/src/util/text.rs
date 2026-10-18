@@ -10,11 +10,7 @@ pub(crate) const ELLIPSIS_WIDTH: usize = ELLIPSIS.len();
 const HORIZONTAL_ELLIPSIS: char = '\u{2026}';
 
 /// `singular` when `count` is one, `plural` otherwise.
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "callers pass integer counts directly"
-)]
-pub(crate) fn plural<'a, N: PartialEq + From<u8>>(
+pub(crate) fn plural<'a, N: Copy + PartialEq + From<u8>>(
     count: N,
     singular: &'a str,
     plural: &'a str,
