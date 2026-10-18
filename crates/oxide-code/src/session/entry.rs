@@ -6,10 +6,10 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::client::TokenUsage;
 use crate::config::PromptCacheTtl;
 use crate::file_tracker::FileSnapshot;
 use crate::message::Message;
+use crate::model::TokenUsage;
 use crate::prompt::SessionContext;
 use crate::tool::ToolMetadata;
 use crate::tool::tasks::Task;

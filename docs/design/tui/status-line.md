@@ -118,6 +118,8 @@ A user-command segment is [#166](https://github.com/hakula139/oxide-code/issues/
 - `crates/oxide-code/src/config.rs`: `StatusLineSegment`, the segment roster and its default order.
 - `crates/oxide-code/src/engine.rs`: `Engine` usage accounting, `UsageUpdated` emission, and restored-cost pricing.
 - `crates/oxide-code/src/engine/turn.rs`: `collect_response`, which emits `RateLimitsUpdated`.
+- `crates/oxide-code/src/model/pricing.rs`: `TokenCostRates`, the per-model rate cards and the request estimate.
+- `crates/oxide-code/src/model/usage.rs`: `TokenUsage`, the token counts one request reports.
 - `crates/oxide-code/src/session/entry.rs`: `Entry::Usage` and `UsageRecord`, the per-request record a resume prices.
 - `crates/oxide-code/src/tui/app/render.rs`: `App::draw_frame`, which copies App-owned state, the permission mode included, into the status bar.
 - `crates/oxide-code/src/tui/components/status.rs`: `StatusBar` state and the run-state `Status`.

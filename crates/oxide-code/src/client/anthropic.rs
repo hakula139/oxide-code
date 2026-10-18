@@ -492,9 +492,10 @@ mod tests {
         text_stream_body,
     };
     use super::*;
-    use crate::client::{Response, StopReason, TokenUsage};
+    use crate::client::{Response, StopReason};
     use crate::config::auth::{Auth, AuthSource};
     use crate::config::{Effort, PromptCacheTtl};
+    use crate::model::TokenUsage;
     use crate::util::tls::testing::TEST_CA_PEM;
 
     // ── Fixtures ──

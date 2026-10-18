@@ -3,10 +3,10 @@
 use serde::ser::SerializeSeq;
 use serde::{Deserialize, Serialize, Serializer};
 
-use crate::client::{StopDetails, StopReason, TokenUsage};
+use crate::client::{StopDetails, StopReason};
 use crate::config::Effort;
 use crate::message::{ContentBlock, Message, Role, WireKind};
-use crate::model::ThinkingConfig;
+use crate::model::{ThinkingConfig, TokenUsage};
 use crate::tool::ToolDefinition;
 
 // ── Request Types ──
@@ -272,16 +272,9 @@ pub(super) struct CacheControl {
 
 // ── SSE Response Types ──
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "fields are populated by serde and used in downstream matching"
-    )
-)]
 /// One frame in the streaming response. `Unknown` swallows future event types so an upstream
 /// addition does not break parsing.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(super) enum StreamEvent {
     MessageStart {
@@ -295,9 +288,7 @@ pub(super) enum StreamEvent {
         index: usize,
         delta: Delta,
     },
-    ContentBlockStop {
-        index: usize,
-    },
+    ContentBlockStop,
     MessageDelta {
         delta: MessageDeltaBody,
         usage: Option<TokenUsage>,
@@ -311,21 +302,12 @@ pub(super) enum StreamEvent {
     Unknown,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "fields populated by serde, defined for full SSE protocol coverage"
-    )
-)]
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub(super) struct MessageResponse {
-    pub(super) id: String,
-    pub(super) model: String,
     pub(super) usage: Option<TokenUsage>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(super) enum ContentBlockInfo {
     Text {
@@ -372,7 +354,7 @@ pub(super) enum ContentBlockInfo {
     reason = "variant names mirror Anthropic API delta type values \
               (text_delta, input_json_delta, etc.)"
 )]
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(super) enum Delta {
     TextDelta {
@@ -391,7 +373,7 @@ pub(super) enum Delta {
     Unknown,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub(super) struct MessageDeltaBody {
     pub(super) stop_reason: Option<StopReason>,
     /// Populated only on `refusal`.
@@ -401,7 +383,7 @@ pub(super) struct MessageDeltaBody {
 
 // ── Error Types ──
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub(super) struct ApiError {
     #[serde(rename = "type")]
     pub(super) error_type: String,
@@ -709,7 +691,7 @@ mod tests {
     fn stream_event_content_block_stop() {
         let event: StreamEvent =
             serde_json::from_str(r#"{"type":"content_block_stop","index":2}"#).unwrap();
-        assert!(matches!(event, StreamEvent::ContentBlockStop { index: 2 }));
+        assert_eq!(event, StreamEvent::ContentBlockStop);
     }
 
     #[test]

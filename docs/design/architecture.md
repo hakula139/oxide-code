@@ -16,7 +16,7 @@ Layers run from the foundation to the frontends.
 | Foundation | `message`      | Conversation message and content-block types shared by the client, the engine, the session transcript, and the tools                            |
 | Foundation | `util`         | Shared helpers for environment variables, the filesystem, git probes, logging, paths, mutex recovery, text width, local time, and TLS           |
 | Domain     | `config`       | Layered configuration with per-value provenance, credentials, gateway settings, and stored OAuth logins with browser sign-in                    |
-| Domain     | `model`        | Supported-model catalog, per-model request capabilities, and pricing                                                                            |
+| Domain     | `model`        | Supported-model catalog, per-model request capabilities, token usage, and pricing                                                               |
 | Domain     | `permission`   | Tool permission gate: modes, deny / ask / allow rules, shipped defaults, path resolution, and shell-command parsing                             |
 | Domain     | `prompt`       | System prompt assembly, environment detection, and instruction-file discovery                                                                   |
 | Services   | `client`       | The `Wire` streaming contract and the Anthropic Messages API client: request bodies and headers, a retrying transport, SSE, and one-shots       |
