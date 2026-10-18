@@ -13,11 +13,7 @@ use super::wire::{ApiError, StreamEvent};
 use crate::client::ResponseEvent;
 
 /// Hard cap. A misbehaving upstream that never ends a frame would otherwise grow until OOM.
-#[cfg(not(test))]
 const MAX_SSE_FRAME_BYTES: usize = 8 * 1024 * 1024;
-/// Tests use a smaller cap so the overflow path exercises without allocating 8 MiB per run.
-#[cfg(test)]
-const MAX_SSE_FRAME_BYTES: usize = 4 * 1024;
 
 /// Runs [`stream_sse`] until it ends or the receiver drops, then forwards any failure on `tx`.
 /// Racing `closed` stops an in-flight request or retry backoff once the consumer is gone.
@@ -81,7 +77,7 @@ async fn pump_events(
         return Ok(());
     }
     let mut stream = response.bytes_stream();
-    let mut frames = FrameDecoder::default();
+    let mut frames = FrameDecoder::new(MAX_SSE_FRAME_BYTES);
     let mut reply = ResponseAccumulator::new(model);
     let fail = |cause: &str, error: anyhow::Error, retryable: bool| {
         if retryable {
@@ -147,16 +143,26 @@ fn is_transient(error: &ApiError) -> bool {
 /// Incremental SSE frame splitter. CRLF and lone CR line endings are normalized to LF as bytes
 /// arrive, so a frame always ends at `\n\n`, and each search resumes where the last one stopped.
 /// Works on bytes so a UTF-8 sequence split across chunks reassembles intact.
-#[derive(Default)]
 struct FrameDecoder {
     buf: Vec<u8>,
     /// Bytes already searched without finding a frame boundary.
     scanned: usize,
     /// The previous byte was a CR, so an immediately following LF belongs to the same line ending.
     after_cr: bool,
+    /// Longest unterminated frame to buffer before failing.
+    max_frame_bytes: usize,
 }
 
 impl FrameDecoder {
+    fn new(max_frame_bytes: usize) -> Self {
+        Self {
+            buf: Vec::new(),
+            scanned: 0,
+            after_cr: false,
+            max_frame_bytes,
+        }
+    }
+
     fn push(&mut self, chunk: &[u8]) {
         self.buf.reserve(chunk.len());
         for &byte in chunk {
@@ -175,8 +181,11 @@ impl FrameDecoder {
         let from = self.scanned.saturating_sub(1);
         let Some(offset) = self.buf[from..].windows(2).position(|w| w == b"\n\n") else {
             self.scanned = self.buf.len();
-            if self.buf.len() > MAX_SSE_FRAME_BYTES {
-                bail!("unterminated SSE frame exceeded {MAX_SSE_FRAME_BYTES} bytes");
+            if self.buf.len() > self.max_frame_bytes {
+                bail!(
+                    "unterminated SSE frame exceeded {} bytes",
+                    self.max_frame_bytes
+                );
             }
             return Ok(None);
         };
@@ -648,7 +657,7 @@ mod tests {
 
     #[test]
     fn frame_decoder_normalizes_line_endings_split_across_chunks() {
-        let mut decoder = FrameDecoder::default();
+        let mut decoder = FrameDecoder::new(MAX_SSE_FRAME_BYTES);
         for chunk in ["data: a\r", "\n\r", "\ndata: b\r", "\r", "data: c\n\n"] {
             decoder.push(chunk.as_bytes());
         }
@@ -660,13 +669,27 @@ mod tests {
 
     #[test]
     fn frame_decoder_finds_a_boundary_straddling_two_searches() {
-        let mut decoder = FrameDecoder::default();
+        let mut decoder = FrameDecoder::new(MAX_SSE_FRAME_BYTES);
         decoder.push(b"data: a\n");
         assert_eq!(drain_frames(&mut decoder), Vec::<String>::new());
         decoder.push(b"\ndata: b");
         assert_eq!(drain_frames(&mut decoder), ["data: a"]);
         decoder.push(b"\n\n");
         assert_eq!(drain_frames(&mut decoder), ["data: b"]);
+    }
+
+    #[test]
+    fn frame_decoder_fails_once_an_unterminated_frame_outgrows_its_cap() {
+        let mut decoder = FrameDecoder::new(8);
+        decoder.push(b"data: ab");
+        assert_eq!(drain_frames(&mut decoder), Vec::<String>::new());
+
+        decoder.push(b"c");
+        let err = decoder
+            .next_frame()
+            .expect_err("9 bytes outgrow the 8-byte cap");
+
+        assert_eq!(err.to_string(), "unterminated SSE frame exceeded 8 bytes");
     }
 
     // ── parse_sse_frame ──
