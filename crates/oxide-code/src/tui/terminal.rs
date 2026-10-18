@@ -5,27 +5,44 @@ use std::io::{self, Stdout, Write};
 use std::sync::Mutex;
 
 use anyhow::Result;
-use crossterm::cursor::{RestorePosition, SavePosition};
+use crossterm::cursor::{MoveTo, RestorePosition, SavePosition, Show};
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
 };
-use crossterm::style::PrintStyledContent;
+use crossterm::style::{
+    Attribute, ContentStyle, Print, SetAttribute, SetAttributes, SetBackgroundColor,
+    SetForegroundColor, SetUnderlineColor,
+};
 use crossterm::terminal::{
     self, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use crossterm::{execute, queue};
+use crossterm::{Command, execute, queue};
 use ratatui::Terminal;
+use ratatui::backend::Backend;
 use ratatui::prelude::{CrosstermBackend, IntoCrossterm};
 
-use super::components::status::StatusHyperlink;
+use super::components::status::{HyperlinkCell, StatusHyperlink};
 use crate::util::sync::lock_or_recover;
 
 pub(crate) type Tui = Terminal<CrosstermBackend<Stdout>>;
+
+/// A backend the TUI draws frames to and then writes escape sequences to, such as the OSC 8 status
+/// links and OSC 52 copies.
+pub(super) trait TuiBackend: Backend<Error: Send + Sync + 'static> + Write {}
+
+impl<B: Backend<Error: Send + Sync + 'static> + Write> TuiBackend for B {}
 
 /// Enters raw mode, the alternate screen, mouse capture, bracketed paste, and, outside Windows,
 /// Kitty keyboard disambiguation. A failed setup restores the terminal before returning the error.
 /// Otherwise the caller must invoke [`restore`] on exit, including panics.
 pub(crate) fn init() -> Result<Tui> {
+    // Besides answering, the check turns on the console's escape-sequence processing, which every
+    // sequence the TUI writes relies on.
+    #[cfg(windows)]
+    anyhow::ensure!(
+        crossterm::ansi_support::supports_ansi(),
+        "the terminal does not support ANSI escape sequences"
+    );
     enable_raw_mode()?;
     open_tui().inspect_err(|_| restore())
 }
@@ -45,7 +62,11 @@ fn open_tui() -> Result<Tui> {
 }
 
 fn enter_tui_mode(stdout: &mut impl Write) -> Result<()> {
-    queue!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
+    queue!(
+        stdout,
+        Ansi(EnterAlternateScreen),
+        Ansi(EnableBracketedPaste)
+    )?;
     // crossterm writes the Kitty keyboard commands only as escape codes and fails them on Windows.
     // It captures the Windows mouse through the console API instead, so `init` enables it there.
     #[cfg(not(windows))]
@@ -58,7 +79,7 @@ fn enter_tui_mode(stdout: &mut impl Write) -> Result<()> {
             EnableMouseCapture
         )?;
     }
-    execute!(stdout, terminal::Clear(terminal::ClearType::All))?;
+    execute!(stdout, Ansi(terminal::Clear(terminal::ClearType::All)))?;
     Ok(())
 }
 
@@ -79,14 +100,14 @@ pub(crate) fn restore() {
 }
 
 fn leave_tui_mode(stdout: &mut impl Write) -> Result<()> {
-    queue!(stdout, DisableBracketedPaste)?;
+    queue!(stdout, Ansi(DisableBracketedPaste))?;
     #[cfg(not(windows))]
     queue!(
         stdout,
         crossterm::event::PopKeyboardEnhancementFlags,
         DisableMouseCapture
     )?;
-    execute!(stdout, LeaveAlternateScreen, crossterm::cursor::Show)?;
+    execute!(stdout, Ansi(LeaveAlternateScreen), Ansi(Show))?;
     Ok(())
 }
 
@@ -117,14 +138,14 @@ fn write_deferred_panics(deferred: &Mutex<DeferredPanics>, out: &mut impl Write)
 
 /// Runs `f` inside a DEC synchronized update (mode 2026), so the terminal presents everything it
 /// writes as one tear-free frame.
-pub(crate) fn synchronized_update<W: Write>(
-    terminal: &mut Terminal<CrosstermBackend<W>>,
-    f: impl FnOnce(&mut Terminal<CrosstermBackend<W>>) -> Result<()>,
+pub(super) fn synchronized_update<B: TuiBackend>(
+    terminal: &mut Terminal<B>,
+    f: impl FnOnce(&mut Terminal<B>) -> Result<()>,
 ) -> Result<()> {
     queue!(terminal.backend_mut(), terminal::BeginSynchronizedUpdate)?;
     let result = f(terminal);
     queue!(terminal.backend_mut(), terminal::EndSynchronizedUpdate)?;
-    terminal.backend_mut().flush()?;
+    Write::flush(terminal.backend_mut())?;
     result
 }
 
@@ -147,24 +168,66 @@ fn build_status_hyperlink_envelope(links: &[StatusHyperlink]) -> io::Result<Vec<
             continue;
         }
         if !wrote_any {
-            queue!(&mut buf, SavePosition)?;
+            queue!(buf, Ansi(SavePosition))?;
             wrote_any = true;
         }
-        let row = link.rect.y.saturating_add(1);
-        let col = link.rect.x.saturating_add(1);
-        write!(buf, "\x1b[{row};{col}H")?;
+        queue!(buf, Ansi(MoveTo(link.rect.x, link.rect.y)))?;
         write!(buf, "\x1b]8;;{safe_url}\x07")?;
         for cell in &link.cells {
-            let style = cell.style.into_crossterm();
-            queue!(buf, PrintStyledContent(style.apply(&cell.symbol)))?;
+            queue_cell(&mut buf, cell)?;
         }
         write!(buf, "\x1b]8;;\x07")?;
-        write!(buf, "\x1b[0m")?;
     }
     if wrote_any {
-        queue!(&mut buf, RestorePosition)?;
+        queue!(buf, Ansi(RestorePosition))?;
     }
     Ok(buf)
+}
+
+/// Queues `cell`'s symbol in its style, resetting the style after a styled cell. crossterm's
+/// `PrintStyledContent` and `SetStyle` send their colors through the Windows console API when it
+/// finds no escape-sequence support, so each color goes out as its own [`Ansi`] command.
+fn queue_cell(out: &mut impl Write, cell: &HyperlinkCell) -> io::Result<()> {
+    let style = cell.style.into_crossterm();
+    if style == ContentStyle::default() {
+        return queue!(out, Print(&cell.symbol));
+    }
+    if let Some(color) = style.background_color {
+        queue!(out, Ansi(SetBackgroundColor(color)))?;
+    }
+    if let Some(color) = style.foreground_color {
+        queue!(out, Ansi(SetForegroundColor(color)))?;
+    }
+    if let Some(color) = style.underline_color {
+        queue!(out, Ansi(SetUnderlineColor(color)))?;
+    }
+    queue!(
+        out,
+        Ansi(SetAttributes(style.attributes)),
+        Print(&cell.symbol),
+        Ansi(SetAttribute(Attribute::Reset)),
+    )
+}
+
+/// Writes the wrapped command as its escape sequence even where crossterm would call the Windows
+/// console API in its place. [`init`] requires a terminal that takes escape sequences, and output
+/// built in memory has no console to call.
+struct Ansi<C>(C);
+
+impl<C: Command> Command for Ansi<C> {
+    fn write_ansi(&self, f: &mut impl fmt::Write) -> fmt::Result {
+        self.0.write_ansi(f)
+    }
+
+    #[cfg(windows)]
+    fn execute_winapi(&self) -> io::Result<()> {
+        self.0.execute_winapi()
+    }
+
+    #[cfg(windows)]
+    fn is_ansi_code_supported(&self) -> bool {
+        true
+    }
 }
 
 /// Background-thread panic reports waiting for [`restore`] to print them.
@@ -237,28 +300,134 @@ fn route_panic(
     PanicRoute::Deferred
 }
 
-#[cfg(test)]
-mod tests {
-    use std::sync::{Arc, Mutex};
+// ── Testing ──
 
-    use indoc::indoc;
-    use ratatui::style::{Color, Modifier, Style};
-    use ratatui::{TerminalOptions, Viewport, layout::Rect};
+#[cfg(test)]
+pub(super) mod testing {
+    //! A terminal stand-in for render tests that records the escape sequences written to it.
+
+    use std::convert::Infallible;
+
+    use ratatui::backend::{ClearType, TestBackend, WindowSize};
+    use ratatui::buffer::{Buffer, Cell};
+    use ratatui::layout::{Position, Size};
 
     use super::*;
-    use crate::tui::components::status::{HyperlinkCell, StatusHyperlink};
+
+    pub(crate) const BEGIN_SYNC: &[u8] = b"\x1b[?2026h";
+    pub(crate) const END_SYNC: &[u8] = b"\x1b[?2026l";
+    pub(crate) const FLUSH: &[u8] = b"<flush>";
+    /// Where [`CaptureBackend`]'s byte log shows a frame the terminal finished drawing.
+    pub(crate) const FRAME: &[u8] = b"<frame>";
+
+    /// A [`TestBackend`] screen that also logs the bytes written to it, with a [`FRAME`] at the end
+    /// of each draw, and none of the Windows console detection a `CrosstermBackend` goes through.
+    pub(crate) struct CaptureBackend {
+        screen: TestBackend,
+        bytes: Vec<u8>,
+    }
+
+    impl CaptureBackend {
+        pub(crate) fn buffer(&self) -> &Buffer {
+            self.screen.buffer()
+        }
+
+        pub(crate) fn bytes(&self) -> &[u8] {
+            &self.bytes
+        }
+    }
+
+    impl Backend for CaptureBackend {
+        type Error = Infallible;
+
+        fn draw<'a, I>(&mut self, content: I) -> Result<(), Infallible>
+        where
+            I: Iterator<Item = (u16, u16, &'a Cell)>,
+        {
+            self.screen.draw(content)
+        }
+
+        fn hide_cursor(&mut self) -> Result<(), Infallible> {
+            self.screen.hide_cursor()
+        }
+
+        fn show_cursor(&mut self) -> Result<(), Infallible> {
+            self.screen.show_cursor()
+        }
+
+        fn get_cursor_position(&mut self) -> Result<Position, Infallible> {
+            self.screen.get_cursor_position()
+        }
+
+        fn set_cursor_position<P: Into<Position>>(
+            &mut self,
+            position: P,
+        ) -> Result<(), Infallible> {
+            self.screen.set_cursor_position(position)
+        }
+
+        fn clear(&mut self) -> Result<(), Infallible> {
+            self.screen.clear()
+        }
+
+        fn clear_region(&mut self, clear_type: ClearType) -> Result<(), Infallible> {
+            self.screen.clear_region(clear_type)
+        }
+
+        fn size(&self) -> Result<Size, Infallible> {
+            self.screen.size()
+        }
+
+        fn window_size(&mut self) -> Result<WindowSize, Infallible> {
+            self.screen.window_size()
+        }
+
+        fn flush(&mut self) -> Result<(), Infallible> {
+            self.bytes.extend_from_slice(FRAME);
+            Backend::flush(&mut self.screen)
+        }
+    }
+
+    impl Write for CaptureBackend {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.bytes.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.bytes.extend_from_slice(FLUSH);
+            Ok(())
+        }
+    }
+
+    /// A `width` x `height` terminal drawing to a [`CaptureBackend`].
+    pub(crate) fn capture_terminal(width: u16, height: u16) -> Terminal<CaptureBackend> {
+        let backend = CaptureBackend {
+            screen: TestBackend::new(width, height),
+            bytes: Vec::new(),
+        };
+        Terminal::new(backend).expect("a test backend reports its size")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use indoc::indoc;
+    use ratatui::layout::Rect;
+    use ratatui::style::{Color, Modifier, Style};
+
+    use super::testing::{BEGIN_SYNC, END_SYNC, FLUSH, capture_terminal};
+    use super::*;
 
     // ── enter_tui_mode ──
 
     const ENTER_ALT_SCREEN: &[u8] = b"\x1b[?1049h";
-    const CLEAR_SCREEN: &[u8] = b"\x1b[2J";
     const ENABLE_BRACKETED_PASTE: &[u8] = b"\x1b[?2004h";
     #[cfg(not(windows))]
     const PUSH_KITTY_DISAMBIGUATE: &[u8] = b"\x1b[>1u";
     #[cfg(not(windows))]
-    const ENABLE_MOUSE_BUTTONS: &[u8] = b"\x1b[?1000h";
-    #[cfg(not(windows))]
-    const ENABLE_MOUSE_SGR: &[u8] = b"\x1b[?1006h";
+    const ENABLE_MOUSE: &[u8] = b"\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1015h\x1b[?1006h";
+    const CLEAR_SCREEN: &[u8] = b"\x1b[2J";
 
     #[test]
     fn enter_tui_mode_writes_setup_sequences() {
@@ -266,39 +435,31 @@ mod tests {
 
         enter_tui_mode(&mut buf).unwrap();
 
-        let enter = index_of(&buf, ENTER_ALT_SCREEN).expect("alternate screen entered");
-        let clear = index_of(&buf, CLEAR_SCREEN).expect("screen cleared");
-        assert!(
-            enter < clear,
-            "setup should enter alternate screen before clearing"
-        );
-        assert!(
-            index_of(&buf, ENABLE_BRACKETED_PASTE).is_some(),
-            "bracketed paste must be enabled so pasted newlines do not submit"
-        );
         #[cfg(not(windows))]
-        {
-            assert!(
-                index_of(&buf, PUSH_KITTY_DISAMBIGUATE).is_some(),
-                "Kitty keyboard disambiguation must be pushed outside Windows"
-            );
-            assert!(
-                index_of(&buf, ENABLE_MOUSE_BUTTONS).is_some()
-                    && index_of(&buf, ENABLE_MOUSE_SGR).is_some(),
-                "mouse reports must be enabled so the wheel scrolls chat inside tmux"
-            );
-        }
+        let expected = [
+            ENTER_ALT_SCREEN,
+            ENABLE_BRACKETED_PASTE,
+            PUSH_KITTY_DISAMBIGUATE,
+            ENABLE_MOUSE,
+            CLEAR_SCREEN,
+        ];
+        #[cfg(windows)]
+        let expected = [ENTER_ALT_SCREEN, ENABLE_BRACKETED_PASTE, CLEAR_SCREEN];
+        assert_eq!(
+            buf.escape_ascii().to_string(),
+            expected.concat().escape_ascii().to_string()
+        );
     }
 
     // ── leave_tui_mode ──
 
-    const LEAVE_ALT_SCREEN: &[u8] = b"\x1b[?1049l";
-    const SHOW_CURSOR: &[u8] = b"\x1b[?25h";
     const DISABLE_BRACKETED_PASTE: &[u8] = b"\x1b[?2004l";
     #[cfg(not(windows))]
     const POP_KITTY_FLAGS: &[u8] = b"\x1b[<1u";
     #[cfg(not(windows))]
-    const DISABLE_MOUSE_BUTTONS: &[u8] = b"\x1b[?1000l";
+    const DISABLE_MOUSE: &[u8] = b"\x1b[?1006l\x1b[?1015l\x1b[?1003l\x1b[?1002l\x1b[?1000l";
+    const LEAVE_ALT_SCREEN: &[u8] = b"\x1b[?1049l";
+    const SHOW_CURSOR: &[u8] = b"\x1b[?25h";
 
     #[test]
     fn leave_tui_mode_writes_restore_sequences() {
@@ -306,27 +467,20 @@ mod tests {
 
         leave_tui_mode(&mut buf).unwrap();
 
-        let leave = index_of(&buf, LEAVE_ALT_SCREEN).expect("alternate screen left");
-        let show = index_of(&buf, SHOW_CURSOR).expect("cursor shown");
-        assert!(
-            leave < show,
-            "restore should leave alternate screen before showing cursor"
-        );
-        assert!(
-            index_of(&buf, DISABLE_BRACKETED_PASTE).is_some(),
-            "bracketed paste must be disabled when leaving the TUI"
-        );
         #[cfg(not(windows))]
-        {
-            assert!(
-                index_of(&buf, POP_KITTY_FLAGS).is_some(),
-                "Kitty keyboard flags must be popped outside Windows"
-            );
-            assert!(
-                index_of(&buf, DISABLE_MOUSE_BUTTONS).is_some(),
-                "mouse reports must be disabled so the shell gets its selection back"
-            );
-        }
+        let expected = [
+            DISABLE_BRACKETED_PASTE,
+            POP_KITTY_FLAGS,
+            DISABLE_MOUSE,
+            LEAVE_ALT_SCREEN,
+            SHOW_CURSOR,
+        ];
+        #[cfg(windows)]
+        let expected = [DISABLE_BRACKETED_PASTE, LEAVE_ALT_SCREEN, SHOW_CURSOR];
+        assert_eq!(
+            buf.escape_ascii().to_string(),
+            expected.concat().escape_ascii().to_string()
+        );
     }
 
     #[test]
@@ -388,27 +542,6 @@ mod tests {
 
     // ── synchronized_update ──
 
-    const BEGIN_SYNC: &[u8] = b"\x1b[?2026h";
-    const END_SYNC: &[u8] = b"\x1b[?2026l";
-
-    #[derive(Clone)]
-    struct SharedWriter(Arc<Mutex<Vec<u8>>>);
-
-    impl Write for SharedWriter {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    fn index_of(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-        haystack.windows(needle.len()).position(|w| w == needle)
-    }
-
     fn plain_hyperlink(rect: Rect, url: &str, symbols: &[&str]) -> StatusHyperlink {
         StatusHyperlink {
             rect,
@@ -423,90 +556,80 @@ mod tests {
         }
     }
 
-    fn fixed_terminal(buf: &Arc<Mutex<Vec<u8>>>) -> Terminal<CrosstermBackend<SharedWriter>> {
-        // `Terminal::new` queries stdout size and fails on CI without a TTY. `Viewport::Fixed`
-        // skips that query.
-        let opts = TerminalOptions {
-            viewport: Viewport::Fixed(Rect::new(0, 0, 80, 24)),
-        };
-        Terminal::with_options(CrosstermBackend::new(SharedWriter(Arc::clone(buf))), opts).unwrap()
-    }
-
     #[test]
     fn synchronized_update_brackets_everything_the_closure_writes() {
-        let buf = Arc::new(Mutex::new(Vec::new()));
-        let mut terminal = fixed_terminal(&buf);
+        let mut terminal = capture_terminal(4, 1);
 
         synchronized_update(&mut terminal, |terminal| {
-            terminal.draw(|_frame| {})?;
             terminal.backend_mut().write_all(b"LINKS")?;
             Ok(())
         })
         .unwrap();
 
-        let bytes = buf.lock().unwrap();
-        let begin = index_of(&bytes, BEGIN_SYNC).expect("BeginSynchronizedUpdate emitted");
-        let links = index_of(&bytes, b"LINKS").expect("closure output written");
-        let end = index_of(&bytes, END_SYNC).expect("EndSynchronizedUpdate emitted");
-        assert!(begin < links && links < end, "{bytes:?}");
+        assert_eq!(
+            terminal.backend().bytes(),
+            [BEGIN_SYNC, b"LINKS", END_SYNC, FLUSH].concat(),
+        );
     }
 
     #[test]
     fn synchronized_update_ends_the_update_when_the_closure_fails() {
-        let buf = Arc::new(Mutex::new(Vec::new()));
-        let mut terminal = fixed_terminal(&buf);
+        let mut terminal = capture_terminal(4, 1);
 
         let result = synchronized_update(&mut terminal, |_| Err(anyhow::anyhow!("draw failed")));
 
         assert_eq!(result.unwrap_err().to_string(), "draw failed");
-        let bytes = buf.lock().unwrap();
-        assert!(
-            index_of(&bytes, END_SYNC).is_some(),
-            "a failed draw must not leave the terminal holding frames",
+        assert_eq!(
+            terminal.backend().bytes(),
+            [BEGIN_SYNC, END_SYNC, FLUSH].concat()
         );
     }
 
     // ── write_status_hyperlinks ──
 
     #[test]
-    fn write_status_hyperlinks_writes_the_plain_envelope_inside_and_outside_tmux() {
-        let link = plain_hyperlink(Rect::new(0, 0, 1, 1), "https://x", &["x"]);
-        let envelope = build_status_hyperlink_envelope(std::slice::from_ref(&link)).unwrap();
+    fn write_status_hyperlinks_writes_the_envelope() {
+        let link = plain_hyperlink(Rect::new(0, 0, 1, 1), "https://example.com", &["x"]);
+        let mut buf = Vec::new();
 
-        // CI never sets TMUX, so pin both cases against the old DCS passthrough returning.
-        for tmux in [None, Some("/tmp/tmux-1000/default,1234,0")] {
-            let mut buf: Vec<u8> = Vec::new();
+        write_status_hyperlinks(&mut buf, &[link]).unwrap();
 
-            temp_env::with_var("TMUX", tmux, || {
-                write_status_hyperlinks(&mut buf, std::slice::from_ref(&link)).unwrap();
-            });
-
-            assert_eq!(buf, envelope, "TMUX={tmux:?}");
-        }
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            "\x1b7\x1b[1;1H\x1b]8;;https://example.com\x07x\x1b]8;;\x07\x1b8",
+        );
     }
 
     #[test]
     fn write_status_hyperlinks_is_a_noop_when_no_links_pending() {
         let mut buf: Vec<u8> = Vec::new();
+
         write_status_hyperlinks(&mut buf, &[]).unwrap();
-        assert!(buf.is_empty(), "no bytes for an empty link list");
+
+        assert_eq!(buf, b"");
     }
 
     // ── build_status_hyperlink_envelope ──
 
     #[test]
     fn build_status_hyperlink_envelope_wraps_each_link_in_cup_and_osc8() {
-        let link = plain_hyperlink(
-            Rect::new(2, 0, 3, 1),
-            "https://example.com/pull/86",
-            &["#", "8", "6"],
-        );
+        let links = [
+            plain_hyperlink(
+                Rect::new(2, 0, 3, 1),
+                "https://example.com/pull/86",
+                &["#", "8", "6"],
+            ),
+            plain_hyperlink(Rect::new(9, 1, 2, 1), "https://example.com/ci", &["C", "I"]),
+        ];
 
-        let bytes = build_status_hyperlink_envelope(&[link]).unwrap();
+        let bytes = build_status_hyperlink_envelope(&links).unwrap();
 
         assert_eq!(
             String::from_utf8(bytes).unwrap(),
-            "\x1b7\x1b[1;3H\x1b]8;;https://example.com/pull/86\x07#86\x1b]8;;\x07\x1b[0m\x1b8",
+            "\x1b7\
+             \x1b[1;3H\x1b]8;;https://example.com/pull/86\x07#86\x1b]8;;\x07\
+             \x1b[2;10H\x1b]8;;https://example.com/ci\x07CI\x1b]8;;\x07\
+             \x1b8",
         );
     }
 
@@ -543,6 +666,7 @@ mod tests {
                     style: Style::default()
                         .fg(Color::Red)
                         .bg(Color::Blue)
+                        .underline_color(Color::Green)
                         .add_modifier(Modifier::BOLD),
                 },
                 HyperlinkCell {
@@ -557,8 +681,8 @@ mod tests {
         assert_eq!(
             String::from_utf8(bytes).unwrap(),
             "\x1b7\x1b[1;1H\x1b]8;;https://x\x07\
-             \x1b[48;5;4m\x1b[38;5;1m\x1b[1mA\x1b[0m\x1b[3mB\x1b[0m\
-             \x1b]8;;\x07\x1b[0m\x1b8",
+             \x1b[48;5;4m\x1b[38;5;1m\x1b[58;5;2m\x1b[1mA\x1b[0m\x1b[3mB\x1b[0m\
+             \x1b]8;;\x07\x1b8",
         );
     }
 
@@ -566,25 +690,25 @@ mod tests {
     fn build_status_hyperlink_envelope_strips_control_chars_from_url() {
         let link = plain_hyperlink(
             Rect::new(0, 0, 1, 1),
-            "https://x.com/\x1b\x07\x00ok",
+            "https://example.com/\x1b\x07\x00ok",
             &["x"],
         );
+
         let bytes = build_status_hyperlink_envelope(&[link]).unwrap();
-        let output = String::from_utf8(bytes).unwrap();
-        assert!(
-            output.contains("\x1b]8;;https://x.com/ok\x07"),
-            "ESC, BEL, NUL stripped from URL: {output:?}",
+
+        assert_eq!(
+            String::from_utf8(bytes).unwrap(),
+            "\x1b7\x1b[1;1H\x1b]8;;https://example.com/ok\x07x\x1b]8;;\x07\x1b8",
         );
     }
 
     #[test]
     fn build_status_hyperlink_envelope_is_empty_when_safe_url_is_empty() {
         let link = plain_hyperlink(Rect::new(0, 0, 1, 1), "\x1b\x07", &["x"]);
+
         let bytes = build_status_hyperlink_envelope(&[link]).unwrap();
-        assert!(
-            bytes.is_empty(),
-            "no bytes (no DECSC either) when sanitized URL is empty",
-        );
+
+        assert_eq!(bytes, b"");
     }
 
     // ── route_panic ──
