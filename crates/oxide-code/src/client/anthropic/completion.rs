@@ -8,6 +8,7 @@ use super::betas::compute_betas;
 use super::transport::{post_messages, with_retry};
 use super::wire::{
     ContentBlockInfo, CreateMessageRequest, OutputConfig, OutputFormat, RequestMessages,
+    RequestMetadata,
 };
 use super::{Client, attribution_text, billing, build_metadata, build_system_blocks};
 use crate::config::Effort;
@@ -40,11 +41,12 @@ impl Client {
             system,
             user,
             max_tokens,
-            effort,
             attribution.as_deref(),
-            &self.device_id,
-            &self.session_id,
-            output_format.filter(|_| self.gateway.structured_outputs),
+            build_metadata(&self.device_id, &self.session_id),
+            OutputConfig::new(
+                output_format.filter(|_| self.gateway.structured_outputs),
+                effort,
+            ),
         )?;
 
         debug!(
@@ -73,20 +75,14 @@ impl Client {
 // ── Body Builder ──
 
 /// System block order: `attribution` (when set) → identity prefix → caller system.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "9 distinct request inputs, and a wrapper struct would only rename them"
-)]
 fn build_completion_body(
     model: &str,
     system: &str,
     user: &str,
     max_tokens: u32,
-    effort: Option<Effort>,
     attribution: Option<&str>,
-    device_id: &str,
-    session_id: &str,
-    output_format: Option<&OutputFormat>,
+    metadata: RequestMetadata,
+    output_config: Option<OutputConfig<'_>>,
 ) -> Result<String> {
     let messages = [Message::user(user)];
 
@@ -96,11 +92,11 @@ fn build_completion_body(
         model,
         max_tokens,
         stream: false,
-        metadata: build_metadata(device_id, session_id),
+        metadata,
         system: system_blocks,
         tools: None,
         thinking: None,
-        output_config: OutputConfig::new(output_format, effort),
+        output_config,
         context_management: None,
         messages: RequestMessages {
             user_context: None,
@@ -454,10 +450,8 @@ mod tests {
             "hi",
             40,
             None,
-            None,
-            "did",
-            "sid",
-            None,
+            build_metadata("did", "sid"),
+            OutputConfig::new(None, None),
         )
         .unwrap();
         let v = parse_body(&body);
@@ -482,10 +476,8 @@ mod tests {
             "hi",
             40,
             None,
-            None,
-            "did",
-            "sid",
-            None,
+            build_metadata("did", "sid"),
+            OutputConfig::new(None, None),
         )
         .unwrap();
         let plain = parse_body(&plain_body);
@@ -500,11 +492,9 @@ mod tests {
             "sys-prompt",
             "Fix login",
             40,
-            None,
             Some(&attribution_text("Fix login", true)),
-            "did",
-            "sid",
-            None,
+            build_metadata("did", "sid"),
+            OutputConfig::new(None, None),
         )
         .unwrap();
         let attributed = parse_body(&attributed_body);
@@ -527,10 +517,8 @@ mod tests {
             "hi",
             40,
             None,
-            None,
-            "did",
-            "sid",
-            None,
+            build_metadata("did", "sid"),
+            OutputConfig::new(None, None),
         )
         .unwrap();
         let v = parse_body(&body);
@@ -559,11 +547,9 @@ mod tests {
                 "sys",
                 "hi",
                 40,
-                effort,
                 None,
-                "did",
-                "sid",
-                format,
+                build_metadata("did", "sid"),
+                OutputConfig::new(format, effort),
             )
             .unwrap();
             assert_eq!(parse_body(&body)["output_config"], expected);
@@ -578,10 +564,8 @@ mod tests {
             "hi",
             40,
             None,
-            None,
-            "did-456",
-            "sid-789",
-            None,
+            build_metadata("did-456", "sid-789"),
+            OutputConfig::new(None, None),
         )
         .unwrap();
         assert!(
