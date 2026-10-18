@@ -221,6 +221,7 @@ jobs:
           # A rerun rebuilds this commit on the current main and replaces the earlier push.
           git push --force origin "$branch"
 
+          setting='Enable "Allow GitHub Actions to create and approve pull requests" in Settings > Actions > General, then rerun this job.'
           if [[ -z "$(gh pr list --head "$branch" --state open --json number --jq '.[].number')" ]] &&
             ! gh pr create --base main --head "$branch" --title "$title" --assignee hakula139 --label chore \
               --body-file - <<EOF
@@ -233,19 +234,14 @@ jobs:
           - [x] The Release workflow rendered the formula from the checksums its build jobs produced.
           EOF
           then
-            echo '::error::Could not open the formula PR. Enable "Allow GitHub Actions to create and approve pull requests" in Settings > Actions > General, then rerun this job.'
+            echo "::error::Could not open the formula PR. $setting"
             exit 1
           fi
 
           # A PR opened with GITHUB_TOKEN starts no workflows, so dispatch CI for its checks.
-          gh workflow run ci.yml --ref "$branch"
-
-          sha=$(git rev-parse HEAD)
-          for _ in {1..30}; do
-            if [[ -n "$(gh run list --workflow ci.yml --commit "$sha" --event workflow_dispatch --json databaseId --jq '.[].databaseId')" ]]; then
-              exit 0
-            fi
-            sleep 10
-          done
-          echo "::error::The dispatched CI run did not start on $sha."
-          exit 1
+          run_url=$(gh workflow run ci.yml --ref "$branch")
+          if [[ -z "$run_url" ]]; then
+            echo "::error::The CI dispatch on $branch returned no run."
+            exit 1
+          fi
+          echo "Dispatched CI: $run_url"
