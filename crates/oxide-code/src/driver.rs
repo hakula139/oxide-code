@@ -55,14 +55,19 @@ async fn shutdown_signal() -> Shutdown {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};
+        use tracing::warn;
 
         let ctrl_c = tokio::signal::ctrl_c();
-        let (Ok(mut sigterm), Ok(mut sighup)) = (
+        let (mut sigterm, mut sighup) = match (
             signal(SignalKind::terminate()),
             signal(SignalKind::hangup()),
-        ) else {
-            _ = ctrl_c.await;
-            return Shutdown::Interrupt;
+        ) {
+            (Ok(sigterm), Ok(sighup)) => (sigterm, sighup),
+            (Err(e), _) | (_, Err(e)) => {
+                warn!("cannot listen for SIGTERM and SIGHUP, falling back to SIGINT alone: {e}");
+                _ = ctrl_c.await;
+                return Shutdown::Interrupt;
+            }
         };
         tokio::select! {
             _ = ctrl_c => Shutdown::Interrupt,

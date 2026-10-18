@@ -28,6 +28,7 @@ use self::compaction::{AutoCompactionConfig, CompactionConfig};
 use self::gateway::{GatewayCompat, GatewaySnapshot};
 use self::load::Loaded;
 use self::merge::Origins;
+use self::oauth::ClaudeCodeKeychain;
 use self::provenance::{Provenance, Source, Sourced};
 use self::schema::{FileConfig, PermissionTable, TierTable};
 use crate::model::ModelSpec;
@@ -65,8 +66,8 @@ pub(crate) struct ConfigSnapshot {
     pub(crate) show_thinking: bool,
     pub(crate) show_welcome: bool,
     pub(crate) status_line: Vec<StatusLineSegment>,
-    /// Resolved theme base name — built-in catalog key or filesystem path. `/theme` reads this
-    /// to mark the active row in the picker.
+    /// Resolved theme base name, either a built-in catalog key or a filesystem path. `/theme` reads
+    /// this to mark the active row in the picker.
     pub(crate) theme_name: String,
     pub(crate) provenance: Provenance,
 }
@@ -552,7 +553,7 @@ async fn resolve_auth(
     let resolved = auth::resolve(
         auth::explicit_credentials(file_api_key),
         base_url,
-        auth::stored_login(extra_ca_certs),
+        auth::stored_login(ClaudeCodeKeychain::SYSTEM, extra_ca_certs),
     )
     .await;
     let (auth, signed_out_notice) = match resolved {
@@ -813,7 +814,7 @@ mod tests {
     fn notices_list_an_unsupported_model_then_why_the_session_is_signed_out() {
         let mut cfg = sample_config();
         cfg.auth = None;
-        cfg.signed_out_notice = Some("Not signed in. Run /login to sign in.".to_owned());
+        cfg.signed_out_notice = Some("Not signed in. Run `/login` to sign in.".to_owned());
 
         let notices = cfg.snapshot().notices();
 
@@ -822,7 +823,7 @@ mod tests {
             notices[0].starts_with("`claude-test-1-0` is not a supported model"),
             "{notices:?}"
         );
-        assert_eq!(notices[1], "Not signed in. Run /login to sign in.");
+        assert_eq!(notices[1], "Not signed in. Run `/login` to sign in.");
     }
 
     #[test]
@@ -1551,14 +1552,14 @@ mod tests {
         assert!(interactive.auth.is_none());
         assert_eq!(
             interactive.signed_out_notice.as_deref(),
-            Some("Not signed in: oxide-code login has expired. Run /login to sign in again."),
+            Some("Not signed in: oxide-code login has expired. Run `/login` to sign in again."),
         );
         assert_eq!(
             format!(
                 "{:#}",
                 other.expect_err("only an interactive session starts signed out")
             ),
-            "oxide-code login has expired. Run /login to sign in again.",
+            "oxide-code login has expired. Run `/login` to sign in again.",
         );
     }
 

@@ -1,9 +1,8 @@
-//! Token cost rates and per-million USD pricing.
+//! Per-model token cost rates, which [`MODELS`](super::MODELS) attaches to each catalog row.
 //!
 //! Rates are quoted in USD per million tokens for the first-party Anthropic API. Values exclude
-//! account discounts, marketplace billing, data-residency multipliers, fast-mode adjustments,
-//! and server-side tool surcharges. Update both this table and `MODELS` in lockstep when a row
-//! changes pricing.
+//! account discounts, marketplace billing, data-residency multipliers, fast-mode adjustments, and
+//! server-side tool surcharges.
 
 use crate::config::PromptCacheTtl;
 
@@ -31,6 +30,17 @@ struct RateCard {
     cache_read: f64,
     output: f64,
 }
+
+pub(super) const FABLE_5_1_RATES: TokenCostRates = TokenCostRates {
+    base: RateCard {
+        input: 10.0,
+        cache_write_5m: 12.50,
+        cache_write_1h: 20.0,
+        cache_read: 0.25,
+        output: 50.0,
+    },
+    long_prompt: None,
+};
 
 pub(super) const OPUS_5_5_RATES: TokenCostRates = TokenCostRates {
     base: RateCard {
@@ -72,17 +82,6 @@ pub(super) const HAIKU_5_5_RATES: TokenCostRates = TokenCostRates {
             output: 2.50,
         },
     }),
-};
-
-pub(super) const FABLE_5_1_RATES: TokenCostRates = TokenCostRates {
-    base: RateCard {
-        input: 10.0,
-        cache_write_5m: 12.50,
-        cache_write_1h: 20.0,
-        cache_read: 0.25,
-        output: 50.0,
-    },
-    long_prompt: None,
 };
 
 impl TokenCostRates {

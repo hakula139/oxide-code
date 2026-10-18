@@ -54,9 +54,8 @@ pub(crate) enum Op {
     Clear,
     /// Archives the live session, then continues in a fresh one like [`Self::Clear`].
     Archive,
-    /// Finalizes the live session and continues the saved session `target` names in place.
-    /// Confirms with [`Event::SessionResumed`], or reports a target it cannot load with
-    /// [`Event::TurnFailed`].
+    /// Finalizes the live session and continues `target`'s saved session in place. Confirms with
+    /// [`Event::SessionResumed`], or reports a target it cannot load with [`Event::TurnFailed`].
     Resume { target: ResumeTarget },
     /// Sets the session title by hand, which stops AI title generation for this session.
     Rename { title: String },
@@ -118,8 +117,8 @@ pub(crate) struct UsageSnapshot {
     pub(crate) estimated_cost_usd: Option<f64>,
 }
 
-/// One-way notifications from the engine to the frontend reading its
-/// [`EngineHandle`](crate::engine::EngineHandle).
+/// Notifications from the engine to a frontend, which receives them on the `events` channel of
+/// the [`EngineHandle`](crate::engine::EngineHandle) it drives.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub(crate) enum Event {
@@ -210,8 +209,7 @@ pub(crate) enum Event {
     },
     /// The permission mode after an [`Op::SetMode`].
     ModeChanged(Mode),
-    /// An [`Op::Login`] is waiting for the user to sign in at `url`, which the frontend opens in a
-    /// browser.
+    /// An [`Op::Login`] waits for sign-in at `url`, which the frontend opens in a browser.
     LoginStarted { url: String },
     /// An [`Op::Login`] stored a new oxide-code login. `auth` is the credential requests now use,
     /// which stays an env var or `client.api_key` when one outranks the login.
@@ -242,9 +240,8 @@ pub(crate) enum Event {
     },
     /// The user granted a session allow rule. Carries every session allow rule now in force.
     SessionRulesUpdated(Vec<Rule>),
-    /// A `tasks` call set the session's task list, or a loaded session restored a non-empty one.
-    /// Carries the whole list. Frontends empty their copy on [`Self::SessionRolled`] and
-    /// [`Self::SessionResumed`].
+    /// The full task list, after a `tasks` call sets it or a loaded session restores a non-empty
+    /// one. Frontends empty their copy on [`Self::SessionRolled`] and [`Self::SessionResumed`].
     TasksUpdated(Vec<Task>),
     /// A background shell started, exited, or stopped. Carries every open shell. Frontends empty
     /// their copy on [`Self::SessionRolled`] and [`Self::SessionResumed`], since the session's
@@ -266,9 +263,9 @@ pub(crate) struct ToolCall {
     pub(crate) label: String,
 }
 
-/// A tool call's result, live in [`Event::ToolCallEnd`] and resumed in
-/// [`Interaction::ToolResult`]. `content` is what the model sees, `title` the tool's own header for
-/// the result, and `view` its structured body.
+/// A tool call's result, live in [`Event::ToolCallEnd`] and resumed in [`Interaction::ToolResult`].
+/// `content` is what the model sees, `title` the tool's own header for the result, and `view` its
+/// structured body.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ToolResult {
     pub(crate) id: String,
@@ -313,9 +310,8 @@ pub(crate) enum Interaction {
 pub(crate) trait EventSink: Send + Sync {
     fn send(&self, event: Event) -> Result<()>;
 
-    /// Sends `event` and logs at `error!` if the channel rejects it. Use for any signal whose
-    /// loss would leave the frontend inconsistent (errors, cancellation, turn completion, state
-    /// changes).
+    /// Sends `event` and logs at `error!` if the channel rejects it. Use it for an event whose loss
+    /// would leave the frontend inconsistent, such as an error, a cancellation, or a turn's end.
     fn emit(&self, event: Event, label: &'static str) {
         if let Err(e) = self.send(event) {
             tracing::error!("{label} event dropped: {e}");

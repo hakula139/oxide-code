@@ -282,7 +282,7 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
-    use crate::config::oauth::Login;
+    use crate::config::oauth::{ClaudeCodeKeychain, Login};
 
     /// A token endpoint nothing listens on, for flows that end before the exchange.
     const UNUSED_TOKEN_URL: &str = "http://127.0.0.1:9/token";
@@ -378,7 +378,11 @@ mod tests {
             temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
                 let (auth, reply) =
                     tokio::join!(pending.finish(&token_url, None), browse(port, &target));
-                (auth, reply, oauth::load_token(Login::Ox, None).await)
+                (
+                    auth,
+                    reply,
+                    oauth::load_token(Login::Ox, ClaudeCodeKeychain::NONE, None).await,
+                )
             })
             .await;
 

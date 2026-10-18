@@ -344,43 +344,55 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn drive_exit_and_result_reflect_how_the_turn_ended() {
+    async fn drive_unescapes_the_prompt_and_reports_the_completed_reply() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            mount_reply(&server, "reply").await;
+            let dir = tempfile::tempdir().unwrap();
+            let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+            let printer = printer(OutputFormat::Json);
+
+            let exit = Box::pin(drive(engine.spawn(&[]), &printer, "//hello"))
+                .await
+                .unwrap();
+
+            assert_eq!(exit, Exit::Success);
+            let (stdout, stderr) = printed(printer);
+            let result = result_data(&stdout);
+            assert_eq!(result["stop_reason"], "completed");
+            assert_eq!(result["error"], serde_json::Value::Null);
+            assert_eq!(result["message"], "reply");
+            assert_eq!(stderr, "");
+            let requests = request_bodies(&server).await;
+            assert_eq!(requests[0]["messages"][1]["content"][0]["text"], "/hello");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn drive_fails_with_the_api_error_when_the_request_is_rejected() {
         with_pinned_home(async {
             let server = MockServer::start().await;
             Mock::given(method("POST"))
                 .and(path("/v1/messages"))
                 .respond_with(ResponseTemplate::new(400))
-                .up_to_n_times(1)
                 .mount(&server)
                 .await;
-            mount_reply(&server, "reply").await;
             let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+            let printer = printer(OutputFormat::Json);
 
-            let failed = printer(OutputFormat::Json);
-            let engine_failed = engine(server.uri(), &store, dir.path()).await;
-            let exit = Box::pin(drive(engine_failed.spawn(&[]), &failed, "first"))
+            let exit = Box::pin(drive(engine.spawn(&[]), &printer, "hello"))
                 .await
                 .unwrap();
+
             assert_eq!(exit, Exit::Failure);
-            let (stdout, stderr) = printed(failed);
+            let (stdout, stderr) = printed(printer);
             let result = result_data(&stdout);
             assert_eq!(result["stop_reason"], "failed");
+            assert_eq!(result["error"], "API error (HTTP 400 Bad Request)");
             assert_eq!(result["message"], serde_json::Value::Null);
-            let error = result["error"].as_str().unwrap();
-            assert_eq!(stderr, format!("Error: {error}\n"));
-
-            let completed = printer(OutputFormat::Json);
-            let engine_completed = engine(server.uri(), &store, dir.path()).await;
-            let exit = Box::pin(drive(engine_completed.spawn(&[]), &completed, "//second"))
-                .await
-                .unwrap();
-            assert_eq!(exit, Exit::Success);
-            let result = result_data(&printed(completed).0);
-            assert_eq!(result["stop_reason"], "completed");
-            assert_eq!(result["message"], "reply");
-            let requests = request_bodies(&server).await;
-            assert_eq!(requests[1]["messages"][1]["content"][0]["text"], "/second");
+            assert_eq!(stderr, "Error: API error (HTTP 400 Bad Request)\n");
         })
         .await;
     }

@@ -122,6 +122,11 @@ pub(crate) fn replacement_for(id: &str) -> Option<&'static ModelInfo> {
     })
 }
 
+/// The catalog rates for `id`, or `None` for an id outside the catalog.
+pub(crate) fn cost_rates(id: &str) -> Option<TokenCostRates> {
+    lookup(id).map(|info| info.cost_rates)
+}
+
 // ── ModelSpec ──
 
 /// A model id resolved against [`MODELS`] once. Every model-derived request field (effort,
@@ -178,10 +183,6 @@ impl ModelSpec {
     /// `None` for unknown ids, which disables auto-compaction.
     pub(crate) fn context_window(&self) -> Option<u32> {
         self.info.map(|_| CONTEXT_WINDOW)
-    }
-
-    pub(crate) fn cost_rates(&self) -> Option<TokenCostRates> {
-        self.info.map(|info| info.cost_rates)
     }
 
     /// Human-facing label. Falls back to the raw id when the model is unknown.
@@ -337,6 +338,30 @@ mod tests {
         }
     }
 
+    // ── cost_rates ──
+
+    #[test]
+    fn cost_rates_route_each_model_to_its_own_card() {
+        // 50K input + 50K cache reads + 1M output stays within Haiku's base card: Fable
+        // $0.50 + $0.0125 + $50, Opus $0.20 + $0.01 + $20, Sonnet $0.10 + $0.005 + $10, and Haiku
+        // $0.005 + $0.0005 + $0.50.
+        for (id, expected) in [
+            ("claude-fable-5-1", 50.5125),
+            ("claude-opus-5-5", 20.21),
+            ("claude-sonnet-5-5", 10.105),
+            ("claude-haiku-5-5", 0.5055),
+        ] {
+            let rates = cost_rates(id).unwrap();
+            let cost = rates.estimate_usd(50_000, 0, 50_000, 1_000_000, PromptCacheTtl::FiveMin);
+            assert!((cost - expected).abs() < 1e-9, "{id}: {cost} vs {expected}");
+        }
+    }
+
+    #[test]
+    fn cost_rates_unknown_model_is_absent() {
+        assert!(cost_rates("claude-future-9").is_none());
+    }
+
     // ── ModelSpec::resolve ──
 
     #[test]
@@ -469,30 +494,6 @@ mod tests {
     #[test]
     fn context_window_unknown_model_is_none() {
         assert_eq!(spec("claude-future-9").context_window(), None);
-    }
-
-    // ── ModelSpec::cost_rates ──
-
-    #[test]
-    fn cost_rates_route_each_model_to_its_own_card() {
-        // 50K input + 50K cache reads + 1M output stays within Haiku's base card: Fable
-        // $0.50 + $0.0125 + $50, Opus $0.20 + $0.01 + $20, Sonnet $0.10 + $0.005 + $10, and Haiku
-        // $0.005 + $0.0005 + $0.50.
-        for (id, expected) in [
-            ("claude-fable-5-1", 50.5125),
-            ("claude-opus-5-5", 20.21),
-            ("claude-sonnet-5-5", 10.105),
-            ("claude-haiku-5-5", 0.5055),
-        ] {
-            let rates = spec(id).cost_rates().unwrap();
-            let cost = rates.estimate_usd(50_000, 0, 50_000, 1_000_000, PromptCacheTtl::FiveMin);
-            assert!((cost - expected).abs() < 1e-9, "{id}: {cost} vs {expected}");
-        }
-    }
-
-    #[test]
-    fn cost_rates_unknown_model_is_absent() {
-        assert!(spec("claude-future-9").cost_rates().is_none());
     }
 
     // ── ModelSpec::display_name ──

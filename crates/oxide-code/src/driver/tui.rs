@@ -12,7 +12,7 @@ use crate::slash::{LiveSessionInfo, ResumePicker};
 use crate::tui::app::{App, AppHistory};
 use crate::tui::terminal;
 use crate::tui::theme::Theme;
-use crate::util;
+use crate::util::git;
 use crate::util::path::tildify;
 
 /// Startup state the TUI shows besides the engine's history.
@@ -39,13 +39,13 @@ pub(crate) async fn run(
 
     let cwd = engine.cwd();
     let notices = config.notices();
+    let (project_root, git_branch) =
+        tokio::join!(git::repo_root(cwd), git::current_branch_async(cwd));
     let session_info = LiveSessionInfo {
         cwd: tildify(cwd),
         working_dir: Some(cwd.to_owned()),
-        project_root: util::git::repo_root(cwd)
-            .await
-            .unwrap_or_else(|| cwd.to_owned()),
-        git_branch: util::git::current_branch(cwd),
+        project_root: project_root.unwrap_or_else(|| cwd.to_owned()),
+        git_branch,
         version: env!("CARGO_PKG_VERSION"),
         session_id: engine.session_id().to_owned(),
         session_allow: Vec::new(),

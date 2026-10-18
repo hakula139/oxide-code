@@ -23,6 +23,7 @@ use crate::client::anthropic::testing::{
     DEVICE_ID, api_key, sse_response, test_config, text_stream_body, tool_use_stream_body,
 };
 use crate::client::{Response, ResponseEvent, StopDetails, StopReason, Wire};
+use crate::config::oauth::ClaudeCodeKeychain;
 use crate::file_tracker::FileTracker;
 use crate::message::{ContentBlock, Message, Replay, Role};
 use crate::model::ModelSpec;
@@ -59,6 +60,7 @@ pub(crate) async fn engine(base_url: String, store: &SessionStore, cwd: &Path) -
         )
         .unwrap(),
         oauth_token_url: "http://127.0.0.1:9/token".to_owned(),
+        claude_code_keychain: ClaudeCodeKeychain::NONE,
         tools: Arc::new(ToolRegistry::new(Vec::new())),
         store: store.clone(),
         session,
