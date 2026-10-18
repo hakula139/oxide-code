@@ -19,6 +19,7 @@ use crate::tui::action::Action;
 use crate::tui::glyphs::{USER_PROMPT_PREFIX, USER_PROMPT_PREFIX_WIDTH};
 use crate::tui::saturating_u16;
 use crate::tui::theme::Theme;
+use crate::util::text::trim_blank_edges;
 
 // ── Constants ──
 
@@ -367,15 +368,6 @@ impl InputArea {
 }
 
 // ── Helpers ──
-
-/// Drops `text`'s trailing whitespace and leading blank lines, keeping the first line's indent.
-fn trim_blank_edges(text: &str) -> &str {
-    let text = text.trim_end();
-    let start = text.find(|c: char| !c.is_whitespace()).map_or(0, |first| {
-        text[..first].rfind('\n').map_or(0, |newline| newline + 1)
-    });
-    &text[start..]
-}
 
 /// Fires only in `Arg` mode with an empty prefix and a `usage()` to surface.
 fn ghost_text_from_state(state: &PopupState<'_>, usage: Option<&str>) -> Option<String> {
