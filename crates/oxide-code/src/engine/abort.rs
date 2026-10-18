@@ -81,7 +81,7 @@ where
     tokio::pin!(fut);
     loop {
         tokio::select! {
-            // A queued interrupt must win over a `fut` that is already ready.
+            // Queued ops, an interrupt above all, must win over a `fut` that is already ready.
             biased;
             op = ops.recv() => {
                 // Unreachable under current wiring, and a `Resolve` here is a stale reply for an

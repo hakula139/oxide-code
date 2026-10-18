@@ -1,4 +1,5 @@
-//! XDG directory lookup, `~` expansion and display, and lexical path normalization.
+//! XDG directory lookup, `~` expansion and display, lexical path normalization, and the
+//! slash-separated spelling of paths the model reads.
 
 use std::path::{Component, Path, PathBuf};
 

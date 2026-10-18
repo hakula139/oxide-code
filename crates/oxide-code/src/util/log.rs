@@ -20,7 +20,7 @@ const BACKUP_LOG_FILE: &str = "oxide-code.log.1";
 const MAX_LOG_BYTES: u64 = 10 * 1024 * 1024;
 
 /// Initializes the global tracing subscriber. In TUI mode it returns the file appender's guard,
-/// which must live until exit since dropping it loses buffered lines.
+/// which flushes on drop and must live until exit, since later lines are lost once it drops.
 pub(crate) fn init_tracing(tui_mode: bool) -> Result<Option<WorkerGuard>> {
     let filter = make_filter();
     if tui_mode {
@@ -56,7 +56,7 @@ fn open_file_appender(dir: &Path) -> Result<(NonBlocking, WorkerGuard)> {
     Ok(tracing_appender::non_blocking(file))
 }
 
-/// Private (0o600) append-only log that moves itself over the [`BACKUP_LOG_FILE`] when a write
+/// Private (0600) append-only log that moves itself over [`BACKUP_LOG_FILE`] when a write
 /// would push it past `max_bytes`.
 struct RotatingFile {
     path: PathBuf,

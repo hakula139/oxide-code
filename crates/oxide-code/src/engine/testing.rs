@@ -1,5 +1,5 @@
-//! Test-only engine fixtures: [`Engine`] builders, mocked replies, turn fixtures for the turn,
-//! dispatch, and compaction tests, and transcripts large enough to compact.
+//! Test-only fixtures shared by the engine, turn, dispatch, and compaction tests. They build
+//! [`Engine`]s, mock API replies, script turns, and seed transcripts large enough to compact.
 
 use std::collections::{HashMap, VecDeque};
 use std::panic::AssertUnwindSafe;
