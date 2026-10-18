@@ -2,7 +2,7 @@
   "private": true,
   "scripts": {
     "format": "pnpm format:prettier && pnpm format:markdown && pnpm format:toml",
-    "format:prettier": "prettier --check \"**/*.{cjs,js,json,mjs,yaml,yml}\"",
+    "format:prettier": "prettier --check \"**/*.{cjs,js,json,jsonc,mjs,yaml,yml}\"",
     "format:markdown": "dprint check",
     "format:toml": "taplo format --check",
     "lint": "markdownlint-cli2 \"**/*.md\"",

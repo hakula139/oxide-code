@@ -2,7 +2,6 @@
   "$schema": "https://dprint.dev/schemas/v0.json",
   "incremental": false,
   "includes": ["**/*.md"],
-  "excludes": [".direnv/**", "node_modules/**", "target/**"],
   "markdown": {
     "emphasisKind": "underscores",
     "strongKind": "asterisks"
